@@ -204,7 +204,9 @@ pub const REPAIR_RELAY_REWARD_SHARE_BPS: u64 = 1_000;
             &clean_tok.replace("5_000", "2_500"),
         )?;
         if run(&dir).is_ok() {
-            return Err(String::from("canary: wrong STORAGE_REWARD_SHARE_BPS passed"));
+            return Err(String::from(
+                "canary: wrong STORAGE_REWARD_SHARE_BPS passed",
+            ));
         }
 
         Ok(())

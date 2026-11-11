@@ -375,12 +375,14 @@ mod tests {
         let mut lone_pow = candidate(1, 10, 0x51);
         lone_pow.finalized_checkpoint = Some(hash(0xFF));
         assert_eq!(
-            pow.fork_choice(std::slice::from_ref(&lone_pow)).unwrap_err(),
+            pow.fork_choice(std::slice::from_ref(&lone_pow))
+                .unwrap_err(),
             ForkChoiceError::MissingCumulativeWork
         );
         lone_pow.cumulative_work = Some(0);
         assert_eq!(
-            pow.fork_choice(std::slice::from_ref(&lone_pow)).unwrap_err(),
+            pow.fork_choice(std::slice::from_ref(&lone_pow))
+                .unwrap_err(),
             ForkChoiceError::MissingCumulativeWork
         );
         lone_pow.cumulative_work = Some(42);
@@ -394,12 +396,14 @@ mod tests {
         };
         let mut lone_pos = candidate(2, 10, 0x61);
         assert_eq!(
-            pos.fork_choice(std::slice::from_ref(&lone_pos)).unwrap_err(),
+            pos.fork_choice(std::slice::from_ref(&lone_pos))
+                .unwrap_err(),
             ForkChoiceError::MissingVoteWeight
         );
         lone_pos.vote_weight = Some(0);
         assert_eq!(
-            pos.fork_choice(std::slice::from_ref(&lone_pos)).unwrap_err(),
+            pos.fork_choice(std::slice::from_ref(&lone_pos))
+                .unwrap_err(),
             ForkChoiceError::MissingVoteWeight
         );
         lone_pos.vote_weight = Some(100);

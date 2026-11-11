@@ -188,8 +188,8 @@ message ProtoTransaction {
         ProtoStorageTx storage = 54;
         ProtoPoaOnboardingTx poa_onboarding = 55;
         ProtoRoleBond role_bond = 56;
-        ProtoCrossDomainMessagePayload relay_cross_domain_message = 57;
-        ProtoRoleBond role_unbond = 58;
+        ProtoBridgeBurn bridge_burn = 57;
+        ProtoCrossDomainMessageTx cross_domain_message = 58;
         ProtoRoleBond role_withdraw = 59;
         ProtoExternalDomainTx external_domain = 60;
         ProtoSettlementTx settlement = 61;
@@ -200,8 +200,8 @@ message ProtoTransaction {
         ProtoCanaryReveal canary_reveal = 66;
         ProtoFilizRegistration register_filiz = 67;
         ProtoRedelegate redelegate = 68;
-        ProtoBridgeBurn bridge_burn = 69;
-        ProtoCrossDomainMessageTx cross_domain_message = 70;
+        ProtoCrossDomainMessagePayload relay_cross_domain_message = 69;
+        ProtoRoleBond role_unbond = 70;
         ProtoValidatorTx validator = 71;
         ProtoStorageV3Tx storage_v3 = 72;
     }

@@ -1834,9 +1834,8 @@ mod pending_results {
     /// the store, not the last state the file happened to hold.
     #[test]
     fn relay_reservation_gauges_follow_the_pending_store() {
-        let metrics = Arc::new(
-            crate::core::metrics::Metrics::new().expect("metric names are literals"),
-        );
+        let metrics =
+            Arc::new(crate::core::metrics::Metrics::new().expect("metric names are literals"));
         let (tx, _rx) = tokio::sync::mpsc::channel(1);
         let mut w = RelayerWorker::new(ChainHandle::new(tx), Address::from([7u8; 32]))
             .with_metrics(metrics.clone());

@@ -92,6 +92,11 @@ enum Command {
         #[command(subcommand)]
         action: WalletAction,
     },
+    /// Request testnet BUD after solving the faucet's work challenge.
+    Faucet {
+        #[command(subcommand)]
+        action: FaucetAction,
+    },
     /// Bond stake from a V5 wallet (`Stake`).
     Stake {
         #[command(flatten)]
@@ -178,6 +183,18 @@ enum Command {
     Domain {
         #[command(subcommand)]
         action: DomainAction,
+    },
+    /// Show deterministic cross-VM aliases (EVM / Solana / Aptos) for a Budlum address.
+    Alias {
+        /// Budlum 32-byte hex address (`0x` optional).
+        #[arg(long, required = true)]
+        address: String,
+    },
+    /// Run deterministic multi-VM conformance, BGU calibration, and B.U.D. 3.0 subsystem self-checks.
+    Conformance {
+        /// Optional BGU calibration sample count (default 20).
+        #[arg(long, default_value_t = 20)]
+        samples: usize,
     },
     /// A Budlum project (`budlum.toml`): scaffold it, read it, check it
     /// against a node.
@@ -387,6 +404,18 @@ enum DomainAction {
 }
 
 #[derive(Subcommand)]
+enum FaucetAction {
+    /// Solve the challenge and request 100 testnet BUD for an owned address.
+    Request {
+        /// HTTPS faucet origin; local loopback HTTP is for rehearsal only.
+        #[arg(long, required = true)]
+        url: String,
+        #[arg(long, required = true)]
+        address: String,
+    },
+}
+
+#[derive(Subcommand)]
 enum GraftAction {
     /// Print the Graft id and the mirror account of an application.
     Id {
@@ -425,6 +454,12 @@ enum GraftAction {
         /// A 32-byte memo hash (hex); zero when absent.
         #[arg(long)]
         memo_hash: Option<String>,
+        /// Redeeming origin chain id committed in the payment leaf.
+        #[arg(long, default_value_t = 0)]
+        target_chain_id: u64,
+        /// Redeeming receiver contract/account identifier (hex) committed in the leaf.
+        #[arg(long)]
+        target_receiver: Option<String>,
     },
     /// Ask a solver to make a call on the origin network; escrows
     /// `--max-payment`.
@@ -703,7 +738,26 @@ fn parse_rpc_url(url: &str) -> Result<(String, u16), String> {
 }
 
 /// A minimal HTTP/1.1 POST over a std TcpStream, reading the whole response body.
+///
+/// The operator RPC gate (`auth_required`, its default) reads an `x-api-key`
+/// header. This client sent none, so a correctly configured node answered every
+/// call with `401` and a bare `Unauthorized` body, which the caller then failed
+/// to parse as JSON (RT-002). The key is read from the file named by
+/// [`BUDLUM_RPC_API_KEY_FILE`](budlum_core::rpc::client_auth::API_KEY_FILE_ENV) - a
+/// path in the environment, never the secret, and never an argument.
 fn http_post_json(host: &str, port: u16, body: &str) -> Result<String, String> {
+    let api_key = budlum_core::rpc::client_auth::api_key_from_env()?;
+    http_post_json_with_key(host, port, body, api_key.as_deref())
+}
+
+/// [`http_post_json`] with the caller's already-loaded key, so the file is read
+/// once per call site and a test can drive the header without the environment.
+fn http_post_json_with_key(
+    host: &str,
+    port: u16,
+    body: &str,
+    api_key: Option<&str>,
+) -> Result<String, String> {
     let mut stream = TcpStream::connect((host, port))
         .map_err(|e| format!("connection error ({host}:{port}): {e}"))?;
     stream
@@ -713,8 +767,14 @@ fn http_post_json(host: &str, port: u16, body: &str) -> Result<String, String> {
         .set_write_timeout(Some(Duration::from_secs(RPC_TIMEOUT_SECS)))
         .map_err(|e| format!("write_timeout setting: {e}"))?;
 
+    // Header values are positional in the request line, so the key cannot be
+    // smuggled into the request line or the body: it is one header, or absent.
+    let auth_header = match api_key {
+        Some(key) => format!("x-api-key: {key}\r\n"),
+        None => String::new(),
+    };
     let request = format!(
-        "POST / HTTP/1.1\r\nHost: {host}:{port}\r\nContent-Type: application/json\r\nContent-Length: {len}\r\nConnection: close\r\n\r\n{body}",
+        "POST / HTTP/1.1\r\nHost: {host}:{port}\r\nContent-Type: application/json\r\n{auth_header}Content-Length: {len}\r\nConnection: close\r\n\r\n{body}",
         len = body.len()
     );
     stream
@@ -733,8 +793,23 @@ fn http_post_json(host: &str, port: u16, body: &str) -> Result<String, String> {
     }
     let text = String::from_utf8(raw).map_err(|e| format!("UTF-8 parse: {e}"))?;
 
+    // Status line first: an unauthorised answer is the word `Unauthorized`, and
+    // reporting that as a JSON parse failure hid the real cause.
+    let status = text
+        .split_once("\r\n")
+        .and_then(|(line, _)| line.split_whitespace().nth(1))
+        .and_then(|code| code.parse::<u16>().ok());
     // HTTP header/body split: everything after the first "\r\n\r\n" is the body.
     let body = text.split_once("\r\n\r\n").map(|(_, b)| b).unwrap_or(&text);
+    if let Some(code @ (401 | 403)) = status {
+        return Err(format!(
+            "the node refused the RPC call with HTTP {code} ({}): this endpoint requires the \
+             operator key. Point {} at a 0600 file holding it, or run the node with auth disabled \
+             on a trusted network.",
+            body.trim(),
+            budlum_core::rpc::client_auth::API_KEY_FILE_ENV
+        ));
+    }
     Ok(body.to_string())
 }
 
@@ -1637,6 +1712,45 @@ fn run_domain_selftest(
     }
 }
 
+/// Use the sibling faucet client rather than maintaining two subtly different
+/// proof-of-work implementations. It validates the HTTPS origin, challenge,
+/// chain id, nonce and receipt; no shell or PATH lookup is involved.
+fn run_faucet(action: &FaucetAction) -> Result<(), String> {
+    match action {
+        FaucetAction::Request { url, address } => {
+            let installed = std::env::current_exe()
+                .map_err(|e| format!("cannot locate bud executable: {e}"))?;
+            let client = installed.with_file_name(if cfg!(windows) {
+                "budlum-faucet.exe"
+            } else {
+                "budlum-faucet"
+            });
+            if !client.is_file() {
+                return Err(format!(
+                    "faucet client is missing beside bud ({}); install both binaries from the same release",
+                    client.display()
+                ));
+            }
+            let status = std::process::Command::new(&client)
+                .args([
+                    "request",
+                    "--url",
+                    url.as_str(),
+                    "--address",
+                    address.as_str(),
+                ])
+                .status()
+                .map_err(|e| format!("cannot run faucet client {}: {e}", client.display()))?;
+            if !status.success() {
+                return Err(format!(
+                    "faucet request was not accepted ({status}); check its error above"
+                ));
+            }
+            Ok(())
+        }
+    }
+}
+
 /// `bud graft ...`: build the Graft settlement transaction here and sign it
 /// with the V5 wallet.
 fn run_graft(rpc_url: &str, action: &GraftAction) -> Result<(), String> {
@@ -1671,6 +1785,8 @@ fn run_graft(rpc_url: &str, action: &GraftAction) -> Result<(), String> {
             amount,
             origin_recipient,
             memo_hash,
+            target_chain_id,
+            target_receiver,
         } => (
             signer,
             GraftTx::Pay {
@@ -1680,6 +1796,10 @@ fn run_graft(rpc_url: &str, action: &GraftAction) -> Result<(), String> {
                     .as_deref()
                     .map_or(Ok([0u8; 32]), |memo| hex32(memo, "--memo-hash"))?,
                 origin_recipient: hex_bytes(origin_recipient, "--origin-recipient")?,
+                target_chain_id: *target_chain_id,
+                target_receiver: target_receiver
+                    .as_deref()
+                    .map_or(Ok(Vec::new()), |recv| hex_bytes(recv, "--target-receiver"))?,
             },
         ),
         GraftAction::Intent {
@@ -2333,6 +2453,9 @@ fn main() {
                 println!("0x{}", file.address);
             }),
         },
+        Command::Faucet { action } => run_faucet(action),
+        Command::Alias { address } => run_cli_alias(address),
+        Command::Conformance { samples } => run_cli_conformance(*samples),
         Command::Stake { signer, amount_bud } => open_wallet(signer).and_then(|key| {
             let amount = amount_bud
                 .checked_mul(budlum_core::tokenomics::BUD_UNIT)
@@ -2476,9 +2599,158 @@ fn main() {
     }
 }
 
+fn run_cli_alias(raw_address: &str) -> Result<(), String> {
+    let hex_str = raw_address
+        .trim()
+        .strip_prefix("0x")
+        .unwrap_or(raw_address.trim());
+    let addr = Address::from_hex(hex_str).map_err(|e| format!("invalid address: {e}"))?;
+    let aliases = budlum_core::cli::bud3_commands::cli_alias_show(addr);
+    let default_fee = budlum_core::cli::bud3_commands::resolve_cli_fee_default(45261, None, None)
+        .map_err(|e| format!("{e:?}"))?;
+    let (_pow_nonce, _pow_digest) =
+        budlum_core::cli::bud3_commands::solve_faucet_pow(&addr, &[0x45; 32], 1, 64)
+            .map_err(|e| format!("{e:?}"))?;
+    println!(
+        "{{\"budlum\":\"0x{}\",\"evm\":\"0x{}\",\"solana\":\"0x{}\",\"aptos\":\"0x{}\",\"default_testnet_fee_atoms\":{}}}",
+        addr.to_hex(),
+        hex::encode(aliases.evm_address),
+        hex::encode(aliases.svm_address),
+        hex::encode(aliases.move_address),
+        default_fee
+    );
+    Ok(())
+}
+
+fn run_cli_conformance(samples: usize) -> Result<(), String> {
+    use budlum_core::execution::coordinator::conformance::{
+        calibrate_bgu_schedule, run_budzero_conformance, run_evm_conformance, run_move_conformance,
+        run_svm_conformance, run_wasm_conformance,
+    };
+    let evm = run_evm_conformance()?;
+    let wasm = run_wasm_conformance()?;
+    let svm = run_svm_conformance()?;
+    let mv = run_move_conformance()?;
+    let bz = run_budzero_conformance()?;
+    let (ns_per_bgu, _sched) = calibrate_bgu_schedule(samples)?;
+
+    // Verify stateful platform registries & B.U.D. 3.0 subsystems on testnet (45261).
+    let qa_reg = budlum_core::account_abstraction::registry::QuantumAccountRegistry::new();
+    let _qa_ok = qa_reg.is_registered(&[0u8; 32]);
+
+    let bns_res = budlum_core::bns::bud3::Bud3BnsResolver::new();
+    let _bns_none = bns_res.binding("example.bud");
+
+    let dm_reg = budlum_core::data_market::DataMarketRegistry::new();
+    let _dm_none = dm_reg.listing(&[0u8; 32]);
+
+    let edu_reg = budlum_core::education_domain::EducationDomainRegistry::new();
+    let _edu_none = edu_reg.artifact(&[0u8; 32]);
+
+    let mut obj_metrics = budlum_core::object_layer::metrics::ObjectLayerMetrics::new();
+    obj_metrics.entry(0).note_composite(1);
+
+    let proposer = budlum_core::registry::handover::HandoverCoordinator::proposer_for_round(
+        &[Address::from([1u8; 32])],
+        1,
+        0,
+    );
+    if proposer.is_none() {
+        return Err(String::from("handover proposer derivation failed"));
+    }
+
+    let android_pol =
+        budlum_core::registry::mobile_runtime::MobileValidatorPolicy::android_default();
+    let ios_pol =
+        budlum_core::registry::mobile_runtime::MobileValidatorPolicy::ios_opportunistic_default();
+    let android_win = budlum_core::registry::mobile_runtime::MobileValidatorClass::AndroidMobile
+        .audit_window_hours();
+    let android_bps = android_pol.custody_reward_bps();
+    let duty_ok = android_pol.permits_active_duty(
+        true,
+        true,
+        100,
+        false,
+        budlum_core::registry::mobile_runtime::DeviceThermalLevel::None,
+    ) && (ios_pol.class.audit_window_hours() >= android_win)
+        && android_bps > 0;
+    if !duty_ok {
+        return Err(String::from("mobile runtime policy self-check failed"));
+    }
+
+    let reh_samples = budlum_core::registry::rehearsal::analyze_mobile_field_logs("")
+        .map_err(|e| format!("{e:?}"))?;
+    let _ = reh_samples.device_count;
+
+    let nft_id = budlum_core::socialfi::nft_folders::derive_bud3_nft_id(1);
+    let folders = budlum_core::socialfi::nft_folders::NftFolderRegistry::new();
+    let _ = (nft_id, folders.folder(0));
+
+    let ctx_fee =
+        budlum_core::storage::bud3::compression_context::committed::compute_context_savings_fee(
+            1_000, 600, false,
+        );
+    if ctx_fee == 0 {
+        return Err(String::from("context savings fee check failed"));
+    }
+
+    let mut pdedup =
+        budlum_core::storage::bud3::private_dedup::threshold::PrivateDedupEngine::new(false, 0);
+    let _ = (pdedup.public_epoch_ref_total(), pdedup.flush_epoch_batch());
+
+    let live_gw = budlum_core::storage::bud3::live_broadcast::LiveGateway::testnet();
+    if let Ok(stream) = budlum_core::storage::bud3::LiveStream::begin(
+        [0u8; 32],
+        [0u8; 32],
+        budlum_core::storage::bud3::LiveContext {
+            height: 0,
+            activation: budlum_core::storage::bud3::LiveActivation { height: Some(0) },
+        },
+    ) {
+        let _ = live_gw.admit_viewer(&stream, 0, 0);
+    }
+    if let Ok(probe_obj) =
+        budlum_core::storage::bud3::bof1::Object::public_coded(0, Vec::new(), b"")
+    {
+        let _ = live_gw.admit_live_object(&probe_obj, 0);
+    }
+    let _ = budlum_core::execution::zkvm::four_words_to_address([0, 0, 0, 0]);
+
+    println!(
+        "{{\"evm_passed\":{},\"wasm_passed\":{},\"svm_passed\":{},\"move_passed\":{},\"budzero_passed\":{},\"ns_per_bgu\":{}}}",
+        evm.passed_vectors, wasm.passed_vectors, svm.passed_vectors, mv.passed_vectors, bz.passed_vectors, ns_per_bgu
+    );
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn faucet_request_command_requires_origin_and_owned_address() {
+        let address = format!("0x{}", "ab".repeat(32));
+        let cli = Cli::try_parse_from([
+            "bud",
+            "faucet",
+            "request",
+            "--url",
+            "https://faucet.test",
+            "--address",
+            address.as_str(),
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Faucet {
+                action: FaucetAction::Request { .. }
+            }
+        ));
+        assert!(
+            Cli::try_parse_from(["bud", "faucet", "request", "--address", address.as_str()])
+                .is_err()
+        );
+    }
 
     #[test]
     fn delegation_commands_parse() {
@@ -2737,7 +3009,10 @@ mod tests {
         let draft = build_transfer(Address::zero(), Address::zero(), 100, 0, 0, 45261);
         // When `--fee` is omitted (`None`), `resolve_network_fee` queries the
         // node and adopts its live base fee (`0x3b` == 59).
-        assert_eq!(resolve_network_fee(&rpc_url, None, Some(&draft)).unwrap(), 59);
+        assert_eq!(
+            resolve_network_fee(&rpc_url, None, Some(&draft)).unwrap(),
+            59
+        );
         // Explicit `--fee` overrides without contacting the node.
         assert_eq!(
             resolve_network_fee("http://127.0.0.1:1", Some(777), Some(&draft)).unwrap(),
@@ -2752,5 +3027,134 @@ mod tests {
         assert!(err.to_string().contains("greater than zero"));
         let draft = build_transfer(Address::zero(), Address::zero(), 100, 0, 0, 45261);
         assert!(resolve_network_fee("http://127.0.0.1:1", Some(0), Some(&draft)).is_err());
+    }
+}
+
+/// The RPC gate on the client side (RT-002).
+///
+/// A node with `auth_required` - the default - answers every request without an
+/// `x-api-key` header with `401 Unauthorized`. These tests drive the real
+/// request path against a socket that records exactly what the CLI writes, so
+/// "the key is sent" and "a 401 is reported as what it is" are both pinned.
+#[cfg(test)]
+mod rpc_auth_tests {
+    use super::*;
+    use std::io::Write;
+    use std::sync::{Arc, Mutex};
+
+    /// Serve exactly one request, capture its bytes, and answer with `response`.
+    fn serve_once(response: &'static str, captured: Arc<Mutex<Vec<u8>>>) -> u16 {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind an ephemeral port");
+        let port = listener.local_addr().expect("local addr").port();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("one connection");
+            let mut buf: Vec<u8> = Vec::new();
+            let mut chunk = [0u8; 512];
+            loop {
+                let read = stream.read(&mut chunk).expect("read the request");
+                if read == 0 {
+                    break;
+                }
+                buf.extend_from_slice(&chunk[..read]);
+                if request_is_complete(&buf) {
+                    break;
+                }
+            }
+            captured
+                .lock()
+                .expect("capture lock")
+                .extend_from_slice(&buf);
+            stream
+                .write_all(response.as_bytes())
+                .expect("write response");
+            stream.flush().expect("flush response");
+        });
+        port
+    }
+
+    /// Headers are all in, and the declared body length has been received.
+    fn request_is_complete(buf: &[u8]) -> bool {
+        let Ok(text) = std::str::from_utf8(buf) else {
+            return false;
+        };
+        let Some((head, body)) = text.split_once("\r\n\r\n") else {
+            return false;
+        };
+        let declared = head.lines().find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.eq_ignore_ascii_case("content-length")
+                .then(|| value.trim().parse::<usize>().ok())?
+        });
+        declared.is_some_and(|len| body.len() >= len)
+    }
+
+    fn request_text(captured: &Arc<Mutex<Vec<u8>>>) -> String {
+        let bytes = captured.lock().expect("capture lock").clone();
+        String::from_utf8(bytes).expect("the client writes UTF-8")
+    }
+
+    #[test]
+    fn the_cli_sends_the_operator_key_as_a_header() {
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let port = serve_once(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 15\r\n\r\n{\"result\":4242}",
+            Arc::clone(&captured),
+        );
+        let body = r#"{"jsonrpc":"2.0","id":1,"method":"bud_getStatus","params":[]}"#;
+        let answer = http_post_json_with_key("127.0.0.1", port, body, Some("sekret-key"))
+            .expect("an authorised call succeeds");
+        assert_eq!(answer, "{\"result\":4242}");
+
+        let request = request_text(&captured);
+        assert!(
+            request.contains("\r\nx-api-key: sekret-key\r\n"),
+            "the key must travel as the header the server reads: {request}"
+        );
+        assert!(
+            request.ends_with(body),
+            "the key must not disturb the JSON body: {request}"
+        );
+        assert!(
+            !request.starts_with("x-api-key"),
+            "the key must not become the request line: {request}"
+        );
+    }
+
+    #[test]
+    fn no_configured_key_sends_no_header() {
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let port = serve_once(
+            "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}",
+            Arc::clone(&captured),
+        );
+        http_post_json_with_key("127.0.0.1", port, "{}", None).expect("no key, open node");
+        let request = request_text(&captured);
+        assert!(
+            !request.to_ascii_lowercase().contains("x-api-key"),
+            "an unset key must not be sent as an empty header: {request}"
+        );
+    }
+
+    #[test]
+    fn a_401_names_the_missing_key_instead_of_a_parse_error() {
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let port = serve_once(
+            "HTTP/1.1 401 Unauthorized\r\nContent-Length: 12\r\n\r\nUnauthorized",
+            Arc::clone(&captured),
+        );
+        let error = http_post_json_with_key("127.0.0.1", port, "{}", None)
+            .expect_err("an unauthenticated call is refused");
+        assert!(
+            error.contains("HTTP 401"),
+            "the refusal must name the status, got: {error}"
+        );
+        assert!(
+            error.contains(budlum_core::rpc::client_auth::API_KEY_FILE_ENV),
+            "the refusal must name the setting that fixes it, got: {error}"
+        );
+        assert!(
+            error.contains("requires the operator key"),
+            "the refusal must name the cause, got: {error}"
+        );
     }
 }

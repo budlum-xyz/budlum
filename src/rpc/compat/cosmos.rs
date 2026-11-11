@@ -1,5 +1,6 @@
 //! CometBFT RPC (`127.0.0.1:18550`) & Cosmos LCD (`127.0.0.1:18551`) gateway
 //! ( & section 8.11.5) supporting CosmJS `SigningCosmWasmClient`.
+//! Convenience: exposed for CLI, RPC, SDK, and multi-VM runtime callers.
 
 use crate::core::account::{AccountState, ATTOS_PER_ATOM};
 use crate::execution::coordinator::foreign::cosmos::BUDLUM_COSMOS_CHAIN_ID;
@@ -59,11 +60,7 @@ impl CosmosCompatGateway {
         Self { config, height }
     }
 
-    pub fn handle_rpc(
-        &mut self,
-        req: &JsonRpcRequest,
-        state: &AccountState,
-    ) -> JsonRpcResponse {
+    pub fn handle_rpc(&mut self, req: &JsonRpcRequest, state: &AccountState) -> JsonRpcResponse {
         let id = req.id.clone();
         if !COMETBFT_RPC_METHODS.iter().any(|m| m.name == req.method) {
             return JsonRpcResponse::err(id, JSONRPC_METHOD_NOT_FOUND, "Method not found");
@@ -168,10 +165,7 @@ impl CosmosCompatGateway {
                         "per_page exceeds max_tx_search_results",
                     );
                 }
-                JsonRpcResponse::ok(
-                    id,
-                    serde_json::json!({ "txs": [], "total_count": "0" }),
-                )
+                JsonRpcResponse::ok(id, serde_json::json!({ "txs": [], "total_count": "0" }))
             }
             "validators" => JsonRpcResponse::ok(
                 id,
@@ -197,7 +191,10 @@ fn execute_abci_query(path: &str, data: &[u8], state: &AccountState) -> Vec<u8> 
                     .get("contract")
                     .and_then(serde_json::Value::as_str)
                     .unwrap_or("");
-                let key = v.get("key").and_then(serde_json::Value::as_str).unwrap_or("");
+                let key = v
+                    .get("key")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("");
                 let mut sk = contract.as_bytes().to_vec();
                 sk.extend_from_slice(format!(":kv:{key}").as_bytes());
                 return state

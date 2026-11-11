@@ -51,7 +51,16 @@ node can also resync from peers. A backup saves the time a full replay takes.
 3. `budlum-core --db-path <empty path> --restore-backup <backup file>`
    restores into an empty directory and exits.
 4. `budlum-core --db-path <path> --check-db` must pass.
-5. Start the node; it replays any blocks after the backup from its peers.
+5. Restore the backed-up vote high-water marks to the **configured**
+   `p2p.vote_history_db` path before signing again. A `.budbak` does not include
+   this file; never substitute an empty file or another validator's marks.
+   The local two-seat rehearsal keeps separate `validator<seat>/vote-history.json`
+   files in each validator volume (pairs 1+5, 2+6, 3+7, 4+8). Restore both
+   files to their original seat paths before restarting either process; follow
+   the sidecar steps in `ops/BACKUP_AND_RESTORE.md` for banned peers and faucet
+   state as well. If a signing validator's marks cannot be recovered, stop and
+   investigate before bringing that key back online.
+6. Start the node; it replays any blocks after the backup from its peers.
 
 ## 4. Upgrades
 
@@ -108,6 +117,7 @@ key stops the node at start.
 | `BudlumMempoolNearFull` | `budlum_rpc_rate_limited_total`; senders | Spam is bounded per sender (200) and evicted by fee; raise nothing in config without review. |
 | `BudlumMempoolEvicting` | `budlum_mempool_evictions`, fee floor | Eviction by fee is normal under load; eviction of everything is a floor set too low for the market. |
 | `BudlumDiskFillingUp` | Data directory size | Add disk; enable pruning only on non-archive nodes. |
+| `BudlumNodeExporterUnavailable` | Host node_exporter on port 9100 and Prometheus `up{job="node"}` | Restore host exporter and verify the filesystem gauges before trusting disk alerts. |
 | `BudlumFinalityRecoveryThreshold` | `budlum_finality_lag_checkpoints`, which validator last voted, whether the committee still has two thirds of the stake | Treat this as the operator recovery threshold; inspect the live committee and presence records. Do not restart the node as a first move; a restart loses nothing here and tells you nothing. |
 | `BudlumFinalityLagCheckpoints` | The same series at half the trigger | Growing on every node is a network problem; growing on one is that node's view. Compare `bud_getStatus` across nodes before touching anything. |
 | `BudlumStateRootMismatch` | The refusal log line naming the height, and `bud_getBlockByNumber` hashes at that height against a peer | R-11, a determinism split. Stop the node: it has already refused to adopt and continuing only widens the gap. Keep its database. |

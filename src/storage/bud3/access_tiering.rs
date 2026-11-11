@@ -55,6 +55,7 @@ struct ObjectAccessLog {
 /// Node-local access estimator recording temperature transitions (Section 6.14 item 8).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AccessTierTracker {
+    #[serde(with = "crate::core::map_keys")]
     objects: BTreeMap<ObjectKey, ObjectAccessLog>,
     transitions: Vec<TierTransition>,
 }
@@ -80,7 +81,12 @@ impl AccessTierTracker {
 
     /// Record a paid view or gateway read at `now_secs` and evaluate tier change.
     /// Convenience: exposed for RPC paid-view telemetry.
-    pub fn record_access(&mut self, object: ObjectKey, is_sealed: bool, now_secs: u64) -> AccessTier {
+    pub fn record_access(
+        &mut self,
+        object: ObjectKey,
+        is_sealed: bool,
+        now_secs: u64,
+    ) -> AccessTier {
         self.track_object(object, is_sealed);
         if let Some(entry) = self.objects.get_mut(&object) {
             let cutoff = now_secs.saturating_sub(COLD_WINDOW_SECS);
@@ -170,9 +176,9 @@ impl AccessTierTracker {
         for (obj, log) in &self.objects {
             if !log.is_sealed
                 && log.current_tier == Some(AccessTier::Cold)
-                && log
-                    .cold_since_secs
-                    .is_some_and(|since| now_secs.saturating_sub(since) >= COLD_DWELL_FOR_ARCHIVE_SECS)
+                && log.cold_since_secs.is_some_and(|since| {
+                    now_secs.saturating_sub(since) >= COLD_DWELL_FOR_ARCHIVE_SECS
+                })
             {
                 out.push(*obj);
             }

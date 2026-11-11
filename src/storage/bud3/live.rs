@@ -10,20 +10,20 @@
 //! is bound to an NFT.
 //!
 //! * Segments: the default segment duration is [`LIVE_SEGMENT_MS`]. It is a
-//! starting parameter; governance changes it once measurements arrive.
-//! The window of a segment is `[start_ms, start_ms + LIVE_SEGMENT_MS)` and
-//! the windows are contiguous: the next segment starts exactly when the
-//! previous one ends.
+//!   starting parameter; governance changes it once measurements arrive.
+//!   The window of a segment is `[start_ms, start_ms + LIVE_SEGMENT_MS)` and
+//!   the windows are contiguous: the next segment starts exactly when the
+//!   previous one ends.
 //! * The profile: objects are P0. The P1 optical profile is a property of
-//! the transport derived at request time and is never written in an
-//! object, so a live segment object carries P0 like every other object.
+//!   the transport derived at request time and is never written in an
+//!   object, so a live segment object carries P0 like every other object.
 //! * The optical transfer: the frames are the RFC 6330 symbols of the
-//! segment object. [`RatiolessPlan`] yields the order they are sent in;
-//! the sender maps each frame to its symbol through `SegmentEncoder`.
+//!   segment object. [`RatiolessPlan`] yields the order they are sent in;
+//!   the sender maps each frame to its symbol through `SegmentEncoder`.
 //! * The gate: live segments are T-Expansion work. `ACTIVATION` holds no
-//! height, so every step is refused at testnet launch
-//! (`bud3_live_is_closed_on_testnet`). The activation height is set after
-//! launch (M7), and bit1 objects are accepted only at and above it.
+//!   height, so every step is refused at testnet launch
+//!   (`bud3_live_is_closed_on_testnet`). The activation height is set after
+//!   launch (M7), and bit1 objects are accepted only at and above it.
 //!
 //! WIRING: unwired - the block executor reaches live segments through the
 //! live StorageTx variants once the activation height is set, and the final
@@ -56,12 +56,12 @@ pub const LIVE_END_TAG: &[u8] = b"BDLM_BUD3_LIVE_END_V1";
 /// When live segments open. `None`: closed on this chain.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LiveActivation {
- /// The activation height; `None` refuses every live segment.
+    /// The activation height; `None` refuses every live segment.
     pub height: Option<u64>,
 }
 
 impl LiveActivation {
- /// Whether live segments are open at `height`.
+    /// Whether live segments are open at `height`.
     #[must_use]
     pub fn is_open_at(&self, height: u64) -> bool {
         self.height.is_some_and(|h| height >= h)
@@ -74,14 +74,14 @@ pub const ACTIVATION: LiveActivation = LiveActivation { height: None };
 /// The gate context of one live call.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LiveContext {
- /// The block height the call is applied at.
+    /// The block height the call is applied at.
     pub height: u64,
- /// The chain's activation schedule.
+    /// The chain's activation schedule.
     pub activation: LiveActivation,
 }
 
 impl LiveContext {
- /// The testnet launch context: closed, at height 1.
+    /// The testnet launch context: closed, at height 1.
     #[must_use]
     pub const fn closed() -> Self {
         Self {
@@ -102,58 +102,58 @@ impl LiveContext {
 /// Why a live stream refused a step.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LiveError {
- /// bit1 objects are refused before the activation height (and at testnet
- /// launch).
+    /// bit1 objects are refused before the activation height (and at testnet
+    /// launch).
     Closed,
- /// The segment does not continue the stream's timeline.
+    /// The segment does not continue the stream's timeline.
     NonContiguous {
- /// Where the next segment must start.
+        /// Where the next segment must start.
         expected_start_ms: u64,
- /// Where it started.
+        /// Where it started.
         got_start_ms: u64,
     },
- /// A segment with no bytes is not a segment.
+    /// A segment with no bytes is not a segment.
     EmptySegment,
- /// The fixed segment window would exceed the timestamp domain.
+    /// The fixed segment window would exceed the timestamp domain.
     TimestampOverflow,
- /// The in-memory segment count cannot be represented on the wire.
+    /// The in-memory segment count cannot be represented on the wire.
     SegmentCountOverflow,
- /// The broadcast has no segment yet.
+    /// The broadcast has no segment yet.
     EmptyStream,
- /// The newest segment ended more than two segment durations ago, so the
- /// join latency budget cannot be honored.
+    /// The newest segment ended more than two segment durations ago, so the
+    /// join latency budget cannot be honored.
     HeadStale {
- /// How far the head is behind the requested time.
+        /// How far the head is behind the requested time.
         age_ms: u64,
- /// The budget, [`MAX_JOIN_LATENCY_MS`].
+        /// The budget, [`MAX_JOIN_LATENCY_MS`].
         max_ms: u64,
     },
- /// The BOF-1 object carries no live flag.
+    /// The BOF-1 object carries no live flag.
     NotLive {
- /// Position in the checked chain.
+        /// Position in the checked chain.
         index: u64,
     },
- /// The `prev_object` link of segment `index` does not match.
+    /// The `prev_object` link of segment `index` does not match.
     ChainBroken {
- /// Position in the checked chain.
+        /// Position in the checked chain.
         index: u64,
     },
- /// The object would not parse as BOF-1.
+    /// The object would not parse as BOF-1.
     Object(Bof1Error),
- /// The object commitment could not be computed.
+    /// The object commitment could not be computed.
     CommitFailed,
- /// A per-segment repair-limit table has the wrong length.
+    /// A per-segment repair-limit table has the wrong length.
     RepairLimitCountMismatch {
- /// Number of source-count entries.
+        /// Number of source-count entries.
         segments: usize,
- /// Number of repair-limit entries.
+        /// Number of repair-limit entries.
         limits: usize,
     },
- /// A repair limit exceeds the RFC 6330 ESI domain.
+    /// A repair limit exceeds the RFC 6330 ESI domain.
     RepairLimitOutOfRange {
- /// Segment whose limit is invalid.
+        /// Segment whose limit is invalid.
         segment: u64,
- /// Requested inclusive repair ESI limit.
+        /// Requested inclusive repair ESI limit.
         limit: u32,
     },
 }
@@ -161,16 +161,16 @@ pub enum LiveError {
 /// One produced live segment: the BOF-1 object and its commitment.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LiveSegment {
- /// The P0 BOF-1 object with the live flag set.
+    /// The P0 BOF-1 object with the live flag set.
     pub object: Object,
- /// The object commitment of the segment object; the link the next
- /// segment carries in `prev_object`.
+    /// The object commitment of the segment object; the link the next
+    /// segment carries in `prev_object`.
     pub commitment: ObjectCommitment,
- /// Position in the stream, from 0.
+    /// Position in the stream, from 0.
     pub index: u64,
- /// Inclusive start of the segment window.
+    /// Inclusive start of the segment window.
     pub start_ms: u64,
- /// Exclusive end of the segment window; `start_ms + LIVE_SEGMENT_MS`.
+    /// Exclusive end of the segment window; `start_ms + LIVE_SEGMENT_MS`.
     pub end_ms: u64,
 }
 
@@ -198,12 +198,12 @@ pub struct LiveStream {
 }
 
 impl LiveStream {
- /// Start a stream. Refused while the chain has not opened live.
- ///
- /// # Errors
- ///
- /// [`LiveError::Closed`] at testnet launch and below the activation
- /// height.
+    /// Start a stream. Refused while the chain has not opened live.
+    ///
+    /// # Errors
+    ///
+    /// [`LiveError::Closed`] at testnet launch and below the activation
+    /// height.
     pub fn begin(
         originator: [u8; 32],
         nonce: [u8; 32],
@@ -217,46 +217,48 @@ impl LiveStream {
         })
     }
 
- /// The stream id: the head of the segment chain.
+    /// The stream id: the head of the segment chain.
     #[must_use]
     pub fn stream_id(&self) -> [u8; 32] {
         self.stream_id
     }
 
- /// The produced segments, in order.
+    /// The produced segments, in order.
     #[must_use]
     pub fn segments(&self) -> &[LiveSegment] {
         &self.segments
     }
 
- /// The end of the newest segment, if any.
+    /// The end of the newest segment, if any.
     #[must_use]
+    /// Convenience: exposed for B.U.D. 3.0 live stream head timestamp reader.
     pub fn head_end_ms(&self) -> Option<u64> {
         self.segments.last().map(|segment| segment.end_ms)
     }
 
- /// The commitment of the newest segment, if any.
+    /// The commitment of the newest segment, if any.
     #[must_use]
     pub fn head_commitment(&self) -> Option<ObjectCommitment> {
         self.segments.last().map(|segment| segment.commitment)
     }
 
- /// Produce the next time segment.
- ///
- /// `start_ms` continues the timeline: the first segment starts when the
- /// caller says the broadcast starts, every later segment starts exactly
- /// when the previous one ended. A gap or an overlap is refused, so two
- /// honest producers of the same timeline reach the same chain.
- ///
- /// # Errors
- ///
- /// [`LiveError::Closed`] before the activation height,
- /// [`LiveError::EmptySegment`] for empty content,
- /// [`LiveError::TimestampOverflow`] when the fixed window cannot be
- /// represented, [`LiveError::SegmentCountOverflow`] when the segment
- /// index cannot be represented,
- /// [`LiveError::NonContiguous`] when `start_ms` does not continue the
- /// timeline.
+    /// Produce the next time segment.
+    ///
+    /// `start_ms` continues the timeline: the first segment starts when the
+    /// caller says the broadcast starts, every later segment starts exactly
+    /// when the previous one ended. A gap or an overlap is refused, so two
+    /// honest producers of the same timeline reach the same chain.
+    ///
+    /// # Errors
+    ///
+    /// [`LiveError::Closed`] before the activation height,
+    /// [`LiveError::EmptySegment`] for empty content,
+    /// [`LiveError::TimestampOverflow`] when the fixed window cannot be
+    /// represented, [`LiveError::SegmentCountOverflow`] when the segment
+    /// index cannot be represented,
+    /// [`LiveError::NonContiguous`] when `start_ms` does not continue the
+    /// timeline.
+    /// Convenience: exposed for B.U.D. 3.0 live stream segment publisher.
     pub fn push_segment(
         &mut self,
         start_ms: u64,
@@ -266,7 +268,10 @@ impl LiveStream {
         if content.is_empty() {
             return Err(LiveError::EmptySegment);
         }
-        let expected_start_ms = self.segments.last().map_or(start_ms, |segment| segment.end_ms);
+        let expected_start_ms = self
+            .segments
+            .last()
+            .map_or(start_ms, |segment| segment.end_ms);
         if start_ms != expected_start_ms {
             return Err(LiveError::NonContiguous {
                 expected_start_ms,
@@ -277,7 +282,10 @@ impl LiveStream {
         let end_ms = start_ms
             .checked_add(LIVE_SEGMENT_MS)
             .ok_or(LiveError::TimestampOverflow)?;
-        let prev_object = self.segments.last().map_or(self.stream_id, |segment| segment.commitment);
+        let prev_object = self
+            .segments
+            .last()
+            .map_or(self.stream_id, |segment| segment.commitment);
         let id = ContentId::public(content);
         let object = Object {
             header: Header {
@@ -307,19 +315,19 @@ impl LiveStream {
         Ok(segment)
     }
 
- /// Join the stream at `now_ms`.
- ///
- /// The viewer starts at the newest complete segment; the source-first
- /// frame order makes that segment independently decodable. The join is
- /// refused when no segment exists yet or when the newest segment ended
- /// more than two segment durations ago, so a stale stream can never be
- /// served to a viewer as live.
- ///
- /// # Errors
- ///
- /// [`LiveError::EmptyStream`] before the first segment,
- /// [`LiveError::HeadStale`] when the head is older than
- /// [`MAX_JOIN_LATENCY_MS`].
+    /// Join the stream at `now_ms`.
+    ///
+    /// The viewer starts at the newest complete segment; the source-first
+    /// frame order makes that segment independently decodable. The join is
+    /// refused when no segment exists yet or when the newest segment ended
+    /// more than two segment durations ago, so a stale stream can never be
+    /// served to a viewer as live.
+    ///
+    /// # Errors
+    ///
+    /// [`LiveError::EmptyStream`] before the first segment,
+    /// [`LiveError::HeadStale`] when the head is older than
+    /// [`MAX_JOIN_LATENCY_MS`].
     pub fn viewer_join(&self, now_ms: u64) -> Result<ViewerTicket, LiveError> {
         let head = self.segments.last().ok_or(LiveError::EmptyStream)?;
         let latency_ms = now_ms.saturating_sub(head.end_ms);
@@ -337,19 +345,19 @@ impl LiveStream {
         })
     }
 
- /// Finish the broadcast and bind the chain's final object commitment to
- /// `nft`.
- ///
- /// The binding record is deterministic: two nodes that apply the same
- /// transactions compute the same [`StreamEnd::bind_tag`]. The chain
- /// writes the binding through `StorageTxV3::BindNft`; that wiring lands
- /// with the storage transactions package.
- ///
- /// # Errors
- ///
- /// [`LiveError::Closed`] before the activation height,
- /// [`LiveError::EmptyStream`] when the broadcast produced no segment,
- /// [`LiveError::SegmentCountOverflow`] when the count cannot be encoded.
+    /// Finish the broadcast and bind the chain's final object commitment to
+    /// `nft`.
+    ///
+    /// The binding record is deterministic: two nodes that apply the same
+    /// transactions compute the same [`StreamEnd::bind_tag`]. The chain
+    /// writes the binding through `StorageTxV3::BindNft`; that wiring lands
+    /// with the storage transactions package.
+    ///
+    /// # Errors
+    ///
+    /// [`LiveError::Closed`] before the activation height,
+    /// [`LiveError::EmptyStream`] when the broadcast produced no segment,
+    /// [`LiveError::SegmentCountOverflow`] when the count cannot be encoded.
     pub fn finish(self, nft: NftId) -> Result<StreamEnd, LiveError> {
         self.ctx.check_open()?;
         let head = self.segments.last().ok_or(LiveError::EmptyStream)?;
@@ -374,28 +382,28 @@ impl LiveStream {
 /// Where a viewer starts watching.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ViewerTicket {
- /// The stream the viewer joined.
+    /// The stream the viewer joined.
     pub stream_id: [u8; 32],
- /// The first segment the viewer needs: the newest complete one.
+    /// The first segment the viewer needs: the newest complete one.
     pub start_index: u64,
- /// The head commitment to verify the chain against.
+    /// The head commitment to verify the chain against.
     pub head_commitment: ObjectCommitment,
- /// How far the head was behind the requested time.
+    /// How far the head was behind the requested time.
     pub latency_ms: u64,
 }
 
 /// The end of a broadcast, bound to an NFT.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StreamEnd {
- /// The stream that ended.
+    /// The stream that ended.
     pub stream_id: [u8; 32],
- /// The final object commitment of the chain.
+    /// The final object commitment of the chain.
     pub final_commitment: ObjectCommitment,
- /// How many segments the broadcast produced.
+    /// How many segments the broadcast produced.
     pub segments: u64,
- /// The NFT the final commitment is bound to.
+    /// The NFT the final commitment is bound to.
     pub nft: NftId,
- /// The domain-separated digest of this binding record.
+    /// The domain-separated digest of this binding record.
     pub bind_tag: [u8; 32],
 }
 
@@ -440,18 +448,18 @@ pub fn verify_chain(
 /// One frame in the ratioless send order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LiveFrame {
- /// Source symbol `esi` of segment `segment`.
+    /// Source symbol `esi` of segment `segment`.
     Source {
- /// The segment the symbol belongs to.
+        /// The segment the symbol belongs to.
         segment: u64,
- /// The encoding symbol id.
+        /// The encoding symbol id.
         esi: u32,
     },
- /// Repair symbol `esi` of segment `segment`.
+    /// Repair symbol `esi` of segment `segment`.
     Repair {
- /// The segment the symbol belongs to.
+        /// The segment the symbol belongs to.
         segment: u64,
- /// The encoding symbol id.
+        /// The encoding symbol id.
         esi: u32,
     },
 }
@@ -467,31 +475,31 @@ pub enum LiveFrame {
 #[derive(Debug, Clone)]
 pub struct RatiolessPlan {
     sources: std::vec::IntoIter<LiveFrame>,
- /// The next repair ESI to emit, per segment (starts at the segment's
- /// source symbol count).
+    /// The next repair ESI to emit, per segment (starts at the segment's
+    /// source symbol count).
     next_repair_esi: Vec<u32>,
- /// Inclusive last repair ESI each segment's encoder can produce.
+    /// Inclusive last repair ESI each segment's encoder can produce.
     repair_limit_esi: Vec<u32>,
- /// Round-robin cursor into `next_repair_esi`.
+    /// Round-robin cursor into `next_repair_esi`.
     cursor: usize,
 }
 
 impl RatiolessPlan {
- /// Build the plan for segments whose source-symbol counts are `ks`.
+    /// Build the plan for segments whose source-symbol counts are `ks`.
     #[must_use]
     pub fn new(ks: &[u32]) -> Self {
         Self::build(ks, vec![MAX_ESI; ks.len()])
     }
 
- /// Build a plan with each segment's inclusive last repair ESI.
- ///
- /// `SegmentEncoder::max_esi` accounts for RFC 6330 source-block padding;
- /// using that value prevents the plan from emitting frames the encoder
- /// must refuse. Length mismatches and limits above [`MAX_ESI`] are errors.
- ///
- /// # Errors
- /// [`LiveError::RepairLimitCountMismatch`] or
- /// [`LiveError::RepairLimitOutOfRange`].
+    /// Build a plan with each segment's inclusive last repair ESI.
+    ///
+    /// `SegmentEncoder::max_esi` accounts for RFC 6330 source-block padding;
+    /// using that value prevents the plan from emitting frames the encoder
+    /// must refuse. Length mismatches and limits above [`MAX_ESI`] are errors.
+    ///
+    /// # Errors
+    /// [`LiveError::RepairLimitCountMismatch`] or
+    /// [`LiveError::RepairLimitOutOfRange`].
     pub fn with_repair_limits(ks: &[u32], repair_limits: &[u32]) -> Result<Self, LiveError> {
         if ks.len() != repair_limits.len() {
             return Err(LiveError::RepairLimitCountMismatch {
@@ -542,9 +550,15 @@ impl Iterator for RatiolessPlan {
         for _ in 0..self.next_repair_esi.len() {
             let index = self.cursor % self.next_repair_esi.len();
             self.cursor = self.cursor.wrapping_add(1);
-            let esi = self.next_repair_esi[index];
-            if esi <= self.repair_limit_esi[index] {
-                self.next_repair_esi[index] = esi + 1;
+            let Some(&limit) = self.repair_limit_esi.get(index) else {
+                continue;
+            };
+            let Some(slot) = self.next_repair_esi.get_mut(index) else {
+                continue;
+            };
+            let esi = *slot;
+            if esi <= limit {
+                *slot = esi + 1;
                 return Some(LiveFrame::Repair {
                     segment: index as u64,
                     esi,
@@ -557,8 +571,8 @@ impl Iterator for RatiolessPlan {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::meter::Meter;
+    use super::*;
 
     const ORIGINATOR: [u8; 32] = [7; 32];
     const NONCE: [u8; 32] = [9; 32];
@@ -663,20 +677,22 @@ mod tests {
         let mut stream = open_stream();
         for index in 0..6u64 {
             let start = index * LIVE_SEGMENT_MS;
-            stream.push_segment(start, format!("segment {index}").as_bytes()).unwrap();
+            stream
+                .push_segment(start, format!("segment {index}").as_bytes())
+                .unwrap();
         }
- // The head segment ends at 12_000 ms. A viewer joining at 13_500 ms
- // is served within the two-segment budget.
+        // The head segment ends at 12_000 ms. A viewer joining at 13_500 ms
+        // is served within the two-segment budget.
         let ticket = stream.viewer_join(13_500).unwrap();
         assert_eq!(ticket.start_index, 5);
         assert_eq!(ticket.latency_ms, 1_500);
         assert!(ticket.latency_ms <= MAX_JOIN_LATENCY_MS);
         assert_eq!(ticket.head_commitment, stream.head_commitment().unwrap());
- // A viewer may also join inside the head window: zero extra latency.
+        // A viewer may also join inside the head window: zero extra latency.
         let ticket = stream.viewer_join(11_000).unwrap();
         assert_eq!(ticket.latency_ms, 0);
- // The join starts at the newest complete segment once the window
- // closed; it never starts after the head.
+        // The join starts at the newest complete segment once the window
+        // closed; it never starts after the head.
         assert_eq!(ticket.start_index, 5);
     }
 
@@ -691,7 +707,7 @@ mod tests {
                 max_ms: MAX_JOIN_LATENCY_MS,
             })
         );
- // A stream with no segment at all is not joinable.
+        // A stream with no segment at all is not joinable.
         let stream = open_stream();
         assert_eq!(stream.viewer_join(0), Err(LiveError::EmptyStream));
     }
@@ -711,16 +727,20 @@ mod tests {
         let mut stream = open_stream();
         for index in 0..3u64 {
             let start = index * LIVE_SEGMENT_MS;
-            stream.push_segment(start, format!("segment {index}").as_bytes()).unwrap();
+            stream
+                .push_segment(start, format!("segment {index}").as_bytes())
+                .unwrap();
         }
         let end = stream.finish(NFT).unwrap();
         let mut stream = open_stream();
         for index in 0..3u64 {
             let start = index * LIVE_SEGMENT_MS;
-            stream.push_segment(start, format!("segment {index}").as_bytes()).unwrap();
+            stream
+                .push_segment(start, format!("segment {index}").as_bytes())
+                .unwrap();
         }
         let end_again = stream.finish(NFT).unwrap();
- // The binding record is deterministic.
+        // The binding record is deterministic.
         assert_eq!(end, end_again);
         assert_eq!(end.nft, NFT);
         assert_eq!(end.segments, 3);
@@ -734,7 +754,7 @@ mod tests {
                 &3u64.to_le_bytes(),
             ])
         );
- // An empty broadcast cannot be bound.
+        // An empty broadcast cannot be bound.
         let empty = open_stream();
         assert_eq!(empty.finish(NFT), Err(LiveError::EmptyStream));
     }
@@ -745,22 +765,22 @@ mod tests {
         stream.push_segment(0, b"segment zero").unwrap();
         stream.push_segment(2_000, b"segment one").unwrap();
         let mut objects: Vec<Object> = stream.segments().iter().map(|s| s.object.clone()).collect();
- // Tamper with the first segment's payload.
+        // Tamper with the first segment's payload.
         objects[0].payload.push(0x00);
- // The chain breaks at index 0: its commitment no longer matches.
+        // The chain breaks at index 0: its commitment no longer matches.
         assert_eq!(
             verify_chain(stream.stream_id(), &objects),
             Err(LiveError::ChainBroken { index: 1 })
         );
- // Rewrite the second link to the tampered first commitment: the
- // forged chain verifies structurally, so the viewer must also check
- // the NFT binding against the chain head out of band.
+        // Rewrite the second link to the tampered first commitment: the
+        // forged chain verifies structurally, so the viewer must also check
+        // the NFT binding against the chain head out of band.
         let first = objects[0].clone();
         let first_bytes = first.encode();
         let first_commitment = commit_object(&first_bytes, &Profile::P0).unwrap();
         objects[1].header.prev_object = Some(first_commitment);
         assert!(verify_chain(stream.stream_id(), &objects).is_ok());
- // An object without the live flag is refused.
+        // An object without the live flag is refused.
         let mut not_live = stream.segments()[0].object.clone();
         not_live.header.flags = Flags::from_byte(0).unwrap();
         not_live.header.prev_object = Some(stream.stream_id());
@@ -791,9 +811,9 @@ mod tests {
                 LiveFrame::Repair { segment: 0, esi: 6 },
             ]
         );
- // An empty plan yields nothing.
+        // An empty plan yields nothing.
         assert_eq!(RatiolessPlan::new(&[]).next(), None);
- // Repair ESIs never repeat within one segment.
+        // Repair ESIs never repeat within one segment.
         let plan = RatiolessPlan::new(&[1]);
         let repairs: Vec<u32> = plan
             .filter_map(|frame| match frame {

@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: LicenseRef-PolyForm-Shield-1.0.0
-pragma solidity ^0.8.24;
+// EIP-2537/Cancun+ target chains support EIP-3855 PUSH0 natively.
+// aderyn-fp-next-line(push-zero-opcode)
+pragma solidity 0.8.26;
 
 /// @title IBudlumUniversal
 /// @notice Precompile interface at `0x000000000000000000000000000000000000B001`

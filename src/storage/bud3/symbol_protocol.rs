@@ -59,7 +59,9 @@ impl MobileServePolicy {
         match link {
             LinkMetering::Unmetered => true,
             LinkMetering::MeteredCellular => {
-                let next = self.served_cellular_today_bytes.saturating_add(bytes_to_serve);
+                let next = self
+                    .served_cellular_today_bytes
+                    .saturating_add(bytes_to_serve);
                 if self.daily_cellular_cap_bytes == 0 || next > self.daily_cellular_cap_bytes {
                     false
                 } else {

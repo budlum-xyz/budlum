@@ -29,13 +29,14 @@ zeroize = { version = "=1.9.1", features = ["derive"] }
 
 [dev-dependencies]
 # The NIST ACVP and Wycheproof vectors the mounted pq tests parse.
+hex = "=0.4.3"
 serde_json = "=1.0.154"
 
 [package.metadata.cargo-machete]
 # src/crypto.rs mounts the node's crypto sources by path, outside this crate
 # directory; cargo-machete scans the crate directory only and cannot see the
 # `use` statements that read these.
-ignored = ["ml-dsa", "libcrux-ml-dsa", "slh-dsa"]
+ignored = ["hex", "ml-dsa", "libcrux-ml-dsa", "serde_json", "slh-dsa"]
 
 [lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
@@ -51,11 +52,8 @@ expect_used = "deny"
 overflow-checks = true
 panic = "abort"
 
-# The mounted pq tests replay SLH-DSA vectors, a few million SHAKE calls
-# each; only the hashing crates are optimized, as in the root manifest.
-[profile.dev.package.keccak]
-opt-level = 3
-[profile.dev.package.sha3]
-opt-level = 3
-[profile.dev.package.slh-dsa]
+[profile.test]
+opt-level = 1
+
+[profile.dev.package."*"]
 opt-level = 3

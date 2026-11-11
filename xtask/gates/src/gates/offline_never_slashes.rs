@@ -26,7 +26,6 @@ pub fn run(root: &Path) -> Result<String, String> {
         "BDLM_PRESENCE_V1",
         "PRESENCE_DOUBLE_SIGN_SLASH_PPM: u64 = 10_000",
         "pub fn hours_to_epochs",
-        "pub struct PresenceSignal",
         "pub struct PresenceAggregate",
         "pub fn verify_single_pairing",
         "pub fn advance_epoch",
@@ -38,6 +37,15 @@ pub fn run(root: &Path) -> Result<String, String> {
                 "src/registry/presence.rs missing required token `{token}`"
             ));
         }
+    }
+
+    if !presence_prod.contains("pub struct PresenceSignal")
+        && !presence_prod.contains("pub use budlum_types::presence::PresenceSignal;")
+    {
+        return Err(
+            "src/registry/presence.rs missing required token `pub struct PresenceSignal` or shared `pub use budlum_types::presence::PresenceSignal;`"
+                .to_owned(),
+        );
     }
 
     // Ensure `advance_epoch` never mutates `stake_atoms`.
@@ -79,7 +87,7 @@ pub fn run(root: &Path) -> Result<String, String> {
     )
 }
 
-pub fn self_test() -> Result<(), String> {
+pub fn self_test() -> Result<String, String> {
     let dir = std::env::temp_dir().join(format!(
         "budlum_offline_never_slashes_gate_{}",
         std::process::id()
@@ -102,26 +110,23 @@ impl PresenceTracker {
     pub fn slash_double_sign(&mut self) {}
 }
 "#;
-    let valid_liveness = r#"
+    let valid_liveness = r"
 pub struct SuspensionNotice { pub stake_slashed_atoms: u64 }
 pub fn record_suspension_epoch() -> SuspensionNotice {
     SuspensionNotice { stake_slashed_atoms: 0 }
 }
-"#;
+";
     fs::write(dir.join("src/registry/presence.rs"), valid_presence).map_err(|e| e.to_string())?;
     fs::write(dir.join("src/registry/liveness.rs"), valid_liveness).map_err(|e| e.to_string())?;
     run(&dir)?;
 
     // Negative canary: touching `stake_atoms` inside `advance_epoch` must fail!
-    let bad_presence = valid_presence.replace(
-        "let _suspended = true;",
-        "let stake_atoms = 0;",
-    );
+    let bad_presence = valid_presence.replace("let _suspended = true;", "let stake_atoms = 0;");
     fs::write(dir.join("src/registry/presence.rs"), bad_presence).map_err(|e| e.to_string())?;
     let res = run(&dir);
     let _ = fs::remove_dir_all(&dir);
     if res.is_ok() {
         return Err("offline-never-slashes accepted stake mutation in advance_epoch".to_owned());
     }
-    Ok(())
+    Ok("offline-never-slashes self-test OK".to_owned())
 }

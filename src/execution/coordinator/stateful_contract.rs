@@ -14,21 +14,21 @@
 //!   `ee/budzero/storage`, runs BudZero VM in execution-only mode, writes all
 //!   `vm.state_writes` back into `ee/budzero/storage`, and commits atomically
 //!   into [`AccountState`].
+//!
+//! Convenience: exposed for CLI, RPC, SDK, and multi-VM runtime callers.
 
 use bud_isa::Instruction;
 use bud_vm::Vm;
-use budlum_uel_abi::{EeId, HostApi, HostRead, Namespace};
+use budlum_uel_abi::EeId;
 
 use crate::core::account::AccountState;
 use crate::core::address::Address;
 use crate::core::hash::hash_fields_bytes;
 use crate::core::transaction::Transaction;
-use crate::execution::coordinator::accounts::derive_contract_account;
-use crate::execution::coordinator::commitment::{NS_BUDZERO_PROGRAM, NS_BUDZERO_STORAGE};
+use crate::execution::coordinator::alias::derive_contract_account;
 use crate::execution::coordinator::deploy_policy::DeployPolicy;
-use crate::execution::coordinator::overlay::{
-    BlockReadCache, ExecutionOverlay, NoopDispatcher, OverlayCore,
-};
+use crate::execution::coordinator::overlay::{BlockReadCache, TxOverlay};
+use crate::execution::coordinator::state::{NS_BUDZERO_PROGRAM, NS_BUDZERO_STORAGE};
 use crate::execution::zkvm::DEFAULT_CONTRACT_GAS_LIMIT;
 
 /// Domain-separated prefix identifying a stateful UEL `ContractCall` payload.
@@ -218,13 +218,8 @@ pub fn derive_budzero_contract_address(
     code: &[u8],
 ) -> Result<Address, String> {
     let nonce_bytes = nonce.to_le_bytes();
-    let seed = hash_fields_bytes(&[
-        b"BDLM_UEL_STATEFUL_V1",
-        &deployer.0,
-        &nonce_bytes,
-        code,
-    ]);
-    derive_contract_account(EeId::BUDZERO, &seed).map_err(|e| e.to_string())
+    let seed = hash_fields_bytes(&[b"BDLM_UEL_STATEFUL_V1", &deployer.0, &nonce_bytes, code]);
+    Ok(derive_contract_account(EeId::BUDZERO, &seed))
 }
 
 fn storage_slot_key(contract: &Address, slot: u64) -> [u8; 40] {
@@ -253,38 +248,32 @@ pub fn execute_stateful_contract_tx(
         StatefulContractEnvelope::Deploy { code, init_slots } => {
             policy
                 .check_deploy_allowed(EeId::BUDZERO)
-                .map_err(|e| e.to_string())?;
+                .map_err(|e| e.message)?;
             let _ = decode_checked_budzero(&code)?;
             let contract_addr = derive_budzero_contract_address(&tx.from, tx.nonce, &code)?;
             if state
-                .uel_state
-                .read(NS_BUDZERO_PROGRAM, &contract_addr.0)
+                .execution_state
+                .read(NS_BUDZERO_PROGRAM, &contract_addr.0)?
                 .is_some()
             {
                 return Err("contract address already occupied".into());
             }
 
-            let mut cache = BlockReadCache::new();
-            let mut disp = NoopDispatcher;
-            let mut core =
-                OverlayCore::new(state, &mut cache, EeId::BUDZERO, DEFAULT_CONTRACT_GAS_LIMIT);
-            {
-                let mut host = ExecutionOverlay::new(&mut core, &mut disp);
-                let prog_ns = Namespace::new(NS_BUDZERO_PROGRAM).map_err(|e| e.to_string())?;
-                let store_ns = Namespace::new(NS_BUDZERO_STORAGE).map_err(|e| e.to_string())?;
-                host.write(&prog_ns, &contract_addr.0, Some(&code))
-                    .map_err(|e| e.to_string())?;
-                for (slot, val) in init_slots {
-                    let key = storage_slot_key(&contract_addr, slot);
-                    host.write(&store_ns, &key, Some(&val.to_le_bytes()))
-                        .map_err(|e| e.to_string())?;
-                }
-            }
-            core.commit_root(state)?;
-            state
-                .uel_state
-                .ensure_alias_registered(&tx.from, EeId::BUDZERO)
+            let cache = BlockReadCache::new();
+            let mut overlay = TxOverlay::new(state, EeId::BUDZERO, DEFAULT_CONTRACT_GAS_LIMIT);
+            overlay
+                .write(NS_BUDZERO_PROGRAM, &contract_addr.0, Some(&code))
                 .map_err(|e| e.to_string())?;
+            for (slot, val) in init_slots {
+                let key = storage_slot_key(&contract_addr, slot);
+                overlay
+                    .write(NS_BUDZERO_STORAGE, &key, Some(&val.to_le_bytes()))
+                    .map_err(|e| e.to_string())?;
+            }
+            overlay.commit_root(&mut state.execution_state, &cache)?;
+            state
+                .execution_state
+                .ensure_alias_registered(&tx.from, EeId::BUDZERO)?;
             Ok(Some(contract_addr))
         }
         StatefulContractEnvelope::Call {
@@ -294,13 +283,15 @@ pub fn execute_stateful_contract_tx(
             gas_limit,
         } => {
             let capped_limit = gas_limit.clamp(1, DEFAULT_CONTRACT_GAS_LIMIT);
-            let mut cache = BlockReadCache::new();
-            let mut disp = NoopDispatcher;
-            let prog_ns = Namespace::new(NS_BUDZERO_PROGRAM).map_err(|e| e.to_string())?;
-            let store_ns = Namespace::new(NS_BUDZERO_STORAGE).map_err(|e| e.to_string())?;
-
-            let mut core = OverlayCore::new(state, &mut cache, EeId::BUDZERO, capped_limit);
-            let code_bytes = HostRead::read(&core, &prog_ns, &contract.0)
+            let cache = BlockReadCache::new();
+            let mut overlay = TxOverlay::new(state, EeId::BUDZERO, capped_limit);
+            let code_bytes = overlay
+                .read(
+                    &state.execution_state,
+                    &cache,
+                    NS_BUDZERO_PROGRAM,
+                    &contract.0,
+                )
                 .map_err(|e| e.to_string())?
                 .ok_or_else(|| "deployed BudZero contract not found".to_string())?;
             let program = decode_checked_budzero(&code_bytes)?;
@@ -312,8 +303,9 @@ pub fn execute_stateful_contract_tx(
 
             for slot in declared_slots {
                 let key = storage_slot_key(&contract, slot);
-                if let Some(raw) =
-                    HostRead::read(&core, &store_ns, &key).map_err(|e| e.to_string())?
+                if let Some(raw) = overlay
+                    .read(&state.execution_state, &cache, NS_BUDZERO_STORAGE, &key)
+                    .map_err(|e| e.to_string())?
                 {
                     if let Ok(arr) = raw.as_slice().try_into() {
                         vm.storage.insert(slot, u64::from_le_bytes(arr));
@@ -332,20 +324,19 @@ pub fn execute_stateful_contract_tx(
                 });
             }
 
-            {
-                let mut host = ExecutionOverlay::new(&mut core, &mut disp);
-                host.charge(receipt.gas_used).map_err(|e| e.to_string())?;
-                for (slot, val) in &vm.state_writes {
-                    let key = storage_slot_key(&contract, *slot);
-                    host.write(&store_ns, &key, Some(&val.to_le_bytes()))
-                        .map_err(|e| e.to_string())?;
-                }
+            overlay
+                .charge_bgu(receipt.gas_used)
+                .map_err(|_| "out of gas in stateful BudZero call".to_string())?;
+            for (slot, val) in &vm.state_writes {
+                let key = storage_slot_key(&contract, *slot);
+                overlay
+                    .write(NS_BUDZERO_STORAGE, &key, Some(&val.to_le_bytes()))
+                    .map_err(|e| e.to_string())?;
             }
-            core.commit_root(state)?;
+            overlay.commit_root(&mut state.execution_state, &cache)?;
             state
-                .uel_state
-                .ensure_alias_registered(&tx.from, EeId::BUDZERO)
-                .map_err(|e| e.to_string())?;
+                .execution_state
+                .ensure_alias_registered(&tx.from, EeId::BUDZERO)?;
             Ok(None)
         }
     }
@@ -361,7 +352,10 @@ pub fn read_budzero_contract_slot(
     slot: u64,
 ) -> Option<u64> {
     let key = storage_slot_key(contract, slot);
-    let raw = state.uel_state.read(NS_BUDZERO_STORAGE, &key)?;
+    let raw = state
+        .execution_state
+        .read(NS_BUDZERO_STORAGE, &key)
+        .ok()??;
     let arr: [u8; 8] = raw.try_into().ok()?;
     Some(u64::from_le_bytes(arr))
 }

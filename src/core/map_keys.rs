@@ -32,6 +32,9 @@
 //! | `(AiRequestId, [u8; 32])` | `"<request hex>:<hash hex>"` |
 //! | `(ContentId, ContentId)` | `"<content hex>:<shard hex>"` |
 //! | `ProofClaimKey` | `"<domain>:<target height>"` |
+//! | `IpAddr` | canonical IPv4/IPv6 string |
+//! | `([u8; 32], u64)` | `"<hash hex>:<index>"` |
+//! | `bud3::ContentId` | `"<public|sealed>:<digest hex>:<len>"` |
 //!
 //! The parser is strict: wrong length, non-hex characters, a missing tuple
 //! part or a duplicate key is a deserialisation error, never a silent skip.
@@ -135,6 +138,26 @@ impl MapKey for [u8; 32] {
     }
 }
 
+impl MapKey for std::net::IpAddr {
+    fn to_key_string(&self) -> String {
+        self.to_string()
+    }
+    fn from_key_string(s: &str) -> Result<Self, String> {
+        s.parse::<std::net::IpAddr>()
+            .map_err(|e| format!("invalid IP map key `{s}`: {e}"))
+    }
+}
+
+impl MapKey for ([u8; 32], u64) {
+    fn to_key_string(&self) -> String {
+        format!("{}:{}", hex::encode(self.0), self.1)
+    }
+    fn from_key_string(s: &str) -> Result<Self, String> {
+        let [hash, idx] = parts::<2>(s)?;
+        Ok((parse_hex32(hash)?, parse_uint(idx, "index")?))
+    }
+}
+
 impl MapKey for (DomainId, Address) {
     fn to_key_string(&self) -> String {
         format!("{}:{}", self.0, self.1.to_hex())
@@ -208,6 +231,38 @@ impl MapKey for (ContentId, ContentId) {
         Ok((
             ContentId(parse_hex32(content)?),
             ContentId(parse_hex32(shard)?),
+        ))
+    }
+}
+
+impl MapKey for (Address, ContentId) {
+    fn to_key_string(&self) -> String {
+        format!("{}:{}", self.0.to_hex(), hex::encode(self.1 .0))
+    }
+    fn from_key_string(s: &str) -> Result<Self, String> {
+        let [address, content] = parts::<2>(s)?;
+        Ok((
+            Address(parse_hex32(address)?),
+            ContentId(parse_hex32(content)?),
+        ))
+    }
+}
+
+impl MapKey for (ContentId, ContentId, Address) {
+    fn to_key_string(&self) -> String {
+        format!(
+            "{}:{}:{}",
+            hex::encode(self.0 .0),
+            hex::encode(self.1 .0),
+            self.2.to_hex()
+        )
+    }
+    fn from_key_string(s: &str) -> Result<Self, String> {
+        let [manifest, shard, address] = parts::<3>(s)?;
+        Ok((
+            ContentId(parse_hex32(manifest)?),
+            ContentId(parse_hex32(shard)?),
+            Address(parse_hex32(address)?),
         ))
     }
 }

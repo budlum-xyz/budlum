@@ -8,13 +8,13 @@
 //! authentication really stays constant time:
 //!
 //! 1. Positive control: verifies that an early-exit naive `==`-like comparison produces a
-//! MEASURABLE timing difference between the "first byte differs" and "last byte differs"
-//! classes (a harness sensitivity test).
-//! If the control shows no difference the environment/harness is unreliable -> exit 2.
+//!    MEASURABLE timing difference between the "first byte differs" and "last byte differs"
+//!    classes (a harness sensitivity test).
+//!    If the control shows no difference the environment/harness is unreliable -> exit 2.
 //! 2. The real test: `constant_time_eq_str` must produce NO significant difference between the
-//! same two classes. The verdict requires BOTH conditions together:
-//! |Welch t| >= 4.5 **and** the observed difference being at least 5 percent of the known
-//! leak measured in the same run -> exit 1.
+//!    same two classes. The verdict requires BOTH conditions together:
+//!    |Welch t| >= 4.5 **and** the observed difference being at least 5 percent of the known
+//!    leak measured in the same run -> exit 1.
 //!
 //! Why two conditions: the t statistic answers "is there a difference", not "does the
 //! difference matter". Because `measure_min_per_batch` takes the batch minimum the
@@ -146,20 +146,20 @@ fn measure_min_per_batch<T: ?Sized, F: Fn(&T, &T) -> bool>(
         let mut m_first = f64::INFINITY;
         let mut m_last = f64::INFINITY;
         for i in 0..iters {
- // Interleaved measurement: drift loads both classes equally.
+            // Interleaved measurement: drift loads both classes equally.
             let (cand, acc) = if i % 2 == 0 {
                 (first, &mut m_first)
             } else {
                 (last, &mut m_last)
             };
- // One clock reading covers CALLS_PER_SAMPLE calls, then the time
- // is divided back down. Without this the reading is quantised to
- // the clock tick and the comparison measures the clock, not the
- // function. The division keeps the FRACTION: an integer ns would
- // snap every sample to a whole nanosecond and quietly destroy the
- // sub-tick resolution this batching exists to create (a 20 ns
- // tick over 64 calls resolves 0.3125 ns per call only because the
- // quotient is not truncated).
+            // One clock reading covers CALLS_PER_SAMPLE calls, then the time
+            // is divided back down. Without this the reading is quantised to
+            // the clock tick and the comparison measures the clock, not the
+            // function. The division keeps the FRACTION: an integer ns would
+            // snap every sample to a whole nanosecond and quietly destroy the
+            // sub-tick resolution this batching exists to create (a 20 ns
+            // tick over 64 calls resolves 0.3125 ns per call only because the
+            // quotient is not truncated).
             let t0 = Instant::now();
             for _ in 0..CALLS_PER_SAMPLE {
                 black_box(f(black_box(cand), black_box(valid)));
@@ -189,14 +189,14 @@ fn welch_t(a: &[f64], b: &[f64]) -> f64 {
     let num = mean(a) - mean(b);
     let den = (variance(a) / na + variance(b) / nb).sqrt();
     if den == 0.0 {
- // Both classes collapsed onto a single value each (a quantised clock,
- // see CALLS_PER_SAMPLE). Welch's statistic is undefined here, and the
- // sentinel has to say so in a way `is_finite()` can see: `f64::MAX`
- // used to be returned for different means, and it is finite, so the
- // caller's guard let a 30ns-vs-40ns flat pair through as an
- // "infinitely significant" control. NaN is not
- // finite, compares false against every threshold, and is rejected
- // before any verdict.
+        // Both classes collapsed onto a single value each (a quantised clock,
+        // see CALLS_PER_SAMPLE). Welch's statistic is undefined here, and the
+        // sentinel has to say so in a way `is_finite()` can see: `f64::MAX`
+        // used to be returned for different means, and it is finite, so the
+        // caller's guard let a 30ns-vs-40ns flat pair through as an
+        // "infinitely significant" control. NaN is not
+        // finite, compares false against every threshold, and is rejected
+        // before any verdict.
         return f64::NAN;
     }
     num / den
@@ -344,7 +344,7 @@ fn pq_signer_classes() -> Result<(), ExitCode> {
         let mut class_a = Vec::with_capacity(*n);
         let mut class_b = Vec::with_capacity(*n);
         let mut control_b = Vec::with_capacity(*n);
- // Warm-up.
+        // Warm-up.
         let warm_seed = seed_for_class(true, &mut rng, *seed_len);
         sign(&warm_seed, b"warm-up message");
         for _ in 0..*n {
@@ -356,7 +356,7 @@ fn pq_signer_classes() -> Result<(), ExitCode> {
             class_b.push(time_once(|| sign(&seed_b, &msg_b)));
         }
         let m = (mean(&class_a) + mean(&class_b)) / 2.0;
- // The leaky copy: the same measurement with class B padded by 60 percent.
+        // The leaky copy: the same measurement with class B padded by 60 percent.
         for value in &class_b {
             control_b.push(*value + 0.6 * m);
         }
@@ -395,14 +395,14 @@ fn main() -> ExitCode {
         eprintln!("FAIL(harness): welch_t sentinel contract broken: {neden}");
         return ExitCode::from(2);
     }
- // One batch has no variance to compare (`variance` divides by len - 1),
- // and zero iterations produce empty samples; with either, Welch's t
- // degenerates to NaN and every later comparison passes silently,
- // turning the gate into an unconditional PASS. Floor both.
+    // One batch has no variance to compare (`variance` divides by len - 1),
+    // and zero iterations produce empty samples; with either, Welch's t
+    // degenerates to NaN and every later comparison passes silently,
+    // turning the gate into an unconditional PASS. Floor both.
     let batches = getenv_usize("TIMING_SAFE_BATCHES", 64).max(2);
     let iters = getenv_usize("TIMING_SAFE_ITERS", 4096).max(1);
 
- // A deterministic 64-byte API key (in the x-api-key length class).
+    // A deterministic 64-byte API key (in the x-api-key length class).
     let mut rng = XorShift(0xB0D1_0CA7_5EED_1234);
     let secret: String = (0..64)
         .map(|_| {
@@ -415,8 +415,8 @@ fn main() -> ExitCode {
         })
         .collect();
 
- // Class A: the first character differs (a naive comparison returns immediately).
- // Class B: the last character differs (a naive comparison walks the longest path).
+    // Class A: the first character differs (a naive comparison returns immediately).
+    // Class B: the last character differs (a naive comparison walks the longest path).
     let mut diff_first = secret.clone();
     let mut diff_last = secret.clone();
     let first_byte = secret.as_bytes()[0];
@@ -424,7 +424,7 @@ fn main() -> ExitCode {
     diff_first.replace_range(0..1, if first_byte == b'A' { "B" } else { "A" });
     diff_last.replace_range(63..64, if last_byte == b'A' { "B" } else { "A" });
 
- // Warm-up: let the I-cache / branch predictor settle.
+    // Warm-up: let the I-cache / branch predictor settle.
     for _ in 0..20_000 {
         black_box(constant_time_eq_str(
             black_box(&diff_first),
@@ -436,7 +436,7 @@ fn main() -> ExitCode {
         ));
     }
 
- // 1) Positive control (harness sensitivity)
+    // 1) Positive control (harness sensitivity)
     let (ctl_a, ctl_b) = measure_min_per_batch(
         naive_eq_bytes,
         diff_first.as_bytes(),
@@ -447,14 +447,14 @@ fn main() -> ExitCode {
     );
     let t_control = welch_t(&ctl_a, &ctl_b);
 
- // 2) The real measurement (the constant-time implementation). The
- // classes are measured as `&str` end to end: the production contract
- // already takes validated `&str`, and converting `&[u8]` inside the
- // timed closure measured UTF-8 validation instead - whose chunked SIMD
- // scan costs differently for a 63-byte candidate than for a 64-byte one,
- // a harness artefact several times larger than the leeway this gate
- // allows. Every class below is built from the `secret` String, so the
- // `&str` values exist before the clock starts.
+    // 2) The real measurement (the constant-time implementation). The
+    // classes are measured as `&str` end to end: the production contract
+    // already takes validated `&str`, and converting `&[u8]` inside the
+    // timed closure measured UTF-8 validation instead - whose chunked SIMD
+    // scan costs differently for a 63-byte candidate than for a 64-byte one,
+    // a harness artefact several times larger than the leeway this gate
+    // allows. Every class below is built from the `secret` String, so the
+    // `&str` values exist before the clock starts.
     let (ct_a, ct_b) = measure_min_per_batch(
         constant_time_eq_str,
         diff_first.as_str(),
@@ -483,21 +483,21 @@ fn main() -> ExitCode {
         t_ct.abs()
     );
 
- // Validity before verdict. A degenerate control does not mean the function
- // under test is constant time, and it does not mean it is broken either;
- // it means this run measured nothing. Exit code 2 says exactly that, and
- // it is kept distinct from 1 (a real regression) on purpose.
+    // Validity before verdict. A degenerate control does not mean the function
+    // under test is constant time, and it does not mean it is broken either;
+    // it means this run measured nothing. Exit code 2 says exactly that, and
+    // it is kept distinct from 1 (a real regression) on purpose.
     let control_delta_pre = (mean(&ctl_a) - mean(&ctl_b)).abs();
     let effective_resolution = granularity as f64 / CALLS_PER_SAMPLE as f64;
- // A NaN from `welch_t` is a zero-variance pair. It is resolved here, out
- // loud, before any threshold sees it: NaN compares false against every
- // threshold, so left alone it would read as "no difference" for the
- // function under test and as an unmeasurable control for the harness.
- // Measured 2026-09-27 (run 36326178651): the control's per-batch minima
- // were flat 1.88ns against flat 21.59ns over every batch - complete
- // separation, a 19.7ns gap on a 0.31ns effective resolution. That is the
- // strongest evidence the harness can produce, and calling it "nothing
- // measured" made the gate red on a perfectly good run.
+    // A NaN from `welch_t` is a zero-variance pair. It is resolved here, out
+    // loud, before any threshold sees it: NaN compares false against every
+    // threshold, so left alone it would read as "no difference" for the
+    // function under test and as an unmeasurable control for the harness.
+    // Measured 2026-09-27 (run 36326178651): the control's per-batch minima
+    // were flat 1.88ns against flat 21.59ns over every batch - complete
+    // separation, a 19.7ns gap on a 0.31ns effective resolution. That is the
+    // strongest evidence the harness can produce, and calling it "nothing
+    // measured" made the gate red on a perfectly good run.
     let t_control = if t_control.is_finite() {
         t_control
     } else if completely_separated(&ctl_a, &ctl_b)
@@ -523,14 +523,14 @@ fn main() -> ExitCode {
     let t_ct = if t_ct.is_finite() {
         t_ct
     } else if ct_delta_pre == 0.0 {
- // Both classes flat on the same value: no difference at all. That is
- // t = 0 by any reading, and it is stated rather than left as NaN.
+        // Both classes flat on the same value: no difference at all. That is
+        // t = 0 by any reading, and it is stated rather than left as NaN.
         println!("constant_time_eq_str: both classes flat on one value; |t| taken as 0");
         0.0
     } else if completely_separated(&ct_a, &ct_b) {
- // Flat AND different: every batch put the classes on different
- // values. Treated as maximal significance so the effect-size check
- // below decides, instead of NaN sliding past the threshold as a pass.
+        // Flat AND different: every batch put the classes on different
+        // values. Treated as maximal significance so the effect-size check
+        // below decides, instead of NaN sliding past the threshold as a pass.
         println!(
             "constant_time_eq_str: zero variance with complete separation (gap \
              {ct_delta_pre:.2}ns); |t| taken as infinite, the effect size decides"
@@ -543,16 +543,16 @@ fn main() -> ExitCode {
         );
         return ExitCode::from(2);
     };
- // The comparison is against the EFFECTIVE resolution, not the raw tick:
- // one reading covers CALLS_PER_SAMPLE calls, so a 20ns tick resolves
- // 20/64 = 0.31ns per call - and the samples keep that fraction (see
- // measure_min_per_batch), so the effective resolution is real in the data,
- // not an artefact of an integer quotient. Measured 2026-09-25 (job
- // 107995294005): a 20ns tick, a control leak of 26.89ns and |t|=0.00 for
- // the constant-time path. Comparing that leak against the raw tick failed
- // a perfectly valid run,
- // which is the same class of mistake as the one this gate is here to
- // catch - judging the clock instead of the code.
+    // The comparison is against the EFFECTIVE resolution, not the raw tick:
+    // one reading covers CALLS_PER_SAMPLE calls, so a 20ns tick resolves
+    // 20/64 = 0.31ns per call - and the samples keep that fraction (see
+    // measure_min_per_batch), so the effective resolution is real in the data,
+    // not an artefact of an integer quotient. Measured 2026-09-25 (job
+    // 107995294005): a 20ns tick, a control leak of 26.89ns and |t|=0.00 for
+    // the constant-time path. Comparing that leak against the raw tick failed
+    // a perfectly valid run,
+    // which is the same class of mistake as the one this gate is here to
+    // catch - judging the clock instead of the code.
     if control_delta_pre < 3.0 * effective_resolution {
         eprintln!(
             "FAIL(harness): the known leak measured {control_delta_pre:.2}ns against an \
@@ -570,9 +570,9 @@ fn main() -> ExitCode {
         );
         return ExitCode::from(2);
     }
- // Effect size: what fraction of the known leak in the same run is the observed
- // difference? The denominator is the measured control, not a constant, so if the environment slows
- // both slow down and the ratio keeps its meaning.
+    // Effect size: what fraction of the known leak in the same run is the observed
+    // difference? The denominator is the measured control, not a constant, so if the environment slows
+    // both slow down and the ratio keeps its meaning.
     let ct_delta = (mean(&ct_a) - mean(&ct_b)).abs();
     let control_delta = (mean(&ctl_a) - mean(&ctl_b)).abs();
     if control_delta <= 0.0 {
@@ -587,8 +587,8 @@ fn main() -> ExitCode {
         EFFECT_RATIO_THRESHOLD * 100.0
     );
 
- // Extra classes: a mismatch in the middle byte against the first byte, and a
- // length mismatch against a same-length mismatch. Same verdict rule as above.
+    // Extra classes: a mismatch in the middle byte against the first byte, and a
+    // length mismatch against a same-length mismatch. Same verdict rule as above.
     let mut diff_mid = secret.clone();
     let mid_byte = secret.as_bytes()[32];
     diff_mid.replace_range(32..33, if mid_byte == b'A' { "B" } else { "A" });
@@ -633,14 +633,14 @@ fn main() -> ExitCode {
         }
     }
 
- // the post-quantum signers, same verdict rule, own controls.
+    // the post-quantum signers, same verdict rule, own controls.
     if let Err(code) = pq_signer_classes() {
         return code;
     }
 
- // Both conditions together: statistical evidence AND practical magnitude. Neither
- // substitutes for the other - t alone counts 1 ns as a violation, and the ratio alone
- // lets a large but random difference through in a noisy environment.
+    // Both conditions together: statistical evidence AND practical magnitude. Neither
+    // substitutes for the other - t alone counts 1 ns as a violation, and the ratio alone
+    // lets a large but random difference through in a noisy environment.
     if t_ct.abs() >= T_THRESHOLD && effect_ratio >= EFFECT_RATIO_THRESHOLD {
         eprintln!(
             "FAIL(regression): constant_time_eq_str produced a significant difference between the classes \

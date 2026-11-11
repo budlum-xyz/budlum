@@ -29,9 +29,7 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use crate::consensus::{affordable_leader_round, ROUND_TIMEOUT_MS};
-use crate::storage::bud3::custody::{
-    CUSTODY_ASSIGNMENT_HANDOVER_EPOCHS, CUSTODY_READ_TIMEOUT_MS,
-};
+use crate::storage::bud3::custody::{CUSTODY_ASSIGNMENT_HANDOVER_EPOCHS, CUSTODY_READ_TIMEOUT_MS};
 use crate::storage::bud3::placement::Class as StorageClass;
 use crate::storage::bud3::registry::{Address, Bud3Registry};
 use crate::storage::bud3::repair::{RepairScheduler, REPAIR_TASK_HANDOVER_BLOCKS};
@@ -41,7 +39,7 @@ use super::ValidatorClass;
 /// Consensus proposer round timeout in milliseconds (`3_000` ms, matching
 /// [`ROUND_TIMEOUT_MS`]).
 pub const PROPOSER_ROUND_TIMEOUT_MS: u64 = 3_000;
-const _: () = assert!(u128::from(PROPOSER_ROUND_TIMEOUT_MS) == ROUND_TIMEOUT_MS);
+const _: () = assert!((PROPOSER_ROUND_TIMEOUT_MS as u128) == ROUND_TIMEOUT_MS);
 
 /// Consecutive missed `SeatParticipation` checkpoints before an active finality
 /// seat hands over to the standby Full queue (Section 7.6, Row 2).
@@ -211,31 +209,20 @@ pub fn proposer_round_for_timestamps(parent_timestamp_ms: u128, now_ms: u128) ->
 /// no block within `ROUND_TIMEOUT_MS`, `round + 1` deterministically hands the
 /// slot to a successor without waiting for an epoch boundary.
 #[must_use]
-pub fn select_round_proposer(
-    slot: u64,
-    round: u64,
-    active_full: &[Address],
-) -> Option<Address> {
+pub fn select_round_proposer(slot: u64, round: u64, active_full: &[Address]) -> Option<Address> {
     if active_full.is_empty() {
         return None;
     }
     let len = u64::try_from(active_full.len()).unwrap_or(1);
-    let idx = usize::try_from(
-        slot.wrapping_mul(131)
-            .wrapping_add(round)
-            .rem_euclid(len),
-    )
-    .unwrap_or(0);
+    let idx =
+        usize::try_from(slot.wrapping_mul(131).wrapping_add(round).rem_euclid(len)).unwrap_or(0);
     active_full.get(idx).copied()
 }
 
 /// Convenience: immediate client/peer failover for custody share reads, upload
 /// gateways, and relay reservations (Section 7.6, Rows 3, 7, 8).
 #[must_use]
-pub fn select_next_endpoint(
-    failed: &[Address],
-    candidates: &[Address],
-) -> Option<Address> {
+pub fn select_next_endpoint(failed: &[Address], candidates: &[Address]) -> Option<Address> {
     candidates
         .iter()
         .find(|cand| !failed.contains(cand))
@@ -455,13 +442,21 @@ pub const fn is_finality_stalled_at_interval(
     checkpoint_interval: u64,
 ) -> bool {
     head_height.saturating_sub(finalized_height)
-        >= FINALITY_STALL_CHECKPOINTS.saturating_mul(checkpoint_interval.max(1))
+        >= FINALITY_STALL_CHECKPOINTS.saturating_mul(if checkpoint_interval > 1 {
+            checkpoint_interval
+        } else {
+            1
+        })
 }
 
 /// Testnet convenience wrapper using the five-block checkpoint interval.
 #[must_use]
 pub const fn is_finality_stalled(head_height: u64, finalized_height: u64) -> bool {
-    is_finality_stalled_at_interval(head_height, finalized_height, TESTNET_CHECKPOINT_INTERVAL_BLOCKS)
+    is_finality_stalled_at_interval(
+        head_height,
+        finalized_height,
+        TESTNET_CHECKPOINT_INTERVAL_BLOCKS,
+    )
 }
 
 /// Node-level disaster recovery tracker implementing Section 7.7.

@@ -25,11 +25,12 @@
 //! erase remote replicas. For public content the volume is recoded within
 //! [`RECODE_DEADLINE_SECS`].
 //!
-//! WIRING: unwired - [`super::pipeline`] builds and views a volume for the
+//! [`super::pipeline`] builds and views a volume for the
 //! upload and view paths. The delete path of `bud3::delete` and the reference
 //! counter call [`AggregationVolume::remove`],
 //! [`AggregationVolume::needs_recode`] and [`AggregationVolume::compact`] once
 //! that door lands.
+//! Convenience: exposed for CLI, RPC, SDK, and multi-VM runtime callers.
 
 use super::content_id::{ContentId, ContentIdKind};
 use super::registry::Address;
@@ -409,7 +410,7 @@ impl AggregationVolume {
             .iter()
             .position(|m| m.content_id == *content_id)
             .ok_or(VolumeError::UnknownMember)?;
-        let member = self.members[index];
+        let member = *self.members.get(index).ok_or(VolumeError::UnknownMember)?;
         let start = usize::try_from(member.offset).map_err(|_| VolumeError::OffsetOverflow)?;
         let len = usize::try_from(member.len).map_err(|_| VolumeError::OffsetOverflow)?;
         let end = start.checked_add(len).ok_or(VolumeError::OffsetOverflow)?;
@@ -466,10 +467,7 @@ impl AggregationVolume {
                 .ok_or(VolumeError::OffsetOverflow)?;
             let offset = bytes.len() as u64;
             bytes.extend_from_slice(slot);
-            members.push(VolumeMember {
-                offset,
-                ..*member
-            });
+            members.push(VolumeMember { offset, ..*member });
         }
         self.bytes = bytes;
         self.members = members;
@@ -508,14 +506,22 @@ pub fn root_of(members: &[VolumeMember]) -> [u8; 32] {
         let mut i = 0usize;
         while i < level.len() {
             match level.get(i + 1) {
-                Some(right) => next.push(node_hash(&level[i], right)),
-                None => next.push(level[i]),
+                Some(right) => {
+                    if let Some(left) = level.get(i) {
+                        next.push(node_hash(left, right));
+                    }
+                }
+                None => {
+                    if let Some(&left) = level.get(i) {
+                        next.push(left);
+                    }
+                }
             }
             i += 2;
         }
         level = next;
     }
-    root_hash(&level[0], members.len() as u64)
+    root_hash(level.first().unwrap_or(&[0u8; 32]), members.len() as u64)
 }
 
 /// The id of a volume with these bytes and this visibility.
@@ -543,7 +549,7 @@ pub fn proof_for(members: &[VolumeMember], index: usize) -> Vec<PathStep> {
     let mut pos = index;
     let mut path = Vec::new();
     while level.len() > 1 {
-        let sibling = if pos % 2 == 0 {
+        let sibling = if pos.is_multiple_of(2) {
             level.get(pos + 1).copied()
         } else {
             level.get(pos - 1).copied()
@@ -553,8 +559,16 @@ pub fn proof_for(members: &[VolumeMember], index: usize) -> Vec<PathStep> {
         let mut i = 0usize;
         while i < level.len() {
             match level.get(i + 1) {
-                Some(right) => next.push(node_hash(&level[i], right)),
-                None => next.push(level[i]),
+                Some(right) => {
+                    if let Some(left) = level.get(i) {
+                        next.push(node_hash(left, right));
+                    }
+                }
+                None => {
+                    if let Some(&left) = level.get(i) {
+                        next.push(left);
+                    }
+                }
             }
             i += 2;
         }
@@ -580,7 +594,7 @@ pub fn verify_member(
     let mut expected_depth = 0usize;
     while levels > 1 {
         expected_depth += 1;
-        levels = (levels + 1) / 2;
+        levels = levels.div_ceil(2);
     }
     // A proof is canonical as well as valid: neither a truncated path nor
     // trailing no-op steps may authenticate the same member.
@@ -592,7 +606,7 @@ pub fn verify_member(
     for step in path {
         match step {
             Some(sibling) => {
-                hash = if pos % 2 == 0 {
+                hash = if pos.is_multiple_of(2) {
                     node_hash(&hash, sibling)
                 } else {
                     node_hash(sibling, &hash)
@@ -650,7 +664,9 @@ mod tests {
     fn bud3_volume_refuses_mixed_visibility_and_duplicates() {
         let mut volume = AggregationVolume::new(Visibility::Public, 4096).unwrap();
         let public_id = public(b"public member");
-        assert!(volume.push(&public_id, commitment(1), b"public member", SYMBOL).is_ok());
+        assert!(volume
+            .push(&public_id, commitment(1), b"public member", SYMBOL)
+            .is_ok());
         // A sealed member never shares a public volume.
         let sealed_id = sealed(b"sealed member");
         assert_eq!(
@@ -703,11 +719,15 @@ mod tests {
         assert_ne!(one, two, "the count and the members are bound");
 
         let mut changed = volume.members().to_vec();
-        changed[0].commitment = commitment(9);
+        if let Some(m0) = changed.first_mut() {
+            m0.commitment = commitment(9);
+        }
         assert_ne!(root_of(&changed), two, "the commitment is bound");
 
         let mut changed = volume.members().to_vec();
-        changed[1].offset += 1;
+        if let Some(m1) = changed.get_mut(1) {
+            m1.offset += 1;
+        }
         assert_ne!(root_of(&changed), two, "the offset is bound");
 
         let mut order = volume.members().to_vec();
@@ -728,23 +748,47 @@ mod tests {
         for (i, id) in ids.iter().enumerate() {
             let member = *volume.member(id).unwrap();
             let path = volume.member_proof(id).unwrap();
-            assert!(verify_member(volume.root(), count, i as u64, &member, &path));
-            let mut extended = path.clone();
-            extended.push(None);
-            assert!(!verify_member(volume.root(), count, i as u64, &member, &extended));
-            assert!(!verify_member(
-                volume.root(),
+            assert!(verify_member(
+                &volume.root(),
                 count,
                 i as u64,
                 &member,
-                &path[..path.len() - 1],
+                &path
+            ));
+            let mut extended = path.clone();
+            extended.push(None);
+            assert!(!verify_member(
+                &volume.root(),
+                count,
+                i as u64,
+                &member,
+                &extended
+            ));
+            assert!(!verify_member(
+                &volume.root(),
+                count,
+                i as u64,
+                &member,
+                path.get(..path.len().saturating_sub(1)).unwrap_or(&[]),
             ));
             // The same path never finds a member at another position.
-            assert!(!verify_member(volume.root(), count, i as u64 + 1, &member, &path));
+            assert!(!verify_member(
+                &volume.root(),
+                count,
+                i as u64 + 1,
+                &member,
+                &path
+            ));
             // A member with another commitment fails under the same path.
             let mut forged = member;
             forged.commitment = commitment(200);
-            assert!(!verify_member(volume.root(), count, i as u64, &forged, &path));
+            assert!(!verify_member(
+                &volume.root(),
+                count,
+                i as u64,
+                &forged,
+                &path
+            ));
         }
         assert!(volume.member_proof(&public(b"absent")).is_none());
     }
@@ -785,8 +829,12 @@ mod tests {
         let mut volume = AggregationVolume::new(Visibility::Sealed(owner), 4096).unwrap();
         let a = sealed(b"secret one");
         let b = sealed(b"secret two");
-        volume.push_owned(&a, Some(owner), commitment(1), b"secret one", SYMBOL).unwrap();
-        volume.push_owned(&b, Some(owner), commitment(2), b"secret two", SYMBOL).unwrap();
+        volume
+            .push_owned(&a, Some(owner), commitment(1), b"secret one", SYMBOL)
+            .unwrap();
+        volume
+            .push_owned(&b, Some(owner), commitment(2), b"secret two", SYMBOL)
+            .unwrap();
         let removal = volume.remove(&a, 7).unwrap();
         assert!(removal.sealed);
         assert_eq!(removal.effective_at, Some(7), "local removal is recorded");
@@ -802,7 +850,9 @@ mod tests {
         assert_eq!(small.capacity(), 8);
         assert_eq!(small.free(), 8);
         let mut volume = small;
-        volume.push(&public(b"a"), commitment(1), b"12345", SYMBOL).unwrap();
+        volume
+            .push(&public(b"a"), commitment(1), b"12345", SYMBOL)
+            .unwrap();
         assert_eq!(volume.free(), 3);
         assert_eq!(
             volume.push(&public(b"b"), commitment(2), b"1234", SYMBOL),

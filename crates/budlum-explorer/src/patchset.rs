@@ -262,7 +262,7 @@ pub fn touched_files(diff: &str) -> Vec<String> {
 /// A patch path stays inside its tree: it is relative and has no `..`
 /// segment, so a string prefix test on it means what it says.
 fn path_stays_in_tree(path: &str) -> bool {
-    !path.starts_with('/') && !path.split('/').any(|segment| segment == "..")
+    !path.starts_with('/') && !path.split('/').any(|segment| segment.is_empty() || segment == "." || segment == "..")
 }
 
 /// Every hunk header's line counts against the lines that follow it.

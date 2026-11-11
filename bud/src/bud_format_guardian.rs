@@ -4,13 +4,14 @@
 //! the tariff is bound to wakefulness." This module is the code counterpart of
 //! the Y ideas in the bud skeleton:
 //! - Y1 Roving guardian: every epoch the guardian picks one of N contents,
-//! reproduces the PACT and verifies it against the commitment (a production
-//! challenge instead of PoR).
+//!   reproduces the PACT and verifies it against the commitment (a production
+//!   challenge instead of PoR).
 //! - Y12 Guardian selection: commit-reveal plus a deterministic PRF (the same
-//! history gives the same selection).
+//!   history gives the same selection).
 //! - Y14 Guardian sub-role: an opt-in flag (without opening a new RoleId).
 //! - Y9 Regenerative device network: the mini-guardian record (shard audit plus
-//! a fault counter).
+//!   a fault counter).
+//!
 //! The numbers are program output; none is written by hand (the 2.0 rule). The
 //! N=26 table comes from DV.
 

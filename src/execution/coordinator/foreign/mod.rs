@@ -1,10 +1,12 @@
 //! Foreign Compatibility Lane envelopes, classical account isolation, `Adopt`,
 //! and Quantum Alert Level gating (sections 8.4.1, 8.4.2, and 8.6.2).
+//! Convenience: exposed for CLI, RPC, SDK, and multi-VM runtime callers.
 
 pub mod aptos;
 pub mod cosmos;
 pub mod ethereum;
 pub mod solana;
+pub mod sui;
 
 #[cfg(test)]
 mod foreign_tests;
@@ -148,7 +150,7 @@ pub fn adopt_signing_digest(
     chain_id: u64,
 ) -> [u8; 32] {
     hash_fields_bytes(&[
-        b"BDLM_ADOPT_FOREIGN_V1",
+        crate::crypto::ctx::ADOPT_FOREIGN_V1,
         &[scheme as u8],
         local_id,
         &native_pq_target.0,
@@ -168,6 +170,78 @@ pub struct ForeignAccountRecord {
     pub adopted_into: Option<Address>,
 }
 
+mod serde_sig64_set {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use std::collections::BTreeSet;
+
+    pub fn serialize<S: Serializer>(
+        set: &BTreeSet<[u8; 64]>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        let hexs: Vec<String> = set.iter().map(hex::encode).collect();
+        hexs.serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<BTreeSet<[u8; 64]>, D::Error> {
+        let hexs = Vec::<String>::deserialize(deserializer)?;
+        let mut out = BTreeSet::new();
+        for h in hexs {
+            let raw = hex::decode(h.strip_prefix("0x").unwrap_or(&h))
+                .map_err(serde::de::Error::custom)?;
+            let arr: [u8; 64] = raw
+                .try_into()
+                .map_err(|_| serde::de::Error::custom("expected 64-byte signature"))?;
+            out.insert(arr);
+        }
+        Ok(out)
+    }
+}
+
+mod serde_sig64_map {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use std::collections::BTreeMap;
+
+    pub fn serialize<S: Serializer>(
+        map: &BTreeMap<[u8; 32], Vec<[u8; 64]>>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        let str_map: BTreeMap<String, Vec<String>> = map
+            .iter()
+            .map(|(k, v)| (hex::encode(k), v.iter().map(hex::encode).collect()))
+            .collect();
+        str_map.serialize(serializer)
+    }
+
+    type SigWindowMap = BTreeMap<[u8; 32], Vec<[u8; 64]>>;
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<SigWindowMap, D::Error> {
+        let str_map = BTreeMap::<String, Vec<String>>::deserialize(deserializer)?;
+        let mut out = BTreeMap::new();
+        for (k, vals) in str_map {
+            let kb = hex::decode(k.strip_prefix("0x").unwrap_or(&k))
+                .map_err(serde::de::Error::custom)?;
+            let karr: [u8; 32] = kb
+                .try_into()
+                .map_err(|_| serde::de::Error::custom("expected 32-byte blockhash"))?;
+            let mut sigs = Vec::with_capacity(vals.len());
+            for v in vals {
+                let vb = hex::decode(v.strip_prefix("0x").unwrap_or(&v))
+                    .map_err(serde::de::Error::custom)?;
+                let varr: [u8; 64] = vb
+                    .try_into()
+                    .map_err(|_| serde::de::Error::custom("expected 64-byte signature"))?;
+                sigs.push(varr);
+            }
+            out.insert(karr, sigs);
+        }
+        Ok(out)
+    }
+}
+
 /// Stateful admission and replay ledger for the foreign Compatibility Lane.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ForeignLaneState {
@@ -175,9 +249,10 @@ pub struct ForeignLaneState {
     pub next_cosmos_account_number: u64,
     pub accounts: BTreeMap<Address, ForeignAccountRecord>,
     pub recent_blockhashes: VecDeque<[u8; 32]>,
+    #[serde(with = "serde_sig64_set")]
     pub seen_solana_signatures: BTreeSet<[u8; 64]>,
     /// Tracks Solana signatures per finalized blockhash for bounded eviction.
-    #[serde(default)]
+    #[serde(default, with = "serde_sig64_map")]
     pub solana_sigs_by_blockhash: BTreeMap<[u8; 32], Vec<[u8; 64]>>,
 }
 
@@ -241,16 +316,29 @@ impl std::fmt::Display for ForeignAdmissionError {
                 write!(f, "foreign sender collides with a registered native alias")
             }
             Self::NonceMismatch { expected, got } => {
-                write!(f, "foreign nonce/sequence mismatch: expected {expected}, got {got}")
+                write!(
+                    f,
+                    "foreign nonce/sequence mismatch: expected {expected}, got {got}"
+                )
             }
             Self::AccountNumberMismatch { expected, got } => {
-                write!(f, "Cosmos account_number mismatch: expected {expected}, got {got}")
+                write!(
+                    f,
+                    "Cosmos account_number mismatch: expected {expected}, got {got}"
+                )
             }
             Self::ClosedByQuantumAlert(lvl) => {
-                write!(f, "foreign envelope refused under quantum alert level {}", *lvl as u8)
+                write!(
+                    f,
+                    "foreign envelope refused under quantum alert level {}",
+                    *lvl as u8
+                )
             }
             Self::PqHoldingsProtected => {
-                write!(f, "classical foreign account cannot touch post-quantum holdings (K-3)")
+                write!(
+                    f,
+                    "classical foreign account cannot touch post-quantum holdings (K-3)"
+                )
             }
             Self::AccountAlreadyAdopted(dst) => {
                 write!(f, "foreign account was already adopted into {dst}")
@@ -518,8 +606,8 @@ impl ForeignLaneState {
                     ForeignScheme::SolanaEd25519,
                     &decoded.fee_payer,
                 )?;
-                let rec = self
-                    .upsert_foreign_account(ForeignScheme::SolanaEd25519, &decoded.fee_payer)?;
+                let rec =
+                    self.upsert_foreign_account(ForeignScheme::SolanaEd25519, &decoded.fee_payer)?;
                 rec.next_nonce = rec.next_nonce.saturating_add(1);
                 self.seen_solana_signatures
                     .insert(decoded.fee_payer_signature);
@@ -537,16 +625,15 @@ impl ForeignLaneState {
                 raw_bcs,
                 direct_native_pq_recipient,
             } => {
-                let decoded =
-                    decode_aptos_tx(raw_bcs, BUDLUM_APTOS_CHAIN_ID, now_timestamp_secs)
-                        .map_err(ForeignAdmissionError::Aptos)?;
+                let decoded = decode_aptos_tx(raw_bcs, BUDLUM_APTOS_CHAIN_ID, now_timestamp_secs)
+                    .map_err(ForeignAdmissionError::Aptos)?;
                 if exec_state.has_registered_alias_collision(EeId::MOVE, &decoded.sender) {
                     return Err(ForeignAdmissionError::AliasCollision);
                 }
                 let intent = if let Some(pq_dst) = direct_native_pq_recipient {
                     self.ensure_direct_pq_target(pq_dst)?;
                     let expected_move = derive_move_alias(pq_dst);
-                    if decoded.payload_kind != AptosPayloadKind::EntryFunction
+                    if !matches!(decoded.payload, AptosPayloadKind::EntryFunction { .. })
                         || !raw_bcs.windows(32).any(|w| w == expected_move)
                     {
                         return Err(ForeignAdmissionError::InvalidDirectPqRecipient(
@@ -595,8 +682,8 @@ impl ForeignLaneState {
                     self.ensure_direct_pq_target(pq_dst)?;
                     let expected_wasm = derive_wasm_alias(pq_dst);
                     let w_bytes = expected_wasm.as_bytes();
-                    let only_msg_send = decoded.type_urls.len() == 1
-                        && decoded.type_urls.first().map(String::as_str)
+                    let only_msg_send = decoded.message_types.len() == 1
+                        && decoded.message_types.first().map(String::as_str)
                             == Some("/cosmos.bank.v1beta1.MsgSend");
                     let has_alias = !w_bytes.is_empty()
                         && tx_raw_bytes.windows(w_bytes.len()).any(|w| w == w_bytes);
@@ -679,7 +766,7 @@ impl ForeignLaneState {
             SchemeId::ML_DSA_87,
             &adopt.pq_public_key,
             &digest,
-            b"BDLM_ADOPT_FOREIGN_V1",
+            crate::crypto::ctx::ADOPT_FOREIGN_V1,
             &adopt.pq_signature,
         )
         .map_err(|e| ForeignAdmissionError::InvalidAdoptProof(e.to_string()))?;
@@ -775,7 +862,7 @@ fn verify_classical_adopt_proof(
                 .map_err(|e| ForeignAdmissionError::InvalidAdoptProof(e.to_string()))?;
             let sig = SecpSig::from_slice(signature64)
                 .map_err(|e| ForeignAdmissionError::InvalidAdoptProof(e.to_string()))?;
-            if sig.normalize_s().is_some() {
+            if sig.normalize_s() != sig {
                 return Err(ForeignAdmissionError::InvalidAdoptProof(String::from(
                     "high-s Cosmos Adopt signature refused",
                 )));

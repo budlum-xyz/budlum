@@ -6,6 +6,8 @@
 //! - `TxOverlay` stacks one root transaction frame plus up to 8 cross-EE
 //!   `UniversalCall` frames, rolling back failed frames without leaving state
 //!   mutations behind (G-4).
+//!
+//! Convenience: exposed for CLI, RPC, SDK, and multi-VM runtime callers.
 
 use crate::core::account::{AccountState, BudEnvUnit};
 use crate::core::address::Address;
@@ -18,9 +20,11 @@ use std::collections::{BTreeMap, BTreeSet};
 pub const MAX_UNIVERSAL_CALL_DEPTH: usize = 8;
 
 /// Block-scoped read cache in front of committed `ExecutionState`.
+type ReadCacheMap = BTreeMap<(String, String), Option<Vec<u8>>>;
+
 #[derive(Debug, Clone, Default)]
 pub struct BlockReadCache {
-    entries: RefCell<BTreeMap<(String, String), Option<Vec<u8>>>>,
+    entries: RefCell<ReadCacheMap>,
 }
 
 impl BlockReadCache {

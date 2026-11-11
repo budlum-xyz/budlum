@@ -11,12 +11,14 @@ pub mod db;
 pub mod precompile_universal;
 
 use std::any::Any;
+use std::cell::Cell;
 use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::rc::Rc;
 
 use budlum_uel_abi::transport::panic_digest;
 use budlum_uel_abi::{
-    BlockContext, BudAmount, CodeInfo, EeCall, EeCallKind, EeFault, EeId, EeIdentity, EeOutcome,
-    EeQuery, EeRefusal, ExecutionEnvironment, HostApi, HostRead, OutcomeStatus, RefusalCode,
+    BlockContext, CodeInfo, EeCall, EeCallKind, EeFault, EeId, EeOutcome, EeQuery, EeRefusal,
+    ExecutionEnvironment, HostApi, HostRead, OutcomeStatus, RefusalCode,
 };
 use revm::context::{BlockEnv, CfgEnv, Context, Journal, TxEnv};
 use revm::context_interface::result::{ExecutionResult, HaltReason};
@@ -29,7 +31,7 @@ use revm::interpreter::{
 use revm::primitives::eip3860::MAX_INITCODE_SIZE;
 use revm::primitives::hardfork::SpecId;
 use revm::primitives::{Address, Bytes, TxKind, U256};
-use revm::{ExecuteEvm, InspectEvm, Inspector, MainBuilder};
+use revm::{InspectEvm, Inspector, MainBuilder};
 use sha2::{Digest, Sha256};
 
 use crate::db::{commit_evm_state, HostDb, ReadOnlyHostDb};
@@ -243,9 +245,10 @@ impl EvmWorker {
             ..TxEnv::default()
         };
 
+        let child_gas_charged = Rc::new(Cell::new(0u64));
         let exec_out = {
-            let host_db = HostDb::new(host, chain_id);
-            let evm_ctx = Context::new(host_db, SpecId::OSAKA)
+            let host_db = HostDb::with_child_gas_tracker(host, chain_id, child_gas_charged.clone());
+            let evm_ctx = Context::<BlockEnv, _, _, _, _, _>::new(host_db, SpecId::OSAKA)
                 .with_cfg(cfg)
                 .with_block(block_env);
             let mut evm = evm_ctx.build_mainnet_with_inspector(BudlumEvmInspector::default());
@@ -267,7 +270,9 @@ impl EvmWorker {
             | ExecutionResult::Halt { gas, .. } => gas.tx_gas_used(),
         };
         let gas_used = raw_gas.min(call.gas_limit);
-        if host.charge(gas_used).is_err() {
+        // HostApi::universal_call has already charged the coordinator overlay for
+        // child execution. revm includes that same gas in the parent tx total.
+        if host.charge(gas_used.saturating_sub(child_gas_charged.get())).is_err() {
             return EeOutcome {
                 status: OutcomeStatus::OutOfGas,
                 output: Vec::new(),
@@ -402,7 +407,7 @@ impl ExecutionEnvironment for EvmWorker {
         };
 
         let ro_db = ReadOnlyHostDb::new(host, chain_id);
-        let evm_ctx = Context::new(ro_db, SpecId::OSAKA)
+        let evm_ctx = Context::<BlockEnv, _, _, _, _, _>::new(ro_db, SpecId::OSAKA)
             .with_cfg(cfg)
             .with_block(block_env);
         let mut evm = evm_ctx.build_mainnet_with_inspector(QueryInspector);
@@ -434,8 +439,9 @@ mod tests {
     use budlum_uel_abi::mock::MemoryHost;
     use budlum_uel_abi::transport::{serve_connection, EeClient};
     use budlum_uel_abi::{
-        BlockContext, BudAmount, EeCall, EeCallKind, EeId, EeIdentity, EeQuery,
-        ExecutionEnvironment, HostApi, Namespace, OutcomeStatus, UniversalResult,
+        BlockContext, BudAmount, EeCall, EeCallKind, EeId, EeIdentity, EeLog, EeQuery,
+        ExecutionEnvironment, HostApi, HostError, HostRead, Namespace, OutOfGas,
+        OutcomeStatus, UniversalCall, UniversalResult,
     };
     use revm::bytecode::opcode;
     use revm::primitives::{keccak256, Address};
@@ -891,6 +897,81 @@ mod tests {
             panic!("faulted");
         };
         assert_ne!(res.status, OutcomeStatus::Success);
+    }
+
+    // Emulate the production coordinator: the child is charged when universal_call
+    // executes, before the EVM worker reports its own (inclusive) tx gas total.
+    struct ChargingUniversalHost(MemoryHost);
+
+    impl HostRead for ChargingUniversalHost {
+        fn read(&self, ns: &Namespace, key: &[u8]) -> Result<Option<Vec<u8>>, HostError> {
+            self.0.read(ns, key)
+        }
+
+        fn bud_balance(&self, who: &EeIdentity) -> Result<BudAmount, HostError> {
+            self.0.bud_balance(who)
+        }
+    }
+
+    impl HostApi for ChargingUniversalHost {
+        fn write(&mut self, ns: &Namespace, key: &[u8], value: Option<&[u8]>) -> Result<(), HostError> {
+            self.0.write(ns, key, value)
+        }
+
+        fn universal_call(&mut self, call: UniversalCall) -> Result<UniversalResult, HostError> {
+            let result = self.0.universal_call(call)?;
+            self.0.charge(result.gas_used).map_err(|_| HostError::OutOfGas)?;
+            Ok(result)
+        }
+
+        fn emit_log(&mut self, log: EeLog) -> Result<(), HostError> {
+            self.0.emit_log(log)
+        }
+
+        fn charge(&mut self, bgu: u64) -> Result<(), OutOfGas> {
+            self.0.charge(bgu)
+        }
+
+        fn bud_transfer(&mut self, from: &EeIdentity, to: &EeIdentity, attos: u128) -> Result<(), HostError> {
+            self.0.bud_transfer(from, to, attos)
+        }
+    }
+
+    #[test]
+    fn evm_universal_child_gas_is_charged_once() {
+        for child_success in [true, false] {
+            let mut host = ChargingUniversalHost(MemoryHost::new(200_000).with_universal_handler(
+                Box::new(move |_| Ok(UniversalResult {
+                    success: child_success,
+                    output: Vec::new(),
+                    gas_used: 1_200,
+                })),
+            ));
+            let call = EeCall {
+                kind: EeCallKind::Call,
+                caller: EeIdentity { ee: EeId::EVM, id: vec![0x44; 20] },
+                target: EeIdentity {
+                    ee: EeId::EVM,
+                    id: UNIVERSAL_CALL_PRECOMPILE.as_slice().to_vec(),
+                },
+                value: BudAmount(0),
+                input: encode_universal_call_input(EeId::WASM.0, b"contract", b"ping", 0, 50_000),
+                gas_limit: 100_000,
+                depth: 0,
+                tx_hash: [0x57; 32],
+            };
+            let ctx = BlockContext {
+                chain_id: BUDLUM_EVM_CHAIN_ID,
+                height: 55,
+                timestamp_ms: 1_762_000_000_000,
+            };
+            let mut worker = EvmWorker;
+            let outcome = worker.execute(&ctx, &call, &mut host).expect("EVM must not fault");
+            assert_eq!(outcome.status, OutcomeStatus::Success);
+            assert_eq!(outcome.output.get(31) == Some(&1), child_success);
+            assert_eq!(host.0.universal_calls.len(), 1);
+            assert_eq!(host.0.gas_charged, outcome.gas_used, "child gas must not be charged twice");
+        }
     }
 
     #[test]

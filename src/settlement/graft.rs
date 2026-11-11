@@ -1,19 +1,19 @@
-//! WIRING: unwired - verify_graft_payment has no in-tree caller by design: bud_getGraftPayment returns the proof to the caller, who verifies it against their own trust anchor (documented in rpc/api.rs).
+//! WIRING: unwired - verify_app_binding_payment has no in-tree caller by design: bud_getapp_bindingPayment returns the proof to the caller, who verifies it against their own trust anchor (documented in rpc/api.rs).
 //! WIRING: wired - registration, ownership claims, payments, solver intents,
-//! bids, fulfilment and refunds run in block through `SettlementTx::Graft`;
-//! the Ethereum-side `GraftExecutor` contract is.
+//! bids, fulfilment and refunds run in block through `SettlementTx::app_binding`;
+//! the Ethereum-side `app_bindingExecutor` contract is ().
 //!
-//! Remote app binding: an application that lives on another network is used from
+//! app_binding: an application that lives on another network is used from
 //! Budlum and paid for in BUD, without moving there.
 //!
-//! An app-binding row binds an application on an origin domain to one deterministic,
+//! A app_binding row binds an application on an origin domain to one deterministic,
 //! keyless Budlum mirror account. Nothing leaves the mirror except by a rule
 //! of this module; there is no administrator key.
 //!
 //! - **Register** is permissionless and idempotent. It names no owner: the
 //!   registrant gains nothing over the application.
 //! - **Claim** proves, from the origin domain, that the application itself
-//!   names a Budlum payout address: an anchored `budlum/graft/claim/v1`
+//!   names a Budlum payout address: an anchored `budlum/app_binding/claim/v1`
 //!   event emitted by the application. The payout becomes the owner and the
 //!   mirror balance moves to it. A later claim event rotates the owner.
 //! - **Pay** moves BUD from a user to the application: to its owner, or into
@@ -31,6 +31,7 @@
 
 use crate::core::account::AccountState;
 use crate::core::address::Address;
+use crate::core::chain_config::app_binding_enabled_for_chain_id;
 use crate::core::hash::hash_fields_bytes;
 use crate::core::transaction::RelayerExternalResult;
 use crate::cross_domain::message::MessageKind;
@@ -40,7 +41,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 /// Event kind an origin application emits to name its Budlum payout.
 pub const GRAFT_CLAIM_KIND: &[u8] = b"budlum/graft/claim/v1";
-/// Event kind a domain's Graft executor emits after carrying out a call.
+/// Event kind a domain's app_binding executor emits after carrying out a call.
 pub const GRAFT_FULFILLED_KIND: &[u8] = b"budlum/graft/fulfilled/v1";
 /// Upper bound of an origin application, executor or recipient identifier.
 pub const MAX_GRAFT_IDENTIFIER_BYTES: usize = 256;
@@ -106,6 +107,10 @@ pub struct GraftPayment {
     pub origin_recipient: Vec<u8>,
     pub memo_hash: [u8; 32],
     pub paid_at_block: u64,
+    #[serde(default)]
+    pub target_chain_id: u64,
+    #[serde(default)]
+    pub target_receiver: Vec<u8>,
 }
 
 impl GraftPayment {
@@ -125,6 +130,11 @@ impl GraftPayment {
             &self.origin_recipient,
             &self.memo_hash,
             &self.paid_at_block.to_le_bytes(),
+            &self.target_chain_id.to_le_bytes(),
+            &u64::try_from(self.target_receiver.len())
+                .unwrap_or(u64::MAX)
+                .to_le_bytes(),
+            &self.target_receiver,
         ])
     }
 }
@@ -161,7 +171,7 @@ pub struct GraftIntent {
     pub awarded_solver: Option<Address>,
 }
 
-/// State-rooted Graft writes. Every variant is carried by a signed settlement
+/// State-rooted app_binding writes. Every variant is carried by a signed settlement
 /// transaction, so the sender is `ctx.sender`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum GraftTx {
@@ -183,6 +193,10 @@ pub enum GraftTx {
         amount: u64,
         memo_hash: [u8; 32],
         origin_recipient: Vec<u8>,
+        #[serde(default)]
+        target_chain_id: u64,
+        #[serde(default)]
+        target_receiver: Vec<u8>,
     },
     /// Pause, resume or retire the application (owner only; retiring is
     /// final).
@@ -190,7 +204,7 @@ pub enum GraftTx {
         graft_id: [u8; 32],
         status: GraftStatus,
     },
-    /// Name the Graft executor contract of a domain (that domain's operator
+    /// Name the app_binding executor contract of a domain (that domain's operator
     /// only). Fulfilment events count only from this emitter.
     SetExecutor { domain_key: u32, executor: Vec<u8> },
     /// Ask a solver to make a call on the origin chain; escrow the maximum.
@@ -262,7 +276,7 @@ pub struct GraftRegistry {
     #[serde(with = "crate::core::map_keys")]
     pub intents: BTreeMap<[u8; 32], GraftIntent>,
     pub intent_count: u64,
-    /// The Graft executor of each domain, set by the domain's operator.
+    /// The app_binding executor of each domain, set by the domain's operator.
     pub executors: BTreeMap<u32, Vec<u8>>,
     /// Claim message ids already used: an anchored claim works once.
     pub used_messages: BTreeSet<[u8; 32]>,
@@ -320,7 +334,7 @@ pub fn window_proof(
     ))
 }
 
-/// Everything an application needs to check a Graft payment itself
+/// Everything an application needs to check a app_binding payment itself
 /// the payment, its path to the payment window root, the
 /// other half of the registry root, and the checkpoint header that commits
 /// that root with the material that ties the header to a finalized block.
@@ -335,7 +349,7 @@ pub struct GraftPaymentProof {
     pub state_root_body: Option<[u8; 32]>,
 }
 
-/// Why a Graft payment proof does not hold.
+/// Why a app_binding payment proof does not hold.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum GraftProofError {
     #[error("the payment does not hash to the proven leaf")]
@@ -346,14 +360,28 @@ pub enum GraftProofError {
     Opening,
     #[error("the proof carries no state root opening for its checkpoint")]
     NoStateRootBody,
+    #[error("the checkpoint lies outside the active payment window")]
+    Window,
+    #[error("the payment was made to a different bound application")]
+    Application,
+    #[error("the payment names a different chain or receiver than this deployment")]
+    Receiver,
     #[error("the header is not the one the finalized checkpoint commits: {0}")]
     Header(String),
 }
 
-/// Check a Graft payment proof against a finalized checkpoint the caller
+/// Check an application-binding payment proof against a finalized checkpoint the caller
 /// already trusts (a [`crate::light_client::VerifiedCheckpoint`] reached
-/// from its trust anchor). The chain checked is: finalized checkpoint ->
-/// state root -> global header -> Graft root -> payment window -> payment.
+/// from its trust anchor) for one specific deployment. The chain checked
+/// is: the payment's application and chain/receiver binding -> finalized
+/// checkpoint -> state root -> global header -> binding root -> payment
+/// window -> payment.
+///
+/// `expected_app_id` is the verifying application's own binding id, and
+/// `expected_target_chain_id` / `expected_target_receiver` are that
+/// deployment's chain and receiver (zero and empty when the payment names
+/// none). A payment made to another application, chain or receiver is
+/// refused.
 ///
 /// # Errors
 ///
@@ -361,15 +389,32 @@ pub enum GraftProofError {
 pub fn verify_graft_payment(
     proof: &GraftPaymentProof,
     checkpoint: &crate::light_client::VerifiedCheckpoint,
+    expected_app_id: [u8; 32],
+    expected_target_chain_id: u64,
+    expected_target_receiver: &[u8],
 ) -> Result<(), GraftProofError> {
     if proof.path.leaf != proof.payment.leaf_hash() {
         return Err(GraftProofError::Leaf);
+    }
+    if proof.payment.graft_id != expected_app_id {
+        return Err(GraftProofError::Application);
+    }
+    if proof.payment.target_chain_id != expected_target_chain_id
+        || proof.payment.target_receiver.as_slice() != expected_target_receiver
+    {
+        return Err(GraftProofError::Receiver);
     }
     if !proof.path.verify(proof.opening.payments_root) {
         return Err(GraftProofError::Path);
     }
     if proof.header.graft_root != Some(proof.opening.root()) {
         return Err(GraftProofError::Opening);
+    }
+    if proof.header.checkpoint_height < proof.payment.paid_at_block
+        || proof.header.checkpoint_height - proof.payment.paid_at_block
+            > GRAFT_PAYMENT_WINDOW as u64
+    {
+        return Err(GraftProofError::Window);
     }
     let body = proof
         .state_root_body
@@ -378,7 +423,7 @@ pub fn verify_graft_payment(
         .map_err(|e| GraftProofError::Header(e.to_string()))
 }
 
-/// `H("BDLM_GRAFT_APP_V1", domain_key, origin_app)`.
+/// `H("BDLM_app_binding_APP_V1", domain_key, origin_app)`.
 #[must_use]
 pub fn graft_id(domain_key: u32, origin_app: &[u8]) -> [u8; 32] {
     hash_fields_bytes(&[
@@ -391,7 +436,7 @@ pub fn graft_id(domain_key: u32, origin_app: &[u8]) -> [u8; 32] {
     ])
 }
 
-/// `H("BDLM_GRAFT_MIRROR_V1", graft_id)`: an address no key controls.
+/// `H("BDLM_app_binding_MIRROR_V1", app_binding_id)`: an address no key controls.
 #[must_use]
 pub fn mirror_account(graft_id: [u8; 32]) -> Address {
     Address::from(hash_fields_bytes(&[b"BDLM_GRAFT_MIRROR_V1", &graft_id]))
@@ -447,6 +492,20 @@ pub fn fulfilled_payload_hash(
 
 fn identifier_ok(bytes: &[u8]) -> bool {
     !bytes.is_empty() && bytes.len() <= MAX_GRAFT_IDENTIFIER_BYTES
+}
+
+fn ensure_serving_origin(state: &AccountState, domain_key: u32) -> Result<(), SettlementTxError> {
+    let domain = state
+        .settlement
+        .domains
+        .get(domain_key)
+        .ok_or_else(|| refused("app-binding origin is not a registered domain"))?;
+    if !domain.is_active() || !domain.bridge_enabled {
+        return Err(refused(
+            "app-binding origin domain is not active with finality anchoring",
+        ));
+    }
+    Ok(())
 }
 
 fn encoded(value: &impl Serialize) -> Vec<u8> {
@@ -587,8 +646,8 @@ impl GraftRegistry {
 
 /// The account that receives the application share of `tx`'s protocol fee.
 ///
-/// Only a registered, active Graft application earns a share, and the
-/// application is identified from the transaction's own effect: the Graft id
+/// Only a registered, active app_binding application earns a share, and the
+/// application is identified from the transaction's own effect: the app_binding id
 /// of a payment or an intent, or the mirror account a contract call names.
 /// A share never returns to the sender itself, so a sender cannot discount
 /// its own fee by naming its own application.
@@ -599,6 +658,9 @@ pub fn application_fee_recipient(
 ) -> Option<Address> {
     use crate::core::transaction::TransactionType;
     use crate::settlement::domains::SettlementTx;
+    if !app_binding_enabled_for_chain_id(tx.chain_id) {
+        return None;
+    }
     let registry = &state.settlement.graft;
     let app = match &tx.tx_type {
         TransactionType::ContractCall if tx.to != Address::zero() => registry.by_mirror(&tx.to),
@@ -610,7 +672,7 @@ pub fn application_fee_recipient(
         },
         _ => None,
     }?;
-    if app.status != GraftStatus::Active {
+    if app.status != GraftStatus::Active || ensure_serving_origin(state, app.domain_key).is_err() {
         return None;
     }
     let recipient = app.fee_recipient();
@@ -630,6 +692,16 @@ fn apply_claim(
     payout: Address,
     proof_id: [u8; 32],
 ) -> Result<(), SettlementTxError> {
+    // Preflight all fallible balance arithmetic before changing the owner or
+    // consuming a one-use proof. Otherwise a payout overflow leaves the claim
+    // recorded even though the transaction was refused (G-4).
+    let swept = state.get_balance(&app.mirror_account);
+    if swept > 0 && payout != app.mirror_account {
+        state
+            .get_balance(&payout)
+            .checked_add(swept)
+            .ok_or_else(|| refused("app-binding payout would overflow"))?;
+    }
     let registry = &mut state.settlement.graft;
     if registry.used_messages.contains(&proof_id) {
         return Err(refused("Graft claim proof has already been used"));
@@ -643,12 +715,7 @@ fn apply_claim(
     }
     // Everything that accrued while nobody owned the application moves to
     // its owner now.
-    let swept = state.get_balance(&app.mirror_account);
     if swept > 0 {
-        state
-            .get_balance(&payout)
-            .checked_add(swept)
-            .ok_or_else(|| refused("Graft payout would overflow"))?;
         let mirror = state.get_or_create(&app.mirror_account);
         mirror.balance = 0;
         state.mark_dirty(&app.mirror_account);
@@ -689,14 +756,40 @@ fn credit(state: &mut AccountState, to: &Address, amount: u64) -> Result<(), Set
         .map_err(SettlementTxError::Refused)
 }
 
-/// Execute one Graft transaction through the settlement door.
+/// Check all recipients together before consuming an intent or paying anyone.
+/// One account may fill several roles (solver, owner, application), so each
+/// individual credit fitting is not enough to prove the total fits.
+fn preflight_credits(
+    state: &AccountState,
+    payments: &[(Address, u64)],
+) -> Result<(), SettlementTxError> {
+    let mut totals = BTreeMap::<Address, u64>::new();
+    for (address, amount) in payments {
+        let total = totals.entry(*address).or_default();
+        *total = total
+            .checked_add(*amount)
+            .ok_or_else(|| refused("app-binding payout would overflow"))?;
+    }
+    for (address, total) in totals {
+        state
+            .get_balance(&address)
+            .checked_add(total)
+            .ok_or_else(|| refused("app-binding payout would overflow"))?;
+    }
+    Ok(())
+}
+
+/// Execute one app_binding transaction through the settlement door.
 pub fn execute_graft_tx(
     state: &mut AccountState,
     ctx: &SettlementTxContext,
     tx: &GraftTx,
 ) -> Result<(), SettlementTxError> {
-    if !crate::core::chain_config::app_binding_enabled_for_chain_id(ctx.chain_id) {
-        return Err(refused("remote app binding is not enabled on this network"));
+    // The launch matrix keeps remote application binding closed until the
+    // object-layer proof/exit gates pass. Refuse before registry or balances
+    // move, including direct callers that bypass the outer settlement door.
+    if !app_binding_enabled_for_chain_id(ctx.chain_id) {
+        return Err(refused("app_binding is not enabled on this chain"));
     }
     let block = state.current_block_height;
     match tx {
@@ -705,8 +798,13 @@ pub fn execute_graft_tx(
             origin_app,
             manifest_hash,
         } => {
-            if state.settlement.domains.get(*domain_key).is_none() {
-                return Err(refused("Graft domain_key is not a registered domain"));
+            ensure_serving_origin(state, *domain_key)?;
+            if let Some(executor) = state.settlement.graft.executors.get(domain_key) {
+                if executor.len() != origin_app.len() {
+                    return Err(refused(
+                        "the Graft application's identifier width does not match its domain's executor",
+                    ));
+                }
             }
             let registration_fee = state.registry.params().graft_registration_fee;
             let funded = state
@@ -719,6 +817,12 @@ pub fn execute_graft_tx(
                     balance: state.spendable_balance(&ctx.sender),
                 });
             }
+            // Burn accounting must not saturate or fail after registration has
+            // already changed the registry. Preflight the next value first.
+            let next_burned = state
+                .burned_total
+                .checked_add(registration_fee)
+                .ok_or_else(|| refused("app-binding registration burn accounting overflows"))?;
             let written = state
                 .settlement
                 .graft
@@ -728,7 +832,7 @@ pub fn execute_graft_tx(
                 // The registration fee is destroyed, and recorded as such
                 // so it does not reopen mint headroom under the cap.
                 debit(state, ctx, registration_fee)?;
-                state.burned_total = state.burned_total.saturating_add(registration_fee);
+                state.burned_total = next_burned;
             }
             Ok(())
         }
@@ -817,12 +921,21 @@ pub fn execute_graft_tx(
             amount,
             memo_hash,
             origin_recipient,
+            target_chain_id,
+            target_receiver,
         } => {
             if *amount == 0 {
                 return Err(refused("Graft payment amount must be non-zero"));
             }
             if !identifier_ok(origin_recipient) {
                 return Err(refused("Graft origin_recipient length is invalid"));
+            }
+            if target_receiver.len() > MAX_GRAFT_IDENTIFIER_BYTES
+                || (*target_chain_id != 0) != (!target_receiver.is_empty())
+            {
+                return Err(refused(
+                    "app-binding target_chain_id and target_receiver must be set together",
+                ));
             }
             let app = state
                 .settlement
@@ -833,9 +946,13 @@ pub fn execute_graft_tx(
             if app.status != GraftStatus::Active {
                 return Err(refused("Graft application is not active"));
             }
+            ensure_serving_origin(state, app.domain_key)?;
             let recipient = app.fee_recipient();
             if state.get_balance(&recipient).checked_add(*amount).is_none() {
                 return Err(refused("Graft payment would overflow the recipient"));
+            }
+            if state.settlement.graft.payment_count == u64::MAX {
+                return Err(refused("app-binding payment identifier space is exhausted"));
             }
             debit(state, ctx, *amount)?;
             credit(state, &recipient, *amount)?;
@@ -848,6 +965,8 @@ pub fn execute_graft_tx(
                 origin_recipient: origin_recipient.clone(),
                 memo_hash: *memo_hash,
                 paid_at_block: block,
+                target_chain_id: *target_chain_id,
+                target_receiver: target_receiver.clone(),
             });
             Ok(())
         }
@@ -913,13 +1032,21 @@ pub fn execute_graft_tx(
             if app.status != GraftStatus::Active {
                 return Err(refused("Graft application is not active"));
             }
-            if !state
+            ensure_serving_origin(state, app.domain_key)?;
+            let executor = state
                 .settlement
                 .graft
                 .executors
-                .contains_key(&app.domain_key)
-            {
-                return Err(refused("the Graft application's domain has no executor"));
+                .get(&app.domain_key)
+                .cloned()
+                .ok_or_else(|| refused("the Graft application's domain has no executor"))?;
+            // The executor emits the application's identifier in the
+            // fulfilment preimage, so an application whose identifier is a
+            // different width than the executor's own can never be fulfilled.
+            if executor.len() != app.origin_app.len() {
+                return Err(refused(
+                    "the Graft application's identifier width does not match its domain's executor",
+                ));
             }
             if *call_hash == [0u8; 32] {
                 return Err(refused("Graft call_hash cannot be zero"));
@@ -944,11 +1071,14 @@ pub fn execute_graft_tx(
             {
                 return Err(refused("Graft intent deadline is out of range"));
             }
-            if state.settlement.graft.intents.len() >= MAX_GRAFT_OPEN_INTENTS {
+            let registry = &state.settlement.graft;
+            if registry.intents.len() >= MAX_GRAFT_OPEN_INTENTS {
                 return Err(refused("Graft intent registry is full"));
             }
-            debit(state, ctx, *max_payment)?;
-            let registry = &mut state.settlement.graft;
+            let next_count = registry
+                .intent_count
+                .checked_add(1)
+                .ok_or_else(|| refused("app-binding intent identifier space is exhausted"))?;
             let intent_id = hash_fields_bytes(&[
                 b"BDLM_GRAFT_INTENT_V1",
                 graft_id,
@@ -956,7 +1086,12 @@ pub fn execute_graft_tx(
                 call_hash,
                 &registry.intent_count.to_le_bytes(),
             ]);
-            registry.intent_count = registry.intent_count.saturating_add(1);
+            if registry.intents.contains_key(&intent_id) {
+                return Err(refused("app-binding intent identifier is already in use"));
+            }
+            debit(state, ctx, *max_payment)?;
+            let registry = &mut state.settlement.graft;
+            registry.intent_count = next_count;
             registry.intents.insert(
                 intent_id,
                 GraftIntent {
@@ -1111,6 +1246,14 @@ pub fn execute_graft_tx(
                 .and_then(|left| left.checked_sub(intent.service_price))
                 .ok_or_else(|| refused("Graft escrow does not cover the bid"))?;
             let recipient = app.fee_recipient();
+            preflight_credits(
+                state,
+                &[
+                    (ctx.sender, solver_paid),
+                    (recipient, intent.service_price),
+                    (intent.owner, refund),
+                ],
+            )?;
             state.settlement.graft.intents.remove(intent_id);
             credit(state, &ctx.sender, solver_paid)?;
             credit(state, &recipient, intent.service_price)?;
@@ -1128,7 +1271,7 @@ pub fn execute_graft_tx(
             if block <= intent.deadline_block {
                 return Err(refused("Graft intent has not expired"));
             }
-            state.settlement.graft.intents.remove(intent_id);
+            preflight_credits(state, &[(intent.owner, intent.max_payment)])?;
             // Bidding alone is not a promise to execute: only the solver
             // actually awarded the work held it open.
             if let Some(solver) = intent.awarded_solver {
@@ -1148,6 +1291,7 @@ pub fn execute_graft_tx(
                         .map_err(|e| refused(e.to_string()))?;
                 }
             }
+            state.settlement.graft.intents.remove(intent_id);
             credit(state, &intent.owner, intent.max_payment)
         }
     }
@@ -1155,6 +1299,8 @@ pub fn execute_graft_tx(
 
 #[cfg(test)]
 mod tests {
+    use super::graft_id as calc_binding_id;
+    use super::GraftTx as BindingTx;
     use super::*;
     use crate::cross_domain::message::{CrossDomainMessage, CrossDomainMessageParams};
 
@@ -1236,12 +1382,38 @@ mod tests {
 
     #[test]
     fn ids_and_mirror_accounts_are_deterministic_and_keyless() {
-        let id = graft_id(7, b"app");
-        assert_eq!(id, graft_id(7, b"app"));
-        assert_ne!(id, graft_id(8, b"app"));
+        let id = calc_binding_id(7, b"app");
+        assert_eq!(id, calc_binding_id(7, b"app"));
+        assert_ne!(id, calc_binding_id(8, b"app"));
         assert_ne!(mirror_account(id), Address::zero());
         assert_eq!(origin_emitter(&[0xAB; 20]).as_bytes()[12..], [0xAB; 20]);
         assert_eq!(origin_emitter(&[0xAB; 20]).as_bytes()[..12], [0u8; 12]);
+    }
+
+    #[test]
+    fn binding_registration_refuses_burn_overflow_before_registry_write() {
+        let operator = Address::from([0x01; 32]);
+        let registrant = Address::from([0x02; 32]);
+        let mut state = state_with_domain(operator);
+        state.add_balance(&registrant, 100);
+        state.burned_total = u64::MAX;
+        let before = state.settlement.graft.root();
+        let result = execute_graft_tx(
+            &mut state,
+            &ctx(registrant),
+            &BindingTx::Register {
+                domain_key: DOMAIN,
+                origin_app: vec![0xAB; 20],
+                manifest_hash: [0x11; 32],
+            },
+        );
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("burn accounting overflows"));
+        assert_eq!(state.settlement.graft.root(), before);
+        assert_eq!(state.get_balance(&registrant), 100);
+        assert!(state.settlement.graft.apps.is_empty());
     }
 
     #[test]
@@ -1250,7 +1422,7 @@ mod tests {
         let registrant = Address::from([0x02; 32]);
         let mut state = state_with_domain(operator);
         state.add_balance(&registrant, 100);
-        let register = GraftTx::Register {
+        let register = BindingTx::Register {
             domain_key: DOMAIN,
             origin_app: vec![0xAB; 20],
             manifest_hash: [0x11; 32],
@@ -1258,7 +1430,7 @@ mod tests {
         execute_graft_tx(&mut state, &ctx(registrant), &register).unwrap();
         let fee = state.registry.params().graft_registration_fee;
         assert_eq!(state.get_balance(&registrant), 100 - fee);
-        let id = graft_id(DOMAIN, &[0xAB; 20]);
+        let id = calc_binding_id(DOMAIN, &[0xAB; 20]);
         let app = state.settlement.graft.get(&id).unwrap();
         assert_eq!(
             app.owner,
@@ -1269,12 +1441,99 @@ mod tests {
         execute_graft_tx(&mut state, &ctx(registrant), &register).unwrap();
         assert_eq!(state.get_balance(&registrant), 100 - fee);
         // An unknown domain is refused.
-        let unknown = GraftTx::Register {
+        let unknown = BindingTx::Register {
             domain_key: DOMAIN + 1,
             origin_app: vec![0xAB; 20],
             manifest_hash: [0x11; 32],
         };
         assert!(execute_graft_tx(&mut state, &ctx(registrant), &unknown).is_err());
+    }
+
+    #[test]
+    fn binding_id_counter_exhaustion_refuses_before_funds_move() {
+        let operator = Address::from([0x01; 32]);
+        let payer = Address::from([0x02; 32]);
+        let mut state = state_with_domain(operator);
+        state.add_balance(&payer, 2_000);
+        let origin = vec![0xAB; 20];
+        let id = calc_binding_id(DOMAIN, &origin);
+        state
+            .settlement
+            .graft
+            .register(DOMAIN, origin, [0x11; 32], 0)
+            .unwrap();
+        state
+            .settlement
+            .graft
+            .executors
+            .insert(DOMAIN, vec![0x77; 20]);
+        state.settlement.graft.payment_count = u64::MAX;
+        let before = state.settlement.graft.root();
+        let pay = BindingTx::Pay {
+            graft_id: id,
+            amount: 1,
+            memo_hash: [0; 32],
+            origin_recipient: vec![0x33; 20],
+            target_chain_id: 0,
+            target_receiver: Vec::new(),
+        };
+        assert!(execute_graft_tx(&mut state, &ctx(payer), &pay).is_err());
+        assert_eq!(state.settlement.graft.root(), before);
+        assert_eq!(state.get_balance(&payer), 2_000);
+
+        state.settlement.graft.intent_count = u64::MAX;
+        let before = state.settlement.graft.root();
+        let intent = BindingTx::OpenIntent {
+            graft_id: id,
+            call_hash: [0x22; 32],
+            value: 0,
+            max_payment: 100,
+            solver_fee_cap: 10,
+            service_price: 0,
+            origin_beneficiary: vec![0x44; 20],
+            deadline_block: 0,
+        };
+        assert!(execute_graft_tx(&mut state, &ctx(payer), &intent).is_err());
+        assert_eq!(state.settlement.graft.root(), before);
+        assert_eq!(state.get_balance(&payer), 2_000);
+        assert!(state.settlement.graft.intents.is_empty());
+    }
+
+    #[test]
+    fn binding_payout_preflight_aggregates_overlapping_recipient_roles() {
+        let mut state = AccountState::new();
+        let same_account = Address::from([0x79; 32]);
+        state.add_balance(&same_account, u64::MAX - 4);
+        assert!(preflight_credits(&state, &[(same_account, 3), (same_account, 3)]).is_err());
+        assert_eq!(state.get_balance(&same_account), u64::MAX - 4);
+    }
+
+    #[test]
+    fn rejected_binding_claim_does_not_consume_proof_or_change_owner() {
+        let mut state = state_with_domain(Address::from([0x01; 32]));
+        let origin = vec![0xAB; 20];
+        let id = calc_binding_id(DOMAIN, &origin);
+        state
+            .settlement
+            .graft
+            .register(DOMAIN, origin, [0x11; 32], 0)
+            .unwrap();
+        let app = state.settlement.graft.get(&id).unwrap().clone();
+        let payout = Address::from([0x77; 32]);
+        let proof_id = [0x92; 32];
+        state.add_balance(&app.mirror_account, 1);
+        state.add_balance(&payout, u64::MAX);
+        let before = state.settlement.graft.root();
+
+        assert!(apply_claim(&mut state, &app, &id, payout, proof_id).is_err());
+        assert_eq!(state.settlement.graft.root(), before);
+        assert!(!state.settlement.graft.used_messages.contains(&proof_id));
+        assert_eq!(
+            state.settlement.graft.get(&id).unwrap().owner,
+            Address::zero()
+        );
+        assert_eq!(state.get_balance(&app.mirror_account), 1);
+        assert_eq!(state.get_balance(&payout), u64::MAX);
     }
 
     #[test]
@@ -1288,19 +1547,21 @@ mod tests {
         execute_graft_tx(
             &mut state,
             &ctx(user),
-            &GraftTx::Register {
+            &BindingTx::Register {
                 domain_key: DOMAIN,
                 origin_app: origin.clone(),
                 manifest_hash: [0x11; 32],
             },
         )
         .unwrap();
-        let id = graft_id(DOMAIN, &origin);
-        let pay = GraftTx::Pay {
+        let id = calc_binding_id(DOMAIN, &origin);
+        let pay = BindingTx::Pay {
             graft_id: id,
             amount: 300,
             memo_hash: [0u8; 32],
             origin_recipient: vec![0x01],
+            target_chain_id: 1,
+            target_receiver: vec![0x22; 20],
         };
         execute_graft_tx(&mut state, &ctx(user), &pay).unwrap();
         assert_eq!(state.get_balance(&mirror_account(id)), 300);
@@ -1318,7 +1579,7 @@ mod tests {
             id,
         );
         let evidence = anchored(&mut state, forged);
-        let claim = |evidence| GraftTx::Claim {
+        let claim = |evidence| BindingTx::Claim {
             graft_id: id,
             payout,
             evidence,
@@ -1364,15 +1625,15 @@ mod tests {
         execute_graft_tx(
             &mut state,
             &ctx(user),
-            &GraftTx::Register {
+            &BindingTx::Register {
                 domain_key: DOMAIN,
                 origin_app: origin.clone(),
                 manifest_hash: [0x11; 32],
             },
         )
         .unwrap();
-        let id = graft_id(DOMAIN, &origin);
-        let open = GraftTx::OpenIntent {
+        let id = calc_binding_id(DOMAIN, &origin);
+        let open = BindingTx::OpenIntent {
             graft_id: id,
             call_hash: [0x22; 32],
             value: 0,
@@ -1387,7 +1648,7 @@ mod tests {
         execute_graft_tx(
             &mut state,
             &ctx(operator),
-            &GraftTx::SetExecutor {
+            &BindingTx::SetExecutor {
                 domain_key: DOMAIN,
                 executor: executor.clone(),
             },
@@ -1412,7 +1673,7 @@ mod tests {
         execute_graft_tx(
             &mut state,
             &ctx(rival),
-            &GraftTx::Bid {
+            &BindingTx::Bid {
                 intent_id: intent.intent_id,
                 cost: 600,
                 fee: 50,
@@ -1422,7 +1683,7 @@ mod tests {
         execute_graft_tx(
             &mut state,
             &ctx(solver),
-            &GraftTx::Bid {
+            &BindingTx::Bid {
                 intent_id: intent.intent_id,
                 cost: 400,
                 fee: 50,
@@ -1432,7 +1693,7 @@ mod tests {
         assert!(execute_graft_tx(
             &mut state,
             &ctx(solver),
-            &GraftTx::Award {
+            &BindingTx::Award {
                 intent_id: intent.intent_id
             }
         )
@@ -1441,7 +1702,7 @@ mod tests {
         execute_graft_tx(
             &mut state,
             &ctx(user),
-            &GraftTx::Award {
+            &BindingTx::Award {
                 intent_id: intent.intent_id,
             },
         )
@@ -1467,7 +1728,7 @@ mod tests {
         assert!(execute_graft_tx(
             &mut state,
             &ctx(late),
-            &GraftTx::Bid {
+            &BindingTx::Bid {
                 intent_id: intent.intent_id,
                 cost: 1,
                 fee: 1
@@ -1485,7 +1746,7 @@ mod tests {
             intent.intent_id,
         );
         let evidence = anchored(&mut state, wrong);
-        let fulfil = |evidence| GraftTx::Fulfill {
+        let fulfil = |evidence| BindingTx::Fulfill {
             intent_id: intent.intent_id,
             evidence,
         };
@@ -1502,6 +1763,21 @@ mod tests {
         // A rival cannot reuse the public proof (or offer a higher-priced
         // proof of its own execution) after the owner chose another winner.
         assert!(execute_graft_tx(&mut state, &ctx(rival), &fulfil(evidence.clone())).is_err());
+        // The application payout is last after the solver credit. A full
+        // recipient account must refuse BEFORE either the solver is paid or
+        // the intent is removed, even when the external proof is valid.
+        let app_mirror = mirror_account(id);
+        state.add_balance(&app_mirror, u64::MAX);
+        let before_refusal = state.settlement.graft.root();
+        assert!(execute_graft_tx(&mut state, &ctx(solver), &fulfil(evidence.clone())).is_err());
+        assert_eq!(state.settlement.graft.root(), before_refusal);
+        assert_eq!(state.get_balance(&solver), 0);
+        assert!(state
+            .settlement
+            .graft
+            .intents
+            .contains_key(&intent.intent_id));
+        state.get_or_create(&app_mirror).balance = 0;
         execute_graft_tx(&mut state, &ctx(solver), &fulfil(evidence)).unwrap();
         assert_eq!(state.get_balance(&solver), 450);
         assert_eq!(state.get_balance(&mirror_account(id)), 200);
@@ -1533,11 +1809,11 @@ mod tests {
             .graft
             .executors
             .insert(DOMAIN, vec![0x77; 20]);
-        let id = graft_id(DOMAIN, &origin);
+        let id = calc_binding_id(DOMAIN, &origin);
         execute_graft_tx(
             &mut state,
             &ctx(user),
-            &GraftTx::OpenIntent {
+            &BindingTx::OpenIntent {
                 graft_id: id,
                 call_hash: [0x22; 32],
                 value: 0,
@@ -1553,7 +1829,7 @@ mod tests {
         execute_graft_tx(
             &mut state,
             &ctx(solver),
-            &GraftTx::Bid {
+            &BindingTx::Bid {
                 intent_id,
                 cost: 100,
                 fee: 10,
@@ -1568,14 +1844,14 @@ mod tests {
         execute_graft_tx(
             &mut state,
             &ctx(rival),
-            &GraftTx::Bid {
+            &BindingTx::Bid {
                 intent_id,
                 cost: 200,
                 fee: 10,
             },
         )
         .unwrap();
-        let refund = GraftTx::Refund { intent_id };
+        let refund = BindingTx::Refund { intent_id };
         let mut unawarded = state.clone();
         unawarded.current_block_height = 11;
         execute_graft_tx(&mut unawarded, &ctx(user), &refund).unwrap();
@@ -1595,10 +1871,29 @@ mod tests {
                 .stake,
             bond
         );
-        execute_graft_tx(&mut state, &ctx(user), &GraftTx::Award { intent_id }).unwrap();
+        execute_graft_tx(&mut state, &ctx(user), &BindingTx::Award { intent_id }).unwrap();
         assert!(execute_graft_tx(&mut state, &ctx(user), &refund).is_err());
         state.current_block_height = 11;
         let before = state.get_balance(&user);
+        let registry_before = state.settlement.graft.root();
+        let solver_stake_before = state
+            .registry
+            .get(&solver, crate::registry::role::roles::RELAYER)
+            .unwrap()
+            .stake;
+        state.get_or_create(&user).balance = u64::MAX;
+        assert!(execute_graft_tx(&mut state, &ctx(user), &refund).is_err());
+        assert_eq!(state.settlement.graft.root(), registry_before);
+        assert_eq!(
+            state
+                .registry
+                .get(&solver, crate::registry::role::roles::RELAYER)
+                .unwrap()
+                .stake,
+            solver_stake_before
+        );
+        assert!(state.settlement.graft.intents.contains_key(&intent_id));
+        state.get_or_create(&user).balance = before;
         execute_graft_tx(&mut state, &ctx(user), &refund).unwrap();
         assert_eq!(state.get_balance(&user), before + 1_000);
         let stake = state
@@ -1628,7 +1923,7 @@ mod tests {
             .graft
             .register(DOMAIN, vec![0xAA; 20], [0x11; 32], 0)
             .unwrap();
-        let id = graft_id(DOMAIN, &[0xAA; 20]);
+        let id = calc_binding_id(DOMAIN, &[0xAA; 20]);
         let pay = |from: Address| {
             crate::core::transaction::Transaction::new_with_chain_id(
                 from,
@@ -1639,11 +1934,13 @@ mod tests {
                 Vec::new(),
                 crate::core::transaction::DEFAULT_CHAIN_ID,
                 crate::core::transaction::TransactionType::Settlement(
-                    crate::settlement::domains::SettlementTx::Graft(Box::new(GraftTx::Pay {
+                    crate::settlement::domains::SettlementTx::Graft(Box::new(BindingTx::Pay {
                         graft_id: id,
                         amount: 1,
                         memo_hash: [0u8; 32],
                         origin_recipient: vec![1],
+                        target_chain_id: 0,
+                        target_receiver: Vec::new(),
                     })),
                 ),
             )
@@ -1656,10 +1953,18 @@ mod tests {
             application_fee_recipient(&state, &pay(mirror_account(id))),
             None
         );
+        let mut testnet_payment = pay(user);
+        testnet_payment.chain_id = crate::core::chain_config::Network::Testnet
+            .chain_id()
+            .value();
+        assert_eq!(application_fee_recipient(&state, &testnet_payment), None);
+        state.settlement.domains.get_mut(DOMAIN).unwrap().status =
+            crate::domain::DomainStatus::Frozen;
+        assert_eq!(application_fee_recipient(&state, &pay(user)), None);
     }
 
     /// Cross-language known answers: contracts/test/Parity.t.sol pins the
-    /// same values for `GraftExecutor` and `BudlumGraftClaim`.
+    /// same values for `app_bindingExecutor` and `Budlumapp_bindingClaim`.
     #[test]
     fn event_payload_hashes_match_the_solidity_known_answers() {
         let intent = GraftIntent {
@@ -1692,7 +1997,7 @@ mod tests {
 
     /// An externally owned application claims with its own key. The
     /// signature was made with Foundry's `cast wallet sign` over
-    /// `eoa_claim_hash(45262, graft_id, [0x33; 32], 100)` by the key of
+    /// `eoa_claim_hash(45262, app_id, [0x33; 32], 100)` by the key of
     /// 0x2c75..5c23.
     #[test]
     fn an_eoa_application_claims_with_its_personal_sign_signature() {
@@ -1705,14 +2010,14 @@ mod tests {
         execute_graft_tx(
             &mut state,
             &ctx(registrant),
-            &GraftTx::Register {
+            &BindingTx::Register {
                 domain_key: DOMAIN,
                 origin_app: eoa.clone(),
                 manifest_hash: [0x11; 32],
             },
         )
         .unwrap();
-        let id = graft_id(DOMAIN, &eoa);
+        let id = calc_binding_id(DOMAIN, &eoa);
         assert_eq!(
             hex::encode(eoa_claim_hash(
                 crate::core::transaction::DEFAULT_CHAIN_ID,
@@ -1722,7 +2027,7 @@ mod tests {
             )),
             "ee19ec77caea74d6ac05b20ac83896d27b65099cd97eac6f19ab4ba9cfe61aa5"
         );
-        let claim = GraftTx::ClaimBySignature {
+        let claim = BindingTx::ClaimBySignature {
             graft_id: id,
             payout: Address::from([0x33; 32]),
             valid_until_block: 100,
@@ -1737,7 +2042,7 @@ mod tests {
             execute_graft_tx(&mut state, &ctx(registrant), &claim).is_err(),
             "each signature works once"
         );
-        let other_payout = GraftTx::ClaimBySignature {
+        let other_payout = BindingTx::ClaimBySignature {
             graft_id: id,
             payout: Address::from([0x34; 32]),
             valid_until_block: 100,
@@ -1747,26 +2052,127 @@ mod tests {
     }
 
     #[test]
-    fn app_binding_is_closed_on_testnet() {
-        let operator = Address::from([0x11; 32]);
+    fn non_matching_origin_app_width_is_refused_before_escrow() {
+        let operator = Address::from([0x01; 32]);
+        let user = Address::from([0x03; 32]);
         let mut state = state_with_domain(operator);
-        let registrant = Address::from([0x22; 32]);
-        state.add_balance(&registrant, 1_000_000);
-        let testnet_ctx = SettlementTxContext {
-            sender: registrant,
-            chain_id: crate::core::chain_config::Network::Testnet
-                .chain_id()
-                .value(),
-            fee: FEE,
-            bls: crate::cross_domain::external::IntakeState::production_bls,
+        state.add_balance(&user, 10_000);
+        // Register a 32-byte app before an executor exists, then set a 20-byte executor.
+        let wide_app = vec![0xAA; 32];
+        execute_graft_tx(
+            &mut state,
+            &ctx(user),
+            &BindingTx::Register {
+                domain_key: DOMAIN,
+                origin_app: wide_app.clone(),
+                manifest_hash: [0x11; 32],
+            },
+        )
+        .unwrap();
+        execute_graft_tx(
+            &mut state,
+            &ctx(operator),
+            &BindingTx::SetExecutor {
+                domain_key: DOMAIN,
+                executor: vec![0x77; 20],
+            },
+        )
+        .unwrap();
+        let open = BindingTx::OpenIntent {
+            graft_id: calc_binding_id(DOMAIN, &wide_app),
+            call_hash: [0x22; 32],
+            value: 0,
+            max_payment: 1_000,
+            solver_fee_cap: 100,
+            service_price: 200,
+            origin_beneficiary: vec![0x33; 20],
+            deadline_block: 0,
         };
-        let tx = GraftTx::Register {
-            domain_key: DOMAIN,
-            origin_app: vec![0xAA; 20],
-            manifest_hash: [0xBB; 32],
+        assert!(
+            execute_graft_tx(&mut state, &ctx(user), &open).is_err(),
+            "an intent whose app identifier width differs from the executor's must be refused"
+        );
+        // Registering a new mismatched-width app after the executor is set is refused too.
+        assert!(execute_graft_tx(
+            &mut state,
+            &ctx(user),
+            &BindingTx::Register {
+                domain_key: DOMAIN,
+                origin_app: vec![0xBB; 32],
+                manifest_hash: [0x11; 32],
+            },
+        )
+        .is_err());
+    }
+    #[test]
+    fn offchain_binding_verifier_binds_application_chain_and_receiver() {
+        let payment = GraftPayment {
+            payment_id: [0x11; 32],
+            graft_id: [0x22; 32],
+            payer: Address::from([0x33; 32]),
+            recipient: Address::from([0x44; 32]),
+            amount: 500,
+            origin_recipient: vec![0x55; 20],
+            memo_hash: [0x66; 32],
+            paid_at_block: 10,
+            target_chain_id: 8453,
+            target_receiver: vec![0x77; 20],
         };
-        let err = execute_graft_tx(&mut state, &testnet_ctx, &tx)
-            .expect_err("remote app binding must be closed on testnet");
-        assert!(err.to_string().contains("closed on testnet"));
+        let leaf = payment.leaf_hash();
+        let proof = GraftPaymentProof {
+            payment,
+            path: crate::cross_domain::event_tree::MerkleProof {
+                leaf,
+                index: 0,
+                siblings: Vec::new(),
+            },
+            opening: GraftRootOpening {
+                payments_root: leaf,
+                rest_hash: [0x88; 32],
+            },
+            header: crate::settlement::GlobalBlockHeader {
+                version: 7,
+                global_height: 15,
+                previous_global_hash: [0u8; 32],
+                chain_id: 45261,
+                timestamp_ms: 1_000,
+                domain_registry_root: [0u8; 32],
+                domain_commitment_root: [0u8; 32],
+                message_root: [0u8; 32],
+                bridge_state_root: [0u8; 32],
+                replay_nonce_root: [0u8; 32],
+                proposer: None,
+                settlement_finality_root: [0u8; 32],
+                storage_root: None,
+                ai_root: None,
+                identity_root: None,
+                checkpoint_height: 15,
+                external_intake_root: None,
+                graft_root: None,
+                delegation_root: None,
+            },
+            block_height: 15,
+            state_root: "00".repeat(32),
+            state_root_body: None,
+        };
+        let cp = crate::light_client::VerifiedCheckpoint {
+            height: 15,
+            block_hash: "00".repeat(32),
+            set_hash: "00".repeat(32),
+            epoch: 0,
+            state_root: "00".repeat(32),
+        };
+        assert_eq!(
+            verify_graft_payment(&proof, &cp, [0x99; 32], 8453, &[0x77; 20]),
+            Err(GraftProofError::Application)
+        );
+        assert_eq!(
+            verify_graft_payment(&proof, &cp, [0x22; 32], 1, &[0x77; 20]),
+            Err(GraftProofError::Receiver)
+        );
+        assert_eq!(
+            verify_graft_payment(&proof, &cp, [0x22; 32], 8453, &[0x99; 20]),
+            Err(GraftProofError::Receiver)
+        );
     }
 }

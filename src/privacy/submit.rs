@@ -82,8 +82,7 @@ impl PrivateTransferSubmit {
                 .is_err()
         {
             return Err(
-                "private transfer: authorization_sig has an unsupported encoding or length"
-                    .into(),
+                "private transfer: authorization_sig has an unsupported encoding or length".into(),
             );
         }
         Ok(())

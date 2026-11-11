@@ -163,6 +163,7 @@ impl CommittedSourceDocument {
     /// When `consent_granted` is `false`, `disclosed_excerpt` is omitted so
     /// only existence under `root` is conveyed.
     #[must_use]
+    /// Convenience: exposed for SDK/CLI proof-bundle chunk verifier.
     pub fn open_chunk(
         &self,
         chunk_index: usize,
@@ -221,7 +222,7 @@ impl SourceCitationProof {
         let mut acc = self.leaf_digest;
         let mut idx = self.chunk_index as usize;
         for sib in &self.merkle_siblings {
-            acc = if idx % 2 == 0 {
+            acc = if idx.is_multiple_of(2) {
                 hash_merkle_pair(&acc, sib)
             } else {
                 hash_merkle_pair(sib, &acc)
@@ -233,6 +234,7 @@ impl SourceCitationProof {
 
     /// Public view honoring owner consent.
     #[must_use]
+    /// Convenience: exposed for RPC/explorer proof-bundle projection.
     pub fn public_view(&self) -> PublicCitationView {
         PublicCitationView {
             document_root: self.document_root,
@@ -310,7 +312,7 @@ pub fn prove_calculator_in_vm(
         return Err(ApbError::InvalidCalculatorProof { index: 0 });
     }
     let vm_log_word = receipt
-        .logs
+        .events
         .first()
         .copied()
         .ok_or(ApbError::InvalidCalculatorProof { index: 0 })?;
@@ -483,6 +485,7 @@ impl AnswerProofBundle {
     /// # Errors
     ///
     /// Returns [`ApbError::Json`] if JSON encoding fails.
+    /// Convenience: exposed for SDK/CLI proof-bundle markdown exporter.
     pub fn to_markdown_document(&self) -> Result<String, ApbError> {
         let json = match serde_json::to_string_pretty(self) {
             Ok(encoded) => encoded,
@@ -504,6 +507,7 @@ impl AnswerProofBundle {
     ///
     /// Refuses missing/multiple `apb` blocks, tampered prose outside the block,
     /// or invalid sentence proofs inside the block.
+    /// Convenience: exposed for SDK/CLI proof-bundle markdown parser.
     pub fn from_markdown_document(markdown: &str) -> Result<Self, ApbError> {
         let Some(fence_pos) = markdown.find(APB_FENCE_OPEN) else {
             return Err(ApbError::MalformedMarkdown("missing ```apb block"));
@@ -661,7 +665,10 @@ mod tests {
 
         let prose_before = bundle.prose_body();
         let digest_before = bundle.prose_digest;
-        assert_eq!(bundle.verification_level.level(), VerificationLevel::Receipt);
+        assert_eq!(
+            bundle.verification_level.level(),
+            VerificationLevel::Receipt
+        );
 
         // proof arrives asynchronously -> level rises to VL-2 -> VL-3,
         // prose text and prose_digest stay byte-identical.

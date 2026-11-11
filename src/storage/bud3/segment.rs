@@ -17,6 +17,7 @@
 //!   commitment.
 //!
 //! Segment digests are not written in the object: they are computed from it.
+//! Convenience: exposed for CLI, RPC, SDK, and multi-VM runtime callers.
 
 use super::limits::Profile;
 use crate::core::hash::hash_fields_bytes;
@@ -245,8 +246,11 @@ impl SegmentStreamCommitter {
         while !chunk.is_empty() {
             let room = self.segment_cap - self.buffer.len();
             let take = room.min(chunk.len());
-            self.buffer.extend_from_slice(&chunk[..take]);
-            chunk = &chunk[take..];
+            let Some((head, tail)) = chunk.split_at_checked(take) else {
+                break;
+            };
+            self.buffer.extend_from_slice(head);
+            chunk = tail;
             self.received += take as u64;
             if self.buffer.len() > self.peak_buffered {
                 self.peak_buffered = self.buffer.len();
@@ -377,10 +381,10 @@ mod tests {
         // u32::MAX byte offset) are all ordinary in-range layouts under P0.
         let p0 = Profile::P0;
         for len in [
-            super::super::limits::MIB + 1,
-            64 * super::super::limits::MIB + 1,
+            (1024 * 1024) + 1,
+            64 * (1024 * 1024) + 1,
             4 * super::super::limits::GIB + 1,
-            super::super::limits::MAX_OBJECT_BYTES,
+            crate::storage::bud3::limits::Bud3Limits::default().max_content_bytes,
         ] {
             let layout = Segmentation::new(len, &p0).unwrap();
             let last = layout.count() - 1;
@@ -401,10 +405,7 @@ mod tests {
         let p0 = Profile::P0;
         let two_segments = 2 * usize::try_from(p0.segment_bytes()).unwrap();
         let chunk = vec![0x5Au8; 1024 * 1024];
-        for target_len in [
-            64 * super::super::limits::MIB + 1,
-            4 * super::super::limits::GIB + 1,
-        ] {
+        for target_len in [64 * (1024 * 1024) + 1, 4 * super::super::limits::GIB + 1] {
             let mut stream = SegmentStreamCommitter::new(target_len, &p0).unwrap();
             let mut rem = target_len;
             while rem > 0 {
@@ -427,7 +428,7 @@ mod tests {
     #[ignore = "nightly T4: streams a 16 GiB object under bounded segment buffer"]
     fn bud3_sixteen_gib_object() {
         let p0 = Profile::P0;
-        let target_len = super::super::limits::MAX_OBJECT_BYTES;
+        let target_len = crate::storage::bud3::limits::Bud3Limits::default().max_content_bytes;
         assert_eq!(target_len, 16 * super::super::limits::GIB);
         let two_segments = 2 * usize::try_from(p0.segment_bytes()).unwrap();
         let chunk = vec![0xA3u8; 4 * 1024 * 1024];

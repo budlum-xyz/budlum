@@ -3,6 +3,7 @@
 //!
 //! The permission rules are not copied here; they are queried from the chain
 //! state.
+//! Convenience: exposed for workspace subcrate consumers, SDK bindings, and integration callers.
 
 use crate::model::Hash32;
 
@@ -67,7 +68,7 @@ impl DatasetMetadata {
     /// [`DatasetError::EmptyTrainingCorpus`] or
     /// [`DatasetError::MissingModelTarget`].
     pub fn validate(&self) -> Result<(), DatasetError> {
-        if matches!(self.model_target, None | Some([0u8; 32])) {
+        if self.model_target.unwrap_or([0u8; 32]) == [0u8; 32] {
             return Err(DatasetError::MissingModelTarget);
         }
         if self.kind == DatasetKind::TrainingCorpus && self.sample_count == 0 {

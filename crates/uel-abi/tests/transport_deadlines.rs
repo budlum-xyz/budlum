@@ -7,11 +7,11 @@
 // Test assertions may panic; production keeps the crate-wide panic denial.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use budlum_uel_abi::EeId;
-use budlum_uel_abi::frame::{ABI_VERSION, read_frame, write_frame};
+use budlum_uel_abi::frame::{read_frame, write_frame, ABI_VERSION};
 use budlum_uel_abi::mock::MockEe;
 use budlum_uel_abi::pb;
-use budlum_uel_abi::transport::{EeClient, TransportError, serve_connection};
+use budlum_uel_abi::transport::{serve_connection, EeClient, TransportError};
+use budlum_uel_abi::EeId;
 use std::io::{Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;

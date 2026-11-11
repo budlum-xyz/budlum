@@ -112,10 +112,7 @@ fn uel_abi_worker_partial_frame_has_a_deadline_after_first_byte() {
     }
     drop(peer);
     let result = worker.join().expect("worker");
-    assert!(matches!(
-        result,
-        Err(TransportError::Timeout)
-    ));
+    assert!(matches!(result, Err(TransportError::Timeout)));
     // The error class, not scheduler timing, distinguishes an absolute frame
     // budget from per-read resets. Leave headroom for a loaded CI runner.
     assert!(started.elapsed() < Duration::from_millis(5000));

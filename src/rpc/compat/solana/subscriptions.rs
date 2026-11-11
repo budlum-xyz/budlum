@@ -4,6 +4,7 @@
 //! log and program feeds are refused by name at the
 //! subscription door. The slot feed reports Budlum chain progress, not Solana's
 //! 400 ms slot clock; `docs/SOLANA_RPC.md` states that boundary.
+//! Convenience: exposed for CLI, RPC, SDK, and multi-VM runtime callers.
 
 use crate::chain::chain_actor::ChainHandle;
 use jsonrpsee::PendingSubscriptionSink;
@@ -53,7 +54,7 @@ impl SlotNotification {
     pub const fn new(slot: u64, finalized: u64) -> Self {
         Self {
             parent: slot.saturating_sub(1),
-            root: finalized.min(slot),
+            root: if finalized < slot { finalized } else { slot },
             slot,
         }
     }
@@ -71,9 +72,9 @@ pub const fn catch_up_range(last: u64, tip: u64) -> Option<(u64, u64)> {
     if tip <= last {
         return None;
     }
-    let first = last
-        .saturating_add(1)
-        .max(tip.saturating_sub(MAX_SLOTS_PER_TICK - 1));
+    let a = last.saturating_add(1);
+    let b = tip.saturating_sub(MAX_SLOTS_PER_TICK - 1);
+    let first = if a > b { a } else { b };
     Some((first, tip))
 }
 
@@ -127,17 +128,10 @@ async fn send(sink: &jsonrpsee::SubscriptionSink, notification: SlotNotification
     let Ok(raw) = serde_json::value::to_raw_value(&value) else {
         return false;
     };
-    matches!(
-        sink.send_timeout(raw, SEND_TIMEOUT).await,
-        Ok(())
-    )
+    matches!(sink.send_timeout(raw, SEND_TIMEOUT).await, Ok(()))
 }
 
-async fn run_slots(
-    chain: ChainHandle,
-    sink: jsonrpsee::SubscriptionSink,
-    commitment: Commitment,
-) {
+async fn run_slots(chain: ChainHandle, sink: jsonrpsee::SubscriptionSink, commitment: Commitment) {
     let mut last = tip(&chain, commitment).await;
     let finalized = chain.get_finalized_height().await;
     if !send(&sink, SlotNotification::new(last, finalized)).await {
@@ -174,9 +168,15 @@ mod tests {
     #[test]
     fn solana_slot_notification_shape_is_the_solana_shape() {
         let value = SlotNotification::new(7, 5).json().unwrap();
-        assert_eq!(value, serde_json::json!({"parent": 6, "root": 5, "slot": 7}));
+        assert_eq!(
+            value,
+            serde_json::json!({"parent": 6, "root": 5, "slot": 7})
+        );
         let genesis = SlotNotification::new(0, 9).json().unwrap();
-        assert_eq!(genesis, serde_json::json!({"parent": 0, "root": 0, "slot": 0}));
+        assert_eq!(
+            genesis,
+            serde_json::json!({"parent": 0, "root": 0, "slot": 0})
+        );
     }
 
     #[test]
@@ -190,11 +190,22 @@ mod tests {
 
     #[test]
     fn solana_slot_config_accepts_only_the_two_honest_commitments() {
-        assert_eq!(serde_json::from_str::<SlotConfig>("{}").unwrap().commitment, None);
-        for text in ["{\"commitment\":\"processed\"}", "{\"commitment\":\"finalized\"}"] {
+        assert_eq!(
+            serde_json::from_str::<SlotConfig>("{}").unwrap().commitment,
+            None
+        );
+        for text in [
+            "{\"commitment\":\"processed\"}",
+            "{\"commitment\":\"finalized\"}",
+        ] {
             assert!(serde_json::from_str::<SlotConfig>(text).is_ok(), "{text}");
         }
-        for text in ["{\"commitment\":\"confirmed\"}", "{\"limit\":1}", "[]", "null"] {
+        for text in [
+            "{\"commitment\":\"confirmed\"}",
+            "{\"limit\":1}",
+            "[]",
+            "null",
+        ] {
             assert!(serde_json::from_str::<SlotConfig>(text).is_err(), "{text}");
         }
     }

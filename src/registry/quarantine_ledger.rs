@@ -244,7 +244,7 @@ mod tests {
             "quarantined_entities": {},
             "alarms": {
                 (key_hex): {
-                    "alarm_id": [1u8; 32],
+                    "alarm_id": vec![1u8; 32],
                     "code": "BAD",
                     "message": "bad",
                     "height": 1,

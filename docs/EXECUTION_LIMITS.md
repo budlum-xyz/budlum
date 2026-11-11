@@ -21,7 +21,7 @@ locks it.
 | Move (`0x04`) | Aptos OIDC keyless accounts | Classical/OIDC witness complexity excluded at T-Launch | `src/execution/coordinator/foreign/aptos.rs` | `uel_foreign_tx_replay_refused` |
 | BudZero (`0x00`) | `VerifyMerkle` and `VerifyInference` proof-dependent consensus opcodes | Closed on testnet pending full 64-depth Merkle and AI inference circuit soundness | `src/execution/budzero_ee/mod.rs` | `verify_merkle_is_closed_on_testnet`, `verify_inference_is_closed_on_testnet` |
 | All EEs | Cross-environment re-entrancy (`A -> B -> A`) and call depth `> 8` | Each stateless worker holds one execution stack at T-Launch (`ReentrancyForbidden`) | `src/execution/coordinator/overlay.rs` | `uel_reentrancy_across_ees_refused`, `uel_call_depth_cap_enforced` |
-| Foreign Lane | Classical foreign account touching post-quantum holdings (K-3) | Prevents quantum key compromise of classical ECDSA/Ed25519 accounts from draining PQ holdings | `src/execution/coordinator/foreign/mod.rs` | `foreign_account_cannot_touch_pq_holding` |
+| Foreign Lane | Classical foreign account touching post-quantum holdings (K-3) | Prevents quantum key compromise of classical ECDSA/Ed25519 accounts from draining PQ holdings | `src/execution/coordinator/foreign/mod.rs` | `foreign_account_cannot_touch_pq_holding` | <!-- claim:L-WALLET-01 -->
 
 ---
 
@@ -43,7 +43,7 @@ across Budlum's execution environments.
 | Maximum contract / module bytecode | `512 KiB` | Deploy / store | Applies to EVM initcode, CosmWasm `.wasm`, SVM ELF, and Move modules |
 | Base transfer gas | `21,000` | Native / EVM | Matches `config/testnet-genesis.json` `gas_schedule.transfer_gas` |
 | Per-byte calldata gas | `1` | All envelopes | Matches `gas_schedule.gas_per_byte` |
-| Post-quantum signature verification gas | `500` | `ML-DSA-65` | Matches `gas_schedule.gas_per_signature` |
+| Post-quantum signature verification gas | `500` | `ML-DSA-65` | Matches `gas_schedule.gas_per_signature` | <!-- claim:L-FINALITY-01 -->
 
 ## 2. Cross-Architecture Determinism Rules (`x86_64` == `aarch64`)
 

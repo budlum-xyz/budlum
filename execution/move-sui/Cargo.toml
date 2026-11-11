@@ -5,7 +5,7 @@ name = "budlum-ee-move-sui"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.88"
-license = "Apache-2.0"
+license = "LicenseRef-PolyForm-Shield-1.0.0"
 publish = false
 description = "Budlum UEL out-of-process Move (Sui dialect) execution worker (EeId::MOVE_SUI = 0x05)"
 

@@ -3,6 +3,7 @@
 //! The Data Rights and Pollen hardening adds the `DataAsset` and `AccessGrant`
 //! maps to this transitional registry. The rule: an AI cannot read a Pollen or
 //! B.U.D. data reference without a valid grant.
+//! Convenience: exposed for CLI, RPC, SDK, and multi-VM runtime callers.
 
 use crate::core::address::Address;
 use crate::storage::content_id::ContentId;
@@ -830,6 +831,7 @@ impl MarketplaceRegistry {
 
     /// Owner of the paid `DataAsset` bound to `manifest_id`, if any.
     #[must_use]
+    /// Convenience: exposed for marketplace content ownership query.
     pub fn bound_asset_owner(&self, manifest_id: &ContentId) -> Option<Address> {
         let asset_id = self.protected_content.asset_for(manifest_id)?;
         self.data_assets.get(&asset_id).map(|a| a.owner)
@@ -1724,7 +1726,7 @@ mod tests {
         let manifest_id = ContentId(bud3_cid.digest);
         let asset = DataAsset::new(seller, manifest_id, [0x55; 32], true);
         let asset_id = reg.register_data_asset(asset.clone()).unwrap();
-        reg.bind_protected_content(manifest_id, asset_id, seller)
+        reg.bind_content_to_asset(manifest_id, asset_id, seller)
             .unwrap();
 
         // Reading protected content without a grant is refused.
@@ -1735,28 +1737,9 @@ mod tests {
         // Seller authorizes bounded sale; buyer purchases an AccessGrant.
         let auth = signed_sale_authorization(&asset);
         let auth_id = reg.create_sale_authorization(auth).unwrap();
-        let sig = signed_purchase(
-            &reg,
-            auth_id,
-            buyer,
-            buyer,
-            12,
-            5,
-            2,
-            [0xCC; 32],
-            2,
-        );
+        let sig = signed_purchase(&reg, auth_id, buyer, buyer, 12, 5, 2, [0xCC; 32], 2);
         let (grant_id, receipt) = reg
-            .issue_grant_from_sale_authorization(
-                auth_id,
-                buyer,
-                buyer,
-                12,
-                5,
-                2,
-                [0xCC; 32],
-                sig,
-            )
+            .issue_grant_from_sale_authorization(auth_id, buyer, buyer, 12, 5, 2, [0xCC; 32], sig)
             .unwrap();
         assert_eq!(receipt.grant_id, grant_id);
         assert_eq!(reg.data_assets.get(&asset_id).unwrap().owner, seller);

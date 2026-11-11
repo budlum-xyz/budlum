@@ -432,10 +432,7 @@ pub fn admit(
         adapter_version: descriptor.adapter_version,
         evidence_version,
         golden_verified,
-        admitted: golden_verified
-            && refuses_undeclared_version
-            && all_passed
-            && !probes.is_empty(),
+        admitted: golden_verified && refuses_undeclared_version && all_passed && !probes.is_empty(),
         probes,
         probe_commitment,
     }

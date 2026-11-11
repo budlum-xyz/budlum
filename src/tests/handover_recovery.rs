@@ -8,9 +8,7 @@ use crate::chain::blockchain::Blockchain;
 use crate::consensus::pow::PoWEngine;
 use crate::core::address::Address;
 use crate::core::metrics::Metrics;
-use crate::storage::bud3::custody::{
-    CUSTODY_ASSIGNMENT_HANDOVER_EPOCHS, CUSTODY_READ_TIMEOUT_MS,
-};
+use crate::storage::bud3::custody::{CUSTODY_ASSIGNMENT_HANDOVER_EPOCHS, CUSTODY_READ_TIMEOUT_MS};
 use crate::storage::bud3::limits::{Bud3Limits, Profile};
 use crate::storage::bud3::pipeline::prepare_public_upload;
 use crate::storage::bud3::placement::{Class as StorageClass, Share};
@@ -20,8 +18,8 @@ use crate::validators::handover::{
     handover_custody_assignments, handover_repair_tasks, handover_spec, is_finality_stalled,
     proposer_round_for_timestamps, select_next_endpoint, select_round_proposer, DutyKind,
     HandoverBound, PresenceAggregateQueue, RecoveryTracker, SeatHandoverTracker,
-    FINALITY_STALL_BLOCKS, FINALITY_STALL_CHECKPOINTS, HANDOVER_TABLE,
-    PROPOSER_ROUND_TIMEOUT_MS, TESTNET_CHECKPOINT_INTERVAL_BLOCKS,
+    FINALITY_STALL_BLOCKS, FINALITY_STALL_CHECKPOINTS, HANDOVER_TABLE, PROPOSER_ROUND_TIMEOUT_MS,
+    TESTNET_CHECKPOINT_INTERVAL_BLOCKS,
 };
 use crate::validators::ValidatorClass;
 
@@ -79,9 +77,18 @@ fn handover_table_covers_all_nine_duties_and_bounds() {
 #[test]
 fn proposer_round_handover() {
     let parent_ts = 1_700_000_000_000u128;
-    assert_eq!(proposer_round_for_timestamps(parent_ts, parent_ts + 1_000), 0);
-    assert_eq!(proposer_round_for_timestamps(parent_ts, parent_ts + 4_000), 1);
-    assert_eq!(proposer_round_for_timestamps(parent_ts, parent_ts + 7_000), 2);
+    assert_eq!(
+        proposer_round_for_timestamps(parent_ts, parent_ts + 1_000),
+        0
+    );
+    assert_eq!(
+        proposer_round_for_timestamps(parent_ts, parent_ts + 4_000),
+        1
+    );
+    assert_eq!(
+        proposer_round_for_timestamps(parent_ts, parent_ts + 7_000),
+        2
+    );
 
     let active = [[1u8; 32], [2u8; 32], [3u8; 32]];
     let r0 = select_round_proposer(10, 0, &active).unwrap();
@@ -152,8 +159,14 @@ fn custody_assignment_handover_after_3_epochs() {
         (v2, StorageClass::Full),
         (v3, StorageClass::Full),
     ];
-    assert_eq!(handover_custody_assignments(&mut registry, 7, &candidates), 0);
-    assert_eq!(handover_custody_assignments(&mut registry, 8, &candidates), 1);
+    assert_eq!(
+        handover_custody_assignments(&mut registry, 7, &candidates),
+        0
+    );
+    assert_eq!(
+        handover_custody_assignments(&mut registry, 8, &candidates),
+        1
+    );
     let obj = registry.object(&key).unwrap();
     assert!(obj
         .shares
@@ -262,7 +275,6 @@ fn finality_stall_enters_recovery_mode() {
     let recovered = tracker.derive_recovery_committee(3, 10, &presence).unwrap();
     assert_eq!(recovered, vec![[1u8; 32]]);
 }
-
 
 #[test]
 fn recovery_threshold_uses_the_running_checkpoint_interval() {

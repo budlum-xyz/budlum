@@ -53,7 +53,7 @@ fn hex_encode(bytes: &[u8]) -> String {
 
 fn hex_decode(text: &str) -> Result<Vec<u8>, String> {
     let text = text.trim();
-    if text.len() % 2 != 0 {
+    if !text.len().is_multiple_of(2) {
         return Err("hex string has an odd length".into());
     }
     (0..text.len())
@@ -296,9 +296,10 @@ fn self_test() -> Result<(), String> {
 }
 
 fn expect_err<T>(what: &str, outcome: Result<T, String>) -> Result<(), String> {
-    match outcome {
-        Err(_) => Ok(()),
-        Ok(_) => Err(format!("self-test: {what} was accepted")),
+    if outcome.err().is_some() {
+        Ok(())
+    } else {
+        Err(format!("self-test: {what} was accepted"))
     }
 }
 

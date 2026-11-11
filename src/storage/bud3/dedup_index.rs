@@ -13,6 +13,7 @@
 //! the filter's history.
 //!
 //! The hashing is integers only, so two architectures agree bit for bit.
+//! Convenience: exposed for CLI, RPC, SDK, and multi-VM runtime callers.
 
 use std::collections::btree_map::{BTreeMap, IntoIter};
 
@@ -174,6 +175,11 @@ impl IntoIterator for DedupIndex {
 }
 
 impl DedupIndex {
+    /// Iterate over all `(digest, object_key)` entries in deterministic order.
+    pub fn iter(&self) -> std::collections::btree_map::Iter<'_, [u8; 32], ObjectKey> {
+        self.map.iter()
+    }
+
     /// The object holding `digest`, if the index holds one. A filter "no"
     /// answers without the lookup; a "maybe" always consults the exact index.
     #[must_use]

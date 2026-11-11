@@ -253,8 +253,7 @@ impl Instruction {
     }
 
     pub fn encode(&self) -> u64 {
-        self.try_encode()
-            .expect("Instruction::encode requires rd, rs1, rs2 <= 31")
+        self.try_encode().unwrap_or(u64::MAX)
     }
 
     pub fn decode_any(val: u64) -> Result<Self, DecodeError> {
@@ -677,6 +676,10 @@ mod tests {
         assert_eq!(
             bad_rd.try_encode(),
             Err(DecodeError::RegisterOutOfRange("rd", 32))
+        );
+        assert_eq!(
+            Instruction::decode_any(bad_rd.encode()),
+            Err(DecodeError::NonCanonicalHighBits(0x1FF))
         );
 
         let neg_imm = Instruction {

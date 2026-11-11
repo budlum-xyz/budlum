@@ -4,6 +4,7 @@
 //! byte budget (memory the path may allocate) and a step budget (work the path
 //! may do). A path charges the meter before it allocates or loops, so an
 //! untrusted length can never make it allocate first and check later.
+//! Convenience: exposed for CLI, RPC, SDK, and multi-VM runtime callers.
 
 /// A spent budget.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -24,12 +24,14 @@ use std::fmt;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use budlum_mobile_core::{
+    crypto::{ctx, pq, scheme::SchemeId},
     Connection, CoreError, CoreStatus, DutyTx, KeyVault, LastAudit, MobileCore, NetworkPolicy,
     OperatorKey, Policy, PowerPolicy, RelayOffer, SealedOperatorKey, ValidatorClass, VaultError,
     FREE_SPACE_FLOOR_BYTES, OPERATOR_SEED_LEN, QUOTA_DEFAULT_BYTES, QUOTA_MAX_BYTES,
-    QUOTA_MIN_BYTES,
+    QUOTA_MIN_BYTES, TESTNET_CHAIN_ID,
 };
 use budlum_types::class::AuditWindow;
+use sha3::{Digest, Sha3_256};
 use zeroize::Zeroizing;
 
 /// The class a phone registers as (section 7.2). A phone is never `Full`.
@@ -106,6 +108,80 @@ pub fn class_parameters(class: PhoneClass) -> ClassParameters {
         free_space_floor_bytes: FREE_SPACE_FLOOR_BYTES,
     }
 }
+
+/// Verify possession of the ML-DSA-87 wallet that derives `owner`.
+///
+/// The wallet signs `SHA3-256("BDLM_MOBILE_OWNER_PROOF_V1" || 45261 LE u64 ||
+/// challenge)` in the shared key-binding context. The host must choose a
+/// fresh unpredictable 32-byte challenge; this function cannot establish
+/// freshness by itself. It is a cryptographic key check, NOT evidence of a
+/// confirmed 10 BUD registration, finality, or an authorized duty transport.
+/// It never enables [`MobileNode::start`]. No mnemonic or private key crosses
+/// this interface.
+///
+/// # Errors
+///
+/// [`MobileError::Refused`] when any input length is invalid or the owner or
+/// challenge is all zero. A well-formed but mismatched proof returns `false`.
+#[uniffi::export]
+pub fn verify_owner_wallet_proof(
+    owner: Vec<u8>,
+    public_key: Vec<u8>,
+    challenge: Vec<u8>,
+    signature: Vec<u8>,
+) -> Result<bool, MobileError> {
+    let owner: [u8; 32] = owner
+        .try_into()
+        .map_err(|_| MobileError::refused("mobile_owner_length", "the owner address is 32 bytes"))?;
+    if owner == [0; 32] {
+        return Err(MobileError::refused("mobile_owner_zero", "the owner address is zero"));
+    }
+    if public_key.len() != 2592 {
+        return Err(MobileError::refused(
+            "mobile_owner_public_key_length",
+            "an ML-DSA-87 public key is 2592 bytes",
+        ));
+    }
+    let challenge: [u8; 32] = challenge.try_into().map_err(|_| {
+        MobileError::refused("mobile_owner_challenge", "the challenge is 32 bytes")
+    })?;
+    if challenge == [0; 32] {
+        return Err(MobileError::refused("mobile_owner_challenge", "the challenge is zero"));
+    }
+    if signature.len() != 4627 {
+        return Err(MobileError::refused(
+            "mobile_owner_signature_length",
+            "an ML-DSA-87 signature is 4627 bytes",
+        ));
+    }
+
+    // Exactly the V2 address derivation in crates/wallet-core and the node.
+    let mut hash = Sha3_256::new();
+    hash.update(b"BUDLUM_ADDRESS_V2");
+    hash.update(&public_key);
+    if hash.finalize().as_slice() != owner.as_slice() {
+        return Ok(false);
+    }
+    let mut proof = Sha3_256::new();
+    proof.update(b"BDLM_MOBILE_OWNER_PROOF_V1");
+    proof.update(TESTNET_CHAIN_ID.to_le_bytes());
+    proof.update(challenge);
+    let message = proof.finalize();
+    Ok(pq::verify(
+        SchemeId::ML_DSA_87,
+        &public_key,
+        &message,
+        ctx::KEY_BINDING_V1,
+        &signature,
+    )
+    .is_ok())
+}
+
+// Compile-time contract for the generated UniFFI owner-proof entry point.
+// If its typed result or inputs change, the native boundary must be reviewed
+// before Android ever wires the generated Kotlin call.
+type OwnerWalletProofFn = fn(Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>) -> Result<bool, MobileError>;
+const _: OwnerWalletProofFn = verify_owner_wallet_proof;
 
 /// A relay the phone reaches the network through (section 7.9.3).
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
@@ -271,7 +347,7 @@ pub enum NodeEvent {
  /// Shares were released and their release waits in the outbox.
     SharesReleased {
  /// How many shares.
-        count: u32,
+        count: u64,
  /// Why.
         reason: ReleaseReason,
     },
@@ -549,7 +625,7 @@ impl MobileNode {
  /// # Errors
  ///
  /// [`MobileError::Refused`] with `mobile_owner_length` when `owner` is not
- /// 32 bytes.
+ /// 32 bytes, or `mobile_owner_zero` when it is an uninitialized placeholder.
     #[uniffi::constructor]
     pub fn new(
         owner: Vec<u8>,
@@ -560,6 +636,12 @@ impl MobileNode {
         let owner: [u8; 32] = owner.try_into().map_err(|_| {
             MobileError::refused("mobile_owner_length", "the owner address is 32 bytes")
         })?;
+        if owner == [0; 32] {
+            return Err(MobileError::refused(
+                "mobile_owner_zero",
+                "an uninitialized owner address cannot start a mobile node",
+            ));
+        }
         let relays = relays.into_iter().map(RelayOffer::from).collect();
         let core = MobileCore::new(owner, class.class(), relays, available_bytes);
         Ok(Arc::new(Self {
@@ -574,10 +656,18 @@ impl MobileNode {
         *lock(&self.listener) = Some(listener);
     }
 
- /// Start the duty loop.
-    pub fn start(&self) {
-        lock(&self.core).start();
-        self.emit(NodeEvent::Started);
+ /// Refuse duty startup until the host can prove owner control and on-chain
+ /// registration and can submit/verify duties. A 32-byte address alone is
+ /// not authority to claim a running validator.
+ ///
+ /// # Errors
+ ///
+ /// [`MobileError::Refused`] with `mobile_validator_unconnected` in this build.
+    pub fn start(&self) -> Result<(), MobileError> {
+        Err(MobileError::refused(
+            "mobile_validator_unconnected",
+            "owner signing, on-chain registration and duty transport are not connected",
+        ))
     }
 
  /// Stop the duty loop. Shares stay on the device.
@@ -848,6 +938,110 @@ mod tests {
     }
 
     #[test]
+    fn mobile_ffi_verifies_owner_wallet_proof_without_unlocking_duties() {
+        let seed = [7u8; 32];
+        let public_key = pq::ml_dsa_public_key(SchemeId::ML_DSA_87, &seed).expect("key");
+        let mut address = Sha3_256::new();
+        address.update(b"BUDLUM_ADDRESS_V2");
+        address.update(&public_key);
+        let owner = address.finalize().to_vec();
+        let challenge = vec![9u8; 32];
+        let mut digest = Sha3_256::new();
+        digest.update(b"BDLM_MOBILE_OWNER_PROOF_V1");
+        digest.update(TESTNET_CHAIN_ID.to_le_bytes());
+        digest.update(&challenge);
+        let message = digest.finalize();
+        let signature = pq::ml_dsa_sign(
+            SchemeId::ML_DSA_87,
+            &seed,
+            &message,
+            ctx::KEY_BINDING_V1,
+            &[0u8; 32],
+        )
+        .expect("sign");
+        assert!(verify_owner_wallet_proof(
+            owner.clone(),
+            public_key.clone(),
+            challenge.clone(),
+            signature.clone(),
+        )
+        .expect("valid proof"));
+        let mut different_challenge = challenge.clone();
+        different_challenge[0] ^= 1;
+        assert!(!verify_owner_wallet_proof(
+            owner.clone(),
+            public_key.clone(),
+            different_challenge,
+            signature.clone(),
+        )
+        .expect("challenge mismatch"));
+        let mut different_owner = owner.clone();
+        different_owner[0] ^= 1;
+        assert!(!verify_owner_wallet_proof(
+            different_owner,
+            public_key.clone(),
+            challenge.clone(),
+            signature.clone(),
+        )
+        .expect("address mismatch"));
+        let transaction_signature = pq::ml_dsa_sign(
+            SchemeId::ML_DSA_87,
+            &seed,
+            &message,
+            ctx::TX_V5,
+            &[0u8; 32],
+        )
+        .expect("sign in transaction context");
+        assert!(!verify_owner_wallet_proof(
+            owner.clone(),
+            public_key.clone(),
+            challenge.clone(),
+            transaction_signature,
+        )
+        .expect("transaction signature is not a key-binding proof"));
+        let mut different_signature = signature.clone();
+        different_signature[0] ^= 1;
+        assert!(!verify_owner_wallet_proof(
+            owner.clone(),
+            public_key.clone(),
+            challenge.clone(),
+            different_signature,
+        )
+        .expect("signature mismatch"));
+        assert_eq!(
+            refusal_code(verify_owner_wallet_proof(
+                owner.clone(),
+                public_key.clone(),
+                vec![0; 32],
+                signature.clone(),
+            )),
+            "mobile_owner_challenge"
+        );
+        assert_eq!(
+            refusal_code(verify_owner_wallet_proof(
+                owner,
+                public_key,
+                challenge,
+                signature[..10].to_vec(),
+            )),
+            "mobile_owner_signature_length"
+        );
+        let node = node(PhoneClass::Mobile);
+        assert_eq!(refusal_code(node.start()), "mobile_validator_unconnected");
+    }
+
+    #[test]
+    fn mobile_ffi_refuses_uninitialized_owner_address() {
+        match MobileNode::new(vec![0; 32], PhoneClass::Mobile, Vec::new(), 64 * GIB) {
+            Err(MobileError::Refused { code, .. }) => assert_eq!(code, "mobile_owner_zero"),
+            Ok(_) => panic!("an uninitialized owner was accepted"),
+        }
+        // Nonzero length alone does not prove control; this only rejects the
+        // placeholder used by disconnected host code.
+        assert!(MobileNode::new(vec![1; 32], PhoneClass::Mobile, Vec::new(), 64 * GIB).is_ok());
+    }
+
+    #[test]
     fn mobile_ffi_policy_round_trips_and_keeps_the_thermal_pause() {
         let node = node(PhoneClass::Mobile);
         let mut policy = node.policy();
@@ -892,8 +1086,8 @@ mod tests {
         let recorder = Arc::new(Recorder::default());
         node.set_listener(recorder.clone());
 
-        node.start();
-        assert!(node.status().running);
+        assert_eq!(refusal_code(node.start()), "mobile_validator_unconnected");
+        assert!(!node.status().running);
         let next = node.on_relay_drop();
         assert_eq!(
             next.as_ref().map(|relay| relay.multiaddr.as_str()),
@@ -908,11 +1102,7 @@ mod tests {
         let events = lock(&recorder.0).clone();
         assert_eq!(
             events,
-            vec![
-                NodeEvent::Started,
-                NodeEvent::RelaySwitched { relay: next },
-                NodeEvent::Stopped,
-            ]
+            vec![NodeEvent::RelaySwitched { relay: next }, NodeEvent::Stopped]
         );
     }
 
@@ -921,22 +1111,20 @@ mod tests {
         let node = node(PhoneClass::Mobile);
         let recorder = Arc::new(Recorder::default());
         node.set_listener(recorder.clone());
-        node.start();
+        assert_eq!(refusal_code(node.start()), "mobile_validator_unconnected");
         assert_eq!(node.leave(), 0);
         assert!(!node.status().running);
         assert_eq!(node.pending_duties(), 0);
         let events = lock(&recorder.0).clone();
         assert_eq!(
-            events.get(1..),
-            Some(
-                &[
-                    NodeEvent::SharesReleased {
-                        count: 0,
-                        reason: ReleaseReason::Leave,
-                    },
-                    NodeEvent::Stopped,
-                ][..]
-            )
+            events.as_slice(),
+            &[
+                NodeEvent::SharesReleased {
+                    count: 0,
+                    reason: ReleaseReason::Leave,
+                },
+                NodeEvent::Stopped,
+            ]
         );
     }
 

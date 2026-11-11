@@ -1,4 +1,4 @@
-//! Static gate: dependent application modules (BNS, SocialFi, Data Market, and
+//! Static gate: dependent application modules (BNS, `SocialFi`, Data Market, and
 //! Education Domain) bind B.U.D. 3.0 `ContentRef` / `ContentId` and never use
 //! retired 2.0 `RegisterManifest` registration (Section 5.6).
 
@@ -58,9 +58,7 @@ fn check(root: &Path) -> Result<String, String> {
         "bud_dataMarketPurchase",
     ] {
         if !market_prod.contains(needle) {
-            return Err(format!(
-                "`{market_rel}` missing required symbol `{needle}`"
-            ));
+            return Err(format!("`{market_rel}` missing required symbol `{needle}`"));
         }
     }
 

@@ -11,10 +11,12 @@
 //! - Non-deterministic worker deaths / socket EOFs / timeouts return
 //!   `WorkerError::Transport`, causing the coordinator to discard the block
 //!   overlay, restart the worker, and retry up to 3 times before halting.
+//!
+//! Convenience: exposed for CLI, RPC, SDK, and multi-VM runtime callers.
 
 use budlum_uel_abi::{
-    panic_digest, panic_message, BlockContext, CodeInfo, EeCall, EeFault, EeId, EeOutcome,
-    EeQuery, EeRefusal, ExecutionEnvironment, HostApi, HostRead, RefusalCode,
+    panic_digest, panic_message, BlockContext, CodeInfo, EeCall, EeFault, EeId, EeOutcome, EeQuery,
+    EeRefusal, ExecutionEnvironment, HostApi, HostRead, RefusalCode,
 };
 use std::collections::BTreeMap;
 use std::panic::{catch_unwind, AssertUnwindSafe};

@@ -527,7 +527,7 @@ impl MoveWorker {
         call: &EeCall,
         host: &mut dyn HostApi,
     ) -> EeOutcome {
-        debug_assert!(!BLOCK_STM_ENABLED, "Block-STM must remain disabled on Budlum");
+        const { assert!(!BLOCK_STM_ENABLED, "Block-STM must remain disabled on Budlum") };
         let cap = call.gas_limit.min(MOVE_SOFT_GAS_LIMIT_BGU);
         let Ok(ns) = Namespace::new(NS_MOVE_STATE) else {
             return EeOutcome {
@@ -982,7 +982,7 @@ mod tests {
 
     #[test]
     fn block_stm_is_disabled_and_execution_is_sequential() {
-        assert!(!BLOCK_STM_ENABLED);
+        const { assert!(!BLOCK_STM_ENABLED) };
     }
 
     #[test]

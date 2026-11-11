@@ -16,8 +16,9 @@ import network.budlum.validator.worker.DutyPeriodicWorker
 /**
  * Android 15+ (API 35/36) prohibits launching a `specialUse` foreground service
  * from `ACTION_BOOT_COMPLETED`. Per Section 7.9.3 item 5 & 6, this receiver
- * never calls `startForegroundService()`; it schedules the 15-minute unmetered
- * `WorkManager` periodic job and posts a user notification to reopen the app.
+ * never calls `startForegroundService()`. It asks the worker to schedule the
+ * 15-minute unmetered job, but the disconnected onboarding gate makes that a
+ * no-op. The informational notification says no duties are active.
  */
 class BootCompletedReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent?) {

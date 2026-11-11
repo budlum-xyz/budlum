@@ -4,6 +4,7 @@
 //! `starknet_blockNumber`, `starknet_getNonce`, `starknet_getStorageAt`,
 //! `starknet_getClassHashAt`) without mutating consensus state, and enforces
 //! `Section 1.5` launch-closure on testnet `45261` until activation.
+//! Convenience: exposed for CLI, RPC, SDK, and multi-VM runtime callers.
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};

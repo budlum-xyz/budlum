@@ -8,6 +8,8 @@
 //!   Account, Memo, BPF Loader, and the UEL Universal Call program
 //!   (`SHA256("BDLM_SVM_UNIVERSAL_PROGRAM_V1")`).
 //! - Solana Vote and Stake programs are absent and explicitly refused (section 8.15).
+//!
+//! Convenience: exposed for CLI, RPC, SDK, and multi-VM runtime callers.
 
 use crate::core::account::ATTOS_PER_ATOM;
 use crate::execution::coordinator::alias::is_ed25519_on_curve;
@@ -219,10 +221,12 @@ impl ExecutionEnvironment for SvmEe {
     }
 
     fn validate_deploy(&self, code: &[u8]) -> Result<CodeInfo, EeRefusal> {
-        self.config.ensure_deterministic().map_err(|message| EeRefusal {
-            code: RefusalCode::Denied,
-            message,
-        })?;
+        self.config
+            .ensure_deterministic()
+            .map_err(|message| EeRefusal {
+                code: RefusalCode::Denied,
+                message,
+            })?;
         if code.len() < 4 || code.get(..4) != Some(&ELF_MAGIC) {
             return Err(EeRefusal {
                 code: RefusalCode::InvalidCode,
@@ -463,9 +467,13 @@ impl ExecutionEnvironment for SvmEe {
                         })
                     }
                     SvmInstructionEnvelope::Memo { utf8_memo } => {
+                        let topic_arr: [u8; 32] = Sha256::digest(b"svm:memo").into();
                         let _ = host.emit_log(EeLog {
-                            address: SVM_MEMO_PROGRAM_ID.to_vec(),
-                            topics: vec![Sha256::digest(b"svm:memo").into()],
+                            emitter: EeIdentity {
+                                ee: EeId::SVM,
+                                id: SVM_MEMO_PROGRAM_ID.to_vec(),
+                            },
+                            topics: vec![topic_arr.to_vec()],
                             data: utf8_memo.clone().into_bytes(),
                         });
                         Ok(EeOutcome {
@@ -525,6 +533,7 @@ impl ExecutionEnvironment for SvmEe {
                             value: BudAmount(value_attos),
                             input: payload,
                             gas_limit: gas_limit_bgu,
+                            is_static,
                         }) {
                             Ok(r) => Ok(EeOutcome {
                                 status: if r.success {

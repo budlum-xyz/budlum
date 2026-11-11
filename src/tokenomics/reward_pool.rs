@@ -18,6 +18,7 @@
 //! the pool account until the payers that read them exist, so the pool never
 //! pays ahead of the work it pays for. Nothing is minted and nothing leaves
 //! the pool without a payer.
+//! Convenience: exposed for CLI, RPC, SDK, and multi-VM runtime callers.
 
 use crate::core::address::Address;
 use crate::tokenomics::{bud, BUD_TOTAL_SUPPLY};
@@ -161,7 +162,11 @@ impl RewardPoolSchedule {
             return 0;
         }
         let base = self.validation_reward_pool / self.validation_pool_epochs;
-        base.min(remaining_pool)
+        if base < remaining_pool {
+            base
+        } else {
+            remaining_pool
+        }
     }
 
     /// The epoch budget of `per_epoch_budget`, split into its three shares.
@@ -240,6 +245,7 @@ pub const REPAIR_SHARE_PPM: u64 = 100_000;
 pub const SHARE_SCALE_PPM: u64 = 1_000_000;
 
 /// One epoch's pool budget, separated into the three destinations.
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct PoolSplit {
     consensus: u64,
@@ -248,6 +254,7 @@ struct PoolSplit {
 }
 
 /// One destination's part of `budget`, in parts per million.
+#[cfg(test)]
 fn share_of(budget: u64, ppm: u64) -> u64 {
     (u128::from(budget) * u128::from(ppm) / u128::from(SHARE_SCALE_PPM)) as u64
 }
@@ -257,6 +264,7 @@ fn share_of(budget: u64, ppm: u64) -> u64 {
 /// The repair share takes the rounding remainder: a remainder that vanished
 /// would burn tokens the schedule had already committed to the pool, and that
 /// burn is not a decision any of the three destinations made.
+#[cfg(test)]
 fn split_budget(budget: u64) -> PoolSplit {
     let consensus = share_of(budget, CONSENSUS_SHARE_PPM);
     let storage = share_of(budget, STORAGE_SHARE_PPM);
@@ -266,16 +274,6 @@ fn split_budget(budget: u64) -> PoolSplit {
         storage,
         repair_relay,
     }
-}
-
-/// The storage share of `epoch`'s pool budget.
-///
-/// WIRING: the storage custody reward path reads this; until it lands, the
-/// storage and repair shares stay in the pool account, where `pay_epoch` cannot
-/// spend them and nothing is minted.
-#[must_use]
-pub fn storage_share(schedule: RewardPoolSchedule, epoch: u64, remaining_pool: u64) -> u64 {
-    split_budget(schedule.per_epoch_budget(epoch, remaining_pool)).storage
 }
 
 pub fn total_epoch_payout(payouts: &[(Address, u64)]) -> u64 {
@@ -507,13 +505,13 @@ mod tests {
             treasury_pool: 0,
             reward_pool_start_epoch: 0,
         };
-        assert_eq!(storage_share(schedule, 0, bud(1_000)), bud(50));
-        assert_eq!(storage_share(schedule, 0, bud(60)), bud(30));
+        assert_eq!(storage_share_for(0, &schedule, bud(1_000)), bud(50));
+        assert_eq!(storage_share_for(0, &schedule, bud(60)), bud(30));
         let before_start = RewardPoolSchedule {
             reward_pool_start_epoch: 10,
             ..Default::default()
         };
-        assert_eq!(storage_share(before_start, 9, bud(1_000)), 0);
+        assert_eq!(storage_share_for(9, &before_start, bud(1_000)), 0);
     }
 
     #[test]
@@ -679,7 +677,7 @@ mod tests {
 
     /// The 40 / 50 / 10 decision is exact on a round budget.
     #[test]
-    fn pool_split_is_40_50_10() {
+    fn pool_split_is_40_50_10_suite() {
         let budget = bud(100);
         let split = split_epoch_budget(budget);
         assert_eq!(split.consensus, bud(40));

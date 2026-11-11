@@ -6,24 +6,55 @@ use super::{
 use crate::rpc::compat::CompatEffect;
 
 const EXPECTED: &[&str] = &[
-    "getHealth", "getVersion", "getGenesisHash", "getSlot",
-    "getBlockHeight", "getEpochInfo", "getLatestBlockhash", "isBlockhashValid",
-    "getBalance", "getAccountInfo", "getMultipleAccounts", "getProgramAccounts",
-    "getTokenAccountsByOwner", "getTokenAccountBalance", "getTokenSupply", "getMinimumBalanceForRentExemption",
-    "getFeeForMessage", "getRecentPrioritizationFees", "sendTransaction", "simulateTransaction",
-    "getSignatureStatuses", "getSignaturesForAddress", "getTransaction", "getBlock",
-    "requestAirdrop", "accountSubscribe", "accountUnsubscribe", "signatureSubscribe",
-    "signatureUnsubscribe", "slotSubscribe", "slotUnsubscribe", "logsSubscribe",
-    "logsUnsubscribe", "programSubscribe", "programUnsubscribe",
+    "getHealth",
+    "getVersion",
+    "getGenesisHash",
+    "getSlot",
+    "getBlockHeight",
+    "getEpochInfo",
+    "getLatestBlockhash",
+    "isBlockhashValid",
+    "getBalance",
+    "getAccountInfo",
+    "getMultipleAccounts",
+    "getProgramAccounts",
+    "getTokenAccountsByOwner",
+    "getTokenAccountBalance",
+    "getTokenSupply",
+    "getMinimumBalanceForRentExemption",
+    "getFeeForMessage",
+    "getRecentPrioritizationFees",
+    "sendTransaction",
+    "simulateTransaction",
+    "getSignatureStatuses",
+    "getSignaturesForAddress",
+    "getTransaction",
+    "getBlock",
+    "requestAirdrop",
+    "accountSubscribe",
+    "accountUnsubscribe",
+    "signatureSubscribe",
+    "signatureUnsubscribe",
+    "slotSubscribe",
+    "slotUnsubscribe",
+    "logsSubscribe",
+    "logsUnsubscribe",
+    "programSubscribe",
+    "programUnsubscribe",
 ];
 
 fn declared_names() -> Vec<String> {
     let api = include_str!("../../api.rs");
     let mut names = Vec::new();
-    for needle in ["#[method(name = \"", "#[subscription(name = \"", "unsubscribe = \""] {
+    for needle in [
+        "#[method(name = \"",
+        "#[subscription(name = \"",
+        "unsubscribe = \"",
+    ] {
         for (at, _) in api.match_indices(needle) {
-            let rest = &api[at + needle.len()..];
-            names.push(rest[..rest.find('"').expect("wire name closes")].to_string());
+            let rest = api.get(at + needle.len()..).unwrap_or("");
+            let end = rest.find('"').unwrap_or(0);
+            names.push(rest.get(..end).unwrap_or("").to_string());
         }
     }
     names
@@ -32,17 +63,26 @@ fn declared_names() -> Vec<String> {
 fn class_rows() -> Vec<(String, String, String)> {
     let source = include_str!("../../method_class.rs");
     let start = source.find("const METHOD_CLASSES").expect("class table");
-    let source = &source[start..];
+    let source = source.get(start..).unwrap_or("");
     let cut = source.find("#[cfg(test)]").unwrap_or(source.len());
-    let source = &source[..cut];
+    let source = source.get(..cut).unwrap_or("");
     let mut rows = Vec::new();
     for (at, _) in source.match_indices("row(\"") {
-        let rest = &source[at + 5..];
-        let name = &rest[..rest.find('"').expect("class name closes")];
-        let inner = &rest[name.len() + 1..];
-        let inner = &inner[..inner.find(')').expect("class row closes")];
-        let mut parts = inner.split(',').map(str::trim).filter(|part| !part.is_empty());
-        rows.push((name.to_string(), parts.next().unwrap().to_string(), parts.next().unwrap().to_string()));
+        let rest = source.get(at + 5..).unwrap_or("");
+        let end_q = rest.find('"').expect("class name closes");
+        let name = rest.get(..end_q).unwrap_or("");
+        let inner = rest.get(name.len() + 1..).unwrap_or("");
+        let end_p = inner.find(')').expect("class row closes");
+        let inner = inner.get(..end_p).unwrap_or("");
+        let mut parts = inner
+            .split(',')
+            .map(str::trim)
+            .filter(|part| !part.is_empty());
+        rows.push((
+            name.to_string(),
+            parts.next().unwrap().to_string(),
+            parts.next().unwrap().to_string(),
+        ));
     }
     rows
 }
@@ -52,7 +92,12 @@ fn solana_method_table_is_exact_and_declared() {
     let actual: Vec<&str> = SOLANA_METHOD_CLASSES.iter().map(|row| row.name).collect();
     assert_eq!(actual, EXPECTED);
     let declared = declared_names();
-    for name in EXPECTED { assert!(declared.iter().any(|candidate| candidate == name), "{name} is not declared"); }
+    for name in EXPECTED {
+        assert!(
+            declared.iter().any(|candidate| candidate == name),
+            "{name} is not declared"
+        );
+    }
 }
 
 #[test]
@@ -60,10 +105,17 @@ fn solana_class_rows_match_the_compat_table() {
     let rows = class_rows();
     let mut previous = None;
     for entry in SOLANA_METHOD_CLASSES {
-        let at = rows.iter().position(|(name, _, _)| name == entry.name).expect("class row");
-        assert!(previous.is_none_or(|old| at > old), "{} is out of order", entry.name);
+        let at = rows
+            .iter()
+            .position(|(name, _, _)| name == entry.name)
+            .expect("class row");
+        assert!(
+            previous.is_none_or(|old| at > old),
+            "{} is out of order",
+            entry.name
+        );
         previous = Some(at);
-        let (_, listener, effect) = &rows[at];
+        let (_, listener, effect) = rows.get(at).expect("row index");
         assert_eq!(listener, "Public", "{}", entry.name);
         assert_eq!(effect, &format!("{:?}", entry.effect), "{}", entry.name);
     }
@@ -74,8 +126,13 @@ fn solana_refusals_name_existing_native_doors() {
     let declared = declared_names();
     for entry in SOLANA_METHOD_CLASSES {
         if entry.effect == CompatEffect::Refused {
-            let door = native_door(entry.name).unwrap_or_else(|| panic!("{} has no door", entry.name));
-            assert!(declared.iter().any(|name| name == door), "{} names missing {door}", entry.name);
+            let door =
+                native_door(entry.name).unwrap_or_else(|| panic!("{} has no door", entry.name));
+            assert!(
+                declared.iter().any(|name| name == door),
+                "{} names missing {door}",
+                entry.name
+            );
         }
     }
     assert_eq!(native_door("slotSubscribe"), None);
@@ -104,5 +161,7 @@ fn solana_error_payloads_name_the_native_door() {
     assert_eq!(error.code(), -32004);
     assert!(error.message().contains("bud_getBalance"));
     assert_eq!(not_exposed("getEpochInfo", "bud_getStatus").code(), -32004);
-    assert!(faucet_unavailable("requestAirdrop").message().contains("no grant was queued"));
+    assert!(faucet_unavailable("requestAirdrop")
+        .message()
+        .contains("no grant was queued"));
 }

@@ -5,7 +5,7 @@ use crate::execution::coordinator::foreign::ethereum::{
 };
 use crate::execution::coordinator::state::NS_WASM_STORE;
 use crate::rpc::compat::aptos::{AptosCompatGateway, APTOS_REST_ROUTES};
-use crate::rpc::compat::cosmos::{ABCI_QUERY_PATHS, COMETBFT_RPC_METHODS, CosmosCompatGateway};
+use crate::rpc::compat::cosmos::{CosmosCompatGateway, ABCI_QUERY_PATHS, COMETBFT_RPC_METHODS};
 use crate::rpc::compat::ethereum::{EthereumCompatGateway, ETH_METHOD_CLASSES};
 use crate::rpc::compat::solana::{SolanaCompatGateway, SOLANA_METHOD_CLASSES};
 use crate::rpc::compat::{
@@ -82,10 +82,7 @@ fn eth_rpc_method_table_is_complete() {
     assert_eq!(cfg.listen_addr, "127.0.0.1:18547");
     let mut gw = EthereumCompatGateway::new(cfg);
     let state = AccountState::new();
-    let expected_root = format!(
-        "0x{}",
-        hex::encode(state.execution_state.execution_root())
-    );
+    let expected_root = format!("0x{}", hex::encode(state.execution_state.execution_root()));
     let blk = gw.handle_request(
         CompatListener::Public,
         "127.0.0.1",
@@ -179,10 +176,7 @@ fn eth_filters_are_bounded() {
         &rpc_req("eth_newBlockFilter", serde_json::json!([])),
         &state,
     );
-    assert_eq!(
-        r_b2.error.expect("global cap").code,
-        JSONRPC_LIMIT_EXCEEDED
-    );
+    assert_eq!(r_b2.error.expect("global cap").code, JSONRPC_LIMIT_EXCEEDED);
 
     // Advance clock past TTL (`1_000 + 61`): expired filters are evicted automatically!
     let r_after_ttl = gw.handle_request(
@@ -208,13 +202,10 @@ fn eth_send_raw_transaction_and_other_compat_gateways_work() {
         &sk,
         BUDLUM_EVM_CHAIN_ID,
         0,
-        1_000_000_000,
-        2_000_000_000,
-        21_000,
+        (1_000_000_000, 2_000_000_000, 21_000),
         Some([0xAB; 20]),
         1_000,
-        &[],
-        &[],
+        (&[], &[]),
     )
     .expect("sign eip1559");
 
@@ -257,7 +248,10 @@ fn eth_send_raw_transaction_and_other_compat_gateways_work() {
         [0x99; 32],
     );
     let airdrop = faucet_gw.handle_request(
-        &rpc_req("requestAirdrop", serde_json::json!([hex::encode([7u8; 32]), 1])),
+        &rpc_req(
+            "requestAirdrop",
+            serde_json::json!([hex::encode([7u8; 32]), 1]),
+        ),
         &state,
     );
     assert!(airdrop.result.is_none());
@@ -317,7 +311,12 @@ fn eth_filters_are_peer_isolated_and_bud_execution_proof_verifies() {
         &rpc_req("eth_newBlockFilter", serde_json::json!([])),
         &state,
     );
-    let fid = created.result.expect("filter id").as_str().expect("str").to_string();
+    let fid = created
+        .result
+        .expect("filter id")
+        .as_str()
+        .expect("str")
+        .to_string();
 
     let poll_other_peer = gw.handle_request(
         CompatListener::Public,
@@ -361,12 +360,13 @@ fn eth_filters_are_peer_isolated_and_bud_execution_proof_verifies() {
     let res = proof_resp.result.expect("proof result");
     let proof: crate::execution::coordinator::state::UelExecutionProof =
         serde_json::from_value(res["proof"].clone()).expect("decode proof");
-    assert!(crate::execution::coordinator::state::uel_proof_matches_root(
-        &proof,
-        &state.execution_state.execution_root(),
-    ));
+    assert!(
+        crate::execution::coordinator::state::uel_proof_matches_root(
+            &proof,
+            &state.execution_state.execution_root(),
+        )
+    );
 }
-
 
 #[test]
 fn solana_unimplemented_methods_never_return_invented_success() {
@@ -405,10 +405,17 @@ fn solana_unimplemented_methods_never_return_invented_success() {
         "programUnsubscribe",
     ] {
         let response = gateway.handle_request(&rpc_req(method, serde_json::json!([])), &state);
-        assert!(response.result.is_none(), "{method} returned an invented result");
+        assert!(
+            response.result.is_none(),
+            "{method} returned an invented result"
+        );
         let error = response.error.expect("unimplemented method must fail");
         assert_eq!(error.code, -32004, "{method}");
-        assert!(error.message.contains(method), "{method}: {}", error.message);
+        assert!(
+            error.message.contains(method),
+            "{method}: {}",
+            error.message
+        );
     }
 
     for method in ["getHealth", "getVersion", "getSlot", "getBlockHeight"] {
@@ -421,5 +428,8 @@ fn solana_unimplemented_methods_never_return_invented_success() {
         &state,
     );
     assert!(configured.result.is_none());
-    assert_eq!(configured.error.expect("unsupported commitment").code, -32602);
+    assert_eq!(
+        configured.error.expect("unsupported commitment").code,
+        -32602
+    );
 }

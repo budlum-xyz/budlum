@@ -13,7 +13,7 @@ use blake2::digest::consts::U32;
 use blake2::{Blake2b, Digest as _};
 use budlum_uel_abi::{
     BlockContext, BudAmount, CodeInfo, EeCall, EeCallKind, EeFault, EeId, EeIdentity, EeLog,
-    EeOutcome, EeQuery, EeRefusal, ExecutionEnvironment, HostApi, HostError, HostRead, Namespace,
+    EeOutcome, EeQuery, EeRefusal, OutcomeStatus, RefusalCode, ExecutionEnvironment, HostApi, HostError, HostRead, Namespace,
     UniversalCall,
 };
 use serde::{Deserialize, Serialize};
@@ -175,20 +175,20 @@ pub fn encode_sui_package_bundle(modules: &[SuiCompiledModule]) -> Result<Vec<u8
 /// Decode and structurally validate a `SUI_MODULE_MAGIC`-prefixed package bundle.
 pub fn decode_sui_package_bundle(raw: &[u8]) -> Result<Vec<SuiCompiledModule>, EeRefusal> {
     if raw.len() < 4 || raw.len() > MAX_SUI_PACKAGE_BYTES {
-        return Err(EeRefusal::BadCode("invalid Sui package bundle size".into()));
+        return Err(ee_bad_code("invalid Sui package bundle size".into()));
     }
     if raw.get(..4) != Some(SUI_MODULE_MAGIC.as_slice()) {
-        return Err(EeRefusal::BadCode("missing SUIM package magic".into()));
+        return Err(ee_bad_code("missing SUIM package magic".into()));
     }
     let body = raw.get(4..).unwrap_or_default();
     let mods: Vec<SuiCompiledModule> = serde_json::from_slice(body)
-        .map_err(|e| EeRefusal::BadCode(format!("bad Sui module bundle: {e}")))?;
+        .map_err(|e| ee_bad_code(format!("bad Sui module bundle: {e}")))?;
     if mods.is_empty() {
-        return Err(EeRefusal::BadCode("empty Sui package".into()));
+        return Err(ee_bad_code("empty Sui package".into()));
     }
     for m in &mods {
         if m.name.is_empty() || m.exported_functions.is_empty() {
-            return Err(EeRefusal::BadCode("empty module or function table".into()));
+            return Err(ee_bad_code("empty module or function table".into()));
         }
     }
     Ok(mods)
@@ -203,7 +203,7 @@ fn derive_sui_object_id(tx_hash: &[u8; 32], ordinal: u64) -> [u8; 32] {
 }
 
 fn sui_ns() -> Result<Namespace, EeFault> {
-    Namespace::new(NS_SUI_OBJECT).map_err(EeFault::Wire)
+    Namespace::new(NS_SUI_OBJECT).map_err(ee_wire_fault)
 }
 
 fn read_sui_object(host: &dyn HostRead, id: &[u8; 32]) -> Result<Option<SuiObject>, HostError> {
@@ -220,13 +220,13 @@ fn write_sui_object(host: &mut dyn HostApi, mut obj: SuiObject) -> Result<SuiObj
     obj.digest = obj.compute_digest();
     let ns = Namespace::new(NS_SUI_OBJECT).map_err(|_| HostError::Invalid("bad sui ns".into()))?;
     let encoded = serde_json::to_vec(&obj).map_err(|e| HostError::Invalid(e.to_string()))?;
-    host.write(ns, &obj.object_id, Some(&encoded))?;
+    host.write(&ns, &obj.object_id, Some(&encoded))?;
     Ok(obj)
 }
 
 fn delete_sui_object(host: &mut dyn HostApi, id: &[u8; 32]) -> Result<(), HostError> {
     let ns = Namespace::new(NS_SUI_OBJECT).map_err(|_| HostError::Invalid("bad sui ns".into()))?;
-    host.write(ns, id, None)
+    host.write(&ns, id, None)
 }
 
 /// Out-of-process sequential Move (Sui dialect) worker (`EeId::MOVE_SUI = 0x05`).
@@ -282,7 +282,7 @@ impl ExecutionEnvironment for MoveSuiWorker {
         let digest: [u8; 32] = Sha256::digest(code).into();
         Ok(CodeInfo {
             code_hash: digest,
-            byte_len: u32::try_from(code.len()).unwrap_or(u32::MAX),
+            abi_tag: String::from("sui-move-v1"),
         })
     }
 
@@ -294,32 +294,32 @@ impl ExecutionEnvironment for MoveSuiWorker {
     ) -> Result<EeOutcome, EeFault> {
         let _ = sui_ns()?;
         if !self.is_active(ctx) {
-            return Ok(EeOutcome::reverted(b"MOVE_SUI_CLOSED_ON_TESTNET".to_vec(), 0));
+            return Ok(ee_reverted(b"MOVE_SUI_CLOSED_ON_TESTNET".to_vec(), 0));
         }
         let Ok(sender32) = <[u8; 32]>::try_from(call.caller.id.as_slice()) else {
-            return Ok(EeOutcome::reverted(b"Sui caller must be 32 bytes".to_vec(), 0));
+            return Ok(ee_reverted(b"Sui caller must be 32 bytes".to_vec(), 0));
         };
 
-        let mut gas_used: u64 = 0;
-        let mut charge = |delta: u64, h: &mut dyn HostApi| -> Result<(), ()> {
+        fn charge_gas(gas_used: &mut u64, gas_limit: u64, delta: u64, h: &mut dyn HostApi) -> Result<(), ()> {
             let next = gas_used.saturating_add(delta);
-            if next > call.gas_limit || h.charge(delta).is_err() {
+            if next > gas_limit || h.charge(delta).is_err() {
                 return Err(());
             }
-            gas_used = next;
+            *gas_used = next;
             Ok(())
-        };
-        if charge(SUI_PTB_BASE_BGU, host).is_err() {
-            return Ok(EeOutcome::out_of_gas(call.gas_limit));
+        }
+        let mut gas_used: u64 = 0;
+        if charge_gas(&mut gas_used, call.gas_limit, SUI_PTB_BASE_BGU, host).is_err() {
+            return Ok(ee_out_of_gas(call.gas_limit));
         }
 
         if call.kind == EeCallKind::Deploy {
             let byte_cost = (call.input.len() as u64).saturating_mul(SUI_PUBLISH_PER_BYTE_BGU);
-            if charge(byte_cost, host).is_err() {
-                return Ok(EeOutcome::out_of_gas(call.gas_limit));
+            if charge_gas(&mut gas_used, call.gas_limit, byte_cost, host).is_err() {
+                return Ok(ee_out_of_gas(call.gas_limit));
             }
             let Ok(mods) = decode_sui_package_bundle(&call.input) else {
-                return Ok(EeOutcome::reverted(b"invalid Sui package bundle".to_vec(), gas_used));
+                return Ok(ee_reverted(b"invalid Sui package bundle".to_vec(), gas_used));
             };
             let pkg_id = derive_sui_object_id(&call.tx_hash, 0);
             let contents = serde_json::to_vec(&mods).unwrap_or_default();
@@ -332,20 +332,20 @@ impl ExecutionEnvironment for MoveSuiWorker {
                 contents,
             };
             if write_sui_object(host, pkg_obj).is_err() {
-                return Ok(EeOutcome::reverted(b"package write failed".to_vec(), gas_used));
+                return Ok(ee_reverted(b"package write failed".to_vec(), gas_used));
             }
-            return Ok(EeOutcome::success(pkg_id.to_vec(), gas_used));
+            return Ok(ee_success(pkg_id.to_vec(), gas_used));
         }
 
         let Ok(ptb) = serde_json::from_slice::<SuiPtb>(&call.input) else {
-            return Ok(EeOutcome::reverted(b"invalid SuiPtb JSON".to_vec(), gas_used));
+            return Ok(ee_reverted(b"invalid SuiPtb JSON".to_vec(), gas_used));
         };
         let mut created_ids: Vec<[u8; 32]> = Vec::new();
         let mut ordinal: u64 = 0;
 
         for cmd in &ptb.commands {
-            if charge(SUI_CMD_STEP_BGU, host).is_err() {
-                return Ok(EeOutcome::out_of_gas(call.gas_limit));
+            if charge_gas(&mut gas_used, call.gas_limit, SUI_CMD_STEP_BGU, host).is_err() {
+                return Ok(ee_out_of_gas(call.gas_limit));
             }
             match cmd {
                 SuiPtbCommand::PublishPackage {
@@ -354,14 +354,14 @@ impl ExecutionEnvironment for MoveSuiWorker {
                 } => {
                     let bundle = match encode_sui_package_bundle(modules) {
                         Ok(b) => b,
-                        Err(e) => return Ok(EeOutcome::reverted(e.into_bytes(), gas_used)),
+                        Err(e) => return Ok(ee_reverted(e.into_bytes(), gas_used)),
                     };
                     let byte_cost = (bundle.len() as u64).saturating_mul(SUI_PUBLISH_PER_BYTE_BGU);
-                    if charge(byte_cost, host).is_err() {
-                        return Ok(EeOutcome::out_of_gas(call.gas_limit));
+                    if charge_gas(&mut gas_used, call.gas_limit, byte_cost, host).is_err() {
+                        return Ok(ee_out_of_gas(call.gas_limit));
                     }
                     if decode_sui_package_bundle(&bundle).is_err() {
-                        return Ok(EeOutcome::reverted(b"bad Sui modules".to_vec(), gas_used));
+                        return Ok(ee_reverted(b"bad Sui modules".to_vec(), gas_used));
                     }
                     let pkg_id = derive_sui_object_id(&call.tx_hash, ordinal);
                     ordinal = ordinal.saturating_add(1);
@@ -374,7 +374,7 @@ impl ExecutionEnvironment for MoveSuiWorker {
                         contents: serde_json::to_vec(modules).unwrap_or_default(),
                     };
                     if write_sui_object(host, pkg_obj).is_err() {
-                        return Ok(EeOutcome::reverted(b"pkg write err".to_vec(), gas_used));
+                        return Ok(ee_reverted(b"pkg write err".to_vec(), gas_used));
                     }
                     created_ids.push(pkg_id);
                     if *initial_coin_mist > 0 {
@@ -389,7 +389,7 @@ impl ExecutionEnvironment for MoveSuiWorker {
                             contents: initial_coin_mist.to_le_bytes().to_vec(),
                         };
                         if write_sui_object(host, coin_obj).is_err() {
-                            return Ok(EeOutcome::reverted(b"coin write err".to_vec(), gas_used));
+                            return Ok(ee_reverted(b"coin write err".to_vec(), gas_used));
                         }
                         created_ids.push(coin_id);
                     }
@@ -401,7 +401,7 @@ impl ExecutionEnvironment for MoveSuiWorker {
                         id: [0x02u8; 32].to_vec(),
                     };
                     if attos > 0 && host.bud_transfer(&call.caller, &vault, attos).is_err() {
-                        return Ok(EeOutcome::reverted(
+                        return Ok(ee_reverted(
                             b"insufficient MIST balance".to_vec(),
                             gas_used,
                         ));
@@ -417,7 +417,7 @@ impl ExecutionEnvironment for MoveSuiWorker {
                         contents: amount_mist.to_le_bytes().to_vec(),
                     };
                     if write_sui_object(host, coin).is_err() {
-                        return Ok(EeOutcome::reverted(b"mint write err".to_vec(), gas_used));
+                        return Ok(ee_reverted(b"mint write err".to_vec(), gas_used));
                     }
                     created_ids.push(coin_id);
                 }
@@ -426,19 +426,19 @@ impl ExecutionEnvironment for MoveSuiWorker {
                     amounts_mist,
                 } => {
                     let Ok(Some(mut src)) = read_sui_object(host, coin_id) else {
-                        return Ok(EeOutcome::reverted(b"coin not found".to_vec(), gas_used));
+                        return Ok(ee_reverted(b"coin not found".to_vec(), gas_used));
                     };
                     if src.owner != SuiOwner::AddressOwner(sender32) {
-                        return Ok(EeOutcome::reverted(b"not coin owner".to_vec(), gas_used));
+                        return Ok(ee_reverted(b"not coin owner".to_vec(), gas_used));
                     }
                     let Ok(bal_bytes) = <[u8; 8]>::try_from(src.contents.as_slice()) else {
-                        return Ok(EeOutcome::reverted(b"corrupt coin".to_vec(), gas_used));
+                        return Ok(ee_reverted(b"corrupt coin".to_vec(), gas_used));
                     };
                     let mut rem = u64::from_le_bytes(bal_bytes);
                     let mut lamport_max = src.version;
                     for amt in amounts_mist {
                         let Some(next_rem) = rem.checked_sub(*amt) else {
-                            return Ok(EeOutcome::reverted(
+                            return Ok(ee_reverted(
                                 b"coin split underflow".to_vec(),
                                 gas_used,
                             ));
@@ -455,7 +455,7 @@ impl ExecutionEnvironment for MoveSuiWorker {
                             contents: amt.to_le_bytes().to_vec(),
                         };
                         if write_sui_object(host, child).is_err() {
-                            return Ok(EeOutcome::reverted(b"split write err".to_vec(), gas_used));
+                            return Ok(ee_reverted(b"split write err".to_vec(), gas_used));
                         }
                         created_ids.push(new_id);
                     }
@@ -463,7 +463,7 @@ impl ExecutionEnvironment for MoveSuiWorker {
                     src.version = lamport_max;
                     src.contents = rem.to_le_bytes().to_vec();
                     if write_sui_object(host, src).is_err() {
-                        return Ok(EeOutcome::reverted(b"src write err".to_vec(), gas_used));
+                        return Ok(ee_reverted(b"src write err".to_vec(), gas_used));
                     }
                 }
                 SuiPtbCommand::MergeCoins {
@@ -471,39 +471,39 @@ impl ExecutionEnvironment for MoveSuiWorker {
                     sources,
                 } => {
                     let Ok(Some(mut prim)) = read_sui_object(host, primary_coin) else {
-                        return Ok(EeOutcome::reverted(b"primary coin missing".to_vec(), gas_used));
+                        return Ok(ee_reverted(b"primary coin missing".to_vec(), gas_used));
                     };
                     if prim.owner != SuiOwner::AddressOwner(sender32) {
-                        return Ok(EeOutcome::reverted(b"not primary owner".to_vec(), gas_used));
+                        return Ok(ee_reverted(b"not primary owner".to_vec(), gas_used));
                     }
                     let Ok(p_arr) = <[u8; 8]>::try_from(prim.contents.as_slice()) else {
-                        return Ok(EeOutcome::reverted(b"bad primary coin".to_vec(), gas_used));
+                        return Ok(ee_reverted(b"bad primary coin".to_vec(), gas_used));
                     };
                     let mut total = u64::from_le_bytes(p_arr);
                     let mut max_ver = prim.version;
                     for sid in sources {
                         let Ok(Some(src)) = read_sui_object(host, sid) else {
-                            return Ok(EeOutcome::reverted(b"merge src missing".to_vec(), gas_used));
+                            return Ok(ee_reverted(b"merge src missing".to_vec(), gas_used));
                         };
                         if src.owner != SuiOwner::AddressOwner(sender32) {
-                            return Ok(EeOutcome::reverted(b"not src owner".to_vec(), gas_used));
+                            return Ok(ee_reverted(b"not src owner".to_vec(), gas_used));
                         }
                         let Ok(s_arr) = <[u8; 8]>::try_from(src.contents.as_slice()) else {
-                            return Ok(EeOutcome::reverted(b"bad src coin".to_vec(), gas_used));
+                            return Ok(ee_reverted(b"bad src coin".to_vec(), gas_used));
                         };
                         let Some(sum) = total.checked_add(u64::from_le_bytes(s_arr)) else {
-                            return Ok(EeOutcome::reverted(b"merge overflow".to_vec(), gas_used));
+                            return Ok(ee_reverted(b"merge overflow".to_vec(), gas_used));
                         };
                         total = sum;
                         max_ver = max_ver.max(src.version);
                         if delete_sui_object(host, sid).is_err() {
-                            return Ok(EeOutcome::reverted(b"merge del err".to_vec(), gas_used));
+                            return Ok(ee_reverted(b"merge del err".to_vec(), gas_used));
                         }
                     }
                     prim.version = max_ver.saturating_add(1);
                     prim.contents = total.to_le_bytes().to_vec();
                     if write_sui_object(host, prim).is_err() {
-                        return Ok(EeOutcome::reverted(b"merge write err".to_vec(), gas_used));
+                        return Ok(ee_reverted(b"merge write err".to_vec(), gas_used));
                     }
                 }
                 SuiPtbCommand::TransferObjects {
@@ -512,10 +512,10 @@ impl ExecutionEnvironment for MoveSuiWorker {
                 } => {
                     for oid in object_ids {
                         let Ok(Some(mut obj)) = read_sui_object(host, oid) else {
-                            return Ok(EeOutcome::reverted(b"object missing".to_vec(), gas_used));
+                            return Ok(ee_reverted(b"object missing".to_vec(), gas_used));
                         };
                         if obj.owner != SuiOwner::AddressOwner(sender32) {
-                            return Ok(EeOutcome::reverted(
+                            return Ok(ee_reverted(
                                 b"cannot transfer non-owned object".to_vec(),
                                 gas_used,
                             ));
@@ -523,16 +523,16 @@ impl ExecutionEnvironment for MoveSuiWorker {
                         obj.version = obj.version.saturating_add(1);
                         obj.owner = SuiOwner::AddressOwner(*recipient);
                         if write_sui_object(host, obj).is_err() {
-                            return Ok(EeOutcome::reverted(b"transfer err".to_vec(), gas_used));
+                            return Ok(ee_reverted(b"transfer err".to_vec(), gas_used));
                         }
                     }
                 }
                 SuiPtbCommand::ShareObject { object_id } => {
                     let Ok(Some(mut obj)) = read_sui_object(host, object_id) else {
-                        return Ok(EeOutcome::reverted(b"object missing".to_vec(), gas_used));
+                        return Ok(ee_reverted(b"object missing".to_vec(), gas_used));
                     };
                     if obj.owner != SuiOwner::AddressOwner(sender32) {
-                        return Ok(EeOutcome::reverted(b"not owner".to_vec(), gas_used));
+                        return Ok(ee_reverted(b"not owner".to_vec(), gas_used));
                     }
                     let next_ver = obj.version.saturating_add(1);
                     obj.version = next_ver;
@@ -540,7 +540,7 @@ impl ExecutionEnvironment for MoveSuiWorker {
                         initial_shared_version: next_ver,
                     };
                     if write_sui_object(host, obj).is_err() {
-                        return Ok(EeOutcome::reverted(b"share err".to_vec(), gas_used));
+                        return Ok(ee_reverted(b"share err".to_vec(), gas_used));
                     }
                 }
                 SuiPtbCommand::MoveCall {
@@ -551,20 +551,20 @@ impl ExecutionEnvironment for MoveSuiWorker {
                     arg_bytes,
                 } => {
                     let Ok(Some(pkg)) = read_sui_object(host, package_id) else {
-                        return Ok(EeOutcome::reverted(b"package not found".to_vec(), gas_used));
+                        return Ok(ee_reverted(b"package not found".to_vec(), gas_used));
                     };
                     if pkg.owner != SuiOwner::Immutable {
-                        return Ok(EeOutcome::reverted(b"not a package".to_vec(), gas_used));
+                        return Ok(ee_reverted(b"not a package".to_vec(), gas_used));
                     }
                     let Ok(mods) = serde_json::from_slice::<Vec<SuiCompiledModule>>(&pkg.contents)
                     else {
-                        return Ok(EeOutcome::reverted(b"corrupt package".to_vec(), gas_used));
+                        return Ok(ee_reverted(b"corrupt package".to_vec(), gas_used));
                     };
                     let found = mods.iter().any(|m| {
                         m.name == *module && m.exported_functions.iter().any(|f| f == function)
                     });
                     if !found {
-                        return Ok(EeOutcome::reverted(
+                        return Ok(ee_reverted(
                             b"Move entry function not found".to_vec(),
                             gas_used,
                         ));
@@ -572,7 +572,7 @@ impl ExecutionEnvironment for MoveSuiWorker {
                     let mut lamport_ver: u64 = 1;
                     for sid in shared_inputs {
                         let Ok(Some(mut sh)) = read_sui_object(host, sid) else {
-                            return Ok(EeOutcome::reverted(
+                            return Ok(ee_reverted(
                                 b"shared input missing".to_vec(),
                                 gas_used,
                             ));
@@ -580,7 +580,7 @@ impl ExecutionEnvironment for MoveSuiWorker {
                         if !matches!(sh.owner, SuiOwner::Shared { .. })
                             && sh.owner != SuiOwner::AddressOwner(sender32)
                         {
-                            return Ok(EeOutcome::reverted(
+                            return Ok(ee_reverted(
                                 b"shared input unauthorized".to_vec(),
                                 gas_used,
                             ));
@@ -589,7 +589,7 @@ impl ExecutionEnvironment for MoveSuiWorker {
                         sh.version = lamport_ver;
                         sh.contents.extend_from_slice(arg_bytes);
                         if write_sui_object(host, sh).is_err() {
-                            return Ok(EeOutcome::reverted(b"shared write err".to_vec(), gas_used));
+                            return Ok(ee_reverted(b"shared write err".to_vec(), gas_used));
                         }
                     }
                     let out_id = derive_sui_object_id(&call.tx_hash, ordinal);
@@ -603,7 +603,7 @@ impl ExecutionEnvironment for MoveSuiWorker {
                         contents: arg_bytes.clone(),
                     };
                     if write_sui_object(host, produced).is_err() {
-                        return Ok(EeOutcome::reverted(b"result write err".to_vec(), gas_used));
+                        return Ok(ee_reverted(b"result write err".to_vec(), gas_used));
                     }
                     let _ = host.emit_log(EeLog {
                         emitter: EeIdentity {
@@ -637,24 +637,24 @@ impl ExecutionEnvironment for MoveSuiWorker {
                     }) {
                         Ok(r) => r,
                         Err(_) => {
-                            return Ok(EeOutcome::reverted(
+                            return Ok(ee_reverted(
                                 b"universal_call failed".to_vec(),
                                 gas_used,
                             ));
                         }
                     };
-                    if charge(res.gas_used, host).is_err() {
-                        return Ok(EeOutcome::out_of_gas(call.gas_limit));
+                    if charge_gas(&mut gas_used, call.gas_limit, res.gas_used, host).is_err() {
+                        return Ok(ee_out_of_gas(call.gas_limit));
                     }
                     if !res.success {
-                        return Ok(EeOutcome::reverted(res.output, gas_used));
+                        return Ok(ee_reverted(res.output, gas_used));
                     }
                 }
             }
         }
 
         let out = serde_json::to_vec(&created_ids).unwrap_or_default();
-        Ok(EeOutcome::success(out, gas_used))
+        Ok(ee_success(out, gas_used))
     }
 
     fn query(
@@ -664,28 +664,52 @@ impl ExecutionEnvironment for MoveSuiWorker {
         host: &dyn HostRead,
     ) -> Result<Vec<u8>, EeRefusal> {
         if !self.is_active(ctx) {
-            return Err(EeRefusal::Denied("MOVE_SUI_CLOSED_ON_TESTNET".into()));
+            return Err(ee_denied("MOVE_SUI_CLOSED_ON_TESTNET".into()));
         }
         let req: SuiWorkerQuery = serde_json::from_slice(&q.input)
-            .map_err(|e| EeRefusal::BadInput(format!("bad SuiWorkerQuery: {e}")))?;
+            .map_err(|e| ee_bad_input(format!("bad SuiWorkerQuery: {e}")))?;
         match req {
             SuiWorkerQuery::GetObject { object_id } => {
                 let obj = read_sui_object(host, &object_id)
-                    .map_err(|e| EeRefusal::Denied(e.to_string()))?;
-                serde_json::to_vec(&obj).map_err(|e| EeRefusal::BadInput(e.to_string()))
+                    .map_err(|e| ee_denied(e.to_string()))?;
+                serde_json::to_vec(&obj).map_err(|e| ee_bad_input(e.to_string()))
             }
             SuiWorkerQuery::GetMistBalance { address } => {
                 let who = EeIdentity::new(EeId::MOVE_SUI, address.to_vec())
-                    .map_err(|e| EeRefusal::BadInput(e.to_string()))?;
+                    .map_err(|e| ee_bad_input(e.to_string()))?;
                 let attos = host
                     .bud_balance(&who)
-                    .map_err(|e| EeRefusal::Denied(e.to_string()))?
+                    .map_err(|e| ee_denied(e.to_string()))?
                     .0;
                 let mist = u64::try_from(attos / ATTO_PER_MIST).unwrap_or(u64::MAX);
                 Ok(mist.to_le_bytes().to_vec())
             }
         }
     }
+}
+
+
+fn ee_bad_code(msg: String) -> EeRefusal {
+    EeRefusal { code: RefusalCode::InvalidCode, message: msg }
+}
+fn ee_denied(msg: String) -> EeRefusal {
+    EeRefusal { code: RefusalCode::Denied, message: msg }
+}
+fn ee_bad_input(msg: String) -> EeRefusal {
+    EeRefusal { code: RefusalCode::Unsupported, message: msg }
+}
+fn ee_success(output: Vec<u8>, gas_used: u64) -> EeOutcome {
+    EeOutcome { status: OutcomeStatus::Success, output, gas_used }
+}
+fn ee_reverted(output: Vec<u8>, gas_used: u64) -> EeOutcome {
+    EeOutcome { status: OutcomeStatus::Revert, output, gas_used }
+}
+fn ee_out_of_gas(gas_used: u64) -> EeOutcome {
+    EeOutcome { status: OutcomeStatus::OutOfGas, output: Vec::new(), gas_used }
+}
+fn ee_wire_fault(err: impl std::fmt::Display) -> EeFault {
+    let msg = err.to_string();
+    EeFault { ee: EeId::MOVE_SUI, panic_digest: budlum_uel_abi::panic_digest(EeId::MOVE_SUI, &msg) }
 }
 
 #[cfg(test)]
@@ -735,7 +759,7 @@ mod tests {
         ) else {
             panic!("exec");
         };
-        assert_eq!(out.status, OutcomeStatus::Reverted);
+        assert_eq!(out.status, OutcomeStatus::Revert);
         assert_eq!(out.output, b"MOVE_SUI_CLOSED_ON_TESTNET");
     }
 

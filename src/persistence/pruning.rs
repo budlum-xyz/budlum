@@ -9,6 +9,7 @@
 //! so an archive node refuses the deletion rather than performing it. A node
 //! with no policy set keeps the previous behaviour, which is what tests and
 //! ephemeral devnet nodes rely on.
+//! Convenience: exposed for CLI, RPC, SDK, and multi-VM runtime callers.
 
 use serde::{Deserialize, Serialize};
 use std::str::FromStr;

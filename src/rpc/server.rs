@@ -32,10 +32,6 @@ use tracing::info;
 const MAX_TRACKED_RPC_CLIENTS: usize = 10_000;
 
 /// Retrieval challenges establish only that an operator responded for the
-/// Requested range. Keep this wire-level discriminator explicit so clients
-/// Cannot mistake a successful retrieval outcome for a full storage proof.
-const RETRIEVAL_OUTCOME_PROOF_KIND: &str = "interim_availability_only";
-
 /// Upper bound accepted for `max_request_body_size`. A limit large enough to
 /// Exhaust node memory is not a limit; anything above this is treated as a
 /// Misconfiguration rather than silently honoured.
@@ -43,6 +39,11 @@ const RPC_BODY_LIMIT_CEILING: u32 = 64 * 1024 * 1024;
 
 /// Upper bound accepted for `max_connections`, for the same reason.
 const RPC_CONNECTION_LIMIT_CEILING: u32 = 100_000;
+
+/// Deadline for the in-process TLS handshake. Without it a peer that opens a
+/// socket and never sends a ClientHello holds the connection task and its file
+/// descriptor for the lifetime of the process.
+const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Transport limits applied when a caller builds a config from process
 /// Configuration without stating its own. These match
@@ -68,30 +69,20 @@ pub struct RpcSecurityConfig {
     pub max_connections: Option<u32>,
 }
 
-/// A 32-byte value from hex, with or without `0x`.
-fn parse_hex32(s: &str) -> Result<[u8; 32], ErrorObjectOwned> {
-    let clean = s.strip_prefix("0x").unwrap_or(s);
-    let bytes = hex::decode(clean)
-        .map_err(|e| ErrorObjectOwned::owned(-32602, format!("Invalid hex: {e}"), None::<()>))?;
-    bytes
-        .try_into()
-        .map_err(|_| ErrorObjectOwned::owned(-32602, "expected 32 bytes", None::<()>))
-}
-
 impl Default for RpcSecurityConfig {
     fn default() -> Self {
- // (security audit) secure default - auth ON, no API key
- // (caller must configure `api_key` before serving). This is what
- // [`Self::operator_default`] used to be (auth OFF); the prior
- // Behaviour is preserved under that explicit name for trusted
- // Local deployments.
+        // (security audit) secure default - auth ON, no API key
+        // (caller must configure `api_key` before serving). This is what
+        // [`Self::operator_default`] used to be (auth OFF); the prior
+        // Behaviour is preserved under that explicit name for trusted
+        // Local deployments.
         Self {
             auth_required: true,
             api_key: None,
             allowed_ips: vec!["127.0.0.1".into(), "::1".into()],
             cors_origins: Vec::new(),
- // Secure default: a limiter that is off by default
- // leaves API-key guessing unthrottled on the public listener.
+            // Secure default: a limiter that is off by default
+            // leaves API-key guessing unthrottled on the public listener.
             rate_limit_per_minute: Some(120),
             trusted_proxies: Vec::new(),
             max_request_body_size: Some(16 * 1024 * 1024),
@@ -102,11 +93,11 @@ impl Default for RpcSecurityConfig {
 
 impl RpcSecurityConfig {
     pub fn operator_default() -> Self {
- // SECURITY WARNING: this constructor explicitly disables
- // Authentication. It is intended for trusted local / private
- // Network deployments only. A loud, multi-line `warn!` is logged
- // At every server start so an operator cannot accidentally ship
- // An unauthenticated RPC to the public internet.
+        // SECURITY WARNING: this constructor explicitly disables
+        // Authentication. It is intended for trusted local / private
+        // Network deployments only. A loud, multi-line `warn!` is logged
+        // At every server start so an operator cannot accidentally ship
+        // An unauthenticated RPC to the public internet.
         tracing::warn!(
             "[SECURITY] Operator RPC auth_required=false - for localhost or a private network only."
         );
@@ -152,15 +143,15 @@ impl RpcSecurityConfig {
             api_key,
             allowed_ips,
             cors_origins,
- // An unset limit falls back to the default, never to unlimited.
+            // An unset limit falls back to the default, never to unlimited.
             rate_limit_per_minute: rate_limit_per_minute
                 .or(Some(RPC_DEFAULT_RATE_LIMIT_PER_MINUTE)),
             trusted_proxies: Vec::new(),
- // Leaving these `None` handed the listener over to whatever the
- // Transport crate happened to default to, and the value differed
- // From every other constructor here. A config built from process
- // Configuration is bounded like the rest; a caller that wants
- // Other values overwrites these fields after construction.
+            // Leaving these `None` handed the listener over to whatever the
+            // Transport crate happened to default to, and the value differed
+            // From every other constructor here. A config built from process
+            // Configuration is bounded like the rest; a caller that wants
+            // Other values overwrites these fields after construction.
             max_request_body_size: Some(RPC_DEFAULT_BODY_LIMIT),
             max_connections: Some(RPC_DEFAULT_CONNECTION_LIMIT),
         })
@@ -177,6 +168,7 @@ pub enum RpcMode {
 struct RpcSecurityLayer {
     config: Arc<RpcSecurityConfig>,
     per_ip_rates: Arc<Mutex<HashMap<IpAddr, VecDeque<Instant>>>>,
+    per_authed_ip_rates: Arc<Mutex<HashMap<IpAddr, VecDeque<Instant>>>>,
     metrics: Option<Arc<crate::core::metrics::Metrics>>,
     mode: RpcMode,
     remote_addr: Option<SocketAddr>,
@@ -191,6 +183,7 @@ impl RpcSecurityLayer {
         Self {
             config: Arc::new(config),
             per_ip_rates: Arc::new(Mutex::new(HashMap::new())),
+            per_authed_ip_rates: Arc::new(Mutex::new(HashMap::new())),
             metrics,
             mode,
             remote_addr: None,
@@ -211,6 +204,7 @@ impl<S> Layer<S> for RpcSecurityLayer {
             inner,
             config: self.config.clone(),
             per_ip_rates: self.per_ip_rates.clone(),
+            per_authed_ip_rates: self.per_authed_ip_rates.clone(),
             metrics: self.metrics.clone(),
             mode: self.mode.clone(),
             remote_addr: self.remote_addr,
@@ -223,6 +217,7 @@ struct RpcSecurityService<S> {
     inner: S,
     config: Arc<RpcSecurityConfig>,
     per_ip_rates: Arc<Mutex<HashMap<IpAddr, VecDeque<Instant>>>>,
+    per_authed_ip_rates: Arc<Mutex<HashMap<IpAddr, VecDeque<Instant>>>>,
     metrics: Option<Arc<crate::core::metrics::Metrics>>,
     mode: RpcMode,
     remote_addr: Option<SocketAddr>,
@@ -260,10 +255,10 @@ where
             return Box::pin(async { Ok(text_response(StatusCode::FORBIDDEN, "Forbidden")) });
         }
 
- // Preflight is answered before authentication: a browser cannot put
- // `x-api-key` on this request, so a 401 here means the real request is
- // never sent. It changes no state, and the IP and origin checks have
- // already run.
+        // Preflight is answered before authentication: a browser cannot put
+        // `x-api-key` on this request, so a 401 here means the real request is
+        // never sent. It changes no state, and the IP and origin checks have
+        // already run.
         if let CorsOutcome::Allow(ref origin) = cors {
             if is_cors_preflight(&req) {
                 let origin = origin.clone();
@@ -271,10 +266,19 @@ where
             }
         }
 
- // The limiter runs before the key check so that failed key guesses
- // count against the client's budget.
+        // Authentication is evaluated in constant time and carries no state
+        // mutation, so selecting an unauthenticated vs authenticated per-IP
+        // bucket keeps brute-force guesses throttled ahead of 401 while
+        // preventing unauthenticated noise on a shared IP/NAT from exhausting
+        // the authenticated caller's rate-limit budget.
+        let authed = is_authorized(&self.config, &req);
         let client_ip = extract_client_ip(&self.config, &req);
-        if !is_per_ip_rate_limited(&self.config, &self.per_ip_rates, client_ip) {
+        let rate_bucket = if authed {
+            &self.per_authed_ip_rates
+        } else {
+            &self.per_ip_rates
+        };
+        if !is_per_ip_rate_limited(&self.config, rate_bucket, client_ip) {
             if let Some(ref m) = self.metrics {
                 m.rpc_rate_limited_total.inc();
             }
@@ -288,7 +292,7 @@ where
             });
         }
 
-        if !is_authorized(&self.config, &req) {
+        if !authed {
             return Box::pin(async move {
                 let mut response = text_response(StatusCode::UNAUTHORIZED, "Unauthorized");
                 if let CorsOutcome::Allow(ref origin) = cors {
@@ -307,9 +311,9 @@ where
         let mut inner = self.inner.clone();
         Box::pin(async move {
             let mut result = inner.call(req).await;
- // Without the headers a browser withholds even a successful body
- // from JavaScript; the allow decision only counts if it is visible
- // on the response.
+            // Without the headers a browser withholds even a successful body
+            // from JavaScript; the allow decision only counts if it is visible
+            // on the response.
             if let (Ok(ref mut response), CorsOutcome::Allow(ref origin)) = (&mut result, &cors) {
                 apply_cors_headers(response, origin);
             }
@@ -330,6 +334,7 @@ async fn serve_tls_connection<S, B>(
     remote_addr: SocketAddr,
     service: S,
     stopped: impl std::future::Future<Output = ()>,
+    _permit: tokio::sync::OwnedSemaphorePermit,
 ) where
     S: tower::Service<HttpRequest<hyper::body::Incoming>, Response = hyper::Response<B>>
         + Clone
@@ -341,14 +346,40 @@ async fn serve_tls_connection<S, B>(
     B: hyper::body::Body<Data = hyper::body::Bytes> + Send + 'static,
     B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
 {
-    match acceptor.accept(socket).await {
-        Ok(stream) => {
+    let handshake = tokio::time::timeout(TLS_HANDSHAKE_TIMEOUT, acceptor.accept(socket));
+    match handshake.await {
+        Ok(Ok(stream)) => {
             let _ = jsonrpsee::server::serve_with_graceful_shutdown(stream, service, stopped).await;
         }
-        Err(error) => {
+        Ok(Err(error)) => {
             tracing::debug!("RPC TLS handshake from {remote_addr} failed: {error}");
         }
+        Err(_) => {
+            tracing::debug!("RPC TLS handshake from {remote_addr} timed out");
+        }
     }
+}
+
+/// Serves a plain-HTTP connection while holding `_permit` for the connection's
+/// full lifetime so `max_connections` applies symmetrically to plain and TLS
+/// listeners.
+async fn serve_plain_connection<S, B>(
+    socket: tokio::net::TcpStream,
+    service: S,
+    stopped: impl std::future::Future<Output = ()>,
+    _permit: tokio::sync::OwnedSemaphorePermit,
+) where
+    S: tower::Service<HttpRequest<hyper::body::Incoming>, Response = hyper::Response<B>>
+        + Clone
+        + Send
+        + 'static,
+    S::Future: Send,
+    S::Response: Send,
+    S::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
+    B: hyper::body::Body<Data = hyper::body::Bytes> + Send + 'static,
+    B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
+{
+    let _ = jsonrpsee::server::serve_with_graceful_shutdown(socket, service, stopped).await;
 }
 
 pub struct RpcServer {
@@ -356,26 +387,26 @@ pub struct RpcServer {
     node: NodeClient,
     security: RpcSecurityConfig,
     mode: RpcMode,
- /// Bounded, expiring reveal-session table (G4). Frames of a Three object
- /// are served through sessions opened by `bud_storageOpenReveal`, never
- /// as raw handle-passing.
+    /// Bounded, expiring reveal-session table (G4). Frames of a Three object
+    /// are served through sessions opened by `bud_storageOpenReveal`, never
+    /// as raw handle-passing.
     reveal_gateway: Arc<Mutex<crate::storage::RevealGateway>>,
- /// Bounded, expiring, per-peer filter table of the Ethereum gateway
- /// . It is node-local bookkeeping, never consensus state.
+    /// Bounded, expiring, per-peer filter table of the Ethereum gateway
+    /// . It is node-local bookkeeping, never consensus state.
     eth_filters: Arc<Mutex<ethereum::filters::FilterPool>>,
- /// Prometheus metrics handle for RPC latency and rate-limit counters.
- /// If `None`, metrics are silently skipped (e.g. in tests without a
- /// Global registry).
+    /// Prometheus metrics handle for RPC latency and rate-limit counters.
+    /// If `None`, metrics are silently skipped (e.g. in tests without a
+    /// Global registry).
     metrics: Option<Arc<crate::core::metrics::Metrics>>,
- /// In-process TLS acceptor. `None` serves plain HTTP, which the
- /// mainnet config check allows on loopback only.
+    /// In-process TLS acceptor. `None` serves plain HTTP, which the
+    /// mainnet config check allows on loopback only.
     tls: Option<tokio_rustls::TlsAcceptor>,
- /// Dedicated Aptos REST bind address. Only the public node startup sets
- /// this; test and embedded servers keep the opt-in default of `None`.
+    /// Dedicated Aptos REST bind address. Only the public node startup sets
+    /// this; test and embedded servers keep the opt-in default of `None`.
     aptos_listener: Option<String>,
- /// Dedicated Solana JSON-RPC/WebSocket bind address.
+    /// Dedicated Solana JSON-RPC/WebSocket bind address.
     solana_listener: Option<String>,
- /// Optional full-node proxy target. `None` preserves local named refusals.
+    /// Optional full-node proxy target. `None` preserves local named refusals.
     aptos_upstream: Option<String>,
 }
 
@@ -401,11 +432,7 @@ impl AptosListener {
             .max_connections
             .unwrap_or(RPC_CONNECTION_LIMIT_CEILING) as usize;
         let connections = Arc::new(tokio::sync::Semaphore::new(connection_limit));
-        let security = RpcSecurityLayer::new(
-            self.security,
-            self.metrics,
-            RpcMode::Public,
-        );
+        let security = RpcSecurityLayer::new(self.security, self.metrics, RpcMode::Public);
         let tls = self.tls;
         let gateway = self.gateway;
         let body_limit = self.body_limit;
@@ -429,29 +456,30 @@ impl AptosListener {
                     Err(_) => break,
                 };
                 let gateway_for_service = gateway.clone();
-                let service = security.clone().for_remote_addr(remote_addr).layer(
-                    tower::service_fn(move |req: HttpRequest<hyper::body::Incoming>| {
-                        let gateway_for_request = gateway_for_service.clone();
-                        async move {
-                            Ok::<_, std::convert::Infallible>(
-                                gateway_for_request.handle_request(req, body_limit).await,
-                            )
-                        }
-                    },
-                ));
+                let service =
+                    security
+                        .clone()
+                        .for_remote_addr(remote_addr)
+                        .layer(tower::service_fn(
+                            move |req: HttpRequest<hyper::body::Incoming>| {
+                                let gateway_for_request = gateway_for_service.clone();
+                                async move {
+                                    Ok::<_, std::convert::Infallible>(
+                                        gateway_for_request.handle_request(req, body_limit).await,
+                                    )
+                                }
+                            },
+                        ));
                 match tls.clone() {
                     Some(acceptor) => {
-                        tokio::spawn(async move {
-                            let _permit = permit;
-                            serve_tls_connection(
-                                acceptor,
-                                socket,
-                                remote_addr,
-                                service,
-                                std::future::pending::<()>(),
-                            )
-                            .await;
-                        });
+                        tokio::spawn(serve_tls_connection(
+                            acceptor,
+                            socket,
+                            remote_addr,
+                            service,
+                            std::future::pending::<()>(),
+                            permit,
+                        ));
                     }
                     None => {
                         tokio::spawn(async move {
@@ -472,7 +500,6 @@ impl AptosListener {
     }
 }
 
-
 /// Dedicated Solana JSON-RPC/WebSocket listener with the primary public
 /// listener's admission and transport limits, but only Solana callbacks.
 struct SolanaListener {
@@ -485,10 +512,7 @@ struct SolanaListener {
 
 impl SolanaListener {
     async fn start(self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        use jsonrpsee::server::{
-            serve_with_graceful_shutdown, stop_channel, BatchRequestConfig, ServerBuilder,
-            ServerConfig,
-        };
+        use jsonrpsee::server::{stop_channel, BatchRequestConfig, ServerBuilder, ServerConfig};
 
         let body_limit = self
             .security
@@ -503,7 +527,9 @@ impl SolanaListener {
             .max_connections(connection_limit as u32)
             .set_batch_request_config(BatchRequestConfig::Limit(100))
             .build();
-        let builder = ServerBuilder::default().set_config(config).to_service_builder();
+        let builder = ServerBuilder::default()
+            .set_config(config)
+            .to_service_builder();
         let listener = tokio::net::TcpListener::bind(self.addr).await?;
         let local_addr = listener.local_addr()?;
         let connections = Arc::new(tokio::sync::Semaphore::new(connection_limit));
@@ -537,27 +563,32 @@ impl SolanaListener {
                 let builder_for_service = builder.clone();
                 let methods_for_service = methods.clone();
                 let stop_for_service = stop_handle.clone();
-                let service = security.clone().for_remote_addr(remote_addr).layer(
-                    tower::service_fn(move |req: HttpRequest<hyper::body::Incoming>| {
-                        let mut service = builder_for_service
-                            .clone()
-                            .build(methods_for_service.clone(), stop_for_service.clone());
-                        async move { service.call(req).await }
-                    }),
-                );
+                let service =
+                    security
+                        .clone()
+                        .for_remote_addr(remote_addr)
+                        .layer(tower::service_fn(
+                            move |req: HttpRequest<hyper::body::Incoming>| {
+                                let mut service = builder_for_service
+                                    .clone()
+                                    .build(methods_for_service.clone(), stop_for_service.clone());
+                                async move { service.call(req).await }
+                            },
+                        ));
                 let stopped = stop_handle.clone().shutdown();
                 match tls.clone() {
                     Some(acceptor) => {
-                        tokio::spawn(async move {
-                            let _permit = permit;
-                            serve_tls_connection(acceptor, socket, remote_addr, service, stopped).await;
-                        });
+                        tokio::spawn(serve_tls_connection(
+                            acceptor,
+                            socket,
+                            remote_addr,
+                            service,
+                            stopped,
+                            permit,
+                        ));
                     }
                     None => {
-                        tokio::spawn(async move {
-                            let _permit = permit;
-                            let _ = serve_with_graceful_shutdown(socket, service, stopped).await;
-                        });
+                        tokio::spawn(serve_plain_connection(socket, service, stopped, permit));
                     }
                 }
             }
@@ -579,7 +610,7 @@ impl RpcServer {
             tls: None,
             aptos_listener: None,
             solana_listener: None,
-            aptos_upstream: None
+            aptos_upstream: None,
         }
     }
 
@@ -599,7 +630,7 @@ impl RpcServer {
             tls: None,
             aptos_listener: None,
             solana_listener: None,
-            aptos_upstream: None
+            aptos_upstream: None,
         }
     }
 
@@ -620,7 +651,7 @@ impl RpcServer {
             tls: None,
             aptos_listener: None,
             solana_listener: None,
-            aptos_upstream: None
+            aptos_upstream: None,
         }
     }
 
@@ -629,27 +660,27 @@ impl RpcServer {
         self
     }
 
- /// Serves this listener over TLS 1.3 with X25519MLKEM768.
+    /// Serves this listener over TLS 1.3 with X25519MLKEM768.
     pub fn with_tls(mut self, acceptor: tokio_rustls::TlsAcceptor) -> Self {
         self.tls = Some(acceptor);
         self
     }
 
- /// Open the dedicated Aptos REST listener when this public server runs.
- /// The address is validated before either listener starts.
+    /// Open the dedicated Aptos REST listener when this public server runs.
+    /// The address is validated before either listener starts.
     pub fn with_aptos_listener(mut self, addr: String) -> Self {
         self.aptos_listener = Some(addr);
         self
     }
 
- /// Open the dedicated Solana JSON-RPC/WebSocket listener on the public server.
+    /// Open the dedicated Solana JSON-RPC/WebSocket listener on the public server.
     pub fn with_solana_listener(mut self, addr: String) -> Self {
         self.solana_listener = Some(addr);
         self
     }
 
- /// Proxy known Aptos routes to this full-node `/v1` URL. Validation and
- /// HTTP-client construction happen before either listener starts.
+    /// Proxy known Aptos routes to this full-node `/v1` URL. Validation and
+    /// HTTP-client construction happen before either listener starts.
     pub fn with_aptos_upstream(mut self, url: String) -> Self {
         self.aptos_upstream = Some(url);
         self
@@ -658,9 +689,7 @@ impl RpcServer {
     pub async fn run(self, addr: String) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         use jsonrpsee::core::server::Methods;
         use jsonrpsee::server::BatchRequestConfig;
-        use jsonrpsee::server::{
-            serve_with_graceful_shutdown, stop_channel, ServerBuilder, ServerConfig,
-        };
+        use jsonrpsee::server::{stop_channel, ServerBuilder, ServerConfig};
 
         validate_rpc_security_config(&self.security)?;
         let aptos_body_limit = self
@@ -668,18 +697,18 @@ impl RpcServer {
             .max_request_body_size
             .ok_or("validated RPC body limit is missing")? as usize;
         let tls = self.tls.clone();
- // Wrap the combined REST/JSON-RPC service, not only jsonrpsee's inner
- // dispatcher. Otherwise the compatibility branch would bypass IP,
- // origin, rate and authentication admission on the shared listener.
+        // Wrap the combined REST/JSON-RPC service, not only jsonrpsee's inner
+        // dispatcher. Otherwise the compatibility branch would bypass IP,
+        // origin, rate and authentication admission on the shared listener.
         let security = RpcSecurityLayer::new(
             self.security.clone(),
             self.metrics.clone(),
             self.mode.clone(),
         );
 
- // jsonrpsee 0.26 moved the transport limits off the server builder and
- // onto `ServerConfig`; the defaults are unchanged, so only the values
- // this node explicitly overrides are set here.
+        // jsonrpsee 0.26 moved the transport limits off the server builder and
+        // onto `ServerConfig`; the defaults are unchanged, so only the values
+        // this node explicitly overrides are set here.
         let mut config = ServerConfig::builder();
         if let Some(limit) = self.security.max_request_body_size {
             config = config.max_request_body_size(limit);
@@ -687,13 +716,13 @@ impl RpcServer {
         if let Some(limit) = self.security.max_connections {
             config = config.max_connections(limit);
         }
- // Batch amplification bound (hardening research #42): the body-size
- // cap alone still admits one request containing thousands of tiny
- // method calls, turning a single authenticated HTTP request into a
- // fan-out of per-method work. 100 calls per batch is far above any
- // legitimate client pattern while keeping amplification bounded;
- // oversized batches are rejected wholesale instead of partially
- // executed (jsonrpsee drops the whole batch at `Limit`).
+        // Batch amplification bound (hardening research #42): the body-size
+        // cap alone still admits one request containing thousands of tiny
+        // method calls, turning a single authenticated HTTP request into a
+        // fan-out of per-method work. 100 calls per batch is far above any
+        // legitimate client pattern while keeping amplification bounded;
+        // oversized batches are rejected wholesale instead of partially
+        // executed (jsonrpsee drops the whole batch at `Limit`).
         config = config.set_batch_request_config(BatchRequestConfig::Limit(100));
         let builder = ServerBuilder::default().set_config(config.build());
 
@@ -721,7 +750,9 @@ impl RpcServer {
         }
         if let Some(solana_addr) = self.solana_listener.as_ref() {
             if solana_addr == &addr {
-                return Err("Solana compatibility and primary listeners need distinct addresses".into());
+                return Err(
+                    "Solana compatibility and primary listeners need distinct addresses".into(),
+                );
             }
             aptos::validate_listener(solana_addr)?;
         }
@@ -729,29 +760,39 @@ impl RpcServer {
             (self.aptos_listener.as_ref(), self.solana_listener.as_ref())
         {
             if aptos_addr == solana_addr {
-                return Err("Aptos and Solana compatibility listeners need distinct addresses".into());
+                return Err(
+                    "Aptos and Solana compatibility listeners need distinct addresses".into(),
+                );
             }
         }
-        let serve_aptos_on_primary =
-            self.mode == RpcMode::Public && self.aptos_listener.is_none();
+        let serve_aptos_on_primary = self.mode == RpcMode::Public && self.aptos_listener.is_none();
         let mut aptos_gateway = AptosGateway::new(self.chain.clone(), self.node.clone());
         if let Some(upstream) = self.aptos_upstream.as_deref() {
-            aptos_gateway = aptos_gateway.with_upstream(
-                aptos::AptosUpstream::parse(upstream).map_err(|problem| {
-                    std::io::Error::new(std::io::ErrorKind::InvalidInput, problem)
-                })?,
-            );
+            aptos_gateway =
+                aptos_gateway.with_upstream(aptos::AptosUpstream::parse(upstream).map_err(
+                    |problem| std::io::Error::new(std::io::ErrorKind::InvalidInput, problem),
+                )?);
         }
-        let dedicated_aptos = self.aptos_listener.as_ref().map(|aptos_addr| AptosListener {
-            addr: aptos_addr.clone(),
-            gateway: aptos_gateway.clone(),
-            security: self.security.clone(),
-            metrics: self.metrics.clone(),
-            tls: self.tls.clone(),
-            body_limit: aptos_body_limit,
-        });
+        let dedicated_aptos = self
+            .aptos_listener
+            .as_ref()
+            .map(|aptos_addr| AptosListener {
+                addr: aptos_addr.clone(),
+                gateway: aptos_gateway.clone(),
+                security: self.security.clone(),
+                metrics: self.metrics.clone(),
+                tls: self.tls.clone(),
+                body_limit: aptos_body_limit,
+            });
         let dedicated_solana_addr = self.solana_listener.clone();
- // Every served method must be classified (`src/rpc/method_class.rs`).
+        let dedicated_solana_security = self.security.clone();
+        let dedicated_solana_metrics = self.metrics.clone();
+        let dedicated_solana_tls = self.tls.clone();
+        let connection_cap = self
+            .security
+            .max_connections
+            .unwrap_or(RPC_DEFAULT_CONNECTION_LIMIT) as usize;
+        // Every served method must be classified (`src/rpc/method_class.rs`).
         let methods: Methods = self.into_rpc().into();
         crate::rpc::method_class::check_served_methods(methods.method_names()).map_err(|e| {
             std::io::Error::new(
@@ -766,6 +807,7 @@ impl RpcServer {
         } else {
             None
         };
+        let connection_permits = Arc::new(tokio::sync::Semaphore::new(connection_cap));
         let svc_builder = builder.to_service_builder();
         let listener = tokio::net::TcpListener::bind(addr.clone()).await?;
         let (stop_handle, server_handle) = stop_channel();
@@ -790,27 +832,40 @@ impl RpcServer {
                     _ = stop_handle.clone().shutdown() => break,
                 };
 
+                let Ok(permit) = connection_permits.clone().try_acquire_owned() else {
+                    tracing::debug!(
+                        "RPC connection from {remote_addr} dropped: max_connections reached"
+                    );
+                    continue;
+                };
+
                 let stop_handle_for_service = stop_handle.clone();
                 let svc_builder_for_service = svc_builder.clone();
                 let methods_for_service = methods.clone();
                 let aptos_for_service = aptos_gateway.clone();
-                let svc = security.clone().for_remote_addr(remote_addr).layer(
-                    tower::service_fn(move |req: HttpRequest<hyper::body::Incoming>| {
-                        let is_aptos =
-                            serve_aptos_on_primary && aptos::owns_path(req.uri().path());
-                        let aptos_for_request = aptos_for_service.clone();
-                        let mut svc = svc_builder_for_service
-                            .clone()
-                            .build(methods_for_service.clone(), stop_handle_for_service.clone());
-                        async move {
-                            if is_aptos {
-                                Ok(aptos_for_request.handle_request(req, aptos_body_limit).await)
-                            } else {
-                                svc.call(req).await
+                let svc = security
+                    .clone()
+                    .for_remote_addr(remote_addr)
+                    .layer(tower::service_fn(
+                        move |req: HttpRequest<hyper::body::Incoming>| {
+                            let is_aptos =
+                                serve_aptos_on_primary && aptos::owns_path(req.uri().path());
+                            let aptos_for_request = aptos_for_service.clone();
+                            let mut svc = svc_builder_for_service.clone().build(
+                                methods_for_service.clone(),
+                                stop_handle_for_service.clone(),
+                            );
+                            async move {
+                                if is_aptos {
+                                    Ok(aptos_for_request
+                                        .handle_request(req, aptos_body_limit)
+                                        .await)
+                                } else {
+                                    svc.call(req).await
+                                }
                             }
-                        }
-                    },
-                ));
+                        },
+                    ));
 
                 let shutdown = stop_handle.clone().shutdown();
                 match tls.clone() {
@@ -821,10 +876,11 @@ impl RpcServer {
                             remote_addr,
                             svc,
                             shutdown,
+                            permit,
                         ));
                     }
                     None => {
-                        tokio::spawn(serve_with_graceful_shutdown(socket, svc, shutdown));
+                        tokio::spawn(serve_plain_connection(socket, svc, shutdown, permit));
                     }
                 }
             }
@@ -837,9 +893,9 @@ impl RpcServer {
             SolanaListener {
                 addr: solana_addr,
                 methods,
-                security: self.security.clone(),
-                metrics: self.metrics.clone(),
-                tls: self.tls.clone(),
+                security: dedicated_solana_security,
+                metrics: dedicated_solana_metrics,
+                tls: dedicated_solana_tls,
             }
             .start()
             .await?;
@@ -907,8 +963,8 @@ impl RpcServer {
         })
     }
 
- /// Parses a 32-byte hex external-domain key. One helper, because five
- /// endpoints read the same parameter and five inline copies would drift.
+    /// Parses a 32-byte hex external-domain key. One helper, because five
+    /// endpoints read the same parameter and five inline copies would drift.
     fn parse_external_domain_key(
         domain_key_hex: &str,
     ) -> Result<crate::cross_domain::external::DomainKey, ErrorObjectOwned> {
@@ -922,9 +978,9 @@ impl RpcServer {
         Ok(crate::cross_domain::external::DomainKey(key_bytes))
     }
 
- /// The answer of a method whose state change moved to a transaction
- /// door. The method stays declared so a client
- /// gets the name of the door instead of "method not found".
+    /// The answer of a method whose state change moved to a transaction
+    /// door. The method stays declared so a client
+    /// gets the name of the door instead of "method not found".
     fn door_refusal(message: &'static str) -> ErrorObjectOwned {
         ErrorObjectOwned::owned(-32602, message, None::<()>)
     }
@@ -940,8 +996,8 @@ impl RpcServer {
     }
 
     fn block_to_json(b: Block) -> serde_json::Value {
- // a block whose witnesses were pruned says so, so a client
- // does not read an empty signature as an unsigned transaction.
+        // a block whose witnesses were pruned says so, so a client
+        // does not read an empty signature as an unsigned transaction.
         let witness_pruned = b.witness_is_stripped();
         serde_json::json!({
             "number": Self::to_hex(b.index),
@@ -978,39 +1034,39 @@ impl RpcServer {
 
     fn global_header_to_json(h: crate::settlement::GlobalBlockHeader) -> serde_json::Value {
         serde_json::json!({
-            "version": Self::to_hex(u64::from(h.version)),
-            "globalHeight": Self::to_hex(h.global_height),
-            "hash": Self::bytes32_to_0x(h.calculate_hash_bytes()),
-            "previousGlobalHash": Self::bytes32_to_0x(h.previous_global_hash),
-            "chainId": Self::to_hex(h.chain_id),
-            "timestamp": Self::to_hex(h.timestamp_ms as u64),
-            "domainRegistryRoot": Self::bytes32_to_0x(h.domain_registry_root),
-            "domainCommitmentRoot": Self::bytes32_to_0x(h.domain_commitment_root),
-            "messageRoot": Self::bytes32_to_0x(h.message_root),
-            "bridgeStateRoot": Self::bytes32_to_0x(h.bridge_state_root),
-            "replayNonceRoot": Self::bytes32_to_0x(h.replay_nonce_root),
-            "proposer": h.proposer.map(|p| p.to_string()),
-            "settlementFinalityRoot": Self::bytes32_to_0x(h.settlement_finality_root),
- // B.U.D.: storage_root anchoring - null when no
- // Storage proofs in this block, 0x-prefixed hex when present.
-            "storageRoot": h.storage_root.map(Self::bytes32_to_0x),
- // The two roots the fold gained after this list was written.
- // A view that hides a field the consensus hash commits is a
- // view callers reason on with half the truth; the header is
- // the source and this function enumerates it. `aiRoot` was
- // missing since the field itself landed - measured, not
- // remembered - and `identityRoot` is not allowed to inherit
- // that drift.
-            "aiRoot": h.ai_root.map(Self::bytes32_to_0x),
-            "identityRoot": h.identity_root.map(Self::bytes32_to_0x),
-            "checkpointHeight": Self::to_hex(h.checkpoint_height),
-            "externalIntakeRoot": h.external_intake_root.map(Self::bytes32_to_0x),
-            "graftRoot": h.graft_root.map(Self::bytes32_to_0x),
-            "delegationRoot": h.delegation_root.map(Self::bytes32_to_0x),
-        })
+                   "version": Self::to_hex(u64::from(h.version)),
+                   "globalHeight": Self::to_hex(h.global_height),
+                   "hash": Self::bytes32_to_0x(h.calculate_hash_bytes()),
+                   "previousGlobalHash": Self::bytes32_to_0x(h.previous_global_hash),
+                   "chainId": Self::to_hex(h.chain_id),
+                   "timestamp": Self::to_hex(h.timestamp_ms as u64),
+                   "domainRegistryRoot": Self::bytes32_to_0x(h.domain_registry_root),
+                   "domainCommitmentRoot": Self::bytes32_to_0x(h.domain_commitment_root),
+                   "messageRoot": Self::bytes32_to_0x(h.message_root),
+                   "bridgeStateRoot": Self::bytes32_to_0x(h.bridge_state_root),
+                   "replayNonceRoot": Self::bytes32_to_0x(h.replay_nonce_root),
+                   "proposer": h.proposer.map(|p| p.to_string()),
+                   "settlementFinalityRoot": Self::bytes32_to_0x(h.settlement_finality_root),
+        // B.U.D.: storage_root anchoring - null when no
+        // Storage proofs in this block, 0x-prefixed hex when present.
+                   "storageRoot": h.storage_root.map(Self::bytes32_to_0x),
+        // The two roots the fold gained after this list was written.
+        // A view that hides a field the consensus hash commits is a
+        // view callers reason on with half the truth; the header is
+        // the source and this function enumerates it. `aiRoot` was
+        // missing since the field itself landed - measured, not
+        // remembered - and `identityRoot` is not allowed to inherit
+        // that drift.
+                   "aiRoot": h.ai_root.map(Self::bytes32_to_0x),
+                   "identityRoot": h.identity_root.map(Self::bytes32_to_0x),
+                   "checkpointHeight": Self::to_hex(h.checkpoint_height),
+                   "externalIntakeRoot": h.external_intake_root.map(Self::bytes32_to_0x),
+                   "graftRoot": h.graft_root.map(Self::bytes32_to_0x),
+                   "delegationRoot": h.delegation_root.map(Self::bytes32_to_0x),
+               })
     }
 
- /// The value of one named root of a header, as the JSON view names it.
+    /// The value of one named root of a header, as the JSON view names it.
     fn global_header_root(
         h: &crate::settlement::GlobalBlockHeader,
         name: &str,
@@ -1055,23 +1111,23 @@ impl RpcServer {
         bundle: &crate::persistence::state_trie::AccountProofBundle,
     ) -> serde_json::Value {
         serde_json::json!({
- // Named `proofRoot`, not `stateRoot`: this commits to the same
- // accounts as the consensus root but under a different structure,
- // and a client that conflates them will verify against the wrong
- // value.
-            "proofRoot": Self::bytes32_to_0x(bundle.root),
-            "present": bundle.present,
-            "balance": Self::to_hex(bundle.balance),
-            "nonce": Self::to_hex(bundle.nonce),
-            "leafHash": Self::bytes32_to_0x(bundle.proof.leaf_hash),
-            "siblings": bundle
-                .proof
-                .siblings
-                .iter()
-                .map(|s| Self::bytes32_to_0x(*s))
-                .collect::<Vec<_>>(),
-            "directions": bundle.proof.directions.clone(),
-        })
+        // Named `proofRoot`, not `stateRoot`: this commits to the same
+        // accounts as the consensus root but under a different structure,
+        // and a client that conflates them will verify against the wrong
+        // value.
+                   "proofRoot": Self::bytes32_to_0x(bundle.root),
+                   "present": bundle.present,
+                   "balance": Self::to_hex(bundle.balance),
+                   "nonce": Self::to_hex(bundle.nonce),
+                   "leafHash": Self::bytes32_to_0x(bundle.proof.leaf_hash),
+                   "siblings": bundle
+                       .proof
+                       .siblings
+                       .iter()
+                       .map(|s| Self::bytes32_to_0x(*s))
+                       .collect::<Vec<_>>(),
+                   "directions": bundle.proof.directions.clone(),
+               })
     }
 
     fn consensus_domain_to_json(d: crate::domain::ConsensusDomain) -> serde_json::Value {
@@ -1103,10 +1159,10 @@ fn validate_rpc_security_config(
         )
         .into());
     }
- // Authentication decides *who* may call; the transport limits decide how
- // Much an accepted caller may cost. A listener that starts without both is
- // Reachable by an authorised client and still trivially exhaustible, so the
- // Absent limit is refused here rather than deferred to the transport crate.
+    // Authentication decides *who* may call; the transport limits decide how
+    // Much an accepted caller may cost. A listener that starts without both is
+    // Reachable by an authorised client and still trivially exhaustible, so the
+    // Absent limit is refused here rather than deferred to the transport crate.
     let body_limit = security.max_request_body_size.ok_or_else(|| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
@@ -1171,16 +1227,11 @@ fn validate_operator_bind_address(
 #[doc(hidden)]
 pub fn constant_time_eq_str(a: &str, b: &str) -> bool {
     use subtle::ConstantTimeEq;
- // Walk the expected value `b` in full on every call, fold the length
- // difference into the accumulator, and clamp the candidate index into
- // range instead of branching on a length mismatch: the work performed
- // then depends only on `b.len()`, never on whether the lengths match or
- // where the first differing byte sits. A short candidate re-reads its
- // last byte and an empty one reads `b` itself; the length fold still
- // refuses both. The earlier shape dummy-compared `b` against itself on
- // the mismatch path, and same-pointer loads do not cost what
- // cross-buffer loads cost - a small but systematic gap the timing_safe
- // regression bench measured at several nanoseconds.
+    // Walk the expected value `b` in full on every call, fold the length
+    // difference into the accumulator, and clamp the candidate index into
+    // range via bitwise masking instead of `core::cmp::min`: `min` lowered to
+    // a branch/cmov that mispredicted on the tail byte of a one-byte-short
+    // candidate (`len - 1`), leaking ~1.5 ns in dudect.
     let a_b = a.as_bytes();
     let b_b = b.as_bytes();
     let mut acc: u8 = 0;
@@ -1188,10 +1239,12 @@ pub fn constant_time_eq_str(a: &str, b: &str) -> bool {
         acc |= byte;
     }
     let src: &[u8] = if a_b.is_empty() { b_b } else { a_b };
+    let last = src.len().saturating_sub(1);
     for (i, &expected) in b_b.iter().enumerate() {
- // `src` is empty only when `b` is empty too, in which case this
- // loop body never runs and the length fold alone decides.
-        let provided = src[core::cmp::min(i, src.len() - 1)];
+        let in_bounds = usize::from(u8::from(std::hint::black_box(i < last)));
+        let mask = usize::MAX.wrapping_mul(in_bounds);
+        let idx = last ^ (mask & (last ^ i));
+        let provided = src.get(idx).copied().unwrap_or(0);
         acc |= provided ^ expected;
         acc = std::hint::black_box(acc);
     }
@@ -1207,7 +1260,7 @@ fn is_authorized<B>(config: &RpcSecurityConfig, req: &HttpRequest<B>) -> bool {
         return false;
     };
 
- // Constant-time compare of provided secret material.
+    // Constant-time compare of provided secret material.
     let api_ok = req
         .headers()
         .get("x-api-key")
@@ -1244,9 +1297,9 @@ fn extract_client_ip<B>(config: &RpcSecurityConfig, req: &HttpRequest<B>) -> Opt
     let direct_ip = extract_direct_client_ip(req);
 
     if !config.trusted_proxies.is_empty() && request_came_from_trusted_proxy(config, req) {
- // All header lines form one chain in wire order. Only explicitly
- // configured proxy addresses may be skipped; a wildcard trusts the
- // socket peer but must not make every forwarded hop trusted.
+        // All header lines form one chain in wire order. Only explicitly
+        // configured proxy addresses may be skipped; a wildcard trusts the
+        // socket peer but must not make every forwarded hop trusted.
         if req.headers().contains_key("x-forwarded-for") {
             let values = req.headers().get_all("x-forwarded-for");
             let mut lines: Vec<_> = values.iter().collect();
@@ -1258,14 +1311,16 @@ fn extract_client_ip<B>(config: &RpcSecurityConfig, req: &HttpRequest<B>) -> Opt
                     .chain(prefix.into_iter().flat_map(|prefix| prefix.rsplit(',')))
                 {
                     let ip = entry.trim().parse::<IpAddr>().ok()?;
-                    if !config.trusted_proxies.iter().any(|proxy| {
-                        proxy.parse::<IpAddr>().is_ok_and(|trusted| trusted == ip)
-                    }) {
+                    if !config
+                        .trusted_proxies
+                        .iter()
+                        .any(|proxy| proxy.parse::<IpAddr>().is_ok_and(|trusted| trusted == ip))
+                    {
                         return Some(ip);
                     }
                 }
             }
- // A malformed or entirely trusted chain cannot identify a client.
+            // A malformed or entirely trusted chain cannot identify a client.
             return None;
         }
 
@@ -1356,11 +1411,11 @@ fn is_ip_allowed<B>(config: &RpcSecurityConfig, req: &HttpRequest<B>) -> bool {
 /// cookie, so a `*` configuration cannot turn into session theft.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum CorsOutcome {
- /// CORS is off, or the request is not from a browser; no header is added.
+    /// CORS is off, or the request is not from a browser; no header is added.
     NotApplicable,
- /// The origin is allowed; the headers go on the response.
+    /// The origin is allowed; the headers go on the response.
     Allow(String),
- /// The origin is not allowed; the request is rejected.
+    /// The origin is not allowed; the request is rejected.
     Deny,
 }
 
@@ -1384,11 +1439,11 @@ pub(crate) fn cors_outcome<B>(config: &RpcSecurityConfig, req: &HttpRequest<B>) 
     else {
         return CorsOutcome::NotApplicable;
     };
- // An origin listed by name is echoed: that is the one value the
- // operator approved. A `*` entry answers with the literal `*` and never
- // echoes the caller's header back: a reflected wildcard turns
- // "any origin" into "this exact origin", which caches and credential
- // rules treat as a named grant.
+    // An origin listed by name is echoed: that is the one value the
+    // operator approved. A `*` entry answers with the literal `*` and never
+    // echoes the caller's header back: a reflected wildcard turns
+    // "any origin" into "this exact origin", which caches and credential
+    // rules treat as a named grant.
     if config.cors_origins.iter().any(|allowed| allowed == origin) {
         CorsOutcome::Allow(origin.to_string())
     } else if config.cors_origins.iter().any(|allowed| allowed == "*") {
@@ -1519,8 +1574,8 @@ fn is_per_ip_rate_limited(
         Err(_) => return false,
     };
 
- // Opportunistically evict expired clients before admitting a new address.
- // The retain scan happens only at the ceiling, not on every request.
+    // Opportunistically evict expired clients before admitting a new address.
+    // The retain scan happens only at the ceiling, not on every request.
     if !rates.contains_key(&ip) && rates.len() >= MAX_TRACKED_RPC_CLIENTS {
         rates.retain(|_, window| {
             while window.front().is_some_and(|instant| *instant < cutoff) {
@@ -1529,16 +1584,16 @@ fn is_per_ip_rate_limited(
             !window.is_empty()
         });
         if rates.len() >= MAX_TRACKED_RPC_CLIENTS {
- // If every tracked client is still active, evict the least-recently
- // Seen client instead of globally rejecting all new IPs. This keeps
- // The map bounded without letting a rotational-IP attacker pin the
- // Table forever and deny unrelated clients.
- //
- // The evicted client is the one with the fewest requests in its
- // window (oldest first among equals), never a busy one
- // because evicting a client at its quota resets its window,
- // so an attacker rotating addresses could buy a fresh quota for
- // its own saturated address by filling the table.
+            // If every tracked client is still active, evict the least-recently
+            // Seen client instead of globally rejecting all new IPs. This keeps
+            // The map bounded without letting a rotational-IP attacker pin the
+            // Table forever and deny unrelated clients.
+            //
+            // The evicted client is the one with the fewest requests in its
+            // window (oldest first among equals), never a busy one
+            // because evicting a client at its quota resets its window,
+            // so an attacker rotating addresses could buy a fresh quota for
+            // its own saturated address by filling the table.
             if let Some(quietest) = rates
                 .iter()
                 .filter_map(|(client, window)| {
@@ -1571,9 +1626,21 @@ fn text_response(status: StatusCode, body: &'static str) -> HttpResponse {
         .status(status)
         .header("content-type", HeaderValue::from_static("text/plain"))
         .body(HttpBody::from(body))
- // Every argument is a literal, so the builder cannot reject this.
- // An RPC error response must never be what kills a node.
+        // Every argument is a literal, so the builder cannot reject this.
+        // An RPC error response must never be what kills a node.
         .unwrap_or_else(|_| HttpResponse::new(HttpBody::from(body)))
+}
+
+fn bud3_actor_unavailable() -> ErrorObjectOwned {
+    ErrorObjectOwned::owned(-32603, "B.U.D. 3.0 consensus read unavailable", None::<()>)
+}
+
+fn validator_directory_unavailable() -> ErrorObjectOwned {
+    ErrorObjectOwned::owned(
+        -32603,
+        "validator directory unavailable or not initialized for existing validators",
+        None::<()>,
+    )
 }
 
 fn parse_hex32_field(hex_str: &str, field_name: &str) -> Result<[u8; 32], ErrorObjectOwned> {
@@ -1816,92 +1883,6 @@ fn fire_three_event(sink: &mut dyn ThreeEventHook, event: ThreeHookEvent) {
     emit_hook(sink, event);
 }
 
-fn qr_feed_json(feed: &crate::storage::emit::FeedPreview) -> serde_json::Value {
-    serde_json::json!({
-        "contentId": format!("0x{}", hex::encode(feed.content_id.as_bytes())),
-        "providerCommitment": format!("0x{}", hex::encode(feed.provider_commitment)),
-        "packedLen": feed.packed_len,
-        "packedIsZlib": feed.packed_is_zlib,
-        "transformShrank": feed.transform_shrank,
-        "progressivePrefixBlocks": feed.progressive_prefix_blocks,
-        "k": feed.k,
-        "preflightK": feed.preflight_k,
-        "plannedDrops": feed.planned_drops,
-        "ceilingDrops": feed.ceiling_drops,
-        "dropBound": feed.drop_bound,
-        "repairPermillage": feed.repair_permillage,
-        "repairMargin": feed.repair_margin,
-        "frameCount": feed.frame_count,
-        "dropWireLen": feed.drop_wire_len,
-        "streamCommitment": format!("0x{}", hex::encode(feed.stream_commitment)),
-        "streamPrefix": feed.stream_prefix,
-        "feedId": format!("0x{}", hex::encode(feed.feed_id)),
-        "videoCommitment": format!("0x{}", hex::encode(feed.video_commitment)),
-        "recipeCommitment": format!("0x{}", hex::encode(feed.recipe_commitment)),
-        "burstLen": feed.burst_len,
-        "burstFold": format!("0x{}", hex::encode(feed.burst_fold)),
-        "framesAccepted": feed.frames_accepted,
-        "framesRejected": feed.frames_rejected,
-        "meterWeight": feed.meter_weight,
-        "rasterModules": feed.raster_modules,
-        "rasterSide": feed.raster_side,
-        "pngLen": feed.png_len,
-        "ecLevel": feed.ec_level,
-        "codecAllowed": feed.codec_allowed,
-        "videoBlobKind": format!("{:?}", feed.video_blob_kind),
-        "seedIsPublic": feed.seed_is_public,
-        "regeneratedLen": feed.regenerated_len,
-        "sealedRecipe": format!("0x{}", hex::encode(feed.sealed_recipe)),
-        "publiclyReemitable": feed.publicly_reemitable,
-        "decodedBodyLen": feed.decoded_body_len,
-        "videoBodyLen": feed.video_body_len,
-        "recipeClass": feed.recipe_class,
-        "a4Agreement": feed.a4_agreement,
-        "nftMeta": format!("0x{}", hex::encode(feed.nft_meta)),
-        "visibility": feed.visibility.clone(),
-        "deleteRotatesKey": feed.rotate_key_on_delete,
-    })
-}
-
-/// A refused emit is the caller's arithmetic, not the node's, unless a stage
-/// below this one is what said no: an out-of-bounds request is a bad param and
-/// everything else is a server-side refusal the caller cannot fix by resending
-/// the same body.
-fn emit_reject(e: crate::storage::emit::EmitError) -> ErrorObjectOwned {
-    let code = match &e {
-        crate::storage::emit::EmitError::ZeroBlockLen
-        | crate::storage::emit::EmitError::TooLarge { .. }
-        | crate::storage::emit::EmitError::BurstTooWide { .. }
-        | crate::storage::emit::EmitError::FrameOutOfRange { .. }
-        | crate::storage::emit::EmitError::Edition(_)
-        | crate::storage::emit::EmitError::UnsealedGated => -32602,
-        _ => -32000,
-    };
-    ErrorObjectOwned::owned(code, format!("qr feed: {e}"), None::<()>)
-}
-
-/// Parse the optional `seal_seed` argument (32 bytes, hex, optional `0x`).
-/// `None` leaves the feed unsealed; a present-but-malformed seed is a caller
-/// fault, not a silent fallback to clear frames.
-fn parse_seal_seed(seed_hex: Option<String>) -> Result<Option<[u8; 32]>, ErrorObjectOwned> {
-    let Some(seed_hex) = seed_hex else {
-        return Ok(None);
-    };
-    let hex = seed_hex.strip_prefix("0x").unwrap_or(seed_hex.as_str());
-    let bytes = hex::decode(hex).map_err(|e| {
-        ErrorObjectOwned::owned(-32602, format!("seal_seed decode failed: {e}"), None::<()>)
-    })?;
-    let len = bytes.len();
-    let seed: [u8; 32] = bytes.try_into().map_err(|_| {
-        ErrorObjectOwned::owned(
-            -32602,
-            format!("seal_seed must be 32 bytes, got {len}"),
-            None::<()>,
-        )
-    })?;
-    Ok(Some(seed))
-}
-
 #[jsonrpsee::core::async_trait]
 impl BudlumApiServer for RpcServer {
     async fn chain_id(&self) -> Result<String, ErrorObjectOwned> {
@@ -1958,16 +1939,16 @@ impl BudlumApiServer for RpcServer {
         let addr = Address::from_hex(clean_addr).map_err(|e| {
             ErrorObjectOwned::owned(-32602, format!("Invalid address: {e}"), None::<()>)
         })?;
- // `None` means the node could not answer at all (the chain actor is
- // gone). Reported as an error rather than an empty result: a caller
- // must never be able to read "we did not answer" as "the account is
- // absent", because absence here is a positive claim carrying a proof.
+        // `None` means the node could not answer at all (the chain actor is
+        // gone). Reported as an error rather than an empty result: a caller
+        // must never be able to read "we did not answer" as "the account is
+        // absent", because absence here is a positive claim carrying a proof.
         let bundle = self.chain.get_account_proof(&addr).await.ok_or_else(|| {
             ErrorObjectOwned::owned(-32603, "Account proof unavailable", None::<()>)
         })?;
- // A bundle that does not verify against its own root is a node bug,
- // not a client error, and must never reach the wire: a caller cannot
- // tell a malformed proof from a forged one.
+        // A bundle that does not verify against its own root is a node bug,
+        // not a client error, and must never reach the wire: a caller cannot
+        // tell a malformed proof from a forged one.
         if !bundle.verify_self_consistent() {
             return Err(ErrorObjectOwned::owned(
                 -32603,
@@ -2004,14 +1985,14 @@ impl BudlumApiServer for RpcServer {
         Ok(Self::to_0x_hash(tx_hash))
     }
 
- /// Admit a bundle, all or none.
- ///
- /// The witness is checked against the bundle root first, then every member
- /// for its own signature and the transport bound: a bundle that fails any
- /// of those doors touches nothing. Only then are the members handed to the chain, one at a time -
- /// the pool has no batch door - and a member the pool refuses takes the
- /// ones already admitted back out, so a client never ends up with half a
- /// bundle in the mempool and no witness to explain it.
+    /// Admit a bundle, all or none.
+    ///
+    /// The witness is checked against the bundle root first, then every member
+    /// for its own signature and the transport bound: a bundle that fails any
+    /// of those doors touches nothing. Only then are the members handed to the chain, one at a time -
+    /// the pool has no batch door - and a member the pool refuses takes the
+    /// ones already admitted back out, so a client never ends up with half a
+    /// bundle in the mempool and no witness to explain it.
     async fn send_tx_bundle(
         &self,
         bundle: crate::core::tx_bundle::TxBundle,
@@ -2035,16 +2016,16 @@ impl BudlumApiServer for RpcServer {
             .iter()
             .map(|member| Self::to_0x_hash(member.hash.clone()))
             .collect();
- // One call, one turn of the chain actor. The pool admits the members as
- // a unit and its own rollback puts back everything the earlier members
- // removed - pool evictions and replacements included. Removing the
- // admitted members here, as this used to, left those deletions behind:
- // a bundle refused at its last member permanently deleted the cheaper
- // transactions its earlier members evicted, at no cost to the sender.
+        // One call, one turn of the chain actor. The pool admits the members as
+        // a unit and its own rollback puts back everything the earlier members
+        // removed - pool evictions and replacements included. Removing the
+        // admitted members here, as this used to, left those deletions behind:
+        // a bundle refused at its last member permanently deleted the cheaper
+        // transactions its earlier members evicted, at no cost to the sender.
         if let Err(refusal) = self.chain.add_transaction_bundle(members.clone()).await {
- // The member index goes out as structured `data` as well as in the
- // message: a client that machine-checks its own bundle needs to
- // know which member to fix, not to parse English.
+            // The member index goes out as structured `data` as well as in the
+            // message: a client that machine-checks its own bundle needs to
+            // know which member to fix, not to parse English.
             return Err(ErrorObjectOwned::owned(
                 -32602,
                 format!("Bundle refused: {refusal}"),
@@ -2096,29 +2077,29 @@ impl BudlumApiServer for RpcServer {
                 None::<()>,
             ));
         }
- // The chain charges a flat fee: `AccountState::validate_transaction`
- // Rejects `fee < base_fee`, rejects a `max_fee` that diverges from
- // `fee`, and rejects any `priority_fee`. `total_cost` is
- // `amount + fee`. There is no gas metering - the `GasSchedule`
- // Per-opcode numbers are not consulted on any settlement path.
- //
- // The previous answer was the literal `21000` for every transaction
- // Type, which is Ethereum's transfer intrinsic and has nothing to do
- // With what this chain charges. A wallet sizing a transaction from it
- // Would price a stake, a vote and a bridge relay identically, and all
- // Three wrong: the number the chain actually enforces is `base_fee`,
- // Which is 10 on mainnet, 1 on testnet and devnet, and moves with
- // `adjust_base_fee` every block.
- //
- // So the estimate is the fee floor the caller's transaction must
- // Clear. If the caller already set a fee at or above the floor, that
- // Fee is what will be charged and it is returned unchanged.
- //
- // The floor is `AccountState::required_fee`, the same function the
- // admission rule uses: base fee plus the proportional cut
- // on a transfer, the escalating fee on a governance proposal. A
- // floor of `base_fee` alone under-quoted both, and the wallet's
- // transaction was then refused for a fee the RPC had just suggested.
+        // The chain charges a flat fee: `AccountState::validate_transaction`
+        // Rejects `fee < base_fee`, rejects a `max_fee` that diverges from
+        // `fee`, and rejects any `priority_fee`. `total_cost` is
+        // `amount + fee`. There is no gas metering - the `GasSchedule`
+        // Per-opcode numbers are not consulted on any settlement path.
+        //
+        // The previous answer was the literal `21000` for every transaction
+        // Type, which is Ethereum's transfer intrinsic and has nothing to do
+        // With what this chain charges. A wallet sizing a transaction from it
+        // Would price a stake, a vote and a bridge relay identically, and all
+        // Three wrong: the number the chain actually enforces is `base_fee`,
+        // Which is 10 on mainnet, 1 on testnet and devnet, and moves with
+        // `adjust_base_fee` every block.
+        //
+        // So the estimate is the fee floor the caller's transaction must
+        // Clear. If the caller already set a fee at or above the floor, that
+        // Fee is what will be charged and it is returned unchanged.
+        //
+        // The floor is `AccountState::required_fee`, the same function the
+        // admission rule uses: base fee plus the proportional cut
+        // on a transfer, the escalating fee on a governance proposal. A
+        // floor of `base_fee` alone under-quoted both, and the wallet's
+        // transaction was then refused for a fee the RPC had just suggested.
         let required = self
             .chain
             .get_required_fee(tx.clone())
@@ -2187,17 +2168,17 @@ impl BudlumApiServer for RpcServer {
             )
         })?;
         Ok(serde_json::json!({
-            "root": root,
-            "value": value.map(Self::bytes32_to_0x),
-            "header": Self::global_header_to_json(proof.header),
-            "blockHeight": Self::to_hex(proof.block_height),
-            "blockHash": Self::to_0x_hash(proof.block_hash),
-            "stateRoot": Self::to_0x_hash(proof.state_root),
- // The state root reopens with this body and the header hash
- // (`AccountState::root_from_opening`); null when this node did
- // not record it.
-            "stateRootBody": proof.state_root_body.map(Self::bytes32_to_0x),
-        }))
+                   "root": root,
+                   "value": value.map(Self::bytes32_to_0x),
+                   "header": Self::global_header_to_json(proof.header),
+                   "blockHeight": Self::to_hex(proof.block_height),
+                   "blockHash": Self::to_0x_hash(proof.block_hash),
+                   "stateRoot": Self::to_0x_hash(proof.state_root),
+        // The state root reopens with this body and the header hash
+        // (`AccountState::root_from_opening`); null when this node did
+        // not record it.
+                   "stateRootBody": proof.state_root_body.map(Self::bytes32_to_0x),
+               }))
     }
 
     async fn get_domain_commitments(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
@@ -2292,8 +2273,8 @@ impl BudlumApiServer for RpcServer {
         &self,
         domain: crate::domain::ConsensusDomain,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
- // domain registration is a signed `Settlement` transaction
- // (`SettlementTx::RegisterDomain`) from the domain's operator.
+        // domain registration is a signed `Settlement` transaction
+        // (`SettlementTx::RegisterDomain`) from the domain's operator.
         self.require_operator("bud_registerConsensusDomain")?;
         let _ = domain;
         Err(Self::door_refusal(
@@ -2307,8 +2288,8 @@ impl BudlumApiServer for RpcServer {
         &self,
         registration: serde_json::Value,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
- // /: registration is a signed `ExternalDomain` transaction
- // (`ExternalDomainTx::Register`) from the poster, applied in block.
+        // /: registration is a signed `ExternalDomain` transaction
+        // (`ExternalDomainTx::Register`) from the poster, applied in block.
         self.require_operator("bud_registerExternalDomain")?;
         let _ = registration;
         Err(Self::door_refusal(
@@ -2322,8 +2303,8 @@ impl BudlumApiServer for RpcServer {
         &self,
         evidence: serde_json::Value,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
- // evidence is a signed `ExternalDomain` transaction from the
- // submitter it names, applied in block.
+        // evidence is a signed `ExternalDomain` transaction from the
+        // submitter it names, applied in block.
         self.require_operator("bud_submitExternalEvidence")?;
         let _ = evidence;
         Err(Self::door_refusal(
@@ -2428,10 +2409,10 @@ impl BudlumApiServer for RpcServer {
         &self,
         request: serde_json::Value,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
- // Gated: the registry's slash takes the challenger's word that an
- // accepted attestation was wrong, and no contradiction proof format
- // exists yet. A door that slashes on a claim would let anyone take
- // any carrier's bond, so there is no transaction for it either.
+        // Gated: the registry's slash takes the challenger's word that an
+        // accepted attestation was wrong, and no contradiction proof format
+        // exists yet. A door that slashes on a claim would let anyone take
+        // any carrier's bond, so there is no transaction for it either.
         self.require_operator("bud_slashExternalProver")?;
         let _ = request;
         Err(Self::door_refusal(
@@ -2534,11 +2515,11 @@ impl BudlumApiServer for RpcServer {
         };
         #[derive(serde::Deserialize)]
         struct Params {
- /// Full BudZKVM finality claim material; when present, the
- /// payload is its encoding and the version is the adapter's.
+            /// Full BudZKVM finality claim material; when present, the
+            /// payload is its encoding and the version is the adapter's.
             zk_evidence: Option<ZkFinalityEvidence>,
- /// Raw payload hex for adapters whose payloads are built
- /// elsewhere (e.g. a sync-committee update).
+            /// Raw payload hex for adapters whose payloads are built
+            /// elsewhere (e.g. a sync-committee update).
             payload_hex: Option<String>,
             adapter_name: String,
             network: String,
@@ -2617,8 +2598,8 @@ impl BudlumApiServer for RpcServer {
             declared_root,
             submitter,
         };
- // The consensus-domain carrier: the same encoding the finality
- // dispatch decodes when an external domain backs a local one.
+        // The consensus-domain carrier: the same encoding the finality
+        // dispatch decodes when an external domain backs a local one.
         let carrier = encode_external_evidence(&evidence).map_err(|e| {
             ErrorObjectOwned::owned(-32602, format!("Carrier encoding refused: {e}"), None::<()>)
         })?;
@@ -2629,8 +2610,8 @@ impl BudlumApiServer for RpcServer {
                 None::<()>,
             )
         })?;
- // The version policy a registrar would declare for a fresh domain:
- // one window, this version, no sunset.
+        // The version policy a registrar would declare for a fresh domain:
+        // one window, this version, no sunset.
         let starting_versions = VersionPolicy::single(adapter, evidence_version, 0);
         let to_val = |what: &str, v: serde_json::Result<serde_json::Value>| {
             v.map_err(|e| {
@@ -2718,8 +2699,8 @@ impl BudlumApiServer for RpcServer {
             })
             .collect::<Result<_, ErrorObjectOwned>>()?;
         let latest = registration.latest_attestation();
- // "No backing yet" is a visible state, not an absent field: shown
- // with the same value an adapter reports before its first cycle.
+        // "No backing yet" is a visible state, not an absent field: shown
+        // with the same value an adapter reports before its first cycle.
         let last_backing = registration
             .record
             .last_backing
@@ -2734,40 +2715,40 @@ impl BudlumApiServer for RpcServer {
             })
         };
         Ok(serde_json::json!({
-            "summary": profile.summary_line(),
-            "profile": to_val("Profile", serde_json::to_value(&profile))?,
-            "registryClockHeight": clock_height,
-            "stalenessHeights": profile.staleness(clock_height),
-            "refusalRatio": { "refused": refused, "attempts": attempts },
-            "economics": {
-                "routingCeilingAtoms": ceiling.to_string(),
-                "requiredBondAtoms": economics.required_bond_atoms().to_string(),
-                "bondRatio": format!("{}/{}", BOND_RATIO_NUM, BOND_RATIO_DEN),
-                "bondUnit": BOND_UNIT,
-                "fee": {
-                    "baseAtoms": economics.fee.base_atoms.to_string(),
-                    "valueBps": economics.fee.value_bps,
-                    "bpsDenominator": BPS_DEN.to_string(),
-                    "feeAtCeilingAtoms": economics.fee.for_value(ceiling).to_string(),
-                },
-                "challenge": to_val("Challenge", serde_json::to_value(economics.challenge))?,
-                "unbondingHeights": economics.unbonding_heights,
- // The registration-time inequality, re-evaluated live: lying
- // at the ceiling must cost more than honest fees earn.
-                "honestyIsCheaperAtCeiling": honesty_is_cheaper(&economics, ceiling),
-            },
-            "versionPolicy": {
-                "windows": windows,
-                "maxGraceHeights": versions.max_grace_heights,
-                "acceptedList": versions.accepted_list(),
-                "currentVersionAtClock": versions.current_version_at(clock_height),
-            },
-            "provers": provers,
-            "latestAttestation": to_val("Attestation", serde_json::to_value(latest))?,
-            "lastBacking": to_val("Backing", serde_json::to_value(last_backing))?,
-            "attestationsHeld": registration.attestations.len(),
-            "admissionDigest": format!("0x{}", hex::encode(registration.admission_digest)),
-        }))
+                   "summary": profile.summary_line(),
+                   "profile": to_val("Profile", serde_json::to_value(&profile))?,
+                   "registryClockHeight": clock_height,
+                   "stalenessHeights": profile.staleness(clock_height),
+                   "refusalRatio": { "refused": refused, "attempts": attempts },
+                   "economics": {
+                       "routingCeilingAtoms": ceiling.to_string(),
+                       "requiredBondAtoms": economics.required_bond_atoms().to_string(),
+                       "bondRatio": format!("{}/{}", BOND_RATIO_NUM, BOND_RATIO_DEN),
+                       "bondUnit": BOND_UNIT,
+                       "fee": {
+                           "baseAtoms": economics.fee.base_atoms.to_string(),
+                           "valueBps": economics.fee.value_bps,
+                           "bpsDenominator": BPS_DEN.to_string(),
+                           "feeAtCeilingAtoms": economics.fee.for_value(ceiling).to_string(),
+                       },
+                       "challenge": to_val("Challenge", serde_json::to_value(economics.challenge))?,
+                       "unbondingHeights": economics.unbonding_heights,
+        // The registration-time inequality, re-evaluated live: lying
+        // at the ceiling must cost more than honest fees earn.
+                       "honestyIsCheaperAtCeiling": honesty_is_cheaper(&economics, ceiling),
+                   },
+                   "versionPolicy": {
+                       "windows": windows,
+                       "maxGraceHeights": versions.max_grace_heights,
+                       "acceptedList": versions.accepted_list(),
+                       "currentVersionAtClock": versions.current_version_at(clock_height),
+                   },
+                   "provers": provers,
+                   "latestAttestation": to_val("Attestation", serde_json::to_value(latest))?,
+                   "lastBacking": to_val("Backing", serde_json::to_value(last_backing))?,
+                   "attestationsHeld": registration.attestations.len(),
+                   "admissionDigest": format!("0x{}", hex::encode(registration.admission_digest)),
+               }))
     }
 
     async fn replay_external_probes(
@@ -2784,9 +2765,9 @@ impl BudlumApiServer for RpcServer {
                 None::<()>,
             ));
         };
- // The same construction the intake uses: rebuild the adapter from
- // the stored spec, with the stored golden, and run the adapter's own
- // probes. Nothing here mutates the registry - this is the dry run.
+        // The same construction the intake uses: rebuild the adapter from
+        // the stored spec, with the stored golden, and run the adapter's own
+        // probes. Nothing here mutates the registry - this is the dry run.
         let bls = matches!(
             entry.spec,
             crate::cross_domain::external::AdapterSpec::EthereumSync { .. }
@@ -2798,9 +2779,9 @@ impl BudlumApiServer for RpcServer {
             .fault_probes()
             .iter()
             .map(|probe| {
- // The corrupted evidence itself, applied by the same patch
- // engine the harness uses: its digest lets an operator
- // replay the exact probe bytes against another node.
+                // The corrupted evidence itself, applied by the same patch
+                // engine the harness uses: its digest lets an operator
+                // replay the exact probe bytes against another node.
                 let corrupted_digest = apply_patch(&entry.golden, &probe.patch)
                     .ok()
                     .map(|corrupted| format!("0x{}", hex::encode(corrupted.digest())));
@@ -2856,8 +2837,8 @@ impl BudlumApiServer for RpcServer {
         let payload = hex::decode(clean).map_err(|e| {
             ErrorObjectOwned::owned(-32602, format!("Invalid payload hex: {e}"), None::<()>)
         })?;
- // The same parser the adapter runs - not a lookalike. A refusal here
- // is exactly the refusal a submission would get.
+        // The same parser the adapter runs - not a lookalike. A refusal here
+        // is exactly the refusal a submission would get.
         let update: SyncCommitteeUpdate = parse_update(&payload).map_err(|e| {
             ErrorObjectOwned::owned(-32602, format!("Update refused: {e}"), None::<()>)
         })?;
@@ -2865,48 +2846,48 @@ impl BudlumApiServer for RpcServer {
         let threshold = minimum_signers();
         let range = |r: &std::ops::Range<usize>| serde_json::json!([r.start, r.end]);
         Ok(serde_json::json!({
-            "finalizedRoot": format!("0x{}", hex::encode(update.finalized_root)),
-            "finalizedSlot": update.finalized_slot,
-            "finalizedEpoch": epoch_of_slot(update.finalized_slot),
-            "attestedSlot": update.attested_slot,
-            "attestedEpoch": epoch_of_slot(update.attested_slot),
-            "declaredPeriod": update.period,
-            "derivedPeriod": period_of_slot(update.attested_slot),
-            "nextCommitteeRoot": format!("0x{}", hex::encode(update.next_committee_root)),
-            "stateRoot": format!("0x{}", hex::encode(update.state_root)),
-            "participation": {
-                "signers": signers,
-                "committeeSize": SYNC_COMMITTEE_SIZE,
-                "minimumSigners": threshold,
-                "hasSupermajority": has_supermajority(signers),
-                "bitvectorBytes": BITVECTOR_BYTES,
- // The smallest passing bitvector, for integrators building
- // boundary tests against the same arithmetic.
-                "thresholdBitvectorHex": format!("0x{}", hex::encode(bits_for(threshold))),
-            },
-            "constants": {
-                "slotsPerEpoch": SLOTS_PER_EPOCH,
-                "epochsPerSyncCommitteePeriod": EPOCHS_PER_SYNC_COMMITTEE_PERIOD,
-                "zkProofSystem": format!(
-                    "{:?}",
-                    crate::cross_domain::external::ethereum::ZK_PROOF_SYSTEM
-                ),
-            },
- // The byte layout the parser applied, so an integrator can build
- // a payload from this response alone instead of reading source.
-            "layout": {
-                "totalBytes": layout::LEN,
-                "finalizedRoot": range(&layout::FINALIZED_ROOT),
-                "finalizedSlot": range(&layout::FINALIZED_SLOT),
-                "attestedSlot": range(&layout::ATTESTED_SLOT),
-                "period": range(&layout::PERIOD),
-                "nextCommitteeRoot": range(&layout::NEXT_COMMITTEE_ROOT),
-                "aggregatePubkey": range(&layout::AGGREGATE_PUBKEY),
-                "signature": range(&layout::SIGNATURE),
-                "participationBits": range(&layout::PARTICIPATION_BITS),
-                "stateRoot": range(&layout::STATE_ROOT),
-            },
-        }))
+                   "finalizedRoot": format!("0x{}", hex::encode(update.finalized_root)),
+                   "finalizedSlot": update.finalized_slot,
+                   "finalizedEpoch": epoch_of_slot(update.finalized_slot),
+                   "attestedSlot": update.attested_slot,
+                   "attestedEpoch": epoch_of_slot(update.attested_slot),
+                   "declaredPeriod": update.period,
+                   "derivedPeriod": period_of_slot(update.attested_slot),
+                   "nextCommitteeRoot": format!("0x{}", hex::encode(update.next_committee_root)),
+                   "stateRoot": format!("0x{}", hex::encode(update.state_root)),
+                   "participation": {
+                       "signers": signers,
+                       "committeeSize": SYNC_COMMITTEE_SIZE,
+                       "minimumSigners": threshold,
+                       "hasSupermajority": has_supermajority(signers),
+                       "bitvectorBytes": BITVECTOR_BYTES,
+        // The smallest passing bitvector, for integrators building
+        // boundary tests against the same arithmetic.
+                       "thresholdBitvectorHex": format!("0x{}", hex::encode(bits_for(threshold))),
+                   },
+                   "constants": {
+                       "slotsPerEpoch": SLOTS_PER_EPOCH,
+                       "epochsPerSyncCommitteePeriod": EPOCHS_PER_SYNC_COMMITTEE_PERIOD,
+                       "zkProofSystem": format!(
+                           "{:?}",
+                           crate::cross_domain::external::ethereum::ZK_PROOF_SYSTEM
+                       ),
+                   },
+        // The byte layout the parser applied, so an integrator can build
+        // a payload from this response alone instead of reading source.
+                   "layout": {
+                       "totalBytes": layout::LEN,
+                       "finalizedRoot": range(&layout::FINALIZED_ROOT),
+                       "finalizedSlot": range(&layout::FINALIZED_SLOT),
+                       "attestedSlot": range(&layout::ATTESTED_SLOT),
+                       "period": range(&layout::PERIOD),
+                       "nextCommitteeRoot": range(&layout::NEXT_COMMITTEE_ROOT),
+                       "aggregatePubkey": range(&layout::AGGREGATE_PUBKEY),
+                       "signature": range(&layout::SIGNATURE),
+                       "participationBits": range(&layout::PARTICIPATION_BITS),
+                       "stateRoot": range(&layout::STATE_ROOT),
+                   },
+               }))
     }
 
     async fn plan_evm_verification(
@@ -2925,10 +2906,10 @@ impl BudlumApiServer for RpcServer {
         };
         #[derive(serde::Deserialize)]
         struct Params {
- /// Raw probe results, converted by the planner itself so an
- /// address list cannot be mistaken for a capability list.
+            /// Raw probe results, converted by the planner itself so an
+            /// address list cannot be mistaken for a capability list.
             observations: Option<Vec<PrecompileObservation>>,
- /// Pre-derived capabilities, for callers that already probed.
+            /// Pre-derived capabilities, for callers that already probed.
             capabilities: Option<EvmPrecompiles>,
             proof: EvmHybridProof,
             schedule: Option<EvmGasSchedule>,
@@ -2938,9 +2919,9 @@ impl BudlumApiServer for RpcServer {
             ErrorObjectOwned::owned(-32602, format!("Invalid plan request: {e}"), None::<()>)
         })?;
         let schedule = params.schedule.unwrap_or_default();
- // The refusal is surfaced with its rule named, and the deploy-vs-fix
- // hint depends on which rule fired: a shape problem is the caller's
- // encoding, a capability problem is the target chain's reality.
+        // The refusal is surfaced with its rule named, and the deploy-vs-fix
+        // hint depends on which rule fired: a shape problem is the caller's
+        // encoding, a capability problem is the target chain's reality.
         let refusal_hint = |e: &EvmPlanError| {
             match e {
             EvmPlanError::WrongPointLength { .. }
@@ -2984,9 +2965,9 @@ impl BudlumApiServer for RpcServer {
                 None::<()>,
             )
         })?;
- // A human-readable reading of the mode, so a deployment report does
- // not require the enum's docs at hand. `FullCryptographic` is the
- // only immediate finality; every other mode waits out a window.
+        // A human-readable reading of the mode, so a deployment report does
+        // not require the enum's docs at hand. `FullCryptographic` is the
+        // only immediate finality; every other mode waits out a window.
         let mode_meaning = match plan.mode {
             EvmVerificationMode::FullCryptographic => "both halves verify now; immediate finality",
             EvmVerificationMode::ClassicalOnlyChallenge => {
@@ -3121,11 +3102,11 @@ impl BudlumApiServer for RpcServer {
         &self,
         payload: crate::domain::VerifiedDomainCommitment,
     ) -> Result<String, ErrorObjectOwned> {
- // a commitment is a signed `Settlement` transaction
- // (`SettlementTx::SubmitCommitment`) from a bonded RELAYER, applied in
- // block. It used to advance the domain registry and the external
- // roots on this node, then gossip the payload so every peer applied
- // it again whenever it arrived.
+        // a commitment is a signed `Settlement` transaction
+        // (`SettlementTx::SubmitCommitment`) from a bonded RELAYER, applied in
+        // block. It used to advance the domain registry and the external
+        // roots on this node, then gossip the payload so every peer applied
+        // it again whenever it arrived.
         self.require_operator("bud_submitVerifiedDomainCommitment")?;
         let _ = payload;
         Err(Self::door_refusal(
@@ -3140,12 +3121,12 @@ impl BudlumApiServer for RpcServer {
         &self,
         msg: crate::cross_domain::CrossDomainMessage,
     ) -> Result<String, ErrorObjectOwned> {
- // this method used to insert the message into the message
- // registry (folded into the state root) on the serving node alone,
- // from the public listener, and gossip it to peers that did the
- // same at whatever moment it reached them. The registration is a
- // transaction door now; the method stays so a client gets a pointer
- // instead of "method not found".
+        // this method used to insert the message into the message
+        // registry (folded into the state root) on the serving node alone,
+        // from the public listener, and gossip it to peers that did the
+        // same at whatever moment it reached them. The registration is a
+        // transaction door now; the method stays so a client gets a pointer
+        // instead of "method not found".
         let _ = msg;
         Err(ErrorObjectOwned::owned(
             -32602,
@@ -3293,8 +3274,8 @@ impl BudlumApiServer for RpcServer {
         asset_id: crate::cross_domain::AssetId,
         domain: crate::domain::DomainId,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
- // /: asset registration is a signed `Bridge` transaction
- // (`BridgeTx::RegisterAsset`) from the home domain's operator.
+        // /: asset registration is a signed `Bridge` transaction
+        // (`BridgeTx::RegisterAsset`) from the home domain's operator.
         self.require_operator("bud_registerBridgeAsset")?;
         let _ = (asset_id, domain);
         Err(Self::door_refusal(
@@ -3314,8 +3295,8 @@ impl BudlumApiServer for RpcServer {
         proof: crate::cross_domain::MerkleProof,
         relayer: crate::core::address::Address,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
- // /: a mint is a signed `Bridge` transaction
- // (`BridgeTx::Mint`) from a bonded RELAYER, applied in block.
+        // /: a mint is a signed `Bridge` transaction
+        // (`BridgeTx::Mint`) from a bonded RELAYER, applied in block.
         self.require_operator("bud_mintBridgeTransfer")?;
         let _ = (
             source_domain,
@@ -3356,8 +3337,8 @@ impl BudlumApiServer for RpcServer {
         expiry_height: u64,
         recipient_eth: [u8; 20],
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
- // /: a burn is a signed `Bridge` transaction
- // (`BridgeTx::BurnWithEvent`) from the transfer's recipient.
+        // /: a burn is a signed `Bridge` transaction
+        // (`BridgeTx::BurnWithEvent`) from the transfer's recipient.
         self.require_operator("bud_burnBridgeTransferWithEvent")?;
         let _ = (
             message_id,
@@ -3397,8 +3378,8 @@ impl BudlumApiServer for RpcServer {
         event: crate::cross_domain::DomainEvent,
         proof: crate::cross_domain::MerkleProof,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
- // /: an unlock is a signed `Bridge` transaction
- // (`BridgeTx::Unlock`) from a bonded RELAYER, applied in block.
+        // /: an unlock is a signed `Bridge` transaction
+        // (`BridgeTx::Unlock`) from a bonded RELAYER, applied in block.
         self.require_operator("bud_unlockBridgeTransferVerified")?;
         let _ = (
             target_domain,
@@ -3423,10 +3404,10 @@ impl BudlumApiServer for RpcServer {
         proof: crate::cross_domain::event_tree::MerkleProof,
         source_domain: crate::domain::types::DomainId,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
- // /: a relay proof is a signed
- // `Bridge` transaction (`BridgeTx::RelayProof`) from the bonded
- // RELAYER it pays, applied in block. It used to record the relay and
- // mint or unlock on this node alone.
+        // /: a relay proof is a signed
+        // `Bridge` transaction (`BridgeTx::RelayProof`) from the bonded
+        // RELAYER it pays, applied in block. It used to record the relay and
+        // mint or unlock on this node alone.
         self.require_operator("bud_submitRelayProof")?;
         let _ = (message_id, relayer, proof, source_domain);
         Err(Self::door_refusal(
@@ -3437,9 +3418,9 @@ impl BudlumApiServer for RpcServer {
     }
 
     async fn seal_global_header(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
- // /: the global header is a consensus object, built by the
- // transition of every finality checkpoint block. Sealing one on this
- // node appended to a sequence no peer shared.
+        // /: the global header is a consensus object, built by the
+        // transition of every finality checkpoint block. Sealing one on this
+        // node appended to a sequence no peer shared.
         self.require_operator("bud_sealGlobalHeader")?;
         Err(Self::door_refusal(
             "Sealing a global header is refused: headers are built in block at every finality \
@@ -3452,9 +3433,9 @@ impl BudlumApiServer for RpcServer {
         &self,
         tx: Transaction,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
- // Permissionless registration reuses signed consensus transactions:
- // Stake onboards validators; AiOperatorBond onboards RoleId(8)
- // Compute operators. No RPC-side state mutation or approval gate.
+        // Permissionless registration reuses signed consensus transactions:
+        // Stake onboards validators; AiOperatorBond onboards RoleId(8)
+        // Compute operators. No RPC-side state mutation or approval gate.
         if !matches!(
             tx.tx_type,
             crate::core::transaction::TransactionType::Stake
@@ -3491,9 +3472,9 @@ impl BudlumApiServer for RpcServer {
         address: String,
         amount: u64,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
- // this helper bonded any address into the relayer role outside
- // a block, on this node alone. The method stays so a client gets a
- // pointer instead of "method not found".
+        // this helper bonded any address into the relayer role outside
+        // a block, on this node alone. The method stays so a client gets a
+        // pointer instead of "method not found".
         self.require_operator("bud_registryBondRelayer")?;
         let _ = (address, amount);
         Err(Self::door_refusal(
@@ -3549,9 +3530,9 @@ impl BudlumApiServer for RpcServer {
         &self,
         submission: crate::prover::ZkProofSubmission,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
- // a ZK proof is a signed `Settlement` transaction
- // (`SettlementTx::SubmitZkProof`) from the submitter the proof names,
- // which also closes (the submitter is the signer now).
+        // a ZK proof is a signed `Settlement` transaction
+        // (`SettlementTx::SubmitZkProof`) from the submitter the proof names,
+        // which also closes (the submitter is the signer now).
         self.require_operator("bud_submitZkProof")?;
         let _ = submission;
         Err(Self::door_refusal(
@@ -3686,13 +3667,13 @@ impl BudlumApiServer for RpcServer {
         &self,
         mut report: crate::registry::SlashingReport,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
- // Security: never trust caller-supplied provenance. An external
- // Submitter cannot self-certify a report as ConsensusVerified to force a
- // Slash - the RPC path is always Unverified. Only the node's own
- // Consensus layer emits ConsensusVerified reports internally; a
- // caller's claim is demoted first.
+        // Security: never trust caller-supplied provenance. An external
+        // Submitter cannot self-certify a report as ConsensusVerified to force a
+        // Slash - the RPC path is always Unverified. Only the node's own
+        // Consensus layer emits ConsensusVerified reports internally; a
+        // caller's claim is demoted first.
         report.demote_to_unverified();
- // A reporter is required so the anti-spam fee can be charged.
+        // A reporter is required so the anti-spam fee can be charged.
         if report.reporter.is_none() {
             return Err(ErrorObjectOwned::owned(
                 -32602,
@@ -3700,12 +3681,12 @@ impl BudlumApiServer for RpcServer {
                 None::<()>,
             ));
         }
- // A caller-supplied report stays `Unverified`: two signatures over two
- // bare block hashes do not bind `height`, so this endpoint must never
- // promote caller-supplied evidence to `ConsensusVerified`, and an
- // unverified report is refused before any fee is charged. Slashing
- // travels the consensus path only, in block: this endpoint no
- // longer reaches the chain at all.
+        // A caller-supplied report stays `Unverified`: two signatures over two
+        // bare block hashes do not bind `height`, so this endpoint must never
+        // promote caller-supplied evidence to `ConsensusVerified`, and an
+        // unverified report is refused before any fee is charged. Slashing
+        // travels the consensus path only, in block: this endpoint no
+        // longer reaches the chain at all.
         let _ = report;
         Err(ErrorObjectOwned::owned(
             -32602,
@@ -3721,16 +3702,16 @@ impl BudlumApiServer for RpcServer {
         &self,
         proof: crate::consensus::qc::QcFaultProof,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
- // (security audit) permissionless entry-point.
- // The proof's correctness is enforced by
- // `handle_qc_fault_proof` (merkle inclusion +
- // Cryptographic dilithium verification), which is the
- // Only acceptable gate - it costs ~millions of dollars
- // Of compute to forge a valid proof, so a fee gate is
- // Not required. On a successful proof the underlying
- // QC blob's finality is invalidated from the proof's
- // Checkpoint height (see
- // `Blockchain::apply_qc_fault_verdict`).
+        // (security audit) permissionless entry-point.
+        // The proof's correctness is enforced by
+        // `handle_qc_fault_proof` (merkle inclusion +
+        // Cryptographic dilithium verification), which is the
+        // Only acceptable gate - it costs ~millions of dollars
+        // Of compute to forge a valid proof, so a fee gate is
+        // Not required. On a successful proof the underlying
+        // QC blob's finality is invalidated from the proof's
+        // Checkpoint height (see
+        // `Blockchain::apply_qc_fault_verdict`).
         match self.chain.handle_qc_fault_proof(proof).await {
             Ok(()) => Ok(serde_json::json!({
                 "accepted": true,
@@ -3817,9 +3798,9 @@ impl BudlumApiServer for RpcServer {
         Ok(serde_json::json!({ "bannedPeers": banned }))
     }
 
- // === B.U.D. Storage RPC implementations ====================
- // This surface keeps temporary grant and reveal operations. Legacy
- // manifest, deal, challenge, and encoding RPCs are not registered.
+    // === B.U.D. Storage RPC implementations ====================
+    // This surface keeps temporary grant and reveal operations. Legacy
+    // manifest, deal, challenge, and encoding RPCs are not registered.
 
     async fn storage_issue_view_grant(
         &self,
@@ -3832,10 +3813,10 @@ impl BudlumApiServer for RpcServer {
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
         let content_id = parse_content_id(&content_id)?;
         let auth = parse_grant_auth(authorization.as_ref())?;
- // Refuse at the boundary when this node cannot check ML-DSA-87 at all:
- // that is an operator fault, and a client must not be told to fix a key
- // it did get right. The registry derives the same address again; this
- // pre-flight only chooses the error code.
+        // Refuse at the boundary when this node cannot check ML-DSA-87 at all:
+        // that is an operator fault, and a client must not be told to fix a key
+        // it did get right. The registry derives the same address again; this
+        // pre-flight only chooses the error code.
         auth.derived_owner().map_err(grant_auth_error)?;
         let grantee = match grantee {
             None => None,
@@ -3876,41 +3857,41 @@ impl BudlumApiServer for RpcServer {
         at_epoch: u64,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
         let auth = parse_grant_auth(authorization.as_ref())?;
- // Refuse at the boundary when this node cannot check ML-DSA-87 at all:
- // that is an operator fault, and a client must not be told to fix a key
- // it did get right. The registry derives the same address again; this
- // pre-flight only chooses the error code - and names the actor the revoke
- // event is filed under, so a sink sees who spoke rather than a caller's
- // claim about it.
+        // Refuse at the boundary when this node cannot check ML-DSA-87 at all:
+        // that is an operator fault, and a client must not be told to fix a key
+        // it did get right. The registry derives the same address again; this
+        // pre-flight only chooses the error code - and names the actor the revoke
+        // event is filed under, so a sink sees who spoke rather than a caller's
+        // claim about it.
         let actor = auth.derived_owner().map_err(grant_auth_error)?;
- // No gateway state moves before the chain has accepted the revoke:
- // an unauthorised attempt reaches this boundary, is refused at
- // `revoke_view_grant` below, and must not perturb what in-flight
- // frame and open calls read. A revoke that does land drops this
- // content's sessions after the chain call, and the reveal paths ask
- // the chain again before they emit.
+        // No gateway state moves before the chain has accepted the revoke:
+        // an unauthorised attempt reaches this boundary, is refused at
+        // `revoke_view_grant` below, and must not perturb what in-flight
+        // frame and open calls read. A revoke that does land drops this
+        // content's sessions after the chain call, and the reveal paths ask
+        // the chain again before they emit.
         let revoked = self
             .chain
             .revoke_view_grant(grant_id, auth, at_epoch)
             .await
             .map_err(|e| ErrorObjectOwned::owned(-32602, e, None::<()>))?;
- // The frame path asks the chain again before every emit, but it asks
- // without the gateway lock and applies the answer under it. A revoke
- // that landed between those two steps was served once more on the
- // stale `true`. Dropping this content's grant-backed sessions here,
- // once the chain has revoked, leaves a racing frame call nothing to
- // emit from. After the revoke, not before: an unauthorised revoke
- // attempt must not be able to close other viewers' sessions.
+        // The frame path asks the chain again before every emit, but it asks
+        // without the gateway lock and applies the answer under it. A revoke
+        // that landed between those two steps was served once more on the
+        // stale `true`. Dropping this content's grant-backed sessions here,
+        // once the chain has revoked, leaves a racing frame call nothing to
+        // emit from. After the revoke, not before: an unauthorised revoke
+        // attempt must not be able to close other viewers' sessions.
         {
             let mut gw = self.reveal_gateway.lock().map_err(|_| {
                 ErrorObjectOwned::owned(-32603, "reveal gateway lock poisoned", None::<()>)
             })?;
             gw.drop_sessions_for_content(&revoked.content_id);
         }
- // A revoke that only reaches the ledger leaves every product surface
- // holding the session key it was promised. The hook is where that word is
- // passed on: a headless node discards it, a gateway installs its own
- // sink, and neither choice can change what a block commits.
+        // A revoke that only reaches the ledger leaves every product surface
+        // holding the session key it was promised. The hook is where that word is
+        // passed on: a headless node discards it, a gateway installs its own
+        // sink, and neither choice can change what a block commits.
         fire_three_event(
             &mut NopThreeHook,
             ThreeHookEvent {
@@ -3936,8 +3917,8 @@ impl BudlumApiServer for RpcServer {
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
         let auth = parse_grant_auth(authorization.as_ref())?;
         let content_id = parse_content_id(&content_id)?;
- // Same boundary rule as revoke: when this node cannot check the
- // signature at all, that is an operator fault, not a client key fault.
+        // Same boundary rule as revoke: when this node cannot check the
+        // signature at all, that is an operator fault, not a client key fault.
         let _actor = auth.derived_owner().map_err(grant_auth_error)?;
         let outcome = self
             .chain
@@ -4023,19 +4004,19 @@ impl BudlumApiServer for RpcServer {
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_secs());
 
- // The viewer is whoever signed the claim, never a field. Before this,
- // `viewer` was a string the caller typed, so any caller could name a
- // grantee and have this node build frames for content it holds no
- // grant on. The derived address is what the grant lookup asks about.
+        // The viewer is whoever signed the claim, never a field. Before this,
+        // `viewer` was a string the caller typed, so any caller could name a
+        // grantee and have this node build frames for content it holds no
+        // grant on. The derived address is what the grant lookup asks about.
         let viewer = verify_view_claim(&viewer_claim, &content_id, &key_id, &owner, &packed, now)?;
 
- // `owner` is a claim in the request; the chain holds who owns this
- // content. A claim naming another address is refused here by name.
- // The registry's `may_view` refuses it too, but silently, as a
- // `false` grant, so a caller naming itself owner of somebody else's
- // sealed content saw a generic refusal and an honest owner with a
- // typo in the field saw the same one. Content with no recorded
- // owner keeps the registry's answer: no grant, sealed refused.
+        // `owner` is a claim in the request; the chain holds who owns this
+        // content. A claim naming another address is refused here by name.
+        // The registry's `may_view` refuses it too, but silently, as a
+        // `false` grant, so a caller naming itself owner of somebody else's
+        // sealed content saw a generic refusal and an honest owner with a
+        // typo in the field saw the same one. Content with no recorded
+        // owner keeps the registry's answer: no grant, sealed refused.
         let recorded = self
             .chain
             .confidential_owner(content_id)
@@ -4043,12 +4024,12 @@ impl BudlumApiServer for RpcServer {
             .map_err(|e| ErrorObjectOwned::owned(-32603, e, None::<()>))?;
         check_claimed_owner(recorded, &owner)?;
 
- // The grant decision is the chain's; the gateway re-enforces it on the
- // sealed path, but the authority that owns the registry answers it.
- // Read the revoke generation first: a revoke that starts while this
- // question is in flight invalidates the answer, and the comparison
- // under the gateway lock below refuses the open instead of admitting
- // a session on a pre-revoke `true`.
+        // The grant decision is the chain's; the gateway re-enforces it on the
+        // sealed path, but the authority that owns the registry answers it.
+        // Read the revoke generation first: a revoke that starts while this
+        // question is in flight invalidates the answer, and the comparison
+        // under the gateway lock below refuses the open instead of admitting
+        // a session on a pre-revoke `true`.
         let generation = {
             let gw = self.reveal_gateway.lock().map_err(|_| {
                 ErrorObjectOwned::owned(-32603, "reveal gateway lock poisoned", None::<()>)
@@ -4082,10 +4063,10 @@ impl BudlumApiServer for RpcServer {
                     None::<()>,
                 ));
             }
- // Reclaim TTL-dead rows before admission so a burst of opens
- // cannot be wedged by corpses, then refuse fast at the cap with
- // its own code instead of paying for an open that admission
- // would refuse.
+            // Reclaim TTL-dead rows before admission so a burst of opens
+            // cannot be wedged by corpses, then refuse fast at the cap with
+            // its own code instead of paying for an open that admission
+            // would refuse.
             gw.sweep(now);
             if gw.session_count() >= crate::storage::MAX_REVEAL_SESSIONS {
                 return Err(ErrorObjectOwned::owned(
@@ -4098,9 +4079,9 @@ impl BudlumApiServer for RpcServer {
                 ));
             }
         }
- // The emitter builds a whole one-shot pass to check the stream pin.
- // That runs off the async workers and outside the gateway lock, so
- // frame serving, close and revoke of other viewers do not wait on it.
+        // The emitter builds a whole one-shot pass to check the stream pin.
+        // That runs off the async workers and outside the gateway lock, so
+        // frame serving, close and revoke of other viewers do not wait on it.
         let prepared = tokio::task::spawn_blocking(move || {
             crate::storage::RevealGateway::prepare_prechecked(req, grant_allows)
         })
@@ -4110,7 +4091,7 @@ impl BudlumApiServer for RpcServer {
         let mut gw = self.reveal_gateway.lock().map_err(|_| {
             ErrorObjectOwned::owned(-32603, "reveal gateway lock poisoned", None::<()>)
         })?;
- // A revoke may have started while the pass was built: ask again.
+        // A revoke may have started while the pass was built: ask again.
         if gw.revoke_generation() != generation {
             return Err(ErrorObjectOwned::owned(
                 -32003,
@@ -4140,8 +4121,8 @@ impl BudlumApiServer for RpcServer {
         seq_start: u32,
         count: u32,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
- // The gateway enforces the ceiling too; answering before touching
- // the table keeps a malformed ask off the shared lock entirely.
+        // The gateway enforces the ceiling too; answering before touching
+        // the table keeps a malformed ask off the shared lock entirely.
         if count > crate::storage::MAX_FRAMES_PER_CALL {
             return Err(ErrorObjectOwned::owned(
                 -32602,
@@ -4155,12 +4136,12 @@ impl BudlumApiServer for RpcServer {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_secs());
- // The grant is asked again on every frame call. A session was checked
- // once at open and then served until its TTL, so a grant revoked on
- // chain kept serving frames for up to the whole TTL. The scope is
- // read under the lock, the chain is asked without it, and the answer
- // is applied under the lock again; a session closed in between is
- // reported as unknown, which is what it is.
+        // The grant is asked again on every frame call. A session was checked
+        // once at open and then served until its TTL, so a grant revoked on
+        // chain kept serving frames for up to the whole TTL. The scope is
+        // read under the lock, the chain is asked without it, and the answer
+        // is applied under the lock again; a session closed in between is
+        // reported as unknown, which is what it is.
         let (scope, generation, session): (
             Option<crate::storage::GrantScope>,
             u64,
@@ -4172,14 +4153,14 @@ impl BudlumApiServer for RpcServer {
             let scope = gw
                 .grant_scope(session_id)
                 .map_err(reveal_gateway_rpc_error)?;
- // The session is taken OUT of the table here so the stream-pin
- // check below can run with the lock released. That check is the
- // only part of serving a frame that scales with the stream: a
- // recipe pinning a frame fold makes it build the whole one-shot
- // carousel pass. Run under the table lock, one caller's first frame
- // stalls every other viewer for the length of an encode (CWE-407).
- // The session is an `Arc`, so `emit_frames` still re-checks it -
- // expiry, grant and budget - on the way back.
+            // The session is taken OUT of the table here so the stream-pin
+            // check below can run with the lock released. That check is the
+            // only part of serving a frame that scales with the stream: a
+            // recipe pinning a frame fold makes it build the whole one-shot
+            // carousel pass. Run under the table lock, one caller's first frame
+            // stalls every other viewer for the length of an encode (CWE-407).
+            // The session is an `Arc`, so `emit_frames` still re-checks it -
+            // expiry, grant and budget - on the way back.
             (
                 scope,
                 gw.revoke_generation(),
@@ -4187,8 +4168,8 @@ impl BudlumApiServer for RpcServer {
                     .map_err(reveal_gateway_rpc_error)?,
             )
         };
- // Outside the lock. The answer is remembered on the session, so the
- // emit below never repeats it.
+        // Outside the lock. The answer is remembered on the session, so the
+        // emit below never repeats it.
         session
             .verify_stream_pin()
             .map_err(|e| ErrorObjectOwned::owned(-32602, e.to_string(), None::<()>))?;
@@ -4203,11 +4184,11 @@ impl BudlumApiServer for RpcServer {
         let mut gw = self.reveal_gateway.lock().map_err(|_| {
             ErrorObjectOwned::owned(-32603, "reveal gateway lock poisoned", None::<()>)
         })?;
- // A revoke that started while the chain was being asked invalidates
- // the answer above: the session may already be dropped and the grant
- // it reports may be the pre-revoke one. Refuse the stale answer and
- // make the caller retry against the new state instead of emitting
- // frames on it.
+        // A revoke that started while the chain was being asked invalidates
+        // the answer above: the session may already be dropped and the grant
+        // it reports may be the pre-revoke one. Refuse the stale answer and
+        // make the caller retry against the new state instead of emitting
+        // frames on it.
         if gw.revoke_generation() != generation {
             return Err(ErrorObjectOwned::owned(
                 -32003,
@@ -4270,30 +4251,30 @@ impl BudlumApiServer for RpcServer {
             return Ok(serde_json::json!(null));
         };
         Ok(serde_json::json!({
-            "did": did,
-            "subject": Self::to_0x_hash(record.subject.to_hex()),
-            "methods": record.methods.iter().map(|method| {
- // An exhaustive match over `MethodKind`: when the registry
- // grows a second scheme, this line fails to compile until the
- // wire has a name for it - the same forcing the preimage
- // encoder uses, because both would otherwise fold a new kind
- // into the old name.
-                let kind = match method.kind {
-                    crate::registry::MethodKind::MlDsa87 => "ml-dsa-87",
-                };
-                serde_json::json!({
-                    "keyId": format!("0x{}", hex::encode(method.key_id)),
-                    "kind": kind,
-                    "revokedAt": method.revoked_at,
-                    "liveNow": method.is_live_at(epoch),
-                })
-            }).collect::<Vec<_>>(),
-            "credentialRoot": record.credential_root.map(|root| format!("0x{}", hex::encode(root))),
-            "guardians": record.guardians.iter()
-                .map(|guardian| Self::to_0x_hash(guardian.to_hex()))
-                .collect::<Vec<_>>(),
-            "recoveryThreshold": record.recovery_threshold,
-        }))
+                   "did": did,
+                   "subject": Self::to_0x_hash(record.subject.to_hex()),
+                   "methods": record.methods.iter().map(|method| {
+        // An exhaustive match over `MethodKind`: when the registry
+        // grows a second scheme, this line fails to compile until the
+        // wire has a name for it - the same forcing the preimage
+        // encoder uses, because both would otherwise fold a new kind
+        // into the old name.
+                       let kind = match method.kind {
+                           crate::registry::MethodKind::MlDsa87 => "ml-dsa-87",
+                       };
+                       serde_json::json!({
+                           "keyId": format!("0x{}", hex::encode(method.key_id)),
+                           "kind": kind,
+                           "revokedAt": method.revoked_at,
+                           "liveNow": method.is_live_at(epoch),
+                       })
+                   }).collect::<Vec<_>>(),
+                   "credentialRoot": record.credential_root.map(|root| format!("0x{}", hex::encode(root))),
+                   "guardians": record.guardians.iter()
+                       .map(|guardian| Self::to_0x_hash(guardian.to_hex()))
+                       .collect::<Vec<_>>(),
+                   "recoveryThreshold": record.recovery_threshold,
+               }))
     }
 
     async fn identity_credential(
@@ -4317,23 +4298,23 @@ impl BudlumApiServer for RpcServer {
             return Ok(serde_json::json!(null));
         };
         Ok(serde_json::json!({
-            "id": format!("0x{}", hex::encode(id)),
-            "issuer": Self::to_0x_hash(credential.issuer.to_hex()),
-            "subject": Self::to_0x_hash(credential.subject.to_hex()),
-            "schema": credential.schema,
-            "fields": credential.fields.iter().map(|field| serde_json::json!({
-                "name": field.name,
-                "commitment": format!("0x{}", hex::encode(field.commitment)),
-            })).collect::<Vec<_>>(),
-            "root": format!("0x{}", hex::encode(credential.root())),
-            "issuedAt": credential.issued_at,
-            "expiresAt": credential.expires_at,
- // The verdict is the registry's own `is_credential_valid`, moved
- // verbatim: this view adds no opinion about validity, so it
- // cannot drift from the rule the executor enforces.
-            "valid": verdict.is_ok(),
-            "refusal": verdict.as_ref().err().map(ToString::to_string),
-        }))
+                   "id": format!("0x{}", hex::encode(id)),
+                   "issuer": Self::to_0x_hash(credential.issuer.to_hex()),
+                   "subject": Self::to_0x_hash(credential.subject.to_hex()),
+                   "schema": credential.schema,
+                   "fields": credential.fields.iter().map(|field| serde_json::json!({
+                       "name": field.name,
+                       "commitment": format!("0x{}", hex::encode(field.commitment)),
+                   })).collect::<Vec<_>>(),
+                   "root": format!("0x{}", hex::encode(credential.root())),
+                   "issuedAt": credential.issued_at,
+                   "expiresAt": credential.expires_at,
+        // The verdict is the registry's own `is_credential_valid`, moved
+        // verbatim: this view adds no opinion about validity, so it
+        // cannot drift from the rule the executor enforces.
+                   "valid": verdict.is_ok(),
+                   "refusal": verdict.as_ref().err().map(ToString::to_string),
+               }))
     }
 
     async fn identity_verify_presentation(
@@ -4356,8 +4337,8 @@ impl BudlumApiServer for RpcServer {
             .await
         {
             Ok(()) => Ok(serde_json::json!({ "valid": true })),
- // A refused presentation is an answer a service can act on;
- // only the call itself failing is an RPC error.
+            // A refused presentation is an answer a service can act on;
+            // only the call itself failing is an RPC error.
             Err(reason) => Ok(serde_json::json!({ "valid": false, "reason": reason })),
         }
     }
@@ -4413,13 +4394,13 @@ impl BudlumApiServer for RpcServer {
         kind: String,
         address: Option<String>,
     ) -> jsonrpsee::core::SubscriptionResult {
- // Each feed polls the chain actor once a second and rebuilds the whole
- // block for its own subscriber, hex-encoding every ML-DSA signature in
- // it. Nothing bounded how many of those one client could start: the
- // per-IP limiter only sees the HTTP upgrade, and jsonrpsee's own cap
- // is per connection, so 1024 subscriptions on each of 500 connections
- // were free. This pool is the node-wide ceiling on subscription-driven
- // work, whatever the connection count.
+        // Each feed polls the chain actor once a second and rebuilds the whole
+        // block for its own subscriber, hex-encoding every ML-DSA signature in
+        // it. Nothing bounded how many of those one client could start: the
+        // per-IP limiter only sees the HTTP upgrade, and jsonrpsee's own cap
+        // is per connection, so 1024 subscriptions on each of 500 connections
+        // were free. This pool is the node-wide ceiling on subscription-driven
+        // work, whatever the connection count.
         let feed = match crate::rpc::subscriptions::Feed::parse(&kind, address.as_deref()) {
             Ok(feed) => feed,
             Err(message) => {
@@ -4445,8 +4426,8 @@ impl BudlumApiServer for RpcServer {
         let sink = pending.accept().await?;
         let chain = self.chain.clone();
         tokio::spawn(async move {
- // The permit lives as long as the feed: closing the subscription
- // (or the feed ending on its own) returns the slot.
+            // The permit lives as long as the feed: closing the subscription
+            // (or the feed ending on its own) returns the slot.
             let _slot = slot;
             feed.run(chain, sink, Self::block_to_json).await;
         });
@@ -4527,9 +4508,9 @@ impl BudlumApiServer for RpcServer {
         let data = bincode::serialize(&(parent_name.clone(), sub_label.clone(), owner_addr))
             .map_err(|e| ErrorObjectOwned::owned(-32000, e.to_string(), None::<()>))?;
 
- // The executor requires the parent's owner as the sender
- // (`register_subdomain` compares it with `tx.from`); a zero sender
- // made the template unsignable.
+        // The executor requires the parent's owner as the sender
+        // (`register_subdomain` compares it with `tx.from`); a zero sender
+        // made the template unsignable.
         let parent_owner = self
             .chain
             .bns_resolve_full(parent_name.clone())
@@ -4949,10 +4930,10 @@ impl BudlumApiServer for RpcServer {
             ErrorObjectOwned::owned(-32602, format!("Invalid seller address: {e}"), None::<()>)
         })?;
 
- // `copy_from_slice` panics when the decoded length is not exactly 32.
- // Every other 32-byte parse in this file goes through
- // `parse_hex32_field`, which rejects the wrong length with -32602;
- // these two were the only handlers left copying the raw decode.
+        // `copy_from_slice` panics when the decoded length is not exactly 32.
+        // Every other 32-byte parse in this file goes through
+        // `parse_hex32_field`, which rejects the wrong length with -32602;
+        // these two were the only handlers left copying the raw decode.
         let cid_obj = parse_content_id(&cid)?;
 
         let data = bincode::serialize(&(cid_obj, price))
@@ -5142,8 +5123,8 @@ impl BudlumApiServer for RpcServer {
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
         let authorization_id = parse_pollen_asset_id(&authorization_id)?;
         let payment_commitment = parse_hex32_field(&payment_commitment, "paymentCommitment")?;
- // Security check (HIGH): the buyer signature is required - an ed25519
- // signature bound to every parameter of the purchase.
+        // Security check (HIGH): the buyer signature is required - an ed25519
+        // signature bound to every parameter of the purchase.
         let clean_sig = buyer_signature
             .strip_prefix("0x")
             .unwrap_or(&buyer_signature);
@@ -5379,15 +5360,15 @@ impl BudlumApiServer for RpcServer {
     }
 
     async fn gateway_fetch_content(&self, name: String) -> Result<String, ErrorObjectOwned> {
- // Security check (HIGH): Pollen-protected content must not be
- // fetchable over this RPC without an AccessGrant. If a protecting
- // asset exists, access is refused.
- //
- // Security check (HIGH): the check used to look at storage_root only,
- // so a record with content_id set and storage_root unset skipped the
- // guard. The gateway serves storage_root, so the guard now checks
- // every identity the record names (content_id and storage_root);
- // a record with two different values cannot pick the unprotected one.
+        // Security check (HIGH): Pollen-protected content must not be
+        // fetchable over this RPC without an AccessGrant. If a protecting
+        // asset exists, access is refused.
+        //
+        // Security check (HIGH): the check used to look at storage_root only,
+        // so a record with content_id set and storage_root unset skipped the
+        // guard. The gateway serves storage_root, so the guard now checks
+        // every identity the record names (content_id and storage_root);
+        // a record with two different values cannot pick the unprotected one.
         let resolved = self.chain.bns_resolve_full(name.clone()).await;
         for cid in resolved
             .as_ref()
@@ -5422,9 +5403,9 @@ impl BudlumApiServer for RpcServer {
         name: String,
         format: String,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
- // The same Pollen check. Asking for a format cannot be a way around
- // the access rules: protected content stays protected in whatever
- // format it is requested.
+        // The same Pollen check. Asking for a format cannot be a way around
+        // the access rules: protected content stays protected in whatever
+        // format it is requested.
         let resolved = self.chain.bns_resolve_full(name.clone()).await;
         for cid in resolved
             .as_ref()
@@ -5574,7 +5555,7 @@ impl BudlumApiServer for RpcServer {
         })
     }
 
- // ---: AI Inference & Verifier Layer ---
+    // ---: AI Inference & Verifier Layer ---
 
     async fn ai_get_model(&self, model_id: String) -> Result<serde_json::Value, ErrorObjectOwned> {
         let clean_id = model_id.strip_prefix("0x").unwrap_or(&model_id);
@@ -6182,7 +6163,7 @@ impl BudlumApiServer for RpcServer {
             ErrorObjectOwned::owned(-32602, format!("Invalid verifier address: {e}"), None::<()>)
         })?;
 
- // Check dispute status before preparing tx
+        // Check dispute status before preparing tx
         let status = self.chain.get_ai_dispute_status(rid, v_addr).await;
         if !status.has_equivocated {
             return Err(ErrorObjectOwned::owned(
@@ -6336,7 +6317,7 @@ impl BudlumApiServer for RpcServer {
         }))
     }
 
- /// Query ZKVM execution proof for a (request, verifier) pair.
+    /// Query ZKVM execution proof for a (request, verifier) pair.
     async fn ai_execution_proof(
         &self,
         request_id: String,
@@ -6386,7 +6367,7 @@ impl BudlumApiServer for RpcServer {
         }
     }
 
- /// Query QoS metrics for a verifier.
+    /// Query QoS metrics for a verifier.
     async fn ai_verifier_qos(
         &self,
         verifier: String,
@@ -6421,7 +6402,7 @@ impl BudlumApiServer for RpcServer {
         }
     }
 
- /// Get all verifiers ranked by reliability score.
+    /// Get all verifiers ranked by reliability score.
     async fn ai_verifier_ranking(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
         let ranking = cap_list_response(self.chain.get_ai_verifiers_by_reliability().await);
         let ranking_json: Vec<serde_json::Value> = ranking
@@ -6447,7 +6428,7 @@ impl BudlumApiServer for RpcServer {
         }))
     }
 
- /// Query an agent-to-agent payment by ID.
+    /// Query an agent-to-agent payment by ID.
     async fn ai_agent_payment(
         &self,
         payment_id: String,
@@ -6487,7 +6468,7 @@ impl BudlumApiServer for RpcServer {
         }
     }
 
- /// Query payments for an agent.
+    /// Query payments for an agent.
     async fn ai_agent_payments(
         &self,
         agent: String,
@@ -6535,7 +6516,7 @@ impl BudlumApiServer for RpcServer {
         }))
     }
 
- /// Query the verifier whitelist.
+    /// Query the verifier whitelist.
     async fn ai_verifier_whitelist(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
         let whitelist = self.chain.get_ai_verifier_whitelist().await;
         let list: Vec<serde_json::Value> = whitelist
@@ -6576,10 +6557,10 @@ impl BudlumApiServer for RpcServer {
     }
 
     async fn ai_agent_ranking(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
- // The score crosses the actor and the wire as a
- // fixed-point permyriad integer (10_000 = full trust), never as an
- // f64 - Z8. The unit is stated in the response so a client never has
- // to guess whether 9000 is 9000.0 or 0.9.
+        // The score crosses the actor and the wire as a
+        // fixed-point permyriad integer (10_000 = full trust), never as an
+        // f64 - Z8. The unit is stated in the response so a client never has
+        // to guess whether 9000 is 9000.0 or 0.9.
         let ranking = cap_list_response(self.chain.get_ai_agent_ranking().await);
         let entries: Vec<serde_json::Value> = ranking
             .iter()
@@ -6611,9 +6592,9 @@ impl BudlumApiServer for RpcServer {
         &self,
         height: Option<u64>,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
- // A full snapshot is every account and registry the state holds: an
- // unbounded response, far too expensive to hand to any caller of the
- // public listener. Operators read it on the loopback listener.
+        // A full snapshot is every account and registry the state holds: an
+        // unbounded response, far too expensive to hand to any caller of the
+        // public listener. Operators read it on the loopback listener.
         self.require_operator("bud_getStateSnapshot")?;
         let height = match height {
             Some(height) => height,
@@ -6655,14 +6636,14 @@ impl BudlumApiServer for RpcServer {
         }))
     }
 
- /// Read-only status.
+    /// Read-only status.
     async fn get_status(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
         let height = self.chain.get_height().await;
         let chain_id = self.chain.get_chain_id().await;
         let mempool = self.chain.get_mempool_size().await;
         let base_fee = self.chain.get_base_fee().await;
         let validator_set_hash = self.chain.get_validator_set_hash().await;
- // item 4: the height the finality certificates have reached.
+        // item 4: the height the finality certificates have reached.
         let finalized = self.chain.get_finalized_height().await;
         Ok(serde_json::json!({
             "blockNumber": height,
@@ -6688,46 +6669,46 @@ impl BudlumApiServer for RpcServer {
         let owner = Address::from_hex(clean).map_err(|e| {
             ErrorObjectOwned::owned(-32602, format!("Invalid address: {e}"), None::<()>)
         })?;
-        Ok(self
-            .chain
+        self.chain
             .validator_directory(crate::validators::DirectoryQuery::One(owner))
-            .await)
+            .await
+            .map_err(|_| validator_directory_unavailable())
     }
 
     async fn storage_get_object(
         &self,
         commitment: String,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        let key = parse_hex32(&commitment)?;
-        Ok(self
-            .chain
+        let key = parse_hex32_field(&commitment, "object commitment")?;
+        self.chain
             .bud3(crate::storage::bud3::registry::Bud3Query::Object(key))
-            .await)
+            .await
+            .map_err(|_| bud3_actor_unavailable())
     }
 
     async fn storage_get_custody(
         &self,
         validator: String,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        let key = parse_hex32(&validator)?;
-        Ok(self
-            .chain
+        let key = parse_hex32_field(&validator, "validator")?;
+        self.chain
             .bud3(crate::storage::bud3::registry::Bud3Query::Custody(key))
-            .await)
+            .await
+            .map_err(|_| bud3_actor_unavailable())
     }
 
     async fn list_relays(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
-        Ok(self
-            .chain
+        self.chain
             .validator_directory(crate::validators::DirectoryQuery::Relays)
-            .await)
+            .await
+            .map_err(|_| validator_directory_unavailable())
     }
 
     async fn list_gateways(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
-        Ok(self
-            .chain
+        self.chain
             .validator_directory(crate::validators::DirectoryQuery::Gateways)
-            .await)
+            .await
+            .map_err(|_| validator_directory_unavailable())
     }
 
     async fn get_quantum_alarm(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
@@ -6735,8 +6716,8 @@ impl BudlumApiServer for RpcServer {
     }
 
     async fn get_domain_info(&self, domain_id: u32) -> Result<serde_json::Value, ErrorObjectOwned> {
- // the facts the chain observed for the domain and the class
- // derived from them, next to the registry record.
+        // the facts the chain observed for the domain and the class
+        // derived from them, next to the registry record.
         let facts = self
             .chain
             .quantum_view()
@@ -6813,13 +6794,16 @@ impl BudlumApiServer for RpcServer {
         Ok(Self::ai_readiness_json(chain_id, active_operators.len()))
     }
 
- // ---- Ethereum JSON-RPC compatibility gateway ----
- //
- // Every answer here is a chain fact or a refusal that names the
- // Budlum door (see `src/rpc/compat/ethereum/opening.rs`).
+    // ---- Ethereum JSON-RPC compatibility gateway ----
+    //
+    // Every answer here is a chain fact or a refusal that names the
+    // Budlum door (see `src/rpc/compat/ethereum/opening.rs`).
     async fn web3_client_version(&self) -> Result<String, ErrorObjectOwned> {
         let chain_id = self.chain.get_chain_id().await;
-        Ok(format!("budlum-core/v{}/chain-{chain_id}", env!("CARGO_PKG_VERSION")))
+        Ok(format!(
+            "budlum-core/v{}/chain-{chain_id}",
+            env!("CARGO_PKG_VERSION")
+        ))
     }
 
     async fn compat_net_version(&self) -> Result<String, ErrorObjectOwned> {
@@ -6868,7 +6852,10 @@ impl BudlumApiServer for RpcServer {
         _address: String,
         _block: Option<String>,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        Err(ethereum::ee_unavailable("eth_getCode", "bud_getAccountProof"))
+        Err(ethereum::ee_unavailable(
+            "eth_getCode",
+            "bud_getAccountProof",
+        ))
     }
 
     async fn eth_get_storage_at(
@@ -6877,7 +6864,10 @@ impl BudlumApiServer for RpcServer {
         _position: String,
         _block: Option<String>,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        Err(ethereum::ee_unavailable("eth_getStorageAt", "bud_getAccountProof"))
+        Err(ethereum::ee_unavailable(
+            "eth_getStorageAt",
+            "bud_getAccountProof",
+        ))
     }
 
     async fn eth_get_transaction_count(
@@ -6885,7 +6875,10 @@ impl BudlumApiServer for RpcServer {
         _address: String,
         _block: Option<String>,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        Err(ethereum::ee_unavailable("eth_getTransactionCount", "bud_getNonce"))
+        Err(ethereum::ee_unavailable(
+            "eth_getTransactionCount",
+            "bud_getNonce",
+        ))
     }
 
     async fn eth_call(
@@ -6901,7 +6894,10 @@ impl BudlumApiServer for RpcServer {
         _call: serde_json::Value,
         _block: Option<String>,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        Err(ethereum::ee_unavailable("eth_estimateGas", "bud_estimateGas"))
+        Err(ethereum::ee_unavailable(
+            "eth_estimateGas",
+            "bud_estimateGas",
+        ))
     }
 
     async fn eth_create_access_list(
@@ -6909,7 +6905,10 @@ impl BudlumApiServer for RpcServer {
         _call: serde_json::Value,
         _block: Option<String>,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        Err(ethereum::ee_unavailable("eth_createAccessList", "bud_txPrecheck"))
+        Err(ethereum::ee_unavailable(
+            "eth_createAccessList",
+            "bud_txPrecheck",
+        ))
     }
 
     async fn eth_fee_history(
@@ -6925,7 +6924,10 @@ impl BudlumApiServer for RpcServer {
         &self,
         _raw: String,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        Err(ethereum::ee_unavailable("eth_sendRawTransaction", "bud_sendRawTransaction"))
+        Err(ethereum::ee_unavailable(
+            "eth_sendRawTransaction",
+            "bud_sendRawTransaction",
+        ))
     }
 
     async fn eth_get_block_by_number(
@@ -6933,7 +6935,10 @@ impl BudlumApiServer for RpcServer {
         _block: String,
         _full: Option<bool>,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        Err(ethereum::ee_unavailable("eth_getBlockByNumber", "bud_getBlockByNumber"))
+        Err(ethereum::ee_unavailable(
+            "eth_getBlockByNumber",
+            "bud_getBlockByNumber",
+        ))
     }
 
     async fn eth_get_block_by_hash(
@@ -6941,7 +6946,10 @@ impl BudlumApiServer for RpcServer {
         _hash: String,
         _full: Option<bool>,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        Err(ethereum::ee_unavailable("eth_getBlockByHash", "bud_getBlockByHash"))
+        Err(ethereum::ee_unavailable(
+            "eth_getBlockByHash",
+            "bud_getBlockByHash",
+        ))
     }
 
     async fn eth_get_block_transaction_count_by_number(
@@ -6958,14 +6966,20 @@ impl BudlumApiServer for RpcServer {
         &self,
         _hash: String,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        Err(ethereum::ee_unavailable("eth_getBlockTransactionCountByHash", "bud_getBlockByHash"))
+        Err(ethereum::ee_unavailable(
+            "eth_getBlockTransactionCountByHash",
+            "bud_getBlockByHash",
+        ))
     }
 
     async fn eth_get_transaction_by_hash(
         &self,
         _hash: String,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        Err(ethereum::ee_unavailable("eth_getTransactionByHash", "bud_getTransactionByHash"))
+        Err(ethereum::ee_unavailable(
+            "eth_getTransactionByHash",
+            "bud_getTransactionByHash",
+        ))
     }
 
     async fn eth_get_transaction_by_block_number_and_index(
@@ -6983,27 +6997,36 @@ impl BudlumApiServer for RpcServer {
         &self,
         _hash: String,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        Err(ethereum::ee_unavailable("eth_getTransactionReceipt", "bud_getTransactionReceipt"))
+        Err(ethereum::ee_unavailable(
+            "eth_getTransactionReceipt",
+            "bud_getTransactionReceipt",
+        ))
     }
 
     async fn eth_get_block_receipts(
         &self,
         _block: String,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        Err(ethereum::ee_unavailable("eth_getBlockReceipts", "bud_getBlockByNumber"))
+        Err(ethereum::ee_unavailable(
+            "eth_getBlockReceipts",
+            "bud_getBlockByNumber",
+        ))
     }
 
     async fn eth_get_logs(
         &self,
         _filter: serde_json::Value,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        Err(ethereum::ee_unavailable("eth_getLogs", "bud_getTransactionReceipt"))
+        Err(ethereum::ee_unavailable(
+            "eth_getLogs",
+            "bud_getTransactionReceipt",
+        ))
     }
 
- // the five filter methods use one bounded, expiring,
- // per-connection table. The owner is the server-assigned connection id;
- // stateful calls without it fail closed. No handler invents log data
- // before the EVM execution environment, and foreign uninstalls are indistinguishable from misses.
+    // the five filter methods use one bounded, expiring,
+    // per-connection table. The owner is the server-assigned connection id;
+    // stateful calls without it fail closed. No handler invents log data
+    // before the EVM execution environment, and foreign uninstalls are indistinguishable from misses.
 
     async fn eth_new_filter(
         &self,
@@ -7114,7 +7137,10 @@ impl BudlumApiServer for RpcServer {
         _options: Option<serde_json::Value>,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
         self.require_operator("debug_traceTransaction")?;
-        Err(ethereum::ee_unavailable("debug_traceTransaction", "bud_getTransactionReceipt"))
+        Err(ethereum::ee_unavailable(
+            "debug_traceTransaction",
+            "bud_getTransactionReceipt",
+        ))
     }
 
     async fn debug_trace_call(
@@ -7124,7 +7150,10 @@ impl BudlumApiServer for RpcServer {
         _options: Option<serde_json::Value>,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
         self.require_operator("debug_traceCall")?;
-        Err(ethereum::ee_unavailable("debug_traceCall", "bud_txPrecheck"))
+        Err(ethereum::ee_unavailable(
+            "debug_traceCall",
+            "bud_txPrecheck",
+        ))
     }
 
     async fn eth_get_proof(
@@ -7136,10 +7165,10 @@ impl BudlumApiServer for RpcServer {
         Err(ethereum::proof_is_not_an_mpt_proof())
     }
 
- // ---- Solana JSON-RPC compatibility gateway ----
- //
- // Every success is a node or chain fact. Unwired state mappings name the
- // native door instead of translating native accounts into invented SVM state.
+    // ---- Solana JSON-RPC compatibility gateway ----
+    //
+    // Every success is a node or chain fact. Unwired state mappings name the
+    // native door instead of translating native accounts into invented SVM state.
 
     async fn solana_get_health(&self) -> Result<String, ErrorObjectOwned> {
         Ok("ok".to_string())
@@ -7152,7 +7181,10 @@ impl BudlumApiServer for RpcServer {
     }
 
     async fn solana_get_genesis_hash(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
-        Err(solana::not_exposed("getGenesisHash", "bud_getBlockByNumber"))
+        Err(solana::not_exposed(
+            "getGenesisHash",
+            "bud_getBlockByNumber",
+        ))
     }
 
     async fn solana_get_slot(
@@ -7188,7 +7220,10 @@ impl BudlumApiServer for RpcServer {
         &self,
         _config: Option<serde_json::Value>,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        Err(solana::not_exposed("getLatestBlockhash", "bud_getBlockByNumber"))
+        Err(solana::not_exposed(
+            "getLatestBlockhash",
+            "bud_getBlockByNumber",
+        ))
     }
 
     async fn solana_is_blockhash_valid(
@@ -7196,7 +7231,10 @@ impl BudlumApiServer for RpcServer {
         _blockhash: String,
         _config: Option<serde_json::Value>,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        Err(solana::not_exposed("isBlockhashValid", "bud_getBlockByNumber"))
+        Err(solana::not_exposed(
+            "isBlockhashValid",
+            "bud_getBlockByNumber",
+        ))
     }
 
     async fn solana_get_balance(
@@ -7212,7 +7250,10 @@ impl BudlumApiServer for RpcServer {
         _address: String,
         _config: Option<serde_json::Value>,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        Err(solana::ee_unavailable("getAccountInfo", "bud_getAccountProof"))
+        Err(solana::ee_unavailable(
+            "getAccountInfo",
+            "bud_getAccountProof",
+        ))
     }
 
     async fn solana_get_multiple_accounts(
@@ -7220,7 +7261,10 @@ impl BudlumApiServer for RpcServer {
         _addresses: Vec<String>,
         _config: Option<serde_json::Value>,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        Err(solana::ee_unavailable("getMultipleAccounts", "bud_getAccountProof"))
+        Err(solana::ee_unavailable(
+            "getMultipleAccounts",
+            "bud_getAccountProof",
+        ))
     }
 
     async fn solana_get_program_accounts(
@@ -7228,7 +7272,10 @@ impl BudlumApiServer for RpcServer {
         _program_id: String,
         _config: Option<serde_json::Value>,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        Err(solana::ee_unavailable("getProgramAccounts", "bud_getAccountProof"))
+        Err(solana::ee_unavailable(
+            "getProgramAccounts",
+            "bud_getAccountProof",
+        ))
     }
 
     async fn solana_get_token_accounts_by_owner(
@@ -7248,7 +7295,10 @@ impl BudlumApiServer for RpcServer {
         _token_account: String,
         _config: Option<serde_json::Value>,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        Err(solana::ee_unavailable("getTokenAccountBalance", "bud_getBalance"))
+        Err(solana::ee_unavailable(
+            "getTokenAccountBalance",
+            "bud_getBalance",
+        ))
     }
 
     async fn solana_get_token_supply(
@@ -7293,7 +7343,10 @@ impl BudlumApiServer for RpcServer {
         _transaction: String,
         _options: Option<serde_json::Value>,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        Err(solana::ee_unavailable("sendTransaction", "bud_sendRawTransaction"))
+        Err(solana::ee_unavailable(
+            "sendTransaction",
+            "bud_sendRawTransaction",
+        ))
     }
 
     async fn solana_simulate_transaction(
@@ -7301,7 +7354,10 @@ impl BudlumApiServer for RpcServer {
         _transaction: String,
         _options: Option<serde_json::Value>,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        Err(solana::ee_unavailable("simulateTransaction", "bud_txPrecheck"))
+        Err(solana::ee_unavailable(
+            "simulateTransaction",
+            "bud_txPrecheck",
+        ))
     }
 
     async fn solana_get_signature_statuses(
@@ -7331,7 +7387,10 @@ impl BudlumApiServer for RpcServer {
         _signature: String,
         _options: Option<serde_json::Value>,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        Err(solana::ee_unavailable("getTransaction", "bud_getTransactionByHash"))
+        Err(solana::ee_unavailable(
+            "getTransaction",
+            "bud_getTransactionByHash",
+        ))
     }
 
     async fn solana_get_block(
@@ -7366,7 +7425,12 @@ impl BudlumApiServer for RpcServer {
         _signature: String,
         _config: Option<serde_json::Value>,
     ) -> jsonrpsee::core::SubscriptionResult {
-        solana::subscriptions::reject_svm(pending, "signatureSubscribe", "bud_getTransactionReceipt").await
+        solana::subscriptions::reject_svm(
+            pending,
+            "signatureSubscribe",
+            "bud_getTransactionReceipt",
+        )
+        .await
     }
 
     async fn solana_slot_subscribe(
@@ -7383,7 +7447,8 @@ impl BudlumApiServer for RpcServer {
         _filter: serde_json::Value,
         _config: Option<serde_json::Value>,
     ) -> jsonrpsee::core::SubscriptionResult {
-        solana::subscriptions::reject_svm(pending, "logsSubscribe", "bud_getTransactionReceipt").await
+        solana::subscriptions::reject_svm(pending, "logsSubscribe", "bud_getTransactionReceipt")
+            .await
     }
 
     async fn solana_program_subscribe(
@@ -7547,8 +7612,8 @@ mod tests {
             .unwrap()
     }
 
- /// An allowed origin has to appear on the response: a browser withholds
- /// the body of a header-less response from JavaScript.
+    /// An allowed origin has to appear on the response: a browser withholds
+    /// the body of a header-less response from JavaScript.
     #[test]
     fn allowed_origin_is_reflected_into_the_response() {
         let config = cors_config(&["https://budlum-explorer.example"]);
@@ -7568,13 +7633,13 @@ mod tests {
                 .and_then(|v| v.to_str().ok()),
             Some("https://budlum-explorer.example")
         );
- // A cache must not serve one origin's response to another.
+        // A cache must not serve one origin's response to another.
         assert_eq!(
             response.headers().get("vary").and_then(|v| v.to_str().ok()),
             Some("Origin")
         );
- // Identity travels in a header, not a cookie: the credentials grant is
- // never sent, so a `*` configuration cannot turn into session theft.
+        // Identity travels in a header, not a cookie: the credentials grant is
+        // never sent, so a `*` configuration cannot turn into session theft.
         assert!(response
             .headers()
             .get("access-control-allow-credentials")
@@ -7589,8 +7654,8 @@ mod tests {
         assert_eq!(outcome, CorsOutcome::Deny);
         assert!(!matches!(outcome, CorsOutcome::Allow(_)));
 
- // No header may leak to a refused origin: even a 403 body becomes
- // readable to the browser if it is returned with the headers.
+        // No header may leak to a refused origin: even a 403 body becomes
+        // readable to the browser if it is returned with the headers.
         let response = text_response(StatusCode::FORBIDDEN, "Forbidden");
         assert!(response
             .headers()
@@ -7598,14 +7663,14 @@ mod tests {
             .is_none());
     }
 
- /// A `*` configuration answers with the literal `*`; the
- /// caller's `Origin` header is never echoed back.
+    /// A `*` configuration answers with the literal `*`; the
+    /// caller's `Origin` header is never echoed back.
     #[test]
     fn cors_wildcard_does_not_reflect_headers() {
         let config = cors_config(&["*"]);
         let req = request_from_origin("https://saldirgan.example");
         assert_eq!(cors_outcome(&config, &req), CorsOutcome::Allow("*".into()));
- // A named origin next to `*` still gets its own name back.
+        // A named origin next to `*` still gets its own name back.
         let config = cors_config(&["*", "https://budlum-explorer.example"]);
         let req = request_from_origin("https://budlum-explorer.example");
         assert_eq!(
@@ -7614,9 +7679,9 @@ mod tests {
         );
     }
 
- /// A prepared template carries the sender's next nonce and the
- /// admission fee floor, with `max_fee == fee`, whatever the hard-coded
- /// values in the template were.
+    /// A prepared template carries the sender's next nonce and the
+    /// admission fee floor, with `max_fee == fee`, whatever the hard-coded
+    /// values in the template were.
     #[tokio::test]
     async fn prepare_templates_carry_valid_nonce_and_fee() {
         use crate::chain::chain_actor::ChainCommand;
@@ -7651,18 +7716,18 @@ mod tests {
         assert_eq!(done.priority_fee, 0);
     }
 
- /// the fee a `Prepare` template is given must be one the chain
- /// will accept, not the `fee = 0` the template struct was built with.
- ///
- /// The finding is that 14 `Prepare` handlers returned `Transaction::new(.)`
- /// verbatim, so the wallet signed a transaction with nonce 0 and fee 0 and
- /// the node refused it at admission for exactly the two fields the RPC had
- /// left at their defaults. The canary is the fixture: the template starts at
- /// `fee = 500, max_fee = 500, nonce = 0` and the chain reports a required
- /// fee of 13 and a nonce of 7, so an unwired template keeps 500/0.
- ///
- /// This is the binding half; `prepare_templates_carry_valid_nonce_and_fee`
- /// above is the pre-existing behavioural test.
+    /// the fee a `Prepare` template is given must be one the chain
+    /// will accept, not the `fee = 0` the template struct was built with.
+    ///
+    /// The finding is that 14 `Prepare` handlers returned `Transaction::new(.)`
+    /// verbatim, so the wallet signed a transaction with nonce 0 and fee 0 and
+    /// the node refused it at admission for exactly the two fields the RPC had
+    /// left at their defaults. The canary is the fixture: the template starts at
+    /// `fee = 500, max_fee = 500, nonce = 0` and the chain reports a required
+    /// fee of 13 and a nonce of 7, so an unwired template keeps 500/0.
+    ///
+    /// This is the binding half; `prepare_templates_carry_valid_nonce_and_fee`
+    /// above is the pre-existing behavioural test.
     #[tokio::test]
     async fn a_prepared_template_is_admissible_by_the_chain() {
         use crate::chain::chain_actor::ChainCommand;
@@ -7682,9 +7747,9 @@ mod tests {
             }
         });
 
- // Every template starts with the two fields the finding names unset,
- // plus a fee that is neither the floor nor zero: if `finish_template`
- // is not on the path, the stale 500 survives and this fails.
+        // Every template starts with the two fields the finding names unset,
+        // plus a fee that is neither the floor nor zero: if `finish_template`
+        // is not on the path, the stale 500 survives and this fails.
         let mut stale = crate::core::transaction::Transaction::new(
             Address::from([1; 32]),
             Address::zero(),
@@ -7696,7 +7761,10 @@ mod tests {
         stale.nonce = 0;
 
         let prepared = finish_template(&chain, stale).await.expect("template");
-        assert_eq!(prepared.nonce, 7, "the sender's next nonce, not the default 0");
+        assert_eq!(
+            prepared.nonce, 7,
+            "the sender's next nonce, not the default 0"
+        );
         assert_eq!(prepared.fee, 13, "the admission floor, not the stale 500");
         assert_eq!(
             prepared.max_fee, prepared.fee,
@@ -7708,8 +7776,8 @@ mod tests {
         );
     }
 
- /// A value that cannot be encoded is an explicit error, not a
- /// `null` that reads as "absent".
+    /// A value that cannot be encoded is an explicit error, not a
+    /// `null` that reads as "absent".
     #[test]
     fn rpc_serialization_error_is_explicit() {
         let mut unencodable = std::collections::BTreeMap::new();
@@ -7720,7 +7788,7 @@ mod tests {
         assert_eq!(to_json("Ok", &5u8).unwrap(), serde_json::json!(5));
     }
 
- /// With CORS unconfigured no header is emitted - the default is closed.
+    /// With CORS unconfigured no header is emitted - the default is closed.
     #[test]
     fn empty_cors_list_emits_no_headers() {
         let config = RpcSecurityConfig {
@@ -7731,8 +7799,8 @@ mod tests {
         assert_eq!(cors_outcome(&config, &req), CorsOutcome::NotApplicable);
     }
 
- /// A preflight cannot carry a credential header. If we returned 401 the real
- /// request would never be sent; that is why preflight is answered before auth.
+    /// A preflight cannot carry a credential header. If we returned 401 the real
+    /// request would never be sent; that is why preflight is answered before auth.
     #[test]
     fn preflight_is_recognised_and_answered_without_credentials() {
         let mut req = HttpRequest::builder()
@@ -7744,7 +7812,7 @@ mod tests {
             .unwrap();
         assert!(is_cors_preflight(&req));
 
- // No identity header, and the allow decision still has to be reachable.
+        // No identity header, and the allow decision still has to be reachable.
         let config = cors_config(&["https://budlum-explorer.example"]);
         assert!(!is_authorized(&config, &req));
 
@@ -7758,13 +7826,12 @@ mod tests {
             Some("content-type, x-api-key, authorization")
         );
 
- // A plain OPTIONS is not a preflight.
+        // A plain OPTIONS is not a preflight.
         *req.method_mut() = hyper::Method::POST;
         assert!(!is_cors_preflight(&req));
     }
 
     async fn status_through_layer(
-        &self,
         mode: RpcMode,
         host: Option<&str>,
         origin: Option<&str>,
@@ -7829,6 +7896,56 @@ mod tests {
         assert_eq!(statuses[0], StatusCode::UNAUTHORIZED);
         assert_eq!(statuses[1], StatusCode::UNAUTHORIZED);
         assert_eq!(statuses[2], StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    #[tokio::test]
+    async fn unauthenticated_noise_does_not_starve_authenticated_caller_on_same_ip() {
+        let layer = RpcSecurityLayer::new(
+            RpcSecurityConfig {
+                auth_required: true,
+                api_key: Some("right-key".into()),
+                allowed_ips: Vec::new(),
+                rate_limit_per_minute: Some(2),
+                ..Default::default()
+            },
+            None,
+            RpcMode::Public,
+        );
+        let inner = tower::service_fn(|_req: HttpRequest<()>| async {
+            Ok::<_, std::convert::Infallible>(text_response(StatusCode::OK, "ok"))
+        });
+        let mut svc = layer.layer(inner);
+        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 40001);
+
+        // Exhaust the unauthenticated bucket from the shared IP.
+        for expected in [
+            StatusCode::UNAUTHORIZED,
+            StatusCode::UNAUTHORIZED,
+            StatusCode::TOO_MANY_REQUESTS,
+        ] {
+            let mut bad = HttpRequest::builder()
+                .uri("/")
+                .header("x-api-key", "wrong-key")
+                .body(())
+                .unwrap();
+            bad.extensions_mut().insert(addr);
+            assert_eq!(svc.call(bad).await.unwrap().status(), expected);
+        }
+
+        // Legitimate authenticated caller behind the same IP keeps its own budget.
+        for expected in [
+            StatusCode::OK,
+            StatusCode::OK,
+            StatusCode::TOO_MANY_REQUESTS,
+        ] {
+            let mut good = HttpRequest::builder()
+                .uri("/")
+                .header("x-api-key", "right-key")
+                .body(())
+                .unwrap();
+            good.extensions_mut().insert(addr);
+            assert_eq!(svc.call(good).await.unwrap().status(), expected);
+        }
     }
 
     #[tokio::test]
@@ -7944,13 +8061,13 @@ mod tests {
         assert_eq!(clamp_feed_limit(5), 5);
     }
 
- /// Subscription feeds are bounded node-wide, not per connection.
- ///
- /// Each feed polls the chain actor every second and serializes a whole
- /// block for its own subscriber, so an unbounded fan-out let one client
- /// multiply that work by opening connections: the per-IP limiter sees the
- /// upgrade, and jsonrpsee's own cap is per connection. The pool of slots is
- /// what makes the ceiling hold across connections.
+    /// Subscription feeds are bounded node-wide, not per connection.
+    ///
+    /// Each feed polls the chain actor every second and serializes a whole
+    /// block for its own subscriber, so an unbounded fan-out let one client
+    /// multiply that work by opening connections: the per-IP limiter sees the
+    /// upgrade, and jsonrpsee's own cap is per connection. The pool of slots is
+    /// what makes the ceiling hold across connections.
     #[test]
     fn subscription_feeds_are_capped_node_wide() {
         let mut held = Vec::new();
@@ -7964,7 +8081,7 @@ mod tests {
         );
         assert!(feed_slot().is_none(), "a full pool refuses the next feed");
 
- // Closing a subscription releases its slot.
+        // Closing a subscription releases its slot.
         held.pop();
         let slot = feed_slot().expect("a released slot is reusable");
         drop(slot);
@@ -7987,17 +8104,17 @@ mod tests {
         let per_ip_rates = Arc::new(Mutex::new(HashMap::new()));
         let ip = Some(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)));
 
- // First request: allowed
+        // First request: allowed
         assert!(is_per_ip_rate_limited(&config, &per_ip_rates, ip));
- // Second request: allowed
+        // Second request: allowed
         assert!(is_per_ip_rate_limited(&config, &per_ip_rates, ip));
- // Third request: rate limited (exceeds limit of 2)
+        // Third request: rate limited (exceeds limit of 2)
         assert!(!is_per_ip_rate_limited(&config, &per_ip_rates, ip));
     }
 
- /// When the table is full, the quietest client is evicted, never
- /// one that sits at its quota: evicting a saturated client would reset its
- /// window and hand it a fresh quota.
+    /// When the table is full, the quietest client is evicted, never
+    /// one that sits at its quota: evicting a saturated client would reset its
+    /// window and hand it a fresh quota.
     #[test]
     fn full_table_does_not_evict_a_saturated_client() {
         let config = RpcSecurityConfig {
@@ -8017,8 +8134,8 @@ mod tests {
                     1,
                 ));
                 let mut window = VecDeque::new();
- // Every client but the saturated one made one recent request;
- // the saturated one is the oldest and at its quota.
+                // Every client but the saturated one made one recent request;
+                // the saturated one is the oldest and at its quota.
                 let first = now - Duration::from_secs(50) + Duration::from_millis(i as u64);
                 window.push_back(first);
                 if ip == saturated {
@@ -8034,7 +8151,7 @@ mod tests {
             Some(newcomer)
         ));
         assert!(per_ip_rates.lock().unwrap().contains_key(&saturated));
- // The saturated client is still refused.
+        // The saturated client is still refused.
         assert!(!is_per_ip_rate_limited(
             &config,
             &per_ip_rates,
@@ -8091,11 +8208,11 @@ mod tests {
         assert!(is_ip_allowed(&config, &req));
     }
 
- /// lock, quota half. A client behind a proxy may forge every entry
- /// to the left of the one its proxy appended. The quota is keyed on the
- /// appended address, so three forgeries spend three requests of one window
- /// and the fourth is refused. An implementation that took the leftmost entry
- /// would hand a fresh bucket to every forged address.
+    /// lock, quota half. A client behind a proxy may forge every entry
+    /// to the left of the one its proxy appended. The quota is keyed on the
+    /// appended address, so three forgeries spend three requests of one window
+    /// and the fourth is refused. An implementation that took the leftmost entry
+    /// would hand a fresh bucket to every forged address.
     #[test]
     fn a_forged_forwarded_for_entry_buys_no_fresh_quota() {
         let config = RpcSecurityConfig {
@@ -8137,10 +8254,10 @@ mod tests {
         );
     }
 
- /// lock. The comparison walks the expected key on every call and
- /// folds the length difference into the accumulator, so a candidate of the
- /// wrong length is refused without an early return and without the
- /// same-buffer self-comparison that measured shorter than a real mismatch.
+    /// lock. The comparison walks the expected key on every call and
+    /// folds the length difference into the accumulator, so a candidate of the
+    /// wrong length is refused without an early return and without the
+    /// same-buffer self-comparison that measured shorter than a real mismatch.
     #[test]
     fn the_api_key_compare_never_early_returns_on_length() {
         let expected = "secret-value";
@@ -8148,7 +8265,7 @@ mod tests {
             "",
             "s",
             "secret",
-            "secret-valu",
+            "secret-val0",
             "secret-value",
             "secret-valuf",
             "secret-value-and-more",
@@ -8159,13 +8276,13 @@ mod tests {
                 "candidate {candidate:?}"
             );
         }
- // An empty candidate and an empty expectation are the one case where the
- // loop body never runs: the length fold alone decides.
+        // An empty candidate and an empty expectation are the one case where the
+        // loop body never runs: the length fold alone decides.
         assert!(constant_time_eq_str("", ""));
         assert!(!constant_time_eq_str("x", ""));
- // A one byte difference at the end is refused, as is the same length
- // with a different byte: neither answer is allowed to be cheaper.
-        assert!(!constant_time_eq_str("secret-valud", expected));
+        // A one byte difference at the end is refused, as is the same length
+        // with a different byte: neither answer is allowed to be cheaper.
+        assert!(!constant_time_eq_str("secret-val00", expected));
     }
 
     #[test]
@@ -8217,22 +8334,30 @@ mod tests {
             "x-forwarded-for",
             HeaderValue::from_static("198.51.100.99, 203.0.113.7"),
         );
-        req.headers_mut().append(
-            "x-forwarded-for",
-            HeaderValue::from_static("192.0.2.10"),
-        );
+        req.headers_mut()
+            .append("x-forwarded-for", HeaderValue::from_static("192.0.2.10"));
         let client = Some(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 7)));
         assert_eq!(extract_client_ip(&config, &req), client);
         assert!(is_ip_allowed(&config, &req));
         let rates = Arc::new(Mutex::new(HashMap::new()));
         assert!(is_per_ip_rate_limited(&config, &rates, client));
-        assert!(!is_per_ip_rate_limited(&config, &rates, extract_client_ip(&config, &req)));
+        assert!(!is_per_ip_rate_limited(
+            &config,
+            &rates,
+            extract_client_ip(&config, &req)
+        ));
 
-        req.headers_mut().insert("x-forwarded-for", HeaderValue::from_static("bad"));
-        req.headers_mut().insert("x-real-ip", HeaderValue::from_static("203.0.113.7"));
+        req.headers_mut()
+            .insert("x-forwarded-for", HeaderValue::from_static("bad"));
+        req.headers_mut()
+            .insert("x-real-ip", HeaderValue::from_static("203.0.113.7"));
         assert_eq!(extract_client_ip(&config, &req), None);
         assert!(!is_ip_allowed(&config, &req));
-        assert!(!is_per_ip_rate_limited(&config, &rates, extract_client_ip(&config, &req)));
+        assert!(!is_per_ip_rate_limited(
+            &config,
+            &rates,
+            extract_client_ip(&config, &req)
+        ));
     }
 
     #[test]
@@ -8277,14 +8402,14 @@ mod tests {
 mod api_key_comparison_tests {
     use super::constant_time_eq_str;
 
- /// Correctness: every one of these must answer exactly `<`, `==` and `>`
- /// the way `str::eq` would, including the empty string on both sides.
+    /// Correctness: every one of these must answer exactly `<`, `==` and `>`
+    /// the way `str::eq` would, including the empty string on both sides.
     #[test]
     fn the_comparison_is_a_correct_equality() {
         for (a, b) in [
             ("secret-value", "secret-value"),
             ("secret-value", "secret-valuf"),
-            ("secret-value", "secret-valu"),
+            ("secret-value", "secret-val0"),
             ("secret-value", "x"),
             ("x", "secret-value"),
             ("", ""),
@@ -8300,28 +8425,28 @@ mod api_key_comparison_tests {
         }
     }
 
- /// The work depends on the expected value's length, never on the
- /// candidate's. A short candidate must still walk the whole expected
- /// buffer: with the self-comparison shape the loop had no second buffer to
- /// walk, and the assembler removed it.
- ///
- /// This is asserted as a shape, not a timer: the function is
- /// `black_box`-ed on every accumulated byte, so the loop is opaque to the
- /// optimiser, and the observable consequence is that one byte of the
- /// candidate changes the answer while a shorter candidate is still refused.
+    /// The work depends on the expected value's length, never on the
+    /// candidate's. A short candidate must still walk the whole expected
+    /// buffer: with the self-comparison shape the loop had no second buffer to
+    /// walk, and the assembler removed it.
+    ///
+    /// This is asserted as a shape, not a timer: the function is
+    /// `black_box`-ed on every accumulated byte, so the loop is opaque to the
+    /// optimiser, and the observable consequence is that one byte of the
+    /// candidate changes the answer while a shorter candidate is still refused.
     #[test]
     fn a_length_mismatch_is_refused_without_a_self_comparison() {
         let expected = "the-expected-api-key-of-some-length";
- // Every truncation is refused, including the ones that agree on their
- // whole prefix: a prefix match must not be accepted.
+        // Every truncation is refused, including the ones that agree on their
+        // whole prefix: a prefix match must not be accepted.
         for cut in 0..expected.len() {
             assert!(
                 !constant_time_eq_str(&expected[..cut], expected),
                 "a {cut}-byte prefix must not be accepted as the key"
             );
         }
- // And an extension is refused too: length is folded into the
- // accumulator, it is not a prefix rule.
+        // And an extension is refused too: length is folded into the
+        // accumulator, it is not a prefix rule.
         let longer = format!("{expected}x");
         assert!(!constant_time_eq_str(&longer, expected));
         assert!(constant_time_eq_str(expected, expected));
@@ -8334,10 +8459,10 @@ mod api_key_comparison_tests {
 /// The finding has two halves and both were exploitable on their own:
 ///
 /// * `extract_client_ip` trusted the **leftmost** `X-Forwarded-For` entry, so
-/// a client could set the header and pick its own identity, walk straight
-/// through an `allowed_ips` list and mint a fresh quota per request.
+///   a client could set the header and pick its own identity, walk straight
+///   through an `allowed_ips` list and mint a fresh quota per request.
 /// * the rate table evicted FIFO, so an attacker rotating addresses could push
-/// a saturated address out of the table and buy it a fresh window.
+///   a saturated address out of the table and buy it a fresh window.
 ///
 /// A test that only checked the header parse would stay green if the quota
 /// went back to a shared bucket, so this one drives both through one config.
@@ -8363,8 +8488,8 @@ mod client_identity_tests {
         };
         let per_ip_rates = Arc::new(Mutex::new(HashMap::new()));
 
- // The client prepends a forged address and the proxy appends the real
- // one. The forged entry must not be the identity.
+        // The client prepends a forged address and the proxy appends the real
+        // one. The forged entry must not be the identity.
         let mut spoofed = request_with_remote(proxy);
         spoofed.headers_mut().insert(
             "x-forwarded-for",
@@ -8375,24 +8500,24 @@ mod client_identity_tests {
             Some(IpAddr::V4(Ipv4Addr::new(198, 51, 100, 9))),
             "the rightmost entry is the one the trusted proxy appended"
         );
- // The forged entry would have passed the allow-list; the real one does
- // not, which is the point of the finding.
+        // The forged entry would have passed the allow-list; the real one does
+        // not, which is the point of the finding.
         assert!(!is_ip_allowed(&config, &spoofed));
 
- // The quota is keyed on the real identity: one request is admitted and
- // the second from the same client is refused.
+        // The quota is keyed on the real identity: one request is admitted and
+        // the second from the same client is refused.
         let real = extract_client_ip(&config, &spoofed);
         assert!(is_per_ip_rate_limited(&config, &per_ip_rates, real));
         assert!(!is_per_ip_rate_limited(&config, &per_ip_rates, real));
 
- // A different client behind the same proxy still has its own quota:
- // the table is per identity, not per proxy.
+        // A different client behind the same proxy still has its own quota:
+        // the table is per identity, not per proxy.
         let other = Some(IpAddr::V4(Ipv4Addr::new(198, 51, 100, 10)));
         assert!(is_per_ip_rate_limited(&config, &per_ip_rates, other));
     }
 
- /// The other half: filling the table does not evict a client that is at its
- /// quota, so a rotation cannot buy a saturated address a fresh window.
+    /// The other half: filling the table does not evict a client that is at its
+    /// quota, so a rotation cannot buy a saturated address a fresh window.
     #[test]
     fn a_full_table_evicts_the_quietest_client_not_the_busiest() {
         let config = RpcSecurityConfig {
@@ -8412,8 +8537,8 @@ mod client_identity_tests {
             let mut quiet_window = VecDeque::new();
             quiet_window.push_back(now - Duration::from_secs(40));
             rates.insert(quiet, quiet_window);
- // The rest of the table, so the ceiling is reached on the next
- // unknown address.
+            // The rest of the table, so the ceiling is reached on the next
+            // unknown address.
             for i in 0..(MAX_TRACKED_RPC_CLIENTS - 2) {
                 let ip = IpAddr::V4(Ipv4Addr::new(
                     11,
@@ -8449,7 +8574,7 @@ mod render_format_tests {
     use super::parse_render_format;
     use crate::storage::render::RenderFormat;
 
- /// Three formats are recognised, and their parameters are carried through.
+    /// Three formats are recognised, and their parameters are carried through.
     #[test]
     fn the_three_read_formats_parse() {
         assert_eq!(parse_render_format("svg"), Ok(RenderFormat::Svg));
@@ -8463,12 +8588,12 @@ mod render_format_tests {
         );
     }
 
- /// An unknown format is rejected, not defaulted.
- ///
- /// Falling back would return a different object under the identity of the
- /// one that was asked for. The format is part of the commitment
- /// (section 72): handing SVG to someone who meant `png` and typed `pngg`
- /// is a wrong answer, not leniency.
+    /// An unknown format is rejected, not defaulted.
+    ///
+    /// Falling back would return a different object under the identity of the
+    /// one that was asked for. The format is part of the commitment
+    /// (section 72): handing SVG to someone who meant `png` and typed `pngg`
+    /// is a wrong answer, not leniency.
     #[test]
     fn an_unknown_format_is_refused_not_defaulted() {
         for bad in ["", "pngg", "webp", "SVG", "svg:1", "png", "frame"] {
@@ -8479,20 +8604,20 @@ mod render_format_tests {
         }
     }
 
- /// An unparsable numeric parameter is an error, not a zero.
+    /// An unparsable numeric parameter is an error, not a zero.
     #[test]
     fn a_bad_number_is_an_error() {
         assert!(parse_render_format("png:large").is_err());
         assert!(parse_render_format("png:-1").is_err());
- // A u16 overflow is an error too: clamping quietly would produce a
- // different object.
+        // A u16 overflow is an error too: clamping quietly would produce a
+        // different object.
         assert!(parse_render_format("png:70000").is_err());
         assert!(parse_render_format("frame:abc").is_err());
     }
 
- /// `QrStream` cannot be requested over RPC.
- ///
- /// It is a transport representation, not a way of reading.
+    /// `QrStream` cannot be requested over RPC.
+    ///
+    /// It is a transport representation, not a way of reading.
     #[test]
     fn the_transport_frame_is_not_a_read_format() {
         assert!(parse_render_format("qrstream:0").is_err());
@@ -8517,10 +8642,10 @@ mod view_claim_tests {
         )
     }
 
- /// The `owner` field is checked against the chain's record before the
- /// grant lookup. A request naming another address as owner of recorded
- /// content is refused by name; the recorded owner passes; content with no
- /// record is left to the grant lookup rather than refused here.
+    /// The `owner` field is checked against the chain's record before the
+    /// grant lookup. A request naming another address as owner of recorded
+    /// content is refused by name; the recorded owner passes; content with no
+    /// record is left to the grant lookup rather than refused here.
     #[test]
     fn the_claimed_owner_must_be_the_recorded_owner() {
         let recorded = Address::from([4u8; 32]);
@@ -8532,7 +8657,7 @@ mod view_claim_tests {
         assert!(check_claimed_owner(None, &stranger).is_ok());
     }
 
- /// A claim without a key or a signature is refused before any crypto.
+    /// A claim without a key or a signature is refused before any crypto.
     #[test]
     fn a_bare_viewer_address_is_not_a_claim() {
         let (content, key, owner, packed) = parts();
@@ -8543,9 +8668,9 @@ mod view_claim_tests {
         assert!(err.message().contains("viewerClaim"), "{err:?}");
     }
 
- /// The claim's key field is the viewer's, by name. A claim that carries
- /// the grant field `ownerPublicKey` instead is refused with the field the
- /// viewer has to send, not with a signature error.
+    /// The claim's key field is the viewer's, by name. A claim that carries
+    /// the grant field `ownerPublicKey` instead is refused with the field the
+    /// viewer has to send, not with a signature error.
     #[test]
     fn a_view_claim_names_the_viewer_key_field() {
         let (content, key, owner, packed) = parts();
@@ -8595,7 +8720,7 @@ mod view_claim_tests {
         })
     }
 
- /// The viewer is the address the signing key derives to, and nothing else.
+    /// The viewer is the address the signing key derives to, and nothing else.
     #[cfg(feature = "wallet-ml-dsa")]
     #[test]
     fn the_viewer_is_whoever_signed() {
@@ -8608,7 +8733,7 @@ mod view_claim_tests {
         assert_eq!(viewer, kp.address());
     }
 
- /// A claim signed for one object, key, owner or payload opens no other.
+    /// A claim signed for one object, key, owner or payload opens no other.
     #[cfg(feature = "wallet-ml-dsa")]
     #[test]
     fn a_claim_is_bound_to_the_request_it_was_signed_for() {
@@ -8631,8 +8756,8 @@ mod view_claim_tests {
         }
     }
 
- /// A stranger's key cannot speak for a grantee: the address is derived,
- /// so the only way to be the grantee is to hold the grantee's key.
+    /// A stranger's key cannot speak for a grantee: the address is derived,
+    /// so the only way to be the grantee is to hold the grantee's key.
     #[cfg(feature = "wallet-ml-dsa")]
     #[test]
     fn a_stranger_cannot_name_the_grantee() {
@@ -8640,9 +8765,9 @@ mod view_claim_tests {
         let (content, key, owner, packed) = parts();
         let grantee = WalletKeyPair::generate();
         let stranger = WalletKeyPair::generate();
- // The stranger signs the grantee's digest with its own key: the
- // signature verifies under the stranger's key, but the key derives to
- // the stranger, so the request is about the stranger, not the grantee.
+        // The stranger signs the grantee's digest with its own key: the
+        // signature verifies under the stranger's key, but the key derives to
+        // the stranger, so the request is about the stranger, not the grantee.
         let digest = crate::storage::view_claim_digest(
             &content,
             &grantee.address(),
@@ -8660,7 +8785,7 @@ mod view_claim_tests {
         assert_eq!(err.code(), -32602, "{err:?}");
     }
 
- /// A captured claim dies with the session window, and future claims are invalid.
+    /// A captured claim dies with the session window, and future claims are invalid.
     #[cfg(feature = "wallet-ml-dsa")]
     #[test]
     fn a_claim_outside_the_window_is_refused() {

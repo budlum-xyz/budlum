@@ -809,7 +809,7 @@ fn settlement_door_refuses_object_layer_on_testnet() {
             .chain_id()
             .value(),
         fee: 0,
-        bls: || Box::new(crate::crypto::primitives::MockBlsVerifier),
+        bls: || Box::new(crate::cross_domain::external::intake::PairingBls),
     };
     let tx = crate::settlement::domains::SettlementTx::ObjectLayer(Box::new(
         ObjectLayerTx::SetTentativeConsent { consent: true },
@@ -830,18 +830,18 @@ fn tentative_single_dependency_consent_resolve_and_depart_guard() {
     let contract = w.fx.address(0x21);
 
     // Without consent, tentative arrival is refused.
-    let mut p1 = w.proof(
-        10,
-        1,
-        w.fx.arrive(ArriveSpec {
+    let raw1 = w.fx.arrive(
+        &w.endpoint,
+        ArriveSpec {
             kind: AssetKind::Fungible,
             contract: &contract,
             native_id: &[],
             amount: 5,
             depositor: &w.fx.address(0x31),
             recipient: Some(alice_addr),
-        }),
+        },
     );
+    let mut p1 = w.proof(raw1);
     p1.phase = Phase::Tentative;
     assert_eq!(w.reg.arrive(&p1, &YES), Err(Refusal::TentativeClosed));
 
@@ -851,18 +851,18 @@ fn tentative_single_dependency_consent_resolve_and_depart_guard() {
     assert_eq!(w.reg.dependencies.len(), 1);
 
     // Single-dependency rule: a second tentative arrival before resolve is refused.
-    let mut p2 = w.proof(
-        11,
-        2,
-        w.fx.arrive(ArriveSpec {
+    let raw2 = w.fx.arrive(
+        &w.endpoint,
+        ArriveSpec {
             kind: AssetKind::Fungible,
             contract: &contract,
             native_id: &[],
             amount: 3,
             depositor: &w.fx.address(0x31),
             recipient: Some(alice_addr),
-        }),
+        },
     );
+    let mut p2 = w.proof(raw2);
     p2.phase = Phase::Tentative;
     assert_eq!(
         w.reg.arrive(&p2, &YES),
@@ -871,8 +871,7 @@ fn tentative_single_dependency_consent_resolve_and_depart_guard() {
 
     // Unresolved tentative balance cannot depart to home prematurely.
     assert_eq!(
-        w.reg
-            .depart(alice(), class, &[], 5, w.fx.address(0x41), 12),
+        w.reg.depart(alice(), class, &[], 5, w.fx.address(0x41), 12),
         Err(Refusal::PendingTentativeDependency)
     );
 
@@ -920,7 +919,7 @@ fn adopt_escape_record_v1_and_challenge_rebut_forgery_paths() {
         .register_class(
             alice_addr,
             ClassRegistration {
-                home_domain: w.domain,
+                home_domain: DOMAIN,
                 kind: AssetKind::Unique,
                 contract: record_contract,
                 rule: record_rule,
@@ -962,21 +961,21 @@ fn adopt_escape_record_v1_and_challenge_rebut_forgery_paths() {
     // Alice binds escape address (`domain_le || raw_home`) and adopts.
     let depositor = w.fx.address(0x66);
     let fungible_contract = w.fx.address(0x21);
-    let arrive_home = w.proof(
-        20,
-        9,
-        w.fx.arrive(ArriveSpec {
+    let raw_home = w.fx.arrive(
+        &w.endpoint,
+        ArriveSpec {
             kind: AssetKind::Fungible,
             contract: &fungible_contract,
             native_id: &[],
             amount: 9,
             depositor: &depositor,
             recipient: None,
-        }),
+        },
     );
+    let arrive_home = w.proof(raw_home);
     w.reg.arrive(&arrive_home, &YES).unwrap();
 
-    let mut binding = w.domain.to_le_bytes().to_vec();
+    let mut binding = DOMAIN.to_le_bytes().to_vec();
     binding.extend_from_slice(&depositor);
     assert_eq!(w.reg.adopt(bob_addr, &binding), Err(Refusal::NotAuthorized));
 

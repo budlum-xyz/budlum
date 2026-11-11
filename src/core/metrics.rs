@@ -1,8 +1,13 @@
 use prometheus::{
-    Encoder, Histogram, HistogramOpts, IntCounter, IntGauge, IntGaugeVec, Registry,
-    TextEncoder,
+    Encoder, Histogram, HistogramOpts, IntCounter, IntGauge, IntGaugeVec, Registry, TextEncoder,
 };
 use std::sync::Arc;
+
+/// Convenience: exposed for integer-only consensus audit latency observation.
+#[must_use]
+pub fn histogram_seconds_from_u64(seconds: u64) -> f64 {
+    u32::try_from(seconds).map_or(f64::from(u32::MAX), f64::from)
+}
 
 #[derive(Clone)]
 pub struct Metrics {

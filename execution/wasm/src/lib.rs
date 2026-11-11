@@ -150,9 +150,6 @@ pub fn build_wasm_engine() -> Engine {
     let mut cfg = Config::default();
     cfg.floats(false);
     cfg.consume_fuel(true);
-    cfg.wasm_simd(false);
-    cfg.wasm_relaxed_simd(false);
-    cfg.wasm_memory64(false);
     cfg.wasm_multi_memory(false);
     Engine::new(&cfg)
 }

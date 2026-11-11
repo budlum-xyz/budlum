@@ -22,7 +22,7 @@
 //! reproduced it here would be a second implementation of the format proving
 //! itself. The runbook says so instead of implying the drill covers it.
 
-use crate::storage::Storage;
+use crate::persistence::db::Storage;
 use std::path::{Path, PathBuf};
 
 fn repo_root() -> &'static Path {

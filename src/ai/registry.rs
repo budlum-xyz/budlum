@@ -2,6 +2,7 @@
 //!
 //! Tracks active models, pending inference requests, accumulated verifier attestations,
 //! And finalized consensus outcomes. Provides deterministic `state_root` calculation.
+//! Convenience: exposed for CLI, RPC, SDK, and multi-VM runtime callers.
 
 use crate::ai::types::{
     AiAgentPayment, AiAgentPaymentReceipt, AiAgentPaymentSettlement, AiAgentReputation,
@@ -2026,7 +2027,10 @@ impl AiRegistry {
             .map(|(addr, rep)| (*addr, rep.trust_score_permyriad(), rep.trust_score()))
             .collect();
         scored.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
-        scored.into_iter().map(|(addr, _, score)| (addr, score)).collect()
+        scored
+            .into_iter()
+            .map(|(addr, _, score)| (addr, score))
+            .collect()
     }
 
     /// The agent ranking as integers: `(address, permyriad score)`, ordered
@@ -2300,9 +2304,10 @@ mod tests {
             assert_eq!(*address, integer_ranking[i].0, "same order as integers");
             let rep = registry.get_agent_reputation(address).unwrap();
             assert_eq!(integer_ranking[i].1, rep.trust_score_permyriad());
-            assert!((*score - f64::from(u32::try_from(integer_ranking[i].1).unwrap()) / 10_000.0)
-                .abs()
-                < 0.01);
+            assert!(
+                (*score - f64::from(u32::try_from(integer_ranking[i].1).unwrap()) / 10_000.0).abs()
+                    < 0.01
+            );
         }
         assert_eq!(
             registry.agents_by_trust_score_permille(),

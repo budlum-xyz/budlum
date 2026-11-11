@@ -2,8 +2,8 @@
 mod ethereum_compat_tests {
     use crate::rpc::compat::ethereum::opening::{proof_is_not_an_mpt_proof, row, Answer, METHODS};
 
- /// Section 8.11.2, verbatim and in its order, without `eth_getProof`
- /// (which Section 8.10.6 adds to this gateway on purpose).
+    /// Section 8.11.2, verbatim and in its order, without `eth_getProof`
+    /// (which Section 8.10.6 adds to this gateway on purpose).
     const DIRECTIVE_METHODS: &[&str] = &[
         "web3_clientVersion",
         "net_version",
@@ -43,7 +43,7 @@ mod ethereum_compat_tests {
         "debug_traceCall",
     ];
 
- /// The names the gateway serves today: every row that is not pending.
+    /// The names the gateway serves today: every row that is not pending.
     fn served_names() -> Vec<&'static str> {
         METHODS
             .iter()
@@ -52,11 +52,11 @@ mod ethereum_compat_tests {
             .collect()
     }
 
- /// Every method name `src/rpc/api.rs` declares, read from its source.
- ///
- /// `api.rs` is the wire surface: a name that is not in it cannot be
- /// called, so the gateway table is checked against this text and not
- /// against a second hand-written list.
+    /// Every method name `src/rpc/api.rs` declares, read from its source.
+    ///
+    /// `api.rs` is the wire surface: a name that is not in it cannot be
+    /// called, so the gateway table is checked against this text and not
+    /// against a second hand-written list.
     fn declared_method_names() -> Vec<String> {
         let api = include_str!("../../../api.rs");
         let mut names = Vec::new();
@@ -70,7 +70,7 @@ mod ethereum_compat_tests {
         names
     }
 
- /// The declared names that belong to a compatibility namespace.
+    /// The declared names that belong to a compatibility namespace.
     fn declared_gateway_names() -> Vec<String> {
         let mut names: Vec<String> = declared_method_names()
             .into_iter()
@@ -85,7 +85,7 @@ mod ethereum_compat_tests {
         names
     }
 
- /// `(name, listener, effect)` for every row of the Budlum class table.
+    /// `(name, listener, effect)` for every row of the Budlum class table.
     fn class_rows() -> Vec<(String, String, String)> {
         let source = include_str!("../../../method_class.rs");
         let start = source
@@ -103,7 +103,10 @@ mod ethereum_compat_tests {
             let mut parts = inner.split(',').map(str::trim).filter(|s| !s.is_empty());
             rows.push((
                 name.to_string(),
-                parts.next().expect("a class row has a listener").to_string(),
+                parts
+                    .next()
+                    .expect("a class row has a listener")
+                    .to_string(),
                 parts.next().expect("a class row has an effect").to_string(),
             ));
         }
@@ -129,14 +132,14 @@ mod ethereum_compat_tests {
             "Section 8.11.2 names methods the gateway table does not: {missing:?}"
         );
 
- // The table is the directive list plus `eth_getProof`, and nothing
- // else: an extra row would be a method the directive never gave this
- // gateway.
+        // The table is the directive list plus `eth_getProof`, and nothing
+        // else: an extra row would be a method the directive never gave this
+        // gateway.
         assert_eq!(listed.len(), DIRECTIVE_METHODS.len() + 1);
         assert_eq!(listed.last().copied(), Some("eth_getProof"));
 
- // The directive names these in this order, so a reader can walk both
- // side by side.
+        // The directive names these in this order, so a reader can walk both
+        // side by side.
         assert_eq!(&listed[..DIRECTIVE_METHODS.len()], DIRECTIVE_METHODS);
     }
 
@@ -205,8 +208,8 @@ mod ethereum_compat_tests {
                         "{} has a different effect in the two tables",
                         entry.name
                     );
- // A chain read is never operator-only: every node agrees
- // on it, so there is nothing to withhold.
+                    // A chain read is never operator-only: every node agrees
+                    // on it, so there is nothing to withhold.
                     if entry.answer == Answer::ChainRead {
                         assert_eq!(listener.as_str(), "Public", "{}", entry.name);
                     }
@@ -223,7 +226,10 @@ mod ethereum_compat_tests {
                 .iter()
                 .find(|(candidate, _, _)| candidate == name)
                 .expect("the operator method has a class row");
-            assert_eq!(row.1, "Operator", "{name} must not be on the public listener");
+            assert_eq!(
+                row.1, "Operator",
+                "{name} must not be on the public listener"
+            );
         }
     }
 
@@ -234,7 +240,11 @@ mod ethereum_compat_tests {
         for entry in METHODS {
             if let Answer::Pending { package } = entry.answer {
                 pending += 1;
-                assert!(!package.is_empty(), "{} pends without a package", entry.name);
+                assert!(
+                    !package.is_empty(),
+                    "{} pends without a package",
+                    entry.name
+                );
                 assert!(
                     !served.contains(&entry.name),
                     "{} pends and is served at the same time",

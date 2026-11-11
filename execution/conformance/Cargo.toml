@@ -6,7 +6,7 @@ name = "budlum-ee-conformance"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.97.1"
-license = "Apache-2.0"
+license = "LicenseRef-PolyForm-Shield-1.0.0"
 publish = false
 description = "Budlum UEL cross-environment conformance, gas calibration, and cross-arch root runner ()"
 

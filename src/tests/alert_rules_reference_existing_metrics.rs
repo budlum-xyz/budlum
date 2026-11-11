@@ -46,7 +46,9 @@ fn exported_metrics() -> BTreeSet<String> {
 fn queried_metrics(text: &str) -> BTreeSet<String> {
     let expressions: String = text
         .lines()
-        .filter(|line| line.trim_start().starts_with("expr:") || line.trim_start().contains("\"expr\":"))
+        .filter(|line| {
+            line.trim_start().starts_with("expr:") || line.trim_start().contains("\"expr\":")
+        })
         .collect::<Vec<_>>()
         .join("\n");
     budlum_metric_names(&expressions)
@@ -63,7 +65,10 @@ fn alert_rules_reference_existing_metrics() {
         .filter(|name| !exported.contains(*name))
         .map(String::as_str)
         .collect();
-    assert!(missing.is_empty(), "alert rules refer to missing metrics: {missing:?}");
+    assert!(
+        missing.is_empty(),
+        "alert rules refer to missing metrics: {missing:?}"
+    );
     assert!(referenced.contains("budlum_rpc_rate_limited_total"));
     assert!(referenced.contains("budlum_faucet_grants_total"));
 }
@@ -108,7 +113,10 @@ fn every_budlum_rule_queries_a_budlum_series() {
             }
         }
     }
-    assert!(rules >= 8, "the rule scan found {rules} rules; that is vacuous");
+    assert!(
+        rules >= 8,
+        "the rule scan found {rules} rules; that is vacuous"
+    );
 }
 
 #[test]
@@ -121,7 +129,10 @@ fn the_dashboard_queries_series_the_node_exports() {
         .filter(|name| !exported.contains(*name))
         .map(String::as_str)
         .collect();
-    assert!(missing.is_empty(), "dashboard queries missing metrics: {missing:?}");
+    assert!(
+        missing.is_empty(),
+        "dashboard queries missing metrics: {missing:?}"
+    );
     for mandatory in [
         "budlum_finality_stalled",
         "budlum_finality_lag_checkpoints",
@@ -131,6 +142,9 @@ fn the_dashboard_queries_series_the_node_exports() {
         "budlum_state_root_mismatch_total",
         "budlum_rpc_rate_limited_total",
     ] {
-        assert!(queried.contains(mandatory), "{mandatory} has no dashboard panel");
+        assert!(
+            queried.contains(mandatory),
+            "{mandatory} has no dashboard panel"
+        );
     }
 }

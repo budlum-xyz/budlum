@@ -55,9 +55,8 @@ mod rpc_tests {
         let mut stream = tokio::net::TcpStream::connect(addr)
             .await
             .expect("the server accepted a connection");
-        let request = format!(
-            "GET {path} HTTP/1.1\r\nHost: {addr}\r\n{headers}Connection: close\r\n\r\n"
-        );
+        let request =
+            format!("GET {path} HTTP/1.1\r\nHost: {addr}\r\n{headers}Connection: close\r\n\r\n");
         stream
             .write_all(request.as_bytes())
             .await
@@ -200,10 +199,7 @@ mod rpc_tests {
             .await
             .expect("a well-formed unknown asset id answers null");
         assert!(asset.is_null());
-        let asset_error = server
-            .get_asset("0x00".to_owned())
-            .await
-            .unwrap_err();
+        let asset_error = server.get_asset("0x00".to_owned()).await.unwrap_err();
         assert_eq!(asset_error.code(), -32602);
     }
 
@@ -1230,7 +1226,6 @@ mod rpc_tests {
         assert_eq!(refused.code(), -32004);
     }
 
-
     /// The re-encode check refuses a body over the shared 1 MiB cap before
     /// it decodes or encodes anything.
     /// The estimate for a transfer of `amount` whose own fee is unset.
@@ -1276,7 +1271,11 @@ mod rpc_tests {
             .await
             .expect("the chain actor answers");
         let estimate = u64::from_str_radix(
-            server.estimate_gas(tx).await.unwrap().trim_start_matches("0x"),
+            server
+                .estimate_gas(tx)
+                .await
+                .unwrap()
+                .trim_start_matches("0x"),
             16,
         )
         .unwrap();
@@ -1290,8 +1289,7 @@ mod rpc_tests {
             "the estimate is the fee the admission rule enforces, not the bare floor"
         );
         assert!(
-            estimate_for_transfer(&server, amount).await
-                > estimate_for_transfer(&server, 1).await,
+            estimate_for_transfer(&server, amount).await > estimate_for_transfer(&server, 1).await,
             "the estimate must grow with the transferred amount"
         );
     }
@@ -1401,7 +1399,11 @@ mod rpc_tests {
         let (server, _chain) = setup().await;
         let id = format!("0x{}", "aa".repeat(32));
         assert!(
-            server.get_bridge_transfer(id.clone()).await.unwrap().is_null(),
+            server
+                .get_bridge_transfer(id.clone())
+                .await
+                .unwrap()
+                .is_null(),
             "an unknown message id is answered with null"
         );
         assert_eq!(
@@ -1446,10 +1448,7 @@ mod rpc_tests {
         let owner_hex = owner.to_hex();
 
         assert_eq!(
-            server
-                .registry_query(owner_hex.clone(), 0)
-                .await
-                .unwrap()["registered"],
+            server.registry_query(owner_hex.clone(), 0).await.unwrap()["registered"],
             serde_json::json!(false),
             "an address with no registry row answers with the shape, not an error"
         );
@@ -1490,11 +1489,7 @@ mod rpc_tests {
             "a fresh chain has no validators to list"
         );
         assert!(
-            server
-                .validator_profile(owner)
-                .await
-                .unwrap()["found"]
-                .is_boolean(),
+            server.validator_profile(owner).await.unwrap()["found"].is_boolean(),
             "a profile lookup for an unknown validator says so in the record"
         );
         assert!(
@@ -1567,30 +1562,112 @@ mod rpc_tests {
         );
     }
 
-
-    /// The remaining B.U.D. 3.0 custody read answers an empty record and
-    /// refuses a malformed 32-byte address instead of truncating it.
     #[tokio::test]
-    async fn rpc_storage_custody_read_answers_and_refuses_short_id() {
+    async fn compatibility_network_identity_matches_native_chain_reads() {
         let (server, _chain) = setup().await;
-        let id = hex::encode([3u8; 32]);
-        assert!(
-            server
-                .storage_get_custody(format!("0x{id}"))
-                .await
-                .unwrap()
-                .is_object(),
-            "custody for a validator with no deals answers with the empty record"
+        assert_eq!(
+            server.compat_net_version().await.unwrap(),
+            server.net_version().await.unwrap()
         );
-        assert!(
+        assert_eq!(
+            server.eth_chain_id().await.unwrap(),
+            server.chain_id().await.unwrap()
+        );
+        assert_eq!(
+            server.eth_block_number().await.unwrap(),
+            server.block_number().await.unwrap()
+        );
+        assert_eq!(
+            server.compat_net_listening().await.unwrap(),
+            server.net_listening().await.unwrap()
+        );
+        assert!(server
+            .web3_client_version()
+            .await
+            .unwrap()
+            .starts_with("Budlum/"));
+        assert_eq!(server.eth_accounts().await.unwrap(), serde_json::json!([]));
+    }
+
+    #[tokio::test]
+    async fn rpc_validator_directory_reads_live_consensus_state() {
+        let (server, _chain) = setup().await;
+        let address = format!("0x{}", hex::encode([7u8; 32]));
+        assert!(server.get_validator(address).await.unwrap().is_null());
+        assert_eq!(server.list_relays().await.unwrap()["count"], 0);
+        assert_eq!(server.list_gateways().await.unwrap()["count"], 0);
+        assert_eq!(
+            server
+                .get_validator("0x1234".into())
+                .await
+                .unwrap_err()
+                .code(),
+            -32602
+        );
+    }
+
+    #[tokio::test]
+    async fn rpc_validator_read_does_not_hide_unmigrated_genesis_directory() {
+        let blockchain = Blockchain::new(Arc::new(PoWEngine::new(0)), None, 45262, None);
+        let mut blockchain = blockchain;
+        let owner = Address::from([0x71; 32]);
+        blockchain.state.add_validator(owner, 1_000);
+        assert!(blockchain.state.validator_directory.is_empty());
+        let (server, _chain) = setup_with_blockchain(blockchain).await;
+        let err = server
+            .get_validator(format!("0x{}", owner.to_hex()))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), -32603);
+        assert!(err.message().contains("not initialized"));
+    }
+
+    #[tokio::test]
+    async fn rpc_object_layer_reads_refuse_until_state_proofs_are_activated() {
+        let (server, _chain) = setup().await;
+        let id = format!("0x{}", hex::encode([9u8; 32]));
+        for err in [
+            server.get_charter(9).await.unwrap_err(),
+            server.get_asset_class(id.clone()).await.unwrap_err(),
+            server.get_asset(id).await.unwrap_err(),
+        ] {
+            assert_eq!(err.code(), -32004);
+            assert!(err.message().contains("object_layer_closed"));
+        }
+        assert_eq!(
+            server
+                .get_asset_class("0x1234".into())
+                .await
+                .unwrap_err()
+                .code(),
+            -32602
+        );
+    }
+
+    /// Public B.U.D. 3.0 reads consult the actor's state-rooted registry;
+    /// an empty ledger is not an unavailable actor or fabricated custody.
+    #[tokio::test]
+    async fn rpc_bud3_reads_consensus_state_and_validate_identifiers() {
+        let (server, _chain) = setup().await;
+        let id = format!("0x{}", hex::encode([3u8; 32]));
+        let custody = server.storage_get_custody(id.clone()).await.unwrap();
+        assert_eq!(custody["validator"], hex::encode([3u8; 32]));
+        assert_eq!(custody["count"], 0);
+        assert!(custody["shares"].as_array().is_some_and(Vec::is_empty));
+        assert!(server.storage_get_object(id).await.unwrap().is_null());
+        for err in [
             server
                 .storage_get_custody("0x1234".to_string())
                 .await
-                .unwrap_err()
-                .message()
-                .contains("expected 32 bytes"),
-            "the custody read uses the shared hex32 rule, including its message"
-        );
+                .unwrap_err(),
+            server
+                .storage_get_object("0x1234".to_string())
+                .await
+                .unwrap_err(),
+        ] {
+            assert_eq!(err.code(), -32602);
+            assert!(err.message().contains("must be 32 bytes"));
+        }
     }
 
     /// second descent: the node reads. A fresh node has a height of
@@ -1614,35 +1691,32 @@ mod rpc_tests {
             serde_json::json!("0x0"),
             "a fresh chain has no blocks to report"
         );
-        assert!(record_answered(&server.node_info().await.unwrap()), "bud_nodeInfo");
-        assert!(record_answered(&server.get_status().await.unwrap()), "bud_getStatus");
-        assert!(record_answered(&server.get_validator_set().await.unwrap()), "bud_getValidatorSet");
         assert!(
-            record_answered(
-                &server
-                    .get_slashing_history()
-                    .await
-                    .unwrap()
-            ),
+            record_answered(&server.node_info().await.unwrap()),
+            "bud_nodeInfo"
+        );
+        assert!(
+            record_answered(&server.get_status().await.unwrap()),
+            "bud_getStatus"
+        );
+        assert!(
+            record_answered(&server.get_validator_set().await.unwrap()),
+            "bud_getValidatorSet"
+        );
+        assert!(
+            record_answered(&server.get_slashing_history().await.unwrap()),
             "bud_getSlashingHistory"
         );
         assert!(
-            record_answered(
-                &server
-                    .get_restaked_validators()
-                    .await
-                    .unwrap()
-            ),
+            record_answered(&server.get_restaked_validators().await.unwrap()),
             "bud_getRestakedValidators"
         );
-        assert!(record_answered(&server.get_quantum_alarm().await.unwrap()), "bud_getQuantumAlarm");
         assert!(
-            record_answered(
-                &server
-                    .get_external_intake_digest()
-                    .await
-                    .unwrap()
-            ),
+            record_answered(&server.get_quantum_alarm().await.unwrap()),
+            "bud_getQuantumAlarm"
+        );
+        assert!(
+            record_answered(&server.get_external_intake_digest().await.unwrap()),
             "bud_getExternalIntakeDigest"
         );
         assert!(
@@ -1695,7 +1769,6 @@ mod rpc_tests {
         );
     }
 
-
     /// third descent: the marketplace, Pollen, AI and directory
     /// listings. Every one of them is a delegation to the chain actor, so on a
     /// fresh chain each answers with an empty collection. The lock worth keeping
@@ -1706,83 +1779,64 @@ mod rpc_tests {
     async fn rpc_listing_reads_answer_with_their_records() {
         let (server, _chain) = setup().await;
 
-        assert!(record_answered(&server.list_relays().await.unwrap()), "bud_listRelays");
-        assert!(record_answered(&server.list_gateways().await.unwrap()), "bud_listGateways");
-        assert!(record_answered(&server.market_get_offers().await.unwrap()), "bud_marketGetOffers");
         assert!(
-            record_answered(
-                &server
-                    .pollen_get_access_grants()
-                    .await
-                    .unwrap()
-            ),
+            record_answered(&server.list_relays().await.unwrap()),
+            "bud_listRelays"
+        );
+        assert!(
+            record_answered(&server.list_gateways().await.unwrap()),
+            "bud_listGateways"
+        );
+        assert!(
+            record_answered(&server.market_get_offers().await.unwrap()),
+            "bud_marketGetOffers"
+        );
+        assert!(
+            record_answered(&server.pollen_get_access_grants().await.unwrap()),
             "bud_pollenGetAccessGrants"
         );
         assert!(
-            record_answered(
-                &server
-                    .pollen_get_data_assets()
-                    .await
-                    .unwrap()
-            ),
+            record_answered(&server.pollen_get_data_assets().await.unwrap()),
             "bud_pollenGetDataAssets"
         );
         assert!(
-            record_answered(
-                &server
-                    .pollen_get_purchase_receipts()
-                    .await
-                    .unwrap()
-            ),
+            record_answered(&server.pollen_get_purchase_receipts().await.unwrap()),
             "bud_pollenGetPurchaseReceipts"
         );
         assert!(
-            record_answered(
-                &server
-                    .pollen_get_sale_authorizations()
-                    .await
-                    .unwrap()
-            ),
+            record_answered(&server.pollen_get_sale_authorizations().await.unwrap()),
             "bud_pollenGetSaleAuthorizations"
         );
-        assert!(record_answered(&server.ai_agent_ranking().await.unwrap()), "bud_aiAgentRanking");
         assert!(
-            record_answered(
-                &server
-                    .ai_get_active_verifiers()
-                    .await
-                    .unwrap()
-            ),
+            record_answered(&server.ai_agent_ranking().await.unwrap()),
+            "bud_aiAgentRanking"
+        );
+        assert!(
+            record_answered(&server.ai_get_active_verifiers().await.unwrap()),
             "bud_aiGetActiveVerifiers"
         );
-        assert!(record_answered(&server.ai_open_requests().await.unwrap()), "bud_aiOpenRequests");
         assert!(
-            record_answered(
-                &server
-                    .ai_verifier_ranking()
-                    .await
-                    .unwrap()
-            ),
+            record_answered(&server.ai_open_requests().await.unwrap()),
+            "bud_aiOpenRequests"
+        );
+        assert!(
+            record_answered(&server.ai_verifier_ranking().await.unwrap()),
             "bud_aiVerifierRanking"
         );
         assert!(
-            record_answered(
-                &server
-                    .ai_verifier_whitelist()
-                    .await
-                    .unwrap()
-            ),
+            record_answered(&server.ai_verifier_whitelist().await.unwrap()),
             "bud_aiVerifierWhitelist"
         );
-        assert!(record_answered(&server.ai_stats().await.unwrap()), "bud_aiInferenceStats");
-        assert!(record_answered(&server.budlumxyz_get_apps().await.unwrap()), "bud_hubGetApps");
         assert!(
-            record_answered(
-                &server
-                    .budlumxyz_get_graft_apps()
-                    .await
-                    .unwrap()
-            ),
+            record_answered(&server.ai_stats().await.unwrap()),
+            "bud_aiInferenceStats"
+        );
+        assert!(
+            record_answered(&server.budlumxyz_get_apps().await.unwrap()),
+            "bud_hubGetApps"
+        );
+        assert!(
+            record_answered(&server.budlumxyz_get_graft_apps().await.unwrap()),
             "bud_hubGetGraftApps"
         );
     }
@@ -1801,7 +1855,6 @@ mod rpc_tests {
     #[tokio::test]
     async fn estimate_gas_quotes_the_proportional_transfer_fee() {
         use crate::chain::fee_market::PPM_DENOMINATOR;
-        use crate::registry::RegistryParams;
 
         let consensus = Arc::new(PoWEngine::new(0));
         let mut blockchain = Blockchain::new(consensus, None, 45262, None);
@@ -1830,7 +1883,10 @@ mod rpc_tests {
         // The charge the admission rule computes: `required_transfer_fee` is
         // the function `bud_estimateGas` must agree with.
         let proportional = amount * params.transfer_fee_ppm / PPM_DENOMINATOR;
-        assert!(proportional > 0, "the fixture must charge a proportional cut");
+        assert!(
+            proportional > 0,
+            "the fixture must charge a proportional cut"
+        );
         let charged = params.required_transfer_fee(amount, base_fee);
         assert_eq!(charged, base_fee + proportional);
         assert_eq!(
@@ -1878,7 +1934,12 @@ mod rpc_tests {
         let terms = "33".repeat(32);
         let answer = server
             .pollen_prepare_sale_authorization(
-                seller.clone(), asset.clone(), 7, 1_000, 2, terms.clone(),
+                seller.clone(),
+                asset.clone(),
+                7,
+                1_000,
+                2,
+                terms.clone(),
             )
             .await
             .unwrap();
@@ -1894,9 +1955,7 @@ mod rpc_tests {
     #[tokio::test]
     async fn data_market_prepare_purchase_ok_and_refused() {
         use crate::crypto::primitives::KeyPair;
-        use crate::pollen::{
-            DataAsset, MarketplaceRegistry, SaleAuthorization, Signature64,
-        };
+        use crate::pollen::{DataAsset, MarketplaceRegistry, SaleAuthorization, Signature64};
         use crate::storage::ContentId;
 
         let seller_keys = KeyPair::from_seed(&[0x41; 32]).unwrap();
@@ -1904,9 +1963,8 @@ mod rpc_tests {
         let buyer_keys = KeyPair::from_seed(&[0x42; 32]).unwrap();
         let buyer = Address::from(buyer_keys.public_key_bytes());
         let asset = DataAsset::new(seller, ContentId::of(b"rpc sale"), [0x51; 32], true);
-        let mut authorization = SaleAuthorization::new_unsigned(
-            asset.asset_id, seller, 7, 0, 1_000, 2, [0x52; 32],
-        );
+        let mut authorization =
+            SaleAuthorization::new_unsigned(asset.asset_id, seller, 7, 0, 1_000, 2, [0x52; 32]);
         authorization.seller_signature =
             Signature64::from(seller_keys.sign(&authorization.signing_hash()));
 
@@ -1925,7 +1983,13 @@ mod rpc_tests {
         let (server, _chain) = setup_with_blockchain(blockchain).await;
         let payment = [0x53; 32];
         let signing_hash = MarketplaceRegistry::purchase_signing_hash(
-            &authorization, buyer, buyer, 0, 10, 5, payment,
+            &authorization,
+            buyer,
+            buyer,
+            0,
+            10,
+            5,
+            payment,
         )
         .unwrap();
         let aid = authorization.authorization_id.to_hex();
@@ -1934,7 +1998,12 @@ mod rpc_tests {
         let signature = hex::encode(buyer_keys.sign(&signing_hash));
         let answer = server
             .pollen_prepare_purchase(
-                aid.clone(), buyer_hex.clone(), buyer_hex.clone(), 10, 5, pc.clone(),
+                aid.clone(),
+                buyer_hex.clone(),
+                buyer_hex.clone(),
+                10,
+                5,
+                pc.clone(),
                 signature,
             )
             .await
@@ -1943,7 +2012,13 @@ mod rpc_tests {
         assert!(answer["note"].as_str().unwrap().contains("prepare-only"));
         let error = server
             .pollen_prepare_purchase(
-                aid, buyer_hex.clone(), buyer_hex, 10, 5, pc, "00".to_string(),
+                aid,
+                buyer_hex.clone(),
+                buyer_hex,
+                10,
+                5,
+                pc,
+                "00".to_string(),
             )
             .await
             .unwrap_err();
@@ -1993,6 +2068,7 @@ mod rpc_tests {
             .await
             .expect("an absent block is not an error");
         assert!(answer.is_null());
+        assert!(!answer.is_object());
     }
 
     #[tokio::test]
@@ -2018,6 +2094,7 @@ mod rpc_tests {
             .await
             .expect("absent hash is a null answer");
         assert!(answer.is_null());
+        assert!(!answer.is_object());
     }
 
     #[tokio::test]
@@ -2350,7 +2427,10 @@ mod rpc_tests {
         assert_ethereum_opening_refusal(&error, "eth_getTransactionCount", "bud_getNonce");
         let error = server.eth_call(call.clone(), None).await.unwrap_err();
         assert_ethereum_opening_refusal(&error, "eth_call", "bud_txPrecheck");
-        let error = server.eth_estimate_gas(call.clone(), None).await.unwrap_err();
+        let error = server
+            .eth_estimate_gas(call.clone(), None)
+            .await
+            .unwrap_err();
         assert_ethereum_opening_refusal(&error, "eth_estimateGas", "bud_estimateGas");
         let error = server
             .eth_create_access_list(call.clone(), None)
@@ -2362,7 +2442,10 @@ mod rpc_tests {
             .await
             .unwrap_err();
         assert_ethereum_opening_refusal(&error, "eth_feeHistory", "bud_gasPrice");
-        let error = server.eth_send_raw_transaction("0x00".into()).await.unwrap_err();
+        let error = server
+            .eth_send_raw_transaction("0x00".into())
+            .await
+            .unwrap_err();
         assert_ethereum_opening_refusal(&error, "eth_sendRawTransaction", "bud_sendRawTransaction");
         let error = server
             .eth_get_block_by_number("latest".into(), None)
@@ -2396,7 +2479,11 @@ mod rpc_tests {
             .eth_get_transaction_by_hash(hash.clone())
             .await
             .unwrap_err();
-        assert_ethereum_opening_refusal(&error, "eth_getTransactionByHash", "bud_getTransactionByHash");
+        assert_ethereum_opening_refusal(
+            &error,
+            "eth_getTransactionByHash",
+            "bud_getTransactionByHash",
+        );
         let error = server
             .eth_get_transaction_by_block_number_and_index("latest".into(), "0x0".into())
             .await
@@ -2420,7 +2507,10 @@ mod rpc_tests {
             .await
             .unwrap_err();
         assert_ethereum_opening_refusal(&error, "eth_getBlockReceipts", "bud_getBlockByNumber");
-        let error = server.eth_get_logs(serde_json::json!({})).await.unwrap_err();
+        let error = server
+            .eth_get_logs(serde_json::json!({}))
+            .await
+            .unwrap_err();
         assert_ethereum_opening_refusal(&error, "eth_getLogs", "bud_getTransactionReceipt");
         let error = server
             .debug_trace_transaction(hash, None)
@@ -2431,10 +2521,7 @@ mod rpc_tests {
             "debug_traceTransaction",
             "bud_getTransactionReceipt",
         );
-        let error = server
-            .debug_trace_call(call, None, None)
-            .await
-            .unwrap_err();
+        let error = server.debug_trace_call(call, None, None).await.unwrap_err();
         assert_ethereum_opening_refusal(&error, "debug_traceCall", "bud_txPrecheck");
 
         let error = server
@@ -2513,10 +2600,7 @@ mod rpc_tests {
         assert_ethereum_filter_error(&error, -32603, "connection_identity_unavailable");
 
         assert_eq!(
-            server
-                .eth_uninstall_filter(&owner, block_id)
-                .await
-                .unwrap(),
+            server.eth_uninstall_filter(&owner, block_id).await.unwrap(),
             serde_json::json!(true)
         );
         assert_eq!(
@@ -2533,10 +2617,7 @@ mod rpc_tests {
                 crate::rpc::compat::ethereum::filters::MAX_FILTER_SPEC_BYTES + 1
             )
         });
-        let error = server
-            .eth_new_filter(&owner, oversized)
-            .await
-            .unwrap_err();
+        let error = server.eth_new_filter(&owner, oversized).await.unwrap_err();
         assert_ethereum_filter_error(&error, -32602, "spec_too_large");
     }
 
@@ -2592,7 +2673,10 @@ mod rpc_tests {
             RpcMode::Public,
         );
         let addr = free_loopback().await;
-        server.run(addr.to_string()).await.expect("the shared listener binds");
+        server
+            .run(addr.to_string())
+            .await
+            .expect("the shared listener binds");
 
         let refused = request(addr, "/v1/-/healthy", "").await;
         assert!(refused.starts_with("HTTP/1.1 401"), "{refused}");
@@ -2600,7 +2684,6 @@ mod rpc_tests {
         assert!(accepted.starts_with("HTTP/1.1 200"), "{accepted}");
         assert!(accepted.ends_with("aptos-node:ok"), "{accepted}");
     }
-
 
     #[tokio::test]
     async fn solana_handlers_honor_commitment_and_refuse_submission() {
@@ -2638,19 +2721,22 @@ mod rpc_tests {
     async fn solana_dedicated_listener_enforces_admission_and_method_filter() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-        async fn rpc(
-            addr: std::net::SocketAddr,
-            method: &str,
-            api_key: Option<&str>,
-        ) -> String {
+        async fn rpc(addr: std::net::SocketAddr, method: &str, api_key: Option<&str>) -> String {
             let body = format!(r#"{{"jsonrpc":"2.0","id":1,"method":"{method}","params":[]}}"#);
-            let key = api_key.map(|key| format!("x-api-key: {key}\r\n")).unwrap_or_default();
-            let mut stream = tokio::net::TcpStream::connect(addr).await.expect("connect Solana RPC");
+            let key = api_key
+                .map(|key| format!("x-api-key: {key}\r\n"))
+                .unwrap_or_default();
+            let mut stream = tokio::net::TcpStream::connect(addr)
+                .await
+                .expect("connect Solana RPC");
             let request = format!(
                 "POST / HTTP/1.1\r\nHost: {addr}\r\n{key}content-type: application/json\r\ncontent-length: {}\r\nConnection: close\r\n\r\n{body}",
                 body.len(),
             );
-            stream.write_all(request.as_bytes()).await.expect("write RPC");
+            stream
+                .write_all(request.as_bytes())
+                .await
+                .expect("write RPC");
             let mut response = Vec::new();
             tokio::time::timeout(
                 std::time::Duration::from_secs(2),
@@ -2665,19 +2751,17 @@ mod rpc_tests {
         let consensus = Arc::new(PoWEngine::new(0));
         let blockchain = Blockchain::new(consensus, None, 45268, None);
         let (chain_actor, chain) = ChainActor::new(blockchain);
-        tokio::spawn(async move { chain_actor.run().await; });
+        tokio::spawn(async move {
+            chain_actor.run().await;
+        });
         let node = Node::new(chain.clone()).expect("node");
         let security = RpcSecurityConfig {
             auth_required: true,
             api_key: Some(String::from("solana-test-key")),
             ..RpcSecurityConfig::default()
         };
-        let server = RpcServer::with_security_and_mode(
-            chain,
-            node.get_client(),
-            security,
-            RpcMode::Public,
-        );
+        let server =
+            RpcServer::with_security_and_mode(chain, node.get_client(), security, RpcMode::Public);
         let primary = free_loopback().await;
         let solana = free_loopback().await;
         server
@@ -2696,5 +2780,4 @@ mod rpc_tests {
         assert!(filtered.contains("-32601"), "{filtered}");
         assert!(!filtered.contains(r#""result":"#), "{filtered}");
     }
-
 }

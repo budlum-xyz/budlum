@@ -43,12 +43,19 @@ const MAX_FILE_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_REPORTED: usize = 32;
 
 fn walk_rs(dir: &Path, root: &Path, out: &mut Vec<(String, PathBuf)>) -> Result<(), String> {
-    let rd = std::fs::read_dir(dir)
-        .map_err(|error| format!("cannot read Rust source directory {}: {error}", dir.display()))?;
+    let rd = std::fs::read_dir(dir).map_err(|error| {
+        format!(
+            "cannot read Rust source directory {}: {error}",
+            dir.display()
+        )
+    })?;
     let mut entries = Vec::new();
     for entry in rd {
         entries.push(entry.map_err(|error| {
-            format!("cannot enumerate Rust source directory {}: {error}", dir.display())
+            format!(
+                "cannot enumerate Rust source directory {}: {error}",
+                dir.display()
+            )
         })?);
     }
     entries.sort_by_key(std::fs::DirEntry::file_name);
@@ -187,7 +194,9 @@ pub fn answer() -> &'static str { r#\"unbalanced { [ (\"# }\n\
 
         std::fs::write(dir.join("src/invalid-utf8.rs"), [0xff]).map_err(|e| e.to_string())?;
         if run(&dir).is_ok() {
-            return Err(String::from("canary: unreadable UTF-8 was silently skipped"));
+            return Err(String::from(
+                "canary: unreadable UTF-8 was silently skipped",
+            ));
         }
         std::fs::remove_file(dir.join("src/invalid-utf8.rs")).map_err(|e| e.to_string())?;
         run(&dir).map_err(|e| format!("canary: clean tree failed after cleanup: {e}"))?;

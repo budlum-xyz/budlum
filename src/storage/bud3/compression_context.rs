@@ -19,8 +19,8 @@ pub use corpus::{
     decode_with_context, encode_with_context, AccessObservation, AccessTierPolicy,
     ContentStoredReceipt, ContextActivation, ContextEncodedPayload, ContextState,
     ContextStoredObject, CorpusEntry, ACTIVATION, CODEC_LZ_CONTEXT, COLD_DWELL_SECS,
-    COLD_WINDOW_SECS, HOT_WINDOW_SECS, CONTEXT_FRAME_MAGIC,
-    CONTEXT_MANIFEST_TAG, MAX_CONTEXT_DICTIONARY_BYTES,
+    COLD_WINDOW_SECS, CONTEXT_FRAME_MAGIC, CONTEXT_MANIFEST_TAG, HOT_WINDOW_SECS,
+    MAX_CONTEXT_DICTIONARY_BYTES,
 };
 pub use corpus::{
     AccessTier as CorpusAccessTier, ContextError as CorpusContextError,

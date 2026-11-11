@@ -4,6 +4,7 @@
 //! `debug_traceTransaction` and `debug_traceCall`. `eth_getProof` explicitly
 //! returns `-32601` (`Method not found; use bud_getAccountProof`, section 8.10.6),
 //! and block headers expose `execution_root` as `stateRoot` (section 8.10.5).
+//! Convenience: exposed for CLI, RPC, SDK, and multi-VM runtime callers.
 
 pub mod filters;
 pub mod opening;
@@ -11,13 +12,9 @@ pub mod opening;
 use crate::core::account::AccountState;
 use crate::execution::coordinator::alias::{derive_foreign_account, ForeignScheme};
 use crate::execution::coordinator::evm_ee::EvmAccountRecord;
-use crate::execution::coordinator::foreign::ethereum::{
-    DecodedEthereumTx, BUDLUM_EVM_CHAIN_ID,
-};
+use crate::execution::coordinator::foreign::ethereum::{DecodedEthereumTx, BUDLUM_EVM_CHAIN_ID};
 use crate::execution::coordinator::foreign::{ForeignTx, VerifiedForeignOutcome};
-use crate::execution::coordinator::state::{
-    NS_EVM_ACCOUNT, NS_EVM_CODE, NS_EVM_STORAGE,
-};
+use crate::execution::coordinator::state::{NS_EVM_ACCOUNT, NS_EVM_CODE, NS_EVM_STORAGE};
 use crate::execution::coordinator::ExecutionCoordinator;
 use crate::rpc::compat::{
     CompatEffect, CompatListener, CompatMethodClass, EthereumCompatConfig, JsonRpcRequest,
@@ -36,45 +33,157 @@ const fn row(
 
 /// Complete Ethereum JSON-RPC method classification table (section 8.11.2 + 8.10.6).
 pub const ETH_METHOD_CLASSES: &[CompatMethodClass] = &[
-    row("web3_clientVersion", CompatListener::Public, CompatEffect::Read),
+    row(
+        "web3_clientVersion",
+        CompatListener::Public,
+        CompatEffect::Read,
+    ),
     row("net_version", CompatListener::Public, CompatEffect::Read),
     row("net_listening", CompatListener::Public, CompatEffect::Read),
     row("eth_chainId", CompatListener::Public, CompatEffect::Read),
     row("eth_syncing", CompatListener::Public, CompatEffect::Read),
-    row("eth_blockNumber", CompatListener::Public, CompatEffect::Read),
+    row(
+        "eth_blockNumber",
+        CompatListener::Public,
+        CompatEffect::Read,
+    ),
     row("eth_getBalance", CompatListener::Public, CompatEffect::Read),
     row("eth_getCode", CompatListener::Public, CompatEffect::Read),
-    row("eth_getStorageAt", CompatListener::Public, CompatEffect::Read),
-    row("eth_getTransactionCount", CompatListener::Public, CompatEffect::Read),
+    row(
+        "eth_getStorageAt",
+        CompatListener::Public,
+        CompatEffect::Read,
+    ),
+    row(
+        "eth_getTransactionCount",
+        CompatListener::Public,
+        CompatEffect::Read,
+    ),
     row("eth_call", CompatListener::Public, CompatEffect::Read),
-    row("eth_estimateGas", CompatListener::Public, CompatEffect::Read),
-    row("eth_createAccessList", CompatListener::Public, CompatEffect::Read),
+    row(
+        "eth_estimateGas",
+        CompatListener::Public,
+        CompatEffect::Read,
+    ),
+    row(
+        "eth_createAccessList",
+        CompatListener::Public,
+        CompatEffect::Read,
+    ),
     row("eth_gasPrice", CompatListener::Public, CompatEffect::Read),
-    row("eth_maxPriorityFeePerGas", CompatListener::Public, CompatEffect::Read),
+    row(
+        "eth_maxPriorityFeePerGas",
+        CompatListener::Public,
+        CompatEffect::Read,
+    ),
     row("eth_feeHistory", CompatListener::Public, CompatEffect::Read),
-    row("eth_sendRawTransaction", CompatListener::Public, CompatEffect::TxSubmit),
-    row("eth_getBlockByNumber", CompatListener::Public, CompatEffect::Read),
-    row("eth_getBlockByHash", CompatListener::Public, CompatEffect::Read),
-    row("eth_getBlockTransactionCountByNumber", CompatListener::Public, CompatEffect::Read),
-    row("eth_getBlockTransactionCountByHash", CompatListener::Public, CompatEffect::Read),
-    row("eth_getTransactionByHash", CompatListener::Public, CompatEffect::Read),
-    row("eth_getTransactionByBlockNumberAndIndex", CompatListener::Public, CompatEffect::Read),
-    row("eth_getTransactionReceipt", CompatListener::Public, CompatEffect::Read),
-    row("eth_getBlockReceipts", CompatListener::Public, CompatEffect::Read),
+    row(
+        "eth_sendRawTransaction",
+        CompatListener::Public,
+        CompatEffect::TxSubmit,
+    ),
+    row(
+        "eth_getBlockByNumber",
+        CompatListener::Public,
+        CompatEffect::Read,
+    ),
+    row(
+        "eth_getBlockByHash",
+        CompatListener::Public,
+        CompatEffect::Read,
+    ),
+    row(
+        "eth_getBlockTransactionCountByNumber",
+        CompatListener::Public,
+        CompatEffect::Read,
+    ),
+    row(
+        "eth_getBlockTransactionCountByHash",
+        CompatListener::Public,
+        CompatEffect::Read,
+    ),
+    row(
+        "eth_getTransactionByHash",
+        CompatListener::Public,
+        CompatEffect::Read,
+    ),
+    row(
+        "eth_getTransactionByBlockNumberAndIndex",
+        CompatListener::Public,
+        CompatEffect::Read,
+    ),
+    row(
+        "eth_getTransactionReceipt",
+        CompatListener::Public,
+        CompatEffect::Read,
+    ),
+    row(
+        "eth_getBlockReceipts",
+        CompatListener::Public,
+        CompatEffect::Read,
+    ),
     row("eth_getLogs", CompatListener::Public, CompatEffect::Read),
-    row("eth_newFilter", CompatListener::Public, CompatEffect::LocalFilter),
-    row("eth_newBlockFilter", CompatListener::Public, CompatEffect::LocalFilter),
-    row("eth_getFilterChanges", CompatListener::Public, CompatEffect::LocalFilter),
-    row("eth_getFilterLogs", CompatListener::Public, CompatEffect::LocalFilter),
-    row("eth_uninstallFilter", CompatListener::Public, CompatEffect::LocalFilter),
-    row("eth_subscribe", CompatListener::Public, CompatEffect::LocalFilter),
-    row("eth_unsubscribe", CompatListener::Public, CompatEffect::LocalFilter),
+    row(
+        "eth_newFilter",
+        CompatListener::Public,
+        CompatEffect::LocalFilter,
+    ),
+    row(
+        "eth_newBlockFilter",
+        CompatListener::Public,
+        CompatEffect::LocalFilter,
+    ),
+    row(
+        "eth_getFilterChanges",
+        CompatListener::Public,
+        CompatEffect::LocalFilter,
+    ),
+    row(
+        "eth_getFilterLogs",
+        CompatListener::Public,
+        CompatEffect::LocalFilter,
+    ),
+    row(
+        "eth_uninstallFilter",
+        CompatListener::Public,
+        CompatEffect::LocalFilter,
+    ),
+    row(
+        "eth_subscribe",
+        CompatListener::Public,
+        CompatEffect::LocalFilter,
+    ),
+    row(
+        "eth_unsubscribe",
+        CompatListener::Public,
+        CompatEffect::LocalFilter,
+    ),
     row("eth_accounts", CompatListener::Public, CompatEffect::Read),
-    row("debug_traceTransaction", CompatListener::Operator, CompatEffect::Read),
-    row("debug_traceCall", CompatListener::Operator, CompatEffect::Read),
-    row("eth_getProof", CompatListener::Public, CompatEffect::Refused),
-    row("bud_getExecutionProof", CompatListener::Public, CompatEffect::Read),
-    row("bud_getImportedContract", CompatListener::Public, CompatEffect::Read),
+    row(
+        "debug_traceTransaction",
+        CompatListener::Operator,
+        CompatEffect::Read,
+    ),
+    row(
+        "debug_traceCall",
+        CompatListener::Operator,
+        CompatEffect::Read,
+    ),
+    row(
+        "eth_getProof",
+        CompatListener::Public,
+        CompatEffect::Refused,
+    ),
+    row(
+        "bud_getExecutionProof",
+        CompatListener::Public,
+        CompatEffect::Read,
+    ),
+    row(
+        "bud_getImportedContract",
+        CompatListener::Public,
+        CompatEffect::Read,
+    ),
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -472,7 +581,8 @@ impl EthereumCompatGateway {
                 }
             }
             "eth_getFilterChanges" | "eth_getFilterLogs" => {
-                self.filters.evict_expired(now_secs, self.config.filter_ttl_secs);
+                self.filters
+                    .evict_expired(now_secs, self.config.filter_ttl_secs);
                 let Some(fid_str) = req.params.get(0).and_then(serde_json::Value::as_str) else {
                     return JsonRpcResponse::err(id, JSONRPC_INVALID_PARAMS, "missing filter id");
                 };

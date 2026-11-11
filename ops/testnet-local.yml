@@ -38,6 +38,7 @@ services:
     command:
       - |
         set -eu
+        umask 077
         dir=/home/budlum/ceremony
         [ -f "$$dir/genesis.json" ] && exit 0
         mkdir -p "$$dir/operators"
@@ -52,13 +53,18 @@ services:
             | sed -n 's/^bootnode (config \[p2p\] bootnodes): "\(.*\)"$$/\1/p' > "$$dir/validator$$i.bootnode"
         done
         faucet=$$(budlum-faucet keygen --out "$$dir/faucet.seed" | sed -n 's/^faucet address: 0x//p')
+        # The testnet template has a 2025 timestamp. Use the wall clock just
+        # like the devnet ceremony, or the slot ladder starts years behind.
+        stamp_ms=$$(date +%s%3N)
         bud genesis assemble --network testnet --operators "$$dir/operators" \
+          --timestamp-ms "$$stamp_ms" \
           --community "$$faucet" \
           --liquidity 5151515151515151515151515151515151515151515151515151515151515151 \
           --ecosystem 5252525252525252525252525252525252525252525252525252525252525252 \
           --team 5353535353535353535353535353535353535353535353535353535353535353 \
           --burn-reserve 5454545454545454545454545454545454545454545454545454545454545454 \
-          --out "$$dir/genesis.json"
+          --out "$$dir/genesis.tmp"
+        mv "$$dir/genesis.tmp" "$$dir/genesis.json"
     restart: "no"
 
   validator1:
@@ -67,9 +73,9 @@ services:
     volumes:
       - validator1_data:/home/budlum/data
       - ceremony:/home/budlum/ceremony:ro
-      - ./testnet-local-validator.sh:/home/budlum/testnet-local-validator.sh:ro
+      - ./testnet-local-validator.py:/home/budlum/testnet-local-validator.py:ro
     # Two seats share a container, never a key, port, database, or process.
-    entrypoint: ["/bin/sh", "/home/budlum/testnet-local-validator.sh"]
+    entrypoint: ["python3", "/home/budlum/testnet-local-validator.py"]
     command: ["1", "5", "validator2"]
     depends_on:
       ceremony:
@@ -81,9 +87,9 @@ services:
     volumes:
       - validator2_data:/home/budlum/data
       - ceremony:/home/budlum/ceremony:ro
-      - ./testnet-local-validator.sh:/home/budlum/testnet-local-validator.sh:ro
+      - ./testnet-local-validator.py:/home/budlum/testnet-local-validator.py:ro
     # Two seats share a container, never a key, port, database, or process.
-    entrypoint: ["/bin/sh", "/home/budlum/testnet-local-validator.sh"]
+    entrypoint: ["python3", "/home/budlum/testnet-local-validator.py"]
     command: ["2", "6", "validator1"]
     depends_on:
       ceremony:
@@ -95,9 +101,9 @@ services:
     volumes:
       - validator3_data:/home/budlum/data
       - ceremony:/home/budlum/ceremony:ro
-      - ./testnet-local-validator.sh:/home/budlum/testnet-local-validator.sh:ro
+      - ./testnet-local-validator.py:/home/budlum/testnet-local-validator.py:ro
     # Two seats share a container, never a key, port, database, or process.
-    entrypoint: ["/bin/sh", "/home/budlum/testnet-local-validator.sh"]
+    entrypoint: ["python3", "/home/budlum/testnet-local-validator.py"]
     command: ["3", "7", "validator1"]
     depends_on:
       ceremony:
@@ -109,9 +115,9 @@ services:
     volumes:
       - validator4_data:/home/budlum/data
       - ceremony:/home/budlum/ceremony:ro
-      - ./testnet-local-validator.sh:/home/budlum/testnet-local-validator.sh:ro
+      - ./testnet-local-validator.py:/home/budlum/testnet-local-validator.py:ro
     # Two seats share a container, never a key, port, database, or process.
-    entrypoint: ["/bin/sh", "/home/budlum/testnet-local-validator.sh"]
+    entrypoint: ["python3", "/home/budlum/testnet-local-validator.py"]
     command: ["4", "8", "validator1"]
     depends_on:
       ceremony:
@@ -163,6 +169,13 @@ services:
       - "--listen=0.0.0.0:18600"
       # Local rehearsal only; Docker's NAT can make clients share one IP.
       - "--allow-direct"
+    # The image probes the node's RPC listener; the faucet instead exposes /health.
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "--max-time", "4", "http://127.0.0.1:18600/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 30s
     depends_on:
       - rpc
 
@@ -179,6 +192,13 @@ services:
       - "--db=/home/budlum/data/indexer"
       - "--listen=0.0.0.0:18700"
       - "--allow-direct"
+    # The image probes node RPC, not the indexer's own liveness endpoint.
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "--max-time", "4", "http://127.0.0.1:18700/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 30s
     depends_on:
       - rpc
 

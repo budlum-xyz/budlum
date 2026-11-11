@@ -11,6 +11,7 @@
 //! the transport tests pin the tables together so adding a route to only one
 //! implementation fails a test. Neither layer invents successful responses
 //! for an unknown path or wrong method.
+//! Convenience: exposed for CLI, RPC, SDK, and multi-VM runtime callers.
 
 use crate::chain::chain_actor::ChainHandle;
 use crate::core::account::AccountState;
@@ -182,12 +183,7 @@ const ENDPOINTS: &[Endpoint] = &[
         Effect::Read,
         "bud_getTransactionByHash",
     ),
-    refused(
-        Verb::Post,
-        "/v1/view",
-        Effect::Read,
-        "bud_txPrecheck",
-    ),
+    refused(Verb::Post, "/v1/view", Effect::Read, "bud_txPrecheck"),
     refused(
         Verb::Get,
         "/v1/estimate_gas_price",
@@ -429,8 +425,10 @@ impl AptosUpstream {
             || base.query().is_some()
             || base.fragment().is_some()
         {
-            return Err("Aptos upstream URL needs a host and no credentials, query, or fragment"
-                .to_string());
+            return Err(
+                "Aptos upstream URL needs a host and no credentials, query, or fragment"
+                    .to_string(),
+            );
         }
         if base.path().trim_end_matches('/') != "/v1" {
             return Err("Aptos upstream URL must end in /v1".to_string());
@@ -463,7 +461,7 @@ impl AptosUpstream {
         Ok(Self { base, client })
     }
 
-    fn url_for(&self, uri: &hyper::Uri) -> Result<reqwest::Url, HttpResponse> {
+    fn url_for(&self, uri: &hyper::Uri) -> Result<reqwest::Url, Box<HttpResponse>> {
         let suffix = uri
             .path_and_query()
             .map(|value| value.as_str())
@@ -473,11 +471,11 @@ impl AptosUpstream {
         let relative = suffix.strip_prefix("/v1").unwrap_or(suffix);
         let target = format!("{}{relative}", self.base.as_str().trim_end_matches('/'));
         reqwest::Url::parse(&target).map_err(|_| {
-            proxy_error(
+            Box::new(proxy_error(
                 StatusCode::BAD_REQUEST,
                 "invalid_aptos_path",
                 "The Aptos request path is not a valid upstream URL",
-            )
+            ))
         })
     }
 
@@ -489,7 +487,7 @@ impl AptosUpstream {
         let (parts, mut incoming) = req.into_parts();
         let url = match self.url_for(&parts.uri) {
             Ok(url) => url,
-            Err(response) => return response,
+            Err(response) => return *response,
         };
         if parts
             .headers
@@ -585,15 +583,13 @@ impl AptosUpstream {
                 builder = builder.header(name.clone(), value.clone());
             }
         }
-        builder
-            .body(HttpBody::from(hyper::body::Bytes::from(body)))
-            .unwrap_or_else(|_| {
-                proxy_error(
-                    StatusCode::BAD_GATEWAY,
-                    "aptos_upstream_response_error",
-                    "The Aptos full node returned invalid response headers",
-                )
-            })
+        builder.body(HttpBody::from(body)).unwrap_or_else(|_| {
+            proxy_error(
+                StatusCode::BAD_GATEWAY,
+                "aptos_upstream_response_error",
+                "The Aptos full node returned invalid response headers",
+            )
+        })
     }
 }
 
@@ -709,15 +705,19 @@ impl AptosGateway {
                 door: None,
             }),
             RouteMatch::Found(index) => {
-                let endpoint = &ENDPOINTS[index];
+                let Some(endpoint) = ENDPOINTS.get(index) else {
+                    return error_response(chain_unavailable("route index out of bounds"));
+                };
                 match endpoint.answer {
                     Answer::ChainRead if endpoint.pattern == "/v1/-/healthy" => {
                         healthy_response(self.node.is_syncing())
                     }
-                    Answer::ChainRead if endpoint.pattern == "/v1" => match self.node_info().await {
-                        Ok(info) => json_response(StatusCode::OK, info),
-                        Err(error) => error_response(error),
-                    },
+                    Answer::ChainRead if endpoint.pattern == "/v1" => {
+                        match self.node_info().await {
+                            Ok(info) => json_response(StatusCode::OK, info),
+                            Err(error) => error_response(error),
+                        }
+                    }
                     Answer::MoveUnavailable { door } => {
                         error_response(move_unavailable(endpoint, door))
                     }
@@ -740,7 +740,10 @@ pub const APTOS_REST_ROUTES: &[CompatMethodClass] = &[
     route("GET /v1/-/healthy", CompatEffect::Read),
     route("GET /v1/accounts/{addr}", CompatEffect::Read),
     route("GET /v1/accounts/{addr}/resources", CompatEffect::Read),
-    route("GET /v1/accounts/{addr}/resource/{type}", CompatEffect::Read),
+    route(
+        "GET /v1/accounts/{addr}/resource/{type}",
+        CompatEffect::Read,
+    ),
     route("GET /v1/accounts/{addr}/modules", CompatEffect::Read),
     route("GET /v1/accounts/{addr}/module/{name}", CompatEffect::Read),
     route("GET /v1/accounts/{addr}/transactions", CompatEffect::Read),
@@ -753,7 +756,10 @@ pub const APTOS_REST_ROUTES: &[CompatMethodClass] = &[
     route("GET /v1/estimate_gas_price", CompatEffect::Read),
     route("GET /v1/blocks/by_height/{h}", CompatEffect::Read),
     route("POST /v1/tables/{handle}/item", CompatEffect::Read),
-    route("GET /v1/accounts/{addr}/events/{creation_number}", CompatEffect::Read),
+    route(
+        "GET /v1/accounts/{addr}/events/{creation_number}",
+        CompatEffect::Read,
+    ),
 ];
 
 /// Minimal HTTP response model for Aptos `/v1` REST handlers.

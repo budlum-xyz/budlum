@@ -359,7 +359,7 @@ pub fn b64_decode(s: &str) -> Result<Vec<u8>, String> {
     if bytes.is_empty() {
         return Ok(Vec::new());
     }
-    if bytes.len() % 4 != 0 {
+    if !bytes.len().is_multiple_of(4) {
         return Err(String::from("invalid base64 length"));
     }
     let mut out = Vec::with_capacity((bytes.len() / 4).saturating_mul(3));

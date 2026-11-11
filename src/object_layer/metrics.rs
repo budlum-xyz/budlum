@@ -91,8 +91,12 @@ impl Ring {
             return out;
         }
         // Full: the oldest sample is the one at `next`.
-        out.extend_from_slice(&self.samples[self.next..]);
-        out.extend_from_slice(&self.samples[..self.next]);
+        if let Some(tail) = self.samples.get(self.next..) {
+            out.extend_from_slice(tail);
+        }
+        if let Some(head) = self.samples.get(..self.next) {
+            out.extend_from_slice(head);
+        }
         out
     }
 

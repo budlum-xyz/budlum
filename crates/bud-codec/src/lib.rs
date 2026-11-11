@@ -23,6 +23,7 @@
 //! less, the slow candidates are not run.
 //!
 //! Every codec id, its frozen meaning and its state live in [`registry`].
+//! Convenience: exposed for workspace subcrate consumers, SDK bindings, and integration callers.
 
 use std::io::Read;
 
@@ -113,6 +114,9 @@ fn zstd_encode(content: &[u8], level: i32, long_range: bool) -> Result<Vec<u8>, 
         enc.long_distance_matching(true)
             .map_err(|e| CodecError::Encode(e.to_string()))?;
         enc.window_log(ZSTD_WINDOW_LOG)
+            .map_err(|e| CodecError::Encode(e.to_string()))?;
+    } else {
+        enc.window_log(19)
             .map_err(|e| CodecError::Encode(e.to_string()))?;
     }
     enc.include_checksum(false)

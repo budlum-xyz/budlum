@@ -44,7 +44,7 @@ kind=nat\tid=dev-motog54\tenv=ipv6_only\tpath=relay
 fn device_log_analyzer_golden_reports() {
     let bundle = parse_field_log(EIGHT_DEVICE_FIXTURE).expect("golden fixture parses");
     let summary = evaluate_bundle(&bundle);
-    assert!(summary.matrix_criteria_met);
+    assert!(summary.matrix_criteria_met.is_passed());
     assert!(summary.overall_passed());
 
     let report_a = render_markdown_report(&bundle, &summary);
@@ -61,7 +61,7 @@ fn android_specialuse_service_runs_24h() {
     let bundle = parse_field_log(&broken).expect("timeout fixture parses");
     let summary = evaluate_bundle(&bundle);
     assert!(
-        !summary.soak_all_passed,
+        !summary.soak_all_passed.is_passed(),
         "any Service.onTimeout invocation during 24h must fail the soak gate"
     );
 
@@ -69,7 +69,7 @@ fn android_specialuse_service_runs_24h() {
     let short_bundle = parse_field_log(&broken).expect("short fixture parses");
     let short_summary = evaluate_bundle(&short_bundle);
     assert!(
-        !short_summary.soak_all_passed,
+        !short_summary.soak_all_passed.is_passed(),
         "6h dataSync-style cutoff (< 86400s) must fail the 24h soak gate"
     );
 }
@@ -83,7 +83,7 @@ fn android_battery_budget() {
     let bundle = parse_field_log(&unexplained).expect("battery fixture parses");
     let summary = evaluate_bundle(&bundle);
     assert!(
-        !summary.battery_all_passed,
+        !summary.battery_all_passed.is_passed(),
         "uncharged drain above 5.00% without a documented variance note must fail"
     );
 }
@@ -107,7 +107,7 @@ fn mobile_nat_matrix() {
     let failed_bundle = parse_field_log(&failed_nat).expect("failed nat fixture parses");
     let failed_summary = evaluate_bundle(&failed_bundle);
     assert!(
-        !failed_summary.nat_all_connected,
+        !failed_summary.nat_all_connected.is_passed(),
         "an unconnected NAT probe must fail the matrix connectivity check"
     );
 }

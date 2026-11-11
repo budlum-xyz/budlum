@@ -1,7 +1,7 @@
 # Universal Execution Layer (`UEL`)
 
 Budlum executes unmodified contracts from multiple virtual-machine ecosystems
-against one post-quantum consensus ledger and one sparse-Merkle state root
+against one post-quantum consensus ledger and one sparse-Merkle state root <!-- claim:S-I0 -->
 (`execution_root`).
 
 ## 1. Out-of-Process Worker Isolation 
@@ -53,7 +53,7 @@ All environments share the single Budlum BUD supply:
 - Exact account value is `balance * 10^12 + frac_attos` attoBUD, conserved
  across every environment (`EVM` wei `10^0`, `SVM` lamport `10^9`, `Move`
  octa `10^10`, `WASM` `ubud` `10^12`, `BudZero` atom `10^12`).
-- Local post-quantum accounts (`Address` V3) derive deterministic key-free
+- Local post-quantum accounts (`Address` V3) derive deterministic key-free <!-- claim:L-WALLET-01 -->
  aliases in every environment (`uel/alias`), including off-curve PDA-style
  `SVM` aliases (`CompressedEdwardsY::decompress.is_none`).
 
@@ -90,7 +90,7 @@ STARK proving on every call.
  accounts carry `QuantumClass::Classical` and can move only their own foreign
  account holdings; they cannot debit any `QuantumClass::PostQuantum` native
  account. A dual-signed `Adopt` operation (`BDLM_FOREIGN_ADOPT_V1`) sweeps
- foreign holdings into a post-quantum `Address` V3 once and remains open even
+ foreign holdings into a post-quantum `Address` V3 once and remains open even <!-- claim:L-WALLET-01 -->
  under `QuantumAlertLevel::Isolated`.
 - Universal Call precompile skeleton: `0x000000000000000000000000000000000000B001`
  (`contracts/uel/BudlumUniversal.sol`).
@@ -199,7 +199,7 @@ STARK proving on every call.
  `panic = "unwind"`, audited engine licenses `lambdaclass/cairo-vm` `Apache-2.0`
  and `starkware-libs/sequencer` `blockifier` `Apache-2.0`).
 - Starknet Account Abstraction (`__validate__`, `__validate_declare__`, `__execute__`)
- bound to the caller's post-quantum Budlum local alias under `ee/cairo/state`, plus
+ bound to the caller's post-quantum Budlum local alias under `ee/cairo/state`, plus <!-- claim:L-WALLET-01 -->
  read-only Starknet JSON-RPC v0.7 subset (`src/rpc/compat/starknet/`).
 - Closed at launch on testnet `45261` (`cairo_is_closed_on_testnet`) with proposed
  activation height `55_000`.

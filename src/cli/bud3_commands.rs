@@ -25,7 +25,9 @@ use crate::storage::bud3::view::{
 /// Domain tag deriving deterministic cross-environment account aliases (`bud alias show`).
 pub const DOMAIN_CLI_ALIAS: &[u8] = b"BDLM_BUD3_CLI_ALIAS_V1";
 
-/// Domain tag hashing faucet proof-of-work challenges (`bud faucet request`).
+/// Legacy B.U.D. CLI PoW test domain; NOT the testnet faucet's wire algorithm.
+/// The testnet service uses SHA-256 over `budlum-faucet-v1`, chain ID,
+/// challenge, recipient and nonce (see `src/bin/budlum-faucet.rs`).
 pub const DOMAIN_CLI_FAUCET_POW: &[u8] = b"BDLM_BUD3_CLI_FAUCET_POW_V1";
 
 /// Minimum Full-class validator stake in base BUD atoms (`10_000 BUD`, `1 BUD = 10^6`).
@@ -165,14 +167,7 @@ pub fn cli_storage_upload(
     }
 
     sessions
-        .finish_session(
-            sid,
-            &params.profile,
-            row,
-            candidates,
-            bud3,
-            params.now_secs,
-        )
+        .finish_session(sid, &params.profile, row, candidates, bud3, params.now_secs)
         .map_err(CliBud3Error::Upload)
 }
 
@@ -249,13 +244,8 @@ pub fn cli_storage_grant(
     current_epoch: u64,
 ) -> Result<(GrantRow, StorageTxV3), CliBud3Error> {
     let tag = compute_grant_tag(&req.nft_id, &req.grant_nonce);
-    let sealed = seal_key_package(
-        req.grantee_hpke_public,
-        &tag,
-        &req.object,
-        req.content_key,
-    )
-    .map_err(CliBud3Error::KeyPackage)?;
+    let sealed = seal_key_package(req.grantee_hpke_public, &tag, &req.object, req.content_key)
+        .map_err(CliBud3Error::KeyPackage)?;
     let row = build_grant_row(
         &req.nft_id,
         &req.grant_nonce,
@@ -392,8 +382,9 @@ fn leading_zero_bits(digest: &[u8; 32]) -> u32 {
     total
 }
 
-/// Solve the faucet proof-of-work challenge (`bud faucet request --address <addr>`).
-/// exposed for `bud faucet request` CLI command.
+/// Solve the legacy B.U.D. CLI PoW test vector, not a production faucet
+/// challenge. No `bud faucet request` command currently calls this function;
+/// using it against the live faucet would generate an incompatible proof.
 ///
 /// # Errors
 ///
@@ -486,9 +477,7 @@ mod tests {
             let seg_syms = &finished.segments[usize::try_from(*seg_idx).unwrap()];
             let start = usize::try_from(sh.first_esi).unwrap();
             let end = start + usize::try_from(sh.symbols).unwrap();
-            for sym in &seg_syms[start..end] {
-                net.insert(sh.validator, key, sym.clone());
-            }
+            net.store_holder_share(sh.validator, key, *seg_idx, seg_syms[start..end].to_vec());
         }
 
         apply_bud3_tx(&mut bud3, uploader, finished.unsigned_tx, 1).unwrap();
@@ -507,8 +496,8 @@ mod tests {
         let ok = cli_validator_register(addr, "mobile", 100_000_000, 2 << 30, 45261).unwrap();
         assert_eq!(ok.class, Class::Mobile);
 
-        let full = cli_validator_register(addr, "full", FULL_VALIDATOR_MIN_STAKE_ATOMS, 0, 45261)
-            .unwrap();
+        let full =
+            cli_validator_register(addr, "full", FULL_VALIDATOR_MIN_STAKE_ATOMS, 0, 45261).unwrap();
         assert_eq!(full.class, Class::Full);
     }
 

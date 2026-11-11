@@ -1,6 +1,8 @@
+//! Convenience: exposed for BudZero zkVM prover, compiler, and verifier callers.
+
 use p3_air::symbolic::SymbolicAirBuilder;
 use p3_air::Air;
-use p3_commit::Pcs;
+use p3_commit::{Pcs, UnivariateStarkPcs};
 use p3_matrix::Matrix;
 use tracing::debug_span;
 
@@ -65,8 +67,11 @@ where
     }
 
     let trace_domain = pcs.natural_domain_for_degree(degree);
-    let (commitment, prover_data) = debug_span!("commit to preprocessed trace")
-        .in_scope(|| pcs.commit_preprocessing([(trace_domain, preprocessed)]));
+    #[allow(clippy::expect_used)]
+    let (commitment, prover_data) = debug_span!("commit to preprocessed trace").in_scope(|| {
+        pcs.commit_preprocessing([(trace_domain, preprocessed)])
+            .expect("preprocessed trace fits FRI input bounds")
+    });
 
     let degree_bits = degree_bits + is_zk;
     let prover_data = PreprocessedProverData {

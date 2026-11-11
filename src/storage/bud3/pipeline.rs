@@ -14,6 +14,7 @@
 //! The codec register sits between content and payload: the upload path
 //! selects the codec and stores its payload, the view path decodes it back.
 //! Nothing after the object changes with the codec.
+//! Convenience: exposed for CLI, RPC, SDK, and multi-VM runtime callers.
 
 use super::bof1::{Bof1Error, CodecId, Object};
 use super::content_id::ContentId;
@@ -442,7 +443,10 @@ where
         .iter()
         .position(|m| m.content_id == *content_id)
         .ok_or(PipelineError::Volume(VolumeError::UnknownMember))?;
-    let member = record.members[index];
+    let member = *record
+        .members
+        .get(index)
+        .ok_or(PipelineError::Volume(VolumeError::UnknownMember))?;
     let proof = volume::proof_for(&record.members, index);
     if !volume::verify_member(
         &record.root,
@@ -505,8 +509,7 @@ pub fn prepare_public_upload_two_path(
         .map_err(PipelineError::Limit)?;
     let selected = bud_codec::select(content);
     let candidate = Object::public_coded(selected.codec, selected.payload, content)?;
-    let verified =
-        super::two_path::verify_upload_two_path_and_round_trip(&candidate, profile, 2)?;
+    let verified = super::two_path::verify_upload_two_path_and_round_trip(&candidate, profile, 2)?;
     let up = prepare_public_upload(content, profile, limits, symbols_per_segment)?;
     if commit_object(&verified.object.encode(), profile) != Some(up.record.commitment) {
         return Err(PipelineError::CommitmentMismatch);
@@ -778,7 +781,10 @@ mod tests {
             prepare_volume_upload(&objects, Visibility::Public, &SMALL, &limits, 12).unwrap();
         assert_eq!(prepared.volume.members().len(), 2);
         assert_eq!(prepared.record.members, prepared.volume.members());
-        assert_eq!(prepared.record.bytes_len, (first.len() + second.len()) as u64);
+        assert_eq!(
+            prepared.record.bytes_len,
+            (first.len() + second.len()) as u64
+        );
         // The volume is coded as one segment. Lose a third of its symbols and
         // every member still comes back byte for byte, found by its position
         // and its proof.
@@ -798,7 +804,10 @@ mod tests {
         // refused even when the volume itself verifies.
         let absent = ContentId::public(b"absent");
         let refused = view_volume_member(&prepared.record, prepared.symbols.clone(), &absent);
-        assert_eq!(refused, Err(PipelineError::Volume(VolumeError::UnknownMember)));
+        assert_eq!(
+            refused,
+            Err(PipelineError::Volume(VolumeError::UnknownMember))
+        );
     }
 
     #[test]
@@ -842,7 +851,10 @@ mod tests {
         let mut record = prepared.record.clone();
         record.members[0].offset = 1;
         let seen = view_volume_bytes(&record, prepared.symbols.clone());
-        assert_eq!(seen, Err(PipelineError::Volume(VolumeError::LayoutMismatch)));
+        assert_eq!(
+            seen,
+            Err(PipelineError::Volume(VolumeError::LayoutMismatch))
+        );
 
         // The member root binds the table.
         let mut record = prepared.record.clone();

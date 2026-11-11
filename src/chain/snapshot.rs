@@ -564,6 +564,10 @@ pub const MIN_SUPPORTED_STATE_SNAPSHOT_SCHEMA_VERSION: u32 = 2;
 /// root that no peer computes. At 12 and below the field cannot affect the
 /// digest and a snapshot without it restores an empty directory.
 ///
+/// Schema 14 digests the B.U.D. 3.0 registry. The field existed in schema 13
+/// without digest binding; nonempty legacy copies must be refused, not migrated
+/// by resealing unauthenticated storage and custody records.
+///
 /// Schema 12 carries and digests the reward-pool flag (testnet item 8). It
 /// decides whether the epoch transition pays from the pre-funded pool, which
 /// moves balances: a node that dropped the flag would either pay rewards the
@@ -571,7 +575,7 @@ pub const MIN_SUPPORTED_STATE_SNAPSHOT_SCHEMA_VERSION: u32 = 2;
 /// next epoch boundary. At 11 and below the field cannot affect the digest,
 /// and a snapshot without it restores the network profile's answer - what the
 /// chain did before the flag existed.
-pub const CURRENT_STATE_SNAPSHOT_SCHEMA_VERSION: u32 = 13;
+pub const CURRENT_STATE_SNAPSHOT_SCHEMA_VERSION: u32 = 14;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StateSnapshotV2MigrationReport {
@@ -1205,6 +1209,12 @@ impl StateSnapshotV2 {
         if self.schema_version >= 13 {
             hash_opt_serializable(&mut hasher, &self.validator_directory);
         }
+        // Schema 14: bind all B.U.D. 3.0 custody, grant, quota and object state.
+        // Schema 13 carried this field but did not hash it; its nonempty copies
+        // are rejected by `verify` rather than silently resealed on migration.
+        if self.schema_version >= 14 {
+            hash_opt_serializable(&mut hasher, &self.bud3_registry);
+        }
 
         hasher.finalize().into()
     }
@@ -1225,8 +1235,24 @@ impl StateSnapshotV2 {
         hex::encode(self.calculate_digest())
     }
 
+    fn bud3_payload_is_bound(&self) -> bool {
+        // Schema 13's B.U.D. field was not in its digest: even an honestly
+        // sealed legacy snapshot cannot prove a nonempty registry's contents.
+        // Compare the entire struct, not `is_empty`, which is an operational
+        // predicate and does not cover every serialized index.
+        if self.schema_version < 14 {
+            return self.bud3_registry.as_ref().is_none_or(|registry| {
+                registry == &crate::storage::bud3::registry::Bud3Registry::default()
+            });
+        }
+        // New snapshots must carry the registry, even when empty. Otherwise a
+        // missing field could be silently defaulted into an apparently valid
+        // fresh state by a caller that recomputes an unsigned digest.
+        self.bud3_registry.is_some()
+    }
+
     pub fn verify(&self) -> bool {
-        self.snapshot_hash == self.calculate_hash()
+        self.bud3_payload_is_bound() && self.snapshot_hash == self.calculate_hash()
     }
 
     /// C4: manifest authenticity verification (RFC_GAP1 section 7.1, Task-1).
@@ -1313,6 +1339,11 @@ impl StateSnapshotV2 {
     /// `#[serde(default)]` fields and are rewritten as schema 3 by
     /// `from_state`; unsupported versions fail closed instead of being guessed.
     pub fn migration_report(&self) -> Result<StateSnapshotV2MigrationReport, String> {
+        if !self.bud3_payload_is_bound() {
+            return Err(String::from(
+                "B.U.D. 3.0 registry missing from schema 14 or nonempty without a schema 14 digest",
+            ));
+        }
         if self.schema_version < MIN_SUPPORTED_STATE_SNAPSHOT_SCHEMA_VERSION {
             return Err(format!(
                 "Unsupported legacy snapshot schema_version {} (minimum supported is {}; staged migration hook rejected)",
@@ -1370,6 +1401,10 @@ impl StateSnapshotV2 {
         // the schema-4 snapshot_hash + AllowUnsigned (devnet transition).
         // A RequireSigned production loader expects a signature (sign_manifest).
         if snapshot.schema_version < CURRENT_STATE_SNAPSHOT_SCHEMA_VERSION {
+            // Older schemas never authenticated a B.U.D. registry. `verify()`
+            // above refuses nonempty copies; only a provably empty historical
+            // registry may be materialized into the required schema-14 field.
+            snapshot.bud3_registry.get_or_insert_with(Default::default);
             snapshot.schema_version = CURRENT_STATE_SNAPSHOT_SCHEMA_VERSION;
             snapshot.snapshot_hash = snapshot.calculate_hash();
         }
@@ -2122,6 +2157,54 @@ mod tests {
         assert!(snapshot.verify_authentic(None).is_ok());
     }
 
+    #[test]
+    fn bud3_schema14_digest_binds_registry_and_refuses_legacy_unbound_state() {
+        let mut snapshot = StateSnapshotV2::from_state(&AccountState::new(), legacy_params(1));
+        assert_eq!(snapshot.schema_version, 14);
+        assert!(snapshot.verify());
+        let old_hash = snapshot.snapshot_hash.clone();
+        snapshot
+            .bud3_registry
+            .as_mut()
+            .expect("schema-14 snapshots carry B.U.D. registry")
+            .set_validator_quota([7; 32], 1_024);
+        assert_ne!(old_hash, snapshot.calculate_hash());
+        assert!(!snapshot.verify(), "undigested quota edits must not verify");
+        assert!(StateSnapshotV2::from_bytes(&snapshot.to_bytes()).is_err());
+
+        snapshot.reseal_after_manual_edit();
+        assert!(snapshot.verify(), "schema-14 digest binds the new value");
+        let mut legacy = snapshot.clone();
+        legacy.schema_version = 13;
+        legacy.reseal_after_manual_edit();
+        assert!(
+            !legacy.verify(),
+            "schema-13 cannot authenticate its B.U.D. payload"
+        );
+        assert!(legacy.migration_report().is_err());
+        assert!(StateSnapshotV2::from_bytes(&legacy.to_bytes()).is_err());
+
+        let mut missing = snapshot;
+        missing.bud3_registry = None;
+        missing.reseal_after_manual_edit();
+        assert!(
+            !missing.verify(),
+            "schema-14 cannot silently default a missing registry"
+        );
+    }
+
+    #[test]
+    fn empty_schema13_bud3_snapshot_remains_migratable() {
+        let mut legacy = StateSnapshotV2::from_state(&AccountState::new(), legacy_params(1));
+        legacy.schema_version = 13;
+        legacy.reseal_after_manual_edit();
+        assert!(legacy.verify());
+        let migrated = StateSnapshotV2::from_bytes(&legacy.to_bytes())
+            .expect("historical empty registry carries no unauthenticated B.U.D. data");
+        assert_eq!(migrated.schema_version, 14);
+        assert!(migrated.verify());
+    }
+
     /// `RequireSigned` with no trust list to compare against means "signed by
     /// Anyone who can sign": a key generated a second ago clears it. A
     /// Signature proves the manifest was signed, never that the signer is one
@@ -2354,7 +2437,7 @@ mod tests {
         let mut account_state = AccountState::new();
         account_state
             .note_registry
-            .insert_note([7u8; 32])
+            .insert_note_for_owner([7u8; 32], Address::zero())
             .expect("a fresh registry accepts a note");
 
         let mut snapshot = StateSnapshotV2::from_state(
@@ -2562,6 +2645,7 @@ mod tests {
 
     /// Only the keys of the schema-13 change.
     const SCHEMA13_KEYS: &[&str] = &["validator_directory"];
+    const SCHEMA14_KEYS: &[&str] = &["bud3_registry"];
 
     /// Fields rooted in schema-2: known to the old release too, and not a single byte
     /// the fields it must not lose. `snapshot_hash` is deliberately outside:
@@ -2722,6 +2806,8 @@ mod tests {
             "reward_pool_enabled",
             // validator directory (schema-13 bump: default-filled AND digested)
             "validator_directory",
+            // B.U.D. 3.0 registry (schema-14 digest; carried unbound in 13)
+            "bud3_registry",
             // identity registry (schema-5 bump: default-filled AND digested)
             "identity",
             // vault folder registry (schema-6 bump: same discipline)
@@ -2765,6 +2851,7 @@ mod tests {
                 SCHEMA11_KEYS,
                 SCHEMA12_KEYS,
                 SCHEMA13_KEYS,
+                SCHEMA14_KEYS,
             ]
             .concat(),
             2,
@@ -2783,6 +2870,7 @@ mod tests {
             SCHEMA11_KEYS,
             SCHEMA12_KEYS,
             SCHEMA13_KEYS,
+            SCHEMA14_KEYS,
         ]
         .concat()
         {
@@ -2882,7 +2970,7 @@ mod tests {
             .unwrap();
         account_state
             .note_registry
-            .insert_note([9u8; 32])
+            .insert_note_for_owner([9u8; 32], Address::zero())
             .expect("a fresh record accepts the note");
         let mut params = legacy_params(64);
         params.finality_certificates = vec![schema2_cert()];
@@ -2899,6 +2987,7 @@ mod tests {
                 SCHEMA11_KEYS,
                 SCHEMA12_KEYS,
                 SCHEMA13_KEYS,
+                SCHEMA14_KEYS,
             ]
             .concat(),
             3,
@@ -2915,6 +3004,7 @@ mod tests {
             SCHEMA11_KEYS,
             SCHEMA12_KEYS,
             SCHEMA13_KEYS,
+            SCHEMA14_KEYS,
         ]
         .concat()
         {
@@ -3007,6 +3097,7 @@ mod tests {
                 SCHEMA11_KEYS,
                 SCHEMA12_KEYS,
                 SCHEMA13_KEYS,
+                SCHEMA14_KEYS,
             ]
             .concat(),
             4,
@@ -3022,6 +3113,7 @@ mod tests {
             SCHEMA11_KEYS,
             SCHEMA12_KEYS,
             SCHEMA13_KEYS,
+            SCHEMA14_KEYS,
         ]
         .concat()
         {

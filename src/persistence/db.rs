@@ -5,8 +5,8 @@ use crate::core::transaction::Transaction;
 use crate::cross_domain::message::CrossDomainMessage;
 use crate::cross_domain::BridgeState;
 use crate::domain::{ConsensusDomain, DomainCommitment};
-use crate::settlement::GlobalBlockHeader;
 use crate::persistence::traits::{BlockchainStorage, DurableCommitBatch, SeenBlockMap};
+use crate::settlement::GlobalBlockHeader;
 use serde::{de::DeserializeOwned, Serialize};
 use sled::Db;
 use std::str::from_utf8;
@@ -433,7 +433,10 @@ impl Storage {
             Ok(metadata) if !metadata.is_dir() => {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::NotADirectory,
-                    format!("restore target {} is not a directory", target_db_path.display()),
+                    format!(
+                        "restore target {} is not a directory",
+                        target_db_path.display()
+                    ),
                 ));
             }
             Ok(_) => {
@@ -819,7 +822,7 @@ impl Storage {
     /// # Errors
     ///
     /// Propagates `std::io::Error` from the read.
-    /// WIRING: unwired - no caller in this tree yet; kept as a declared surface, and nothing depends on it until one arrives.
+    /// WIRING: called from `Blockchain::validate_candidate_chain` so locally witness-pruned blocks are not rejected during fork-choice replay.
     pub fn is_witness_pruned(&self, height: u64) -> std::io::Result<bool> {
         Ok(self
             .db
@@ -1100,6 +1103,23 @@ impl Storage {
             .insert("CANONICAL_HEIGHT", height.to_string().as_bytes())?;
         self.db.flush()?;
         Ok(())
+    }
+
+    pub(crate) fn save_round_price_sightings(
+        &self,
+        sightings: &[(String, u128)],
+    ) -> std::io::Result<()> {
+        let val = encode(&sightings.to_vec())?;
+        self.db.insert("ROUND_PRICE_SIGHTINGS", val)?;
+        self.db.flush()?;
+        Ok(())
+    }
+
+    pub(crate) fn load_round_price_sightings(&self) -> std::io::Result<Vec<(String, u128)>> {
+        match self.db.get("ROUND_PRICE_SIGHTINGS")? {
+            Some(bytes) => decode(&bytes),
+            None => Ok(Vec::new()),
+        }
     }
     /// # Errors
     ///
@@ -2592,7 +2612,10 @@ mod tests {
         let error = storage.create_snapshot(&backup).unwrap_err();
         assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
         assert_eq!(std::fs::read(&backup).unwrap(), b"earlier verified backup");
-        assert!(!partial.exists(), "failed publication must clean its partial");
+        assert!(
+            !partial.exists(),
+            "failed publication must clean its partial"
+        );
     }
 
     #[test]
@@ -2889,8 +2912,7 @@ mod tests {
             vec![(b"LAST".to_vec(), b"00".to_vec())],
         );
         let missing_schema_target = root.path().join("missing-schema-target");
-        let error =
-            Storage::restore_snapshot(&missing_schema, &missing_schema_target).unwrap_err();
+        let error = Storage::restore_snapshot(&missing_schema, &missing_schema_target).unwrap_err();
         assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
         assert!(error.to_string().contains("no schema version"));
         assert!(!missing_schema_target.exists());

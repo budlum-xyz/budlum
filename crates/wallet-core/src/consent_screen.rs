@@ -45,7 +45,7 @@ pub const fn padme_bucket_len(raw_len: u64) -> u64 {
     let mask = (1u64 << last_bits) - 1;
     match raw_len.checked_add(mask) {
         Some(sum) => sum & !mask,
-        None => u64::MAX & !mask,
+        None => !mask,
     }
 }
 

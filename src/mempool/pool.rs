@@ -223,7 +223,7 @@ pub struct Mempool {
     journal: Option<Vec<PendingTx>>,
 
     /// Per-envelope UEL and duty lanes with isolated entry/byte budgets.
-    lanes: crate::mempool::lanes::MultiLanePool,
+    lanes: crate::mempool::lanes::MultiLaneMempool,
 }
 
 /// How many bytes one transaction occupies, by the transport's own measure.
@@ -248,7 +248,7 @@ impl Mempool {
             scheme_registry: crate::crypto::scheme::SchemeStatusRegistry::genesis(),
             authority_cache: crate::mempool::authority_cache::AuthorityCache::default(),
             journal: None,
-            lanes: crate::mempool::lanes::MultiLanePool::default(),
+            lanes: crate::mempool::lanes::MultiLaneMempool::new(1024, 16 * 1024 * 1024),
         }
     }
 
@@ -259,9 +259,12 @@ impl Mempool {
         &mut self,
         entry: crate::mempool::lanes::LaneEntry,
     ) -> Result<(), MempoolError> {
+        let now_unix_s = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
         self.lanes
-            .admit(entry)
-            .map_err(MempoolError::InvalidTransaction)
+            .admit(entry, now_unix_s)
+            .map_err(|e| MempoolError::InvalidTransaction(format!("{e:?}")))
     }
 
     /// Selects ready UEL and duty envelopes across all lanes up to `block_bgu_limit`.
@@ -272,14 +275,14 @@ impl Mempool {
         &self,
         block_bgu_limit: u64,
     ) -> Vec<crate::mempool::lanes::LaneEntry> {
-        self.lanes.select_for_block(block_bgu_limit)
+        self.lanes.select_for_block(0, block_bgu_limit)
     }
 
     /// Number of queued entries in `lane`.
     ///
     /// exposed for: operator metrics and compatibility RPC status.
     #[must_use]
-    pub fn lane_len(&self, lane: crate::mempool::lanes::EnvelopeLane) -> usize {
+    pub fn lane_len(&self, lane: crate::mempool::lanes::LaneKind) -> usize {
         self.lanes.lane_len(lane)
     }
 
@@ -357,6 +360,7 @@ impl Mempool {
         let registry_commitment = self.scheme_registry.commitment();
         let authorization = bincode::serialize(&tx.authorization).unwrap_or_default();
         let digest = crate::mempool::authority_cache::authorization_digest(&[
+            tx.hash.as_bytes(),
             &tx.signing_hash(),
             tx.signature.as_deref().unwrap_or_default(),
             &tx.signer_public_key,
@@ -465,9 +469,10 @@ impl Mempool {
                 .saturating_add(batch.block_bytes);
             let cap = self.duty_lane_cap();
             if lane_bytes > cap {
-                return Err(MempoolError::DutyLaneRefused(
-                    DutyRefusal::LaneBytesFull { lane_bytes, cap },
-                ));
+                return Err(MempoolError::DutyLaneRefused(DutyRefusal::LaneBytesFull {
+                    lane_bytes,
+                    cap,
+                }));
             }
         }
 
@@ -1850,5 +1855,40 @@ mod tests {
                 "only one equal-fee entry should be evicted"
             );
         }
+    }
+
+    #[test]
+    fn authorization_cache_rejects_mutated_tx_hash_after_valid_cache_entry() {
+        let mut pool = Mempool::new(MempoolConfig {
+            min_fee: 0,
+            ..MempoolConfig::default()
+        });
+        let tx = create_test_tx_from_seed(0x77, 0, 1);
+        let canonical_hash = tx.hash.clone();
+        let mut tampered = tx.clone();
+        tampered.hash = "ff".repeat(32);
+
+        pool.add_transaction(tx).expect("valid tx admitted");
+        assert_eq!(
+            pool.authority_cache.len(),
+            1,
+            "authorization must be cached"
+        );
+        // Keep the accepted authorization while removing the pending nonce,
+        // so a replacement-policy rejection cannot mask a cache bypass.
+        pool.remove_transaction(&canonical_hash)
+            .expect("remove pending transaction");
+        assert_eq!(
+            pool.authority_cache.len(),
+            1,
+            "removal must retain the cache fixture"
+        );
+        let err = pool
+            .add_transaction(tampered)
+            .expect_err("non-canonical tx.hash must not hit authorization cache");
+        assert!(
+            matches!(err, MempoolError::InvalidTransaction(_)),
+            "got: {err:?}"
+        );
     }
 }

@@ -76,27 +76,27 @@ const METHOD_NOT_FOUND: i32 = -32601;
 /// What a method answers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Answer {
- /// Read from chain state. No execution environment is involved, so the
- /// answer is the same on every node at the same block.
+    /// Read from chain state. No execution environment is involved, so the
+    /// answer is the same on every node at the same block.
     ChainRead,
- /// `-32601` on purpose (Section 8.10.6: `eth_getProof`).
+    /// `-32601` on purpose (Section 8.10.6: `eth_getProof`).
     MethodNotFound,
- /// `-32004`, naming the Budlum door that replaces the method.
+    /// `-32004`, naming the Budlum door that replaces the method.
     EeUnavailable {
- /// The `bud_*` method that answers the same question on Budlum.
+        /// The `bud_*` method that answers the same question on Budlum.
         door: &'static str,
     },
- /// Creation or removal of one record in the bounded filter table. These
- /// successful calls perform node-local administration, so their class is
- /// `LocalAdmin`.
+    /// Creation or removal of one record in the bounded filter table. These
+    /// successful calls perform node-local administration, so their class is
+    /// `LocalAdmin`.
     BoundedFilter,
- /// Validation of a bounded filter followed by the honest the EVM execution environment refusal.
- /// No successful log response exists yet, so these rows stay `Refused`
- /// instead of implying that a success behavior can be covered.
+    /// Validation of a bounded filter followed by the honest the EVM execution environment refusal.
+    /// No successful log response exists yet, so these rows stay `Refused`
+    /// instead of implying that a success behavior can be covered.
     BoundedFilterRead,
- /// Not served yet. A client gets `-32601` from the dispatcher.
+    /// Not served yet. A client gets `-32601` from the dispatcher.
     Pending {
- /// The work left before this row can be served.
+        /// The work left before this row can be served.
         package: &'static str,
     },
 }
@@ -108,9 +108,9 @@ enum Answer {
 /// not drift from itself.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct MethodRow {
- /// The wire name, exactly as a client sends it.
+    /// The wire name, exactly as a client sends it.
     name: &'static str,
- /// What a successful call does.
+    /// What a successful call does.
     answer: Answer,
 }
 
@@ -336,7 +336,9 @@ fn namespace_of(name: &str) -> bool {
 ///
 /// Names every foreign method with no row, and every served method whose row
 /// is pending.
-pub(crate) fn check_served<'a>(registered: impl IntoIterator<Item = &'a str>) -> Result<(), String> {
+pub(crate) fn check_served<'a>(
+    registered: impl IntoIterator<Item = &'a str>,
+) -> Result<(), String> {
     let mut problems = Vec::new();
     for name in registered {
         if !namespace_of(name) {
@@ -382,9 +384,15 @@ pub(crate) fn ee_unavailable(method: &str, door: &'static str) -> ErrorObjectOwn
 /// the refusal.
 pub(crate) fn filter_error(method: &str, error: filters::FilterError) -> ErrorObjectOwned {
     let mut data = serde_json::json!({ "reason": error.reason() });
-    if let Some(door) = error.door() {
-        data["door"] = serde_json::Value::String(door.to_string());
-        data["package"] = serde_json::Value::String("evm-execution".to_string());
+    if let (Some(door), Some(obj)) = (error.door(), data.as_object_mut()) {
+        obj.insert(
+            "door".to_string(),
+            serde_json::Value::String(door.to_string()),
+        );
+        obj.insert(
+            "package".to_string(),
+            serde_json::Value::String("evm-execution".to_string()),
+        );
     }
     ErrorObjectOwned::owned(
         error.code(),

@@ -59,7 +59,7 @@ A certificate whose `set_hash` differs from the trusted one is refused. It is
 never silently followed: a set change is handled only by the handoff chain
 below.
 
-### Mainnet: the post-quantum half is required
+### Mainnet: the post-quantum half is required <!-- claim:L-FINALITY-01 -->
 
 A client built with `LightClient::for_chain` for the mainnet chain id refuses
 a BLS-only checkpoint. It advances only through
@@ -69,13 +69,13 @@ ML-DSA-65 `QcBlob` of the same signers over the same checkpoint) or through
 binding chain and the same stake and count quorum, and no validator counted
 twice). On testnet and devnet the BLS certificate alone advances the anchor.
 
-### Set changes: post-quantum handoffs only
+### Set changes: post-quantum handoffs only <!-- claim:L-FINALITY-01 -->
 
 When the validator set changes, `LightClient::follow_handoffs` moves the
 trusted `set_hash` along the chain of `HandoffCertificate`s. Each step is
 signed by the outgoing set and names the incoming set. Only ML-DSA-65
 signatures are checked on this path, so the move holds without trusting BLS:
-a quantum adversary that can forge BLS signatures still cannot hand the
+a quantum adversary that can forge BLS signatures still cannot hand the <!-- claim:L-FINALITY-01 -->
 client to a set of its choosing. The epoch randomness that seats each
 handoff committee is supplied by the caller from an independent source; a
 certificate is not allowed to name its own randomness. The anchor height does
@@ -83,8 +83,8 @@ not move during a handoff; the next checkpoint verified over the new set
 advances it.
 
 This is the split asks to have written down: **BLS at every
-checkpoint, post-quantum signatures at every set change.** On mainnet the
-checkpoint carries the post-quantum half as well.
+checkpoint, post-quantum signatures at every set change.** On mainnet the <!-- claim:L-FINALITY-01 -->
+checkpoint carries the post-quantum half as well. <!-- claim:L-FINALITY-01 -->
 
 ## What it costs a phone
 
@@ -97,14 +97,14 @@ assume the implementation track's committee of 128 seats.
 | BLS aggregate signature | one G1 point, compressed | 48 bytes |
 | Seat bitmap | 128 bits | 16 bytes |
 | Checkpoint, BLS half | aggregate signature plus bitmap | 64 bytes plus the header fields |
-| Checkpoint or handoff, post-quantum, every seat signing | 128 x 3309 | 423 552 bytes (about 420 KB) |
+| Checkpoint or handoff, post-quantum, every seat signing | 128 x 3309 | 423 552 bytes (about 420 KB) | <!-- claim:L-FINALITY-01 -->
 | Same, at the smallest quorum | (floor(2 x 128 / 3) + 1) x 3309 = 86 x 3309 | 284 574 bytes |
 
-So a testnet phone pays tens of bytes per checkpoint, and the post-quantum
-cost only when the set changes. A mainnet phone pays the post-quantum half at
+So a testnet phone pays tens of bytes per checkpoint, and the post-quantum <!-- claim:L-FINALITY-01 -->
+cost only when the set changes. A mainnet phone pays the post-quantum half at <!-- claim:L-FINALITY-01 -->
 every checkpoint it verifies; that is the cost records as high for a
 phone, and reducing it (fewer checkpoints verified, or a smaller
-post-quantum attestation) belongs to the implementation track together with the certificate
+post-quantum attestation) belongs to the implementation track together with the certificate <!-- claim:L-FINALITY-01 -->
 format.
 
 ## What it does not do

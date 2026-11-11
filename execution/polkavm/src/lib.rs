@@ -10,7 +10,7 @@
 
 use budlum_uel_abi::{
     BlockContext, CodeInfo, EeCall, EeCallKind, EeFault, EeId, EeIdentity, EeLog, EeOutcome,
-    EeQuery, EeRefusal, ExecutionEnvironment, HostApi, HostRead, Namespace,
+    EeQuery, EeRefusal, OutcomeStatus, RefusalCode, ExecutionEnvironment, HostApi, HostRead, Namespace,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
@@ -85,23 +85,23 @@ pub fn encode_polkavm_blob(prog: &PolkaVmProgram) -> Result<Vec<u8>, String> {
 /// Decode and validate a `POLKAVM_BLOB_MAGIC`-prefixed `.polkavm` blob.
 pub fn decode_polkavm_blob(raw: &[u8]) -> Result<PolkaVmProgram, EeRefusal> {
     if raw.len() < 4 || raw.len() > MAX_POLKAVM_BLOB_BYTES {
-        return Err(EeRefusal::BadCode("invalid PolkaVM blob length".into()));
+        return Err(ee_bad_code("invalid PolkaVM blob length".into()));
     }
     if raw.get(..4) != Some(POLKAVM_BLOB_MAGIC.as_slice()) {
-        return Err(EeRefusal::BadCode("missing PVM\\0 magic".into()));
+        return Err(ee_bad_code("missing PVM\\0 magic".into()));
     }
     let prog: PolkaVmProgram = serde_json::from_slice(raw.get(4..).unwrap_or_default())
-        .map_err(|e| EeRefusal::BadCode(format!("corrupt PolkaVM blob: {e}")))?;
+        .map_err(|e| ee_bad_code(format!("corrupt PolkaVM blob: {e}")))?;
     for d in &prog.dispatches {
         for ins in &d.insns {
             if !regs_in_range(ins) {
-                return Err(EeRefusal::BadCode("PolkaVM register >= 16".into()));
+                return Err(ee_bad_code("PolkaVM register >= 16".into()));
             }
         }
     }
     for ins in &prog.constructor {
         if !regs_in_range(ins) {
-            return Err(EeRefusal::BadCode("PolkaVM constructor reg >= 16".into()));
+            return Err(ee_bad_code("PolkaVM constructor reg >= 16".into()));
         }
     }
     Ok(prog)
@@ -218,7 +218,7 @@ fn run_rv32em(
             PolkaVmInsn::SealSetStorageU32 { slot, rs } => {
                 let val = regs.get(rs as usize).copied().unwrap_or(0).to_le_bytes();
                 let sk = stor_key(contract, &slot);
-                if host.write(ns.clone(), &sk, Some(&val)).is_err() {
+                if host.write(ns, &sk, Some(&val)).is_err() {
                     return Err(b"SEAL_STORAGE_ERR");
                 }
             }
@@ -298,7 +298,7 @@ impl ExecutionEnvironment for PolkaVmWorker {
         let _ = decode_polkavm_blob(code)?;
         Ok(CodeInfo {
             code_hash: Sha256::digest(code).into(),
-            byte_len: u32::try_from(code.len()).unwrap_or(u32::MAX),
+            abi_tag: String::from("ink-polkavm-v1"),
         })
     }
 
@@ -308,25 +308,25 @@ impl ExecutionEnvironment for PolkaVmWorker {
         call: &EeCall,
         host: &mut dyn HostApi,
     ) -> Result<EeOutcome, EeFault> {
-        let ns = Namespace::new(NS_POLKAVM_STATE).map_err(EeFault::Wire)?;
+        let ns = Namespace::new(NS_POLKAVM_STATE).map_err(ee_wire_fault)?;
         if !self.is_active(ctx) {
-            return Ok(EeOutcome::reverted(b"POLKAVM_CLOSED_ON_TESTNET".to_vec(), 0));
+            return Ok(ee_reverted(b"POLKAVM_CLOSED_ON_TESTNET".to_vec(), 0));
         }
         let Ok(caller32) = <[u8; 32]>::try_from(call.caller.id.as_slice()) else {
-            return Ok(EeOutcome::reverted(b"PolkaVM caller must be 32 bytes".to_vec(), 0));
+            return Ok(ee_reverted(b"PolkaVM caller must be 32 bytes".to_vec(), 0));
         };
         let mut gas_used: u64 = 1_000;
         if gas_used > call.gas_limit || host.charge(gas_used).is_err() {
-            return Ok(EeOutcome::out_of_gas(call.gas_limit));
+            return Ok(ee_out_of_gas(call.gas_limit));
         }
 
         if call.kind == EeCallKind::Deploy {
             let Ok(prog) = decode_polkavm_blob(&call.input) else {
-                return Ok(EeOutcome::reverted(b"bad PolkaVM blob".to_vec(), gas_used));
+                return Ok(ee_reverted(b"bad PolkaVM blob".to_vec(), gas_used));
             };
             let addr = derive_contract_addr(&caller32, &call.tx_hash);
-            if host.write(ns.clone(), &code_key(&addr), Some(&call.input)).is_err() {
-                return Ok(EeOutcome::reverted(b"code write err".to_vec(), gas_used));
+            if host.write(&ns, &code_key(&addr), Some(&call.input)).is_err() {
+                return Ok(ee_reverted(b"code write err".to_vec(), gas_used));
             }
             match run_rv32em(
                 &ns,
@@ -337,25 +337,25 @@ impl ExecutionEnvironment for PolkaVmWorker {
                 call.gas_limit,
                 host,
             ) {
-                Ok(_) => Ok(EeOutcome::success(addr.to_vec(), gas_used)),
-                Err(b"OUT_OF_GAS") => Ok(EeOutcome::out_of_gas(call.gas_limit)),
-                Err(r) => Ok(EeOutcome::reverted(r.to_vec(), gas_used)),
+                Ok(_) => Ok(ee_success(addr.to_vec(), gas_used)),
+                Err(b"OUT_OF_GAS") => Ok(ee_out_of_gas(call.gas_limit)),
+                Err(r) => Ok(ee_reverted(r.to_vec(), gas_used)),
             }
         } else {
             let Ok(target32) = <[u8; 32]>::try_from(call.target.id.as_slice()) else {
-                return Ok(EeOutcome::reverted(b"PolkaVM target must be 32 bytes".to_vec(), 0));
+                return Ok(ee_reverted(b"PolkaVM target must be 32 bytes".to_vec(), 0));
             };
             let Ok(Some(blob)) = host.read(&ns, &code_key(&target32)) else {
-                return Ok(EeOutcome::reverted(b"PolkaVM contract missing".to_vec(), gas_used));
+                return Ok(ee_reverted(b"PolkaVM contract missing".to_vec(), gas_used));
             };
             let Ok(prog) = decode_polkavm_blob(&blob) else {
-                return Ok(EeOutcome::reverted(b"corrupt PolkaVM blob".to_vec(), gas_used));
+                return Ok(ee_reverted(b"corrupt PolkaVM blob".to_vec(), gas_used));
             };
             let Some((sel_slice, args_tail)) = call.input.split_at_checked(4) else {
-                return Ok(EeOutcome::reverted(b"missing 4-byte ink! selector".to_vec(), gas_used));
+                return Ok(ee_reverted(b"missing 4-byte ink! selector".to_vec(), gas_used));
             };
             let Some(disp) = prog.dispatches.iter().find(|d| d.selector == sel_slice) else {
-                return Ok(EeOutcome::reverted(b"unknown ink! selector".to_vec(), gas_used));
+                return Ok(ee_reverted(b"unknown ink! selector".to_vec(), gas_used));
             };
             match run_rv32em(
                 &ns,
@@ -366,9 +366,9 @@ impl ExecutionEnvironment for PolkaVmWorker {
                 call.gas_limit,
                 host,
             ) {
-                Ok(out) => Ok(EeOutcome::success(out, gas_used)),
-                Err(b"OUT_OF_GAS") => Ok(EeOutcome::out_of_gas(call.gas_limit)),
-                Err(r) => Ok(EeOutcome::reverted(r.to_vec(), gas_used)),
+                Ok(out) => Ok(ee_success(out, gas_used)),
+                Err(b"OUT_OF_GAS") => Ok(ee_out_of_gas(call.gas_limit)),
+                Err(r) => Ok(ee_reverted(r.to_vec(), gas_used)),
             }
         }
     }
@@ -380,26 +380,50 @@ impl ExecutionEnvironment for PolkaVmWorker {
         host: &dyn HostRead,
     ) -> Result<Vec<u8>, EeRefusal> {
         if !self.is_active(ctx) {
-            return Err(EeRefusal::Denied("POLKAVM_CLOSED_ON_TESTNET".into()));
+            return Err(ee_denied("POLKAVM_CLOSED_ON_TESTNET".into()));
         }
         let ns = Namespace::new(NS_POLKAVM_STATE)
-            .map_err(|_| EeRefusal::Denied("bad polkavm ns".into()))?;
+            .map_err(|_| ee_denied("bad polkavm ns".into()))?;
         let target32: [u8; 32] = q
             .target
             .id
             .as_slice()
             .try_into()
-            .map_err(|_| EeRefusal::BadInput("target must be 32 bytes".into()))?;
+            .map_err(|_| ee_bad_input("target must be 32 bytes".into()))?;
         let slot: [u8; 32] = q
             .input
             .as_slice()
             .try_into()
-            .map_err(|_| EeRefusal::BadInput("slot must be 32 bytes".into()))?;
+            .map_err(|_| ee_bad_input("slot must be 32 bytes".into()))?;
         Ok(host
             .read(&ns, &stor_key(&target32, &slot))
-            .map_err(|e| EeRefusal::Denied(e.to_string()))?
+            .map_err(|e| ee_denied(e.to_string()))?
             .unwrap_or_default())
     }
+}
+
+
+fn ee_bad_code(msg: String) -> EeRefusal {
+    EeRefusal { code: RefusalCode::InvalidCode, message: msg }
+}
+fn ee_denied(msg: String) -> EeRefusal {
+    EeRefusal { code: RefusalCode::Denied, message: msg }
+}
+fn ee_bad_input(msg: String) -> EeRefusal {
+    EeRefusal { code: RefusalCode::Unsupported, message: msg }
+}
+fn ee_success(output: Vec<u8>, gas_used: u64) -> EeOutcome {
+    EeOutcome { status: OutcomeStatus::Success, output, gas_used }
+}
+fn ee_reverted(output: Vec<u8>, gas_used: u64) -> EeOutcome {
+    EeOutcome { status: OutcomeStatus::Revert, output, gas_used }
+}
+fn ee_out_of_gas(gas_used: u64) -> EeOutcome {
+    EeOutcome { status: OutcomeStatus::OutOfGas, output: Vec::new(), gas_used }
+}
+fn ee_wire_fault(err: impl std::fmt::Display) -> EeFault {
+    let msg = err.to_string();
+    EeFault { ee: EeId::POLKAVM, panic_digest: budlum_uel_abi::panic_digest(EeId::POLKAVM, &msg) }
 }
 
 #[cfg(test)]
@@ -410,7 +434,7 @@ mod tests {
 
     #[test]
     fn polkavm_is_closed_on_testnet() {
-        assert!(!POLKAVM_JIT_ENABLED);
+        const { assert!(!POLKAVM_JIT_ENABLED) };
         let mut worker = PolkaVmWorker::new();
         let mut host = MemoryHost::new(1_000_000);
         let Ok(caller) = EeIdentity::new(EeId::POLKAVM, vec![0xAA; 32]) else {
@@ -436,7 +460,7 @@ mod tests {
         ) else {
             panic!("exec");
         };
-        assert_eq!(out.status, OutcomeStatus::Reverted);
+        assert_eq!(out.status, OutcomeStatus::Revert);
         assert_eq!(out.output, b"POLKAVM_CLOSED_ON_TESTNET");
     }
 

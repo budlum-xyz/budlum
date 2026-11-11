@@ -29,7 +29,7 @@ concurrency:
 jobs:
   android-validator-and-log-analyzer:
     name: Mobile Log Analyzer & Android Validator Suite
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     permissions:
       contents: read
@@ -52,7 +52,25 @@ jobs:
           cargo test --locked --manifest-path mobile/tools/log-analyzer/Cargo.toml
 
       - name: Install protoc
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
+        run: |
+          set -euo pipefail
+          if ! command -v protoc >/dev/null 2>&1; then
+            case "$(uname -m)" in
+              aarch64|arm64)
+                PROTOC_ZIP=protoc-29.3-linux-aarch_64.zip
+                PROTOC_SHA256=6427349140e01f06e049e707a58709a4f221ae73ab9a0425bc4a00c8d0e1ab32
+                ;;
+              *)
+                PROTOC_ZIP=protoc-29.3-linux-x86_64.zip
+                PROTOC_SHA256=3e866620c5be27664f3d2fa2d656b5f3e09b5152b42f1bedbf427b333e90021a
+                ;;
+            esac
+            curl -sSfL --retry 5 --retry-all-errors --retry-delay 2 -o /tmp/protoc.zip \
+              "https://github.com/protocolbuffers/protobuf/releases/download/v29.3/${PROTOC_ZIP}"
+            echo "${PROTOC_SHA256}  /tmp/protoc.zip" | sha256sum -c -
+            sudo unzip -q -o /tmp/protoc.zip -d /usr/local bin/protoc 'include/*'
+            rm -f /tmp/protoc.zip
+          fi
 
       - name: Test shared mobile runtime
         run: cargo test --lib registry::mobile_runtime::tests --locked -- --nocapture
@@ -94,7 +112,7 @@ jobs:
 
   android-gradle:
     name: Android Gradle build and unit tests
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
       contents: read
@@ -113,7 +131,10 @@ jobs:
           gradle-version: "8.11.1"
       - name: Install Android SDK platform 36
         run: |
+          export PATH="$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_SDK_ROOT/cmdline-tools/latest/bin:$PATH"
+          set +o pipefail
           yes | sdkmanager --licenses > /dev/null
+          set -o pipefail
           sdkmanager --install "platforms;android-36" "build-tools;36.0.0"
       - name: Build debug APK
         working-directory: mobile/android
@@ -125,7 +146,7 @@ jobs:
   android-instrumentation:
     name: Android Keystore and boot instrumentation (manual)
     if: github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
       contents: read

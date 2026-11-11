@@ -12,18 +12,14 @@ use crate::execution::coordinator::svm_ee::{
     SVM_SPL_TOKEN_PROGRAM_ID,
 };
 use crate::execution::coordinator::wasm_ee::build_valid_cosmwasm_module;
-use crate::execution::coordinator::{
-    ExecutionCoordinator, UelAction, UelReceiptStatus, UelTx,
-};
-use budlum_uel_abi::{BlockContext, BudAmount, EeId, ExecutionEnvironment};
+use crate::execution::coordinator::{ExecutionCoordinator, UelAction, UelReceiptStatus, UelTx};
+use budlum_uel_abi::{BlockContext, EeId, ExecutionEnvironment};
 
 fn sample_ctx() -> BlockContext {
     BlockContext {
         height: 77,
         timestamp_ms: 1_700_000_077_000,
         chain_id: 45_261,
-        randao: [0x5A; 32],
-        base_fee: BudAmount(MIN_UEL_BASE_FEE_ATTOS),
     }
 }
 
@@ -143,9 +139,12 @@ fn svm_spl_token_and_vote_stake_refusal_and_universal_cpi() {
     assert!(recs.iter().all(|r| r.status == UelReceiptStatus::Success));
 
     // 2. Vote and Stake programs MUST be refused (section 8.15).
-    for (idx, forbidden_prog) in [FORBIDDEN_SVM_VOTE_PROGRAM_ID, FORBIDDEN_SVM_STAKE_PROGRAM_ID]
-        .iter()
-        .enumerate()
+    for (idx, forbidden_prog) in [
+        FORBIDDEN_SVM_VOTE_PROGRAM_ID,
+        FORBIDDEN_SVM_STAKE_PROGRAM_ID,
+    ]
+    .iter()
+    .enumerate()
     {
         let r = state
             .execute_uel_block(
@@ -235,7 +234,10 @@ fn svm_spl_token_and_vote_stake_refusal_and_universal_cpi() {
     let mut store_k = wasm_contract;
     store_k.extend_from_slice(b":kv:from_svm");
     assert_eq!(
-        state.execution_state.read(NS_WASM_STORE, &store_k).expect("r"),
+        state
+            .execution_state
+            .read(NS_WASM_STORE, &store_k)
+            .expect("r"),
         Some(b"ok".to_vec())
     );
 }
@@ -407,7 +409,10 @@ fn move_sequential_randomness_staking_refusal_and_universal_call() {
     let mut store_k = wasm_target;
     store_k.extend_from_slice(b":kv:from_move");
     assert_eq!(
-        state.execution_state.read(NS_WASM_STORE, &store_k).expect("r"),
+        state
+            .execution_state
+            .read(NS_WASM_STORE, &store_k)
+            .expect("r"),
         Some(b"aptos_ok".to_vec())
     );
 }

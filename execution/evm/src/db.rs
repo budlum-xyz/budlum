@@ -7,12 +7,15 @@
 //! - `uel/alias`: key = 21 bytes (`[EeId::EVM.0]` || `address` 20B) or 20 bytes (`address`),
 //!   checked to refuse `CREATE`/`CREATE2` collisions against post-quantum local aliases.
 
+use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::fmt;
+use std::rc::Rc;
 
+use budlum_uel_abi::types::MAX_LOG_TOPICS;
 use budlum_uel_abi::{
     BudAmount, EeId, EeIdentity, EeLog, HostApi, HostError, HostRead, Namespace, UniversalCall,
-    UniversalResult, MAX_LOG_TOPICS,
+    UniversalResult,
 };
 use revm::database_interface::{DBErrorMarker, Database};
 use revm::primitives::{Address, Bytes, Log, StorageKey, StorageValue, B256, KECCAK_EMPTY, U256};
@@ -186,11 +189,21 @@ pub fn check_pq_alias_in_host(host: &dyn HostRead, address: Address) -> Result<b
 pub struct HostDb<'a> {
     pub host: &'a mut dyn HostApi,
     pub chain_id: u64,
+    child_gas_charged: Rc<Cell<u64>>,
 }
 
 impl<'a> HostDb<'a> {
     pub fn new(host: &'a mut dyn HostApi, chain_id: u64) -> Self {
-        Self { host, chain_id }
+        Self::with_child_gas_tracker(host, chain_id, Rc::new(Cell::new(0)))
+    }
+
+    /// Track child gas already metered by the coordinator during a Universal Call.
+    pub fn with_child_gas_tracker(
+        host: &'a mut dyn HostApi,
+        chain_id: u64,
+        child_gas_charged: Rc<Cell<u64>>,
+    ) -> Self {
+        Self { host, chain_id, child_gas_charged }
     }
 
     pub fn has_pq_alias(&self, address: Address) -> Result<bool, HostDbError> {
@@ -198,7 +211,11 @@ impl<'a> HostDb<'a> {
     }
 
     pub fn universal_call(&mut self, call: UniversalCall) -> Result<UniversalResult, HostError> {
-        self.host.universal_call(call)
+        let result = self.host.universal_call(call)?;
+        self.child_gas_charged.set(
+            self.child_gas_charged.get().saturating_add(result.gas_used),
+        );
+        Ok(result)
     }
 }
 

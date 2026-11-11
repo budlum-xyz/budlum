@@ -135,7 +135,7 @@ impl HandoverCoordinator {
     /// Convenience: exposed for finalized checkpoint seat table update.
     pub fn record_checkpoint_participation(
         &mut self,
-        active_holders: &mut Vec<Address>,
+        active_holders: &mut [Address],
         participated: &BTreeSet<Address>,
         standby_queue: &[Address],
     ) -> Vec<(Address, Address)> {
@@ -255,7 +255,11 @@ impl HandoverCoordinator {
     /// Row 9 (Presence aggregation): if the proposer of block `h` omits a
     /// [`PresenceAggregate`], retain it so the proposer of block `h + 1` includes it.
     /// Convenience: exposed for block proposer presence queue.
-    pub fn on_presence_window_ready(&mut self, aggregate: PresenceAggregate, proposer_included: bool) -> Vec<PresenceAggregate> {
+    pub fn on_presence_window_ready(
+        &mut self,
+        aggregate: PresenceAggregate,
+        proposer_included: bool,
+    ) -> Vec<PresenceAggregate> {
         self.pending_presence_aggregates.push(aggregate);
         if proposer_included {
             std::mem::take(&mut self.pending_presence_aggregates)
@@ -526,7 +530,8 @@ impl ChurnSimulator {
                     .copied()
                     .enumerate()
                     .filter(|(idx, v)| {
-                        self.online.contains(v) && !dropped_packet(h, *idx as u64, self.packet_drop_ppm)
+                        self.online.contains(v)
+                            && !dropped_packet(h, *idx as u64, self.packet_drop_ppm)
                     })
                     .map(|(_, v)| v)
                     .collect();
@@ -544,16 +549,21 @@ impl ChurnSimulator {
             }
 
             self.coordinator.observe_block(h, epoch, new_fin);
-            if matches!(self.coordinator.recovery_mode, RecoveryMode::Recovery { .. }) {
+            if matches!(
+                self.coordinator.recovery_mode,
+                RecoveryMode::Recovery { .. }
+            ) {
                 entered_recovery_mode = true;
                 let mut pool = self.full_validators.clone();
                 pool.extend(self.standby_full.iter().copied());
                 pool.sort();
                 pool.dedup();
-                if let Some(recovered) =
-                    self.coordinator
-                        .compute_recovery_committee(epoch.saturating_add(1), &pool, &self.presence, 2)
-                {
+                if let Some(recovered) = self.coordinator.compute_recovery_committee(
+                    epoch.saturating_add(1),
+                    &pool,
+                    &self.presence,
+                    2,
+                ) {
                     self.full_validators = recovered;
                 }
             }
@@ -578,7 +588,8 @@ impl ChurnSimulator {
     fn count_reconstructible_objects(&self) -> usize {
         let mut intact = 0usize;
         for obj in &self.objects {
-            let Ok(mut dec) = SegmentDecoder::new(0, obj.original.len() as u64, &obj.profile) else {
+            let Ok(mut dec) = SegmentDecoder::new(0, obj.original.len() as u64, &obj.profile)
+            else {
                 continue;
             };
             let mut meter = Meter::new(1 << 20, 1 << 20);
@@ -590,7 +601,7 @@ impl ChurnSimulator {
                     if dec.is_done() {
                         break;
                     }
-                    let _ = dec.push(sym, &mut meter);
+                    let _ = dec.push(sym.clone(), &mut meter);
                 }
             }
             if dec.into_bytes().as_deref() == Some(obj.original.as_slice()) {
@@ -688,7 +699,9 @@ mod tests {
             aggregate_sig: vec![0x11; 48],
         };
         // Block `h` proposer omits the aggregate -> retained in queue.
-        assert!(coord.on_presence_window_ready(agg.clone(), false).is_empty());
+        assert!(coord
+            .on_presence_window_ready(agg.clone(), false)
+            .is_empty());
         // Block `h + 1` proposer flushes and includes it -> 1-block max delay.
         let flushed = coord.flush_pending_presence_aggregates();
         assert_eq!(flushed, vec![agg]);
@@ -717,14 +730,19 @@ mod tests {
 
         let mut churned = ChurnSimulator::new(8, 2, 500, 10);
         churned
-            .store_coded_object(&b"object survives 100% mobile departure via full shares".repeat(32))
+            .store_coded_object(
+                &b"object survives 100% mobile departure via full shares".repeat(32),
+            )
             .unwrap();
         // Stop ALL 500 Mobile validators simultaneously!
         let all_mobile = churned.mobile_validators.clone();
         churned.set_offline(&all_mobile);
 
         let summary = churned.run_blocks(25);
-        assert_eq!(summary.checkpoints_finalized, base_summary.checkpoints_finalized);
+        assert_eq!(
+            summary.checkpoints_finalized,
+            base_summary.checkpoints_finalized
+        );
         assert_eq!(
             summary.max_finality_gap_checkpoints,
             base_summary.max_finality_gap_checkpoints

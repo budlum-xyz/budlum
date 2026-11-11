@@ -13,6 +13,7 @@
 //! snapshotted. A Full validator's stake lives in `AccountState::validators`
 //! (the consensus set); a Mobile validator holds no seat, so its bond lives in
 //! the directory record itself and never enters a quorum.
+//! Convenience: exposed for CLI, RPC, SDK, and multi-VM runtime callers.
 
 pub mod committee;
 pub mod handover;
@@ -427,6 +428,29 @@ impl ValidatorDirectory {
     ///
     /// A second registration of the owner, a peer id or operator key already
     /// in use, or a stake below `floor`.
+    /// Insert a registration after verifying its chain-bound BLS Proof of Possession.
+    pub fn register_verified(
+        &mut self,
+        registration: &ValidatorRegistration,
+        bonded_stake: u64,
+        floor: u64,
+        epoch: u64,
+        chain_id: u64,
+    ) -> Result<(), ValidatorError> {
+        if !crate::chain::finality::verify_bls_pop_bytes(
+            &registration.owner,
+            &registration.bls_key,
+            &registration.bls_pop,
+            chain_id,
+        ) {
+            return Err(ValidatorError::new(
+                "validator_bls_pop_invalid",
+                "the BLS proof of possession failed verification for this owner and chain id",
+            ));
+        }
+        self.register(registration, bonded_stake, floor, epoch)
+    }
+
     pub fn register(
         &mut self,
         registration: &ValidatorRegistration,
@@ -452,12 +476,12 @@ impl ValidatorDirectory {
         if self
             .records
             .values()
-            .any(|r| r.peer_id == registration.peer_id)
+            .any(|r| r.peer_id == registration.peer_id || r.bls_key == registration.bls_key)
             || self.operator_key_in_use(&registration.operator_key)
         {
             return Err(ValidatorError::new(
                 "validator_peer_or_operator_key_in_use",
-                "the peer id or the operator key belongs to another validator",
+                "the peer id, BLS key, or operator key belongs to another validator",
             ));
         }
         self.records.insert(

@@ -76,7 +76,7 @@ bundle; a `fee_schedule` field inside that bundle is rejected.
 1. Submit `MigrationTx::BeginEvmImport(Box<MigrationRequest>)` -> stages
  `MigrationPlan` in `ExecutionState::pending_evm_migrations`.
 2. Submit zero or more `MigrationTx::ImportEvmStorageChunk(ImportEvmStorageChunk)`
- transactions -> proves and stages all non-zero storage slots.
+ transactions -> proves and stages all non-fixed-commitment custody slots.
 3. Submit `MigrationTx::FinalizeEvmImport { contract }` -> verifies complete
  `storageRoot`, settles fee from migrator, writes `ee/evm/code`,
  `ee/evm/account` (with `imported_from`), and `ee/evm/storage`, and clears the

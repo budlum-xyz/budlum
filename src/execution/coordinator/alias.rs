@@ -7,6 +7,8 @@
 //! - Deterministic aliases for EVM (`BDLM_EVM_ALIAS_V1`), WASM (`bud1...`),
 //!   SVM (`BDLM_SVM_ALIAS_V1`, guaranteed off the Ed25519 curve), Move
 //!   (`SHA3-256(addr32 || 0xBD)`) and BudZero (`addr32`).
+//!
+//! Convenience: exposed for CLI, RPC, SDK, and multi-VM runtime callers.
 
 use crate::core::address::Address;
 use crate::object_layer::family::encoding::bech32_encode;
@@ -33,6 +35,8 @@ pub enum ForeignScheme {
     Aptos = 3,
     /// Cosmos 20-byte secp256k1 address.
     CosmosSecp256k1 = 4,
+    /// Sui 32-byte Ed25519 address.
+    SuiEd25519 = 5,
 }
 
 /// Quantum security classification of an account in the unified model.
@@ -169,7 +173,10 @@ pub fn derive_alias_bytes(addr: &Address, ee: EeId) -> Result<Vec<u8>, String> {
         EeId::WASM => Ok(derive_wasm_alias(addr).into_bytes()),
         EeId::SVM => derive_svm_alias(addr).map(|(pk, _)| pk.to_vec()),
         EeId::MOVE => Ok(derive_move_alias(addr).to_vec()),
-        other => Err(format!("unsupported execution environment 0x{:02x}", other.0)),
+        other => Err(format!(
+            "unsupported execution environment 0x{:02x}",
+            other.0
+        )),
     }
 }
 

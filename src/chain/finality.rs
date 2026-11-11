@@ -1,5 +1,4 @@
 use crate::core::address::Address;
-use crate::core::transaction::DEFAULT_CHAIN_ID;
 use crate::registry::SlashingReport;
 use bls12_381::{
     hash_to_curve::{ExpandMsgXmd, HashToCurve},
@@ -210,7 +209,7 @@ pub struct FinalityCert {
     /// checkpoint whose seats have moved carries the height of the block that
     /// moved them, so a verifier knows it needs that table and not the epoch's
     /// base one. `#[serde(default)]` reads an older certificate as version 0,
-    /// which the base-table path refuses rather than mis-counts.
+    /// which the base-table path refuses rather than miscounts.
     #[serde(default)]
     pub seat_table_version: u64,
 }
@@ -574,6 +573,24 @@ pub fn verify_bls_sig(pk: &[u8], msg: &[u8], sig: &[u8]) -> Result<(), String> {
     Ok(())
 }
 
+pub fn verify_bls_pop_bytes(
+    owner: &Address,
+    bls_public_key: &[u8],
+    pop_signature: &[u8],
+    chain_id: u64,
+) -> bool {
+    verify_pop(
+        &ValidatorEntry {
+            address: *owner,
+            stake: 0,
+            bls_public_key: bls_public_key.to_vec(),
+            pop_signature: pop_signature.to_vec(),
+            pq_public_key: Vec::new(),
+        },
+        chain_id,
+    )
+}
+
 pub fn verify_pop(entry: &ValidatorEntry, chain_id: u64) -> bool {
     if entry.bls_public_key.is_empty() || entry.pop_signature.is_empty() {
         return false;
@@ -814,6 +831,12 @@ impl FinalityAggregator {
             &vote.sig_bls,
         )
         .map_err(|e| format!("Invalid precommit signature: {e}"))?;
+        // A registered PQ signer cannot downgrade its vote to BLS-only. Reject
+        // before deduplication or equivocation bookkeeping so a stripped copy
+        // cannot occupy the authentic precommit's slot (PR110-C4510256171).
+        if !entry.pq_public_key.is_empty() && vote.pq_sig.is_empty() {
+            return Err("Missing PQ attestation in precommit".into());
+        }
 
         // Equivocation detection .
         self.detect_precommit_equivocation(&vote);
@@ -917,19 +940,31 @@ impl FinalityAggregator {
     }
 
     fn check_prevote_quorum(&mut self) {
-        // Quorum is counted in seats (section 7.4.3): a voter signs once and
-        // covers every seat it holds. The validator-count quorum is gone, so a
-        // mass of low-weight validators and a departing phone no longer set
-        // the threshold.
         let covered = self.committee.covered_seats(self.prevotes.keys());
-        if covered >= self.committee.quorum_seats() {
+        let voted_stake: u128 = self
+            .prevotes
+            .keys()
+            .filter_map(|addr| self.validator_snapshot.find_validator(addr))
+            .map(|validator| u128::from(validator.stake))
+            .sum();
+        if covered >= self.committee.quorum_seats()
+            && voted_stake >= self.validator_snapshot.quorum_stake()
+        {
             self.prevote_quorum_reached = true;
         }
     }
 
     fn check_precommit_quorum(&mut self) {
         let covered = self.committee.covered_seats(self.precommits.keys());
-        if covered >= self.committee.quorum_seats() {
+        let voted_stake: u128 = self
+            .precommits
+            .keys()
+            .filter_map(|addr| self.validator_snapshot.find_validator(addr))
+            .map(|validator| u128::from(validator.stake))
+            .sum();
+        if covered >= self.committee.quorum_seats()
+            && voted_stake >= self.validator_snapshot.quorum_stake()
+        {
             self.precommit_quorum_reached = true;
         }
     }
@@ -1057,11 +1092,8 @@ impl FinalityCert {
     /// only a snapshot and cannot derive that table. A caller that holds the
     /// chain uses [`Self::verify_with_committee`].
     pub fn verify(&self, snapshot: &ValidatorSetSnapshot) -> Result<(), String> {
-        let committee = crate::validators::committee::CommitteeTable::for_snapshot(
-            snapshot,
-            0,
-            self.chain_id,
-        );
+        let committee =
+            crate::validators::committee::CommitteeTable::for_snapshot(snapshot, 0, self.chain_id);
         self.verify_with_committee(snapshot, &committee)
     }
 
@@ -1179,6 +1211,18 @@ impl FinalityCert {
                 committee.quorum_seats()
             ));
         }
+        let voted_stake: u128 = signer_addresses
+            .iter()
+            .filter_map(|address| snapshot.find_validator(address))
+            .map(|validator| u128::from(validator.stake))
+            .sum();
+        if voted_stake < snapshot.quorum_stake() {
+            return Err(format!(
+                "Insufficient stake quorum: {} < {}",
+                voted_stake,
+                snapshot.quorum_stake()
+            ));
+        }
 
         if signers_pks.is_empty() {
             return Err("No signers in bitmap".into());
@@ -1264,6 +1308,7 @@ impl FinalityCert {
 
 #[cfg(test)]
 mod tests {
+    use crate::core::block::DEFAULT_CHAIN_ID;
 
     /// The bytes the Mikoriza slasher (`contracts/mikoriza/BudlumSlasher.sol`)
     /// verifies must be the bytes this node signs. The Solidity test
@@ -1811,31 +1856,26 @@ mod tests {
         // The three one-unit validators hold twelve of sixteen seats. Their
         // combined stake is far below two thirds, yet their seats are the
         // consensus weight and must finalize once their signatures verify.
-        let mut agg = FinalityAggregator::new(
-            DEFAULT_CHAIN_ID,
-            1,
-            10,
-            "cp_hash".into(),
-            snap.clone(),
-        );
+        let mut agg =
+            FinalityAggregator::new(DEFAULT_CHAIN_ID, 1, 10, "cp_hash".into(), snap.clone());
         for i in 1..4 {
             agg.add_prevote(signed_prevote(&snap, &sks, i, 1, 10, "cp_hash"))
                 .unwrap();
         }
         assert!(agg.prevote_quorum_reached);
-        for i in 1..4 {
+        for (v_info, sk_tuple) in snap.validators.iter().zip(sks.iter()).take(4).skip(1) {
             let pc = Precommit {
                 chain_id: crate::core::transaction::DEFAULT_CHAIN_ID,
                 epoch: 1,
                 checkpoint_height: 10,
                 checkpoint_hash: "cp_hash".into(),
-                voter_id: snap.validators[i].address,
+                voter_id: v_info.address,
                 sig_bls: vec![],
                 auth_sig: Vec::new(),
                 pq_sig: Vec::new(),
             };
             let mut signed = pc.clone();
-            signed.sig_bls = sign_msg(sks[i], &pc.signing_message());
+            signed.sig_bls = sign_msg(*sk_tuple, &pc.signing_message());
             agg.add_precommit(signed).unwrap();
         }
         let cert = agg

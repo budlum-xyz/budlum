@@ -1,8 +1,8 @@
 //! Budlum settlement endpoint, SVM family.
 //!
-//! Takes custody of SPL tokens and NFT mints that enter the Budlum Universal
-//! Object Layer, carries home calls, and tracks the last accepted Budlum
-//! checkpoint for the silence window. Deployed with the upgrade authority
+//! Custody and home calls are closed until departure and escape can return
+//! assets. Only finalized checkpoint tracking remains available. The program
+//! is deployed with the upgrade authority
 //! set to none: no admin, no upgrade, no pause.
 //!
 //! Events follow the Anchor layout so standard indexers decode them:
@@ -139,6 +139,11 @@ pub fn process_instruction(
 ) -> ProgramResult {
     let instruction =
         Instruction::try_from_slice(input).map_err(|_| ProgramError::InvalidInstructionData)?;
+    // Until the exit proofs exist, a vault transfer would be irreversible.
+    // Refuse deposit and home-call events before touching any account.
+    if matches!(&instruction, Instruction::Deposit { .. } | Instruction::HomeCall { .. }) {
+        return Err(ProgramError::Custom(NOT_OPEN));
+    }
     let mut it = accounts.iter();
     match instruction {
         Instruction::Deposit { kind, amount, recipient, collection } => {
@@ -263,5 +268,26 @@ fn spl_transfer(
             AccountMeta::new_readonly(*authority, true),
         ],
         data,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn custody_and_home_call_are_closed_before_accounts_are_touched() {
+        // Borsh enum discriminant 0 = Deposit, then kind, amount and two
+        // absent option fields. Empty accounts would otherwise fail later.
+        let mut deposit = vec![0, FUNGIBLE];
+        deposit.extend_from_slice(&1u64.to_le_bytes());
+        deposit.extend_from_slice(&[0, 0]);
+        let home_call = [1, 0, 0, 0, 0]; // variant 1, empty call vector
+        for input in [&deposit[..], &home_call[..]] {
+            assert_eq!(
+                process_instruction(&Pubkey::new_unique(), &[], input),
+                Err(ProgramError::Custom(NOT_OPEN))
+            );
+        }
     }
 }
