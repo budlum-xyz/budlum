@@ -68,6 +68,12 @@ pub enum ChainCommand {
     TxPrecheck(Transaction, oneshot::Sender<serde_json::Value>),
     GetChainId(oneshot::Sender<u64>),
     GetBaseFee(oneshot::Sender<u64>),
+    /// Quote the same governed fee floor that admission uses, in one actor turn.
+    GetRequiredTransactionFee(
+        crate::core::transaction::TransactionType,
+        u64,
+        oneshot::Sender<u64>,
+    ),
     GetValidatorSetHash(oneshot::Sender<String>),
     GetMempoolSize(oneshot::Sender<usize>),
     /// Whether the mempool still holds the transaction with this hash.
@@ -727,6 +733,25 @@ impl ChainHandle {
         let (tx, rx) = oneshot::channel();
         let _ = self.tx.send(ChainCommand::GetBaseFee(tx)).await;
         rx.await.unwrap_or(1)
+    }
+
+    /// Ask the consensus state for its current admission floor. An unavailable
+    /// actor is an error, never a cheap quote a wallet might sign and submit.
+    ///
+    /// # Errors
+    /// The actor is unreachable or did not answer.
+    pub async fn get_required_transaction_fee(
+        &self,
+        tx_type: crate::core::transaction::TransactionType,
+        amount: u64,
+    ) -> Result<u64, String> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(ChainCommand::GetRequiredTransactionFee(tx_type, amount, tx))
+            .await
+            .map_err(|_| String::from("chain actor unavailable for fee estimate"))?;
+        rx.await
+            .map_err(|_| String::from("chain actor dropped fee estimate"))
     }
 
     pub async fn get_validator_set_hash(&self) -> String {
@@ -2601,6 +2626,13 @@ impl ChainActor {
                 }
                 ChainCommand::GetBaseFee(tx) => {
                     let _ = tx.send(self.blockchain.state.base_fee);
+                }
+                ChainCommand::GetRequiredTransactionFee(tx_type, amount, tx) => {
+                    let fee = self
+                        .blockchain
+                        .state
+                        .required_transaction_fee(&tx_type, amount);
+                    let _ = tx.send(fee);
                 }
                 ChainCommand::GetValidatorSetHash(tx) => {
                     let _ = tx.send(self.blockchain.get_validator_set_hash());

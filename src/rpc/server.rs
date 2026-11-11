@@ -1776,25 +1776,26 @@ impl BudlumApiServer for RpcServer {
                 None::<()>,
             ));
         }
-        // The chain charges a flat fee: `AccountState::validate_transaction`
-        // Rejects `fee < base_fee`, rejects a `max_fee` that diverges from
-        // `fee`, and rejects any `priority_fee`. `total_cost` is
-        // `amount + fee`. There is no gas metering - the `GasSchedule`
-        // Per-opcode numbers are not consulted on any settlement path.
-        //
-        // The previous answer was the literal `21000` for every transaction
-        // Type, which is Ethereum's transfer intrinsic and has nothing to do
-        // With what this chain charges. A wallet sizing a transaction from it
-        // Would price a stake, a vote and a bridge relay identically, and all
-        // Three wrong: the number the chain actually enforces is `base_fee`,
-        // Which is 10 on mainnet, 1 on testnet and devnet, and moves with
-        // `adjust_base_fee` every block.
-        //
-        // So the estimate is the fee floor the caller's transaction must
-        // Clear. If the caller already set a fee at or above the floor, that
-        // Fee is what will be charged and it is returned unchanged.
-        let base_fee = self.chain.get_base_fee().await;
-        Ok(Self::to_hex(tx.fee.max(base_fee)))
+        // This is a flat-fee chain, not EVM gas metering. Its consensus
+        // admission floor comes from the *live* state: base_fee for most
+        // transactions, but base_fee plus the governed proportional rate for
+        // transfers. Returning only base_fee made a 100 BUD testnet faucet
+        // grant quote 1 atom while admission required 20001. The faucet
+        // reserved its allowance and got a 502 instead of funding the user.
+        // Query the same method admission calls; do not duplicate a static
+        // testnet rate here or turn an unavailable chain actor into a cheap fee.
+        let required = self
+            .chain
+            .get_required_transaction_fee(tx.tx_type.clone(), tx.amount)
+            .await
+            .map_err(|error| {
+                ErrorObjectOwned::owned(
+                    -32603,
+                    format!("Fee estimate unavailable: {error}"),
+                    None::<()>,
+                )
+            })?;
+        Ok(Self::to_hex(tx.fee.max(required)))
     }
 
     async fn tx_precheck(&self, tx: Transaction) -> Result<serde_json::Value, ErrorObjectOwned> {
