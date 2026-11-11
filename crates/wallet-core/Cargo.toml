@@ -99,3 +99,9 @@ getrandom-wasm = { package = "getrandom", version = "0.4", features = ["wasm_js"
 [profile.release]
 overflow-checks = true
 panic = "abort"
+
+[profile.test]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
