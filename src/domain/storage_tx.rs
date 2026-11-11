@@ -893,7 +893,10 @@ fn declare_self_host_policy(
         .storage_registry
         .get_manifest(manifest_id)
         .ok_or(StorageTxError::ManifestNotRegistered)?;
-    if !state.storage_registry.has_claim(manifest_id, sender) {
+    if !state
+        .storage_registry
+        .has_manifest_claim(manifest_id, sender)
+    {
         return Err(StorageTxError::OwnerIsNotSender {
             owner: state
                 .storage_registry

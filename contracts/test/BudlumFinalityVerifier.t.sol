@@ -171,6 +171,11 @@ contract BudlumFinalityVerifierTest is Harness {
         bls.settle(digest);
         vm.expectPartialRevert(BudlumFinalityVerifier.ConflictingRoot.selector);
         bls.verify(_attestation(42, bytes32(uint256(8))));
+
+        Attestation memory duplicateAfterFinal = _attestation(42, bytes32(uint256(7)));
+        duplicateAfterFinal.mlDsaSignature = _filled(3309, 0xCC);
+        vm.expectPartialRevert(BudlumFinalityVerifier.AlreadyAccepted.selector);
+        bls.verify(duplicateAfterFinal);
     }
 
     function test_F06_a_mutated_ml_dsa_blob_cannot_shadow_the_committee_attestation() public {

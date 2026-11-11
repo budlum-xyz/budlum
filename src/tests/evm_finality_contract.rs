@@ -53,9 +53,13 @@ fn f01_license_and_immutable_key_commitments_are_pinned() {
 fn f02_missing_verifiers_remain_pending_not_accepted() {
     let source = contract_source();
     assert!(source.contains("pendingRootAtHeight[a.height] = a.stateRoot"));
-    assert!(source.contains("pendingAttestationAtHeight[a.height] = digest"));
-    assert!(source.contains("accepted[digest] = true;\n            rootAtHeight"));
-    assert!(source.contains("accepted[digest] = true;\n        rootAtHeight"));
+    assert!(source.contains("pendingAttestationAtHeight[a.height] = identity"));
+    assert!(
+        source.contains(
+            "accepted[digest] = true;\n            accepted[identity] = true;\n            rootAtHeight"
+        )
+    );
+    assert!(source.contains("accepted[digest] = true;\n        accepted[identity] = true;"));
     assert!(source.contains("ChallengeWindowOpen"));
     // The acceptance sentence wraps across the comment's line break in the
     // current source, so it is pinned as the two fragments it is written
@@ -134,8 +138,8 @@ fn f06_one_pending_attestation_claims_one_height() {
     assert!(source.contains("mapping(uint64 => bytes32) public pendingRootAtHeight"));
     assert!(source.contains("mapping(uint64 => bytes32) public pendingAttestationAtHeight"));
     assert!(source.contains("error PendingAttestation"));
-    assert!(source.contains("pendingDigest != bytes32(0) && pendingDigest != digest"));
-    assert!(source.contains("pendingAttestationAtHeight[c.height] != digest"));
+    assert!(source.contains("pendingDigest != bytes32(0) && pendingDigest != identity"));
+    assert!(source.contains("pendingAttestationAtHeight[c.height] != identity"));
 }
 
 #[test]
