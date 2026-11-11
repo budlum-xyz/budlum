@@ -2367,19 +2367,21 @@ impl StorageRegistry {
                 )
             });
         }
-        if self
-            .scoped_confidential_commits
-            .iter()
-            .any(|((other, cid), prev)| {
-                *cid == content_id && *other != owner && prev.commitment() == commitment
-            })
-            || self
-                .confidential_commits
-                .get(&content_id)
-                .is_some_and(|prev| {
-                    prev.commitment() == commitment
-                        && self.confidential_owners.get(&content_id) != Some(&owner)
+        let is_canonical_owner = self.owner_of(&content_id) == Some(owner);
+        if !is_canonical_owner
+            && (self
+                .scoped_confidential_commits
+                .iter()
+                .any(|((other, cid), prev)| {
+                    *cid == content_id && *other != owner && prev.commitment() == commitment
                 })
+                || self
+                    .confidential_commits
+                    .get(&content_id)
+                    .is_some_and(|prev| {
+                        prev.commitment() == commitment
+                            && self.confidential_owners.get(&content_id) != Some(&owner)
+                    }))
         {
             return Err(format!(
                 "confidential body commit refused: commitment for 0x{content_id:?} is already bound to another principal"
@@ -2387,9 +2389,14 @@ impl StorageRegistry {
         }
         self.scoped_confidential_commits
             .insert((owner, content_id), commit.clone());
-        self.confidential_commits
-            .entry(content_id)
-            .or_insert(commit);
+        if is_canonical_owner {
+            self.confidential_commits.insert(content_id, commit);
+            self.confidential_owners.insert(content_id, owner);
+        } else {
+            self.confidential_commits
+                .entry(content_id)
+                .or_insert(commit);
+        }
         Ok(commitment)
     }
 
@@ -9616,6 +9623,44 @@ mod demand_driven_replication_tests {
             reg.confidential_owners.get(&m.manifest_id).copied(),
             Some(owner),
             "the commit must be recorded under the address that signed it"
+        );
+    }
+
+    #[test]
+    fn canonical_manifest_owner_overrides_front_run_confidential_commit_without_leaking_manifest_claim(
+    ) {
+        use crate::storage::{
+            ConfidentialBodyCommit, ConfidentialProofKind, ContentCipher, ContentEncryption,
+        };
+
+        let owner = Address::from([0x11; 32]);
+        let squatter = Address::from([0x22; 32]);
+        let mut m = ContentManifest::from_bytes_sliced(b"front-run private body bytes", 8).unwrap();
+        m.owner = owner;
+        let commit = ConfidentialBodyCommit::new(
+            m.manifest_id,
+            ContentEncryption::ClientSide(ContentCipher::Aes256Gcm),
+            [7u8; 32],
+            ConfidentialProofKind::HybridZkTee,
+        )
+        .unwrap();
+
+        let mut reg = StorageRegistry::new();
+        // Squatter replays the confidential commit before the manifest lands:
+        // neither `owner_of` nor `has_manifest_claim` may grant manifest authority.
+        reg.register_confidential_commit_as(squatter, commit.clone())
+            .unwrap();
+        assert_eq!(reg.owner_of(&m.manifest_id), None);
+        assert!(!reg.has_manifest_claim(&m.manifest_id, &squatter));
+
+        // Canonical manifest owner registers the manifest and commits the body:
+        // the squatter's front-run collision cannot block the canonical owner.
+        reg.register_manifest(&m);
+        assert_eq!(reg.owner_of(&m.manifest_id), Some(owner));
+        reg.register_confidential_commit_as(owner, commit).unwrap();
+        assert_eq!(
+            reg.confidential_owners.get(&m.manifest_id).copied(),
+            Some(owner)
         );
     }
 

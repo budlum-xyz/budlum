@@ -216,6 +216,9 @@ contract BudlumFinalityVerifier is IBudlumFinality {
             revert ConflictingRoot(a.height, held, a.stateRoot);
         }
         bytes32 identity = pendingIdentity(a.height, a.stateRoot);
+        if (heightFinal[a.height]) {
+            revert AlreadyAccepted(identity);
+        }
         bytes32 pendingDigest = pendingAttestationAtHeight[a.height];
         if (pendingDigest != bytes32(0) && pendingDigest != identity) {
             revert PendingAttestation(a.height, pendingDigest);
