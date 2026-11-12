@@ -4092,7 +4092,8 @@ impl AccountState {
     /// remove exactly what was counted.
     fn total_storage_escrowed_supply(&self) -> u128 {
         let epoch = self.epoch_index;
-        self.storage_registry
+        let deals_escrow = self
+            .storage_registry
             .all_deals()
             .iter()
             .filter(|deal| deal.is_active())
@@ -4105,7 +4106,21 @@ impl AccountState {
                 total
                     .saturating_add(u128::from(deal.economics.operator_bond))
                     .saturating_add(u128::from(unearned))
-            })
+            });
+        // User-opened challenges debit `opener_bond` from the opener's balance
+        // until the challenge resolves (`answer_challenge` or
+        // `finalize_missed_challenges`). Count unresolved non-zero opener bonds
+        // so an open challenge never reopens temporary minting headroom.
+        let challenge_bonds = self
+            .storage_registry
+            .all_challenges()
+            .iter()
+            .filter(|c| c.opener != Address::zero() && c.opener_bond > 0)
+            .filter(|c| self.storage_registry.get_result(c.challenge_id).is_none())
+            .fold(0u128, |acc, c| {
+                acc.saturating_add(u128::from(c.opener_bond))
+            });
+        deals_escrow.saturating_add(challenge_bonds)
     }
 
     /// Total $BUD escrowed as external-domain prover bonds. A
@@ -6151,7 +6166,7 @@ mod tests {
             },
             None,
         );
-        assert!(state.slash_from_report(&liveness_report).unwrap().is_some());
+        assert!(state.slash_from_report(&liveness_report).unwrap().is_none());
         let liveness_bytes = bincode::serialize(&liveness_report).unwrap();
         let liveness_hash: [u8; 32] = sha2::Sha256::digest(&liveness_bytes).into();
         let stake_after_liveness = state.get_validator(&who).unwrap().stake;

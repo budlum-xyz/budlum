@@ -338,8 +338,10 @@ mod tests {
         assert_eq!(ok.recipient_eth, [9u8; 20]);
 
         // Zero Ethereum recipient ([0u8; 20]) is refused so funds never unlock to 0x0.
+        let a2 = AssetId(hash_fields_bytes(&[b"bte-neg-2"]));
+        bridge.register_asset(a2, 1).unwrap();
         let (t2, ev2) = bridge
-            .lock(1, 2, 30, 1, a, owner, recipient, 100, 500)
+            .lock(1, 2, 30, 1, a2, owner, recipient, 100, 500)
             .unwrap();
         let id2 = t2.message_id;
         bridge.mint(&ev2.message.unwrap(), 31).unwrap();

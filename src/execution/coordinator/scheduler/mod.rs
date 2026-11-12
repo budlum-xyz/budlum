@@ -528,6 +528,7 @@ type TransferDelta = (Address, Account, Address, Account);
 
 fn run_isolated_transfer(base: &AccountState, tx: &Transaction) -> BudlumResult<TransferDelta> {
     let mut local = isolated_transfer_state(base, tx);
+    Executor::check_block_transaction_nonce(&local, tx)?;
     Executor::apply_transaction_checked(&mut local, tx)?;
     let sender = local
         .accounts
@@ -574,6 +575,7 @@ pub fn execute_block_checked(
 
         if !all_disjoint_transfers {
             for tx in wave_txs {
+                Executor::check_block_transaction_nonce(&candidate, tx)?;
                 Executor::apply_transaction_checked(&mut candidate, tx)?;
                 report.sequential_txs = report.sequential_txs.saturating_add(1);
             }
@@ -620,6 +622,7 @@ pub fn execute_block_checked(
                 && (touched_in_wave.contains(&tx.from) || touched_in_wave.contains(&tx.to))
             {
                 report.block_stm_fallbacks = report.block_stm_fallbacks.saturating_add(1);
+                Executor::check_block_transaction_nonce(&candidate, tx)?;
                 Executor::apply_transaction_checked(&mut candidate, tx)?;
                 report.sequential_txs = report.sequential_txs.saturating_add(1);
                 continue;

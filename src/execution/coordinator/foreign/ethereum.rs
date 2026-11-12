@@ -656,11 +656,11 @@ pub fn sign_eip1559_tx(
         None => Item::String(Vec::new()),
     };
     let mut fields = vec![
-        Item::String(rlp::encode_uint(chain_id)),
-        Item::String(rlp::encode_uint(nonce)),
+        encode_u128_item(u128::from(chain_id)),
+        encode_u128_item(u128::from(nonce)),
         encode_u128_item(max_priority_fee_per_gas_wei),
         encode_u128_item(max_fee_per_gas_wei),
-        Item::String(rlp::encode_uint(gas_limit)),
+        encode_u128_item(u128::from(gas_limit)),
         to_item,
         encode_u128_item(value_wei),
         Item::String(data.to_vec()),
@@ -675,7 +675,7 @@ pub fn sign_eip1559_tx(
     let s_slice = sig_bytes.get(32..64).unwrap_or(&[]);
     let r_skip = r_slice.iter().take_while(|b| **b == 0).count();
     let s_skip = s_slice.iter().take_while(|b| **b == 0).count();
-    fields.push(Item::String(rlp::encode_uint(u64::from(rec_id.to_byte()))));
+    fields.push(encode_u128_item(u128::from(rec_id.to_byte())));
     fields.push(Item::String(r_slice.get(r_skip..).unwrap_or(&[]).to_vec()));
     fields.push(Item::String(s_slice.get(s_skip..).unwrap_or(&[]).to_vec()));
     let mut raw = vec![0x02];

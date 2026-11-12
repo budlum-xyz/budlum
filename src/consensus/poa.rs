@@ -540,10 +540,10 @@ impl ConsensusEngine for PoAEngine {
         chain: &[Block],
         state: &AccountState,
     ) -> Result<(), ConsensusError> {
-        if block.hash != block.calculate_hash() {
-            return Err(ConsensusError("Invalid block hash".into()));
-        }
         if block.index == 0 {
+            if block.hash != block.calculate_hash() {
+                return Err(ConsensusError("Invalid block hash".into()));
+            }
             return Ok(());
         }
         if let Some(prev_block) = chain.last() {
@@ -622,6 +622,9 @@ impl ConsensusEngine for PoAEngine {
                         )));
                     }
                 }
+            }
+            if block.hash != block.calculate_hash() {
+                return Err(ConsensusError("Invalid block hash".into()));
             }
             // V5-SECURITY-12: the seed must match the one `prepare_common`
             // used - the grandparent, because the parent's hash is the

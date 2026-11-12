@@ -542,7 +542,7 @@ mod tests {
         let Ok(rt_len) = u16::try_from(runtime.len()) else {
             panic!("runtime too big");
         };
-        let init_len = prefix_ops.len() + 12;
+        let init_len = prefix_ops.len() + 13;
         let Ok(init_len16) = u16::try_from(init_len) else {
             panic!("init too big");
         };

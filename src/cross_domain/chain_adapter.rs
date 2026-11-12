@@ -360,6 +360,14 @@ pub mod test_adapter {
         // The default now fails closed, and the stub has no
         // anchor to give.
         fn verify_observation(&self, result: &RelayerExternalResult) -> Result<(), AdapterError> {
+            if result.chain != self.chain {
+                return Err(AdapterError::UnsupportedChain(result.chain));
+            }
+            if !result.success {
+                return Err(AdapterError::ProofVerificationFailed(
+                    "observation indicates failure".into(),
+                ));
+            }
             let proof: MerkleProof = bincode::options()
                 .with_fixint_encoding()
                 .with_limit(MAX_RECEIPT_PROOF_BYTES)

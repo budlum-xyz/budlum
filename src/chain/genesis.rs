@@ -1053,11 +1053,36 @@ impl GenesisConfig {
             .map_or(0, |schedule| schedule.validation_reward_pool)
     }
 
-    /// The stake every genesis validator is bonded with, summed.
+    /// The stake every genesis validator (including 1-atom bootstrap PoA
+    /// authorities not already in `validators`) is bonded with, summed.
     fn genesis_stake_total(&self) -> u64 {
-        u64::try_from(self.validators.len())
+        let base = u64::try_from(self.validators.len())
             .unwrap_or(u64::MAX)
-            .saturating_mul(self.validator_stake())
+            .saturating_mul(self.validator_stake());
+        let declared: Vec<Address> = if self.poa_authorities.is_empty() {
+            self.bootstrap_domains
+                .iter()
+                .find(|domain| domain.kind == "poa")
+                .map(|domain| {
+                    domain
+                        .poa_authorities
+                        .iter()
+                        .filter_map(|authority| Address::from_hex(authority).ok())
+                        .collect()
+                })
+                .unwrap_or_default()
+        } else {
+            self.poa_authorities.clone()
+        };
+        let mut seen: std::collections::BTreeSet<Address> =
+            self.validators.iter().copied().collect();
+        let mut extra_poa = 0u64;
+        for authority in declared {
+            if seen.insert(authority) {
+                extra_poa = extra_poa.saturating_add(1);
+            }
+        }
+        base.saturating_add(extra_poa)
     }
 }
 
@@ -1336,8 +1361,12 @@ mod tests {
         ceremony.tokenomics_addresses = Some(addresses);
         let seeded = ceremony.build_state();
         assert_eq!(
-            seeded.circulating_supply(),
+            seeded.total_bud_committed(),
             u128::from(crate::tokenomics::BUD_TOTAL_SUPPLY)
+        );
+        assert_eq!(
+            seeded.circulating_supply(),
+            u128::from(crate::tokenomics::BUD_TOTAL_SUPPLY) - 3
         );
         assert_eq!(seeded.burn_reserve_address, Some(addresses.burn_reserve));
         assert_eq!(seeded.get_balance(&reserved.community), 0);

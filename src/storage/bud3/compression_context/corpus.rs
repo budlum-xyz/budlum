@@ -644,7 +644,16 @@ mod tests {
     use crate::storage::bud3::content_id::ContentKey;
 
     fn sample_corpus_base() -> Vec<u8> {
-        b"def step(h, p):\n    return h == p + 1\n".repeat(128)
+        let mut out = Vec::with_capacity(6144);
+        for i in 0..128u32 {
+            let line = format!(
+                "def step_{i:03}(h_{i:03}, p_{i:03}):\n    return ((h_{i:03} * {}) ^ p_{i:03}) == {}\n",
+                i.wrapping_mul(2_654_435_761),
+                i.wrapping_mul(2_246_822_519),
+            );
+            out.extend_from_slice(line.as_bytes());
+        }
+        out
     }
 
     #[test]

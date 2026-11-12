@@ -1002,6 +1002,18 @@ impl HostApi for HostBridge<'_> {
             .ok_or_else(|| HostError::Invalid(String::from("unsupported EE unit")))?;
         let src = resolve_identity_address(from.ee, &from.id);
         let dst = resolve_identity_address(to.ee, &to.id);
+        let frame_src = resolve_identity_address(self.frame_actor.ee, &self.frame_actor.id);
+        let frame_caller = resolve_identity_address(self.frame_caller.ee, &self.frame_caller.id);
+        let ee_scoped_contract = from.ee == self.frame_actor.ee && from.id.len() != 32;
+        if src != frame_src
+            && src != frame_caller
+            && src != self.root_actor
+            && !ee_scoped_contract
+        {
+            return Err(HostError::Denied(String::from(
+                "bud transfer may only debit the executing frame or the transaction sender",
+            )));
+        }
         self.state
             .execution_state
             .foreign_lane

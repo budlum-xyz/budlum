@@ -137,78 +137,67 @@ mod tests {
     use crate::storage::bud3::pipeline::prepare_public_upload;
     use crate::storage::bud3::placement::{Class, Share};
 
-    const P: Profile = Profile {
-        id: 0,
-        qr_version: 40,
-        symbol_size: 128,
-        fps: 10,
-        k_max: 16,
-    };
-
-    fn registry_with_object(owner: Address) -> (Bud3Registry, ContentId, ObjectKey) {
-        let mut bud3 = Bud3Registry::default();
-        let up = prepare_public_upload(b"app bundle bytes", &P, &Bud3Limits::default(), 8)
-            .expect("upload");
-        let cid = up.record.content_id;
-        let obj_key = up.record.commitment;
-        bud3.register_object(
-            owner.0,
-            up.record,
-            vec![(
-                0,
-                Share {
-                    validator: [3u8; 32],
-                    class: Class::Full,
-                    first_esi: 0,
-                    symbols: 8,
-                },
-            )],
-            1,
-            40,
-        )
-        .expect("register");
-        (bud3, cid, obj_key)
-    }
-
     #[test]
-    fn register_app_binds_developer_to_bundle_owner_and_fee() {
-        let owner = Address([0x41; 32]);
-        let other = Address([0x42; 32]);
-        let (bud3, cid, obj_key) = registry_with_object(owner);
-        let mut registry = AppRegistry::new();
+    fn register_app_enforces_bundle_owner_and_minimum_fee() {
+        let mut bud3 = Bud3Registry::default();
+        let owner = Address::from([0x11; 32]);
+        let intruder = Address::from([0x22; 32]);
+        let profile = Profile {
+            id: 0,
+            qr_version: 40,
+            symbol_size: 128,
+            fps: 10,
+            k_max: 16,
+        };
+        let up = prepare_public_upload(&[0xAB; 256], &profile, &Bud3Limits::default(), 4).unwrap();
+        let cid = up.record.content_id;
+        let key = up.record.commitment;
+        let shares = vec![(
+            0,
+            Share {
+                validator: [0x99; 32],
+                class: Class::Full,
+                first_esi: 0,
+                symbols: up.record.symbols_per_segment,
+            },
+        )];
+        bud3.register_object(*owner.as_bytes(), up.record, shares, 0, 50)
+            .unwrap();
+
+        let mut reg = AppRegistry::new();
         assert_eq!(
-            registry.register_app(
+            reg.register_app(
                 &bud3,
-                "My App",
-                other,
-                AppRegistryCategory::DeFi,
-                (cid, obj_key),
-                APP_REGISTRY_MIN_FEE,
-            ),
-            Err(AppRegistryError::NotOwner)
-        );
-        assert_eq!(
-            registry.register_app(
-                &bud3,
-                "My App",
+                "budswap",
                 owner,
                 AppRegistryCategory::DeFi,
-                (cid, obj_key),
+                (cid, key),
                 APP_REGISTRY_MIN_FEE - 1,
             ),
             Err(AppRegistryError::FeeBelowMinimum)
         );
-        let app = registry
+        assert_eq!(
+            reg.register_app(
+                &bud3,
+                "budswap",
+                intruder,
+                AppRegistryCategory::DeFi,
+                (cid, key),
+                APP_REGISTRY_MIN_FEE,
+            ),
+            Err(AppRegistryError::NotOwner)
+        );
+        let registered = reg
             .register_app(
                 &bud3,
-                "My App",
+                "BudSwap",
                 owner,
                 AppRegistryCategory::DeFi,
-                (cid, obj_key),
+                (cid, key),
                 APP_REGISTRY_MIN_FEE,
             )
-            .expect("owner with the minimum fee registers");
-        assert_eq!(app.developer, owner);
-        assert!(registry.get_app("my app").is_some());
+            .unwrap();
+        assert_eq!(registered.developer, owner);
+        assert_eq!(reg.get_app("budswap"), Some(&registered));
     }
 }

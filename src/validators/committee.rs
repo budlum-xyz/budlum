@@ -531,13 +531,8 @@ fn allocate_seats(
             if used == seat_count {
                 break;
             }
-            let weight = members.get(*index).map_or(0, |(_, w)| *w);
             let current_alloc = alloc.get(*index).copied().unwrap_or(0);
-            let ideal = seats.saturating_mul(u128::from(weight));
-            let held = u128::try_from(current_alloc)
-                .unwrap_or(0)
-                .saturating_mul(total_weight);
-            if current_alloc < cap && held < ideal {
+            if current_alloc < cap {
                 if let Some(slot) = alloc.get_mut(*index) {
                     *slot += 1;
                     used += 1;

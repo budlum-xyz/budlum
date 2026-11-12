@@ -317,6 +317,9 @@ mod ethereum_compat_tests {
         assert!(err.contains("eth_notAThing"), "{err}");
         let err = super::super::check_served(["eth_subscribe"])
             .expect_err("a pending row cannot be served");
-        assert!(err.contains("the Ethereum compatibility gateway"), "{err}");
+        assert!(
+            err.contains("eth_subscribe") && err.contains("waits for"),
+            "{err}"
+        );
     }
 }

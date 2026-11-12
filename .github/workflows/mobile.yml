@@ -78,7 +78,7 @@ jobs:
       - name: Verify mobile application invariants
         run: |
           set -euo pipefail
-          cargo run --release --manifest-path xtask/gates/Cargo.toml -- --self-test mobile-validator-apps
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- mobile-validator-apps --self-test
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- mobile-validator-apps
 
       - name: Verify Android manifest & Play policy invariants

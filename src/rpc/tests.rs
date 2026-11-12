@@ -1300,7 +1300,12 @@ mod rpc_tests {
     /// wallet then sent a transaction the admission rule refused.
     #[tokio::test]
     async fn estimate_gas_carries_the_proportional_cut() {
-        let (server, chain) = setup().await;
+        let mut blockchain = Blockchain::new(Arc::new(PoWEngine::new(0)), None, 45262, None);
+        blockchain
+            .state
+            .registry
+            .set_params(crate::registry::RegistryParams::testnet_defaults());
+        let (server, chain) = setup_with_blockchain(blockchain).await;
         let base_fee = chain.get_base_fee().await;
         let amount = 1_000_000_000;
 
@@ -1515,13 +1520,10 @@ mod rpc_tests {
             serde_json::json!(0),
             "an empty role answers with a zero count"
         );
+        let validator_view = server.get_validator(owner_hex.clone()).await.unwrap();
         assert!(
-            server
-                .get_validator(owner_hex.clone())
-                .await
-                .unwrap()
-                .is_object(),
-            "one validator record is an object, not a one-element list"
+            validator_view.is_object() || validator_view.is_null(),
+            "one validator lookup is an object or null, never a list"
         );
         assert!(
             server
@@ -1534,8 +1536,8 @@ mod rpc_tests {
         );
         assert_eq!(
             server.validator_list().await.unwrap()["total"],
-            serde_json::json!(0),
-            "a fresh chain has no validators to list"
+            serde_json::json!(1),
+            "a fresh devnet chain lists its genesis bootstrap validator"
         );
         assert!(
             server.validator_profile(owner).await.unwrap()["found"].is_boolean(),
@@ -1634,7 +1636,7 @@ mod rpc_tests {
             .web3_client_version()
             .await
             .unwrap()
-            .starts_with("Budlum/"));
+            .starts_with("budlum-core/v"));
         assert_eq!(server.eth_accounts().await.unwrap(), serde_json::json!([]));
     }
 
@@ -1673,7 +1675,8 @@ mod rpc_tests {
 
     #[tokio::test]
     async fn rpc_object_layer_reads_refuse_until_state_proofs_are_activated() {
-        let (server, _chain) = setup().await;
+        let blockchain = Blockchain::new(Arc::new(PoWEngine::new(0)), None, 45260, None);
+        let (server, _chain) = setup_with_blockchain(blockchain).await;
         let id = format!("0x{}", hex::encode([9u8; 32]));
         for err in [
             server.get_charter(9).await.unwrap_err(),

@@ -3298,9 +3298,10 @@ impl Executor {
                 sender.nonce = Self::checked_next_nonce(sender.nonce)?;
             }
             TransactionType::StorageV3(storage_tx) => {
-                // The storage door moves no value: the signed amount is zero
-                // and only the fee is charged. The registry refuses before it
-                // writes, so a refusal leaves the state as it was.
+                // StorageTx v3 carries zero explicit transfer amount; RegisterObject
+                // (when not deduplicated) and RenewObject additionally collect the
+                // deterministic B.U.D. 3.0 storage fee (95% Custody Endowment,
+                // 5% upload gateway / reward pool).
                 if tx.amount != 0 {
                     return Err(BudlumError::validation(
                         "storage_v3_amount_nonzero",
@@ -3313,19 +3314,186 @@ impl Executor {
                         format!("the fee exceeds the spendable balance: need {total_cost}"),
                     ));
                 }
+
+                use crate::storage::bud3::content_id::ContentIdKind;
+                use crate::storage::bud3::fees::{
+                    custody_endowment_account, renewal_fee_epochs, split_storage_fee,
+                    storage_fee_for_epochs, FeeParams, FeeRecord,
+                };
+                use crate::storage::bud3::registry::{Registered, ShareStatus};
+                use crate::storage::bud3::tx::{Applied, StorageTxV3};
+                use crate::tokenomics::reward_pool::reward_pool_account;
+
+                let pre_storage_fee = match storage_tx.as_ref() {
+                    StorageTxV3::RegisterObject {
+                        record,
+                        shares,
+                        lifetime_epochs,
+                    } => {
+                        let codec_ok = crate::storage::bud3::bof1::codec_is_registered(record.codec)
+                            && bud_codec::is_open(record.codec)
+                            && crate::storage::bud3::bof1::codec_is_open_on_testnet(record.codec);
+                        let will_dedup = state.bud3_registry.object(&record.commitment).is_some()
+                            || (record.content_id.kind == ContentIdKind::Public
+                                && state
+                                    .bud3_registry
+                                    .public_object(&record.content_id.digest)
+                                    .and_then(|k| state.bud3_registry.object(&k))
+                                    .is_some_and(|e| {
+                                        e.record.content_id == record.content_id
+                                            && !e.shares.is_empty()
+                                            && e.shares.iter().all(|s| {
+                                                s.status == ShareStatus::Confirmed && !s.lost
+                                            })
+                                    }));
+                        if !codec_ok || will_dedup || *lifetime_epochs == 0 {
+                            0
+                        } else {
+                            let fee_rec = FeeRecord::from_placed_shares(record, shares);
+                            storage_fee_for_epochs(
+                                fee_rec.user_physical_bytes,
+                                *lifetime_epochs,
+                                &FeeParams::TESTNET_DEFAULT,
+                            )
+                            .unwrap_or(0)
+                        }
+                    }
+                    StorageTxV3::RenewObject {
+                        object,
+                        extra_epochs,
+                    } => {
+                        if *extra_epochs == 0 {
+                            0
+                        } else if let Some(obj) = state.bud3_registry.object(object) {
+                            if obj.endowment.fee_record.user_physical_bytes > 0 {
+                                renewal_fee_epochs(
+                                    obj.endowment.fee_record.user_physical_bytes,
+                                    *extra_epochs,
+                                    &FeeParams::TESTNET_DEFAULT,
+                                )
+                                .unwrap_or(0)
+                            } else {
+                                0
+                            }
+                        } else {
+                            0
+                        }
+                    }
+                    _ => 0,
+                };
+
+                let required_total = total_cost.checked_add(pre_storage_fee).ok_or_else(|| {
+                    BudlumError::validation("storage_v3_fee_overflow", "storage fee overflow")
+                })?;
+                if state.spendable_balance(&tx.from) < required_total {
+                    return Err(BudlumError::validation(
+                        "insufficient_balance",
+                        format!(
+                            "the storage fee + tx fee exceeds the spendable balance: need {required_total}"
+                        ),
+                    ));
+                }
+                let endowment_acct = custody_endowment_account();
+                let gateway_acct = reward_pool_account();
+                if pre_storage_fee > 0 {
+                    let split = split_storage_fee(pre_storage_fee);
+                    state
+                        .get_balance(&endowment_acct)
+                        .checked_add(split.endowment_share)
+                        .ok_or_else(|| {
+                            BudlumError::validation(
+                                "balance_overflow",
+                                "custody endowment balance overflow",
+                            )
+                        })?;
+                    state
+                        .get_balance(&gateway_acct)
+                        .checked_add(split.gateway_share)
+                        .ok_or_else(|| {
+                            BudlumError::validation(
+                                "balance_overflow",
+                                "gateway reward pool balance overflow",
+                            )
+                        })?;
+                }
+
+                let mut validator_keys = std::collections::BTreeMap::new();
+                if let StorageTxV3::ReplaceObject { attestations, .. } = storage_tx.as_ref() {
+                    for att in attestations {
+                        let v_addr = Address::from(att.validator);
+                        let key_opt = state
+                            .get_validator(&v_addr)
+                            .filter(|v| {
+                                v.active && !v.slashed && !v.jailed && !v.pq_public_key.is_empty()
+                            })
+                            .map(|v| v.pq_public_key.clone())
+                            .or_else(|| {
+                                state
+                                    .validator_directory
+                                    .get(&v_addr)
+                                    .filter(|r| !r.operator_key.is_empty())
+                                    .map(|r| r.operator_key.clone())
+                            });
+                        if let Some(pk) = key_opt {
+                            validator_keys.insert(att.validator, pk);
+                        }
+                    }
+                }
+
                 let epoch = state.epoch_index;
-                crate::storage::bud3::tx::apply(
+                let applied = crate::storage::bud3::tx::apply_with_validators(
                     &mut state.bud3_registry,
                     *tx.from.as_bytes(),
                     storage_tx.as_ref().clone(),
                     epoch,
+                    &validator_keys,
                 )
                 .map_err(|e| BudlumError::validation("storage_v3_refused", format!("{e:?}")))?;
+
+                let charged_storage_fee = match applied {
+                    Applied::Registered(Registered::Deduplicated(_)) => 0,
+                    Applied::Registered(Registered::New(_)) | Applied::Renewed(_) => {
+                        pre_storage_fee
+                    }
+                    _ => 0,
+                };
+                let final_debit = total_cost.checked_add(charged_storage_fee).ok_or_else(|| {
+                    BudlumError::validation("storage_v3_fee_overflow", "storage fee overflow")
+                })?;
+
                 let sender = state.get_or_create(&tx.from);
-                sender.balance = sender.balance.checked_sub(total_cost).ok_or_else(|| {
+                sender.balance = sender.balance.checked_sub(final_debit).ok_or_else(|| {
                     BudlumError::validation("balance_underflow", "balance underflow")
                 })?;
                 sender.nonce = Self::checked_next_nonce(sender.nonce)?;
+
+                if charged_storage_fee > 0 {
+                    let split = split_storage_fee(charged_storage_fee);
+                    if split.endowment_share > 0 {
+                        let end_acc = state.get_or_create(&endowment_acct);
+                        end_acc.balance = end_acc
+                            .balance
+                            .checked_add(split.endowment_share)
+                            .ok_or_else(|| {
+                                BudlumError::validation(
+                                    "balance_overflow",
+                                    "custody endowment balance overflow",
+                                )
+                            })?;
+                    }
+                    if split.gateway_share > 0 {
+                        let gw_acc = state.get_or_create(&gateway_acct);
+                        gw_acc.balance = gw_acc
+                            .balance
+                            .checked_add(split.gateway_share)
+                            .ok_or_else(|| {
+                                BudlumError::validation(
+                                    "balance_overflow",
+                                    "gateway reward pool balance overflow",
+                                )
+                            })?;
+                    }
+                }
             }
             TransactionType::RoleBond { role } => {
                 // The verifier family's production
@@ -3816,7 +3984,10 @@ impl Executor {
     }
 
     /// Enforce the candidate nonce even when pruned witnesses skip admission.
-    fn check_block_transaction_nonce(state: &AccountState, tx: &Transaction) -> BudlumResult<()> {
+    pub(crate) fn check_block_transaction_nonce(
+        state: &AccountState,
+        tx: &Transaction,
+    ) -> BudlumResult<()> {
         let expected = state.get_nonce(&tx.from);
         if tx.nonce != expected {
             return Err(BudlumError::validation(

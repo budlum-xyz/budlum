@@ -90,6 +90,14 @@ pub enum ChainCommand {
         Precommit,
         oneshot::Sender<Result<Option<FinalityCert>, String>>,
     ),
+    VoteIsFromRegisteredValidator {
+        voter_id: Address,
+        auth_msg: Vec<u8>,
+        auth_sig: Vec<u8>,
+        signing_msg: Vec<u8>,
+        sig_bls: Vec<u8>,
+        response: oneshot::Sender<bool>,
+    },
     ImportQcBlob(QcBlob, oneshot::Sender<Result<(), String>>),
     HandleQcFaultProof(QcFaultProof, oneshot::Sender<Result<(), String>>),
     SubmitSlashingEvidence(
@@ -842,6 +850,29 @@ impl ChainHandle {
         res_rx
             .await
             .unwrap_or_else(|_| Err("Actor dropped".to_string()))
+    }
+
+    pub(crate) async fn vote_is_from_registered_validator(
+        &self,
+        voter_id: Address,
+        auth_msg: Vec<u8>,
+        auth_sig: Vec<u8>,
+        signing_msg: Vec<u8>,
+        sig_bls: Vec<u8>,
+    ) -> bool {
+        let (response, res_rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::VoteIsFromRegisteredValidator {
+                voter_id,
+                auth_msg,
+                auth_sig,
+                signing_msg,
+                sig_bls,
+                response,
+            })
+            .await;
+        res_rx.await.unwrap_or(false)
     }
 
     pub async fn sign_prevote(
@@ -2553,10 +2584,7 @@ impl ChainActor {
     /// stale trie would produce a proof that verifies against its own root and
     /// describes state that no longer exists - worse than no proof, because it
     /// is a correct-looking answer to the wrong question.
-    fn account_proof(
-        &mut self,
-        addr: &Address,
-    ) -> crate::persistence::state_trie::AccountProofBundle {
+    fn account_proof(&mut self, addr: &Address) -> AccountProofBundle {
         let accounts = &self.blockchain.state.accounts;
         let fresh = self.proof_trie.as_ref().is_some_and(|cached| {
             cached.leaves.len() == accounts.len()
@@ -2778,6 +2806,23 @@ impl ChainActor {
                     let result = self.blockchain.handle_precommit(vote);
                     let _ = res_tx.send(result);
                 }
+                ChainCommand::VoteIsFromRegisteredValidator {
+                    voter_id,
+                    auth_msg,
+                    auth_sig,
+                    signing_msg,
+                    sig_bls,
+                    response,
+                } => {
+                    let ok = self.blockchain.vote_is_from_registered_validator(
+                        &voter_id,
+                        &auth_msg,
+                        &auth_sig,
+                        &signing_msg,
+                        &sig_bls,
+                    );
+                    let _ = response.send(ok);
+                }
                 ChainCommand::SignPrevote {
                     epoch,
                     checkpoint_height,
@@ -2934,15 +2979,19 @@ impl ChainActor {
                 }
                 ChainCommand::GetValidatorDirectory(query, tx) => {
                     let state = &self.blockchain.state;
-                    let result =
-                        if state.validator_directory.is_empty() && !state.validators.is_empty() {
-                            Err(
+                    let result = if matches!(
+                        query,
+                        crate::validators::DirectoryQuery::One(owner)
+                            if state.validators.contains_key(&owner)
+                                && state.validator_directory.get(&owner).is_none()
+                    ) {
+                        Err(
                             "validator directory has not been populated for existing validators"
                                 .into(),
                         )
-                        } else {
-                            Ok(state.validator_directory.query_json(query))
-                        };
+                    } else {
+                        Ok(state.validator_directory.query_json(query))
+                    };
                     let _ = tx.send(result);
                 }
                 ChainCommand::GetPqSealedHeights(live, tx) => {

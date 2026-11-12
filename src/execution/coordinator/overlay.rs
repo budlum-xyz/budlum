@@ -255,8 +255,14 @@ impl TxOverlay {
                 "static call cannot write state",
             )));
         }
-        if RootGroup::for_namespace(ns).is_none() {
+        let Some(group) = RootGroup::for_namespace(ns) else {
             return Err(HostError::Denied(format!("unknown UEL namespace `{ns}`")));
+        };
+        if RootGroup::for_ee(self.current_ee()) != Some(group) {
+            return Err(HostError::Denied(format!(
+                "environment 0x{:02x} may not write namespace `{ns}`",
+                self.current_ee().0
+            )));
         }
         let entry_key = (ns.to_string(), hex::encode(key));
         if let Some(top) = self.frames.last_mut() {

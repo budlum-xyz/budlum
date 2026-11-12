@@ -497,7 +497,7 @@ fn adopt_moves_holdings_once() {
         SchemeId::ML_DSA_87,
         &pq_seed,
         &digest,
-        b"BDLM_ADOPT_FOREIGN_V1",
+        crate::crypto::ctx::ADOPT_FOREIGN_V1,
         &[0u8; 32],
     )
     .expect("ml-dsa-87 sign");

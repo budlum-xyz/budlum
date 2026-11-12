@@ -828,4 +828,119 @@ mod tests {
         );
         let _ = deal_id;
     }
+
+    #[test]
+    fn missed_user_challenge_refunds_opener_bond_and_conserves_committed_supply() {
+        use crate::domain::storage_tx::{self, StorageTx, StorageTxContext};
+
+        let consensus = Arc::new(PoWEngine::new(0));
+        let mut blockchain = Blockchain::new(consensus, None, 45261, None);
+
+        let operator = Address::from([0x41u8; 32]);
+        let payer = Address::from([0x42u8; 32]);
+        let opener = Address::from([0x43u8; 32]);
+        blockchain.state.add_balance(&operator, 10_000_000);
+        blockchain.state.add_balance(&payer, 10_000_000);
+        blockchain.state.add_balance(&opener, 2_000_000);
+        blockchain.state.epoch_index = 100;
+        blockchain.state.current_block_unix_secs = 1_000_000;
+
+        let payload = vec![0x5Au8; 262_144];
+        let mut manifest = ContentManifest::from_bytes_sliced(&payload, 262_144).unwrap();
+        manifest.owner = payer;
+        let shard_id = manifest.shards[0].shard_id;
+        let params = StorageDomainParams::default();
+        let shard_bytes = u64::from(manifest.shard(&shard_id).expect("shard").size);
+        let economics = StorageEconomicsParams {
+            operator_bond: params.min_operator_bond,
+            fee_per_byte_epoch: 10 * (FEE_RATE_SCALE as u64) / shard_bytes,
+        };
+        let proof = {
+            let envelope = bud_proof::ProofEnvelope {
+                proof_format_version: 1,
+                backend: "test-backend".to_string(),
+                p3_version: "0.6".to_string(),
+                fri_params_id: "test-fri".to_string(),
+                public_inputs_hash: [0x42u8; 32],
+                proof_bytes: vec![0xABu8; 96],
+                degree_bits: 8,
+            };
+            bincode::serialize(&envelope).unwrap()
+        };
+
+        let deal_id = blockchain
+            .open_deal_through_shared_escrow(
+                &DealOpenTerms {
+                    domain_id: 42,
+                    manifest: &manifest,
+                    shard_id,
+                    operator,
+                    replica_index: 0,
+                    start_epoch: 100,
+                    end_epoch: 250,
+                    economics,
+                    merkle_proof: Some(proof),
+                    storage_root: Some([0x42u8; 32]),
+                },
+                payer,
+                &params,
+            )
+            .unwrap();
+
+        let opener_before = blockchain.state.get_balance(&opener);
+        let committed_plus_burned_before = blockchain
+            .state
+            .total_bud_committed()
+            .saturating_add(u128::from(blockchain.state.burned_total));
+
+        let bond = 75_000u64;
+        storage_tx::execute_storage_tx(
+            &mut blockchain.state,
+            &StorageTxContext {
+                sender: opener,
+                nonce: 0,
+                chain_id: 45261,
+                fee: 0,
+            },
+            &StorageTx::OpenChallenge {
+                deal_id,
+                range_len: 4096,
+                deadline_epoch: 110,
+                opener_bond: bond,
+            },
+        )
+        .expect("open bonded challenge");
+        assert_eq!(blockchain.state.get_balance(&opener), opener_before - bond);
+        assert_eq!(
+            blockchain
+                .state
+                .total_bud_committed()
+                .saturating_add(u128::from(blockchain.state.burned_total)),
+            committed_plus_burned_before,
+            "pending opener bond must stay in committed supply while open"
+        );
+
+        blockchain.state.epoch_index = 111;
+        crate::chain::storage_maintenance::accrue_operator_rewards(&mut blockchain.state, 111);
+        let (finalized, slashed) = crate::chain::storage_maintenance::finalize_missed_challenges(
+            &mut blockchain.state,
+            111,
+        )
+        .expect("finalize missed challenge");
+        assert_eq!(finalized, 1);
+        assert!(slashed > 0);
+        assert_eq!(
+            blockchain.state.get_balance(&opener),
+            opener_before,
+            "missed challenge must refund opener bond in full"
+        );
+        assert_eq!(
+            blockchain
+                .state
+                .total_bud_committed()
+                .saturating_add(u128::from(blockchain.state.burned_total)),
+            committed_plus_burned_before,
+            "missed challenge settlement must conserve committed + burned supply"
+        );
+    }
 }

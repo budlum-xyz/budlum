@@ -1608,8 +1608,11 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
             .assert_zero(cur[COL_GAS_USED].into());
         let cur_gas: AB::Expr = cur[COL_GAS_USED].into();
         let nxt_gas: AB::Expr = nxt[COL_GAS_USED].into();
+        let is_active_synth_halt: AB::Expr =
+            cpu_active.clone() * cur[COL_EXIT_CODE].into();
         builder
             .when_transition()
+            .when(one.clone() - is_active_synth_halt)
             .assert_zero(nxt_gas - cur_gas.clone() - gas_cost);
 
         let expected_gas = public_inputs[34].into()
@@ -1931,16 +1934,17 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
                 .assert_zero(cur[COL_EXIT_CODE].into() - expected_exit);
         }
 
-        // (6b) A proven execution is a clean halt: `exit_code` is zero. The column above
-        // was only compared with the public input the prover chose, so a clean run could
-        // be proven as exit code 1 (and the reverse for a forged one). A failing run
-        // cannot be proven at all today (its synthetic Halt row disagrees with
-        // the program lookup); when that is fixed the exit code must be tied to that
-        // row, and this constraint becomes the "success" arm of it.
+        // (6b) Bind exit_code to boolean {0, 1} on the active Halt row and force
+        // zero on every non-Halt row. A clean Halt (exit_code == 0) remains active
+        // in the Program CTL so the ROM proves `program[pc]` is a real Halt, whereas
+        // a synthetic fault Halt (exit_code == 1) skips the ROM fetch (`BLG-191`).
+        builder
+            .when(one.clone() - is_halt.clone())
+            .assert_zero(cur[COL_EXIT_CODE]);
         builder
             .when(is_halt.clone())
             .when(cpu_active.clone())
-            .assert_zero(cur[COL_EXIT_CODE]);
+            .assert_bool(cur[COL_EXIT_CODE]);
 
         // (7) chain_id: first row, COL_CHAIN_ID == public[0] (low 32 bits)
         {
@@ -2894,9 +2898,10 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
             // 1 original + 8 expansion rows map to 1 preprocessed ROM row;
             // without COL_INFERENCE_IS_EXPAND here the LogUp multiplicity
             // never balances and every VerifyInference proof is InvalidProof.
-            let is_expand: AB::Expr =
-                cur[COL_VM_MERKLE_IS_EXPAND].into() + cur[COL_INFERENCE_IS_EXPAND].into();
-            let prog_active: AB::Expr = cpu_active.clone() * (one.clone() - is_expand);
+            let is_non_prog_fetch: AB::Expr = cur[COL_VM_MERKLE_IS_EXPAND].into()
+                + cur[COL_INFERENCE_IS_EXPAND].into()
+                + cur[COL_EXIT_CODE].into();
+            let prog_active: AB::Expr = cpu_active.clone() * (one.clone() - is_non_prog_fetch);
             let prog_active_ext: AB::ExprEF = prog_active.into();
             // A row outside the program can lend nothing: the multiplicity can be
             // non-zero only on a real ROM row (pre_active=1).

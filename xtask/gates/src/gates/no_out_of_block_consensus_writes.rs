@@ -88,6 +88,7 @@ const CALLS: &[(&str, Class)] = &[
     ("handle_precommit", NodeLocal),
     ("handle_prevote", NodeLocal),
     ("handle_qc_fault_proof", NodeLocal),
+    ("vote_is_from_registered_validator", Read),
     ("import_qc_blob", NodeLocal),
     ("last_block", Read),
     ("produce_block", BlockPath),

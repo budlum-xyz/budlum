@@ -1036,7 +1036,10 @@ mod tests {
         *block_hash_1 = block_hash_1.to_lowercase();
         *block_hash_2 = block_hash_2.to_uppercase();
         assert_ne!(block_hash_1, block_hash_2, "the strings differ");
-        assert!(r.validate_shape().is_ok(), "so the shape check lets it by");
+        assert!(
+            r.validate_shape().is_err(),
+            "case-insensitive shape check already catches equal hex hashes"
+        );
 
         assert_eq!(
             r.verify_double_sign(),

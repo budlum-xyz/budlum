@@ -2,13 +2,20 @@
 //! exposed for `apply_storage_tx_v3` and placement-group replacement verifiers.
 
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use super::bof1::{codec_is_open_on_testnet, codec_is_registered, CodecId};
 use super::content_id::{ContentId, ContentIdKind};
 use super::pipeline::ObjectRecord;
 use super::registry::{Address, ObjectKey};
 use super::repair::bad_repair_slash_amount;
+use crate::core::hash::hash_fields_bytes;
+use crate::crypto::ctx::STORAGE_V2;
+use crate::crypto::pq::{ml_dsa_sign, verify, PqError};
+use crate::crypto::scheme::SchemeId;
+
+/// Domain tag binding Full-validator replacement attestations to `(old_key, new_record)`.
+pub const REPLACE_ATTEST_DOMAIN: &[u8] = b"BDLM_BUD3_REPLACE_ATTEST_V1";
 
 /// Minimum independent Full validators from the placement group required to
 /// verify `decode(new_object)` produces the exact same `ContentId` (Section 6.14 item 3).
@@ -27,6 +34,75 @@ pub const GENERIC_ENTROPY_CEILING_MILLIBITS: u32 = 7_900;
 pub struct ReplaceAttestation {
     pub validator: Address,
     pub verified_content_id: ContentId,
+    pub new_commitment: ObjectKey,
+    pub signature: Vec<u8>,
+}
+
+/// Canonical domain-separated digest signed by each placement-group Full
+/// validator over `(old_key, new_record)`.
+#[must_use]
+pub fn replace_attestation_digest(old_key: &ObjectKey, new_record: &ObjectRecord) -> [u8; 32] {
+    let kind_byte = [match new_record.content_id.kind {
+        ContentIdKind::Public => 0u8,
+        ContentIdKind::Sealed => 1u8,
+    }];
+    let cid_len = new_record.content_id.len.to_le_bytes();
+    let obj_len = new_record.object_len.to_le_bytes();
+    let prof_id = new_record.profile.id.to_le_bytes();
+    let qr_ver = [new_record.profile.qr_version];
+    let sym_sz = new_record.profile.symbol_size.to_le_bytes();
+    let fps = new_record.profile.fps.to_le_bytes();
+    let k_max = new_record.profile.k_max.to_le_bytes();
+    let codec = new_record.codec.to_le_bytes();
+    let syms_per_seg = new_record.symbols_per_segment.to_le_bytes();
+    let roots_count = (new_record.symbol_roots.len() as u64).to_le_bytes();
+    let mut roots_flat = Vec::with_capacity(new_record.symbol_roots.len() * 32);
+    for root in &new_record.symbol_roots {
+        roots_flat.extend_from_slice(root);
+    }
+    hash_fields_bytes(&[
+        REPLACE_ATTEST_DOMAIN,
+        old_key,
+        &kind_byte,
+        &new_record.content_id.digest,
+        &cid_len,
+        &obj_len,
+        &new_record.commitment,
+        &prof_id,
+        &qr_ver,
+        &sym_sz,
+        &fps,
+        &k_max,
+        &codec,
+        &syms_per_seg,
+        &roots_count,
+        &roots_flat,
+    ])
+}
+
+/// Sign a [`ReplaceAttestation`] with `validator`'s ML-DSA-65 seed under `ctx::STORAGE_V2`.
+///
+/// Convenience: exposed for validator custody daemons and replacement tests.
+pub fn sign_replace_attestation(
+    validator: Address,
+    ml_dsa_seed: &[u8; 32],
+    old_key: &ObjectKey,
+    new_record: &ObjectRecord,
+) -> Result<ReplaceAttestation, PqError> {
+    let digest = replace_attestation_digest(old_key, new_record);
+    let signature = ml_dsa_sign(
+        SchemeId::ML_DSA_65,
+        ml_dsa_seed,
+        &digest,
+        STORAGE_V2,
+        &[0u8; 32],
+    )?;
+    Ok(ReplaceAttestation {
+        validator,
+        verified_content_id: new_record.content_id,
+        new_commitment: new_record.commitment,
+        signature,
+    })
 }
 
 /// Verified candidate produced during stage A0 codec selection (Section 6.6.2).
@@ -117,6 +193,8 @@ pub enum ReplaceError {
         need: usize,
     },
     AttesterOutsidePlacementGroup(Address),
+    InvalidAttestationSignature(Address),
+    NoIndependentAttester,
     /// Different content produced: rejected AND proposer is slashed 1% under bad-repair rule!
     ContentIdMismatch {
         proposer_slash_atoms: u64,
@@ -129,14 +207,13 @@ pub enum ReplaceError {
 /// 3. If `new_record.content_id != old_record.content_id`, refuses AND computes the
 ///    1% bad-repair slash (`bad_repair_slash_amount(proposer_stake)`).
 /// 4. Requires at least `MIN_REPLACE_ATTESTATIONS` (3) distinct Full validators from
-///    `placement_group_full` attesting to the exact `old_record.content_id`.
+///    `placement_group_full` signing `(old_record.commitment, new_record)` with their
+///    registered consensus ML-DSA-65 keys, including at least one attester independent
+///    of `sender`.
 pub fn admit_object_replacement(
-    sender: &Address,
-    old_owner: &Address,
-    proposer_stake: u64,
-    old_record: &ObjectRecord,
-    new_record: &ObjectRecord,
-    placement_group_full: &BTreeSet<Address>,
+    (sender, old_owner, proposer_stake): (&Address, &Address, u64),
+    (old_record, new_record): (&ObjectRecord, &ObjectRecord),
+    (placement_group_full, validator_keys): (&BTreeSet<Address>, &BTreeMap<Address, Vec<u8>>),
     attestations: &[ReplaceAttestation],
 ) -> Result<(), ReplaceError> {
     if old_record.commitment == new_record.commitment {
@@ -158,6 +235,7 @@ pub fn admit_object_replacement(
         });
     }
 
+    let digest = replace_attestation_digest(&old_record.commitment, new_record);
     let mut distinct_attesters = BTreeSet::new();
     for att in attestations {
         if !placement_group_full.contains(&att.validator) {
@@ -168,6 +246,15 @@ pub fn admit_object_replacement(
                 proposer_slash_atoms: bad_repair_slash_amount(proposer_stake),
             });
         }
+        if att.new_commitment != new_record.commitment {
+            return Err(ReplaceError::InvalidAttestationSignature(att.validator));
+        }
+        let Some(pk) = validator_keys.get(&att.validator) else {
+            return Err(ReplaceError::InvalidAttestationSignature(att.validator));
+        };
+        if verify(SchemeId::ML_DSA_65, pk, &digest, STORAGE_V2, &att.signature).is_err() {
+            return Err(ReplaceError::InvalidAttestationSignature(att.validator));
+        }
         distinct_attesters.insert(att.validator);
     }
 
@@ -176,6 +263,9 @@ pub fn admit_object_replacement(
             got: distinct_attesters.len(),
             need: MIN_REPLACE_ATTESTATIONS,
         });
+    }
+    if !distinct_attesters.iter().any(|v| v != sender) {
+        return Err(ReplaceError::NoIndependentAttester);
     }
     Ok(())
 }
@@ -203,6 +293,7 @@ impl PendingReplacementBarrier {
 mod tests {
     use super::super::limits::Profile;
     use super::*;
+    use crate::crypto::pq::ml_dsa_public_key;
 
     fn sample_record(commitment: [u8; 32], content_id: ContentId, codec: CodecId) -> ObjectRecord {
         ObjectRecord {
@@ -222,31 +313,37 @@ mod tests {
         }
     }
 
+    fn key_map(ids: &[u8]) -> BTreeMap<Address, Vec<u8>> {
+        ids.iter()
+            .map(|&b| {
+                let seed = [b; 32];
+                let pk = ml_dsa_public_key(SchemeId::ML_DSA_65, &seed).unwrap();
+                ([b; 32], pk)
+            })
+            .collect()
+    }
+
     #[test]
     fn closed_codecs_refuse_on_testnet() {
         let cid = ContentId::public(b"closed codec test");
         let old_rec = sample_record([1u8; 32], cid, 0);
         let pg: BTreeSet<Address> = [[1u8; 32], [2u8; 32], [3u8; 32]].into();
-        let atts = vec![
-            ReplaceAttestation {
-                validator: [1u8; 32],
-                verified_content_id: cid,
-            },
-            ReplaceAttestation {
-                validator: [2u8; 32],
-                verified_content_id: cid,
-            },
-            ReplaceAttestation {
-                validator: [3u8; 32],
-                verified_content_id: cid,
-            },
-        ];
+        let keys = key_map(&[1, 2, 3]);
 
         for closed in [2u16, 6, 7, 8, 9, 12, 13, 14, 15, 22, 26] {
             let bad = sample_record([2u8; 32], cid, closed);
+            let atts: Vec<ReplaceAttestation> = [1u8, 2, 3]
+                .into_iter()
+                .map(|b| {
+                    sign_replace_attestation([b; 32], &[b; 32], &old_rec.commitment, &bad).unwrap()
+                })
+                .collect();
             assert_eq!(
                 admit_object_replacement(
-                    &[1u8; 32], &[1u8; 32], 50_000, &old_rec, &bad, &pg, &atts
+                    (&[1u8; 32], &[1u8; 32], 50_000),
+                    (&old_rec, &bad),
+                    (&pg, &keys),
+                    &atts
                 ),
                 Err(ReplaceError::CodecNotOpen(closed))
             );
@@ -273,39 +370,55 @@ mod tests {
         let old_rec = sample_record([10u8; 32], cid, 0);
         let new_rec = sample_record([20u8; 32], cid, 1);
         let pg: BTreeSet<Address> = [[1u8; 32], [2u8; 32], [3u8; 32], [4u8; 32]].into();
+        let keys = key_map(&[1, 2, 3, 4]);
 
         let two_att = vec![
-            ReplaceAttestation {
-                validator: [1u8; 32],
-                verified_content_id: cid,
-            },
-            ReplaceAttestation {
-                validator: [2u8; 32],
-                verified_content_id: cid,
-            },
+            sign_replace_attestation([1u8; 32], &[1u8; 32], &old_rec.commitment, &new_rec).unwrap(),
+            sign_replace_attestation([2u8; 32], &[2u8; 32], &old_rec.commitment, &new_rec).unwrap(),
         ];
         assert!(matches!(
             admit_object_replacement(
-                &[9u8; 32], &[1u8; 32], 100_000, &old_rec, &new_rec, &pg, &two_att
+                (&[9u8; 32], &[1u8; 32], 100_000),
+                (&old_rec, &new_rec),
+                (&pg, &keys),
+                &two_att
             ),
             Err(ReplaceError::InsufficientAttestations { got: 2, need: 3 })
         ));
 
         let mut three_att = two_att;
-        three_att.push(ReplaceAttestation {
-            validator: [3u8; 32],
-            verified_content_id: cid,
-        });
+        three_att.push(
+            sign_replace_attestation([3u8; 32], &[3u8; 32], &old_rec.commitment, &new_rec).unwrap(),
+        );
         admit_object_replacement(
-            &[9u8; 32], &[1u8; 32], 100_000, &old_rec, &new_rec, &pg, &three_att,
+            (&[9u8; 32], &[1u8; 32], 100_000),
+            (&old_rec, &new_rec),
+            (&pg, &keys),
+            &three_att,
         )
         .unwrap();
+
+        // Forged signature or record swap must fail signature / commitment check.
+        let mut forged = three_att.clone();
+        forged[0].signature[0] ^= 0xFF;
+        assert_eq!(
+            admit_object_replacement(
+                (&[9u8; 32], &[1u8; 32], 100_000),
+                (&old_rec, &new_rec),
+                (&pg, &keys),
+                &forged
+            ),
+            Err(ReplaceError::InvalidAttestationSignature([1u8; 32]))
+        );
 
         let bad_cid = ContentId::public(b"corrupted object bytes");
         let bad_rec = sample_record([30u8; 32], bad_cid, 1);
         assert_eq!(
             admit_object_replacement(
-                &[9u8; 32], &[1u8; 32], 100_000, &old_rec, &bad_rec, &pg, &three_att
+                (&[9u8; 32], &[1u8; 32], 100_000),
+                (&old_rec, &bad_rec),
+                (&pg, &keys),
+                &three_att
             ),
             Err(ReplaceError::ContentIdMismatch {
                 proposer_slash_atoms: 1_000

@@ -1853,17 +1853,19 @@ mod tests {
             .expect_err("a stake-majority holder still has only its capped seats");
         assert!(err.contains("Insufficient seat quorum"), "got: {err}");
 
-        // The three one-unit validators hold twelve of sixteen seats. Their
-        // combined stake is far below two thirds, yet their seats are the
-        // consensus weight and must finalize once their signatures verify.
+        // The three one-unit validators hold twelve of sixteen seats, yet
+        // dual-quorum finality requires BOTH seat quorum and stake quorum.
         let mut agg =
             FinalityAggregator::new(DEFAULT_CHAIN_ID, 1, 10, "cp_hash".into(), snap.clone());
         for i in 1..4 {
             agg.add_prevote(signed_prevote(&snap, &sks, i, 1, 10, "cp_hash"))
                 .unwrap();
         }
+        assert!(!agg.prevote_quorum_reached);
+        agg.add_prevote(signed_prevote(&snap, &sks, 0, 1, 10, "cp_hash"))
+            .unwrap();
         assert!(agg.prevote_quorum_reached);
-        for (v_info, sk_tuple) in snap.validators.iter().zip(sks.iter()).take(4).skip(1) {
+        for (v_info, sk_tuple) in snap.validators.iter().zip(sks.iter()).take(4) {
             let pc = Precommit {
                 chain_id: crate::core::transaction::DEFAULT_CHAIN_ID,
                 epoch: 1,
@@ -1880,8 +1882,9 @@ mod tests {
         }
         let cert = agg
             .try_produce_cert()
-            .expect("three low-stake validators cover the seat quorum");
-        cert.verify(&snap).expect("the seat quorum is sufficient");
+            .expect("both seat quorum and stake quorum are satisfied");
+        cert.verify(&snap)
+            .expect("both seat and stake quorums verify");
     }
 
     #[test]

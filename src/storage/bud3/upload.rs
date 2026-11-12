@@ -574,7 +574,8 @@ impl UploadSessionManager {
                 &syms,
                 |frame| {
                     let png = frame_to_png(frame)?;
-                    let mut sample_meter = super::meter::Meter::for_object(payload_len);
+                    let mut sample_meter =
+                        super::meter::Meter::for_object((frame.data.len() as u64).saturating_add(128));
                     png_to_frame(&png, &mut sample_meter)
                 },
             )?;
@@ -807,6 +808,7 @@ mod tests {
             ),
             Ok(Registered::New(key))
         );
+        reg.ack(&key, &[10; 32]).unwrap();
 
         let mut mgr = UploadSessionManager::new(Bud3Limits::default());
         let sid = mgr
@@ -851,7 +853,9 @@ mod tests {
     fn bud3_buffered_upload_reports_actual_peak_and_session_finish() {
         let mut mgr = UploadSessionManager::new(Bud3Limits::default());
         let reg = Bud3Registry::default();
-        let data = b"multi-segment upload streamed chunk by chunk".repeat(120);
+        let data: Vec<u8> = (0..1320u32)
+            .flat_map(|i| i.wrapping_mul(0x9E37_79B9).to_le_bytes())
+            .collect();
         let sid = mgr
             .open_session(([2; 32], [3; 16]), data.len() as u64, 0, 20, false, 500)
             .unwrap();

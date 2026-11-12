@@ -50,8 +50,9 @@ fn register_object(
     };
     // One segment: 64 bytes of content is well under `symbol_size`, so the
     // object codes a single segment and the arithmetic below is one root.
+    let fill = u8::try_from(symbol_size & 0xFF).unwrap_or(7);
     let upload =
-        prepare_public_upload(&[7u8; 64], &profile, &Bud3Limits::default(), 24).expect("prepare");
+        prepare_public_upload(&[fill; 64], &profile, &Bud3Limits::default(), 24).expect("prepare");
     assert_eq!(upload.segments.len(), 1, "the fixture is one segment");
     let key = upload.record.commitment;
     let segments = upload.segments.len() as u64;
@@ -282,10 +283,13 @@ fn open_audit_latency_uses_the_canonical_deadline() {
     bc.state.epoch_index = 12;
     bc.emit_chain_metrics();
     let body = metrics.encode();
-    assert_eq!(parse_scalar(&body, "bud3_audit_latency_seconds_count"), 1.0);
+    assert_eq!(
+        parse_scalar(&body, "budlum_bud3_audit_latency_seconds_count"),
+        1.0
+    );
     let expected = 2 * crate::core::chain_config::epoch_seconds_for_chain_id(45262);
     assert_eq!(
-        parse_scalar(&body, "bud3_audit_latency_seconds_sum"),
+        parse_scalar(&body, "budlum_bud3_audit_latency_seconds_sum"),
         expected as f64
     );
 }

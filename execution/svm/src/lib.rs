@@ -1201,10 +1201,12 @@ mod tests {
         let sbpf_version = exe.get_sbpf_version();
         let stack_size = exe.get_config().stack_size();
         let mut stack = AlignedMemory::<{ ebpf::HOST_ALIGN }>::zero_filled(stack_size);
+        let mut heap = AlignedMemory::<{ ebpf::HOST_ALIGN }>::zero_filled(SBPF_HEAP_BYTES);
         let mut input = vec![0u8; 8];
         let regions = vec![
             exe.get_ro_region(),
             MemoryRegion::new_writable(stack.as_slice_mut(), ebpf::MM_STACK_START),
+            MemoryRegion::new_writable(heap.as_slice_mut(), ebpf::MM_HEAP_START),
             MemoryRegion::new_writable(input.as_mut_slice(), ebpf::MM_INPUT_START),
         ];
         let Ok(mapping) = MemoryMapping::new(regions, exe.get_config(), sbpf_version) else {

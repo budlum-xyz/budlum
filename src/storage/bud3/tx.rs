@@ -156,6 +156,28 @@ pub fn apply(
     tx: StorageTxV3,
     epoch: u64,
 ) -> Result<Applied, RegistryError> {
+    apply_with_validators(
+        registry,
+        signer,
+        tx,
+        epoch,
+        &std::collections::BTreeMap::new(),
+    )
+}
+
+/// Apply one transaction signed by `signer` at `epoch`, supplying the active
+/// consensus ML-DSA-65 validator key directory for `ReplaceObject` attestations.
+///
+/// # Errors
+///
+/// The [`RegistryError`] of the refused step; the registry is unchanged.
+pub fn apply_with_validators(
+    registry: &mut Bud3Registry,
+    signer: Address,
+    tx: StorageTxV3,
+    epoch: u64,
+    validator_keys: &std::collections::BTreeMap<Address, Vec<u8>>,
+) -> Result<Applied, RegistryError> {
     match tx {
         StorageTxV3::RegisterObject {
             record,
@@ -231,7 +253,7 @@ pub fn apply(
                 new_record,
                 new_shares,
                 &attestations,
-                epoch,
+                (epoch, validator_keys),
             )
             .map(Applied::Replaced),
     }
@@ -314,7 +336,7 @@ mod tests {
             ),
             Ok(Applied::Renewed(55))
         );
-        // Only the NFT holder burns.
+        // Only the NFT holder burns, and a non-owner cannot burn the sole reference.
         let before = r.state_root();
         assert_eq!(
             apply(
@@ -325,12 +347,42 @@ mod tests {
             ),
             Err(RegistryError::NotAuthorized)
         );
-        assert_eq!(r.state_root(), before, "a refusal writes nothing");
         assert_eq!(
             apply(
                 &mut r,
                 [2; 32],
                 StorageTxV3::BurnReference { nft: [7; 32] },
+                3
+            ),
+            Err(RegistryError::NotAuthorized)
+        );
+        assert_eq!(r.state_root(), before, "a refusal writes nothing");
+        assert_eq!(
+            apply(
+                &mut r,
+                [1; 32],
+                StorageTxV3::BindNft {
+                    nft: [8; 32],
+                    object: key
+                },
+                3
+            ),
+            Ok(Applied::Bound)
+        );
+        assert_eq!(
+            apply(
+                &mut r,
+                [2; 32],
+                StorageTxV3::BurnReference { nft: [7; 32] },
+                3
+            ),
+            Ok(Applied::Burned(false))
+        );
+        assert_eq!(
+            apply(
+                &mut r,
+                [1; 32],
+                StorageTxV3::BurnReference { nft: [8; 32] },
                 3
             ),
             Ok(Applied::Burned(true))

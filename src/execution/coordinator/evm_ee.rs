@@ -1224,7 +1224,7 @@ fn run_evm_bytecode(
                 ) else {
                     return Ok((OutcomeStatus::Revert, b"CALL mem overflow".to_vec()));
                 };
-                if val_u128 > 0 {
+                if val_u128 > 0 && addr_w.to_addr20() != EVM_UNIVERSAL_PRECOMPILE {
                     if call_is_static {
                         return Ok((OutcomeStatus::Revert, b"value in STATICCALL".to_vec()));
                     }

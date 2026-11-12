@@ -41,7 +41,7 @@ fn register_bind_and_view_through_the_executor() {
     let uploader = Address::from([1u8; 32]);
     let holder = Address::from([10u8; 32]);
     let mut state = AccountState::new();
-    state.add_balance(&uploader, 1_000);
+    state.add_balance(&uploader, 10_000);
     state.add_balance(&holder, 1_000);
     let empty_root = state.calculate_state_root();
 
@@ -89,7 +89,19 @@ fn register_bind_and_view_through_the_executor() {
         empty_root,
         "the registry is rooted"
     );
-    assert_eq!(state.get_balance(&uploader), 999, "only the fee is charged");
+    assert_eq!(
+        state.get_balance(&uploader),
+        8_999,
+        "tx fee (1) + min storage fee (1_000) are charged"
+    );
+    assert_eq!(
+        state.get_balance(&crate::storage::bud3::fees::custody_endowment_account()),
+        950
+    );
+    assert_eq!(
+        state.get_balance(&crate::tokenomics::reward_pool::reward_pool_account()),
+        50
+    );
 
     apply(
         &mut state,
@@ -154,7 +166,7 @@ fn the_door_refuses_value_and_bad_steps_without_writing() {
 fn the_epoch_boundary_expires_and_audits() {
     let uploader = Address::from([3u8; 32]);
     let mut state = AccountState::new();
-    state.add_balance(&uploader, 1_000);
+    state.add_balance(&uploader, 10_000);
     let up = prepare_public_upload(b"short lease", &P, &Bud3Limits::default(), 6).unwrap();
     let key = up.record.commitment;
     let shares = vec![(
@@ -524,6 +536,7 @@ fn bud3_sealed_grant_issue_revoke_and_not_served() {
     assert!(revoked_json.get("sealed_key_package").is_none());
 }
 
+#[cfg(not(miri))]
 #[test]
 fn bud3_social_delete_crypto_shredding_and_tombstone() {
     use crate::crypto::hpke::HpkeKeyPair;
@@ -692,10 +705,14 @@ fn bud3_public_dedup_sealed_isolation_and_dependency_rules() {
         ),
     ];
 
-    // Public dedup across two uploaders shares one physical object commitment.
+    // Public dedup across two uploaders shares one physical object commitment
+    // once the initial custody shares are confirmed.
     let pub_up =
         prepare_public_upload(b"shared public content", &P, &Bud3Limits::default(), 12).unwrap();
     let pub_key = pub_up.record.commitment;
+    for holder in [80u8, 81] {
+        state.add_balance(&Address::from([holder; 32]), 1_000);
+    }
     apply(
         &mut state,
         &storage_tx(
@@ -711,6 +728,20 @@ fn bud3_public_dedup_sealed_isolation_and_dependency_rules() {
         ),
     )
     .unwrap();
+    for holder in [80u8, 81] {
+        apply(
+            &mut state,
+            &storage_tx(
+                Address::from([holder; 32]),
+                0,
+                1,
+                0,
+                StorageTxV3::CustodyAck { object: pub_key },
+            ),
+        )
+        .unwrap();
+    }
+    let bob_before = state.get_balance(&bob);
     apply(
         &mut state,
         &storage_tx(
@@ -726,6 +757,11 @@ fn bud3_public_dedup_sealed_isolation_and_dependency_rules() {
         ),
     )
     .unwrap();
+    assert_eq!(
+        state.get_balance(&bob),
+        bob_before - 1,
+        "deduplicated registration pays only the tx fee"
+    );
     apply(
         &mut state,
         &storage_tx(
@@ -756,12 +792,11 @@ fn bud3_public_dedup_sealed_isolation_and_dependency_rules() {
     .unwrap();
     assert_eq!(state.bud3_registry.refcount(&pub_key), 2);
 
-    // Burning Alice's NFT leaves Bob's reference alive. Bob holds the last
-    // reference but is not the object owner, so his burn cannot delete or
-    // tombstone Alice's object.
+    // Burning Bob's NFT leaves Alice's reference alive; a non-owner cannot burn
+    // another account's sole remaining reference, and Alice's last burn tombstones.
     apply(
         &mut state,
-        &storage_tx(alice, 2, 1, 0, StorageTxV3::BurnReference { nft: [1; 32] }),
+        &storage_tx(bob, 2, 1, 0, StorageTxV3::BurnReference { nft: [2; 32] }),
     )
     .unwrap();
     assert_eq!(state.bud3_registry.refcount(&pub_key), 1);
@@ -769,14 +804,18 @@ fn bud3_public_dedup_sealed_isolation_and_dependency_rules() {
 
     assert!(apply(
         &mut state,
-        &storage_tx(bob, 2, 1, 0, StorageTxV3::BurnReference { nft: [2; 32] }),
+        &storage_tx(bob, 3, 1, 0, StorageTxV3::BurnReference { nft: [1; 32] }),
     )
     .is_err());
     assert_eq!(state.bud3_registry.refcount(&pub_key), 1);
     assert!(state.bud3_registry.object(&pub_key).is_some());
     assert!(!state.bud3_registry.is_tombstoned(&pub_key));
-    // Owner-last-burn deletion is covered by the registry unit test
-    // `register_bind_burn_deletes_at_zero_references`.
+    apply(
+        &mut state,
+        &storage_tx(alice, 2, 1, 0, StorageTxV3::BurnReference { nft: [1; 32] }),
+    )
+    .unwrap();
+    assert!(state.bud3_registry.is_tombstoned(&pub_key));
 
     // Sealed isolation: identical plaintext from Alice and Bob produces isolated objects.
     let alice_sealed = prepare_sealed_upload(
@@ -1303,47 +1342,61 @@ fn bud3_e2e_upload_register_view() {
 
 #[test]
 fn bud3_e2e_replace_object_preserves_nft_binding_and_slashes_mismatch() {
+    use crate::crypto::pq::ml_dsa_public_key;
+    use crate::crypto::scheme::SchemeId;
     use crate::storage::bud3::pipeline::prepare_public_upload;
-    use crate::storage::bud3::replace::ReplaceAttestation;
+    use crate::storage::bud3::replace::sign_replace_attestation;
 
     let alice = Address::from([131u8; 32]);
-    let proposer = Address::from([132u8; 32]);
+    let proposer = Address::from([201u8; 32]);
     let mut state = AccountState::new();
     state.add_balance(&alice, 100_000);
     state.add_balance(&proposer, 100_000);
+    for id in [201u8, 202, 203] {
+        let v_addr = Address::from([id; 32]);
+        state.add_validator(v_addr, 50_000);
+        state.get_validator_mut(&v_addr).unwrap().pq_public_key =
+            ml_dsa_public_key(SchemeId::ML_DSA_65, &[id; 32]).unwrap();
+    }
 
-    let body = b"replaceable canonical payload".repeat(40);
+    let body: Vec<u8> = (0..750u32)
+        .flat_map(|i| i.wrapping_mul(0x9E37_79B9).to_le_bytes())
+        .collect();
     let old_up = prepare_public_upload(&body, &P, &Bud3Limits::default(), 48).unwrap();
     let old_key = old_up.record.commitment;
-    let old_shares = vec![
-        (
-            0,
-            Share {
-                validator: [201; 32],
-                class: Class::Full,
-                first_esi: 0,
-                symbols: 16,
-            },
-        ),
-        (
-            0,
-            Share {
-                validator: [202; 32],
-                class: Class::Full,
-                first_esi: 16,
-                symbols: 16,
-            },
-        ),
-        (
-            0,
-            Share {
-                validator: [203; 32],
-                class: Class::Full,
-                first_esi: 32,
-                symbols: 16,
-            },
-        ),
-    ];
+    let old_shares: Vec<(u64, Share)> = (0..old_up.segments.len() as u64)
+        .flat_map(|seg| {
+            [
+                (
+                    seg,
+                    Share {
+                        validator: [201; 32],
+                        class: Class::Full,
+                        first_esi: 0,
+                        symbols: 16,
+                    },
+                ),
+                (
+                    seg,
+                    Share {
+                        validator: [202; 32],
+                        class: Class::Full,
+                        first_esi: 16,
+                        symbols: 16,
+                    },
+                ),
+                (
+                    seg,
+                    Share {
+                        validator: [203; 32],
+                        class: Class::Full,
+                        first_esi: 32,
+                        symbols: 16,
+                    },
+                ),
+            ]
+        })
+        .collect();
     let nft = [0x99u8; 32];
     apply(
         &mut state,
@@ -1388,20 +1441,10 @@ fn bud3_e2e_replace_object_preserves_nft_binding_and_slashes_mismatch() {
     assert_ne!(old_key, new_key);
     assert_eq!(old_up.record.content_id, new_up.record.content_id);
 
-    let attestations = vec![
-        ReplaceAttestation {
-            validator: [201u8; 32],
-            verified_content_id: old_up.record.content_id,
-        },
-        ReplaceAttestation {
-            validator: [202u8; 32],
-            verified_content_id: old_up.record.content_id,
-        },
-        ReplaceAttestation {
-            validator: [203u8; 32],
-            verified_content_id: old_up.record.content_id,
-        },
-    ];
+    let attestations: Vec<_> = [201u8, 202, 203]
+        .into_iter()
+        .map(|id| sign_replace_attestation([id; 32], &[id; 32], &old_key, &new_up.record).unwrap())
+        .collect();
     let new_shares = vec![(
         0,
         Share {
@@ -1425,6 +1468,21 @@ fn bud3_e2e_replace_object_preserves_nft_binding_and_slashes_mismatch() {
                 attestations,
                 proposer_stake: 50_000,
             },
+        ),
+    )
+    .unwrap();
+    assert!(
+        state.bud3_registry.object(&old_key).is_some(),
+        "old shares stay until replacement custody ack"
+    );
+    apply(
+        &mut state,
+        &storage_tx(
+            proposer,
+            1,
+            1,
+            0,
+            StorageTxV3::CustodyAck { object: new_key },
         ),
     )
     .unwrap();

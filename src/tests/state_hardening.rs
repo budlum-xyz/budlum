@@ -116,11 +116,13 @@ fn v2_snapshot_from_bytes_verifies_digest_and_saves_atomically() {
 fn cross_shard_transfer_enforces_vesting_and_checked_cost() {
     let num_shards = 4;
     let sender = Address::from([0u8; 32]);
-    let mut raw_to = [0u8; 32];
-    if let Some(last) = raw_to.last_mut() {
-        *last = 1;
-    }
-    let receiver = Address::from(raw_to);
+    let receiver = (1u8..=255)
+        .map(|b| Address::from([b; 32]))
+        .find(|cand| {
+            let probe = Transaction::new_with_fee(sender, *cand, 1, 0, 0, Vec::new());
+            crate::sharding::is_cross_shard(&probe, num_shards)
+        })
+        .expect("at least one address must map to a different shard");
 
     let mut locked_state = AccountState::new();
     locked_state.add_balance(&sender, 10_000);
@@ -295,10 +297,6 @@ fn governance_slash_syncs_permissionless_registry() {
     let mut state = AccountState::new();
     let stake = 20_000u64;
     state.add_validator(offender, stake);
-    state
-        .registry
-        .register_validator(offender, stake, 0)
-        .expect("register validator in permissionless registry");
 
     let evidence_report = SlashingReport::new_verified(
         offender,
@@ -348,7 +346,10 @@ fn governance_slash_syncs_permissionless_registry() {
         .expect("proposal exists");
     state.execute_proposal(&prop);
 
-    assert_eq!(state.get_validator(&offender).map(|v| v.stake), Some(0));
+    assert_eq!(
+        state.get_validator(&offender).map(|v| v.stake),
+        Some(stake / 2)
+    );
     assert!(state.get_validator(&offender).unwrap().slashed);
     assert!(!state.registry.is_active(&offender, roles::VALIDATOR));
 }

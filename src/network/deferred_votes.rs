@@ -39,13 +39,30 @@ use crate::chain::finality::{Precommit, Prevote};
 /// Two votes per validator per round and a handful of rounds in flight is
 /// single digits; the cap is set far above that so a stall does not lose the
 /// vote that would have ended it, and far below anything a peer can grow.
-const DEFERRED_VOTE_CAP: usize = 64;
+const DEFERRED_VOTE_CAP: usize = 128;
+
+/// Maximum deferred slots one validator identity may occupy at once across
+/// upcoming rounds (prevote + precommit across the 8-checkpoint early-vote horizon).
+const MAX_DEFERRED_PER_VOTER: usize = 16;
 
 /// A vote held for a round that is not open here yet.
 #[derive(Clone, Debug)]
 pub(crate) enum DeferredVote {
     Prevote(Prevote),
     Precommit(Precommit),
+}
+
+impl DeferredVote {
+    fn voter_id(&self) -> crate::core::address::Address {
+        match self {
+            Self::Prevote(v) => v.voter_id,
+            Self::Precommit(v) => v.voter_id,
+        }
+    }
+
+    const fn is_precommit(&self) -> bool {
+        matches!(self, Self::Precommit(_))
+    }
 }
 
 /// Bounded, height-keyed store of votes that arrived too early.
@@ -59,9 +76,33 @@ impl DeferredVotes {
         Self::default()
     }
 
-    /// Hold `vote` for `epoch`/`height`, dropping the oldest when full.
+    /// Hold `vote` for `epoch`/`height`, deduplicating per `(round, voter, kind)`,
+    /// bounding each voter's share, and dropping the oldest overall when full.
     pub(crate) fn push(&mut self, epoch: u64, height: u64, vote: DeferredVote) {
-        if self.inner.len() >= DEFERRED_VOTE_CAP {
+        let voter = vote.voter_id();
+        let is_precommit = vote.is_precommit();
+        if self.inner.iter().any(|(e, h, existing)| {
+            *e == epoch
+                && *h == height
+                && existing.voter_id() == voter
+                && existing.is_precommit() == is_precommit
+        }) {
+            return;
+        }
+        let voter_slots = self
+            .inner
+            .iter()
+            .filter(|(_, _, existing)| existing.voter_id() == voter)
+            .count();
+        if voter_slots >= MAX_DEFERRED_PER_VOTER {
+            if let Some(pos) = self
+                .inner
+                .iter()
+                .position(|(_, _, existing)| existing.voter_id() == voter)
+            {
+                let _ = self.inner.remove(pos);
+            }
+        } else if self.inner.len() >= DEFERRED_VOTE_CAP {
             self.inner.pop_front();
         }
         self.inner.push_back((epoch, height, vote));
@@ -167,5 +208,22 @@ mod tests {
             ),
             other => panic!("unexpected first deferred vote: {other:?}"),
         }
+    }
+
+    #[test]
+    fn one_voter_cannot_evict_other_validators_early_votes() {
+        let mut held = DeferredVotes::new();
+        held.push(0, 8, DeferredVote::Prevote(prevote(8, 1)));
+        held.push(0, 8, DeferredVote::Prevote(prevote(8, 2)));
+        for round in 10..100 {
+            held.push(0, round, DeferredVote::Prevote(prevote(round, 99)));
+            held.push(0, round, DeferredVote::Precommit(precommit(round, 99)));
+        }
+        let honest = held.take_for(0, 8);
+        assert_eq!(
+            honest.len(),
+            2,
+            "a single voter flooding rounds must only evict its own slots"
+        );
     }
 }

@@ -548,11 +548,11 @@ mod tests {
         let link = next_link(&A, &SEED);
         assert_eq!(
             hex::encode(link),
-            "4b5de930c1503a81e13d0356ed4af1ff5870da6e62e87b83790277eb249be020"
+            "17780e23b2fc2f7eff18dda65ee3c325d099da1633094b8b8a6f3656708a6feb"
         );
         assert_eq!(
             hex::encode(eligibility_output(&A, &link, &[2; 32], 7, 5)),
-            "a93ccd647ac0ba8c2d690ad095f746b9f59ae3329f3a4c2833d3df994e122d73"
+            "9e44c86c8b9cf0d32a344b6aa63f9e7cc0610a45aee34996b2d16df86f037ccc"
         );
     }
 

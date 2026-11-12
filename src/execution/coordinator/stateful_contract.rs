@@ -399,8 +399,8 @@ mod tests {
             Instruction {
                 opcode: Opcode::SWrite,
                 rd: 0,
-                rs1: 10,
-                rs2: 3,
+                rs1: 3,
+                rs2: 10,
                 imm: 0,
             },
             Instruction {

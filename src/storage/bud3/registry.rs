@@ -491,7 +491,16 @@ impl Bud3Registry {
         let public = record.content_id.kind == ContentIdKind::Public;
         if public {
             if let Some(existing) = self.public_index.get(&record.content_id.digest) {
-                return Ok(Registered::Deduplicated(*existing));
+                if self.objects.get(existing).is_some_and(|entry| {
+                    entry.record.content_id == record.content_id
+                        && !entry.shares.is_empty()
+                        && entry
+                            .shares
+                            .iter()
+                            .all(|s| s.status == ShareStatus::Confirmed && !s.lost)
+                }) {
+                    return Ok(Registered::Deduplicated(*existing));
+                }
             }
         }
         if self.objects.contains_key(&key) {
@@ -514,9 +523,6 @@ impl Bud3Registry {
         .map_err(|_| RegistryError::BadLifetime)?;
         let endowment = ObjectEndowment::new(fee_record, split_storage_fee(initial_fee));
         let (shares, roots, next_esi) = initial_state(&record, shares, epoch);
-        if public {
-            self.public_index.insert(digest, key);
-        }
         self.objects.insert(
             key,
             ObjectEntry {
@@ -666,6 +672,11 @@ impl Bud3Registry {
         if holder != *signer {
             return Err(RegistryError::NotAuthorized);
         }
+        let owner = self
+            .objects
+            .get(&key)
+            .ok_or(RegistryError::UnknownObject)?
+            .owner;
         let has_deps = self.base_deps.get(&key).is_some_and(|d| !d.is_empty());
         let nft_count = self.objects.get(&key).map_or(0, |o| o.references.len());
         if nft_count <= 1 && has_deps {
@@ -676,8 +687,7 @@ impl Bud3Registry {
         // the object's owner may take that loss. A reference is whatever
         // `BindNft` named, verified against no NFT registry, so holding one is
         // not authority over the object it points at.
-        let owner = self.objects.get(&key).map_or(*signer, |o| o.owner);
-        if nft_count <= 1 && owner != *signer {
+        if nft_count <= 1 && !has_deps && owner != *signer {
             return Err(RegistryError::NotAuthorized);
         }
         self.nfts.remove(nft);
@@ -822,10 +832,18 @@ impl Bud3Registry {
         if holder != *signer {
             return Err(RegistryError::NotAuthorized);
         }
+        let owner = self
+            .objects
+            .get(&key)
+            .ok_or(RegistryError::UnknownObject)?
+            .owner;
         let has_deps = self.base_deps.get(&key).is_some_and(|d| !d.is_empty());
         let nft_count = self.objects.get(&key).map_or(0, |o| o.references.len());
         if nft_count <= 1 && has_deps {
             return Err(RegistryError::HasDependents);
+        }
+        if nft_count <= 1 && !has_deps && owner != *signer {
+            return Err(RegistryError::NotAuthorized);
         }
 
         let mut seen = BTreeSet::new();
@@ -926,7 +944,7 @@ impl Bud3Registry {
         new_record: ObjectRecord,
         new_shares: Vec<(u64, Share)>,
         attestations: &[super::replace::ReplaceAttestation],
-        epoch: u64,
+        (epoch, validator_keys): (u64, &BTreeMap<Address, Vec<u8>>),
     ) -> Result<ObjectKey, RegistryError> {
         let (sender, proposer_stake) = proposer;
         if self.tombstones.contains_key(old_key) {
@@ -960,12 +978,9 @@ impl Bud3Registry {
             .map(|s| s.share.validator)
             .collect();
         super::replace::admit_object_replacement(
-            &sender,
-            &old_entry.owner,
-            proposer_stake,
-            &old_entry.record,
-            &new_record,
-            &pg_full,
+            (&sender, &old_entry.owner, proposer_stake),
+            (&old_entry.record, &new_record),
+            (&pg_full, validator_keys),
             attestations,
         )
         .map_err(RegistryError::BadReplacement)?;
@@ -1001,9 +1016,6 @@ impl Bud3Registry {
             if let Some((_, holder)) = self.nfts.get(nft).copied() {
                 self.nfts.insert(*nft, (new_key, holder));
             }
-        }
-        if new_record.content_id.kind == ContentIdKind::Public {
-            self.public_index.insert(digest, new_key);
         }
         let content = old_entry.record.content_id;
         let new_object_len = new_record.object_len;
@@ -1156,7 +1168,7 @@ impl Bud3Registry {
     ///
     /// [`RegistryError::UnknownObject`].
     pub fn ack(&mut self, key: &ObjectKey, holder: &Address) -> Result<usize, RegistryError> {
-        let (n, complete) = {
+        let (n, complete, public_digest) = {
             let obj = self
                 .objects
                 .get_mut(key)
@@ -1176,12 +1188,18 @@ impl Bud3Registry {
                 && obj
                     .shares
                     .iter()
-                    .all(|s| s.status == ShareStatus::Confirmed);
-            (n, complete)
+                    .all(|s| s.status == ShareStatus::Confirmed && !s.lost);
+            let public_digest = (obj.record.content_id.kind == ContentIdKind::Public)
+                .then_some(obj.record.content_id.digest);
+            (n, complete, public_digest)
         };
-        // The new object carries the content from here on, so the replaced
-        // object may let its shares go (section 6.14, item 6).
+        // The new object carries the content from here on, so it enters the
+        // public dedup index and any replaced object may let its shares go
+        // (section 6.14, item 6).
         if n > 0 && complete {
+            if let Some(digest) = public_digest {
+                self.public_index.insert(digest, *key);
+            }
             self.release_replaced(key);
         }
         Ok(n)
@@ -1608,7 +1626,7 @@ impl Bud3Registry {
                     .iter()
                     .filter(|s| s.segment == index && s.lost)
                     .count() as u64;
-                lost > 0 && lost >= (f / 2).max(1)
+                f > 0 && lost > 0 && lost >= (f / 2).max(1)
             })
             .collect()
     }
@@ -1856,6 +1874,8 @@ impl Bud3Registry {
             && self.base_deps.is_empty()
             && self.validator_quotas.is_empty()
             && self.replacements.is_empty()
+            && self.nfts.is_empty()
+            && self.public_index.is_empty()
     }
 
     /// The registry state root over every serialized field, in deterministic order.
@@ -2149,21 +2169,24 @@ mod tests {
         registry
             .register_object(addr(1), upload.record, shares, 0, 10)
             .unwrap();
+        for h in [10u8, 11, 12, 13] {
+            registry.ack(&key, &addr(h)).unwrap();
+        }
 
         let mut alice = registry.clone();
         let mut bob = registry.clone();
-        alice.bind_nft([9; 32], addr(7), &key).unwrap();
+        alice.bind_nft([9; 32], addr(1), &key).unwrap();
         bob.bind_nft([9; 32], addr(8), &key).unwrap();
         assert_ne!(alice.state_root(), bob.state_root());
-        // addr(7) is not the object owner, so burning the only reference
-        // cannot delete the object.
+        assert!(alice.burn_reference(&[9; 32], &addr(1), 1).is_ok());
         assert_eq!(
-            alice.burn_reference(&[9; 32], &addr(7), 1),
+            bob.burn_reference(&[9; 32], &addr(1), 1),
             Err(RegistryError::NotAuthorized)
         );
         assert_eq!(
-            bob.burn_reference(&[9; 32], &addr(7), 1),
-            Err(RegistryError::NotAuthorized)
+            bob.burn_reference(&[9; 32], &addr(8), 1),
+            Err(RegistryError::NotAuthorized),
+            "non-owner cannot tombstone sole reference"
         );
 
         let mut without_index = registry.clone();
@@ -2254,8 +2277,20 @@ mod tests {
         let key = up.record.commitment;
         r.register_object(addr(1), up.record.clone(), shares.clone(), 0, 10)
             .unwrap();
+        // Before custody confirmation, an unacked upload does not hijack public_index.
+        assert!(r.public_object(&up.record.content_id.digest).is_none());
+        let mut rival = up.record.clone();
+        rival.commitment = [0xEF; 32];
+        assert_eq!(
+            r.register_object(addr(9), rival, shares.clone(), 0, 10),
+            Ok(Registered::New([0xEF; 32]))
+        );
+        for h in [10u8, 11, 12, 13] {
+            r.ack(&key, &addr(h)).unwrap();
+        }
+        assert_eq!(r.public_object(&up.record.content_id.digest), Some(key));
         let root = r.state_root();
-        // A second upload of the same public content stores nothing.
+        // A second upload of the same confirmed public content stores nothing.
         let mut again = up.record.clone();
         again.commitment = [0xEE; 32];
         assert_eq!(
