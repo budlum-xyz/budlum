@@ -1172,7 +1172,10 @@ pub enum StorageError {
     /// from. A device that is online when its owner is awake cannot be it.
     MobileOperatorCannotHoldPrimary(Address),
     /// A deal's own operator cannot open a retrieval challenge against itself.
-    ChallengeOpenerIsOperator { deal_id: u64, operator: Address },
+    ChallengeOpenerIsOperator {
+        deal_id: u64,
+        operator: Address,
+    },
 }
 
 impl std::fmt::Display for StorageError {
@@ -9327,11 +9330,15 @@ mod tests {
         let (deal_id, _) = open_one(&mut reg, &m);
         let err = reg.open_challenge(deal_id, 0, 4, 110, 120, operator(), 50);
         let err = err.unwrap_err();
-        assert!(matches!(err, StorageError::ChallengeOpenerIsOperator { .. }));
+        assert!(matches!(
+            err,
+            StorageError::ChallengeOpenerIsOperator { .. }
+        ));
 
         let cid = reg.open_challenge(deal_id, 0, 4, 110, 120, opener(), 50);
         let cid = cid.unwrap();
-        let res = reg.answer_challenge(cid, ContentId([1u8; 32]), operator(), 115, Some(&[1u8; 16]));
+        let res =
+            reg.answer_challenge(cid, ContentId([1u8; 32]), operator(), 115, Some(&[1u8; 16]));
         let res = res.unwrap();
         assert_eq!(res.outcome, ChallengeOutcome::Answered);
         assert!(

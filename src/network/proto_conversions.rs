@@ -2616,7 +2616,7 @@ impl TryFrom<pb::ProtoNetworkMessage> for NetworkMessage {
                 if !r.found {
                     if r.cert.is_some() {
                         return Err(
-                            "FinalityCertResponse with found=false must not carry cert".into(),
+                            "FinalityCertResponse with found=false must not carry cert".into()
                         );
                     }
                     return Ok(NetworkMessage::FinalityCertResponse {
