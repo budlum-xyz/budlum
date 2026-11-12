@@ -12683,17 +12683,17 @@ mod bond_and_reorg_tests {
         // Once the node rolls to epoch 1 and prevote quorum opens, replay verifies PQ.
         bc.state.epoch_index = 1;
         let snap = bc.build_validator_snapshot(1);
-        let mut agg =
-            crate::chain::finality::FinalityAggregator::new(1, 50, cp_hash.clone(), snap);
+        let mut agg = crate::chain::finality::FinalityAggregator::new(1, 50, cp_hash.clone(), snap);
         let mut pv = crate::chain::finality::Prevote {
             chain_id: 45261,
             epoch: 1,
             checkpoint_height: 50,
             checkpoint_hash: cp_hash.clone(),
             voter_id: voter,
-            sig_bls: crate::chain::finality::sign_bls(&bls_kp.secret_key, &msg),
+            sig_bls: Vec::new(),
             auth_sig: Vec::new(),
         };
+        pv.sig_bls = crate::chain::finality::sign_bls(&bls_kp.secret_key, &pv.signing_message());
         pv.auth_sig =
             crate::chain::finality::sign_bls(&bls_kp.secret_key, &pv.auth_signing_message());
         agg.add_prevote(pv).unwrap();
@@ -12711,18 +12711,17 @@ mod bond_and_reorg_tests {
             auth_sig: Vec::new(),
             pq_sig: vec![0x99; 64],
         };
-        bad_early.auth_sig = crate::chain::finality::sign_bls(
-            &bls_kp.secret_key,
-            &bad_early.auth_signing_message(),
-        );
+        bad_early.auth_sig =
+            crate::chain::finality::sign_bls(&bls_kp.secret_key, &bad_early.auth_signing_message());
         bc.early_finality_votes.precommits.insert(0, bad_early);
 
         bc.replay_early_precommits();
-        assert!(bc
-            .finality_aggregator
-            .as_ref()
-            .unwrap()
-            .precommit_quorum_reached);
+        assert!(
+            bc.finality_aggregator
+                .as_ref()
+                .unwrap()
+                .precommit_quorum_reached
+        );
     }
 
     #[test]
