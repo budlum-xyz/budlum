@@ -323,8 +323,9 @@ pub fn encode_uint_bytes(n: u64) -> Vec<u8> {
 }
 
 /// Encodes a `u64` as an RLP integer; zero becomes the empty string, 0x80.
+#[cfg(test)]
 #[must_use]
-pub fn encode_uint(n: u64) -> Vec<u8> {
+fn encode_uint(n: u64) -> Vec<u8> {
     let bytes = trim_leading_zeros_u64(n);
     encode(&Item::String(bytes))
 }

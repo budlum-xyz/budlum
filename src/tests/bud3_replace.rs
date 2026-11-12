@@ -595,7 +595,7 @@ fn bud3_object_replacement_refuses_a_target_that_is_already_live() {
 fn bud3_object_replacement_refuses_a_closed_codec() {
     let (mut r, old, record, _) = registered(b"a closed codec cannot carry content");
     let mut closed = recoded(&record, 0x11, 0);
-    closed.codec = 14; // defined, gated behind its own acceptance, closed here
+    closed.codec = 9; // reserved codec id is never valid
     let closed_atts = attestations(&old, &closed);
     assert_eq!(
         apply(
@@ -611,7 +611,7 @@ fn bud3_object_replacement_refuses_a_closed_codec() {
             1,
         ),
         Err(RegistryError::BadReplacement(ReplaceError::CodecNotOpen(
-            14
+            9
         )))
     );
 }

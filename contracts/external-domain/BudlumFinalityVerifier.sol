@@ -309,6 +309,7 @@ contract BudlumFinalityVerifier is IBudlumFinality {
         emit AttestationOptimistic(digest, a.height, reason);
     }
 
+    // aderyn-fp-next-line(reentrancy-state-change)
     function challenge(bytes32 digest, bytes calldata fraudProof) external nonReentrant {
         Challenge storage c = challenges[digest];
         if (c.openedAt == 0) {
@@ -323,6 +324,16 @@ contract BudlumFinalityVerifier is IBudlumFinality {
         }
         uint64 challengeHeight = c.height;
         bytes32 challengeIdentity = pendingIdentity(challengeHeight, c.stateRoot);
+        bool fraud;
+        try IExternalFraudProofVerifier(fraudProofVerifier).verifyFraud(digest, fraudProof) returns (bool proven) {
+            fraud = proven;
+        } catch {
+            revert FraudProofRejected(digest);
+        }
+        if (!fraud) {
+            revert FraudProofRejected(digest);
+        }
+        // aderyn-fp-next-line(reentrancy-state-change)
         c.challenger = msg.sender;
         c.resolved = true;
         // The fraud proof speaks only to this envelope (`digest`), not to the
@@ -341,15 +352,6 @@ contract BudlumFinalityVerifier is IBudlumFinality {
                 pendingAttestationAtHeight[challengeHeight] = bytes32(0);
                 pendingRootAtHeight[challengeHeight] = bytes32(0);
             }
-        }
-        bool fraud;
-        try IExternalFraudProofVerifier(fraudProofVerifier).verifyFraud(digest, fraudProof) returns (bool proven) {
-            fraud = proven;
-        } catch {
-            revert FraudProofRejected(digest);
-        }
-        if (!fraud) {
-            revert FraudProofRejected(digest);
         }
         emit ChallengeOpened(digest, msg.sender);
         emit ChallengeProven(digest, msg.sender, true);

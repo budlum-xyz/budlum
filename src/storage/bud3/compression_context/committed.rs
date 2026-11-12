@@ -26,9 +26,9 @@ use super::super::access_tiering::AccessTier;
 use super::super::content_id::ContentId;
 use super::super::registry::ObjectKey;
 
-/// Testnet launch posture: shared compression context is closed at genesis (`Section 6.20.1`).
+/// Testnet posture: shared compression context is open from height 0 (`Section 6.20.1`).
 /// Convenience: exposed for launch configuration gates.
-pub const TESTNET_CONTEXT_ENABLED_BY_DEFAULT: bool = false;
+pub const TESTNET_CONTEXT_ENABLED_BY_DEFAULT: bool = true;
 
 /// Codec identifier `12`: fast shared-context codec (`Section 6.20.2.3`).
 /// Convenience: exposed for A0 expansion codec dispatch.
@@ -627,7 +627,7 @@ mod tests {
 
     #[test]
     fn bud3_context_codec_vectors() {
-        const { assert!(!TESTNET_CONTEXT_ENABLED_BY_DEFAULT) };
+        const { assert!(TESTNET_CONTEXT_ENABLED_BY_DEFAULT) };
         let engine =
             SharedContextEngine::new(true, "json-records".to_owned(), sample_corpus(), 10).unwrap();
         assert!(engine.manifest.verify_id());

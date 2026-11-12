@@ -41,8 +41,8 @@ pub struct PrivateDedupActivation {
     pub height: Option<u64>,
 }
 
-/// Testnet launch configuration: closed per Section 1.5 and KR-36.
-pub const ACTIVATION: PrivateDedupActivation = PrivateDedupActivation { height: None };
+/// Testnet configuration: private cross-owner deduplication is active from genesis (height 0).
+pub const ACTIVATION: PrivateDedupActivation = PrivateDedupActivation { height: Some(0) };
 
 impl PrivateDedupActivation {
     /// Whether private cross-owner deduplication is active at `block_height`.
@@ -503,9 +503,9 @@ mod tests {
     }
 
     #[test]
-    fn private_dedup_is_closed_on_testnet() {
-        assert!(!ACTIVATION.is_active(0));
-        assert!(!ACTIVATION.is_active(500_000));
+    fn private_dedup_is_open_on_testnet() {
+        assert!(ACTIVATION.is_active(0));
+        assert!(ACTIVATION.is_active(500_000));
         let opened = PrivateDedupActivation {
             height: Some(2_000),
         };

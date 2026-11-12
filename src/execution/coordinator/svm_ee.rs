@@ -372,7 +372,10 @@ impl ExecutionEnvironment for SvmEe {
                             rent_epoch: 0,
                             data: serde_json::to_vec(&meta).unwrap_or_default(),
                         };
-                        let _ = write_svm_account(host, &mint, &acct);
+                        write_svm_account(host, &mint, &acct).map_err(|e| EeFault {
+                            ee: EeId::SVM,
+                            panic_digest: budlum_uel_abi::panic_digest(EeId::SVM, &e),
+                        })?;
                         Ok(EeOutcome {
                             status: OutcomeStatus::Success,
                             output: mint.to_vec(),
@@ -537,8 +540,9 @@ impl ExecutionEnvironment for SvmEe {
                         if dst_acc.lamports == 0 || dst_acc.owner != src_acc.owner {
                             return Ok(EeOutcome {
                                 status: OutcomeStatus::Revert,
-                                output: b"uninitialized or mismatched destination SPL token account"
-                                    .to_vec(),
+                                output:
+                                    b"uninitialized or mismatched destination SPL token account"
+                                        .to_vec(),
                                 gas_used: 7_000,
                             });
                         }
@@ -588,6 +592,17 @@ impl ExecutionEnvironment for SvmEe {
                                 gas_used: 5_000,
                             });
                         };
+                        let mint_acc = read_svm_account(host, &mint).unwrap_or_default();
+                        if mint_acc.lamports == 0
+                            || (mint_acc.owner != SVM_SPL_TOKEN_PROGRAM_ID
+                                && mint_acc.owner != SVM_TOKEN_2022_PROGRAM_ID)
+                        {
+                            return Ok(EeOutcome {
+                                status: OutcomeStatus::Revert,
+                                output: b"uninitialized or invalid SPL mint".to_vec(),
+                                gas_used: 5_000,
+                            });
+                        }
                         let existing = read_svm_account(host, &ata).unwrap_or_default();
                         if existing.lamports != 0 || existing.owner != SVM_SYSTEM_PROGRAM_ID {
                             return Ok(EeOutcome {
@@ -598,12 +613,15 @@ impl ExecutionEnvironment for SvmEe {
                         }
                         let acc = SvmAccountData {
                             lamports: 1,
-                            owner: SVM_SPL_TOKEN_PROGRAM_ID,
+                            owner: mint_acc.owner,
                             executable: false,
                             rent_epoch: 0,
                             data: 0u64.to_le_bytes().to_vec(),
                         };
-                        let _ = write_svm_account(host, &ata, &acc);
+                        write_svm_account(host, &ata, &acc).map_err(|e| EeFault {
+                            ee: EeId::SVM,
+                            panic_digest: budlum_uel_abi::panic_digest(EeId::SVM, &e),
+                        })?;
                         Ok(EeOutcome {
                             status: OutcomeStatus::Success,
                             output: ata.to_vec(),
