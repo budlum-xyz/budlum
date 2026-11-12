@@ -308,6 +308,16 @@ mod settlement_prod_tests {
                         .map_err(|error| format!("domain registration: {error:?}"))?;
                         if admitted {
                             bc.state.poa_onboarding.add_admin(domain.id, attacker);
+                            let signer = poa_test_keys(1).1[0];
+                            bc.state
+                                .poa_onboarding
+                                .submit_application(domain.id, signer, [0x77; 32], 0)
+                                .map_err(|error| format!("poa application: {error:?}"))?;
+                            bc.state
+                                .poa_onboarding
+                                .approve(domain.id, attacker, signer, 0, 100)
+                                .map_err(|error| format!("poa approval: {error:?}"))?;
+                            bc.state.refresh_poa_admissions(0);
                         }
                         assert_eq!(bc.state.poa_is_permissioned(domain.id), admitted);
                         bc.state.get_or_create(&victim).nonce = 4;

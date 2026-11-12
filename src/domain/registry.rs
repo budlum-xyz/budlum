@@ -429,25 +429,35 @@ impl ConsensusDomainRegistry {
 /// mixes both in. Other domains keep their earlier leaf byte for byte.
 pub fn domain_leaf_hash(domain: &ConsensusDomain) -> Hash32 {
     let base = base_domain_leaf_hash(domain);
-    if domain.zk_program_allowlist.is_empty() && domain.plugin_code_hash.is_none() {
-        return base;
+    let leaf = if domain.zk_program_allowlist.is_empty() && domain.plugin_code_hash.is_none() {
+        base
+    } else {
+        let mut allowlist = domain.zk_program_allowlist.clone();
+        allowlist.sort();
+        allowlist.dedup();
+        let mut allowlist_bytes = Vec::new();
+        for program in &allowlist {
+            allowlist_bytes.extend_from_slice(program);
+        }
+        let plugin = domain.plugin_code_hash.unwrap_or_default();
+        hash_fields_bytes(&[
+            b"BDLM_DOMAIN_REGISTRY_LEAF_V4",
+            &base,
+            &(allowlist.len() as u64).to_le_bytes(),
+            &allowlist_bytes,
+            &[u8::from(domain.plugin_code_hash.is_some())],
+            &plugin,
+        ])
+    };
+    if domain.genesis_state_root == [0u8; 32] {
+        leaf
+    } else {
+        hash_fields_bytes(&[
+            b"BDLM_DOMAIN_REGISTRY_LEAF_V5",
+            &leaf,
+            &domain.genesis_state_root,
+        ])
     }
-    let mut allowlist = domain.zk_program_allowlist.clone();
-    allowlist.sort();
-    allowlist.dedup();
-    let mut allowlist_bytes = Vec::new();
-    for program in &allowlist {
-        allowlist_bytes.extend_from_slice(program);
-    }
-    let plugin = domain.plugin_code_hash.unwrap_or_default();
-    hash_fields_bytes(&[
-        b"BDLM_DOMAIN_REGISTRY_LEAF_V4",
-        &base,
-        &(allowlist.len() as u64).to_le_bytes(),
-        &allowlist_bytes,
-        &[u8::from(domain.plugin_code_hash.is_some())],
-        &plugin,
-    ])
 }
 
 fn base_domain_leaf_hash(domain: &ConsensusDomain) -> Hash32 {

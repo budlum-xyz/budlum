@@ -568,6 +568,17 @@ fn open_challenge(
     if is_mainnet(ctx.chain_id) {
         return Err(StorageTxError::ChallengeOnMainnet);
     }
+    if let Some(deal) = state.storage_registry.get_deal(deal_id) {
+        if deal.operator == ctx.sender {
+            return Err(StorageTxError::ChallengeRefused(
+                crate::domain::storage_deal::StorageError::ChallengeOpenerIsOperator {
+                    deal_id,
+                    operator: deal.operator,
+                }
+                .to_string(),
+            ));
+        }
+    }
     let epoch = state.epoch_index;
     StorageRegistry::validate_challenge_window(epoch, deadline_epoch, epoch)
         .map_err(|e| StorageTxError::ChallengeRefused(e.to_string()))?;
@@ -2343,5 +2354,18 @@ mod tests {
             .view_grants
             .live_for_content(&mid)
             .is_empty());
+    }
+
+    #[test]
+    fn operator_cannot_self_open_challenge_via_tx() {
+        let mut state = AccountState::new();
+        let (op, _opener, deal_id) = challengeable(&mut state);
+        state.add_balance(&op, OPENER_FUNDS);
+        let root = state.storage_registry.root();
+        let err =
+            execute_storage_tx(&mut state, &ctx(op), &open_challenge_tx(deal_id)).unwrap_err();
+        assert!(matches!(err, StorageTxError::ChallengeRefused(_)), "{err}");
+        assert_eq!(state.get_balance(&op), OPENER_FUNDS);
+        assert_eq!(state.storage_registry.root(), root);
     }
 }
