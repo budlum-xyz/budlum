@@ -566,13 +566,13 @@ impl ExecutionEnvironment for SvmEe {
                         src_acc.data = (src_bal - amount).to_le_bytes().to_vec();
                         write_svm_account(host, &src_ata, &src_acc).map_err(|e| EeFault {
                             ee: EeId::SVM,
-                            message: e,
+                            panic_digest: budlum_uel_abi::panic_digest(EeId::SVM, &e),
                         })?;
 
                         dst_acc.data = new_dst_bal.to_le_bytes().to_vec();
                         write_svm_account(host, &dst_ata, &dst_acc).map_err(|e| EeFault {
                             ee: EeId::SVM,
-                            message: e,
+                            panic_digest: budlum_uel_abi::panic_digest(EeId::SVM, &e),
                         })?;
                         Ok(EeOutcome {
                             status: OutcomeStatus::Success,
