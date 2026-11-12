@@ -7308,7 +7308,7 @@ mod finality_publish_tests {
                 .insert(gossipsub::IdentTopic::new(topic).hash(), params);
         }
         let kp = libp2p::identity::Keypair::generate_ed25519();
-        let mut gs = gossipsub::Behaviour::new(
+        let mut gs: gossipsub::Behaviour = gossipsub::Behaviour::new(
             gossipsub::MessageAuthenticity::Signed(kp),
             gossipsub::Config::default(),
         )
