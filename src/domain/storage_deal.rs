@@ -3516,7 +3516,12 @@ impl StorageRegistry {
             .values()
             .filter_map(|challenge| {
                 let challenged_deal = self.deals.get(&challenge.deal_id)?;
-                (challenged_deal.operator == operator && challenged_deal.manifest_id == manifest_id)
+                // A self-challenge never shields the operator's manifest from
+                // an independent challenger's rate-limit window.
+                let counts_for_opener = opener == operator || challenge.opener != operator;
+                (counts_for_opener
+                    && challenged_deal.operator == operator
+                    && challenged_deal.manifest_id == manifest_id)
                     .then_some(
                         challenge
                             .challenge_epoch
