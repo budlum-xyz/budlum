@@ -3017,6 +3017,7 @@ mod tests {
                     pow_parameters: None,
                     zk_program_allowlist: vec![[3u8; 32]],
                     plugin_code_hash: None,
+                    genesis_state_root: [0u8; 32],
                 }),
             )),
             TransactionType::Bridge(crate::cross_domain::bridge_tx::BridgeTx::RegisterAsset {
