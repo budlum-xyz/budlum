@@ -285,7 +285,7 @@ fn coding_audit_column_is_bound_and_replay_derives_end_roots() {
 #[test]
 fn boost_share_math_is_u128_and_dust_is_not_burned() {
     let src = production_part(include_str!("../chain/blockchain.rs"));
-    let body = window(src, "fn distribute_bud_boost_share_in_state(", 3200);
+    let body = window(src, "fn distribute_bud_boost_share_in_state(", 4800);
     assert!(body.contains("let total_weight: u128"));
     assert!(body.contains("checked_mul(u128::from(*weight))"));
     assert!(body.contains("let dust = boost_share.saturating_sub(distributed)"));

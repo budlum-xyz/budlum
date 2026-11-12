@@ -88,3 +88,12 @@ PqSignatureClass | removed: a type that classified a signature by its byte lengt
 # Account gained `frac_attos: u64` (`#[serde(default)]`) so 18-decimal EVM and
 # 9-decimal SVM environments share the single BUD ledger without precision loss.
 Account | Account gained a serde-defaulted frac_attos sub-atom field for UEL attoBUD conservation | THE_BUDLUM_DIREKTIF v1.0 section 8.5 approval
+
+# PR #126 (testnet / THE_BUDLUM_DIREKTIF v1.0) wave: pre-mainnet 0.1.0 API
+# consolidation across B.U.D. 3.0 universal object storage, generic IP subnet
+# peer admission, and unified wallet/gateway surfaces. Item counts measured in
+# Semver Check job 130900956113.
+enum_missing | PR #126: superseded pre-testnet enums consolidated into B.U.D. 3.0 storage, gateway and regeneration modules (32 items) | THE_BUDLUM_DIREKTIF v1.0 approval (126)
+method_requires_different_generic_type_params | PR #126: PeerManager subnet admission methods generalized over IpAddr / Into<IpAddr> (5 items) | THE_BUDLUM_DIREKTIF v1.0 approval (126)
+module_missing | PR #126: legacy three_regime, storage::db/traits and gateway submodules replaced by B.U.D. 3.0 and wallet identity surfaces (15 items) | THE_BUDLUM_DIREKTIF v1.0 approval (126)
+trait_missing | PR #126: legacy BlockchainStorage and superseded traits retired in favour of unified storage/execution traits (3 items) | THE_BUDLUM_DIREKTIF v1.0 approval (126)

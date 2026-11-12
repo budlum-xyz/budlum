@@ -384,11 +384,17 @@ fn subnet_bucket(addr: &Multiaddr) -> Option<crate::network::peer_manager::Subne
     for proto in addr.iter() {
         match proto {
             Protocol::Ip4(ip) => {
+                if ip.is_loopback() {
+                    return None;
+                }
                 return Some(crate::network::peer_manager::SubnetKey::from_ip(
                     std::net::IpAddr::V4(ip),
                 ));
             }
             Protocol::Ip6(ip) => {
+                if ip.is_loopback() || ip.to_ipv4_mapped().is_some_and(|v4| v4.is_loopback()) {
+                    return None;
+                }
                 return Some(crate::network::peer_manager::SubnetKey::from_ip(
                     std::net::IpAddr::V6(ip),
                 ));
@@ -397,6 +403,22 @@ fn subnet_bucket(addr: &Multiaddr) -> Option<crate::network::peer_manager::Subne
         }
     }
     None
+}
+
+/// Whether a `Blockchain::add_transaction` refusal reflects benign mempool or
+/// block-inclusion ordering rather than a malformed or forged gossip payload.
+fn tx_refusal_is_pool_race(tx: &crate::core::transaction::Transaction, err: &str) -> bool {
+    if err.contains("DuplicateTransaction")
+        || err.contains("PoolFull")
+        || err.contains("PoolBytesFull")
+        || err.contains("FeeTooLow")
+        || err.contains("RbfFeeTooLow")
+        || err.contains("SenderLimitReached")
+        || err.contains("TransactionExpired")
+    {
+        return true;
+    }
+    (err.contains("Invalid nonce:") || err.contains("InvalidNonce")) && tx.verify()
 }
 
 /// Whether an address a peer advertised may enter the routing table.
@@ -2187,6 +2209,12 @@ impl Node {
             ip_colocation_factor_threshold: 4.0,
             ..Default::default()
         };
+        score_params
+            .ip_colocation_factor_whitelist
+            .insert(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST));
+        score_params
+            .ip_colocation_factor_whitelist
+            .insert(std::net::IpAddr::V6(std::net::Ipv6Addr::LOCALHOST));
         // The topics this node publishes on. Registering them keeps the
         // per-topic score caps meaningful; without an entry a topic
         // contributes nothing and only the global penalties apply.
@@ -3971,18 +3999,15 @@ impl Node {
 
                                     if !is_handshake_msg && !is_handshaked {
                                         warn!("Peer {} sent {:?} before completing handshake, dropping.", peer_id, msg);
-
-                                        {
-                                            let mut pm = self.peer_manager_lock();
-                                            pm.report_invalid_tx(&peer_id);
-                                        }
                                         // Dropped for the sender's state, not for the
-                                        // content: an honest copy must stay new.
+                                        // content: an honest copy must stay new, and a
+                                        // frame racing ahead of `/sync` HandshakeAck must
+                                        // be ignored rather than graylisting the peer.
                                         self.gossip_dedup
                                             .lock()
                                             .unwrap_or_else(|poisoned| poisoned.into_inner())
                                             .forget(&message.data);
-                                        self.report_gossip(&id, &peer_id, gossipsub::MessageAcceptance::Reject);
+                                        self.report_gossip(&id, &peer_id, gossipsub::MessageAcceptance::Ignore);
                                         continue;
                                     }
 
@@ -4155,7 +4180,7 @@ impl Node {
                                         let hash_prefix: String = tx.hash.chars().take(8).collect();
                                         info!("Broadcasted tx: {} from: {} to: {} amount: {}",
                                             hash_prefix, tx.from, tx.to, tx.amount);
-                                        match self.chain.add_transaction(tx).await {
+                                        match self.chain.add_transaction(tx.clone()).await {
                                             Ok(_) => {
                                                 {
                                                     let mut pm = self.peer_manager_lock();
@@ -4163,12 +4188,25 @@ impl Node {
                                                 }
                                             }
                                             Err(e) => {
-                                                warn!("Failed to add transaction: {e}");
-                                                {
+                                                let pool_race = tx_refusal_is_pool_race(&tx, &e);
+                                                warn!(
+                                                    peer = %peer_id,
+                                                    pool_race,
+                                                    "Failed to add transaction: {e}"
+                                                );
+                                                if !pool_race {
                                                     let mut pm = self.peer_manager_lock();
                                                     pm.report_invalid_tx(&peer_id);
                                                 }
-                                                self.report_gossip(&id, &peer_id, gossipsub::MessageAcceptance::Reject);
+                                                self.report_gossip(
+                                                    &id,
+                                                    &peer_id,
+                                                    if pool_race {
+                                                        gossipsub::MessageAcceptance::Ignore
+                                                    } else {
+                                                        gossipsub::MessageAcceptance::Reject
+                                                    },
+                                                );
                                                 continue;
                                             }
                                         }
@@ -4554,7 +4592,34 @@ impl Node {
                                             Err(e) => {
                                                 warn!("Prevote from {peer_id} rejected: {e}");
                                                 if refusal_is_round_scope(&e) {
-                                                    if !e.contains("Duplicate") {
+                                                    // Round-scope refusals are raised before
+                                                    // membership and BLS verification, so
+                                                    // buffering on the error text alone lets an
+                                                    // unauthenticated peer evict honest early
+                                                    // votes. Require a registered validator BLS
+                                                    // signature before taking a slot.
+                                                    let authentic = self
+                                                        .chain
+                                                        .vote_is_from_registered_validator(
+                                                            voter_addr,
+                                                            prevote.auth_signing_message(),
+                                                            prevote.auth_sig.clone(),
+                                                            prevote.signing_message(),
+                                                            prevote.sig_bls.clone(),
+                                                        )
+                                                        .await;
+                                                    if !authentic {
+                                                        if !e.contains("Voter not in validator set") {
+                                                            self.peer_manager_lock().report_bad_behavior(&peer_id);
+                                                            self.report_gossip(&id, &peer_id, gossipsub::MessageAcceptance::Reject);
+                                                        } else {
+                                                            self.report_gossip(&id, &peer_id, gossipsub::MessageAcceptance::Ignore);
+                                                        }
+                                                        continue;
+                                                    }
+                                                    if !e.contains("Duplicate")
+                                                        && !e.contains("outside active window")
+                                                    {
                                                         // The round may simply not be
                                                         // open yet, and a vote is
                                                         // published once: hold it
@@ -4566,8 +4631,10 @@ impl Node {
                                                             prevote.checkpoint_height,
                                                             crate::network::deferred_votes::DeferredVote::Prevote(prevote),
                                                         );
+                                                        self.report_gossip(&id, &peer_id, gossipsub::MessageAcceptance::Accept);
+                                                    } else {
+                                                        self.report_gossip(&id, &peer_id, gossipsub::MessageAcceptance::Ignore);
                                                     }
-                                                    self.report_gossip(&id, &peer_id, gossipsub::MessageAcceptance::Ignore);
                                                     continue;
                                                 }
                                                 self.peer_manager_lock().report_bad_behavior(&peer_id);
@@ -4642,7 +4709,28 @@ impl Node {
                                             Err(e) => {
                                                 warn!("Precommit from {peer_id} rejected: {e}");
                                                 if refusal_is_round_scope(&e) {
-                                                    if !e.contains("Duplicate") {
+                                                    let authentic = self
+                                                        .chain
+                                                        .vote_is_from_registered_validator(
+                                                            voter_addr,
+                                                            precommit.auth_signing_message(),
+                                                            precommit.auth_sig.clone(),
+                                                            precommit.signing_message(),
+                                                            precommit.sig_bls.clone(),
+                                                        )
+                                                        .await;
+                                                    if !authentic {
+                                                        if !e.contains("Voter not in validator set") {
+                                                            self.peer_manager_lock().report_bad_behavior(&peer_id);
+                                                            self.report_gossip(&id, &peer_id, gossipsub::MessageAcceptance::Reject);
+                                                        } else {
+                                                            self.report_gossip(&id, &peer_id, gossipsub::MessageAcceptance::Ignore);
+                                                        }
+                                                        continue;
+                                                    }
+                                                    if !e.contains("Duplicate")
+                                                        && !e.contains("outside active window")
+                                                    {
                                                         // `Cannot precommit before
                                                         // prevote quorum` is the
                                                         // common case here: the
@@ -4657,8 +4745,10 @@ impl Node {
                                                             precommit.checkpoint_height,
                                                             crate::network::deferred_votes::DeferredVote::Precommit(precommit),
                                                         );
+                                                        self.report_gossip(&id, &peer_id, gossipsub::MessageAcceptance::Accept);
+                                                    } else {
+                                                        self.report_gossip(&id, &peer_id, gossipsub::MessageAcceptance::Ignore);
                                                     }
-                                                    self.report_gossip(&id, &peer_id, gossipsub::MessageAcceptance::Ignore);
                                                     continue;
                                                 }
                                                 self.peer_manager_lock().report_bad_behavior(&peer_id);
@@ -6820,8 +6910,9 @@ mod subnet_policy_tests {
 
 #[cfg(test)]
 mod finality_publish_tests {
-    use super::publish_reached_the_mesh;
+    use super::{publish_reached_the_mesh, subnet_bucket, tx_refusal_is_pool_race};
     use libp2p::gossipsub::PublishError;
+    use libp2p::Multiaddr;
 
     /// RT-003: a re-published vote is not a failed vote.
     ///
@@ -7006,6 +7097,44 @@ mod finality_publish_tests {
             src.contains("let prevote_retry = agg_state.active\n                        && !agg_state.precommit_quorum_reached"),
             "prevote retry must stay active until precommit quorum is reached across 2-hop meshes"
         );
+    }
+
+    #[test]
+    fn loopback_subnet_exemption_and_signed_tx_pool_race_classification() {
+        let lo: Multiaddr = "/ip4/127.0.0.1/tcp/25001".parse().unwrap();
+        let lo6: Multiaddr = "/ip6/::1/tcp/25001".parse().unwrap();
+        let pub_addr: Multiaddr = "/ip4/203.0.113.7/tcp/5001".parse().unwrap();
+        assert_eq!(subnet_bucket(&lo), None);
+        assert_eq!(subnet_bucket(&lo6), None);
+        assert!(subnet_bucket(&pub_addr).is_some());
+
+        let signer = crate::crypto::primitives::KeyPair::generate().unwrap();
+        let sender = crate::core::address::Address::from(signer.public_key_bytes());
+        let recipient = crate::core::address::Address::from([0x22; 32]);
+        let mut signed =
+            crate::core::transaction::Transaction::new(sender, recipient, 1_000, Vec::new());
+        signed.chain_id = 45261;
+        signed.nonce = 7;
+        signed.sign(&signer);
+        assert!(tx_refusal_is_pool_race(
+            &signed,
+            "Invalid transaction: Invalid nonce: expected 8, got 7"
+        ));
+        assert!(tx_refusal_is_pool_race(
+            &signed,
+            "Mempool error: DuplicateTransaction"
+        ));
+        assert!(!tx_refusal_is_pool_race(
+            &signed,
+            "Invalid transaction: Invalid Chain ID: expected 45261, got 1"
+        ));
+
+        let unsigned =
+            crate::core::transaction::Transaction::new(sender, recipient, 1_000, Vec::new());
+        assert!(!tx_refusal_is_pool_race(
+            &unsigned,
+            "Invalid transaction: Invalid nonce: expected 1, got 0"
+        ));
     }
 }
 

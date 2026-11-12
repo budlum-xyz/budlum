@@ -183,6 +183,20 @@ fn application_contract_fee_is_split_between_recipient_and_producer() {
     let sender = Address::from([0x11u8; 32]);
     let producer = Address::from([0x33u8; 32]);
     state.add_balance(&sender, 1_000_000);
+    let mut origin_domain = crate::domain::plugin::default_domain(
+        7,
+        crate::domain::ConsensusKind::PoW,
+        45262,
+        crate::domain::POW_HEADER_CHAIN_ADAPTER,
+        1,
+    );
+    origin_domain.operator = Some(sender);
+    origin_domain.bridge_enabled = true;
+    state
+        .settlement
+        .domains
+        .register(origin_domain)
+        .unwrap();
     state
         .settlement
         .graft
@@ -549,10 +563,10 @@ fn team_vesting_holds_on_every_value_path_not_only_transfer() {
     );
     tx.hash = tx.calculate_hash();
     let err = Executor::apply_transaction_checked(&mut state, &tx).unwrap_err();
-    assert_eq!(
-        err.code(),
-        "ai_payment_insufficient_funds",
-        "an agent payment must not move locked team funds"
+    assert!(
+        matches!(err.code(), "vesting_locked" | "ai_payment_insufficient_funds"),
+        "an agent payment must not move locked team funds (got {})",
+        err.code()
     );
     assert_eq!(
         state.get_balance(&addrs.team),

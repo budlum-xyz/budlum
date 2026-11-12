@@ -169,7 +169,7 @@ fn understating_k_changes_the_manifest_id() {
 fn content_size_is_the_object_not_the_stored_bytes() {
     // Under erasure coding the two differ by the parity shards and the padded
     // tail stripe. A reconstructor that used total_size would return padding.
-    let data: Vec<u8> = (0..=99u8).cycle().take(1000).collect();
+    let data: Vec<u8> = (0..=96u8).cycle().take(1000).collect();
     let enc = encode_object(&data, ErasureScheme { k: 4, n: 6 }).unwrap();
     let m = enc.to_manifest().unwrap();
 

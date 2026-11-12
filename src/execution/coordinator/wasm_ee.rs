@@ -90,7 +90,7 @@ fn check_valtype_no_float(vt: u8) -> Result<(), String> {
 fn is_float_opcode(op: u8) -> bool {
     matches!(
         op,
-        0x2a | 0x2b | 0x38 | 0x39 | 0x43 | 0x44 | 0x5b..=0x66 | 0x8b..=0x9f | 0xa8..=0xbf
+        0x2a | 0x2b | 0x38 | 0x39 | 0x43 | 0x44 | 0x5b..=0x66 | 0x8b..=0xa6 | 0xa8..=0xbf
     )
 }
 
@@ -282,11 +282,7 @@ pub fn build_valid_cosmwasm_module(export_names: &[&str], body_ops: &[u8]) -> Ve
     // Section 3: Function (1 func of type 0)
     wasm.extend_from_slice(&[0x03, 0x02, 0x01, 0x00]);
     // Section 5: Memory (min 1 page, max 256 pages <= 1024)
-    wasm.extend_from_slice(&[0x05, 0x04, 0x01, 0x01, 0x01, 0x80, 0x02]);
-    let fix_mem = wasm.len() - 5;
-    if let Some(len_slot) = wasm.get_mut(fix_mem) {
-        *len_slot = 0x05;
-    }
+    wasm.extend_from_slice(&[0x05, 0x05, 0x01, 0x01, 0x01, 0x80, 0x02]);
     // Section 7: Exports
     let mut exp_sec = vec![export_names.len() as u8];
     for name in export_names {
@@ -708,6 +704,10 @@ fn handle_cw_query(
     }
     if let Some(raw_q) = q_obj.get("raw") {
         let key_s = raw_q.as_str().unwrap_or_default();
+        let kv_key = format!("kv:{key_s}");
+        if let Some(val) = read_store(host, contract, kv_key.as_bytes())? {
+            return Ok(val);
+        }
         return Ok(read_store(host, contract, key_s.as_bytes())?.unwrap_or_default());
     }
     Err(String::from("unknown CosmWasm query"))
@@ -1090,7 +1090,8 @@ fn execute_cosmwasm_json(
         }
         let k = kv.get("key").and_then(|v| v.as_str()).unwrap_or_default();
         let v = kv.get("value").and_then(|v| v.as_str()).unwrap_or_default();
-        write_store(host, contract, k.as_bytes(), Some(v.as_bytes()))?;
+        let namespaced = format!("kv:{k}");
+        write_store(host, contract, namespaced.as_bytes(), Some(v.as_bytes()))?;
         return Ok((OutcomeStatus::Success, v.as_bytes().to_vec()));
     }
 

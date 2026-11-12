@@ -539,6 +539,7 @@ mod upload_delivery_tests {
             ),
             Ok(Registered::New(key))
         );
+        registry.ack(&key, &[10; 32]).unwrap();
         let (row, candidates) = placement();
         let reply = upload_from_rpc(
             &mut Bud3RpcService::default(),

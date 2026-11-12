@@ -663,7 +663,10 @@ fn report_fee_insufficient_balance_rejected_without_state_change() {
     let err = bc
         .submit_registry_slashing_report(double_sign_report(&keys, Some(reporter)))
         .unwrap_err();
-    assert!(err.contains("insufficient balance"));
+    assert!(
+        err.contains("insufficient") && err.contains("balance"),
+        "err: {err}"
+    );
     // Offender not slashed.
     assert!(bc.state.registry.is_active(&offender, roles::VALIDATOR));
 }

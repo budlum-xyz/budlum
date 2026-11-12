@@ -281,6 +281,10 @@ fn review_2_quantum_alert_level2_spoofed_recipient_refused() {
     ));
 
     // Legitimate empty-calldata transfer to `pq_evm` succeeds under Level 2.
+    state
+        .execution_state
+        .foreign_lane
+        .register_native_pq_account(pq_addr);
     let valid_lvl2 = sign_eip1559_tx(
         &eth_sk,
         BUDLUM_EVM_CHAIN_ID,
@@ -492,7 +496,7 @@ fn review_2_foreign_cross_scheme_signature_and_chain_id_confusion() {
         crate::crypto::scheme::SchemeId::ML_DSA_87,
         &pq_seed,
         &digest,
-        b"BDLM_ADOPT_FOREIGN_V1",
+        crate::crypto::ctx::ADOPT_FOREIGN_V1,
         &[0u8; 32],
     )
     .expect("ml-dsa-87 sig");
@@ -798,7 +802,7 @@ fn review_2_risk_matrix_r01_r08_r18_r21_and_rpc_isolation() {
                     target: vec![0u8; 32],
                     input: vec![1, 2, 3],
                 },
-                value_attos: 1_000_000,
+                value_attos: 1_000_000_000,
                 gas_limit_bgu: 50_000,
                 max_fee_per_bgu_attos: MIN_UEL_BASE_FEE_ATTOS * 2,
                 max_priority_fee_per_bgu_attos: 0,
@@ -864,4 +868,33 @@ fn review_2_risk_matrix_r01_r08_r18_r21_and_rpc_isolation() {
     assert_eq!(apt_code, 200);
     assert_eq!(cos_code, 200);
     assert_eq!(state.execution_state.execution_root(), root_pre_rpc);
+
+    // d76b9006: An overlay frame scoped to WASM cannot stage writes into EVM or
+    // coordinator-owned namespaces.
+    let mut wasm_overlay = crate::execution::coordinator::overlay::TxOverlay::new(
+        &state,
+        EeId::WASM,
+        100_000,
+    );
+    assert!(wasm_overlay
+        .write(
+            crate::execution::coordinator::state::NS_WASM_STORE,
+            b"ok",
+            Some(b"1")
+        )
+        .is_ok());
+    assert!(wasm_overlay
+        .write(
+            crate::execution::coordinator::state::NS_EVM_ACCOUNT,
+            b"forged",
+            Some(b"1")
+        )
+        .is_err());
+    assert!(wasm_overlay
+        .write(
+            crate::execution::coordinator::alias::ALIAS_NAMESPACE,
+            b"forged",
+            Some(b"1")
+        )
+        .is_err());
 }

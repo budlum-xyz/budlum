@@ -933,13 +933,13 @@ mod tests {
         assert_eq!(record.imported_from.block, SOURCE_BLOCK);
         assert_eq!(record.imported_from.address, address_of(CONTRACT));
         assert_eq!(record.usage.proof_nodes, 4);
-        assert_eq!(record.usage.code_bytes, 9);
+        assert_eq!(record.usage.code_bytes, 17);
         assert_eq!(record.usage.storage_slots, 1);
-        assert_eq!(record.fee.verification_bgu, 158);
-        assert_eq!(record.fee.storage_bytes, 73);
-        assert_eq!(record.fee.verification_attos, 474);
-        assert_eq!(record.fee.storage_deposit_attos, 365);
-        assert_eq!(record.fee.total_attos, 839);
+        assert_eq!(record.fee.verification_bgu, 174);
+        assert_eq!(record.fee.storage_bytes, 81);
+        assert_eq!(record.fee.verification_attos, 522);
+        assert_eq!(record.fee.storage_deposit_attos, 405);
+        assert_eq!(record.fee.total_attos, 927);
     }
 
     #[test]

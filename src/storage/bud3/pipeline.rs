@@ -475,11 +475,11 @@ fn check_volume_layout(members: &[VolumeMember], bytes: &[u8]) -> Result<(), Pip
         let offset = usize::try_from(member.offset).map_err(|_| PipelineError::TooLarge)?;
         let len = usize::try_from(member.len).map_err(|_| PipelineError::TooLarge)?;
         let end = offset.checked_add(len).ok_or(PipelineError::TooLarge)?;
-        if offset < expect {
+        if offset < expect || end > bytes.len() {
             return Err(PipelineError::Volume(VolumeError::LayoutMismatch));
         }
-        bytes.get(offset..end).ok_or(PipelineError::TooLarge)?;
-        let hole = bytes.get(expect..offset).ok_or(PipelineError::TooLarge)?;
+        bytes.get(offset..end).ok_or(PipelineError::Volume(VolumeError::LayoutMismatch))?;
+        let hole = bytes.get(expect..offset).ok_or(PipelineError::Volume(VolumeError::LayoutMismatch))?;
         if !hole.iter().all(|byte| *byte == 0) {
             return Err(PipelineError::Volume(VolumeError::LayoutMismatch));
         }
