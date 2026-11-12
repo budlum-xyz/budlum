@@ -287,7 +287,7 @@ impl DataMarketRegistry {
         bud3.validate_view_grant(
             &listing.nft_id,
             &seller_grant.grant_nonce,
-            &listing.seller,
+            listing.seller.as_bytes(),
             &row,
             current_epoch,
         )
@@ -306,7 +306,7 @@ impl DataMarketRegistry {
         bud3.issue_grant(
             &listing.nft_id,
             &seller_grant.grant_nonce,
-            &listing.seller,
+            listing.seller.as_bytes(),
             row.clone(),
             current_epoch,
         )

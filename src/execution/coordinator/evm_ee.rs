@@ -40,7 +40,7 @@ pub const MAX_EVM_BYTECODE_BYTES: usize = 24_576;
 /// Maximum initcode size at deployment (EIP-3860: 48 KiB).
 pub const MAX_EVM_INITCODE_BYTES: usize = 49_152;
 /// Maximum EVM call/create nesting depth per EIP-150 (`1024`).
-pub const MAX_EVM_CALL_DEPTH: u32 = 1_024;
+const MAX_EVM_CALL_DEPTH: u32 = 1_024;
 /// Cold `SSTORE` zero-to-nonzero base cost in EVM gas / BGU.
 pub const GAS_SSTORE_SET: u64 = 20_000;
 /// Warm / nonzero-to-nonzero `SSTORE` reset cost in EVM gas / BGU.
@@ -2071,6 +2071,8 @@ mod tests {
                     value: BudAmount(0),
                     input: code,
                     gas_limit: 500_000,
+                    depth: 0,
+                    tx_hash: [0u8; 32],
                 },
                 host,
             )
@@ -2139,6 +2141,8 @@ mod tests {
                     value: BudAmount(0),
                     input: Vec::new(),
                     gas_limit: 500_000,
+                    depth: 0,
+                    tx_hash: [0u8; 32],
                 },
                 &mut host,
             )
@@ -2214,6 +2218,8 @@ mod tests {
                     value: BudAmount(0),
                     input: Vec::new(),
                     gas_limit: 500_000,
+                    depth: 0,
+                    tx_hash: [0u8; 32],
                 },
                 &mut host,
             )
@@ -2256,6 +2262,8 @@ mod tests {
                     value: BudAmount(0),
                     input: Vec::new(),
                     gas_limit: u64::MAX / 8,
+                    depth: 0,
+                    tx_hash: [0u8; 32],
                 },
                 &mut host,
             )
@@ -2313,6 +2321,8 @@ mod tests {
                     value: BudAmount(0),
                     input: Vec::new(),
                     gas_limit: 800_000,
+                    depth: 0,
+                    tx_hash: [0u8; 32],
                 },
                 &mut host,
             )
@@ -2331,7 +2341,7 @@ mod tests {
 
     #[test]
     fn evm_callcode_rejects_unbacked_value() {
-        let mut host = MemoryHost::new();
+        let mut host = MemoryHost::new(2_000_000);
         let caller = [0x11u8; 20];
         let contract_a = [0xAAu8; 20];
         let contract_b = [0xBBu8; 20];
@@ -2347,7 +2357,7 @@ mod tests {
         code_a.extend_from_slice(&[0x62, 0x07, 0xa1, 0x20, 0xf2]); // PUSH3 500_000, CALLCODE
         code_a.extend_from_slice(&[0x5f, 0x52, 0x60, 32, 0x5f, 0xf3]); // MSTORE(0), RETURN(0,32)
         deploy(&mut host, contract_a, code_a);
-        host.set_bud_balance(
+        host.balances.insert(
             EeIdentity {
                 ee: EeId::EVM,
                 id: contract_a.to_vec(),
@@ -2372,6 +2382,8 @@ mod tests {
                     value: BudAmount(0),
                     input: Vec::new(),
                     gas_limit: 800_000,
+                    depth: 0,
+                    tx_hash: [0u8; 32],
                 },
                 &mut host,
             )
@@ -2379,8 +2391,8 @@ mod tests {
         assert_eq!(out.status, OutcomeStatus::Success);
         assert_eq!(out.output, U256Word::ZERO.0.to_vec());
         assert_eq!(
-            sload_word(&host, &contract_a, &U256Word::from_u64(1).0),
-            None
+            sload_word(&host, &contract_a, &U256Word::from_u64(1).0).unwrap(),
+            [0u8; 32]
         );
     }
 }
