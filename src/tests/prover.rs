@@ -770,27 +770,23 @@ fn zk_domain_first_claim_must_match_genesis_state_root_and_reject_unanchored_adv
     bc.state.add_balance(&prover, fee * 10);
 
     // Height 0 is reserved for domain genesis.
-    let h0 = bc
-        .submit_zk_proof(submission(prover, 9, 0, &proof, &pi, &program))
-        .unwrap_err();
+    let h0 = bc.submit_zk_proof(submission(prover, 9, 0, &proof, &pi, &program));
+    let h0 = h0.unwrap_err();
     assert!(h0.contains("height 0"), "{h0}");
 
     // Mismatched initial_state_root against domain.genesis_state_root is refused.
-    let mismatch = bc
-        .submit_zk_proof(submission(prover, 9, 1, &proof, &pi, &program))
-        .unwrap_err();
+    let mismatch = bc.submit_zk_proof(submission(prover, 9, 1, &proof, &pi, &program));
+    let mismatch = mismatch.unwrap_err();
     assert!(mismatch.contains("starts from"), "{mismatch}");
 
     // Register a domain matching pi.initial_state_root ([0; 32]).
     register_domain_allowing(&mut bc, 1, &program);
-    assert!(bc
-        .submit_zk_proof(submission(prover, 1, 1, &proof, &pi, &program))
-        .is_ok());
+    let first = bc.submit_zk_proof(submission(prover, 1, 1, &proof, &pi, &program));
+    assert!(first.is_ok(), "{first:?}");
 
     // Subsequent advance (1 -> 2) cannot rely on a fold-consistent anchor.
-    let err = bc
-        .submit_zk_proof(submission(prover, 1, 2, &proof, &pi, &program))
-        .unwrap_err();
+    let err = bc.submit_zk_proof(submission(prover, 1, 2, &proof, &pi, &program));
+    let err = err.unwrap_err();
     assert!(err.contains("no derivable initial root"), "{err}");
 
     // Claiming at the already-committed tip height with a different root is refused.
@@ -812,11 +808,32 @@ fn zk_domain_first_claim_must_match_genesis_state_root_and_reject_unanchored_adv
         crate::settlement::domains::apply_domain_tip_resets(&mut bc.state, &[reset]),
         vec![1]
     );
-    assert_eq!(bc.state.settlement.domains.get(1).unwrap().last_committed_height, 0);
+    let d = bc.state.settlement.domains.get(1).unwrap();
+    assert_eq!(d.last_committed_height, 0);
     assert!(bc.state.settlement.proof_claims.is_empty());
-    assert!(bc
-        .submit_zk_proof(submission(prover, 1, 1, &proof, &pi, &program))
-        .is_ok());
+    let re_advance = bc.submit_zk_proof(submission(prover, 1, 1, &proof, &pi, &program));
+    assert!(re_advance.is_ok(), "{re_advance:?}");
+
+    // Non-zero genesis_state_root remains restartable after resetting to height 0.
+    let mut nonzero = crate::domain::plugin::default_domain(
+        11,
+        crate::domain::ConsensusKind::Zk,
+        45262 + 11,
+        "zk-proof-verification",
+        0,
+    );
+    nonzero.genesis_state_root[0] = 0x77;
+    assert_eq!(
+        crate::domain::expected_initial_root(&nonzero, &program),
+        Some(nonzero.genesis_state_root)
+    );
+    nonzero.last_committed_hash = nonzero.genesis_state_root;
+    assert_eq!(
+        crate::domain::expected_initial_root(&nonzero, &program),
+        Some(nonzero.genesis_state_root)
+    );
+    nonzero.last_committed_height = 1;
+    assert_eq!(crate::domain::expected_initial_root(&nonzero, &program), None);
 }
 
 #[test]
