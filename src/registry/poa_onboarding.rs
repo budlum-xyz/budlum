@@ -501,6 +501,26 @@ impl PoAOnboarding {
     ) -> bool {
         self.whitelist(domain, now_block).contains(account)
     }
+
+    /// Read-only live admission check at `now_block` (without mutating the
+    /// audit trail), verifying both administrative authorization and KYC expiry.
+    #[must_use]
+    pub fn is_member_admitted_at(
+        &self,
+        domain: DomainId,
+        account: &Address,
+        now_block: u64,
+    ) -> bool {
+        if !self.registry.is_authorized(domain, account) {
+            return false;
+        }
+        let expiry = self
+            .kyc_expiry
+            .get(&(domain, *account))
+            .copied()
+            .unwrap_or(u64::MAX);
+        now_block <= expiry
+    }
 }
 
 /// The PoA admission door at the transaction layer.

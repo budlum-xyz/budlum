@@ -389,18 +389,28 @@ pub fn ipv4_slash24(addr: &Multiaddr) -> Option<[u8; 3]> {
 
 /// Whether a `Blockchain::add_transaction` refusal reflects benign mempool or
 /// block-inclusion ordering rather than a malformed or forged gossip payload.
-fn tx_refusal_is_pool_race(tx: &crate::core::transaction::Transaction, err: &str) -> bool {
-    if err.contains("DuplicateTransaction")
-        || err.contains("PoolFull")
-        || err.contains("PoolBytesFull")
-        || err.contains("FeeTooLow")
-        || err.contains("RbfFeeTooLow")
-        || err.contains("SenderLimitReached")
-        || err.contains("TransactionExpired")
+fn tx_refusal_is_pool_race(
+    tx: &crate::core::transaction::Transaction,
+    err: &str,
+    expected_chain_id: u64,
+) -> bool {
+    if tx.from == crate::core::address::Address::zero()
+        || tx.chain_id != expected_chain_id
+        || !tx.verify()
     {
-        return true;
+        return false;
     }
-    (err.contains("Invalid nonce:") || err.contains("InvalidNonce")) && tx.verify()
+    matches!(
+        err,
+        "Mempool error: DuplicateTransaction"
+            | "Mempool error: PoolFull"
+            | "Mempool error: PoolBytesFull"
+            | "Mempool error: FeeTooLow"
+            | "Mempool error: RbfFeeTooLow"
+            | "Mempool error: SenderLimitReached"
+            | "Mempool error: TransactionExpired"
+            | "Mempool error: InvalidNonce"
+    ) || err.starts_with("Invalid transaction: Invalid nonce:")
 }
 
 #[derive(NetworkBehaviour)]
@@ -4063,7 +4073,12 @@ impl Node {
                                                 }
                                             }
                                             Err(e) => {
-                                                let pool_race = tx_refusal_is_pool_race(&tx, &e);
+                                                let expected_chain_id = self.chain.get_chain_id().await;
+                                                let pool_race = tx_refusal_is_pool_race(
+                                                    &tx,
+                                                    &e,
+                                                    expected_chain_id,
+                                                );
                                                 warn!(
                                                     peer = %peer_id,
                                                     pool_race,
@@ -6843,22 +6858,41 @@ mod finality_publish_tests {
         signed.sign(&signer);
         assert!(tx_refusal_is_pool_race(
             &signed,
-            "Invalid transaction: Invalid nonce: expected 8, got 7"
+            "Invalid transaction: Invalid nonce: expected 8, got 7",
+            45261,
         ));
         assert!(tx_refusal_is_pool_race(
             &signed,
-            "Mempool error: DuplicateTransaction"
+            "Mempool error: DuplicateTransaction",
+            45261,
         ));
         assert!(!tx_refusal_is_pool_race(
             &signed,
-            "Invalid transaction: Invalid Chain ID: expected 45261, got 1"
+            "Invalid transaction: Invalid Chain ID: expected 45261, got 1",
+            45261,
+        ));
+        assert!(!tx_refusal_is_pool_race(
+            &signed,
+            "Mempool error: DuplicateTransaction",
+            45262,
+        ));
+        assert!(!tx_refusal_is_pool_race(
+            &signed,
+            "custom wrapper mentioning DuplicateTransaction",
+            45261,
         ));
 
         let unsigned =
             crate::core::transaction::Transaction::new(sender, recipient, 1_000, Vec::new());
         assert!(!tx_refusal_is_pool_race(
             &unsigned,
-            "Invalid transaction: Invalid nonce: expected 1, got 0"
+            "Invalid transaction: Invalid nonce: expected 1, got 0",
+            45261,
+        ));
+        assert!(!tx_refusal_is_pool_race(
+            &unsigned,
+            "Mempool error: DuplicateTransaction",
+            45261,
         ));
     }
 }

@@ -358,6 +358,12 @@ pub fn validate_domain_registration(domain: &ConsensusDomain) -> Result<(), Stri
             domain.id
         ));
     }
+    if matches!(domain.kind, ConsensusKind::Zk) && domain.genesis_state_root[16..32] != [0u8; 16] {
+        return Err(format!(
+            "Zk domain {} genesis_state_root upper 16 bytes must be zero",
+            domain.id
+        ));
+    }
 
     Ok(())
 }
@@ -444,7 +450,15 @@ fn require_active_attester_authorities(
     purpose: &str,
 ) -> Result<(), String> {
     let check = |authority: &Address| {
-        if state.registry.is_active_attester(authority) {
+        let jailed = state
+            .registry
+            .slashing_history_for(authority)
+            .iter()
+            .any(|record| {
+                record.report.condition()
+                    != crate::registry::permissionless::SlashingCondition::LivenessFault
+            });
+        if state.registry.is_active_attester(authority) && !jailed {
             Ok(())
         } else {
             Err(format!(
@@ -553,6 +567,24 @@ pub fn verify_commitment_finality_observed(
         ConsensusKind::PoA => {
             let adapter = PoAFinalityAdapter::default();
             ensure_adapter_name(domain, adapter.adapter_name())?;
+            if state.poa_is_permissioned(domain.id) {
+                let declared: Vec<Address> = match proof {
+                    FinalityProof::PoA { authorities, .. } => authorities.clone(),
+                    FinalityProof::PoAPq { authorities, .. } => {
+                        authorities.iter().map(|entry| entry.authority).collect()
+                    }
+                    _ => Vec::new(),
+                };
+                for authority in declared {
+                    if !state.poa_authority_admitted(domain.id, &authority) {
+                        return Err(format!(
+                            "PoA domain {} commitment authority {authority} is not admitted: \
+                             the admission gate revoked it or its KYC horizon elapsed",
+                            domain.id
+                        ));
+                    }
+                }
+            }
             adapter.verify_finality_observed_in(
                 &state.scheme_registry,
                 domain,
@@ -1223,6 +1255,9 @@ pub fn submit_zk_proof(
         ));
     }
     let claim_height = submission.target_height();
+    if claim_height == 0 {
+        return Err("zk claim target height 0 is reserved for domain genesis".into());
+    }
     if claim_height < domain.last_committed_height {
         return Err(format!(
             "stale zk claim: domain {claimed_domain} already committed at height {} but the claim targets {claim_height}",
@@ -1242,20 +1277,31 @@ pub fn submit_zk_proof(
                 .to_string(),
         );
     }
-    // The proof has to start where the domain is. Both checks above are
-    // self-consistency: they say the proof agrees with itself, not that it
-    // says anything about this domain. Without the tie below a proof over any
-    // state at all advances the domain, and the tip it parks is a state the
-    // domain never held.
-    if claim_height > domain.last_committed_height
-        && domain.last_committed_hash != [0u8; 32]
-        && pi.initial_state_root != domain.last_committed_hash
-    {
-        return Err(format!(
-            "zk proof starts from state {} but domain {claimed_domain} is committed at {}",
-            hex::encode(pi.initial_state_root),
-            hex::encode(domain.last_committed_hash)
-        ));
+    // The proof has to start where the domain is, and that only means
+    // something if `initial_state_root` is anchored to registered state rather
+    // than a prover-chosen Horner fold at fixed constants. Re-executing the
+    // committed tip height may only repeat `last_committed_hash` idempotently.
+    if claim_height == domain.last_committed_height {
+        if pi.final_state_root != domain.last_committed_hash {
+            return Err(format!(
+                "zk claim targets height {claim_height} of domain {claimed_domain}, which already commits a different root"
+            ));
+        }
+    } else if claim_height > domain.last_committed_height {
+        let expected = crate::domain::expected_initial_root(domain, &submission.program)
+            .ok_or_else(|| {
+                format!(
+                    "zk proof for domain {claimed_domain}: no derivable initial root - a \
+                     fold-consistent prover value is not evidence of the starting state"
+                )
+            })?;
+        if pi.initial_state_root != expected {
+            return Err(format!(
+                "zk proof starts from state {} but domain {claimed_domain} starts from {}",
+                hex::encode(pi.initial_state_root),
+                hex::encode(expected)
+            ));
+        }
     }
     // Bounded advance. An accepted claim parks the tip and nothing lowers it,
     // so a submitter free to name any height could park it out of reach of
@@ -1393,6 +1439,55 @@ pub fn apply_domain_unfreezes(
         }
     }
     unfrozen
+}
+
+/// Apply governance-queued consensus domain tip rollbacks inside the
+/// deterministic `(state, block) -> state` transition, rolling back both the
+/// domain's `last_committed_height`/`last_committed_hash` and any accepted proof
+/// claims strictly above `target_height`.
+pub fn apply_domain_tip_resets(
+    state: &mut AccountState,
+    pending: &[crate::core::account::PendingDomainTipReset],
+) -> Vec<DomainId> {
+    let mut reset = Vec::new();
+    for req in pending {
+        let domain_id = req.domain_id;
+        let Some(domain) = state.settlement.domains.get_mut(domain_id) else {
+            tracing::warn!("ResetConsensusDomainTip: domain {domain_id} not found");
+            continue;
+        };
+        if req.target_height > domain.last_committed_height {
+            tracing::warn!(
+                "ResetConsensusDomainTip: domain {} target_height {} exceeds committed height {}",
+                domain_id,
+                req.target_height,
+                domain.last_committed_height
+            );
+            continue;
+        }
+        if req.target_height == 0 && req.target_hash != domain.genesis_state_root {
+            tracing::warn!(
+                "ResetConsensusDomainTip: domain {} target_height 0 must restore genesis_state_root",
+                domain_id
+            );
+            continue;
+        }
+        domain.last_committed_height = req.target_height;
+        domain.last_committed_hash = req.target_hash;
+        let pruned = state
+            .settlement
+            .proof_claims
+            .rollback_domain_above(domain_id, req.target_height);
+        tracing::info!(
+            "Governance tip reset: domain={} target_height={} pruned_claims={} justification={}",
+            domain_id,
+            req.target_height,
+            pruned,
+            hex::encode(req.justification_hash)
+        );
+        reset.push(domain_id);
+    }
+    reset
 }
 
 /// Apply one settlement write to `state`.
@@ -1957,7 +2052,35 @@ fn execute_proof_market_tx(
                     })?;
                     slash_failed_prover(state, &ctx.sender)
                 }
-                ProofAcceptance::Accepted { .. } | ProofAcceptance::Idempotent => {
+                ProofAcceptance::Idempotent => {
+                    // The claim is already recorded on-chain: no new domain
+                    // progress occurred, so do not mint a reward receipt.
+                    // Refund the creator's reserved reward without slashing
+                    // the prover whose proof verified cleanly.
+                    let creator = task.creator;
+                    let reward = task.reward;
+                    let balance = state.get_balance(&creator);
+                    if balance.checked_add(reward).is_none() {
+                        return Err(SettlementTxError::Refused(
+                            "proof-market duplicate-claim refund would overflow balance".into(),
+                        ));
+                    }
+                    let (rooted_creator, refunded) = state
+                        .proof_market
+                        .fail_task(
+                            *task_id,
+                            "ZK claim already accepted: the task bought no new progress".into(),
+                        )
+                        .map_err(SettlementTxError::Refused)?;
+                    debug_assert_eq!(rooted_creator, creator);
+                    debug_assert_eq!(refunded, reward);
+                    state.try_add_balance(&creator, reward).map_err(|e| {
+                        SettlementTxError::Refused(format!(
+                            "proof-market duplicate-claim refund: {e}"
+                        ))
+                    })
+                }
+                ProofAcceptance::Accepted { .. } => {
                     let receipt = crate::settlement::proof_market::ProofReceipt::new(
                         *task_id,
                         ctx.sender,
@@ -3914,5 +4037,137 @@ mod tests {
         let enabled_delivery = make_delivery(&mut state, 71, 2);
         deliver_message(&mut state, &ctx, &enabled_delivery)
             .expect("bridge_enabled: true domain must succeed");
+    }
+
+    #[test]
+    fn poa_finality_rejects_revoked_and_kyc_expired_authorities() {
+        let mut state = AccountState::new();
+        let admin = Address::from([0x11; 32]);
+        let authority_kp = crate::crypto::primitives::KeyPair::generate().expect("authority key");
+        let authority = Address::from(authority_kp.public_key_bytes());
+
+        let mut domain = default_domain(98, ConsensusKind::PoA, 98_001, "poa-authority-quorum", 1);
+        domain.validator_set_hash = [0u8; 32];
+        register_domain(&mut state, domain.clone()).unwrap();
+
+        state.poa_onboarding.add_admin(domain.id, admin);
+        state
+            .poa_onboarding
+            .submit_application(domain.id, authority, [0x44; 32], 1)
+            .unwrap();
+        state
+            .poa_onboarding
+            .approve(domain.id, admin, authority, 1, 5)
+            .unwrap();
+        state.current_block_height = 6;
+
+        let blk = block(1, &"00".repeat(32), 1);
+        let mut com = commitment(&domain, &blk, 1);
+        let signing_msg = crate::domain::finality_adapter::poa_commit_signing_message(
+            domain.domain_chain_id,
+            com.domain_id,
+            &com,
+        );
+        let sig = authority_kp.sign(&signing_msg).to_vec();
+        let proof = FinalityProof::PoA {
+            authorities: vec![authority],
+            signatures: vec![crate::domain::finality_adapter::PoAAuthoritySignature {
+                authority,
+                signature: sig,
+            }],
+        };
+        com.finality_proof_hash = crate::domain::hash_finality_proof(&proof).unwrap();
+
+        verify_commitment_finality(
+            &state,
+            &com,
+            &proof,
+            crate::cross_domain::external::IntakeState::production_bls,
+        )
+        .expect("admitted active PoA authority within KYC horizon should verify");
+
+        // After KYC horizon elapses (at_block 1 + 5 = 6; block 7 is expired), reject.
+        state.current_block_height = 7;
+        let err = verify_commitment_finality(
+            &state,
+            &com,
+            &proof,
+            crate::cross_domain::external::IntakeState::production_bls,
+        )
+        .unwrap_err();
+        assert!(err.contains("not admitted"), "got: {err}");
+
+        // Renew KYC then revoke the authority: revoked authorities must fail too.
+        state
+            .poa_onboarding
+            .renew_kyc(domain.id, admin, authority, 7, 100)
+            .unwrap();
+        state
+            .poa_onboarding
+            .revoke(domain.id, admin, authority, b"revoked".to_vec(), 7)
+            .unwrap();
+        let err = verify_commitment_finality(
+            &state,
+            &com,
+            &proof,
+            crate::cross_domain::external::IntakeState::production_bls,
+        )
+        .unwrap_err();
+        assert!(err.contains("not admitted"), "got: {err}");
+    }
+
+    #[test]
+    fn slashed_attester_cannot_regain_finality_authority_by_unbonding() {
+        let mut state = AccountState::new();
+        let kp = crate::crypto::primitives::KeyPair::generate().unwrap();
+        let attester = Address::from(kp.public_key_bytes());
+        let stake = state.registry.params().min_stake;
+        state
+            .registry
+            .register(attester, crate::registry::role::roles::ATTESTER, stake, 0)
+            .unwrap();
+        state
+            .registry
+            .slash_role_only(
+                attester,
+                crate::registry::role::roles::ATTESTER,
+                crate::registry::permissionless::SlashingCondition::DoubleSign,
+                500,
+            )
+            .unwrap();
+        state
+            .registry
+            .begin_unbonding(attester, crate::registry::role::roles::ATTESTER, 1)
+            .unwrap();
+
+        let proof = FinalityProof::PoA {
+            authorities: vec![attester],
+            signatures: Vec::new(),
+        };
+        let err = require_active_attester_authorities(&state, &proof, "Storage attestation")
+            .unwrap_err();
+        assert!(err.contains("not an active attester"), "got: {err}");
+
+        // A recorded non-liveness slash report in slashing_history_for must also block finality.
+        let mut jailed_state = AccountState::new();
+        let attester2 = Address::from([0x77; 32]);
+        jailed_state
+            .registry
+            .register(attester2, crate::registry::role::roles::ATTESTER, stake, 0)
+            .unwrap();
+        let report = crate::registry::evidence::SlashingReport::consensus_invalid_attester_proof(
+            attester2,
+            "bad".into(),
+            None,
+        );
+        jailed_state.registry.slash_from_report(&report).unwrap();
+        let proof2 = FinalityProof::PoA {
+            authorities: vec![attester2],
+            signatures: Vec::new(),
+        };
+        let err2 =
+            require_active_attester_authorities(&jailed_state, &proof2, "Storage attestation")
+                .unwrap_err();
+        assert!(err2.contains("not an active attester"), "got: {err2}");
     }
 }

@@ -797,6 +797,14 @@ pub fn execute_graft_tx(
             if app.status == GraftStatus::Retired {
                 return Err(refused("a retired Graft application cannot be claimed"));
             }
+            if !state
+                .settlement
+                .domains
+                .get(app.domain_key)
+                .is_some_and(crate::domain::types::ConsensusDomain::is_active)
+            {
+                return Err(refused("the Graft application's domain is not Active"));
+            }
             if evidence.chain.domain_id() != app.domain_key {
                 return Err(refused("Graft claim evidence comes from another domain"));
             }
@@ -839,6 +847,14 @@ pub fn execute_graft_tx(
                 .ok_or_else(|| refused("Graft application not found"))?;
             if app.status == GraftStatus::Retired {
                 return Err(refused("a retired Graft application cannot be claimed"));
+            }
+            if !state
+                .settlement
+                .domains
+                .get(app.domain_key)
+                .is_some_and(crate::domain::types::ConsensusDomain::is_active)
+            {
+                return Err(refused("the Graft application's domain is not Active"));
             }
             let eoa: [u8; 20] = app
                 .origin_app
@@ -1142,6 +1158,14 @@ pub fn execute_graft_tx(
                 .get(&intent.graft_id)
                 .cloned()
                 .ok_or_else(|| refused("Graft application not found"))?;
+            if !state
+                .settlement
+                .domains
+                .get(app.domain_key)
+                .is_some_and(crate::domain::types::ConsensusDomain::is_active)
+            {
+                return Err(refused("the Graft application's domain is not Active"));
+            }
             let executor = state
                 .settlement
                 .graft
@@ -1939,5 +1963,124 @@ mod tests {
             verify_graft_payment(&proof, &cp, [0x22; 32], 8453, &[0x99; 20]),
             Err(GraftProofError::Receiver)
         );
+    }
+
+    #[test]
+    fn graft_claim_claim_by_signature_and_fulfill_refuse_frozen_or_retired_domain() {
+        let operator = Address::from([0x01; 32]);
+        let registrant = Address::from([0x02; 32]);
+        let user = Address::from([0x03; 32]);
+        let solver = Address::from([0x04; 32]);
+        let payout = Address::from([0x33; 32]);
+
+        let mut state = state_with_domain(operator);
+        let origin_app = vec![0xAB; 20];
+        let id = graft_id(DOMAIN, &origin_app);
+        state.add_balance(&registrant, 1_000);
+        state.add_balance(&user, 10_000);
+        state.add_balance(&solver, 10_000);
+        execute_graft_tx(
+            &mut state,
+            &ctx(registrant),
+            &GraftTx::Register {
+                domain_key: DOMAIN,
+                origin_app: origin_app.clone(),
+                manifest_hash: [0x11; 32],
+            },
+        )
+        .unwrap();
+        let executor = vec![0xCD; 20];
+        execute_graft_tx(
+            &mut state,
+            &ctx(operator),
+            &GraftTx::SetExecutor {
+                domain_key: DOMAIN,
+                executor: executor.clone(),
+            },
+        )
+        .unwrap();
+
+        let claim_msg = message(
+            origin_emitter(&origin_app),
+            payout,
+            claim_payload_hash(id, payout),
+            GRAFT_CLAIM_KIND,
+            id,
+        );
+        let claim_ev = anchor(&mut state, claim_msg);
+
+        // Create and award an intent while Active, then freeze the domain.
+        let intent_id = [0x91; 32];
+        let spec = b"call".to_vec();
+        let intent_tx = GraftTx::OpenIntent {
+            intent_id,
+            graft_id: id,
+            spec: spec.clone(),
+            max_payment: 1_000,
+            deadline_block: 100,
+        };
+        execute_graft_tx(&mut state, &ctx(user), &intent_tx).unwrap();
+        let stake = state.registry.params().min_stake;
+        state
+            .registry
+            .register(solver, crate::registry::role::roles::RELAYER, stake, 0)
+            .unwrap();
+        execute_graft_tx(
+            &mut state,
+            &ctx(solver),
+            &GraftTx::Bid {
+                intent_id,
+                cost: 100,
+                fee: 10,
+            },
+        )
+        .unwrap();
+        execute_graft_tx(&mut state, &ctx(user), &GraftTx::Award { intent_id }).unwrap();
+        let intent = state.settlement.graft.intents.get(&intent_id).unwrap().clone();
+        let fulfill_msg = message(
+            origin_emitter(&executor),
+            solver,
+            fulfilled_payload_hash(&intent, &origin_app, solver),
+            GRAFT_FULFILLED_KIND,
+            intent_id,
+        );
+        let fulfill_ev = anchor(&mut state, fulfill_msg);
+
+        for status in [
+            crate::domain::DomainStatus::Frozen,
+            crate::domain::DomainStatus::Retired,
+        ] {
+            state.settlement.domains.set_status(DOMAIN, status).unwrap();
+            assert!(execute_graft_tx(
+                &mut state,
+                &ctx(registrant),
+                &GraftTx::Claim {
+                    graft_id: id,
+                    payout,
+                    evidence: claim_ev.clone(),
+                },
+            )
+            .is_err());
+            assert!(execute_graft_tx(
+                &mut state,
+                &ctx(registrant),
+                &GraftTx::ClaimBySignature {
+                    graft_id: id,
+                    payout,
+                    valid_until_block: 50,
+                    signature: vec![0u8; 65],
+                },
+            )
+            .is_err());
+            assert!(execute_graft_tx(
+                &mut state,
+                &ctx(solver),
+                &GraftTx::Fulfill {
+                    intent_id,
+                    evidence: fulfill_ev.clone(),
+                },
+            )
+            .is_err());
+        }
     }
 }

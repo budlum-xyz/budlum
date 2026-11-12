@@ -10430,6 +10430,16 @@ mod tests {
     }
 
     #[test]
+    fn air_rejects_nonzero_upper_bytes_of_initial_state_root() {
+        let (envelope, pi, program) = build_arith_proof_forged(|pi| pi.initial_state_root[16] = 1);
+        let res = Plonky3Adapter::verify(&envelope, &pi, &program);
+        assert!(
+            matches!(res, Err(VerifyError::InvalidProof)),
+            "upper 16 bytes of initial_state_root must be constrained to zero in the AIR, got {res:?}"
+        );
+    }
+
+    #[test]
     fn zk_flag_is_pinned() {
         const {
             assert!(

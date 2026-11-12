@@ -61,6 +61,7 @@ pub const fn activation_delay_epochs(p_type: &ProposalType) -> u64 {
         | ProposalType::SetEncryptionPolicy(_)
         | ProposalType::SetConstitutionParameter(_)
         | ProposalType::UnfreezeConsensusDomain { .. }
+        | ProposalType::ResetConsensusDomainTip { .. }
         | ProposalType::PoaAddAdmin { .. } => GOVERNANCE_POLICY_ACTIVATION_DELAY_EPOCHS,
 
         // Actions aimed at one account.
@@ -278,6 +279,14 @@ pub enum ProposalType {
         admin: Address,
         address: Address,
         reason_hash: [u8; 32],
+    },
+    /// Governance-approved rollback of a consensus domain's committed tip and
+    /// pruning of proof claims strictly above `target_height`.
+    ResetConsensusDomainTip {
+        domain_id: u32,
+        target_height: u64,
+        target_hash: [u8; 32],
+        justification_hash: [u8; 32],
     },
 }
 
@@ -611,6 +620,20 @@ impl GovernanceState {
                     );
                 }
             }
+            ProposalType::ResetConsensusDomainTip {
+                domain_id,
+                justification_hash,
+                ..
+            } => {
+                if *domain_id == 0 {
+                    return Err("ResetConsensusDomainTip domain_id 0 is reserved".into());
+                }
+                if justification_hash == &[0u8; 32] {
+                    return Err(
+                        "ResetConsensusDomainTip justification_hash must be non-zero".into(),
+                    );
+                }
+            }
             _ => {}
         }
 
@@ -794,6 +817,17 @@ impl GovernanceState {
                     expected_validator_set_hash: *expected_validator_set_hash,
                     justification_hash: *justification_hash,
                 }),
+                ProposalType::ResetConsensusDomainTip {
+                    domain_id,
+                    target_height,
+                    target_hash,
+                    justification_hash,
+                } => Some(GovernanceAction::ResetConsensusDomainTip {
+                    domain_id: *domain_id,
+                    target_height: *target_height,
+                    target_hash: *target_hash,
+                    justification_hash: *justification_hash,
+                }),
                 // Applied (and marked Executed) by the account state at the
                 // epoch boundary, see the doc comment.
                 ProposalType::ChangeBaseFee(_)
@@ -862,6 +896,12 @@ pub enum GovernanceAction {
         admin: Address,
         address: Address,
         reason_hash: [u8; 32],
+    },
+    ResetConsensusDomainTip {
+        domain_id: u32,
+        target_height: u64,
+        target_hash: [u8; 32],
+        justification_hash: [u8; 32],
     },
 }
 

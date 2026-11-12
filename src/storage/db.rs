@@ -87,6 +87,7 @@ impl From<LegacyConsensusDomainV1> for ConsensusDomain {
             // be advanced by zk until a program list is given.
             zk_program_allowlist: Vec::new(),
             plugin_code_hash: None,
+            genesis_state_root: [0u8; 32],
         }
     }
 }
