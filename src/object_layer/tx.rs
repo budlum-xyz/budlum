@@ -201,8 +201,14 @@ impl ObjectLayerTx {
             Self::SetTentativeConsent { consent } => {
                 registry.set_tentative_consent(ctx.signer, *consent);
             }
-            Self::Adopt { home } => {
-                registry.adopt(ctx.signer, home)?;
+            Self::Adopt { .. } => {
+                // `escape_addresses` is recorded from a plain transaction, so it
+                // proves nothing about who controls the home identity: any
+                // account can register any home address and then adopt the
+                // balances held for it. Adoption stays closed until a proven
+                // home event binds the raw home address to the adopting
+                // account; a proven `HomeCall` already moves these balances.
+                return Err(TxRefusal::StepNotOpen);
             }
             Self::Challenge { class } => {
                 registry.challenge(ctx.signer, *class, ctx.height)?;

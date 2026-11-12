@@ -175,6 +175,12 @@ impl IntoIterator for DedupIndex {
 }
 
 impl DedupIndex {
+    /// Whether the exact index holds no mapping.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.map.is_empty()
+    }
+
     /// Iterate over all `(digest, object_key)` entries in deterministic order.
     pub fn iter(&self) -> std::collections::btree_map::Iter<'_, [u8; 32], ObjectKey> {
         self.map.iter()

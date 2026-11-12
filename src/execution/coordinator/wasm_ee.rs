@@ -353,6 +353,15 @@ fn write_store(
         .map_err(|e| e.to_string())
 }
 
+fn contract_creator(host: &dyn HostRead, contract: &[u8]) -> Option<String> {
+    let c_ns = Namespace::new(NS_WASM_CONTRACT).ok()?;
+    let meta_b = host.read(&c_ns, contract).ok()??;
+    let meta: serde_json::Value = serde_json::from_slice(&meta_b).ok()?;
+    meta.get("creator")
+        .and_then(|v| v.as_str())
+        .map(str::to_owned)
+}
+
 fn load_wasm_code(host: &dyn HostRead, contract: &[u8]) -> Result<Vec<u8>, String> {
     let c_ns = Namespace::new(NS_WASM_CONTRACT).map_err(|e| e.to_string())?;
     let Some(meta_b) = host.read(&c_ns, contract).map_err(|e| e.to_string())? else {
@@ -743,6 +752,12 @@ fn execute_cosmwasm_json(
     let exec_obj = msg_json.get("execute").unwrap_or(msg_json);
 
     if let Some(init_cw20) = exec_obj.get("instantiate_cw20") {
+        if contract_creator(host, contract).as_deref() != Some(sender_str) {
+            return Ok((OutcomeStatus::Revert, b"not cw20 contract admin".to_vec()));
+        }
+        if read_store(host, contract, b"cw20:info")?.is_some() {
+            return Ok((OutcomeStatus::Revert, b"cw20 already instantiated".to_vec()));
+        }
         let name = init_cw20
             .get("name")
             .and_then(|v| v.as_str())
@@ -936,10 +951,16 @@ fn execute_cosmwasm_json(
     }
 
     if let Some(mint_nft) = exec_obj.get("mint_nft") {
+        if contract_creator(host, contract).as_deref() != Some(sender_str) {
+            return Ok((OutcomeStatus::Revert, b"not cw721 minter".to_vec()));
+        }
         let tid = mint_nft
             .get("token_id")
             .and_then(|v| v.as_str())
             .unwrap_or("1");
+        if read_store(host, contract, format!("cw721:owner:{tid}").as_bytes())?.is_some() {
+            return Ok((OutcomeStatus::Revert, b"cw721 already minted".to_vec()));
+        }
         let owner = mint_nft
             .get("owner")
             .and_then(|v| v.as_str())
@@ -1061,6 +1082,12 @@ fn execute_cosmwasm_json(
     }
 
     if let Some(kv) = exec_obj.get("put") {
+        // A raw store write rewrites any key in the contract's store,
+        // including `cw20:bal:*` and `cw721:owner:*`, so only the contract
+        // creator may use it.
+        if contract_creator(host, contract).as_deref() != Some(sender_str) {
+            return Ok((OutcomeStatus::Revert, b"not contract creator".to_vec()));
+        }
         let k = kv.get("key").and_then(|v| v.as_str()).unwrap_or_default();
         let v = kv.get("value").and_then(|v| v.as_str()).unwrap_or_default();
         write_store(host, contract, k.as_bytes(), Some(v.as_bytes()))?;
@@ -1247,5 +1274,135 @@ impl ExecutionEnvironment for WasmEe {
             code: RefusalCode::Denied,
             message,
         })
+    }
+}
+
+#[cfg(test)]
+mod creator_gate_tests {
+    use super::*;
+    use budlum_uel_abi::{HostError, OutOfGas, UniversalResult};
+    use std::collections::BTreeMap;
+
+    #[derive(Default)]
+    struct MockHost {
+        store: BTreeMap<(String, Vec<u8>), Vec<u8>>,
+    }
+
+    impl MockHost {
+        fn with_creator(contract: &[u8], creator: &str) -> Self {
+            let mut host = Self::default();
+            let meta = serde_json::json!({
+                "code_hash": "00",
+                "creator": creator,
+                "label": "cosmwasm",
+            });
+            host.store.insert(
+                (NS_WASM_CONTRACT.to_owned(), contract.to_vec()),
+                serde_json::to_vec(&meta).unwrap(),
+            );
+            host
+        }
+    }
+
+    impl HostRead for MockHost {
+        fn read(&self, ns: &Namespace, key: &[u8]) -> Result<Option<Vec<u8>>, HostError> {
+            Ok(self
+                .store
+                .get(&(ns.as_str().to_owned(), key.to_vec()))
+                .cloned())
+        }
+
+        fn bud_balance(&self, _who: &EeIdentity) -> Result<BudAmount, HostError> {
+            Ok(BudAmount(0))
+        }
+    }
+
+    impl HostApi for MockHost {
+        fn write(
+            &mut self,
+            ns: &Namespace,
+            key: &[u8],
+            value: Option<&[u8]>,
+        ) -> Result<(), HostError> {
+            match value {
+                Some(v) => {
+                    self.store
+                        .insert((ns.as_str().to_owned(), key.to_vec()), v.to_vec());
+                }
+                None => {
+                    self.store.remove(&(ns.as_str().to_owned(), key.to_vec()));
+                }
+            }
+            Ok(())
+        }
+
+        fn universal_call(&mut self, _call: UniversalCall) -> Result<UniversalResult, HostError> {
+            Err(HostError::Denied(String::from("no universal call in test")))
+        }
+
+        fn emit_log(&mut self, _log: EeLog) -> Result<(), HostError> {
+            Ok(())
+        }
+
+        fn charge(&mut self, _bgu: u64) -> Result<(), OutOfGas> {
+            Ok(())
+        }
+
+        fn bud_transfer(
+            &mut self,
+            _from: &EeIdentity,
+            _to: &EeIdentity,
+            _attos: u128,
+        ) -> Result<(), HostError> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn non_creator_cannot_instantiate_mint_or_put() {
+        let contract = b"contract-1";
+        let mut host = MockHost::with_creator(contract, "creator");
+        for msg in [
+            serde_json::json!({"execute": {"instantiate_cw20": {"name": "T", "initial_balances": [{"address": "attacker", "amount": "100"}]}}}),
+            serde_json::json!({"execute": {"mint_nft": {"token_id": "1", "owner": "attacker"}}}),
+            serde_json::json!({"execute": {"put": {"key": "cw20:bal:attacker", "value": "100"}}}),
+        ] {
+            let (status, _) =
+                execute_cosmwasm_json(contract, "attacker", &msg, false, 100_000, &mut host)
+                    .unwrap();
+            assert_eq!(status, OutcomeStatus::Revert, "msg: {msg}");
+        }
+        assert!(read_store(&host, contract, b"cw20:info").unwrap().is_none());
+        assert!(read_store(&host, contract, b"cw721:owner:1")
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn creator_instantiates_once_and_mints_once() {
+        let contract = b"contract-1";
+        let mut host = MockHost::with_creator(contract, "creator");
+        let init = serde_json::json!({"execute": {"instantiate_cw20": {"name": "T", "initial_balances": [{"address": "creator", "amount": "100"}]}}});
+        let (status, _) =
+            execute_cosmwasm_json(contract, "creator", &init, false, 100_000, &mut host).unwrap();
+        assert_eq!(status, OutcomeStatus::Success);
+        let (status, _) =
+            execute_cosmwasm_json(contract, "creator", &init, false, 100_000, &mut host).unwrap();
+        assert_eq!(status, OutcomeStatus::Revert);
+
+        let mint =
+            serde_json::json!({"execute": {"mint_nft": {"token_id": "1", "owner": "alice"}}});
+        let (status, _) =
+            execute_cosmwasm_json(contract, "creator", &mint, false, 100_000, &mut host).unwrap();
+        assert_eq!(status, OutcomeStatus::Success);
+        let steal =
+            serde_json::json!({"execute": {"mint_nft": {"token_id": "1", "owner": "attacker"}}});
+        let (status, _) =
+            execute_cosmwasm_json(contract, "creator", &steal, false, 100_000, &mut host).unwrap();
+        assert_eq!(status, OutcomeStatus::Revert);
+        assert_eq!(
+            read_store(&host, contract, b"cw721:owner:1").unwrap(),
+            Some(b"alice".to_vec())
+        );
     }
 }

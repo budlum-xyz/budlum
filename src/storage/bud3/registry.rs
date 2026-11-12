@@ -671,6 +671,15 @@ impl Bud3Registry {
         if nft_count <= 1 && has_deps {
             return Err(RegistryError::HasDependents);
         }
+        // Emptying the reference set deletes the object and writes a tombstone
+        // that keeps its commitment from ever being registered again, so only
+        // the object's owner may take that loss. A reference is whatever
+        // `BindNft` named, verified against no NFT registry, so holding one is
+        // not authority over the object it points at.
+        let owner = self.objects.get(&key).map_or(*signer, |o| o.owner);
+        if nft_count <= 1 && owner != *signer {
+            return Err(RegistryError::NotAuthorized);
+        }
         self.nfts.remove(nft);
         let no_nfts = self.objects.get_mut(&key).is_some_and(|o| {
             o.references.remove(nft);
@@ -1835,6 +1844,8 @@ impl Bud3Registry {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.objects.is_empty()
+            && self.public_index.is_empty()
+            && self.nfts.is_empty()
             && self.tombstones.is_empty()
             && self.declines.is_empty()
             && self.custody_credits.is_empty()
@@ -2144,7 +2155,12 @@ mod tests {
         alice.bind_nft([9; 32], addr(7), &key).unwrap();
         bob.bind_nft([9; 32], addr(8), &key).unwrap();
         assert_ne!(alice.state_root(), bob.state_root());
-        assert!(alice.burn_reference(&[9; 32], &addr(7), 1).is_ok());
+        // addr(7) is not the object owner, so burning the only reference
+        // cannot delete the object.
+        assert_eq!(
+            alice.burn_reference(&[9; 32], &addr(7), 1),
+            Err(RegistryError::NotAuthorized)
+        );
         assert_eq!(
             bob.burn_reference(&[9; 32], &addr(7), 1),
             Err(RegistryError::NotAuthorized)
@@ -2205,7 +2221,19 @@ mod tests {
         );
         assert_eq!(r.burn_reference(&[1; 32], &addr(1), 5), Ok(false));
         assert_eq!(r.refcount(&key), 1);
-        assert_eq!(r.burn_reference(&[2; 32], &addr(2), 6), Ok(true));
+        // A non-owner holding the last reference cannot delete the object:
+        // the reference is self-declared, so it is not authority over it.
+        assert_eq!(
+            r.burn_reference(&[2; 32], &addr(2), 6),
+            Err(RegistryError::NotAuthorized)
+        );
+        assert_eq!(r.refcount(&key), 1);
+        assert!(r.object(&key).is_some());
+        assert_eq!(r.tombstone(&key), None);
+        // The owner deleting the last reference does delete the object.
+        r.bind_nft([3; 32], addr(1), &key).unwrap();
+        assert_eq!(r.burn_reference(&[2; 32], &addr(2), 6), Ok(false));
+        assert_eq!(r.burn_reference(&[3; 32], &addr(1), 6), Ok(true));
         assert!(r.object(&key).is_none());
         assert_eq!(r.tombstone(&key), Some(6));
         // Deletion is final.

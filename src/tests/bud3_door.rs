@@ -756,7 +756,9 @@ fn bud3_public_dedup_sealed_isolation_and_dependency_rules() {
     .unwrap();
     assert_eq!(state.bud3_registry.refcount(&pub_key), 2);
 
-    // Burning Alice's NFT leaves Bob's reference alive; burning Bob's tombstones.
+    // Burning Alice's NFT leaves Bob's reference alive. Bob holds the last
+    // reference but is not the object owner, so his burn cannot delete or
+    // tombstone Alice's object.
     apply(
         &mut state,
         &storage_tx(alice, 2, 1, 0, StorageTxV3::BurnReference { nft: [1; 32] }),
@@ -765,12 +767,16 @@ fn bud3_public_dedup_sealed_isolation_and_dependency_rules() {
     assert_eq!(state.bud3_registry.refcount(&pub_key), 1);
     assert!(state.bud3_registry.object(&pub_key).is_some());
 
-    apply(
+    assert!(apply(
         &mut state,
         &storage_tx(bob, 2, 1, 0, StorageTxV3::BurnReference { nft: [2; 32] }),
     )
-    .unwrap();
-    assert!(state.bud3_registry.is_tombstoned(&pub_key));
+    .is_err());
+    assert_eq!(state.bud3_registry.refcount(&pub_key), 1);
+    assert!(state.bud3_registry.object(&pub_key).is_some());
+    assert!(!state.bud3_registry.is_tombstoned(&pub_key));
+    // Owner-last-burn deletion is covered by the registry unit test
+    // `register_bind_burn_deletes_at_zero_references`.
 
     // Sealed isolation: identical plaintext from Alice and Bob produces isolated objects.
     let alice_sealed = prepare_sealed_upload(
