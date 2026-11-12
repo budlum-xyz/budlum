@@ -1373,6 +1373,54 @@ fn scan_rejoined_producer(
     Ok(None)
 }
 
+/// Native validator roles disable JSON-RPC, but keep loopback Prometheus
+/// listeners. Read only numeric, non-sensitive gauges so a stopped-seat
+/// failure can distinguish an RPC observer lag from a partition or missing
+/// finality votes. Never attach raw node logs or key-bearing process output.
+fn metric_u64(body: &str, name: &str) -> Option<u64> {
+    body.lines().find_map(|line| {
+        line.strip_prefix(name)
+            .and_then(|tail| tail.strip_prefix(' '))
+            .and_then(|value| value.trim().parse().ok())
+    })
+}
+
+fn local_metric_pair(body: &str) -> Option<String> {
+    let height = metric_u64(body, "budlum_chain_height")?;
+    let finality = metric_u64(body, "budlum_finalized_height")?;
+    let peers = metric_u64(body, "budlum_p2p_peers_connected")?;
+    let active = metric_u64(body, "budlum_active_validators")?;
+    Some(format!(
+        "tip={height},finalized={finality},peers={peers},active={active}"
+    ))
+}
+
+fn local_metrics_snapshot(stack: &LocalStack) -> String {
+    let probe = |port| {
+        rpc::request("GET", port, "/metrics", None, Duration::from_secs(2))
+            .ok()
+            .filter(rpc::Reply::is_success)
+            .and_then(|reply| local_metric_pair(&reply.body))
+            .unwrap_or_else(|| String::from("metrics unavailable"))
+    };
+    let mut parts = vec![format!("rpc({})", probe(29090))];
+    for seat in 1..=stack.seats {
+        if stack.validators.get(seat - 1).is_some_and(Option::is_none) {
+            parts.push(format!("v{seat}(stopped)"));
+            continue;
+        }
+        let Ok(seat_port) = u16::try_from(seat) else {
+            parts.push(format!("v{seat}(invalid port)"));
+            continue;
+        };
+        parts.push(format!(
+            "v{seat}({})",
+            probe(LOCAL_VAL_METRICS_BASE + seat_port)
+        ));
+    }
+    parts.join("; ")
+}
+
 fn scenario_chaos(backend: &mut Backend<'_>) -> Result<String, String> {
     let watched: Vec<String> = match &*backend {
         Backend::Compose { eight_seat, .. } => {
@@ -1407,6 +1455,15 @@ fn scenario_chaos(backend: &mut Backend<'_>) -> Result<String, String> {
         offline_progress(stopped_at, observed_finality, stopped_tip, observed_tip)
             .then_some(observed_finality)
     });
+    let offline_diagnostics = match (&*backend, advanced) {
+        (Backend::Local { stack, .. }, None) => {
+            format!(
+                "; native metrics before restart: {}",
+                local_metrics_snapshot(stack)
+            )
+        }
+        _ => String::new(),
+    };
     let restart = match backend {
         Backend::Compose { root, .. } => compose(root, &["start", "validator4"]).map(|_| ()),
         Backend::Local { root, stack } => stack.spawn_validator(root, stack.seats),
@@ -1414,7 +1471,7 @@ fn scenario_chaos(backend: &mut Backend<'_>) -> Result<String, String> {
     let advanced = advanced.ok_or_else(|| {
         format!(
             "validator offline: finalized {stopped_at}->{observed_finality}, tip \
-             {stopped_tip}->{observed_tip}; require finalized > {stopped_at} AND tip >= {}",
+             {stopped_tip}->{observed_tip}; require finalized > {stopped_at} AND tip >= {}{offline_diagnostics}",
             stopped_tip.saturating_add(16)
         )
     })?;
@@ -1705,6 +1762,27 @@ mod tests {
         assert!(!offline_progress(30, 30, 31, 47), "no new finality");
         assert!(!offline_progress(30, 35, 31, 46), "only 15 new blocks");
         assert!(offline_progress(30, 35, 31, 47), "both conditions met");
+    }
+
+    #[test]
+    fn native_failure_snapshot_only_reports_exact_numeric_metrics() {
+        let sample = "# HELP budlum_chain_height validator tip\n\
+                      budlum_chain_height_extra 900\n\
+                      budlum_chain_height 63\n\
+                      budlum_finalized_height 55\n\
+                      budlum_p2p_peers_connected 2\n\
+                      budlum_active_validators 4\n";
+        assert_eq!(
+            local_metric_pair(sample),
+            Some(String::from("tip=63,finalized=55,peers=2,active=4"))
+        );
+        assert_eq!(metric_u64(sample, "budlum_chain_height_extra"), Some(900));
+        assert!(local_metric_pair("budlum_chain_height 900\n").is_none());
+        assert!(local_metric_pair(&sample.replace(
+            "budlum_finalized_height 55",
+            "budlum_finalized_height secret"
+        ))
+        .is_none());
     }
 
     #[test]
