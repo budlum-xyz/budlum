@@ -393,9 +393,9 @@ mod tests {
         }
         let four_gib_plus_one = Segmentation::new(4 * super::super::limits::GIB + 1, &p0).unwrap();
         assert!(four_gib_plus_one.total_source_symbols() > 50_000);
-        let last_offset = four_gib_plus_one
-            .offset(four_gib_plus_one.count() - 1)
-            .unwrap();
+        let beyond_u32 =
+            Segmentation::new(4 * super::super::limits::GIB + p0.segment_bytes() + 1, &p0).unwrap();
+        let last_offset = beyond_u32.offset(beyond_u32.count() - 1).unwrap();
         assert!(last_offset > u64::from(u32::MAX));
     }
 

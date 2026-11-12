@@ -122,7 +122,7 @@ fn eth_get_proof_returns_method_not_found() {
     );
     let err = resp.error.expect("eth_getProof must return JSON-RPC error");
     assert_eq!(err.code, JSONRPC_METHOD_NOT_FOUND);
-    assert!(err.message.contains("bud_getExecutionProof"));
+    assert!(err.message.contains("bud_getAccountProof"));
 }
 
 #[test]
@@ -385,7 +385,6 @@ fn solana_unimplemented_methods_never_return_invented_success() {
         "getMinimumBalanceForRentExemption",
         "getFeeForMessage",
         "getRecentPrioritizationFees",
-        "sendTransaction",
         "simulateTransaction",
         "getSignatureStatuses",
         "getSignaturesForAddress",

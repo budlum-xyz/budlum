@@ -222,7 +222,6 @@ pub enum Refusal {
     NothingToAdopt,
     ChallengeAlreadyOpen,
     NoChallengeOpen,
-    ChallengeExpired,
     Overflow,
 }
 
@@ -389,9 +388,10 @@ impl ObjectLayerRegistry {
         &self,
         proof: &HomeEventProof,
         finality: &dyn HomeFinality,
+        allow_tentative: bool,
     ) -> Result<(HomeVmFamily, EndpointEvent), Refusal> {
         let charter = self.active_charter(proof.domain)?;
-        if proof.phase == Phase::Tentative {
+        if !allow_tentative && proof.phase == Phase::Tentative {
             return Err(Refusal::TentativeClosed);
         }
         if proof.event.emitter != charter.endpoint {
@@ -517,7 +517,7 @@ impl ObjectLayerRegistry {
         proof: &HomeEventProof,
         finality: &dyn HomeFinality,
     ) -> Result<AssetId, Refusal> {
-        let (_, event) = self.read_event(proof, finality)?;
+        let (_, event) = self.read_event(proof, finality, true)?;
         let EndpointEvent::Arrive {
             kind,
             contract,
@@ -807,10 +807,10 @@ impl ObjectLayerRegistry {
             }
             Condition::Holds { class, holder } => self.holds(class, holder),
             Condition::SignedBy { signer } => signer == maker || signer == taker,
-            Condition::EscapeAddress { holder, home } => match holder {
-                Holder::Account(addr) => self.escape_addresses.get(addr) == Some(home),
-                Holder::Home(_) => false,
-            },
+            Condition::EscapeAddress { holder, home } => {
+                let _ = (holder, home);
+                false
+            }
         }
     }
 
@@ -822,7 +822,7 @@ impl ObjectLayerRegistry {
         proof: &HomeEventProof,
         finality: &dyn HomeFinality,
     ) -> Result<HomeIdentity, Refusal> {
-        let (family, event) = self.read_event(proof, finality)?;
+        let (family, event) = self.read_event(proof, finality, false)?;
         let EndpointEvent::Call {
             sender,
             nonce,
@@ -922,7 +922,7 @@ impl ObjectLayerRegistry {
         proof: &HomeEventProof,
         finality: &dyn HomeFinality,
     ) -> Result<DepartureId, Refusal> {
-        let (_, event) = self.read_event(proof, finality)?;
+        let (_, event) = self.read_event(proof, finality, false)?;
         let EndpointEvent::Released { departure } = event else {
             return Err(Refusal::UnexpectedEvent);
         };
@@ -951,7 +951,7 @@ impl ObjectLayerRegistry {
         proof: &HomeEventProof,
         finality: &dyn HomeFinality,
     ) -> Result<AssetId, Refusal> {
-        let (_, event) = self.read_event(proof, finality)?;
+        let (_, event) = self.read_event(proof, finality, false)?;
         let EndpointEvent::Escaped {
             kind,
             contract,
@@ -1075,28 +1075,52 @@ impl ObjectLayerRegistry {
         Ok(())
     }
 
-    /// `ObjectLayerTx::Adopt`: migrate assets held by `Holder::Home` to
-    /// `Holder::Account(account)` once `account` has bound `home` (`4-byte LE
-    /// domain || raw_home_address`) via `SetEscapeAddress`.
+    /// `ObjectLayerTx::Adopt`: refused on unverified `escape_addresses` blobs;
+    /// callers must prove home-chain ownership via [`Self::adopt_with_proof`]
+    /// or [`Self::home_call`].
     pub fn adopt(&mut self, account: Address, home: &[u8]) -> Result<u64, Refusal> {
-        if self.escape_addresses.get(&account).map(Vec::as_slice) != Some(home) {
+        let _ = (account, home);
+        Err(Refusal::NotAuthorized)
+    }
+
+    /// Migrate assets held by `Holder::Home` to `Holder::Account(account)`
+    /// using a finality-verified home event signed by the home address whose
+    /// payload commits to `account.as_bytes()`.
+    pub fn adopt_with_proof(
+        &mut self,
+        account: Address,
+        proof: &HomeEventProof,
+        finality: &dyn HomeFinality,
+    ) -> Result<u64, Refusal> {
+        let (family, event) = self.read_event(proof, finality, false)?;
+        let EndpointEvent::Call {
+            sender,
+            nonce,
+            calls,
+        } = event
+        else {
+            return Err(Refusal::UnexpectedEvent);
+        };
+        profile_for(family).validate_address(&sender)?;
+        if calls.as_slice() != account.as_bytes() {
             return Err(Refusal::NotAuthorized);
         }
-        let Some((domain_bytes, raw_addr)) = home.split_at_checked(4) else {
-            return Err(Refusal::Family(FamilyError::Malformed(
-                "adopt domain prefix",
-            )));
-        };
-        let mut prefix = [0u8; 4];
-        prefix.copy_from_slice(domain_bytes);
-        let domain = u32::from_le_bytes(prefix);
-        let charter = self.active_charter(domain)?;
-        profile_for(charter.vm_family).validate_address(raw_addr)?;
-        let identity = HomeIdentity::derive(domain, raw_addr);
+        let domain = proof.domain;
+        let identity = HomeIdentity::derive(domain, &sender);
         let from = Holder::Home(identity);
         let to = Holder::Account(account);
 
         self.atomic(|r| {
+            r.use_arrival(proof)?;
+            let expected = r.home_nonces.get(&identity).copied().unwrap_or(0);
+            if nonce != expected {
+                return Err(Refusal::HomeNonce {
+                    expected,
+                    got: nonce,
+                });
+            }
+            r.home_nonces
+                .insert(identity, expected.checked_add(1).ok_or(Refusal::Overflow)?);
             let mut moved: u64 = 0;
             let fungible_keys: Vec<(AssetClassId, u128)> = r
                 .balances
@@ -1115,7 +1139,12 @@ impl ObjectLayerRegistry {
                 moved = moved.saturating_add(1);
             }
             for asset in r.unique.values_mut() {
-                if asset.location == Location::ObjectLayer && asset.holder == Some(from) {
+                if asset.location == Location::ObjectLayer
+                    && asset.holder == Some(from)
+                    && r.classes
+                        .get(&asset.class)
+                        .is_some_and(|cl| cl.home_domain == domain)
+                {
                     asset.holder = Some(to);
                     moved = moved.saturating_add(1);
                 }
@@ -1180,6 +1209,9 @@ impl ObjectLayerRegistry {
             if status != ClassStatus::Active {
                 return Err(Refusal::ClassFrozen);
             }
+            if !r.holds(&class, &Holder::Account(challenger)) {
+                return Err(Refusal::NotAuthorized);
+            }
             r.challenges.insert(
                 class,
                 ChallengeRecord {
@@ -1191,8 +1223,8 @@ impl ObjectLayerRegistry {
         })
     }
 
-    /// `ObjectLayerTx::Rebut`: clear an open challenge within the rebuttal
-    /// window when signed by the class registrant.
+    /// `ObjectLayerTx::Rebut`: clear an open challenge or lift an
+    /// `UnrebuttedChallenge` freeze when signed by the class registrant.
     pub fn rebut(
         &mut self,
         actor: Address,
@@ -1200,20 +1232,19 @@ impl ObjectLayerRegistry {
         height: u64,
     ) -> Result<(), Refusal> {
         self.atomic(|r| {
+            let _ = height;
             let registrant = r.class(&class)?.registrant;
             if actor != registrant {
                 return Err(Refusal::NotAuthorized);
             }
-            let existing = r
-                .challenges
-                .remove(&class)
-                .ok_or(Refusal::NoChallengeOpen)?;
-            if height
-                >= existing
-                    .opened_at
-                    .saturating_add(DEFAULT_CHALLENGE_WINDOW_BLOCKS)
-            {
-                return Err(Refusal::ChallengeExpired);
+            let had_open = r.challenges.remove(&class).is_some();
+            let entry = r.classes.get_mut(&class).ok_or(Refusal::UnknownClass)?;
+            if entry.status == ClassStatus::Frozen(FreezeReason::UnrebuttedChallenge) {
+                entry.status = ClassStatus::Active;
+                return Ok(());
+            }
+            if !had_open {
+                return Err(Refusal::NoChallengeOpen);
             }
             Ok(())
         })

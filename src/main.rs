@@ -133,12 +133,16 @@ fn write_database_backup(
         .map_err(std::io::Error::other)?
         .as_millis();
     let path = backup_dir.join(format!("budlum-{timestamp_ms}.budbak"));
-    // Reserve the name rather than replacing an existing verified backup if
-    // two requests arrive in the same millisecond or the clock moves back.
-    std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&path)?;
+    // `Storage::create_snapshot` writes `<path>.partial` and atomically links
+    // it to `path` via `std::fs::hard_link`, failing with `AlreadyExists` if
+    // `path` is already present (e.g. two requests in the same millisecond or
+    // clock rollback) without replacing an existing verified backup.
+    if path.exists() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            format!("backup already exists at {}", path.display()),
+        ));
+    }
     if let Err(error) = storage.create_snapshot(&path) {
         let _ = std::fs::remove_file(&path);
         return Err(error);

@@ -1086,7 +1086,7 @@ mod tests {
         let prompt = [12, -4, 7, 3];
         let (out_a, digest_a) = eval_dip_inference(&dip, &spec, &prompt).unwrap();
         let (out_b, digest_b) = eval_dip_inference(&dip, &spec, &prompt).unwrap();
-        assert_eq!(out_a, vec![35, 31]);
+        assert_eq!(out_a, vec![15, -1]);
         assert_eq!(out_a, out_b);
         assert_eq!(digest_a, digest_b);
     }

@@ -313,15 +313,14 @@ impl Pkcs11Signer {
     /// bind the vendor BLS signing mechanism to a named token object.
     ///
     /// The vendor BLS path used to sign through the compiled-in
-    /// [`BLS_DATA_LABEL`] whatever the operator's `pkcs11_key_label` said, so
+    /// `BLS_DATA_LABEL` whatever the operator's `pkcs11_key_label` said, so
     /// the startup binding test could prove a pairing between the announced key
     /// and one object while the node signed with another. Setting the label here
     /// makes the object the operator selected the object that signs.
     ///
     /// Without this call the compiled-in label is used, which is what every
     /// existing deployment does; the difference is that the choice is now
-    /// recorded on the signer and can be read back
-    /// ([`Self::bls_key_label`]) and tested.
+    /// recorded on the signer and can be read back (`bls_key_label`) and tested.
     /// # Errors
     ///
     /// [`CryptoError::KeyGeneration`] when the label is empty or whitespace.
@@ -1008,10 +1007,14 @@ mod tests {
     fn a_slot_with_more_than_one_key_is_refused_not_guessed() {
         assert!(Pkcs11Signer::require_single_key("private", 1).is_ok());
         let none = Pkcs11Signer::require_single_key("private", 0).unwrap_err();
-        assert!(none.contains("No Ed25519 private key found"), "{none}");
+        assert!(
+            none.contains("No Ed25519 private key") && none.contains("found in HSM"),
+            "{none}"
+        );
         let many = Pkcs11Signer::require_single_key("public", 3).unwrap_err();
         assert!(
-            many.starts_with("3 Ed25519 public keys found in HSM slot")
+            many.starts_with("3 Ed25519 public key")
+                && many.contains("found in HSM slot")
                 && many.contains("refusing to guess")
                 && many.contains("key label"),
             "the refusal must count the keys and name the remedy, got: {many}"

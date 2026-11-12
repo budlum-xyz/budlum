@@ -90,6 +90,19 @@ impl RootGroup {
             _ => None,
         }
     }
+
+    /// Returns the exclusive `execution_root` namespace subtree owned by `ee`.
+    #[must_use]
+    pub const fn for_ee(ee: EeId) -> Option<Self> {
+        match ee {
+            EeId::EVM => Some(Self::Evm),
+            EeId::WASM => Some(Self::Wasm),
+            EeId::SVM => Some(Self::Svm),
+            EeId::MOVE => Some(Self::Move),
+            EeId::BUDZERO => Some(Self::BudZero),
+            _ => None,
+        }
+    }
 }
 
 /// Derives `asset_id = SHA3-256("BDLM_UEL_ASSET_V1" || home_ee || len_le64 || home_ref)`.

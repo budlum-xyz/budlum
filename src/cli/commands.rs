@@ -934,13 +934,15 @@ impl NodeConfig {
         }
 
         if let Some(metrics) = fc.metrics {
-            if let Some(listener) = metrics
-                .listener
-                .or_else(|| metrics.port.map(|p| format!("0.0.0.0:{p}")))
-            {
-                self.metrics_listener = Some(listener.clone());
-                if let Some((_, port)) = parse_listener(&listener) {
-                    self.metrics_port = port;
+            if self.metrics_listener.is_none() {
+                if let Some(listener) = metrics
+                    .listener
+                    .or_else(|| metrics.port.map(|p| format!("0.0.0.0:{p}")))
+                {
+                    self.metrics_listener = Some(listener.clone());
+                    if let Some((_, port)) = parse_listener(&listener) {
+                        self.metrics_port = port;
+                    }
                 }
             }
         }
@@ -1953,7 +1955,8 @@ mod tests {
 
 #[cfg(test)]
 mod persona_config_tests {
-    use super::FileConfig;
+    use super::{FileConfig, NodeConfig};
+    use clap::Parser as _;
 
     #[test]
     fn persona_configs_parse_as_strict_v2() {
@@ -1978,7 +1981,20 @@ mod persona_config_tests {
             let config = format!("[features]\n{key} = false\n");
             let error = toml::from_str::<FileConfig>(&config)
                 .expect_err("removed feature keys must not parse");
-            assert!(error.to_string().contains(key), "unexpected error: {error}");
+                assert!(error.to_string().contains(key), "unexpected error: {error}");
         }
+    }
+
+    #[test]
+    fn cli_metrics_listener_overrides_config_file() {
+        let mut cfg = NodeConfig::parse_from([
+            "budlum-core",
+            "--network=testnet",
+            "--metrics-listener=127.0.0.1:29093",
+        ]);
+        let fc: FileConfig = toml::from_str("[metrics]\nlistener = \"0.0.0.0:9090\"\n")
+            .expect("parse metrics config");
+        cfg.apply_file_config(fc);
+        assert_eq!(cfg.metrics_listener.as_deref(), Some("127.0.0.1:29093"));
     }
 }

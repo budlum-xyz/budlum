@@ -4344,6 +4344,17 @@ impl BudlumApiServer for RpcServer {
     }
 
     async fn get_charter(&self, domain_id: u32) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let chain_id = self.chain.get_chain_id().await;
+        let height = self.chain.get_height().await;
+        if chain_id != crate::core::chain_config::Network::Devnet.chain_id().value()
+            && !crate::object_layer::ACTIVATION.is_open_at(height)
+        {
+            return Err(ErrorObjectOwned::owned(
+                -32004,
+                "object_layer_closed",
+                None::<()>,
+            ));
+        }
         let Some(charter) = self.chain.object_layer_charter(domain_id).await else {
             return Ok(serde_json::Value::Null);
         };
@@ -4362,6 +4373,17 @@ impl BudlumApiServer for RpcServer {
         let bytes: [u8; 32] = raw.try_into().map_err(|_| {
             ErrorObjectOwned::owned(-32602, "class_id must be 32 bytes", None::<()>)
         })?;
+        let chain_id = self.chain.get_chain_id().await;
+        let height = self.chain.get_height().await;
+        if chain_id != crate::core::chain_config::Network::Devnet.chain_id().value()
+            && !crate::object_layer::ACTIVATION.is_open_at(height)
+        {
+            return Err(ErrorObjectOwned::owned(
+                -32004,
+                "object_layer_closed",
+                None::<()>,
+            ));
+        }
         let id = crate::object_layer::AssetClassId(bytes);
         let Some((class, recorded_custody)) = self.chain.object_layer_asset_class(id).await else {
             return Ok(serde_json::Value::Null);
@@ -4380,6 +4402,17 @@ impl BudlumApiServer for RpcServer {
         let bytes: [u8; 32] = raw.try_into().map_err(|_| {
             ErrorObjectOwned::owned(-32602, "asset_id must be 32 bytes", None::<()>)
         })?;
+        let chain_id = self.chain.get_chain_id().await;
+        let height = self.chain.get_height().await;
+        if chain_id != crate::core::chain_config::Network::Devnet.chain_id().value()
+            && !crate::object_layer::ACTIVATION.is_open_at(height)
+        {
+            return Err(ErrorObjectOwned::owned(
+                -32004,
+                "object_layer_closed",
+                None::<()>,
+            ));
+        }
         let id = crate::object_layer::AssetId(bytes);
         let Some(asset) = self.chain.object_layer_asset(id).await else {
             return Ok(serde_json::Value::Null);
@@ -5445,84 +5478,108 @@ impl BudlumApiServer for RpcServer {
         &self,
         name: String,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        crate::wallet::identity_profile::validate_passport_name(&name).map_err(|e| {
-            ErrorObjectOwned::owned(-32602, format!("Invalid passport name: {e}"), None::<()>)
-        })?;
-        let resolved = self.chain.bns_resolve_full(name.clone()).await;
-        let manifest_id = resolved.as_ref().and_then(|r| {
-            r.content_id
-                .or(r.storage_root.map(crate::storage::ContentId))
-        });
-        let manifest = if let Some(id) = manifest_id {
-            self.chain.get_storage_manifest(id).await
-        } else {
-            None
-        };
-        let data_assets = self.chain.pollen_get_data_assets().await;
-        let access_grants = self.chain.pollen_get_access_grants().await;
-        let sale_authorizations = self.chain.pollen_get_sale_authorizations().await;
-        let profile = crate::wallet::identity_profile::build_passport_profile(
-            name,
-            resolved,
-            manifest,
-            &data_assets,
-            &access_grants,
-            &sale_authorizations,
-        );
-        serde_json::to_value(profile).map_err(|e| {
-            ErrorObjectOwned::owned(
+        #[cfg(not(feature = "wallet-ml-dsa"))]
+        {
+            let _ = name;
+            Err(ErrorObjectOwned::owned(
                 -32603,
-                format!("failed to serialize passport profile: {e}"),
+                "wallet-ml-dsa feature is required for identity profile RPC",
                 None::<()>,
-            )
-        })
+            ))
+        }
+        #[cfg(feature = "wallet-ml-dsa")]
+        {
+            crate::wallet::identity_profile::validate_passport_name(&name).map_err(|e| {
+                ErrorObjectOwned::owned(-32602, format!("Invalid passport name: {e}"), None::<()>)
+            })?;
+            let resolved = self.chain.bns_resolve_full(name.clone()).await;
+            let manifest_id = resolved.as_ref().and_then(|r| {
+                r.content_id
+                    .or(r.storage_root.map(crate::storage::ContentId))
+            });
+            let manifest = if let Some(id) = manifest_id {
+                self.chain.get_storage_manifest(id).await
+            } else {
+                None
+            };
+            let data_assets = self.chain.pollen_get_data_assets().await;
+            let access_grants = self.chain.pollen_get_access_grants().await;
+            let sale_authorizations = self.chain.pollen_get_sale_authorizations().await;
+            let profile = crate::wallet::identity_profile::build_passport_profile(
+                name,
+                resolved,
+                manifest,
+                &data_assets,
+                &access_grants,
+                &sale_authorizations,
+            );
+            serde_json::to_value(profile).map_err(|e| {
+                ErrorObjectOwned::owned(
+                    -32603,
+                    format!("failed to serialize passport profile: {e}"),
+                    None::<()>,
+                )
+            })
+        }
     }
 
     async fn passport_get_proof_bundle(
         &self,
         name: String,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        crate::wallet::identity_profile::validate_passport_name(&name).map_err(|e| {
-            ErrorObjectOwned::owned(-32602, format!("Invalid passport name: {e}"), None::<()>)
-        })?;
-        let resolved = self.chain.bns_resolve_full(name.clone()).await;
-        let manifest_id = resolved.as_ref().and_then(|r| {
-            r.content_id
-                .or(r.storage_root.map(crate::storage::ContentId))
-        });
-        let manifest = if let Some(id) = manifest_id {
-            self.chain.get_storage_manifest(id).await
-        } else {
-            None
-        };
-        let data_assets = self.chain.pollen_get_data_assets().await;
-        let access_grants = self.chain.pollen_get_access_grants().await;
-        let sale_authorizations = self.chain.pollen_get_sale_authorizations().await;
-        let profile = crate::wallet::identity_profile::build_passport_profile(
-            name,
-            resolved,
-            manifest,
-            &data_assets,
-            &access_grants,
-            &sale_authorizations,
-        );
-        let height = self.chain.get_height().await;
-        let bundle =
-            crate::wallet::identity_profile::try_build_passport_proof_bundle(&profile, height)
-                .map_err(|e| {
-                    ErrorObjectOwned::owned(
-                        -32603,
-                        format!("failed to build passport proof bundle: {e}"),
-                        None::<()>,
-                    )
-                })?;
-        serde_json::to_value(bundle).map_err(|e| {
-            ErrorObjectOwned::owned(
+        #[cfg(not(feature = "wallet-ml-dsa"))]
+        {
+            let _ = name;
+            Err(ErrorObjectOwned::owned(
                 -32603,
-                format!("failed to serialize passport proof bundle: {e}"),
+                "wallet-ml-dsa feature is required for identity profile RPC",
                 None::<()>,
-            )
-        })
+            ))
+        }
+        #[cfg(feature = "wallet-ml-dsa")]
+        {
+            crate::wallet::identity_profile::validate_passport_name(&name).map_err(|e| {
+                ErrorObjectOwned::owned(-32602, format!("Invalid passport name: {e}"), None::<()>)
+            })?;
+            let resolved = self.chain.bns_resolve_full(name.clone()).await;
+            let manifest_id = resolved.as_ref().and_then(|r| {
+                r.content_id
+                    .or(r.storage_root.map(crate::storage::ContentId))
+            });
+            let manifest = if let Some(id) = manifest_id {
+                self.chain.get_storage_manifest(id).await
+            } else {
+                None
+            };
+            let data_assets = self.chain.pollen_get_data_assets().await;
+            let access_grants = self.chain.pollen_get_access_grants().await;
+            let sale_authorizations = self.chain.pollen_get_sale_authorizations().await;
+            let profile = crate::wallet::identity_profile::build_passport_profile(
+                name,
+                resolved,
+                manifest,
+                &data_assets,
+                &access_grants,
+                &sale_authorizations,
+            );
+            let height = self.chain.get_height().await;
+            let bundle =
+                crate::wallet::identity_profile::try_build_passport_proof_bundle(&profile, height)
+                    .map_err(|e| {
+                        ErrorObjectOwned::owned(
+                            -32603,
+                            format!("failed to build passport proof bundle: {e}"),
+                            None::<()>,
+                        )
+                    })?;
+            serde_json::to_value(bundle).map_err(|e| {
+                ErrorObjectOwned::owned(
+                    -32603,
+                    format!("failed to serialize passport proof bundle: {e}"),
+                    None::<()>,
+                )
+            })
+        }
     }
 
     async fn atlas_get_wallet_context(

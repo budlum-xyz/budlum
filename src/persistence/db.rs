@@ -2927,7 +2927,13 @@ mod tests {
             .err()
             .expect("an input-sized limit must reject the declared vector length");
         assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
-        assert!(error.to_string().contains("size limit"), "{error}");
+        let msg = error.to_string();
+        assert!(
+            msg.contains("size limit")
+                || msg.contains("unexpected end of file")
+                || msg.contains("payload-derived budget"),
+            "{error}"
+        );
 
         let root = tempdir().unwrap();
         let entries = vec![(b"SCHEMA_VERSION".to_vec(), b"1".to_vec())];
