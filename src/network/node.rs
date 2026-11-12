@@ -380,10 +380,11 @@ fn budlum_topic_score_params() -> gossipsub::TopicScoreParams {
     // Keep P1/P2/P4 active while disabling P3/P3b delivery-deficit penalties:
     // sparse low-rate testnet meshes otherwise fall below the 20 msg/s default
     // threshold and silently graylist honest validators across partitions.
-    let mut params = gossipsub::TopicScoreParams::default();
-    params.mesh_message_deliveries_weight = 0.0;
-    params.mesh_failure_penalty_weight = 0.0;
-    params
+    gossipsub::TopicScoreParams {
+        mesh_message_deliveries_weight: 0.0,
+        mesh_failure_penalty_weight: 0.0,
+        ..Default::default()
+    }
 }
 
 /// First `max_chars` characters of a peer controlled string, for log lines.
