@@ -103,10 +103,15 @@ impl BudEnvUnit {
     pub const fn for_ee(ee: budlum_uel_abi::EeId) -> Option<Self> {
         match ee {
             budlum_uel_abi::EeId::BUDZERO => Some(Self::BudZeroAtom),
-            budlum_uel_abi::EeId::EVM => Some(Self::EvmWei),
+            budlum_uel_abi::EeId::EVM
+            | budlum_uel_abi::EeId::CAIRO
+            | budlum_uel_abi::EeId::NEAR_WASM
+            | budlum_uel_abi::EeId::POLKAVM
+            | budlum_uel_abi::EeId::TVM
+            | budlum_uel_abi::EeId::PLUTUS => Some(Self::EvmWei),
             budlum_uel_abi::EeId::WASM => Some(Self::WasmUbud),
-            budlum_uel_abi::EeId::SVM => Some(Self::SvmLamport),
-            budlum_uel_abi::EeId::MOVE => Some(Self::MoveOcta),
+            budlum_uel_abi::EeId::SVM | budlum_uel_abi::EeId::MOVE_SUI => Some(Self::SvmLamport),
+            budlum_uel_abi::EeId::MOVE | budlum_uel_abi::EeId::UTXO => Some(Self::MoveOcta),
             _ => None,
         }
     }

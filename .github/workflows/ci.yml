@@ -1566,7 +1566,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master 2026-09-12
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master 2026-09-12
         with:
           toolchain: "1.97.1"
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
@@ -1856,8 +1856,12 @@ jobs:
             execution/evm
             execution/move
             execution/move-sui
+            execution/near
+            execution/plutus
             execution/polkavm
             execution/svm
+            execution/tvm
+            execution/utxo
             execution/wasm
       - id: protoc
         name: Install protoc
@@ -1911,12 +1915,24 @@ jobs:
       - name: Format (ee-move-sui)
         if: always() && steps.rust.outcome == 'success'
         run: cargo fmt --manifest-path execution/move-sui/Cargo.toml --all -- --check
+      - name: Format (ee-near)
+        if: always() && steps.rust.outcome == 'success'
+        run: cargo fmt --manifest-path execution/near/Cargo.toml --all -- --check
+      - name: Format (ee-plutus)
+        if: always() && steps.rust.outcome == 'success'
+        run: cargo fmt --manifest-path execution/plutus/Cargo.toml --all -- --check
       - name: Format (ee-polkavm)
         if: always() && steps.rust.outcome == 'success'
         run: cargo fmt --manifest-path execution/polkavm/Cargo.toml --all -- --check
       - name: Format (ee-svm)
         if: always() && steps.rust.outcome == 'success'
         run: cargo fmt --manifest-path execution/svm/Cargo.toml --all -- --check
+      - name: Format (ee-tvm)
+        if: always() && steps.rust.outcome == 'success'
+        run: cargo fmt --manifest-path execution/tvm/Cargo.toml --all -- --check
+      - name: Format (ee-utxo)
+        if: always() && steps.rust.outcome == 'success'
+        run: cargo fmt --manifest-path execution/utxo/Cargo.toml --all -- --check
       - name: Format (ee-wasm)
         if: always() && steps.rust.outcome == 'success'
         run: cargo fmt --manifest-path execution/wasm/Cargo.toml --all -- --check
@@ -1950,12 +1966,24 @@ jobs:
       - name: Clippy (ee-move-sui)
         if: always() && steps.protoc.outcome == 'success'
         run: cargo clippy --manifest-path execution/move-sui/Cargo.toml --all-targets -- -D warnings
+      - name: Clippy (ee-near)
+        if: always() && steps.protoc.outcome == 'success'
+        run: cargo clippy --manifest-path execution/near/Cargo.toml --all-targets -- -D warnings
+      - name: Clippy (ee-plutus)
+        if: always() && steps.protoc.outcome == 'success'
+        run: cargo clippy --manifest-path execution/plutus/Cargo.toml --all-targets -- -D warnings
       - name: Clippy (ee-polkavm)
         if: always() && steps.protoc.outcome == 'success'
         run: cargo clippy --manifest-path execution/polkavm/Cargo.toml --all-targets -- -D warnings
       - name: Clippy (ee-svm)
         if: always() && steps.protoc.outcome == 'success'
         run: cargo clippy --manifest-path execution/svm/Cargo.toml --all-targets -- -D warnings
+      - name: Clippy (ee-tvm)
+        if: always() && steps.protoc.outcome == 'success'
+        run: cargo clippy --manifest-path execution/tvm/Cargo.toml --all-targets -- -D warnings
+      - name: Clippy (ee-utxo)
+        if: always() && steps.protoc.outcome == 'success'
+        run: cargo clippy --manifest-path execution/utxo/Cargo.toml --all-targets -- -D warnings
       - name: Clippy (ee-wasm)
         if: always() && steps.protoc.outcome == 'success'
         run: cargo clippy --manifest-path execution/wasm/Cargo.toml --all-targets -- -D warnings
@@ -1992,12 +2020,24 @@ jobs:
       - name: Tests (ee-move-sui)
         if: always() && steps.protoc.outcome == 'success'
         run: cargo test --manifest-path execution/move-sui/Cargo.toml
+      - name: Tests (ee-near)
+        if: always() && steps.protoc.outcome == 'success'
+        run: cargo test --manifest-path execution/near/Cargo.toml
+      - name: Tests (ee-plutus)
+        if: always() && steps.protoc.outcome == 'success'
+        run: cargo test --manifest-path execution/plutus/Cargo.toml
       - name: Tests (ee-polkavm)
         if: always() && steps.protoc.outcome == 'success'
         run: cargo test --manifest-path execution/polkavm/Cargo.toml
       - name: Tests (ee-svm)
         if: always() && steps.protoc.outcome == 'success'
         run: cargo test --manifest-path execution/svm/Cargo.toml
+      - name: Tests (ee-tvm)
+        if: always() && steps.protoc.outcome == 'success'
+        run: cargo test --manifest-path execution/tvm/Cargo.toml
+      - name: Tests (ee-utxo)
+        if: always() && steps.protoc.outcome == 'success'
+        run: cargo test --manifest-path execution/utxo/Cargo.toml
       - name: Tests (ee-wasm)
         if: always() && steps.protoc.outcome == 'success'
         run: cargo test --manifest-path execution/wasm/Cargo.toml

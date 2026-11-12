@@ -1,12 +1,16 @@
 //! Execution namespaces, sparse binary Merkle commitments, and `execution_root`.
 //!
-//! Implements sections 8.8 and 8.10:
-//! - Twelve canonical namespaces grouped into seven fixed-depth (256-bit) sparse
-//!   binary Merkle subtrees (`evm`, `wasm`, `svm`, `move`, `budzero`, `alias`,
-//!   `asset`).
+//! Implements sections 8.8 and 8.10 plus the T-Expansion environments:
+//! - Twelve core canonical namespaces grouped into seven fixed-depth (256-bit)
+//!   sparse binary Merkle subtrees (`evm`, `wasm`, `svm`, `move`, `budzero`,
+//!   `alias`, `asset`) plus the seven expansion namespaces (`sui/object`,
+//!   `cairo/state`, `near/state`, `polkavm/state`, `tvm/state`, `utxo/state`,
+//!   `plutus/state`).
 //! - `execution_root = H("BDLM_UEL_ROOT_V1", evm_root, wasm_root, svm_root,
-//!   move_root, budzero_root, alias_root, asset_root)` with length-prefixed
-//!   fields (`core::hash::hash_fields_bytes`).
+//!   move_root, budzero_root, alias_root, asset_root)` when no expansion subtree
+//!   is non-zero, and `H("BDLM_UEL_ROOT_V2", v1_root, sui_root, cairo_root,
+//!   near_root, polkavm_root, tvm_root, utxo_root, plutus_root)` once any
+//!   expansion environment writes state.
 //! - Permissionless Universal Asset ID derivation (`BDLM_UEL_ASSET_V1`) and
 //!   per-environment deploy feature flags (R-21).
 //!
@@ -43,10 +47,31 @@ pub const NS_MOVE_STATE: &str = "ee/move/state";
 pub const NS_BUDZERO_PROGRAM: &str = "ee/budzero/program";
 pub const NS_BUDZERO_STORAGE: &str = "ee/budzero/storage";
 
+/// Canonical Move-Sui namespace (`EeId::MOVE_SUI = 0x05`).
+pub const NS_SUI_OBJECT: &str = "ee/sui/object";
+
+/// Canonical Cairo namespace (`EeId::CAIRO = 0x06`).
+pub const NS_CAIRO_STATE: &str = "ee/cairo/state";
+
+/// Canonical NEAR-WASM namespace (`EeId::NEAR_WASM = 0x07`).
+pub const NS_NEAR_STATE: &str = "ee/near/state";
+
+/// Canonical PolkaVM namespace (`EeId::POLKAVM = 0x08`).
+pub const NS_POLKAVM_STATE: &str = "ee/polkavm/state";
+
+/// Canonical TVM (TON) namespace (`EeId::TVM = 0x09`).
+pub const NS_TVM_STATE: &str = "ee/tvm/state";
+
+/// Canonical UTXO Script namespace (`EeId::UTXO = 0x0A`).
+pub const NS_UTXO_STATE: &str = "ee/utxo/state";
+
+/// Canonical Plutus (Cardano) namespace (`EeId::PLUTUS = 0x0B`).
+pub const NS_PLUTUS_STATE: &str = "ee/plutus/state";
+
 /// Canonical Universal Asset Registry namespace.
 pub const NS_UEL_ASSETS: &str = "uel/assets";
 
-/// All twelve canonical UEL namespaces in deterministic order.
+/// All nineteen canonical UEL namespaces in deterministic order.
 pub const ALL_NAMESPACES: &[&str] = &[
     NS_EVM_ACCOUNT,
     NS_EVM_CODE,
@@ -60,9 +85,16 @@ pub const ALL_NAMESPACES: &[&str] = &[
     NS_BUDZERO_STORAGE,
     ALIAS_NAMESPACE,
     NS_UEL_ASSETS,
+    NS_SUI_OBJECT,
+    NS_CAIRO_STATE,
+    NS_NEAR_STATE,
+    NS_POLKAVM_STATE,
+    NS_TVM_STATE,
+    NS_UTXO_STATE,
+    NS_PLUTUS_STATE,
 ];
 
-/// Seven root groups folded into `execution_root` in section 8.10 order.
+/// Fourteen root groups folded into `execution_root` (seven core V1 + seven expansion groups).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum RootGroup {
     Evm,
@@ -72,6 +104,13 @@ pub enum RootGroup {
     BudZero,
     Alias,
     Asset,
+    MoveSui,
+    Cairo,
+    NearWasm,
+    PolkaVm,
+    Tvm,
+    Utxo,
+    Plutus,
 }
 
 impl RootGroup {
@@ -87,6 +126,13 @@ impl RootGroup {
             NS_BUDZERO_PROGRAM | NS_BUDZERO_STORAGE => Some(Self::BudZero),
             ALIAS_NAMESPACE => Some(Self::Alias),
             NS_UEL_ASSETS => Some(Self::Asset),
+            NS_SUI_OBJECT => Some(Self::MoveSui),
+            NS_CAIRO_STATE => Some(Self::Cairo),
+            NS_NEAR_STATE => Some(Self::NearWasm),
+            NS_POLKAVM_STATE => Some(Self::PolkaVm),
+            NS_TVM_STATE => Some(Self::Tvm),
+            NS_UTXO_STATE => Some(Self::Utxo),
+            NS_PLUTUS_STATE => Some(Self::Plutus),
             _ => None,
         }
     }
@@ -100,6 +146,13 @@ impl RootGroup {
             EeId::SVM => Some(Self::Svm),
             EeId::MOVE => Some(Self::Move),
             EeId::BUDZERO => Some(Self::BudZero),
+            EeId::MOVE_SUI => Some(Self::MoveSui),
+            EeId::CAIRO => Some(Self::Cairo),
+            EeId::NEAR_WASM => Some(Self::NearWasm),
+            EeId::POLKAVM => Some(Self::PolkaVm),
+            EeId::TVM => Some(Self::Tvm),
+            EeId::UTXO => Some(Self::Utxo),
+            EeId::PLUTUS => Some(Self::Plutus),
             _ => None,
         }
     }
@@ -316,8 +369,11 @@ impl ExecutionState {
         sparse_merkle_subtree(&entries, 0)
     }
 
-    /// Computes `execution_root` over all seven canonical root groups
-    /// (`BDLM_UEL_ROOT_V1`, `evm`, `wasm`, `svm`, `move`, `budzero`, `alias`, `asset`).
+    /// Computes `execution_root` across all core and expansion root groups.
+    ///
+    /// When no expansion namespace (`ee/{sui/object,cairo/state,near/state,
+    /// polkavm/state,tvm/state,utxo/state,plutus/state}`) holds state, this
+    /// equals `BDLM_UEL_ROOT_V1` bit-for-bit to preserve Phase-1 vectors.
     #[must_use]
     pub fn execution_root(&self) -> [u8; 32] {
         let evm = self.group_root(RootGroup::Evm);
@@ -327,7 +383,7 @@ impl ExecutionState {
         let budzero = self.group_root(RootGroup::BudZero);
         let alias = self.group_root(RootGroup::Alias);
         let asset = self.group_root(RootGroup::Asset);
-        hash_fields_bytes(&[
+        let v1 = hash_fields_bytes(&[
             b"BDLM_UEL_ROOT_V1",
             &evm,
             &wasm,
@@ -336,6 +392,34 @@ impl ExecutionState {
             &budzero,
             &alias,
             &asset,
+        ]);
+        let expansion = [
+            self.group_root(RootGroup::MoveSui),
+            self.group_root(RootGroup::Cairo),
+            self.group_root(RootGroup::NearWasm),
+            self.group_root(RootGroup::PolkaVm),
+            self.group_root(RootGroup::Tvm),
+            self.group_root(RootGroup::Utxo),
+            self.group_root(RootGroup::Plutus),
+        ];
+        fold_execution_root_v1_or_v2(v1, expansion)
+    }
+}
+
+fn fold_execution_root_v1_or_v2(v1: [u8; 32], expansion: [[u8; 32]; 7]) -> [u8; 32] {
+    if expansion.iter().all(|r| *r == [0u8; 32]) {
+        v1
+    } else {
+        hash_fields_bytes(&[
+            b"BDLM_UEL_ROOT_V2",
+            &v1,
+            &expansion[0],
+            &expansion[1],
+            &expansion[2],
+            &expansion[3],
+            &expansion[4],
+            &expansion[5],
+            &expansion[6],
         ])
     }
 }
@@ -374,8 +458,11 @@ pub struct UelExecutionProof {
     pub value: Option<Vec<u8>>,
     /// Non-zero sibling hashes `(depth, sibling_hash)` along the 256-bit path.
     pub non_zero_siblings: Vec<(u8, [u8; 32])>,
-    /// All seven group roots `[evm, wasm, svm, move, budzero, alias, asset]`.
+    /// All seven core group roots `[evm, wasm, svm, move, budzero, alias, asset]`.
     pub group_roots: [[u8; 32]; 7],
+    /// Seven expansion group roots `[sui, cairo, near, polkavm, tvm, utxo, plutus]`.
+    #[serde(default)]
+    pub expansion_roots: [[u8; 32]; 7],
 }
 
 impl ExecutionState {
@@ -415,12 +502,22 @@ impl ExecutionState {
             self.group_root(RootGroup::Alias),
             self.group_root(RootGroup::Asset),
         ];
+        let expansion_roots = [
+            self.group_root(RootGroup::MoveSui),
+            self.group_root(RootGroup::Cairo),
+            self.group_root(RootGroup::NearWasm),
+            self.group_root(RootGroup::PolkaVm),
+            self.group_root(RootGroup::Tvm),
+            self.group_root(RootGroup::Utxo),
+            self.group_root(RootGroup::Plutus),
+        ];
         Ok(UelExecutionProof {
             namespace: String::from(ns),
             key: key.to_vec(),
             value,
             non_zero_siblings: siblings,
             group_roots,
+            expansion_roots,
         })
     }
 }
@@ -491,19 +588,26 @@ pub fn uel_proof_matches_root(
             hash_fields_bytes(&[b"BDLM_UEL_NS_NODE_V1", &cur, &sib])
         };
     }
-    let idx = match group {
-        RootGroup::Evm => 0,
-        RootGroup::Wasm => 1,
-        RootGroup::Svm => 2,
-        RootGroup::Move => 3,
-        RootGroup::BudZero => 4,
-        RootGroup::Alias => 5,
-        RootGroup::Asset => 6,
+    let expected_group_root = match group {
+        RootGroup::Evm => proof.group_roots.first(),
+        RootGroup::Wasm => proof.group_roots.get(1),
+        RootGroup::Svm => proof.group_roots.get(2),
+        RootGroup::Move => proof.group_roots.get(3),
+        RootGroup::BudZero => proof.group_roots.get(4),
+        RootGroup::Alias => proof.group_roots.get(5),
+        RootGroup::Asset => proof.group_roots.get(6),
+        RootGroup::MoveSui => proof.expansion_roots.first(),
+        RootGroup::Cairo => proof.expansion_roots.get(1),
+        RootGroup::NearWasm => proof.expansion_roots.get(2),
+        RootGroup::PolkaVm => proof.expansion_roots.get(3),
+        RootGroup::Tvm => proof.expansion_roots.get(4),
+        RootGroup::Utxo => proof.expansion_roots.get(5),
+        RootGroup::Plutus => proof.expansion_roots.get(6),
     };
-    if proof.group_roots.get(idx) != Some(&cur) {
+    if expected_group_root != Some(&cur) {
         return false;
     }
     let [g0, g1, g2, g3, g4, g5, g6] = proof.group_roots;
-    let folded = hash_fields_bytes(&[b"BDLM_UEL_ROOT_V1", &g0, &g1, &g2, &g3, &g4, &g5, &g6]);
-    folded == *expected_execution_root
+    let v1 = hash_fields_bytes(&[b"BDLM_UEL_ROOT_V1", &g0, &g1, &g2, &g3, &g4, &g5, &g6]);
+    fold_execution_root_v1_or_v2(v1, proof.expansion_roots) == *expected_execution_root
 }

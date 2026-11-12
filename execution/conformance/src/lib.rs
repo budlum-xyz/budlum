@@ -500,11 +500,27 @@ mod tests {
         MoveSuiWorker, SuiCompiledModule, SuiPtb, SuiPtbCommand, ATTO_PER_MIST,
         PROPOSED_SUI_ACTIVATION_HEIGHT,
     };
+    use budlum_ee_near::{
+        encode_near_blob, NearContractProgram, NearFunctionCall, NearMethod, NearOp,
+        NearWasmWorker, AUDITED_NEAR_SPDX, PROPOSED_NEAR_ACTIVATION_HEIGHT,
+    };
+    use budlum_ee_plutus::{
+        encode_plutus_blob, PlutusSpendInput, PlutusValidatorProgram, PlutusWorker, UplcTerm,
+        AUDITED_PLUTUS_SPDX, PROPOSED_PLUTUS_ACTIVATION_HEIGHT,
+    };
     use budlum_ee_polkavm::{
         encode_polkavm_blob, PolkaVmDispatch, PolkaVmInsn, PolkaVmProgram, PolkaVmWorker,
         PROPOSED_POLKAVM_ACTIVATION_HEIGHT,
     };
     use budlum_ee_svm::programs::{NS_SVM_ACCOUNT, STAKE_PROGRAM_ID, VOTE_PROGRAM_ID};
+    use budlum_ee_tvm::{
+        encode_tvm_blob, TvmContract, TvmInsn, TvmInternalMsg, TvmMethod, TvmWorker,
+        AUDITED_TVM_SPDX, PROPOSED_TVM_ACTIVATION_HEIGHT,
+    };
+    use budlum_ee_utxo::{
+        encode_utxo_script, ScriptOp, UtxoLockScript, UtxoScriptWorker, UtxoSpendWitness,
+        AUDITED_UTXO_SPDX, PROPOSED_UTXO_ACTIVATION_HEIGHT,
+    };
     use budlum_ee_wasm::NS_WASM_STORE;
     use budlum_uel_abi::EeQuery;
 
@@ -1003,5 +1019,315 @@ mod tests {
             panic!("polkavm deploy");
         };
         assert_eq!(dep.status, OutcomeStatus::Success);
+    }
+
+    /// Directive IP-53 (2/5) conformance gate: `uel_conformance_near`.
+    #[test]
+    fn uel_conformance_near() {
+        assert_eq!(AUDITED_NEAR_SPDX, "MIT OR Apache-2.0");
+        let mut worker = NearWasmWorker::new();
+        let prog = NearContractProgram {
+            abi_version: String::from("near-sdk-5.0"),
+            init_ops: vec![NearOp::StorageWrite {
+                key: String::from("val"),
+                value: 3u64.to_le_bytes().to_vec(),
+            }],
+            methods: vec![NearMethod {
+                name: String::from("inc"),
+                is_view: false,
+                ops: vec![NearOp::StorageAddU64 {
+                    key: String::from("val"),
+                    delta: 4,
+                }],
+            }],
+        };
+        let Ok(blob) = encode_near_blob(&prog) else {
+            panic!("near blob");
+        };
+        let mut host = MemoryHost::new(5_000_000);
+        let Ok(caller) = EeIdentity::new(EeId::NEAR_WASM, b"alice.budlum".to_vec()) else {
+            panic!("caller");
+        };
+        let ctx = BlockContext {
+            chain_id: 45_261,
+            height: PROPOSED_NEAR_ACTIVATION_HEIGHT,
+            timestamp_ms: 1_793_923_200_000,
+        };
+        let Ok(dep) = worker.execute(
+            &ctx,
+            &EeCall {
+                kind: EeCallKind::Deploy,
+                caller: caller.clone(),
+                target: caller.clone(),
+                value: BudAmount(0),
+                input: blob,
+                gas_limit: 500_000,
+                depth: 0,
+                tx_hash: [0x70; 32],
+            },
+            &mut host,
+        ) else {
+            panic!("near deploy");
+        };
+        assert_eq!(dep.status, OutcomeStatus::Success);
+        let Ok(target) = EeIdentity::new(EeId::NEAR_WASM, dep.output) else {
+            panic!("target");
+        };
+        let Ok(call_in) = serde_json::to_vec(&NearFunctionCall {
+            method_name: String::from("inc"),
+            args: std::collections::BTreeMap::new(),
+        }) else {
+            panic!("call_in");
+        };
+        let Ok(call_out) = worker.execute(
+            &ctx,
+            &EeCall {
+                kind: EeCallKind::Call,
+                caller,
+                target,
+                value: BudAmount(0),
+                input: call_in,
+                gas_limit: 500_000,
+                depth: 0,
+                tx_hash: [0x71; 32],
+            },
+            &mut host,
+        ) else {
+            panic!("near call");
+        };
+        assert_eq!(call_out.status, OutcomeStatus::Success);
+        assert_eq!(call_out.output, 7u64.to_le_bytes());
+    }
+
+    /// Directive IP-53 (3/5) conformance gate: `uel_conformance_tvm`.
+    #[test]
+    fn uel_conformance_tvm() {
+        assert_eq!(AUDITED_TVM_SPDX, "MIT OR Apache-2.0");
+        let mut worker = TvmWorker::new();
+        let contract = TvmContract {
+            init: vec![
+                TvmInsn::PushInt(10),
+                TvmInsn::StoreC4Word {
+                    key: String::from("x"),
+                },
+            ],
+            handlers: vec![TvmMethod {
+                op: 1,
+                body: vec![
+                    TvmInsn::LoadC4Word {
+                        key: String::from("x"),
+                    },
+                    TvmInsn::PushMsgWord(0),
+                    TvmInsn::Add,
+                    TvmInsn::AcceptRetTop,
+                ],
+            }],
+        };
+        let Ok(blob) = encode_tvm_blob(&contract) else {
+            panic!("tvm blob");
+        };
+        let mut host = MemoryHost::new(5_000_000);
+        let Ok(caller) = EeIdentity::new(EeId::TVM, vec![0x91; 32]) else {
+            panic!("caller");
+        };
+        let ctx = BlockContext {
+            chain_id: 45_261,
+            height: PROPOSED_TVM_ACTIVATION_HEIGHT,
+            timestamp_ms: 1_793_923_200_000,
+        };
+        let Ok(dep) = worker.execute(
+            &ctx,
+            &EeCall {
+                kind: EeCallKind::Deploy,
+                caller: caller.clone(),
+                target: caller.clone(),
+                value: BudAmount(0),
+                input: blob,
+                gas_limit: 500_000,
+                depth: 0,
+                tx_hash: [0x90; 32],
+            },
+            &mut host,
+        ) else {
+            panic!("tvm deploy");
+        };
+        assert_eq!(dep.status, OutcomeStatus::Success);
+        let Ok(target) = EeIdentity::new(EeId::TVM, dep.output) else {
+            panic!("target");
+        };
+        let Ok(msg) = serde_json::to_vec(&TvmInternalMsg {
+            op: 1,
+            args: vec![32],
+        }) else {
+            panic!("tvm msg");
+        };
+        let Ok(res) = worker.execute(
+            &ctx,
+            &EeCall {
+                kind: EeCallKind::Call,
+                caller,
+                target,
+                value: BudAmount(0),
+                input: msg,
+                gas_limit: 500_000,
+                depth: 0,
+                tx_hash: [0x91; 32],
+            },
+            &mut host,
+        ) else {
+            panic!("tvm call");
+        };
+        assert_eq!(res.status, OutcomeStatus::Success);
+        assert_eq!(res.output, 42i128.to_le_bytes());
+    }
+
+    /// Directive IP-53 (4/5) conformance gate: `uel_conformance_utxo`.
+    #[test]
+    fn uel_conformance_utxo() {
+        assert_eq!(AUDITED_UTXO_SPDX, "MIT");
+        let mut worker = UtxoScriptWorker::new();
+        let preimage = b"conformance-preimage".to_vec();
+        let digest: [u8; 32] = Sha256::digest(&preimage).into();
+        let lock = UtxoLockScript {
+            witness_ops: Vec::new(),
+            lock_ops: vec![
+                ScriptOp::OpSha256,
+                ScriptOp::PushBytes(digest.to_vec()),
+                ScriptOp::OpEqual,
+            ],
+            value_atoms: 1_000,
+        };
+        let Ok(blob) = encode_utxo_script(&lock) else {
+            panic!("utxo blob");
+        };
+        let mut host = MemoryHost::new(5_000_000);
+        let Ok(caller) = EeIdentity::new(EeId::UTXO, vec![0xA1; 32]) else {
+            panic!("caller");
+        };
+        let ctx = BlockContext {
+            chain_id: 45_261,
+            height: PROPOSED_UTXO_ACTIVATION_HEIGHT,
+            timestamp_ms: 1_793_923_200_000,
+        };
+        let Ok(dep) = worker.execute(
+            &ctx,
+            &EeCall {
+                kind: EeCallKind::Deploy,
+                caller: caller.clone(),
+                target: caller.clone(),
+                value: BudAmount(0),
+                input: blob,
+                gas_limit: 500_000,
+                depth: 0,
+                tx_hash: [0xA0; 32],
+            },
+            &mut host,
+        ) else {
+            panic!("utxo deploy");
+        };
+        assert_eq!(dep.status, OutcomeStatus::Success);
+        let Ok(target) = EeIdentity::new(EeId::UTXO, dep.output) else {
+            panic!("target");
+        };
+        let Ok(witness) = serde_json::to_vec(&UtxoSpendWitness {
+            unlock_ops: vec![ScriptOp::PushBytes(preimage)],
+            recipient: [0xCC; 32],
+        }) else {
+            panic!("utxo witness");
+        };
+        let Ok(res) = worker.execute(
+            &ctx,
+            &EeCall {
+                kind: EeCallKind::Call,
+                caller,
+                target,
+                value: BudAmount(0),
+                input: witness,
+                gas_limit: 500_000,
+                depth: 0,
+                tx_hash: [0xA1; 32],
+            },
+            &mut host,
+        ) else {
+            panic!("utxo spend");
+        };
+        assert_eq!(res.status, OutcomeStatus::Success);
+        assert_eq!(res.output, [0xCC; 32]);
+    }
+
+    /// Directive IP-53 (5/5) conformance gate: `uel_conformance_plutus`.
+    #[test]
+    fn uel_conformance_plutus() {
+        assert_eq!(AUDITED_PLUTUS_SPDX, "Apache-2.0");
+        let mut worker = PlutusWorker::new();
+        let prog = PlutusValidatorProgram {
+            uplc_version: String::from("1.1.0"),
+            initial_datum_int: 5,
+            validator: UplcTerm::IfThenElse {
+                cond: Box::new(UplcTerm::EqualsInt(
+                    Box::new(UplcTerm::DatumInt),
+                    Box::new(UplcTerm::RedeemerInt),
+                )),
+                then_branch: Box::new(UplcTerm::TraceUnit(Box::new(UplcTerm::ConstInt(1)))),
+                else_branch: Box::new(UplcTerm::Error),
+            },
+        };
+        let Ok(blob) = encode_plutus_blob(&prog) else {
+            panic!("plutus blob");
+        };
+        let mut host = MemoryHost::new(5_000_000);
+        let Ok(caller) = EeIdentity::new(EeId::PLUTUS, vec![0xB1; 32]) else {
+            panic!("caller");
+        };
+        let ctx = BlockContext {
+            chain_id: 45_261,
+            height: PROPOSED_PLUTUS_ACTIVATION_HEIGHT,
+            timestamp_ms: 1_793_923_200_000,
+        };
+        let Ok(dep) = worker.execute(
+            &ctx,
+            &EeCall {
+                kind: EeCallKind::Deploy,
+                caller: caller.clone(),
+                target: caller.clone(),
+                value: BudAmount(0),
+                input: blob,
+                gas_limit: 500_000,
+                depth: 0,
+                tx_hash: [0xB0; 32],
+            },
+            &mut host,
+        ) else {
+            panic!("plutus deploy");
+        };
+        assert_eq!(dep.status, OutcomeStatus::Success);
+        let Ok(target) = EeIdentity::new(EeId::PLUTUS, dep.output) else {
+            panic!("target");
+        };
+        let Ok(spend) = serde_json::to_vec(&PlutusSpendInput {
+            new_datum_int: Some(6),
+            redeemer_int: 5,
+            redeemer_bytes: Vec::new(),
+        }) else {
+            panic!("spend");
+        };
+        let Ok(res) = worker.execute(
+            &ctx,
+            &EeCall {
+                kind: EeCallKind::Call,
+                caller,
+                target,
+                value: BudAmount(0),
+                input: spend,
+                gas_limit: 500_000,
+                depth: 0,
+                tx_hash: [0xB1; 32],
+            },
+            &mut host,
+        ) else {
+            panic!("plutus call");
+        };
+        assert_eq!(res.status, OutcomeStatus::Success);
+        assert_eq!(res.output, 5i64.to_le_bytes());
     }
 }
