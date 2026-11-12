@@ -514,7 +514,11 @@ impl PoAOnboarding {
         if !self.registry.is_authorized(domain, account) {
             return false;
         }
-        let expiry = self.kyc_expiry.get(&(domain, *account)).copied().unwrap_or(u64::MAX);
+        let expiry = self
+            .kyc_expiry
+            .get(&(domain, *account))
+            .copied()
+            .unwrap_or(u64::MAX);
         now_block <= expiry
     }
 }
