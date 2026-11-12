@@ -1395,26 +1395,63 @@ fn local_metric_pair(body: &str) -> Option<String> {
     ))
 }
 
-fn local_metrics_snapshot(stack: &LocalStack) -> String {
+/// Do not put raw HTTP errors, responses, or node logs in CI. Distinguish
+/// absent gauges from an unreachable listener using only fixed labels and
+/// numeric values; the original 'metrics unavailable' hid both causes.
+fn metric_probe_summary(reply: Result<rpc::Reply, String>) -> String {
+    match reply {
+        Ok(reply) if reply.is_success() => local_metric_pair(&reply.body).unwrap_or_else(|| {
+            let missing: Vec<&str> = [
+                ("tip", "budlum_chain_height"),
+                ("finalized", "budlum_finalized_height"),
+                ("peers", "budlum_p2p_peers_connected"),
+                ("active", "budlum_active_validators"),
+            ]
+            .into_iter()
+            .filter_map(|(label, metric)| {
+                metric_u64(&reply.body, metric).is_none().then_some(label)
+            })
+            .collect();
+            format!("metrics-missing-or-invalid={}", missing.join(","))
+        }),
+        Ok(reply) => format!("metrics-http={}", reply.status),
+        Err(error) if error.starts_with("connect to ") => String::from("metrics-connect-failed"),
+        Err(error) if error.contains("did not finish the reply in time") => {
+            String::from("metrics-timeout")
+        }
+        Err(_) => String::from("metrics-read-failed"),
+    }
+}
+
+fn local_metrics_snapshot(stack: &mut LocalStack) -> String {
     let probe = |port| {
-        rpc::request("GET", port, "/metrics", None, Duration::from_secs(2))
-            .ok()
-            .filter(rpc::Reply::is_success)
-            .and_then(|reply| local_metric_pair(&reply.body))
-            .unwrap_or_else(|| String::from("metrics unavailable"))
+        metric_probe_summary(rpc::request(
+            "GET",
+            port,
+            "/metrics",
+            None,
+            Duration::from_secs(2),
+        ))
     };
     let mut parts = vec![format!("rpc({})", probe(29090))];
     for seat in 1..=stack.seats {
-        if stack.validators.get(seat - 1).is_some_and(Option::is_none) {
+        let Some(Some(child)) = stack.validators.get_mut(seat - 1) else {
             parts.push(format!("v{seat}(stopped)"));
             continue;
-        }
+        };
+        let state = match child.try_wait() {
+            Ok(None) => String::from("running"),
+            Ok(Some(exit)) => exit
+                .code()
+                .map_or_else(|| String::from("signaled"), |code| format!("exited={code}")),
+            Err(_) => String::from("state-unavailable"),
+        };
         let Ok(seat_port) = u16::try_from(seat) else {
             parts.push(format!("v{seat}(invalid port)"));
             continue;
         };
         parts.push(format!(
-            "v{seat}({})",
+            "v{seat}({state},{})",
             probe(LOCAL_VAL_METRICS_BASE + seat_port)
         ));
     }
@@ -1455,10 +1492,10 @@ fn scenario_chaos(backend: &mut Backend<'_>) -> Result<String, String> {
         offline_progress(stopped_at, observed_finality, stopped_tip, observed_tip)
             .then_some(observed_finality)
     });
-    let offline_diagnostics = match (&*backend, advanced) {
+    let offline_diagnostics = match (&mut *backend, advanced) {
         (Backend::Local { stack, .. }, None) => {
             format!(
-                "; native metrics before restart: {}",
+                "; native metrics and process states before restart: {}",
                 local_metrics_snapshot(stack)
             )
         }
@@ -1783,6 +1820,35 @@ mod tests {
             "budlum_finalized_height secret"
         ))
         .is_none());
+        assert_eq!(
+            metric_probe_summary(Ok(rpc::Reply {
+                status: 200,
+                body: sample.into(),
+            })),
+            "tip=63,finalized=55,peers=2,active=4"
+        );
+        assert_eq!(
+            metric_probe_summary(Ok(rpc::Reply {
+                status: 200,
+                body: "budlum_chain_height 33\n".into(),
+            })),
+            "metrics-missing-or-invalid=finalized,peers,active"
+        );
+        assert_eq!(
+            metric_probe_summary(Ok(rpc::Reply {
+                status: 403,
+                body: "untrusted body".into(),
+            })),
+            "metrics-http=403"
+        );
+        assert_eq!(
+            metric_probe_summary(Err("connect to untrusted error text".into())),
+            "metrics-connect-failed"
+        );
+        assert_eq!(
+            metric_probe_summary(Err("read from untrusted error text".into())),
+            "metrics-read-failed"
+        );
     }
 
     #[test]
