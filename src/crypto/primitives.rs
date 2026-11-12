@@ -1013,17 +1013,6 @@ pub fn verify_ml_dsa_87_signature_in(
     ))
 }
 
-#[cfg(not(feature = "wallet-ml-dsa"))]
-pub fn verify_ml_dsa_87_signature(
-    _ctx: &[u8],
-    _message: &[u8],
-    _signature: &[u8],
-    _public_key: &[u8],
-) -> Result<(), CryptoError> {
-    Err(CryptoError::Verification(
-        "wallet ML-DSA-87 support is not compiled in (enable wallet-ml-dsa)".into(),
-    ))
-}
 #[cfg(test)]
 mod tests {
     #[test]

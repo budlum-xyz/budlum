@@ -24,7 +24,7 @@ PUL|12|98
 Pollen|66|727
 Regeneration|27|108
 Sera|0|0
-Tarif|51|1412
+Tarif|52|1413
 Universal Gateway|4|7
 Vault (SocialFi)|7|152
 budlumxyz|25|204

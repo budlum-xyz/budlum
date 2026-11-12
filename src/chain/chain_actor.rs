@@ -2792,11 +2792,14 @@ impl ChainActor {
                     let _ = res_tx.send(res);
                 }
                 ChainCommand::HandleFinalityCert(cert, res_tx) => {
-                    let _ = res_tx.send(
-                        self.blockchain
-                            .handle_finality_cert(cert)
-                            .map_err(|e| e.to_string()),
-                    );
+                    let res = self
+                        .blockchain
+                        .handle_finality_cert(cert)
+                        .map_err(|e| e.to_string());
+                    if res.is_ok() {
+                        self.blockchain.start_pending_finality_round();
+                    }
+                    let _ = res_tx.send(res);
                 }
                 ChainCommand::HandlePrevote(vote, res_tx) => {
                     let result = self.blockchain.handle_prevote(vote);
@@ -2854,11 +2857,14 @@ impl ChainActor {
                     let _ = response.send(result);
                 }
                 ChainCommand::ImportQcBlob(blob, res_tx) => {
-                    let _ = res_tx.send(
-                        self.blockchain
-                            .import_qc_blob(blob)
-                            .map_err(|e| e.to_string()),
-                    );
+                    let res = self
+                        .blockchain
+                        .import_qc_blob(blob)
+                        .map_err(|e| e.to_string());
+                    if res.is_ok() {
+                        self.blockchain.start_pending_finality_round();
+                    }
+                    let _ = res_tx.send(res);
                 }
                 ChainCommand::HandleQcFaultProof(proof, res_tx) => {
                     let _ = res_tx.send(

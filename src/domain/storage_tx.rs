@@ -2223,4 +2223,43 @@ mod tests {
             .live_for_content(&mid)
             .is_empty());
     }
+
+    #[test]
+    fn operator_self_challenge_via_tx_never_credits_demand_or_rewards() {
+        let mut state = AccountState::new();
+        let (op, _opener, deal_id) = challengeable(&mut state);
+        let mid = state
+            .storage_registry
+            .get_deal(deal_id)
+            .unwrap()
+            .manifest_id;
+        state.add_balance(&op, OPENER_FUNDS);
+        execute_storage_tx(&mut state, &ctx(op), &open_challenge_tx(deal_id))
+            .expect("permissionless challenge invariant allows self-challenge");
+        let cid = state.storage_registry.all_challenges()[0].challenge_id;
+        execute_storage_tx(
+            &mut state,
+            &ctx(op),
+            &StorageTx::AnswerChallenge {
+                challenge_id: cid,
+                range_hash: ContentId([0x44; 32]),
+                proof: vec![0xAB; 16],
+            },
+        )
+        .expect("self-challenge answer settles bond cleanly");
+        assert_eq!(
+            state
+                .storage_registry
+                .access_estimate(&mid, state.epoch_index),
+            crate::storage::AccessEstimate::from_events(&[], state.epoch_index),
+            "self-challenge via tx must never credit storage demand"
+        );
+        assert_eq!(
+            state
+                .storage_registry
+                .verified_challenge_bytes_with_gate(deal_id, op, true),
+            0,
+            "self-challenge via tx must never credit reward bytes"
+        );
+    }
 }

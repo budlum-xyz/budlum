@@ -240,9 +240,7 @@ enum RouteMatch {
 fn segments(path: &str) -> impl Iterator<Item = &str> {
     let trimmed = path.strip_prefix('/').unwrap_or(path);
     let non_empty = !trimmed.is_empty();
-    trimmed
-        .split('/')
-        .take_while(move |_| non_empty)
+    trimmed.split('/').take_while(move |_| non_empty)
 }
 
 fn path_matches(pattern: &str, path: &str) -> bool {

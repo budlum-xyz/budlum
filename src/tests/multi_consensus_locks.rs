@@ -133,6 +133,7 @@ mod poa_authority_binding {
             pow_parameters: None,
             zk_program_allowlist: Vec::new(),
             plugin_code_hash: None,
+            genesis_state_root: [0u8; 32],
         }
     }
 

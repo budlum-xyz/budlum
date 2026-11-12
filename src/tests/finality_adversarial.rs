@@ -548,7 +548,6 @@ fn finality_honest_quorum_survives_byzantine_noise() {
 /// path and applies a real slash.
 #[test]
 fn equivocation_generates_slashing_evidence() {
-
     // Two validators: `honest` produces the blocks, `equivocator` will double-sign.
     let mut hsk = [0u8; 64];
     hsk[0] = 11;
@@ -963,7 +962,6 @@ fn invalid_signatures_below_threshold_do_not_slash() {
 /// signature at ingest - it never enters the aggregate and state does not change.
 #[test]
 fn blockchain_rejects_invalid_vote_signature_at_ingest() {
-
     let mut hsk = [0u8; 64];
     hsk[0] = 33;
     let honest_bls = Scalar::from_bytes_wide(&hsk);
@@ -1398,7 +1396,6 @@ const OTHER_CHAIN_ID: u64 = 45262 + 1;
 
 #[test]
 fn votes_signed_for_another_chain_are_refused_at_ingest() {
-
     let (bls_sk, bls_pk) = make_test_key(41);
     let voter = test_addr_from_byte(7u8);
 
@@ -1450,7 +1447,6 @@ fn votes_signed_for_another_chain_are_refused_at_ingest() {
 
 #[test]
 fn a_cross_chain_vote_pair_is_not_equivocation() {
-
     let (bls_sk, bls_pk) = make_test_key(43);
     let voter = test_addr_from_byte(9u8);
 
