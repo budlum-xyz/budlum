@@ -176,8 +176,7 @@ pub fn encode_universal_call_input(
         .copy_from_slice(&(target.len() as u64).to_be_bytes());
     body[target_offset + 32..target_offset + 32 + target.len()].copy_from_slice(target);
 
-    body[input_offset + 24..input_offset + 32]
-        .copy_from_slice(&(input.len() as u64).to_be_bytes());
+    body[input_offset + 24..input_offset + 32].copy_from_slice(&(input.len() as u64).to_be_bytes());
     body[input_offset + 32..input_offset + 32 + input.len()].copy_from_slice(input);
     out
 }

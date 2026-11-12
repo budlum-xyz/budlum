@@ -8,6 +8,8 @@
 //!   Account, Memo, BPF Loader, and the UEL Universal Call program
 //!   (`SHA256("BDLM_SVM_UNIVERSAL_PROGRAM_V1")`).
 //! - Solana Vote and Stake programs are absent and explicitly refused (section 8.15).
+//!
+//! Convenience: exposed for CLI, RPC, SDK, and multi-VM runtime callers.
 
 use crate::core::account::ATTOS_PER_ATOM;
 use crate::execution::coordinator::alias::is_ed25519_on_curve;
@@ -219,10 +221,12 @@ impl ExecutionEnvironment for SvmEe {
     }
 
     fn validate_deploy(&self, code: &[u8]) -> Result<CodeInfo, EeRefusal> {
-        self.config.ensure_deterministic().map_err(|message| EeRefusal {
-            code: RefusalCode::Denied,
-            message,
-        })?;
+        self.config
+            .ensure_deterministic()
+            .map_err(|message| EeRefusal {
+                code: RefusalCode::Denied,
+                message,
+            })?;
         if code.len() < 4 || code.get(..4) != Some(&ELF_MAGIC) {
             return Err(EeRefusal {
                 code: RefusalCode::InvalidCode,
@@ -344,6 +348,14 @@ impl ExecutionEnvironment for SvmEe {
                         mint_authority,
                         is_token_2022,
                     } => {
+                        let existing = read_svm_account(host, &mint).unwrap_or_default();
+                        if existing.lamports != 0 || existing.owner != SVM_SYSTEM_PROGRAM_ID {
+                            return Ok(EeOutcome {
+                                status: OutcomeStatus::Revert,
+                                output: b"target account is owned by another program".to_vec(),
+                                gas_used: 8_000,
+                            });
+                        }
                         let meta = serde_json::json!({
                             "decimals": decimals,
                             "authority": hex::encode(mint_authority),
@@ -372,6 +384,43 @@ impl ExecutionEnvironment for SvmEe {
                         dest_owner,
                         amount,
                     } => {
+                        let Some(mut mint_acc) = read_svm_account(host, &mint).ok() else {
+                            return Ok(EeOutcome {
+                                status: OutcomeStatus::Revert,
+                                output: b"uninitialized mint".to_vec(),
+                                gas_used: 5_000,
+                            });
+                        };
+                        if mint_acc.owner != SVM_SPL_TOKEN_PROGRAM_ID
+                            && mint_acc.owner != SVM_TOKEN_2022_PROGRAM_ID
+                        {
+                            return Ok(EeOutcome {
+                                status: OutcomeStatus::Revert,
+                                output: b"invalid mint owner".to_vec(),
+                                gas_used: 5_000,
+                            });
+                        }
+                        let Ok(mut mint_meta) =
+                            serde_json::from_slice::<serde_json::Value>(&mint_acc.data)
+                        else {
+                            return Ok(EeOutcome {
+                                status: OutcomeStatus::Revert,
+                                output: b"corrupt mint metadata".to_vec(),
+                                gas_used: 5_000,
+                            });
+                        };
+                        let auth_ok = mint_meta
+                            .get("authority")
+                            .and_then(serde_json::Value::as_str)
+                            .and_then(|h| hex::decode(h).ok())
+                            .is_some_and(|b| b.as_slice() == caller_pk);
+                        if !auth_ok {
+                            return Ok(EeOutcome {
+                                status: OutcomeStatus::Revert,
+                                output: b"caller is not mint authority".to_vec(),
+                                gas_used: 5_000,
+                            });
+                        }
                         let Ok(ata) = derive_associated_token_address(&dest_owner, &mint) else {
                             return Ok(EeOutcome {
                                 status: OutcomeStatus::Revert,
@@ -380,13 +429,47 @@ impl ExecutionEnvironment for SvmEe {
                             });
                         };
                         let mut acc = read_svm_account(host, &ata).unwrap_or_default();
+                        if acc.lamports != 0
+                            && acc.owner != SVM_SPL_TOKEN_PROGRAM_ID
+                            && acc.owner != SVM_TOKEN_2022_PROGRAM_ID
+                        {
+                            return Ok(EeOutcome {
+                                status: OutcomeStatus::Revert,
+                                output: b"destination ATA owned by another program".to_vec(),
+                                gas_used: 5_000,
+                            });
+                        }
                         let cur = acc
                             .data
                             .get(..8)
                             .and_then(|s| <[u8; 8]>::try_from(s).ok())
                             .map_or(0u64, u64::from_le_bytes);
-                        acc.owner = SVM_SPL_TOKEN_PROGRAM_ID;
-                        acc.data = cur.saturating_add(amount).to_le_bytes().to_vec();
+                        let Some(new_bal) = cur.checked_add(amount) else {
+                            return Ok(EeOutcome {
+                                status: OutcomeStatus::Revert,
+                                output: b"SPL balance overflow".to_vec(),
+                                gas_used: 5_000,
+                            });
+                        };
+                        let cur_supply = mint_meta
+                            .get("supply")
+                            .and_then(serde_json::Value::as_u64)
+                            .unwrap_or(0);
+                        let Some(new_supply) = cur_supply.checked_add(amount) else {
+                            return Ok(EeOutcome {
+                                status: OutcomeStatus::Revert,
+                                output: b"SPL supply overflow".to_vec(),
+                                gas_used: 5_000,
+                            });
+                        };
+                        if let Some(obj) = mint_meta.as_object_mut() {
+                            obj.insert(String::from("supply"), serde_json::json!(new_supply));
+                        }
+                        mint_acc.data = serde_json::to_vec(&mint_meta).unwrap_or_default();
+                        let _ = write_svm_account(host, &mint, &mint_acc);
+                        acc.lamports = acc.lamports.max(1);
+                        acc.owner = mint_acc.owner;
+                        acc.data = new_bal.to_le_bytes().to_vec();
                         let _ = write_svm_account(host, &ata, &acc);
                         Ok(EeOutcome {
                             status: OutcomeStatus::Success,
@@ -448,6 +531,14 @@ impl ExecutionEnvironment for SvmEe {
                                 gas_used: 5_000,
                             });
                         };
+                        let existing = read_svm_account(host, &ata).unwrap_or_default();
+                        if existing.lamports != 0 || existing.owner != SVM_SYSTEM_PROGRAM_ID {
+                            return Ok(EeOutcome {
+                                status: OutcomeStatus::Revert,
+                                output: b"associated token account already exists".to_vec(),
+                                gas_used: 7_500,
+                            });
+                        }
                         let acc = SvmAccountData {
                             lamports: 1,
                             owner: SVM_SPL_TOKEN_PROGRAM_ID,
@@ -463,9 +554,13 @@ impl ExecutionEnvironment for SvmEe {
                         })
                     }
                     SvmInstructionEnvelope::Memo { utf8_memo } => {
+                        let topic_arr: [u8; 32] = Sha256::digest(b"svm:memo").into();
                         let _ = host.emit_log(EeLog {
-                            address: SVM_MEMO_PROGRAM_ID.to_vec(),
-                            topics: vec![Sha256::digest(b"svm:memo").into()],
+                            emitter: EeIdentity {
+                                ee: EeId::SVM,
+                                id: SVM_MEMO_PROGRAM_ID.to_vec(),
+                            },
+                            topics: vec![topic_arr.to_vec()],
                             data: utf8_memo.clone().into_bytes(),
                         });
                         Ok(EeOutcome {
@@ -525,6 +620,7 @@ impl ExecutionEnvironment for SvmEe {
                             value: BudAmount(value_attos),
                             input: payload,
                             gas_limit: gas_limit_bgu,
+                            is_static,
                         }) {
                             Ok(r) => Ok(EeOutcome {
                                 status: if r.success {

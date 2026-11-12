@@ -25,6 +25,7 @@
 //!
 //! The parser never panics, never allocates from an untrusted length before
 //! it has checked the bytes are there, and charges a [`Meter`] for the copy.
+//! Convenience: exposed for CLI, RPC, SDK, and multi-VM runtime callers.
 
 use super::content_id::{ContentId, ContentIdKind};
 use super::limits::{Profile, ProfileId};
@@ -500,8 +501,15 @@ impl Object {
         let bin = self.encode();
         let seg = super::segment::Segmentation::new(bin.len() as u64, &profile)
             .ok_or(Bof1Error::TextFormat("segmentation"))?;
-        let commitment = super::segment::object_commitment(&bin, &profile)
-            .ok_or(Bof1Error::TextFormat("commitment"))?;
+        let digests: Vec<[u8; 32]> = (0..seg.count())
+            .filter_map(|i| {
+                let r = seg.byte_range(i)?;
+                let s = usize::try_from(r.start).ok()?;
+                let e = usize::try_from(r.end).ok()?;
+                bin.get(s..e).map(|b| super::segment::segment_digest(i, b))
+            })
+            .collect();
+        let commitment = super::segment::object_commitment(&digests);
 
         let mut out = String::from("BUD3-OBJECT 1\n");
         if self.header.flags.bits() == 0 {
@@ -576,7 +584,7 @@ impl Object {
             }
         }
 
-        let _ = writeln!(out, "end commitment={}", hex::encode(commitment.0));
+        let _ = writeln!(out, "end commitment={}", hex::encode(commitment));
         Ok(out)
     }
 
@@ -597,7 +605,9 @@ impl Object {
             .ok_or(Bof1Error::TextFormat("newline"))?;
         let mut lines = body.split('\n');
 
-        let magic_line = lines.next().ok_or(Bof1Error::TextFormat("missing header"))?;
+        let magic_line = lines
+            .next()
+            .ok_or(Bof1Error::TextFormat("missing header"))?;
         if magic_line != "BUD3-OBJECT 1" {
             return Err(Bof1Error::TextFormat("bad magic line"));
         }
@@ -621,8 +631,8 @@ impl Object {
                 .copied()
                 .ok_or(Bof1Error::TextFormat("profile"))?,
         )?;
-        let profile = Profile::by_id(profile_id)
-            .ok_or(Bof1Error::UnknownProfile(u64::from(profile_id)))?;
+        let profile =
+            Profile::by_id(profile_id).ok_or(Bof1Error::UnknownProfile(u64::from(profile_id)))?;
         let codec_id = parse_strict_u16(
             prof_tokens
                 .get(3)
@@ -806,11 +816,21 @@ impl Object {
             }
         }
 
-        let expected_commitment =
-            saw_end.ok_or(Bof1Error::TextFormat("missing end commitment"))?;
-        let actual_commitment = super::segment::object_commitment(&raw_object, &profile)
+        let expected_commitment = saw_end.ok_or(Bof1Error::TextFormat("missing end commitment"))?;
+        let raw_seg = super::segment::Segmentation::new(raw_object.len() as u64, &profile)
             .ok_or(Bof1Error::CommitmentMismatch)?;
-        if actual_commitment.0 != expected_commitment {
+        let digests: Vec<[u8; 32]> = (0..raw_seg.count())
+            .filter_map(|i| {
+                let r = raw_seg.byte_range(i)?;
+                let s = usize::try_from(r.start).ok()?;
+                let e = usize::try_from(r.end).ok()?;
+                raw_object
+                    .get(s..e)
+                    .map(|b| super::segment::segment_digest(i, b))
+            })
+            .collect();
+        let actual_commitment = super::segment::object_commitment(&digests);
+        if actual_commitment != expected_commitment {
             return Err(Bof1Error::CommitmentMismatch);
         }
 

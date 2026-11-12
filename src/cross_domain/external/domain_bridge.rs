@@ -71,11 +71,8 @@ pub fn decode_external_evidence(
     // The carrier is peer-supplied: bound both its bytes and every advertised
     // collection count before a Serde visitor can reserve attacker-declared
     // capacity. The shared decoder preserves the fixint wire encoding.
-    crate::network::bounded_bincode::decode_bounded_bincode(
-        payload,
-        MAX_EXTERNAL_EVIDENCE_BYTES,
-    )
-    .map_err(|error| FinalityError(format!("external evidence carrier is malformed: {error}")))
+    crate::network::bounded_bincode::decode_bounded_bincode(payload, MAX_EXTERNAL_EVIDENCE_BYTES)
+        .map_err(|error| FinalityError(format!("external evidence carrier is malformed: {error}")))
 }
 
 /// A consensus-facing adapter backed by one permissionless external adapter.
@@ -185,6 +182,15 @@ impl DomainFinalityAdapter for ExternalDomainFinalityBridge {
                 "the evidence and attestation do not name the bridge's adapter".to_string(),
             ));
         }
+        let evidence_domain = crate::cross_domain::external::spec::DomainKey::from_parts(
+            &evidence.adapter,
+            &evidence.network,
+        );
+        if attestation.domain != evidence_domain {
+            return Ok(FinalityStatus::Rejected(
+                "the attestation belongs to a different external network".to_string(),
+            ));
+        }
         if attestation.evidence_digest != evidence.digest() {
             return Ok(FinalityStatus::Rejected(
                 "the attestation is not derived from the submitted evidence".to_string(),
@@ -282,6 +288,7 @@ mod tests {
     struct FixtureAdapter {
         descriptor: AdapterDescriptor,
         evidence: RawConsensusEvidence,
+        wrong_domain: bool,
     }
 
     impl ExternalFinalityAdapter for FixtureAdapter {
@@ -307,7 +314,11 @@ mod tests {
                 adapter: self.descriptor.id,
                 domain: crate::cross_domain::external::spec::DomainKey::from_parts(
                     &self.descriptor.id,
-                    &evidence.network,
+                    if self.wrong_domain {
+                        "another-network"
+                    } else {
+                        &evidence.network
+                    },
                 ),
                 height: evidence.declared_height,
                 state_root: evidence.declared_root,
@@ -402,6 +413,7 @@ mod tests {
             FixtureAdapter {
                 descriptor,
                 evidence,
+                wrong_domain: false,
             },
             domain,
             commitment,
@@ -414,6 +426,20 @@ mod tests {
         let proof = encode_external_evidence(&adapter.evidence).expect("encode");
         let decoded = decode_external_evidence(&proof).expect("decode");
         assert_eq!(decoded, adapter.evidence);
+    }
+
+    #[test]
+    fn evidence_from_one_network_cannot_finalize_another_network() {
+        let (mut adapter, domain, mut commitment) = fixture();
+        let proof = encode_external_evidence(&adapter.evidence).expect("encode");
+        commitment.finality_proof_hash = crate::domain::hash_finality_proof(&proof).unwrap();
+        adapter.wrong_domain = true;
+        let bridge =
+            ExternalDomainFinalityBridge::new(Box::new(adapter), VerificationPolicy::proven(100));
+        assert!(matches!(
+            bridge.verify_finality(&domain, &commitment, &proof).unwrap(),
+            FinalityStatus::Rejected(message) if message.contains("different external network")
+        ));
     }
 
     #[test]
@@ -489,10 +515,8 @@ mod tests {
         let (adapter, mut domain, mut commitment) = fixture();
         let proof = encode_external_evidence(&adapter.evidence).expect("encode");
         commitment.finality_proof_hash = crate::domain::hash_finality_proof(&proof).unwrap();
-        let bridge = ExternalDomainFinalityBridge::new(
-            Box::new(adapter),
-            VerificationPolicy::proven(100),
-        );
+        let bridge =
+            ExternalDomainFinalityBridge::new(Box::new(adapter), VerificationPolicy::proven(100));
 
         domain.status = DomainStatus::Frozen;
         let frozen_status = bridge

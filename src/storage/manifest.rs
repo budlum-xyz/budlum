@@ -11,6 +11,7 @@
 //! Per the data-sovereignty rule: the manifest is
 //! Fully reconstructable from public on-chain state by any independent
 //! Node. No "Budlum Inc. indexer" service is required.
+//! Convenience: exposed for CLI, RPC, SDK, and multi-VM runtime callers.
 
 use crate::core::hash::hash_fields_bytes;
 use crate::storage::content_id::ContentId;

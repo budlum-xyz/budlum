@@ -202,6 +202,28 @@ pub struct NatEnvSummary {
     pub relay_bps: u32,
 }
 
+/// Outcome of one matrix verification gate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CheckOutcome {
+    Passed,
+    Failed,
+}
+
+impl CheckOutcome {
+    #[must_use]
+    pub const fn is_passed(self) -> bool {
+        matches!(self, Self::Passed)
+    }
+
+    const fn from_bool(ok: bool) -> Self {
+        if ok {
+            Self::Passed
+        } else {
+            Self::Failed
+        }
+    }
+}
+
 /// Summary verdict computed from a [`FieldLogBundle`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MatrixSummary {
@@ -209,21 +231,21 @@ pub struct MatrixSummary {
     pub oem_groups: BTreeSet<OemGroup>,
     pub has_low_ram_device: bool,
     pub min_api_observed: Option<u32>,
-    pub matrix_criteria_met: bool,
-    pub soak_all_passed: bool,
-    pub battery_all_passed: bool,
+    pub matrix_criteria_met: CheckOutcome,
+    pub soak_all_passed: CheckOutcome,
+    pub battery_all_passed: CheckOutcome,
     pub nat_by_env: BTreeMap<NatEnvironment, NatEnvSummary>,
-    pub nat_all_connected: bool,
+    pub nat_all_connected: CheckOutcome,
 }
 
 impl MatrixSummary {
     /// Overall  pass verdict.
     #[must_use]
     pub const fn overall_passed(&self) -> bool {
-        self.matrix_criteria_met
-            && self.soak_all_passed
-            && self.battery_all_passed
-            && self.nat_all_connected
+        self.matrix_criteria_met.is_passed()
+            && self.soak_all_passed.is_passed()
+            && self.battery_all_passed.is_passed()
+            && self.nat_all_connected.is_passed()
     }
 }
 
@@ -237,7 +259,10 @@ fn parse_kv_line(line: &str) -> Result<BTreeMap<String, String>, String> {
         let (k, v) = trimmed
             .split_once('=')
             .ok_or_else(|| format!("malformed field `{trimmed}` (expected key=value)"))?;
-        if map.insert(k.trim().to_string(), v.trim().to_string()).is_some() {
+        if map
+            .insert(k.trim().to_string(), v.trim().to_string())
+            .is_some()
+        {
             return Err(format!("duplicate key `{k}` in log record"));
         }
     }
@@ -443,9 +468,16 @@ pub fn evaluate_bundle(bundle: &FieldLogBundle) -> MatrixSummary {
         && has_low_ram_device
         && min_api_observed.is_some_and(|api| api >= MIN_ANDROID_API);
 
-    let soak_ids: BTreeSet<&str> = bundle.soak_runs.iter().map(|r| r.device_id.as_str()).collect();
+    let soak_ids: BTreeSet<&str> = bundle
+        .soak_runs
+        .iter()
+        .map(|r| r.device_id.as_str())
+        .collect();
     let soak_all_passed = !bundle.devices.is_empty()
-        && bundle.devices.keys().all(|id| soak_ids.contains(id.as_str()))
+        && bundle
+            .devices
+            .keys()
+            .all(|id| soak_ids.contains(id.as_str()))
         && bundle.soak_runs.iter().all(ServiceSoakRecord::passed);
 
     let bat_ids: BTreeSet<&str> = bundle
@@ -454,7 +486,10 @@ pub fn evaluate_bundle(bundle: &FieldLogBundle) -> MatrixSummary {
         .map(|r| r.device_id.as_str())
         .collect();
     let battery_all_passed = !bundle.devices.is_empty()
-        && bundle.devices.keys().all(|id| bat_ids.contains(id.as_str()))
+        && bundle
+            .devices
+            .keys()
+            .all(|id| bat_ids.contains(id.as_str()))
         && bundle.battery_runs.iter().all(BatteryRecord::passed);
 
     let mut nat_by_env = BTreeMap::new();
@@ -475,11 +510,11 @@ pub fn evaluate_bundle(bundle: &FieldLogBundle) -> MatrixSummary {
         oem_groups,
         has_low_ram_device,
         min_api_observed,
-        matrix_criteria_met,
-        soak_all_passed,
-        battery_all_passed,
+        matrix_criteria_met: CheckOutcome::from_bool(matrix_criteria_met),
+        soak_all_passed: CheckOutcome::from_bool(soak_all_passed),
+        battery_all_passed: CheckOutcome::from_bool(battery_all_passed),
         nat_by_env,
-        nat_all_connected,
+        nat_all_connected: CheckOutcome::from_bool(nat_all_connected),
     }
 }
 

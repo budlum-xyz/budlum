@@ -6,7 +6,7 @@
 //!
 //! exposed for: Data Market `bud_dataMarket*` RPC handlers and block execution.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -45,6 +45,7 @@ pub enum DataMarketError {
     ZeroSellerOrPrice,
     UnknownObject,
     ContentIdMismatch,
+    NotObjectOwner,
     InvalidContentRef(ContentRefError),
     UnknownListing,
     InactiveListing,
@@ -111,6 +112,13 @@ impl PurchaseAuthorizationV5 {
         }
         validate_public_key(SchemeId::ML_DSA_87, &self.buyer_ml_dsa_87_pk)
             .map_err(|_| DataMarketError::InvalidBuyerSignature)?;
+        let derived = crate::crypto::primitives::wallet_address_from_ml_dsa_87_public_key(
+            &self.buyer_ml_dsa_87_pk,
+        )
+        .map_err(|_| DataMarketError::InvalidBuyerSignature)?;
+        if derived != self.buyer {
+            return Err(DataMarketError::InvalidBuyerSignature);
+        }
         let digest = self.signing_digest();
         verify(
             SchemeId::ML_DSA_87,
@@ -144,6 +152,7 @@ pub struct DataMarketPurchaseReceipt {
 /// B.U.D. 3.0 Data Market registry.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DataMarketRegistry {
+    #[serde(with = "crate::core::map_keys")]
     listings: BTreeMap<[u8; 32], DataMarketListing>,
     receipts: Vec<DataMarketPurchaseReceipt>,
     #[serde(default)]
@@ -179,6 +188,9 @@ impl DataMarketRegistry {
             .ok_or(DataMarketError::UnknownObject)?;
         if obj.record.content_id != content_id {
             return Err(DataMarketError::ContentIdMismatch);
+        }
+        if obj.owner != *seller.as_bytes() || !obj.references.contains(&nft_id) {
+            return Err(DataMarketError::NotObjectOwner);
         }
         let content_ref = ContentRef::new(content_id, object_commitment, Some(nft_id))
             .map_err(DataMarketError::InvalidContentRef)?;
@@ -234,6 +246,14 @@ impl DataMarketRegistry {
         if !listing.active {
             return Err(DataMarketError::InactiveListing);
         }
+        let live_obj = bud3
+            .object(&listing.content_ref.object_commitment)
+            .ok_or(DataMarketError::UnknownObject)?;
+        if live_obj.owner != *listing.seller.as_bytes()
+            || !live_obj.references.contains(&listing.nft_id)
+        {
+            return Err(DataMarketError::NotObjectOwner);
+        }
         let purchase_key = (auth.listing_id, auth.buyer);
         if self.consumed_purchases.contains(&purchase_key) {
             return Err(DataMarketError::ReplayedPurchase);
@@ -267,9 +287,16 @@ impl DataMarketRegistry {
         bud3.validate_view_grant(&row, current_epoch)
             .map_err(DataMarketError::Registry)?;
 
+        let price_attos = u128::from(listing.price_atoms)
+            .saturating_mul(u128::from(crate::core::account::ATTOS_PER_ATOM));
         accounts
-            .transfer(&auth.buyer, &listing.seller, listing.price_atoms)
-            .map_err(|e| DataMarketError::PaymentFailed(e.to_string()))?;
+            .transfer_attos_in_unit(
+                &auth.buyer,
+                &listing.seller,
+                price_attos,
+                crate::core::account::BudEnvUnit::BudZeroAtom,
+            )
+            .map_err(DataMarketError::PaymentFailed)?;
         bud3.issue_grant(row.clone(), current_epoch)
             .map_err(DataMarketError::Registry)?;
         self.consumed_purchases.insert(purchase_key);
@@ -307,7 +334,11 @@ mod tests {
     #[test]
     fn data_market_sale_uses_grant() {
         let seller = Address([0x41; 32]);
-        let buyer = Address([0x42; 32]);
+        let buyer_pq_seed = [0x51u8; 32];
+        let buyer_pq_pk = ml_dsa_public_key(SchemeId::ML_DSA_87, &buyer_pq_seed).expect("pk87");
+        let buyer =
+            crate::crypto::primitives::wallet_address_from_ml_dsa_87_public_key(&buyer_pq_pk)
+                .expect("derived buyer address");
         let mut accounts = AccountState::new();
         accounts.credit_account(&buyer, 500);
 
@@ -340,8 +371,6 @@ mod tests {
             .create_listing(&bud3, seller, (cid, obj_key, nft_id), 25, 10)
             .expect("listing");
 
-        let buyer_pq_seed = [0x51u8; 32];
-        let buyer_pq_pk = ml_dsa_public_key(SchemeId::ML_DSA_87, &buyer_pq_seed).expect("pk87");
         let buyer_hpke = HpkeKeyPair::from_seed(&[0x52u8; 32]).expect("hpke");
 
         let mut auth = PurchaseAuthorizationV5 {
@@ -362,6 +391,45 @@ mod tests {
             &[0u8; 32],
         )
         .expect("sign87");
+
+        // An attacker must not sign a valid digest naming somebody else's
+        // funded buyer address: signature and payer must refer to the same
+        // ML-DSA-87 key before any debit or grant.
+        let victim = Address([0x43; 32]);
+        accounts.credit_account(&victim, 500);
+        let mut forged = auth.clone();
+        forged.buyer = victim;
+        forged.buyer_signature = ml_dsa_sign(
+            SchemeId::ML_DSA_87,
+            &buyer_pq_seed,
+            &forged.signing_digest(),
+            STORAGE_V2,
+            &[0u8; 32],
+        )
+        .expect("attacker signs forged payer");
+        let before_accounts = accounts.calculate_state_root();
+        let before_bud3 = bud3.state_root();
+        let before_receipts = market.receipts.len();
+        let forged_result = market.settle_purchase_with_grant(
+            &mut accounts,
+            &mut bud3,
+            45_261,
+            &forged,
+            &SellerGrantBundle {
+                grant_nonce: [0x71; 32],
+                one_time_ml_dsa_65_pk: ml_dsa_public_key(SchemeId::ML_DSA_65, &[0x72; 32])
+                    .expect("one-time pk"),
+                content_key: ContentKey([0x77; 32]),
+            },
+            2,
+        );
+        assert!(matches!(
+            forged_result,
+            Err(DataMarketError::InvalidBuyerSignature)
+        ));
+        assert_eq!(accounts.calculate_state_root(), before_accounts);
+        assert_eq!(bud3.state_root(), before_bud3);
+        assert_eq!(market.receipts.len(), before_receipts);
 
         // Wrong chain_id must be refused with zero balance mutation (`G-4`).
         let mut wrong_chain = auth.clone();

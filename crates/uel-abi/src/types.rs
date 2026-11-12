@@ -5,6 +5,7 @@
 //! [`MAX_IDENTITY_BYTES`], a namespace [`MAX_NAMESPACE_BYTES`], a log carries at
 //! most [`MAX_LOG_TOPICS`] topics. Payloads (keys, values, call input) are
 //! bounded by the 16 MiB frame alone.
+//! Convenience: exposed for workspace subcrate consumers, SDK bindings, and integration callers.
 
 use std::fmt;
 

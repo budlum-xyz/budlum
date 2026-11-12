@@ -89,10 +89,7 @@ fn the_rules_are_mounted_where_the_config_expects_them() {
         .expect("the config names its rule file");
     for (compose, expected) in [
         ("ops/docker-compose.yml", format!("monitoring/{rule_file}")),
-        (
-            "ops/testnet-local.yml",
-            format!("monitoring/{rule_file}"),
-        ),
+        ("ops/testnet-local.yml", format!("monitoring/{rule_file}")),
     ] {
         let body = read(compose);
         assert!(

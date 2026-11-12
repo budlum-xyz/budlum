@@ -5,20 +5,19 @@ use std::collections::BTreeSet;
 use crate::chain::genesis_ceremony::{assemble, genesis_hash, CeremonyInputs, OperatorRecord};
 use crate::core::address::Address;
 use crate::core::chain_config::Network;
-use crate::crypto::pq::generate_keypair;
+use crate::crypto::pq::ml_dsa_public_key;
 use crate::crypto::primitives::ValidatorKeys;
 use crate::crypto::scheme::SchemeId;
 use crate::rpc::method_class::{Effect, Listener, METHOD_CLASSES};
 use crate::storage::bud3::placement::PlacementTable;
-use crate::tokenomics::{TokenomicsAddresses, BUD_MAX_SUPPLY};
+use crate::tokenomics::{TokenomicsAddresses, BUD_TOTAL_SUPPLY};
 use crate::validators::handover::{
     handover_spec, is_finality_stalled, DutyKind, HandoverBound, RecoveryTracker,
     SeatHandoverTracker, FINALITY_STALL_BLOCKS, TESTNET_CHECKPOINT_INTERVAL_BLOCKS,
 };
-use crate::validators::{
-    ValidatorClass, ValidatorDirectory, ValidatorRegistration, MIN_MOBILE_QUOTA_BYTES,
-    MIN_MOBILE_STAKE,
-};
+use crate::validators::{ValidatorClass, ValidatorDirectory, ValidatorRegistration};
+const MIN_MOBILE_QUOTA_BYTES: u64 = 1024 * 1024 * 1024;
+const MIN_MOBILE_STAKE: u64 = 100_000_000;
 
 fn make_operator_record(index: usize) -> OperatorRecord {
     let keys = ValidatorKeys::generate().expect("validator keys generate");
@@ -99,7 +98,7 @@ fn rehearsal_ceremony_assembles_eight_full_validators_deterministically() {
         .iter()
         .filter_map(|entry| entry.get(1).and_then(serde_json::Value::as_u64))
         .sum();
-    assert_eq!(alloc_sum, BUD_MAX_SUPPLY);
+    assert_eq!(alloc_sum, BUD_TOTAL_SUPPLY);
 }
 
 #[test]
@@ -107,7 +106,7 @@ fn drill_t1_and_t4_mobile_departure_and_one_epoch_activation() {
     // T-1: When all Mobile validators stop simultaneously (mobile = 0),
     // the Full-only placement row still reconstructs every segment (>= k + 2 symbols)
     // and finality seats never include Mobile or MobileOpportunistic validators (V-1, V-2).
-    let table = PlacementTable::default();
+    let table = PlacementTable::testnet_default();
     table.validate().expect("default placement table valid");
     let row = table
         .lookup(64, 0)
@@ -130,18 +129,22 @@ fn drill_t1_and_t4_mobile_departure_and_one_epoch_activation() {
     // T-4: Mobile quota / class changes activate strictly at E + 1 via activate_due.
     let mut dir = ValidatorDirectory::new();
     let owner = Address::from([0x81; 32]);
-    let (op_pk, _) = generate_keypair(SchemeId::ML_DSA_65).expect("keygen");
+    let op_pk = ml_dsa_public_key(SchemeId::ML_DSA_65, &[0x81; 32]).expect("keygen");
+    let vkeys = crate::crypto::primitives::ValidatorKeys::generate().expect("validator keys");
+    let bls = vkeys.bls_key.as_ref().expect("bls key");
     let reg = ValidatorRegistration {
         owner,
         class: ValidatorClass::Mobile,
-        peer_id: b"12D3KooWRehearsalMobile01".to_vec(),
+        peer_id: [0x81; 32],
         operator_key: op_pk,
+        bls_key: bls.public_key.clone(),
+        bls_pop: bls.generate_pop(45_261, &owner),
         custody_quota_bytes: MIN_MOBILE_QUOTA_BYTES,
         seat: None,
         relay_offer: None,
         gateway_offer: None,
     };
-    dir.register(&reg, MIN_MOBILE_STAKE, MIN_MOBILE_STAKE, 10)
+    dir.register_verified(&reg, MIN_MOBILE_STAKE, MIN_MOBILE_STAKE, 10, 45_261)
         .expect("mobile registration");
     dir.request_quota_increase(&owner, MIN_MOBILE_QUOTA_BYTES * 2, 0, 10)
         .expect("quota increase queued for E + 1");
@@ -188,7 +191,7 @@ fn drill_t2_and_t3_full_stop_standby_handover_and_recovery_mode() {
     // T-3: > 1/3 of active seats stop for >= 50 blocks -> budlum_finality_stalled triggers;
     // once seats return and finalize a checkpoint, stalled state clears immediately.
     assert!(is_finality_stalled(50, 0));
-    assert!(50 >= FINALITY_STALL_BLOCKS);
+    const { assert!(50 >= FINALITY_STALL_BLOCKS) };
     let mut recovery = RecoveryTracker::new();
     assert!(recovery.observe_block(50, 2, 0));
     assert!(recovery.is_stalled());

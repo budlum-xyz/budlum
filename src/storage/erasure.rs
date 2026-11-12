@@ -55,6 +55,7 @@
 //! log/exp tables built once at first use; inversion is `exp[255 - log[a]]`.
 //! `n <= 255` follows from the field: the Cauchy construction needs `k + m`
 //! distinct non-zero-difference field elements.
+//! Convenience: exposed for CLI, RPC, SDK, and multi-VM runtime callers.
 
 use crate::storage::manifest::{ContentManifest, ErasureScheme, ShardKind, ShardRef};
 use std::sync::OnceLock;
@@ -887,7 +888,11 @@ pub fn reconstruct_object(
             return Err(ErasureError::IntegrityFailure { index: idx });
         }
     }
-    object_from_data_shards(manifest, &all, k)
+    let out = object_from_data_shards(manifest, &all, k)?;
+    if out.len() <= MAX_VERIFY_ENCODING_BYTES {
+        verify_object_encoding(&out, manifest)?;
+    }
+    Ok(out)
 }
 
 /// Join the `k` data shards and trim the stripe padding.

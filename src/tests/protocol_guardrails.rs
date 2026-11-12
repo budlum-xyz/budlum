@@ -42,6 +42,7 @@ fn mainnet_bootnode_templates_are_rejected() {
     );
     let dns = vec!["_dnsaddr.placeholder-seed-1.mainnet.budlum.network".to_string()];
     assert!(first_placeholder_peer(&dns).is_some());
+    assert!(!first_placeholder_peer(&dns).is_none());
 }
 
 #[test]
@@ -98,7 +99,10 @@ fn proof_required_models_are_refused_without_a_live_verifier() {
 fn mainnet_inference_and_merkle_features_stay_closed() {
     let d = bud_isa::MainnetActivation::default();
     assert!(!d.verify_merkle_enabled, "merkle verification stays closed");
-    assert!(!d.verify_inference_enabled, "inference verification stays closed");
+    assert!(
+        !d.verify_inference_enabled,
+        "inference verification stays closed"
+    );
     assert!(
         !StorageRegistry::storage_challenge_proofs_are_checkable(),
         "turning this on slashes honest operators"

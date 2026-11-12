@@ -91,8 +91,7 @@ impl StorageDomainParams {
                 self.max_committed_chunks, MAX_COMMITTED_CHUNKS_PER_OPERATOR
             ));
         }
-        if self.challenge_interval == 0
-            || self.challenge_interval > MAX_STORAGE_CHALLENGE_INTERVAL
+        if self.challenge_interval == 0 || self.challenge_interval > MAX_STORAGE_CHALLENGE_INTERVAL
         {
             return Err(format!(
                 "StorageDomainParams.challenge_interval {} out of range [1, {}]",
@@ -100,12 +99,12 @@ impl StorageDomainParams {
             ));
         }
         if self.min_operator_bond == 0
-            || self.min_operator_bond > crate::core::account::MAX_TOTAL_SUPPLY
+            || self.min_operator_bond > crate::tokenomics::BUD_TOTAL_SUPPLY
         {
             return Err(format!(
                 "StorageDomainParams.min_operator_bond {} out of range [1, {}]",
                 self.min_operator_bond,
-                crate::core::account::MAX_TOTAL_SUPPLY
+                crate::tokenomics::BUD_TOTAL_SUPPLY
             ));
         }
         Ok(())

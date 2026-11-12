@@ -14,11 +14,11 @@
 
 #![forbid(unsafe_code)]
 
+use budlum_explorer::patchset;
 use budlum_explorer::{
     evidence::{Claim, Strength},
     Evidence,
 };
-use budlum_explorer::patchset;
 use budlum_explorer::{name_rule, query};
 
 fn usage() -> String {
@@ -154,7 +154,10 @@ fn self_test() -> i32 {
         for p in &problems {
             println!("  {p}");
         }
-        println!("budlum-explorer self-test: FAILED ({} finding(s))", problems.len());
+        println!(
+            "budlum-explorer self-test: FAILED ({} finding(s))",
+            problems.len()
+        );
         1
     }
 }

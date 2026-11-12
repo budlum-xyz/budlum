@@ -41,10 +41,7 @@ pub const MAX_APP_URL_BYTES: usize = 256;
 
 fn is_valid_app_url(url: &str) -> bool {
     let trimmed = url.trim();
-    if trimmed.is_empty()
-        || url.len() > MAX_APP_URL_BYTES
-        || url.chars().any(char::is_control)
-    {
+    if trimmed.is_empty() || url.len() > MAX_APP_URL_BYTES || url.chars().any(char::is_control) {
         return false;
     }
     // If a URI scheme is present before any path separator, allow only safe
@@ -677,15 +674,8 @@ mod tests {
             "https://",
         ] {
             assert!(
-                reg.register_app(
-                    "App".into(),
-                    dev,
-                    AppCategory::Other,
-                    bad.into(),
-                    None,
-                    1,
-                )
-                .is_err(),
+                reg.register_app("App".into(), dev, AppCategory::Other, bad.into(), None, 1,)
+                    .is_err(),
                 "{bad:?} must be refused on register_app"
             );
         }
@@ -699,10 +689,9 @@ mod tests {
                 1,
             )
             .unwrap();
-        assert!(
-            reg.update_app(id, &dev, Some("javascript:alert(1)".into()), None)
-                .is_err()
-        );
+        assert!(reg
+            .update_app(id, &dev, Some("javascript:alert(1)".into()), None)
+            .is_err());
         let overlong = format!("https://{}", "a".repeat(MAX_APP_URL_BYTES));
         assert!(reg.update_app(id, &dev, Some(overlong), None).is_err());
         assert_eq!(reg.apps[&id].website_url, "https://clean.bud");

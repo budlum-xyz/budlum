@@ -282,5 +282,9 @@ fn a_signed_recovery_cannot_bypass_the_domain_gate_through_the_executor() {
         "the valid approvals must not mutate the registry under PoS"
     );
     assert_eq!(state.get_nonce(&subject), 1, "the refusal spends no nonce");
-    assert_eq!(state.get_balance(&subject), 999, "the refusal spends no fee");
+    assert_eq!(
+        state.get_balance(&subject),
+        999,
+        "the refusal spends no fee"
+    );
 }

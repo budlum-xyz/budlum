@@ -13,10 +13,11 @@ import android.os.PowerManager
 import network.budlum.validator.R
 import network.budlum.validator.core.Connection
 import network.budlum.validator.core.CoreStatus
+import network.budlum.validator.core.ValidatorOnboardingGate
 
 /**
- * `specialUse` foreground service keeping QUIC/TCP relay sessions open to serve
- * B.U.D. 3.0 custody shares and answer storage audits (Section 7.9.3).
+ * `specialUse` service shell. No relay or registered wallet is connected yet;
+ * an attempted start stops without claiming custody or an audit result.
  */
 class ValidatorService : Service() {
     private var timeoutObserved: Boolean = false
@@ -27,6 +28,12 @@ class ValidatorService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        if (!ValidatorOnboardingGate.readyForDuties()) {
+            // No signed owner registration or native duty transport exists.
+            // Never present a sticky custody notification for a fake validator.
+            stopSelf(startId)
+            return START_NOT_STICKY
+        }
         val storedLabel = intent?.getStringExtra(EXTRA_STORED_LABEL) ?: "0 B"
         val auditLabel = intent?.getStringExtra(EXTRA_AUDIT_LABEL) ?: "None"
         val netLabel = intent?.getStringExtra(EXTRA_NET_LABEL) ?: "Connecting"

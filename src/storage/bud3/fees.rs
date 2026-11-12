@@ -382,9 +382,9 @@ pub fn distribute_object_endowment_epoch(
     endowment.remaining_balance = endowment.remaining_balance.saturating_sub(epoch_unlock);
 
     let mut holder_payouts: BTreeMap<[u8; 32], u64> = BTreeMap::new();
-    let total_symbol_bytes = shares
-        .iter()
-        .fold(0u128, |acc, s| acc.saturating_add(u128::from(s.symbol_bytes)));
+    let total_symbol_bytes = shares.iter().fold(0u128, |acc, s| {
+        acc.saturating_add(u128::from(s.symbol_bytes))
+    });
     let total_weight = total_symbol_bytes.saturating_mul(u128::from(PRESENCE_PPM_SCALE));
 
     let mut paid_total = 0u64;
@@ -398,8 +398,7 @@ pub fn distribute_object_endowment_epoch(
                 continue;
             }
             let share_weight = u128::from(share.symbol_bytes).saturating_mul(presence);
-            let payout_u128 =
-                u128::from(epoch_unlock).saturating_mul(share_weight) / total_weight;
+            let payout_u128 = u128::from(epoch_unlock).saturating_mul(share_weight) / total_weight;
             let payout = u64::try_from(payout_u128).unwrap_or(0);
             if payout > 0 {
                 let entry = holder_payouts.entry(share.validator).or_insert(0);
@@ -514,7 +513,8 @@ mod tests {
                 presence_ppm: PRESENCE_PPM_SCALE,
             },
         ];
-        let settlement = distribute_object_endowment_epoch(&mut endowment, 10, &shares, 100 * BUD_UNIT);
+        let settlement =
+            distribute_object_endowment_epoch(&mut endowment, 10, &shares, 100 * BUD_UNIT);
         let paid_h1 = *settlement.holder_payouts.get(&[1u8; 32]).unwrap();
         assert!(!settlement.holder_payouts.contains_key(&[2u8; 32]));
         // 95_000 * 2 / 3 = 63_333; forfeited = 95_000 - 63_333 = 31_667.
@@ -579,13 +579,9 @@ mod tests {
         assert!(storage_fee_for_days(16 * one_gib, 3_650, &default).is_ok());
 
         let full_year_epochs = year_days * default.epochs_per_day;
-        let shared = shared_public_reference_fee_epochs(
-            3 * one_gib + 1,
-            3,
-            full_year_epochs,
-            &default,
-        )
-        .unwrap();
+        let shared =
+            shared_public_reference_fee_epochs(3 * one_gib + 1, 3, full_year_epochs, &default)
+                .unwrap();
         let direct = storage_fee_for_epochs(one_gib + 1, full_year_epochs, &default).unwrap();
         assert_eq!(shared, direct, "the shared byte count is rounded up");
         assert_eq!(
@@ -593,5 +589,4 @@ mod tests {
             Err(FeeError::ZeroReferences)
         );
     }
-
 }

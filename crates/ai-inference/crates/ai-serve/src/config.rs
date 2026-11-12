@@ -459,9 +459,7 @@ fn plan_on_device(
             "the routed part does not fit on this device's disk: {needed} B needed, \
              {available} B of disk available"
         ),
-        PlanError::ZeroByteShard { .. } => {
-            String::from("a weight shard declared zero bytes")
-        }
+        PlanError::ZeroByteShard { .. } => String::from("a weight shard declared zero bytes"),
         PlanError::DuplicateShard { .. } => {
             String::from("two weight shards declared the same content id")
         }

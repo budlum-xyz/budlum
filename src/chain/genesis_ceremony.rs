@@ -85,10 +85,9 @@ pub fn supply_audit(genesis: &GenesisConfig) -> Result<SupplyAudit, String> {
         .sum();
     // Fold rather than cast a `usize` count into `u128`: the sum stays
     // independent of the host word size.
-    let validator_stake = genesis
-        .validators
-        .iter()
-        .fold(0u128, |sum, _| sum.saturating_add(u128::from(network.min_stake())));
+    let validator_stake = genesis.validators.iter().fold(0u128, |sum, _| {
+        sum.saturating_add(u128::from(network.min_stake()))
+    });
     let validation_pool = u128::from(
         network
             .reward_pool()

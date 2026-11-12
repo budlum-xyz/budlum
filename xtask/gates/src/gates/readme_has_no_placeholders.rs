@@ -74,15 +74,12 @@ fn slots_on(line: &str) -> Vec<String> {
     while let Some(pos) = line[from..].find(SLOT_OPEN) {
         let start = from + pos;
         let rest = &line[start..];
-        match rest.find("}}") {
-            Some(end) => {
-                out.push(rest[..=end + 1].to_string());
-                from = start + end + 2;
-            }
-            None => {
-                out.push(String::from("{{unclosed"));
-                return out;
-            }
+        if let Some(end) = rest.find("}}") {
+            out.push(rest[..=end + 1].to_string());
+            from = start + end + 2;
+        } else {
+            out.push(String::from("{{unclosed"));
+            return out;
         }
     }
     out
@@ -93,7 +90,10 @@ fn markers_on(line: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut start = 0usize;
     let mut word_len = 0usize;
-    for (index, c) in line.char_indices().chain(std::iter::once((line.len(), ' '))) {
+    for (index, c) in line
+        .char_indices()
+        .chain(std::iter::once((line.len(), ' ')))
+    {
         if c.is_alphanumeric() || c == '_' {
             if word_len == 0 {
                 start = index;
@@ -131,8 +131,8 @@ fn scan(root: &Path) -> Result<Vec<Slot>, String> {
     let mut out = Vec::new();
     for file in FILES {
         let path = root.join(file);
-        let text = std::fs::read_to_string(&path)
-            .map_err(|e| format!("{file} could not be read: {e}"))?;
+        let text =
+            std::fs::read_to_string(&path).map_err(|e| format!("{file} could not be read: {e}"))?;
         for (index, line) in text.lines().enumerate() {
             for text_slot in slots_on(line) {
                 out.push(Slot {
@@ -152,8 +152,8 @@ fn markers(root: &Path) -> Result<Vec<Slot>, String> {
     let mut out = Vec::new();
     for file in FILES {
         let path = root.join(file);
-        let text = std::fs::read_to_string(&path)
-            .map_err(|e| format!("{file} could not be read: {e}"))?;
+        let text =
+            std::fs::read_to_string(&path).map_err(|e| format!("{file} could not be read: {e}"))?;
         for (index, line) in text.lines().enumerate() {
             for marker in markers_on(line) {
                 out.push(Slot {
@@ -171,8 +171,8 @@ fn markers(root: &Path) -> Result<Vec<Slot>, String> {
 /// Read the baseline, keyed by `file:line`.
 fn baseline(root: &Path) -> Result<BTreeMap<String, (String, String)>, String> {
     let path = root.join(BASELINE);
-    let text = std::fs::read_to_string(&path)
-        .map_err(|e| format!("{BASELINE} could not be read: {e}"))?;
+    let text =
+        std::fs::read_to_string(&path).map_err(|e| format!("{BASELINE} could not be read: {e}"))?;
     let mut out = BTreeMap::new();
     for line in text.lines() {
         let trimmed = line.trim();
@@ -224,9 +224,7 @@ pub fn run(root: &Path) -> Result<String, String> {
                 "  {key} carries {} and {BASELINE} does not record it: {}",
                 slot.text, slot.sentence
             )),
-            Some((recorded, sentence))
-                if *recorded != slot.text || *sentence != slot.sentence =>
-            {
+            Some((recorded, sentence)) if *recorded != slot.text || *sentence != slot.sentence => {
                 messages.push(format!(
                     "  {key} carries {} in `{}` but {BASELINE} records {recorded} in `{sentence}`",
                     slot.text, slot.sentence
@@ -282,7 +280,9 @@ pub fn run(root: &Path) -> Result<String, String> {
 pub fn self_test() -> Result<String, String> {
     // The two readers.
     if slots_on("a {{ONE}} b {{TWO}}").len() != 2 {
-        return Err(String::from("canary: two slots on one line were not both read"));
+        return Err(String::from(
+            "canary: two slots on one line were not both read",
+        ));
     }
     if slots_on("a {{ONE") != vec![String::from("{{unclosed")] {
         return Err(String::from("canary: an unclosed slot was not reported"));
@@ -296,9 +296,7 @@ pub fn self_test() -> Result<String, String> {
         return Err(String::from("canary: a TODO was not read"));
     }
     if !markers_on("mastodon and todolist are words").is_empty() {
-        return Err(String::from(
-            "canary: a marker inside a word was reported",
-        ));
+        return Err(String::from("canary: a marker inside a word was reported"));
     }
     if markers_on("the ToDo list").is_empty() {
         return Err(String::from("canary: a mixed-case marker was not read"));
@@ -312,7 +310,10 @@ pub fn self_test() -> Result<String, String> {
         std::fs::create_dir_all(dir.join(".github")).map_err(|e| e.to_string())?;
         put("README.md", "tests-{{N}}%20lib\nplain line\n")?;
         put("README.tr.md", "temiz\n")?;
-        put(BASELINE, "# baseline\nREADME.md:1|{{N}}|tests-{{N}}%20lib\n")?;
+        put(
+            BASELINE,
+            "# baseline\nREADME.md:1|{{N}}|tests-{{N}}%20lib\n",
+        )?;
         run(&dir).map_err(|e| format!("canary: a recorded slot failed: {e}"))?;
         put(BASELINE, "README.md:1|{{N}}|a different sentence\n")?;
         if run(&dir).is_ok() {
@@ -326,15 +327,15 @@ pub fn self_test() -> Result<String, String> {
         }
         // A stale line is a finding, so the baseline cannot rot.
         put("README.md", "tests-{{N}}%20lib\n")?;
-        put(BASELINE, "README.md:1|{{N}}|tests\nREADME.md:9|{{GONE}}|gone\n")?;
+        put(
+            BASELINE,
+            "README.md:1|{{N}}|tests\nREADME.md:9|{{GONE}}|gone\n",
+        )?;
         if run(&dir).is_ok() {
             return Err(String::from("canary: a stale baseline line passed"));
         }
         // A slot inside a fence is still a slot.
-        put(
-            "README.md",
-            "text\n```\nvalue {{IN_FENCE}}\n```\n",
-        )?;
+        put("README.md", "text\n```\nvalue {{IN_FENCE}}\n```\n")?;
         put(BASELINE, "")?;
         if run(&dir).is_ok() {
             return Err(String::from(

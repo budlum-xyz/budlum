@@ -14,7 +14,6 @@ cosmwasm-std = "2"
 cosmwasm-schema = "2"
 cw-storage-plus = "2"
 cw20 = "2"
-cw721 = "0.18"
 hex = "0.4"
 
 [workspace]

@@ -7,6 +7,7 @@ import os
 import shutil
 import stat
 import subprocess
+import sys
 import tempfile
 import textwrap
 import unittest
@@ -15,7 +16,7 @@ from unittest import mock
 
 
 REPOSITORY = Path(__file__).resolve().parents[3]
-SCRIPT = REPOSITORY / "ops/rehearsal/genesis_rehearsal.sh"
+SCRIPT = REPOSITORY / "ops/rehearsal/genesis_rehearsal.py"
 TEMPLATE = REPOSITORY / "config/ceremony-rehearsal-template.json"
 BLS_SCHEME = "BLS_SIG_BLS12381G1_XMD:SHA-256_SSWU_RO_POP_"
 
@@ -134,7 +135,7 @@ class GenesisRehearsalTests(unittest.TestCase):
         if mutation:
             env["BUD_TEST_MUTATION"] = mutation
         return subprocess.run(
-            ["bash", str(SCRIPT), str(self.records), str(self.output)],
+            [sys.executable, str(SCRIPT), str(self.records), str(self.output)],
             cwd=self.root,
             env=env,
             text=True,
@@ -292,6 +293,33 @@ class GenesisRehearsalTests(unittest.TestCase):
         )
         self.assert_refused_before_assembly(result)
         self.assertIn("1952-byte", result.stderr)
+
+
+class LocalTestnetConfigTests(unittest.TestCase):
+    """Guard the local compose ceremony and public-service observability."""
+
+    def test_local_ceremony_stamps_genesis_and_publishes_it_atomically(self):
+        compose = (REPOSITORY / "ops/testnet-local.yml").read_text(encoding="utf-8")
+        ceremony = compose.split("  ceremony:\n", 1)[1].split("  validator1:\n", 1)[0]
+        self.assertIn("stamp_ms=$$(date +%s%3N)", ceremony)
+        self.assertIn('--timestamp-ms "$$stamp_ms"', ceremony)
+        self.assertIn('--out "$$dir/genesis.tmp"', ceremony)
+        self.assertIn('mv "$$dir/genesis.tmp" "$$dir/genesis.json"', ceremony)
+
+    def test_local_services_probe_their_own_endpoints(self):
+        compose = (REPOSITORY / "ops/testnet-local.yml").read_text(encoding="utf-8")
+        faucet = compose.split("  faucet:\n", 1)[1].split("  indexer:\n", 1)[0]
+        indexer = compose.split("  indexer:\n", 1)[1].split("  prometheus:\n", 1)[0]
+        self.assertIn("http://127.0.0.1:18600/health", faucet)
+        self.assertIn("http://127.0.0.1:18700/health", indexer)
+        self.assertIn("--state-file=/home/budlum/data/faucet-state.json", faucet)
+
+    def test_local_prometheus_scrapes_faucet_metrics(self):
+        prometheus = (REPOSITORY / "ops/monitoring/testnet-local-prometheus.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('targets: ["faucet:18600"]', prometheus)
+        self.assertIn("metrics_path: /metrics", prometheus)
 
 
 if __name__ == "__main__":

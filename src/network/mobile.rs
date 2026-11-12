@@ -8,7 +8,8 @@
 //!
 //! - **Battery-aware challenge policy:** verification frequency follows the
 //!   battery level.
-//! - **NAT connectivity:** relay/STUN for mobile nodes sitting behind a NAT.
+//! - **NAT topology:** records network hints; relay/STUN/DCUtR remain unwired
+//!   and cannot be reported as active connectivity.
 //! - **Self-hosted B.U.D.:** serving B.U.D. storage from the device.
 //! - **Lightweight sync:** stateless verification.
 
@@ -196,7 +197,7 @@ impl StorageStatus {
         Ok(())
     }
 
-/// Space available to B.U.D., in bytes.
+    /// Space available to B.U.D., in bytes.
     pub fn bud_available(&self) -> u64 {
         self.bud_reserved_bytes.min(self.available_bytes)
     }
@@ -404,19 +405,22 @@ pub struct NatTraversalStatus {
 
 impl NatTraversalStatus {
     pub fn validate(&self) -> Result<(), String> {
-        if self.using_relay {
-            let relay = self.relay_address.as_ref().ok_or_else(|| {
-                "NatTraversalStatus relay_address required when using_relay".to_string()
-            })?;
+        if self.using_relay && self.relay_address.is_none() {
+            return Err("NatTraversalStatus relay_address required when using_relay".into());
+        }
+        if let Some(relay) = &self.relay_address {
             if relay.is_empty()
                 || relay.len() > 256
                 || relay.bytes().any(|b| b.is_ascii_whitespace())
             {
                 return Err("NatTraversalStatus relay_address invalid".into());
             }
-            if self.hole_punched {
-                return Err("NatTraversalStatus cannot use relay and claim hole_punched".into());
-            }
+        }
+        // These fields are runtime outcomes, not predictions from the NAT type
+        // or from a configured address. The current swarm has no relay,
+        // DCUtR or AutoNAT behaviour, so it cannot prove any of them.
+        if self.using_relay || self.hole_punched || self.nat_detected {
+            return Err("NatTraversalStatus claims unimplemented NAT traversal".into());
         }
         Ok(())
     }
@@ -455,6 +459,9 @@ impl MobileNodeProfile {
         self.network.validate()?;
         self.storage.validate()?;
         self.nat_status.validate()?;
+        if self.network.nat_type == NatType::Symmetric && !self.network.public_ip {
+            return Err("MobileNodeProfile symmetric NAT requires an active relay reservation; NAT traversal is unavailable".into());
+        }
         // `can_accept_tasks` trusts the stored policy, so a policy that the
         // battery mode does not call for would enable work the battery state
         // must disable. The policy is derived, never chosen.
@@ -516,17 +523,11 @@ impl MobileNodeProfile {
         };
         candidate.validate()?;
         self.network = candidate;
-
-        // Symmetric NAT means a relay is required
-        if nat_type == NatType::Symmetric && !public_ip {
-            self.nat_status.using_relay = true;
-            self.nat_status.hole_punched = false;
-        } else if nat_type == NatType::None || public_ip {
-            self.nat_status.using_relay = false;
-            self.nat_status.hole_punched = true;
-        }
-
-        self.nat_status.nat_detected = true;
+        // Changing the reported topology cannot establish a relay reservation,
+        // perform STUN detection or punch a hole. Invalidate any previous
+        // status; an address can be configured again separately, but cannot be
+        // reported as a working circuit without an actual transport event.
+        self.nat_status = NatTraversalStatus::default();
         Ok(())
     }
 
@@ -534,7 +535,8 @@ impl MobileNodeProfile {
         // Validate a candidate first, like `update_nat`: a refused address leaves the
         // profile as it was.
         let mut candidate = self.nat_status.clone();
-        candidate.using_relay = true;
+        // Configuring a candidate does not obtain a relay reservation.
+        candidate.using_relay = false;
         candidate.relay_address = Some(relay_address);
         candidate.hole_punched = false;
         candidate.validate()?;
@@ -664,8 +666,12 @@ mod tests {
     fn nat_symmetric_requires_relay() {
         let mut profile = MobileNodeProfile::new(test_address(), DeviceType::Phone);
         profile.update_nat(NatType::Symmetric, false).unwrap();
-        assert!(profile.nat_status.using_relay);
-        assert!(!profile.nat_status.hole_punched);
+        assert!(!profile.nat_status.using_relay);
+        assert!(!profile.nat_status.nat_detected);
+        assert!(profile
+            .validate()
+            .unwrap_err()
+            .contains("active relay reservation"));
     }
 
     #[test]
@@ -673,7 +679,25 @@ mod tests {
         let mut profile = MobileNodeProfile::new(test_address(), DeviceType::Phone);
         profile.update_nat(NatType::None, true).unwrap();
         assert!(!profile.nat_status.using_relay);
-        assert!(profile.nat_status.hole_punched);
+        assert!(!profile.nat_status.hole_punched);
+        assert!(!profile.nat_status.nat_detected);
+        assert!(profile.validate().is_ok());
+    }
+
+    #[test]
+    fn changing_network_invalidates_configured_relay_and_old_success_claims() {
+        let mut profile = MobileNodeProfile::new(test_address(), DeviceType::Phone);
+        profile
+            .set_relay_address("relay.example:4001".into())
+            .unwrap();
+        // Deserialized old profiles can contain stale success claims. A fresh
+        // topology input must not preserve them on the new network.
+        profile.nat_status.using_relay = true;
+        profile.update_nat(NatType::Symmetric, false).unwrap();
+        assert!(profile.nat_status.relay_address.is_none());
+        assert!(!profile.nat_status.using_relay);
+        assert!(!profile.nat_status.hole_punched);
+        assert!(!profile.nat_status.nat_detected);
     }
 
     #[test]
@@ -685,7 +709,12 @@ mod tests {
         assert!(profile
             .set_relay_address("relay.example:4001".to_string())
             .is_ok());
-        assert!(profile.nat_status.using_relay);
+        assert_eq!(
+            profile.nat_status.relay_address.as_deref(),
+            Some("relay.example:4001")
+        );
+        assert!(!profile.nat_status.using_relay);
+        assert!(profile.validate().is_ok());
     }
 
     /// `NatType::None` without a public address is a contradiction the
@@ -761,14 +790,44 @@ mod tests {
     }
 
     #[test]
-    fn relay_address_required_for_symmetric_nat_profile() {
+    fn configured_relay_is_not_an_active_reservation() {
         let mut profile = MobileNodeProfile::new(test_address(), DeviceType::Phone);
         profile.update_nat(NatType::Symmetric, false).unwrap();
-        assert!(profile.validate().unwrap_err().contains("relay_address"));
+        assert!(profile
+            .validate()
+            .unwrap_err()
+            .contains("active relay reservation"));
         profile
             .set_relay_address("relay.budlum.local:4001".into())
             .unwrap();
-        assert!(profile.validate().is_ok());
+        assert!(!profile.nat_status.using_relay);
+        assert!(profile
+            .validate()
+            .unwrap_err()
+            .contains("active relay reservation"));
+    }
+
+    #[test]
+    fn unverified_nat_success_claims_are_rejected() {
+        let mut profile = MobileNodeProfile::new(test_address(), DeviceType::Phone);
+        profile.nat_status.relay_address = Some("relay.budlum.local:4001".into());
+        profile.nat_status.using_relay = true;
+        assert!(profile
+            .validate()
+            .unwrap_err()
+            .contains("unimplemented NAT traversal"));
+        profile.nat_status.using_relay = false;
+        profile.nat_status.hole_punched = true;
+        assert!(profile
+            .validate()
+            .unwrap_err()
+            .contains("unimplemented NAT traversal"));
+        profile.nat_status.hole_punched = false;
+        profile.nat_status.nat_detected = true;
+        assert!(profile
+            .validate()
+            .unwrap_err()
+            .contains("unimplemented NAT traversal"));
     }
 
     #[test]

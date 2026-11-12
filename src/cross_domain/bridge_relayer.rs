@@ -154,6 +154,7 @@ impl<'a> BridgeRelayerPipeline<'a> {
         clippy::too_many_arguments,
         reason = ": the pipeline's lock mirrors BridgeState::lock's parameter set one-for-one"
     )]
+    /// PARTIAL: allowed - rolls back the newly inserted message row and bridge lock if relay enqueueing fails.
     pub fn lock(
         &mut self,
         source_domain: DomainId,
@@ -264,7 +265,12 @@ impl<'a> BridgeRelayerPipeline<'a> {
                 got: message.kind.name(),
             });
         }
-        if self.relayer.ledger.get_record(&message.message_id).is_none() {
+        if self
+            .relayer
+            .ledger
+            .get_record(&message.message_id)
+            .is_none()
+        {
             return Err(PipelineError::Relayer(RelayerError::Other(
                 "bridge mint requires a verified relay proof".into(),
             )));
@@ -277,6 +283,7 @@ impl<'a> BridgeRelayerPipeline<'a> {
 
     /// Burn the asset on the target domain to send it back.
     /// Returns the event for relay back to the source domain.
+    /// PARTIAL: allowed - rolls back the newly inserted message row and bridge burn if relay enqueueing fails.
     pub fn burn(
         &mut self,
         message_id: MessageId,
@@ -353,7 +360,12 @@ impl<'a> BridgeRelayerPipeline<'a> {
                 got: message.kind.name(),
             });
         }
-        if self.relayer.ledger.get_record(&message.message_id).is_none() {
+        if self
+            .relayer
+            .ledger
+            .get_record(&message.message_id)
+            .is_none()
+        {
             return Err(PipelineError::Relayer(RelayerError::Other(
                 "bridge unlock requires a verified relay proof".into(),
             )));

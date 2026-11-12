@@ -54,7 +54,6 @@ fuzz_target!(|data: &[u8]| {
         }
     }
 
-
     // Build a candidate chain from fuzz bytes (possibly invalid / deep).
     let mode = take_u8(data, &mut i);
     let mut candidate: Vec<Block> = match mode % 4 {
@@ -145,7 +144,10 @@ fuzz_target!(|data: &[u8]| {
                 "reorg at or below the finalized height was accepted"
             );
             let after: Vec<String> = chain.chain.iter().map(|b| b.hash.clone()).collect();
-            assert_eq!(after, candidate_hashes, "accepted reorg did not install the candidate");
+            assert_eq!(
+                after, candidate_hashes,
+                "accepted reorg did not install the candidate"
+            );
         }
         Ok(false) | Err(_) => {
             let after: Vec<String> = chain.chain.iter().map(|b| b.hash.clone()).collect();

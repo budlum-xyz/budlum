@@ -1,8 +1,8 @@
 /// Budlum settlement endpoint, Move family.
 ///
-/// Takes custody of Fungible Asset and token objects that enter the Budlum
-/// Universal Object Layer, carries home calls, and tracks the last accepted
-/// Budlum checkpoint for the silence window. Published immutable: no admin,
+/// Custody and home calls are closed until departure and escape can return
+/// assets. Only finalized checkpoint tracking remains available. Published
+/// immutable: no admin,
 /// no upgrade, no pause.
 ///
 /// The event layouts are pinned by `src/object_layer/family/move.rs`
@@ -97,54 +97,28 @@ module budlum::settlement_endpoint {
         if (len == 0) option::none() else option::some(recipient)
     }
 
-    /// Fungible arrival. The amount is the vault's balance difference.
+    /// Custody without an authenticated departure or escape is irreversible.
     public entry fun deposit_fa(
-        owner: &signer,
-        metadata: Object<Metadata>,
-        amount: u64,
-        recipient: vector<u8>,
-    ) acquires Endpoint {
-        let vault = vault_address();
-        let before = primary_fungible_store::balance(vault, metadata);
-        primary_fungible_store::transfer(owner, metadata, vault, amount);
-        let received = primary_fungible_store::balance(vault, metadata) - before;
-        assert!(received > 0, E_NOTHING_RECEIVED);
-        event::emit(ArriveEvent {
-            kind: FUNGIBLE,
-            class: object::object_address(&metadata),
-            native_id: option::none(),
-            amount: received,
-            depositor: signer::address_of(owner),
-            recipient: recipient_of(recipient),
-        });
+        _owner: &signer,
+        _metadata: Object<Metadata>,
+        _amount: u64,
+        _recipient: vector<u8>,
+    ) {
+        abort E_NOT_OPEN
     }
 
-    /// Unique arrival: a token object moves into the vault.
+    /// Do not accept unique objects into a vault with no exit.
     public entry fun deposit_token(
-        owner: &signer,
-        collection: address,
-        token: Object<ObjectCore>,
-        recipient: vector<u8>,
-    ) acquires Endpoint {
-        object::transfer(owner, token, vault_address());
-        event::emit(ArriveEvent {
-            kind: UNIQUE,
-            class: collection,
-            native_id: option::some(object::object_address(&token)),
-            amount: 1,
-            depositor: signer::address_of(owner),
-            recipient: recipient_of(recipient),
-        });
+        _owner: &signer,
+        _token: Object<ObjectCore>,
+        _recipient: vector<u8>,
+    ) {
+        abort E_NOT_OPEN
     }
 
-    /// A home call: Budlum runs `calls` as the home identity of the signer.
-    public entry fun home_call(sender: &signer, calls: vector<u8>) acquires Endpoint {
-        let e = borrow_global_mut<Endpoint>(@budlum);
-        let who = signer::address_of(sender);
-        let nonce = table::borrow_mut_with_default(&mut e.home_nonce, who, 0);
-        let current = *nonce;
-        *nonce = current + 1;
-        event::emit(HomeCallEvent { sender: who, nonce: current, calls });
+    /// Home calls cannot be honored before identity proofs are available.
+    public entry fun home_call(_sender: &signer, _calls: vector<u8>) {
+        abort E_NOT_OPEN
     }
 
     /// Accept a newer final Budlum checkpoint; restarts the silence clock.

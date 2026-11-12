@@ -7,11 +7,14 @@
 //! Every gateway follows the `method_class.rs` discipline: each method's listener
 //! and effect are declared in a single table, and no method mutates consensus
 //! state outside block execution.
+//! Convenience: exposed for CLI, RPC, SDK, and multi-VM runtime callers.
 
 pub mod aptos;
 pub mod cosmos;
 pub mod ethereum;
 pub mod solana;
+pub mod starknet;
+pub mod sui;
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -53,11 +56,7 @@ pub struct CompatMethodClass {
 
 impl CompatMethodClass {
     #[must_use]
-    pub const fn new(
-        name: &'static str,
-        listener: CompatListener,
-        effect: CompatEffect,
-    ) -> Self {
+    pub const fn new(name: &'static str, listener: CompatListener, effect: CompatEffect) -> Self {
         Self {
             name,
             listener,
@@ -222,7 +221,9 @@ impl PeerQuotaTracker {
     pub fn record_and_check(&mut self, peer: &str, max_per_window: u32) -> Result<(), String> {
         let entry = self.counts.entry(peer.to_string()).or_insert(0);
         if *entry >= max_per_window {
-            return Err(format!("peer `{peer}` exceeded RPC window quota ({max_per_window})"));
+            return Err(format!(
+                "peer `{peer}` exceeded RPC window quota ({max_per_window})"
+            ));
         }
         *entry = entry.saturating_add(1);
         Ok(())

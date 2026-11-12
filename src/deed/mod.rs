@@ -12,9 +12,7 @@ use crate::storage::ContentId;
 use serde::{Deserialize, Serialize};
 
 pub mod education_domain;
-pub use education_domain::{
-    EducationArtifact, EducationDomainError, EducationDomainRegistry,
-};
+pub use education_domain::{EducationArtifact, EducationDomainError, EducationDomainRegistry};
 
 /// Permissionless DeEd participant roles.
 ///

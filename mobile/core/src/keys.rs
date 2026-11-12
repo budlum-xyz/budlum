@@ -41,33 +41,33 @@ pub const OPERATOR_KEY_LABEL: &[u8] = b"budlum/operator-key/ml-dsa-65/v1";
 /// A refusal from the platform key store.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VaultError {
- /// The platform's reason, for the log.
+    /// The platform's reason, for the log.
     pub reason: String,
 }
 
 /// The platform key store, implemented by the host.
 pub trait KeyVault {
- /// Encrypt `secret` under the platform key and authenticate `context`.
- ///
- /// # Errors
- ///
- /// [`VaultError`] when the platform refuses.
+    /// Encrypt `secret` under the platform key and authenticate `context`.
+    ///
+    /// # Errors
+    ///
+    /// [`VaultError`] when the platform refuses.
     fn seal(&self, secret: &[u8], context: &[u8]) -> Result<Vec<u8>, VaultError>;
 
- /// Decrypt what [`Self::seal`] returned for the same `context`.
- ///
- /// # Errors
- ///
- /// [`VaultError`] when the platform refuses or the context differs.
+    /// Decrypt what [`Self::seal`] returned for the same `context`.
+    ///
+    /// # Errors
+    ///
+    /// [`VaultError`] when the platform refuses or the context differs.
     fn open(&self, sealed: &[u8], context: &[u8]) -> Result<Zeroizing<Vec<u8>>, VaultError>;
 }
 
 /// What the core stores for the operator key.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SealedOperatorKey {
- /// The ML-DSA-65 public key, as registered on chain.
+    /// The ML-DSA-65 public key, as registered on chain.
     pub public_key: Vec<u8>,
- /// The seed, as the vault sealed it.
+    /// The seed, as the vault sealed it.
     pub sealed_seed: Vec<u8>,
 }
 
@@ -97,11 +97,11 @@ fn vault_context(public_key: &[u8]) -> Vec<u8> {
 }
 
 impl OperatorKey {
- /// Generate the key from 32 bytes of fresh platform entropy.
- ///
- /// # Errors
- ///
- /// [`CoreError`] `mobile_operator_key` when the signature code refuses.
+    /// Generate the key from 32 bytes of fresh platform entropy.
+    ///
+    /// # Errors
+    ///
+    /// [`CoreError`] `mobile_operator_key` when the signature code refuses.
     pub fn from_entropy(entropy: [u8; OPERATOR_SEED_LEN]) -> Result<Self, CoreError> {
         Self::from_seed(Zeroizing::new(entropy))
     }
@@ -112,28 +112,28 @@ impl OperatorKey {
         Ok(Self { seed, public_key })
     }
 
- /// The public key, as `RegisterValidator` and `RotateOperatorKey` carry it.
+    /// The public key, as `RegisterValidator` and `RotateOperatorKey` carry it.
     #[must_use]
     pub fn public_key(&self) -> &[u8] {
         &self.public_key
     }
 
- /// Sign `message` under the FIPS 204 context `ctx`. `rnd` hedges the
- /// signature; all zero is the deterministic variant.
- ///
- /// # Errors
- ///
- /// [`CoreError`] `mobile_operator_sign` for an empty or too long context.
+    /// Sign `message` under the FIPS 204 context `ctx`. `rnd` hedges the
+    /// signature; all zero is the deterministic variant.
+    ///
+    /// # Errors
+    ///
+    /// [`CoreError`] `mobile_operator_sign` for an empty or too long context.
     pub fn sign(&self, ctx: &[u8], message: &[u8], rnd: &[u8; 32]) -> Result<Vec<u8>, CoreError> {
         pq::ml_dsa_sign(OPERATOR_KEY_SCHEME, &self.seed, message, ctx, rnd)
             .map_err(|e| key_error("mobile_operator_sign", &e))
     }
 
- /// Seal the seed with the platform vault.
- ///
- /// # Errors
- ///
- /// [`CoreError`] `mobile_key_vault` when the vault refuses.
+    /// Seal the seed with the platform vault.
+    ///
+    /// # Errors
+    ///
+    /// [`CoreError`] `mobile_key_vault` when the vault refuses.
     pub fn seal(&self, vault: &dyn KeyVault) -> Result<SealedOperatorKey, CoreError> {
         let context = vault_context(&self.public_key);
         let sealed_seed = vault
@@ -145,14 +145,14 @@ impl OperatorKey {
         })
     }
 
- /// Open a sealed key and check it is the key it claims to be.
- ///
- /// # Errors
- ///
- /// [`CoreError`] `mobile_key_vault` when the vault refuses,
- /// `mobile_operator_key_sealed` when it returns a seed of the wrong
- /// length, and `mobile_operator_key_mismatch` when the seed derives
- /// another public key.
+    /// Open a sealed key and check it is the key it claims to be.
+    ///
+    /// # Errors
+    ///
+    /// [`CoreError`] `mobile_key_vault` when the vault refuses,
+    /// `mobile_operator_key_sealed` when it returns a seed of the wrong
+    /// length, and `mobile_operator_key_mismatch` when the seed derives
+    /// another public key.
     pub fn open(vault: &dyn KeyVault, sealed: &SealedOperatorKey) -> Result<Self, CoreError> {
         let context = vault_context(&sealed.public_key);
         let secret = vault

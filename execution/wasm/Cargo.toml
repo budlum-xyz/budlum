@@ -3,7 +3,7 @@ name = "budlum-ee-wasm"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.97.1"
-license.workspace = true
+license = "LicenseRef-PolyForm-Shield-1.0.0"
 description = "Out-of-process CosmWasm execution-environment worker on wasmi (EeId::WASM = 0x02)"
 
 [workspace]

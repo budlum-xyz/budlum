@@ -61,10 +61,8 @@ fn extract_struct_body<'a>(code: &'a str, marker: &str) -> Option<&'a str> {
 /// Returns an actionable message if any  sealing, unlinkability, or
 /// cryptographic-erasure invariant is violated.
 pub fn run(root: &Path) -> Result<String, String> {
-    let seal_src = strip_line_comments(strip_cfg_test(&read_rel(
-        root,
-        "src/storage/bud3/seal.rs",
-    )?));
+    let seal_src =
+        strip_line_comments(strip_cfg_test(&read_rel(root, "src/storage/bud3/seal.rs")?));
     for required in [
         "pub fn padme_padded_len",
         "XChaCha20Poly1305",
@@ -106,10 +104,8 @@ pub fn run(root: &Path) -> Result<String, String> {
         }
     }
 
-    let keys_src = strip_line_comments(strip_cfg_test(&read_rel(
-        root,
-        "src/storage/bud3/keys.rs",
-    )?));
+    let keys_src =
+        strip_line_comments(strip_cfg_test(&read_rel(root, "src/storage/bud3/keys.rs")?));
     for required in [
         "HpkeEnvelope::seal",
         "HpkeEnvelope::from_bytes",

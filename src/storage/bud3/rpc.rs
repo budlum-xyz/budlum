@@ -117,13 +117,9 @@ impl Bud3RpcService {
                     .get("declared_len")
                     .and_then(Value::as_u64)
                     .ok_or_else(|| String::from("missing `declared_len`"))?;
-                let raw_flags = u8::try_from(
-                    params
-                        .get("flags")
-                        .and_then(Value::as_u64)
-                        .unwrap_or(0),
-                )
-                .map_err(|_| String::from("invalid `flags`"))?;
+                let raw_flags =
+                    u8::try_from(params.get("flags").and_then(Value::as_u64).unwrap_or(0))
+                        .map_err(|_| String::from("invalid `flags`"))?;
                 let lifetime_epochs = params
                     .get("lifetime_epochs")
                     .and_then(Value::as_u64)
@@ -132,30 +128,32 @@ impl Bud3RpcService {
                     .get("pre_sealed")
                     .and_then(Value::as_bool)
                     .unwrap_or(false);
-                let sid = if let Some(days_u64) = params.get("lifetime_days").and_then(Value::as_u64) {
-                    let days = u32::try_from(days_u64).map_err(|_| String::from("invalid `lifetime_days`"))?;
-                    self.uploads
-                        .open_session_for_days(
-                            (account, [0u8; 16]),
-                            declared_len,
-                            raw_flags,
-                            days,
-                            pre_sealed,
-                            now_sec,
-                        )
-                        .map_err(|e| format!("{e:?}"))?
-                } else {
-                    self.uploads
-                        .open_session(
-                            (account, [0u8; 16]),
-                            declared_len,
-                            raw_flags,
-                            lifetime_epochs,
-                            pre_sealed,
-                            now_sec,
-                        )
-                        .map_err(|e| format!("{e:?}"))?
-                };
+                let sid =
+                    if let Some(days_u64) = params.get("lifetime_days").and_then(Value::as_u64) {
+                        let days = u32::try_from(days_u64)
+                            .map_err(|_| String::from("invalid `lifetime_days`"))?;
+                        self.uploads
+                            .open_session_for_days(
+                                (account, [0u8; 16]),
+                                declared_len,
+                                raw_flags,
+                                days,
+                                pre_sealed,
+                                now_sec,
+                            )
+                            .map_err(|e| format!("{e:?}"))?
+                    } else {
+                        self.uploads
+                            .open_session(
+                                (account, [0u8; 16]),
+                                declared_len,
+                                raw_flags,
+                                lifetime_epochs,
+                                pre_sealed,
+                                now_sec,
+                            )
+                            .map_err(|e| format!("{e:?}"))?
+                    };
                 Ok(json!({ "session_id": sid }))
             }
             "bud_storageUploadAppend" => {
@@ -186,6 +184,15 @@ impl Bud3RpcService {
                         now_sec,
                     )
                     .map_err(|e| format!("{e:?}"))?;
+                // The current symbol protocol defines custody push messages but
+                // has no network send/receipt implementation. Until every new
+                // share is durably delivered, returning a successful commitment
+                // would discard `done.segments` and advertise unavailable data.
+                if done.deduplicated_existing.is_none() || !done.segments.is_empty() {
+                    return Err(String::from(
+                        "custody delivery unavailable: upload produced symbols but no verified holder receipts",
+                    ));
+                }
                 Ok(json!({
                     "object_commitment": hex::encode(done.record.commitment),
                     "content_digest": hex::encode(done.record.content_id.digest),
@@ -198,12 +205,19 @@ impl Bud3RpcService {
                 let mut val = registry.query_json(&Bud3Query::Object(key));
                 if method == "bud_storageGetPlacement" {
                     if let Some(entry) = registry.object(&key) {
-                        let total_src = Segmentation::new(entry.record.object_len, &entry.record.profile)
-                            .map_or(0, |s| s.total_source_symbols());
+                        let total_src =
+                            Segmentation::new(entry.record.object_len, &entry.record.profile)
+                                .map_or(0, |s| s.total_source_symbols());
                         let k_seg = u32::try_from(total_src).unwrap_or(1).max(1);
                         if let Some(map) = val.as_object_mut() {
-                            map.insert("mobile_share_milli".to_owned(), json!(placement_row.mobile_share_milli()));
-                            map.insert("redundancy_milli".to_owned(), json!(placement_row.redundancy_milli(k_seg)));
+                            map.insert(
+                                "mobile_share_milli".to_owned(),
+                                json!(placement_row.mobile_share_milli()),
+                            );
+                            map.insert(
+                                "redundancy_milli".to_owned(),
+                                json!(placement_row.redundancy_milli(k_seg)),
+                            );
                             map.insert(
                                 "total_physical_bytes".to_owned(),
                                 json!(entry.endowment.fee_record.total_physical_bytes()),
@@ -221,18 +235,16 @@ impl Bud3RpcService {
                 let holder: Address = parse_hex32(params.get("holder"), "holder")?;
                 let object: ObjectKey = parse_hex32(params.get("object"), "object")?;
                 let segment = params.get("segment").and_then(Value::as_u64).unwrap_or(0);
-                let first_esi = u32::try_from(
-                    params.get("first_esi").and_then(Value::as_u64).unwrap_or(0),
-                )
-                .map_err(|_| String::from("invalid `first_esi`"))?;
-                let count = u32::try_from(
-                    params.get("count").and_then(Value::as_u64).unwrap_or(1),
-                )
-                .map_err(|_| String::from("invalid `count`"))?;
+                let first_esi =
+                    u32::try_from(params.get("first_esi").and_then(Value::as_u64).unwrap_or(0))
+                        .map_err(|_| String::from("invalid `first_esi`"))?;
+                let count = u32::try_from(params.get("count").and_then(Value::as_u64).unwrap_or(1))
+                    .map_err(|_| String::from("invalid `count`"))?;
                 if count == 0 || count > super::symbol_protocol::MAX_SYMBOLS_PER_REQUEST {
                     return Err(String::from("symbol count outside 1..=64"));
                 }
-                let syms = network.fetch_holder_symbols(&holder, &object, segment, first_esi, count);
+                let syms =
+                    network.fetch_holder_symbols(&holder, &object, segment, first_esi, count);
                 let encoded: Vec<Value> = syms
                     .into_iter()
                     .map(|s| json!({ "segment": s.segment, "esi": s.esi, "data_hex": hex::encode(s.data) }))
@@ -357,19 +369,20 @@ impl Bud3RpcService {
                     .get("reveal_session_id")
                     .and_then(Value::as_u64)
                     .ok_or_else(|| String::from("missing `reveal_session_id`"))?;
-                let offset = usize::try_from(
-                    params.get("offset").and_then(Value::as_u64).unwrap_or(0),
-                )
-                .unwrap_or(0);
-                let limit = usize::try_from(
-                    params.get("limit").and_then(Value::as_u64).unwrap_or(16),
-                )
-                .unwrap_or(16);
+                let offset =
+                    usize::try_from(params.get("offset").and_then(Value::as_u64).unwrap_or(0))
+                        .unwrap_or(0);
+                let limit =
+                    usize::try_from(params.get("limit").and_then(Value::as_u64).unwrap_or(16))
+                        .unwrap_or(16);
                 let (obj, frames, total) = self
                     .reveals
                     .reveal_frames(sid, offset, limit)
                     .map_err(|e| format!("{e:?}"))?;
-                let encoded: Vec<String> = frames.iter().map(|f| hex::encode(f.encode())).collect();
+                let encoded: Vec<String> = frames
+                    .iter()
+                    .map(|f| hex::encode(f.encode_wire()))
+                    .collect();
                 Ok(json!({
                     "object": hex::encode(obj),
                     "total_frames": total,
@@ -425,5 +438,117 @@ impl Bud3RpcService {
             }
             other => Err(format!("unknown B.U.D. 3.0 RPC method `{other}`")),
         }
+    }
+}
+
+#[cfg(test)]
+mod upload_delivery_tests {
+    use super::super::pipeline::prepare_public_upload;
+    use super::super::placement::{Class, Share};
+    use super::super::registry::Registered;
+    use super::super::view::MemorySymbolNetwork;
+    use super::*;
+
+    fn placement() -> (PlacementRow, Vec<Candidate>) {
+        (
+            PlacementRow {
+                n_full: 1,
+                s_full: 3,
+                n_mobile: 0,
+                s_mobile: 0,
+            },
+            vec![Candidate {
+                validator: [10; 32],
+                account: [10; 32],
+                class: Class::Full,
+                stake: 1_000,
+                free_quota_bytes: u64::MAX,
+                network: None,
+            }],
+        )
+    }
+
+    fn upload_from_rpc(
+        service: &mut Bud3RpcService,
+        registry: &Bud3Registry,
+        row: &PlacementRow,
+        candidates: &[Candidate],
+        content: &[u8],
+    ) -> Result<Value, String> {
+        let network = MemorySymbolNetwork::default();
+        let open = service.handle(
+            "bud_storageUploadOpen",
+            &json!({ "account": hex::encode([2u8; 32]), "declared_len": content.len() }),
+            registry,
+            &network,
+            (row, candidates, 100),
+        )?;
+        let sid = open["session_id"].as_u64().unwrap();
+        service.handle(
+            "bud_storageUploadAppend",
+            &json!({ "session_id": sid, "chunk_hex": hex::encode(content) }),
+            registry,
+            &network,
+            (row, candidates, 101),
+        )?;
+        service.handle(
+            "bud_storageUploadFinish",
+            &json!({ "session_id": sid }),
+            registry,
+            &network,
+            (row, candidates, 102),
+        )
+    }
+
+    #[test]
+    fn upload_finish_refuses_new_object_without_custody_delivery_receipts() {
+        let (row, candidates) = placement();
+        let err = upload_from_rpc(
+            &mut Bud3RpcService::default(),
+            &Bud3Registry::default(),
+            &row,
+            &candidates,
+            b"new object needs custody",
+        )
+        .unwrap_err();
+        assert!(err.contains("custody delivery unavailable"), "{err}");
+    }
+
+    #[test]
+    fn upload_finish_can_reuse_already_custodied_public_object() {
+        let content = b"same public bytes";
+        let prepared =
+            prepare_public_upload(content, &Profile::P0, &Bud3Limits::default(), 3).unwrap();
+        let key = prepared.record.commitment;
+        let mut registry = Bud3Registry::default();
+        assert_eq!(
+            registry.register_object(
+                [1; 32],
+                prepared.record,
+                vec![(
+                    0,
+                    Share {
+                        validator: [10; 32],
+                        class: Class::Full,
+                        first_esi: 0,
+                        symbols: 3
+                    }
+                )],
+                0,
+                20,
+            ),
+            Ok(Registered::New(key))
+        );
+        let (row, candidates) = placement();
+        let reply = upload_from_rpc(
+            &mut Bud3RpcService::default(),
+            &registry,
+            &row,
+            &candidates,
+            content,
+        )
+        .unwrap();
+        assert_eq!(reply["deduplicated_existing"], hex::encode(key));
+        assert_eq!(reply["object_commitment"], hex::encode(key));
     }
 }

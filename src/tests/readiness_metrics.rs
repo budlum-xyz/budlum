@@ -74,7 +74,7 @@ fn register_object(
     // refused by the registry.
     state
         .bud3_registry
-        .register_object(upload.record, owner, shares, 0, 100)
+        .register_object(owner.0, upload.record, shares, 0, 100)
         .expect("register");
     (key, segments * symbols * u64::from(symbol_size))
 }
@@ -161,7 +161,7 @@ fn finality_gauges_follow_the_chain() {
 /// outage would stay at zero.
 #[test]
 fn state_root_mismatch_is_counted_at_the_refusal() {
-    let (mut bc, metrics) = chain_with_metrics(45262);
+    let (bc, metrics) = chain_with_metrics(45262);
     let good = bc.chain.clone();
     assert!(
         bc.is_valid_chain(&good),
@@ -234,8 +234,8 @@ fn bud3_health_gauges_read_the_rooted_registry() {
     // The one holder of both objects never comes back: every segment of both
     // is at risk, and still no repair task is open, because the lazy
     // threshold is measured in lost shares of a segment, not in a lost share.
-    bc.state.bud3_registry.mark_unseen(&full_holder);
-    bc.state.bud3_registry.mark_unseen(&mobile_holder);
+    bc.state.bud3_registry.mark_unseen(&full_holder.0);
+    bc.state.bud3_registry.mark_unseen(&mobile_holder.0);
     bc.emit_chain_metrics();
     let registry = &bc.state.bud3_registry;
     assert!(

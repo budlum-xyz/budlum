@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 
@@ -25,7 +26,6 @@ TEMPLATE_FIELDS = (
     "block_reward",
     "base_fee",
     "gas_schedule",
-    "timestamp",
     "bud_tokenomics",
     "pq_scheme",
 )
@@ -251,11 +251,13 @@ def reject_secret_fields(value):
             reject_secret_fields(child)
 
 
-def finalize_genesis(template, assembled_path, expected_records):
+def finalize_genesis(template, assembled_path, expected_records, timestamp_ms):
     expected_count = len(expected_records)
     genesis = load_json(assembled_path, "assembled genesis")
     if not isinstance(genesis, dict):
         refuse("assembled genesis must be a JSON object")
+    if type(genesis.get("timestamp")) is not int or genesis["timestamp"] != timestamp_ms:
+        refuse("assembled genesis did not retain the selected wall-clock timestamp")
     for field in TEMPLATE_FIELDS:
         if field not in template or genesis.get(field) != template[field]:
             refuse(f"assembled testnet genesis differs from rehearsal template field {field!r}")
@@ -314,7 +316,7 @@ def finalize_genesis(template, assembled_path, expected_records):
     reject_secret_fields(genesis)
     genesis["ceremony_status"] = "rehearsal"
     genesis["ceremony_note"] = (
-        "Rehearsal genesis produced by ops/rehearsal/genesis_rehearsal.sh from "
+        "Rehearsal genesis produced by ops/rehearsal/genesis_rehearsal.py from "
         f"{expected_count} complete Full validator public records. Throwaway network; "
         "chain id 45261 (testnet)."
     )
@@ -351,9 +353,30 @@ def publish(output_dir, genesis_bytes):
     return digest
 
 
+def existing_publication(output_dir, template, records):
+    """A completed ceremony is immutable, even when this command is retried."""
+    genesis_path = output_dir / "rehearsal-genesis.json"
+    digest_path = output_dir / "rehearsal-genesis.sha256"
+    if not genesis_path.exists() and not digest_path.exists():
+        return None
+    if not genesis_path.is_file() or not digest_path.is_file():
+        refuse("incomplete published ceremony; inspect it before retrying")
+    genesis_bytes = genesis_path.read_bytes()
+    digest = hashlib.sha256(genesis_bytes).hexdigest()
+    if digest_path.read_bytes() != f"{digest}  rehearsal-genesis.json\n".encode("ascii"):
+        refuse("published genesis digest does not match; refusing to replace it")
+    existing = load_json(genesis_path, "published genesis")
+    timestamp_ms = existing.get("timestamp") if isinstance(existing, dict) else None
+    if type(timestamp_ms) is not int or timestamp_ms > time.time_ns() // 1_000_000 + 60_000:
+        refuse("published genesis timestamp is invalid or in the future")
+    if genesis_bytes != finalize_genesis(template, genesis_path, records, timestamp_ms):
+        refuse("published genesis differs from the validated operator records")
+    return digest
+
+
 def main(argv):
     if len(argv) not in (1, 2):
-        print("usage: genesis_rehearsal.sh <registrations-dir> [out-dir]", file=sys.stderr)
+        print("usage: genesis_rehearsal.py <registrations-dir> [out-dir]", file=sys.stderr)
         return 2
     registrations_dir = Path(argv[0]).resolve()
     output_dir = Path(argv[1] if len(argv) == 2 else "docs/rehearsal").resolve()
@@ -377,17 +400,24 @@ def main(argv):
             assembled_path = temporary_dir / "assembled-genesis.json"
             records = stage_public_records(registrations_dir, staging_dir)
             record_count = len(records)
+            digest = existing_publication(output_dir, template, records)
+            if digest is not None:
+                print(f"existing rehearsal genesis verified ({record_count} Full validators; SHA-256 {digest})")
+                return 0
             print(
                 f"preflight accepted {record_count} complete public operator records; "
                 "the node CLI will validate their proofs",
                 file=sys.stderr,
             )
+            # The checked-in template's stamp is a schema fixture, not the
+            # clock of a live rehearsal: a future stamp cannot produce slots.
+            timestamp_ms = time.time_ns() // 1_000_000
             assembler_status = run_genesis_assembler(
-                staging_dir, assembled_path, template["timestamp"]
+                staging_dir, assembled_path, timestamp_ms
             )
             if assembler_status != 0:
                 return assembler_status
-            genesis_bytes = finalize_genesis(template, assembled_path, records)
+            genesis_bytes = finalize_genesis(template, assembled_path, records, timestamp_ms)
         digest = publish(output_dir, genesis_bytes)
     except Refusal as error:
         print(f"genesis rehearsal refused: {error}", file=sys.stderr)

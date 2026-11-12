@@ -184,8 +184,8 @@ use crate::chain::blockchain::EPOCH_LENGTH;
 use crate::consensus::pow::PoWEngine;
 use crate::core::address::Address;
 use crate::core::transaction::{Transaction, TransactionType};
-use crate::registry::role::roles;
 use crate::persistence::db::Storage;
+use crate::registry::role::roles;
 
 /// Sled's file-lock release is not guaranteed to be synchronous with the
 /// Previous owner's `drop` under CI scheduling (os error 11 / WouldBlock

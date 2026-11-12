@@ -89,10 +89,8 @@ impl ChurnSimulator {
                 latency_ms: 250,
             });
         }
-        let candidates: Vec<([u8; 32], ValidatorClass)> = validators
-            .iter()
-            .map(|v| (v.address, v.class))
-            .collect();
+        let candidates: Vec<([u8; 32], ValidatorClass)> =
+            validators.iter().map(|v| (v.address, v.class)).collect();
         let seat_tracker =
             SeatHandoverTracker::from_epoch_candidates(cfg.active_seat_cap, &candidates);
         Self {
@@ -189,7 +187,10 @@ impl ChurnSimulator {
         self.height = next_height;
         let epoch = self.current_epoch();
 
-        if self.height.is_multiple_of(TESTNET_CHECKPOINT_INTERVAL_BLOCKS) {
+        if self
+            .height
+            .is_multiple_of(TESTNET_CHECKPOINT_INTERVAL_BLOCKS)
+        {
             let mut voters = BTreeSet::new();
             let active: Vec<[u8; 32]> = self.seat_tracker.active_seats().to_vec();
             for seat in active {
@@ -308,7 +309,10 @@ fn proposer_round_handover() {
         }
     }
     let (round_used, actual_proposer, _) = sim.step_block(false);
-    assert!(round_used >= 1, "expected handover round >= 1 when round 0 leader is offline");
+    assert!(
+        round_used >= 1,
+        "expected handover round >= 1 when round 0 leader is offline"
+    );
     assert_ne!(actual_proposer, r0_leader);
 }
 
@@ -348,7 +352,8 @@ fn custody_assignment_handover_after_3_epochs() {
     let v3 = [0xA3; 32];
 
     let payload = b"bud3 custody handover test payload".repeat(16);
-    let upload = prepare_public_upload(&payload, &TEST_PROFILE, &Bud3Limits::default(), 12).unwrap();
+    let upload =
+        prepare_public_upload(&payload, &TEST_PROFILE, &Bud3Limits::default(), 12).unwrap();
     let key = upload.record.commitment;
     let seg_count = u64::try_from(upload.segments.len()).unwrap_or(0);
     let shares: Vec<(u64, Share)> = (0..seg_count)
@@ -388,10 +393,16 @@ fn custody_assignment_handover_after_3_epochs() {
         (v3, StorageClass::Full),
     ];
     // Epochs 11 and 12 (< 3 epochs elapsed): no handover yet.
-    assert_eq!(handover_custody_assignments(&mut registry, 12, &candidates), 0);
+    assert_eq!(
+        handover_custody_assignments(&mut registry, 12, &candidates),
+        0
+    );
 
     // Epoch 13 (3 epochs elapsed without `CustodyAck` from `v2`): hands over to `v3`.
-    assert_eq!(handover_custody_assignments(&mut registry, 13, &candidates), 1);
+    assert_eq!(
+        handover_custody_assignments(&mut registry, 13, &candidates),
+        1
+    );
     let obj = registry.object(&key).unwrap();
     assert!(obj
         .shares
@@ -455,7 +466,10 @@ fn ten_percent_full_departure_keeps_finality() {
         sim.step_block(false);
     }
 
-    assert_eq!(sim.finalized_height, 25, "finality must advance on every 5-block checkpoint");
+    assert_eq!(
+        sim.finalized_height, 25,
+        "finality must advance on every 5-block checkpoint"
+    );
     assert_eq!(sim.stalled_metric(), 0);
     assert!(
         !sim.seat_tracker.active_seats().contains(&departed_a)
@@ -557,7 +571,10 @@ fn churn_runs_on_the_testnet_schedule() {
     for expected_height in 1..=40 {
         let (round, proposer, _) = sim.step_block(false);
         assert_eq!(sim.height, expected_height);
-        assert!(round <= 63, "the simulator's bounded successor search exhausted");
+        assert!(
+            round <= 63,
+            "the simulator's bounded successor search exhausted"
+        );
         assert!(sim.validators.iter().any(|validator| {
             validator.address == proposer && validator.class == ValidatorClass::Full
         }));
@@ -566,9 +583,9 @@ fn churn_runs_on_the_testnet_schedule() {
     assert_eq!(sim.stalled_metric(), 0);
     assert!(sim.seat_tracker.active_seats().len() <= 6);
     assert!(sim.seat_tracker.active_seats().iter().all(|seat| {
-        sim.validators.iter().any(|validator| {
-            validator.address == *seat && validator.class == ValidatorClass::Full
-        })
+        sim.validators
+            .iter()
+            .any(|validator| validator.address == *seat && validator.class == ValidatorClass::Full)
     }));
 }
 
@@ -606,9 +623,7 @@ fn churn_random_leave_and_return_keeps_finality() {
             let candidates: Vec<[u8; 32]> = sim
                 .validators
                 .iter()
-                .filter(|validator| {
-                    validator.class == ValidatorClass::Full && validator.online
-                })
+                .filter(|validator| validator.class == ValidatorClass::Full && validator.online)
                 .map(|validator| validator.address)
                 .collect();
             if !candidates.is_empty() {

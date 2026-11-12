@@ -173,7 +173,9 @@ pub fn decode_optical_path() {}
             &format!("{clean_two_path}\npub struct {forbidden};\n"),
         )?;
         if run(&dir).is_ok() {
-            return Err(String::from("canary: forbidden legacy struct in bud3 passed"));
+            return Err(String::from(
+                "canary: forbidden legacy struct in bud3 passed",
+            ));
         }
         put("src/storage/bud3/two_path.rs", clean_two_path)?;
 

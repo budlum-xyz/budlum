@@ -8,7 +8,7 @@ use std::process::ExitCode;
 #[cfg(unix)]
 fn run_unix() -> ExitCode {
     use budlum_uel_abi::mock::MockEe;
-    use budlum_uel_abi::transport::{serve_connection, ServeEnd};
+    use budlum_uel_abi::transport::{ServeEnd, serve_connection};
     use std::os::unix::net::UnixListener;
 
     let mut args = std::env::args().skip(1);

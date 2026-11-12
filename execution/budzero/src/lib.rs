@@ -83,7 +83,9 @@ fn take_u64(cur: &mut &[u8]) -> Result<u64, String> {
     Ok(u64::from_le_bytes(arr))
 }
 
-fn parse_call_payload(mut cur: &[u8]) -> Result<(Vec<u64>, Vec<(u64, u64)>), String> {
+type ParsedCallPayload = (Vec<u64>, Vec<(u64, u64)>);
+
+fn parse_call_payload(mut cur: &[u8]) -> Result<ParsedCallPayload, String> {
     if cur.is_empty() {
         return Ok((Vec::new(), Vec::new()));
     }
@@ -128,14 +130,17 @@ fn set_caller_256(vm: &mut Vm, caller_id: &[u8]) {
 }
 
 fn read_packed_bytes(
-    storage: &std::collections::BTreeMap<u64, u64>,
+    storage: &std::collections::HashMap<u64, u64>,
     base: u64,
     len: usize,
 ) -> Vec<u8> {
     let mut out = Vec::with_capacity(len);
     let words = len.div_ceil(8);
     for idx in 0..words {
-        let w = storage.get(&(base.saturating_add(idx as u64))).copied().unwrap_or(0);
+        let w = storage
+            .get(&(base.saturating_add(idx as u64)))
+            .copied()
+            .unwrap_or(0);
         out.extend_from_slice(&w.to_le_bytes());
     }
     out.truncate(len);

@@ -16,6 +16,9 @@ use crate::core::address::Address;
 /// Gossip topic for validator presence signals (Section 7.8 item 3).
 pub const PRESENCE_GOSSIP_TOPIC: &str = "/budlum/presence/1";
 
+/// Domain separation tag for validator presence digests (`BDLM_PRESENCE_V1`).
+pub(crate) const PRESENCE_DOMAIN_TAG: &[u8] = b"BDLM_PRESENCE_V1";
+
 /// Full-class presence window length in epochs (Section 7.8 item 1).
 pub const FULL_PRESENCE_WINDOW_EPOCHS: u64 = 1;
 
@@ -43,12 +46,16 @@ pub const RESUME_ACTIVATION_DELAY_EPOCHS: u64 = 1;
 /// The one validator-class definition shared by the node and phone (K-4).
 /// The alias keeps existing node call sites source-compatible.
 pub use budlum_types::ValidatorClass as PresenceClass;
+const _: &[u8] = PRESENCE_DOMAIN_TAG;
 
 /// Convert an offline duration in hours to a ceiling epoch count (Section 6.21.3):
 /// `ceil(hours * 3600 / (slot_secs * epoch_len_blocks))`.
 /// Convenience: exposed for validator class and governance parameter checks.
-#[must_use]
-pub fn hours_to_epochs(hours: u64, slot_secs: u64, epoch_len_blocks: u64) -> Result<u64, PresenceError> {
+pub fn hours_to_epochs(
+    hours: u64,
+    slot_secs: u64,
+    epoch_len_blocks: u64,
+) -> Result<u64, PresenceError> {
     let denom = u128::from(slot_secs).saturating_mul(u128::from(epoch_len_blocks));
     if denom == 0 {
         return Err(PresenceError::ZeroEpochDuration);
@@ -111,7 +118,9 @@ pub struct PresenceDoubleSignEvidence {
 pub enum GossipIngestOutcome {
     Accepted,
     /// Duplicate signal in the same `(validator, window)` dropped with peer penalty.
-    DroppedDuplicate { peer_score_delta: i32 },
+    DroppedDuplicate {
+        peer_score_delta: i32,
+    },
     /// Conflicting class signed in the same `(validator, window)`: slashable double-sign.
     DoubleSignDetected(Box<PresenceDoubleSignEvidence>),
 }
@@ -348,10 +357,19 @@ impl PresenceTracker {
         chain_id: u64,
         current_epoch: u64,
     ) -> Result<Vec<Address>, PresenceError> {
+        let expected_window =
+            budlum_types::presence::window_of_epoch(current_epoch, aggregate.class);
+        if aggregate.window != expected_window {
+            return Err(PresenceError::StaleAggregate);
+        }
         let present = aggregate.verify_single_pairing(roster, chain_id)?;
         for addr in &present {
             if let Some(st) = self.validators.get_mut(addr) {
-                if st.class == aggregate.class && st.last_seen_window != Some(aggregate.window) {
+                if st.class == aggregate.class
+                    && st
+                        .last_seen_window
+                        .is_none_or(|prev| prev < aggregate.window)
+                {
                     st.last_seen_window = Some(aggregate.window);
                     st.last_seen_epoch = current_epoch;
                     st.seen_windows_in_period = st.seen_windows_in_period.saturating_add(1);
@@ -402,7 +420,10 @@ impl PresenceTracker {
     /// 1-epoch delay has elapsed, and suspend validators exceeding their offline threshold.
     /// Stake is NEVER reduced by suspension (invariant V-4).
     /// Convenience: exposed for epoch boundary transition.
-    pub fn advance_epoch(&mut self, current_epoch: u64) -> Result<BTreeSet<Address>, PresenceError> {
+    pub fn advance_epoch(
+        &mut self,
+        current_epoch: u64,
+    ) -> Result<BTreeSet<Address>, PresenceError> {
         let mut newly_suspended = BTreeSet::new();
         let slot_secs = self.slot_secs;
         let epoch_len = self.epoch_len_blocks;
@@ -474,8 +495,7 @@ impl PresenceTracker {
             return Ok(0);
         }
         let slash_atoms = u64::try_from(
-            u128::from(st.stake_atoms)
-                .saturating_mul(u128::from(PRESENCE_DOUBLE_SIGN_SLASH_PPM))
+            u128::from(st.stake_atoms).saturating_mul(u128::from(PRESENCE_DOUBLE_SIGN_SLASH_PPM))
                 / 1_000_000,
         )
         .unwrap_or(u64::MAX);
@@ -548,6 +568,7 @@ pub enum PresenceError {
     ZeroEpochDuration,
     EpochOverflow,
     EmptyAggregate,
+    StaleAggregate,
     InvalidBitmapLength,
     InvalidBitmapTrailingBits,
     InvalidSignature(String),
@@ -678,30 +699,10 @@ mod tests {
         tracker.register_validator(val, PresenceClass::Mobile, 100_000, 0);
 
         let mut inbox = PresenceGossipInbox::default();
-        let sig_mobile = sign_presence_signal(
-            val,
-            CHAIN_ID,
-            42,
-            PresenceClass::Mobile,
-            [1; 32],
-            &sk,
-        );
-        let sig_dup = sign_presence_signal(
-            val,
-            CHAIN_ID,
-            42,
-            PresenceClass::Mobile,
-            [2; 32],
-            &sk,
-        );
-        let sig_full = sign_presence_signal(
-            val,
-            CHAIN_ID,
-            42,
-            PresenceClass::Full,
-            [1; 32],
-            &sk,
-        );
+        let sig_mobile =
+            sign_presence_signal(val, CHAIN_ID, 42, PresenceClass::Mobile, [1; 32], &sk);
+        let sig_dup = sign_presence_signal(val, CHAIN_ID, 42, PresenceClass::Mobile, [2; 32], &sk);
+        let sig_full = sign_presence_signal(val, CHAIN_ID, 42, PresenceClass::Full, [1; 32], &sk);
 
         assert_eq!(
             inbox.ingest(sig_mobile, &pk, CHAIN_ID).unwrap(),
@@ -728,8 +729,12 @@ mod tests {
     fn liveness_report_no_longer_slashes() {
         let mut liveness = LivenessTracker::new();
         let v = Address::from([7u8; 32]);
-        assert!(liveness.record_suspension_epoch(1, &[v], |_| false, 3).is_empty());
-        assert!(liveness.record_suspension_epoch(2, &[v], |_| false, 3).is_empty());
+        assert!(liveness
+            .record_suspension_epoch(1, &[v], |_| false, 3)
+            .is_empty());
+        assert!(liveness
+            .record_suspension_epoch(2, &[v], |_| false, 3)
+            .is_empty());
         let notices = liveness.record_suspension_epoch(3, &[v], |_| false, 3);
         assert_eq!(notices.len(), 1);
         assert_eq!(notices[0].validator, v);

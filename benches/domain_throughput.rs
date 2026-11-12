@@ -20,7 +20,8 @@
 //!   Cargo bench --bench domain_throughput -- "tx_execute"  (tek grup)
 //!   Cargo bench --bench domain_throughput -- --save-baseline main (baseline)
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
+use std::hint::black_box;
 use std::time::Duration;
 
 use budlum_core::core::account::AccountState;
@@ -34,11 +35,11 @@ use budlum_core::crypto::primitives::KeyPair;
 use budlum_core::execution::executor::Executor;
 use budlum_core::execution::proof_verifier::{ExecutionPublicInputs, ProofEnvelope, ProofVerifier};
 use budlum_core::network::gossip_dedup::GossipDedup;
+use budlum_core::persistence::state_trie::MerkleTrie;
 use budlum_core::registry::permissionless::{
     PermissionlessRegistry, SlashingCondition, MIN_REGISTRATION_STAKE,
 };
 use budlum_core::registry::role::roles;
-use budlum_core::persistence::state_trie::MerkleTrie;
 
 // ─── Helpers ────────────────────────────────────────────────────────
 
@@ -49,7 +50,7 @@ fn addr(b: u8) -> Address {
 fn setup_funded_state(n: usize) -> (AccountState, Vec<KeyPair>) {
     let mut state = AccountState::new();
     let mut keypairs = Vec::new();
-    for i in 0..n {
+    for _ in 0..n {
         let kp = KeyPair::generate().unwrap();
         let a = Address::from(kp.public_key_bytes());
         state.add_balance(&a, 10_000_000);
@@ -175,7 +176,7 @@ fn bench_state_root(c: &mut Criterion) {
                     trie
                 },
                 |mut trie| {
-                    trie.insert(&addr(0xFF), 9999, 42);
+                    trie.insert(addr(0xFF).as_bytes(), 9999, 42);
                     black_box(trie.root());
                 },
             )
@@ -193,7 +194,7 @@ fn bench_state_root(c: &mut Criterion) {
                     trie
                 },
                 |trie| {
-                    black_box(trie.proof(&addr(42)));
+                    black_box(trie.proof(addr(42).as_bytes()));
                 },
             )
         });
@@ -299,11 +300,7 @@ fn bench_signatures(c: &mut Criterion) {
     let sig = kp.sign(msg);
     group.bench_function("ed25519_verify", |b| {
         b.iter(|| {
-            black_box(KeyPair::verify(
-                black_box(msg),
-                black_box(&sig),
-                black_box(&kp.public_key_bytes()),
-            ));
+            let _ = black_box(kp.verify(black_box(msg), black_box(&sig)));
         })
     });
 
@@ -342,7 +339,7 @@ fn bench_serialization(c: &mut Criterion) {
     let tx_bytes = tx.to_bytes();
     group.bench_function("tx_from_bytes", |b| {
         b.iter(|| {
-            black_box(Transaction::from_bytes(black_box(&tx_bytes)));
+            let _ = black_box(serde_json::from_slice::<Transaction>(black_box(&tx_bytes)));
         })
     });
 
@@ -350,21 +347,21 @@ fn bench_serialization(c: &mut Criterion) {
     let block = Block::new(42, "aabbccdd".repeat(8), vec![tx.clone()]);
     group.bench_function("block_to_json", |b| {
         b.iter(|| {
-            black_box(serde_json::to_string(black_box(&block)));
+            let _ = black_box(serde_json::to_string(black_box(&block)));
         })
     });
 
     let block_json = serde_json::to_string(&block).unwrap();
     group.bench_function("block_from_json", |b| {
         b.iter(|| {
-            black_box(serde_json::from_str::<Block>(black_box(&block_json)));
+            let _ = black_box(serde_json::from_str::<Block>(black_box(&block_json)));
         })
     });
 
     // Transaction hash calculation
     group.bench_function("tx_calculate_hash", |b| {
         b.iter(|| {
-            let mut t = tx.clone();
+            let t = tx.clone();
             black_box(t.calculate_hash());
         })
     });
@@ -379,15 +376,12 @@ fn bench_registry(c: &mut Criterion) {
 
     // Register
     group.bench_function("register_validator", |b| {
-        b.iter_with_setup(
-            || PermissionlessRegistry::new(),
-            |mut reg| {
-                for i in 0..100u8 {
-                    let _ = reg.register_validator(addr(i), MIN_REGISTRATION_STAKE, 0);
-                }
-                black_box(reg.len());
-            },
-        )
+        b.iter_with_setup(PermissionlessRegistry::new, |mut reg| {
+            for i in 0..100u8 {
+                let _ = reg.register_validator(addr(i), MIN_REGISTRATION_STAKE, 0);
+            }
+            black_box(reg.len());
+        })
     });
 
     // Is_active query
@@ -420,7 +414,7 @@ fn bench_registry(c: &mut Criterion) {
                 reg
             },
             |mut reg| {
-                black_box(reg.slash(
+                let _ = black_box(reg.slash(
                     addr(50),
                     roles::VALIDATOR,
                     SlashingCondition::DoubleSign,
@@ -442,7 +436,7 @@ fn bench_registry(c: &mut Criterion) {
                 reg
             },
             |mut reg| {
-                black_box(reg.slash(
+                let _ = black_box(reg.slash(
                     addr(25),
                     roles::VALIDATOR,
                     SlashingCondition::DoubleSign,
@@ -508,9 +502,9 @@ fn bench_bridge(c: &mut Criterion) {
                     .lock(1, 2, 10, 0, asset, addr(1), addr(2), 100, 1000)
                     .unwrap();
                 let message = event.message.unwrap();
-                bridge.mint(&message).unwrap();
-                bridge.burn(transfer.message_id, 2).unwrap();
-                bridge.unlock(transfer.message_id, 2).unwrap();
+                bridge.mint(&message, 11).unwrap();
+                bridge.burn(transfer.message_id, 2, [0u8; 20]).unwrap();
+                bridge.unlock(transfer.message_id, 2, 12).unwrap();
                 black_box(());
             },
         )
@@ -567,6 +561,7 @@ fn bench_proof(c: &mut Criterion) {
         exit_code: 0,
         trace_len: 1024,
         event_digest: [4u8; 32],
+        state_writes_digest: [5u8; 32],
     };
 
     // Public inputs hash
@@ -580,6 +575,8 @@ fn bench_proof(c: &mut Criterion) {
     let envelope = ProofEnvelope {
         proof_format_version: 1,
         backend: "plonky3-stark".into(),
+        p3_version: "p3-0.4.2".into(),
+        fri_params_id: "default-fri-100bits".into(),
         public_inputs_hash: inputs.hash(),
         proof_bytes: vec![0u8; 10_000],
         degree_bits: 12,
@@ -587,7 +584,7 @@ fn bench_proof(c: &mut Criterion) {
 
     group.bench_function("envelope_validate_structure", |b| {
         b.iter(|| {
-            black_box(ProofVerifier::validate_envelope_structure(black_box(
+            let _ = black_box(ProofVerifier::validate_envelope_structure(black_box(
                 &envelope,
             )));
         })
@@ -596,9 +593,10 @@ fn bench_proof(c: &mut Criterion) {
     // Full verify (structural + inputs hash)
     group.bench_function("full_verify", |b| {
         b.iter(|| {
-            black_box(ProofVerifier::verify(
+            let _ = black_box(ProofVerifier::verify(
                 black_box(&envelope),
                 black_box(&inputs),
+                black_box(&[]),
                 1_000_000,
             ));
         })
@@ -637,7 +635,7 @@ fn bench_governance(c: &mut Criterion) {
                     let _ = Executor::apply_transaction(&mut state, &vote_tx);
 
                     for _ in 0..11 {
-                        state.advance_epoch(1000);
+                        state.advance_epoch(1000, budlum_core::core::transaction::DEFAULT_CHAIN_ID);
                     }
                 }
                 black_box(&state.governance);

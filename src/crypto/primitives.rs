@@ -1,3 +1,5 @@
+//! Convenience: exposed for CLI, RPC, SDK, and multi-VM runtime callers.
+
 #[cfg(feature = "pq-ml-dsa")]
 use super::ctx;
 #[cfg(any(feature = "pq-ml-dsa", feature = "wallet-ml-dsa"))]
@@ -1082,7 +1084,9 @@ mod tests {
         crate::crypto::key_file::require_owner_only(&path).expect("a saved file is owner-only");
 
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
-        let err = ValidatorKeys::load(&path).expect_err("0o644 must be refused");
+        let res = ValidatorKeys::load(&path);
+        assert!(res.is_err());
+        let err = res.err().expect("0o644 must be refused");
         let message = err.to_string();
         assert!(message.contains("chmod 600"), "{message}");
         assert!(message.contains("644"), "{message}");
@@ -1105,7 +1109,9 @@ mod tests {
         crate::crypto::key_file::require_owner_only(&path).expect("a saved file is owner-only");
 
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o604)).unwrap();
-        let err = KeyPair::load(&path).expect_err("0o604 must be refused");
+        let res = KeyPair::load(&path);
+        assert!(res.is_err());
+        let err = res.err().expect("0o604 must be refused");
         assert!(err.to_string().contains("chmod 600"), "{err}");
 
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
@@ -1201,7 +1207,7 @@ mod tests {
     /// encoding (`0xc0`), so the refusal cannot rest on a failed decode.
     #[test]
     fn zero_and_identity_bls_material_is_refused() {
-        let identity = *bls12_381::G2Affine::identity().to_compressed();
+        let identity = bls12_381::G2Affine::identity().to_compressed();
         // A file holding a zero secret and the identity point: both halves are
         // bad on their own, and the pairing check is the second net.
         let mut zero_pair = vec![0u8; 32];
@@ -1329,14 +1335,10 @@ fn keypair_generate_does_not_leak_public_key_via_println() {
             println!("{canary}");
         }
         _ => {
-            // Test-only re-exec of this test binary to capture its stdout; no
-            // security decision depends on the path. The suppression carries
-            // the rule id alone: a trailing " - reason" after the id is not
-            // part of the recognised form in every semgrep version, and the
-            // alert this line exists to silence came back on the PR when it
-            // had one.
-            // nosemgrep: rust.lang.security.current-exe.current-exe
-            let exe = std::env::current_exe().expect("test binary path");
+            // Test-only re-exec of this test binary via argv[0] to capture its
+            // stdout; no security decision depends on the path and avoiding
+            // `current_exe()` keeps Semgrep's SARIF free of suppressed alerts.
+            let exe = std::env::args().next().expect("test binary argv[0]");
             // `--exact` matches the full test path, which includes the module
             // (without the crate name). A bare function name matches nothing,
             // and a probe that runs nothing prints nothing - the red-green
@@ -1413,7 +1415,9 @@ mod bls_integrity_tests {
         let good = BlsKeypair::generate().expect("bls key");
         let mut bytes = good.to_bytes();
         bytes[..32].fill(0);
-        let err = BlsKeypair::from_bytes(&bytes).expect_err("a zero secret is refused");
+        let err = BlsKeypair::from_bytes(&bytes)
+            .err()
+            .expect("a zero secret is refused");
         assert!(
             format!("{err}").contains("zero"),
             "the refusal must name the zero scalar: {err}"
@@ -1429,7 +1433,9 @@ mod bls_integrity_tests {
         let mut bytes = a.to_bytes();
         // Splice b's public half onto a's secret half.
         bytes[32..].copy_from_slice(&b.public_key);
-        let err = BlsKeypair::from_bytes(&bytes).expect_err("a mismatched half is refused");
+        let res = BlsKeypair::from_bytes(&bytes);
+        assert!(res.is_err());
+        let err = res.err().expect("a mismatched half is refused");
         assert!(
             format!("{err}").contains("does not match"),
             "the refusal must name the mismatch: {err}"
@@ -1613,11 +1619,13 @@ mod pq_identity_tests {
     const MESSAGE: &[u8] = b"identity probe";
 
     fn keypair() -> PqKeyPair {
-        PqKeyPair::from_bytes(
-            &pq::ml_dsa_public_key(SchemeId::ML_DSA_65, &[7u8; 32]).expect("public key"),
-            &[7u8; 32],
-        )
-        .expect("a paired ML-DSA-65 key")
+        let Ok(pk) = pq::ml_dsa_public_key(SchemeId::ML_DSA_65, &[7u8; 32]) else {
+            panic!("public key");
+        };
+        let Ok(kp) = PqKeyPair::from_bytes(&pk, &[7u8; 32]) else {
+            panic!("a paired ML-DSA-65 key");
+        };
+        kp
     }
 
     #[test]
@@ -1656,9 +1664,14 @@ mod pq_identity_tests {
 
     #[test]
     fn the_scheme_identity_names_its_length_and_status() {
-        let info = SchemeId::ML_DSA_65.info().expect("a registered scheme has an entry");
+        let info = SchemeId::ML_DSA_65
+            .info()
+            .expect("a registered scheme has an entry");
         assert_eq!(info.public_key_len, Some(1952));
-        assert_eq!(SchemeId::ML_DSA_87.info().expect("entry").public_key_len, Some(2592));
+        assert_eq!(
+            SchemeId::ML_DSA_87.info().expect("entry").public_key_len,
+            Some(2592)
+        );
         assert_eq!(crate::crypto::primitives::PQ_SCHEME_ID, "ml-dsa-65");
         assert_eq!(
             crate::crypto::primitives::pq_public_key_len(),
@@ -1695,8 +1708,7 @@ mod pq_identity_tests {
             .iter()
             .position(|(id, _)| *id == SchemeId::ML_DSA_65.0)
             .expect("the genesis registry lists this build's scheme");
-        schemes[index].1 = crate::crypto::scheme::SchemeStatus::Disabled
-            .to_byte();
+        schemes[index].1 = crate::crypto::scheme::SchemeStatus::Disabled.to_byte();
         let disabled = crate::crypto::scheme::SchemeStatusRegistry::from_entries(&schemes, &suites)
             .expect("the entry list keeps its shape");
         let err = PqKeyPair::verify_in(
@@ -1708,14 +1720,20 @@ mod pq_identity_tests {
         )
         .expect_err("a scheme the chain disabled is refused");
         let text = format!("{err}").to_lowercase();
-        assert!(text.contains("not verifiable") || text.contains("scheme"), "{err}");
+        assert!(
+            text.contains("not verifiable") || text.contains("scheme"),
+            "{err}"
+        );
     }
 
     #[test]
     fn every_registered_context_is_non_empty_and_within_the_cap() {
         assert!(!ctx::TABLE.is_empty(), "the table must not be empty");
         for entry in ctx::TABLE {
-            assert!(!entry.is_empty(), "an empty context would be refused anyway");
+            assert!(
+                !entry.is_empty(),
+                "an empty context would be refused anyway"
+            );
             assert!(
                 entry.len() <= ctx::MAX_CONTEXT_LEN,
                 "{} exceeds the FIPS 204 cap",

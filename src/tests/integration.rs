@@ -19,8 +19,8 @@ mod integration_tests {
 
     use crate::core::block::Block;
     use crate::core::governance::ProposalType;
-    use crate::core::transaction::DEFAULT_CHAIN_ID;
     use crate::core::transaction::Transaction;
+    use crate::core::transaction::DEFAULT_CHAIN_ID;
     use crate::crypto::primitives::BlsKeypair;
     use crate::crypto::primitives::KeyPair;
     use crate::crypto::primitives::ValidatorKeys;
@@ -863,12 +863,8 @@ mod integration_tests {
         let mut state = AccountState::new();
         state.add_balance(&validator_addr, 10000);
         state.add_validator(validator_addr, 5000);
-        let pq_public = ValidatorKeys::generate()
-            .unwrap()
-            .pq_key
-            .unwrap()
-            .public_key_bytes()
-            .to_vec();
+        let pq_kp = ValidatorKeys::generate().unwrap().pq_key.unwrap();
+        let pq_public = pq_kp.public_key_bytes().to_vec();
         install_finality_keys(&mut state, validator_addr, &bls_sk, bls_pk, pq_public);
 
         let consensus = Arc::new(PoWEngine::new(0));
@@ -902,6 +898,8 @@ mod integration_tests {
         vote1.auth_sig = sign_bls(&bls_sk, &vote1.auth_signing_message());
         assert!(bc.handle_prevote(vote1).is_ok());
 
+        let pq_msg = crate::consensus::qc::pq_signing_message(epoch, cp_height, &hash, 0);
+        let pq_sig = pq_kp.sign(crate::crypto::ctx::QC_V2, &pq_msg).unwrap();
         let mut vote2 = Precommit {
             chain_id: crate::core::transaction::DEFAULT_CHAIN_ID,
             epoch,
@@ -910,7 +908,7 @@ mod integration_tests {
             voter_id: validator_addr,
             sig_bls: vec![],
             auth_sig: Vec::new(),
-            pq_sig: Vec::new(),
+            pq_sig,
         };
         vote2.sig_bls = sign_bls(&bls_sk, &vote2.signing_message());
         vote2.auth_sig = sign_bls(&bls_sk, &vote2.auth_signing_message());

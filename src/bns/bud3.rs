@@ -208,7 +208,9 @@ impl Bud3BnsResolver {
         let active_owner = bns
             .resolve(&canonical, current_epoch)
             .ok_or(BnsBud3Error::Bns(BnsError::Expired))?;
-        let binding = self.binding(&canonical).ok_or(BnsBud3Error::NoContentBound)?;
+        let binding = self
+            .binding(&canonical)
+            .ok_or(BnsBud3Error::NoContentBound)?;
         if binding.owner != active_owner {
             return Err(BnsBud3Error::Bns(BnsError::NotOwner));
         }
@@ -232,9 +234,8 @@ impl Bud3BnsResolver {
             .map_err(BnsBud3Error::Gateway);
         }
 
-        let _bundle =
-            Bud3ContentGateway::fetch_symbol_bundle(bud3, &binding.content_ref, network)
-                .map_err(BnsBud3Error::Gateway)?;
+        let _bundle = Bud3ContentGateway::fetch_symbol_bundle(bud3, &binding.content_ref, network)
+            .map_err(BnsBud3Error::Gateway)?;
         view_from_network(
             bud3,
             &binding.content_ref.object_commitment,
@@ -277,10 +278,8 @@ mod tests {
         let holder = [1u8; 32];
 
         let mut net = MemorySymbolNetwork::default();
-        for (_, syms) in &up.segments {
-            for sym in syms {
-                net.insert(holder, key, sym.clone());
-            }
+        for (seg_idx, syms) in up.segments.iter().enumerate() {
+            net.store_holder_share(holder, key, seg_idx as u64, syms.clone());
         }
 
         bud3.register_object(
@@ -315,13 +314,19 @@ mod tests {
         assert_ne!(binding.digest(), [0u8; 32]);
 
         let body = resolver
-            .resolve_via_bud3_view(&bns, &bud3, &net, "budlum.bud", 2, &BnsViewAccess::default())
+            .resolve_via_bud3_view(
+                &bns,
+                &bud3,
+                &net,
+                "budlum.bud",
+                2,
+                &BnsViewAccess::default(),
+            )
             .unwrap();
         assert_eq!(body, html);
 
         let new_owner = Address([0x33; 32]);
-        bns.transfer("budlum.bud", &alice, new_owner, 3)
-            .unwrap();
+        bns.transfer("budlum.bud", &alice, new_owner, 3).unwrap();
         assert!(matches!(
             resolver.resolve_via_bud3_view(
                 &bns,

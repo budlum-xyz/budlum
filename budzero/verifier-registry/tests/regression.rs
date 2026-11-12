@@ -53,12 +53,10 @@ fn zero_slash_ratios_are_refused() {
 fn state_root_commits_params_history_and_zero_liveness_refused() {
     use verifier_registry::registry::VerifierRegistry;
     let base = VerifierRegistry::default();
-    let Ok(custom) = VerifierRegistry::with_params(RegistryParams {
+    let custom = VerifierRegistry::with_params(RegistryParams {
         min_stake: 2_500,
         ..RegistryParams::default()
-    }) else {
-        panic!("valid params");
-    };
+    });
     assert_ne!(base.state_root(), custom.state_root());
     assert!(liveness(0, 0).validate_shape().is_err());
     assert!(liveness(0, 5).validate_shape().is_err());

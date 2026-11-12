@@ -103,6 +103,7 @@ impl ExecutionEnvironment for CanonicalTestEe {
                     value: BudAmount(u128::from(ATTOS_PER_ATOM)),
                     input: sub_input,
                     gas_limit: call.gas_limit.saturating_sub(150),
+                    is_static: false,
                 };
                 match host.universal_call(ucall) {
                     Ok(res) => {
@@ -149,7 +150,9 @@ impl ExecutionEnvironment for CanonicalTestEe {
 fn funded_state(addrs: &[Address]) -> AccountState {
     let mut state = AccountState::new();
     for a in addrs {
-        state.accounts.insert(*a, Account::with_balance(*a, 1_000_000));
+        state
+            .accounts
+            .insert(*a, Account::with_balance(*a, 1_000_000));
     }
     state.keys_dirty = true;
     state
@@ -287,7 +290,12 @@ fn uel_worker_death_does_not_commit() {
     input.extend_from_slice(b"key1val1");
     let tx = make_call_tx(sender, 0, EeId::EVM, input);
     let err = state
-        .execute_uel_block(&mut coord_dead, sample_ctx(), proposer, &[tx.clone()])
+        .execute_uel_block(
+            &mut coord_dead,
+            sample_ctx(),
+            proposer,
+            std::slice::from_ref(&tx),
+        )
         .expect_err("persistent worker death must halt without committing");
     assert!(matches!(
         err,
@@ -430,7 +438,13 @@ fn uel_reentrancy_forbidden() {
         .execute_uel_block(&mut coord, sample_ctx(), proposer, &[tx])
         .expect("block");
     assert_eq!(receipts[0].status, UelReceiptStatus::Success);
-    assert_eq!(receipts[0].output, vec![0u8], "nested EVM re-entry failed");
+    assert!(
+        !receipts[0].output.is_empty() && receipts[0].output == vec![0u8],
+        "nested EVM re-entry failed"
+    );
+    let mut ov = TxOverlay::new(&state, EeId::EVM, 1_000_000);
+    ov.push_universal_frame(&state, EeId::WASM, false).unwrap();
+    assert!(ov.push_universal_frame(&state, EeId::EVM, false).is_err());
 }
 
 #[test]
@@ -569,7 +583,12 @@ fn ee_feature_flag_freezes_new_deploys() {
         max_priority_fee_per_bgu_attos: 0,
     };
     let r2 = state
-        .execute_uel_block(&mut coord, sample_ctx(), proposer, &[deploy2, existing_call])
+        .execute_uel_block(
+            &mut coord,
+            sample_ctx(),
+            proposer,
+            &[deploy2, existing_call],
+        )
         .expect("frozen block still executes");
     assert_eq!(r2[0].status, UelReceiptStatus::DeployFrozen);
     assert!(r2[0].contract_address.is_none());
@@ -673,7 +692,7 @@ fn budzero_stateful_storage_persists_across_blocks() {
         state
             .execution_state
             .read("ee/budzero/storage", &full_key)
-            .expect("read budzero storage"),
+            .expect("read budfixed-commitment custody"),
         Some(b"persisted-budzero-state".to_vec())
     );
 }

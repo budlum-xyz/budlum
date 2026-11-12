@@ -42,6 +42,7 @@ pub struct VerifiedCodecCandidate {
 /// - Rejects any candidate that is closed on testnet or not round-trip verified.
 /// - Applies the entropy ceiling (`> 7.9` bits/byte -> codec `0`) and the **fast probe
 ///   rule** (`<= 5%` probe savings on generic input skips `Speed::Medium` candidates!).
+///
 /// Convenience: exposed for A0 encoder selection and CLI measurement tools.
 #[must_use]
 pub fn select_codec_with_fast_probe(
@@ -90,8 +91,7 @@ pub fn select_codec_with_fast_probe(
         if skipped_medium && speed == bud_codec::registry::Speed::Medium {
             continue;
         }
-        if cand.encoded_len < best_len
-            || (cand.encoded_len == best_len && cand.codec_id < best_id)
+        if cand.encoded_len < best_len || (cand.encoded_len == best_len && cand.codec_id < best_id)
         {
             best_len = cand.encoded_len;
             best_id = cand.codec_id;
@@ -112,10 +112,15 @@ pub enum ReplaceError {
     ReplacementAlreadyPending,
     /// A live or tombstoned commitment cannot be reused for a replacement.
     CommitmentAlreadyLive,
-    InsufficientAttestations { got: usize, need: usize },
+    InsufficientAttestations {
+        got: usize,
+        need: usize,
+    },
     AttesterOutsidePlacementGroup(Address),
     /// Different content produced: rejected AND proposer is slashed 1% under bad-repair rule!
-    ContentIdMismatch { proposer_slash_atoms: u64 },
+    ContentIdMismatch {
+        proposer_slash_atoms: u64,
+    },
 }
 
 /// Guard enforcing Section 6.14 items 2-9 before committing `StorageTxV3::ReplaceObject`:
@@ -223,15 +228,26 @@ mod tests {
         let old_rec = sample_record([1u8; 32], cid, 0);
         let pg: BTreeSet<Address> = [[1u8; 32], [2u8; 32], [3u8; 32]].into();
         let atts = vec![
-            ReplaceAttestation { validator: [1u8; 32], verified_content_id: cid },
-            ReplaceAttestation { validator: [2u8; 32], verified_content_id: cid },
-            ReplaceAttestation { validator: [3u8; 32], verified_content_id: cid },
+            ReplaceAttestation {
+                validator: [1u8; 32],
+                verified_content_id: cid,
+            },
+            ReplaceAttestation {
+                validator: [2u8; 32],
+                verified_content_id: cid,
+            },
+            ReplaceAttestation {
+                validator: [3u8; 32],
+                verified_content_id: cid,
+            },
         ];
 
         for closed in [2u16, 6, 7, 8, 9, 12, 13, 14, 15, 22, 26] {
             let bad = sample_record([2u8; 32], cid, closed);
             assert_eq!(
-                admit_object_replacement(&[1u8; 32], &[1u8; 32], 50_000, &old_rec, &bad, &pg, &atts),
+                admit_object_replacement(
+                    &[1u8; 32], &[1u8; 32], 50_000, &old_rec, &bad, &pg, &atts
+                ),
                 Err(ReplaceError::CodecNotOpen(closed))
             );
         }
@@ -259,22 +275,38 @@ mod tests {
         let pg: BTreeSet<Address> = [[1u8; 32], [2u8; 32], [3u8; 32], [4u8; 32]].into();
 
         let two_att = vec![
-            ReplaceAttestation { validator: [1u8; 32], verified_content_id: cid },
-            ReplaceAttestation { validator: [2u8; 32], verified_content_id: cid },
+            ReplaceAttestation {
+                validator: [1u8; 32],
+                verified_content_id: cid,
+            },
+            ReplaceAttestation {
+                validator: [2u8; 32],
+                verified_content_id: cid,
+            },
         ];
         assert!(matches!(
-            admit_object_replacement(&[9u8; 32], &[1u8; 32], 100_000, &old_rec, &new_rec, &pg, &two_att),
+            admit_object_replacement(
+                &[9u8; 32], &[1u8; 32], 100_000, &old_rec, &new_rec, &pg, &two_att
+            ),
             Err(ReplaceError::InsufficientAttestations { got: 2, need: 3 })
         ));
 
         let mut three_att = two_att;
-        three_att.push(ReplaceAttestation { validator: [3u8; 32], verified_content_id: cid });
-        admit_object_replacement(&[9u8; 32], &[1u8; 32], 100_000, &old_rec, &new_rec, &pg, &three_att).unwrap();
+        three_att.push(ReplaceAttestation {
+            validator: [3u8; 32],
+            verified_content_id: cid,
+        });
+        admit_object_replacement(
+            &[9u8; 32], &[1u8; 32], 100_000, &old_rec, &new_rec, &pg, &three_att,
+        )
+        .unwrap();
 
         let bad_cid = ContentId::public(b"corrupted object bytes");
         let bad_rec = sample_record([30u8; 32], bad_cid, 1);
         assert_eq!(
-            admit_object_replacement(&[9u8; 32], &[1u8; 32], 100_000, &old_rec, &bad_rec, &pg, &three_att),
+            admit_object_replacement(
+                &[9u8; 32], &[1u8; 32], 100_000, &old_rec, &bad_rec, &pg, &three_att
+            ),
             Err(ReplaceError::ContentIdMismatch {
                 proposer_slash_atoms: 1_000
             })

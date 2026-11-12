@@ -9,6 +9,7 @@
 //!
 //! A content id never changes. The object that carries the content may change
 //! (a better codec, a new dictionary); the content id does not.
+//! Convenience: exposed for CLI, RPC, SDK, and multi-VM runtime callers.
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -43,6 +44,30 @@ pub struct ContentKey(pub [u8; 32]);
 impl core::fmt::Debug for ContentKey {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.write_str("ContentKey(<redacted>)")
+    }
+}
+
+impl crate::core::map_keys::MapKey for ContentId {
+    fn to_key_string(&self) -> String {
+        let tag = match self.kind {
+            ContentIdKind::Public => "public",
+            ContentIdKind::Sealed => "sealed",
+        };
+        format!("{tag}:{}:{}", hex::encode(self.digest), self.len)
+    }
+
+    fn from_key_string(s: &str) -> Result<Self, String> {
+        let [tag, digest, len] = crate::core::map_keys::parts::<3>(s)?;
+        let kind = match tag {
+            "public" => ContentIdKind::Public,
+            "sealed" => ContentIdKind::Sealed,
+            other => return Err(format!("invalid bud3 ContentId kind `{other}`")),
+        };
+        Ok(Self {
+            kind,
+            digest: crate::core::map_keys::parse_hex32(digest)?,
+            len: crate::core::map_keys::parse_uint(len, "len")?,
+        })
     }
 }
 

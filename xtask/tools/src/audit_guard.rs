@@ -635,9 +635,8 @@ fn self_test(root: &Path) -> Report {
     let mut out = format!("audit-guard red-team: PASS ({count} mutations rejected)\n");
     let mut errors = Vec::new();
     let base_ref = configured_commit_base();
-    let scanned = active_code_audit(root, &mut errors).and_then(|()| {
-        commit_subject_audit(root, base_ref.as_deref(), &mut errors)
-    });
+    let scanned = active_code_audit(root, &mut errors)
+        .and_then(|()| commit_subject_audit(root, base_ref.as_deref(), &mut errors));
     if let Err(e) = scanned {
         return Report {
             stdout: out,
@@ -860,23 +859,30 @@ mod tests {
 
     #[test]
     fn commit_audit_checks_only_commits_after_the_base() {
-        let root = std::env::temp_dir().join(format!(
-            "audit-guard-commit-range-{}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("audit-guard-commit-range-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).expect("temporary git repository");
         run_git(&root, &["init", "-q"]);
         run_git(&root, &["config", "user.name", "Audit Guard Test"]);
-        run_git(&root, &["config", "user.email", "audit-guard@example.invalid"]);
+        run_git(
+            &root,
+            &["config", "user.email", "audit-guard@example.invalid"],
+        );
         let inherited = format!("Add {}_launcher.py", review_identity().to_lowercase());
         run_git(&root, &["commit", "--allow-empty", "-m", &inherited]);
         run_git(&root, &["branch", "base"]);
-        run_git(&root, &["commit", "--allow-empty", "-m", "fix: ordinary change"]);
+        run_git(
+            &root,
+            &["commit", "--allow-empty", "-m", "fix: ordinary change"],
+        );
 
         let mut errors = Vec::new();
         commit_subject_audit(&root, Some("base"), &mut errors).expect("commit audit");
-        assert!(errors.is_empty(), "base history is outside the change range: {errors:?}");
+        assert!(
+            errors.is_empty(),
+            "base history is outside the change range: {errors:?}"
+        );
 
         let introduced = format!("fix: {} is forbidden", review_identity());
         run_git(&root, &["commit", "--allow-empty", "-m", &introduced]);

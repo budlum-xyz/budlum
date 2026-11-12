@@ -300,14 +300,7 @@ impl MoveWorker {
                     StepErr::Revert("publish_package_txn missing module bytes".to_string())
                 })?;
                 self.publish_single_module(
-                    signer,
-                    raw_mod,
-                    ns,
-                    journal,
-                    logs,
-                    gas_used,
-                    cap,
-                    host,
+                    signer, raw_mod, ns, journal, logs, gas_used, cap, host,
                 )?;
                 Ok(Some(Vec::new()))
             }
@@ -325,13 +318,9 @@ impl MoveWorker {
                 // call(caller: &signer, ee: u8, target: vector<u8>, input: vector<u8>,
                 //      value_octas: u64, gas_bgu: u64): (bool, vector<u8>)
                 charge_bgu(host, gas_used, 8 * APTOS_GAS_TO_BGU, cap)?;
-                let to_ee = EeId(
-                    args.first()
-                        .and_then(|b| b.first().copied())
-                        .ok_or_else(|| {
-                            StepErr::Revert("budlum_universal::call missing ee u8".to_string())
-                        })?,
-                );
+                let to_ee = EeId(args.first().and_then(|b| b.first().copied()).ok_or_else(
+                    || StepErr::Revert("budlum_universal::call missing ee u8".to_string()),
+                )?);
                 let target_bytes = args
                     .get(1)
                     .ok_or_else(|| {
@@ -398,7 +387,9 @@ impl MoveWorker {
                 raw_mod.len()
             )));
         }
-        let publish_cost = (raw_mod.len() as u64).saturating_mul(10).saturating_add(500);
+        let publish_cost = (raw_mod.len() as u64)
+            .saturating_mul(10)
+            .saturating_add(500);
         charge_bgu(host, gas_used, publish_cost, cap)?;
         let verified = verify_move_module_bytes(raw_mod, Some(&signer)).map_err(StepErr::Revert)?;
         let key = module_state_key(&signer, &verified.name);
@@ -527,7 +518,12 @@ impl MoveWorker {
         call: &EeCall,
         host: &mut dyn HostApi,
     ) -> EeOutcome {
-        debug_assert!(!BLOCK_STM_ENABLED, "Block-STM must remain disabled on Budlum");
+        const {
+            assert!(
+                !BLOCK_STM_ENABLED,
+                "Block-STM must remain disabled on Budlum"
+            )
+        };
         let cap = call.gas_limit.min(MOVE_SOFT_GAS_LIMIT_BGU);
         let Ok(ns) = Namespace::new(NS_MOVE_STATE) else {
             return EeOutcome {
@@ -965,7 +961,9 @@ mod tests {
     fn move_alias_scheme_byte_is_unused() {
         assert_eq!(BUDLUM_MOVE_ALIAS_SCHEME_BYTE, 0xBD);
         assert_eq!(APTOS_PINNED_COMMIT.len(), 40);
-        assert!(is_scheme_byte_unused_in_pinned_aptos(BUDLUM_MOVE_ALIAS_SCHEME_BYTE));
+        assert!(is_scheme_byte_unused_in_pinned_aptos(
+            BUDLUM_MOVE_ALIAS_SCHEME_BYTE
+        ));
         for &used in APTOS_USED_SCHEME_BYTES {
             assert_ne!(used, 0xBD);
             assert!(!is_scheme_byte_unused_in_pinned_aptos(used));
@@ -982,7 +980,7 @@ mod tests {
 
     #[test]
     fn block_stm_is_disabled_and_execution_is_sequential() {
-        assert!(!BLOCK_STM_ENABLED);
+        const { assert!(!BLOCK_STM_ENABLED) };
     }
 
     #[test]
@@ -1081,11 +1079,9 @@ mod tests {
         }) else {
             panic!("serialize publish");
         };
-        let Ok(pub_res) = worker.execute(
-            &ctx,
-            &make_call(publisher, publisher, pub_input),
-            &mut host,
-        ) else {
+        let Ok(pub_res) =
+            worker.execute(&ctx, &make_call(publisher, publisher, pub_input), &mut host)
+        else {
             panic!("publish");
         };
         assert_eq!(pub_res.status, OutcomeStatus::Success);
@@ -1099,11 +1095,9 @@ mod tests {
         }) else {
             panic!("serialize run");
         };
-        let Ok(run_res) = worker.execute(
-            &ctx,
-            &make_call(publisher, publisher, run_input),
-            &mut host,
-        ) else {
+        let Ok(run_res) =
+            worker.execute(&ctx, &make_call(publisher, publisher, run_input), &mut host)
+        else {
             panic!("run");
         };
         assert_eq!(run_res.status, OutcomeStatus::Success);

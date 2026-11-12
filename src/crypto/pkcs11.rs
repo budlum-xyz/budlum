@@ -1,3 +1,5 @@
+//! Convenience: exposed for CLI, RPC, SDK, and multi-VM runtime callers.
+
 use crate::crypto::primitives::{BlsKeypair, CryptoError, PqKeyPair};
 use crate::crypto::signer::ConsensusSigner;
 use std::sync::Mutex;
@@ -324,10 +326,7 @@ impl Pkcs11Signer {
     ///
     /// [`CryptoError::KeyGeneration`] when the label is empty or whitespace.
     /// An explicit invalid label never falls back to the compiled-in object.
-    pub fn with_bls_key_label(
-        mut self,
-        label: impl Into<String>,
-    ) -> Result<Self, CryptoError> {
+    pub fn with_bls_key_label(mut self, label: impl Into<String>) -> Result<Self, CryptoError> {
         let label = label.into();
         let kept = Self::bls_label_after_setting(Some(&label)).ok_or_else(|| {
             CryptoError::KeyGeneration(
@@ -342,6 +341,7 @@ impl Pkcs11Signer {
     /// opened the standard PQ key, as recorded on this signer. `None` means the
     /// compiled-in default is in force.
     #[must_use]
+    /// Convenience: exposed for PKCS#11 HSM operator ceremony CLI.
     pub fn key_labels(&self) -> (Option<&str>, Option<&str>) {
         (
             self.bls_key_label.as_deref(),
@@ -654,6 +654,7 @@ impl Pkcs11Signer {
     /// The slot must hold exactly one Ed25519 key. The older behaviour guessed with
     /// `objects[0]`, so with several keys the identity a node announced and the key it
     /// signed with could differ.
+    #[cfg(test)]
     fn require_single_key(kind: &str, count: usize) -> Result<(), String> {
         Self::require_exactly_one(kind, count, None)
     }
@@ -1499,8 +1500,7 @@ mod vendor_tests {
         let empty = Pkcs11Signer::bls_label_after_setting(Some(""));
         assert_eq!(Pkcs11Signer::bls_label_after_setting(Some("  \t")), None);
         assert_eq!(
-            empty,
-            None,
+            empty, None,
             "an empty label must not replace the compiled-in default"
         );
 

@@ -68,7 +68,9 @@ fn static_targets(code: &[u8]) -> Vec<[u8; 20]> {
                     out.push(address);
                 }
             } else if width == 32
-                && operand.get(..12).is_some_and(|hi| hi.iter().all(|b| *b == 0))
+                && operand
+                    .get(..12)
+                    .is_some_and(|hi| hi.iter().all(|b| *b == 0))
             {
                 if let Some(lo) = operand.get(12..32) {
                     if let Ok(address) = <[u8; 20]>::try_from(lo) {
@@ -86,11 +88,7 @@ fn static_targets(code: &[u8]) -> Vec<[u8; 20]> {
 
 /// Builds the dependency report of `contract` from its EVM `code` and optional `trace`.
 #[must_use]
-pub fn dependency_report(
-    contract: [u8; 20],
-    code: &[u8],
-    trace: &[[u8; 20]],
-) -> DependencyReport {
+pub fn dependency_report(contract: [u8; 20], code: &[u8], trace: &[[u8; 20]]) -> DependencyReport {
     DependencyReport {
         contract,
         static_targets: normalised(&static_targets(code), &contract),

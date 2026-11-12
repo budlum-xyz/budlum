@@ -139,7 +139,7 @@ fn zk_domain_refuses_empty_halt_proof() {
     assert!(crate::prover::is_empty_or_halt_only_program(&[]));
     assert!(crate::prover::is_empty_or_halt_only_program(&halt_words));
 
-    let (envelope, mut pi) =
+    let (envelope, mut pi, _) =
         prove_bytecode(&halt_bytes, DEFAULT_CONTRACT_GAS_LIMIT).expect("prove bare Halt");
     pi.chain_id = TESTNET_CHAIN_ID;
     pi.block_height = 1;
@@ -165,9 +165,9 @@ fn zk_domain_refuses_empty_halt_proof() {
         .register(zk_domain)
         .expect("register zk domain");
 
-    let payload_hash =
-        ZkProofSubmission::payload_binding_hash(&envelope, &pi, &halt_words, 7, 1);
+    let payload_hash = ZkProofSubmission::payload_binding_hash(&envelope, &pi, &halt_words, 7, 1);
     let msg = CrossDomainMessage::new(CrossDomainMessageParams {
+        nonce: 0,
         source_domain: 7,
         source_height: 1,
         event_index: 0,
@@ -219,6 +219,11 @@ fn zk_domain_refuses_empty_halt_proof() {
 #[test]
 fn zkvm_adapter_refuses_bare_halt_program() {
     zk_domain_refuses_empty_halt_proof();
+    assert!(
+        !crate::core::chain_config::Network::Testnet
+            .shared_security()
+            .enabled
+    );
 }
 
 /// Ethereum sync-committee external domain
@@ -304,6 +309,11 @@ fn ethereum_sync_committee_is_closed_on_testnet() {
 #[test]
 fn ethereum_sync_committee_refused_on_testnet_chain_id() {
     ethereum_sync_committee_is_closed_on_testnet();
+    assert!(
+        !crate::core::chain_config::Network::Testnet
+            .shared_security()
+            .enabled
+    );
 }
 
 /// shared security (`shared_security`) is closed on Testnet (`45261`).
@@ -359,18 +369,13 @@ fn app_binding_is_closed_on_testnet() {
         origin_app: vec![0x44; 20],
         manifest_hash: [0x55; 32],
     };
-    let err = execute_graft_tx(&mut state, &ctx, &tx)
-        .expect_err("app_binding must be closed on testnet");
+    let err =
+        execute_graft_tx(&mut state, &ctx, &tx).expect_err("app_binding must be closed on testnet");
     assert!(err.to_string().contains("not enabled"), "{err}");
     assert!(state.settlement.graft.apps.is_empty());
 
-    let outer_err = execute_settlement_tx(
-        &mut state,
-        &ctx,
-        &SettlementTx::Graft(Box::new(tx)),
-        1,
-    )
-    .expect_err("SettlementTx::Graft must be closed on testnet");
+    let outer_err = execute_settlement_tx(&mut state, &ctx, &SettlementTx::Graft(Box::new(tx)))
+        .expect_err("SettlementTx::Graft must be closed on testnet");
     assert!(outer_err.to_string().contains("not enabled"), "{outer_err}");
 }
 
@@ -404,8 +409,9 @@ fn bridge_e2e_lock_mint_burn_unlock() {
     let relayer = addr(0x43);
     let owner = addr(0x44);
     let recipient = addr(0x45);
-    let min_relayer = bc.state.registry.params.min_relayer_stake;
-    bc.state.add_balance(&relayer, min_relayer.saturating_mul(2));
+    let min_relayer = bc.state.registry.params().min_stake;
+    bc.state
+        .add_balance(&relayer, min_relayer.saturating_mul(2));
     bc.state
         .bond_relayer(&relayer, min_relayer)
         .expect("bond relayer");
@@ -706,7 +712,14 @@ fn relay_proof_rolls_back_ledger_on_supply_ceiling_refusal() {
     state
         .settlement
         .commitments
-        .insert(make_commitment(1, 10, 1, [0xD1; 32], root, ConsensusKind::PoW))
+        .insert(make_commitment(
+            1,
+            10,
+            1,
+            [0xD1; 32],
+            root,
+            ConsensusKind::PoW,
+        ))
         .expect("commit");
 
     let err = submit_relay_proof(&mut state, msg_id, relayer, &proof, 1, 15)
@@ -758,7 +771,7 @@ fn finality_adapters_reject_cross_domain_commitment_and_empty_authorities() {
         set_hash: empty_snap.set_hash.clone(),
         seat_table_version: 0,
     };
-    let pos_res = PoSFinalityAdapter::default()
+    let pos_res = PoSFinalityAdapter
         .verify_finality(
             &pos_domain,
             &wrong_commitment,
@@ -948,12 +961,13 @@ fn external_registry_readmit_requires_probes_and_height_is_monotonic() {
         .registry
         .readmit(&key, &zero_probe_report, "zero probes")
         .expect_err("0-probe report must not readmit a faulted domain");
-    assert!(matches!(err_zero, ExternalRegistryError::AdmissionFailed { .. }));
+    assert!(matches!(
+        err_zero,
+        ExternalRegistryError::AdmissionFailed { .. }
+    ));
 
-    let mut wrong_ver = crate::cross_domain::external::admit(
-        adapter.as_ref(),
-        &VerificationPolicy::strict(1_000),
-    );
+    let mut wrong_ver =
+        crate::cross_domain::external::admit(adapter.as_ref(), &VerificationPolicy::strict(1_000));
     wrong_ver.evidence_version = 999;
     let err_ver = intake
         .registry

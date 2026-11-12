@@ -18,6 +18,7 @@
 //!
 //! The limits are TESTNET-DEFAULT values. Governance changes them after the
 //! measurements of the fee calibration work. Nothing here claims a measurement.
+//! Convenience: exposed for CLI, RPC, SDK, and multi-VM runtime callers.
 
 use std::collections::BTreeMap;
 
@@ -36,39 +37,39 @@ pub const MAX_FILTER_SPEC_BYTES: usize = 16 * 1024;
 /// The two filter shapes Section 8.11.2 names.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FilterKind {
- /// `eth_newFilter`: log criteria.
+    /// `eth_newFilter`: log criteria.
     Log,
- /// `eth_newBlockFilter`: new block heads.
+    /// `eth_newBlockFilter`: new block heads.
     Block,
 }
 
 /// Why a filter call failed. Each variant carries one JSON-RPC code.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FilterError {
- /// The filter object is larger than the record ceiling.
+    /// The filter object is larger than the record ceiling.
     SpecTooLarge,
- /// This peer already holds the allowed number of filters.
+    /// This peer already holds the allowed number of filters.
     PeerQuotaReached,
- /// The node holds the allowed number of filters.
+    /// The node holds the allowed number of filters.
     PoolFull,
- /// The id is not a hex quantity.
+    /// The id is not a hex quantity.
     InvalidId,
- /// The id names no live filter visible to this connection.
+    /// The id names no live filter visible to this connection.
     UnknownFilter,
- /// The filter expired. Its slot is released by this call.
+    /// The filter expired. Its slot is released by this call.
     Expired,
- /// Another peer owns this filter id.
+    /// Another peer owns this filter id.
     ForeignFilter,
- /// The server did not attach its transport connection identity.
+    /// The server did not attach its transport connection identity.
     ConnectionIdentityUnavailable,
- /// The id counter cannot advance.
+    /// The id counter cannot advance.
     IdOverflow,
- /// Log data needs the execution environment of the EVM execution environment.
+    /// Log data needs the execution environment of the EVM execution environment.
     ExecutionEnvironmentUnavailable,
 }
 
 impl FilterError {
- /// The JSON-RPC code for this failure.
+    /// The JSON-RPC code for this failure.
     pub fn code(self) -> i32 {
         match self {
             Self::SpecTooLarge | Self::InvalidId | Self::UnknownFilter | Self::Expired => -32602,
@@ -78,7 +79,7 @@ impl FilterError {
         }
     }
 
- /// One line for a client log. Short sentences, one meaning per line.
+    /// One line for a client log. Short sentences, one meaning per line.
     pub fn message(self) -> &'static str {
         match self {
             Self::SpecTooLarge => "filter object exceeds the record limit",
@@ -90,13 +91,11 @@ impl FilterError {
             Self::ForeignFilter => "filter id belongs to another peer",
             Self::ConnectionIdentityUnavailable => "RPC connection identity is unavailable",
             Self::IdOverflow => "filter id counter is exhausted",
-            Self::ExecutionEnvironmentUnavailable => {
-                "log data needs the EVM execution environment"
-            }
+            Self::ExecutionEnvironmentUnavailable => "log data needs the EVM execution environment",
         }
     }
 
- /// A stable machine-readable reason for the error data.
+    /// A stable machine-readable reason for the error data.
     pub fn reason(self) -> &'static str {
         match self {
             Self::SpecTooLarge => "spec_too_large",
@@ -112,7 +111,7 @@ impl FilterError {
         }
     }
 
- /// The Budlum door that answers the same question, when one exists.
+    /// The Budlum door that answers the same question, when one exists.
     pub fn door(self) -> Option<&'static str> {
         match self {
             Self::ExecutionEnvironmentUnavailable => Some("bud_subscribe"),
@@ -124,9 +123,9 @@ impl FilterError {
 #[derive(Debug, Clone)]
 struct FilterEntry {
     peer: String,
- // Retained for the future log evaluator; neither field is exposed as log
- // data before the EVM execution environment. Underscores keep the production build honest about
- // the fact that only tests inspect the kind today.
+    // Retained for the future log evaluator; neither field is exposed as log
+    // data before the EVM execution environment. Underscores keep the production build honest about
+    // the fact that only tests inspect the kind today.
     _kind: FilterKind,
     _spec: String,
     touched_at: u64,
@@ -140,28 +139,31 @@ pub struct FilterPool {
 }
 
 impl FilterPool {
- /// An empty pool.
+    /// An empty pool.
     pub fn new() -> Self {
         Self::default()
     }
 
- /// The number of live records.
+    /// The number of live records.
     pub fn len(&self) -> usize {
         self.entries.len()
     }
 
- /// Whether the pool holds no records.
+    /// Whether the pool holds no records.
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
 
- /// The number of live records owned by one peer.
+    /// The number of live records owned by one peer.
     pub fn peer_len(&self, peer: &str) -> usize {
-        self.entries.values().filter(|entry| entry.peer == peer).count()
+        self.entries
+            .values()
+            .filter(|entry| entry.peer == peer)
+            .count()
     }
 
- /// Drop records that saw no read inside the idle timeout. Returns the
- /// number dropped, so a caller can see the sweep worked.
+    /// Drop records that saw no read inside the idle timeout. Returns the
+    /// number dropped, so a caller can see the sweep worked.
     pub fn expire(&mut self, now: u64) -> usize {
         let before = self.entries.len();
         self.entries
@@ -169,10 +171,10 @@ impl FilterPool {
         before - self.entries.len()
     }
 
- /// Admit one filter and return its hex quantity id.
- ///
- /// A call sweeps first, so an expired record never holds a slot against a
- /// new one. All three bounds are checked before any record is written.
+    /// Admit one filter and return its hex quantity id.
+    ///
+    /// A call sweeps first, so an expired record never holds a slot against a
+    /// new one. All three bounds are checked before any record is written.
     pub fn create(
         &mut self,
         peer: &str,
@@ -204,7 +206,8 @@ impl FilterPool {
         Ok(format!("0x{id:x}"))
     }
 
- /// Resolve a filter id for one peer, or name the reason it cannot be used.
+    /// Resolve a filter id for one peer, or name the reason it cannot be used.
+    /// PARTIAL: allowed - evicts an expired idle filter entry before returning FilterError::Expired.
     fn resolve(&mut self, peer: &str, id: &str, now: u64) -> Result<u64, FilterError> {
         let key = id
             .strip_prefix("0x")
@@ -223,10 +226,10 @@ impl FilterPool {
         Ok(key)
     }
 
- /// Read the changes of a filter.
- ///
- /// This validates ownership and freshness, then refuses. No log data is
- /// invented before the EVM execution environment. The slot stays bounded while the client waits.
+    /// Read the changes of a filter.
+    ///
+    /// This validates ownership and freshness, then refuses. No log data is
+    /// invented before the EVM execution environment. The slot stays bounded while the client waits.
     pub fn changes(
         &mut self,
         peer: &str,
@@ -243,13 +246,13 @@ impl FilterPool {
         Err(FilterError::ExecutionEnvironmentUnavailable)
     }
 
- /// Drop one filter. Returns whether a live record was removed.
+    /// Drop one filter. Returns whether a live record was removed.
     pub fn uninstall(&mut self, peer: &str, id: &str, now: u64) -> Result<bool, FilterError> {
         let key = self.resolve(peer, id, now)?;
         Ok(self.entries.remove(&key).is_some())
     }
 
- /// The kind of a live filter. Used by tests, not by the handlers.
+    /// The kind of a live filter. Used by tests, not by the handlers.
     #[cfg(test)]
     fn kind(&self, id: &str) -> Option<FilterKind> {
         let key = id
@@ -374,7 +377,10 @@ mod tests {
             .expect("an empty pool has a slot");
         assert_eq!(pool.uninstall("owner", &id, 6), Ok(true));
         assert!(pool.is_empty());
-        assert_eq!(pool.uninstall("owner", &id, 6), Err(FilterError::UnknownFilter));
+        assert_eq!(
+            pool.uninstall("owner", &id, 6),
+            Err(FilterError::UnknownFilter)
+        );
         assert_eq!(
             pool.create("owner", FilterKind::Block, "{}", 6),
             Ok("0x1".to_string()),
@@ -403,7 +409,10 @@ mod tests {
             pool.changes("owner", &id, 2),
             Err(FilterError::ExecutionEnvironmentUnavailable)
         );
-        assert_eq!(pool.changes("owner", "0xdead", 2), Err(FilterError::UnknownFilter));
+        assert_eq!(
+            pool.changes("owner", "0xdead", 2),
+            Err(FilterError::UnknownFilter)
+        );
         assert_eq!(pool.len(), 1, "a refusal does not drop the filter");
     }
 

@@ -327,18 +327,14 @@ mod tests {
         let mut store = ReplayNonceStore::new();
         let s = sender(9);
         assert!(store.mark_processed_at(1, 2, &s, u64::MAX, 1).is_err());
-        assert!(
-            store
-                .mark_processed_at(1, 2, &s, MAX_NONCE_GAP + 1, 1)
-                .is_err()
-        );
+        assert!(store
+            .mark_processed_at(1, 2, &s, MAX_NONCE_GAP + 1, 1)
+            .is_err());
         assert!(!store.is_processed(1, 2, &s, 0));
         assert!(store.mark_processed_at(1, 2, &s, 0, 1).is_ok());
-        assert!(
-            store
-                .mark_processed_at(1, 2, &s, MAX_NONCE_GAP + 1, 2)
-                .is_err()
-        );
+        assert!(store
+            .mark_processed_at(1, 2, &s, MAX_NONCE_GAP + 1, 2)
+            .is_err());
         assert!(store.mark_processed_at(1, 2, &s, 1, 2).is_ok());
     }
 }

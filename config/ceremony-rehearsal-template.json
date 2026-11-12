@@ -33,5 +33,5 @@
     "epoch_length_slots": 50
   },
   "ceremony_status": "rehearsal_template",
-  "ceremony_note": "Empty testnet rehearsal-ceremony template. The live artifact is produced by ops/rehearsal/genesis_rehearsal.sh from at least eight validated public operator records. A node refuses this template because it has no validators. Chain id remains 45261 (testnet)."
+  "ceremony_note": "Empty testnet rehearsal-ceremony template. The live artifact is produced by ops/rehearsal/genesis_rehearsal.py from at least eight validated public operator records. A node refuses this template because it has no validators. Chain id remains 45261 (testnet)."
 }

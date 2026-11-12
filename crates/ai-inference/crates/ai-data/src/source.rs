@@ -75,7 +75,9 @@ mod tests {
 
     #[test]
     fn all_three_closed_loop_kinds_pass() {
-        assert!(assert_closed_loop(&SourceRef::data_market_grant([8; 32], [9; 32], [1; 32], 2)).is_ok());
+        assert!(
+            assert_closed_loop(&SourceRef::data_market_grant([8; 32], [9; 32], [1; 32], 2)).is_ok()
+        );
         assert!(assert_closed_loop(&SourceRef::storage_deal([1; 32])).is_ok());
         assert!(assert_closed_loop(&SourceRef::social([1; 32])).is_ok());
     }

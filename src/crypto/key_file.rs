@@ -19,6 +19,7 @@
 //! window exists in which the bytes are on disk and the mode is still wide.
 //! One definition, called by every writer, is the rule this module exists to
 //! hold (one shared definition of a primitive).
+//! Convenience: exposed for CLI, RPC, SDK, and multi-VM runtime callers.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};

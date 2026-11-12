@@ -24,20 +24,22 @@ use std::fmt;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use budlum_mobile_core::{
+    crypto::{ctx, pq, scheme::SchemeId},
     Connection, CoreError, CoreStatus, DutyTx, KeyVault, LastAudit, MobileCore, NetworkPolicy,
     OperatorKey, Policy, PowerPolicy, RelayOffer, SealedOperatorKey, ValidatorClass, VaultError,
     FREE_SPACE_FLOOR_BYTES, OPERATOR_SEED_LEN, QUOTA_DEFAULT_BYTES, QUOTA_MAX_BYTES,
-    QUOTA_MIN_BYTES,
+    QUOTA_MIN_BYTES, TESTNET_CHAIN_ID,
 };
 use budlum_types::class::AuditWindow;
+use sha3::{Digest, Sha3_256};
 use zeroize::Zeroizing;
 
 /// The class a phone registers as (section 7.2). A phone is never `Full`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
 pub enum PhoneClass {
- /// Android: 24 h audit window, suspended after 72 h without a passed audit.
+    /// Android: 24 h audit window, suspended after 72 h without a passed audit.
     Mobile,
- /// iOS: 48 h audit window, suspended after 7 days, quota at most 8 GiB.
+    /// iOS: 48 h audit window, suspended after 7 days, quota at most 8 GiB.
     MobileOpportunistic,
 }
 
@@ -53,14 +55,14 @@ impl PhoneClass {
 /// How long a validator has to answer a custody audit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
 pub enum AuditSpan {
- /// A number of epochs (the Full class).
+    /// A number of epochs (the Full class).
     Epochs {
- /// Epochs.
+        /// Epochs.
         epochs: u64,
     },
- /// A number of hours (both phone classes).
+    /// A number of hours (both phone classes).
     Hours {
- /// Hours.
+        /// Hours.
         hours: u64,
     },
 }
@@ -70,21 +72,21 @@ pub enum AuditSpan {
 /// section 7.2 table (K-4).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Record)]
 pub struct ClassParameters {
- /// Epochs per presence window.
+    /// Epochs per presence window.
     pub presence_window_epochs: u64,
- /// Hours unseen before suspension. Suspension is not a slash (V-4).
+    /// Hours unseen before suspension. Suspension is not a slash (V-4).
     pub suspension_hours: u64,
- /// The custody audit answer window.
+    /// The custody audit answer window.
     pub audit_window: AuditSpan,
- /// The class quota ceiling, or none when only the user range applies.
+    /// The class quota ceiling, or none when only the user range applies.
     pub max_custody_quota_bytes: Option<u64>,
- /// The smallest quota a user may choose.
+    /// The smallest quota a user may choose.
     pub quota_min_bytes: u64,
- /// The largest quota a user may choose.
+    /// The largest quota a user may choose.
     pub quota_max_bytes: u64,
- /// The quota of a new node.
+    /// The quota of a new node.
     pub quota_default_bytes: u64,
- /// Free space the core keeps on the device by releasing shares.
+    /// Free space the core keeps on the device by releasing shares.
     pub free_space_floor_bytes: u64,
 }
 
@@ -107,12 +109,92 @@ pub fn class_parameters(class: PhoneClass) -> ClassParameters {
     }
 }
 
+/// Verify possession of the ML-DSA-87 wallet that derives `owner`.
+///
+/// The wallet signs `SHA3-256("BDLM_MOBILE_OWNER_PROOF_V1" || 45261 LE u64 ||
+/// challenge)` in the shared key-binding context. The host must choose a
+/// fresh unpredictable 32-byte challenge; this function cannot establish
+/// freshness by itself. It is a cryptographic key check, NOT evidence of a
+/// confirmed 10 BUD registration, finality, or an authorized duty transport.
+/// It never enables [`MobileNode::start`]. No mnemonic or private key crosses
+/// this interface.
+///
+/// # Errors
+///
+/// [`MobileError::Refused`] when any input length is invalid or the owner or
+/// challenge is all zero. A well-formed but mismatched proof returns `false`.
+#[uniffi::export]
+pub fn verify_owner_wallet_proof(
+    owner: Vec<u8>,
+    public_key: Vec<u8>,
+    challenge: Vec<u8>,
+    signature: Vec<u8>,
+) -> Result<bool, MobileError> {
+    let owner: [u8; 32] = owner.try_into().map_err(|_| {
+        MobileError::refused("mobile_owner_length", "the owner address is 32 bytes")
+    })?;
+    if owner == [0; 32] {
+        return Err(MobileError::refused(
+            "mobile_owner_zero",
+            "the owner address is zero",
+        ));
+    }
+    if public_key.len() != 2592 {
+        return Err(MobileError::refused(
+            "mobile_owner_public_key_length",
+            "an ML-DSA-87 public key is 2592 bytes",
+        ));
+    }
+    let challenge: [u8; 32] = challenge
+        .try_into()
+        .map_err(|_| MobileError::refused("mobile_owner_challenge", "the challenge is 32 bytes"))?;
+    if challenge == [0; 32] {
+        return Err(MobileError::refused(
+            "mobile_owner_challenge",
+            "the challenge is zero",
+        ));
+    }
+    if signature.len() != 4627 {
+        return Err(MobileError::refused(
+            "mobile_owner_signature_length",
+            "an ML-DSA-87 signature is 4627 bytes",
+        ));
+    }
+
+    // Exactly the V2 address derivation in crates/wallet-core and the node.
+    let mut hash = Sha3_256::new();
+    hash.update(b"BUDLUM_ADDRESS_V2");
+    hash.update(&public_key);
+    if hash.finalize().as_slice() != owner.as_slice() {
+        return Ok(false);
+    }
+    let mut proof = Sha3_256::new();
+    proof.update(b"BDLM_MOBILE_OWNER_PROOF_V1");
+    proof.update(TESTNET_CHAIN_ID.to_le_bytes());
+    proof.update(challenge);
+    let message = proof.finalize();
+    Ok(pq::verify(
+        SchemeId::ML_DSA_87,
+        &public_key,
+        &message,
+        ctx::KEY_BINDING_V1,
+        &signature,
+    )
+    .is_ok())
+}
+
+// Compile-time contract for the generated UniFFI owner-proof entry point.
+// If its typed result or inputs change, the native boundary must be reviewed
+// before Android ever wires the generated Kotlin call.
+type OwnerWalletProofFn = fn(Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>) -> Result<bool, MobileError>;
+const _: OwnerWalletProofFn = verify_owner_wallet_proof;
+
 /// A relay the phone reaches the network through (section 7.9.3).
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct Relay {
- /// libp2p multiaddress of the relay.
+    /// libp2p multiaddress of the relay.
     pub multiaddr: String,
- /// Offered relay capacity.
+    /// Offered relay capacity.
     pub capacity_kbps: u64,
 }
 
@@ -137,11 +219,11 @@ impl From<RelayOffer> for Relay {
 /// Which networks the node may use (section 7.9.4).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
 pub enum NetworkUse {
- /// Wi-Fi or another unmetered network only. The default.
+    /// Wi-Fi or another unmetered network only. The default.
     UnmeteredOnly,
- /// Metered networks too, up to a daily cap.
+    /// Metered networks too, up to a daily cap.
     Metered {
- /// Daily cap on metered traffic.
+        /// Daily cap on metered traffic.
         daily_cap_mb: u32,
     },
 }
@@ -149,9 +231,9 @@ pub enum NetworkUse {
 /// When the node may run (section 7.9.4).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
 pub enum PowerUse {
- /// While charging, or on battery above 50 percent. The default.
+    /// While charging, or on battery above 50 percent. The default.
     ChargingOrBatteryAbove50,
- /// Only while charging.
+    /// Only while charging.
     ChargingOnly,
 }
 
@@ -159,15 +241,15 @@ pub enum PowerUse {
 /// refuses a policy that tries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Record)]
 pub struct NodePolicy {
- /// Network use.
+    /// Network use.
     pub network: NetworkUse,
- /// Power use.
+    /// Power use.
     pub power: PowerUse,
- /// Pause when the device is hot. Always true.
+    /// Pause when the device is hot. Always true.
     pub thermal_pause: bool,
- /// Custody quota: 1 GiB to 64 GiB, at most 8 GiB for an iOS validator.
+    /// Custody quota: 1 GiB to 64 GiB, at most 8 GiB for an iOS validator.
     pub quota_bytes: u64,
- /// Serve stored symbols to readers.
+    /// Serve stored symbols to readers.
     pub serve_symbols: bool,
 }
 
@@ -210,11 +292,11 @@ impl From<Policy> for NodePolicy {
 /// The last custody audit outcome.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
 pub enum AuditState {
- /// No audit answered yet.
+    /// No audit answered yet.
     Unaudited,
- /// The last audit was answered with a valid proof.
+    /// The last audit was answered with a valid proof.
     Passed,
- /// The last audit was missed.
+    /// The last audit was missed.
     Missed,
 }
 
@@ -231,53 +313,53 @@ impl From<LastAudit> for AuditState {
 /// The panel snapshot (section 7.9.5).
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct NodeStatus {
- /// Whether the duty loop runs.
+    /// Whether the duty loop runs.
     pub running: bool,
- /// Bytes of shares stored.
+    /// Bytes of shares stored.
     pub stored_bytes: u64,
- /// The current quota.
+    /// The current quota.
     pub quota_bytes: u64,
- /// The last audit outcome.
+    /// The last audit outcome.
     pub last_audit: AuditState,
- /// The relay in use, or none when the node has no connection.
+    /// The relay in use, or none when the node has no connection.
     pub relay: Option<Relay>,
- /// Duties waiting for the network.
+    /// Duties waiting for the network.
     pub pending_duties: u64,
 }
 
 /// Why shares were released. Neither is a penalty.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
 pub enum ReleaseReason {
- /// Free space fell below the 2 GB floor.
+    /// Free space fell below the 2 GB floor.
     FreeSpaceFloor,
- /// The user lowered the quota below the bytes stored.
+    /// The user lowered the quota below the bytes stored.
     QuotaLowered,
- /// The user left.
+    /// The user left.
     Leave,
 }
 
 /// What the node tells the host.
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
 pub enum NodeEvent {
- /// The duty loop started.
+    /// The duty loop started.
     Started,
- /// The duty loop stopped. Shares stay until the user leaves.
+    /// The duty loop stopped. Shares stay until the user leaves.
     Stopped,
- /// A new policy is in force.
+    /// A new policy is in force.
     PolicyChanged {
- /// The policy as the core applied it.
+        /// The policy as the core applied it.
         policy: NodePolicy,
     },
- /// Shares were released and their release waits in the outbox.
+    /// Shares were released and their release waits in the outbox.
     SharesReleased {
- /// How many shares.
-        count: u32,
- /// Why.
+        /// How many shares.
+        count: u64,
+        /// Why.
         reason: ReleaseReason,
     },
- /// The relay dropped and the node moved to the next one.
+    /// The relay dropped and the node moved to the next one.
     RelaySwitched {
- /// The relay now in use, or none when no relay is left.
+        /// The relay now in use, or none when no relay is left.
         relay: Option<Relay>,
     },
 }
@@ -285,7 +367,7 @@ pub enum NodeEvent {
 /// Implemented by the host (Kotlin, Swift) to receive [`NodeEvent`]s.
 #[uniffi::export(foreign)]
 pub trait NodeListener: Send + Sync {
- /// Called once per event, outside the core lock.
+    /// Called once per event, outside the core lock.
     fn on_event(&self, event: NodeEvent);
 }
 
@@ -300,28 +382,28 @@ pub trait NodeListener: Send + Sync {
 /// its copy once the cipher has consumed it.
 #[uniffi::export(foreign)]
 pub trait PlatformVault: Send + Sync {
- /// Encrypts `secret` under the device key, bound to `context`.
- ///
- /// # Errors
- ///
- /// [`VaultFailure::Refused`] when the platform cipher refuses.
+    /// Encrypts `secret` under the device key, bound to `context`.
+    ///
+    /// # Errors
+    ///
+    /// [`VaultFailure::Refused`] when the platform cipher refuses.
     fn seal(&self, secret: Vec<u8>, context: Vec<u8>) -> Result<Vec<u8>, VaultFailure>;
 
- /// Decrypts a record that [`PlatformVault::seal`] made under `context`.
- ///
- /// # Errors
- ///
- /// [`VaultFailure::Refused`] when the record does not authenticate under
- /// `context` or the device key is gone.
+    /// Decrypts a record that [`PlatformVault::seal`] made under `context`.
+    ///
+    /// # Errors
+    ///
+    /// [`VaultFailure::Refused`] when the record does not authenticate under
+    /// `context` or the device key is gone.
     fn open(&self, sealed: Vec<u8>, context: Vec<u8>) -> Result<Vec<u8>, VaultFailure>;
 }
 
 /// Why the platform vault refused.
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Error)]
 pub enum VaultFailure {
- /// The platform cipher refused, or the host implementation threw.
+    /// The platform cipher refused, or the host implementation threw.
     Refused {
- /// The platform's reason, for logs; never key material.
+        /// The platform's reason, for logs; never key material.
         reason: String,
     },
 }
@@ -373,9 +455,9 @@ impl KeyVault for HostVault {
 /// A sealed operator key, as the app stores it (section 7.9.6).
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct SealedKey {
- /// The ML-DSA-65 public key, the one registered on chain.
+    /// The ML-DSA-65 public key, the one registered on chain.
     pub public_key: Vec<u8>,
- /// The seed, as the platform vault sealed it.
+    /// The seed, as the platform vault sealed it.
     pub sealed_seed: Vec<u8>,
 }
 
@@ -449,11 +531,11 @@ pub fn open_operator_key(
 /// `Throwable.message` in the generated class (uniffi-rs issue 1434).
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Error)]
 pub enum MobileError {
- /// The core refused the call; nothing changed.
+    /// The core refused the call; nothing changed.
     Refused {
- /// Stable machine code, for example `mobile_quota_above_class_cap`.
+        /// Stable machine code, for example `mobile_quota_above_class_cap`.
         code: String,
- /// Human-readable reason.
+        /// Human-readable reason.
         reason: String,
     },
 }
@@ -526,8 +608,8 @@ impl MobileNode {
         }
     }
 
- /// Queue duties for the network and return the shares they release. A
- /// release of no shares carries nothing and is not queued.
+    /// Queue duties for the network and return the shares they release. A
+    /// release of no shares carries nothing and is not queued.
     fn queue(&self, duties: Vec<DutyTx>) -> u64 {
         let duties: Vec<DutyTx> = duties
             .into_iter()
@@ -541,15 +623,15 @@ impl MobileNode {
 
 #[uniffi::export]
 impl MobileNode {
- /// A stopped node with the default policy.
- ///
- /// `owner` is the 32-byte stake owner address held by the wallet;
- /// `available_bytes` is the free space the host measured.
- ///
- /// # Errors
- ///
- /// [`MobileError::Refused`] with `mobile_owner_length` when `owner` is not
- /// 32 bytes.
+    /// A stopped node with the default policy.
+    ///
+    /// `owner` is the 32-byte stake owner address held by the wallet;
+    /// `available_bytes` is the free space the host measured.
+    ///
+    /// # Errors
+    ///
+    /// [`MobileError::Refused`] with `mobile_owner_length` when `owner` is not
+    /// 32 bytes, or `mobile_owner_zero` when it is an uninitialized placeholder.
     #[uniffi::constructor]
     pub fn new(
         owner: Vec<u8>,
@@ -560,6 +642,12 @@ impl MobileNode {
         let owner: [u8; 32] = owner.try_into().map_err(|_| {
             MobileError::refused("mobile_owner_length", "the owner address is 32 bytes")
         })?;
+        if owner == [0; 32] {
+            return Err(MobileError::refused(
+                "mobile_owner_zero",
+                "an uninitialized owner address cannot start a mobile node",
+            ));
+        }
         let relays = relays.into_iter().map(RelayOffer::from).collect();
         let core = MobileCore::new(owner, class.class(), relays, available_bytes);
         Ok(Arc::new(Self {
@@ -569,24 +657,32 @@ impl MobileNode {
         }))
     }
 
- /// Register the host's event listener, replacing any earlier one.
+    /// Register the host's event listener, replacing any earlier one.
     pub fn set_listener(&self, listener: Arc<dyn NodeListener>) {
         *lock(&self.listener) = Some(listener);
     }
 
- /// Start the duty loop.
-    pub fn start(&self) {
-        lock(&self.core).start();
-        self.emit(NodeEvent::Started);
+    /// Refuse duty startup until the host can prove owner control and on-chain
+    /// registration and can submit/verify duties. A 32-byte address alone is
+    /// not authority to claim a running validator.
+    ///
+    /// # Errors
+    ///
+    /// [`MobileError::Refused`] with `mobile_validator_unconnected` in this build.
+    pub fn start(&self) -> Result<(), MobileError> {
+        Err(MobileError::refused(
+            "mobile_validator_unconnected",
+            "owner signing, on-chain registration and duty transport are not connected",
+        ))
     }
 
- /// Stop the duty loop. Shares stay on the device.
+    /// Stop the duty loop. Shares stay on the device.
     pub fn stop(&self) {
         lock(&self.core).stop();
         self.emit(NodeEvent::Stopped);
     }
 
- /// The panel snapshot.
+    /// The panel snapshot.
     pub fn status(&self) -> NodeStatus {
         let CoreStatus {
             running,
@@ -609,18 +705,18 @@ impl MobileNode {
         }
     }
 
- /// The policy in force.
+    /// The policy in force.
     pub fn policy(&self) -> NodePolicy {
         lock(&self.core).policy().into()
     }
 
- /// Replace the policy. A quota below the bytes stored releases the
- /// largest shares; their release waits in the outbox.
- ///
- /// # Errors
- ///
- /// [`MobileError::Refused`] when the thermal pause is off, the quota is
- /// outside 1 GiB to 64 GiB, or above the class cap; the old policy stays.
+    /// Replace the policy. A quota below the bytes stored releases the
+    /// largest shares; their release waits in the outbox.
+    ///
+    /// # Errors
+    ///
+    /// [`MobileError::Refused`] when the thermal pause is off, the quota is
+    /// outside 1 GiB to 64 GiB, or above the class cap; the old policy stays.
     pub fn set_policy(&self, policy: NodePolicy) -> Result<(), MobileError> {
         let (applied, duties) = {
             let mut core = lock(&self.core);
@@ -640,8 +736,8 @@ impl MobileNode {
         Ok(())
     }
 
- /// Report the free space the host measured. Below the 2 GB floor the core
- /// releases the largest shares; the count released is returned.
+    /// Report the free space the host measured. Below the 2 GB floor the core
+    /// releases the largest shares; the count released is returned.
     pub fn report_free_space(&self, available_bytes: u64) -> u64 {
         let duties = {
             let mut core = lock(&self.core);
@@ -658,7 +754,7 @@ impl MobileNode {
         count
     }
 
- /// The relay connection dropped: move to the next relay.
+    /// The relay connection dropped: move to the next relay.
     pub fn on_relay_drop(&self) -> Option<Relay> {
         let relay = lock(&self.core).on_relay_drop().map(Relay::from);
         self.emit(NodeEvent::RelaySwitched {
@@ -667,15 +763,15 @@ impl MobileNode {
         relay
     }
 
- /// Queue a resume request after a suspension (section 7.8: it takes
- /// effect one epoch after inclusion).
+    /// Queue a resume request after a suspension (section 7.8: it takes
+    /// effect one epoch after inclusion).
     pub fn resume(&self) {
         let duty = lock(&self.core).resume();
         self.queue(vec![duty]);
     }
 
- /// Leave: release every share and stop. Not a penalty. Returns the count
- /// of shares released; unbonding is the wallet's transaction.
+    /// Leave: release every share and stop. Not a penalty. Returns the count
+    /// of shares released; unbonding is the wallet's transaction.
     pub fn leave(&self) -> u64 {
         let duty = lock(&self.core).leave();
         let count = self.queue(vec![duty]);
@@ -687,7 +783,7 @@ impl MobileNode {
         count
     }
 
- /// Duties waiting for the network.
+    /// Duties waiting for the network.
     pub fn pending_duties(&self) -> u64 {
         ffi_count(lock(&self.outbox).len())
     }
@@ -722,8 +818,8 @@ mod tests {
         MobileNode::new(vec![7; 32], class, relays, 64 * GIB).expect("node")
     }
 
- /// Stores the context in front of the masked secret and refuses to open
- /// under another one, as AES-GCM refuses foreign associated data.
+    /// Stores the context in front of the masked secret and refuses to open
+    /// under another one, as AES-GCM refuses foreign associated data.
     struct MaskVault;
 
     impl PlatformVault for MaskVault {
@@ -743,7 +839,7 @@ mod tests {
         }
     }
 
- /// A vault whose device key is gone.
+    /// A vault whose device key is gone.
     struct LostVault;
 
     impl PlatformVault for LostVault {
@@ -777,7 +873,9 @@ mod tests {
             unreachable!("a poisoned production lock must abort");
         }
 
-        let executable = std::env::current_exe().expect("test executable");
+        // Test-only re-exec via argv[0]; avoids `current_exe()` so Semgrep
+        // SARIF stays clean (#517).
+        let executable = std::env::args().next().expect("test binary argv[0]");
         let status = std::process::Command::new(executable)
             .args([
                 "--exact",
@@ -848,6 +946,105 @@ mod tests {
     }
 
     #[test]
+    fn mobile_ffi_verifies_owner_wallet_proof_without_unlocking_duties() {
+        let seed = [7u8; 32];
+        let public_key = pq::ml_dsa_public_key(SchemeId::ML_DSA_87, &seed).expect("key");
+        let mut address = Sha3_256::new();
+        address.update(b"BUDLUM_ADDRESS_V2");
+        address.update(&public_key);
+        let owner = address.finalize().to_vec();
+        let challenge = vec![9u8; 32];
+        let mut digest = Sha3_256::new();
+        digest.update(b"BDLM_MOBILE_OWNER_PROOF_V1");
+        digest.update(TESTNET_CHAIN_ID.to_le_bytes());
+        digest.update(&challenge);
+        let message = digest.finalize();
+        let signature = pq::ml_dsa_sign(
+            SchemeId::ML_DSA_87,
+            &seed,
+            &message,
+            ctx::KEY_BINDING_V1,
+            &[0u8; 32],
+        )
+        .expect("sign");
+        assert!(verify_owner_wallet_proof(
+            owner.clone(),
+            public_key.clone(),
+            challenge.clone(),
+            signature.clone(),
+        )
+        .expect("valid proof"));
+        let mut different_challenge = challenge.clone();
+        different_challenge[0] ^= 1;
+        assert!(!verify_owner_wallet_proof(
+            owner.clone(),
+            public_key.clone(),
+            different_challenge,
+            signature.clone(),
+        )
+        .expect("challenge mismatch"));
+        let mut different_owner = owner.clone();
+        different_owner[0] ^= 1;
+        assert!(!verify_owner_wallet_proof(
+            different_owner,
+            public_key.clone(),
+            challenge.clone(),
+            signature.clone(),
+        )
+        .expect("address mismatch"));
+        let transaction_signature =
+            pq::ml_dsa_sign(SchemeId::ML_DSA_87, &seed, &message, ctx::TX_V5, &[0u8; 32])
+                .expect("sign in transaction context");
+        assert!(!verify_owner_wallet_proof(
+            owner.clone(),
+            public_key.clone(),
+            challenge.clone(),
+            transaction_signature,
+        )
+        .expect("transaction signature is not a key-binding proof"));
+        let mut different_signature = signature.clone();
+        different_signature[0] ^= 1;
+        assert!(!verify_owner_wallet_proof(
+            owner.clone(),
+            public_key.clone(),
+            challenge.clone(),
+            different_signature,
+        )
+        .expect("signature mismatch"));
+        assert_eq!(
+            refusal_code(verify_owner_wallet_proof(
+                owner.clone(),
+                public_key.clone(),
+                vec![0; 32],
+                signature.clone(),
+            )),
+            "mobile_owner_challenge"
+        );
+        assert_eq!(
+            refusal_code(verify_owner_wallet_proof(
+                owner,
+                public_key,
+                challenge,
+                signature[..10].to_vec(),
+            )),
+            "mobile_owner_signature_length"
+        );
+        let node = node(PhoneClass::Mobile);
+        assert_eq!(refusal_code(node.start()), "mobile_validator_unconnected");
+    }
+
+    #[test]
+    fn mobile_ffi_refuses_uninitialized_owner_address() {
+        match MobileNode::new(vec![0; 32], PhoneClass::Mobile, Vec::new(), 64 * GIB) {
+            Err(MobileError::Refused { code, .. }) => assert_eq!(code, "mobile_owner_zero"),
+            Ok(_) => panic!("an uninitialized owner was accepted"),
+        }
+        // Nonzero length alone does not prove control; this only rejects the
+        // placeholder used by disconnected host code.
+        assert!(MobileNode::new(vec![1; 32], PhoneClass::Mobile, Vec::new(), 64 * GIB).is_ok());
+    }
+
+    #[test]
     fn mobile_ffi_policy_round_trips_and_keeps_the_thermal_pause() {
         let node = node(PhoneClass::Mobile);
         let mut policy = node.policy();
@@ -892,8 +1089,8 @@ mod tests {
         let recorder = Arc::new(Recorder::default());
         node.set_listener(recorder.clone());
 
-        node.start();
-        assert!(node.status().running);
+        assert_eq!(refusal_code(node.start()), "mobile_validator_unconnected");
+        assert!(!node.status().running);
         let next = node.on_relay_drop();
         assert_eq!(
             next.as_ref().map(|relay| relay.multiaddr.as_str()),
@@ -908,11 +1105,7 @@ mod tests {
         let events = lock(&recorder.0).clone();
         assert_eq!(
             events,
-            vec![
-                NodeEvent::Started,
-                NodeEvent::RelaySwitched { relay: next },
-                NodeEvent::Stopped,
-            ]
+            vec![NodeEvent::RelaySwitched { relay: next }, NodeEvent::Stopped]
         );
     }
 
@@ -921,22 +1114,20 @@ mod tests {
         let node = node(PhoneClass::Mobile);
         let recorder = Arc::new(Recorder::default());
         node.set_listener(recorder.clone());
-        node.start();
+        assert_eq!(refusal_code(node.start()), "mobile_validator_unconnected");
         assert_eq!(node.leave(), 0);
         assert!(!node.status().running);
         assert_eq!(node.pending_duties(), 0);
         let events = lock(&recorder.0).clone();
         assert_eq!(
-            events.get(1..),
-            Some(
-                &[
-                    NodeEvent::SharesReleased {
-                        count: 0,
-                        reason: ReleaseReason::Leave,
-                    },
-                    NodeEvent::Stopped,
-                ][..]
-            )
+            events.as_slice(),
+            &[
+                NodeEvent::SharesReleased {
+                    count: 0,
+                    reason: ReleaseReason::Leave,
+                },
+                NodeEvent::Stopped,
+            ]
         );
     }
 

@@ -37,8 +37,8 @@
 
 use crate::core::account::{Account, AccountState};
 use crate::core::address::Address;
-use crate::core::error::{BudlumError, BudlumResult};
 use crate::core::transaction::{Transaction, TransactionType};
+use crate::error::{BudlumError, BudlumResult};
 use crate::execution::coordinator::assets::BUDLUM_TESTNET_CHAIN_ID;
 use crate::execution::executor::Executor;
 use std::collections::{BTreeMap, BTreeSet};
@@ -114,7 +114,6 @@ pub struct BlockExecutionReport {
     pub elapsed_micros: u64,
     pub state_root: String,
 }
-
 
 /// One unit of state a transaction can touch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -436,7 +435,6 @@ pub fn execute_planned_block(
     }
 }
 
-
 /// Execute a block under the activation policy and report deterministic
 /// scheduling telemetry. Inactive chains always use block order.
 pub fn execute_block_with_policy(
@@ -512,7 +510,7 @@ pub struct ScheduleReport {
 fn isolated_transfer_state(base: &AccountState, tx: &Transaction) -> AccountState {
     let mut local = AccountState::new();
     local.burn_reserve_address = base.burn_reserve_address;
-    local.team_vesting = base.team_vesting.clone();
+    local.team_vesting = base.team_vesting;
     local.epoch_index = base.epoch_index;
     local.base_fee = base.base_fee;
     local.current_block_height = base.current_block_height;
@@ -600,16 +598,15 @@ pub fn execute_block_checked(
                 for handle in handles {
                     let chunk = handle.join().map_err(|_| BudlumError::Consensus {
                         code: "parallel_worker_panic",
-                        message: "a parallel transfer worker panicked; block rolled back".to_owned(),
+                        message: "a parallel transfer worker panicked; block rolled back"
+                            .to_owned(),
                     })?;
                     chunks.push(chunk);
                 }
                 Ok(chunks)
             });
-        let outcomes: Vec<BudlumResult<TransferDelta>> = chunk_results?
-            .into_iter()
-            .flatten()
-            .collect();
+        let outcomes: Vec<BudlumResult<TransferDelta>> =
+            chunk_results?.into_iter().flatten().collect();
         if outcomes.len() != wave_txs.len() {
             return Err(BudlumError::Consensus {
                 code: "parallel_worker_result_mismatch",

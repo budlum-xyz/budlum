@@ -9,6 +9,8 @@
 //!   max 12.5% (`1/8`) adjustment per block.
 //! - Base fee split: 10% burned, 90% credited to the Network Security Pool
 //!   (`reward_pool_account`). Priority fee: 100% credited to block proposer.
+//!
+//! Convenience: exposed for CLI, RPC, SDK, and multi-VM runtime callers.
 
 use crate::core::account::{AccountState, BudEnvUnit, ATTOS_PER_ATOM};
 use crate::core::address::Address;
@@ -64,7 +66,10 @@ pub fn native_gas_to_bgu(ee: EeId, native_units: u64) -> Result<u64, String> {
         EeId::MOVE => native_units
             .checked_mul(MOVE_GAS_TO_BGU)
             .ok_or_else(|| String::from("Move gas to BGU conversion overflow")),
-        other => Err(format!("unsupported execution environment 0x{:02x}", other.0)),
+        other => Err(format!(
+            "unsupported execution environment 0x{:02x}",
+            other.0
+        )),
     }
 }
 
@@ -186,11 +191,8 @@ pub fn settle_uel_fee_attos(
     max_priority_fee_per_bgu_attos: u128,
 ) -> Result<UelFeeSettlement, String> {
     let base = base_fee_attos.max(MIN_UEL_BASE_FEE_ATTOS);
-    let tip = effective_priority_fee_attos(
-        base,
-        max_fee_per_bgu_attos,
-        max_priority_fee_per_bgu_attos,
-    )?;
+    let tip =
+        effective_priority_fee_attos(base, max_fee_per_bgu_attos, max_priority_fee_per_bgu_attos)?;
     let gas = u128::from(gas_used_bgu);
     let base_total = gas
         .checked_mul(base)
@@ -211,8 +213,8 @@ pub fn settle_uel_fee_attos(
     let ten_percent = base_total / 10;
     let pool_share = base_total - ten_percent;
     let atom_q = u128::from(ATTOS_PER_ATOM);
-    let whole_burn_atoms = u64::try_from(ten_percent / atom_q)
-        .map_err(|_| String::from("UEL burn atom overflow"))?;
+    let whole_burn_atoms =
+        u64::try_from(ten_percent / atom_q).map_err(|_| String::from("UEL burn atom overflow"))?;
     let burn_dust_attos = ten_percent % atom_q;
 
     let pool_addr = reward_pool_account();

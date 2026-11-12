@@ -52,6 +52,7 @@ pub fn seal_grant_key_package(
 }
 
 /// Open a grant key package through the canonical B.U.D. 3.0 key-package codec.
+/// Convenience: exposed for B.U.D. 3.0 client grant key-package opener.
 pub fn open_grant_key_package(
     recipient_kp: &crate::crypto::hpke::HpkeKeyPair,
     grant_tag: &[u8; 32],

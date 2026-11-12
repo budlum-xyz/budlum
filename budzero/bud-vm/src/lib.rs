@@ -1,3 +1,5 @@
+//! Convenience: exposed for BudZero zkVM prover, compiler, and verifier callers.
+
 // Unsafe lock: this crate is at 0 unsafe today. The moment an `unsafe` block
 // enters, the build FAILs (a regression gate). The same policy as the main crate.
 #![forbid(unsafe_code)]

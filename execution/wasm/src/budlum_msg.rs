@@ -181,10 +181,7 @@ pub enum CwCosmosMsg {
     Distribution(serde_json::Value),
     Gov(serde_json::Value),
     Ibc(serde_json::Value),
-    Stargate {
-        type_url: String,
-        value: String,
-    },
+    Stargate { type_url: String, value: String },
 }
 
 /// CosmWasm `SubMsg<BudlumMsg>`.
@@ -326,17 +323,42 @@ pub fn b64_encode(input: &[u8]) -> String {
     if rem.len() == 1 {
         let b0 = rem.first().copied().unwrap_or(0);
         let n = u32::from(b0) << 16;
-        out.push(B64_ALPHABET.get(((n >> 18) & 0x3f) as usize).copied().unwrap_or(b'A') as char);
-        out.push(B64_ALPHABET.get(((n >> 12) & 0x3f) as usize).copied().unwrap_or(b'A') as char);
+        out.push(
+            B64_ALPHABET
+                .get(((n >> 18) & 0x3f) as usize)
+                .copied()
+                .unwrap_or(b'A') as char,
+        );
+        out.push(
+            B64_ALPHABET
+                .get(((n >> 12) & 0x3f) as usize)
+                .copied()
+                .unwrap_or(b'A') as char,
+        );
         out.push('=');
         out.push('=');
     } else if rem.len() == 2 {
         let b0 = rem.first().copied().unwrap_or(0);
         let b1 = rem.get(1).copied().unwrap_or(0);
         let n = (u32::from(b0) << 16) | (u32::from(b1) << 8);
-        out.push(B64_ALPHABET.get(((n >> 18) & 0x3f) as usize).copied().unwrap_or(b'A') as char);
-        out.push(B64_ALPHABET.get(((n >> 12) & 0x3f) as usize).copied().unwrap_or(b'A') as char);
-        out.push(B64_ALPHABET.get(((n >> 6) & 0x3f) as usize).copied().unwrap_or(b'A') as char);
+        out.push(
+            B64_ALPHABET
+                .get(((n >> 18) & 0x3f) as usize)
+                .copied()
+                .unwrap_or(b'A') as char,
+        );
+        out.push(
+            B64_ALPHABET
+                .get(((n >> 12) & 0x3f) as usize)
+                .copied()
+                .unwrap_or(b'A') as char,
+        );
+        out.push(
+            B64_ALPHABET
+                .get(((n >> 6) & 0x3f) as usize)
+                .copied()
+                .unwrap_or(b'A') as char,
+        );
         out.push('=');
     }
     out
@@ -359,7 +381,7 @@ pub fn b64_decode(s: &str) -> Result<Vec<u8>, String> {
     if bytes.is_empty() {
         return Ok(Vec::new());
     }
-    if bytes.len() % 4 != 0 {
+    if !bytes.len().is_multiple_of(4) {
         return Err(String::from("invalid base64 length"));
     }
     let mut out = Vec::with_capacity((bytes.len() / 4).saturating_mul(3));
@@ -397,7 +419,13 @@ pub fn b64_decode(s: &str) -> Result<Vec<u8>, String> {
 const BECH32_CHARSET: &[u8; 32] = b"qpzry9x8gf2tvdw0s3jn54khce6mua7l";
 
 fn bech32_polymod(values: &[u8]) -> u32 {
-    const GEN: [u32; 5] = [0x3b6a_57b2, 0x2650_8e6d, 0x1ea1_19fa, 0x3d42_33dd, 0x2a14_62b3];
+    const GEN: [u32; 5] = [
+        0x3b6a_57b2,
+        0x2650_8e6d,
+        0x1ea1_19fa,
+        0x3d42_33dd,
+        0x2a14_62b3,
+    ];
     let mut chk: u32 = 1;
     for &v in values {
         let top = chk >> 25;

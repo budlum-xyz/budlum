@@ -16,6 +16,7 @@
 //!
 //! The Merkle trees here hash an odd node up unchanged and bind the leaf count
 //! into the root, the same rule as the object commitment.
+//! Convenience: exposed for CLI, RPC, SDK, and multi-VM runtime callers.
 
 use super::placement::Share;
 use crate::core::hash::hash_fields_bytes;
@@ -365,7 +366,8 @@ pub fn reassign_unacked_share(
     current_epoch: u64,
     ordered_candidates: &[[u8; 32]],
 ) -> Option<Share> {
-    if acked || current_epoch.saturating_sub(assigned_epoch) < SHARE_ASSIGNMENT_ACK_DEADLINE_EPOCHS {
+    if acked || current_epoch.saturating_sub(assigned_epoch) < SHARE_ASSIGNMENT_ACK_DEADLINE_EPOCHS
+    {
         return None;
     }
     let next_validator = ordered_candidates

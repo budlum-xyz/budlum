@@ -145,15 +145,22 @@ pub fn self_test() -> Result<String, String> {
         };
 
         let clean_manifest = "<manifest><uses-permission android:name=\"android.permission.FOREGROUND_SERVICE_SPECIAL_USE\"/><application android:allowBackup=\"false\"><service android:foregroundServiceType=\"specialUse\"><property android:name=\"android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE\"/></service></application></manifest>";
-        let clean_gradle = "minSdk = 29\ntargetSdk = 36\nndkVersion = \"27.2.12479018\"\nincludeInApk = false\n";
+        let clean_gradle =
+            "minSdk = 29\ntargetSdk = 36\nndkVersion = \"27.2.12479018\"\nincludeInApk = false\n";
         let clean_fdroid = "ndk: 27.2.12479018\n";
         let clean_plist = "<plist><key>BGTaskSchedulerPermittedIdentifiers</key><string>xyz.budlum.validator.audit</string><string>16.0</string></plist>";
         let clean_ios = "case mobileOpportunistic = \"MobileOpportunistic\"\npublic static let maxQuotaBytes: UInt64 = 8 * gib\nrequiresExternalPower: Bool = true\nisExcludedFromBackup = true\n";
         let clean_rt = "pub struct MobileValidatorController;\npub fn run_ios_bg_processing_task() {}\npub fn verify_reproducible_apk_builds() {}\n";
 
-        put("mobile/android/app/src/main/AndroidManifest.xml", clean_manifest)?;
+        put(
+            "mobile/android/app/src/main/AndroidManifest.xml",
+            clean_manifest,
+        )?;
         put("mobile/android/app/build.gradle.kts", clean_gradle)?;
-        put("mobile/android/fdroid/network.budlum.validator.yml", clean_fdroid)?;
+        put(
+            "mobile/android/fdroid/network.budlum.validator.yml",
+            clean_fdroid,
+        )?;
         put("mobile/ios/Info.plist", clean_plist)?;
         put(
             "mobile/ios/Sources/BudlumValidator/OpportunisticValidatorEngine.swift",
@@ -175,7 +182,10 @@ pub fn self_test() -> Result<String, String> {
                 "negative canary 1 passed despite REQUEST_IGNORE_BATTERY_OPTIMIZATIONS",
             ));
         }
-        put("mobile/android/app/src/main/AndroidManifest.xml", clean_manifest)?;
+        put(
+            "mobile/android/app/src/main/AndroidManifest.xml",
+            clean_manifest,
+        )?;
 
         // Negative canary 2: banned Firebase SDK in Gradle file must be rejected.
         put(

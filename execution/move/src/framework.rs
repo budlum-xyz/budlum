@@ -84,11 +84,7 @@ pub fn is_disabled_framework_module(address: &[u8; 32], module_name: &str) -> bo
 /// Deterministic Budlum epoch/block randomness seed bound to `0x1::randomness`
 /// (`IP-32` item 3 and Section 8.15).
 #[must_use]
-pub fn derive_move_randomness(
-    block: &BlockContext,
-    caller: &[u8; 32],
-    call_seq: u64,
-) -> [u8; 32] {
+pub fn derive_move_randomness(block: &BlockContext, caller: &[u8; 32], call_seq: u64) -> [u8; 32] {
     let mut h = Sha3_256::new();
     h.update(b"BDLM_MOVE_RANDOMNESS_V1");
     h.update(block.height.to_le_bytes());
@@ -139,10 +135,7 @@ pub enum MoveOp {
         resource_tag: String,
     },
     /// Transfer `octas` (`1 octa = 10^10 attoBUD`) from signer to `recipient`.
-    TransferOctas {
-        recipient: [u8; 32],
-        octas: u64,
-    },
+    TransferOctas { recipient: [u8; 32], octas: u64 },
     /// Invoke `0x1::budlum_universal::call` from Move into another UEL environment.
     UniversalCall {
         target_ee: u8,
@@ -157,13 +150,9 @@ pub enum MoveOp {
         payload: Vec<u8>,
     },
     /// Deterministically abort execution with an Aptos `u64` abort code.
-    Abort {
-        code: u64,
-    },
+    Abort { code: u64 },
     /// Push literal bytes to the function return values.
-    ReturnConst {
-        bytes: Vec<u8>,
-    },
+    ReturnConst { bytes: Vec<u8> },
 }
 
 /// Encode a [`CompiledMoveModule`] with the canonical Move binary header
@@ -226,7 +215,10 @@ pub fn verify_move_module_bytes(
             return Err(format!("invalid Move function identifier '{}'", func.name));
         }
         if func.code.len() > 4_096 {
-            return Err(format!("Move function '{}' exceeds 4096-instruction cap", func.name));
+            return Err(format!(
+                "Move function '{}' exceeds 4096-instruction cap",
+                func.name
+            ));
         }
     }
     Ok(module)
@@ -240,8 +232,7 @@ pub fn is_valid_move_ident(name: &str) -> bool {
     if !(first.is_ascii_alphabetic() || first == b'_') || name.len() > 128 {
         return false;
     }
-    name.bytes()
-        .all(|b| b.is_ascii_alphanumeric() || b == b'_')
+    name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
 }
 
 /// Minimal BCS helper encoding `(bool, vector<u8>)` for `0x1::budlum_universal::call`.

@@ -116,14 +116,7 @@ mod tests {
     fn served_model_name_blocks_multiplier_and_control_injection() {
         let prefix = ModelTier::Light.served_model_name("");
         assert_eq!(prefix, "ai_inference-light-");
-        for bad in [
-            "0.5x",
-            "10x",
-            "v1-2x",
-            "v1-10.0X",
-            "v1\nheader",
-            "v1 bad",
-        ] {
+        for bad in ["0.5x", "10x", "v1-2x", "v1-10.0X", "v1\nheader", "v1 bad"] {
             assert!(
                 ModelTier::Light.try_served_model_name(bad).is_err(),
                 "{bad:?}"

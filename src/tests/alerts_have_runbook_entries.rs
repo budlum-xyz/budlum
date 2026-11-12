@@ -75,7 +75,7 @@ fn every_runbook_row_names_a_live_alert() {
             continue;
         }
         assert!(
-            rules.iter().any(|name| *name == row.as_str()),
+            rules.contains(&row.as_str()),
             "docs/OPERATIONS.md documents {row}, which no rule in \
              ops/monitoring/alerts.yml declares"
         );

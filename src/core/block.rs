@@ -803,7 +803,7 @@ impl Block {
             }
         }
     }
-    /// exposed for: the crypto/key registry's public labels and shapes - production readers land with the anchor-ceremony and key-config doors (wiring pending).
+    #[cfg(test)]
     pub fn verify_signature_with_pubkey(&self, expected_pubkey: &Address) -> bool {
         self.verify_signature_with_pubkey_in(
             &crate::crypto::scheme::SchemeStatusRegistry::genesis(),

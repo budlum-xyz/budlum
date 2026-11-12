@@ -1,10 +1,12 @@
 //! Foreign Compatibility Lane envelopes, classical account isolation, `Adopt`,
 //! and Quantum Alert Level gating (sections 8.4.1, 8.4.2, and 8.6.2).
+//! Convenience: exposed for CLI, RPC, SDK, and multi-VM runtime callers.
 
 pub mod aptos;
 pub mod cosmos;
 pub mod ethereum;
 pub mod solana;
+pub mod sui;
 
 #[cfg(test)]
 mod foreign_tests;
@@ -25,8 +27,8 @@ use crate::execution::coordinator::foreign::aptos::{
     BUDLUM_APTOS_CHAIN_ID,
 };
 use crate::execution::coordinator::foreign::cosmos::{
-    cosmos_addr20_from_compressed_pubkey, decode_cosmos_tx, CosmosEnvelopeError, DecodedCosmosTx,
-    BUDLUM_COSMOS_CHAIN_ID,
+    cosmos_addr20_from_compressed_pubkey, decode_cosmos_tx, decode_msg_send_recipient,
+    CosmosEnvelopeError, DecodedCosmosTx, BUDLUM_COSMOS_CHAIN_ID,
 };
 use crate::execution::coordinator::foreign::ethereum::{
     decode_ethereum_tx, DecodedEthereumTx, EthereumEnvelopeError, BUDLUM_EVM_CHAIN_ID,
@@ -148,7 +150,7 @@ pub fn adopt_signing_digest(
     chain_id: u64,
 ) -> [u8; 32] {
     hash_fields_bytes(&[
-        b"BDLM_ADOPT_FOREIGN_V1",
+        crate::crypto::ctx::ADOPT_FOREIGN_V1,
         &[scheme as u8],
         local_id,
         &native_pq_target.0,
@@ -168,6 +170,78 @@ pub struct ForeignAccountRecord {
     pub adopted_into: Option<Address>,
 }
 
+mod serde_sig64_set {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use std::collections::BTreeSet;
+
+    pub fn serialize<S: Serializer>(
+        set: &BTreeSet<[u8; 64]>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        let hexs: Vec<String> = set.iter().map(hex::encode).collect();
+        hexs.serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<BTreeSet<[u8; 64]>, D::Error> {
+        let hexs = Vec::<String>::deserialize(deserializer)?;
+        let mut out = BTreeSet::new();
+        for h in hexs {
+            let raw = hex::decode(h.strip_prefix("0x").unwrap_or(&h))
+                .map_err(serde::de::Error::custom)?;
+            let arr: [u8; 64] = raw
+                .try_into()
+                .map_err(|_| serde::de::Error::custom("expected 64-byte signature"))?;
+            out.insert(arr);
+        }
+        Ok(out)
+    }
+}
+
+mod serde_sig64_map {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use std::collections::BTreeMap;
+
+    pub fn serialize<S: Serializer>(
+        map: &BTreeMap<[u8; 32], Vec<[u8; 64]>>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        let str_map: BTreeMap<String, Vec<String>> = map
+            .iter()
+            .map(|(k, v)| (hex::encode(k), v.iter().map(hex::encode).collect()))
+            .collect();
+        str_map.serialize(serializer)
+    }
+
+    type SigWindowMap = BTreeMap<[u8; 32], Vec<[u8; 64]>>;
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<SigWindowMap, D::Error> {
+        let str_map = BTreeMap::<String, Vec<String>>::deserialize(deserializer)?;
+        let mut out = BTreeMap::new();
+        for (k, vals) in str_map {
+            let kb = hex::decode(k.strip_prefix("0x").unwrap_or(&k))
+                .map_err(serde::de::Error::custom)?;
+            let karr: [u8; 32] = kb
+                .try_into()
+                .map_err(|_| serde::de::Error::custom("expected 32-byte blockhash"))?;
+            let mut sigs = Vec::with_capacity(vals.len());
+            for v in vals {
+                let vb = hex::decode(v.strip_prefix("0x").unwrap_or(&v))
+                    .map_err(serde::de::Error::custom)?;
+                let varr: [u8; 64] = vb
+                    .try_into()
+                    .map_err(|_| serde::de::Error::custom("expected 64-byte signature"))?;
+                sigs.push(varr);
+            }
+            out.insert(karr, sigs);
+        }
+        Ok(out)
+    }
+}
+
 /// Stateful admission and replay ledger for the foreign Compatibility Lane.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ForeignLaneState {
@@ -175,10 +249,15 @@ pub struct ForeignLaneState {
     pub next_cosmos_account_number: u64,
     pub accounts: BTreeMap<Address, ForeignAccountRecord>,
     pub recent_blockhashes: VecDeque<[u8; 32]>,
+    #[serde(with = "serde_sig64_set")]
     pub seen_solana_signatures: BTreeSet<[u8; 64]>,
     /// Tracks Solana signatures per finalized blockhash for bounded eviction.
-    #[serde(default)]
+    #[serde(default, with = "serde_sig64_map")]
     pub solana_sigs_by_blockhash: BTreeMap<[u8; 32], Vec<[u8; 64]>>,
+    /// Native post-quantum accounts proven on chain. A recipient absent from
+    /// this set is not a PQ target, so the direct-PQ guard fails closed.
+    #[serde(default)]
+    pub native_pq_accounts: BTreeSet<Address>,
 }
 
 /// Verified outcome of admitting a [`ForeignTx`].
@@ -241,16 +320,29 @@ impl std::fmt::Display for ForeignAdmissionError {
                 write!(f, "foreign sender collides with a registered native alias")
             }
             Self::NonceMismatch { expected, got } => {
-                write!(f, "foreign nonce/sequence mismatch: expected {expected}, got {got}")
+                write!(
+                    f,
+                    "foreign nonce/sequence mismatch: expected {expected}, got {got}"
+                )
             }
             Self::AccountNumberMismatch { expected, got } => {
-                write!(f, "Cosmos account_number mismatch: expected {expected}, got {got}")
+                write!(
+                    f,
+                    "Cosmos account_number mismatch: expected {expected}, got {got}"
+                )
             }
             Self::ClosedByQuantumAlert(lvl) => {
-                write!(f, "foreign envelope refused under quantum alert level {}", *lvl as u8)
+                write!(
+                    f,
+                    "foreign envelope refused under quantum alert level {}",
+                    *lvl as u8
+                )
             }
             Self::PqHoldingsProtected => {
-                write!(f, "classical foreign account cannot touch post-quantum holdings (K-3)")
+                write!(
+                    f,
+                    "classical foreign account cannot touch post-quantum holdings (K-3)"
+                )
             }
             Self::AccountAlreadyAdopted(dst) => {
                 write!(f, "foreign account was already adopted into {dst}")
@@ -271,6 +363,117 @@ impl ForeignLaneState {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Records `address` as a proven native post-quantum account. Only recorded
+    /// addresses may be the target of a direct PQ transfer.
+    pub fn register_native_pq_account(&mut self, address: Address) {
+        self.native_pq_accounts.insert(address);
+    }
+
+    /// Validates a foreign envelope against read-only state without cloning
+    /// [`AccountState`] or mutating nonces (`a5e532e0`).
+    pub fn validate_envelope_readonly(
+        &self,
+        exec_state: &ExecutionState,
+        tx: &ForeignTx,
+        now_timestamp_secs: u64,
+    ) -> Result<[u8; 32], ForeignAdmissionError> {
+        let _ = self.ensure_alert_allows(ForeignIntentKind::GeneralExecution)?;
+        match tx {
+            ForeignTx::Ethereum { raw_rlp, .. } => {
+                let decoded = decode_ethereum_tx(raw_rlp, BUDLUM_EVM_CHAIN_ID)
+                    .map_err(ForeignAdmissionError::Ethereum)?;
+                exec_state
+                    .check_evm_alias_collision(&decoded.sender)
+                    .map_err(|_| ForeignAdmissionError::AliasCollision)?;
+                let (_, _, expected_nonce) = self.foreign_account_expectation(
+                    ForeignScheme::EthereumSecp256k1,
+                    &decoded.sender,
+                )?;
+                if decoded.nonce != expected_nonce {
+                    return Err(ForeignAdmissionError::NonceMismatch {
+                        expected: expected_nonce,
+                        got: decoded.nonce,
+                    });
+                }
+                Ok(decoded.tx_hash)
+            }
+            ForeignTx::Cosmos {
+                tx_raw_bytes,
+                chain_id,
+                account_number,
+                ..
+            } => {
+                let decoded = decode_cosmos_tx(
+                    tx_raw_bytes,
+                    chain_id,
+                    *account_number,
+                    BUDLUM_COSMOS_CHAIN_ID,
+                )
+                .map_err(ForeignAdmissionError::Cosmos)?;
+                let cosmos_bech32 = derive_foreign_cosmos_bech32(&decoded.sender_addr20);
+                if exec_state.has_registered_alias_collision(EeId::WASM, cosmos_bech32.as_bytes()) {
+                    return Err(ForeignAdmissionError::AliasCollision);
+                }
+                let (_, expected_acc_num, expected_nonce) = self.foreign_account_expectation(
+                    ForeignScheme::CosmosSecp256k1,
+                    &decoded.sender_addr20,
+                )?;
+                if *account_number != expected_acc_num {
+                    return Err(ForeignAdmissionError::AccountNumberMismatch {
+                        expected: expected_acc_num,
+                        got: *account_number,
+                    });
+                }
+                if decoded.sequence != expected_nonce {
+                    return Err(ForeignAdmissionError::NonceMismatch {
+                        expected: expected_nonce,
+                        got: decoded.sequence,
+                    });
+                }
+                Ok(decoded.tx_hash)
+            }
+            ForeignTx::Aptos { raw_bcs, .. } => {
+                let decoded = decode_aptos_tx(raw_bcs, BUDLUM_APTOS_CHAIN_ID, now_timestamp_secs)
+                    .map_err(ForeignAdmissionError::Aptos)?;
+                if exec_state.has_registered_alias_collision(EeId::MOVE, &decoded.sender) {
+                    return Err(ForeignAdmissionError::AliasCollision);
+                }
+                let (_, _, expected_nonce) =
+                    self.foreign_account_expectation(ForeignScheme::Aptos, &decoded.sender)?;
+                if decoded.sequence_number != expected_nonce {
+                    return Err(ForeignAdmissionError::NonceMismatch {
+                        expected: expected_nonce,
+                        got: decoded.sequence_number,
+                    });
+                }
+                Ok(decoded.tx_hash)
+            }
+            ForeignTx::Solana { raw_wire, .. } => {
+                let decoded = decode_solana_tx(raw_wire).map_err(ForeignAdmissionError::Solana)?;
+                if exec_state.has_registered_alias_collision(EeId::SVM, &decoded.fee_payer) {
+                    return Err(ForeignAdmissionError::AliasCollision);
+                }
+                if !self.recent_blockhashes.contains(&decoded.recent_blockhash) {
+                    return Err(ForeignAdmissionError::Solana(
+                        SolanaEnvelopeError::UnknownOrExpiredBlockhash,
+                    ));
+                }
+                if self
+                    .seen_solana_signatures
+                    .contains(&decoded.fee_payer_signature)
+                {
+                    return Err(ForeignAdmissionError::Solana(
+                        SolanaEnvelopeError::ReplayedSignature,
+                    ));
+                }
+                Ok([0u8; 32])
+            }
+            ForeignTx::Adopt(_) => Err(ForeignAdmissionError::InvalidAdoptProof(String::from(
+                "Adopt requires native submission",
+            ))),
+        }
     }
 
     /// Pushes a finalized Budlum block hash into the 150-block Solana window,
@@ -336,9 +539,11 @@ impl ForeignLaneState {
     }
 
     fn ensure_direct_pq_target(&self, pq_dst: &Address) -> Result<(), ForeignAdmissionError> {
-        if self.quantum_class_of(pq_dst) != AccountQuantumClass::PostQuantum {
+        if !self.native_pq_accounts.contains(pq_dst)
+            || self.quantum_class_of(pq_dst) != AccountQuantumClass::PostQuantum
+        {
             return Err(ForeignAdmissionError::InvalidDirectPqRecipient(
-                String::from("target is not a post-quantum native account"),
+                String::from("target is not a registered post-quantum native account"),
             ));
         }
         Ok(())
@@ -518,8 +723,8 @@ impl ForeignLaneState {
                     ForeignScheme::SolanaEd25519,
                     &decoded.fee_payer,
                 )?;
-                let rec = self
-                    .upsert_foreign_account(ForeignScheme::SolanaEd25519, &decoded.fee_payer)?;
+                let rec =
+                    self.upsert_foreign_account(ForeignScheme::SolanaEd25519, &decoded.fee_payer)?;
                 rec.next_nonce = rec.next_nonce.saturating_add(1);
                 self.seen_solana_signatures
                     .insert(decoded.fee_payer_signature);
@@ -537,18 +742,36 @@ impl ForeignLaneState {
                 raw_bcs,
                 direct_native_pq_recipient,
             } => {
-                let decoded =
-                    decode_aptos_tx(raw_bcs, BUDLUM_APTOS_CHAIN_ID, now_timestamp_secs)
-                        .map_err(ForeignAdmissionError::Aptos)?;
+                let decoded = decode_aptos_tx(raw_bcs, BUDLUM_APTOS_CHAIN_ID, now_timestamp_secs)
+                    .map_err(ForeignAdmissionError::Aptos)?;
                 if exec_state.has_registered_alias_collision(EeId::MOVE, &decoded.sender) {
                     return Err(ForeignAdmissionError::AliasCollision);
                 }
                 let intent = if let Some(pq_dst) = direct_native_pq_recipient {
                     self.ensure_direct_pq_target(pq_dst)?;
                     let expected_move = derive_move_alias(pq_dst);
-                    if decoded.payload_kind != AptosPayloadKind::EntryFunction
-                        || !raw_bcs.windows(32).any(|w| w == expected_move)
-                    {
+                    let mut framework = [0u8; 32];
+                    framework[31] = 1;
+                    let is_transfer_call = match &decoded.payload {
+                        AptosPayloadKind::EntryFunction {
+                            module_address,
+                            module_name,
+                            function_name,
+                            args_bcs,
+                        } => {
+                            *module_address == framework
+                                && matches!(
+                                    (module_name.as_str(), function_name.as_str()),
+                                    ("aptos_account", "transfer") | ("coin", "transfer")
+                                )
+                                && args_bcs
+                                    .get(..32)
+                                    .and_then(|r| <[u8; 32]>::try_from(r).ok())
+                                    == Some(expected_move)
+                        }
+                        _ => false,
+                    };
+                    if !is_transfer_call {
                         return Err(ForeignAdmissionError::InvalidDirectPqRecipient(
                             String::from("Aptos payload does not bind PQ Move alias"),
                         ));
@@ -594,13 +817,14 @@ impl ForeignLaneState {
                 let intent = if let Some(pq_dst) = direct_native_pq_recipient {
                     self.ensure_direct_pq_target(pq_dst)?;
                     let expected_wasm = derive_wasm_alias(pq_dst);
-                    let w_bytes = expected_wasm.as_bytes();
-                    let only_msg_send = decoded.type_urls.len() == 1
-                        && decoded.type_urls.first().map(String::as_str)
+                    let only_msg_send = decoded.message_types.len() == 1
+                        && decoded.message_types.first().map(String::as_str)
                             == Some("/cosmos.bank.v1beta1.MsgSend");
-                    let has_alias = !w_bytes.is_empty()
-                        && tx_raw_bytes.windows(w_bytes.len()).any(|w| w == w_bytes);
-                    if !only_msg_send || !has_alias {
+                    let recipient = decoded
+                        .message_payloads
+                        .first()
+                        .and_then(|payload| decode_msg_send_recipient(payload));
+                    if !only_msg_send || recipient.as_deref() != Some(expected_wasm.as_str()) {
                         return Err(ForeignAdmissionError::InvalidDirectPqRecipient(
                             String::from("Cosmos tx is not a direct MsgSend to PQ WASM alias"),
                         ));
@@ -679,7 +903,7 @@ impl ForeignLaneState {
             SchemeId::ML_DSA_87,
             &adopt.pq_public_key,
             &digest,
-            b"BDLM_ADOPT_FOREIGN_V1",
+            crate::crypto::ctx::ADOPT_FOREIGN_V1,
             &adopt.pq_signature,
         )
         .map_err(|e| ForeignAdmissionError::InvalidAdoptProof(e.to_string()))?;
@@ -708,6 +932,7 @@ impl ForeignLaneState {
                 )
                 .map_err(ForeignAdmissionError::InvalidAdoptProof)?;
         }
+        self.register_native_pq_account(adopt.native_pq_target);
         let rec = self.upsert_foreign_account(adopt.scheme, &adopt.local_id)?;
         rec.adopted_into = Some(adopt.native_pq_target);
 
@@ -775,7 +1000,7 @@ fn verify_classical_adopt_proof(
                 .map_err(|e| ForeignAdmissionError::InvalidAdoptProof(e.to_string()))?;
             let sig = SecpSig::from_slice(signature64)
                 .map_err(|e| ForeignAdmissionError::InvalidAdoptProof(e.to_string()))?;
-            if sig.normalize_s().is_some() {
+            if sig.normalize_s() != sig {
                 return Err(ForeignAdmissionError::InvalidAdoptProof(String::from(
                     "high-s Cosmos Adopt signature refused",
                 )));

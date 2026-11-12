@@ -43,8 +43,8 @@ const BENIGN_KEYS: &[&str] = &["author", "authors", "max_tokens", "tokenizer", "
 /// Does a key name carry one of the secret keywords?
 fn is_secret_key(key: &str) -> bool {
     let key_norm = key.to_lowercase().replace('-', "_");
-    let bare = key_norm
-        .trim_matches(|c: char| c.is_whitespace() || c == '"' || c == '\'' || c == '\\');
+    let bare =
+        key_norm.trim_matches(|c: char| c.is_whitespace() || c == '"' || c == '\'' || c == '\\');
     if BENIGN_KEYS.contains(&bare) {
         return false;
     }
@@ -275,9 +275,7 @@ fn redact_key_value(line: &str, report: &mut RedactionReport) -> String {
         let key = if key_seg.ends_with('"') || key_seg.ends_with('\'') {
             key_seg
         } else {
-            key_seg
-                .rsplit_once([' ', '\t'])
-                .map_or(key_seg, |(_, k)| k)
+            key_seg.rsplit_once([' ', '\t']).map_or(key_seg, |(_, k)| k)
         };
         out.push_str(head);
         out.push_str(&line[pos..=pos]);

@@ -419,10 +419,7 @@ mod tests {
         assert_eq!(c.result_type(), Some(IrType::U64));
         assert_eq!(c.effect(), Effect::Pure);
 
-        let sw = Instruction::StateWrite {
-            slot: v0,
-            value: v1,
-        };
+        let sw = Instruction::StateWrite { slot: 0, value: v1 };
         assert_eq!(sw.result_type(), None);
         assert_eq!(sw.effect(), Effect::StateWrite);
 

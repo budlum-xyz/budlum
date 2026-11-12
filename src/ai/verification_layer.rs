@@ -143,13 +143,14 @@ impl ModelRecordV2 {
     ///
     /// Returns [`VerificationLayerError::InvalidModelOrInput`] if `spec` fails
     /// validation.
+    /// Convenience: exposed for AI model specification loader.
     pub fn from_mlp_spec(
         model_id: AiModelId,
         spec: &FixedPointMlpSpec,
         dip: &DeterministicInferenceProfile,
     ) -> Result<Self, VerificationLayerError> {
-        let program_hash = matmul_program_hash(spec)
-            .map_err(VerificationLayerError::InvalidModelOrInput)?;
+        let program_hash =
+            matmul_program_hash(spec).map_err(VerificationLayerError::InvalidModelOrInput)?;
         Ok(Self {
             model_id,
             version: 2,
@@ -219,6 +220,7 @@ fn fold_merkle_leaves(leaves: &[[u8; 32]]) -> [u8; 32] {
 /// # Errors
 ///
 /// Refuses invalid quantization bit widths or mismatched input dimensions.
+/// Convenience: exposed for deterministic integer inference evaluator.
 pub fn eval_dip_inference(
     dip: &DeterministicInferenceProfile,
     spec: &FixedPointMlpSpec,
@@ -301,6 +303,7 @@ pub fn eval_dip_inference(
 ///
 /// Refuses any randomness from an epoch `<= request_epoch` so the requester and
 /// verifiers cannot predict the committee at request submission time.
+/// Convenience: exposed for AI verifier committee selector.
 pub fn draw_committee_for_request(
     request_id: &AiRequestId,
     request_epoch: u64,
@@ -448,6 +451,7 @@ impl CommitRevealSession {
     /// # Errors
     ///
     /// Refuses non-committee members or late commits.
+    /// Convenience: exposed for AI verifier commit submission door.
     pub fn submit_commit(
         &mut self,
         member: Address,
@@ -479,6 +483,7 @@ impl CommitRevealSession {
     /// Slashes and returns [`VerificationLayerError::RevealHashMismatch`] if the
     /// member tries to reveal a copied digest that does not match its own bound
     /// commitment.
+    /// Convenience: exposed for AI verifier reveal submission door.
     pub fn submit_reveal(
         &mut self,
         member: Address,
@@ -489,9 +494,7 @@ impl CommitRevealSession {
         if !self.committee.contains(&member) {
             return Err(VerificationLayerError::NotCommitteeMember(member));
         }
-        if block_height <= self.commit_deadline_block
-            || block_height > self.reveal_deadline_block
-        {
+        if block_height <= self.commit_deadline_block || block_height > self.reveal_deadline_block {
             return Err(VerificationLayerError::PhaseClosed);
         }
         let Some(committed) = self.commits.get(&member).copied() else {
@@ -513,6 +516,7 @@ impl CommitRevealSession {
     /// # Errors
     ///
     /// Refuses calls before `reveal_deadline_block` has passed.
+    /// Convenience: exposed for AI commit-reveal phase finalizer.
     pub fn finalize_reveal_phase(
         &mut self,
         block_height: u64,
@@ -552,6 +556,7 @@ impl CommitRevealSession {
     /// # Errors
     ///
     /// Refuses promotion before the challenge window closes or when refuted.
+    /// Convenience: exposed for AI challenge window settlement driver.
     pub fn close_challenge_window(
         &mut self,
         block_height: u64,
@@ -568,6 +573,7 @@ impl CommitRevealSession {
 
 /// Deterministic statistical draw for second-committee audit (Step 4).
 #[must_use]
+/// Convenience: exposed for AI second-committee audit sampler.
 pub fn should_sample_for_second_committee(
     request_id: &AiRequestId,
     epoch_randomness: &[u8; 32],
@@ -640,6 +646,7 @@ impl DisputeBisectionGame {
     /// # Errors
     ///
     /// Refuses calls after convergence or beyond [`MAX_BISECTION_ROUNDS`].
+    /// Convenience: exposed for AI dispute bisection driver.
     pub fn advance_bisection(
         &mut self,
         defender_mid: &[u8; 32],
@@ -747,11 +754,8 @@ pub fn prove_tile_64x64(
 
 /// Audit a [`Tile64x64Proof`] against `a_cells` and `b_cells`.
 #[must_use]
-pub fn is_valid_tile_64x64_proof(
-    proof: &Tile64x64Proof,
-    a_cells: &[i32],
-    b_cells: &[i32],
-) -> bool {
+/// Convenience: exposed for AI 64x64 matmul tile proof verifier.
+pub fn is_valid_tile_64x64_proof(proof: &Tile64x64Proof, a_cells: &[i32], b_cells: &[i32]) -> bool {
     let Ok(expected) = prove_tile_64x64(a_cells, b_cells) else {
         return false;
     };
@@ -811,6 +815,7 @@ fn compute_proof_binding(
 ///
 /// Returns [`VerificationLayerError`] if model validation fails or if host and
 /// guest outputs diverge.
+/// Convenience: exposed for AI small-model bound prover.
 pub fn prove_small_model_bound(
     request_id: AiRequestId,
     model: &ModelRecordV2,
@@ -823,14 +828,14 @@ pub fn prove_small_model_bound(
             "weights_root does not match registered ModelRecordV2".to_owned(),
         ));
     }
-    let host_out = eval_fixed_point_mlp(spec, input)
-        .map_err(VerificationLayerError::InvalidModelOrInput)?;
+    let host_out =
+        eval_fixed_point_mlp(spec, input).map_err(VerificationLayerError::InvalidModelOrInput)?;
     let (guest_out, receipt) = run_matmul_guest(spec, input, 500_000)
         .map_err(VerificationLayerError::InvalidModelOrInput)?;
     if host_out != guest_out {
         return Err(VerificationLayerError::HostGuestMismatch);
     }
-    let Some(vm_journal_word) = receipt.logs.first().copied() else {
+    let Some(vm_journal_word) = receipt.events.first().copied() else {
         return Err(VerificationLayerError::InvalidModelOrInput(
             "empty VM log".to_owned(),
         ));
@@ -872,8 +877,7 @@ pub fn is_valid_small_model_bound_proof(
     if &proof.request_id != expected_request_id || proof.model_id != model.model_id {
         return false;
     }
-    if proof.weights_root != model.weights_root
-        || compute_weights_root(spec) != model.weights_root
+    if proof.weights_root != model.weights_root || compute_weights_root(spec) != model.weights_root
     {
         return false;
     }
@@ -886,7 +890,7 @@ pub fn is_valid_small_model_bound_proof(
     let Ok((guest_out, receipt)) = run_matmul_guest(spec, input, 500_000) else {
         return false;
     };
-    let Some(expected_log) = receipt.logs.first().copied() else {
+    let Some(expected_log) = receipt.events.first().copied() else {
         return false;
     };
     if proof.output_limbs != guest_out || proof.vm_journal_word != expected_log {
@@ -930,11 +934,13 @@ pub struct InferenceAssumptionPool {
 
 impl InferenceAssumptionPool {
     /// Record an assumption emitted by a guest execution.
+    /// Convenience: exposed for AI optimistic assumption recorder.
     pub fn record_assumption(&mut self, assumption: InferenceAssumption) {
         self.pending.insert(assumption);
     }
 
     /// Discharge a matching assumption using a verified [`SmallModelBoundProof`].
+    /// Convenience: exposed for AI proof discharge verifier.
     pub fn discharge_with_proof(
         &mut self,
         proof: &SmallModelBoundProof,
@@ -957,6 +963,7 @@ impl InferenceAssumptionPool {
 
     /// True iff all recorded inference assumptions have been discharged.
     #[must_use]
+    /// Convenience: exposed for AI assumption discharge query.
     pub fn is_fully_discharged(&self) -> bool {
         self.pending.is_empty()
     }
@@ -997,7 +1004,7 @@ mod tests {
     fn committee_requires_next_epoch_randomness() {
         let req_id = AiRequestId([0xAA; 32]);
         let candidates: Vec<(Address, u64)> = (1u8..=8)
-            .map(|i| (Address::from_bytes([i; 20]), u64::from(i) * 1_000))
+            .map(|i| (Address([i; 32]), u64::from(i) * 1_000))
             .collect();
 
         assert_eq!(
@@ -1028,7 +1035,7 @@ mod tests {
     #[test]
     fn copying_and_non_revealing_members_are_slashed() {
         let req_id = AiRequestId([0xBB; 32]);
-        let addr = |i: u8| Address::from_bytes([i; 20]);
+        let addr = |i: u8| Address([i; 32]);
         let members: Vec<Address> = (1u8..=5).map(addr).collect();
         let mut session = CommitRevealSession::new(
             req_id,
@@ -1201,14 +1208,14 @@ mod tests {
         assert_eq!(record.level(), VerificationLevel::ChallengeWindowClosed);
     }
 
-    /// verification invariants 9–12: small-model bound proof matches host bit-for-bit,
+    /// verification invariants 9-12: small-model bound proof matches host bit-for-bit,
     /// rejects modified weights, rejects output commitments not derived from VM
     /// journal log, and rejects replay across requests.
     #[test]
     fn small_model_proof_soundness_and_anti_replay() {
         let dip = sample_dip();
         let spec = sample_mlp();
-        let owner = Address::from_bytes([0x01; 20]);
+        let owner = Address([0x01; 32]);
         let model_id = AiModelId::of(&owner, &[0x33; 32], 2);
         let model = ModelRecordV2::from_mlp_spec(model_id, &spec, &dip).unwrap();
         let req_a = AiRequestId([0xA1; 32]);

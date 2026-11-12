@@ -5,18 +5,15 @@
 //! `sui_getLatestCheckpointSequenceNumber`, `sui_getObject`, `suix_getBalance`,
 //! `suix_getAllBalances`) against `AccountState` without mutating consensus state,
 //! and enforces `Section 1.5` launch-closure on `45261` until activation.
+//! Convenience: exposed for CLI, RPC, SDK, and multi-VM runtime callers.
 
 use budlum_uel_abi::EeId;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::core::account::AccountState;
-use crate::execution::coordinator::accounts::{derive_foreign_account, ForeignScheme};
-use crate::execution::coordinator::bud_unit::account_total_attos;
-use crate::execution::coordinator::foreign::sui::{
-    decode_and_recover_sui_tx, SuiActivationPolicy, PROPOSED_SUI_ACTIVATION_HEIGHT,
-};
-use crate::execution::coordinator::universal_call::resolve_ee_identity;
+use crate::execution::coordinator::alias::{derive_foreign_account, ForeignScheme};
+use crate::execution::coordinator::foreign::sui::{decode_and_recover_sui_tx, SuiActivationPolicy};
 
 /// `1 MIST = 10^9 attoBUD`.
 const ATTO_PER_MIST: u128 = 1_000_000_000;
@@ -74,20 +71,12 @@ fn parse_sui_hex32(raw: &str) -> Option<[u8; 32]> {
 }
 
 fn mist_balance_of(state: &AccountState, sui_addr: &[u8; 32]) -> u64 {
-    let id = budlum_uel_abi::EeIdentity {
-        ee: EeId::MOVE_SUI,
-        id: sui_addr.to_vec(),
-    };
-    let bud_addr = resolve_ee_identity(state, &id)
-        .ok()
-        .or_else(|| derive_foreign_account(ForeignScheme::SuiEd25519, sui_addr).ok());
-    let Some(addr) = bud_addr else {
+    let _ = EeId::MOVE_SUI;
+    let addr = derive_foreign_account(ForeignScheme::SuiEd25519, sui_addr);
+    let Some(acct) = state.accounts.get(&addr) else {
         return 0;
     };
-    let Some(acct) = state.get_account(&addr) else {
-        return 0;
-    };
-    let attos = account_total_attos(acct.balance, acct.frac_attos).unwrap_or(0);
+    let attos = acct.checked_total_attos().unwrap_or(0);
     u64::try_from(attos / ATTO_PER_MIST).unwrap_or(u64::MAX)
 }
 
@@ -204,13 +193,16 @@ mod tests {
         assert!(closed.error.is_some());
 
         let sui_addr = [0x55u8; 32];
-        let bud_addr = derive_foreign_account(ForeignScheme::SuiEd25519, &sui_addr).unwrap();
+        let bud_addr = derive_foreign_account(ForeignScheme::SuiEd25519, &sui_addr);
         state.add_balance(&bud_addr, 7); // 7 atoms = 7_000 MIST (1 atom = 10^12 attos = 10^3 MIST)
 
         let active = SuiActivationPolicy {
             chain_id: BUDLUM_TESTNET_CHAIN_ID,
-            block_height: PROPOSED_SUI_ACTIVATION_HEIGHT,
-            activation_height: Some(PROPOSED_SUI_ACTIVATION_HEIGHT),
+            block_height:
+                crate::execution::coordinator::foreign::sui::PROPOSED_SUI_ACTIVATION_HEIGHT,
+            activation_height: Some(
+                crate::execution::coordinator::foreign::sui::PROPOSED_SUI_ACTIVATION_HEIGHT,
+            ),
         };
         let bal = handle_sui_rpc(
             &state,

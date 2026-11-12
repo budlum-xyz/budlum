@@ -280,8 +280,7 @@ mod tests {
         let alice = HpkeKeyPair::from_seed(&[0x21u8; 32]).unwrap();
         let bob = HpkeKeyPair::from_seed(&[0x22u8; 32]).unwrap();
 
-        let pkg =
-            seal_key_package(alice.public_key(), &grant_tag, &obj_key, &content_key).unwrap();
+        let pkg = seal_key_package(alice.public_key(), &grant_tag, &obj_key, &content_key).unwrap();
         // Bob scans the grant capsule and cannot open it.
         assert!(open_key_package(&bob, &grant_tag, &pkg).is_err());
         // Wrong grant_tag AAD also fails for Alice.
@@ -303,7 +302,8 @@ mod tests {
         let backup = idx.export_sealed_backup([0x77u8; SEAL_SALT_LEN]).unwrap();
         assert_eq!(backup.header.content_len, 0);
         let mut m = Meter::for_object(1 << 20);
-        let restored = ClientSealedDedupIndex::import_sealed_backup(&seed, &backup, &mut m).unwrap();
+        let restored =
+            ClientSealedDedupIndex::import_sealed_backup(&seed, &backup, &mut m).unwrap();
         assert_eq!(restored.lookup(b"photo-1"), Some([0xa1u8; 32]));
     }
 }

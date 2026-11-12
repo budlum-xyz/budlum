@@ -4,10 +4,12 @@
 //!
 //! The scheduler executes independent waves in parallel with deterministic
 //! sequential fallback and byte-identical checked state transitions.
+//! Convenience: exposed for CLI, RPC, SDK, and multi-VM runtime callers.
 
 pub mod alias;
 pub mod assets;
 pub mod conformance;
+pub mod deploy_policy;
 pub mod evm_ee;
 pub mod foreign;
 pub mod gas;
@@ -16,6 +18,7 @@ pub mod move_ee;
 pub mod overlay;
 pub mod scheduler;
 pub mod state;
+pub mod stateful_contract;
 pub mod svm_ee;
 pub mod universal_call;
 pub mod wasm_ee;
@@ -235,9 +238,10 @@ impl ExecutionEnvironment for StatefulBudZeroEe {
                 };
                 let mut caller_addr = [0u8; 32];
                 let copy_len = call.caller.id.len().min(32);
-                if let (Some(dst), Some(src)) =
-                    (caller_addr.get_mut(..copy_len), call.caller.id.get(..copy_len))
-                {
+                if let (Some(dst), Some(src)) = (
+                    caller_addr.get_mut(..copy_len),
+                    call.caller.id.get(..copy_len),
+                ) {
                     dst.copy_from_slice(src);
                 }
                 let sender_words =
@@ -303,6 +307,7 @@ impl ExecutionEnvironment for StatefulBudZeroEe {
                             value: BudAmount(0),
                             input: sub_in,
                             gas_limit: call.gas_limit.saturating_sub(spent),
+                            is_static: false,
                         })
                         .map_err(|_| EeOutcome {
                             status: OutcomeStatus::Revert,
@@ -661,9 +666,7 @@ impl ExecutionCoordinator {
                 &cache,
                 &mut overlay,
                 &ctx,
-                tx.ee,
-                &ee_call,
-                tx.sender,
+                (tx.ee, &ee_call, tx.sender),
             )?;
 
             match exec_res {
@@ -774,6 +777,21 @@ fn resolve_identity_address(ee: EeId, id: &[u8]) -> Address {
     }
 }
 
+fn is_system_universal_gateway(ee: EeId, target_id: &[u8]) -> bool {
+    match ee {
+        EeId::EVM => {
+            target_id == crate::execution::coordinator::universal_call::EVM_UNIVERSAL_PRECOMPILE
+        }
+        EeId::SVM => target_id == crate::execution::coordinator::svm_ee::svm_universal_program_id(),
+        EeId::MOVE => {
+            let mut fw = [0u8; 32];
+            fw[31] = 1;
+            target_id == fw
+        }
+        _ => false,
+    }
+}
+
 struct HostBridge<'a> {
     supervisor: &'a mut WorkerSupervisor,
     state: &'a mut AccountState,
@@ -782,6 +800,8 @@ struct HostBridge<'a> {
     ctx: &'a BlockContext,
     tx_hash: [u8; 32],
     root_actor: Address,
+    frame_actor: EeIdentity,
+    frame_caller: EeIdentity,
     transport_failure: Option<WorkerError>,
 }
 
@@ -791,9 +811,7 @@ fn run_ee_call(
     cache: &BlockReadCache,
     overlay: &mut TxOverlay,
     ctx: &BlockContext,
-    ee: EeId,
-    call: &EeCall,
-    root_actor: Address,
+    (ee, call, root_actor): (EeId, &EeCall, Address),
 ) -> Result<Result<EeOutcome, EeFault>, AttemptError> {
     let mut endpoint = supervisor
         .take_endpoint(ee)
@@ -806,6 +824,11 @@ fn run_ee_call(
         ctx,
         tx_hash: call.tx_hash,
         root_actor,
+        frame_actor: EeIdentity {
+            ee,
+            id: call.target.id.clone(),
+        },
+        frame_caller: call.caller.clone(),
         transport_failure: None,
     };
     let res = endpoint.execute(ctx, call, &mut bridge);
@@ -847,7 +870,8 @@ impl HostApi for HostBridge<'_> {
     }
 
     fn universal_call(&mut self, call: UniversalCall) -> Result<UniversalResult, HostError> {
-        let (is_static, clean_input) = unwrap_static_universal_input(&call.input);
+        let (prefixed_static, clean_input) = unwrap_static_universal_input(&call.input);
+        let is_static = call.is_static || prefixed_static;
         if is_static && call.value.0 > 0 {
             return Err(HostError::Denied(String::from(
                 "non-zero value transfer forbidden in static universal call",
@@ -860,10 +884,29 @@ impl HostApi for HostBridge<'_> {
             let unit = BudEnvUnit::for_ee(call.to_ee)
                 .ok_or_else(|| HostError::Invalid(String::from("unsupported target EE")))?;
             let src = resolve_identity_address(call.from.ee, &call.from.id);
+            let frame_src = resolve_identity_address(self.frame_actor.ee, &self.frame_actor.id);
+            let gateway_caller_ok =
+                is_system_universal_gateway(self.frame_actor.ee, &self.frame_actor.id)
+                    && src == resolve_identity_address(self.frame_caller.ee, &self.frame_caller.id);
+            if src != frame_src && src != self.root_actor && !gateway_caller_ok {
+                self.overlay.rollback_universal_frame(self.state);
+                return Err(HostError::Denied(String::from(
+                    "universal call may only debit the executing contract or the transaction sender",
+                )));
+            }
+            if let Err(e) = self
+                .state
+                .execution_state
+                .foreign_lane
+                .authorize_holding_access(&self.root_actor, &src)
+            {
+                self.overlay.rollback_universal_frame(self.state);
+                return Err(HostError::Denied(e.to_string()));
+            }
             let dst = resolve_identity_address(call.target.ee, &call.target.id);
-            if let Err(e) =
-                self.overlay
-                    .transfer_attos(self.state, &src, &dst, call.value.0, unit)
+            if let Err(e) = self
+                .overlay
+                .transfer_attos(self.state, &src, &dst, call.value.0, unit)
             {
                 self.overlay.rollback_universal_frame(self.state);
                 return Err(e);
@@ -887,9 +930,7 @@ impl HostApi for HostBridge<'_> {
             self.cache,
             self.overlay,
             self.ctx,
-            call.to_ee,
-            &child_call,
-            self.root_actor,
+            (call.to_ee, &child_call, self.root_actor),
         ) {
             Ok(Ok(outcome)) => {
                 let extra = outcome
@@ -967,12 +1008,12 @@ impl HostApi for HostBridge<'_> {
 }
 
 #[cfg(test)]
-mod coordinator_tests;
-#[cfg(test)]
 mod conformance_tests;
 #[cfg(test)]
-mod review_2_attack_tests;
+mod coordinator_tests;
 #[cfg(test)]
 mod evm_wasm_universal_call_tests;
+#[cfg(test)]
+mod review_2_attack_tests;
 #[cfg(test)]
 mod svm_move_tests;

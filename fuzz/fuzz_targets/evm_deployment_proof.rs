@@ -47,10 +47,7 @@ fuzz_target!(|data: &[u8]| {
         Item::String(vec![0; 256]),
         Item::List(Vec::new()),
     ]));
-    let receipt_node = rlp::encode(&Item::List(vec![
-        Item::String(path),
-        Item::String(receipt),
-    ]));
+    let receipt_node = rlp::encode(&Item::List(vec![Item::String(path), Item::String(receipt)]));
     let proven = DeploymentProof {
         deployment_block: 0,
         transaction_index: 0,

@@ -244,11 +244,7 @@ impl NftFolderRegistry {
     /// # Errors
     ///
     /// Returns [`SocialFiBud3Error`] if the name or folder count is out of bounds.
-    pub fn create_folder(
-        &mut self,
-        caller: Address,
-        name: &str,
-    ) -> Result<u64, SocialFiBud3Error> {
+    pub fn create_folder(&mut self, caller: Address, name: &str) -> Result<u64, SocialFiBud3Error> {
         let trimmed = name.trim();
         if trimmed.is_empty() || trimmed.len() > MAX_FOLDER_NAME_BYTES {
             return Err(SocialFiBud3Error::InvalidFolderName);

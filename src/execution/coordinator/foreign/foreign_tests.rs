@@ -63,13 +63,10 @@ fn uel_foreign_tx_replay_refused() {
         &eth_sk,
         BUDLUM_EVM_CHAIN_ID,
         0,
-        1_000_000_000,
-        2_000_000_000,
-        21_000,
+        (1_000_000_000, 2_000_000_000, 21_000),
         Some([0xAB; 20]),
         0,
-        &[],
-        &[],
+        (&[], &[]),
     )
     .expect("sign eip1559");
     let eth_env = ForeignTx::Ethereum {
@@ -94,13 +91,10 @@ fn uel_foreign_tx_replay_refused() {
         &eth_sk,
         1,
         1,
-        1_000_000_000,
-        2_000_000_000,
-        21_000,
+        (1_000_000_000, 2_000_000_000, 21_000),
         Some([0xAB; 20]),
         0,
-        &[],
-        &[],
+        (&[], &[]),
     )
     .expect("sign mainnet tx");
     let bad_eth_res = coord.process_foreign_envelope(
@@ -177,7 +171,10 @@ fn uel_foreign_tx_replay_refused() {
 
     // 3. Solana leg: blockhash window + signature replay cache.
     let recent_bh = [0x77u8; 32];
-    state.execution_state.foreign_lane.record_blockhash(recent_bh);
+    state
+        .execution_state
+        .foreign_lane
+        .record_blockhash(recent_bh);
     let sol_seed = [0x41u8; 32];
     let sol_ix = vec![SolanaCompiledInstruction {
         program_id_index: 1,
@@ -244,15 +241,8 @@ fn uel_foreign_tx_replay_refused() {
             got: 0
         })
     );
-    let wrong_aptos = sign_aptos_ed25519_tx(
-        &aptos_seed,
-        1,
-        &payload,
-        100_000,
-        100,
-        now_secs + 60,
-        1,
-    );
+    let wrong_aptos =
+        sign_aptos_ed25519_tx(&aptos_seed, 1, &payload, 100_000, 100, now_secs + 60, 1);
     assert!(matches!(
         coord.process_foreign_envelope(
             &mut state,
@@ -287,13 +277,10 @@ fn uel_quantum_alert_closes_foreign_lane() {
         &eth_sk,
         BUDLUM_EVM_CHAIN_ID,
         0,
-        1_000,
-        2_000,
-        50_000,
+        (1_000, 2_000, 50_000),
         Some([0xCC; 20]),
         0,
-        &[0xaa, 0xbb],
-        &[],
+        (&[0xaa, 0xbb], &[]),
     )
     .expect("sign lvl1");
     let out1 = coord
@@ -320,13 +307,10 @@ fn uel_quantum_alert_closes_foreign_lane() {
         &eth_sk,
         BUDLUM_EVM_CHAIN_ID,
         1,
-        1_000,
-        2_000,
-        50_000,
+        (1_000, 2_000, 50_000),
         Some([0xCC; 20]),
         0,
-        &[0xde, 0xad],
-        &[],
+        (&[0xde, 0xad], &[]),
     )
     .expect("sign lvl2 call");
     assert_eq!(
@@ -354,15 +338,28 @@ fn uel_quantum_alert_closes_foreign_lane() {
         &eth_sk,
         BUDLUM_EVM_CHAIN_ID,
         1,
-        1_000,
-        2_000,
-        21_000,
+        (1_000, 2_000, 21_000),
         Some(pq_evm_alias),
         send_wei,
-        &[],
-        &[],
+        (&[], &[]),
     )
     .expect("sign lvl2 transfer to pq");
+    // Unregistered recipient fails closed before native PQ registration (`1bd52750`).
+    assert!(matches!(
+        coord.process_foreign_envelope(
+            &mut state,
+            &ForeignTx::Ethereum {
+                raw_rlp: tx_lvl2_to_pq.clone(),
+                direct_native_pq_recipient: Some(pq_addr),
+            },
+            now_secs,
+        ),
+        Err(ForeignAdmissionError::InvalidDirectPqRecipient(_))
+    ));
+    state
+        .execution_state
+        .foreign_lane
+        .register_native_pq_account(pq_addr);
     coord
         .process_foreign_envelope(
             &mut state,
@@ -381,13 +378,10 @@ fn uel_quantum_alert_closes_foreign_lane() {
         &eth_sk,
         BUDLUM_EVM_CHAIN_ID,
         2,
-        1_000,
-        2_000,
-        21_000,
+        (1_000, 2_000, 21_000),
         Some(pq_evm_alias),
         u128::from(ATTOS_PER_ATOM),
-        &[],
-        &[],
+        (&[], &[]),
     )
     .expect("sign lvl3 transfer");
     assert_eq!(
@@ -417,13 +411,10 @@ fn foreign_account_cannot_touch_pq_holdings() {
         &eth_sk,
         BUDLUM_EVM_CHAIN_ID,
         0,
-        1_000,
-        2_000,
-        21_000,
+        (1_000, 2_000, 21_000),
         Some([0x11; 20]),
         0,
-        &[],
-        &[],
+        (&[], &[]),
     )
     .expect("sign eth");
     let out = coord
@@ -512,9 +503,7 @@ fn adopt_moves_holdings_once() {
     .expect("ml-dsa-87 sign");
 
     let secp_key = SecpSigningKey::from_bytes((&eth_sk).into()).expect("secp key");
-    let (sig, rec_id) = secp_key
-        .sign_prehash_recoverable(&digest)
-        .expect("recoverable secp sign");
+    let (sig, rec_id) = secp_key.sign_prehash_recoverable(&digest);
     let mut sig65 = Vec::with_capacity(65);
     sig65.extend_from_slice(&sig.to_bytes());
     sig65.push(rec_id.to_byte());

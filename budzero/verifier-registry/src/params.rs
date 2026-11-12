@@ -2,6 +2,7 @@
 //!
 //! Parameters are governance / config driven, never hard-coded.
 //! [`RegistryParams::default`] provides sane devnet defaults.
+//! Convenience: exposed for BudZero zkVM prover, compiler, and verifier callers.
 
 use serde::{Deserialize, Serialize};
 

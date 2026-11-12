@@ -204,9 +204,9 @@ mod tests {
     #[test]
     fn ordering_is_by_bytes() {
         let mut low = [0u8; 32];
-        low[0] = 0x01;
+        low[31] = 0x01;
         let mut high = [0u8; 32];
-        high[31] = 0x01;
+        high[0] = 0x01;
         assert!(Address::from(low) < Address::from(high));
         assert_eq!(Address::from(low), Address::from(low));
     }
