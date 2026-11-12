@@ -358,7 +358,9 @@ pub fn validate_domain_registration(domain: &ConsensusDomain) -> Result<(), Stri
             domain.id
         ));
     }
-    if matches!(domain.kind, ConsensusKind::Zk) && domain.genesis_state_root[16..32] != [0u8; 16] {
+    if matches!(domain.kind, ConsensusKind::Zk)
+        && domain.genesis_state_root.get(16..32) != Some([0u8; 16].as_slice())
+    {
         return Err(format!(
             "Zk domain {} genesis_state_root upper 16 bytes must be zero",
             domain.id
@@ -567,29 +569,15 @@ pub fn verify_commitment_finality_observed(
         ConsensusKind::PoA => {
             let adapter = PoAFinalityAdapter::default();
             ensure_adapter_name(domain, adapter.adapter_name())?;
-            if state.poa_is_permissioned(domain.id) {
-                let declared: Vec<Address> = match proof {
-                    FinalityProof::PoA { authorities, .. } => authorities.clone(),
-                    FinalityProof::PoAPq { authorities, .. } => {
-                        authorities.iter().map(|entry| entry.authority).collect()
-                    }
-                    _ => Vec::new(),
-                };
-                for authority in declared {
-                    if !state.poa_authority_admitted(domain.id, &authority) {
-                        return Err(format!(
-                            "PoA domain {} commitment authority {authority} is not admitted: \
-                             the admission gate revoked it or its KYC horizon elapsed",
-                            domain.id
-                        ));
-                    }
-                }
-            }
-            adapter.verify_finality_observed_in(
+            let admitted = state
+                .poa_is_permissioned(domain.id)
+                .then(|| state.poa_live_admitted(domain.id));
+            adapter.verify_finality_admitted_observed_in(
                 &state.scheme_registry,
                 domain,
                 commitment,
                 proof,
+                admitted.as_ref(),
                 observer,
             )
         }
@@ -1265,6 +1253,13 @@ pub fn submit_zk_proof(
         ));
     }
     let pi = &submission.public_inputs;
+    if claim_height == domain.last_committed_height
+        && pi.final_state_root != domain.last_committed_hash
+    {
+        return Err(format!(
+            "zk claim targets height {claim_height} of domain {claimed_domain}, which already commits a different root"
+        ));
+    }
     if pi.gas_used > pi.gas_limit {
         return Err(format!(
             "proof claims {} gas used against a declared limit of {}",
@@ -1281,13 +1276,7 @@ pub fn submit_zk_proof(
     // something if `initial_state_root` is anchored to registered state rather
     // than a prover-chosen Horner fold at fixed constants. Re-executing the
     // committed tip height may only repeat `last_committed_hash` idempotently.
-    if claim_height == domain.last_committed_height {
-        if pi.final_state_root != domain.last_committed_hash {
-            return Err(format!(
-                "zk claim targets height {claim_height} of domain {claimed_domain}, which already commits a different root"
-            ));
-        }
-    } else if claim_height > domain.last_committed_height {
+    if claim_height > domain.last_committed_height {
         let expected = crate::domain::expected_initial_root(domain, &submission.program)
             .ok_or_else(|| {
                 format!(
@@ -2032,53 +2021,42 @@ fn execute_proof_market_tx(
             )
             .map_err(SettlementTxError::Refused)?;
             match acceptance {
-                ProofAcceptance::Rejected => {
+                outcome @ (ProofAcceptance::Rejected | ProofAcceptance::Idempotent) => {
+                    // Rejected: refund the creator's reserved reward and slash the prover.
+                    // Idempotent: the claim was already recorded on-chain, so no new domain
+                    // progress occurred; refund the creator without minting a reward receipt
+                    // or slashing a prover whose proof verified cleanly.
+                    let is_rejected = matches!(outcome, ProofAcceptance::Rejected);
+                    let (label, reason) = if is_rejected {
+                        ("failed-task", "ZK proof verification failed")
+                    } else {
+                        (
+                            "duplicate-claim",
+                            "ZK claim already accepted: the task bought no new progress",
+                        )
+                    };
                     let creator = task.creator;
                     let reward = task.reward;
                     let balance = state.get_balance(&creator);
                     if balance.checked_add(reward).is_none() {
-                        return Err(SettlementTxError::Refused(
-                            "proof-market failed-task refund would overflow balance".into(),
-                        ));
-                    }
-                    let (rooted_creator, failed_reward) = state
-                        .proof_market
-                        .fail_task(*task_id, "ZK proof verification failed".into())
-                        .map_err(SettlementTxError::Refused)?;
-                    debug_assert_eq!(rooted_creator, creator);
-                    debug_assert_eq!(failed_reward, reward);
-                    state.try_add_balance(&creator, reward).map_err(|e| {
-                        SettlementTxError::Refused(format!("proof-market failed-task refund: {e}"))
-                    })?;
-                    slash_failed_prover(state, &ctx.sender)
-                }
-                ProofAcceptance::Idempotent => {
-                    // The claim is already recorded on-chain: no new domain
-                    // progress occurred, so do not mint a reward receipt.
-                    // Refund the creator's reserved reward without slashing
-                    // the prover whose proof verified cleanly.
-                    let creator = task.creator;
-                    let reward = task.reward;
-                    let balance = state.get_balance(&creator);
-                    if balance.checked_add(reward).is_none() {
-                        return Err(SettlementTxError::Refused(
-                            "proof-market duplicate-claim refund would overflow balance".into(),
-                        ));
+                        return Err(SettlementTxError::Refused(format!(
+                            "proof-market {label} refund would overflow balance"
+                        )));
                     }
                     let (rooted_creator, refunded) = state
                         .proof_market
-                        .fail_task(
-                            *task_id,
-                            "ZK claim already accepted: the task bought no new progress".into(),
-                        )
+                        .fail_task(*task_id, reason.into())
                         .map_err(SettlementTxError::Refused)?;
                     debug_assert_eq!(rooted_creator, creator);
                     debug_assert_eq!(refunded, reward);
                     state.try_add_balance(&creator, reward).map_err(|e| {
-                        SettlementTxError::Refused(format!(
-                            "proof-market duplicate-claim refund: {e}"
-                        ))
-                    })
+                        SettlementTxError::Refused(format!("proof-market {label} refund: {e}"))
+                    })?;
+                    if is_rejected {
+                        slash_failed_prover(state, &ctx.sender)
+                    } else {
+                        Ok(())
+                    }
                 }
                 ProofAcceptance::Accepted { .. } => {
                     let receipt = crate::settlement::proof_market::ProofReceipt::new(
@@ -4052,7 +4030,8 @@ mod tests {
 
         let ob = &mut state.poa_onboarding;
         ob.add_admin(domain.id, admin);
-        ob.submit_application(domain.id, authority, [0x44; 32], 1).unwrap();
+        ob.submit_application(domain.id, authority, [0x44; 32], 1)
+            .unwrap();
         ob.approve(domain.id, admin, authority, 1, 5).unwrap();
         state.current_block_height = 6;
 
@@ -4094,8 +4073,10 @@ mod tests {
 
         // Renew KYC then revoke the authority: revoked authorities must fail too.
         let ob = &mut state.poa_onboarding;
-        ob.renew_kyc(domain.id, admin, authority, [0x44; 32], 7, 100).unwrap();
-        ob.revoke(domain.id, admin, authority, 7, "revoked").unwrap();
+        ob.renew_kyc(domain.id, admin, authority, [0x44; 32], 7, 100)
+            .unwrap();
+        ob.revoke(domain.id, admin, authority, 7, "revoked")
+            .unwrap();
         let err = verify_commitment_finality(
             &state,
             &com,
@@ -4104,6 +4085,60 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.contains("not admitted"), "got: {err}");
+
+        // Partial revocation on a multi-authority PoA domain must re-anchor quorum
+        // to the remaining live admitted authorities rather than bricking finality.
+        let kp_a = crate::crypto::primitives::KeyPair::generate().unwrap();
+        let kp_b = crate::crypto::primitives::KeyPair::generate().unwrap();
+        let kp_c = crate::crypto::primitives::KeyPair::generate().unwrap();
+        let (a, b, c) = (
+            Address::from(kp_a.public_key_bytes()),
+            Address::from(kp_b.public_key_bytes()),
+            Address::from(kp_c.public_key_bytes()),
+        );
+        let mut domain2 = default_domain(99, ConsensusKind::PoA, 99_001, "poa-authority-quorum", 1);
+        let mut initial_set = vec![a, b, c];
+        initial_set.sort();
+        domain2.validator_set_hash =
+            crate::domain::finality_adapter::poa_authority_set_hash(&domain2, &initial_set)
+                .unwrap();
+        register_domain(&mut state, domain2.clone()).unwrap();
+        let ob = &mut state.poa_onboarding;
+        ob.add_admin(domain2.id, admin);
+        for member in [a, b, c] {
+            ob.submit_application(domain2.id, member, [0x55; 32], 7)
+                .unwrap();
+            ob.approve(domain2.id, admin, member, 7, 100).unwrap();
+        }
+        ob.revoke(domain2.id, admin, c, 7, "compromised").unwrap();
+
+        let mut com2 = commitment(&domain2, &blk, 1);
+        let msg2 = crate::domain::finality_adapter::poa_commit_signing_message(
+            domain2.domain_chain_id,
+            com2.domain_id,
+            &com2,
+        );
+        let live_proof = FinalityProof::PoA {
+            authorities: vec![a, b],
+            signatures: vec![
+                crate::domain::finality_adapter::PoAAuthoritySignature {
+                    authority: a,
+                    signature: kp_a.sign(&msg2).to_vec(),
+                },
+                crate::domain::finality_adapter::PoAAuthoritySignature {
+                    authority: b,
+                    signature: kp_b.sign(&msg2).to_vec(),
+                },
+            ],
+        };
+        com2.finality_proof_hash = crate::domain::hash_finality_proof(&live_proof).unwrap();
+        verify_commitment_finality(
+            &state,
+            &com2,
+            &live_proof,
+            crate::cross_domain::external::IntakeState::production_bls,
+        )
+        .expect("remaining admitted authorities must still finalize after partial revocation");
     }
 
     #[test]
@@ -4113,7 +4148,10 @@ mod tests {
         let attester = Address::from(kp.public_key_bytes());
         let stake = state.registry.params().min_stake;
         let attester_role = crate::registry::role::roles::ATTESTER;
-        state.registry.register(attester, attester_role, stake, 0).unwrap();
+        state
+            .registry
+            .register(attester, attester_role, stake, 0)
+            .unwrap();
         state
             .registry
             .slash_role_only(
@@ -4123,7 +4161,10 @@ mod tests {
                 500,
             )
             .unwrap();
-        state.registry.begin_unbonding(attester, attester_role, 1).unwrap();
+        state
+            .registry
+            .begin_unbonding(attester, attester_role, 1)
+            .unwrap();
 
         let proof = FinalityProof::PoA {
             authorities: vec![attester],
@@ -4136,7 +4177,10 @@ mod tests {
         // A recorded non-liveness slash report in slashing_history_for must also block finality.
         let mut jailed_state = AccountState::new();
         let attester2 = Address::from([0x77; 32]);
-        jailed_state.registry.register(attester2, attester_role, stake, 0).unwrap();
+        jailed_state
+            .registry
+            .register(attester2, attester_role, stake, 0)
+            .unwrap();
         let report = crate::registry::evidence::SlashingReport::consensus_invalid_attester_proof(
             attester2,
             "bad".into(),

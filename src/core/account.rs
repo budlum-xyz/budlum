@@ -3771,16 +3771,12 @@ impl AccountState {
         self.poa_admitted.get(&domain).cloned().unwrap_or_default()
     }
 
-    /// Whether `authority` is currently admitted in PoA `domain` at the
-    /// live block height (checking both active membership and KYC expiry).
+    /// Live admitted PoA authorities for `domain` at `self.current_block_height`
+    /// (administratively approved and within KYC validity horizon).
     #[must_use]
-    pub fn poa_authority_admitted(
-        &self,
-        domain: crate::domain::types::DomainId,
-        authority: &Address,
-    ) -> bool {
+    pub fn poa_live_admitted(&self, domain: crate::domain::types::DomainId) -> BTreeSet<Address> {
         self.poa_onboarding
-            .is_member_admitted_at(domain, authority, self.current_block_height)
+            .live_admitted_members(domain, self.current_block_height)
     }
 
     /// The state root: the body digest of every committed field, folded
