@@ -13,8 +13,15 @@
 
 use crate::core::account::ATTOS_PER_ATOM;
 use crate::execution::coordinator::alias::is_ed25519_on_curve;
+use crate::execution::coordinator::assets::{
+    decode_pointer_bytecode, resolve_pointer_party_for_home, MovePointerFlavor, MovePointerOp,
+    PointerDescriptor, SplPointerOp,
+};
+use crate::execution::coordinator::evm_ee::solidity_selector;
 use crate::execution::coordinator::state::NS_SVM_ACCOUNT;
-use crate::execution::coordinator::universal_call::wrap_static_universal_input;
+use crate::execution::coordinator::universal_call::{
+    unwrap_static_universal_input, wrap_static_universal_input,
+};
 use budlum_uel_abi::{
     BlockContext, BudAmount, CodeInfo, EeCall, EeCallKind, EeFault, EeId, EeIdentity, EeLog,
     EeOutcome, EeQuery, EeRefusal, ExecutionEnvironment, HostApi, HostRead, Namespace,
@@ -117,6 +124,26 @@ pub enum SvmInstructionEnvelope {
         to_owner: [u8; 32],
         amount: u64,
     },
+    SplApprove {
+        mint: [u8; 32],
+        delegate: [u8; 32],
+        amount: u64,
+    },
+    SplTransferFrom {
+        mint: [u8; 32],
+        owner: [u8; 32],
+        to_owner: [u8; 32],
+        amount: u64,
+    },
+    SplBalanceOf {
+        mint: [u8; 32],
+        owner: [u8; 32],
+    },
+    SplAllowance {
+        mint: [u8; 32],
+        owner: [u8; 32],
+        delegate: [u8; 32],
+    },
     CreateAssociatedTokenAccount {
         wallet: [u8; 32],
         mint: [u8; 32],
@@ -156,6 +183,299 @@ pub fn derive_associated_token_address(
         }
     }
     Err(String::from("failed to find off-curve ATA bump"))
+}
+
+/// Derives an off-curve allowance PDA for `(mint, owner, delegate)` on home SVM mints.
+fn derive_spl_allowance_pda(
+    mint: &[u8; 32],
+    owner: &[u8; 32],
+    delegate: &[u8; 32],
+) -> Result<[u8; 32], String> {
+    for bump in (0u8..=255u8).rev() {
+        let mut h = Sha256::new();
+        h.update(b"BDLM_SPL_ALLOWANCE_V1");
+        h.update(mint);
+        h.update(owner);
+        h.update(delegate);
+        h.update([bump]);
+        let cand: [u8; 32] = h.finalize().into();
+        if !is_ed25519_on_curve(&cand) {
+            return Ok(cand);
+        }
+    }
+    Err(String::from("failed to find off-curve allowance bump"))
+}
+
+fn abi_word_addr20(addr: &[u8]) -> [u8; 32] {
+    let mut w = [0u8; 32];
+    if let (Some(tail), Some(dst)) = (addr.get(..20), w.get_mut(12..32)) {
+        dst.copy_from_slice(tail);
+    }
+    w
+}
+
+fn abi_word_u128_be(v: u128) -> [u8; 32] {
+    let mut w = [0u8; 32];
+    if let Some(dst) = w.get_mut(16..32) {
+        dst.copy_from_slice(&v.to_be_bytes());
+    }
+    w
+}
+
+fn decode_u256_be_to_u128(raw: &[u8]) -> u128 {
+    let Some(lo) = raw.get(16..32) else {
+        return 0;
+    };
+    <[u8; 16]>::try_from(lo).map_or(0, u128::from_be_bytes)
+}
+
+fn execute_svm_pointer(
+    ptr: &PointerDescriptor,
+    caller_pk: &[u8; 32],
+    raw_input: &[u8],
+    is_static: bool,
+    gas_budget: u64,
+    host: &mut dyn HostApi,
+) -> Result<EeOutcome, EeFault> {
+    let Ok(op) = serde_json::from_slice::<SplPointerOp>(raw_input) else {
+        return Ok(EeOutcome {
+            status: OutcomeStatus::Revert,
+            output: b"invalid SplPointerOp payload".to_vec(),
+            gas_used: 5_000,
+        });
+    };
+    let read_only_op = matches!(
+        op,
+        SplPointerOp::BalanceOf { .. } | SplPointerOp::Allowance { .. }
+    );
+    if is_static && !read_only_op {
+        return Ok(EeOutcome {
+            status: OutcomeStatus::Revert,
+            output: b"static frame forbids SPL pointer mutation".to_vec(),
+            gas_used: 5_000,
+        });
+    }
+
+    let home_ee = EeId(ptr.home_ee);
+    let forward_payload = match home_ee {
+        EeId::EVM => match &op {
+            SplPointerOp::Transfer { to, amount } => {
+                let to_id = resolve_pointer_party_for_home(host, to, EeId::EVM);
+                let mut cd = solidity_selector("transfer(address,uint256)").to_vec();
+                cd.extend_from_slice(&abi_word_addr20(&to_id));
+                cd.extend_from_slice(&abi_word_u128_be(*amount));
+                cd
+            }
+            SplPointerOp::Approve { delegate, amount } => {
+                let sp_id = resolve_pointer_party_for_home(host, delegate, EeId::EVM);
+                let mut cd = solidity_selector("approve(address,uint256)").to_vec();
+                cd.extend_from_slice(&abi_word_addr20(&sp_id));
+                cd.extend_from_slice(&abi_word_u128_be(*amount));
+                cd
+            }
+            SplPointerOp::TransferFrom { owner, to, amount } => {
+                let ow_id = resolve_pointer_party_for_home(host, owner, EeId::EVM);
+                let to_id = resolve_pointer_party_for_home(host, to, EeId::EVM);
+                let mut cd = solidity_selector("transferFrom(address,address,uint256)").to_vec();
+                cd.extend_from_slice(&abi_word_addr20(&ow_id));
+                cd.extend_from_slice(&abi_word_addr20(&to_id));
+                cd.extend_from_slice(&abi_word_u128_be(*amount));
+                cd
+            }
+            SplPointerOp::BalanceOf { owner } => {
+                let ow_id = resolve_pointer_party_for_home(host, owner, EeId::EVM);
+                let mut cd = solidity_selector("balanceOf(address)").to_vec();
+                cd.extend_from_slice(&abi_word_addr20(&ow_id));
+                cd
+            }
+            SplPointerOp::Allowance { owner, delegate } => {
+                let ow_id = resolve_pointer_party_for_home(host, owner, EeId::EVM);
+                let sp_id = resolve_pointer_party_for_home(host, delegate, EeId::EVM);
+                let mut cd = solidity_selector("allowance(address,address)").to_vec();
+                cd.extend_from_slice(&abi_word_addr20(&ow_id));
+                cd.extend_from_slice(&abi_word_addr20(&sp_id));
+                cd
+            }
+        },
+        EeId::WASM => {
+            let val = match &op {
+                SplPointerOp::Transfer { to, amount } => {
+                    let to_s = String::from_utf8_lossy(&resolve_pointer_party_for_home(
+                        host,
+                        to,
+                        EeId::WASM,
+                    ))
+                    .into_owned();
+                    serde_json::json!({
+                        "execute": {
+                            "transfer": { "recipient": to_s, "amount": amount.to_string() }
+                        }
+                    })
+                }
+                SplPointerOp::Approve { delegate, amount } => {
+                    let sp_s = String::from_utf8_lossy(&resolve_pointer_party_for_home(
+                        host,
+                        delegate,
+                        EeId::WASM,
+                    ))
+                    .into_owned();
+                    serde_json::json!({
+                        "execute": {
+                            "set_allowance": { "spender": sp_s, "amount": amount.to_string() }
+                        }
+                    })
+                }
+                SplPointerOp::TransferFrom { owner, to, amount } => {
+                    let ow_s = String::from_utf8_lossy(&resolve_pointer_party_for_home(
+                        host,
+                        owner,
+                        EeId::WASM,
+                    ))
+                    .into_owned();
+                    let to_s = String::from_utf8_lossy(&resolve_pointer_party_for_home(
+                        host,
+                        to,
+                        EeId::WASM,
+                    ))
+                    .into_owned();
+                    serde_json::json!({
+                        "execute": {
+                            "transfer_from": {
+                                "owner": ow_s,
+                                "recipient": to_s,
+                                "amount": amount.to_string()
+                            }
+                        }
+                    })
+                }
+                SplPointerOp::BalanceOf { owner } => {
+                    let ow_s = String::from_utf8_lossy(&resolve_pointer_party_for_home(
+                        host,
+                        owner,
+                        EeId::WASM,
+                    ))
+                    .into_owned();
+                    serde_json::json!({ "query": { "balance": { "address": ow_s } } })
+                }
+                SplPointerOp::Allowance { owner, delegate } => {
+                    let ow_s = String::from_utf8_lossy(&resolve_pointer_party_for_home(
+                        host,
+                        owner,
+                        EeId::WASM,
+                    ))
+                    .into_owned();
+                    let sp_s = String::from_utf8_lossy(&resolve_pointer_party_for_home(
+                        host,
+                        delegate,
+                        EeId::WASM,
+                    ))
+                    .into_owned();
+                    serde_json::json!({
+                        "query": { "allowance": { "owner": ow_s, "spender": sp_s } }
+                    })
+                }
+            };
+            serde_json::to_vec(&val).unwrap_or_default()
+        }
+        EeId::MOVE => {
+            let move_op = match &op {
+                SplPointerOp::Transfer { to, amount } => MovePointerOp::Transfer {
+                    flavor: MovePointerFlavor::FungibleAsset,
+                    to: coerce_pk32(&resolve_pointer_party_for_home(host, to, EeId::MOVE)),
+                    amount: *amount,
+                },
+                SplPointerOp::Approve { delegate, amount } => MovePointerOp::Approve {
+                    flavor: MovePointerFlavor::FungibleAsset,
+                    spender: coerce_pk32(&resolve_pointer_party_for_home(
+                        host,
+                        delegate,
+                        EeId::MOVE,
+                    )),
+                    amount: *amount,
+                },
+                SplPointerOp::TransferFrom { owner, to, amount } => MovePointerOp::TransferFrom {
+                    flavor: MovePointerFlavor::FungibleAsset,
+                    owner: coerce_pk32(&resolve_pointer_party_for_home(host, owner, EeId::MOVE)),
+                    to: coerce_pk32(&resolve_pointer_party_for_home(host, to, EeId::MOVE)),
+                    amount: *amount,
+                },
+                SplPointerOp::BalanceOf { owner } => MovePointerOp::Balance {
+                    flavor: MovePointerFlavor::FungibleAsset,
+                    owner: coerce_pk32(&resolve_pointer_party_for_home(host, owner, EeId::MOVE)),
+                },
+                SplPointerOp::Allowance { owner, delegate } => MovePointerOp::Allowance {
+                    flavor: MovePointerFlavor::FungibleAsset,
+                    owner: coerce_pk32(&resolve_pointer_party_for_home(host, owner, EeId::MOVE)),
+                    spender: coerce_pk32(&resolve_pointer_party_for_home(
+                        host,
+                        delegate,
+                        EeId::MOVE,
+                    )),
+                },
+            };
+            serde_json::to_vec(&move_op).unwrap_or_default()
+        }
+        _ => {
+            return Ok(EeOutcome {
+                status: OutcomeStatus::Revert,
+                output: b"unsupported home_ee for SVM pointer".to_vec(),
+                gas_used: 5_000,
+            });
+        }
+    };
+
+    let final_in = if read_only_op {
+        wrap_static_universal_input(&forward_payload)
+    } else {
+        forward_payload
+    };
+    let ures = host.universal_call(UniversalCall {
+        from: EeIdentity {
+            ee: EeId::SVM,
+            id: caller_pk.to_vec(),
+        },
+        to_ee: home_ee,
+        target: EeIdentity {
+            ee: home_ee,
+            id: ptr.home_ref.clone(),
+        },
+        value: BudAmount(0),
+        input: final_in,
+        gas_limit: gas_budget / 2 + 10_000,
+        is_static: read_only_op,
+    });
+    match ures {
+        Ok(r) => {
+            let output = if r.success && read_only_op && home_ee == EeId::EVM {
+                decode_u256_be_to_u128(&r.output).to_le_bytes().to_vec()
+            } else if r.success && read_only_op && home_ee == EeId::WASM {
+                let parsed = serde_json::from_slice::<serde_json::Value>(&r.output).ok();
+                let num = parsed
+                    .as_ref()
+                    .and_then(|v| v.get("balance").or_else(|| v.get("allowance")))
+                    .and_then(|s| s.as_str())
+                    .and_then(|s| s.parse::<u128>().ok())
+                    .unwrap_or(0);
+                num.to_le_bytes().to_vec()
+            } else {
+                r.output
+            };
+            Ok(EeOutcome {
+                status: if r.success {
+                    OutcomeStatus::Success
+                } else {
+                    OutcomeStatus::Revert
+                },
+                output,
+                gas_used: 15_000,
+            })
+        }
+        Err(e) => Ok(EeOutcome {
+            status: OutcomeStatus::Revert,
+            output: e.to_string().into_bytes(),
+            gas_used: 10_000,
+        }),
+    }
 }
 
 /// Stateless SVM execution environment (`budlum-ee-svm`).
@@ -309,13 +629,101 @@ impl ExecutionEnvironment for SvmEe {
                         gas_used: 5_000,
                     });
                 }
-                let Ok(ix) = serde_json::from_slice::<SvmInstructionEnvelope>(&call.input) else {
+                let (is_static, clean_input) = unwrap_static_universal_input(&call.input);
+                if let Ok(target_acc) = read_svm_account(host, &target_pk) {
+                    if let Some(ptr) = decode_pointer_bytecode(&target_acc.data) {
+                        return execute_svm_pointer(
+                            &ptr,
+                            &caller_pk,
+                            clean_input,
+                            is_static,
+                            call.gas_limit,
+                            host,
+                        );
+                    }
+                }
+                let (ix, from_pointer_op) = if let Ok(parsed) =
+                    serde_json::from_slice::<SvmInstructionEnvelope>(clean_input)
+                {
+                    (parsed, false)
+                } else if let Ok(ptr_op) = serde_json::from_slice::<SplPointerOp>(clean_input) {
+                    let env = match ptr_op {
+                        SplPointerOp::Transfer { to, amount } => {
+                            let Ok(amt) = u64::try_from(amount) else {
+                                return Ok(EeOutcome {
+                                    status: OutcomeStatus::Revert,
+                                    output: b"SPL amount exceeds u64".to_vec(),
+                                    gas_used: 5_000,
+                                });
+                            };
+                            SvmInstructionEnvelope::SplTransfer {
+                                mint: target_pk,
+                                to_owner: to,
+                                amount: amt,
+                            }
+                        }
+                        SplPointerOp::Approve { delegate, amount } => {
+                            let Ok(amt) = u64::try_from(amount) else {
+                                return Ok(EeOutcome {
+                                    status: OutcomeStatus::Revert,
+                                    output: b"SPL amount exceeds u64".to_vec(),
+                                    gas_used: 5_000,
+                                });
+                            };
+                            SvmInstructionEnvelope::SplApprove {
+                                mint: target_pk,
+                                delegate,
+                                amount: amt,
+                            }
+                        }
+                        SplPointerOp::TransferFrom { owner, to, amount } => {
+                            let Ok(amt) = u64::try_from(amount) else {
+                                return Ok(EeOutcome {
+                                    status: OutcomeStatus::Revert,
+                                    output: b"SPL amount exceeds u64".to_vec(),
+                                    gas_used: 5_000,
+                                });
+                            };
+                            SvmInstructionEnvelope::SplTransferFrom {
+                                mint: target_pk,
+                                owner,
+                                to_owner: to,
+                                amount: amt,
+                            }
+                        }
+                        SplPointerOp::BalanceOf { owner } => SvmInstructionEnvelope::SplBalanceOf {
+                            mint: target_pk,
+                            owner,
+                        },
+                        SplPointerOp::Allowance { owner, delegate } => {
+                            SvmInstructionEnvelope::SplAllowance {
+                                mint: target_pk,
+                                owner,
+                                delegate,
+                            }
+                        }
+                    };
+                    (env, true)
+                } else {
                     return Ok(EeOutcome {
                         status: OutcomeStatus::Revert,
                         output: b"invalid SvmInstructionEnvelope".to_vec(),
                         gas_used: 5_000,
                     });
                 };
+                if is_static
+                    && !matches!(
+                        ix,
+                        SvmInstructionEnvelope::SplBalanceOf { .. }
+                            | SvmInstructionEnvelope::SplAllowance { .. }
+                    )
+                {
+                    return Ok(EeOutcome {
+                        status: OutcomeStatus::Revert,
+                        output: b"static call forbids SVM state mutation".to_vec(),
+                        gas_used: 5_000,
+                    });
+                }
                 match ix {
                     SvmInstructionEnvelope::SystemTransfer { to, lamports } => {
                         let attos = u128::from(lamports).saturating_mul(ATTOS_PER_LAMPORT);
@@ -537,7 +945,14 @@ impl ExecutionEnvironment for SvmEe {
                                 });
                             }
                         };
-                        if dst_acc.lamports == 0 || dst_acc.owner != src_acc.owner {
+                        if from_pointer_op
+                            && dst_acc.lamports == 0
+                            && dst_acc.owner == SVM_SYSTEM_PROGRAM_ID
+                        {
+                            dst_acc.lamports = 1;
+                            dst_acc.owner = src_acc.owner;
+                            dst_acc.data = 0u64.to_le_bytes().to_vec();
+                        } else if dst_acc.lamports == 0 || dst_acc.owner != src_acc.owner {
                             return Ok(EeOutcome {
                                 status: OutcomeStatus::Revert,
                                 output:
@@ -582,6 +997,176 @@ impl ExecutionEnvironment for SvmEe {
                             status: OutcomeStatus::Success,
                             output: dst_ata.to_vec(),
                             gas_used: 10_000,
+                        })
+                    }
+                    SvmInstructionEnvelope::SplApprove {
+                        mint,
+                        delegate,
+                        amount,
+                    } => {
+                        let Ok(alw_pda) = derive_spl_allowance_pda(&mint, &caller_pk, &delegate)
+                        else {
+                            return Ok(EeOutcome {
+                                status: OutcomeStatus::Revert,
+                                output: Vec::new(),
+                                gas_used: 5_000,
+                            });
+                        };
+                        let mint_acc = read_svm_account(host, &mint).unwrap_or_default();
+                        if mint_acc.lamports == 0
+                            || (mint_acc.owner != SVM_SPL_TOKEN_PROGRAM_ID
+                                && mint_acc.owner != SVM_TOKEN_2022_PROGRAM_ID)
+                        {
+                            return Ok(EeOutcome {
+                                status: OutcomeStatus::Revert,
+                                output: b"uninitialized SPL mint".to_vec(),
+                                gas_used: 5_000,
+                            });
+                        }
+                        let alw_acc = SvmAccountData {
+                            lamports: 1,
+                            owner: mint_acc.owner,
+                            executable: false,
+                            rent_epoch: 0,
+                            data: amount.to_le_bytes().to_vec(),
+                        };
+                        write_svm_account(host, &alw_pda, &alw_acc).map_err(|e| EeFault {
+                            ee: EeId::SVM,
+                            panic_digest: budlum_uel_abi::panic_digest(EeId::SVM, &e),
+                        })?;
+                        Ok(EeOutcome {
+                            status: OutcomeStatus::Success,
+                            output: u128::from(amount).to_le_bytes().to_vec(),
+                            gas_used: 8_000,
+                        })
+                    }
+                    SvmInstructionEnvelope::SplTransferFrom {
+                        mint,
+                        owner,
+                        to_owner,
+                        amount,
+                    } => {
+                        let (Ok(alw_pda), Ok(src_ata), Ok(dst_ata)) = (
+                            derive_spl_allowance_pda(&mint, &owner, &caller_pk),
+                            derive_associated_token_address(&owner, &mint),
+                            derive_associated_token_address(&to_owner, &mint),
+                        ) else {
+                            return Ok(EeOutcome {
+                                status: OutcomeStatus::Revert,
+                                output: Vec::new(),
+                                gas_used: 5_000,
+                            });
+                        };
+                        let mut alw_acc = read_svm_account(host, &alw_pda).unwrap_or_default();
+                        let cur_alw = alw_acc
+                            .data
+                            .get(..8)
+                            .and_then(|s| <[u8; 8]>::try_from(s).ok())
+                            .map_or(0u64, u64::from_le_bytes);
+                        if cur_alw < amount {
+                            return Ok(EeOutcome {
+                                status: OutcomeStatus::Revert,
+                                output: b"insufficient SPL allowance".to_vec(),
+                                gas_used: 7_000,
+                            });
+                        }
+                        let mut src_acc = read_svm_account(host, &src_ata).unwrap_or_default();
+                        let src_bal = src_acc
+                            .data
+                            .get(..8)
+                            .and_then(|s| <[u8; 8]>::try_from(s).ok())
+                            .map_or(0u64, u64::from_le_bytes);
+                        if src_bal < amount
+                            || (src_acc.owner != SVM_SPL_TOKEN_PROGRAM_ID
+                                && src_acc.owner != SVM_TOKEN_2022_PROGRAM_ID)
+                        {
+                            return Ok(EeOutcome {
+                                status: OutcomeStatus::Revert,
+                                output: b"insufficient SPL owner balance".to_vec(),
+                                gas_used: 7_000,
+                            });
+                        }
+                        let mut dst_acc = read_svm_account(host, &dst_ata).unwrap_or_default();
+                        if dst_acc.lamports == 0 && dst_acc.owner == SVM_SYSTEM_PROGRAM_ID {
+                            dst_acc.lamports = 1;
+                            dst_acc.owner = src_acc.owner;
+                            dst_acc.data = 0u64.to_le_bytes().to_vec();
+                        } else if dst_acc.lamports == 0 || dst_acc.owner != src_acc.owner {
+                            return Ok(EeOutcome {
+                                status: OutcomeStatus::Revert,
+                                output:
+                                    b"uninitialized or mismatched destination SPL token account"
+                                        .to_vec(),
+                                gas_used: 7_000,
+                            });
+                        }
+                        let dst_bal = dst_acc
+                            .data
+                            .get(..8)
+                            .and_then(|s| <[u8; 8]>::try_from(s).ok())
+                            .map_or(0u64, u64::from_le_bytes);
+                        let Some(new_dst_bal) = dst_bal.checked_add(amount) else {
+                            return Ok(EeOutcome {
+                                status: OutcomeStatus::Revert,
+                                output: b"SPL destination overflow".to_vec(),
+                                gas_used: 7_000,
+                            });
+                        };
+                        alw_acc.data = (cur_alw - amount).to_le_bytes().to_vec();
+                        let _ = write_svm_account(host, &alw_pda, &alw_acc);
+                        src_acc.data = (src_bal - amount).to_le_bytes().to_vec();
+                        let _ = write_svm_account(host, &src_ata, &src_acc);
+                        dst_acc.data = new_dst_bal.to_le_bytes().to_vec();
+                        let _ = write_svm_account(host, &dst_ata, &dst_acc);
+                        Ok(EeOutcome {
+                            status: OutcomeStatus::Success,
+                            output: dst_ata.to_vec(),
+                            gas_used: 12_000,
+                        })
+                    }
+                    SvmInstructionEnvelope::SplBalanceOf { mint, owner } => {
+                        let Ok(ata) = derive_associated_token_address(&owner, &mint) else {
+                            return Ok(EeOutcome {
+                                status: OutcomeStatus::Revert,
+                                output: Vec::new(),
+                                gas_used: 5_000,
+                            });
+                        };
+                        let acc = read_svm_account(host, &ata).unwrap_or_default();
+                        let bal = acc
+                            .data
+                            .get(..8)
+                            .and_then(|s| <[u8; 8]>::try_from(s).ok())
+                            .map_or(0u64, u64::from_le_bytes);
+                        Ok(EeOutcome {
+                            status: OutcomeStatus::Success,
+                            output: u128::from(bal).to_le_bytes().to_vec(),
+                            gas_used: 5_000,
+                        })
+                    }
+                    SvmInstructionEnvelope::SplAllowance {
+                        mint,
+                        owner,
+                        delegate,
+                    } => {
+                        let Ok(alw_pda) = derive_spl_allowance_pda(&mint, &owner, &delegate)
+                        else {
+                            return Ok(EeOutcome {
+                                status: OutcomeStatus::Revert,
+                                output: Vec::new(),
+                                gas_used: 5_000,
+                            });
+                        };
+                        let acc = read_svm_account(host, &alw_pda).unwrap_or_default();
+                        let alw = acc
+                            .data
+                            .get(..8)
+                            .and_then(|s| <[u8; 8]>::try_from(s).ok())
+                            .map_or(0u64, u64::from_le_bytes);
+                        Ok(EeOutcome {
+                            status: OutcomeStatus::Success,
+                            output: u128::from(alw).to_le_bytes().to_vec(),
+                            gas_used: 5_000,
                         })
                     }
                     SvmInstructionEnvelope::CreateAssociatedTokenAccount { wallet, mint } => {

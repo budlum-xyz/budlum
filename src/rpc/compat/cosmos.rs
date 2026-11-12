@@ -307,7 +307,7 @@ mod tests {
 
     #[test]
     fn cosmos_compat_peer_quota_enforces_limit_and_payload_bound() {
-        let state = AccountState::new(45261);
+        let state = AccountState::new();
         let mut gw = CosmosCompatGateway::new(CosmosCompatConfig::default(), 7);
         let req = JsonRpcRequest {
             jsonrpc: String::from("2.0"),
@@ -316,11 +316,20 @@ mod tests {
             params: serde_json::json!({}),
         };
         for _ in 0..DEFAULT_COSMOS_MAX_REQUESTS_PER_WINDOW {
-            assert!(gw.handle_rpc_for_peer("peer-a", &req, &state).error.is_none());
+            assert!(gw
+                .handle_rpc_for_peer("peer-a", &req, &state)
+                .error
+                .is_none());
         }
         let limited = gw.handle_rpc_for_peer("peer-a", &req, &state);
-        assert_eq!(limited.error.as_ref().map(|e| e.code), Some(JSONRPC_LIMIT_EXCEEDED));
-        assert!(gw.handle_rpc_for_peer("peer-b", &req, &state).error.is_none());
+        assert_eq!(
+            limited.error.as_ref().map(|e| e.code),
+            Some(JSONRPC_LIMIT_EXCEEDED)
+        );
+        assert!(gw
+            .handle_rpc_for_peer("peer-b", &req, &state)
+            .error
+            .is_none());
 
         let oversized = "ab".repeat(crate::rpc::compat::ethereum::MAX_COMPAT_REQUEST_BYTES + 8);
         let big_tx = JsonRpcRequest {
@@ -330,6 +339,9 @@ mod tests {
             params: serde_json::json!({ "tx": oversized }),
         };
         let big_resp = gw.handle_rpc_for_peer("peer-b", &big_tx, &state);
-        assert_eq!(big_resp.error.as_ref().map(|e| e.code), Some(JSONRPC_LIMIT_EXCEEDED));
+        assert_eq!(
+            big_resp.error.as_ref().map(|e| e.code),
+            Some(JSONRPC_LIMIT_EXCEEDED)
+        );
     }
 }

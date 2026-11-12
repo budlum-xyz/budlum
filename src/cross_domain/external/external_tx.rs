@@ -128,13 +128,6 @@ fn is_mainnet(chain_id: u64) -> bool {
             .value()
 }
 
-fn is_testnet(chain_id: u64) -> bool {
-    chain_id
-        == crate::core::chain_config::Network::Testnet
-            .chain_id()
-            .value()
-}
-
 /// Apply one external-domain write to `state`.
 ///
 /// Every variant decides its refusals before it writes, and a refusal leaves
@@ -239,9 +232,6 @@ fn register(
     ctx: &ExternalDomainTxContext,
     request: &RegistrationRequest,
 ) -> Result<(), ExternalDomainTxError> {
-    if is_testnet(ctx.chain_id) && matches!(request.spec, AdapterSpec::EthereumSync { .. }) {
-        return Err(ExternalDomainTxError::TestnetSyncCommitteeDisabled);
-    }
     if request.poster != ctx.sender {
         return Err(ExternalDomainTxError::PosterIsNotSender);
     }
@@ -279,9 +269,6 @@ fn submit_evidence(
     let Some(entry) = intake.entries.get(&key) else {
         return Err(ExternalDomainTxError::UnknownDomain);
     };
-    if is_testnet(ctx.chain_id) && matches!(entry.spec, AdapterSpec::EthereumSync { .. }) {
-        return Err(ExternalDomainTxError::TestnetSyncCommitteeDisabled);
-    }
     let bls = bls_for(&entry.spec, ctx);
     let before = intake.clone();
     match intake.submit_evidence(evidence, bls) {

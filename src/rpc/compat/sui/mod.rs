@@ -178,11 +178,15 @@ mod tests {
     use crate::execution::coordinator::assets::BUDLUM_TESTNET_CHAIN_ID;
 
     #[test]
-    fn sui_rpc_is_closed_on_testnet_before_activation_and_reads_mist_once_active() {
+    fn sui_rpc_is_open_on_testnet_at_launch_and_reads_mist() {
         let mut state = AccountState::new();
         let closed = handle_sui_rpc(
             &state,
-            SuiActivationPolicy::default(),
+            SuiActivationPolicy {
+                chain_id: BUDLUM_TESTNET_CHAIN_ID,
+                block_height: 0,
+                activation_height: None,
+            },
             SuiRpcRequest {
                 jsonrpc: "2.0".into(),
                 id: json!(1),
@@ -196,17 +200,9 @@ mod tests {
         let bud_addr = derive_foreign_account(ForeignScheme::SuiEd25519, &sui_addr);
         state.add_balance(&bud_addr, 7); // 7 atoms = 7_000 MIST (1 atom = 10^12 attos = 10^3 MIST)
 
-        let active = SuiActivationPolicy {
-            chain_id: BUDLUM_TESTNET_CHAIN_ID,
-            block_height:
-                crate::execution::coordinator::foreign::sui::PROPOSED_SUI_ACTIVATION_HEIGHT,
-            activation_height: Some(
-                crate::execution::coordinator::foreign::sui::PROPOSED_SUI_ACTIVATION_HEIGHT,
-            ),
-        };
         let bal = handle_sui_rpc(
             &state,
-            active,
+            SuiActivationPolicy::default(),
             SuiRpcRequest {
                 jsonrpc: "2.0".into(),
                 id: json!(2),

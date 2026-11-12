@@ -1,7 +1,7 @@
 //! Domains, cross-domain bridge, settlement, and testnet feature-matrix
 //! regression locks (`zk_domain_refuses_empty_halt_proof`,
-//! `bridge_e2e_lock_mint_burn_unlock`, `ethereum_sync_committee_is_closed_on_testnet`,
-//! `shared_security_is_closed_on_testnet`, `app_binding_is_closed_on_testnet`,
+//! `bridge_e2e_lock_mint_burn_unlock`, `ethereum_sync_committee_is_open_on_testnet`,
+//! `shared_security_is_open_on_testnet`, `app_binding_is_open_on_testnet`,
 //! and functional regression names).
 
 use crate::chain::blockchain::Blockchain;
@@ -221,26 +221,38 @@ fn zk_domain_refuses_empty_halt_proof() {
 fn zkvm_adapter_refuses_bare_halt_program() {
     zk_domain_refuses_empty_halt_proof();
     assert!(
-        !crate::core::chain_config::Network::Testnet
+        crate::core::chain_config::Network::Testnet
+            .shared_security()
+            .enabled
+    );
+    assert!(
+        !crate::core::chain_config::Network::Mainnet
             .shared_security()
             .enabled
     );
 }
 
-/// Ethereum sync-committee external domain
-/// registration is refused on Testnet (`45261`).
+/// Ethereum sync-committee external domain registration is open on Testnet (`45261`)
+/// with real BLS12-381 verification and gated on Mainnet (`45260`).
 #[test]
-fn ethereum_sync_committee_is_closed_on_testnet() {
+fn ethereum_sync_committee_is_open_on_testnet() {
+    use bls12_381::{G1Affine, G1Projective, G2Affine, G2Projective, Scalar};
+
     let poster = addr(0x21);
+    let sk = Scalar::from(11u64);
+    let pk_compressed = G1Affine::from(G1Projective::generator() * sk).to_compressed();
+    let mut agg_pk = vec![0u8; 96];
+    agg_pk[..48].copy_from_slice(&pk_compressed);
+
     let spec = AdapterSpec::EthereumSync {
         network: "testnet".to_string(),
         committee: Some(PinnedCommittee {
             period: 0,
-            aggregate_pubkey: vec![0x11; 96],
+            aggregate_pubkey: agg_pk.clone(),
             next_committee_root: [0xbb; 32],
         }),
     };
-    let adapter = spec.build(Some(test_bls()), None);
+    let adapter = spec.build(Some(IntakeState::production_bls()), None);
     let economics = IntakeState::conservative_economics(1_000_000);
     let bond = u64::try_from(economics.required_bond_atoms()).expect("bond fits u64");
 
@@ -258,16 +270,21 @@ fn ethereum_sync_committee_is_closed_on_testnet() {
         s.copy_from_slice(&[0xbb; 32]);
     }
     if let Some(s) = payload.get_mut(layout::AGGREGATE_PUBKEY) {
-        s.copy_from_slice(&[0x11; 96]);
-    }
-    if let Some(s) = payload.get_mut(layout::SIGNATURE) {
-        s.copy_from_slice(&[0x22; 96]);
+        s.copy_from_slice(&agg_pk);
     }
     if let Some(s) = payload.get_mut(layout::PARTICIPATION_BITS) {
         s.copy_from_slice(&[0xff; 64]);
     }
     if let Some(s) = payload.get_mut(layout::STATE_ROOT) {
         s.copy_from_slice(&[0xcc; 32]);
+    }
+    let update = crate::cross_domain::external::ethereum::parse_update(&payload).expect("update");
+    let root = crate::cross_domain::external::ethereum::signing_root_v2(&update);
+    let sig = G2Affine::from(
+        G2Projective::from(crate::chain::finality::hash_to_g2(&root)) * sk,
+    );
+    if let Some(s) = payload.get_mut(layout::SIGNATURE) {
+        s.copy_from_slice(&sig.to_compressed());
     }
 
     let request = RegistrationRequest {
@@ -294,61 +311,97 @@ fn ethereum_sync_committee_is_closed_on_testnet() {
         sender: poster,
         chain_id: Network::Testnet.chain_id().value(),
         fee: 10,
-        bls: test_bls,
+        bls: IntakeState::production_bls,
     };
-    let err = execute_external_domain_tx(
-        &mut state,
-        &ctx,
-        &ExternalDomainTx::Register(Box::new(request)),
-    )
-    .expect_err("EthereumSync must be refused on testnet chain id 45261");
-    assert_eq!(err, ExternalDomainTxError::TestnetSyncCommitteeDisabled);
-    assert!(state.settlement.external_intake.entries.is_empty());
-    assert_eq!(state.get_balance(&poster), bond.saturating_mul(4));
+    let tx = ExternalDomainTx::Register(Box::new(request));
+    execute_external_domain_tx(&mut state, &ctx, &tx)
+        .expect("EthereumSync must register cleanly on testnet 45261");
+    assert_eq!(state.settlement.external_intake.entries.len(), 1);
+
+    let mainnet_ctx = ExternalDomainTxContext {
+        sender: poster,
+        chain_id: Network::Mainnet.chain_id().value(),
+        fee: 10,
+        bls: IntakeState::production_bls,
+    };
+    let err = execute_external_domain_tx(&mut state, &mainnet_ctx, &tx)
+        .expect_err("EthereumSync must remain gated on mainnet 45260");
+    assert_eq!(err, ExternalDomainTxError::MainnetDisabled);
 }
 
 #[test]
-fn ethereum_sync_committee_refused_on_testnet_chain_id() {
-    ethereum_sync_committee_is_closed_on_testnet();
+fn ethereum_sync_committee_open_on_testnet_chain_id() {
+    ethereum_sync_committee_is_open_on_testnet();
     assert!(
-        !crate::core::chain_config::Network::Testnet
+        crate::core::chain_config::Network::Testnet
             .shared_security()
             .enabled
     );
 }
 
-/// shared security (`shared_security`) is closed on Testnet (`45261`).
+/// Shared security (`shared_security`) is open on Testnet (`45261`) and gated
+/// on Mainnet (`45260`).
 #[test]
-fn shared_security_is_closed_on_testnet() {
-    assert!(!Network::Testnet.shared_security().enabled);
+fn shared_security_is_open_on_testnet() {
+    assert!(Network::Testnet.shared_security().enabled);
+    assert!(!Network::Mainnet.shared_security().enabled);
     let operator = addr(0x31);
     let mut state = AccountState::new();
-    let ctx = SettlementTxContext {
+    state.add_balance(&operator, 1_000_000);
+    let mut domain = default_domain(
+        1,
+        ConsensusKind::PoW,
+        TESTNET_CHAIN_ID,
+        POW_HEADER_CHAIN_ADAPTER,
+        1,
+    );
+    domain.operator = Some(operator);
+    crate::settlement::domains::register_domain(&mut state, domain).expect("register domain");
+
+    let testnet_ctx = SettlementTxContext {
         sender: operator,
         chain_id: Network::Testnet.chain_id().value(),
         fee: 10,
         bls: IntakeState::production_bls,
     };
-    let err = execute_shared_security_tx(
+    execute_shared_security_tx(
         &mut state,
-        &ctx,
+        &testnet_ctx,
         &SharedSecurityTx::SetRegistrar {
             domain_key: 1,
             registrar: vec![0xAB; 20],
         },
     )
-    .expect_err("shared_security must be closed on testnet");
+    .expect("shared_security must succeed on testnet 45261");
+
+    let mainnet_ctx = SettlementTxContext {
+        sender: operator,
+        chain_id: Network::Mainnet.chain_id().value(),
+        fee: 10,
+        bls: IntakeState::production_bls,
+    };
+    let err = execute_shared_security_tx(
+        &mut state,
+        &mainnet_ctx,
+        &SharedSecurityTx::SetRegistrar {
+            domain_key: 1,
+            registrar: vec![0xCD; 20],
+        },
+    )
+    .expect_err("shared_security must remain closed on mainnet");
     assert!(err.to_string().contains("not enabled"), "{err}");
 }
 
-/// remote app binding (`app_binding`) is closed on Testnet (`45261`).
+/// Remote app binding (`app_binding`) is open on Testnet (`45261`) and gated
+/// on Mainnet (`45260`).
 #[test]
-fn app_binding_is_closed_on_testnet() {
-    assert!(!Network::Testnet.app_binding_enabled());
+fn app_binding_is_open_on_testnet() {
+    assert!(Network::Testnet.app_binding_enabled());
     assert!(Network::Devnet.app_binding_enabled());
+    assert!(!Network::Mainnet.app_binding_enabled());
     let registrant = addr(0x32);
     let mut state = AccountState::new();
-    state.add_balance(&registrant, 1_000_000);
+    state.add_balance(&registrant, 1_000_000_000_000);
     let mut domain = default_domain(
         9,
         ConsensusKind::PoW,
@@ -359,7 +412,7 @@ fn app_binding_is_closed_on_testnet() {
     domain.operator = Some(registrant);
     crate::settlement::domains::register_domain(&mut state, domain).expect("register domain");
 
-    let ctx = SettlementTxContext {
+    let testnet_ctx = SettlementTxContext {
         sender: registrant,
         chain_id: Network::Testnet.chain_id().value(),
         fee: 5,
@@ -370,13 +423,26 @@ fn app_binding_is_closed_on_testnet() {
         origin_app: vec![0x44; 20],
         manifest_hash: [0x55; 32],
     };
-    let err =
-        execute_graft_tx(&mut state, &ctx, &tx).expect_err("app_binding must be closed on testnet");
-    assert!(err.to_string().contains("not enabled"), "{err}");
-    assert!(state.settlement.graft.apps.is_empty());
+    execute_graft_tx(&mut state, &testnet_ctx, &tx)
+        .expect("app_binding must execute on testnet 45261");
+    assert_eq!(state.settlement.graft.apps.len(), 1);
 
-    let outer_err = execute_settlement_tx(&mut state, &ctx, &SettlementTx::Graft(Box::new(tx)))
-        .expect_err("SettlementTx::Graft must be closed on testnet");
+    let mainnet_ctx = SettlementTxContext {
+        sender: registrant,
+        chain_id: Network::Mainnet.chain_id().value(),
+        fee: 5,
+        bls: IntakeState::production_bls,
+    };
+    let outer_err = execute_settlement_tx(
+        &mut state,
+        &mainnet_ctx,
+        &SettlementTx::Graft(Box::new(GraftTx::Register {
+            domain_key: 9,
+            origin_app: vec![0x45; 20],
+            manifest_hash: [0x56; 32],
+        })),
+    )
+    .expect_err("SettlementTx::Graft must remain closed on mainnet");
     assert!(outer_err.to_string().contains("not enabled"), "{outer_err}");
 }
 

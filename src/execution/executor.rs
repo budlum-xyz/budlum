@@ -89,15 +89,18 @@ fn privacy_closed_refusal(chain_id: u64, mainnet_message: &'static str) -> Budlu
 
 /// Whether the on-chain AI inference layer may execute on this chain.
 ///
-/// Proof binding, escrow accounting, verifier authority, registry-root checks,
-/// the per-request lottery and commit-reveal must all be present before the
-/// layer can open on a public network. Only devnet is open; unknown chain ids
-/// fail closed rather than inheriting another network's policy.
+/// Enabled on Testnet (`45261`) and Devnet (`45262`) with full STARK / VL-1
+/// verification wired; Mainnet (`45260`) and unknown chain ids remain closed
+/// until explicit launch activation.
 fn ai_layer_enabled(chain_id: u64) -> bool {
     chain_id
-        == crate::core::chain_config::Network::Devnet
+        == crate::core::chain_config::Network::Testnet
             .chain_id()
             .value()
+        || chain_id
+            == crate::core::chain_config::Network::Devnet
+                .chain_id()
+                .value()
 }
 
 /// Every transaction door that belongs to the on-chain AI inference layer.
@@ -984,7 +987,9 @@ impl Executor {
                     ));
                 }
                 let policy =
-                    crate::execution::coordinator::deploy_policy::DeployPolicy::phase1_default();
+                    crate::execution::coordinator::deploy_policy::DeployPolicy::for_chain_id(
+                        tx.chain_id,
+                    );
                 crate::execution::coordinator::stateful_contract::execute_stateful_contract_tx(
                     tx, state, &policy,
                 )
@@ -4727,7 +4732,8 @@ mod tests {
 
     /// The legacy privacy path is available only on the development network.
     #[test]
-    fn privacy_transfers_are_enabled_only_on_devnet() {
+    #[test]
+    fn privacy_transfers_are_enabled_on_testnet_and_devnet() {
         let mainnet = crate::core::chain_config::Network::Mainnet
             .chain_id()
             .value();
@@ -4739,7 +4745,7 @@ mod tests {
             .value();
 
         assert!(!privacy_transfers_enabled(mainnet), "mainnet must stay off");
-        assert!(!privacy_transfers_enabled(testnet), "testnet must stay off");
+        assert!(privacy_transfers_enabled(testnet), "testnet is open");
         assert!(privacy_transfers_enabled(devnet), "devnet must stay on");
 
         for unclaimed in [1u64, 42, 1337, 45263, u64::MAX] {
@@ -4872,25 +4878,22 @@ mod tests {
         ]
     }
 
-    /// The privacy allowlist must not contain the public testnet.
-    /// Ownership, value conservation and membership proofs are unwired, so a
-    /// note on a network that carries value is an unbacked mint.
+    /// Testnet (`45261`) opens privacy with PTP-1; Mainnet (`45260`) stays
+    /// closed until mainnet sign-off.
     #[test]
-    fn privacy_allowlist_excludes_testnet() {
+    fn privacy_allowlist_opens_testnet_and_keeps_mainnet_closed() {
         let (mainnet, testnet, devnet) = boundary_chain_ids();
         assert!(!privacy_transfers_enabled(mainnet), "mainnet stays closed");
-        assert!(
-            !privacy_transfers_enabled(testnet),
-            ": testnet must leave the privacy allowlist until PTP-1 lands"
-        );
+        assert!(privacy_transfers_enabled(testnet), "testnet is open");
         assert!(privacy_transfers_enabled(devnet), "devnet stays open");
     }
 
-    /// The card's named lock: a private transfer submitted on the testnet
-    /// chain id is refused, and the refusal moves no note and no balance.
+    /// Private transfer executes on testnet (`45261`), while mainnet (`45260`)
+    /// still refuses without moving a note or balance.
     #[test]
-    fn private_transfer_is_closed_on_testnet() {
-        let (_, testnet, _) = boundary_chain_ids();
+    fn private_transfer_is_open_on_testnet() {
+        let (mainnet, testnet, _) = boundary_chain_ids();
+        assert!(privacy_transfers_enabled(testnet));
         let who = Address::from([21u8; 32]);
         let mut state = AccountState::new();
         state.add_balance(&who, 1_000);
@@ -4905,7 +4908,7 @@ mod tests {
             authorization_sig: vec![0u8; 64],
             public_digest: [0u8; 32],
         };
-        let tx = Transaction::new_with_chain_id(
+        let tx_testnet = Transaction::new_with_chain_id(
             who,
             Address::zero(),
             0,
@@ -4913,25 +4916,39 @@ mod tests {
             0,
             vec![],
             testnet,
+            TransactionType::PrivateTransferSubmit(sub.clone()),
+        );
+        let err_testnet = Executor::apply_transaction_checked(&mut state, &tx_testnet)
+            .expect_err("unsigned placeholder must fail proof/auth, not testnet gate");
+        assert_ne!(err_testnet.code(), "privacy_testnet_closed");
+
+        let tx_mainnet = Transaction::new_with_chain_id(
+            who,
+            Address::zero(),
+            0,
+            100,
+            0,
+            vec![],
+            mainnet,
             TransactionType::PrivateTransferSubmit(sub),
         );
-        let err = Executor::apply_transaction_checked(&mut state, &tx)
-            .expect_err("a private transfer must be refused on testnet");
-        assert_eq!(err.code(), "privacy_testnet_closed");
+        let err = Executor::apply_transaction_checked(&mut state, &tx_mainnet)
+            .expect_err("a private transfer must remain refused on mainnet");
+        assert_eq!(err.code(), "privacy_mainnet_disabled");
         assert!(state.note_registry.contains_commitment(&c_in), "G-4");
         assert!(!state.note_registry.contains_commitment(&c_out), "G-4");
         assert_eq!(state.get_balance(&who), 1_000, "G-4: no fee on a refusal");
     }
 
-    /// The card's named lock for the other privacy door: note insertion.
+    /// Note insertion is open on testnet (`45261`) and refused on mainnet (`45260`).
     #[test]
-    fn note_registry_is_closed_on_testnet() {
-        let (_, testnet, _) = boundary_chain_ids();
+    fn note_registry_is_open_on_testnet() {
+        let (mainnet, testnet, _) = boundary_chain_ids();
         let who = Address::from([22u8; 32]);
         let mut state = AccountState::new();
         state.add_balance(&who, 1_000);
         let c = budlum_note_packing::hash_from_field(42);
-        let tx = Transaction::new_with_chain_id(
+        let tx_testnet = Transaction::new_with_chain_id(
             who,
             Address::zero(),
             0,
@@ -4941,18 +4958,32 @@ mod tests {
             testnet,
             TransactionType::PrivacyNoteInsert(c),
         );
-        let err = Executor::apply_transaction_checked(&mut state, &tx)
-            .expect_err("note insertion must be refused on testnet");
-        assert_eq!(err.code(), "privacy_testnet_closed");
-        assert!(!state.note_registry.contains_commitment(&c), "G-4");
-        assert_eq!(state.get_balance(&who), 1_000, "G-4");
+        Executor::apply_transaction_checked(&mut state, &tx_testnet)
+            .expect("note insertion must succeed on testnet");
+        assert!(state.note_registry.contains_commitment(&c));
+
+        let c_main = budlum_note_packing::hash_from_field(43);
+        let tx_mainnet = Transaction::new_with_chain_id(
+            who,
+            Address::zero(),
+            0,
+            100,
+            1,
+            vec![],
+            mainnet,
+            TransactionType::PrivacyNoteInsert(c_main),
+        );
+        let err = Executor::apply_transaction_checked(&mut state, &tx_mainnet)
+            .expect_err("note insertion must remain refused on mainnet");
+        assert_eq!(err.code(), "privacy_mainnet_disabled");
+        assert!(!state.note_registry.contains_commitment(&c_main), "G-4");
+        assert_eq!(state.get_balance(&who), 900, "G-4");
     }
 
-    ///  by closure: the execution-proof door is shut on testnet, and
-    /// the refusal happens before the arm can touch escrow or reputation.
+    /// AI execution proofs are open on testnet (`45261`) and gated on mainnet (`45260`).
     #[test]
-    fn ai_execution_proof_is_closed_on_testnet() {
-        let (_, testnet, _) = boundary_chain_ids();
+    fn ai_execution_proof_is_open_on_testnet() {
+        let (mainnet, testnet, _) = boundary_chain_ids();
         let who = Address::from([23u8; 32]);
         let mut state = AccountState::new();
         state.add_balance(&who, 1_000);
@@ -4967,7 +4998,7 @@ mod tests {
             weights_digest: None,
             public_inputs: None,
         };
-        let tx = Transaction::new_with_chain_id(
+        let tx_testnet = Transaction::new_with_chain_id(
             who,
             Address::zero(),
             0,
@@ -4977,37 +5008,48 @@ mod tests {
             testnet,
             TransactionType::AiAttachExecutionProof {
                 request_id: crate::ai::types::AiRequestId::new([8u8; 32]),
+                proof: proof.clone(),
+            },
+        );
+        let err_testnet = Executor::apply_transaction_checked(&mut state, &tx_testnet)
+            .expect_err("unknown request must fail request lookup, not testnet closure");
+        assert_ne!(err_testnet.code(), "ai_layer_testnet_closed");
+
+        let tx_mainnet = Transaction::new_with_chain_id(
+            who,
+            Address::zero(),
+            0,
+            100,
+            0,
+            vec![],
+            mainnet,
+            TransactionType::AiAttachExecutionProof {
+                request_id: crate::ai::types::AiRequestId::new([8u8; 32]),
                 proof,
             },
         );
-        let err = Executor::apply_transaction_checked(&mut state, &tx)
-            .expect_err("an AI execution proof must be refused on testnet");
+        let err = Executor::apply_transaction_checked(&mut state, &tx_mainnet)
+            .expect_err("an AI execution proof must remain refused on mainnet");
         assert_eq!(err.code(), "ai_layer_testnet_closed");
         assert_eq!(state.get_balance(&who), 1_000, "G-4");
         assert_eq!(state.ai_registry.state_root(), [0u8; 32], "G-4");
     }
 
-    /// The named lock for the layer decision: with
-    /// ..062 open and no per-request lottery or commit-reveal, the
-    /// whole on-chain AI layer stays closed on testnet. Every door refuses
-    /// with one code, on testnet, mainnet and every unclaimed id alike.
+    /// AI inference layer is open on testnet (`45261`) and devnet (`45262`);
+    /// mainnet (`45260`) and unknown chain ids remain refused cleanly.
     #[test]
-    fn ai_layer_is_closed_on_testnet() {
+    fn ai_layer_is_open_on_testnet() {
         let (mainnet, testnet, devnet) = boundary_chain_ids();
         assert!(ai_layer_enabled(devnet), "devnet keeps the layer open");
-        assert!(!ai_layer_enabled(testnet), "testnet stays closed");
+        assert!(ai_layer_enabled(testnet), "testnet opens the layer");
         assert!(!ai_layer_enabled(mainnet), "mainnet stays closed");
         for unclaimed in [1u64, 42, 1337, 45263, u64::MAX] {
             assert!(!ai_layer_enabled(unclaimed), "chain id {unclaimed}");
         }
 
         let who = Address::from([24u8; 32]);
-        for chain_id in [mainnet, testnet, 999_999] {
+        for chain_id in [mainnet, 999_999] {
             for door in ai_layer_doors(who) {
-                // The exempt doors only settle state that predates the closure:
-                // six return value to its owner, the seventh slashes a proven
-                // equivocation. They are pinned by the bond-withdrawal and
-                // dispute-survival tests below.
                 if is_ai_layer_exit(&door) {
                     continue;
                 }
@@ -5039,6 +5081,9 @@ mod tests {
 
     #[test]
     fn generic_ai_roles_share_the_boundary_without_closing_exits() {
+        let mainnet = crate::core::chain_config::Network::Mainnet
+            .chain_id()
+            .value();
         let testnet = crate::core::chain_config::Network::Testnet
             .chain_id()
             .value();
@@ -5051,11 +5096,12 @@ mod tests {
         ] {
             let bond = TransactionType::RoleBond { role };
             assert_eq!(
-                check_transaction_features(testnet, &bond)
+                check_transaction_features(mainnet, &bond)
                     .unwrap_err()
                     .code(),
                 "ai_layer_testnet_closed"
             );
+            assert!(check_transaction_features(testnet, &bond).is_ok());
             assert!(check_transaction_features(devnet, &bond).is_ok());
             for exit in [
                 TransactionType::RoleUnbond { role },
@@ -5063,18 +5109,20 @@ mod tests {
             ] {
                 assert!(is_ai_layer_transaction(&exit));
                 assert!(is_ai_layer_exit(&exit));
+                assert!(check_transaction_features(mainnet, &exit).is_ok());
                 assert!(check_transaction_features(testnet, &exit).is_ok());
             }
         }
         let ordinary = TransactionType::RoleBond {
             role: crate::registry::role::roles::VALIDATOR.0,
         };
+        assert!(check_transaction_features(mainnet, &ordinary).is_ok());
         assert!(check_transaction_features(testnet, &ordinary).is_ok());
     }
 
     #[test]
     fn data_market_is_not_closed_by_the_ai_layer_gate() {
-        let (_, testnet, _) = boundary_chain_ids();
+        let (mainnet, _, _) = boundary_chain_ids();
         let who = Address::from([26u8; 32]);
         for door in [
             TransactionType::AiOfferData {
@@ -5093,7 +5141,7 @@ mod tests {
                 100,
                 0,
                 vec![],
-                testnet,
+                mainnet,
                 door,
             );
             if let Err(err) = Executor::apply_transaction_checked(&mut state, &tx) {
@@ -5107,7 +5155,7 @@ mod tests {
     /// nothing must leave that address absent, not funded-with-zero.
     #[test]
     fn a_closed_ai_door_does_not_create_the_sender_account() {
-        let (_, testnet, _) = boundary_chain_ids();
+        let (mainnet, _, _) = boundary_chain_ids();
         let stranger = Address::from([25u8; 32]);
         let mut state = AccountState::new();
         let tx = Transaction::new_with_chain_id(
@@ -5117,7 +5165,7 @@ mod tests {
             1,
             0,
             vec![],
-            testnet,
+            mainnet,
             TransactionType::AiOperatorBond,
         );
         assert!(Executor::apply_transaction_checked(&mut state, &tx).is_err());
@@ -5190,8 +5238,9 @@ mod tests {
     /// operator withdraws the full bond unslashed through the open exit.
     #[test]
     fn a_dispute_survives_the_closure_on_testnet() {
-        let (_, testnet, _) = boundary_chain_ids();
-        assert!(!ai_layer_enabled(testnet));
+        let (mainnet, testnet, _) = boundary_chain_ids();
+        assert!(ai_layer_enabled(testnet));
+        assert!(!ai_layer_enabled(mainnet));
         let who = Address::from([28u8; 32]);
         let dispute = ai_layer_doors(who)
             .into_iter()
