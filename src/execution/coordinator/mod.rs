@@ -47,7 +47,7 @@ use crate::execution::coordinator::wasm_ee::WasmEe;
 use crate::execution::coordinator::worker::{
     WorkerEndpoint, WorkerError, WorkerSupervisor, MAX_BLOCK_WORKER_RETRIES,
 };
-use crate::execution::zkvm::{TxContext, ZkVmExecutor};
+use crate::execution::zkvm::{TxContext, ZkVmExecutor, DEFAULT_CONTRACT_GAS_LIMIT};
 use budlum_uel_abi::{
     BlockContext, BudAmount, CodeInfo, EeCall, EeCallKind, EeFault, EeId, EeIdentity, EeLog,
     EeOutcome, EeQuery, EeRefusal, ExecutionEnvironment, HostApi, HostError, HostRead, Namespace,
@@ -253,15 +253,20 @@ impl ExecutionEnvironment for StatefulBudZeroEe {
                     nonce: 0,
                     block_height: ctx.height,
                 };
-                let Ok(receipt) = ZkVmExecutor::execute_bytecode(&code, call.gas_limit, vm_ctx)
-                else {
+                // The transaction supplies `call.gas_limit`, and the proving
+                // wrapper turns gas into trace rows: an uncapped limit lets
+                // one call demand a whole block of proving work. The
+                // per-contract ceiling is the bound every other BudZero
+                // entry point already applies.
+                let gas_limit = call.gas_limit.min(DEFAULT_CONTRACT_GAS_LIMIT);
+                let Ok(receipt) = ZkVmExecutor::execute_bytecode(&code, gas_limit, vm_ctx) else {
                     return Ok(EeOutcome {
                         status: OutcomeStatus::Revert,
                         output: Vec::new(),
-                        gas_used: call.gas_limit,
+                        gas_used: gas_limit,
                     });
                 };
-                let spent = receipt.gas_used.max(1).min(call.gas_limit);
+                let spent = receipt.gas_used.max(1).min(gas_limit);
                 if host.charge(spent).is_err() {
                     return Ok(EeOutcome {
                         status: OutcomeStatus::OutOfGas,
