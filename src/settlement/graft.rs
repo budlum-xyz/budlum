@@ -2007,19 +2007,21 @@ mod tests {
             GRAFT_CLAIM_KIND,
             id,
         );
-        let claim_ev = anchor(&mut state, claim_msg);
+        let claim_ev = anchored(&mut state, claim_msg);
 
         // Create and award an intent while Active, then freeze the domain.
-        let intent_id = [0x91; 32];
-        let spec = b"call".to_vec();
         let intent_tx = GraftTx::OpenIntent {
-            intent_id,
             graft_id: id,
-            spec: spec.clone(),
+            call_hash: [0x91; 32],
+            value: 0,
             max_payment: 1_000,
+            solver_fee_cap: 100,
+            service_price: 200,
+            origin_beneficiary: vec![0x33; 20],
             deadline_block: 100,
         };
         execute_graft_tx(&mut state, &ctx(user), &intent_tx).unwrap();
+        let intent_id = state.settlement.graft.intents.values().next().unwrap().intent_id;
         let stake = state.registry.params().min_stake;
         state
             .registry
@@ -2044,7 +2046,7 @@ mod tests {
             GRAFT_FULFILLED_KIND,
             intent_id,
         );
-        let fulfill_ev = anchor(&mut state, fulfill_msg);
+        let fulfill_ev = anchored(&mut state, fulfill_msg);
 
         for status in [
             crate::domain::DomainStatus::Frozen,
