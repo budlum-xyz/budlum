@@ -75,12 +75,13 @@ operator listener (`operator_auth_required = true`). See
    ```
 
    The `budlum-faucet request` client and server challenge/response are
-   implemented in source, **not yet verified by a running testnet**. Do not
+   implemented in source; `bud faucet request` uses the shared challenge
+   client too. Neither command is **verified by a running testnet**. Do not
    send an address-only `POST /request`: the server requires a fresh challenge
-   and solved nonce. The focused Rust tests could not compile here because
-   `protoc` is unavailable; compile and run challenge/replay tests and a live
-   transfer before publishing this as an operational step. The `bud` binary
-   does not implement the directive's `bud faucet request` spelling.
+   and solved nonce. A focused loopback harness exercised the shared client,
+   but it did not build the full `bud` binary or demonstrate a live HTTPS
+   transfer. Build both clients, run challenge/replay tests and prove a live
+   transfer before publishing either command as an operational step.
 3. **Send a transaction.** `bud` speaks plain HTTP, so point it at a node
    you run (or reach over an SSH tunnel):
 
