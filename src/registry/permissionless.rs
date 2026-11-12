@@ -2985,17 +2985,11 @@ mod tests {
     fn slashed_member_enters_slashed_unbonding_and_stays_ineligible() {
         let mut reg = PermissionlessRegistry::new();
         let attester = addr(0x55);
-        reg.register(attester, roles::ATTESTER, MIN_REGISTRATION_STAKE, 0)
-            .unwrap();
+        reg.register(attester, roles::ATTESTER, MIN_REGISTRATION_STAKE, 0).unwrap();
         assert!(reg.is_active_attester(&attester));
 
         let outcome = reg
-            .slash_role_only(
-                attester,
-                roles::ATTESTER,
-                SlashingCondition::DoubleSign,
-                500,
-            )
+            .slash_role_only(attester, roles::ATTESTER, SlashingCondition::DoubleSign, 500)
             .unwrap();
         assert!(outcome.remaining_stake > 0);
         assert!(!reg.is_active_attester(&attester));
