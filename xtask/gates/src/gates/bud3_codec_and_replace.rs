@@ -6,8 +6,8 @@
 //! 2. `src/storage/bud3/replace.rs` enforces `MIN_REPLACE_ATTESTATIONS: usize = 3`,
 //!    `FAST_PROBE_MIN_SAVINGS_BPS: u32 = 500` (`select_codec_with_fast_probe`),
 //!    and `admit_object_replacement` slashing mismatched `ContentId` proposals.
-//! 3. `src/storage/bud3/access_tiering.rs` logs `TierTransition` observations with
-//!    `testnet_converts_objects() == false`.
+//! 3. `src/storage/bud3/access_tiering.rs` records `TierTransition` observations and
+//!    reports `testnet_converts_objects()`.
 //! 4. `src/storage/bud3/tx.rs` wires `StorageTxV3::ReplaceObject`.
 
 use std::fs;

@@ -77,6 +77,8 @@ struct FrameSnapshot {
     touched_keys: BTreeSet<(String, String)>,
     accounts_snapshot: BTreeMap<Address, (u64, u64)>,
     logs_len: usize,
+    frame_gas_limit_bgu: Option<u64>,
+    frame_gas_used_bgu: u64,
 }
 
 /// Nested overlay for a single UEL transaction and its `UniversalCall` stack.
@@ -104,6 +106,8 @@ impl TxOverlay {
                 touched_keys: BTreeSet::new(),
                 accounts_snapshot,
                 logs_len: 0,
+                frame_gas_limit_bgu: None,
+                frame_gas_used_bgu: 0,
             }],
             logs: Vec::new(),
             gas_limit_bgu,
@@ -135,18 +139,41 @@ impl TxOverlay {
         self.gas_used_bgu
     }
 
-    /// Remaining BGU budget in the transaction.
+    /// Remaining BGU budget in the transaction (bounded by active nested frame caps).
     #[must_use]
-    pub const fn remaining_bgu(&self) -> u64 {
-        self.gas_limit_bgu.saturating_sub(self.gas_used_bgu)
+    pub fn remaining_bgu(&self) -> u64 {
+        let mut rem = self.gas_limit_bgu.saturating_sub(self.gas_used_bgu);
+        for frame in &self.frames {
+            if let Some(limit) = frame.frame_gas_limit_bgu {
+                rem = rem.min(limit.saturating_sub(frame.frame_gas_used_bgu));
+            }
+        }
+        rem
     }
 
-    /// Charges `bgu` against the transaction gas limit.
+    /// Charges `bgu` against the transaction and every active frame budget.
     ///
     /// # Errors
     ///
     /// Returns an error if the operation fails.
     pub fn charge_bgu(&mut self, bgu: u64) -> Result<(), budlum_uel_abi::OutOfGas> {
+        for frame in &mut self.frames {
+            if let Some(limit) = frame.frame_gas_limit_bgu {
+                let next_frame = frame
+                    .frame_gas_used_bgu
+                    .checked_add(bgu)
+                    .ok_or(budlum_uel_abi::OutOfGas)?;
+                if next_frame > limit {
+                    let avail = limit.saturating_sub(frame.frame_gas_used_bgu);
+                    frame.frame_gas_used_bgu = limit;
+                    self.gas_used_bgu = self
+                        .gas_used_bgu
+                        .saturating_add(avail)
+                        .min(self.gas_limit_bgu);
+                    return Err(budlum_uel_abi::OutOfGas);
+                }
+            }
+        }
         let next = self
             .gas_used_bgu
             .checked_add(bgu)
@@ -154,6 +181,9 @@ impl TxOverlay {
         if next > self.gas_limit_bgu {
             self.gas_used_bgu = self.gas_limit_bgu;
             return Err(budlum_uel_abi::OutOfGas);
+        }
+        for frame in &mut self.frames {
+            frame.frame_gas_used_bgu = frame.frame_gas_used_bgu.saturating_add(bgu);
         }
         self.gas_used_bgu = next;
         Ok(())
@@ -170,6 +200,21 @@ impl TxOverlay {
         state: &AccountState,
         target_ee: EeId,
         call_static: bool,
+    ) -> Result<(), HostError> {
+        self.push_universal_frame_with_budget(state, target_ee, call_static, None)
+    }
+
+    /// Opens a child `UniversalCall` frame with an optional per-frame BGU budget cap.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
+    pub(crate) fn push_universal_frame_with_budget(
+        &mut self,
+        state: &AccountState,
+        target_ee: EeId,
+        call_static: bool,
+        budget_bgu: Option<u64>,
     ) -> Result<(), HostError> {
         if self.universal_depth() >= MAX_UNIVERSAL_CALL_DEPTH {
             return Err(HostError::DepthExceeded);
@@ -194,6 +239,8 @@ impl TxOverlay {
             touched_keys: BTreeSet::new(),
             accounts_snapshot,
             logs_len: self.logs.len(),
+            frame_gas_limit_bgu: budget_bgu,
+            frame_gas_used_bgu: 0,
         });
         Ok(())
     }

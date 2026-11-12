@@ -916,7 +916,7 @@ impl HostApi for HostBridge<'_> {
         }
         let budget = call.gas_limit.min(self.overlay.remaining_bgu());
         self.overlay
-            .push_universal_frame(self.state, call.to_ee, is_static)?;
+            .push_universal_frame_with_budget(self.state, call.to_ee, is_static, Some(budget))?;
         if call.value.0 > 0 {
             let unit = BudEnvUnit::for_ee(call.to_ee)
                 .ok_or_else(|| HostError::Invalid(String::from("unsupported target EE")))?;

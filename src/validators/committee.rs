@@ -499,7 +499,7 @@ impl CommitteeTable {
 ///
 /// Whenever one or more high-stake validators hit `cap`, the remaining seats are
 /// redistributed **proportionally by stake** among uncapped validators (`floor`
-/// + largest fractional remainder, ties broken by address tie rank), rather than
+/// plus largest fractional remainder, ties broken by address tie rank), rather than
 /// flat round-robin across dust validators.
 fn allocate_seats(
     members: &[(Address, u64)],

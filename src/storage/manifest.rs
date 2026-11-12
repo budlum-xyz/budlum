@@ -784,6 +784,24 @@ impl ContentManifest {
     /// what was missing was anything applying them to a manifest that arrived
     /// fully formed instead of being built locally.
     pub fn validate_untrusted(&self) -> Result<(), String> {
+        self.erasure.validate()?;
+        if self.erasure.n != self.shard_count {
+            return Err(format!(
+                "erasure n {} does not match shard_count {}",
+                self.erasure.n, self.shard_count
+            ));
+        }
+        let data = self
+            .shards
+            .iter()
+            .filter(|s| s.kind == ShardKind::Data)
+            .count() as u32;
+        if data != self.erasure.k {
+            return Err(format!(
+                "erasure k {} does not match the {data} data shards present",
+                self.erasure.k
+            ));
+        }
         self.validate_with_options(true)
     }
 

@@ -1707,7 +1707,7 @@ jobs:
         with:
           toolchain: "1.97.1"
           targets: ${{ matrix.target }}
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: mobile-core-${{ matrix.target }}
           workspaces: mobile/core
@@ -1737,7 +1737,7 @@ jobs:
           toolchain: "1.97.1"
           components: clippy, rustfmt
           targets: aarch64-linux-android, armv7-linux-androideabi, x86_64-linux-android, aarch64-apple-ios, aarch64-apple-ios-sim
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: mobile-ffi
           workspaces: mobile/ffi
@@ -1793,7 +1793,7 @@ jobs:
         with:
           toolchain: "1.97.1"
           components: clippy, rustfmt
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: budlum-explorer
           workspaces: budlum-explorer
@@ -3448,7 +3448,7 @@ jobs:
         with:
           toolchain: "1.97.1"
           components: clippy, rustfmt
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: budlum-types
           workspaces: |

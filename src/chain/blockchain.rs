@@ -8529,9 +8529,9 @@ impl Blockchain {
             .validators
             .iter()
             .any(|v| !v.bls_public_key.is_empty() || !v.pq_public_key.is_empty());
-        let record_at =
-            |height: u64,
-             active_table: &CommitteeTable| -> Option<crate::validators::committee::SeatParticipation> {
+        let record_at = |height: u64,
+                         active_table: &CommitteeTable|
+         -> Option<crate::validators::committee::SeatParticipation> {
             let block = block_at(height)?;
             let record = block.seat_participation.as_ref()?;
             let expected_cp = height.checked_sub(interval)?;
@@ -13519,8 +13519,7 @@ mod bond_and_reorg_tests {
 
     #[test]
     fn derive_seat_table_ignores_forged_participation_without_verified_qc() {
-        let interval =
-            crate::core::chain_config::finality_checkpoint_interval_for_chain_id(45262);
+        let interval = crate::core::chain_config::finality_checkpoint_interval_for_chain_id(45262);
         let mut bc = Blockchain::new(
             std::sync::Arc::new(crate::consensus::PoWEngine::new(0)),
             None,
