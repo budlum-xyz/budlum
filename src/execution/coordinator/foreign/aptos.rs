@@ -6,6 +6,8 @@
 //!   secp256k1 (`2`). OIDC keyless accounts are refused at launch (section 8.15).
 //! - Pins the Aptos authentication-key scheme table and proves `0xBD`
 //!   (`MOVE_ALIAS_SCHEME_BYTE`) is unused.
+//!
+//! Convenience: exposed for CLI, RPC, SDK, and multi-VM runtime callers.
 
 use crate::execution::coordinator::alias::MOVE_ALIAS_SCHEME_BYTE;
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
@@ -387,7 +389,7 @@ pub fn decode_aptos_tx(
                 .map_err(|e| AptosEnvelopeError::InvalidSignature(e.to_string()))?;
             let sig = SecpSig::from_slice(&sig_bytes)
                 .map_err(|e| AptosEnvelopeError::InvalidSignature(e.to_string()))?;
-            if sig.normalize_s().is_some() {
+            if sig.normalize_s() != sig {
                 return Err(AptosEnvelopeError::InvalidSignature(String::from(
                     "high-s secp256k1 signature refused",
                 )));

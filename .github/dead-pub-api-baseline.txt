@@ -59,7 +59,6 @@ src/budlumxyz/mod.rs:update_app
 src/chain/blockchain.rs:emit_mempool_cleanup
 src/chain/blockchain.rs:emit_mempool_eviction
 src/chain/blockchain.rs:emit_reorg
-src/chain/blockchain.rs:is_valid_chain
 src/chain/blockchain.rs:mine_pending_transactions
 src/chain/blockchain.rs:print_info
 src/chain/blockchain.rs:sovereign_template_root

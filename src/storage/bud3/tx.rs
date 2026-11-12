@@ -182,7 +182,7 @@ pub fn apply(
                 ));
             }
             registry
-                .record_repair(&object, segment, new_shares, new_root)
+                .record_repair(&object, segment, new_shares, new_root, epoch)
                 .map(|()| Applied::Repaired)
         }
         StorageTxV3::BindNft { nft, object } => registry

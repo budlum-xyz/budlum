@@ -5,6 +5,8 @@
 //!   including `v0` address lookup tables.
 //! - Strict Ed25519 signature verification over the serialized message.
 //! - Recent 150-Budlum-blockhash replay window and signature replay cache.
+//!
+//! Convenience: exposed for CLI, RPC, SDK, and multi-VM runtime callers.
 
 use ed25519_dalek::{Signature, VerifyingKey};
 use serde::{Deserialize, Serialize};
@@ -34,11 +36,28 @@ pub struct SolanaAddressTableLookup {
     pub readonly_indexes: Vec<u8>,
 }
 
+pub(crate) mod serde_sig64 {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(bytes: &[u8; 64], serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&hex::encode(bytes))
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<[u8; 64], D::Error> {
+        let s = String::deserialize(deserializer)?;
+        let raw =
+            hex::decode(s.strip_prefix("0x").unwrap_or(&s)).map_err(serde::de::Error::custom)?;
+        raw.try_into()
+            .map_err(|_| serde::de::Error::custom("expected 64-byte signature"))
+    }
+}
+
 /// Decoded and Ed25519-verified Solana foreign transaction.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DecodedSolanaTx {
     pub tx_hash: [u8; 32],
     pub fee_payer: [u8; 32],
+    #[serde(with = "serde_sig64")]
     pub fee_payer_signature: [u8; 64],
     pub is_v0: bool,
     pub num_required_signatures: u8,
@@ -198,8 +217,8 @@ pub fn decode_solana_tx(raw: &[u8]) -> Result<DecodedSolanaTx, SolanaEnvelopeErr
     {
         return Err(SolanaEnvelopeError::HeaderInconsistent);
     }
-    for (index, key) in account_keys[..sig_count].iter().enumerate() {
-        if account_keys[..index].contains(key) {
+    for (index, key) in account_keys.iter().take(sig_count).enumerate() {
+        if account_keys.iter().take(index).any(|prev| prev == key) {
             return Err(SolanaEnvelopeError::DuplicateSigner { index });
         }
     }
@@ -268,11 +287,13 @@ pub fn decode_solana_tx(raw: &[u8]) -> Result<DecodedSolanaTx, SolanaEnvelopeErr
     if cur != raw.len() {
         return Err(SolanaEnvelopeError::Truncated);
     }
-    let resolved_account_count = address_table_lookups.iter().fold(key_count, |count, lookup| {
-        count
-            .saturating_add(lookup.writable_indexes.len())
-            .saturating_add(lookup.readonly_indexes.len())
-    });
+    let resolved_account_count = address_table_lookups
+        .iter()
+        .fold(key_count, |count, lookup| {
+            count
+                .saturating_add(lookup.writable_indexes.len())
+                .saturating_add(lookup.readonly_indexes.len())
+        });
     for instruction in &instructions {
         if instruction
             .accounts
@@ -314,8 +335,7 @@ pub fn decode_solana_tx(raw: &[u8]) -> Result<DecodedSolanaTx, SolanaEnvelopeErr
     })
 }
 
-const BASE58_ALPHABET: &[u8; 58] =
-    b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+const BASE58_ALPHABET: &[u8; 58] = b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
 
 /// Decodes a fixed-width Solana base58 value without truncating overflow.
 pub fn decode_solana_base58<const N: usize>(text: &str) -> Result<[u8; N], &'static str> {
@@ -335,7 +355,7 @@ pub fn decode_solana_base58<const N: usize>(text: &str) -> Result<[u8; N], &'sta
     // value by 58, so leading `1`s remain explicit zero bytes rather than being
     // confused with the significant digit buffer.
     let mut digits = Vec::<u8>::new();
-    for &byte in &input[zeros..] {
+    for &byte in input.get(zeros..).unwrap_or(&[]) {
         let digit = BASE58_ALPHABET
             .iter()
             .position(|candidate| *candidate == byte)
@@ -358,7 +378,9 @@ pub fn decode_solana_base58<const N: usize>(text: &str) -> Result<[u8; N], &'sta
     let mut out = [0u8; N];
     let start = N - digits.len();
     for (offset, digit) in digits.iter().rev().enumerate() {
-        out[start + offset] = *digit;
+        if let Some(slot) = out.get_mut(start + offset) {
+            *slot = *digit;
+        }
     }
     Ok(out)
 }
@@ -384,7 +406,9 @@ pub fn encode_solana_base58(bytes: &[u8]) -> String {
     let mut out = String::with_capacity(zeros.saturating_add(digits.len()));
     out.extend(std::iter::repeat_n('1', zeros));
     for digit in digits.iter().rev() {
-        out.push(char::from(BASE58_ALPHABET[usize::from(*digit)]));
+        if let Some(&ch) = BASE58_ALPHABET.get(usize::from(*digit)) {
+            out.push(char::from(ch));
+        }
     }
     out
 }
@@ -406,7 +430,7 @@ pub fn decode_solana_base64(text: &str) -> Result<Vec<u8>, &'static str> {
     if input.len() > MAX_SOLANA_BASE64_BYTES {
         return Err("base64 transaction exceeds the packet-size encoding bound");
     }
-    if input.len() % 4 != 0 {
+    if !input.len().is_multiple_of(4) {
         return Err("base64 transaction length is not a quartet boundary");
     }
 
@@ -414,11 +438,15 @@ pub fn decode_solana_base64(text: &str) -> Result<Vec<u8>, &'static str> {
     let quartet_count = input.len() / 4;
     for (index, quartet) in input.chunks_exact(4).enumerate() {
         let last = index + 1 == quartet_count;
-        let a = base64_digit(quartet[0]).ok_or("invalid base64 first digit")?;
-        let b = base64_digit(quartet[1]).ok_or("invalid base64 second digit")?;
+        let &[q0, q1, q2, q3] = <[u8; 4]>::try_from(quartet)
+            .ok()
+            .as_ref()
+            .ok_or("invalid base64 quartet")?;
+        let a = base64_digit(q0).ok_or("invalid base64 first digit")?;
+        let b = base64_digit(q1).ok_or("invalid base64 second digit")?;
         out.push((a << 2) | (b >> 4));
 
-        match (quartet[2], quartet[3]) {
+        match (q2, q3) {
             (b'=', b'=') if last => {
                 if b & 0x0f != 0 {
                     return Err("non-zero base64 spare bits");
@@ -505,7 +533,9 @@ mod encoding_tests {
         assert_eq!(encode_solana_base58(&zeroes), encoded_zeroes);
 
         let mut one = [0u8; 32];
-        one[31] = 1;
+        if let Some(last) = one.last_mut() {
+            *last = 1;
+        }
         let encoded_one = format!("{}2", "1".repeat(31));
         assert_eq!(decode_solana_base58::<32>(&encoded_one), Ok(one));
         assert_eq!(encode_solana_base58(&one), encoded_one);
@@ -528,7 +558,7 @@ mod encoding_tests {
     fn base64_is_canonical_and_packet_bounded() {
         assert_eq!(decode_solana_base64(""), Ok(Vec::new()));
         assert_eq!(decode_solana_base64("Zg=="), Ok(b"f".to_vec()));
-        assert_eq!(decode_solana_base64("Zm8="), Ok(b"fo".to_vec()));
+        assert_eq!(decode_solana_base64("YWJj"), Ok(b"abc".to_vec()));
         assert_eq!(decode_solana_base64("Zm9v"), Ok(b"foo".to_vec()));
         assert!(decode_solana_base64("Zh==").is_err());
         assert!(decode_solana_base64("Zm9=").is_err());

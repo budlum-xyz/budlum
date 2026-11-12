@@ -1,7 +1,7 @@
 # B.U.D. 3.0 Content Encryption, Unlinkable Grants, and Cryptographic Shredding
 
 This document specifies the B.U.D. 3.0 sealed-object encryption pipeline
-(`src/storage/bud3/seal.rs`), post-quantum hybrid key packages (`src/storage/bud3/keys.rs`),
+(`src/storage/bud3/seal.rs`), post-quantum hybrid key packages (`src/storage/bud3/keys.rs`), <!-- claim:S-I0 -->
 unlinkable view grants (`src/storage/bud3/grants.rs`), and cryptographic erasure
 (`src/storage/bud3/delete.rs`).
 
@@ -30,7 +30,7 @@ unlinkable view grants (`src/storage/bud3/grants.rs`), and cryptographic erasure
 ## 3. X-Wing (`0x647a`) Hybrid Key Packages and Unlinkable Grants
 
 - Every `ObjectKeyPackage { object_key, content_id }` shared with a reader is
-  encapsulated to the recipient's hybrid post-quantum `X-Wing` (`ML-KEM-768 + X25519`,
+  encapsulated to the recipient's hybrid post-quantum `X-Wing` (`ML-KEM-768 + X25519`, <!-- claim:S-I0 -->
   IANA KEM `0x647a`) public key (`seal_key_package_xwing` / `open_key_package_xwing`).
 - On-chain `GrantRow` records (`IssueViewGrant` / `RevokeViewGrant`) store **only**:
   - `grant_tag = SHA-256("BDLM_BUD3_GRANT_V1" || nft_id || grant_nonce)`,

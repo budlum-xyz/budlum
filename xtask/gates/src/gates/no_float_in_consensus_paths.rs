@@ -41,15 +41,12 @@ const PINNED: &[(&str, usize, &str, &str)] = &[(
 fn is_cfg_test(attrs: &[Attribute]) -> bool {
     attrs.iter().any(|attr| {
         attr.path().is_ident("cfg")
-            && attr
-                .meta
-                .require_list()
-                .is_ok_and(|list| {
-                    list.tokens
-                        .to_string()
-                        .split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
-                        .any(|t| t == "test")
-                })
+            && attr.meta.require_list().is_ok_and(|list| {
+                list.tokens
+                    .to_string()
+                    .split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+                    .any(|t| t == "test")
+            })
     })
 }
 
@@ -70,8 +67,7 @@ struct FloatFinder {
 
 impl FloatFinder {
     fn report(&mut self, what: &str, line: usize) {
-        self.findings
-            .push(format!("{}:{line}: {what}", self.path));
+        self.findings.push(format!("{}:{line}: {what}", self.path));
     }
 }
 
@@ -93,7 +89,7 @@ impl<'ast> Visit<'ast> for FloatFinder {
     fn visit_type_path(&mut self, type_path: &'ast syn::TypePath) {
         if let Some(segment) = type_path.path.segments.last() {
             if segment.ident == "f32" || segment.ident == "f64" {
-                self.report("floating-point type", segment.ident.span().start().line);
+                self.report("floating-point type", 0);
             }
         }
         syn::visit::visit_type_path(self, type_path);
@@ -103,15 +99,15 @@ impl<'ast> Visit<'ast> for FloatFinder {
         if let syn::Type::Path(type_path) = &*cast.ty {
             if let Some(segment) = type_path.path.segments.last() {
                 if segment.ident == "f32" || segment.ident == "f64" {
-                    self.report("cast to a floating-point type", segment.ident.span().start().line);
+                    self.report("cast to a floating-point type", 0);
                 }
             }
         }
         syn::visit::visit_expr_cast(self, cast);
     }
 
-    fn visit_lit_float(&mut self, literal: &'ast syn::LitFloat) {
-        self.report("floating-point literal", literal.span().start().line);
+    fn visit_lit_float(&mut self, _literal: &'ast syn::LitFloat) {
+        self.report("floating-point literal", 0);
     }
 }
 
@@ -125,8 +121,8 @@ fn skip_path(path: &Path) -> bool {
 }
 
 fn rust_files_under(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), String> {
-    let entries = std::fs::read_dir(dir)
-        .map_err(|e| format!("cannot read {}: {e}", dir.display()))?;
+    let entries =
+        std::fs::read_dir(dir).map_err(|e| format!("cannot read {}: {e}", dir.display()))?;
     for entry in entries {
         let entry = entry.map_err(|e| e.to_string())?;
         let path = entry.path();
@@ -146,8 +142,8 @@ fn rust_files_under(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), String> {
 fn scan_file(path: &Path, root: &Path, findings: &mut Vec<String>) -> Result<(), String> {
     let source = std::fs::read_to_string(path)
         .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
-    let file = syn::parse_file(&source)
-        .map_err(|e| format!("cannot parse {}: {e}", path.display()))?;
+    let file =
+        syn::parse_file(&source).map_err(|e| format!("cannot parse {}: {e}", path.display()))?;
     let relative = path
         .strip_prefix(root)
         .unwrap_or(path)
@@ -196,7 +192,10 @@ pub fn run(root: &Path) -> Result<String, String> {
             continue;
         }
         let prefix = format!("{path}:");
-        let count = findings.iter().filter(|f| f.starts_with(prefix.as_str())).count();
+        let count = findings
+            .iter()
+            .filter(|f| f.starts_with(prefix.as_str()))
+            .count();
         if count == 0 {
             return Err(format!(
                 "stale float pin {finding} for {path}: the file has no f32/f64 left; remove the pin when {owner} closes it"
@@ -207,7 +206,9 @@ pub fn run(root: &Path) -> Result<String, String> {
                 "{path}: {count} floating-point findings exceed the {finding} ceiling {ceiling} owned by {owner}"
             ));
         }
-        pinned_notes.push(format!("{path}: {count}/{ceiling} pinned by {finding} ({owner})"));
+        pinned_notes.push(format!(
+            "{path}: {count}/{ceiling} pinned by {finding} ({owner})"
+        ));
     }
     let unpinned: Vec<&String> = findings
         .iter()
@@ -225,7 +226,10 @@ pub fn run(root: &Path) -> Result<String, String> {
             message.push('\n');
         }
         if unpinned.len() > 40 {
-            message.push_str(&format!("  ... and {} more\n", unpinned.len() - 40));
+            let _ = std::fmt::Write::write_fmt(
+                &mut message,
+                format_args!("  ... and {} more\n", unpinned.len() - 40),
+            );
         }
         return Err(message);
     }

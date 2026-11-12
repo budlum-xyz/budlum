@@ -2,6 +2,7 @@
 //!
 //! Provides deterministic model registry specifications, bounded execution reference
 //! Payloads, attestation request/result primitives, and consensus agreement outcomes.
+//! Convenience: exposed for CLI, RPC, SDK, and multi-VM runtime callers.
 
 use crate::core::address::Address;
 use serde::{Deserialize, Serialize};
@@ -44,16 +45,16 @@ fn permyriad_of_ratio(numerator: u64, denominator: u64) -> u64 {
     if denominator == 0 {
         return 0;
     }
-    let scaled = u128::from(numerator) * u128::from(TRUST_SCORE_BASIS_POINTS)
-        / u128::from(denominator);
+    let scaled =
+        u128::from(numerator) * u128::from(TRUST_SCORE_BASIS_POINTS) / u128::from(denominator);
     let capped = scaled.min(u128::from(TRUST_SCORE_BASIS_POINTS));
     u64::try_from(capped).unwrap_or(TRUST_SCORE_BASIS_POINTS)
 }
 
 /// Applies a permyriad factor to a permyriad score, truncating toward zero.
 fn permyriad_scale(value: u64, factor_permyriad: u64) -> u64 {
-    let scaled = u128::from(value) * u128::from(factor_permyriad)
-        / u128::from(TRUST_SCORE_BASIS_POINTS);
+    let scaled =
+        u128::from(value) * u128::from(factor_permyriad) / u128::from(TRUST_SCORE_BASIS_POINTS);
     let capped = scaled.min(u128::from(TRUST_SCORE_BASIS_POINTS));
     u64::try_from(capped).unwrap_or(TRUST_SCORE_BASIS_POINTS)
 }
@@ -875,10 +876,8 @@ impl AiVerifierQos {
         if self.total_results_submitted == 0 {
             return 0;
         }
-        let finalization_rate = permyriad_of_ratio(
-            self.successful_finalizations,
-            self.total_results_submitted,
-        );
+        let finalization_rate =
+            permyriad_of_ratio(self.successful_finalizations, self.total_results_submitted);
         let penalty = self
             .equivocation_count
             .saturating_mul(VERIFIER_EQUIVOCATION_PENALTY_PERMYRIAD)
@@ -940,7 +939,9 @@ impl AiInferenceOutcome {
         hasher.update(b"BDLM_AI_OUTCOME_LEAF_V1");
         hasher.update(self.request_id.0);
         hasher.update(self.output_commitment);
+        hasher.update((self.output_ref.len() as u64).to_le_bytes());
         hasher.update(self.output_ref.as_slice());
+        hasher.update((self.agreeing_verifiers.len() as u64).to_le_bytes());
         for verifier in &self.agreeing_verifiers {
             hasher.update(verifier.as_bytes());
         }
@@ -1455,11 +1456,7 @@ mod tests {
         );
         let mut m = valid_spec();
         m.modalities = crate::ai_inference::perception::ModalitySet::none();
-        assert_ne!(
-            base,
-            m.calculate_leaf(),
-            "modalities must change the leaf"
-        );
+        assert_ne!(base, m.calculate_leaf(), "modalities must change the leaf");
     }
 
     #[test]

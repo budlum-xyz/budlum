@@ -2,7 +2,7 @@
 //! hardening regression locks (functional regression names).
 
 use crate::chain::snapshot::{PruningManager, StateSnapshotV2, StateSnapshotV2Params};
-use crate::core::account::{AccountState, Validator};
+use crate::core::account::AccountState;
 use crate::core::address::Address;
 use crate::core::governance::ProposalType;
 use crate::core::transaction::{Transaction, TransactionType};
@@ -38,7 +38,7 @@ fn snapshot_params(height: u64) -> StateSnapshotV2Params {
 fn role_bond_enforces_vesting_lock() {
     let mut state = AccountState::new();
     let team = addr(0x21);
-    let min_bond = state.registry.params.min_relayer_stake;
+    let min_bond = state.registry.params().min_stake;
     let total_locked = min_bond.saturating_mul(4);
 
     state.add_balance(&team, total_locked);
@@ -58,12 +58,14 @@ fn role_bond_enforces_vesting_lock() {
         "vesting-locked balance must not fund a relayer bond"
     );
     assert!(
-        state.bond_prover(&team, state.registry.params.min_prover_stake).is_err(),
+        state
+            .bond_prover(&team, state.registry.params().min_stake)
+            .is_err(),
         "vesting-locked balance must not fund a prover bond"
     );
     assert!(
         state
-            .bond_storage_operator(&team, state.registry.params.min_storage_stake)
+            .bond_storage_operator(&team, state.registry.params().min_stake)
             .is_err(),
         "vesting-locked balance must not fund a storage operator bond"
     );
@@ -169,7 +171,7 @@ fn unstake_checks_fee_not_staked_amount_and_enforces_vesting() {
     let staked = 50_000_000u64;
     let liquid_fee_budget = 500u64;
     state.add_balance(&validator, liquid_fee_budget);
-    state.add_validator(Validator::new(validator, staked));
+    state.add_validator(validator, staked);
 
     // Pre-sign validation: `validate_transaction_with_context` must NOT reject
     // `Unstake` for insufficient balance when `spendable_balance >= fee` even
@@ -202,7 +204,7 @@ fn unstake_checks_fee_not_staked_amount_and_enforces_vesting() {
     let locked_val = addr(0x42);
     let mut vested_state = AccountState::new();
     vested_state.add_balance(&locked_val, 1_000);
-    vested_state.add_validator(Validator::new(locked_val, staked));
+    vested_state.add_validator(locked_val, staked);
     vested_state.team_vesting = Some((
         locked_val,
         VestingSchedule {
@@ -236,10 +238,11 @@ fn slashed_proposer_and_missing_proposal_vote_refuse_without_debit() {
     let jailed = addr(0x51);
     let mut state = AccountState::new();
     state.add_balance(&jailed, 10_000);
-    let mut v = Validator::new(jailed, 50_000);
-    v.jailed = true;
-    v.jail_until = 100;
-    state.add_validator(v);
+    state.add_validator(jailed, 50_000);
+    if let Some(v) = state.validators.get_mut(&jailed) {
+        v.jailed = true;
+        v.jail_until = 100;
+    }
 
     let mut create_payload = 10u64.to_le_bytes().to_vec();
     create_payload.extend_from_slice(
@@ -263,7 +266,7 @@ fn slashed_proposer_and_missing_proposal_vote_refuse_without_debit() {
 
     let active = addr(0x52);
     state.add_balance(&active, 10_000);
-    state.add_validator(Validator::new(active, 50_000));
+    state.add_validator(active, 50_000);
     let mut missing_vote = vec![1u8];
     missing_vote.extend_from_slice(&9999u64.to_le_bytes());
     let vote_tx = Transaction::new_with_chain_id(
@@ -291,7 +294,7 @@ fn governance_slash_syncs_permissionless_registry() {
     let proposer = addr(0x62);
     let mut state = AccountState::new();
     let stake = 20_000u64;
-    state.add_validator(Validator::new(offender, stake));
+    state.add_validator(offender, stake);
     state
         .registry
         .register_validator(offender, stake, 0)
@@ -338,7 +341,9 @@ fn governance_slash_syncs_permissionless_registry() {
         .expect("create slash proposal");
     let prop = state
         .governance
-        .find_proposal(prop_id)
+        .proposals
+        .iter()
+        .find(|p| p.id == prop_id)
         .cloned()
         .expect("proposal exists");
     state.execute_proposal(&prop);
@@ -379,7 +384,7 @@ fn total_cost_overflow_and_stake_overflow_refuse_without_partial_write() {
     let staker = addr(0x73);
     let mut stake_state = AccountState::new();
     stake_state.add_balance(&staker, 1_000);
-    stake_state.add_validator(Validator::new(staker, u64::MAX - 10));
+    stake_state.add_validator(staker, u64::MAX - 10);
     let stake_tx = Transaction::new_with_chain_id(
         staker,
         Address::zero(),

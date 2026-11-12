@@ -41,7 +41,7 @@ fn budzero_soft_budget_equals_the_hard_block_limit() {
     assert_eq!(BLOCK_BGU_LIMIT, 60_000_000);
     assert_eq!(MAX_BLOCK_CONTRACT_GAS, BLOCK_BGU_LIMIT);
     assert_eq!(soft_limit_for_ee(EeId::BUDZERO), Some(BLOCK_BGU_LIMIT));
-    assert!(DEFAULT_CONTRACT_GAS_LIMIT <= MAX_BLOCK_CONTRACT_GAS);
+    const { assert!(DEFAULT_CONTRACT_GAS_LIMIT <= MAX_BLOCK_CONTRACT_GAS) };
     assert_eq!(MAX_BLOCK_CONTRACT_GAS / DEFAULT_CONTRACT_GAS_LIMIT, 60);
 }
 
@@ -64,7 +64,11 @@ fn the_sixty_first_full_budzero_call_is_refused_before_execution() {
     assert!(Executor::check_contract_call_count(60).is_ok());
     let error = Executor::check_contract_call_count(61)
         .expect_err("61 full calls price 61,000,000 BGU and must not fit a 60,000,000 BGU block");
-    assert!(error.message().contains("block budget"), "{}", error.message());
+    assert!(
+        error.message().contains("block budget"),
+        "{}",
+        error.message()
+    );
 }
 
 #[test]

@@ -1,3 +1,5 @@
+//! Convenience: exposed for CLI, RPC, SDK, and multi-VM runtime callers.
+
 use crate::core::transaction::DEFAULT_CHAIN_ID;
 use bud_proof::{DefaultAdapter as Prover, ExecutionPublicInputs, ProofEnvelope, ProverAdapter};
 use bud_vm::Vm;
@@ -130,6 +132,41 @@ impl ZkVmExecutor {
     /// its sender, nonce and block height, so the syscalls that read them and
     /// the public inputs that repeat them describe this transaction rather
     /// than a zeroed one. The executor's `ContractCall` path is the caller.
+    /// Execution-only gated VM run for consensus `ContractCall` (§8.8: deterministic
+    /// execution without inline per-validator STARK proof generation).
+    pub fn execute_bytecode_vm_only(
+        bytecode: &[u8],
+        gas_limit: u64,
+        ctx: TxContext,
+    ) -> Result<ZkVmReceipt, String> {
+        if bytecode.is_empty() {
+            return Err("Empty BudZKVM bytecode".into());
+        }
+        if !bytecode.len().is_multiple_of(8) {
+            return Err("BudZKVM bytecode length must be a multiple of 8 bytes".into());
+        }
+        let program = decode_program(bytecode)?;
+        let mut vm = Vm::with_mainnet_mode(CONTRACT_VM_MEMORY_BYTES, gas_limit, true);
+        vm.context.sender = ctx.sender;
+        vm.context.nonce = ctx.nonce;
+        vm.context.block_height = ctx.block_height;
+        let receipt =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| vm.run_receipt(&program)))
+                .map_err(|_| "BudZKVM execution failed".to_string())?;
+        if !receipt.success {
+            return Err(match receipt.error {
+                Some(e) => format!("BudZKVM execution failed: {e:?}"),
+                None => "BudZKVM execution failed".to_string(),
+            });
+        }
+        Ok(ZkVmReceipt {
+            gas_used: receipt.gas_used,
+            steps: receipt.trace_len as usize,
+            events: receipt.events,
+            proof_bytes: 0,
+        })
+    }
+
     pub fn execute_bytecode(
         bytecode: &[u8],
         gas_limit: u64,

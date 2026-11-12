@@ -105,9 +105,7 @@ where
     {
         if self.limit_current_container {
             let count = access.size_hint().ok_or_else(|| {
-                <A::Error as de::Error>::custom(
-                    "bincode map is missing its bounded entry count",
-                )
+                <A::Error as de::Error>::custom("bincode map is missing its bounded entry count")
             })?;
             let remaining = self.item_budget.get();
             if count > remaining {
@@ -121,6 +119,14 @@ where
             inner: access,
             item_budget: self.item_budget,
         })
+    }
+
+    fn visit_none<E>(self) -> Result<Self::Value, E>
+    where
+        E: de::Error,
+    {
+        // None allocates no container and must not replenish the shared budget.
+        self.inner.visit_none()
     }
 
     fn visit_some<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
@@ -416,11 +422,8 @@ where
     where
         V: Visitor<'de>,
     {
-        self.inner.deserialize_struct(
-            name,
-            fields,
-            GuardVisitor::fixed(visitor, self.item_budget),
-        )
+        self.inner
+            .deserialize_struct(name, fields, GuardVisitor::fixed(visitor, self.item_budget))
     }
 
     fn deserialize_enum<V>(
@@ -463,8 +466,8 @@ pub(crate) fn decode_bounded_bincode<T: DeserializeOwned>(
             bytes.len()
         ));
     }
-    let byte_limit = u64::try_from(bytes.len())
-        .map_err(|_| "bincode limit exceeds u64".to_string())?;
+    let byte_limit =
+        u64::try_from(bytes.len()).map_err(|_| "bincode limit exceeds u64".to_string())?;
     use bincode::Options as _;
     bincode::DefaultOptions::new()
         .with_fixint_encoding()
@@ -542,7 +545,7 @@ mod tests {
         let expected = vec![1u8, 2, 3];
         let mut payload = bincode::serialize(&expected).expect("serialize");
         payload.push(0xA5);
-        let decoded = decode_bounded_bincode(&payload, payload.len()).expect("decode");
+        let decoded: Vec<u8> = decode_bounded_bincode(&payload, payload.len()).expect("decode");
         assert_eq!(decoded, expected);
     }
 
@@ -550,7 +553,61 @@ mod tests {
     fn claimed_string_length_cannot_exceed_the_input_byte_budget() {
         let payload = 4_096u64.to_le_bytes();
         let result = decode_bounded_bincode::<String>(&payload, payload.len());
-        assert!(result.is_err(), "a length prefix cannot authorize missing bytes");
+        assert!(
+            result.is_err(),
+            "a length prefix cannot authorize missing bytes"
+        );
+    }
+
+    // Strix PR126-I6721058664: the guard must forward valid None values,
+    // without giving Some containers a new allocation budget.
+    #[test]
+    fn optional_scalars_preserve_none_and_some() {
+        for expected in [None, Some(0u64), Some(u64::MAX)] {
+            let payload = bincode::serialize(&expected).expect("serialize option");
+            let actual: Option<u64> =
+                decode_bounded_bincode(&payload, payload.len()).expect("decode option");
+            assert_eq!(actual, expected);
+        }
+    }
+
+    #[test]
+    fn nested_optional_collections_preserve_none() {
+        #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+        enum Payload {
+            Values(Vec<Option<Vec<u8>>>),
+            Record {
+                epoch: Option<u64>,
+                grants: BTreeMap<u8, Option<Vec<u8>>>,
+            },
+        }
+        let values = Payload::Values(vec![None, Some(Vec::new()), Some(vec![1, 2]), None]);
+        let record = Payload::Record {
+            epoch: None,
+            grants: BTreeMap::from([(1, None), (2, Some(vec![3]))]),
+        };
+        for expected in [values, record] {
+            let payload = bincode::serialize(&expected).expect("serialize nested options");
+            let actual: Payload =
+                decode_bounded_bincode(&payload, payload.len()).expect("decode nested options");
+            assert_eq!(actual, expected);
+        }
+    }
+
+    #[test]
+    fn some_collection_still_shares_the_item_budget() {
+        let mut payload = vec![1u8]; // Some
+        payload.extend_from_slice(&4_096u64.to_le_bytes());
+        let error = decode_bounded_bincode::<Option<Vec<()>>>(&payload, payload.len())
+            .expect_err("Some must not bypass the count guard");
+        assert!(error.contains("sequence item count"), "{error}");
+    }
+
+    #[test]
+    fn malformed_or_truncated_options_are_refused() {
+        for payload in [&[][..], &[1][..], &[2][..]] {
+            assert!(decode_bounded_bincode::<Option<u64>>(payload, payload.len()).is_err());
+        }
     }
 
     #[test]

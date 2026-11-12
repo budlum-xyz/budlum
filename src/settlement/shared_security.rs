@@ -54,13 +54,20 @@ pub const MAX_USED_ALLOCATION_MESSAGES: usize = 100_000;
 pub const MAX_REGISTRAR_BYTES: usize = 32;
 /// Length of a compressed BLS12-381 G2 public key, as Budlum registers it.
 pub const BLS_PUBLIC_KEY_BYTES: usize = 96;
+/// How many Budlum epochs an attested allocation stays in force.
+///
+/// Nothing on Budlum re-reads the operator's allocation on the other chain, so
+/// a row is only as true as the event that wrote it. The window is long enough
+/// for a permissionless `reportAllocation` to be carried and anchored, and an
+/// operator that wants its restaked weight re-attests inside it.
+pub const MAX_ALLOCATION_AGE_EPOCHS: u64 = 100;
 /// Parts per million.
 const PPM: u128 = 1_000_000;
 
 /// The Mikoriza parameters of a profile (genesis parameters).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SharedSecurityParams {
-    /// The genesis flag.
+    /// The genesis flag (10.7).
     pub enabled: bool,
     /// The restaked share of the total weight never exceeds this.
     pub max_restaked_share_ppm: u32,
@@ -211,12 +218,19 @@ pub struct SharedSecurityRegistry {
     pub registrars: BTreeMap<u32, Vec<u8>>,
     pub validators: BTreeMap<Address, RestakedValidator>,
     pub used_messages: BTreeSet<[u8; 32]>,
+    /// The Budlum epoch each row was last written from an attested event, so
+    /// the weight pass can refuse an allocation that has not been re-attested.
+    #[serde(default)]
+    pub attested_at: BTreeMap<Address, u64>,
 }
 
 impl SharedSecurityRegistry {
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.registrars.is_empty() && self.validators.is_empty() && self.used_messages.is_empty()
+        self.registrars.is_empty()
+            && self.validators.is_empty()
+            && self.used_messages.is_empty()
+            && self.attested_at.is_empty()
     }
 
     /// The registry root, folded into the settlement root once the registry
@@ -391,6 +405,7 @@ fn observe(
         ));
     }
     let message_id = message.message_id;
+    let attested_at = state.epoch_index;
     let registry = &mut state.settlement.shared_security;
     if registry.used_messages.contains(&message_id) {
         return Err(refused("Mikoriza allocation event has already been used"));
@@ -414,18 +429,16 @@ fn observe(
     registry.used_messages.insert(message_id);
     // The registrar keeps one `validator` slot per operator, so an operator's
     // live allocation names one validator at a time: a newer report from that
-    // operator for another validator means it moved and the validator it was
-    // bound to before is no longer backed. Retire the old row, or the same
-    // allocation counts twice in `apply_restaked_weights`.
-    if allocation.allocated_units > 0 {
-        for row in registry.validators.values_mut() {
-            if row.budlum_validator != allocation.budlum_validator
-                && row.source == source
-                && row.eth_operator == allocation.eth_operator
-                && row.status == RestakeStatus::Active
-            {
-                row.status = RestakeStatus::Exited;
-            }
+    // operator for another validator (even with zero allocated units on exit)
+    // means it moved and the validator it was bound to before is no longer
+    // backed. Retire the old row unconditionally.
+    for row in registry.validators.values_mut() {
+        if row.budlum_validator != allocation.budlum_validator
+            && row.source == source
+            && row.eth_operator == allocation.eth_operator
+            && row.status == RestakeStatus::Active
+        {
+            row.status = RestakeStatus::Exited;
         }
     }
     registry.validators.insert(
@@ -444,6 +457,9 @@ fn observe(
             bls_public_key: allocation.bls_public_key.clone(),
         },
     );
+    registry
+        .attested_at
+        .insert(allocation.budlum_validator, attested_at);
     Ok(())
 }
 
@@ -460,6 +476,23 @@ pub fn apply_restaked_weights(state: &mut AccountState, params: &SharedSecurityP
     if params.enabled {
         for (address, row) in &state.settlement.shared_security.validators {
             if row.status != RestakeStatus::Active {
+                continue;
+            }
+            // A row is a claim about collateral that is free to move on the
+            // other chain, and nothing here re-reads that chain. The
+            // attestation therefore expires and the weight with it; a row with
+            // no recorded attestation epoch is not counted, so restored state
+            // fails closed.
+            let Some(attested) = state
+                .settlement
+                .shared_security
+                .attested_at
+                .get(address)
+                .copied()
+            else {
+                continue;
+            };
+            if epoch.saturating_sub(attested) > MAX_ALLOCATION_AGE_EPOCHS {
                 continue;
             }
             // The row must also name the key the validator registered. The
@@ -751,6 +784,21 @@ mod tests {
         apply_restaked_weights(&mut state, &params);
         assert_eq!(state.validators[&left].restaked_weight, 0);
         assert!(state.validators[&moved_to].restaked_weight > 0);
+
+        // Moving again with zero allocated units (operator rebind + unstake in
+        // one Ethereum epoch) must also retire `moved_to`.
+        let zero_dest = Address::from([6u8; 32]);
+        let tx = observe_tx(&mut state, &claim(zero_dest, 0, 7), 2);
+        execute_shared_security_tx(&mut state, &ctx(carrier, devnet()), &tx)
+            .expect("zero-unit move records");
+        assert!(state.settlement.shared_security.active(&moved_to).is_none());
+        assert!(state
+            .settlement
+            .shared_security
+            .active(&zero_dest)
+            .is_none());
+        apply_restaked_weights(&mut state, &params);
+        assert_eq!(state.validators[&moved_to].restaked_weight, 0);
     }
 
     #[test]
@@ -815,6 +863,11 @@ mod tests {
                         bls_public_key: Vec::new(),
                     },
                 );
+                state
+                    .settlement
+                    .shared_security
+                    .attested_at
+                    .insert(address, state.epoch_index);
             }
         }
         apply_restaked_weights(&mut state, &params);
@@ -879,6 +932,11 @@ mod tests {
                     bls_public_key: named_key.clone(),
                 },
             );
+            state
+                .settlement
+                .shared_security
+                .attested_at
+                .insert(address, state.epoch_index);
         }
 
         apply_restaked_weights(&mut state, &params);
@@ -932,18 +990,56 @@ mod tests {
     }
 
     #[test]
-    fn shared_security_is_closed_on_testnet() {
-        let operator = Address::from([0x21; 32]);
-        let mut state = state_with_registrar(operator);
-        let testnet = crate::core::chain_config::Network::Testnet
-            .chain_id()
-            .value();
-        let tx = SharedSecurityTx::SetRegistrar {
-            domain_key: DOMAIN,
-            registrar: REGISTRAR.to_vec(),
+    fn restaked_weight_expires_past_freshness_window_and_resumes_on_refresh() {
+        let params = SharedSecurityParams {
+            enabled: true,
+            max_restaked_share_ppm: 300_000,
+            units_to_weight_ppm: 1_000_000,
         };
-        let err = execute_shared_security_tx(&mut state, &ctx(operator, testnet), &tx)
-            .expect_err("shared security must be closed on testnet");
-        assert!(err.to_string().contains("not enabled"));
+        let mut state = AccountState::new();
+        let addr = Address::from([0x44; 32]);
+        let key = vec![0xB1; BLS_PUBLIC_KEY_BYTES];
+        let mut validator = Validator::new(addr, 1_000);
+        validator.active = true;
+        validator.bls_public_key = key.clone();
+        state.validators.insert(addr, validator);
+        state.settlement.shared_security.validators.insert(
+            addr,
+            RestakedValidator {
+                budlum_validator: addr,
+                eth_operator: [0x11; 20],
+                allocated_units: 10_000,
+                source: RestakeSource::EigenLayer,
+                observed_epoch: 1,
+                status: RestakeStatus::Active,
+                bls_public_key: key,
+            },
+        );
+        // Unstamped row fails closed.
+        apply_restaked_weights(&mut state, &params);
+        assert_eq!(state.validators[&addr].restaked_weight, 0);
+
+        // Stamped at epoch 5: counts up to 5 + MAX_ALLOCATION_AGE_EPOCHS, expires past it.
+        state.epoch_index = 5;
+        state.settlement.shared_security.attested_at.insert(addr, 5);
+        apply_restaked_weights(&mut state, &params);
+        assert!(state.validators[&addr].restaked_weight > 0);
+
+        state.epoch_index = 5 + MAX_ALLOCATION_AGE_EPOCHS;
+        apply_restaked_weights(&mut state, &params);
+        assert!(state.validators[&addr].restaked_weight > 0);
+
+        state.epoch_index = 5 + MAX_ALLOCATION_AGE_EPOCHS + 1;
+        apply_restaked_weights(&mut state, &params);
+        assert_eq!(state.validators[&addr].restaked_weight, 0);
+
+        // Re-attesting at the current epoch restores weight.
+        state
+            .settlement
+            .shared_security
+            .attested_at
+            .insert(addr, state.epoch_index);
+        apply_restaked_weights(&mut state, &params);
+        assert!(state.validators[&addr].restaked_weight > 0);
     }
 }

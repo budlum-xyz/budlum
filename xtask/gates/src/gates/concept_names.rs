@@ -405,7 +405,9 @@ fn check(root: &Path, write: bool) -> Result<String, String> {
         }
         for (name, c) in &counts {
             let Some(b) = baseline.get(name) else {
-                return Err(format!("refusing to write: {name} has no existing baseline"));
+                return Err(format!(
+                    "refusing to write: {name} has no existing baseline"
+                ));
             };
             if c.files > b.files || c.matches > b.matches {
                 return Err(format!(
@@ -602,14 +604,14 @@ mod tests {
     #[test]
     fn concept_names_baseline_rejects_duplicate_rows() {
         let duplicate = "Canaryname|0|0\nCanaryname|0|0\n";
-        assert!(parse_baseline(duplicate)
-            .is_err_and(|e| e.contains("duplicate concept")));
+        assert!(parse_baseline(duplicate).is_err_and(|e| e.contains("duplicate concept")));
     }
 
     #[test]
     fn concept_names_writer_requires_an_exact_existing_baseline() {
-        let dir = crate::gates::rust_literals::exclusive_scratch_dir("budlum-gates-concepts-writer")
-            .expect("create isolated scratch directory");
+        let dir =
+            crate::gates::rust_literals::exclusive_scratch_dir("budlum-gates-concepts-writer")
+                .expect("create isolated scratch directory");
         let result = (|| {
             stage(&dir, CANARY_MAP, "Canaryname|0|0\n")?;
             std::fs::remove_file(dir.join(BASELINE_PATH)).map_err(|e| e.to_string())?;

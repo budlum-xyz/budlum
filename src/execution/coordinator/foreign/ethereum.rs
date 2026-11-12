@@ -5,6 +5,8 @@
 //! - EIP-155 chain ID `45261` strictly required across types `0`, `1`, `2`, `4`.
 //! - Type `3` (EIP-4844 blob transactions) explicitly refused (section 8.15).
 //! - Low-`s` (EIP-2) secp256k1 sender recovery (`crypto::secp256k1_recover`).
+//!
+//! Convenience: exposed for CLI, RPC, SDK, and multi-VM runtime callers.
 
 use crate::cross_domain::evm::rlp::{self, Item};
 use crate::crypto::secp256k1_recover::recover_address;
@@ -100,8 +102,8 @@ impl std::fmt::Display for EthereumEnvelopeError {
 }
 
 fn decode_u128_be(item: &Item) -> Result<u128, EthereumEnvelopeError> {
-    let bytes = rlp::as_bytes(item)
-        .map_err(|e| EthereumEnvelopeError::MalformedRlp(e.to_string()))?;
+    let bytes =
+        rlp::as_bytes(item).map_err(|e| EthereumEnvelopeError::MalformedRlp(e.to_string()))?;
     if bytes.len() > 16 {
         return Err(EthereumEnvelopeError::MalformedRlp(String::from(
             "integer exceeds 128 bits",
@@ -131,8 +133,8 @@ pub(crate) fn encode_u128_item(val: u128) -> Item {
 }
 
 fn decode_scalar32(item: &Item) -> Result<[u8; 32], EthereumEnvelopeError> {
-    let bytes = rlp::as_bytes(item)
-        .map_err(|e| EthereumEnvelopeError::MalformedRlp(e.to_string()))?;
+    let bytes =
+        rlp::as_bytes(item).map_err(|e| EthereumEnvelopeError::MalformedRlp(e.to_string()))?;
     if bytes.len() > 32 {
         return Err(EthereumEnvelopeError::MalformedRlp(String::from(
             "signature scalar exceeds 32 bytes",
@@ -152,8 +154,8 @@ fn decode_scalar32(item: &Item) -> Result<[u8; 32], EthereumEnvelopeError> {
 }
 
 fn decode_to(item: &Item) -> Result<Option<[u8; 20]>, EthereumEnvelopeError> {
-    let bytes = rlp::as_bytes(item)
-        .map_err(|e| EthereumEnvelopeError::MalformedRlp(e.to_string()))?;
+    let bytes =
+        rlp::as_bytes(item).map_err(|e| EthereumEnvelopeError::MalformedRlp(e.to_string()))?;
     if bytes.is_empty() {
         return Ok(None);
     }
@@ -176,15 +178,14 @@ fn decode_access_list(item: &Item) -> Result<Vec<EvmAccessListEntry>, EthereumEn
                 "access_list item must be a 2-element list",
             )));
         };
-        let (Some(addr_it), Some(keys_it), None) =
-            (fields.first(), fields.get(1), fields.get(2))
+        let (Some(addr_it), Some(keys_it), None) = (fields.first(), fields.get(1), fields.get(2))
         else {
             return Err(EthereumEnvelopeError::MalformedRlp(String::from(
                 "access_list item arity mismatch",
             )));
         };
-        let addr_bytes =
-            rlp::as_bytes(addr_it).map_err(|e| EthereumEnvelopeError::MalformedRlp(e.to_string()))?;
+        let addr_bytes = rlp::as_bytes(addr_it)
+            .map_err(|e| EthereumEnvelopeError::MalformedRlp(e.to_string()))?;
         let address: [u8; 20] = addr_bytes.try_into().map_err(|_| {
             EthereumEnvelopeError::MalformedRlp(String::from("access_list address is not 20 bytes"))
         })?;
@@ -600,8 +601,7 @@ fn decode_eip7702(
         .map_err(|e| EthereumEnvelopeError::MalformedRlp(e.to_string()))?
         .to_vec();
     let access_list = decode_access_list(fields.get(8).ok_or(EthereumEnvelopeError::Empty)?)?;
-    let authorization_list =
-        decode_auth_list(fields.get(9).ok_or(EthereumEnvelopeError::Empty)?)?;
+    let authorization_list = decode_auth_list(fields.get(9).ok_or(EthereumEnvelopeError::Empty)?)?;
     if authorization_list.is_empty() {
         return Err(EthereumEnvelopeError::Type4EmptyAuthorizationList);
     }
@@ -641,14 +641,12 @@ pub fn sign_eip1559_tx(
     secret_key: &[u8; 32],
     chain_id: u64,
     nonce: u64,
-    max_priority_fee_per_gas_wei: u128,
-    max_fee_per_gas_wei: u128,
-    gas_limit: u64,
+    fees: (u128, u128, u64),
     to: Option<[u8; 20]>,
     value_wei: u128,
-    data: &[u8],
-    access_list: &[EvmAccessListEntry],
+    (data, access_list): (&[u8], &[EvmAccessListEntry]),
 ) -> Result<Vec<u8>, String> {
+    let (max_priority_fee_per_gas_wei, max_fee_per_gas_wei, gas_limit) = fees;
     use k256::ecdsa::SigningKey;
 
     let signing_key =
@@ -671,9 +669,7 @@ pub fn sign_eip1559_tx(
     let mut preimage = vec![0x02];
     preimage.extend_from_slice(&rlp::encode(&Item::List(fields.clone())));
     let digest: [u8; 32] = Keccak256::digest(&preimage).into();
-    let (sig, rec_id) = signing_key
-        .sign_prehash_recoverable(&digest)
-        .map_err(|e| format!("secp256k1 sign failed: {e}"))?;
+    let (sig, rec_id) = signing_key.sign_prehash_recoverable(&digest);
     let sig_bytes = sig.to_bytes();
     let r_slice = sig_bytes.get(..32).unwrap_or(&[]);
     let s_slice = sig_bytes.get(32..64).unwrap_or(&[]);
@@ -693,7 +689,7 @@ pub fn evm_address_from_secret_key(secret_key: &[u8; 32]) -> Result<[u8; 20], St
 
     let signing_key =
         SigningKey::from_bytes(secret_key.into()).map_err(|e| format!("bad secp256k1 key: {e}"))?;
-    let uncompressed = signing_key.verifying_key().to_encoded_point(false);
+    let uncompressed = signing_key.verifying_key().to_sec1_point(false);
     let pub_bytes = uncompressed.as_bytes();
     let xy = pub_bytes
         .get(1..)

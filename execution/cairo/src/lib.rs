@@ -14,7 +14,7 @@
 use budlum_uel_abi::{
     BlockContext, BudAmount, CodeInfo, EeCall, EeCallKind, EeFault, EeId, EeIdentity, EeLog,
     EeOutcome, EeQuery, EeRefusal, ExecutionEnvironment, HostApi, HostError, HostRead, Namespace,
-    UniversalCall,
+    OutcomeStatus, RefusalCode, UniversalCall,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
@@ -130,16 +130,16 @@ pub fn encode_sierra_class(cls: &SierraContractClass) -> Result<Vec<u8>, String>
 /// Decode and validate a `SIERRA_CLASS_MAGIC`-prefixed Sierra/CASM class bundle.
 pub fn decode_sierra_class(raw: &[u8]) -> Result<SierraContractClass, EeRefusal> {
     if raw.len() < 4 || raw.len() > MAX_SIERRA_CLASS_BYTES {
-        return Err(EeRefusal::BadCode("invalid Sierra class size".into()));
+        return Err(ee_bad_code("invalid Sierra class size".into()));
     }
     if raw.get(..4) != Some(SIERRA_CLASS_MAGIC.as_slice()) {
-        return Err(EeRefusal::BadCode("missing SRCA Sierra magic".into()));
+        return Err(ee_bad_code("missing SRCA Sierra magic".into()));
     }
     let body = raw.get(4..).unwrap_or_default();
     let cls: SierraContractClass = serde_json::from_slice(body)
-        .map_err(|e| EeRefusal::BadCode(format!("malformed Sierra class: {e}")))?;
+        .map_err(|e| ee_bad_code(format!("malformed Sierra class: {e}")))?;
     if cls.entrypoints.is_empty() {
-        return Err(EeRefusal::BadCode("Sierra class has no entrypoints".into()));
+        return Err(ee_bad_code("Sierra class has no entrypoints".into()));
     }
     Ok(cls)
 }
@@ -157,10 +157,7 @@ pub struct StarknetCall {
 #[serde(rename_all = "snake_case")]
 pub enum CairoAction {
     /// `INVOKE` v3 (`__validate_declare__` + class registration, `sncast declare`).
-    Declare {
-        class_bundle: Vec<u8>,
-        nonce: u64,
-    },
+    Declare { class_bundle: Vec<u8>, nonce: u64 },
     /// Universal Deployer (`sncast deploy`): instantiate `class_hash` with `salt` and run
     /// `constructor` if present.
     DeployContract {
@@ -180,12 +177,16 @@ pub enum CairoAction {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CairoQuery {
-    GetClassHashAt { contract_address: [u8; 32] },
+    GetClassHashAt {
+        contract_address: [u8; 32],
+    },
     GetStorageAt {
         contract_address: [u8; 32],
         slot: [u8; 32],
     },
-    GetNonce { account_address: [u8; 32] },
+    GetNonce {
+        account_address: [u8; 32],
+    },
     Call {
         contract_address: [u8; 32],
         entrypoint: String,
@@ -264,7 +265,7 @@ fn bump_account_nonce(
     let Ok(ns) = cairo_ns() else {
         return Err(b"cairo ns err");
     };
-    host.write(ns, &nonce_key(account), Some(&next.to_le_bytes()))
+    host.write(&ns, &nonce_key(account), Some(&next.to_le_bytes()))
         .map_err(|_| &b"nonce write err"[..])
 }
 
@@ -351,7 +352,7 @@ fn run_entrypoint(
             CairoSyscallOp::StorageWrite { slot, value } => {
                 let val = mask_to_felt252(*value);
                 let sk = storage_key(contract_addr, slot);
-                if host.write(ns.clone(), &sk, Some(&val)).is_err() {
+                if host.write(&ns, &sk, Some(&val)).is_err() {
                     return Err(b"storage write err");
                 }
             }
@@ -361,7 +362,7 @@ fn run_entrypoint(
                 };
                 let val = mask_to_felt252(*arg);
                 let sk = storage_key(contract_addr, slot);
-                if host.write(ns.clone(), &sk, Some(&val)).is_err() {
+                if host.write(&ns, &sk, Some(&val)).is_err() {
                     return Err(b"storage write err");
                 }
             }
@@ -383,7 +384,7 @@ fn run_entrypoint(
                     tail.copy_from_slice(&sum.to_be_bytes());
                 }
                 let felt = mask_to_felt252(felt);
-                if host.write(ns.clone(), &sk, Some(&felt)).is_err() {
+                if host.write(&ns, &sk, Some(&felt)).is_err() {
                     return Err(b"storage add err");
                 }
             }
@@ -459,7 +460,7 @@ impl ExecutionEnvironment for CairoWorker {
         let cls = decode_sierra_class(code)?;
         Ok(CodeInfo {
             code_hash: cls.class_hash(),
-            byte_len: u32::try_from(code.len()).unwrap_or(u32::MAX),
+            abi_tag: String::from("starknet-sierra-v1"),
         })
     }
 
@@ -469,35 +470,41 @@ impl ExecutionEnvironment for CairoWorker {
         call: &EeCall,
         host: &mut dyn HostApi,
     ) -> Result<EeOutcome, EeFault> {
-        let ns = Namespace::new(NS_CAIRO_STATE).map_err(EeFault::Wire)?;
+        let ns = Namespace::new(NS_CAIRO_STATE).map_err(ee_wire_fault)?;
         if !self.is_active(ctx) {
-            return Ok(EeOutcome::reverted(b"CAIRO_CLOSED_ON_TESTNET".to_vec(), 0));
+            return Ok(ee_reverted(b"CAIRO_CLOSED_ON_TESTNET".to_vec(), 0));
         }
         let Ok(caller_raw) = <[u8; 32]>::try_from(call.caller.id.as_slice()) else {
-            return Ok(EeOutcome::reverted(b"Starknet caller alias must be 32 bytes".to_vec(), 0));
+            return Ok(ee_reverted(
+                b"Starknet caller alias must be 32 bytes".to_vec(),
+                0,
+            ));
         };
         let caller_felt = mask_to_felt252(caller_raw);
 
         let mut gas_used: u64 = 0;
         if CAIRO_AA_BASE_BGU > call.gas_limit || host.charge(CAIRO_AA_BASE_BGU).is_err() {
-            return Ok(EeOutcome::out_of_gas(call.gas_limit));
+            return Ok(ee_out_of_gas(call.gas_limit));
         }
         gas_used = gas_used.saturating_add(CAIRO_AA_BASE_BGU);
 
         if call.kind == EeCallKind::Deploy {
             let Ok(cls) = decode_sierra_class(&call.input) else {
-                return Ok(EeOutcome::reverted(b"invalid Sierra class bundle".to_vec(), gas_used));
+                return Ok(ee_reverted(
+                    b"invalid Sierra class bundle".to_vec(),
+                    gas_used,
+                ));
             };
             let ch = cls.class_hash();
             let encoded = serde_json::to_vec(&cls).unwrap_or_default();
-            if host.write(ns, &class_key(&ch), Some(&encoded)).is_err() {
-                return Ok(EeOutcome::reverted(b"declare write failed".to_vec(), gas_used));
+            if host.write(&ns, &class_key(&ch), Some(&encoded)).is_err() {
+                return Ok(ee_reverted(b"declare write failed".to_vec(), gas_used));
             }
-            return Ok(EeOutcome::success(ch.to_vec(), gas_used));
+            return Ok(ee_success(ch.to_vec(), gas_used));
         }
 
         let Ok(action) = serde_json::from_slice::<CairoAction>(&call.input) else {
-            return Ok(EeOutcome::reverted(b"invalid CairoAction JSON".to_vec(), gas_used));
+            return Ok(ee_reverted(b"invalid CairoAction JSON".to_vec(), gas_used));
         };
 
         match action {
@@ -506,20 +513,20 @@ impl ExecutionEnvironment for CairoWorker {
                 nonce,
             } => {
                 if let Err(reason) = bump_account_nonce(host, &caller_felt, nonce) {
-                    return Ok(EeOutcome::reverted(reason.to_vec(), gas_used));
+                    return Ok(ee_reverted(reason.to_vec(), gas_used));
                 }
                 let Ok(cls) = decode_sierra_class(&class_bundle) else {
-                    return Ok(EeOutcome::reverted(
+                    return Ok(ee_reverted(
                         b"invalid Sierra class bundle".to_vec(),
                         gas_used,
                     ));
                 };
                 let ch = cls.class_hash();
                 let encoded = serde_json::to_vec(&cls).unwrap_or_default();
-                if host.write(ns, &class_key(&ch), Some(&encoded)).is_err() {
-                    return Ok(EeOutcome::reverted(b"class write err".to_vec(), gas_used));
+                if host.write(&ns, &class_key(&ch), Some(&encoded)).is_err() {
+                    return Ok(ee_reverted(b"class write err".to_vec(), gas_used));
                 }
-                Ok(EeOutcome::success(ch.to_vec(), gas_used))
+                Ok(ee_success(ch.to_vec(), gas_used))
             }
             CairoAction::DeployContract {
                 class_hash,
@@ -528,14 +535,17 @@ impl ExecutionEnvironment for CairoWorker {
                 nonce,
             } => {
                 if let Err(reason) = bump_account_nonce(host, &caller_felt, nonce) {
-                    return Ok(EeOutcome::reverted(reason.to_vec(), gas_used));
+                    return Ok(ee_reverted(reason.to_vec(), gas_used));
                 }
                 let Ok(Some(_)) = host.read(&ns, &class_key(&class_hash)) else {
-                    return Ok(EeOutcome::reverted(b"CLASS_NOT_DECLARED".to_vec(), gas_used));
+                    return Ok(ee_reverted(b"CLASS_NOT_DECLARED".to_vec(), gas_used));
                 };
                 let addr = derive_starknet_contract_address(&caller_felt, &salt, &class_hash);
-                if host.write(ns, &inst_key(&addr), Some(&class_hash)).is_err() {
-                    return Ok(EeOutcome::reverted(b"deploy write err".to_vec(), gas_used));
+                if host
+                    .write(&ns, &inst_key(&addr), Some(&class_hash))
+                    .is_err()
+                {
+                    return Ok(ee_reverted(b"deploy write err".to_vec(), gas_used));
                 }
                 match run_entrypoint(
                     &addr,
@@ -545,15 +555,15 @@ impl ExecutionEnvironment for CairoWorker {
                     call.gas_limit,
                     host,
                 ) {
-                    Ok(_) => Ok(EeOutcome::success(addr.to_vec(), gas_used)),
-                    Err(b"OUT_OF_GAS") => Ok(EeOutcome::out_of_gas(call.gas_limit)),
-                    Err(reason) => Ok(EeOutcome::reverted(reason.to_vec(), gas_used)),
+                    Ok(_) => Ok(ee_success(addr.to_vec(), gas_used)),
+                    Err(b"OUT_OF_GAS") => Ok(ee_out_of_gas(call.gas_limit)),
+                    Err(reason) => Ok(ee_reverted(reason.to_vec(), gas_used)),
                 }
             }
             CairoAction::InvokeAccount { calls, nonce } => {
                 // `__validate__`: bound directly to caller's post-quantum Budlum alias + nonce.
                 if let Err(reason) = bump_account_nonce(host, &caller_felt, nonce) {
-                    return Ok(EeOutcome::reverted(reason.to_vec(), gas_used));
+                    return Ok(ee_reverted(reason.to_vec(), gas_used));
                 }
                 let mut all_ret: Vec<[u8; 32]> = Vec::new();
                 for c in &calls {
@@ -566,12 +576,12 @@ impl ExecutionEnvironment for CairoWorker {
                         host,
                     ) {
                         Ok(ret) => all_ret.extend(ret),
-                        Err(b"OUT_OF_GAS") => return Ok(EeOutcome::out_of_gas(call.gas_limit)),
-                        Err(reason) => return Ok(EeOutcome::reverted(reason.to_vec(), gas_used)),
+                        Err(b"OUT_OF_GAS") => return Ok(ee_out_of_gas(call.gas_limit)),
+                        Err(reason) => return Ok(ee_reverted(reason.to_vec(), gas_used)),
                     }
                 }
                 let out = serde_json::to_vec(&all_ret).unwrap_or_default();
-                Ok(EeOutcome::success(out, gas_used))
+                Ok(ee_success(out, gas_used))
             }
         }
     }
@@ -583,17 +593,17 @@ impl ExecutionEnvironment for CairoWorker {
         host: &dyn HostRead,
     ) -> Result<Vec<u8>, EeRefusal> {
         if !self.is_active(ctx) {
-            return Err(EeRefusal::Denied("CAIRO_CLOSED_ON_TESTNET".into()));
+            return Err(ee_denied("CAIRO_CLOSED_ON_TESTNET".into()));
         }
-        let ns = cairo_ns().map_err(|e| EeRefusal::Denied(e.to_string()))?;
+        let ns = cairo_ns().map_err(|e| ee_denied(e.to_string()))?;
         let req: CairoQuery = serde_json::from_slice(&q.input)
-            .map_err(|e| EeRefusal::BadInput(format!("bad CairoQuery: {e}")))?;
+            .map_err(|e| ee_bad_input(format!("bad CairoQuery: {e}")))?;
         match req {
             CairoQuery::GetClassHashAt { contract_address } => {
                 let raw = host
                     .read(&ns, &inst_key(&contract_address))
-                    .map_err(|e| EeRefusal::Denied(e.to_string()))?
-                    .ok_or_else(|| EeRefusal::Denied("CONTRACT_NOT_FOUND".into()))?;
+                    .map_err(|e| ee_denied(e.to_string()))?
+                    .ok_or_else(|| ee_denied("CONTRACT_NOT_FOUND".into()))?;
                 Ok(raw)
             }
             CairoQuery::GetStorageAt {
@@ -602,14 +612,13 @@ impl ExecutionEnvironment for CairoWorker {
             } => {
                 let val = host
                     .read(&ns, &storage_key(&contract_address, &slot))
-                    .map_err(|e| EeRefusal::Denied(e.to_string()))?
+                    .map_err(|e| ee_denied(e.to_string()))?
                     .unwrap_or_else(|| vec![0u8; 32]);
                 Ok(val)
             }
             CairoQuery::GetNonce { account_address } => {
                 let felt = mask_to_felt252(account_address);
-                let n = read_account_nonce(host, &felt)
-                    .map_err(|e| EeRefusal::Denied(e.to_string()))?;
+                let n = read_account_nonce(host, &felt).map_err(|e| ee_denied(e.to_string()))?;
                 Ok(n.to_le_bytes().to_vec())
             }
             CairoQuery::Call {
@@ -619,37 +628,84 @@ impl ExecutionEnvironment for CairoWorker {
             } => {
                 let ch_bytes = host
                     .read(&ns, &inst_key(&contract_address))
-                    .map_err(|e| EeRefusal::Denied(e.to_string()))?
-                    .ok_or_else(|| EeRefusal::Denied("CONTRACT_NOT_FOUND".into()))?;
+                    .map_err(|e| ee_denied(e.to_string()))?
+                    .ok_or_else(|| ee_denied("CONTRACT_NOT_FOUND".into()))?;
                 let ch32: [u8; 32] = ch_bytes
                     .as_slice()
                     .try_into()
-                    .map_err(|_| EeRefusal::Denied("corrupt class_hash".into()))?;
+                    .map_err(|_| ee_denied("corrupt class_hash".into()))?;
                 let cls_bytes = host
                     .read(&ns, &class_key(&ch32))
-                    .map_err(|e| EeRefusal::Denied(e.to_string()))?
-                    .ok_or_else(|| EeRefusal::Denied("CLASS_NOT_DECLARED".into()))?;
-                let cls: SierraContractClass = serde_json::from_slice(&cls_bytes)
-                    .map_err(|e| EeRefusal::Denied(e.to_string()))?;
+                    .map_err(|e| ee_denied(e.to_string()))?
+                    .ok_or_else(|| ee_denied("CLASS_NOT_DECLARED".into()))?;
+                let cls: SierraContractClass =
+                    serde_json::from_slice(&cls_bytes).map_err(|e| ee_denied(e.to_string()))?;
                 let ep = cls
                     .entrypoints
                     .iter()
                     .find(|e| e.name == entrypoint)
-                    .ok_or_else(|| EeRefusal::Denied("ENTRYPOINT_NOT_FOUND".into()))?;
+                    .ok_or_else(|| ee_denied("ENTRYPOINT_NOT_FOUND".into()))?;
                 let mut ret: Vec<[u8; 32]> = Vec::new();
                 for op in &ep.ops {
                     if let CairoSyscallOp::StorageReadReturn { slot } = op {
                         let v = host
                             .read(&ns, &storage_key(&contract_address, slot))
-                            .map_err(|e| EeRefusal::Denied(e.to_string()))?
+                            .map_err(|e| ee_denied(e.to_string()))?
                             .and_then(|b| <[u8; 32]>::try_from(b.as_slice()).ok())
                             .unwrap_or([0u8; 32]);
                         ret.push(v);
                     }
                 }
-                serde_json::to_vec(&ret).map_err(|e| EeRefusal::BadInput(e.to_string()))
+                serde_json::to_vec(&ret).map_err(|e| ee_bad_input(e.to_string()))
             }
         }
+    }
+}
+
+fn ee_bad_code(msg: String) -> EeRefusal {
+    EeRefusal {
+        code: RefusalCode::InvalidCode,
+        message: msg,
+    }
+}
+fn ee_denied(msg: String) -> EeRefusal {
+    EeRefusal {
+        code: RefusalCode::Denied,
+        message: msg,
+    }
+}
+fn ee_bad_input(msg: String) -> EeRefusal {
+    EeRefusal {
+        code: RefusalCode::Unsupported,
+        message: msg,
+    }
+}
+fn ee_success(output: Vec<u8>, gas_used: u64) -> EeOutcome {
+    EeOutcome {
+        status: OutcomeStatus::Success,
+        output,
+        gas_used,
+    }
+}
+fn ee_reverted(output: Vec<u8>, gas_used: u64) -> EeOutcome {
+    EeOutcome {
+        status: OutcomeStatus::Revert,
+        output,
+        gas_used,
+    }
+}
+fn ee_out_of_gas(gas_used: u64) -> EeOutcome {
+    EeOutcome {
+        status: OutcomeStatus::OutOfGas,
+        output: Vec::new(),
+        gas_used,
+    }
+}
+fn ee_wire_fault(err: impl std::fmt::Display) -> EeFault {
+    let msg = err.to_string();
+    EeFault {
+        ee: EeId::CAIRO,
+        panic_digest: budlum_uel_abi::panic_digest(EeId::CAIRO, &msg),
     }
 }
 
@@ -728,7 +784,7 @@ mod tests {
         ) else {
             panic!("exec");
         };
-        assert_eq!(out.status, OutcomeStatus::Reverted);
+        assert_eq!(out.status, OutcomeStatus::Revert);
         assert_eq!(out.output, b"CAIRO_CLOSED_ON_TESTNET");
     }
 

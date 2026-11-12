@@ -113,7 +113,10 @@ const ALLOWED_FILES: &[&str] = &[
 /// so that a localisation gains files without the gate having to be edited,
 /// and it is deliberately narrow - only the Turkish locale of the browser,
 /// never a source tree.
-const ALLOWED_DIRS: &[&str] = &["crates/budlum-explorer/browser/l10n/tr-TR/"];
+const ALLOWED_DIRS: &[&str] = &[
+    "crates/budlum-explorer/browser/l10n/tr-TR/",
+    "mobile/android/app/src/main/res/values-tr/",
+];
 
 /// The one Turkish word that may appear anywhere: the label on the link to the
 /// Turkish README. Scrubbed before both scans.
@@ -1156,17 +1159,44 @@ fn dictionary_canaries(clean: &Path, tmp: &Path) -> Result<usize, String> {
         .find(|phrase| turkish_char(phrase).is_some())
         .ok_or_else(|| String::from("canary: the bilingual dictionary has no Turkish phrase"))?;
     let cases = [
-        ("dictionary-literal", FORBIDDEN_PHRASES_SOURCE, format!("\"{phrase}\",\n"), true),
-        ("dictionary-other-file", "src/other.rs", format!("\"{phrase}\",\n"), false),
-        ("dictionary-comment", FORBIDDEN_PHRASES_SOURCE, format!("// {phrase}\n"), false),
-        ("dictionary-unknown", FORBIDDEN_PHRASES_SOURCE, String::from("\"kullanıcı verisi\",\n"), false),
-        ("dictionary-trailing", FORBIDDEN_PHRASES_SOURCE, format!("\"{phrase}\", // kullanıcı\n"), false),
+        (
+            "dictionary-literal",
+            FORBIDDEN_PHRASES_SOURCE,
+            format!("\"{phrase}\",\n"),
+            true,
+        ),
+        (
+            "dictionary-other-file",
+            "src/other.rs",
+            format!("\"{phrase}\",\n"),
+            false,
+        ),
+        (
+            "dictionary-comment",
+            FORBIDDEN_PHRASES_SOURCE,
+            format!("// {phrase}\n"),
+            false,
+        ),
+        (
+            "dictionary-unknown",
+            FORBIDDEN_PHRASES_SOURCE,
+            String::from("\"kullanıcı verisi\",\n"),
+            false,
+        ),
+        (
+            "dictionary-trailing",
+            FORBIDDEN_PHRASES_SOURCE,
+            format!("\"{phrase}\", // kullanıcı\n"),
+            false,
+        ),
     ];
     let mut ran = 0;
     for (name, file, body, expected) in cases {
         let accepted = counted_accepts_with(&mut ran, clean, tmp, name, file, &body)?;
         if accepted != expected {
-            return Err(format!("canary: {name} accepted={accepted}, expected {expected}"));
+            return Err(format!(
+                "canary: {name} accepted={accepted}, expected {expected}"
+            ));
         }
     }
     Ok(ran)
@@ -1221,7 +1251,7 @@ const CANARY_GROUPS: [CanaryGroup; 5] = [
 /// Hard-coded on purpose. A group that stops testing anything still returns
 /// `Ok`, so the only way to notice is to know the number beforehand. Raise it
 /// deliberately when a canary is added; a drop is a defect.
-const EXPECTED_CANARIES: usize = 72;
+const EXPECTED_CANARIES: usize = 74;
 
 pub fn self_test() -> Result<String, String> {
     let tmp = scratch_dir()?;

@@ -11,6 +11,7 @@
 //! The per-class windows below are written in hours where the directive writes
 //! them in hours, and converted to epochs with section 6.21.3's formula, so no
 //! consensus decision reads a wall clock (G-2, section 6.21.3 item 1).
+//! Convenience: exposed for workspace subcrate consumers, SDK bindings, and integration callers.
 
 use serde::{Deserialize, Serialize};
 
@@ -102,7 +103,6 @@ impl ValidatorClass {
     }
 
     /// The suspension threshold in epochs (section 6.21.3).
-    #[must_use]
     pub fn suspension_threshold_epochs(
         self,
         slot_ms: u64,
@@ -123,7 +123,6 @@ impl ValidatorClass {
     }
 
     /// The audit answer window in epochs (section 6.21.3).
-    #[must_use]
     pub fn audit_window_epochs(
         self,
         slot_ms: u64,

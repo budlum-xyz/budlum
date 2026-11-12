@@ -1,11 +1,11 @@
 //! CometBFT RPC (`127.0.0.1:18550`) & Cosmos LCD (`127.0.0.1:18551`) gateway
 //! ( & section 8.11.5) supporting CosmJS `SigningCosmWasmClient`.
+//! Convenience: exposed for CLI, RPC, SDK, and multi-VM runtime callers.
 
 use crate::core::account::{AccountState, ATTOS_PER_ATOM};
 use crate::execution::coordinator::foreign::cosmos::BUDLUM_COSMOS_CHAIN_ID;
-use crate::execution::coordinator::foreign::{ForeignTx, VerifiedForeignOutcome};
+use crate::execution::coordinator::foreign::ForeignTx;
 use crate::execution::coordinator::state::{NS_WASM_CODE, NS_WASM_CONTRACT, NS_WASM_STORE};
-use crate::execution::coordinator::ExecutionCoordinator;
 use crate::rpc::compat::{
     CompatEffect, CompatListener, CompatMethodClass, CosmosCompatConfig, JsonRpcRequest,
     JsonRpcResponse, JSONRPC_INVALID_PARAMS, JSONRPC_LIMIT_EXCEEDED, JSONRPC_METHOD_NOT_FOUND,
@@ -59,11 +59,7 @@ impl CosmosCompatGateway {
         Self { config, height }
     }
 
-    pub fn handle_rpc(
-        &mut self,
-        req: &JsonRpcRequest,
-        state: &AccountState,
-    ) -> JsonRpcResponse {
+    pub fn handle_rpc(&mut self, req: &JsonRpcRequest, state: &AccountState) -> JsonRpcResponse {
         let id = req.id.clone();
         if !COMETBFT_RPC_METHODS.iter().any(|m| m.name == req.method) {
             return JsonRpcResponse::err(id, JSONRPC_METHOD_NOT_FOUND, "Method not found");
@@ -135,23 +131,24 @@ impl CosmosCompatGateway {
                     .get("account_number")
                     .and_then(serde_json::Value::as_u64)
                     .unwrap_or(0);
-                let mut preview = state.clone();
-                let mut coord = ExecutionCoordinator::new();
                 let env = ForeignTx::Cosmos {
                     tx_raw_bytes,
                     chain_id: String::from(BUDLUM_COSMOS_CHAIN_ID),
                     account_number: acct_num,
                     direct_native_pq_recipient: None,
                 };
-                match coord.process_foreign_envelope(&mut preview, &env, 0) {
-                    Ok(VerifiedForeignOutcome::Cosmos { decoded, .. }) => JsonRpcResponse::ok(
+                match state
+                    .execution_state
+                    .foreign_lane
+                    .validate_envelope_readonly(&state.execution_state, &env, 0)
+                {
+                    Ok(tx_hash) => JsonRpcResponse::ok(
                         id,
                         serde_json::json!({
                             "code": 0,
-                            "hash": hex::encode(decoded.tx_hash).to_uppercase(),
+                            "hash": hex::encode(tx_hash).to_uppercase(),
                         }),
                     ),
-                    Ok(_) => JsonRpcResponse::err(id, JSONRPC_TX_REJECTED, "unexpected tx kind"),
                     Err(e) => JsonRpcResponse::err(id, JSONRPC_TX_REJECTED, e.to_string()),
                 }
             }
@@ -168,10 +165,7 @@ impl CosmosCompatGateway {
                         "per_page exceeds max_tx_search_results",
                     );
                 }
-                JsonRpcResponse::ok(
-                    id,
-                    serde_json::json!({ "txs": [], "total_count": "0" }),
-                )
+                JsonRpcResponse::ok(id, serde_json::json!({ "txs": [], "total_count": "0" }))
             }
             "validators" => JsonRpcResponse::ok(
                 id,
@@ -197,7 +191,10 @@ fn execute_abci_query(path: &str, data: &[u8], state: &AccountState) -> Vec<u8> 
                     .get("contract")
                     .and_then(serde_json::Value::as_str)
                     .unwrap_or("");
-                let key = v.get("key").and_then(serde_json::Value::as_str).unwrap_or("");
+                let key = v
+                    .get("key")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("");
                 let mut sk = contract.as_bytes().to_vec();
                 sk.extend_from_slice(format!(":kv:{key}").as_bytes());
                 return state

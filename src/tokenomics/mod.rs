@@ -17,6 +17,8 @@
 //!   The producer receives `tx.fee - metabolic_burn` exactly once per included
 //!   Transaction. The legacy `block_reward` field is wire/snapshot compatibility
 //!   Metadata and cannot mint supply.
+//!
+//! Convenience: exposed for CLI, RPC, SDK, and multi-VM runtime callers.
 
 pub mod reward_pool;
 

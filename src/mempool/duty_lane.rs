@@ -203,9 +203,9 @@ mod tests {
             tx
         };
 
-        let ack = build(TransactionType::StorageV3(Box::new(StorageTxV3::CustodyAck {
-            object: [1u8; 32],
-        })));
+        let ack = build(TransactionType::StorageV3(Box::new(
+            StorageTxV3::CustodyAck { object: [1u8; 32] },
+        )));
         assert!(is_duty(&ack));
         assert!(block_bytes(&ack) > 1);
 

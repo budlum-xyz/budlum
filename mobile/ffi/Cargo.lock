@@ -160,6 +160,7 @@ version = "0.1.0"
 dependencies = [
  "budlum-mobile-core",
  "budlum-types",
+ "sha3 0.10.9",
  "uniffi",
  "zeroize",
 ]

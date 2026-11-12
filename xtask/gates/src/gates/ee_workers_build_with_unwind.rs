@@ -6,8 +6,6 @@ use std::fmt::Write as _;
 use std::fs;
 use std::path::Path;
 
-use crate::GateReport;
-
 /// Check `[profile.release]` `panic` settings on the root manifest and every
 /// `execution/*/Cargo.toml` worker manifest under `root`.
 ///
@@ -51,8 +49,8 @@ pub fn check_root(root: &Path) -> Result<Vec<String>, String> {
                 .unwrap_or(&manifest)
                 .display()
                 .to_string();
-            let text = fs::read_to_string(&manifest)
-                .map_err(|e| format!("cannot read {rel}: {e}"))?;
+            let text =
+                fs::read_to_string(&manifest).map_err(|e| format!("cannot read {rel}: {e}"))?;
             // Skip pure conformance test-runner crates that are not worker binaries.
             if rel == "execution/conformance/Cargo.toml" {
                 continue;
@@ -99,61 +97,61 @@ fn release_panic_mode(cargo_toml: &str) -> Option<&str> {
 }
 
 /// Run the `ee-workers-build-with-unwind` gate on the repository root.
-#[must_use]
-pub fn run(root: &Path) -> GateReport {
+pub fn run(root: &Path) -> Result<String, String> {
     match check_root(root) {
-        Err(err) => GateReport::fail(err),
-        Ok(problems) if problems.is_empty() => GateReport::ok(
+        Err(err) => Err(err),
+        Ok(problems) if problems.is_empty() => Ok(
             "ee-workers-build-with-unwind OK: node release profile uses `panic = \"abort\"` and \
-             all EE worker manifests use `panic = \"unwind\"`.",
+             all EE worker manifests use `panic = \"unwind\"`."
+                .to_owned(),
         ),
         Ok(problems) => {
             let mut out = String::from("ee-workers-build-with-unwind FAILED:\n");
             for p in &problems {
                 let _ = writeln!(out, "  - {p}");
             }
-            GateReport::fail(out)
+            Err(out)
         }
     }
 }
 
 /// Self-test verifying both compliant and violating worker manifests.
-#[must_use]
-pub fn self_test(_root: &Path) -> GateReport {
+pub fn self_test() -> Result<String, String> {
     let Ok(tmp) = tempfile::tempdir() else {
-        return GateReport::fail("cannot create tempdir for self-test");
+        return Err("cannot create tempdir for self-test".to_owned());
     };
     let root = tmp.path();
 
     let node_ok = "[package]\nname = \"node\"\n[profile.release]\npanic = \"abort\"\n";
     if fs::write(root.join("Cargo.toml"), node_ok).is_err() {
-        return GateReport::fail("cannot write fixture Cargo.toml");
+        return Err("cannot write fixture Cargo.toml".to_owned());
     }
     let worker_dir = root.join("execution/evm");
     if fs::create_dir_all(&worker_dir).is_err() {
-        return GateReport::fail("cannot create fixture worker dir");
+        return Err("cannot create fixture worker dir".to_owned());
     }
 
     // 1. Worker with panic = "abort" must fail.
     let worker_bad = "[package]\nname = \"budlum-ee-evm\"\n[profile.release]\npanic = \"abort\"\n";
     if fs::write(worker_dir.join("Cargo.toml"), worker_bad).is_err() {
-        return GateReport::fail("cannot write bad worker Cargo.toml");
+        return Err("cannot write bad worker Cargo.toml".to_owned());
     }
     match check_root(root) {
         Ok(p) if !p.is_empty() => {}
-        _ => return GateReport::fail("VACUOUS: accepted EE worker with panic = \"abort\""),
+        _ => return Err("VACUOUS: accepted EE worker with panic = \"abort\"".to_owned()),
     }
 
     // 2. Worker with panic = "unwind" must pass.
     let worker_good =
         "[package]\nname = \"budlum-ee-evm\"\n[profile.release]\npanic = \"unwind\"\n";
     if fs::write(worker_dir.join("Cargo.toml"), worker_good).is_err() {
-        return GateReport::fail("cannot write good worker Cargo.toml");
+        return Err("cannot write good worker Cargo.toml".to_owned());
     }
     match check_root(root) {
-        Ok(p) if p.is_empty() => GateReport::ok(
-            "ee-workers-build-with-unwind self-test OK: rejected abort worker and accepted unwind.",
+        Ok(p) if p.is_empty() => Ok(
+            "ee-workers-build-with-unwind self-test OK: rejected abort worker and accepted unwind."
+                .to_owned(),
         ),
-        other => GateReport::fail(format!("unexpected self-test failure: {other:?}")),
+        other => Err(format!("unexpected self-test failure: {other:?}")),
     }
 }

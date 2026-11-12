@@ -22,6 +22,7 @@
 //! The [`PlacementTable`] is a genesis parameter computed off chain from the
 //! class loss and availability rates. The consensus path only reads it, by
 //! integer comparison.
+//! Convenience: exposed for CLI, RPC, SDK, and multi-VM runtime callers.
 
 use crate::core::hash::hash_fields_bytes;
 
@@ -238,7 +239,9 @@ impl PlacementTable {
         symbol_size: u32,
     ) -> Option<(u64, u64)> {
         let chosen = self.lookup_with_shrink(full, mobile)?;
-        let total_bytes = chosen.total_symbols().saturating_mul(u64::from(symbol_size));
+        let total_bytes = chosen
+            .total_symbols()
+            .saturating_mul(u64::from(symbol_size));
         if chosen.n_mobile == 0 {
             return Some((total_bytes, 0));
         }
@@ -617,24 +620,33 @@ mod tests {
 
         let table = PlacementTable::testnet_default();
         let row = table.lookup(8, 256).unwrap();
-        assert_eq!((row.n_full, row.s_full, row.n_mobile, row.s_mobile), (8, 443, 256, 13));
+        assert_eq!(
+            (row.n_full, row.s_full, row.n_mobile, row.s_mobile),
+            (8, 443, 256, 13)
+        );
 
         // 8 Full + 256 Mobile validators place an object; all 256 Mobile validators
         // disappear simultaneously; the object decodes bit-identically from Full shares alone.
         let candidates = pool(8, 256);
-        let payload = b"B.U.D. 3.0 survives complete 256-phone churn on 8 Full validators".repeat(64);
+        let payload =
+            b"B.U.D. 3.0 survives complete 256-phone churn on 8 Full validators".repeat(64);
         let total_syms = u32::try_from(row.total_symbols()).unwrap();
-        let up = prepare_public_upload(
-            &payload,
-            &Profile::P0,
-            &Bud3Limits::default(),
-            total_syms,
+        let up = prepare_public_upload(&payload, &Profile::P0, &Bud3Limits::default(), total_syms)
+            .unwrap();
+        let seg_key = segment_key(&up.record.commitment, 0);
+        let shares = place(
+            &seg_key,
+            &candidates,
+            &row,
+            16,
+            u32::from(Profile::P0.symbol_size),
         )
         .unwrap();
-        let seg_key = segment_key(&up.record.commitment, 0);
-        let shares = place(&seg_key, &candidates, &row, 16, Profile::P0.symbol_size).unwrap();
         assert_eq!(shares.iter().filter(|s| s.class == Class::Full).count(), 8);
-        assert_eq!(shares.iter().filter(|s| s.class == Class::Mobile).count(), 256);
+        assert_eq!(
+            shares.iter().filter(|s| s.class == Class::Mobile).count(),
+            256
+        );
 
         // Drop every Mobile share completely; collect only Full validator ESIs.
         let full_symbols: Vec<_> = shares

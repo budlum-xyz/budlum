@@ -13,8 +13,8 @@ use std::process::ExitCode;
 use budlum_core::cross_domain::evm::account_proof;
 use budlum_core::execution::coordinator::migration::{
     begin_import, dependency_report, verify_deployment, DependencyReport, DeploymentProof,
-    ImportEvmStorageChunk, MigrationAuthorization,
-    MigrationFeeSchedule, MigrationRecord, MigrationRequest, StorageEntry,
+    ImportEvmStorageChunk, MigrationAuthorization, MigrationFeeSchedule, MigrationRecord,
+    MigrationRequest, StorageEntry,
 };
 use serde::{Deserialize, Serialize};
 
@@ -106,25 +106,26 @@ fn run_analyze(args: &[String]) -> Result<String, String> {
     let path = code_file.ok_or_else(|| String::from("--code-file is required"))?;
     let raw = fs::read_to_string(&path).map_err(|e| format!("read {path}: {e}"))?;
     let code = parse_hex_bytes(raw.trim())?;
-    let report = dependency_report(&code);
+    let scanned_bytes = code.len();
+    let report = dependency_report([0u8; 20], &code, &[]);
     if json {
-        serde_json::to_string_pretty(&JsonDependencyReport::from(&report))
+        serde_json::to_string_pretty(&JsonDependencyReport::from_report(&report, scanned_bytes))
             .map_err(|e| format!("encode report: {e}"))
     } else {
-        Ok(format_dependency_report(&report))
+        Ok(format_dependency_report(&report, scanned_bytes))
     }
 }
 
-fn format_dependency_report(report: &DependencyReport) -> String {
+fn format_dependency_report(report: &DependencyReport, scanned_bytes: usize) -> String {
     let mut lines = vec![
-        format!("scanned_bytes: {}", report.scanned_bytes),
-        format!("external_call_opcodes: {}", report.external_call_opcodes),
+        format!("scanned_bytes: {scanned_bytes}"),
+        format!("static_targets: {}", report.static_targets.len()),
     ];
-    if report.addresses.is_empty() {
+    if report.static_targets.is_empty() {
         lines.push(String::from("hardcoded_addresses: none"));
     } else {
         lines.push(String::from("hardcoded_addresses:"));
-        for address in &report.addresses {
+        for address in &report.static_targets {
             lines.push(format!("  0x{}", hex::encode(address)));
         }
     }
@@ -188,13 +189,15 @@ fn verify_bundle(
         let decoded = chunk.into_chunk()?;
         plan.import_chunk(&decoded).map_err(|e| e.to_string())?;
     }
-    let deps = dependency_report(&parse_hex_bytes(&bundle.code)?);
+    let raw_code = parse_hex_bytes(&bundle.code)?;
+    let deps = dependency_report(evidence.contract, &raw_code, &[]);
     let record = plan.finalize(fee_schedule).map_err(|e| e.to_string())?;
     Ok(VerifiedMigrationOutput::from_record(
         record,
         evidence.deployer,
         source_account.balance_u128(),
         &deps,
+        raw_code.len(),
     ))
 }
 
@@ -289,13 +292,13 @@ struct JsonDependencyReport {
     addresses: Vec<String>,
 }
 
-impl From<&DependencyReport> for JsonDependencyReport {
-    fn from(report: &DependencyReport) -> Self {
+impl JsonDependencyReport {
+    fn from_report(report: &DependencyReport, scanned_bytes: usize) -> Self {
         Self {
-            scanned_bytes: report.scanned_bytes,
-            external_call_opcodes: report.external_call_opcodes,
+            scanned_bytes,
+            external_call_opcodes: report.static_targets.len(),
             addresses: report
-                .addresses
+                .static_targets
                 .iter()
                 .map(|addr| format!("0x{}", hex::encode(addr)))
                 .collect(),
@@ -343,6 +346,7 @@ impl VerifiedMigrationOutput {
         deployer: [u8; 20],
         source_eth_balance: Option<u128>,
         deps: &DependencyReport,
+        scanned_bytes: usize,
     ) -> Self {
         let mut storage = BTreeMap::new();
         for (slot, value) in record.storage {
@@ -365,7 +369,7 @@ impl VerifiedMigrationOutput {
                 address: format!("0x{}", hex::encode(record.imported_from.address)),
             },
             storage,
-            dependencies: JsonDependencyReport::from(deps),
+            dependencies: JsonDependencyReport::from_report(deps, scanned_bytes),
             fee: FeeOutput {
                 proof_nodes: record.usage.proof_nodes,
                 code_bytes: record.usage.code_bytes,

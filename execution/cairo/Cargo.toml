@@ -5,7 +5,7 @@ name = "budlum-ee-cairo"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.88"
-license = "Apache-2.0"
+license = "LicenseRef-PolyForm-Shield-1.0.0"
 publish = false
 description = "Budlum UEL out-of-process Cairo (Starknet) execution worker (EeId::CAIRO = 0x06)"
 

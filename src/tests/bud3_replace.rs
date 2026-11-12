@@ -40,7 +40,7 @@ const FULL_C: u8 = 12;
 /// An address that is in no placement group.
 const OUTSIDER: u8 = 99;
 
-fn addr(b: u8) -> Address {
+fn addr(b: u8) -> [u8; 32] {
     [b; 32]
 }
 
@@ -48,17 +48,20 @@ fn addr(b: u8) -> Address {
 fn placement(segments: u64) -> Vec<(u64, Share)> {
     (0..segments)
         .flat_map(|segment| {
-            [FULL_A, FULL_B, FULL_C].into_iter().enumerate().map(move |(h, v)| {
-                (
-                    segment,
-                    Share {
-                        validator: [v; 32],
-                        class: Class::Full,
-                        first_esi: (h as u32) * 4,
-                        symbols: 4,
-                    },
-                )
-            })
+            [FULL_A, FULL_B, FULL_C]
+                .into_iter()
+                .enumerate()
+                .map(move |(h, v)| {
+                    (
+                        segment,
+                        Share {
+                            validator: [v; 32],
+                            class: Class::Full,
+                            first_esi: (h as u32) * 4,
+                            symbols: 4,
+                        },
+                    )
+                })
         })
         .collect()
 }
@@ -141,7 +144,7 @@ fn bud3_object_replacement() {
             addr(FULL_A),
             StorageTxV3::ReplaceObject {
                 old_object: old,
-                new_record: new_record,
+                new_record,
                 new_shares: placement(1),
                 attestations: attestations(record.content_id),
                 proposer_stake: 100_000,
@@ -158,7 +161,11 @@ fn bud3_object_replacement() {
     assert_eq!(replacement.proposer, [FULL_A; 32]);
     assert_eq!(replacement.proposed_at, 1);
     assert!(!replacement.finalized);
-    assert_ne!(r.state_root(), root_before, "the barrier is consensus state");
+    assert_ne!(
+        r.state_root(),
+        root_before,
+        "the barrier is consensus state"
+    );
     let snapshot = serde_json::to_vec(&r).expect("serialize replacement barrier");
     let restored: Bud3Registry =
         serde_json::from_slice(&snapshot).expect("restore replacement barrier");
@@ -175,7 +182,7 @@ fn bud3_object_replacement_keeps_the_content_id_and_moves_the_references() {
     let (mut r, old, record, _) = registered(b"a replacement keeps this content");
     let new_record = recoded(&record, 0xA5, 64);
     let new = new_record.commitment;
-    let shares = placement(1);
+    let _shares = placement(1);
     assert!(matches!(
         apply(
             &mut r,
@@ -194,8 +201,8 @@ fn bud3_object_replacement_keeps_the_content_id_and_moves_the_references() {
             addr(FULL_A),
             StorageTxV3::ReplaceObject {
                 old_object: old,
-                new_record: new_record,
-                new_shares,
+                new_record,
+                new_shares: placement(1),
                 attestations: attestations(record.content_id),
                 proposer_stake: 100_000,
             },
@@ -226,7 +233,7 @@ fn bud3_object_replacement_keeps_the_old_shares_until_the_new_ones_are_confirmed
         addr(FULL_A),
         StorageTxV3::ReplaceObject {
             old_object: old,
-            new_record: new_record,
+            new_record,
             new_shares: placement(1),
             attestations: attestations(record.content_id),
             proposer_stake: 100_000,
@@ -236,7 +243,12 @@ fn bud3_object_replacement_keeps_the_old_shares_until_the_new_ones_are_confirmed
     .unwrap();
     let pending = "one holder confirmed, so the old shares stay";
     assert_eq!(
-        apply(&mut r, addr(FULL_A), StorageTxV3::CustodyAck { object: new }, 2),
+        apply(
+            &mut r,
+            addr(FULL_A),
+            StorageTxV3::CustodyAck { object: new },
+            2
+        ),
         Ok(Applied::Acked(1))
     );
     assert!(
@@ -245,12 +257,22 @@ fn bud3_object_replacement_keeps_the_old_shares_until_the_new_ones_are_confirmed
     );
     assert_eq!(r.replacement(&old).map(|x| x.finalized), Some(false));
     assert_eq!(
-        apply(&mut r, addr(FULL_B), StorageTxV3::CustodyAck { object: new }, 2),
+        apply(
+            &mut r,
+            addr(FULL_B),
+            StorageTxV3::CustodyAck { object: new },
+            2
+        ),
         Ok(Applied::Acked(1))
     );
     assert!(r.object(&old).is_some(), "one holder is still pending");
     assert_eq!(
-        apply(&mut r, addr(FULL_C), StorageTxV3::CustodyAck { object: new }, 2),
+        apply(
+            &mut r,
+            addr(FULL_C),
+            StorageTxV3::CustodyAck { object: new },
+            2
+        ),
         Ok(Applied::Acked(1))
     );
     assert!(
@@ -292,8 +314,14 @@ fn bud3_pending_replacement_expiry_does_not_release_old_shares() {
     r.renew(&new, 10).expect("keep the replacement live");
 
     let expired = r.expire(101);
-    assert!(!expired.contains(&old), "a pending old object is not due alone");
-    assert!(r.object(&old).is_some(), "expiry is not a share acknowledgement");
+    assert!(
+        !expired.contains(&old),
+        "a pending old object is not due alone"
+    );
+    assert!(
+        r.object(&old).is_some(),
+        "expiry is not a share acknowledgement"
+    );
     assert_eq!(r.replacement(&old).map(|x| x.finalized), Some(false));
 
     for holder in [FULL_A, FULL_B, FULL_C] {
@@ -427,7 +455,7 @@ fn bud3_object_replacement_of_sealed_content_is_the_owners() {
             addr(OWNER),
             StorageTxV3::ReplaceObject {
                 old_object: old,
-                new_record: new_record,
+                new_record,
                 new_shares: placement(1),
                 attestations: attestations(record.content_id),
                 proposer_stake: 100_000,
@@ -522,7 +550,7 @@ fn bud3_object_replacement_refuses_a_target_that_is_already_live() {
             StorageTxV3::ReplaceObject {
                 old_object: old,
                 new_record: live,
-                new_shares,
+                new_shares: placement(1),
                 attestations: attestations(record.content_id),
                 proposer_stake: 100_000,
             },
@@ -552,13 +580,15 @@ fn bud3_object_replacement_refuses_a_closed_codec() {
             },
             1,
         ),
-        Err(RegistryError::BadReplacement(ReplaceError::CodecNotOpen(14)))
+        Err(RegistryError::BadReplacement(ReplaceError::CodecNotOpen(
+            14
+        )))
     );
 }
 
 #[test]
 fn bud3_object_replacement_round_trips_through_the_wire_codec() {
-    let (_, _, record, shares) = registered(b"the variant has a wire form");
+    let (_, _, record, new_shares) = registered(b"the variant has a wire form");
     let tx = StorageTxV3::ReplaceObject {
         old_object: [9; 32],
         new_record: recoded(&record, 0x1A, 8),
@@ -620,7 +650,7 @@ fn bud3_object_replacement_is_the_signed_door_path() {
             1,
             StorageTxV3::ReplaceObject {
                 old_object: old,
-                new_record: new_record,
+                new_record,
                 new_shares: placement(1),
                 attestations: attestations(record.content_id),
                 proposer_stake: 100_000,

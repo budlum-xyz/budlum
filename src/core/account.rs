@@ -1,3 +1,5 @@
+//! Convenience: exposed for CLI, RPC, SDK, and multi-VM runtime callers.
+
 use crate::consensus::pos::SlashingEvidence;
 use crate::core::address::Address;
 
@@ -13,8 +15,8 @@ use crate::core::transaction::{Transaction, TransactionType};
 use crate::cross_domain::message_registry::CrossDomainMessageRegistry;
 use crate::cross_domain::BridgeState;
 use crate::domain::storage_deal::StorageRegistry;
-use crate::registry::role::{roles, RoleId};
 use crate::persistence::db::Storage;
+use crate::registry::role::{roles, RoleId};
 #[cfg(not(miri))]
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -138,7 +140,7 @@ impl BudEnvUnit {
     /// exposed for: the Execution Coordinator (`execution::coordinator`) and UEL transfer doors.
     pub fn check_transfer_quantum(self, attos: u128) -> Result<(), String> {
         let q = self.quantum_attos();
-        if attos % q != 0 {
+        if !attos.is_multiple_of(q) {
             return Err(format!(
                 "transfer amount {attos} attoBUD is not divisible by environment quantum {q}"
             ));
@@ -218,13 +220,20 @@ impl Account {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Validator {
     pub address: Address,
+    /// SIGNING: excluded - consensus state field on account::Validator; never carried on the wire.
     pub stake: u64,
     pub active: bool,
+    /// SIGNING: excluded - consensus state field on account::Validator; never carried on the wire.
     pub slashed: bool,
+    /// SIGNING: excluded - consensus state field on account::Validator; never carried on the wire.
     pub jailed: bool,
+    /// SIGNING: excluded - consensus state field on account::Validator; never carried on the wire.
     pub jail_until: u64,
+    /// SIGNING: excluded - consensus state field on account::Validator; never carried on the wire.
     pub last_proposed_block: Option<u64>,
+    /// SIGNING: excluded - consensus state field on account::Validator; never carried on the wire.
     pub votes_for: u64,
+    /// SIGNING: excluded - consensus state field on account::Validator; never carried on the wire.
     pub votes_against: u64,
     #[serde(default)]
     pub vrf_public_key: Vec<u8>,
@@ -237,11 +246,13 @@ pub struct Validator {
     /// Mikoriza restaked weight: written only by
     /// `settlement::shared_security::apply_restaked_weights` at the epoch
     /// boundary, already capped. Zero for a validator with no allocation.
+    /// SIGNING: excluded - consensus state field on account::Validator; never carried on the wire.
     #[serde(default)]
     pub restaked_weight: u64,
     /// Filiz Chain leader-election commitment: written by the
     /// `RegisterFiliz` door and advanced by each canonical block the
     /// validator produced. `None` until the validator registers a chain.
+    /// SIGNING: excluded - consensus state field on account::Validator; never carried on the wire.
     #[serde(default)]
     pub filiz: Option<crate::consensus::filiz::FilizRegistration>,
     /// Multi-role architecture: tracks which roles this validator has bonded for.
@@ -251,6 +262,7 @@ pub struct Validator {
     /// - AI_OPERATOR (RoleId 8): AI inference layer AI compute provider
     ///
     /// Cross-role slashing: slashing any role jails ALL roles.
+    /// SIGNING: excluded - consensus state field on account::Validator; never carried on the wire.
     #[serde(default)]
     pub roles: BTreeSet<RoleId>,
 }
@@ -551,8 +563,8 @@ pub struct AccountState {
     /// NOT included in `calculate_state_root` - this is an audit log, not
     /// Consensus state. Overwritten each block (not appended).
     pub fee_distributions: Vec<crate::chain::fee_market::FeeDistribution>,
-    dirty_accounts: HashSet<Address>,
-    keys_dirty: bool,
+    pub(crate) dirty_accounts: HashSet<Address>,
+    pub(crate) keys_dirty: bool,
     cached_leaves: Vec<[u8; 32]>,
     cached_keys: Vec<Address>,
     cached_tree: Vec<Vec<[u8; 32]>>,
@@ -621,6 +633,47 @@ pub struct AccountState {
     /// sees no root change from this field existing.
     pub proof_market: crate::settlement::ProofMarketState,
 }
+/// Shared quantum-alarm intake gate for cross-domain message registration doors
+/// (`AccountState::register_relayed_cross_domain_message` and
+/// `settlement::domains::deliver_message`).
+pub(crate) fn enforce_classical_message_intake(
+    message: &crate::cross_domain::message::CrossDomainMessage,
+    alarm: &crate::security::quantum_canary::QuantumAlarmState,
+    anchored_budlum_height: Option<u64>,
+    current_block_height: u64,
+) -> Result<(), String> {
+    if message.source_quantum_class == Some(crate::crypto::facts::QuantumClass::Classical) {
+        use crate::security::alarm_effects::{classical_intake, ClassicalIntake};
+        match classical_intake(alarm) {
+            ClassicalIntake::Open => {}
+            ClassicalIntake::Wait(blocks) => {
+                // Age the Watch hold strictly from the Budlum block height at
+                // which the source commitment was accepted into consensus,
+                // never from `message.source_height` (which is chosen by the
+                // message builder or measured in a foreign block space).
+                let Some(anchored_at) = anchored_budlum_height else {
+                    return Err(
+                        "classical-class message is held by the quantum alarm: source commitment is not anchored on Budlum"
+                            .into(),
+                    );
+                };
+                let ready = anchored_at.saturating_add(blocks);
+                if current_block_height < ready {
+                    return Err(format!(
+                        "classical-class message is held by the quantum alarm until height {ready} (anchored at {anchored_at}, now {current_block_height})"
+                    ));
+                }
+            }
+            ClassicalIntake::Stopped => {
+                return Err(
+                    "the quantum alarm has stopped the intake of classical-class messages".into(),
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
 impl AccountState {
     pub fn new() -> Self {
         AccountState {
@@ -1347,39 +1400,48 @@ impl AccountState {
         // for its source domain, never one the relayer chose. A message that
         // hides a classical source behind a lattice label (or the reverse) is
         // refused here, before any rule reads the class.
-        let derived = self
+        let source_domain = self
             .settlement
             .domains
-            .observed(message.source_domain)
-            .quantum_class();
+            .get(message.source_domain)
+            .ok_or_else(|| format!("unknown source domain {}", message.source_domain))?;
+        if source_domain.status != crate::domain::types::DomainStatus::Active {
+            return Err(format!(
+                "source domain {} is not active (status={:?})",
+                message.source_domain, source_domain.status
+            ));
+        }
+        if !source_domain.bridge_enabled {
+            return Err(format!(
+                "source domain {} is not bridge-enabled",
+                message.source_domain
+            ));
+        }
+        let derived = Some(
+            self.settlement
+                .domains
+                .observed(message.source_domain)
+                .quantum_class()
+                .unwrap_or_else(|| {
+                    crate::settlement::pq_anchor::domain_quantum_class(&source_domain.kind)
+                }),
+        );
         if message.source_quantum_class != derived {
             return Err(format!(
                 "relayed message carries source quantum class {:?}, the chain derives {:?} for source domain {}",
                 message.source_quantum_class, derived, message.source_domain
             ));
         }
-        // a classical-class message is slowed at Watch and stopped from
-        // Restrict on. A lattice or hash class message is not touched.
-        if message.source_quantum_class == Some(crate::crypto::facts::QuantumClass::Classical) {
-            use crate::security::alarm_effects::{classical_intake, ClassicalIntake};
-            match classical_intake(self.settlement.quantum.alarm()) {
-                ClassicalIntake::Open => {}
-                ClassicalIntake::Wait(blocks) => {
-                    let ready = message.source_height.saturating_add(blocks);
-                    if self.current_block_height < ready {
-                        return Err(format!(
-                            "classical-class message is held by the quantum alarm until height {ready} (now {})",
-                            self.current_block_height
-                        ));
-                    }
-                }
-                ClassicalIntake::Stopped => {
-                    return Err(
-                        "the quantum alarm stopped the intake of classical-class messages".into(),
-                    );
-                }
-            }
-        }
+        let anchored_height = self
+            .settlement
+            .commitments
+            .earliest_accepted_height(message.source_domain, message.source_height);
+        enforce_classical_message_intake(
+            message,
+            self.settlement.quantum.alarm(),
+            anchored_height,
+            self.current_block_height,
+        )?;
         if message.source_domain == message.target_domain {
             return Err(format!(
                 "Cross-domain message source and target domains must differ (both={})",
@@ -2440,22 +2502,10 @@ impl AccountState {
         validator.active = false;
         validator.jailed = true;
 
-        // Stake destroyed here left the supply denominator, and a burn only
-        // counts against the fixed cap if it is recorded. Left out of
-        // `burned_total`, every slashed bond reopened its own amount as
-        // minting headroom - the same hole the external-bond and storage-bond
-        // slashes had.
-        //
-        // It is recorded ONCE, by `slash_validator`, which measures the drop
-        // in committed supply across the whole call (`record_destroyed_since`).
-        // That measurement already covers every part this body cuts - the
-        // bond, the queue, the delegation positions, the delegation exits and
-        // the cross-role sweep - so adding `penalty` here as well booked the
-        // slash twice: a 1 200 penalty left `burned_total` at 2 400 and closed
-        // twice as much minting headroom as the slash destroyed
-        // (`a_validator_slash_records_what_it_destroyed` measured exactly
-        // that, 2400 against 1200). Recording in the wrapper and not here
-        // keeps the one measurement that cannot miss a part.
+        // Destroyed stake is recorded once by `slash_validator` via
+        // `record_destroyed_since`, which covers the validator bond, the
+        // unbonding queue, delegation positions/exits, and any cross-role bonds
+        // swept below.
 
         let jail_epochs = 7;
         validator.jail_until = self.epoch_index.saturating_add(jail_epochs);
@@ -2549,7 +2599,9 @@ impl AccountState {
                 .validators
                 .get(&report.offender)
                 .is_some_and(|validator| validator.slashed);
-        let outcome = self.registry.slash_from_report(report)?;
+        let outcome = self
+            .registry
+            .slash_from_report_at_epoch(report, self.epoch_index)?;
         if report.role == roles::VALIDATOR && !already_slashed {
             let ratio = self.registry.params().slash_ratio(report.condition());
             let mut cut_total = 0u64;
@@ -2832,7 +2884,10 @@ impl AccountState {
                         "only the owner account of a validator may send this",
                     ));
                 }
-                if self.validator_directory.operator_key_in_use(new_operator_key) {
+                if self
+                    .validator_directory
+                    .operator_key_in_use(new_operator_key)
+                {
                     return Err(refuse(
                         "validator_peer_or_operator_key_in_use",
                         "the operator key belongs to a validator already",
@@ -2957,37 +3012,31 @@ impl AccountState {
         {
             return Err("leader commitment epoch or chain length out of range".into());
         }
+        let mut leader_reg = crate::consensus::filiz::FilizRegistration::default();
+        leader_reg
+            .register(
+                owner.0,
+                seat.leader_commitment.commitment,
+                seat.leader_commitment.length,
+                epoch,
+            )
+            .map_err(|e| format!("{e:?}"))?;
         let floor = crate::core::chain_config::Network::from_chain_id(chain_id)
             .map_or(1, |n| n.min_stake_full());
         self.add_validator_with_floor(owner, stake, floor);
-        let reg_res = self
+        let validator = self
             .validators
             .get_mut(&owner)
-            .ok_or_else(|| "the validator was not created".to_string())
-            .and_then(|validator| {
-                validator.vrf_public_key = seat.vrf_key.clone();
-                validator.bls_public_key = bls_key.to_vec();
-                validator.pop_signature = bls_pop.to_vec();
-                validator.pq_public_key = seat.pq_vote_key.clone();
-                validator.active = validator.stake >= floor
-                    && validator.is_consensus_ready()
-                    && validator.verify_pop_is_valid(chain_id)
-                    && !validator.jailed;
-                validator
-                    .filiz
-                    .get_or_insert_with(Default::default)
-                    .register(
-                        owner.0,
-                        seat.leader_commitment.commitment,
-                        seat.leader_commitment.length,
-                        epoch,
-                    )
-                    .map_err(|e| format!("{e:?}"))
-            });
-        if let Err(err) = reg_res {
-            self.validators.remove(&owner);
-            return Err(err);
-        }
+            .ok_or_else(|| "the validator was not created".to_string())?;
+        validator.vrf_public_key = seat.vrf_key.clone();
+        validator.bls_public_key = bls_key.to_vec();
+        validator.pop_signature = bls_pop.to_vec();
+        validator.pq_public_key = seat.pq_vote_key.clone();
+        validator.active = validator.stake >= floor
+            && validator.is_consensus_ready()
+            && validator.verify_pop_is_valid(chain_id)
+            && !validator.jailed;
+        validator.filiz = Some(leader_reg);
         self.sync_validator_registration_with_floor(&owner, floor);
         self.keys_dirty = true;
         Ok(())
@@ -3189,7 +3238,7 @@ impl AccountState {
         }
     }
 
-    fn execute_proposal(&mut self, proposal: &crate::core::governance::Proposal) {
+    pub(crate) fn execute_proposal(&mut self, proposal: &crate::core::governance::Proposal) {
         use crate::core::governance::ProposalType;
         match &proposal.p_type {
             ProposalType::ChangeBaseFee(new_fee) => {
@@ -3219,37 +3268,59 @@ impl AccountState {
                 address,
                 evidence_hash,
             } => {
-                // Governance slash now requires evidence, and the committed
-                // evidence_hash must match a real slashing record in the
-                // registry. Before this check the hash was discarded and any
-                // historical slashing record for the address was enough, so a
-                // proposal could claim one evidence hash while zeroing stake
-                // on unrelated past evidence (security audit, MEDIUM,
-                // CWE-345). The hash is the bincode serialization of
-                // the report that was actually slashed, so a passed proposal
-                // names the exact evidence it relies on.
+                // Maximum age (in epochs) of a slashing report that governance
+                // may escalate into a full validator slash.
+                const MAX_GOVERNANCE_SLASH_EVIDENCE_AGE_EPOCHS: u64 = 1_000;
+                let slash_digest = *evidence_hash;
+                let registered_epoch = self
+                    .registry
+                    .get(address, crate::registry::role::roles::VALIDATOR)
+                    .map_or(0, |reg| reg.registered_epoch);
+                let mut matched_remaining_stake: u64 = 0;
+
+                // Governance slash requires unconsumed, fresh, equivocation/fault
+                // VALIDATOR evidence from the validator's current registration era
+                // (never a timed LivenessFault jail), and caps active-bond
+                // confiscation to the remaining stake at the time of the offence.
                 let evidence_matches =
                     self.registry
                         .slashing_history_for(address)
                         .iter()
                         .any(|record| {
-                            // The evidence must be a VALIDATOR slashing record.
-                            // A slash record for another role on the same
-                            // address (e.g. a VERIFIER) proves nothing about
-                            // the validator role this proposal is slashing
-                            // (security audit, HIGH).
                             if record.report.role != crate::registry::role::roles::VALIDATOR {
                                 return false;
                             }
+                            if record.report.condition()
+                                == crate::registry::SlashingCondition::LivenessFault
+                            {
+                                return false;
+                            }
+                            if self
+                                .governance
+                                .consumed_slash_evidence
+                                .contains(&slash_digest)
+                            {
+                                return false;
+                            }
+                            if record.slashed_epoch < registered_epoch {
+                                return false;
+                            }
+                            if self.epoch_index.saturating_sub(record.slashed_epoch)
+                                > MAX_GOVERNANCE_SLASH_EVIDENCE_AGE_EPOCHS
+                            {
+                                return false;
+                            }
+                            matched_remaining_stake = record.remaining_stake;
                             let bytes = bincode::serialize(&record.report)
                                 .unwrap_or_else(|_| STATE_SERIALIZE_FAILED.to_vec());
                             sha2::Sha256::digest(&bytes).as_slice() == evidence_hash
                         });
                 if !evidence_matches {
                     tracing::warn!(
-                        "Rejecting SlashValidator {address}: no slashing record matching the committed evidence_hash in registry history"
+                        "Rejecting SlashValidator {address}: no eligible unconsumed validator slashing record matching the committed evidence_hash"
                     );
-                } else if self.validators.contains_key(address) {
+                } else {
+                    self.governance.consumed_slash_evidence.insert(slash_digest);
                     let committed_before = self.total_bud_committed();
                     if let Some(v) = self.validators.get_mut(address) {
                         let stake_before = v.stake;
@@ -3257,7 +3328,8 @@ impl AccountState {
                         v.active = false;
                         v.jailed = true;
                         v.jail_until = self.epoch_index.saturating_add(7);
-                        v.stake = 0;
+                        let slashed_active = v.stake.min(matched_remaining_stake);
+                        v.stake = v.stake.saturating_sub(slashed_active);
                         self.unbonding_queue
                             .retain(|entry| entry.address != *address);
                         let _ = self.registry.slash(
@@ -3266,8 +3338,11 @@ impl AccountState {
                             crate::registry::permissionless::SlashingCondition::DoubleSign,
                             crate::core::chain_config::FIXED_POINT_SCALE,
                         );
-                        self.registry
-                            .reduce_delegated_for_slash(address, stake_before, stake_before);
+                        self.registry.reduce_delegated_for_slash(
+                            address,
+                            stake_before,
+                            slashed_active,
+                        );
                         let _ = self.registry.slash_delegation_unbonding(
                             address,
                             crate::core::chain_config::FIXED_POINT_SCALE,
@@ -3280,10 +3355,10 @@ impl AccountState {
                         if proposal.status == crate::core::governance::ProposalStatus::Active {
                             proposal.reduce_vote_weight(address, u64::MAX);
                         }
+                        tracing::info!(
+                            "Executing Governance: Slashed validator {address} (evidence-verified)"
+                        );
                     }
-                    tracing::info!(
-                        "Executing Governance: Slashed validator {address} (evidence-verified)"
-                    );
                 }
             }
             ProposalType::PoaAddAdmin { domain_id, admin } => {
@@ -3976,9 +4051,7 @@ impl AccountState {
             .and_then(|v| v.checked_add(self.registry.total_delegation_unbonding_supply()))
             .and_then(|v| v.checked_add(self.total_external_bonded_supply()))
             .and_then(|v| v.checked_add(self.proof_market.total_locked_supply()))
-            .and_then(|v| {
-                v.checked_add(self.settlement.relayer_policy.total_escrowed_supply())
-            })
+            .and_then(|v| v.checked_add(self.settlement.relayer_policy.total_escrowed_supply()))
             .and_then(|v| v.checked_add(self.settlement.graft.total_escrowed_supply()))
             .and_then(|v| v.checked_add(self.total_storage_escrowed_supply()));
         match total {
@@ -4176,19 +4249,19 @@ impl AccountState {
     }
 
     /// Records the drop in committed supply since `committed_before` as
-    /// destroyed. For paths that mint nothing, so any drop is a destruction.
+    /// destroyed. For paths that mint nothing, any drop is a destruction.
     fn record_destroyed_since(&mut self, committed_before: u128) {
         let destroyed = committed_before.saturating_sub(self.total_bud_committed());
         self.record_destroyed(destroyed);
     }
 
     /// Slash one application role bond and record the penalty as destroyed.
-    /// Every non-validator role bond counts toward committed supply,
-    /// so the penalty is exactly what leaves it.
+    /// Every non-validator role bond counts toward committed supply, so the
+    /// penalty is exactly what leaves it.
     ///
     /// # Errors
     ///
-    /// The registry's refusal: an unregistered or already slashed role.
+    /// Returns the registry's refusal for an unregistered or already slashed role.
     pub fn slash_role_destroying(
         &mut self,
         account: Address,
@@ -6059,6 +6132,108 @@ mod tests {
     }
 
     #[test]
+    fn governance_slash_rejects_consumed_liveness_stale_and_post_offence_stake() {
+        use crate::core::governance::{Proposal, ProposalType};
+        let who = test_addr_from_byte(7u8);
+        let proposer = test_addr_from_byte(8u8);
+        let mut state = AccountState::new();
+        state.add_validator(who, 1_000);
+
+        // 1. A LivenessFault report is a timed jail, never valid SlashValidator evidence.
+        let liveness_report = crate::registry::evidence::SlashingReport::consensus_liveness(
+            who,
+            crate::registry::role::roles::VALIDATOR,
+            crate::registry::evidence::SlashingProof::Liveness {
+                window_start_epoch: 0,
+                window_end_epoch: 10,
+                missed: 10,
+                expected: 10,
+            },
+            None,
+        );
+        assert!(state.slash_from_report(&liveness_report).unwrap().is_some());
+        let liveness_bytes = bincode::serialize(&liveness_report).unwrap();
+        let liveness_hash: [u8; 32] = sha2::Sha256::digest(&liveness_bytes).into();
+        let stake_after_liveness = state.get_validator(&who).unwrap().stake;
+        state.execute_proposal(&Proposal::new(
+            1,
+            proposer,
+            ProposalType::SlashValidator {
+                address: who,
+                evidence_hash: liveness_hash,
+            },
+            0,
+            10,
+        ));
+        assert_eq!(
+            state.get_validator(&who).unwrap().stake,
+            stake_after_liveness,
+            "LivenessFault report must never trigger full governance stake confiscation"
+        );
+
+        // 2. Real double-sign report: simulate post-offence stake added above
+        // `remaining_stake` and verify only offence-time remaining stake is confiscated,
+        // and replaying the same `evidence_hash` a second time is rejected.
+        let eq_report = crate::registry::evidence::SlashingReport::consensus_double_sign(
+            who,
+            crate::registry::evidence::SlashingProof::DoubleSign {
+                height: 9,
+                kind: crate::registry::evidence::DoubleSignKind::BlockHeader,
+                epoch: None,
+                block_hash_1: "11".into(),
+                block_hash_2: "22".into(),
+                signature_1: vec![3],
+                signature_2: vec![4],
+            },
+            None,
+        );
+        assert!(state.slash_from_report(&eq_report).unwrap().is_some());
+        let offence_remaining = state
+            .registry
+            .slashing_history()
+            .last()
+            .unwrap()
+            .remaining_stake;
+        state.get_validator_mut(&who).unwrap().stake = offence_remaining + 2_500;
+
+        let eq_bytes = bincode::serialize(&eq_report).unwrap();
+        let eq_hash: [u8; 32] = sha2::Sha256::digest(&eq_bytes).into();
+        state.execute_proposal(&Proposal::new(
+            2,
+            proposer,
+            ProposalType::SlashValidator {
+                address: who,
+                evidence_hash: eq_hash,
+            },
+            0,
+            10,
+        ));
+        assert_eq!(
+            state.get_validator(&who).unwrap().stake,
+            2_500,
+            "stake bonded after the offence must not be confiscated"
+        );
+        assert!(state.governance.consumed_slash_evidence.contains(&eq_hash));
+
+        // Second execution with the same consumed evidence_hash must leave remaining stake intact.
+        state.execute_proposal(&Proposal::new(
+            3,
+            proposer,
+            ProposalType::SlashValidator {
+                address: who,
+                evidence_hash: eq_hash,
+            },
+            0,
+            10,
+        ));
+        assert_eq!(
+            state.get_validator(&who).unwrap().stake,
+            2_500,
+            "replayed SlashValidator evidence must be refused"
+        );
+    }
+
+    #[test]
     fn change_base_fee_bounds() {
         use crate::core::governance::{Proposal, ProposalType};
         let mut state = AccountState::new();
@@ -6690,6 +6865,120 @@ mod c3_validator_readiness_tests {
             "the reward can never exceed the slash"
         );
     }
+
+    #[test]
+    fn report_slash_records_validator_and_unbonding_cuts_in_burned_total() {
+        let mut state = AccountState::new();
+        let who = Address::from([0x31; 32]);
+        state.add_validator(who, 4_000);
+        state.unbonding_queue.push(UnbondingEntry {
+            address: who,
+            amount: 2_000,
+            release_epoch: 10,
+        });
+        let headroom_before = state.supply_capacity_remaining();
+        let committed_before = state.total_bud_committed();
+        let report = crate::registry::evidence::SlashingReport::consensus_double_sign(
+            who,
+            crate::registry::evidence::SlashingProof::DoubleSign {
+                height: 7,
+                kind: crate::registry::evidence::DoubleSignKind::BlockHeader,
+                epoch: None,
+                block_hash_1: "aa".into(),
+                block_hash_2: "bb".into(),
+                signature_1: vec![1],
+                signature_2: vec![2],
+            },
+            None,
+        );
+        let outcome = state
+            .slash_from_report(&report)
+            .expect("valid report")
+            .expect("validator slashed");
+        assert!(outcome.penalty > 0);
+        let destroyed = committed_before - state.total_bud_committed();
+        assert!(destroyed > u128::from(outcome.penalty));
+        assert_eq!(u128::from(state.burned_total), destroyed);
+        assert_eq!(
+            state.supply_capacity_remaining(),
+            headroom_before,
+            "slash_from_report must not reopen supply mint headroom"
+        );
+    }
+
+    #[test]
+    fn report_slash_and_role_slash_conserve_non_validator_role_headroom() {
+        let mut state = AccountState::new();
+        let relayer = Address::from([0x32; 32]);
+        let relayer_min = state.registry.params().min_stake;
+        state
+            .registry
+            .register_relayer(relayer, relayer_min, 0)
+            .expect("register relayer");
+
+        let operator = Address::from([0x33; 32]);
+        let ai_bond = state.required_ai_bond(crate::core::transaction::DEFAULT_CHAIN_ID);
+        state.add_balance(&operator, ai_bond * 2);
+        state
+            .bond_ai_operator(
+                &operator,
+                ai_bond,
+                crate::core::transaction::DEFAULT_CHAIN_ID,
+            )
+            .expect("bond AI operator");
+
+        let headroom_before = state.supply_capacity_remaining();
+        let relayer_report =
+            crate::registry::evidence::SlashingReport::consensus_invalid_relay_proof(
+                relayer,
+                "invalid relay proof".into(),
+                None,
+            );
+        let relayer_outcome = state
+            .slash_from_report(&relayer_report)
+            .expect("valid relayer report")
+            .expect("relayer slashed");
+        assert_eq!(relayer_outcome.penalty, relayer_min);
+        assert_eq!(state.supply_capacity_remaining(), headroom_before);
+
+        let ai_outcome = state
+            .slash_role_destroying(
+                operator,
+                crate::registry::role::roles::AI_OPERATOR,
+                crate::registry::permissionless::SlashingCondition::MaliciousBehaviour,
+                crate::core::chain_config::FIXED_POINT_SCALE,
+            )
+            .expect("slash AI operator");
+        assert_eq!(ai_outcome.penalty, ai_bond);
+        assert_eq!(state.burned_total, relayer_min + ai_bond);
+        assert_eq!(state.supply_capacity_remaining(), headroom_before);
+    }
+
+    #[test]
+    fn slash_validator_counts_cross_role_sweep_in_burned_total() {
+        let mut state = AccountState::new();
+        let who = Address::from([0x34; 32]);
+        state.add_validator(who, 10_000);
+        let relayer_min = state.registry.params().min_stake;
+        state
+            .registry
+            .register_relayer(who, relayer_min, 0)
+            .expect("register relayer on same address");
+
+        let headroom_before = state.supply_capacity_remaining();
+        let committed_before = state.total_bud_committed();
+        let penalty = state
+            .slash_validator(&who, 500_000, "double sign")
+            .expect("validator slashed");
+        assert!(penalty > 0);
+        let destroyed = committed_before - state.total_bud_committed();
+        assert!(
+            destroyed > u128::from(penalty),
+            "cross-role sweep must also cut the relayer bond"
+        );
+        assert_eq!(u128::from(state.burned_total), destroyed);
+        assert_eq!(state.supply_capacity_remaining(), headroom_before);
+    }
 }
 
 #[cfg(test)]
@@ -6827,7 +7116,9 @@ mod validator_v7_binding_tests {
         let alice = Address::from([0xA1; 32]);
         let bob = Address::from([0xB2; 32]);
         let mut state = AccountState::new();
-        state.accounts.insert(alice, Account::with_balance(alice, 5));
+        state
+            .accounts
+            .insert(alice, Account::with_balance(alice, 5));
         state.keys_dirty = true;
 
         // Transfer 1 wei (`1` attoBUD) out of 5 whole atoms: borrows 1 atom into
@@ -6873,9 +7164,10 @@ mod validator_v7_binding_tests {
         let addrs: Vec<Address> = (1u8..=6).map(|i| Address::from([i; 32])).collect();
         let mut state = AccountState::new();
         for (idx, addr) in addrs.iter().enumerate() {
-            state
-                .accounts
-                .insert(*addr, Account::with_balance(*addr, (idx as u64 + 1) * 1_000));
+            state.accounts.insert(
+                *addr,
+                Account::with_balance(*addr, (idx as u64 + 1) * 1_000),
+            );
         }
         state.keys_dirty = true;
         let initial_attos = state.total_bud_committed_attos();
@@ -6919,5 +7211,12 @@ mod validator_v7_binding_tests {
             // below the true whole-atom ceiling.
             assert!(state.circulating_supply() >= initial_ceiling_atoms);
         }
+    }
+}
+
+#[cfg(test)]
+impl AccountState {
+    pub fn credit_account(&mut self, address: &Address, amount: u64) {
+        self.add_balance(address, amount);
     }
 }

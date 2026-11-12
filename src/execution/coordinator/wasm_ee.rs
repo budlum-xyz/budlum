@@ -9,6 +9,8 @@
 //! - Refuses `StakingMsg`, `DistributionMsg`, `GovMsg`, and `IbcMsg` messages.
 //! - Supports `BudlumMsg::UniversalCall` (`SubMsg` reply model), `BudlumQuery::UniversalView`,
 //!   CW20 (`cw20-base`), CW721 (`cw721-base`), and zero-balance UEL pointers to EVM.
+//!
+//! Convenience: exposed for CLI, RPC, SDK, and multi-VM runtime callers.
 
 use crate::execution::coordinator::assets::{
     decode_pointer_bytecode, AssetStandard, PointerDescriptor,
@@ -21,7 +23,7 @@ use crate::execution::coordinator::universal_call::{
 };
 use budlum_uel_abi::{
     BlockContext, BudAmount, CodeInfo, EeCall, EeCallKind, EeFault, EeId, EeIdentity, EeLog,
-    EeOutcome, EeQuery, EeRefusal, ExecutionEnvironment, HostApi, HostError, HostRead, Namespace,
+    EeOutcome, EeQuery, EeRefusal, ExecutionEnvironment, HostApi, HostRead, Namespace,
     OutcomeStatus, RefusalCode, UniversalCall,
 };
 use serde::{Deserialize, Serialize};
@@ -433,6 +435,7 @@ fn execute_wasm_pointer_to_evm(
             value: BudAmount(0),
             input: wrapped,
             gas_limit: gas_budget / 2 + 10_000,
+            is_static: read_only,
         })
         .map_err(|e| e.to_string())
     };
@@ -629,7 +632,10 @@ fn execute_wasm_pointer_to_evm(
             ures.output,
         ));
     }
-    Ok((OutcomeStatus::Revert, b"unsupported CW pointer action".to_vec()))
+    Ok((
+        OutcomeStatus::Revert,
+        b"unsupported CW pointer action".to_vec(),
+    ))
 }
 
 fn handle_cw_query(
@@ -816,9 +822,13 @@ fn execute_cosmwasm_json(
             tk.as_bytes(),
             Some(cur_to.saturating_add(amt).to_string().as_bytes()),
         )?;
+        let topic_arr: [u8; 32] = Sha256::digest(b"wasm:transfer").into();
         host.emit_log(EeLog {
-            address: contract.to_vec(),
-            topics: vec![Sha256::digest(b"wasm:transfer").into()],
+            emitter: EeIdentity {
+                ee: EeId::WASM,
+                id: contract.to_vec(),
+            },
+            topics: vec![topic_arr.to_vec()],
             data: format!("{sender_str}->{rcpt}:{amt}").into_bytes(),
         })
         .map_err(|e| e.to_string())?;
@@ -836,7 +846,12 @@ fn execute_cosmwasm_json(
             .and_then(|s| s.parse().ok())
             .unwrap_or(0);
         let ak = format!("cw20:alw:{sender_str}:{spender}");
-        write_store(host, contract, ak.as_bytes(), Some(amt.to_string().as_bytes()))?;
+        write_store(
+            host,
+            contract,
+            ak.as_bytes(),
+            Some(amt.to_string().as_bytes()),
+        )?;
         return Ok((OutcomeStatus::Success, b"{\"ok\":true}".to_vec()));
     }
 
@@ -1030,6 +1045,7 @@ fn execute_cosmwasm_json(
                         value: BudAmount(value_attos),
                         input: input_b,
                         gas_limit: gas_limit_bgu.min(gas_budget),
+                        is_static: false,
                     })
                     .map_err(|e| e.to_string())?;
                 return Ok((
@@ -1051,7 +1067,10 @@ fn execute_cosmwasm_json(
         return Ok((OutcomeStatus::Success, v.as_bytes().to_vec()));
     }
 
-    Ok((OutcomeStatus::Revert, b"unknown CosmWasm execute message".to_vec()))
+    Ok((
+        OutcomeStatus::Revert,
+        b"unknown CosmWasm execute message".to_vec(),
+    ))
 }
 
 impl ExecutionEnvironment for WasmEe {

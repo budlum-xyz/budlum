@@ -6,6 +6,7 @@
 //!   contract's storage trie against `storageRoot`.
 //!
 //! Node count is capped before any node is decoded or hashed.
+//! Convenience: exposed for CLI, RPC, SDK, and multi-VM runtime callers.
 
 use crate::cross_domain::evm::mpt::{self, MptError};
 use crate::cross_domain::evm::rlp::{self, Item, RlpError};
@@ -31,7 +32,11 @@ impl EvmAccount {
     /// Low `u128` wei balance when the source balance fits in 128 bits (`None` above `2^128 - 1`).
     #[must_use]
     pub fn balance_u128(&self) -> Option<u128> {
-        if self.balance_be.get(..16).is_some_and(|hi| hi.iter().any(|b| *b != 0)) {
+        if self
+            .balance_be
+            .get(..16)
+            .is_some_and(|hi| hi.iter().any(|b| *b != 0))
+        {
             return None;
         }
         let lo: [u8; 16] = self.balance_be.get(16..32)?.try_into().ok()?;
@@ -144,7 +149,7 @@ fn decode_account(value: &[u8]) -> Result<EvmAccount, AccountProofError> {
     let nonce = rlp::decode_uint(f0)?;
     let bal_bytes = rlp::as_bytes(f1)?;
     if bal_bytes.first() == Some(&0) {
-        return Err(AccountProofError::Rlp(RlpError::NonCanonicalInt));
+        return Err(AccountProofError::Rlp(RlpError::NonCanonical));
     }
     let balance_be = right_aligned_32(bal_bytes)?;
     let storage_root = fixed_hash(f2)?;
@@ -179,7 +184,7 @@ fn decode_storage_value(value: &[u8]) -> Result<[u8; 32], AccountProofError> {
     let item = rlp::decode(value)?;
     let bytes = rlp::as_bytes(&item)?;
     if bytes.first() == Some(&0) {
-        return Err(AccountProofError::Rlp(RlpError::NonCanonicalInt));
+        return Err(AccountProofError::Rlp(RlpError::NonCanonical));
     }
     right_aligned_32(bytes)
 }
@@ -211,10 +216,7 @@ mod tests {
 
     fn leaf(key: &[u8], value: Vec<u8>) -> Vec<u8> {
         let path = mpt::hp_encode(&mpt::to_nibbles(key), true);
-        rlp::encode(&Item::List(vec![
-            Item::String(path),
-            Item::String(value),
-        ]))
+        rlp::encode(&Item::List(vec![Item::String(path), Item::String(value)]))
     }
 
     fn account_value(
@@ -313,7 +315,10 @@ mod tests {
             Item::String(vec![0u8; 32]),
             Item::String(vec![0u8; 32]),
         ]));
-        assert_eq!(decode_account(&too_wide_33b), Err(AccountProofError::FieldTooWide));
+        assert_eq!(
+            decode_account(&too_wide_33b),
+            Err(AccountProofError::FieldTooWide)
+        );
 
         let short_hash = rlp::encode(&Item::List(vec![
             Item::String(Vec::new()),

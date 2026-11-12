@@ -94,6 +94,9 @@ pub const CROSS_DOMAIN_V1: &[u8] = b"BDLM/CROSS_DOMAIN/V1";
 /// Validator operator key: the custody quota update.
 pub const VALIDATOR_V1: &[u8] = b"BDLM/VALIDATOR/V1";
 
+/// Foreign-lane account adoption ML-DSA-87 companion signature.
+pub const ADOPT_FOREIGN_V1: &[u8] = b"BDLM/ADOPT_FOREIGN/V1";
+
 /// table, in the order of section 6.5.
 pub const TABLE: &[&[u8]] = &[
     TX_V7,
@@ -131,6 +134,7 @@ pub const EXTRAS: &[&[u8]] = &[
     BRIDGE_V1,
     CROSS_DOMAIN_V1,
     VALIDATOR_V1,
+    ADOPT_FOREIGN_V1,
 ];
 
 /// Whether `ctx` is a registered context string.

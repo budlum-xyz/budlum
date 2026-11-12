@@ -626,8 +626,8 @@ mod tests {
 
     #[test]
     fn ens_arweave_ns_32b_tx_id_renders_with_honest_badge() {
-        // EIP-1577 `arweave-ns` codec 0xb29910 as unsigned varint: 0x90 0xb2 0x2c
-        let mut ch = vec![0x90, 0xb2, 0x2c];
+        // EIP-1577 `arweave-ns` codec 0xb29910 as unsigned varint: 0x90 0xb2 0xca 0x05
+        let mut ch = vec![0x90, 0xb2, 0xca, 0x05];
         let tx_id = [0x55u8; 32];
         ch.extend_from_slice(&tx_id);
         let key = hex::encode(tx_id);

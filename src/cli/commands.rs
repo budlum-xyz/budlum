@@ -128,6 +128,9 @@ pub struct NodeConfig {
     pub rpc_auth_required: bool,
 
     #[arg(skip)]
+    pub rpc_operator_auth_required: bool,
+
+    #[arg(skip)]
     pub rpc_api_key_env: Option<String>,
 
     #[arg(skip)]
@@ -393,6 +396,7 @@ impl Default for NodeConfig {
             // Setting `BUDLUM_RPC_AUTH_REQUIRED=0` in env), but a
             // Forgetful operator no longer ships an open node.
             rpc_auth_required: true,
+            rpc_operator_auth_required: false,
             rpc_api_key_env: None,
             // Same reasoning: empty `allowed_ips` means "allow all" in
             // The runtime check, so we now default to localhost-only and
@@ -613,6 +617,7 @@ pub struct RpcSection {
     pub host: Option<String>, // backwards-compatibility
     pub port: Option<u16>,    // backwards-compatibility
     pub auth_required: Option<bool>,
+    pub operator_auth_required: Option<bool>,
     pub allowed_ips: Option<Vec<String>>,
     pub cors_origins: Option<Vec<String>>,
     pub rate_limit_per_minute: Option<u64>,
@@ -923,6 +928,9 @@ impl NodeConfig {
             if let Some(auth) = rpc.auth_required {
                 self.rpc_auth_required = auth;
             }
+            if let Some(op_auth) = rpc.operator_auth_required {
+                self.rpc_operator_auth_required = op_auth;
+            }
         }
 
         if let Some(metrics) = fc.metrics {
@@ -1147,6 +1155,13 @@ impl NodeConfig {
                 eprintln!("CRITICAL: invalid BUDLUM_RPC_AUTH_REQUIRED: {error}");
                 std::process::exit(1);
             });
+        }
+        if let Ok(op_auth_required) = std::env::var("BUDLUM_RPC_OPERATOR_AUTH_REQUIRED") {
+            self.rpc_operator_auth_required =
+                parse_env_bool(&op_auth_required).unwrap_or_else(|error| {
+                    eprintln!("CRITICAL: invalid BUDLUM_RPC_OPERATOR_AUTH_REQUIRED: {error}");
+                    std::process::exit(1);
+                });
         }
         if let Ok(api_key_env) = std::env::var("BUDLUM_RPC_API_KEY_ENV") {
             if !api_key_env.trim().is_empty() {

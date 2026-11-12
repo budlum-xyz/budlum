@@ -281,9 +281,24 @@ fn check_chain_id(chain_id: u64) -> Result<(), String> {
     Ok(())
 }
 
+/// Local opt-in is for development, not an activation of testnet consensus.
+/// Check the proof's public chain id when verifying, not just the CLI flag.
+fn check_testnet_activation(
+    chain_id: u64,
+    activation: bud_isa::MainnetActivation,
+) -> Result<(), String> {
+    if chain_id == 45_261 && activation != bud_isa::MainnetActivation::default() {
+        return Err(
+            "testnet does not permit --activation full for proof execution or verification".into(),
+        );
+    }
+    Ok(())
+}
+
 fn run_pipeline(config: ExecutionConfig) -> Result<ExecutionOutput, Box<dyn std::error::Error>> {
     use bud_state::StateBackend;
     check_chain_id(config.chain_id)?;
+    check_testnet_activation(config.chain_id, config.activation)?;
 
     debug!("Starting pipeline");
 
@@ -1073,6 +1088,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         } => {
             let (envelope, expected_inputs, program) =
                 load_verifier_inputs(proof_file, public_inputs_file, bytecode_file)?;
+            check_testnet_activation(expected_inputs.chain_id, cli.activation.state())?;
 
             match bud_proof::Plonky3Adapter::verify_with_activation(
                 &envelope,
@@ -1209,6 +1225,34 @@ mod tests {
     fn chain_id_zero_is_refused() {
         assert!(check_chain_id(0).is_err());
         assert!(check_chain_id(45262).is_ok());
+    }
+
+    #[test]
+    fn testnet_proof_activation_is_closed() {
+        let closed = bud_isa::MainnetActivation::default();
+        let open = bud_isa::MainnetActivation::full();
+        assert!(check_testnet_activation(45_261, closed).is_ok());
+        assert!(check_testnet_activation(45_262, open).is_ok());
+        assert!(check_testnet_activation(45_261, open).is_err());
+
+        // The execution door refuses before reading a state file or producing
+        // a receipt. The verifier door uses the proof's public chain id above.
+        let result = run_pipeline(ExecutionConfig {
+            bytecode: vec![],
+            sender: None,
+            nonce: None,
+            block_height: None,
+            args: Vec::new(),
+            chain_id: 45_261,
+            state_in_file: Some("nonexistent-testnet-state.json".into()),
+            commit_state: false,
+            activation: open,
+        });
+        let error = result.err().expect("open testnet activation must fail");
+        assert!(
+            error.to_string().contains("testnet does not permit"),
+            "{error}"
+        );
     }
 
     /// The VM the CLI constructs must be **in mainnet mode**.

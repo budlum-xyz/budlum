@@ -23,7 +23,7 @@ fn test_multi_validator_permissionless_lifecycle_and_suspension() {
     let v2 = addr(2);
     let absentee = addr(3);
 
- // Register 3 validators permissionlessly with stake
+    // Register 3 validators permissionlessly with stake
     bc.state.add_validator(v1, 20_000);
     bc.state.add_validator(v2, 20_000);
     bc.state.add_validator(absentee, 20_000);
@@ -32,14 +32,14 @@ fn test_multi_validator_permissionless_lifecycle_and_suspension() {
     assert!(bc.state.registry.is_active(&v2, roles::VALIDATOR));
     assert!(bc.state.registry.is_active(&absentee, roles::VALIDATOR));
 
- // Low liveness threshold so the absentee crosses it. V-4 / liveness tracking:
- // absence suspends, it never slashes.
+    // Low liveness threshold so the absentee crosses it. V-4 / liveness tracking:
+    // absence suspends, it never slashes.
     bc.state.registry.set_params(RegistryParams {
         liveness_max_missed_epochs: 1,
         ..RegistryParams::default()
     });
 
- // Produce blocks with v1 and v2 participating, absentee missing
+    // Produce blocks with v1 and v2 participating, absentee missing
     for i in 0..(EPOCH_LENGTH * 2) {
         let producer = if i % 2 == 0 { v1 } else { v2 };
         let _ = bc
@@ -47,7 +47,7 @@ fn test_multi_validator_permissionless_lifecycle_and_suspension() {
             .expect("block production succeeds");
     }
 
- // Absentee missed epochs: suspended, stake untouched.
+    // Absentee missed epochs: suspended, stake untouched.
     let absentee_reg = bc.state.registry.get(&absentee, roles::VALIDATOR).unwrap();
     assert_eq!(
         absentee_reg.stake, 20_000,
@@ -64,7 +64,7 @@ fn test_multi_validator_permissionless_lifecycle_and_suspension() {
     );
     assert!(bc.state.liveness.is_suspended(&absentee));
 
- // V1 and v2 should remain active and unslashed
+    // V1 and v2 should remain active and unslashed
     assert!(bc.state.registry.is_active(&v1, roles::VALIDATOR));
     assert!(bc.state.registry.is_active(&v2, roles::VALIDATOR));
 }

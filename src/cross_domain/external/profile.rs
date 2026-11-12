@@ -290,11 +290,16 @@ mod tests {
             crypto_facts: CryptoFacts::new(),
             quantum_class: None,
         };
-        let owned_json = serde_json::to_string(&profile).unwrap();
-        let decoded: DomainProfile = serde_json::from_str(&owned_json).unwrap();
+        let owned_json: &'static str =
+            Box::leak(serde_json::to_string(&profile).unwrap().into_boxed_str());
+        let decoded: DomainProfile = serde_json::from_str(owned_json).unwrap();
         assert_eq!(decoded, profile);
 
-        let wrong_unit = owned_json.replace("\"atoms\"", "\"tokens\"");
-        assert!(serde_json::from_str::<DomainProfile>(&wrong_unit).is_err());
+        let wrong_unit: &'static str = Box::leak(
+            owned_json
+                .replace("\"atoms\"", "\"tokens\"")
+                .into_boxed_str(),
+        );
+        assert!(serde_json::from_str::<DomainProfile>(wrong_unit).is_err());
     }
 }

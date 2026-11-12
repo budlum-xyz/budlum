@@ -138,8 +138,7 @@ pub fn run(root: &Path) -> Result<String, String> {
 ///
 /// Returns an error if any canary fails to trigger or clean tree fails.
 pub fn self_test() -> Result<String, String> {
-    let dir =
-        crate::gates::rust_literals::exclusive_scratch_dir("budlum-gates-bud3-fee-physical")?;
+    let dir = crate::gates::rust_literals::exclusive_scratch_dir("budlum-gates-bud3-fee-physical")?;
     let result = (|| {
         let put = |rel: &str, body: &str| -> Result<(), String> {
             let p = dir.join(rel);
@@ -180,7 +179,9 @@ pub fn reg() {
         let legacy_rel = format!("src/storage/{}.rs", ["three", "_regime"].concat());
         put(&legacy_rel, "pub fn held_bytes_for() -> u64 { 0 }\n")?;
         if run(&dir).is_ok() {
-            return Err(String::from("canary: resurrected zero-held-bytes file passed"));
+            return Err(String::from(
+                "canary: resurrected zero-held-bytes file passed",
+            ));
         }
         let _ = std::fs::remove_file(dir.join(&legacy_rel));
 

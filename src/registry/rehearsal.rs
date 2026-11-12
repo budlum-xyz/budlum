@@ -76,7 +76,10 @@ pub enum RehearsalError {
     /// Topology failed a mandatory minimum count or diversity floor.
     TopologyViolation(&'static str),
     /// One of the seven drills (`T-1`..`T-7`) failed its pass criterion.
-    DrillFailed { drill: &'static str, reason: &'static str },
+    DrillFailed {
+        drill: &'static str,
+        reason: &'static str,
+    },
     /// Mobile field-test log entry violated battery, RAM, or metered-network policy.
     MobileFieldViolation(&'static str),
 }
@@ -112,7 +115,11 @@ pub fn verify_rehearsal_topology(topo: &RehearsalTopology) -> Result<(), Rehears
             "fewer than 8 Full validators",
         ));
     }
-    let ids: BTreeSet<[u8; 32]> = topo.full_validators.iter().map(|v| v.validator_id).collect();
+    let ids: BTreeSet<[u8; 32]> = topo
+        .full_validators
+        .iter()
+        .map(|v| v.validator_id)
+        .collect();
     if ids.len() != topo.full_validators.len() {
         return Err(RehearsalError::TopologyViolation(
             "duplicate Full validator_id in topology",
@@ -141,7 +148,9 @@ pub fn verify_rehearsal_topology(topo: &RehearsalTopology) -> Result<(), Rehears
         ));
     }
     if topo.relay_count < MIN_REHEARSAL_RELAYS {
-        return Err(RehearsalError::TopologyViolation("fewer than 4 relay nodes"));
+        return Err(RehearsalError::TopologyViolation(
+            "fewer than 4 relay nodes",
+        ));
     }
     if topo.upload_gateway_count < MIN_REHEARSAL_GATEWAYS {
         return Err(RehearsalError::TopologyViolation(
@@ -234,7 +243,8 @@ pub fn evaluate_rehearsal_drills(r: &RehearsalDrillReport) -> Result<(), Rehears
     if !r.t4_resume_activated_in_one_epoch || r.t4_repair_backlog_after_sweep != 0 {
         return Err(RehearsalError::DrillFailed {
             drill: "T-4",
-            reason: "ResumeValidator did not activate next epoch or repair backlog remained non-zero",
+            reason:
+                "ResumeValidator did not activate next epoch or repair backlog remained non-zero",
         });
     }
     if r.t5_total_uploaded_bytes < MIN_T5_TOTAL_UPLOAD_BYTES
@@ -337,9 +347,7 @@ pub fn analyze_mobile_field_logs(jsonl: &str) -> Result<MobileFieldSummary, Rehe
         devices.insert(sample.device_id);
         summary.device_count = devices.len();
         summary.max_rss_mib = summary.max_rss_mib.max(sample.peak_rss_mib);
-        summary.max_daily_battery_bps = summary
-            .max_daily_battery_bps
-            .max(sample.daily_battery_bps);
+        summary.max_daily_battery_bps = summary.max_daily_battery_bps.max(sample.daily_battery_bps);
         summary.total_audits_answered = summary
             .total_audits_answered
             .saturating_add(sample.audits_answered);

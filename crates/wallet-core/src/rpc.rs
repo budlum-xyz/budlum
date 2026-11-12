@@ -33,9 +33,7 @@ fn strip_hex_prefix(address_hex: &str) -> &str {
 #[must_use]
 pub fn request(method: &str, params: &str, id: u64) -> String {
     let safe_method = json_escape_str(method);
-    format!(
-        "{{\"jsonrpc\":\"2.0\",\"id\":{id},\"method\":\"{safe_method}\",\"params\":{params}}}"
-    )
+    format!("{{\"jsonrpc\":\"2.0\",\"id\":{id},\"method\":\"{safe_method}\",\"params\":{params}}}")
 }
 
 /// `bud_chainId`.

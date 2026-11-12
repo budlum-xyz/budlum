@@ -78,7 +78,9 @@ impl LivenessTracker {
     }
 
     /// Apply resumes whose epoch has come; returns the reactivated
-    /// validators and clears their miss streak.
+    /// validators. The accrued miss streak survives until `record_epoch`
+    /// observes genuine on-chain participation, preventing a non-participating
+    /// validator from resetting its streak with control-plane resumes alone.
     pub fn activate_due_resumes(&mut self, epoch: u64) -> Vec<Address> {
         let due: Vec<Address> = self
             .reported
@@ -88,8 +90,6 @@ impl LivenessTracker {
             .collect();
         for addr in &due {
             self.reported.remove(addr);
-            self.missed.remove(addr);
-            self.streak_start_epoch.remove(addr);
         }
         due
     }

@@ -85,9 +85,9 @@ too_many_arguments = "allow"
 type_complexity = "allow"
 
 [dependencies]
-sha3 = "0.10"
+sha3 = "0.12"
 clap = { version = "4", features = ["derive"] }
-ed25519-dalek = { version = "2", features = ["rand_core"] }
+ed25519-dalek = "3"
 ml-dsa = { version = "0.1", features = ["getrandom"] }
 zstd = "0.14"
 # The Shamir split draws its polynomial coefficients from the OS random

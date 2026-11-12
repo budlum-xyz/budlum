@@ -13,9 +13,7 @@ use crate::core::transaction::{Transaction, TransactionType, DEFAULT_CHAIN_ID};
 use crate::crypto::primitives::{KeyPair, ValidatorKeys};
 use crate::crypto::scheme::SchemeId;
 use crate::execution::executor::Executor;
-use crate::mempool::duty_lane::{
-    block_bytes, block_share_bytes, is_duty, window_at, DutyRefusal,
-};
+use crate::mempool::duty_lane::{block_bytes, block_share_bytes, is_duty, window_at, DutyRefusal};
 use crate::mempool::pool::{Mempool, MempoolConfig, MempoolError, DEFAULT_DUTY_BLOCK_BYTES};
 use crate::storage::bud3::tx::StorageTxV3;
 use crate::validators::{
@@ -813,7 +811,9 @@ fn mobile_duty_tx_lane_is_rate_limited() {
     let refused = tiny.admit_at(duty_ack(&keypair, 0, [5u8; 32]), now);
     assert!(matches!(
         refused,
-        Err(MempoolError::DutyLaneRefused(DutyRefusal::LaneBytesFull { .. }))
+        Err(MempoolError::DutyLaneRefused(
+            DutyRefusal::LaneBytesFull { .. }
+        ))
     ));
     assert_eq!(tiny.len(), 0);
 }
@@ -861,7 +861,10 @@ fn duty_lane_budget_is_twenty_percent() {
             carried_bytes = carried_bytes.saturating_add(block_bytes(tx));
         }
     }
-    assert!(carried_bytes <= cap, "the lane took {carried_bytes} of {cap}");
+    assert!(
+        carried_bytes <= cap,
+        "the lane took {carried_bytes} of {cap}"
+    );
     assert!(carried > 0);
     assert!(
         carried < 5,
@@ -895,15 +898,7 @@ fn resume_validator_is_suspension_only_and_activates_one_epoch_later() {
     )
     .unwrap();
 
-    let resume = || {
-        tx(
-            f.owner,
-            0,
-            1,
-            DEFAULT_CHAIN_ID,
-            ValidatorTx::Resume,
-        )
-    };
+    let resume = || tx(f.owner, 0, 1, DEFAULT_CHAIN_ID, ValidatorTx::Resume);
     assert_eq!(
         apply(&mut state, &resume()).unwrap_err(),
         "validator_not_suspended",
@@ -914,7 +909,9 @@ fn resume_validator_is_suspension_only_and_activates_one_epoch_later() {
     let mut params = *state.registry.params();
     params.liveness_max_missed_epochs = 1;
     assert_eq!(
-        state.liveness.record_epoch(1, &[f.owner], |_| false, &params),
+        state
+            .liveness
+            .record_epoch(1, &[f.owner], |_| false, &params),
         vec![f.owner]
     );
     // Epoch-close applies the tracker's suspension to validator duty.
@@ -930,5 +927,8 @@ fn resume_validator_is_suspension_only_and_activates_one_epoch_later() {
     assert!(!state.liveness.is_suspended(&f.owner));
     let validator = state.validators.get(&f.owner).unwrap();
     assert!(validator.active && !validator.slashed && !validator.jailed);
-    assert_eq!(validator.stake, stake_before, "absence and resume move no stake");
+    assert_eq!(
+        validator.stake, stake_before,
+        "absence and resume move no stake"
+    );
 }

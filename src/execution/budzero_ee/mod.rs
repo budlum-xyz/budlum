@@ -17,7 +17,7 @@ use budlum_uel_abi::{
 };
 
 use crate::core::hash::calculate_hash_bytes;
-use crate::execution::coordinator::commitment::{NS_BUDZERO_PROGRAM, NS_BUDZERO_STORAGE};
+use crate::execution::coordinator::state::{NS_BUDZERO_PROGRAM, NS_BUDZERO_STORAGE};
 
 /// Maximum deployable BudZero bytecode size (`1 MiB`).
 pub const MAX_BUDZERO_CODE_BYTES: usize = 1024 * 1024;
@@ -44,7 +44,9 @@ pub fn encode_budzero_call_input(declared_slots: &[u64], inputs: &[(u64, u64)]) 
     out
 }
 
-fn decode_budzero_call_input(mut cur: &[u8]) -> Result<(Vec<u64>, Vec<(u64, u64)>), String> {
+type BudZeroCallInput = (Vec<u64>, Vec<(u64, u64)>);
+
+fn decode_budzero_call_input(mut cur: &[u8]) -> Result<BudZeroCallInput, String> {
     if cur.is_empty() {
         return Ok((Vec::new(), Vec::new()));
     }
@@ -378,11 +380,112 @@ impl ExecutionEnvironment for BudZeroEe {
     }
 }
 
+/// Maximum preprocessed trace bytes accepted in an optional proof setup (`2 MiB`).
+pub const MAX_SETUP_PREPROCESSED_BYTES: usize = 2 * 1024 * 1024;
+
+/// Four-word (`256-bit`) BudZero caller context preserving all 32 bytes of [`Address`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BudZeroVmContext {
+    pub sender_words: [u64; 4],
+    pub nonce: u64,
+    pub block_height: u64,
+}
+
+impl BudZeroVmContext {
+    /// Build a 4-word VM context from a 32-byte Budlum [`Address`].
+    #[must_use]
+    pub fn from_sender(
+        sender: &crate::core::address::Address,
+        nonce: u64,
+        block_height: u64,
+    ) -> Self {
+        let b = sender.as_bytes();
+        let word = |start: usize| -> u64 {
+            let mut arr = [0u8; 8];
+            if let Some(slice) = b.get(start..start + 8) {
+                arr.copy_from_slice(slice);
+            }
+            u64::from_le_bytes(arr)
+        };
+        Self {
+            sender_words: [word(0), word(8), word(16), word(24)],
+            nonce,
+            block_height,
+        }
+    }
+
+    /// Reconstruct the 32-byte Budlum [`Address`] from `sender_words`.
+    #[must_use]
+    pub fn sender_address(&self) -> crate::core::address::Address {
+        let mut out = [0u8; 32];
+        for (i, w) in self.sender_words.iter().enumerate() {
+            let start = i * 8;
+            if let Some(dst) = out.get_mut(start..start + 8) {
+                dst.copy_from_slice(&w.to_le_bytes());
+            }
+        }
+        crate::core::address::Address::from(out)
+    }
+}
+
+/// Receipt for an optional off-consensus proof-market job.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OptionalProofJobReceipt {
+    pub job_id: [u8; 32],
+    pub degree_bits: usize,
+    pub setup_gas: u64,
+    pub alters_consensus_state: bool,
+}
+
+/// Decode BudZero bytecode under testnet/mainnet phase-1 opcode closure (`VerifyMerkle` and
+/// `VerifyInference` refused).
+pub fn decode_budzero_for_testnet(code: &[u8]) -> Result<Vec<u64>, String> {
+    decode_gated_program(code).map_err(|r| r.message)
+}
+
+/// Validate verifier DoS bounds and charge setup BGU before accepting preprocessed trace data.
+pub fn evaluate_preprocessed_setup(
+    degree_bits: usize,
+    preprocessed_bytes: usize,
+    gas_budget_bgu: u64,
+) -> Result<u64, String> {
+    if degree_bits == 0 || degree_bits > crate::execution::proof_verifier::MAX_DEGREE_BITS as usize
+    {
+        return Err("degree_bits out of bounds".into());
+    }
+    if preprocessed_bytes > MAX_SETUP_PREPROCESSED_BYTES {
+        return Err("preprocessed setup exceeds MAX_SETUP_PREPROCESSED_BYTES".into());
+    }
+    let setup_gas = 5_000u64
+        .saturating_add((degree_bits as u64).saturating_mul(1_000))
+        .saturating_add((preprocessed_bytes as u64).saturating_mul(16));
+    if setup_gas > gas_budget_bgu {
+        return Err("insufficient gas budget for preprocessed setup".into());
+    }
+    Ok(setup_gas)
+}
+
+/// Evaluate an optional off-consensus proof job without mutating consensus execution state.
+pub fn evaluate_optional_proof_job(
+    job_id: [u8; 32],
+    degree_bits: usize,
+    preprocessed_bytes: usize,
+    gas_budget_bgu: u64,
+) -> Result<OptionalProofJobReceipt, String> {
+    let setup_gas = evaluate_preprocessed_setup(degree_bits, preprocessed_bytes, gas_budget_bgu)?;
+    Ok(OptionalProofJobReceipt {
+        job_id,
+        degree_bits,
+        setup_gas,
+        alters_consensus_state: false,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use bud_isa::Opcode;
-    use budlum_uel_abi::mock::InMemoryHost;
+    use budlum_uel_abi::mock::MemoryHost as InMemoryHost;
     use budlum_uel_abi::{BudAmount, EeIdentity};
 
     fn encode_instrs(instrs: &[Instruction]) -> Vec<u8> {
@@ -682,3 +785,6 @@ mod tests {
         assert_eq!(out.output, sender32);
     }
 }
+
+#[cfg(test)]
+mod budzero_ee_tests;

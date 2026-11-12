@@ -1,8 +1,6 @@
 use crate::core::account::AccountState;
 use crate::core::address::Address;
-use crate::execution::coordinator::alias::{
-    derive_evm_alias, derive_foreign_cosmos_bech32,
-};
+use crate::execution::coordinator::alias::{derive_evm_alias, derive_foreign_cosmos_bech32};
 use crate::execution::coordinator::assets::{
     deploy_asset_pointer, derive_pointer_address, register_asset_entry, AssetStandard,
 };
@@ -10,27 +8,21 @@ use crate::execution::coordinator::evm_ee::{
     encode_std_evm_token_code, solidity_selector, StdEvmTokenSpec, EVM_STORAGE_ENTRY_BYTES,
 };
 use crate::execution::coordinator::gas::MIN_UEL_BASE_FEE_ATTOS;
-use crate::execution::coordinator::state::{
-    derive_uel_asset_id, NS_EVM_STORAGE, NS_WASM_STORE,
-};
+use crate::execution::coordinator::state::{derive_uel_asset_id, NS_EVM_STORAGE, NS_WASM_STORE};
 use crate::execution::coordinator::universal_call::{
     encode_precompile_call, universal_call_executed_topic0, EVM_UNIVERSAL_PRECOMPILE,
 };
 use crate::execution::coordinator::wasm_ee::{
     build_valid_cosmwasm_module, validate_cosmwasm_bytecode, WasmEe,
 };
-use crate::execution::coordinator::{
-    ExecutionCoordinator, UelAction, UelReceiptStatus, UelTx,
-};
-use budlum_uel_abi::{BlockContext, BudAmount, EeId, ExecutionEnvironment};
+use crate::execution::coordinator::{ExecutionCoordinator, UelAction, UelReceiptStatus, UelTx};
+use budlum_uel_abi::{BlockContext, EeId, ExecutionEnvironment};
 
 fn sample_ctx() -> BlockContext {
     BlockContext {
         height: 42,
         timestamp_ms: 1_700_000_000_000,
         chain_id: 45_261,
-        randao: [0xAB; 32],
-        base_fee: BudAmount(MIN_UEL_BASE_FEE_ATTOS),
     }
 }
 
@@ -260,8 +252,7 @@ fn build_evm_atomic_router_bytecode() -> Vec<u8> {
         0x60, 0x2c, // dest = 0x2c
         0x57, // JUMPI
         // Commit path: RETURN(0, 64)
-        0x60, 0x40, 0x60, 0x00, 0xf3,
-        // 0x2c: JUMPDEST -> REVERT(0, 0)
+        0x60, 0x40, 0x60, 0x00, 0xf3, // 0x2c: JUMPDEST -> REVERT(0, 0)
         0x5b, 0x60, 0x00, 0x60, 0x00, 0xfd,
     ]
 }
@@ -354,8 +345,7 @@ fn uel_evm_calls_wasm_atomically() {
         }
     }))
     .expect("transfer json");
-    let precompile_payload =
-        encode_precompile_call(EeId::WASM, &cw20_id, &cw_transfer, 0, 200_000);
+    let precompile_payload = encode_precompile_call(EeId::WASM, &cw20_id, &cw_transfer, 0, 200_000);
 
     // 3. First invoke router with revert_flag = 1: EVM calls WASM (250 CW20 moved),
     // then EVM reverts -> CW20 balances MUST remain 1000 / 0!
@@ -388,7 +378,10 @@ fn uel_evm_calls_wasm_atomically() {
     let mut rcpt_key = cw20_id.clone();
     rcpt_key.extend_from_slice(format!(":cw20:bal:{recipient_wasm}").as_bytes());
     assert_eq!(
-        state.execution_state.read(NS_WASM_STORE, &rcpt_key).expect("read"),
+        state
+            .execution_state
+            .read(NS_WASM_STORE, &rcpt_key)
+            .expect("read"),
         None,
         "CW20 transfer must roll back when outer EVM frame reverts"
     );
@@ -504,7 +497,7 @@ fn universal_call_log_is_visible_to_evm_indexers() {
     let expected_topic0 = universal_call_executed_topic0();
     let found = call_rec[0].logs.iter().any(|(ee, log)| {
         *ee == EeId::EVM
-            && log.address == EVM_UNIVERSAL_PRECOMPILE
+            && log.emitter.id == EVM_UNIVERSAL_PRECOMPILE
             && log.topics == vec![expected_topic0]
     });
     assert!(
@@ -650,7 +643,7 @@ fn uel_pointer_holds_no_balance() {
         .expect("call pointer transfer");
     assert_eq!(r_ptr[0].status, UelReceiptStatus::Success);
 
-    // Zero storage slots in `ee/evm/storage`: the pointer holds NO balance!
+    // fixed-commitment custody slots in `ee/evm/storage`: the pointer holds NO balance!
     assert_eq!(state.execution_state.namespace_bytes(NS_EVM_STORAGE), 0);
 
     // Home CW20 balances updated to 380 / 120!
@@ -659,11 +652,17 @@ fn uel_pointer_holds_no_balance() {
     let mut k_bob = cw20_home;
     k_bob.extend_from_slice(format!(":cw20:bal:{bob_wasm}").as_bytes());
     assert_eq!(
-        state.execution_state.read(NS_WASM_STORE, &k_alice).expect("r"),
+        state
+            .execution_state
+            .read(NS_WASM_STORE, &k_alice)
+            .expect("r"),
         Some(b"380".to_vec())
     );
     assert_eq!(
-        state.execution_state.read(NS_WASM_STORE, &k_bob).expect("r"),
+        state
+            .execution_state
+            .read(NS_WASM_STORE, &k_bob)
+            .expect("r"),
         Some(b"120".to_vec())
     );
 }
@@ -757,7 +756,10 @@ fn pointer_allowance_lives_at_home() {
     let mut alw_key = cw20_home;
     alw_key.extend_from_slice(format!(":cw20:alw:{owner_wasm}:{spender_wasm}").as_bytes());
     assert_eq!(
-        state.execution_state.read(NS_WASM_STORE, &alw_key).expect("r"),
+        state
+            .execution_state
+            .read(NS_WASM_STORE, &alw_key)
+            .expect("r"),
         Some(b"777".to_vec())
     );
 

@@ -1,4 +1,4 @@
-3
+2
 # Guards no production path reaches.
 #
 # Every `pub fn` named check/verify/validate/require/enforce/assert/reject/

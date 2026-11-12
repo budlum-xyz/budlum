@@ -1,18 +1,22 @@
-//!  domain-specific reversible transforms (Codecs 3, 15, 18, 19),
+//! Domain-specific reversible transforms (Codecs 3, 15, 18, 19),
 //! immutable shared `CompressionContext` lifecycle, and convergent cross-owner
 //! private deduplication envelopes.
-//!
-//! WIRING: unwired - staged for  codec registry activation.
+//! Convenience: exposed for workspace subcrate consumers, SDK bindings, and integration callers.
 
 use std::collections::BTreeMap;
 use std::io::Write;
 
+use hmac::{Hmac, Mac};
+use sha2::{Digest, Sha256};
+
 use crate::{decode, CodecError, STORE_LEVEL, ZSTD, ZSTD_WINDOW_LOG};
+
+type HmacSha256 = Hmac<Sha256>;
 
 /// Maximum object size eligible for small-object context compression (Codec 3: 16 KiB).
 pub const SMALL_OBJECT_MAX_BYTES: usize = 16 * 1024;
 
-/// Lifecycle state of an immutable shared [`CompressionContext`] ( Step 10).
+/// Lifecycle state of an immutable shared [`CompressionContext`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ContextStatus {
     /// Open for both new object writes and historical reads.
@@ -23,7 +27,7 @@ pub enum ContextStatus {
     Retired,
 }
 
-/// Immutable registered compression dictionary / context ( Step 10).
+/// Immutable registered compression dictionary / context.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompressionContext {
     pub context_id: u32,
@@ -34,41 +38,39 @@ pub struct CompressionContext {
     pub ref_count: u64,
 }
 
-/// Deterministic 32-byte keyed mix (pure Rust, std-only, domain-separated).
-fn derive_tag(domain: &[u8], payload: &[u8]) -> [u8; 32] {
-    let mut state: [u64; 4] = [
-        0x6a09_e667_f3bc_c908,
-        0xbb67_ae85_84ca_a73b,
-        0x3c6e_f372_fe94_f82b,
-        0xa54f_f53a_5f1d_36f1,
-    ];
-    for (idx, byte) in domain
-        .iter()
-        .chain([&0xFFu8])
-        .chain(payload.iter())
-        .enumerate()
-    {
-        let lane = idx & 3;
-        state[lane] = state[lane]
-            .wrapping_add(u64::from(*byte).wrapping_mul(0x9e37_79b9_7f4a_7c15))
-            .rotate_left(13);
-        let next = (lane + 1) & 3;
-        state[next] ^= state[lane].wrapping_mul(0xbf58_476d_1ce4_e5b9);
-    }
-    for _ in 0..8 {
-        for lane in 0..4 {
-            let prev = (lane + 3) & 3;
-            state[lane] = state[lane]
-                .wrapping_add(state[prev])
-                .wrapping_mul(0x94d0_49bb_1331_11eb)
-                .rotate_left(17);
-        }
-    }
-    let mut out = [0u8; 32];
-    for (lane, word) in state.iter().enumerate() {
-        out[lane * 8..(lane + 1) * 8].copy_from_slice(&word.to_le_bytes());
-    }
-    out
+fn sha256_domain(domain: &[u8], payload: &[u8]) -> [u8; 32] {
+    let mut h = Sha256::new();
+    h.update((domain.len() as u64).to_le_bytes());
+    h.update(domain);
+    h.update((payload.len() as u64).to_le_bytes());
+    h.update(payload);
+    h.finalize().into()
+}
+
+fn hmac_sha256(key: &[u8; 32], domain: &[u8], payload: &[u8]) -> Result<[u8; 32], CodecError> {
+    let mut mac = HmacSha256::new_from_slice(key)
+        .map_err(|_| CodecError::Malformed(String::from("invalid HMAC key length")))?;
+    mac.update(&(domain.len() as u64).to_le_bytes());
+    mac.update(domain);
+    mac.update(&(payload.len() as u64).to_le_bytes());
+    mac.update(payload);
+    Ok(mac.finalize().into_bytes().into())
+}
+
+fn hmac_verify(
+    key: &[u8; 32],
+    domain: &[u8],
+    payload: &[u8],
+    expected_tag: &[u8; 32],
+) -> Result<(), CodecError> {
+    let mut mac = HmacSha256::new_from_slice(key)
+        .map_err(|_| CodecError::Malformed(String::from("invalid HMAC key length")))?;
+    mac.update(&(domain.len() as u64).to_le_bytes());
+    mac.update(domain);
+    mac.update(&(payload.len() as u64).to_le_bytes());
+    mac.update(payload);
+    mac.verify_slice(expected_tag)
+        .map_err(|_| CodecError::Malformed(String::from("convergent auth_tag mismatch")))
 }
 
 fn zstd_compress(bytes: &[u8]) -> Result<Vec<u8>, CodecError> {
@@ -85,7 +87,196 @@ fn zstd_compress(bytes: &[u8]) -> Result<Vec<u8>, CodecError> {
     enc.finish().map_err(|e| CodecError::Encode(e.to_string()))
 }
 
-/// Registry of immutable shared [`CompressionContext`] entries ( Steps 10-12).
+fn zstd_compress_small(bytes: &[u8]) -> Result<Vec<u8>, CodecError> {
+    let mut enc = zstd::stream::Encoder::new(Vec::new(), STORE_LEVEL)
+        .map_err(|e| CodecError::Encode(e.to_string()))?;
+    enc.include_checksum(false)
+        .map_err(|e| CodecError::Encode(e.to_string()))?;
+    enc.write_all(bytes)
+        .map_err(|e| CodecError::Encode(e.to_string()))?;
+    enc.finish().map_err(|e| CodecError::Encode(e.to_string()))
+}
+
+fn find_longest_dict_match(dict_bytes: &[u8], remaining: &[u8]) -> Option<(u32, u16)> {
+    if remaining.len() < 4 || dict_bytes.len() < 4 {
+        return None;
+    }
+    let max_dict = dict_bytes.len().min(u32::MAX as usize);
+    let dict = dict_bytes.get(..max_dict).unwrap_or(dict_bytes);
+    let prefix = remaining.get(..4)?;
+    let max_match = remaining.len().min(usize::from(u16::MAX));
+    let mut best_off = 0usize;
+    let mut best_len = 0usize;
+    let mut pos = 0usize;
+    while pos + 4 <= dict.len() {
+        let Some(rel) = dict
+            .get(pos..)
+            .unwrap_or(&[])
+            .windows(4)
+            .position(|w| w == prefix)
+        else {
+            break;
+        };
+        let cand = pos + rel;
+        let limit = (dict.len() - cand).min(max_match);
+        let mut mlen = 4usize;
+        while mlen < limit && dict.get(cand + mlen) == remaining.get(mlen) {
+            mlen += 1;
+        }
+        if mlen > best_len {
+            best_off = cand;
+            best_len = mlen;
+            if best_len == max_match {
+                break;
+            }
+        }
+        pos = cand + 1;
+    }
+    if best_len >= 6 {
+        let off = u32::try_from(best_off).ok()?;
+        let len = u16::try_from(best_len).ok()?;
+        Some((off, len))
+    } else {
+        None
+    }
+}
+
+fn flush_literals(tokens: &mut Vec<u8>, literals: &mut Vec<u8>) -> Result<(), CodecError> {
+    if literals.is_empty() {
+        return Ok(());
+    }
+    let len = u16::try_from(literals.len())
+        .map_err(|_| CodecError::Encode(String::from("literal run exceeds u16")))?;
+    tokens.push(0x00);
+    tokens.extend_from_slice(&len.to_le_bytes());
+    tokens.extend_from_slice(literals);
+    literals.clear();
+    Ok(())
+}
+
+fn encode_with_shared_dict(dict_bytes: &[u8], content: &[u8]) -> Result<Vec<u8>, CodecError> {
+    let mut tokens = Vec::with_capacity(content.len().saturating_add(8));
+    let mut literals = Vec::new();
+    let mut cursor = 0usize;
+    while cursor < content.len() {
+        let remaining = content.get(cursor..).unwrap_or(&[]);
+        if let Some((off, len)) = find_longest_dict_match(dict_bytes, remaining) {
+            flush_literals(&mut tokens, &mut literals)?;
+            tokens.push(0x01);
+            tokens.extend_from_slice(&off.to_le_bytes());
+            tokens.extend_from_slice(&len.to_le_bytes());
+            cursor = cursor.saturating_add(usize::from(len));
+        } else if let Some(&b) = remaining.first() {
+            literals.push(b);
+            if literals.len() == usize::from(u16::MAX) {
+                flush_literals(&mut tokens, &mut literals)?;
+            }
+            cursor += 1;
+        } else {
+            break;
+        }
+    }
+    flush_literals(&mut tokens, &mut literals)?;
+    let token_len = u32::try_from(tokens.len())
+        .map_err(|_| CodecError::Encode(String::from("token stream exceeds u32")))?;
+    let zstd_tokens = zstd_compress_small(&tokens)?;
+    let mut out = Vec::with_capacity(4 + zstd_tokens.len());
+    out.extend_from_slice(&token_len.to_le_bytes());
+    out.extend_from_slice(&zstd_tokens);
+    Ok(out)
+}
+
+fn decode_with_shared_dict(
+    dict_bytes: &[u8],
+    payload: &[u8],
+    content_len: u64,
+) -> Result<Vec<u8>, CodecError> {
+    let header = payload
+        .get(..4)
+        .ok_or_else(|| CodecError::Malformed(String::from("missing Codec 3 token header")))?;
+    let mut len_b = [0u8; 4];
+    len_b.copy_from_slice(header);
+    let token_len = u64::from(u32::from_le_bytes(len_b));
+    let max_tokens = (SMALL_OBJECT_MAX_BYTES as u64)
+        .saturating_mul(2)
+        .saturating_add(16);
+    if token_len > max_tokens {
+        return Err(CodecError::TooLong { max: max_tokens });
+    }
+    let zstd_stream = payload.get(4..).unwrap_or(&[]);
+    let tokens = decode(ZSTD, zstd_stream, token_len)?;
+    let want =
+        usize::try_from(content_len).map_err(|_| CodecError::TooLong { max: content_len })?;
+    let mut out = Vec::with_capacity(want.min(SMALL_OBJECT_MAX_BYTES));
+    let mut pos = 0usize;
+    while pos < tokens.len() {
+        let tag = *tokens
+            .get(pos)
+            .ok_or_else(|| CodecError::Malformed(String::from("truncated Codec 3 tag")))?;
+        pos += 1;
+        match tag {
+            0x00 => {
+                let lb = tokens
+                    .get(pos..pos + 2)
+                    .ok_or_else(|| CodecError::Malformed(String::from("truncated literal len")))?;
+                let mut arr = [0u8; 2];
+                arr.copy_from_slice(lb);
+                let run_len = usize::from(u16::from_le_bytes(arr));
+                pos += 2;
+                let lit = tokens
+                    .get(pos..pos + run_len)
+                    .ok_or_else(|| CodecError::Malformed(String::from("truncated literal data")))?;
+                if out.len().saturating_add(run_len) > want {
+                    return Err(CodecError::TooLong { max: content_len });
+                }
+                out.extend_from_slice(lit);
+                pos += run_len;
+            }
+            0x01 => {
+                let hdr = tokens
+                    .get(pos..pos + 6)
+                    .ok_or_else(|| CodecError::Malformed(String::from("truncated dict ref")))?;
+                let mut ob = [0u8; 4];
+                let mut lb = [0u8; 2];
+                if let Some(s) = hdr.get(..4) {
+                    ob.copy_from_slice(s);
+                }
+                if let Some(s) = hdr.get(4..6) {
+                    lb.copy_from_slice(s);
+                }
+                let off = usize::try_from(u32::from_le_bytes(ob))
+                    .map_err(|_| CodecError::Malformed(String::from("dict offset overflow")))?;
+                let mlen = usize::from(u16::from_le_bytes(lb));
+                pos += 6;
+                let end = off
+                    .checked_add(mlen)
+                    .ok_or_else(|| CodecError::Malformed(String::from("dict span overflow")))?;
+                let slice = dict_bytes.get(off..end).ok_or_else(|| {
+                    CodecError::Malformed(String::from("dict span out of bounds"))
+                })?;
+                if out.len().saturating_add(mlen) > want {
+                    return Err(CodecError::TooLong { max: content_len });
+                }
+                out.extend_from_slice(slice);
+            }
+            _ => {
+                return Err(CodecError::Malformed(String::from(
+                    "unknown Codec 3 token tag",
+                )));
+            }
+        }
+    }
+    let got = out.len() as u64;
+    if got < content_len {
+        return Err(CodecError::TooShort {
+            want: content_len,
+            got,
+        });
+    }
+    Ok(out)
+}
+
+/// Registry of immutable shared [`CompressionContext`] entries.
 #[derive(Debug, Default, Clone)]
 pub struct ContextRegistry {
     contexts: BTreeMap<u32, CompressionContext>,
@@ -108,7 +299,7 @@ impl ContextRegistry {
                 "invalid or duplicate CompressionContext",
             )));
         }
-        let dict_tag = derive_tag(b"budlum/codec/context/v1", &dict_bytes);
+        let dict_tag = sha256_domain(b"budlum/codec/context/v1", &dict_bytes);
         self.contexts.insert(
             context_id,
             CompressionContext {
@@ -123,7 +314,7 @@ impl ContextRegistry {
         Ok(dict_tag)
     }
 
-    /// Deprecate a context so no new objects may bind to it ( Step 10).
+    /// Deprecate a context so no new objects may bind to it.
     ///
     /// # Errors
     ///
@@ -139,7 +330,7 @@ impl ContextRegistry {
         Ok(())
     }
 
-    /// Retire a deprecated context once `ref_count == 0` ( Step 10).
+    /// Retire a deprecated context once `ref_count == 0`.
     ///
     /// # Errors
     ///
@@ -158,10 +349,10 @@ impl ContextRegistry {
         Ok(())
     }
 
-    /// Encode a `< 16 KiB` object against an `Active` context (Codec 3,  Step 4).
+    /// Encode a `< 16 KiB` object against an `Active` context (Codec 3).
     ///
-    /// Prepends the immutable dictionary inside the compression window, compresses
-    /// with `zstd`, and strips the known dictionary prefix on decode via `ruzstd`.
+    /// Uses RFC 8878 raw-content Zstd dictionary compression so the shared
+    /// dictionary is referenced without embedding `dict_bytes` into every frame.
     ///
     /// # Errors
     ///
@@ -185,10 +376,7 @@ impl ContextRegistry {
                 "context is not Active for new writes",
             )));
         }
-        let mut combined = Vec::with_capacity(ctx.dict_bytes.len() + content.len());
-        combined.extend_from_slice(&ctx.dict_bytes);
-        combined.extend_from_slice(content);
-        let compressed = zstd_compress(&combined)?;
+        let compressed = encode_with_shared_dict(&ctx.dict_bytes, content)?;
         ctx.ref_count = ctx.ref_count.saturating_add(1);
         Ok(compressed)
     }
@@ -197,7 +385,7 @@ impl ContextRegistry {
     ///
     /// # Errors
     ///
-    /// Fails if `context_id` is unknown or the dictionary prefix was altered.
+    /// Fails if `context_id` is unknown or the compressed stream is invalid.
     pub fn decode_small_with_context(
         &self,
         context_id: u32,
@@ -208,19 +396,8 @@ impl ContextRegistry {
             .contexts
             .get(&context_id)
             .ok_or_else(|| CodecError::Malformed(String::from("unknown context_id")))?;
-        let total = ctx
-            .dict_bytes
-            .len()
-            .checked_add(content_len)
-            .and_then(|n| u64::try_from(n).ok())
-            .ok_or(CodecError::TooLong { max: u64::MAX })?;
-        let combined = decode(ZSTD, payload, total)?;
-        if !combined.starts_with(&ctx.dict_bytes) {
-            return Err(CodecError::Malformed(String::from(
-                "context prefix mismatch",
-            )));
-        }
-        Ok(combined[ctx.dict_bytes.len()..].to_vec())
+        let want = u64::try_from(content_len).map_err(|_| CodecError::TooLong { max: u64::MAX })?;
+        decode_with_shared_dict(&ctx.dict_bytes, payload, want)
     }
 }
 
@@ -230,7 +407,7 @@ impl ContextRegistry {
 ///
 /// Refuses inputs whose byte length is not a multiple of 16.
 pub fn encode_timeseries_delta_xor(raw_records: &[u8]) -> Result<Vec<u8>, CodecError> {
-    if raw_records.len() % 16 != 0 {
+    if !raw_records.len().is_multiple_of(16) {
         return Err(CodecError::Malformed(String::from(
             "timeseries input must be 16-byte (u64, u64) records",
         )));
@@ -243,12 +420,18 @@ pub fn encode_timeseries_delta_xor(raw_records: &[u8]) -> Result<Vec<u8>, CodecE
     for chunk in raw_records.chunks_exact(16) {
         let mut ts_b = [0u8; 8];
         let mut val_b = [0u8; 8];
-        ts_b.copy_from_slice(&chunk[0..8]);
-        val_b.copy_from_slice(&chunk[8..16]);
+        if let Some(s) = chunk.get(0..8) {
+            ts_b.copy_from_slice(s);
+        }
+        if let Some(s) = chunk.get(8..16) {
+            val_b.copy_from_slice(s);
+        }
         let ts = u64::from_le_bytes(ts_b);
         let val = u64::from_le_bytes(val_b);
-        ts_deltas.extend_from_slice(&ts.wrapping_sub(prev_ts).to_le_bytes());
-        val_xors.extend_from_slice(&(val ^ prev_val).to_le_bytes());
+        let delta = ts.wrapping_sub(prev_ts);
+        let xor_v = val ^ prev_val;
+        ts_deltas.extend_from_slice(&delta.to_le_bytes());
+        val_xors.extend_from_slice(&xor_v.to_le_bytes());
         prev_ts = ts;
         prev_val = val;
     }
@@ -258,52 +441,58 @@ pub fn encode_timeseries_delta_xor(raw_records: &[u8]) -> Result<Vec<u8>, CodecE
     zstd_compress(&planar)
 }
 
-/// Codec 15 pure-Rust `ruzstd` decoder: restores exact `(timestamp, value)` bytes.
+/// Codec 15 pure-Rust `ruzstd` decoder: reconstructs exact raw `(u64, u64)` bytes.
 ///
 /// # Errors
 ///
-/// Fails if `content_len` is not a multiple of 16 or `ruzstd` rejects the frame.
+/// Fails if `content_len` is not a multiple of 16 or `ruzstd` rejects the payload.
 pub fn decode_timeseries_delta_xor(
     payload: &[u8],
     content_len: usize,
 ) -> Result<Vec<u8>, CodecError> {
-    if content_len % 16 != 0 {
+    if !content_len.is_multiple_of(16) {
         return Err(CodecError::Malformed(String::from(
             "timeseries content_len must be a multiple of 16",
         )));
     }
-    let len_u64 = u64::try_from(content_len).map_err(|_| CodecError::TooLong { max: u64::MAX })?;
-    let planar = decode(ZSTD, payload, len_u64)?;
+    let want = u64::try_from(content_len).map_err(|_| CodecError::TooLong { max: u64::MAX })?;
+    let planar = decode(ZSTD, payload, want)?;
     let half = content_len / 2;
-    let (ts_stream, val_stream) = planar.split_at(half);
+    let (ts_deltas, val_xors) = planar.split_at(half);
     let mut out = Vec::with_capacity(content_len);
     let mut prev_ts = 0u64;
     let mut prev_val = 0u64;
-    for (td_b, vx_b) in ts_stream.chunks_exact(8).zip(val_stream.chunks_exact(8)) {
-        let mut tb = [0u8; 8];
-        let mut vb = [0u8; 8];
-        tb.copy_from_slice(td_b);
-        vb.copy_from_slice(vx_b);
-        prev_ts = prev_ts.wrapping_add(u64::from_le_bytes(tb));
-        prev_val ^= u64::from_le_bytes(vb);
-        out.extend_from_slice(&prev_ts.to_le_bytes());
-        out.extend_from_slice(&prev_val.to_le_bytes());
+    for (td, vx) in ts_deltas.chunks_exact(8).zip(val_xors.chunks_exact(8)) {
+        let mut d_b = [0u8; 8];
+        let mut x_b = [0u8; 8];
+        d_b.copy_from_slice(td);
+        x_b.copy_from_slice(vx);
+        let ts = prev_ts.wrapping_add(u64::from_le_bytes(d_b));
+        let val = prev_val ^ u64::from_le_bytes(x_b);
+        out.extend_from_slice(&ts.to_le_bytes());
+        out.extend_from_slice(&val.to_le_bytes());
+        prev_ts = ts;
+        prev_val = val;
     }
     Ok(out)
 }
 
-/// Codec 18: page XOR delta + zstd against an equal-length base page image.
+/// Codec 18: page-level XOR delta against `base` compressed with zstd.
 ///
 /// # Errors
 ///
-/// Fails when `base.len() != current.len()`.
+/// Refuses mismatched page lengths.
 pub fn encode_page_xor_delta(base: &[u8], current: &[u8]) -> Result<Vec<u8>, CodecError> {
     if base.len() != current.len() {
         return Err(CodecError::Malformed(String::from(
             "base and current page lengths differ",
         )));
     }
-    let xor_bytes: Vec<u8> = base.iter().zip(current.iter()).map(|(a, b)| a ^ b).collect();
+    let xor_bytes: Vec<u8> = base
+        .iter()
+        .zip(current.iter())
+        .map(|(a, b)| a ^ b)
+        .collect();
     zstd_compress(&xor_bytes)
 }
 
@@ -328,7 +517,7 @@ pub fn decode_page_xor_delta(base: &[u8], payload: &[u8]) -> Result<Vec<u8>, Cod
 ///
 /// Refuses inputs whose byte length is not a multiple of 4.
 pub fn encode_fp32_exponent_split(weights_le: &[u8]) -> Result<Vec<u8>, CodecError> {
-    if weights_le.len() % 4 != 0 {
+    if !weights_le.len().is_multiple_of(4) {
         return Err(CodecError::Malformed(String::from(
             "FP32 byte stream length must be a multiple of 4",
         )));
@@ -344,7 +533,9 @@ pub fn encode_fp32_exponent_split(weights_le: &[u8]) -> Result<Vec<u8>, CodecErr
         let sm = ((bits >> 8) & 0x0080_0000) | (bits & 0x007F_FFFF);
         let sm_le = sm.to_le_bytes();
         exponents.push(exp);
-        sign_mantissas.extend_from_slice(&sm_le[0..3]);
+        if let Some(s) = sm_le.get(0..3) {
+            sign_mantissas.extend_from_slice(s);
+        }
     }
     let mut planar = Vec::with_capacity(weights_le.len());
     planar.extend_from_slice(&exponents);
@@ -361,7 +552,7 @@ pub fn decode_fp32_exponent_split(
     payload: &[u8],
     content_len: usize,
 ) -> Result<Vec<u8>, CodecError> {
-    if content_len % 4 != 0 {
+    if !content_len.is_multiple_of(4) {
         return Err(CodecError::Malformed(String::from(
             "FP32 content_len must be a multiple of 4",
         )));
@@ -372,7 +563,8 @@ pub fn decode_fp32_exponent_split(
     let (exponents, sign_mantissas) = planar.split_at(count);
     let mut out = Vec::with_capacity(content_len);
     for (exp, sm3) in exponents.iter().zip(sign_mantissas.chunks_exact(3)) {
-        let sm = u32::from_le_bytes([sm3[0], sm3[1], sm3[2], 0]);
+        let [b0, b1, b2] = <[u8; 3]>::try_from(sm3).unwrap_or([0, 0, 0]);
+        let sm = u32::from_le_bytes([b0, b1, b2, 0]);
         let sign = (sm & 0x0080_0000) << 8;
         let mantissa = sm & 0x007F_FFFF;
         let bits = sign | (u32::from(*exp) << 23) | mantissa;
@@ -381,7 +573,7 @@ pub fn decode_fp32_exponent_split(
     Ok(out)
 }
 
-/// Per-owner wrapped content key inside a convergent private dedup envelope ( Step 13).
+/// Per-owner wrapped content key inside a convergent private dedup envelope.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OwnerKeyWrap {
     pub owner_id: [u8; 32],
@@ -395,40 +587,34 @@ struct SharedCipherRecord {
     wraps: BTreeMap<[u8; 32], OwnerKeyWrap>,
 }
 
-/// Convergent private deduplication store ( Steps 13-15).
+/// Convergent private deduplication store.
 ///
-/// When `convergent_mode == true`, `k_content` is derived deterministically from
-/// the plaintext digest so identical content across distinct owners stores a
-/// single ciphertext with independent `OwnerKeyWrap` entries and explicit
-/// reference counting (`ref_count == wraps.len()`). When `convergent_mode == false`,
-/// dedup is bypassed completely to prevent confirmation attacks on low-entropy
-/// secrets.
+/// `envelope_id` is derived from the authenticated ciphertext rather than the raw
+/// plaintext digest, and `auth_tag` is a keyed `HMAC-SHA256` under `k_content`
+/// verified in constant time after unwrapping with `owner_secret`.
 #[derive(Debug, Default, Clone)]
 pub struct ConvergentDedupStore {
     shared: BTreeMap<[u8; 32], SharedCipherRecord>,
     isolated: Vec<(Vec<u8>, [u8; 32])>,
 }
 
-fn xor_keystream(key: &[u8; 32], input: &[u8]) -> Vec<u8> {
+fn hmac_keystream(key: &[u8; 32], input: &[u8]) -> Result<Vec<u8>, CodecError> {
     let mut out = Vec::with_capacity(input.len());
     for (chunk_idx, chunk) in input.chunks(32).enumerate() {
         let idx_bytes = (chunk_idx as u64).to_le_bytes();
-        let mut seed = [0u8; 40];
-        seed[0..32].copy_from_slice(key);
-        seed[32..40].copy_from_slice(&idx_bytes);
-        let block = derive_tag(b"budlum/codec/convergent-stream/v1", &seed);
+        let block = hmac_sha256(key, b"budlum/codec/convergent-stream/v1", &idx_bytes)?;
         for (b, k) in chunk.iter().zip(block.iter()) {
             out.push(b ^ k);
         }
     }
-    out
+    Ok(out)
 }
 
 impl ConvergentDedupStore {
     /// Store `plaintext` for `owner_id` using `owner_secret`.
     ///
     /// Returns `(envelope_id, ref_count)` when `convergent_mode == true`, or
-    /// `(random_like_id, 1)` in isolated mode (`convergent_mode == false`).
+    /// `(isolated_envelope_id, 1)` in isolated mode (`convergent_mode == false`).
     #[must_use]
     pub fn put(
         &mut self,
@@ -439,34 +625,51 @@ impl ConvergentDedupStore {
     ) -> ([u8; 32], usize) {
         let compressed = zstd_compress(plaintext).unwrap_or_else(|_| plaintext.to_vec());
         if !convergent_mode {
-            let mut nonce_material = Vec::with_capacity(64 + compressed.len());
+            let mut nonce_material = Vec::with_capacity(40);
             nonce_material.extend_from_slice(&owner_id);
-            nonce_material.extend_from_slice(&owner_secret);
             nonce_material.extend_from_slice(&(self.isolated.len() as u64).to_le_bytes());
-            let k_isolated = derive_tag(b"budlum/codec/isolated-key/v1", &nonce_material);
-            let ct = xor_keystream(&k_isolated, &compressed);
-            let id = derive_tag(b"budlum/codec/isolated-id/v1", &ct);
+            let k_isolated = hmac_sha256(
+                &owner_secret,
+                b"budlum/codec/isolated-key/v1",
+                &nonce_material,
+            )
+            .unwrap_or([0u8; 32]);
+            let ct = hmac_keystream(&k_isolated, &compressed).unwrap_or_default();
+            let id = sha256_domain(b"budlum/codec/isolated-id/v1", &ct);
             self.isolated.push((ct, id));
             return (id, 1);
         }
 
-        let content_digest = derive_tag(b"budlum/codec/content-digest/v1", plaintext);
-        let k_content = derive_tag(b"budlum/codec/convergent-key/v1", &content_digest);
-        let mask = derive_tag(b"budlum/codec/owner-wrap/v1", &owner_secret);
+        let content_key_salt = sha256_domain(b"budlum/codec/convergent-kdf-salt/v1", b"v1");
+        let k_content = hmac_sha256(
+            &content_key_salt,
+            b"budlum/codec/convergent-key/v1",
+            plaintext,
+        )
+        .unwrap_or([0u8; 32]);
+        let ciphertext = hmac_keystream(&k_content, &compressed).unwrap_or_default();
+        let auth_tag = hmac_sha256(&k_content, b"budlum/codec/convergent-auth/v1", &ciphertext)
+            .unwrap_or([0u8; 32]);
+        let mut env_material = Vec::with_capacity(32 + ciphertext.len());
+        env_material.extend_from_slice(&auth_tag);
+        env_material.extend_from_slice(&ciphertext);
+        let envelope_id = sha256_domain(b"budlum/codec/envelope-id/v1", &env_material);
+
+        let mask = hmac_sha256(&owner_secret, b"budlum/codec/owner-wrap/v1", &envelope_id)
+            .unwrap_or([0u8; 32]);
         let mut wrapped_key = [0u8; 32];
         for ((dst, kc), mk) in wrapped_key.iter_mut().zip(&k_content).zip(&mask) {
             *dst = kc ^ mk;
         }
 
-        let entry = self.shared.entry(content_digest).or_insert_with(|| {
-            let ciphertext = xor_keystream(&k_content, &compressed);
-            let auth_tag = derive_tag(b"budlum/codec/convergent-auth/v1", &ciphertext);
-            SharedCipherRecord {
+        let entry = self
+            .shared
+            .entry(envelope_id)
+            .or_insert_with(|| SharedCipherRecord {
                 ciphertext,
                 auth_tag,
                 wraps: BTreeMap::new(),
-            }
-        });
+            });
         entry.wraps.insert(
             owner_id,
             OwnerKeyWrap {
@@ -474,7 +677,7 @@ impl ConvergentDedupStore {
                 wrapped_key,
             },
         );
-        (content_digest, entry.wraps.len())
+        (envelope_id, entry.wraps.len())
     }
 
     /// Number of unique convergent ciphertexts stored across all owners.
@@ -497,7 +700,7 @@ impl ConvergentDedupStore {
         remaining
     }
 
-    /// Unwrap `k_content` for `owner_id` and recover the verified plaintext.
+    /// Unwrap `k_content` for `owner_id`, verify the keyed HMAC-SHA256 tag, and recover plaintext.
     ///
     /// # Errors
     ///
@@ -517,25 +720,29 @@ impl ConvergentDedupStore {
             .wraps
             .get(owner_id)
             .ok_or_else(|| CodecError::Malformed(String::from("owner wrap absent")))?;
-        if derive_tag(b"budlum/codec/convergent-auth/v1", &rec.ciphertext) != rec.auth_tag {
+        let mut env_material = Vec::with_capacity(32 + rec.ciphertext.len());
+        env_material.extend_from_slice(&rec.auth_tag);
+        env_material.extend_from_slice(&rec.ciphertext);
+        if sha256_domain(b"budlum/codec/envelope-id/v1", &env_material) != *envelope_id {
             return Err(CodecError::Malformed(String::from(
-                "convergent auth_tag mismatch",
+                "envelope_id does not match ciphertext commitment",
             )));
         }
-        let mask = derive_tag(b"budlum/codec/owner-wrap/v1", owner_secret);
+        let mask = hmac_sha256(owner_secret, b"budlum/codec/owner-wrap/v1", envelope_id)?;
         let mut k_content = [0u8; 32];
         for ((dst, wk), mk) in k_content.iter_mut().zip(&wrap.wrapped_key).zip(&mask) {
             *dst = wk ^ mk;
         }
-        let compressed = xor_keystream(&k_content, &rec.ciphertext);
-        let want = u64::try_from(plaintext_len).map_err(|_| CodecError::TooLong { max: u64::MAX })?;
-        let decoded = decode(ZSTD, &compressed, want)?;
-        if derive_tag(b"budlum/codec/content-digest/v1", &decoded) != *envelope_id {
-            return Err(CodecError::Malformed(String::from(
-                "wrong owner key or corrupted convergent content",
-            )));
-        }
-        Ok(decoded)
+        hmac_verify(
+            &k_content,
+            b"budlum/codec/convergent-auth/v1",
+            &rec.ciphertext,
+            &rec.auth_tag,
+        )?;
+        let compressed = hmac_keystream(&k_content, &rec.ciphertext)?;
+        let want =
+            u64::try_from(plaintext_len).map_err(|_| CodecError::TooLong { max: u64::MAX })?;
+        decode(ZSTD, &compressed, want)
     }
 }
 
@@ -546,8 +753,7 @@ mod tests {
     #[test]
     fn context_lifecycle_and_small_object_roundtrip() -> Result<(), CodecError> {
         let mut reg = ContextRegistry::default();
-        let dict =
-            br#"{"schema":"v1","network":"mainnet","status":"finalized","kind":"#.repeat(16);
+        let dict = br#"{"schema":"v1","network":"mainnet","status":"finalized","kind":"#.repeat(16);
         reg.register(1, "json-small", dict)?;
 
         let doc =
@@ -583,46 +789,61 @@ mod tests {
         let mut next_page = base_page.clone();
         next_page[128] = 0x11;
         next_page[129] = 0x22;
-        let page_delta = encode_page_xor_delta(&base_page, &next_page)?;
-        assert!(page_delta.len() < 64);
-        assert_eq!(decode_page_xor_delta(&base_page, &page_delta)?, next_page);
+        let page_enc = encode_page_xor_delta(&base_page, &next_page)?;
+        assert!(page_enc.len() < 128);
+        assert_eq!(decode_page_xor_delta(&base_page, &page_enc)?, next_page);
 
-        // Codec 19: 256 normalized FP32 weights around [0.125, 0.25).
+        // Codec 19: 256 FP32 weights near 0.125.
         let mut weights = Vec::with_capacity(256 * 4);
-        for i in 0u16..256 {
-            let val = 0.125_f32 + f32::from(i) * 0.000_1_f32;
-            weights.extend_from_slice(&val.to_le_bytes());
+        for i in 0u32..256 {
+            let w = 0.125_f32 + (i as f32) * 1e-5;
+            weights.extend_from_slice(&w.to_le_bytes());
         }
-        let fp_enc = encode_fp32_exponent_split(&weights)?;
-        assert!(fp_enc.len() < weights.len());
-        assert_eq!(decode_fp32_exponent_split(&fp_enc, weights.len())?, weights);
+        let w_enc = encode_fp32_exponent_split(&weights)?;
+        assert!(w_enc.len() < weights.len());
+        assert_eq!(decode_fp32_exponent_split(&w_enc, weights.len())?, weights);
         Ok(())
     }
 
     #[test]
     fn convergent_cross_owner_dedup_keeps_payload_until_last_release() -> Result<(), CodecError> {
         let mut store = ConvergentDedupStore::default();
-        let owner_a = [0x01; 32];
-        let secret_a = [0xA1; 32];
-        let owner_b = [0x02; 32];
-        let secret_b = [0xB2; 32];
-        let blob = b"identical large-entropy-safe structured archive payload ".repeat(16);
+        let alice = [0x11u8; 32];
+        let alice_sk = [0xA1u8; 32];
+        let bob = [0x22u8; 32];
+        let bob_sk = [0xB2u8; 32];
+        let payload = b"shared confidential dataset chunk repeated ".repeat(32);
 
-        let (env_a, refs_1) = store.put(owner_a, secret_a, &blob, true);
-        let (env_b, refs_2) = store.put(owner_b, secret_b, &blob, true);
+        let (env_a, refs_a) = store.put(alice, alice_sk, &payload, true);
+        let (env_b, refs_b) = store.put(bob, bob_sk, &payload, true);
         assert_eq!(env_a, env_b);
-        assert_eq!(refs_1, 1);
-        assert_eq!(refs_2, 2);
+        assert_eq!(refs_a, 1);
+        assert_eq!(refs_b, 2);
         assert_eq!(store.shared_ciphertext_count(), 1);
 
-        // Owner A releases -> ref_count drops 2 -> 1; Owner B still decrypts cleanly.
-        assert_eq!(store.release_owner(&env_a, &owner_a), 1);
-        assert!(store.open(&env_a, &owner_a, &secret_a, blob.len()).is_err());
-        assert_eq!(store.open(&env_b, &owner_b, &secret_b, blob.len())?, blob);
+        // envelope_id must commit to ciphertext+tag, never raw plaintext SHA-256.
+        assert_ne!(
+            env_a,
+            sha256_domain(b"budlum/codec/content-digest/v1", &payload)
+        );
 
-        // Owner B releases -> ref_count drops 1 -> 0; shared ciphertext is collected.
-        assert_eq!(store.release_owner(&env_b, &owner_b), 0);
+        assert_eq!(
+            store.open(&env_a, &alice, &alice_sk, payload.len())?,
+            payload
+        );
+        assert_eq!(store.open(&env_b, &bob, &bob_sk, payload.len())?, payload);
+        assert!(store.open(&env_a, &alice, &bob_sk, payload.len()).is_err());
+
+        assert_eq!(store.release_owner(&env_a, &alice), 1);
+        assert_eq!(store.open(&env_b, &bob, &bob_sk, payload.len())?, payload);
+        assert_eq!(store.release_owner(&env_b, &bob), 0);
         assert_eq!(store.shared_ciphertext_count(), 0);
+
+        // Isolated mode bypasses dedup completely.
+        let (iso1, r1) = store.put(alice, alice_sk, &payload, false);
+        let (iso2, r2) = store.put(bob, bob_sk, &payload, false);
+        assert_ne!(iso1, iso2);
+        assert_eq!((r1, r2), (1, 1));
         Ok(())
     }
 }

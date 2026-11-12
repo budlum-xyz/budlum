@@ -24,6 +24,9 @@ use super::view::{
     ViewBud3Error,
 };
 
+/// Alias for [`ViewBud3Error`] returned by [`Bud3ContentGateway`] operations.
+pub type ContentGatewayError = ViewBud3Error;
+
 /// Bundle of `>= k + 2` symbols per segment returned by [`Bud3ContentGateway`]
 /// for client-side verification and decoding.
 #[derive(Debug, Clone)]
@@ -121,8 +124,13 @@ mod tests {
             fps: 10,
             k_max: 16,
         };
-        let up = prepare_public_upload(b"gateway delivered bud3 content", &profile, &Bud3Limits::default(), 6)
-            .unwrap();
+        let up = prepare_public_upload(
+            b"gateway delivered bud3 content",
+            &profile,
+            &Bud3Limits::default(),
+            6,
+        )
+        .unwrap();
         let key = up.record.commitment;
         let cref = ContentRef::new(up.record.content_id, key, None).unwrap();
 

@@ -274,8 +274,7 @@ mod tests {
         let selected = bud_codec::select(&text);
         assert_eq!(selected.codec, bud_codec::ZSTD);
         let coded_obj = Object::public_coded(selected.codec, selected.payload, &text).unwrap();
-        let verified =
-            verify_upload_two_path_and_round_trip(&coded_obj, &FAST_PROFILE, 2).unwrap();
+        let verified = verify_upload_two_path_and_round_trip(&coded_obj, &FAST_PROFILE, 2).unwrap();
         assert_eq!(verified.object.public_content().unwrap(), text);
     }
 
@@ -285,8 +284,7 @@ mod tests {
         let obj = Object::raw_public(&content);
 
         let logical_frames = frames_for_object_bytes(&obj.encode(), &FAST_PROFILE, 4).unwrap();
-        let mut optical_seconds =
-            render_optical_seconds(&obj, &FAST_PROFILE, 4).unwrap();
+        let mut optical_seconds = render_optical_seconds(&obj, &FAST_PROFILE, 4).unwrap();
 
         // Drop two frames from the first optical second; the 4 repair symbols recover them.
         if let Some(sec0) = optical_seconds.first_mut() {
@@ -304,8 +302,7 @@ mod tests {
         assert_eq!(from_optical, content);
 
         // Derived P1 optical profile also recovers identical content.
-        let p1_seconds =
-            render_p1_optical_seconds(&obj, &OpticalProfile::P1_DEFAULT, 2).unwrap();
+        let p1_seconds = render_p1_optical_seconds(&obj, &OpticalProfile::P1_DEFAULT, 2).unwrap();
         let mut m3 = Meter::for_object(1 << 20);
         assert_eq!(decode_optical_path(&p1_seconds, &mut m3).unwrap(), content);
     }

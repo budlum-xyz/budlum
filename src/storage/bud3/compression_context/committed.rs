@@ -168,7 +168,8 @@ impl LocalContextCache {
         if digest != manifest.dictionary_digest {
             return Err(ContextError::ManifestIntegrityMismatch);
         }
-        self.dictionaries.insert(manifest.context_id, dictionary_bytes);
+        self.dictionaries
+            .insert(manifest.context_id, dictionary_bytes);
         Ok(())
     }
 
@@ -201,6 +202,7 @@ impl ContextMaintenancePool {
 ///
 /// - Exact full-content deduplication match (`exact_dedup_match == true`) pays `0` extra fee.
 /// - Otherwise pays `CONTEXT_SAVINGS_FEE_SHARE_BPS` (`20%`) of `(baseline_fee_atoms - compressed_fee_atoms)`.
+///
 /// Convenience: exposed for storage fee calculation.
 #[must_use]
 pub fn compute_context_savings_fee(
@@ -224,6 +226,7 @@ pub fn compute_context_savings_fee(
 /// where each op is:
 /// - `0x00 || lit_len_u16_le || literal_bytes`
 /// - `0x01 || dict_off_u32_le || match_len_u16_le`
+///
 /// Convenience: exposed for expansion codec evaluation and tests.
 ///
 /// # Errors
@@ -263,8 +266,9 @@ pub fn encode_with_shared_context(
     let mut lit_start = 0usize;
 
     while pos + min_match <= plaintext.len() {
-        if let Some((dict_off, mlen)) = find_longest_dict_match(dictionary, &plaintext[pos..], min_match) {
-            flush_literals(&mut out, &plaintext[lit_start..pos])?;
+        let tail = plaintext.get(pos..).unwrap_or(&[]);
+        if let Some((dict_off, mlen)) = find_longest_dict_match(dictionary, tail, min_match) {
+            flush_literals(&mut out, plaintext.get(lit_start..pos).unwrap_or(&[]))?;
             out.push(0x01);
             let off_u32 = u32::try_from(dict_off)
                 .map_err(|_| ContextError::MalformedWirePayload("dict offset overflow"))?;
@@ -278,7 +282,7 @@ pub fn encode_with_shared_context(
             pos += 1;
         }
     }
-    flush_literals(&mut out, &plaintext[lit_start..])?;
+    flush_literals(&mut out, plaintext.get(lit_start..).unwrap_or(&[]))?;
 
     if codec_id == CODEC_SHARED_CTX_ARCHIVAL && tier != AccessTier::Cold && !plaintext.is_empty() {
         let savings_bps = if out.len() < plaintext.len() {
@@ -306,19 +310,27 @@ pub fn decode_with_shared_context(
     wire: &[u8],
     cache: &LocalContextCache,
 ) -> Result<Vec<u8>, ContextError> {
-    if wire.len() < 41 {
-        return Err(ContextError::MalformedWirePayload("truncated BCX1 header"));
+    if wire.get(0..4) != Some(CTX_WIRE_MAGIC) {
+        return Err(ContextError::MalformedWirePayload(
+            "invalid or truncated BCX1 magic",
+        ));
     }
-    if &wire[0..4] != CTX_WIRE_MAGIC {
-        return Err(ContextError::MalformedWirePayload("invalid BCX1 magic"));
-    }
-    let codec_id = wire[4];
+    let codec_id = *wire
+        .get(4)
+        .ok_or(ContextError::MalformedWirePayload("truncated BCX1 header"))?;
     if codec_id != CODEC_SHARED_CTX_FAST && codec_id != CODEC_SHARED_CTX_ARCHIVAL {
         return Err(ContextError::UnsupportedContextCodec(codec_id));
     }
+    let ctx_slice = wire
+        .get(5..37)
+        .ok_or(ContextError::MalformedWirePayload("truncated BCX1 header"))?;
     let mut context_id = [0u8; 32];
-    context_id.copy_from_slice(&wire[5..37]);
-    let orig_len = usize::try_from(u32::from_le_bytes([wire[37], wire[38], wire[39], wire[40]]))
+    context_id.copy_from_slice(ctx_slice);
+    let len_hdr: [u8; 4] = wire
+        .get(37..41)
+        .and_then(|s| s.try_into().ok())
+        .ok_or(ContextError::MalformedWirePayload("truncated BCX1 header"))?;
+    let orig_len = usize::try_from(u32::from_le_bytes(len_hdr))
         .map_err(|_| ContextError::MalformedWirePayload("orig_len exceeds usize"))?;
 
     let dict = cache
@@ -327,38 +339,48 @@ pub fn decode_with_shared_context(
 
     let mut out = Vec::with_capacity(orig_len.min(65_536));
     let mut cursor = 41usize;
-    while cursor < wire.len() {
-        let tag = wire[cursor];
+    while let Some(&tag) = wire.get(cursor) {
         cursor += 1;
         match tag {
             0x00 => {
-                let len_bytes = wire
+                let len_bytes: [u8; 2] = wire
                     .get(cursor..cursor + 2)
-                    .ok_or(ContextError::MalformedWirePayload("truncated literal length"))?;
-                let lit_len = usize::from(u16::from_le_bytes([len_bytes[0], len_bytes[1]]));
+                    .and_then(|s| s.try_into().ok())
+                    .ok_or(ContextError::MalformedWirePayload(
+                        "truncated literal length",
+                    ))?;
+                let lit_len = usize::from(u16::from_le_bytes(len_bytes));
                 cursor += 2;
-                let slice = wire
-                    .get(cursor..cursor + lit_len)
-                    .ok_or(ContextError::MalformedWirePayload("truncated literal bytes"))?;
+                let slice = wire.get(cursor..cursor + lit_len).ok_or(
+                    ContextError::MalformedWirePayload("truncated literal bytes"),
+                )?;
                 if out.len().saturating_add(lit_len) > orig_len {
-                    return Err(ContextError::MalformedWirePayload("decoded output exceeds orig_len"));
+                    return Err(ContextError::MalformedWirePayload(
+                        "decoded output exceeds orig_len",
+                    ));
                 }
                 out.extend_from_slice(slice);
                 cursor += lit_len;
             }
             0x01 => {
-                let hdr = wire
+                let hdr: [u8; 6] = wire
                     .get(cursor..cursor + 6)
-                    .ok_or(ContextError::MalformedWirePayload("truncated dict match op"))?;
-                let off = usize::try_from(u32::from_le_bytes([hdr[0], hdr[1], hdr[2], hdr[3]]))
+                    .and_then(|s| s.try_into().ok())
+                    .ok_or(ContextError::MalformedWirePayload(
+                        "truncated dict match op",
+                    ))?;
+                let [b0, b1, b2, b3, b4, b5] = hdr;
+                let off = usize::try_from(u32::from_le_bytes([b0, b1, b2, b3]))
                     .map_err(|_| ContextError::MalformedWirePayload("offset exceeds usize"))?;
-                let mlen = usize::from(u16::from_le_bytes([hdr[4], hdr[5]]));
+                let mlen = usize::from(u16::from_le_bytes([b4, b5]));
                 cursor += 6;
-                let slice = dict
-                    .get(off..off.saturating_add(mlen))
-                    .ok_or(ContextError::MalformedWirePayload("dict reference out of bounds"))?;
+                let slice = dict.get(off..off.saturating_add(mlen)).ok_or(
+                    ContextError::MalformedWirePayload("dict reference out of bounds"),
+                )?;
                 if out.len().saturating_add(mlen) > orig_len {
-                    return Err(ContextError::MalformedWirePayload("decoded output exceeds orig_len"));
+                    return Err(ContextError::MalformedWirePayload(
+                        "decoded output exceeds orig_len",
+                    ));
                 }
                 out.extend_from_slice(slice);
             }
@@ -367,7 +389,9 @@ pub fn decode_with_shared_context(
     }
 
     if out.len() != orig_len {
-        return Err(ContextError::MalformedWirePayload("decoded length mismatch"));
+        return Err(ContextError::MalformedWirePayload(
+            "decoded length mismatch",
+        ));
     }
     Ok(out)
 }
@@ -375,34 +399,44 @@ pub fn decode_with_shared_context(
 fn flush_literals(out: &mut Vec<u8>, mut literals: &[u8]) -> Result<(), ContextError> {
     while !literals.is_empty() {
         let chunk_len = literals.len().min(usize::from(u16::MAX));
+        let Some((head, tail)) = literals.split_at_checked(chunk_len) else {
+            break;
+        };
         let len_u16 = u16::try_from(chunk_len)
             .map_err(|_| ContextError::MalformedWirePayload("literal chunk overflow"))?;
         out.push(0x00);
         out.extend_from_slice(&len_u16.to_le_bytes());
-        out.extend_from_slice(&literals[..chunk_len]);
-        literals = &literals[chunk_len..];
+        out.extend_from_slice(head);
+        literals = tail;
     }
     Ok(())
 }
 
 fn find_longest_dict_match(dict: &[u8], target: &[u8], min_match: usize) -> Option<(usize, usize)> {
-    if dict.len() < min_match || target.len() < min_match {
+    let probe = target.get(..min_match)?;
+    if dict.len() < min_match {
         return None;
     }
     let max_cap = target.len().min(usize::from(u16::MAX));
-    let probe = &target[..min_match];
     let mut best: Option<(usize, usize)> = None;
     let mut search_from = 0usize;
-    while search_from + min_match <= dict.len() {
-        let Some(rel) = dict[search_from..].windows(min_match).position(|w| w == probe) else {
+    while let Some(window_slice) = dict.get(search_from..) {
+        if window_slice.len() < min_match {
+            break;
+        }
+        let Some(rel) = window_slice.windows(min_match).position(|w| w == probe) else {
             break;
         };
         let off = search_from + rel;
         let limit = (dict.len() - off).min(max_cap);
-        let mut mlen = min_match;
-        while mlen < limit && dict[off + mlen] == target[mlen] {
-            mlen += 1;
-        }
+        let dict_tail = dict.get(off + min_match..off + limit).unwrap_or(&[]);
+        let target_tail = target.get(min_match..limit).unwrap_or(&[]);
+        let extra = dict_tail
+            .iter()
+            .zip(target_tail.iter())
+            .take_while(|(a, b)| a == b)
+            .count();
+        let mlen = min_match + extra;
         if best.is_none_or(|(_, b)| mlen > b) {
             best = Some((off, mlen));
         }
@@ -506,14 +540,16 @@ impl SharedContextEngine {
         if !self.enabled {
             return Err(ContextError::ContextDisabled);
         }
-        for burned in &self.burned_corpus {
-            self.corpus_payloads.remove(burned);
-        }
-        self.burned_corpus.clear();
-
+        let next_corpus: BTreeMap<ObjectKey, Vec<u8>> = self
+            .corpus_payloads
+            .iter()
+            .filter(|(key, _)| !self.burned_corpus.contains(*key))
+            .map(|(key, val)| (*key, val.clone()))
+            .collect();
+        let empty_burned = BTreeSet::new();
         let next_gen = self.manifest.generation.saturating_add(1);
-        let dict_bytes = materialize_dictionary(&self.corpus_payloads, &self.burned_corpus);
-        let keys: Vec<ObjectKey> = self.corpus_payloads.keys().copied().collect();
+        let dict_bytes = materialize_dictionary(&next_corpus, &empty_burned);
+        let keys: Vec<ObjectKey> = next_corpus.keys().copied().collect();
         let next_manifest = ContextManifest::new(
             self.manifest.class_tag.clone(),
             next_gen,
@@ -521,10 +557,12 @@ impl SharedContextEngine {
             &dict_bytes,
             epoch,
         );
-        self.cache.insert_verified(&next_manifest, dict_bytes.clone())?;
+        let mut next_cache = self.cache.clone();
+        next_cache.insert_verified(&next_manifest, dict_bytes.clone())?;
 
-        for dep in dependents.iter_mut() {
-            let recovered = decode_with_shared_context(&dep.wire_payload, &self.cache)?;
+        let mut staged_deps = dependents.to_vec();
+        for dep in &mut staged_deps {
+            let recovered = decode_with_shared_context(&dep.wire_payload, &next_cache)?;
             let recomputed_cid = ContentId::public(&recovered);
             if recomputed_cid != dep.content_id {
                 return Err(ContextError::MalformedWirePayload(
@@ -548,6 +586,10 @@ impl SharedContextEngine {
             dep.wire_payload = new_wire;
         }
 
+        self.corpus_payloads = next_corpus;
+        self.burned_corpus.clear();
+        self.cache = next_cache;
+        dependents.clone_from_slice(&staged_deps);
         self.manifest = next_manifest.clone();
         Ok(next_manifest)
     }
@@ -585,9 +627,9 @@ mod tests {
 
     #[test]
     fn bud3_context_codec_vectors() {
-        assert!(!TESTNET_CONTEXT_ENABLED_BY_DEFAULT);
-        let engine = SharedContextEngine::new(true, "json-records".to_owned(), sample_corpus(), 10)
-            .unwrap();
+        const { assert!(!TESTNET_CONTEXT_ENABLED_BY_DEFAULT) };
+        let engine =
+            SharedContextEngine::new(true, "json-records".to_owned(), sample_corpus(), 10).unwrap();
         assert!(engine.manifest.verify_id());
         let dict = engine.cache.get(&engine.manifest.context_id).unwrap();
 
@@ -649,9 +691,14 @@ mod tests {
     fn bud3_context_rotation_keeps_content_id() {
         let mut engine =
             SharedContextEngine::new(true, "json-records".to_owned(), sample_corpus(), 1).unwrap();
-        let dict = engine.cache.get(&engine.manifest.context_id).unwrap().to_vec();
+        let dict = engine
+            .cache
+            .get(&engine.manifest.context_id)
+            .unwrap()
+            .to_vec();
 
-        let payload = b"{\"schema\":\"budlum.v3.record\",\"network\":\"budlum-mainnet\",\"item\":\"alpha\"}";
+        let payload =
+            b"{\"schema\":\"budlum.v3.record\",\"network\":\"budlum-mainnet\",\"item\":\"alpha\"}";
         let cid_before = ContentId::public(payload);
         let wire_gen1 = encode_with_shared_context(
             CODEC_SHARED_CTX_FAST,
