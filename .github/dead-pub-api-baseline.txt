@@ -117,7 +117,6 @@ src/network/mobile.rs:set_relay_address
 src/network/mobile.rs:update_battery
 src/network/node.rs:broadcast_domain_commitment_sync
 src/network/node.rs:broadcast_slashing_evidence_sync
-src/network/node.rs:broadcast_tx
 src/network/node.rs:new_with_bootstrap
 src/network/node.rs:with_pruning_policy
 src/network/peer_manager.rs:consume_token

@@ -13,10 +13,11 @@ pub enum Network {
     Devnet,
 }
 
-/// This legacy path is available only on the development network while
-/// ownership, membership, and value-conservation proofs are not verified.
+/// Privacy transfers and note insertion are enabled on Testnet (`45261`) and
+/// Devnet (`45262`); Mainnet (`45260`) stays gated until ceremony sign-off.
 pub(crate) fn privacy_transfers_enabled(chain_id: u64) -> bool {
-    chain_id == Network::Devnet.chain_id().value()
+    chain_id == Network::Testnet.chain_id().value()
+        || chain_id == Network::Devnet.chain_id().value()
 }
 
 impl Network {
@@ -208,17 +209,15 @@ impl Network {
 
     /// The shared-security parameters of this profile.
     ///
-    /// The flag is a genesis parameter. Devnet has it on so the rehearsal can
-    /// run the path; testnet keeps it off until the end-to-end Sepolia test
-    /// passes; the mainnet decision is Ayaz's.
-    /// `max_restaked_share_ppm = 300_000` and one weight atom per allocated
-    /// unit are TESTNET-DEFAULT values.
+    /// Enabled on Testnet (`45261`) and Devnet (`45262`); Mainnet (`45260`)
+    /// waits for launch sign-off. `max_restaked_share_ppm = 300_000` and one
+    /// weight atom per allocated unit are TESTNET-DEFAULT values.
     #[must_use]
     pub const fn shared_security(
         &self,
     ) -> crate::settlement::shared_security::SharedSecurityParams {
         crate::settlement::shared_security::SharedSecurityParams {
-            enabled: matches!(self, Network::Devnet),
+            enabled: matches!(self, Network::Devnet | Network::Testnet),
             // TESTNET-DEFAULT: restaked weight stays below a third of
             // the total, so ETH-backed validators cannot finalize alone.
             max_restaked_share_ppm: 300_000,
@@ -230,11 +229,11 @@ impl Network {
 
     /// Whether remote app binding (`app_binding`) is enabled on this profile.
     ///
-    /// Enabled on devnet (`45262`) for integration verification; closed on
-    /// testnet (`45261`) and mainnet (`45260`) per the launch feature matrix.
+    /// Enabled on Testnet (`45261`) and Devnet (`45262`); closed on Mainnet
+    /// (`45260`) until explicit launch activation.
     #[must_use]
     pub const fn app_binding_enabled(&self) -> bool {
-        matches!(self, Network::Devnet)
+        matches!(self, Network::Devnet | Network::Testnet)
     }
 
     pub fn mempool_config(&self) -> crate::mempool::pool::MempoolConfig {

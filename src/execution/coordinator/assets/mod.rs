@@ -13,20 +13,123 @@
 //! Convenience: exposed for CLI, RPC, SDK, and multi-VM runtime callers.
 
 use crate::core::account::AccountState;
-use crate::execution::coordinator::alias::bech32_contract_addr;
-use crate::execution::coordinator::state::{
-    derive_uel_asset_id, NS_EVM_ACCOUNT, NS_EVM_CODE, NS_UEL_ASSETS, NS_WASM_CODE, NS_WASM_CONTRACT,
+use crate::core::address::Address;
+use crate::execution::coordinator::alias::{
+    bech32_contract_addr, derive_evm_alias, derive_wasm_alias, is_ed25519_on_curve, ALIAS_NAMESPACE,
 };
-use budlum_uel_abi::EeId;
+use crate::execution::coordinator::state::{
+    derive_uel_asset_id, NS_EVM_ACCOUNT, NS_EVM_CODE, NS_MOVE_STATE, NS_SVM_ACCOUNT,
+    NS_UEL_ASSETS, NS_WASM_CODE, NS_WASM_CONTRACT,
+};
+use budlum_uel_abi::{EeId, HostRead, Namespace};
 use serde::{Deserialize, Serialize};
+use sha2::Sha256;
 use sha3::{Digest, Keccak256, Sha3_256};
 use std::collections::BTreeMap;
 
 /// Canonical Budlum testnet chain ID (`45261`).
 pub const BUDLUM_TESTNET_CHAIN_ID: u64 = 45_261;
 
-/// Bytecode magic identifying an immutable UEL pointer contract in EVM or WASM.
+/// Bytecode magic identifying an immutable UEL pointer contract in EVM, WASM, SVM, or Move.
 pub const POINTER_BYTECODE_PREFIX: &[u8] = b"BDLM_UEL_PTR_BYTECODE_V1";
+
+/// Canonical stateless SPL Token pointer operations (`EeId::SVM = 0x03`, section 8.8).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SplPointerOp {
+    Transfer {
+        to: [u8; 32],
+        amount: u128,
+    },
+    Approve {
+        delegate: [u8; 32],
+        amount: u128,
+    },
+    TransferFrom {
+        owner: [u8; 32],
+        to: [u8; 32],
+        amount: u128,
+    },
+    BalanceOf {
+        owner: [u8; 32],
+    },
+    Allowance {
+        owner: [u8; 32],
+        delegate: [u8; 32],
+    },
+}
+
+/// Move pointer flavor (`0x1::fungible_asset` vs `0x1::coin`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MovePointerFlavor {
+    FungibleAsset,
+    Coin,
+}
+
+/// Canonical stateless Move asset pointer operations (`EeId::MOVE = 0x04`, section 8.8).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MovePointerOp {
+    Transfer {
+        flavor: MovePointerFlavor,
+        to: [u8; 32],
+        amount: u128,
+    },
+    Approve {
+        flavor: MovePointerFlavor,
+        spender: [u8; 32],
+        amount: u128,
+    },
+    TransferFrom {
+        flavor: MovePointerFlavor,
+        owner: [u8; 32],
+        to: [u8; 32],
+        amount: u128,
+    },
+    Balance {
+        flavor: MovePointerFlavor,
+        owner: [u8; 32],
+    },
+    Allowance {
+        flavor: MovePointerFlavor,
+        owner: [u8; 32],
+        spender: [u8; 32],
+    },
+}
+
+/// Resolves a 32-byte recipient/owner argument inside a cross-EE pointer call
+/// to the target `home_ee` identity bytes using `uel/alias` when available.
+#[must_use]
+pub fn resolve_pointer_party_for_home(
+    host: &dyn HostRead,
+    raw32: &[u8; 32],
+    home_ee: EeId,
+) -> Vec<u8> {
+    if home_ee == EeId::EVM
+        && raw32.get(..12) == Some([0u8; 12].as_slice())
+        && raw32.get(12..32) != Some([0u8; 20].as_slice())
+    {
+        return raw32.get(12..32).unwrap_or(&[]).to_vec();
+    }
+    if let Ok(ns) = Namespace::new(ALIAS_NAMESPACE) {
+        let mut key = [0u8; 33];
+        if let Some(prefix) = key.get_mut(..32) {
+            prefix.copy_from_slice(raw32);
+        }
+        if let Some(last) = key.get_mut(32) {
+            *last = home_ee.0;
+        }
+        if let Ok(Some(alias)) = host.read(&ns, &key) {
+            return alias;
+        }
+    }
+    match home_ee {
+        EeId::EVM => derive_evm_alias(&Address::from(*raw32)).to_vec(),
+        EeId::WASM => derive_wasm_alias(&Address::from(*raw32)).into_bytes(),
+        _ => raw32.to_vec(),
+    }
+}
 
 /// Token standard classification in `uel/assets` (section 8.8 item 2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -85,8 +188,10 @@ pub fn decode_pointer_bytecode(code: &[u8]) -> Option<PointerDescriptor> {
 
 /// Derives the deterministic pointer address for `(asset_id, target_ee)` (8.8 item 5).
 ///
-/// - `EeId::EVM`: 20-byte address `keccak256("BDLM_UEL_POINTER_V1" || asset_id || 0x01)[12..32]`.
+/// - `EeId::EVM`: 20-byte `keccak256("BDLM_UEL_POINTER_V1" || asset_id || 0x01)[12..32]`.
 /// - `EeId::WASM`: bech32 `bud1...` over `SHA3-256("BDLM_UEL_POINTER_V1" || asset_id || 0x02)`.
+/// - `EeId::SVM`: off-curve PDA `SHA256("BDLM_UEL_POINTER_V1" || asset_id || 0x03 || bump)`.
+/// - `EeId::MOVE`: 32-byte address `SHA3-256("BDLM_UEL_POINTER_V1" || asset_id || 0x04)`.
 ///
 /// # Errors
 ///
@@ -110,8 +215,30 @@ pub fn derive_pointer_address(asset_id: &[u8; 32], target_ee: EeId) -> Result<Ve
             let digest: [u8; 32] = h.finalize().into();
             Ok(bech32_contract_addr(&digest).into_bytes())
         }
+        EeId::SVM => {
+            for step in 0u8..=255u8 {
+                let bump = 255u8.wrapping_sub(step);
+                let mut h = Sha256::new();
+                h.update(b"BDLM_UEL_POINTER_V1");
+                h.update(asset_id);
+                h.update([EeId::SVM.0, bump]);
+                let cand: [u8; 32] = h.finalize().into();
+                if !is_ed25519_on_curve(&cand) {
+                    return Ok(cand.to_vec());
+                }
+            }
+            Err(String::from("failed to derive off-curve SVM pointer PDA"))
+        }
+        EeId::MOVE => {
+            let mut h = Sha3_256::new();
+            h.update(b"BDLM_UEL_POINTER_V1");
+            h.update(asset_id);
+            h.update([EeId::MOVE.0]);
+            let digest: [u8; 32] = h.finalize().into();
+            Ok(digest.to_vec())
+        }
         other => Err(format!(
-            "pointers for EE 0x{:02x} are deferred to T-Expansion ()",
+            "pointers for EE 0x{:02x} are not yet defined",
             other.0
         )),
     }
@@ -148,9 +275,9 @@ pub fn register_asset_entry(
     symbol: String,
     name: String,
 ) -> Result<RegisteredAsset, String> {
-    if !matches!(home_ee, EeId::EVM | EeId::WASM) {
+    if !matches!(home_ee, EeId::EVM | EeId::WASM | EeId::SVM | EeId::MOVE) {
         return Err(format!(
-            "launch asset registration supports EVM and WASM homes; got 0x{:02x}",
+            "asset registration supports EVM, WASM, SVM, and Move homes; got 0x{:02x}",
             home_ee.0
         ));
     }
@@ -245,9 +372,35 @@ pub fn deploy_asset_pointer(
                 .execution_state
                 .write(NS_WASM_CONTRACT, &ptr_addr, Some(&meta_bytes))?;
         }
+        EeId::SVM => {
+            let addr32: [u8; 32] = ptr_addr
+                .as_slice()
+                .try_into()
+                .map_err(|_| String::from("SVM pointer address != 32 bytes"))?;
+            let ptr_acc = serde_json::json!({
+                "lamports": 1u64,
+                "owner": crate::execution::coordinator::svm_ee::SVM_BPF_LOADER_ID,
+                "executable": true,
+                "rent_epoch": 0u64,
+                "data": code,
+            });
+            let acc_bytes = serde_json::to_vec(&ptr_acc).map_err(|e| e.to_string())?;
+            state
+                .execution_state
+                .write(NS_SVM_ACCOUNT, &addr32, Some(&acc_bytes))?;
+        }
+        EeId::MOVE => {
+            let mut mod_key = Vec::with_capacity(4 + ptr_addr.len() + 8);
+            mod_key.extend_from_slice(b"mod:");
+            mod_key.extend_from_slice(&ptr_addr);
+            mod_key.extend_from_slice(b":pointer");
+            state
+                .execution_state
+                .write(NS_MOVE_STATE, &mod_key, Some(&code))?;
+        }
         other => {
             return Err(format!(
-                "unsupported launch pointer target EE 0x{:02x}",
+                "unsupported pointer target EE 0x{:02x}",
                 other.0
             ));
         }

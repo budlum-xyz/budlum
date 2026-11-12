@@ -49,7 +49,14 @@ pub const MOVE_GAS_TO_BGU: u64 = 100;
 pub const fn soft_limit_for_ee(ee: EeId) -> Option<u64> {
     match ee {
         EeId::EVM => Some(EVM_SOFT_BGU_LIMIT),
-        EeId::WASM => Some(WASM_SOFT_BGU_LIMIT),
+        EeId::WASM
+        | EeId::MOVE_SUI
+        | EeId::CAIRO
+        | EeId::NEAR_WASM
+        | EeId::POLKAVM
+        | EeId::TVM
+        | EeId::UTXO
+        | EeId::PLUTUS => Some(WASM_SOFT_BGU_LIMIT),
         EeId::SVM => Some(SVM_SOFT_BGU_LIMIT),
         EeId::MOVE => Some(MOVE_SOFT_BGU_LIMIT),
         EeId::BUDZERO => Some(MAX_BLOCK_CONTRACT_GAS),
@@ -66,7 +73,17 @@ pub const fn soft_limit_for_ee(ee: EeId) -> Option<u64> {
 /// Returns an error if the operation fails.
 pub fn native_gas_to_bgu(ee: EeId, native_units: u64) -> Result<u64, String> {
     match ee {
-        EeId::EVM | EeId::WASM | EeId::SVM | EeId::BUDZERO => Ok(native_units),
+        EeId::EVM
+        | EeId::WASM
+        | EeId::SVM
+        | EeId::BUDZERO
+        | EeId::MOVE_SUI
+        | EeId::CAIRO
+        | EeId::NEAR_WASM
+        | EeId::POLKAVM
+        | EeId::TVM
+        | EeId::UTXO
+        | EeId::PLUTUS => Ok(native_units),
         EeId::MOVE => native_units
             .checked_mul(MOVE_GAS_TO_BGU)
             .ok_or_else(|| String::from("Move gas to BGU conversion overflow")),

@@ -1,14 +1,22 @@
 use crate::core::account::AccountState;
 use crate::core::address::Address;
-use crate::execution::coordinator::alias::{derive_evm_alias, derive_foreign_cosmos_bech32};
+use crate::execution::coordinator::alias::{
+    derive_evm_alias, derive_foreign_cosmos_bech32, derive_move_alias, derive_svm_alias,
+    derive_wasm_alias,
+};
 use crate::execution::coordinator::assets::{
     deploy_asset_pointer, derive_pointer_address, register_asset_entry, AssetStandard,
+    MovePointerFlavor, MovePointerOp, SplPointerOp,
 };
 use crate::execution::coordinator::evm_ee::{
     encode_std_evm_token_code, solidity_selector, StdEvmTokenSpec, EVM_STORAGE_ENTRY_BYTES,
 };
 use crate::execution::coordinator::gas::MIN_UEL_BASE_FEE_ATTOS;
-use crate::execution::coordinator::state::{derive_uel_asset_id, NS_EVM_STORAGE, NS_WASM_STORE};
+use crate::execution::coordinator::move_ee::{MoveCallEnvelope, MOVE_BINARY_MAGIC};
+use crate::execution::coordinator::state::{
+    derive_uel_asset_id, NS_EVM_STORAGE, NS_MOVE_STATE, NS_SVM_ACCOUNT, NS_WASM_STORE,
+};
+use crate::execution::coordinator::svm_ee::SvmInstructionEnvelope;
 use crate::execution::coordinator::universal_call::{
     encode_precompile_call, universal_call_executed_topic0, EVM_UNIVERSAL_PRECOMPILE,
 };
@@ -863,4 +871,689 @@ fn pointer_allowance_lives_at_home() {
         wasm_bytes_before,
         "CW20 pointer must not write any allowance key into ee/wasm/store"
     );
+}
+
+#[test]
+fn svm_pointer_holds_no_balance() {
+    let alice = Address::from([0x71; 32]);
+    let bob = Address::from([0x72; 32]);
+    let proposer = Address::from([0x73; 32]);
+    let mut state = funded(&[alice, bob, proposer]);
+    let mut coord = ExecutionCoordinator::new();
+
+    let alice_evm20 = derive_evm_alias(&alice);
+    let bob_evm20 = derive_evm_alias(&bob);
+    state
+        .execution_state
+        .ensure_alias_registered(&bob, EeId::EVM)
+        .expect("register bob evm alias");
+
+    // 1. Deploy home ERC-20 on EVM with 1,000 units held by Alice.
+    let erc20_code = encode_std_evm_token_code(&StdEvmTokenSpec {
+        standard: AssetStandard::Fungible,
+        name: String::from("HomeSvmAsset"),
+        symbol: String::from("HSA"),
+        decimals: 6,
+        initial_holder: alice_evm20,
+        initial_supply_or_token_id: 1_000,
+        base_uri: String::new(),
+    })
+    .expect("std erc20");
+    let dep = state
+        .execute_uel_block(
+            &mut coord,
+            sample_ctx(),
+            proposer,
+            &[UelTx {
+                tx_hash: [0x81; 32],
+                sender: alice,
+                nonce: 0,
+                ee: EeId::EVM,
+                action: UelAction::Deploy {
+                    code: erc20_code,
+                    salt: [0x81; 32],
+                },
+                value_attos: 0,
+                gas_limit_bgu: 400_000,
+                max_fee_per_bgu_attos: MIN_UEL_BASE_FEE_ATTOS * 2,
+                max_priority_fee_per_bgu_attos: 100,
+            }],
+        )
+        .expect("deploy home erc20");
+    let home_erc20 = dep[0].output.clone();
+
+    // 2. Register asset & deploy stateless SPL pointer on SVM.
+    let asset = register_asset_entry(
+        &mut state,
+        EeId::EVM,
+        &home_erc20,
+        AssetStandard::Fungible,
+        6,
+        String::from("HSA"),
+        String::from("HomeSvmAsset"),
+    )
+    .expect("reg");
+    let ptr_svm = deploy_asset_pointer(&mut state, &asset.asset_id, EeId::SVM).expect("svm ptr");
+    let svm_bytes_before = state.execution_state.namespace_bytes(NS_SVM_ACCOUNT);
+
+    // 3. Alice transfers 250 units via SVM SPL pointer and approves Bob for 300.
+    let xfer_in = serde_json::to_vec(&SplPointerOp::Transfer {
+        to: bob.0,
+        amount: 250,
+    })
+    .expect("json");
+    let appr_in = serde_json::to_vec(&SplPointerOp::Approve {
+        delegate: bob.0,
+        amount: 300,
+    })
+    .expect("json");
+    let res = state
+        .execute_uel_block(
+            &mut coord,
+            sample_ctx(),
+            proposer,
+            &[
+                UelTx {
+                    tx_hash: [0x82; 32],
+                    sender: alice,
+                    nonce: 1,
+                    ee: EeId::SVM,
+                    action: UelAction::Call {
+                        target: ptr_svm.clone(),
+                        input: xfer_in,
+                    },
+                    value_attos: 0,
+                    gas_limit_bgu: 400_000,
+                    max_fee_per_bgu_attos: MIN_UEL_BASE_FEE_ATTOS * 2,
+                    max_priority_fee_per_bgu_attos: 100,
+                },
+                UelTx {
+                    tx_hash: [0x83; 32],
+                    sender: alice,
+                    nonce: 2,
+                    ee: EeId::SVM,
+                    action: UelAction::Call {
+                        target: ptr_svm.clone(),
+                        input: appr_in,
+                    },
+                    value_attos: 0,
+                    gas_limit_bgu: 400_000,
+                    max_fee_per_bgu_attos: MIN_UEL_BASE_FEE_ATTOS * 2,
+                    max_priority_fee_per_bgu_attos: 100,
+                },
+            ],
+        )
+        .expect("svm ptr calls");
+    assert_eq!(res[0].status, UelReceiptStatus::Success);
+    assert_eq!(res[1].status, UelReceiptStatus::Success);
+
+    // Zero shadow balances or allowance accounts in `ee/svm/account`.
+    assert_eq!(
+        state.execution_state.namespace_bytes(NS_SVM_ACCOUNT),
+        svm_bytes_before,
+        "SVM pointer must hold zero balance or allowance state"
+    );
+
+    // Query balanceOf(bob) through the SVM pointer: must read 250 live from EVM home.
+    let bal_q = serde_json::to_vec(&SplPointerOp::BalanceOf { owner: bob.0 }).expect("json");
+    let alw_q = serde_json::to_vec(&SplPointerOp::Allowance {
+        owner: alice.0,
+        delegate: bob.0,
+    })
+    .expect("json");
+    state
+        .execution_state
+        .ensure_alias_registered(&alice, EeId::EVM)
+        .expect("alice alias");
+    let q_res = state
+        .execute_uel_block(
+            &mut coord,
+            sample_ctx(),
+            proposer,
+            &[
+                UelTx {
+                    tx_hash: [0x84; 32],
+                    sender: bob,
+                    nonce: 0,
+                    ee: EeId::SVM,
+                    action: UelAction::Call {
+                        target: ptr_svm.clone(),
+                        input: bal_q,
+                    },
+                    value_attos: 0,
+                    gas_limit_bgu: 400_000,
+                    max_fee_per_bgu_attos: MIN_UEL_BASE_FEE_ATTOS * 2,
+                    max_priority_fee_per_bgu_attos: 100,
+                },
+                UelTx {
+                    tx_hash: [0x85; 32],
+                    sender: bob,
+                    nonce: 1,
+                    ee: EeId::SVM,
+                    action: UelAction::Call {
+                        target: ptr_svm,
+                        input: alw_q,
+                    },
+                    value_attos: 0,
+                    gas_limit_bgu: 400_000,
+                    max_fee_per_bgu_attos: MIN_UEL_BASE_FEE_ATTOS * 2,
+                    max_priority_fee_per_bgu_attos: 100,
+                },
+            ],
+        )
+        .expect("svm ptr queries");
+    assert_eq!(q_res[0].status, UelReceiptStatus::Success);
+    assert_eq!(q_res[0].output, 250u128.to_le_bytes());
+    assert_eq!(q_res[1].status, UelReceiptStatus::Success);
+    assert_eq!(q_res[1].output, 300u128.to_le_bytes());
+
+    // Confirm Bob's home ERC-20 balance on EVM via balanceOf.
+    let mut bal_cd = solidity_selector("balanceOf(address)").to_vec();
+    let mut bob_w = [0u8; 32];
+    bob_w[12..32].copy_from_slice(&bob_evm20);
+    bal_cd.extend_from_slice(&bob_w);
+    let evm_q = state
+        .execute_uel_block(
+            &mut coord,
+            sample_ctx(),
+            proposer,
+            &[UelTx {
+                tx_hash: [0x86; 32],
+                sender: bob,
+                nonce: 2,
+                ee: EeId::EVM,
+                action: UelAction::Call {
+                    target: home_erc20,
+                    input: bal_cd,
+                },
+                value_attos: 0,
+                gas_limit_bgu: 200_000,
+                max_fee_per_bgu_attos: MIN_UEL_BASE_FEE_ATTOS * 2,
+                max_priority_fee_per_bgu_attos: 100,
+            }],
+        )
+        .expect("evm bal");
+    assert_eq!(evm_q[0].output.get(16..32), Some(&250u128.to_be_bytes()[..]));
+}
+
+#[test]
+fn move_pointer_holds_no_balance() {
+    let alice = Address::from([0x91; 32]);
+    let bob = Address::from([0x92; 32]);
+    let proposer = Address::from([0x93; 32]);
+    let mut state = funded(&[alice, bob, proposer]);
+    let mut coord = ExecutionCoordinator::new();
+
+    let alice_evm20 = derive_evm_alias(&alice);
+    state
+        .execution_state
+        .ensure_alias_registered(&bob, EeId::EVM)
+        .expect("register bob evm alias");
+    let _ = derive_move_alias(&alice);
+
+    // 1. Deploy home ERC-20 on EVM with 2,000 units held by Alice.
+    let erc20_code = encode_std_evm_token_code(&StdEvmTokenSpec {
+        standard: AssetStandard::Fungible,
+        name: String::from("HomeMoveAsset"),
+        symbol: String::from("HMA"),
+        decimals: 8,
+        initial_holder: alice_evm20,
+        initial_supply_or_token_id: 2_000,
+        base_uri: String::new(),
+    })
+    .expect("std erc20");
+    let dep = state
+        .execute_uel_block(
+            &mut coord,
+            sample_ctx(),
+            proposer,
+            &[UelTx {
+                tx_hash: [0x91; 32],
+                sender: alice,
+                nonce: 0,
+                ee: EeId::EVM,
+                action: UelAction::Deploy {
+                    code: erc20_code,
+                    salt: [0x91; 32],
+                },
+                value_attos: 0,
+                gas_limit_bgu: 400_000,
+                max_fee_per_bgu_attos: MIN_UEL_BASE_FEE_ATTOS * 2,
+                max_priority_fee_per_bgu_attos: 100,
+            }],
+        )
+        .expect("deploy home erc20");
+    let home_erc20 = dep[0].output.clone();
+
+    // 2. Register asset & deploy stateless Move pointer
+    // (`ee/move/state` holds only pointer bytecode).
+    let asset = register_asset_entry(
+        &mut state,
+        EeId::EVM,
+        &home_erc20,
+        AssetStandard::Fungible,
+        8,
+        String::from("HMA"),
+        String::from("HomeMoveAsset"),
+    )
+    .expect("reg");
+    let ptr_move = deploy_asset_pointer(&mut state, &asset.asset_id, EeId::MOVE).expect("move ptr");
+    let move_bytes_before = state.execution_state.namespace_bytes(NS_MOVE_STATE);
+
+    // 3. Alice approves Bob 450 via Move pointer (`FungibleAsset` flavor),
+    // then Bob runs `transferFrom` 150.
+    let appr_in = serde_json::to_vec(&MovePointerOp::Approve {
+        flavor: MovePointerFlavor::FungibleAsset,
+        spender: bob.0,
+        amount: 450,
+    })
+    .expect("json");
+    let xfer_from_in = serde_json::to_vec(&MovePointerOp::TransferFrom {
+        flavor: MovePointerFlavor::Coin,
+        owner: alice.0,
+        to: bob.0,
+        amount: 150,
+    })
+    .expect("json");
+    state
+        .execution_state
+        .ensure_alias_registered(&alice, EeId::EVM)
+        .expect("alice alias");
+    let r1 = state
+        .execute_uel_block(
+            &mut coord,
+            sample_ctx(),
+            proposer,
+            &[
+                UelTx {
+                    tx_hash: [0x92; 32],
+                    sender: alice,
+                    nonce: 1,
+                    ee: EeId::MOVE,
+                    action: UelAction::Call {
+                        target: ptr_move.clone(),
+                        input: appr_in,
+                    },
+                    value_attos: 0,
+                    gas_limit_bgu: 400_000,
+                    max_fee_per_bgu_attos: MIN_UEL_BASE_FEE_ATTOS * 2,
+                    max_priority_fee_per_bgu_attos: 100,
+                },
+                UelTx {
+                    tx_hash: [0x93; 32],
+                    sender: bob,
+                    nonce: 0,
+                    ee: EeId::MOVE,
+                    action: UelAction::Call {
+                        target: ptr_move.clone(),
+                        input: xfer_from_in,
+                    },
+                    value_attos: 0,
+                    gas_limit_bgu: 400_000,
+                    max_fee_per_bgu_attos: MIN_UEL_BASE_FEE_ATTOS * 2,
+                    max_priority_fee_per_bgu_attos: 100,
+                },
+            ],
+        )
+        .expect("move ptr ops");
+    assert_eq!(r1[0].status, UelReceiptStatus::Success);
+    assert_eq!(r1[1].status, UelReceiptStatus::Success);
+
+    // Move pointer wrote zero CoinStore / FungibleStore / allowance state into `ee/move/state`.
+    assert_eq!(
+        state.execution_state.namespace_bytes(NS_MOVE_STATE),
+        move_bytes_before,
+        "Move pointer must hold zero balance or allowance resources"
+    );
+
+    // Query live balance & remaining allowance (450 - 150 = 300) via Move pointer.
+    let bal_q = serde_json::to_vec(&MovePointerOp::Balance {
+        flavor: MovePointerFlavor::Coin,
+        owner: bob.0,
+    })
+    .expect("json");
+    let alw_q = serde_json::to_vec(&MovePointerOp::Allowance {
+        flavor: MovePointerFlavor::FungibleAsset,
+        owner: alice.0,
+        spender: bob.0,
+    })
+    .expect("json");
+    let q_res = state
+        .execute_uel_block(
+            &mut coord,
+            sample_ctx(),
+            proposer,
+            &[
+                UelTx {
+                    tx_hash: [0x94; 32],
+                    sender: bob,
+                    nonce: 1,
+                    ee: EeId::MOVE,
+                    action: UelAction::Call {
+                        target: ptr_move.clone(),
+                        input: bal_q,
+                    },
+                    value_attos: 0,
+                    gas_limit_bgu: 400_000,
+                    max_fee_per_bgu_attos: MIN_UEL_BASE_FEE_ATTOS * 2,
+                    max_priority_fee_per_bgu_attos: 100,
+                },
+                UelTx {
+                    tx_hash: [0x95; 32],
+                    sender: bob,
+                    nonce: 2,
+                    ee: EeId::MOVE,
+                    action: UelAction::Call {
+                        target: ptr_move,
+                        input: alw_q,
+                    },
+                    value_attos: 0,
+                    gas_limit_bgu: 400_000,
+                    max_fee_per_bgu_attos: MIN_UEL_BASE_FEE_ATTOS * 2,
+                    max_priority_fee_per_bgu_attos: 100,
+                },
+            ],
+        )
+        .expect("move ptr queries");
+    assert_eq!(q_res[0].status, UelReceiptStatus::Success);
+    assert_eq!(q_res[0].output, 150u128.to_le_bytes());
+    assert_eq!(q_res[1].status, UelReceiptStatus::Success);
+    assert_eq!(q_res[1].output, 300u128.to_le_bytes());
+}
+
+#[test]
+fn home_svm_and_move_pointers_work_cross_ee_and_refuse_unauthorized_mint() {
+    let alice = Address::from([0xA1; 32]);
+    let bob = Address::from([0xA2; 32]);
+    let proposer = Address::from([0xA3; 32]);
+    let mut state = funded(&[alice, bob, proposer]);
+    let mut coord = ExecutionCoordinator::new();
+
+    let alice_move = derive_move_alias(&alice);
+    let (alice_svm, _) = derive_svm_alias(&alice).expect("alice svm alias");
+    state
+        .execution_state
+        .ensure_alias_registered(&alice, EeId::EVM)
+        .expect("alice evm");
+    state
+        .execution_state
+        .ensure_alias_registered(&bob, EeId::EVM)
+        .expect("bob evm");
+    state
+        .execution_state
+        .ensure_alias_registered(&bob, EeId::MOVE)
+        .expect("bob move");
+    state
+        .execution_state
+        .ensure_alias_registered(&bob, EeId::SVM)
+        .expect("bob svm");
+    let bob_wasm = derive_wasm_alias(&bob);
+    let bob_evm20 = derive_evm_alias(&bob);
+
+    // 1. Deploy home Move module, mint as Alice, and verify Bob cannot mint.
+    let mut move_code = MOVE_BINARY_MAGIC.to_vec();
+    move_code.extend_from_slice(&[0x01, 0x02, 0x03, 0x04]);
+    let dep_move = state
+        .execute_uel_block(
+            &mut coord,
+            sample_ctx(),
+            proposer,
+            &[UelTx {
+                tx_hash: [0xE1; 32],
+                sender: alice,
+                nonce: 0,
+                ee: EeId::MOVE,
+                action: UelAction::Deploy {
+                    code: move_code,
+                    salt: [0xE1; 32],
+                },
+                value_attos: 0,
+                gas_limit_bgu: 300_000,
+                max_fee_per_bgu_attos: MIN_UEL_BASE_FEE_ATTOS * 2,
+                max_priority_fee_per_bgu_attos: 100,
+            }],
+        )
+        .expect("deploy move home");
+    let move_home = dep_move[0].output.clone();
+
+    let mint_ok = serde_json::to_vec(&MoveCallEnvelope::EntryFunction {
+        module_id: String::from("0x1::fungible_asset"),
+        function_name: String::from("mint"),
+        args: vec![format!("0x{}", hex::encode(alice_move)), String::from("1500")],
+    })
+    .expect("json");
+    let mint_bad = serde_json::to_vec(&MoveCallEnvelope::EntryFunction {
+        module_id: String::from("0x1::fungible_asset"),
+        function_name: String::from("mint"),
+        args: vec![format!("0x{}", hex::encode(bob.0)), String::from("9999")],
+    })
+    .expect("json");
+    let mint_res = state
+        .execute_uel_block(
+            &mut coord,
+            sample_ctx(),
+            proposer,
+            &[
+                UelTx {
+                    tx_hash: [0xE2; 32],
+                    sender: alice,
+                    nonce: 1,
+                    ee: EeId::MOVE,
+                    action: UelAction::Call {
+                        target: move_home.clone(),
+                        input: mint_ok,
+                    },
+                    value_attos: 0,
+                    gas_limit_bgu: 300_000,
+                    max_fee_per_bgu_attos: MIN_UEL_BASE_FEE_ATTOS * 2,
+                    max_priority_fee_per_bgu_attos: 100,
+                },
+                UelTx {
+                    tx_hash: [0xE3; 32],
+                    sender: bob,
+                    nonce: 0,
+                    ee: EeId::MOVE,
+                    action: UelAction::Call {
+                        target: move_home.clone(),
+                        input: mint_bad,
+                    },
+                    value_attos: 0,
+                    gas_limit_bgu: 300_000,
+                    max_fee_per_bgu_attos: MIN_UEL_BASE_FEE_ATTOS * 2,
+                    max_priority_fee_per_bgu_attos: 100,
+                },
+            ],
+        )
+        .expect("move mint checks");
+    assert_eq!(mint_res[0].status, UelReceiptStatus::Success);
+    assert_eq!(mint_res[1].status, UelReceiptStatus::Revert);
+
+    // 2. Register Move home asset and deploy stateless CW20 pointer on WASM.
+    let asset_move = register_asset_entry(
+        &mut state,
+        EeId::MOVE,
+        &move_home,
+        AssetStandard::Fungible,
+        8,
+        String::from("HMV"),
+        String::from("HomeMove"),
+    )
+    .expect("reg move");
+    let ptr_wasm = deploy_asset_pointer(&mut state, &asset_move.asset_id, EeId::WASM)
+        .expect("deploy wasm ptr for move");
+    let wasm_before = state.execution_state.namespace_bytes(NS_WASM_STORE);
+
+    let cw_xfer = serde_json::to_vec(&serde_json::json!({
+        "execute": { "transfer": { "recipient": bob_wasm, "amount": "400" } }
+    }))
+    .expect("json");
+    let cw_q = serde_json::to_vec(&serde_json::json!({
+        "query": { "balance": { "address": bob_wasm } }
+    }))
+    .expect("json");
+    let wasm_res = state
+        .execute_uel_block(
+            &mut coord,
+            sample_ctx(),
+            proposer,
+            &[
+                UelTx {
+                    tx_hash: [0xE4; 32],
+                    sender: alice,
+                    nonce: 2,
+                    ee: EeId::WASM,
+                    action: UelAction::Call {
+                        target: ptr_wasm.clone(),
+                        input: cw_xfer,
+                    },
+                    value_attos: 0,
+                    gas_limit_bgu: 400_000,
+                    max_fee_per_bgu_attos: MIN_UEL_BASE_FEE_ATTOS * 2,
+                    max_priority_fee_per_bgu_attos: 100,
+                },
+                UelTx {
+                    tx_hash: [0xE5; 32],
+                    sender: bob,
+                    nonce: 1,
+                    ee: EeId::WASM,
+                    action: UelAction::Call {
+                        target: ptr_wasm,
+                        input: cw_q,
+                    },
+                    value_attos: 0,
+                    gas_limit_bgu: 400_000,
+                    max_fee_per_bgu_attos: MIN_UEL_BASE_FEE_ATTOS * 2,
+                    max_priority_fee_per_bgu_attos: 100,
+                },
+            ],
+        )
+        .expect("wasm ptr over move home");
+    assert_eq!(wasm_res[0].status, UelReceiptStatus::Success);
+    assert_eq!(wasm_res[1].status, UelReceiptStatus::Success);
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&wasm_res[1].output).expect("bal")["balance"],
+        "400"
+    );
+    assert_eq!(state.execution_state.namespace_bytes(NS_WASM_STORE), wasm_before);
+
+    // 3. Initialize & mint SVM SPL home asset, then operate via stateless EVM pointer.
+    let mint_pk = [0xD1u8; 32];
+    let init_ix = serde_json::to_vec(&SvmInstructionEnvelope::SplInitializeMint {
+        mint: mint_pk,
+        decimals: 6,
+        mint_authority: alice_svm,
+        is_token_2022: false,
+    })
+    .expect("json");
+    let mint_ix = serde_json::to_vec(&SvmInstructionEnvelope::SplMintTo {
+        mint: mint_pk,
+        dest_owner: alice_svm,
+        amount: 900,
+    })
+    .expect("json");
+    let svm_setup = state
+        .execute_uel_block(
+            &mut coord,
+            sample_ctx(),
+            proposer,
+            &[
+                UelTx {
+                    tx_hash: [0xE6; 32],
+                    sender: alice,
+                    nonce: 3,
+                    ee: EeId::SVM,
+                    action: UelAction::Call {
+                        target: mint_pk.to_vec(),
+                        input: init_ix,
+                    },
+                    value_attos: 0,
+                    gas_limit_bgu: 300_000,
+                    max_fee_per_bgu_attos: MIN_UEL_BASE_FEE_ATTOS * 2,
+                    max_priority_fee_per_bgu_attos: 100,
+                },
+                UelTx {
+                    tx_hash: [0xE7; 32],
+                    sender: alice,
+                    nonce: 4,
+                    ee: EeId::SVM,
+                    action: UelAction::Call {
+                        target: mint_pk.to_vec(),
+                        input: mint_ix,
+                    },
+                    value_attos: 0,
+                    gas_limit_bgu: 300_000,
+                    max_fee_per_bgu_attos: MIN_UEL_BASE_FEE_ATTOS * 2,
+                    max_priority_fee_per_bgu_attos: 100,
+                },
+            ],
+        )
+        .expect("svm setup");
+    assert_eq!(svm_setup[0].status, UelReceiptStatus::Success);
+    assert_eq!(svm_setup[1].status, UelReceiptStatus::Success);
+
+    let asset_svm = register_asset_entry(
+        &mut state,
+        EeId::SVM,
+        &mint_pk,
+        AssetStandard::Fungible,
+        6,
+        String::from("HSPL"),
+        String::from("HomeSPL"),
+    )
+    .expect("reg svm");
+    let ptr_evm = deploy_asset_pointer(&mut state, &asset_svm.asset_id, EeId::EVM)
+        .expect("deploy evm ptr for svm");
+    let evm_before = state.execution_state.namespace_bytes(NS_EVM_STORAGE);
+
+    let mut xfer_cd = solidity_selector("transfer(address,uint256)").to_vec();
+    let mut bob_w = [0u8; 32];
+    bob_w[12..32].copy_from_slice(&bob_evm20);
+    let mut amt_w = [0u8; 32];
+    amt_w[16..32].copy_from_slice(&200u128.to_be_bytes());
+    xfer_cd.extend_from_slice(&bob_w);
+    xfer_cd.extend_from_slice(&amt_w);
+    let mut bal_cd = solidity_selector("balanceOf(address)").to_vec();
+    bal_cd.extend_from_slice(&bob_w);
+
+    let evm_res = state
+        .execute_uel_block(
+            &mut coord,
+            sample_ctx(),
+            proposer,
+            &[
+                UelTx {
+                    tx_hash: [0xE8; 32],
+                    sender: alice,
+                    nonce: 5,
+                    ee: EeId::EVM,
+                    action: UelAction::Call {
+                        target: ptr_evm.clone(),
+                        input: xfer_cd,
+                    },
+                    value_attos: 0,
+                    gas_limit_bgu: 400_000,
+                    max_fee_per_bgu_attos: MIN_UEL_BASE_FEE_ATTOS * 2,
+                    max_priority_fee_per_bgu_attos: 100,
+                },
+                UelTx {
+                    tx_hash: [0xE9; 32],
+                    sender: bob,
+                    nonce: 2,
+                    ee: EeId::EVM,
+                    action: UelAction::Call {
+                        target: ptr_evm,
+                        input: bal_cd,
+                    },
+                    value_attos: 0,
+                    gas_limit_bgu: 400_000,
+                    max_fee_per_bgu_attos: MIN_UEL_BASE_FEE_ATTOS * 2,
+                    max_priority_fee_per_bgu_attos: 100,
+                },
+            ],
+        )
+        .expect("evm ptr over svm home");
+    assert_eq!(evm_res[0].status, UelReceiptStatus::Success);
+    assert_eq!(evm_res[1].status, UelReceiptStatus::Success);
+    assert_eq!(evm_res[1].output.get(16..32), Some(&200u128.to_be_bytes()[..]));
+    assert_eq!(state.execution_state.namespace_bytes(NS_EVM_STORAGE), evm_before);
 }
