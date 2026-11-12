@@ -39,6 +39,7 @@ pub enum AppRegistryError {
     UnknownObject,
     ContentIdMismatch,
     InvalidContentRef(ContentRefError),
+    FeeBelowMinimum,
 }
 
 /// Registered application entry backed by a B.U.D. 3.0 [`ContentRef`].
@@ -77,8 +78,11 @@ impl AppRegistry {
         developer: Address,
         category: AppRegistryCategory,
         bundle: (ContentId, ObjectKey),
+        fee_paid_atoms: u64,
     ) -> Result<RegisteredApp, AppRegistryError> {
-        let _ = APP_REGISTRY_MIN_FEE;
+        if fee_paid_atoms < APP_REGISTRY_MIN_FEE {
+            return Err(AppRegistryError::FeeBelowMinimum);
+        }
         let canonical = name.trim().to_ascii_lowercase();
         if canonical.len() < 3 || canonical.len() > 64 {
             return Err(AppRegistryError::InvalidName);
@@ -92,6 +96,9 @@ impl AppRegistry {
             .ok_or(AppRegistryError::UnknownObject)?;
         if obj.record.content_id != cid {
             return Err(AppRegistryError::ContentIdMismatch);
+        }
+        if obj.owner != *developer.as_bytes() {
+            return Err(AppRegistryError::NotOwner);
         }
         let bundle_ref =
             ContentRef::new(cid, obj_key, None).map_err(AppRegistryError::InvalidContentRef)?;
@@ -120,5 +127,88 @@ impl AppRegistry {
     #[must_use]
     pub fn get_app(&self, name: &str) -> Option<&RegisteredApp> {
         self.apps.get(&name.trim().to_ascii_lowercase())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::storage::bud3::limits::{Bud3Limits, Profile};
+    use crate::storage::bud3::pipeline::prepare_public_upload;
+    use crate::storage::bud3::placement::{Class, Share};
+
+    const P: Profile = Profile {
+        id: 0,
+        qr_version: 40,
+        symbol_size: 128,
+        fps: 10,
+        k_max: 16,
+    };
+
+    fn registry_with_object(owner: Address) -> (Bud3Registry, ContentId, ObjectKey) {
+        let mut bud3 = Bud3Registry::default();
+        let up = prepare_public_upload(b"app bundle bytes", &P, &Bud3Limits::default(), 8)
+            .expect("upload");
+        let cid = up.record.content_id;
+        let obj_key = up.record.commitment;
+        bud3.register_object(
+            owner.0,
+            up.record,
+            vec![(
+                0,
+                Share {
+                    validator: [3u8; 32],
+                    class: Class::Full,
+                    first_esi: 0,
+                    symbols: 8,
+                },
+            )],
+            1,
+            40,
+        )
+        .expect("register");
+        (bud3, cid, obj_key)
+    }
+
+    #[test]
+    fn register_app_binds_developer_to_bundle_owner_and_fee() {
+        let owner = Address([0x41; 32]);
+        let other = Address([0x42; 32]);
+        let (bud3, cid, obj_key) = registry_with_object(owner);
+        let mut registry = AppRegistry::new();
+        assert_eq!(
+            registry.register_app(
+                &bud3,
+                "My App",
+                other,
+                AppRegistryCategory::DeFi,
+                (cid, obj_key),
+                APP_REGISTRY_MIN_FEE,
+            ),
+            Err(AppRegistryError::NotOwner)
+        );
+        assert_eq!(
+            registry.register_app(
+                &bud3,
+                "My App",
+                owner,
+                AppRegistryCategory::DeFi,
+                (cid, obj_key),
+                APP_REGISTRY_MIN_FEE - 1,
+            ),
+            Err(AppRegistryError::FeeBelowMinimum)
+        );
+        let app = registry
+            .register_app(
+                &bud3,
+                "My App",
+                owner,
+                AppRegistryCategory::DeFi,
+                (cid, obj_key),
+                APP_REGISTRY_MIN_FEE,
+            )
+            .expect("owner with the minimum fee registers");
+        assert_eq!(app.developer, owner);
+        assert!(registry.get_app("my app").is_some());
     }
 }
