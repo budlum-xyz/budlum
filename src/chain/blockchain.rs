@@ -3930,8 +3930,10 @@ impl Blockchain {
                 {
                     Some(registration) => match registration.status {
                         crate::registry::MemberStatus::Unbonding { release_epoch }
+                        | crate::registry::MemberStatus::SlashedUnbonding { release_epoch }
                             if self.state.epoch_index >= release_epoch => {}
-                        crate::registry::MemberStatus::Unbonding { .. } => {
+                        crate::registry::MemberStatus::Unbonding { .. }
+                        | crate::registry::MemberStatus::SlashedUnbonding { .. } => {
                             reasons.push("ai_bond_still_unbonding".to_string());
                         }
                         _ => reasons.push("ai_operator_not_unbonding".to_string()),
@@ -4422,10 +4424,9 @@ impl Blockchain {
                         // delete worker as well as the registry prune, so a
                         // burn by anybody but the manifest claimant must
                         // contribute no cid to either sink.
-                        if state.storage_registry.owner_of(&nft.content_id) == Some(tx.from)
-                            && !state
-                                .storage_registry
-                                .has_active_deal_for_other_payer(&nft.content_id, &tx.from)
+                        if state
+                            .storage_registry
+                            .can_prune_on_nft_burn(&nft.content_id, &tx.from)
                         {
                             cids.push((nft.content_id, tx.from));
                         }
@@ -4607,10 +4608,9 @@ impl Blockchain {
             // unambiguous owner (a legacy zero-owner manifest, or an id with
             // two claims) is refused here and left to the scheduled
             // `pending_prune_manifests` pass, which is not caller-driven.
-            if next_state.storage_registry.owner_of(&content_id) != Some(burner)
-                || next_state
-                    .storage_registry
-                    .has_active_deal_for_other_payer(&content_id, &burner)
+            if !next_state
+                .storage_registry
+                .can_prune_on_nft_burn(&content_id, &burner)
             {
                 tracing::warn!(
                     %content_id,
@@ -4670,6 +4670,13 @@ impl Blockchain {
         // before the root, and nowhere else.
         let unfrozen =
             crate::settlement::domains::apply_domain_unfreezes(&mut next_state, &drained_unfreezes);
+        let drained_tip_resets = std::mem::take(&mut next_state.pending_domain_tip_resets);
+        if !drained_tip_resets.is_empty() {
+            let _reset = crate::settlement::domains::apply_domain_tip_resets(
+                &mut next_state,
+                &drained_tip_resets,
+            );
+        }
         let boost_share = next_state.pending_bud_boost_share;
         Self::distribute_bud_boost_share_in_state(&mut next_state, boost_share)?;
         // B.U.D. storage maintenance and the AI registry eviction run here,
