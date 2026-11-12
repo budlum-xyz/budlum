@@ -3385,6 +3385,11 @@ impl Blockchain {
     }
 
     fn invalidate_finality_from_height(&mut self, from_height: u64) {
+        let upper_bound = self.chain.len().saturating_sub(1) as u64;
+        self.invalidate_finality_range(from_height, upper_bound);
+    }
+
+    fn invalidate_finality_range(&mut self, from_height: u64, upper_bound: u64) {
         let checkpoint_interval =
             crate::core::chain_config::finality_checkpoint_interval_for_chain_id(self.chain_id);
         let qc_heights: Vec<u64> = self
@@ -3397,14 +3402,22 @@ impl Blockchain {
         }
 
         if let Some(store) = &self.storage {
-            let mut height = from_height;
-            let upper_bound = self.chain.len().saturating_sub(1) as u64;
+            let mut height = if checkpoint_interval == 0 {
+                from_height
+            } else {
+                from_height
+                    .div_ceil(checkpoint_interval)
+                    .saturating_mul(checkpoint_interval)
+            };
             while height <= upper_bound {
                 if let Err(e) = store.delete_finality_cert(height) {
                     tracing::error!(error = %e, height, "Failed to delete finality cert");
                 }
                 if let Err(e) = store.delete_qc_blob(height) {
                     tracing::error!(error = %e, height, "Failed to delete QC blob");
+                }
+                if checkpoint_interval == 0 {
+                    break;
                 }
                 if let Some(next) = height.checked_add(checkpoint_interval) {
                     height = next;
@@ -6139,7 +6152,8 @@ impl Blockchain {
         // and blobs at the orphaned heights and rescans finality against the
         // NEW chain (its adoption now hash-checks the cert against the
         // block).
-        self.invalidate_finality_from_height(fork_point as u64);
+        let max_upper_bound = old_chain.len().max(self.chain.len()).saturating_sub(1) as u64;
+        self.invalidate_finality_range(fork_point as u64, max_upper_bound);
 
         // After a reorg, reload the node-side structures from storage. The
         // settlement registries (domains, commitments, proof claims, the
@@ -7427,7 +7441,7 @@ impl Blockchain {
                 );
             }
             let max_early_height = (self.chain.len() as u64).saturating_add(
-                crate::core::chain_config::FINALITY_CHECKPOINT_INTERVAL.saturating_mul(8),
+                crate::core::chain_config::FINALITY_CHECKPOINT_INTERVAL.saturating_mul(16),
             );
             if vote.checkpoint_height > max_early_height {
                 return Err("Rejecting early prevote beyond finality horizon".into());
@@ -7555,7 +7569,7 @@ impl Blockchain {
                 .is_some_and(|agg| !agg.prevote_quorum_reached)
         {
             let max_early_height = (self.chain.len() as u64).saturating_add(
-                crate::core::chain_config::FINALITY_CHECKPOINT_INTERVAL.saturating_mul(8),
+                crate::core::chain_config::FINALITY_CHECKPOINT_INTERVAL.saturating_mul(16),
             );
             if vote.checkpoint_height > max_early_height {
                 return Err("Rejecting early precommit beyond finality horizon".into());
@@ -7658,6 +7672,26 @@ impl Blockchain {
         }
         let snapshot =
             active_round_snapshot.or_else(|| self.cached_validator_snapshot_for_epoch(vote.epoch));
+        if snapshot.is_none() && vote.epoch > self.state.epoch_index {
+            // The sender crossed into the next epoch before our node imported
+            // the boundary block. BLS + auth_sig and non-empty PQ obligation
+            // already cleared above; keep the vote until this epoch starts and
+            // replay_early_precommits runs full ML-DSA verification against the
+            // real epoch snapshot.
+            let max_early_height = (self.chain.len() as u64).saturating_add(
+                crate::core::chain_config::FINALITY_CHECKPOINT_INTERVAL.saturating_mul(16),
+            );
+            if vote.checkpoint_height > max_early_height {
+                return Err("Rejecting early precommit beyond finality horizon".into());
+            }
+            let no_round_yet = self.finality_aggregator.is_none();
+            self.keep_early_precommit(vote);
+            return Err(if no_round_yet {
+                "No active finality aggregator".into()
+            } else {
+                "Cannot precommit before prevote quorum".into()
+            });
+        }
         let entry = snapshot
             .as_ref()
             .and_then(|snapshot| snapshot.find_validator(&vote.voter_id));
@@ -7709,7 +7743,7 @@ impl Blockchain {
                 );
             }
             let max_early_height = (self.chain.len() as u64).saturating_add(
-                crate::core::chain_config::FINALITY_CHECKPOINT_INTERVAL.saturating_mul(8),
+                crate::core::chain_config::FINALITY_CHECKPOINT_INTERVAL.saturating_mul(16),
             );
             if vote.checkpoint_height > max_early_height {
                 return Err("Rejecting early precommit beyond finality horizon".into());
@@ -12599,6 +12633,147 @@ mod bond_and_reorg_tests {
         assert!(
             bc.current_epoch_snapshot_cache.is_none(),
             "tampered pq_sig must not trigger O(N) validator snapshot rebuild"
+        );
+    }
+
+    #[test]
+    fn epoch_ahead_precommit_defers_and_verifies_pq_on_epoch_rollover() {
+        let consensus = Arc::new(crate::consensus::pow::PoWEngine::new(0));
+        // Testnet chain_id 45261 uses epoch_len=50 and checkpoint_interval=5.
+        let mut bc = Blockchain::new(consensus, None, 45261, None);
+        let bls_kp = crate::crypto::primitives::BlsKeypair::generate().unwrap();
+        let pq_kp = crate::crypto::primitives::PqKeyPair::generate();
+        let voter = Address::from([0x71; 32]);
+        let pop_msg =
+            crate::chain::finality::pop_signing_message(45261, &voter, &bls_kp.public_key);
+        let pop = crate::chain::finality::sign_bls_pop(&bls_kp.secret_key, &pop_msg);
+        bc.state.add_validator(voter, 50_000);
+        let v = bc.state.validators.get_mut(&voter).unwrap();
+        v.vrf_public_key = vec![0x11; 32];
+        v.bls_public_key = bls_kp.public_key.clone();
+        v.pop_signature = pop;
+        v.pq_public_key = pq_kp.public_key_bytes().to_vec();
+        bc.current_epoch_snapshot_cache = None;
+
+        // Node is still at epoch 0 (chain len 1); checkpoint 50 is epoch 1.
+        let cp_hash = "cc".repeat(32);
+        let msg = crate::chain::finality::checkpoint_signing_message(45261, 1, 50, &cp_hash);
+        let sig_bls = crate::chain::finality::sign_bls(&bls_kp.secret_key, &msg);
+        let pq_msg = crate::consensus::qc::pq_signing_message(1, 50, &cp_hash, 0);
+        let pq_sig = pq_kp
+            .sign_in(&bc.state.scheme_registry, crate::crypto::ctx::QC_V2, &pq_msg)
+            .unwrap();
+        let mut early = crate::chain::finality::Precommit {
+            chain_id: 45261,
+            epoch: 1,
+            checkpoint_height: 50,
+            checkpoint_hash: cp_hash.clone(),
+            voter_id: voter,
+            sig_bls,
+            auth_sig: Vec::new(),
+            pq_sig,
+        };
+        let auth_msg = early.auth_signing_message();
+        early.auth_sig = crate::chain::finality::sign_bls(&bls_kp.secret_key, &auth_msg);
+
+        let err = bc
+            .handle_precommit(early)
+            .expect_err("epoch-ahead precommit defers cleanly before rollover");
+        assert_eq!(err, "No active finality aggregator");
+        assert_eq!(bc.early_finality_votes.precommits.len(), 1);
+
+        // Once the node rolls to epoch 1 and prevote quorum opens, replay verifies PQ.
+        bc.state.epoch_index = 1;
+        let snap = bc.build_validator_snapshot(1);
+        let mut agg =
+            crate::chain::finality::FinalityAggregator::new(1, 50, cp_hash.clone(), snap);
+        let mut pv = crate::chain::finality::Prevote {
+            chain_id: 45261,
+            epoch: 1,
+            checkpoint_height: 50,
+            checkpoint_hash: cp_hash.clone(),
+            voter_id: voter,
+            sig_bls: crate::chain::finality::sign_bls(&bls_kp.secret_key, &msg),
+            auth_sig: Vec::new(),
+        };
+        pv.auth_sig =
+            crate::chain::finality::sign_bls(&bls_kp.secret_key, &pv.auth_signing_message());
+        agg.add_prevote(pv).unwrap();
+        bc.finality_aggregator = Some(agg);
+
+        // Also queue an epoch-1 precommit with tampered pq_sig: epoch-0 deferral
+        // could not check it without epoch 1 snapshot, so replay must reject it.
+        let mut bad_early = crate::chain::finality::Precommit {
+            chain_id: 45261,
+            epoch: 1,
+            checkpoint_height: 50,
+            checkpoint_hash: cp_hash,
+            voter_id: voter,
+            sig_bls: crate::chain::finality::sign_bls(&bls_kp.secret_key, &msg),
+            auth_sig: Vec::new(),
+            pq_sig: vec![0x99; 64],
+        };
+        bad_early.auth_sig = crate::chain::finality::sign_bls(
+            &bls_kp.secret_key,
+            &bad_early.auth_signing_message(),
+        );
+        bc.early_finality_votes.precommits.push_front(bad_early);
+
+        bc.replay_early_precommits();
+        assert!(bc
+            .finality_aggregator
+            .as_ref()
+            .unwrap()
+            .precommit_quorum_reached);
+    }
+
+    #[test]
+    fn invalidate_finality_from_unaligned_fork_clears_next_checkpoint_cert() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("unaligned_invalidate.db");
+        let store = Storage::new(db_path.to_str().unwrap()).unwrap();
+        let mut bc = Blockchain::new(
+            Arc::new(crate::consensus::pow::PoWEngine::new(0)),
+            Some(store),
+            45261,
+            None,
+        );
+        let miner = Address::from([0x12; 32]);
+        for _ in 0..12 {
+            let _ = bc.produce_block(miner).unwrap();
+        }
+        // Checkpoint 10 on chain_id 45261 (interval 5) sits above unaligned fork 7.
+        let cert_10 = crate::chain::finality::FinalityCert {
+            epoch: 0,
+            checkpoint_height: 10,
+            checkpoint_hash: bc.chain[10].hash.clone(),
+            chain_id: 45261,
+            agg_sig_bls: vec![0xAA; 48],
+            bitmap: vec![0x01],
+            set_hash: "00".repeat(32),
+        };
+        bc.storage
+            .as_ref()
+            .unwrap()
+            .save_finality_cert(10, &cert_10)
+            .unwrap();
+        assert!(bc
+            .storage
+            .as_ref()
+            .unwrap()
+            .get_finality_cert(10)
+            .unwrap()
+            .is_some());
+
+        bc.invalidate_finality_from_height(7);
+        assert!(
+            bc.storage
+                .as_ref()
+                .unwrap()
+                .get_finality_cert(10)
+                .unwrap()
+                .is_none(),
+            "unaligned fork invalidation at height 7 must clear checkpoint 10"
         );
     }
 }
