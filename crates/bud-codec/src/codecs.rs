@@ -131,7 +131,9 @@ fn unwrap_tagged_zstd(
         .saturating_add(4096)
         .min(MAX_CODEC_DECODE_BYTES);
     if raw_len > hard_cap {
-        return Err(CodecError::TooLong { max: max_decoded_bytes });
+        return Err(CodecError::TooLong {
+            max: max_decoded_bytes,
+        });
     }
     let comp = payload.get(6..).unwrap_or(&[]);
     let decoded = decode(ZSTD, comp, raw_len)?;
@@ -172,25 +174,25 @@ fn encode_lz77_tokens(content: &[u8]) -> Result<Vec<u8>, CodecError> {
     let mut out = Vec::with_capacity(content.len().saturating_add(16));
     let mut lit_buf = Vec::new();
     let mut cursor = 0usize;
-    let flush_lit = |dst: &mut Vec<u8>, lits: &mut Vec<u8>| -> Result<(), CodecError> {
-        if lits.is_empty() {
+    let flush_lit = |dst: &mut Vec<u8>, literals: &mut Vec<u8>| -> Result<(), CodecError> {
+        if literals.is_empty() {
             return Ok(());
         }
-        let len = u16::try_from(lits.len())
+        let len = u16::try_from(literals.len())
             .map_err(|_| CodecError::Encode(String::from("literal run overflow")))?;
         dst.push(0x00);
         dst.extend_from_slice(&len.to_le_bytes());
-        dst.extend_from_slice(lits);
-        lits.clear();
+        dst.extend_from_slice(literals);
+        literals.clear();
         Ok(())
     };
     while cursor < content.len() {
         let win_start = cursor.saturating_sub(4096);
         let mut best_off = 0usize;
         let mut best_len = 0usize;
-        if cursor + 4 <= content.len() {
+        if cursor > 0 && cursor + 4 <= content.len() {
             let pat = content.get(cursor..cursor + 4).unwrap_or(&[]);
-            let mut probe = cursor.saturating_sub(1);
+            let mut probe = cursor - 1;
             let mut steps = 0usize;
             while probe >= win_start && steps < 64 {
                 if content.get(probe..probe + 4) == Some(pat) {
@@ -481,7 +483,11 @@ fn stride_delta_encode(content: &[u8], stride: usize) -> Vec<u8> {
     }
     let mut out = Vec::with_capacity(content.len());
     for (idx, &b) in content.iter().enumerate() {
-        let pred = idx.checked_sub(stride).and_then(|p| content.get(p)).copied().unwrap_or(0);
+        let pred = idx
+            .checked_sub(stride)
+            .and_then(|p| content.get(p))
+            .copied()
+            .unwrap_or(0);
         out.push(b.wrapping_sub(pred));
     }
     out
@@ -493,7 +499,11 @@ fn stride_delta_decode(encoded: &[u8], stride: usize) -> Vec<u8> {
     }
     let mut out = Vec::with_capacity(encoded.len());
     for (idx, &d) in encoded.iter().enumerate() {
-        let pred = idx.checked_sub(stride).and_then(|p| out.get(p)).copied().unwrap_or(0);
+        let pred = idx
+            .checked_sub(stride)
+            .and_then(|p| out.get(p))
+            .copied()
+            .unwrap_or(0);
         out.push(d.wrapping_add(pred));
     }
     out
@@ -540,15 +550,17 @@ fn columnar_lines_decode(encoded: &[u8], sep: u8, content_len: u64) -> Result<Ve
             .map_err(|_| CodecError::Malformed(String::from("line len overflow")))?;
         total_chars = total_chars
             .checked_add(l)
-            .ok_or_else(|| CodecError::TooLong { max: content_len })?;
-        if (total_chars as u64) > content_len {
+            .ok_or(CodecError::TooLong { max: content_len })?;
+        if u64::try_from(total_chars).unwrap_or(u64::MAX) > content_len {
             return Err(CodecError::TooLong { max: content_len });
         }
         lens.push(l);
     }
     let body = encoded.get(pos..).unwrap_or(&[]);
     if body.len() != total_chars {
-        return Err(CodecError::Malformed(String::from("columnar body len mismatch")));
+        return Err(CodecError::Malformed(String::from(
+            "columnar body len mismatch",
+        )));
     }
     let mut lines: Vec<Vec<u8>> = lens.iter().map(|&l| Vec::with_capacity(l)).collect();
     let max_cols = lens.iter().copied().max().unwrap_or(0);
@@ -556,9 +568,9 @@ fn columnar_lines_decode(encoded: &[u8], sep: u8, content_len: u64) -> Result<Ve
     for col in 0..max_cols {
         for (idx, &l) in lens.iter().enumerate() {
             if col < l {
-                let b = *body
-                    .get(body_pos)
-                    .ok_or_else(|| CodecError::Malformed(String::from("truncated columnar byte")))?;
+                let b = *body.get(body_pos).ok_or_else(|| {
+                    CodecError::Malformed(String::from("truncated columnar byte"))
+                })?;
                 if let Some(dst) = lines.get_mut(idx) {
                     dst.push(b);
                 }
@@ -952,7 +964,9 @@ pub fn decode_codec(
                 .get(1)
                 .ok_or_else(|| CodecError::Malformed(String::from("truncated TIME_SERIES mode")))?;
             if tag != tag_byte(TIME_SERIES) {
-                return Err(CodecError::Malformed(String::from("TIME_SERIES tag mismatch")));
+                return Err(CodecError::Malformed(String::from(
+                    "TIME_SERIES tag mismatch",
+                )));
             }
             if mode == 1 {
                 let want = usize::try_from(content_len)
@@ -979,7 +993,9 @@ pub fn decode_codec(
                 .get(1)
                 .ok_or_else(|| CodecError::Malformed(String::from("truncated FLOAT_SPLIT mode")))?;
             if tag != tag_byte(FLOAT_SPLIT) {
-                return Err(CodecError::Malformed(String::from("FLOAT_SPLIT tag mismatch")));
+                return Err(CodecError::Malformed(String::from(
+                    "FLOAT_SPLIT tag mismatch",
+                )));
             }
             if mode == 1 {
                 let want = usize::try_from(content_len)
@@ -1021,9 +1037,7 @@ pub fn candidate_codecs_for(content: &[u8]) -> &'static [CodecId] {
     if content.starts_with(b"RIFF") || content.starts_with(b"FORM") {
         return &[LOSSLESS_AUDIO];
     }
-    if content.starts_with(b"BM")
-        || content.starts_with(b"II*\0")
-        || content.starts_with(b"MM\0*")
+    if content.starts_with(b"BM") || content.starts_with(b"II*\0") || content.starts_with(b"MM\0*")
     {
         return &[LOSSLESS_IMAGE];
     }

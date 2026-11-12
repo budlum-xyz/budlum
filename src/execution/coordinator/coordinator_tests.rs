@@ -746,3 +746,95 @@ fn host_bridge_refuses_cross_ee_namespace_write_and_static_write() {
         "static frame must reject state write"
     );
 }
+
+#[test]
+fn expansion_ee_all_twelve_environments_execute_on_testnet() {
+    let sender = Address::from([0x77; 32]);
+    let proposer = Address::from([0x78; 32]);
+    let mut state = funded_state(&[sender, proposer]);
+    let mut coord = ExecutionCoordinator::new();
+    let ctx = BlockContext {
+        height: 55,
+        timestamp_ms: 1_700_000_055_000,
+        chain_id: crate::core::chain_config::Network::Testnet
+            .chain_id()
+            .value(),
+    };
+
+    let expansion_envs = [
+        (EeId::MOVE_SUI, state::NS_SUI_OBJECT),
+        (EeId::CAIRO, state::NS_CAIRO_STATE),
+        (EeId::NEAR_WASM, state::NS_NEAR_STATE),
+        (EeId::POLKAVM, state::NS_POLKAVM_STATE),
+        (EeId::TVM, state::NS_TVM_STATE),
+        (EeId::UTXO, state::NS_UTXO_STATE),
+        (EeId::PLUTUS, state::NS_PLUTUS_STATE),
+    ];
+
+    let mut nonce = 0u64;
+    for (idx, (ee, ns)) in expansion_envs.iter().enumerate() {
+        let idx_byte = u8::try_from(idx).unwrap_or(0);
+        let code = format!("expansion-contract-0x{:02x}", ee.0).into_bytes();
+        let dep = state
+            .execute_uel_block(
+                &mut coord,
+                ctx,
+                proposer,
+                &[UelTx {
+                    tx_hash: [0xC0u8.saturating_add(idx_byte); 32],
+                    sender,
+                    nonce,
+                    ee: *ee,
+                    action: UelAction::Deploy {
+                        code,
+                        salt: [idx_byte; 32],
+                    },
+                    value_attos: 0,
+                    gas_limit_bgu: 200_000,
+                    max_fee_per_bgu_attos: MIN_UEL_BASE_FEE_ATTOS * 2,
+                    max_priority_fee_per_bgu_attos: 100,
+                }],
+            )
+            .expect("expansion deploy");
+        nonce += 1;
+        assert_eq!(dep[0].status, UelReceiptStatus::Success);
+        let target = dep[0].output.clone();
+
+        let call = state
+            .execute_uel_block(
+                &mut coord,
+                ctx,
+                proposer,
+                &[UelTx {
+                    tx_hash: [0xD0u8.saturating_add(idx_byte); 32],
+                    sender,
+                    nonce,
+                    ee: *ee,
+                    action: UelAction::Call {
+                        target: target.clone(),
+                        input: b"invoke".to_vec(),
+                    },
+                    value_attos: 0,
+                    gas_limit_bgu: 200_000,
+                    max_fee_per_bgu_attos: MIN_UEL_BASE_FEE_ATTOS * 2,
+                    max_priority_fee_per_bgu_attos: 100,
+                }],
+            )
+            .expect("expansion call");
+        nonce += 1;
+        assert_eq!(call[0].status, UelReceiptStatus::Success);
+
+        let mut proof_key = Vec::with_capacity(5 + target.len() + 5);
+        proof_key.extend_from_slice(b"data:");
+        proof_key.extend_from_slice(&target);
+        proof_key.extend_from_slice(b":last");
+        let proof = state
+            .execution_state
+            .build_execution_proof(ns, &proof_key)
+            .expect("expansion proof");
+        assert!(state::uel_proof_matches_root(
+            &proof,
+            &state.execution_state.execution_root()
+        ));
+    }
+}

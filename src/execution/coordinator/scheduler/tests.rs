@@ -168,16 +168,16 @@ fn parallel_scheduler_is_deterministic_across_arch() {
 const PINNED_WAVES: &str = "0,1,2,3|4|5,6,8,9|7,10,12|11|13|14,15,17,18|16,19,21|20|22|23";
 
 #[test]
-fn parallel_scheduler_is_closed_on_testnet() {
+fn parallel_scheduler_is_open_on_testnet() {
     let default_policy = ParallelSchedulerPolicy::default();
-    assert!(!default_policy.scheduler_active());
-    assert!(!default_policy.intra_ee_parallelism_active());
+    assert!(default_policy.scheduler_active());
+    assert!(default_policy.intra_ee_parallelism_active());
 
     let txs = [transfer(1, 2, 5), transfer(3, 4, 5), transfer(5, 6, 5)];
     let mut state = funded();
     let rep = execute_block_with_policy(&mut state, &txs, default_policy);
-    assert!(!rep.used_parallel_waves);
-    assert!(!rep.intra_ee_parallelism);
+    assert!(rep.used_parallel_waves);
+    assert!(rep.intra_ee_parallelism);
     assert_eq!(rep.state_root, sequential(&txs));
 }
 

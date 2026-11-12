@@ -8,7 +8,7 @@ edition = "2021"
 rust-version = "1.97.1"
 license = "LicenseRef-PolyForm-Shield-1.0.0"
 publish = false
-description = "Budlum UEL cross-environment conformance, gas calibration, and cross-arch root runner ()"
+description = "Budlum UEL cross-environment conformance and cross-arch root runner"
 
 [dependencies]
 bud-isa = { path = "../../budzero/bud-isa" }
@@ -17,8 +17,12 @@ budlum-ee-cairo = { path = "../cairo" }
 budlum-ee-evm = { path = "../evm" }
 budlum-ee-move = { path = "../move" }
 budlum-ee-move-sui = { path = "../move-sui" }
+budlum-ee-near = { path = "../near" }
+budlum-ee-plutus = { path = "../plutus" }
 budlum-ee-polkavm = { path = "../polkavm" }
 budlum-ee-svm = { path = "../svm" }
+budlum-ee-tvm = { path = "../tvm" }
+budlum-ee-utxo = { path = "../utxo" }
 budlum-ee-wasm = { path = "../wasm" }
 budlum-uel-abi = { path = "../../crates/uel-abi" }
 hex = "0.4"

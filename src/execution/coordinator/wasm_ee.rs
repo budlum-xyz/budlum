@@ -13,7 +13,8 @@
 //! Convenience: exposed for CLI, RPC, SDK, and multi-VM runtime callers.
 
 use crate::execution::coordinator::assets::{
-    decode_pointer_bytecode, AssetStandard, PointerDescriptor,
+    decode_pointer_bytecode, resolve_pointer_party_for_home, AssetStandard, MovePointerFlavor,
+    MovePointerOp, PointerDescriptor, SplPointerOp,
 };
 use crate::execution::coordinator::evm_ee::solidity_selector;
 use crate::execution::coordinator::state::{NS_WASM_CODE, NS_WASM_CONTRACT, NS_WASM_STORE};
@@ -21,6 +22,7 @@ use crate::execution::coordinator::universal_call::{
     has_reserved_static_prefix, unwrap_static_universal_input, wrap_static_universal_input,
     BudlumMsg,
 };
+use crate::object_layer::family::encoding::bech32_decode;
 use budlum_uel_abi::{
     BlockContext, BudAmount, CodeInfo, EeCall, EeCallKind, EeFault, EeId, EeIdentity, EeLog,
     EeOutcome, EeQuery, EeRefusal, ExecutionEnvironment, HostApi, HostRead, Namespace,
@@ -689,6 +691,257 @@ fn execute_wasm_pointer_to_evm(
     ))
 }
 
+fn parse_wasm_party32(host: &dyn HostRead, home_ee: EeId, raw: &str) -> [u8; 32] {
+    let trimmed_raw = raw.trim();
+    if let Ok((hrp, bytes)) = bech32_decode(trimmed_raw) {
+        if hrp == "bud" {
+            if let Ok(arr32) = <[u8; 32]>::try_from(bytes.as_slice()) {
+                let resolved = resolve_pointer_party_for_home(host, &arr32, home_ee);
+                if let Ok(mapped) = <[u8; 32]>::try_from(resolved.as_slice()) {
+                    return mapped;
+                }
+                return arr32;
+            }
+        }
+    }
+    let trimmed = trimmed_raw.trim_start_matches("0x");
+    if let Ok(bytes) = hex::decode(trimmed) {
+        if let Ok(arr32) = <[u8; 32]>::try_from(bytes.as_slice()) {
+            let resolved = resolve_pointer_party_for_home(host, &arr32, home_ee);
+            if let Ok(mapped) = <[u8; 32]>::try_from(resolved.as_slice()) {
+                return mapped;
+            }
+            return arr32;
+        }
+    }
+    Sha256::digest(trimmed_raw.as_bytes()).into()
+}
+
+fn execute_wasm_pointer_to_svm_or_move(
+    ptr: &PointerDescriptor,
+    sender_str: &str,
+    msg_json: &serde_json::Value,
+    is_static: bool,
+    gas_budget: u64,
+    host: &mut dyn HostApi,
+) -> Result<(OutcomeStatus, Vec<u8>), String> {
+    let home_ee = EeId(ptr.home_ee);
+    if let Some(q_obj) = msg_json.get("query") {
+        if q_obj.get("token_info").is_some() {
+            let out = serde_json::to_vec(&serde_json::json!({
+                "name": ptr.name,
+                "symbol": ptr.symbol,
+                "decimals": ptr.decimals,
+            }))
+            .map_err(|e| e.to_string())?;
+            return Ok((OutcomeStatus::Success, out));
+        }
+        let (key_name, raw_payload) = if let Some(bal_q) = q_obj.get("balance") {
+            let owner = parse_wasm_party32(
+                host,
+                home_ee,
+                bal_q
+                    .get("address")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default(),
+            );
+            let bytes = if home_ee == EeId::SVM {
+                serde_json::to_vec(&SplPointerOp::BalanceOf { owner }).map_err(|e| e.to_string())?
+            } else {
+                serde_json::to_vec(&MovePointerOp::Balance {
+                    flavor: MovePointerFlavor::FungibleAsset,
+                    owner,
+                })
+                .map_err(|e| e.to_string())?
+            };
+            ("balance", bytes)
+        } else if let Some(alw_q) = q_obj.get("allowance") {
+            let owner = parse_wasm_party32(
+                host,
+                home_ee,
+                alw_q
+                    .get("owner")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default(),
+            );
+            let party = parse_wasm_party32(
+                host,
+                home_ee,
+                alw_q
+                    .get("spender")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default(),
+            );
+            let bytes = if home_ee == EeId::SVM {
+                serde_json::to_vec(&SplPointerOp::Allowance {
+                    owner,
+                    delegate: party,
+                })
+                .map_err(|e| e.to_string())?
+            } else {
+                serde_json::to_vec(&MovePointerOp::Allowance {
+                    flavor: MovePointerFlavor::FungibleAsset,
+                    owner,
+                    spender: party,
+                })
+                .map_err(|e| e.to_string())?
+            };
+            ("allowance", bytes)
+        } else {
+            return Ok((
+                OutcomeStatus::Revert,
+                b"unsupported CW pointer query".to_vec(),
+            ));
+        };
+        let ures = host
+            .universal_call(UniversalCall {
+                from: EeIdentity {
+                    ee: EeId::WASM,
+                    id: sender_str.as_bytes().to_vec(),
+                },
+                to_ee: home_ee,
+                target: EeIdentity {
+                    ee: home_ee,
+                    id: ptr.home_ref.clone(),
+                },
+                value: BudAmount(0),
+                input: wrap_static_universal_input(&raw_payload),
+                gas_limit: gas_budget / 2 + 10_000,
+                is_static: true,
+            })
+            .map_err(|e| e.to_string())?;
+        if !ures.success {
+            return Ok((OutcomeStatus::Revert, ures.output));
+        }
+        let num = <[u8; 16]>::try_from(ures.output.as_slice()).map_or(0, u128::from_le_bytes);
+        let out = serde_json::to_vec(&serde_json::json!({ key_name: num.to_string() }))
+            .map_err(|e| e.to_string())?;
+        return Ok((OutcomeStatus::Success, out));
+    }
+
+    if is_static {
+        return Ok((OutcomeStatus::Revert, b"static CW pointer write".to_vec()));
+    }
+    let exec_obj = msg_json.get("execute").unwrap_or(msg_json);
+    let raw_payload = if let Some(tr) = exec_obj.get("transfer") {
+        let to = parse_wasm_party32(
+            host,
+            home_ee,
+            tr.get("recipient")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default(),
+        );
+        let amount: u128 = tr
+            .get("amount")
+            .and_then(|v| v.as_str())
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+        if home_ee == EeId::SVM {
+            serde_json::to_vec(&SplPointerOp::Transfer { to, amount }).map_err(|e| e.to_string())?
+        } else {
+            serde_json::to_vec(&MovePointerOp::Transfer {
+                flavor: MovePointerFlavor::FungibleAsset,
+                to,
+                amount,
+            })
+            .map_err(|e| e.to_string())?
+        }
+    } else if let Some(inc) = exec_obj
+        .get("increase_allowance")
+        .or_else(|| exec_obj.get("approve"))
+    {
+        let party = parse_wasm_party32(
+            host,
+            home_ee,
+            inc.get("spender")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default(),
+        );
+        let amount: u128 = inc
+            .get("amount")
+            .and_then(|v| v.as_str())
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+        if home_ee == EeId::SVM {
+            serde_json::to_vec(&SplPointerOp::Approve {
+                delegate: party,
+                amount,
+            })
+            .map_err(|e| e.to_string())?
+        } else {
+            serde_json::to_vec(&MovePointerOp::Approve {
+                flavor: MovePointerFlavor::FungibleAsset,
+                spender: party,
+                amount,
+            })
+            .map_err(|e| e.to_string())?
+        }
+    } else if let Some(tf) = exec_obj.get("transfer_from") {
+        let owner = parse_wasm_party32(
+            host,
+            home_ee,
+            tf.get("owner")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default(),
+        );
+        let to = parse_wasm_party32(
+            host,
+            home_ee,
+            tf.get("recipient")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default(),
+        );
+        let amount: u128 = tf
+            .get("amount")
+            .and_then(|v| v.as_str())
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+        if home_ee == EeId::SVM {
+            serde_json::to_vec(&SplPointerOp::TransferFrom { owner, to, amount })
+                .map_err(|e| e.to_string())?
+        } else {
+            serde_json::to_vec(&MovePointerOp::TransferFrom {
+                flavor: MovePointerFlavor::FungibleAsset,
+                owner,
+                to,
+                amount,
+            })
+            .map_err(|e| e.to_string())?
+        }
+    } else {
+        return Ok((
+            OutcomeStatus::Revert,
+            b"unsupported CW pointer action".to_vec(),
+        ));
+    };
+
+    let ures = host
+        .universal_call(UniversalCall {
+            from: EeIdentity {
+                ee: EeId::WASM,
+                id: sender_str.as_bytes().to_vec(),
+            },
+            to_ee: home_ee,
+            target: EeIdentity {
+                ee: home_ee,
+                id: ptr.home_ref.clone(),
+            },
+            value: BudAmount(0),
+            input: raw_payload,
+            gas_limit: gas_budget / 2 + 10_000,
+            is_static: false,
+        })
+        .map_err(|e| e.to_string())?;
+    Ok((
+        if ures.success {
+            OutcomeStatus::Success
+        } else {
+            OutcomeStatus::Revert
+        },
+        ures.output,
+    ))
+}
+
 fn handle_cw_query(
     host: &dyn HostRead,
     contract: &[u8],
@@ -1308,14 +1561,25 @@ impl ExecutionEnvironment for WasmEe {
                     });
                 };
                 let res = if let Some(ptr) = decode_pointer_bytecode(&code) {
-                    execute_wasm_pointer_to_evm(
-                        &ptr,
-                        &sender_str,
-                        &msg_json,
-                        is_static,
-                        call.gas_limit,
-                        host,
-                    )
+                    if EeId(ptr.home_ee) == EeId::EVM {
+                        execute_wasm_pointer_to_evm(
+                            &ptr,
+                            &sender_str,
+                            &msg_json,
+                            is_static,
+                            call.gas_limit,
+                            host,
+                        )
+                    } else {
+                        execute_wasm_pointer_to_svm_or_move(
+                            &ptr,
+                            &sender_str,
+                            &msg_json,
+                            is_static,
+                            call.gas_limit,
+                            host,
+                        )
+                    }
                 } else {
                     execute_cosmwasm_json(
                         &call.target.id,
@@ -1452,7 +1716,14 @@ mod creator_gate_tests {
         let contract = b"contract-1";
         let mut host = MockHost::with_creator(contract, "creator");
         for msg in [
-            serde_json::json!({"execute": {"instantiate_cw20": {"name": "T", "initial_balances": [{"address": "attacker", "amount": "100"}]}}}),
+            serde_json::json!({
+                "execute": {
+                    "instantiate_cw20": {
+                        "name": "T",
+                        "initial_balances": [{"address": "attacker", "amount": "100"}]
+                    }
+                }
+            }),
             serde_json::json!({"execute": {"mint_nft": {"token_id": "1", "owner": "attacker"}}}),
             serde_json::json!({"execute": {"put": {"key": "cw20:bal:attacker", "value": "100"}}}),
         ] {
@@ -1471,7 +1742,14 @@ mod creator_gate_tests {
     fn creator_instantiates_once_and_mints_once() {
         let contract = b"contract-1";
         let mut host = MockHost::with_creator(contract, "creator");
-        let init = serde_json::json!({"execute": {"instantiate_cw20": {"name": "T", "initial_balances": [{"address": "creator", "amount": "100"}]}}});
+        let init = serde_json::json!({
+            "execute": {
+                "instantiate_cw20": {
+                    "name": "T",
+                    "initial_balances": [{"address": "creator", "amount": "100"}]
+                }
+            }
+        });
         let (status, _) =
             execute_cosmwasm_json(contract, "creator", &init, false, 100_000, &mut host).unwrap();
         assert_eq!(status, OutcomeStatus::Success);
