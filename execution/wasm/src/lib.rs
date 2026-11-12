@@ -38,9 +38,8 @@ use crate::abi::{StoredCodeMeta, StoredContractInfo, WasmTxAction, WasmViewActio
 use crate::budlum_msg::{
     b64_decode, b64_encode, bud_addr_canonicalize, bud_addr_humanize, BudlumMsg, BudlumQuery,
     CwBankMsg, CwBankQuery, CwBlockInfo, CwCoin, CwContractResult, CwCosmosMsg, CwEnv,
-    CwEnvContract, CwMessageInfo, CwQueryRequest, CwReply, CwReplyOn, CwResponse,
-    CwSubMsgResponse, CwSubMsgResult, CwSystemError, CwSystemResult, CwTxInfo, CwWasmMsg,
-    CwWasmQuery,
+    CwEnvContract, CwMessageInfo, CwQueryRequest, CwReply, CwReplyOn, CwResponse, CwSubMsgResponse,
+    CwSubMsgResult, CwSystemError, CwSystemResult, CwTxInfo, CwWasmMsg, CwWasmQuery,
 };
 
 /// Namespace holding uploaded `.wasm` bytecode and code-id counter (`Section 8.10`).
@@ -150,9 +149,6 @@ pub fn build_wasm_engine() -> Engine {
     let mut cfg = Config::default();
     cfg.floats(false);
     cfg.consume_fuel(true);
-    cfg.wasm_simd(false);
-    cfg.wasm_relaxed_simd(false);
-    cfg.wasm_memory64(false);
     cfg.wasm_multi_memory(false);
     Engine::new(&cfg)
 }
@@ -360,8 +356,12 @@ fn write_into_existing_region_caller(
             .map_err(|_| WasmiError::new("Region payload write out of bounds"))?;
     }
     let len_le = (bytes.len() as u32).to_le_bytes();
-    mem.write(&mut *caller, (region_ptr as usize).saturating_add(8), &len_le)
-        .map_err(|_| WasmiError::new("Region length write out of bounds"))
+    mem.write(
+        &mut *caller,
+        (region_ptr as usize).saturating_add(8),
+        &len_le,
+    )
+    .map_err(|_| WasmiError::new("Region length write out of bounds"))
 }
 
 fn alloc_and_write_caller(
@@ -410,8 +410,12 @@ fn alloc_and_write_store(
             .map_err(|_| WasmiError::new("Region write out of bounds"))?;
     }
     let len_le = (bytes.len() as u32).to_le_bytes();
-    mem.write(&mut *store, (region_ptr as usize).saturating_add(8), &len_le)
-        .map_err(|_| WasmiError::new("Region length write out of bounds"))?;
+    mem.write(
+        &mut *store,
+        (region_ptr as usize).saturating_add(8),
+        &len_le,
+    )
+    .map_err(|_| WasmiError::new("Region length write out of bounds"))?;
     Ok(region_ptr)
 }
 
@@ -730,9 +734,7 @@ fn service_chain_query(
             request: b64_encode(request_bytes),
         }),
         Ok(
-            CwQueryRequest::Staking(_)
-            | CwQueryRequest::Distribution(_)
-            | CwQueryRequest::Ibc(_),
+            CwQueryRequest::Staking(_) | CwQueryRequest::Distribution(_) | CwQueryRequest::Ibc(_),
         ) => CwSystemResult::Error(CwSystemError::UnsupportedRequest {
             kind: String::from("staking/distribution/ibc queries are closed on Budlum"),
         }),
@@ -1015,11 +1017,10 @@ fn load_contract_module(
             message: format!("unknown CosmWasm contract '{contract_addr}'"),
         });
     };
-    let info: StoredContractInfo =
-        serde_json::from_slice(&info_bytes).map_err(|e| EeRefusal {
-            code: RefusalCode::InvalidCode,
-            message: format!("corrupt StoredContractInfo: {e}"),
-        })?;
+    let info: StoredContractInfo = serde_json::from_slice(&info_bytes).map_err(|e| EeRefusal {
+        code: RefusalCode::InvalidCode,
+        message: format!("corrupt StoredContractInfo: {e}"),
+    })?;
     let Some(wasm_bytes) = host
         .read(&ns_code, &code_blob_key(info.code_id))
         .map_err(|e| EeRefusal {
@@ -1065,22 +1066,21 @@ fn run_smart_query_on_read(
             code: RefusalCode::InvalidCode,
             message: format!("WASM instantiate failed: {e}"),
         })?;
-    let env_bytes = serde_json::to_vec(&make_cw_env(ctx, contract_addr)).map_err(|e| EeRefusal {
-        code: RefusalCode::Denied,
-        message: e.to_string(),
-    })?;
-    let env_ptr = alloc_and_write_store(&instance, &mut store, &env_bytes).map_err(|e| {
-        EeRefusal {
+    let env_bytes =
+        serde_json::to_vec(&make_cw_env(ctx, contract_addr)).map_err(|e| EeRefusal {
             code: RefusalCode::Denied,
             message: e.to_string(),
-        }
-    })?;
-    let msg_ptr = alloc_and_write_store(&instance, &mut store, query_json).map_err(|e| {
-        EeRefusal {
+        })?;
+    let env_ptr =
+        alloc_and_write_store(&instance, &mut store, &env_bytes).map_err(|e| EeRefusal {
             code: RefusalCode::Denied,
             message: e.to_string(),
-        }
-    })?;
+        })?;
+    let msg_ptr =
+        alloc_and_write_store(&instance, &mut store, query_json).map_err(|e| EeRefusal {
+            code: RefusalCode::Denied,
+            message: e.to_string(),
+        })?;
     let query_fn = instance
         .get_typed_func::<(i32, i32), i32>(&store, "query")
         .map_err(|e| EeRefusal {
@@ -1094,7 +1094,14 @@ fn run_smart_query_on_read(
             message: format!("WASM query trap: {e}"),
         })?;
     let mut access = QuerierAccess::ReadOnly(host);
-    match drive_resumable(ctx, &instance, &mut store, &mut access, resumable, fuel_budget) {
+    match drive_resumable(
+        ctx,
+        &instance,
+        &mut store,
+        &mut access,
+        resumable,
+        fuel_budget,
+    ) {
         WasmInvokeOutcome::Ok { bytes, .. } => {
             let parsed: CwContractResult<String> =
                 serde_json::from_slice(&bytes).map_err(|e| EeRefusal {
@@ -1228,7 +1235,14 @@ fn invoke_contract_entry(
     };
     let invoke_res = {
         let mut access = QuerierAccess::ReadWrite(host, contract_id.clone());
-        drive_resumable(ctx, &instance, &mut store, &mut access, resumable, fuel_budget)
+        drive_resumable(
+            ctx,
+            &instance,
+            &mut store,
+            &mut access,
+            resumable,
+            fuel_budget,
+        )
     };
     let (resp_bytes, mut total_fuel) = match invoke_res {
         WasmInvokeOutcome::Ok { bytes, fuel_used } => (bytes, fuel_used),
@@ -1244,8 +1258,14 @@ fn invoke_contract_entry(
         }
     };
 
-    let cw_res: CwContractResult<CwResponse> = serde_json::from_slice(&resp_bytes)
-        .map_err(|e| (OutcomeStatus::Revert, format!("bad Response JSON: {e}"), total_fuel))?;
+    let cw_res: CwContractResult<CwResponse> =
+        serde_json::from_slice(&resp_bytes).map_err(|e| {
+            (
+                OutcomeStatus::Revert,
+                format!("bad Response JSON: {e}"),
+                total_fuel,
+            )
+        })?;
     let resp = match cw_res {
         CwContractResult::Ok(r) => r,
         CwContractResult::Error(err_msg) => {
@@ -1272,8 +1292,13 @@ fn invoke_contract_entry(
     }
 
     let guest_state = store.into_data();
-    flush_contract_kv(host, contract_addr, &guest_state.kv, &guest_state.dirty_keys)
-        .map_err(|m| (OutcomeStatus::Revert, m, total_fuel))?;
+    flush_contract_kv(
+        host,
+        contract_addr,
+        &guest_state.kv,
+        &guest_state.dirty_keys,
+    )
+    .map_err(|m| (OutcomeStatus::Revert, m, total_fuel))?;
 
     if !resp.attributes.is_empty() || !resp.events.is_empty() {
         let log_json = serde_json::json!({
@@ -1290,8 +1315,7 @@ fn invoke_contract_entry(
     }
 
     let mut final_data = match &resp.data {
-        Some(d_b64) => b64_decode(d_b64)
-            .map_err(|m| (OutcomeStatus::Revert, m, total_fuel))?,
+        Some(d_b64) => b64_decode(d_b64).map_err(|m| (OutcomeStatus::Revert, m, total_fuel))?,
         None => Vec::new(),
     };
 
@@ -1319,7 +1343,11 @@ fn invoke_contract_entry(
                 used,
             ),
             Err((OutcomeStatus::OutOfGas, msg, used)) => {
-                return Err((OutcomeStatus::OutOfGas, msg, total_fuel.saturating_add(used)));
+                return Err((
+                    OutcomeStatus::OutOfGas,
+                    msg,
+                    total_fuel.saturating_add(used),
+                ));
             }
             Err((_, err_msg, used)) => (CwSubMsgResult::Error(err_msg), used),
         };
@@ -1334,7 +1362,11 @@ fn invoke_contract_entry(
         };
         if !is_ok && matches!(sub.reply_on, CwReplyOn::Never | CwReplyOn::Success) {
             let CwSubMsgResult::Error(e) = sub_result else {
-                return Err((OutcomeStatus::Revert, String::from("submsg failed"), total_fuel));
+                return Err((
+                    OutcomeStatus::Revert,
+                    String::from("submsg failed"),
+                    total_fuel,
+                ));
             };
             return Err((OutcomeStatus::Revert, e, total_fuel));
         }
@@ -1624,8 +1656,12 @@ fn execute_instantiate(
     };
     let info_bytes =
         serde_json::to_vec(&info_rec).map_err(|e| (OutcomeStatus::Revert, e.to_string(), 0))?;
-    host.write(&ns_contract, &contract_info_key(&contract_addr), Some(&info_bytes))
-        .map_err(|e| (OutcomeStatus::Revert, e.to_string(), 0))?;
+    host.write(
+        &ns_contract,
+        &contract_info_key(&contract_addr),
+        Some(&info_bytes),
+    )
+    .map_err(|e| (OutcomeStatus::Revert, e.to_string(), 0))?;
 
     let mut funds = Vec::new();
     if funds_ubud > 0 {
@@ -1709,9 +1745,14 @@ fn execute_migrate(
         ));
     }
     info.code_id = new_code_id;
-    let updated = serde_json::to_vec(&info).map_err(|e| (OutcomeStatus::Revert, e.to_string(), 0))?;
-    host.write(&ns_contract, &contract_info_key(contract_addr), Some(&updated))
-        .map_err(|e| (OutcomeStatus::Revert, e.to_string(), 0))?;
+    let updated =
+        serde_json::to_vec(&info).map_err(|e| (OutcomeStatus::Revert, e.to_string(), 0))?;
+    host.write(
+        &ns_contract,
+        &contract_info_key(contract_addr),
+        Some(&updated),
+    )
+    .map_err(|e| (OutcomeStatus::Revert, e.to_string(), 0))?;
     invoke_contract_entry(
         ctx,
         host,
@@ -2041,15 +2082,13 @@ impl ExecutionEnvironment for WasmWorker {
         call: &EeCall,
         host: &mut dyn HostApi,
     ) -> Result<EeOutcome, EeFault> {
-        catch_unwind(AssertUnwindSafe(|| Self::execute_inner(ctx, call, host))).map_err(
-            |payload| {
-                let msg = panic_payload_message(&*payload);
-                EeFault {
-                    ee: EeId::WASM,
-                    panic_digest: panic_digest(EeId::WASM, &msg),
-                }
-            },
-        )
+        catch_unwind(AssertUnwindSafe(|| Self::execute_inner(ctx, call, host))).map_err(|payload| {
+            let msg = panic_payload_message(&*payload);
+            EeFault {
+                ee: EeId::WASM,
+                panic_digest: panic_digest(EeId::WASM, &msg),
+            }
+        })
     }
 
     fn query(
@@ -2426,7 +2465,8 @@ mod tests {
             escaped = ucall_json.replace('"', "\\\""),
             len_lo = format!("\\{:02x}", ucall_json.len() & 0xff),
             len_hi = format!("\\{:02x}", (ucall_json.len() >> 8) & 0xff),
-            empty_ok = r#"{\"ok\":{\"messages\":[],\"attributes\":[],\"events\":[],\"data\":null}}"#,
+            empty_ok =
+                r#"{\"ok\":{\"messages\":[],\"attributes\":[],\"events\":[],\"data\":null}}"#,
         );
         let Ok(code_bytes) = wat::parse_str(&wat_src) else {
             panic!("wat compile failed");

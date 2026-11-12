@@ -14,7 +14,7 @@ hangi kesinlik kanıtının geçerli olduğunu sorar. Böylece değer, bir arac�
 alanlar arasında hareket eder.
 
 [![CI](https://github.com/budlum-xyz/budlum/actions/workflows/ci.yml/badge.svg?branch=main&event=push)](https://github.com/budlum-xyz/budlum/actions/workflows/ci.yml?query=branch%3Amain+event%3Apush)
-[![Tests](https://img.shields.io/badge/tests-4365%20lib-blue)](https://github.com/budlum-xyz/budlum/actions/workflows/ci.yml?query=branch%3Amain+event%3Apush)
+[![Tests](https://img.shields.io/badge/tests-4444%20lib-blue)](https://github.com/budlum-xyz/budlum/actions/workflows/ci.yml?query=branch%3Amain+event%3Apush)
 [![Rust](https://img.shields.io/badge/rust-1.97.1-orange?logo=rust)](rust-toolchain.toml)
 [![License](https://img.shields.io/badge/license-PolyForm%20Shield%201.0.0-blue)](LICENSE.md)
 
@@ -23,10 +23,10 @@ alanlar arasında hareket eder.
 ---
 
 > [!WARNING]
-> **Budlum bir ana ağ başlatmadı ve denetimden geçmedi.** Bu depo araştırma
-> düzeyinde, kontrollü devnet yazılımıdır. Gerçek değer taşıyan trafik için kullanmayın.
-> Neyin uygulandığını, neyin bilerek yarım bırakıldığını ve neyin iddia edilmediğini
-> [Proje durumu](#proje-durumu) bölümünde tam olarak görebilirsiniz.
+> **Herkese açık testnet veya ana ağ açılışı için kanıt yoktur; dış denetim
+> yapılmadı.** Bu yazılım geliştirme aşamasındadır. Gerçek değer taşıyan trafik
+> için kullanmayın. [Testnet açılış kapısı kaydı](docs/audit/TLG_REPORT.md),
+> depodaki kodu ve benzetimli testleri doğrulanmış dağıtımdan ayırır.
 
 ---
 
@@ -34,7 +34,7 @@ alanlar arasında hareket eder.
 
 - [Budlum neden var](#budlum-neden-var)
 - [Uzlaşma nasıl çalışır](#uzlaşma-nasıl-çalışır)
-- [Operatör senaryoları](#operatör-senaryoları-ölçülmüş)
+- [Operatör senaryoları](#operatör-senaryoları-kod-örnekleri-ve-geçmiş-ölçüm)
 - [Depo yerleşimi](#depo-yerleşimi)
 - [Başlarken](#başlarken)
 - [Düğüm çalıştırma](#düğüm-çalıştırma)
@@ -127,10 +127,12 @@ olgu koddur, diyagram ise hatadır.
 
 ---
 
-## Operatör senaryoları (ölçülmüş)
+## Operatör senaryoları (kod örnekleri ve geçmiş ölçüm)
 
-Üç üretim yolu CI'da uç uca çalışır. Aşağıdaki her sayı bir CI günlüğünden
-okunmuştur; hiçbiri yerel ölçüm değildir.
+Aşağıdaki yollar depodaki kodu anlatır; herkese açık ağ provası değildir.
+Depolama karşılaştırması geçmiş bir CI işine atıfta bulunur; B.U.D. 3.0'ın
+güncel ölçümü veya açılış kapısı kanıtı değildir. Diğer örnekler yeni bir
+performans ölçümü içermez.
 
 1. **Kanonik kanıt rölesi.** `bud-cli relay` önce iki kanonik kontrol programını
    (private-transfer, syscall-context) sabitlenmiş işlenen değerlerden satır
@@ -301,16 +303,28 @@ bir tören dosyasına karşı yanlışlıkla "ana ağ" başlatamaz.
 
 ### Testnet
 
-Testnet, ana ağın provasıdır: aynı kod yolu, aynı arz kuralları ve aynı
-doğrulayıcı töreni. Yalnızca profil, genesis ve parametre değerleri farklıdır.
-Zincir kimliği `45261`, ağ imzası `BDLT`. Özet:
+Testnet profilinin zincir kimliği `45261`, ağ imzası `BDLT`'dir. Bu yapılandırma,
+herkese açık bir ağın açıldığının **kanıtı değildir**. İşletmecilerin önce
+[açılış kapısını](docs/audit/TLG_REPORT.md), genesis törenini ve uç nokta
+kurulumunu tamamlaması gerekir. Yerel prova için:
 
-- Cüzdan: `bud wallet create` (ML-DSA-87, 24 kelime).
-- BUD almak: musluk adres başına günde 100 BUD verir.
-- Doğrulayıcı olmak: en az 1.000 BUD teminat, bkz.
-  [docs/VALIDATOR_GUIDE.md](docs/VALIDATOR_GUIDE.md).
-- Delegasyon: `bud delegate`, bkz. [docs/DELEGATION.md](docs/DELEGATION.md).
-- Düğüm: `budlum-core --config config/testnet.toml`.
+- **Cüzdan oluşturun:** `bud wallet create --key-file ./secrets/wallet.json`
+  (ML-DSA-87, 24 kelime; bir parola seçin).
+- **BUD istemeden önce musluk istemcisini derleyip çalışan düğümde sınayın:**
+  yapılandırılmış aktarım 100 BUD'dur. Kaynak kodda yer alan yerel komut:
+  `budlum-faucet request --url http://127.0.0.1:28600 --address
+  0x<64-onaltılık-karakter-adres>`. İstemci önce hesap işi sorgusunu alıp
+  çözmelidir; yalnız adres içeren POST geçerli bir katılım yöntemi değildir.
+  Yayımlanmış genel musluk adresi yoktur; bkz. [ön koşullar](docs/TESTNET.md#use-the-testnet).
+- **Doğrulayıcı olun:** Önce anahtar oluşturun, sonra yeterli teminat ve ücret
+  ile `bud --rpc-url http://127.0.0.1:28545 --signing-chain-id 45261 validator
+  join --key-file ./secrets/testnet-validator.key --stake-bud 1000` çalıştırın;
+  bkz. [doğrulayıcı kılavuzu](docs/VALIDATOR_GUIDE.md).
+- **Delegasyon:** `bud delegate --key-file ./secrets/wallet.json --validator
+  0x<doğrulayıcı-adresi> --amount-bud <tutar>` komutuna imza zinciri kimliğini
+  ekleyin; bkz. [delegasyon kılavuzu](docs/DELEGATION.md).
+- **Düğüm:** `budlum-core --config config/testnet.toml` komutundan önce anahtar,
+  eş ve genesis dosyalarını [işletmeci notlarına](docs/TESTNET.md) göre kurun.
 
 İmza atan her komut, tekrar alanını `--signing-chain-id 45261` ile adlandırır (`45260` ana
 ağ, `45262` devnet). Bu bayrağın varsayılanı yoktur ve düğümün `bud_chainId` yanıtı yalnızca
@@ -397,11 +411,10 @@ kümesini çalıştırır.
   zorundadır. Ayrı bir kapı, hiçbir özet fonksiyonunun sırasız bir koleksiyonu
   gezmediğini kanıtlar; durum kökü yolundaki bir `HashMap`, iki düğümün anlaşmazlığa
   düşmesini bekleyen bir zincir durmasıdır ve kapı bunu inceleme anında yakalar.
-- **Rozetler yalan söyleyemez.** Bu sayfadaki her rozet, işaret ettiği dosyaya karşı
-  denetlenir: test sayısı koşunun ölçtüğüne, Rust sürümü `rust-toolchain.toml` dosyasına,
-  lisans `Cargo.toml` içindeki SPDX kimliğine ve CI rozeti adlandırmak zorunda olduğu dal
-  ile olaya karşı. Çünkü süzgeçsiz bir rozet, varsayılan dalda koşu yokken herhangi bir
-  daldaki en yeni koşuyu bildirir. Uyuşmazlık, ona yol açan pull request'i düşürür.
+- **Rozet denetimi.** CI'da rozet kapısı test sayısını o koşunun çıktısıyla,
+  Rust sürümünü `rust-toolchain.toml` ile, lisansı `Cargo.toml` ile ve CI
+  rozetini dal ve olay filtresiyle karşılaştırır. Bu sayfadaki sabit sayı,
+  güncel testnet CI sonucunun veya açılış onayının kanıtı değildir.
 - **Testler gerçekten test olmalıdır.** Bir kapının zorunlu ilan ettiği her ad, gerçekten
   `#[test]` taşıyıp taşımadığına karşı denetlenir; aksi halde sessizce var olmayı bırakmış
   zorunlu bir test sonsuza dek geçerdi.
@@ -469,14 +482,14 @@ depoda hiçbir yerde "denetlenmiş" iddiası yapılmaz.
 **Kuantum güvenliği, güncel basamak (İ-0):** Budlum kuantum tehdidine eksiksiz bir planla yaklaşır. Her katmanın tanımlı bir çözümü, ölçütü ve tamamlanma kapısı vardır. Budlum cüzdan çekirdeği bugün NIST FIPS 204 ML-DSA-87 ile imza atar. <!-- claim:S-I0 -->
 İddiaların kaydı, her birinin kanıtı ve hangi basamağı gerektirdiği [`docs/pq/CLAIMS.md`](docs/pq/CLAIMS.md) dosyasındadır; yalnızca ulaşılan basamağın cümlesi kullanılır.
 
-**Uygulanmış ve test edilmiş:** Evrensel Uzlaşma Katmanı üzerinde heterojen konsensüs
-(PoW/PoS/PoA/BFT) · BLS + kuantum sonrası melez kesinlik <!-- claim:L-FINALITY-01 --> · alan kayıt defteri ve kesinlik
-adaptörleri · sahtecilik kapılarıyla alanlar arası köprü yaşam döngüsü · kesinti ve
-çözülme ile izinsiz teminat kayıt defteri · STARK kanıtlamalı ağaç içi BudZKVM · anlaşma ve
-meydan okuma ekonomisiyle B.U.D. depolama · BNS `.bud` adları · Pollen veri pazarı ·
-SocialFi ilkelleri · AI inference layer yapay zeka çıkarım katmanı · EVM zincir adaptörü
-(RLP + MPT + makbuz doğrulama) · `$BUD` tokenomisi · doğrulayıcı yönetişimi · parça oturumu
-bağlamalı anlık görüntü V2.
+**Depoda bulunan uygulamalar ve testler, herkese açık testnet onayı değil:**
+PoW/PoS/PoA/BFT motorları, melez kesinlik <!-- claim:L-FINALITY-01 -->, domain
+bağdaştırıcıları, köprü kodu, teminat kaydı, BudZero kanıtlayıcısı, B.U.D.
+depolama modülleri, BNS, pazar ve SocialFi modülleri, EVM zincir bağdaştırıcısı,
+tokenomi ve anlık görüntüler depoda bulunur. Kodun varlığı; köprünün, birleşik
+B.U.D. 3.0 üretim yolunun, ortamlar arası yürütmenin veya fiziksel cihazlarla
+testnet provasının geçtiği anlamına **gelmez**. Gereken kanıtlar için
+[açılış kapısı kaydına](docs/audit/TLG_REPORT.md) bakın.
 
 **Bilerek etkinleştirilmemiş ve bu durum değişirse kırılan testlerle sabitlenmiş:** zincir
 üstü yapay zeka çıkarım kanıtı *doğrulaması* ([durum](docs/AI_VERIFICATION_STATUS.md)) ·

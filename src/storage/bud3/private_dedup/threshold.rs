@@ -61,7 +61,11 @@ impl ThresholdOprfShare {
     /// Produce a deterministic transcript hash; this is not an OPRF.
     /// Convenience: exposed for committee signer nodes.
     #[must_use]
-    pub fn evaluate(member_index: u16, member_secret_share: &[u8; 32], blinded_input: &[u8; 32]) -> Self {
+    pub fn evaluate(
+        member_index: u16,
+        member_secret_share: &[u8; 32],
+        blinded_input: &[u8; 32],
+    ) -> Self {
         let partial_tag = hash_fields_bytes(&[
             OPRF_SHARE_DOMAIN,
             &member_index.to_le_bytes(),
@@ -103,7 +107,11 @@ pub fn combine_threshold_oprf_shares(
         folded.extend_from_slice(&idx.to_le_bytes());
         folded.extend_from_slice(&tag);
     }
-    Ok(hash_fields_bytes(&[OPRF_FINAL_DOMAIN, blinded_input, &folded]))
+    Ok(hash_fields_bytes(&[
+        OPRF_FINAL_DOMAIN,
+        blinded_input,
+        &folded,
+    ]))
 }
 
 /// Experimental ownership transcript. This is not a BudZero STARK proof.
@@ -140,7 +148,7 @@ impl OwnershipProofBundle {
         ]);
         let mut stark_proof_bytes = Vec::with_capacity(64);
         stark_proof_bytes.extend_from_slice(b"BZOWN1::");
-        stark_proof_bytes.extend_from_slice(& hash_fields_bytes(&[
+        stark_proof_bytes.extend_from_slice(&hash_fields_bytes(&[
             OWNERSHIP_PROOF_DOMAIN,
             &stark_witness_commitment,
             claimant.as_bytes(),
@@ -164,22 +172,34 @@ impl OwnershipProofBundle {
         expected_bucket_bytes: u64,
     ) -> Result<(), PrivateDedupError> {
         if &self.claimant != expected_claimant {
-            return Err(PrivateDedupError::InvalidOwnershipProof("claimant mismatch"));
+            return Err(PrivateDedupError::InvalidOwnershipProof(
+                "claimant mismatch",
+            ));
         }
         if self.epoch != expected_epoch {
             return Err(PrivateDedupError::InvalidOwnershipProof("epoch mismatch"));
         }
         if &self.oprf_tag != expected_oprf_tag {
-            return Err(PrivateDedupError::InvalidOwnershipProof("oprf_tag mismatch"));
+            return Err(PrivateDedupError::InvalidOwnershipProof(
+                "oprf_tag mismatch",
+            ));
         }
         if self.padme_bucket_bytes != expected_bucket_bytes {
-            return Err(PrivateDedupError::InvalidOwnershipProof("padme bucket mismatch"));
+            return Err(PrivateDedupError::InvalidOwnershipProof(
+                "padme bucket mismatch",
+            ));
         }
         if self.stark_witness_commitment == [0u8; 32] {
-            return Err(PrivateDedupError::InvalidOwnershipProof("zero witness commitment"));
+            return Err(PrivateDedupError::InvalidOwnershipProof(
+                "zero witness commitment",
+            ));
         }
-        if self.stark_proof_bytes.len() != 40 || &self.stark_proof_bytes[..8] != b"BZOWN1::" {
-            return Err(PrivateDedupError::InvalidOwnershipProof("malformed BudZero proof envelope"));
+        if self.stark_proof_bytes.len() != 40
+            || self.stark_proof_bytes.get(..8) != Some(b"BZOWN1::".as_slice())
+        {
+            return Err(PrivateDedupError::InvalidOwnershipProof(
+                "malformed BudZero proof envelope",
+            ));
         }
         let expected_seal = hash_fields_bytes(&[
             OWNERSHIP_PROOF_DOMAIN,
@@ -187,8 +207,10 @@ impl OwnershipProofBundle {
             self.claimant.as_bytes(),
             &self.epoch.to_le_bytes(),
         ]);
-        if self.stark_proof_bytes[8..] != expected_seal {
-            return Err(PrivateDedupError::InvalidOwnershipProof("forged BudZero proof transcript"));
+        if self.stark_proof_bytes.get(8..) != Some(expected_seal.as_slice()) {
+            return Err(PrivateDedupError::InvalidOwnershipProof(
+                "forged BudZero proof transcript",
+            ));
         }
         Err(PrivateDedupError::InvalidOwnershipProof(
             "BudZero ownership verifier is not integrated",
@@ -203,6 +225,7 @@ impl OwnershipProofBundle {
 /// - No shared `object_commitment` linking two owners' NFTs,
 /// - Uniform `charged_fee_atoms` drawn from the sealed pool average (`sealed_pool_average_fee_atoms`),
 /// - Reference counts are updated only inside [`PrivateDedupEngine::flush_epoch_batch`].
+///
 /// Convenience: exposed for Deed/NFT minting records.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BlindedDedupRecord {
@@ -280,7 +303,10 @@ impl PrivateDedupEngine {
             return Err(PrivateDedupError::Disabled);
         }
 
-        let used = self.rate_counters.entry((req.epoch, req.caller)).or_insert(0);
+        let used = self
+            .rate_counters
+            .entry((req.epoch, req.caller))
+            .or_insert(0);
         if *used >= self.max_queries_per_epoch {
             return Err(PrivateDedupError::RateLimitExceeded {
                 account: req.caller,
@@ -290,12 +316,12 @@ impl PrivateDedupEngine {
         }
         *used += 1;
 
-        let proof = req
-            .ownership_proof
-            .as_ref()
-            .ok_or(PrivateDedupError::InvalidOwnershipProof(
-                "BudZero ownership proof is required",
-            ))?;
+        let proof =
+            req.ownership_proof
+                .as_ref()
+                .ok_or(PrivateDedupError::InvalidOwnershipProof(
+                    "BudZero ownership proof is required",
+                ))?;
         proof.verify_statement(
             &req.caller,
             req.epoch,
@@ -359,7 +385,10 @@ mod tests {
             padme_bucket_bytes: proof.padme_bucket_bytes,
             ownership_proof: Some(proof),
         };
-        assert_eq!(engine.submit_sealed_upload(request), Err(PrivateDedupError::Disabled));
+        assert_eq!(
+            engine.submit_sealed_upload(request),
+            Err(PrivateDedupError::Disabled)
+        );
         assert_eq!(engine.public_epoch_ref_total(), 0);
         assert_eq!(engine.flush_epoch_batch(), 0);
     }

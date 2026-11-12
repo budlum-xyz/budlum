@@ -1,3 +1,5 @@
+//! Convenience: exposed for CLI, RPC, SDK, and multi-VM runtime callers.
+
 use crate::chain::blockchain::Blockchain;
 use crate::chain::finality::{FinalityCert, Precommit, Prevote};
 use crate::consensus::qc::{QcBlob, QcFaultProof};
@@ -141,7 +143,7 @@ pub enum ChainCommand {
     GetQuantumView(oneshot::Sender<serde_json::Value>),
     GetValidatorDirectory(
         crate::validators::DirectoryQuery,
-        oneshot::Sender<serde_json::Value>,
+        oneshot::Sender<Result<serde_json::Value, String>>,
     ),
     GetBud3(
         crate::storage::bud3::registry::Bud3Query,
@@ -1254,6 +1256,7 @@ impl ChainHandle {
         rx.await.unwrap_or(None)
     }
 
+    /// Convenience: exposed for RPC manifest deal query surface.
     pub async fn get_storage_deals_by_manifest(
         &self,
         manifest_id: crate::storage::ContentId,
@@ -1269,6 +1272,7 @@ impl ChainHandle {
         rx.await.unwrap_or_default()
     }
 
+    /// Convenience: exposed for RPC shard deal query surface.
     pub async fn get_storage_deals_by_shard(
         &self,
         manifest_id: crate::storage::ContentId,
@@ -1288,6 +1292,7 @@ impl ChainHandle {
 
     /// Objects within `margin` shards of unrecoverable, and those already past
     /// it, measured at the caller's margin.
+    /// Convenience: exposed for RPC storage repair band query.
     pub async fn get_storage_repair_band(&self, margin: u32) -> StorageRepairBand {
         let (tx, rx) = oneshot::channel();
         let _ = self
@@ -1300,6 +1305,7 @@ impl ChainHandle {
         rx.await.unwrap_or_default()
     }
 
+    /// Convenience: exposed for RPC storage challenge outcome query.
     pub async fn get_storage_outcome(
         &self,
         challenge_id: u64,
@@ -1373,23 +1379,28 @@ impl ChainHandle {
     pub async fn validator_directory(
         &self,
         query: crate::validators::DirectoryQuery,
-    ) -> serde_json::Value {
+    ) -> Result<serde_json::Value, String> {
         let (tx, rx) = oneshot::channel();
-        let _ = self
-            .tx
+        self.tx
             .send(ChainCommand::GetValidatorDirectory(query, tx))
-            .await;
-        rx.await.unwrap_or(serde_json::Value::Null)
+            .await
+            .map_err(|_| "validator directory actor is unavailable".to_string())?;
+        rx.await
+            .map_err(|_| "validator directory reply was lost".to_string())?
     }
 
     /// A read of the B.U.D. 3.0 registry: one object or one validator's shares.
     pub async fn bud3(
         &self,
         query: crate::storage::bud3::registry::Bud3Query,
-    ) -> serde_json::Value {
+    ) -> Result<serde_json::Value, &'static str> {
         let (tx, rx) = oneshot::channel();
-        let _ = self.tx.send(ChainCommand::GetBud3(query, tx)).await;
-        rx.await.unwrap_or(serde_json::Value::Null)
+        self.tx
+            .send(ChainCommand::GetBud3(query, tx))
+            .await
+            .map_err(|_| "B.U.D. 3.0 chain actor is unavailable")?;
+        rx.await
+            .map_err(|_| "B.U.D. 3.0 chain actor reply was lost")
     }
 
     /// The quantum alarm and the observed crypto facts of the native domains.
@@ -2147,6 +2158,7 @@ impl ChainHandle {
     }
 
     /// Query all storage challenges.
+    /// Convenience: exposed for RPC storage challenge query surface.
     pub async fn get_storage_challenges(
         &self,
     ) -> Result<Vec<crate::domain::storage_deal::RetrievalChallenge>, String> {
@@ -2168,6 +2180,7 @@ impl ChainHandle {
     }
 
     /// Query aggregate storage economics accounting.
+    /// Convenience: exposed for RPC storage economics summary.
     pub async fn get_storage_economics_summary(&self) -> Result<serde_json::Value, String> {
         let (tx, rx) = oneshot::channel();
         let _ = self
@@ -2540,7 +2553,10 @@ impl ChainActor {
     /// stale trie would produce a proof that verifies against its own root and
     /// describes state that no longer exists - worse than no proof, because it
     /// is a correct-looking answer to the wrong question.
-    fn account_proof(&mut self, addr: &Address) -> crate::persistence::state_trie::AccountProofBundle {
+    fn account_proof(
+        &mut self,
+        addr: &Address,
+    ) -> crate::persistence::state_trie::AccountProofBundle {
         let accounts = &self.blockchain.state.accounts;
         let fresh = self.proof_trie.as_ref().is_some_and(|cached| {
             cached.leaves.len() == accounts.len()
@@ -2917,7 +2933,17 @@ impl ChainActor {
                     let _ = tx.send(self.blockchain.state.bud3_registry.query_json(&query));
                 }
                 ChainCommand::GetValidatorDirectory(query, tx) => {
-                    let _ = tx.send(self.blockchain.state.validator_directory.query_json(query));
+                    let state = &self.blockchain.state;
+                    let result =
+                        if state.validator_directory.is_empty() && !state.validators.is_empty() {
+                            Err(
+                            "validator directory has not been populated for existing validators"
+                                .into(),
+                        )
+                        } else {
+                            Ok(state.validator_directory.query_json(query))
+                        };
+                    let _ = tx.send(result);
                 }
                 ChainCommand::GetPqSealedHeights(live, tx) => {
                     let res = self.blockchain.pq_sealed_heights(live);

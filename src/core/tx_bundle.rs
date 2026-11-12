@@ -442,7 +442,10 @@ mod tests {
         let reg = SchemeStatusRegistry::genesis();
 
         let mut bloated = bundle(&acct, 2);
-        bloated.witness.authorization_signatures.push(vec![0xAA; 64]);
+        bloated
+            .witness
+            .authorization_signatures
+            .push((vec![0xBB; 32], vec![0xAA; 64]));
         assert!(matches!(
             bloated.verify_in(&reg),
             Err(BundleError::Signature(_))

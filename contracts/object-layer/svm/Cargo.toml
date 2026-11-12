@@ -9,8 +9,15 @@ publish = false
 [lib]
 crate-type = ["cdylib", "lib"]
 
+[features]
+custom-heap = []
+custom-panic = []
+
 [dependencies]
 solana-program = "2"
 borsh = { version = "1", features = ["derive"] }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("solana"))'] }
 
 [workspace]

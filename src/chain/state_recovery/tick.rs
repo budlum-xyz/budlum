@@ -42,11 +42,11 @@
 //! the target checkpoint is a chain state transition that the chain actor
 //! does not define, so this tick does not do it.
 
-use crate::domain::pq_canonical::SealId;
 use crate::chain::state_recovery::health::{assess, AlarmReason, HealthPolicy, HealthVerdict};
 use crate::chain::state_recovery::stage::{
     RecoveryLedger, Reversion, ReversionError, Stage, StageSnapshot, Stress,
 };
+use crate::domain::pq_canonical::SealId;
 
 /// One sealed checkpoint of one stage as the node sees it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -303,9 +303,9 @@ pub fn hash32(hex_str: &str) -> Option<[u8; 32]> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::chain::state_recovery::stage::ReversionPolicy;
     use crate::crypto::scheme::SchemeId;
     use crate::domain::pq_canonical::{test_seal, SealKind};
-    use crate::chain::state_recovery::stage::ReversionPolicy;
 
     const INTERVAL: u64 = 100;
 

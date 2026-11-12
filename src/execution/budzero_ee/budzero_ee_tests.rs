@@ -8,13 +8,11 @@ use crate::execution::coordinator::gas::MIN_UEL_BASE_FEE_ATTOS;
 use crate::execution::coordinator::state::{
     uel_proof_matches_root, ExecutionState, NS_BUDZERO_STORAGE, NS_EVM_STORAGE,
 };
-use crate::execution::coordinator::{
-    ExecutionCoordinator, UelAction, UelReceiptStatus, UelTx,
-};
+use crate::execution::coordinator::{ExecutionCoordinator, UelAction, UelReceiptStatus, UelTx};
 use crate::execution::proof_verifier::MAX_DEGREE_BITS;
-use crate::execution::zkvm::{DEFAULT_CONTRACT_GAS_LIMIT, ZkVmExecutor};
+use crate::execution::zkvm::{ZkVmExecutor, DEFAULT_CONTRACT_GAS_LIMIT};
 use bud_isa::{Instruction, Opcode};
-use budlum_uel_abi::{BlockContext, BudAmount, EeId};
+use budlum_uel_abi::{BlockContext, EeId};
 
 fn encode_program(insts: &[Instruction]) -> Vec<u8> {
     insts
@@ -28,8 +26,6 @@ fn sample_ctx(height: u64) -> BlockContext {
         height,
         timestamp_ms: 1_700_000_000_000 + height * 3_000,
         chain_id: 45_261,
-        randao: [0x77; 32],
-        base_fee: BudAmount(MIN_UEL_BASE_FEE_ATTOS),
     }
 }
 
@@ -117,8 +113,8 @@ fn budzero_ee_stateful_program_persists() {
     let sender = Address::from([0x91; 32]);
     let proposer = Address::from([0x92; 32]);
     let mut state = AccountState::new();
-    state.credit_account(&sender, 20_000);
-    state.credit_account(&proposer, 20_000);
+    state.add_balance(&sender, 20_000);
+    state.add_balance(&proposer, 20_000);
     let mut coord = ExecutionCoordinator::new();
 
     let halt_prog = encode_program(&[Instruction {
@@ -219,10 +215,8 @@ fn budzero_ee_stateful_program_persists() {
 #[test]
 fn verifier_dos_bounds_and_optional_proof_market() {
     assert!(evaluate_preprocessed_setup(0, 64, 500_000).is_err());
-    assert!(evaluate_preprocessed_setup(MAX_DEGREE_BITS + 1, 64, 500_000).is_err());
-    assert!(
-        evaluate_preprocessed_setup(16, MAX_SETUP_PREPROCESSED_BYTES + 1, 50_000_000).is_err()
-    );
+    assert!(evaluate_preprocessed_setup((MAX_DEGREE_BITS as usize) + 1, 64, 500_000).is_err());
+    assert!(evaluate_preprocessed_setup(16, MAX_SETUP_PREPROCESSED_BYTES + 1, 50_000_000).is_err());
     assert!(evaluate_preprocessed_setup(16, 4_096, 1_000).is_err());
 
     let receipt =

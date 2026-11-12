@@ -6,6 +6,7 @@
 //! external out-of-band state. At canonical `Profile::P0` (`symbol_size = 2911`),
 //! `26 + 2911 = 2937 <= 2953`, fitting inside one ISO QR Version 40 ECC-L
 //! byte-mode symbol.
+//! Convenience: exposed for CLI, RPC, SDK, and multi-VM runtime callers.
 
 use super::fountain::{FountainError, SegmentEncoder, Symbol, SymbolKind, MAX_ESI};
 use super::limits::Profile;

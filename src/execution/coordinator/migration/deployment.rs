@@ -4,6 +4,7 @@
 //! (`receiptsRoot`), recovering the deployer from the signed transaction and
 //! deriving the direct `CREATE` contract address. Factory calls are refused:
 //! their created address requires execution evidence that this proof does not carry.
+//! Convenience: exposed for CLI, RPC, SDK, and multi-VM runtime callers.
 
 use super::DeploymentEvidence;
 use crate::cross_domain::evm::mpt::{self, MptError};
@@ -126,12 +127,8 @@ pub fn verify_deployment(
         return Err(DeploymentProofError::ProofTooLarge);
     }
     let key = transaction_key(proof.transaction_index);
-    let proven_tx = mpt::verify(
-        &proof.transaction_proof,
-        &proof.transactions_root,
-        &key,
-    )
-    .map_err(DeploymentProofError::TransactionTrie)?;
+    let proven_tx = mpt::verify(&proof.transaction_proof, &proof.transactions_root, &key)
+        .map_err(DeploymentProofError::TransactionTrie)?;
     if proven_tx != proof.transaction {
         return Err(DeploymentProofError::TransactionMismatch);
     }
@@ -230,7 +227,9 @@ fn decode_typed_transaction(
     raw: &[u8],
     kind: u8,
 ) -> Result<SignedDeploymentTransaction, DeploymentProofError> {
-    let payload = raw.get(1..).ok_or(DeploymentProofError::InvalidTransaction)?;
+    let payload = raw
+        .get(1..)
+        .ok_or(DeploymentProofError::InvalidTransaction)?;
     let fields = list_fields(rlp::decode(payload)?)?;
     let (field_count, to_index, sig_index) = match kind {
         0x01 => (11usize, 4usize, 8usize),
@@ -240,8 +239,12 @@ fn decode_typed_transaction(
     if fields.len() != field_count {
         return Err(DeploymentProofError::InvalidTransaction);
     }
-    let f0 = fields.first().ok_or(DeploymentProofError::InvalidTransaction)?;
-    let f1 = fields.get(1).ok_or(DeploymentProofError::InvalidTransaction)?;
+    let f0 = fields
+        .first()
+        .ok_or(DeploymentProofError::InvalidTransaction)?;
+    let f1 = fields
+        .get(1)
+        .ok_or(DeploymentProofError::InvalidTransaction)?;
     let f_to = fields
         .get(to_index)
         .ok_or(DeploymentProofError::InvalidTransaction)?;
@@ -283,11 +286,7 @@ fn typed_signing_digest(kind: u8, unsigned_fields: &[Item]) -> [u8; 32] {
     mpt::keccak256(&encoded)
 }
 
-fn signature(
-    r: &Item,
-    s: &Item,
-    recovery_id: u8,
-) -> Result<Vec<u8>, DeploymentProofError> {
+fn signature(r: &Item, s: &Item, recovery_id: u8) -> Result<Vec<u8>, DeploymentProofError> {
     if recovery_id > 1 {
         return Err(DeploymentProofError::InvalidTransaction);
     }
@@ -328,7 +327,10 @@ fn uint_bytes(value: u64) -> Vec<u8> {
         return Vec::new();
     }
     let bytes = value.to_be_bytes();
-    let first = bytes.iter().position(|byte| *byte != 0).unwrap_or(bytes.len());
+    let first = bytes
+        .iter()
+        .position(|byte| *byte != 0)
+        .unwrap_or(bytes.len());
     bytes.get(first..).unwrap_or(&[]).to_vec()
 }
 
@@ -384,7 +386,11 @@ mod tests {
             Item::String(vec![0; 256]),
             Item::List(Vec::new()),
         ]);
-        let mut encoded = if tx_type == 0 { Vec::new() } else { vec![tx_type] };
+        let mut encoded = if tx_type == 0 {
+            Vec::new()
+        } else {
+            vec![tx_type]
+        };
         encoded.extend_from_slice(&rlp::encode(&item));
         encoded
     }
@@ -392,10 +398,11 @@ mod tests {
     fn proof(parts: &[&str], success: bool) -> DeploymentProof {
         let joined: String = parts.iter().copied().collect();
         let transaction = hex::decode(joined).expect("tx hex");
-        let tx_type = match transaction.first().copied() {
-            Some(kind @ (0x01 | 0x02)) => kind,
-            _ => 0,
-        };
+        let tx_type = transaction
+            .first()
+            .copied()
+            .filter(|k| matches!(*k, 0x01 | 0x02))
+            .unwrap_or_default();
         let rec = receipt(success, tx_type);
         let key = transaction_key(0);
         let path = mpt::hp_encode(&mpt::to_nibbles(&key), true);
@@ -403,10 +410,7 @@ mod tests {
             Item::String(path.clone()),
             Item::String(transaction.clone()),
         ]));
-        let rec_node = rlp::encode(&Item::List(vec![
-            Item::String(path),
-            Item::String(rec),
-        ]));
+        let rec_node = rlp::encode(&Item::List(vec![Item::String(path), Item::String(rec)]));
         DeploymentProof {
             deployment_block: 18_999_000,
             transaction_index: 0,

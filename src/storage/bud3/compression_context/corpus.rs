@@ -357,33 +357,29 @@ pub struct AccessObservation {
 }
 
 /// Policy engine for Section 6.14 item 8 access-tier transitions.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct AccessTierPolicy {
     /// Whether cold objects past [`COLD_DWELL_SECS`] trigger slow-codec
     /// re-encoding. Closed (`false`) on testnet launch; opened by governance upon
     /// activation.
     pub conversion_enabled: bool,
+    #[serde(with = "crate::core::map_keys")]
     observations: BTreeMap<ContentId, AccessObservation>,
-}
-
-impl Default for AccessTierPolicy {
-    fn default() -> Self {
-        Self {
-            conversion_enabled: false,
-            observations: BTreeMap::new(),
-        }
-    }
 }
 
 impl AccessTierPolicy {
     /// Record an access at `now_secs` for a public object.
     pub fn record_access(&mut self, content_id: ContentId, now_secs: u64) {
-        let obs = self.observations.entry(content_id).or_default();
-        let cutoff = now_secs.saturating_sub(COLD_WINDOW_SECS);
-        obs.read_timestamps_secs.retain(|ts| *ts >= cutoff);
-        obs.read_timestamps_secs.push(now_secs);
+        {
+            let obs = self.observations.entry(content_id).or_default();
+            let cutoff = now_secs.saturating_sub(COLD_WINDOW_SECS);
+            obs.read_timestamps_secs.retain(|ts| *ts >= cutoff);
+            obs.read_timestamps_secs.push(now_secs);
+        }
         if self.classify(content_id, now_secs) != AccessTier::Cold {
-            obs.cold_since_secs = None;
+            if let Some(obs) = self.observations.get_mut(&content_id) {
+                obs.cold_since_secs = None;
+            }
         }
     }
 
@@ -431,6 +427,7 @@ impl AccessTierPolicy {
     /// `now_secs`. Sealed objects are never converted by validators (Section
     /// 6.14 item 9).
     #[must_use]
+    /// Convenience: exposed for B.U.D. 3.0 cold-tier policy evaluator.
     pub fn should_convert_to_cold_representation(
         &self,
         content_id: ContentId,
@@ -455,10 +452,12 @@ impl AccessTierPolicy {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ContextState {
     /// Corpus candidates indexed by public [`ContentId`].
+    #[serde(with = "crate::core::map_keys")]
     pub corpus: BTreeMap<ContentId, CorpusEntry>,
     /// Active context manifest per content class.
     pub manifests: BTreeMap<String, ContextManifest>,
     /// Context-encoded public objects indexed by immutable [`ContentId`].
+    #[serde(with = "crate::core::map_keys")]
     pub objects: BTreeMap<ContentId, ContextStoredObject>,
     /// Accumulated Context Maintenance Pool balance in base units.
     pub context_maintenance_pool: u64,
@@ -498,6 +497,7 @@ impl ContextState {
     }
 
     /// Mark a burned public object so the next context rotation excludes it.
+    /// Convenience: exposed for B.U.D. 3.0 burned-corpus maintenance.
     pub fn evict_burned_corpus(&mut self, content_id: &ContentId) -> bool {
         if let Some(entry) = self.corpus.get_mut(content_id) {
             entry.burned = true;
@@ -513,6 +513,7 @@ impl ContextState {
     /// # Errors
     ///
     /// Refuses sealed content or missing active manifest.
+    /// Convenience: exposed for B.U.D. 3.0 shared-context public upload helper.
     pub fn store_public_with_context(
         &mut self,
         content_class: &str,
@@ -548,10 +549,7 @@ impl ContextState {
     ///
     /// Returns [`ContextError`] if manifest construction or object decoding
     /// fails.
-    pub fn rotate_context(
-        &mut self,
-        content_class: &str,
-    ) -> Result<ContextManifest, ContextError> {
+    pub fn rotate_context(&mut self, content_class: &str) -> Result<ContextManifest, ContextError> {
         let old_manifest = self.manifests.get(content_class).cloned();
         let next_gen = old_manifest
             .as_ref()
@@ -600,6 +598,7 @@ impl ContextState {
     ///
     /// Returns [`ContextError::InsufficientFeeBalance`] on overflow or when
     /// `payer_balance` cannot cover the fee.
+    /// Convenience: exposed for B.U.D. 3.0 shared-context fee settlement.
     pub fn apply_context_savings_fee(
         &mut self,
         payer_balance: &mut u64,

@@ -4,6 +4,7 @@
 //! `debug_traceTransaction` and `debug_traceCall`. `eth_getProof` explicitly
 //! returns `-32601` (`Method not found; use bud_getAccountProof`, section 8.10.6),
 //! and block headers expose `execution_root` as `stateRoot` (section 8.10.5).
+//! Convenience: exposed for CLI, RPC, SDK, and multi-VM runtime callers.
 
 pub mod filters;
 pub mod opening;
@@ -11,14 +12,9 @@ pub mod opening;
 use crate::core::account::AccountState;
 use crate::execution::coordinator::alias::{derive_foreign_account, ForeignScheme};
 use crate::execution::coordinator::evm_ee::EvmAccountRecord;
-use crate::execution::coordinator::foreign::ethereum::{
-    DecodedEthereumTx, BUDLUM_EVM_CHAIN_ID,
-};
-use crate::execution::coordinator::foreign::{ForeignTx, VerifiedForeignOutcome};
-use crate::execution::coordinator::state::{
-    NS_EVM_ACCOUNT, NS_EVM_CODE, NS_EVM_STORAGE,
-};
-use crate::execution::coordinator::ExecutionCoordinator;
+use crate::execution::coordinator::foreign::ethereum::BUDLUM_EVM_CHAIN_ID;
+use crate::execution::coordinator::foreign::ForeignTx;
+use crate::execution::coordinator::state::{NS_EVM_ACCOUNT, NS_EVM_CODE, NS_EVM_STORAGE};
 use crate::rpc::compat::{
     CompatEffect, CompatListener, CompatMethodClass, EthereumCompatConfig, JsonRpcRequest,
     JsonRpcResponse, PeerQuotaTracker, JSONRPC_INVALID_PARAMS, JSONRPC_LIMIT_EXCEEDED,
@@ -36,45 +32,157 @@ const fn row(
 
 /// Complete Ethereum JSON-RPC method classification table (section 8.11.2 + 8.10.6).
 pub const ETH_METHOD_CLASSES: &[CompatMethodClass] = &[
-    row("web3_clientVersion", CompatListener::Public, CompatEffect::Read),
+    row(
+        "web3_clientVersion",
+        CompatListener::Public,
+        CompatEffect::Read,
+    ),
     row("net_version", CompatListener::Public, CompatEffect::Read),
     row("net_listening", CompatListener::Public, CompatEffect::Read),
     row("eth_chainId", CompatListener::Public, CompatEffect::Read),
     row("eth_syncing", CompatListener::Public, CompatEffect::Read),
-    row("eth_blockNumber", CompatListener::Public, CompatEffect::Read),
+    row(
+        "eth_blockNumber",
+        CompatListener::Public,
+        CompatEffect::Read,
+    ),
     row("eth_getBalance", CompatListener::Public, CompatEffect::Read),
     row("eth_getCode", CompatListener::Public, CompatEffect::Read),
-    row("eth_getStorageAt", CompatListener::Public, CompatEffect::Read),
-    row("eth_getTransactionCount", CompatListener::Public, CompatEffect::Read),
+    row(
+        "eth_getStorageAt",
+        CompatListener::Public,
+        CompatEffect::Read,
+    ),
+    row(
+        "eth_getTransactionCount",
+        CompatListener::Public,
+        CompatEffect::Read,
+    ),
     row("eth_call", CompatListener::Public, CompatEffect::Read),
-    row("eth_estimateGas", CompatListener::Public, CompatEffect::Read),
-    row("eth_createAccessList", CompatListener::Public, CompatEffect::Read),
+    row(
+        "eth_estimateGas",
+        CompatListener::Public,
+        CompatEffect::Read,
+    ),
+    row(
+        "eth_createAccessList",
+        CompatListener::Public,
+        CompatEffect::Read,
+    ),
     row("eth_gasPrice", CompatListener::Public, CompatEffect::Read),
-    row("eth_maxPriorityFeePerGas", CompatListener::Public, CompatEffect::Read),
+    row(
+        "eth_maxPriorityFeePerGas",
+        CompatListener::Public,
+        CompatEffect::Read,
+    ),
     row("eth_feeHistory", CompatListener::Public, CompatEffect::Read),
-    row("eth_sendRawTransaction", CompatListener::Public, CompatEffect::TxSubmit),
-    row("eth_getBlockByNumber", CompatListener::Public, CompatEffect::Read),
-    row("eth_getBlockByHash", CompatListener::Public, CompatEffect::Read),
-    row("eth_getBlockTransactionCountByNumber", CompatListener::Public, CompatEffect::Read),
-    row("eth_getBlockTransactionCountByHash", CompatListener::Public, CompatEffect::Read),
-    row("eth_getTransactionByHash", CompatListener::Public, CompatEffect::Read),
-    row("eth_getTransactionByBlockNumberAndIndex", CompatListener::Public, CompatEffect::Read),
-    row("eth_getTransactionReceipt", CompatListener::Public, CompatEffect::Read),
-    row("eth_getBlockReceipts", CompatListener::Public, CompatEffect::Read),
+    row(
+        "eth_sendRawTransaction",
+        CompatListener::Public,
+        CompatEffect::TxSubmit,
+    ),
+    row(
+        "eth_getBlockByNumber",
+        CompatListener::Public,
+        CompatEffect::Read,
+    ),
+    row(
+        "eth_getBlockByHash",
+        CompatListener::Public,
+        CompatEffect::Read,
+    ),
+    row(
+        "eth_getBlockTransactionCountByNumber",
+        CompatListener::Public,
+        CompatEffect::Read,
+    ),
+    row(
+        "eth_getBlockTransactionCountByHash",
+        CompatListener::Public,
+        CompatEffect::Read,
+    ),
+    row(
+        "eth_getTransactionByHash",
+        CompatListener::Public,
+        CompatEffect::Read,
+    ),
+    row(
+        "eth_getTransactionByBlockNumberAndIndex",
+        CompatListener::Public,
+        CompatEffect::Read,
+    ),
+    row(
+        "eth_getTransactionReceipt",
+        CompatListener::Public,
+        CompatEffect::Read,
+    ),
+    row(
+        "eth_getBlockReceipts",
+        CompatListener::Public,
+        CompatEffect::Read,
+    ),
     row("eth_getLogs", CompatListener::Public, CompatEffect::Read),
-    row("eth_newFilter", CompatListener::Public, CompatEffect::LocalFilter),
-    row("eth_newBlockFilter", CompatListener::Public, CompatEffect::LocalFilter),
-    row("eth_getFilterChanges", CompatListener::Public, CompatEffect::LocalFilter),
-    row("eth_getFilterLogs", CompatListener::Public, CompatEffect::LocalFilter),
-    row("eth_uninstallFilter", CompatListener::Public, CompatEffect::LocalFilter),
-    row("eth_subscribe", CompatListener::Public, CompatEffect::LocalFilter),
-    row("eth_unsubscribe", CompatListener::Public, CompatEffect::LocalFilter),
+    row(
+        "eth_newFilter",
+        CompatListener::Public,
+        CompatEffect::LocalFilter,
+    ),
+    row(
+        "eth_newBlockFilter",
+        CompatListener::Public,
+        CompatEffect::LocalFilter,
+    ),
+    row(
+        "eth_getFilterChanges",
+        CompatListener::Public,
+        CompatEffect::LocalFilter,
+    ),
+    row(
+        "eth_getFilterLogs",
+        CompatListener::Public,
+        CompatEffect::LocalFilter,
+    ),
+    row(
+        "eth_uninstallFilter",
+        CompatListener::Public,
+        CompatEffect::LocalFilter,
+    ),
+    row(
+        "eth_subscribe",
+        CompatListener::Public,
+        CompatEffect::LocalFilter,
+    ),
+    row(
+        "eth_unsubscribe",
+        CompatListener::Public,
+        CompatEffect::LocalFilter,
+    ),
     row("eth_accounts", CompatListener::Public, CompatEffect::Read),
-    row("debug_traceTransaction", CompatListener::Operator, CompatEffect::Read),
-    row("debug_traceCall", CompatListener::Operator, CompatEffect::Read),
-    row("eth_getProof", CompatListener::Public, CompatEffect::Refused),
-    row("bud_getExecutionProof", CompatListener::Public, CompatEffect::Read),
-    row("bud_getImportedContract", CompatListener::Public, CompatEffect::Read),
+    row(
+        "debug_traceTransaction",
+        CompatListener::Operator,
+        CompatEffect::Read,
+    ),
+    row(
+        "debug_traceCall",
+        CompatListener::Operator,
+        CompatEffect::Read,
+    ),
+    row(
+        "eth_getProof",
+        CompatListener::Public,
+        CompatEffect::Refused,
+    ),
+    row(
+        "bud_getExecutionProof",
+        CompatListener::Public,
+        CompatEffect::Read,
+    ),
+    row(
+        "bud_getImportedContract",
+        CompatListener::Public,
+        CompatEffect::Read,
+    ),
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -173,7 +281,6 @@ pub struct EthereumCompatGateway {
     config: EthereumCompatConfig,
     filters: EthFilterRegistry,
     quotas: PeerQuotaTracker,
-    staged_txs: BTreeMap<[u8; 32], DecodedEthereumTx>,
     block_height: u64,
 }
 
@@ -184,7 +291,6 @@ impl EthereumCompatGateway {
             config,
             filters: EthFilterRegistry::default(),
             quotas: PeerQuotaTracker::default(),
-            staged_txs: BTreeMap::new(),
             block_height: 0,
         }
     }
@@ -202,6 +308,12 @@ impl EthereumCompatGateway {
     /// exposed for: Ethereum JSON-RPC gateway block-height sync.
     pub fn set_block_height(&mut self, height: u64) {
         self.block_height = height;
+    }
+
+    /// Rotates the per-peer request-quota window so a long-lived gateway bounds a
+    /// burst instead of locking every peer out for the life of the process.
+    pub fn reset_quota_window(&mut self) {
+        self.quotas.reset_window();
     }
 
     /// Handles a JSON-RPC 2.0 request without mutating consensus `state`.
@@ -355,19 +467,20 @@ impl EthereumCompatGateway {
                 let Ok(raw_rlp) = hex::decode(raw_hex.trim_start_matches("0x")) else {
                     return JsonRpcResponse::err(id, JSONRPC_INVALID_PARAMS, "invalid hex");
                 };
-                let mut preview = state.clone();
-                let mut coord = ExecutionCoordinator::new();
                 let env = ForeignTx::Ethereum {
                     raw_rlp,
                     direct_native_pq_recipient: None,
                 };
-                match coord.process_foreign_envelope(&mut preview, &env, now_secs) {
-                    Ok(VerifiedForeignOutcome::Ethereum { decoded, .. }) => {
-                        let hash_hex = format!("0x{}", hex::encode(decoded.tx_hash));
-                        self.staged_txs.insert(decoded.tx_hash, decoded);
-                        JsonRpcResponse::ok(id, serde_json::json!(hash_hex))
-                    }
-                    Ok(_) => JsonRpcResponse::err(id, JSONRPC_TX_REJECTED, "unexpected tx kind"),
+                match state.execution_state.foreign_lane.validate_envelope_readonly(
+                    &state.execution_state,
+                    &env,
+                    now_secs,
+                ) {
+                    Ok(_) => JsonRpcResponse::err(
+                        id,
+                        EE_UNAVAILABLE,
+                        "eth_sendRawTransaction: EVM execution environment is not available on this RPC surface; use bud_sendRawTransaction",
+                    ),
                     Err(e) => JsonRpcResponse::err(id, JSONRPC_TX_REJECTED, e.to_string()),
                 }
             }
@@ -387,41 +500,19 @@ impl EthereumCompatGateway {
             "eth_getBlockTransactionCountByNumber" | "eth_getBlockTransactionCountByHash" => {
                 JsonRpcResponse::ok(id, serde_json::json!("0x0"))
             }
-            "eth_getTransactionByHash" => {
-                let Some(h32) = parse_param_word32(&req.params, 0) else {
-                    return JsonRpcResponse::ok(id, serde_json::Value::Null);
-                };
-                let Some(tx) = self.staged_txs.get(&h32) else {
-                    return JsonRpcResponse::ok(id, serde_json::Value::Null);
-                };
-                JsonRpcResponse::ok(
-                    id,
-                    serde_json::json!({
-                        "hash": format!("0x{}", hex::encode(tx.tx_hash)),
-                        "nonce": format!("0x{:x}", tx.nonce),
-                        "value": format!("0x{:x}", tx.value_wei),
-                    }),
-                )
-            }
+            "eth_getTransactionByHash" => JsonRpcResponse::err(
+                id,
+                EE_UNAVAILABLE,
+                "eth_getTransactionByHash: EVM execution environment is not available on this RPC surface; use bud_getTransactionByHash",
+            ),
             "eth_getTransactionByBlockNumberAndIndex" => {
                 JsonRpcResponse::ok(id, serde_json::Value::Null)
             }
-            "eth_getTransactionReceipt" => {
-                let Some(h32) = parse_param_word32(&req.params, 0) else {
-                    return JsonRpcResponse::ok(id, serde_json::Value::Null);
-                };
-                let Some(tx) = self.staged_txs.get(&h32) else {
-                    return JsonRpcResponse::ok(id, serde_json::Value::Null);
-                };
-                JsonRpcResponse::ok(
-                    id,
-                    serde_json::json!({
-                        "transactionHash": format!("0x{}", hex::encode(tx.tx_hash)),
-                        "status": "0x1",
-                        "logs": [],
-                    }),
-                )
-            }
+            "eth_getTransactionReceipt" => JsonRpcResponse::err(
+                id,
+                EE_UNAVAILABLE,
+                "eth_getTransactionReceipt: EVM execution environment is not available on this RPC surface; use bud_getTransactionReceipt",
+            ),
             "eth_getBlockReceipts" => JsonRpcResponse::ok(id, serde_json::json!([])),
             "eth_getLogs" => {
                 let (from_b, to_b) = parse_filter_range(&req.params, self.block_height);
@@ -436,7 +527,11 @@ impl EthereumCompatGateway {
                     );
                 }
                 let _ = self.config.max_logs_returned;
-                JsonRpcResponse::ok(id, serde_json::json!([]))
+                JsonRpcResponse::err(
+                    id,
+                    EE_UNAVAILABLE,
+                    "eth_getLogs: EVM execution environment is not available on this RPC surface; use bud_getTransactionReceipt",
+                )
             }
             "eth_newFilter" => {
                 let (from_block, to_block) = parse_filter_range(&req.params, self.block_height);
@@ -472,7 +567,8 @@ impl EthereumCompatGateway {
                 }
             }
             "eth_getFilterChanges" | "eth_getFilterLogs" => {
-                self.filters.evict_expired(now_secs, self.config.filter_ttl_secs);
+                self.filters
+                    .evict_expired(now_secs, self.config.filter_ttl_secs);
                 let Some(fid_str) = req.params.get(0).and_then(serde_json::Value::as_str) else {
                     return JsonRpcResponse::err(id, JSONRPC_INVALID_PARAMS, "missing filter id");
                 };
@@ -486,7 +582,11 @@ impl EthereumCompatGateway {
                     return JsonRpcResponse::err(id, JSONRPC_INVALID_PARAMS, "filter not found");
                 }
                 let _ = &entry.kind;
-                JsonRpcResponse::ok(id, serde_json::json!([]))
+                JsonRpcResponse::err(
+                    id,
+                    EE_UNAVAILABLE,
+                    "eth_getFilterChanges: EVM execution environment is not available on this RPC surface; use bud_subscribe",
+                )
             }
             "eth_uninstallFilter" => {
                 let removed = req
@@ -623,15 +723,23 @@ fn parse_filter_range(params: &serde_json::Value, head: u64) -> (u64, u64) {
     (from_b, to_b)
 }
 
+/// Refusal code when the EVM execution environment is unavailable on a read-only surface.
+pub const EE_UNAVAILABLE: i32 = -32004;
+
 /// Maximum raw JSON-RPC request body accepted by compatibility gateways (`R-08`).
 pub const MAX_COMPAT_REQUEST_BYTES: usize = 256 * 1024;
 
 /// Evaluates a raw JSON-RPC 2.0 request string against read-only `state` on the public
-/// Ethereum compatibility surface (`127.0.0.1:18547`).
+/// Ethereum compatibility surface (`127.0.0.1:18547`), enforcing a persistent per-peer quota.
 ///
 /// exposed for: wire-level Ethereum JSON-RPC handler.
 #[must_use]
-pub fn handle_eth_jsonrpc(state: &AccountState, raw_json: &str) -> String {
+pub fn handle_eth_jsonrpc(state: &AccountState, peer: &str, raw_json: &str) -> String {
+    const QUOTA_WINDOW_SECS: u64 = 60;
+    static ETH_GATEWAY: std::sync::Mutex<Option<EthereumCompatGateway>> =
+        std::sync::Mutex::new(None);
+    static QUOTA_WINDOW: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(u64::MAX);
+
     if raw_json.len() > MAX_COMPAT_REQUEST_BYTES {
         let resp = JsonRpcResponse::err(
             serde_json::Value::Null,
@@ -644,7 +752,24 @@ pub fn handle_eth_jsonrpc(state: &AccountState, raw_json: &str) -> String {
         let resp = JsonRpcResponse::err(serde_json::Value::Null, -32700, "Parse error");
         return serde_json::to_string(&resp).unwrap_or_default();
     };
-    let mut gw = EthereumCompatGateway::new(EthereumCompatConfig::default());
-    let resp = gw.handle_request(CompatListener::Public, "127.0.0.1", 0, &req, state);
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    let window = now_secs / QUOTA_WINDOW_SECS;
+    let Ok(mut guard) = ETH_GATEWAY.lock() else {
+        let resp = JsonRpcResponse::err(
+            req.id.clone(),
+            JSONRPC_LIMIT_EXCEEDED,
+            "compatibility gateway unavailable",
+        );
+        return serde_json::to_string(&resp).unwrap_or_default();
+    };
+    let gw =
+        guard.get_or_insert_with(|| EthereumCompatGateway::new(EthereumCompatConfig::default()));
+    if QUOTA_WINDOW.swap(window, std::sync::atomic::Ordering::Relaxed) != window {
+        gw.reset_quota_window();
+    }
+    let resp = gw.handle_request(CompatListener::Public, peer, now_secs, &req, state);
+    drop(guard);
     serde_json::to_string(&resp).unwrap_or_default()
 }

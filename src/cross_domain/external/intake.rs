@@ -64,7 +64,8 @@ use serde::{Deserialize, Serialize};
 /// `cross_domain::evm::sync_committee`, without recomputing the aggregation
 /// (the committee membership question belongs to the adapter's layout, not to
 /// the pairing).
-struct PairingBls;
+/// WIRING: External beacon light-client pairing verifier (`object_layer` and `ethereum` intake).
+pub(crate) struct PairingBls;
 
 impl BlsVerifier for PairingBls {
     fn verify_aggregate(
@@ -720,6 +721,28 @@ impl IntakeState {
             return Err(IntakeError::InvalidQuorumPolicy {
                 reason: "fewer provers are bonded than the threshold needs",
             });
+        }
+        // Attestations accepted before this policy existed were decided by a
+        // single prover rather than a quorum round. Withdraw them so they
+        // neither satisfy the commitment gate nor block honest rounds at those
+        // `(height, version)` slots.
+        if let Some(reg) = self.registry.domain_mut(key) {
+            let withdrawn_digests: Vec<[u8; 32]> = reg
+                .attestations
+                .values()
+                .map(|att| att.evidence_digest)
+                .collect();
+            for digest in withdrawn_digests {
+                let was_slashed = reg
+                    .provers
+                    .values()
+                    .flat_map(|b| &b.slashings)
+                    .any(|s| s.evidence_digest == digest);
+                if !was_slashed {
+                    reg.attestation_provers.remove(&digest);
+                }
+            }
+            reg.attestations.clear();
         }
         self.quorum.set_policy(*key, policy);
         Ok(())

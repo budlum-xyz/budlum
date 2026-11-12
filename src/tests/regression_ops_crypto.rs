@@ -68,6 +68,7 @@ fn coverage_gate_reads_the_total_and_refuses_nan() {
     assert!(prod.contains(".get(\"totals\")"));
     assert!(prod.contains("is_finite()"));
     assert!(src.contains("fn the_total_is_read_not_the_first_file"));
+    assert!(!f64::NAN.is_finite());
 }
 
 /// No lock file pins a crate below the patched version of the

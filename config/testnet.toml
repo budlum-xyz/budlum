@@ -46,8 +46,11 @@ public_listener = "127.0.0.1:18545"
 operator_listener = "127.0.0.1:18546"
 trusted_proxies = ["127.0.0.1"]
 enabled = true
-# Same rule as mainnet: the key is required whatever the bind address.
-auth_required = true
+# Public reads and signed-transaction submission are keyless on testnet;
+# operator/admin methods remain refused on the public listener and require
+# BUDLUM_RPC_API_KEY on the loopback operator listener.
+auth_required = false
+operator_auth_required = true
 api_key_env = "BUDLUM_RPC_API_KEY"
 allowed_ips = []
 rate_limit_per_minute = 600

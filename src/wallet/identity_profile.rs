@@ -19,9 +19,7 @@
 
 use crate::bns::types::BnsResolved;
 use crate::core::address::Address;
-use crate::pollen::{
-    AccessGrant, AccessGrantStatus, DataAsset, DataAssetStatus, SaleAuthorization,
-};
+use crate::pollen::{AccessGrant, AccessGrantStatus, DataAsset, SaleAuthorization};
 use crate::storage::{ContentId, ContentManifest};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -409,8 +407,7 @@ pub fn build_passport_profile(
     let sale_authorizations = sale_authorizations
         .iter()
         .filter(|authorization| {
-            authorization.seller == owner
-                && authorization.grants_issued < authorization.max_grants
+            authorization.seller == owner && authorization.grants_issued < authorization.max_grants
         })
         .count();
 
@@ -629,7 +626,7 @@ mod tests {
             is_expired: false,
         };
         let mut revoked_asset = DataAsset::new(owner, cid, [9u8; 32], true);
-        revoked_asset.status = DataAssetStatus::Revoked;
+        revoked_asset.status = crate::pollen::DataAssetStatus::Revoked;
         let profile = build_passport_profile(
             "doc.bud".into(),
             Some(resolved.clone()),
@@ -665,11 +662,11 @@ mod tests {
             content_id: Some(cid),
             is_expired: false,
         };
-        let mut revoked: DataAsset = serde_json::from_value(serde_json::json!({
+        let revoked: DataAsset = serde_json::from_value(serde_json::json!({
             "asset_id": DataAsset::derive_id(&owner, &cid, &[1u8; 32]),
             "owner": owner,
             "manifest_id": cid,
-            "metadata_commitment": [1u8; 32],
+            "metadata_commitment": vec![1u8; 32],
             "encrypted": true,
             "status": "Revoked"
         }))
@@ -684,7 +681,7 @@ mod tests {
             &[],
             &[],
         );
-        let lineage_count = (&profile.pollen).assets_owned;
+        let lineage_count = profile.pollen.assets_owned;
         assert_eq!(lineage_count, 1);
         let bundle = try_build_passport_proof_bundle(&profile, 50).unwrap();
         let mut spoofed = profile.clone();

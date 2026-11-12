@@ -664,7 +664,7 @@ pub fn self_test() -> Result<String, String> {
 /// so the vector's own name never appears directly before a mutator. Without
 /// this case the gate's `with_label_values` entry would be dead code, and a
 /// vec that no production path touched would pass by accident.
-fn labelled_case(tmp: &Path) -> Result<(), String> {
+fn labelled_metrics_fixture() -> String {
     let mut fields = String::new();
     let mut inits = String::new();
     let mut registers = String::new();
@@ -687,9 +687,12 @@ fn labelled_case(tmp: &Path) -> Result<(), String> {
         inits,
         "        let v0 = IntGaugeVec::new(Opts::new(\"budlum_v0\", \"h\"), LABELS)?"
     );
-    let _ = writeln!(registers, "        registry.register(Box::new(v0.clone()))?");
+    let _ = writeln!(
+        registers,
+        "        registry.register(Box::new(v0.clone()))?"
+    );
     let _ = writeln!(struct_init, "            v0,");
-    let metrics = format!(
+    format!(
         "use prometheus::{{IntGauge, IntGaugeVec, Opts, Registry}};\n\
          const LABELS: &[&str] = &[\"class\"];\n\
          pub struct Metrics {{\n\
@@ -705,7 +708,11 @@ fn labelled_case(tmp: &Path) -> Result<(), String> {
          }})\n\
          }}\n\
          }}\n"
-    );
+    )
+}
+
+fn labelled_case(tmp: &Path) -> Result<(), String> {
+    let metrics = labelled_metrics_fixture();
     let writer = "fn emit(m: &crate::core::metrics::Metrics) {\n\
                   m.m0.set(1); m.m1.set(1); m.m2.set(1); m.m3.set(1);\n\
                   m.m4.set(1); m.m5.set(1); m.m6.set(1); m.m7.set(1);\n\

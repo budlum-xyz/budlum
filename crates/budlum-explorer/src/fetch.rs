@@ -373,40 +373,7 @@ pub fn fetch_and_verify<T: Transport>(transport: &T, target: &Target) -> Result<
                 )),
             }
         }
-        Target::Arweave(root) => {
-            if root.len() == 32 {
-                if root.iter().all(|&b| b == 0) {
-                    Evidence::new().with(Claim::new(
-                        "arweave",
-                        Strength::Refused,
-                        "an all-zero 32-byte Arweave transaction id cannot name a real object",
-                    ))
-                } else {
-                    Evidence::new().with(Claim::new(
-                        "arweave",
-                        Strength::RpcClaimOnly,
-                        "arweave-ns carries a 32-byte transaction id rather than a 48-byte \
-                         data_root; without a verified transaction header the content bytes \
-                         cannot be bound to the id",
-                    ))
-                }
-            } else {
-                match arweave::verify(root, &bytes) {
-                    ArweaveVerdict::Verified => Evidence::new().with(Claim::new(
-                        "arweave",
-                        Strength::Verified,
-                        "the data_root derived from the bytes equals the one in the transaction",
-                    )),
-                    ArweaveVerdict::RootMismatch { expected, produced } => {
-                        Evidence::new().with(Claim::new(
-                            "arweave",
-                            Strength::Refused,
-                            &format!("the data_root is {produced}, expected {expected}"),
-                        ))
-                    }
-                }
-            }
-        }
+        Target::Arweave(root) => verify_arweave_target(root, &bytes),
         Target::Https(url) => Evidence::new().with(Claim::new(
             "https",
             Strength::TransportOnly,
@@ -415,6 +382,41 @@ pub fn fetch_and_verify<T: Transport>(transport: &T, target: &Target) -> Result<
     };
 
     Ok(Fetched { bytes, evidence })
+}
+
+fn verify_arweave_target(root: &[u8], bytes: &[u8]) -> Evidence {
+    if root.len() == 32 {
+        if root.iter().all(|&b| b == 0) {
+            Evidence::new().with(Claim::new(
+                "arweave",
+                Strength::Refused,
+                "an all-zero 32-byte Arweave transaction id cannot name a real object",
+            ))
+        } else {
+            Evidence::new().with(Claim::new(
+                "arweave",
+                Strength::RpcClaimOnly,
+                "arweave-ns carries a 32-byte transaction id rather than a 48-byte \
+                 data_root; without a verified transaction header the content bytes \
+                 cannot be bound to the id",
+            ))
+        }
+    } else {
+        match arweave::verify(root, bytes) {
+            ArweaveVerdict::Verified => Evidence::new().with(Claim::new(
+                "arweave",
+                Strength::Verified,
+                "the data_root derived from the bytes equals the one in the transaction",
+            )),
+            ArweaveVerdict::RootMismatch { expected, produced } => {
+                Evidence::new().with(Claim::new(
+                    "arweave",
+                    Strength::Refused,
+                    &format!("the data_root is {produced}, expected {expected}"),
+                ))
+            }
+        }
+    }
 }
 
 #[cfg(test)]

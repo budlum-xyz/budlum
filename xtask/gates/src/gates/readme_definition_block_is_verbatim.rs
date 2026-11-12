@@ -139,7 +139,10 @@ pub fn self_test() -> Result<String, String> {
     let dir = crate::gates::rust_literals::exclusive_scratch_dir("budlum-gates-readme-block")?;
     let result = (|| {
         let body = |n: usize| -> String {
-            (1..=n).map(|i| format!("line {i}\n")).collect::<String>()
+            (1..=n).fold(String::new(), |mut acc, i| {
+                let _ = std::fmt::Write::write_fmt(&mut acc, format_args!("line {i}\n"));
+                acc
+            })
         };
         let pinned = crate::sha256::hex_digest(body(3).as_bytes());
         let put = |rel: &str, text: &str| -> Result<(), String> {

@@ -224,11 +224,7 @@ pub fn assess(
                 stress: Some(Stress::RepairFailed),
             };
         }
-        let Some(steps) = ledger
-            .stage
-            .reversions_to(Stage::Polyp)
-            .filter(|&s| s > 0)
-        else {
+        let Some(steps) = ledger.stage.reversions_to(Stage::Polyp).filter(|&s| s > 0) else {
             return HealthVerdict::Alarm {
                 reason: AlarmReason::AuditTrailCorrupt {
                     rule: rule.to_string(),
@@ -635,8 +631,6 @@ mod tests {
         ledger.reversion_events.clear();
         ledger.total_reused = 0;
         ledger.total_discarded = 0;
-        ledger.total_refiled = 0;
-        ledger.total_rederive = 0;
         let canon = |stage: Stage, height: u64| -> Option<[u8; 32]> {
             if (stage, height) == (Stage::Medusa, 2) {
                 return Some(C_MEDUSA);

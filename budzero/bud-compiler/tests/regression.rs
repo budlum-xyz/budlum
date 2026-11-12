@@ -6,15 +6,19 @@
 
 // A panic is how a test reports a broken invariant (the same exemption the other
 // budzero integration tests carry).
-#![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use bud_compiler::{compile, CompileError};
 use bud_isa::IsaProfile;
 
 fn run_events(src: &str) -> Vec<u64> {
-    let bytecode = compile(src, IsaProfile::Production).expect("compiles");
+    let bytecode = match compile(src, IsaProfile::Production) {
+        Ok(b) => b,
+        Err(e) => panic!("compiles: {e:?}"),
+    };
     let mut vm = bud_vm::Vm::new(bud_compiler::MIN_VM_MEMORY_BYTES);
-    vm.run(&bytecode).expect("vm runs");
+    if let Err(e) = vm.run(&bytecode) {
+        panic!("vm runs: {e:?}");
+    }
     vm.events.clone()
 }
 
@@ -169,6 +173,11 @@ fn entrypoint_abi_match_bounds_and_unknown_field_refused() {
 fn compiler_preserves_u64_patterns_scopes_and_rejects_dup_main() {
     arm_let_does_not_clobber_outer_variable();
     duplicate_main_and_oversized_literal_are_refused();
+    assert!(compile(
+        "contract T { pub fn main() {} pub fn main() {} }",
+        IsaProfile::Production
+    )
+    .is_err());
 }
 
 #[test]
@@ -199,4 +208,9 @@ fn lexer_handles_crlf_multistar_comments_and_hex_match() {
 fn deep_ast_chains_refused_without_stack_overflow() {
     long_operator_and_field_chains_return_parser_error();
     sequential_branches_release_their_registers();
+    let deep = format!(
+        "contract T {{ pub fn main() {{ let x = 0{}; }} }}",
+        " + 1".repeat(600)
+    );
+    assert!(compile(&deep, IsaProfile::Production).is_err());
 }

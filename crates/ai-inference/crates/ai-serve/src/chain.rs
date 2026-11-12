@@ -4,6 +4,7 @@
 //! grant checks) go through this interface. The skeleton has no real HTTP
 //! client: until a connection is established no chain query counts as
 //! successful, and permission rules are not copied into this crate.
+//! Convenience: exposed for workspace subcrate consumers, SDK bindings, and integration callers.
 
 use ai_core::dataset::{SourceError, SourceKind, SourceRef};
 use ai_core::model::Hash32;

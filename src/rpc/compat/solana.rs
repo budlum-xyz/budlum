@@ -1,4 +1,5 @@
 //! Solana JSON-RPC compatibility gateway (`127.0.0.1:18548`,  & section 8.11.3).
+//! Convenience: exposed for CLI, RPC, SDK, and multi-VM runtime callers.
 
 use crate::core::account::AccountState;
 use crate::rpc::compat::{
@@ -16,15 +17,23 @@ pub const SOLANA_UNAVAILABLE: i32 = -32004;
 #[must_use]
 pub fn native_door(method: &str) -> Option<&'static str> {
     Some(match method {
-        "getGenesisHash" | "getLatestBlockhash" | "isBlockhashValid" | "getBlock" => "bud_getBlockByNumber",
+        "getGenesisHash" | "getLatestBlockhash" | "isBlockhashValid" | "getBlock" => {
+            "bud_getBlockByNumber"
+        }
         "getEpochInfo" | "getTokenSupply" | "getMinimumBalanceForRentExemption" => "bud_getStatus",
         "getBalance" | "getTokenAccountBalance" => "bud_getBalance",
-        "getAccountInfo" | "getMultipleAccounts" | "getProgramAccounts"
-        | "getTokenAccountsByOwner" | "accountSubscribe" | "programSubscribe" => "bud_getAccountProof",
+        "getAccountInfo"
+        | "getMultipleAccounts"
+        | "getProgramAccounts"
+        | "getTokenAccountsByOwner"
+        | "accountSubscribe"
+        | "programSubscribe" => "bud_getAccountProof",
         "getFeeForMessage" | "getRecentPrioritizationFees" => "bud_gasPrice",
         "sendTransaction" | "requestAirdrop" => "bud_sendRawTransaction",
         "simulateTransaction" => "bud_txPrecheck",
-        "getSignatureStatuses" | "signatureSubscribe" | "logsSubscribe" => "bud_getTransactionReceipt",
+        "getSignatureStatuses" | "signatureSubscribe" | "logsSubscribe" => {
+            "bud_getTransactionReceipt"
+        }
         "getSignaturesForAddress" | "getTransaction" => "bud_getTransactionByHash",
         _ => return None,
     })
@@ -95,10 +104,7 @@ pub fn ee_unavailable(
 }
 
 #[must_use]
-pub fn not_exposed(
-    method: &str,
-    door: &'static str,
-) -> jsonrpsee::types::error::ErrorObjectOwned {
+pub fn not_exposed(method: &str, door: &'static str) -> jsonrpsee::types::error::ErrorObjectOwned {
     jsonrpsee::types::error::ErrorObjectOwned::owned(
         SOLANA_UNAVAILABLE,
         format!("{method}: this chain fact is not exposed in Solana form; use {door}"),
@@ -107,9 +113,7 @@ pub fn not_exposed(
 }
 
 #[must_use]
-pub fn faucet_unavailable(
-    method: &str,
-) -> jsonrpsee::types::error::ErrorObjectOwned {
+pub fn faucet_unavailable(method: &str) -> jsonrpsee::types::error::ErrorObjectOwned {
     jsonrpsee::types::error::ErrorObjectOwned::owned(
         SOLANA_UNAVAILABLE,
         format!("{method}: no grant was queued; use the testnet faucet"),
@@ -165,12 +169,23 @@ pub const SOLANA_METHOD_CLASSES: &[CompatMethodClass] = &[
 pub struct SolanaCompatGateway {
     config: SolanaCompatConfig,
     slot: u64,
+    latest_blockhash: [u8; 32],
+    lane_pool: crate::mempool::lanes::MultiLaneMempool,
 }
 
 impl SolanaCompatGateway {
     #[must_use]
-    pub fn new(config: SolanaCompatConfig, slot: u64, _latest_blockhash: [u8; 32]) -> Self {
-        Self { config, slot }
+    pub fn new(config: SolanaCompatConfig, slot: u64, latest_blockhash: [u8; 32]) -> Self {
+        let mut lane_pool = crate::mempool::lanes::MultiLaneMempool::new(1024, 4 * 1024 * 1024);
+        if latest_blockhash != [0u8; 32] {
+            lane_pool.push_recent_blockhash(latest_blockhash);
+        }
+        Self {
+            config,
+            slot,
+            latest_blockhash,
+            lane_pool,
+        }
     }
 
     pub fn handle_request(
@@ -196,6 +211,60 @@ impl SolanaCompatGateway {
                     return JsonRpcResponse::err(id, JSONRPC_INVALID_PARAMS, "the standalone adapter cannot honor a slot commitment config");
                 }
                 JsonRpcResponse::ok(id, serde_json::json!(self.slot))
+            }
+            "sendTransaction" => {
+                let Some(raw_str) = req
+                    .params
+                    .as_array()
+                    .and_then(|arr| arr.first())
+                    .and_then(serde_json::Value::as_str)
+                else {
+                    return JsonRpcResponse::err(
+                        id,
+                        JSONRPC_INVALID_PARAMS,
+                        "sendTransaction requires a base58 or base64 wire transaction string",
+                    );
+                };
+                let use_base64 = req
+                    .params
+                    .as_array()
+                    .and_then(|arr| arr.get(1))
+                    .and_then(|cfg| cfg.get("encoding"))
+                    .and_then(serde_json::Value::as_str)
+                    == Some("base64");
+                let wire_res = if use_base64 {
+                    crate::execution::coordinator::foreign::solana::decode_solana_base64(raw_str)
+                } else {
+                    crate::execution::coordinator::foreign::solana::decode_solana_base58::<164>(
+                        raw_str,
+                    )
+                    .map(|arr| arr.to_vec())
+                };
+                let Ok(wire) = wire_res else {
+                    return JsonRpcResponse::err(
+                        id,
+                        JSONRPC_INVALID_PARAMS,
+                        "invalid Solana wire encoding",
+                    );
+                };
+                let _window = self.lane_pool.solana_blockhash_window();
+                let _bh = self.latest_blockhash;
+                match self
+                    .lane_pool
+                    .admit_foreign_solana(&wire, 200_000, 1_000, 100, self.slot)
+                {
+                    Ok(decoded) => {
+                        let sig = crate::execution::coordinator::foreign::solana::encode_solana_base58(
+                            &decoded.fee_payer_signature,
+                        );
+                        JsonRpcResponse::ok(id, serde_json::json!(sig))
+                    }
+                    Err(err) => JsonRpcResponse::err(
+                        id,
+                        JSONRPC_TX_REJECTED,
+                        format!("Solana lane admission refused: {err:?}"),
+                    ),
+                }
             }
             "requestAirdrop" => {
                 if !self.config.testnet_faucet_enabled {

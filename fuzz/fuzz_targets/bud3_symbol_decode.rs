@@ -33,7 +33,11 @@ fuzz_target!(|data: &[u8]| {
         let take = size.min(tail.len());
         let (sym, next) = tail.split_at(take);
         rest = next;
-        let symbol = Symbol { segment: 0, esi, data: sym.to_vec() };
+        let symbol = Symbol {
+            segment: 0,
+            esi,
+            data: sym.to_vec(),
+        };
         if let Ok(Some(bytes)) = dec.push(symbol, &mut meter) {
             assert_eq!(bytes.len() as u64, len);
             break;

@@ -67,7 +67,9 @@ fn is_verification_line(line: &str) -> bool {
 fn check_workflow(path: &Path, text: &str) -> Result<(), String> {
     let label = path.display().to_string();
     if !has_schedule(text) {
-        return Err(format!("{label}: no live schedule trigger with a cron entry"));
+        return Err(format!(
+            "{label}: no live schedule trigger with a cron entry"
+        ));
     }
     let blocks = run_blocks(text);
     let mut binding = false;
@@ -140,22 +142,37 @@ pub fn self_test() -> Result<String, String> {
         }
         std::fs::write(dir.join(missing), good).map_err(|e| e.to_string())?;
 
-        let unscheduled = good.replace("  schedule:\n    - cron: \"0 3 * * *\"\n", "  workflow_dispatch:\n");
+        let unscheduled = good.replace(
+            "  schedule:\n    - cron: \"0 3 * * *\"\n",
+            "  workflow_dispatch:\n",
+        );
         std::fs::write(dir.join(missing), unscheduled).map_err(|e| e.to_string())?;
         if run(&dir).is_ok() {
-            return Err(String::from("canary: an unscheduled nightly workflow passed"));
+            return Err(String::from(
+                "canary: an unscheduled nightly workflow passed",
+            ));
         }
 
-        let softened = good.replace("      - run: cargo test --workspace\n", "      - continue-on-error: true\n        run: cargo test --workspace\n");
+        let softened = good.replace(
+            "      - run: cargo test --workspace\n",
+            "      - continue-on-error: true\n        run: cargo test --workspace\n",
+        );
         std::fs::write(dir.join(missing), softened).map_err(|e| e.to_string())?;
         if run(&dir).is_ok() {
-            return Err(String::from("canary: a softened nightly verification passed"));
+            return Err(String::from(
+                "canary: a softened nightly verification passed",
+            ));
         }
 
-        let commented = good.replace("      - run: cargo test --workspace\n", "      # - run: cargo test --workspace\n      - run: echo nothing\n");
+        let commented = good.replace(
+            "      - run: cargo test --workspace\n",
+            "      # - run: cargo test --workspace\n      - run: echo nothing\n",
+        );
         std::fs::write(dir.join(missing), commented).map_err(|e| e.to_string())?;
         if run(&dir).is_ok() {
-            return Err(String::from("canary: a commented nightly verification passed"));
+            return Err(String::from(
+                "canary: a commented nightly verification passed",
+            ));
         }
         Ok(String::from(
             "nightly_workflows_are_required canary OK: scheduled binding passes, missing/unscheduled/softened/commented verification fails",

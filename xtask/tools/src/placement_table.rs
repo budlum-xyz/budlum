@@ -167,7 +167,8 @@ pub fn compute_canonical_table(
             return Err(format!("bucket ({nf}, {nm}) below k + 2"));
         }
         if nm > 0 && nf >= 16 {
-            let mobile_ratio = (f64::from(nm) * f64::from(sm)) / (total as f64);
+            let total_f64 = f64::from(nf) * f64::from(sf) + f64::from(nm) * f64::from(sm);
+            let mobile_ratio = (f64::from(nm) * f64::from(sm)) / total_f64;
             if mobile_ratio + 1e-9 < inputs.mobile_floor {
                 return Err(format!(
                     "bucket ({nf}, {nm}) mobile share {mobile_ratio:.3} below floor {:.3}",

@@ -1418,7 +1418,9 @@ mod tests {
 
         // The categories are the distribution, and the audit reads their sum
         // rather than trusting the rows one at a time.
-        let params = testnet_genesis().bud_tokenomics.expect("testnet tokenomics");
+        let params = testnet_genesis()
+            .bud_tokenomics
+            .expect("testnet tokenomics");
         assert_eq!(params.total(), BUD_TOTAL_SUPPLY);
 
         // Stake and pool both come out of the ecosystem share, so a genesis

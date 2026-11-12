@@ -1961,9 +1961,11 @@ mod tests {
             "ab".repeat(32),
             0,
             "00".repeat(32),
-            vec![0x11; 64],
-            vec![vec![0xAA]],
-            0,
+            InvalidDilithiumEvidence {
+                pq_signature: vec![0x11; 64],
+                merkle_proof: vec![vec![0xAA]],
+                leaf_index: 0,
+            },
         );
         assert!(
             short_sibling.validate().is_err(),
@@ -1976,9 +1978,11 @@ mod tests {
             "ab".repeat(32),
             0,
             "00".repeat(32),
-            vec![0x11; 64],
-            vec![vec![0x22; 32]],
-            2,
+            InvalidDilithiumEvidence {
+                pq_signature: vec![0x11; 64],
+                merkle_proof: vec![vec![0x22; 32]],
+                leaf_index: 2,
+            },
         );
         assert!(
             high_index.validate().is_err(),
@@ -1991,9 +1995,11 @@ mod tests {
             "ab".repeat(32),
             0,
             "00".repeat(32),
-            vec![0x11; 64],
-            vec![],
-            0,
+            InvalidDilithiumEvidence {
+                pq_signature: vec![0x11; 64],
+                merkle_proof: vec![],
+                leaf_index: 0,
+            },
         );
         assert!(
             valid_shape.verify_inclusion(&"00".repeat(32)).is_err(),

@@ -2,13 +2,18 @@
 //!
 //! Each test locks a fix that is already in the tree: it is green and stays permanent.
 
-#![allow(clippy::unwrap_used, clippy::expect_used)]
-
 use bud_isa::{Instruction, MainnetActivation, Opcode};
 use bud_proof::adapter::{ExecutionPublicInputs, ProofEnvelope, ProverAdapter};
 use bud_proof::{DefaultAdapter as Prover, Plonky3Adapter};
 use bud_vm::Vm;
 use tiny_keccak::{Hasher, Keccak};
+
+fn must_ok<T, E: core::fmt::Debug>(res: Result<T, E>, msg: &str) -> T {
+    match res {
+        Ok(v) => v,
+        Err(e) => panic!("{msg}: {e:?}"),
+    }
+}
 
 const GOLDILOCKS_P: u64 = 0xFFFF_FFFF_0000_0001;
 
@@ -84,7 +89,10 @@ fn prove_and_verify(vm: &Vm, pi: &ExecutionPublicInputs, program: &[u64]) -> Res
 fn control_honest_logging_proof_is_accepted() {
     let (program, vm, events) = logging_run();
     let pi = honest_inputs(&vm, &program, &events);
-    prove_and_verify(&vm, &pi, &program).expect("control: the honest proof must verify");
+    must_ok(
+        prove_and_verify(&vm, &pi, &program),
+        "control: the honest proof must verify",
+    );
 }
 
 /// No trace containing the reserved VerifyInference opcode can be proven.
@@ -120,7 +128,8 @@ fn verify_inference_is_refused_in_any_trace() {
             )
             .map_err(|e| format!("verify refused: {e:?}"))
         });
-    let err = res.expect_err("a trace with VerifyInference must be refused");
+    assert!(res.is_err(), "a trace with VerifyInference must be refused");
+    let err = res.unwrap_err();
     assert!(
         err.starts_with("verify refused"),
         "the AIR must refuse it, got {err}"
@@ -132,7 +141,7 @@ fn verify_inference_is_refused_in_any_trace() {
 fn oversized_claims_are_refused_not_fatal() {
     let (program, vm, events) = logging_run();
     let pi = honest_inputs(&vm, &program, &events);
-    let envelope = Prover::prove(&vm.trace, &pi, &program).expect("honest proof");
+    let envelope = must_ok(Prover::prove(&vm.trace, &pi, &program), "honest proof");
     let mut huge = pi.clone();
     huge.trace_len = u64::MAX;
     let mut forged: ProofEnvelope = envelope.clone();
@@ -154,7 +163,7 @@ fn oversized_claims_are_refused_not_fatal() {
 fn non_canonical_public_scalars_are_refused() {
     let (program, vm, events) = logging_run();
     let pi = honest_inputs(&vm, &program, &events);
-    let envelope = Prover::prove(&vm.trace, &pi, &program).expect("honest proof");
+    let envelope = must_ok(Prover::prove(&vm.trace, &pi, &program), "honest proof");
     type Alias = fn(&mut ExecutionPublicInputs);
     let aliases: Vec<(&str, Alias)> = vec![
         ("sender", |p| p.sender = p.sender.wrapping_add(GOLDILOCKS_P)),
@@ -183,8 +192,11 @@ fn non_canonical_public_scalars_are_refused() {
 fn trailing_bytes_after_a_valid_proof_are_refused() {
     let (program, vm, events) = logging_run();
     let pi = honest_inputs(&vm, &program, &events);
-    let envelope = Prover::prove(&vm.trace, &pi, &program).expect("honest proof");
-    Prover::verify(&envelope, &pi, &program).expect("control: the clean proof verifies");
+    let envelope = must_ok(Prover::prove(&vm.trace, &pi, &program), "honest proof");
+    must_ok(
+        Prover::verify(&envelope, &pi, &program),
+        "control: the clean proof verifies",
+    );
     let mut padded = envelope.clone();
     padded.proof_bytes.push(0);
     assert!(
@@ -220,7 +232,10 @@ fn single_pin_source_is_not_unanimity() {
 fn unsupported_public_inputs_are_refused() {
     let (program, vm, events) = logging_run();
     let honest = honest_inputs(&vm, &program, &events);
-    prove_and_verify(&vm, &honest, &program).expect("control: the honest proof verifies");
+    must_ok(
+        prove_and_verify(&vm, &honest, &program),
+        "control: the honest proof verifies",
+    );
 
     // exit_code: a proven execution is a clean halt.
     let mut forged = honest.clone();
@@ -261,7 +276,10 @@ fn sorted_table_soundness_refuses_tampered_trace() {
     let receipt = vm.run_receipt(&program);
     assert!(receipt.success);
     let pi = honest_inputs(&vm, &program, &receipt.events);
-    prove_and_verify(&vm, &pi, &program).expect("honest memory/register trace verifies");
+    must_ok(
+        prove_and_verify(&vm, &pi, &program),
+        "honest memory/register trace verifies",
+    );
 
     let mut bad_pi = pi;
     bad_pi.event_digest = bud_proof::event_digest_from_events(&[999]);
@@ -289,7 +307,7 @@ fn verify_inference_and_forged_swrite_digest_refused() {
 fn memory_event_chain_id_and_zk_mode_bound() {
     let (program, vm, events) = logging_run();
     let pi = honest_inputs(&vm, &program, &events);
-    let env = Prover::prove(&vm.trace, &pi, &program).expect("honest proof");
+    let env = must_ok(Prover::prove(&vm.trace, &pi, &program), "honest proof");
 
     // High 32 bits of chain_id must be bound into the transcript.
     let mut hi_chain = pi.clone();
@@ -307,7 +325,15 @@ fn memory_event_chain_id_and_zk_mode_bound() {
 
 #[test]
 fn oversized_degree_bits_and_preprocessed_setup_refused() {
+    use bud_proof::bud_stark::setup_preprocessed;
+    use bud_proof::plonky3_air::BudAir;
     oversized_claims_are_refused_not_fatal();
+    let cfg = bud_proof::plonky3_prover::build_config();
+    let air = BudAir {
+        num_steps: 4,
+        program: vec![0; 4],
+    };
+    assert!(setup_preprocessed(&cfg, &air, 30).is_none());
 }
 
 #[test]
@@ -321,7 +347,7 @@ fn quarantine_ledger_caps_entries_and_roundtrips() {
     }
     assert_eq!(ledger.len(), 4096);
     let text = ledger.to_text();
-    let parsed = QuarantineLedger::from_text(&text).expect("roundtrip");
+    let parsed = must_ok(QuarantineLedger::from_text(&text), "roundtrip");
     assert_eq!(parsed.len(), 4096);
 }
 
@@ -338,7 +364,7 @@ fn aux_openings_and_canonical_recovery_unanimity_enforced() {
 
 #[test]
 fn preprocessed_setup_and_stark_config_bounds_enforced() {
-    use bud_proof::bud_stark::preprocessed::{setup_preprocessed, MAX_SETUP_DEGREE_BITS};
+    use bud_proof::bud_stark::{setup_preprocessed, MAX_SETUP_DEGREE_BITS};
     use bud_proof::plonky3_air::BudAir;
     let cfg = bud_proof::plonky3_prover::build_config();
     let air = BudAir {
@@ -358,7 +384,7 @@ fn goldilocks_canonical_scalars_and_envelope_degree_bound() {
     non_canonical_public_scalars_are_refused();
     let (program, vm, events) = logging_run();
     let pi = honest_inputs(&vm, &program, &events);
-    let mut env = Prover::prove(&vm.trace, &pi, &program).expect("honest proof");
+    let mut env = must_ok(Prover::prove(&vm.trace, &pi, &program), "honest proof");
     env.degree_bits = env.degree_bits.saturating_add(1);
     assert!(Prover::verify(&env, &pi, &program).is_err());
 }
@@ -377,5 +403,8 @@ fn faulting_vm_trace_with_synthetic_halt_is_provable() {
     assert!(!receipt.success);
     let mut pi = honest_inputs(&vm, &program, &receipt.events);
     pi.exit_code = receipt.exit_code;
-    prove_and_verify(&vm, &pi, &program).expect("faulting trace with exit_code != 0 must prove");
+    must_ok(
+        prove_and_verify(&vm, &pi, &program),
+        "faulting trace with exit_code != 0 must prove",
+    );
 }

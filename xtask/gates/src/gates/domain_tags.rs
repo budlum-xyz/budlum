@@ -10,34 +10,34 @@
 //! Two scope fixes are load-bearing, and both were measured, not assumed:
 //!
 //! 1. **Prefix blind spot.** The gate used to match only `BDLM_`. The tree
-//! carries a full legacy `BUDLUM_` generation from before the rename:
-//! 23 hash/signature tags (finality, consensus, `PoA`, note registry,
-//! wallet-core key derivation) plus 14 non-domain literals (env vars,
-//! HSM slot label, CLI/test strings). None of them reached the
-//! inventory, so a separation tag could be edited in those files without
-//! any review surface noticing. The gate now matches both prefixes, and
-//! the inventory lists all of them - including the non-domain ones, so
-//! the gate needs no hidden exception list to stay total.
+//!    carries a full legacy `BUDLUM_` generation from before the rename:
+//!    23 hash/signature tags (finality, consensus, `PoA`, note registry,
+//!    wallet-core key derivation) plus 14 non-domain literals (env vars,
+//!    HSM slot label, CLI/test strings). None of them reached the
+//!    inventory, so a separation tag could be edited in those files without
+//!    any review surface noticing. The gate now matches both prefixes, and
+//!    the inventory lists all of them - including the non-domain ones, so
+//!    the gate needs no hidden exception list to stay total.
 //! 2. **Path blind spot.** The scan used to read `src`, `budzero` and a
-//! literal `wallet-core` directory that does not exist (the crate lives
-//! at `crates/wallet-core`). `scan_dir` returns early on a missing
-//! directory, so the wallet-core surface was never looked at. The scan
-//! became `src` + `budzero` + `crates`.
+//!    literal `wallet-core` directory that does not exist (the crate lives
+//!    at `crates/wallet-core`). `scan_dir` returns early on a missing
+//!    directory, so the wallet-core surface was never looked at. The scan
+//!    became `src` + `budzero` + `crates`.
 //! 3. **The `bud/` exemption.** `bud/` was then left out on the grounds
-//! that it is a separate workspace with its own `BDLM_BUD_*` constellation
-//! and its own gates. Measured (2026-09-02): `bud/` has no domain-tag
-//! gate of its own, it carries 55 distinct tags, and one of them,
-//! `BDLM_CONTENT_V1`, is also used by `src/storage/content_id.rs` and
-//! `budzero/bud-node/src/store.rs`. A tag shared across trees is the
-//! collision case the inventory exists to review, and it sat outside the
-//! review surface. The scan is `src` + `budzero` + `crates` + `bud` now.
+//!    that it is a separate workspace with its own `BDLM_BUD_*` constellation
+//!    and its own gates. Measured (2026-09-02): `bud/` has no domain-tag
+//!    gate of its own, it carries 55 distinct tags, and one of them,
+//!    `BDLM_CONTENT_V1`, is also used by `src/storage/content_id.rs` and
+//!    `budzero/bud-node/src/store.rs`. A tag shared across trees is the
+//!    collision case the inventory exists to review, and it sat outside the
+//!    review surface. The scan is `src` + `budzero` + `crates` + `bud` now.
 //! 4. **The `mobile/` blind spot.** The mobile core (the mobile validator core) is a standalone
-//! crate under `mobile/core`, outside all four roots. Measured when it
-//! landed: it carried four tags, `BDLM_PRESENCE_V1` and
-//! `BDLM_PRESENCE_HINT_V1` among them, and neither presence tag was in the
-//! inventory, so a phone could sign under a domain no reviewer had seen.
-//! A phone's signature is verified by the node, so its domains are the
-//! node's domains. The scan reads `mobile` too.
+//!    crate under `mobile/core`, outside all four roots. Measured when it
+//!    landed: it carried four tags, `BDLM_PRESENCE_V1` and
+//!    `BDLM_PRESENCE_HINT_V1` among them, and neither presence tag was in the
+//!    inventory, so a phone could sign under a domain no reviewer had seen.
+//!    A phone's signature is verified by the node, so its domains are the
+//!    node's domains. The scan reads `mobile` too.
 
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
@@ -154,9 +154,9 @@ pub fn run(root: &Path) -> Result<String, String> {
     if !inventory_path.is_file() {
         return Err(format!("missing inventory: {INVENTORY}"));
     }
- // `listed` comes from the inventory file alone; `used` comes from every
- // source file except the inventory itself (the shell gate's
- // `tags_in_inventory` / `tags_in_sources` split).
+    // `listed` comes from the inventory file alone; `used` comes from every
+    // source file except the inventory itself (the shell gate's
+    // `tags_in_inventory` / `tags_in_sources` split).
     let inventory_text =
         fs::read_to_string(&inventory_path).map_err(|e| format!("cannot read {INVENTORY}: {e}"))?;
     let mut listed = BTreeSet::new();
@@ -227,8 +227,8 @@ pub fn self_test() -> Result<String, String> {
         return Err(String::from("self-test: unlisted tag was not caught"));
     }
 
- // The `BUDLUM_` prefix lives in code that predates the rename; an
- // unlisted legacy tag must trip the gate just like a `BDLM_` one.
+    // The `BUDLUM_` prefix lives in code that predates the rename; an
+    // unlisted legacy tag must trip the gate just like a `BDLM_` one.
     fs::write(
         tmp.join("src/sneaky.rs"),
         "const B: &[u8] = b\"BUDLUM_UNLISTED_V1\";\n",
@@ -241,9 +241,9 @@ pub fn self_test() -> Result<String, String> {
         ));
     }
 
- // A tag under `crates/` must be seen: the scan used to name a
- // nonexistent top-level `wallet-core` directory, which made the whole
- // wallet surface invisible without a single error.
+    // A tag under `crates/` must be seen: the scan used to name a
+    // nonexistent top-level `wallet-core` directory, which made the whole
+    // wallet surface invisible without a single error.
     fs::remove_file(tmp.join("src/sneaky.rs")).map_err(|e| e.to_string())?;
     fs::write(
         tmp.join("crates/wallet-core/src/lib.rs"),
@@ -257,8 +257,8 @@ pub fn self_test() -> Result<String, String> {
         ));
     }
 
- // A tag under `bud/` must be seen too: the B.U.D. workspace was
- // exempted as "having its own gates", and it has none for this.
+    // A tag under `bud/` must be seen too: the B.U.D. workspace was
+    // exempted as "having its own gates", and it has none for this.
     fs::remove_file(tmp.join("crates/wallet-core/src/lib.rs")).map_err(|e| e.to_string())?;
     fs::write(
         tmp.join("bud/src/lib.rs"),
@@ -274,8 +274,8 @@ pub fn self_test() -> Result<String, String> {
 
     fs::remove_file(tmp.join("bud/src/lib.rs")).map_err(|e| e.to_string())?;
 
- // A tag under `mobile/` must be seen: the phone signs under it and the
- // node verifies it, so it is a node domain like any other.
+    // A tag under `mobile/` must be seen: the phone signs under it and the
+    // node verifies it, so it is a node domain like any other.
     fs::write(
         tmp.join("mobile/core/src/lib.rs"),
         "const E: &[u8] = b\"BDLM_MOBILE_UNLISTED_V1\";\n",
@@ -307,7 +307,7 @@ pub fn self_test() -> Result<String, String> {
 mod tests {
     use super::*;
 
- /// A missing scan root must fail, not pass silently.
+    /// A missing scan root must fail, not pass silently.
     #[test]
     fn missing_scan_root_is_an_error() {
         let dir = std::env::temp_dir().join(format!("dtags-missing-{}", std::process::id()));
@@ -317,7 +317,7 @@ mod tests {
         assert!(out.is_err());
     }
 
- /// A `'"'` character literal must not hide the tags after it.
+    /// A `'"'` character literal must not hide the tags after it.
     #[test]
     fn extract_survives_a_quote_character_literal() {
         let mut s = BTreeSet::new();
@@ -331,7 +331,7 @@ mod tests {
         );
     }
 
- /// A tag-shaped word that is not a complete literal is not a tag.
+    /// A tag-shaped word that is not a complete literal is not a tag.
     #[test]
     fn extract_requires_a_closing_quote() {
         let mut s = BTreeSet::new();

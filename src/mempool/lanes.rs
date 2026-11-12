@@ -12,6 +12,7 @@
 //!
 //! Block proposers draw across all non-empty lanes ordered by effective
 //! priority fee per BGU (`effective_priority_fee_atto`).
+//! Convenience: exposed for CLI, RPC, SDK, and multi-VM runtime callers.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
@@ -62,10 +63,7 @@ pub enum LaneReplayRule {
         sequence: u64,
     },
     /// Validator duty batch bounded to one submission per `(validator, window_id)`.
-    DutyWindow {
-        validator: [u8; 32],
-        window_id: u64,
-    },
+    DutyWindow { validator: [u8; 32], window_id: u64 },
 }
 
 /// One admitted transaction sitting in a UEL mempool lane.
@@ -118,7 +116,7 @@ impl fmt::Display for LaneAdmissionError {
 
 impl std::error::Error for LaneAdmissionError {}
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 struct SingleLane {
     entries: BTreeMap<[u8; 32], LaneEntry>,
     used_bytes: usize,
@@ -126,7 +124,7 @@ struct SingleLane {
 }
 
 /// Six-lane isolated transaction pool with priority-fee cross-lane selection.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct MultiLaneMempool {
     max_entries_per_lane: usize,
     max_bytes_per_lane: usize,
@@ -212,10 +210,8 @@ impl MultiLaneMempool {
         max_fee_per_bgu_atto: u128,
         max_priority_fee_per_bgu_atto: u128,
         now_unix_s: u64,
-    ) -> Result<
-        crate::execution::coordinator::foreign::solana::DecodedSolanaTx,
-        LaneAdmissionError,
-    > {
+    ) -> Result<crate::execution::coordinator::foreign::solana::DecodedSolanaTx, LaneAdmissionError>
+    {
         use crate::execution::coordinator::foreign::solana::decode_solana_tx;
 
         if gas_limit_bgu == 0 {
@@ -259,9 +255,10 @@ impl MultiLaneMempool {
     pub fn admit(&mut self, entry: LaneEntry, now_unix_s: u64) -> Result<(), LaneAdmissionError> {
         // 1. Validate lane <-> replay rule match and replay/freshness BEFORE mutating!
         let nonce_pair: Option<([u8; 32], u64)> = match (&entry.lane, &entry.replay) {
-            (LaneKind::Local | LaneKind::Ethereum, LaneReplayRule::AccountNonce { sender, nonce }) => {
-                Some((*sender, *nonce))
-            }
+            (
+                LaneKind::Local | LaneKind::Ethereum,
+                LaneReplayRule::AccountNonce { sender, nonce },
+            ) => Some((*sender, *nonce)),
             (
                 LaneKind::Solana,
                 LaneReplayRule::SolanaWindow {
@@ -510,7 +507,7 @@ mod tests {
             false,
             blockhash,
             &[[0xEEu8; 32]],
-            &[instruction.clone()],
+            std::slice::from_ref(&instruction),
         );
         let mut pool = MultiLaneMempool::new(8, 4096);
         pool.push_recent_blockhash(blockhash);

@@ -48,7 +48,25 @@ jobs:
           workspaces: execution/conformance
           shared-key: uel-conformance-${{ matrix.arch }}
       - name: Install protoc
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
+        run: |
+          set -euo pipefail
+          if ! command -v protoc >/dev/null 2>&1; then
+            case "$(uname -m)" in
+              aarch64|arm64)
+                PROTOC_ZIP=protoc-29.3-linux-aarch_64.zip
+                PROTOC_SHA256=6427349140e01f06e049e707a58709a4f221ae73ab9a0425bc4a00c8d0e1ab32
+                ;;
+              *)
+                PROTOC_ZIP=protoc-29.3-linux-x86_64.zip
+                PROTOC_SHA256=3e866620c5be27664f3d2fa2d656b5f3e09b5152b42f1bedbf427b333e90021a
+                ;;
+            esac
+            curl -sSfL --retry 5 --retry-all-errors --retry-delay 2 -o /tmp/protoc.zip \
+              "https://github.com/protocolbuffers/protobuf/releases/download/v29.3/${PROTOC_ZIP}"
+            echo "${PROTOC_SHA256}  /tmp/protoc.zip" | sha256sum -c -
+            sudo unzip -q -o /tmp/protoc.zip -d /usr/local bin/protoc 'include/*'
+            rm -f /tmp/protoc.zip
+          fi
       - name: Run conformance suites and gas calibration
         shell: bash
         env:
@@ -61,13 +79,15 @@ jobs:
           ROOT=$(cat "uel-root-${CONFORMANCE_ARCH}.hex")
           echo "UEL_EXECUTION_ROOT (${CONFORMANCE_ARCH}): ${ROOT}"
           test "${#ROOT}" -eq 64
+      - name: Build mock worker binary
+        run: cargo build --manifest-path execution/mock/Cargo.toml
       - name: Measure parallel block execution timing
         env:
           CONFORMANCE_ARCH: ${{ matrix.arch }}
         shell: bash
         run: |
           set -euo pipefail
-          cargo test --release --lib execution::coordinator::scheduler::tests:: -- --nocapture | tee "scheduler-${CONFORMANCE_ARCH}.log"
+          cargo test --lib execution::coordinator::scheduler::tests:: -- --nocapture | tee "scheduler-${CONFORMANCE_ARCH}.log"
           sed -n 's/^PARALLEL_BLOCK_TIMING_JSON=//p' "scheduler-${CONFORMANCE_ARCH}.log" | head -n1 > "parallel-block-timing-${CONFORMANCE_ARCH}.json"
           test -s "parallel-block-timing-${CONFORMANCE_ARCH}.json"
       - name: Upload execution_root digest

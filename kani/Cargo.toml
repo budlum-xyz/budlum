@@ -33,6 +33,9 @@ members = ["."]
 
 [dev-dependencies]
 
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }
+
 # Release hardening: a wrapping operation becomes a panic and the
 # panic becomes an exit, as in the node. Tests are unaffected: Cargo builds
 # test targets with unwinding whatever this says.

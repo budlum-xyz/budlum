@@ -20,7 +20,9 @@ import network.budlum.validator.core.Policy
 import network.budlum.validator.core.RelayOffer
 import network.budlum.validator.core.ShareCustodyDirectory
 import network.budlum.validator.core.StorageAudit
+import network.budlum.validator.core.ValidatorOnboardingGate
 import network.budlum.validator.core.generatePreferStrongBox
+import network.budlum.validator.core.presenceSigningDigest
 import network.budlum.validator.devicetests.DeviceFieldHarness
 
 /**
@@ -105,24 +107,23 @@ object MobileValidatorUnitTest {
         check(vault.unwrapKey(opEnvelope).contentEquals(operatorSecret), "operator key round-trips")
         check(vault.unwrapKey(blsEnvelope).contentEquals(blsSecret), "BLS key round-trips")
 
-        var ownerBlockedWithoutBiometric = false
-        try {
-            vault.wrapKey(KeyPurpose.OwnerSpendMlDsa87, ownerSecret, biometricAuthToken = null)
-        } catch (_: SecurityException) {
-            ownerBlockedWithoutBiometric = true
+        // Even the old public bearer token, a random string, and an empty
+        // string must all fail. No production owner wrapper can be created
+        // without a real Keystore-backed authorization and wallet signer.
+        for (candidate in listOf(null, "BIOMETRIC_VERIFIED_SESSION", "arbitrary")) {
+            check(
+                runCatching {
+                    vault.wrapKey(KeyPurpose.OwnerSpendMlDsa87, ownerSecret, biometricAuthToken = candidate)
+                }.exceptionOrNull() is SecurityException,
+                "owner key wrapping must refuse every caller-controlled string",
+            )
+            check(
+                runCatching {
+                    vault.unwrapKey(opEnvelope.copy(purpose = KeyPurpose.OwnerSpendMlDsa87), candidate)
+                }.exceptionOrNull() is SecurityException,
+                "owner key unwrapping must refuse every caller-controlled string",
+            )
         }
-        check(ownerBlockedWithoutBiometric, "owner ML-DSA-87 key must require biometric/PIN")
-
-        val ownerEnvelope = vault.wrapKey(
-            KeyPurpose.OwnerSpendMlDsa87,
-            ownerSecret,
-            biometricAuthToken = "BIOMETRIC_VERIFIED_SESSION",
-        )
-        check(ownerEnvelope.userAuthenticationRequired, "owner key requires user auth")
-        check(
-            vault.unwrapKey(ownerEnvelope, "BIOMETRIC_VERIFIED_SESSION").contentEquals(ownerSecret),
-            "owner key unwraps after biometric verification",
-        )
     }
 
     fun android_unwrap_requires_existing_wrapping_key() {
@@ -251,130 +252,166 @@ object MobileValidatorUnitTest {
         }
     }
 
-    fun android_metered_data_unknown_fails_closed() {
+    fun android_unconnected_policy_and_stake_do_not_create_duties() {
         val engine = MobileValidatorEngine(
             ownerAddressHex = "06".repeat(32),
             keyVault = KeystoreKeyVault(JvmMemoryWrappingKeyProvider()),
             custodyDir = newTestCustody(),
             relays = emptyList(),
             initialAvailableBytes = 16L * MobileConstants.GIB_BYTES,
+            initialSimulatedLiquidBud = 100L,
         )
-        engine.requestTestnetFaucet(1L)
-        engine.registerValidator("BIOMETRIC_VERIFIED_SESSION", "42".repeat(32))
-        engine.setPolicy(Policy(network = NetworkPolicy.Metered(dailyCapMb = 100)))
-        fun tick(used: Long?, unmetered: Boolean = false): List<DutyTx> =
-            engine.runWorkManagerPeriodicTick(
-                window = 19L,
-                isUnmeteredWifi = unmetered,
-                pendingAudits = emptyList(),
-                mobileUsedMbToday = used,
-                incomingShares = emptyList(),
-            )
-        check(tick(null).isEmpty(), "unknown metered usage fails closed")
-        check(tick(-1L).isEmpty(), "negative metered usage refused")
-        check(tick(100L).isEmpty(), "daily cap is exclusive")
-        check(tick(99L).any { it is DutyTx.Presence }, "usage below cap permits duty")
-        check(tick(null, unmetered = true).any { it is DutyTx.Presence }, "unmetered Wi-Fi needs no mobile meter")
+        check(runCatching {
+            engine.setPolicy(Policy(network = NetworkPolicy.Metered(dailyCapMb = 100)))
+        }.isFailure, "policy cannot delete shares or claim a mobile duty before onboarding")
+        for (token in listOf("", "BIOMETRIC_VERIFIED_SESSION", "someone-else")) {
+            check(runCatching { engine.registerValidator(token, "42".repeat(32)) }.isFailure,
+                "caller-supplied token cannot stake even with simulated funds")
+        }
+        val tick = engine.runWorkManagerPeriodicTick(
+            window = 19L, isUnmeteredWifi = true, pendingAudits = emptyList(),
+            incomingShares = emptyList(),
+        )
+        check(tick.isEmpty() && engine.drainOutbox().isEmpty(), "no false presence, stake or network duties")
+        check(!engine.status().registered && engine.status().liquidBud == 100L, "balance unchanged")
     }
 
-    fun android_leave_releases_shares_and_unbonds() {
+    fun android_unbound_leave_keeps_local_shares() {
         val bud3 = newTempBud3Dir()
-        val vault = KeystoreKeyVault(JvmMemoryWrappingKeyProvider())
+        val custody = ShareCustodyDirectory(bud3) { Long.MAX_VALUE }
+        custody.putShare(AssignedShare("00ff11", 0, ByteArray(4096) { 0x5a }),
+            MobileConstants.QUOTA_DEFAULT_BYTES)
         val engine = MobileValidatorEngine(
             ownerAddressHex = "02".repeat(32),
-            keyVault = vault,
-            custodyDir = ShareCustodyDirectory(bud3) { Long.MAX_VALUE },
-            relays = listOf(RelayOffer("/ip4/198.51.100.2/udp/4001/quic-v1", 8_000L)),
+            keyVault = KeystoreKeyVault(JvmMemoryWrappingKeyProvider()),
+            custodyDir = custody,
+            relays = emptyList(),
             initialAvailableBytes = 16L * MobileConstants.GIB_BYTES,
         )
-        engine.requestTestnetFaucet(powNonce = 7L)
-        engine.registerValidator("BIOMETRIC_VERIFIED_SESSION", "ab".repeat(32))
-        engine.startForegroundFromUi(isAppInForeground = true)
-        engine.acceptShare(AssignedShare("00ff11", 0, ByteArray(4096) { 0x5a }))
-        check(engine.status().storedBytes == 4096L, "share stored before leave")
-
-        val txs = engine.leave("BIOMETRIC_VERIFIED_SESSION")
-        check(txs.any { it is DutyTx.ReleaseShares }, "leave must emit ReleaseShares")
-        check(
-            txs.any { it is DutyTx.UnbondValidator && it.stakeBud == MobileConstants.MOBILE_MIN_STAKE_BUD },
-            "leave must unbond the 10 BUD stake",
-        )
-        check(engine.status().storedBytes == 0L, "all share files removed on leave")
-        check(!engine.status().running && !engine.status().registered, "validator stopped after leave")
+        check(runCatching { engine.leave("BIOMETRIC_VERIFIED_SESSION") }.isFailure,
+            "a static string cannot unbond or release a share")
+        check(engine.status().storedBytes == 4096L && engine.drainOutbox().isEmpty(),
+            "rejected leave preserves existing local custody and emits no fake chain release")
     }
 
-    fun android_low_space_releases_shares() {
+    fun android_unbound_low_space_does_not_silently_delete_shares() {
         val bud3 = newTempBud3Dir()
+        val custody = ShareCustodyDirectory(bud3) { Long.MAX_VALUE }
+        custody.putShare(AssignedShare("aa01bb", 1, ByteArray(2048) { 0x33 }),
+            MobileConstants.QUOTA_DEFAULT_BYTES)
         val engine = MobileValidatorEngine(
             ownerAddressHex = "03".repeat(32),
             keyVault = KeystoreKeyVault(JvmMemoryWrappingKeyProvider()),
-            custodyDir = ShareCustodyDirectory(bud3) { Long.MAX_VALUE },
+            custodyDir = custody,
             relays = emptyList(),
             initialAvailableBytes = 8L * MobileConstants.GIB_BYTES,
         )
-        engine.requestTestnetFaucet(1L)
-        engine.registerValidator("BIOMETRIC_VERIFIED_SESSION", "cd".repeat(32))
-        engine.acceptShare(AssignedShare("aa01bb", 1, ByteArray(2048) { 0x33 }))
-        check(engine.status().storedBytes == 2048L, "share present above 2 GiB floor")
-
-        val release = engine.updateAvailableDiskBytes(MobileConstants.FREE_SPACE_FLOOR_BYTES - 1L)
-        check(
-            release != null && release.segments == listOf("aa01bb"),
-            "R-34 dropping below 2 GiB free space must emit ReleaseShares",
-        )
-        check(engine.status().storedBytes == 0L, "custody directory cleared at low space")
+        check(engine.updateAvailableDiskBytes(MobileConstants.FREE_SPACE_FLOOR_BYTES - 1L) == null,
+            "no unsigned release claim on low space")
+        check(custody.storedBytes() == 2048L && engine.drainOutbox().isEmpty(),
+            "unbound low-space check cannot delete custody files")
     }
 
-    fun android_onboarding_reaches_registered_state() {
-        val bud3 = newTempBud3Dir()
-        val vault = KeystoreKeyVault(JvmMemoryWrappingKeyProvider())
+    fun android_release_requires_real_generated_wallet_binding() {
+        val gradle = File("mobile/android/app/build.gradle.kts").readText()
+        check(gradle.contains("checkNativeValidatorRelease"), "release validates native owner proof artifacts")
+        check(gradle.contains("preReleaseBuild"), "release build depends on binding validation")
+        check(gradle.contains("budlum_mobile_ffi.kt"), "release requires generated UniFFI Kotlin")
+        check(gradle.contains("NativeValidatorGateway.kt"), "release requires real host gateway")
+        check(gradle.contains("libbudlum_mobile_ffi.so"), "release requires built native library")
+        check(gradle.contains("readyForDuties(): Boolean = false"), "release must refuse while gate is closed")
+        check(!ValidatorOnboardingGate.readyForDuties(), "no wallet proof may enable validator today")
+    }
+
+    fun android_unconnected_onboarding_is_fail_closed() {
+        check(!ValidatorOnboardingGate.readyForDuties(), "an RPC balance is not wallet registration")
+        for (owner in listOf("00".repeat(32), "01", "zz".repeat(32))) {
+            check(runCatching {
+                MobileValidatorEngine(
+                    ownerAddressHex = owner,
+                    keyVault = KeystoreKeyVault(JvmMemoryWrappingKeyProvider()),
+                    custodyDir = newTestCustody(),
+                    relays = emptyList(),
+                    initialAvailableBytes = 8L * MobileConstants.GIB_BYTES,
+                )
+            }.isFailure, "zero or malformed owner must not construct a node")
+        }
+        val service = File("mobile/android/app/src/main/java/network/budlum/validator/service/ValidatorService.kt").readText()
+        val worker = File("mobile/android/app/src/main/java/network/budlum/validator/worker/DutyPeriodicWorker.kt").readText()
+        check(service.contains("!ValidatorOnboardingGate.readyForDuties()"), "service checks wallet readiness")
+        check(service.contains("return START_NOT_STICKY"), "unbound service cannot be sticky")
+        check(worker.contains("if (!ValidatorOnboardingGate.readyForDuties()) return Result.failure()"),
+            "periodic duty cannot claim success without onboarding")
+        check(!worker.contains("updateAvailableDiskBytes"), "an unbound worker must not delete custody files")
+        val ffi = File("mobile/ffi/src/lib.rs").readText()
+        check(ffi.contains("mobile_validator_unconnected"), "native start must refuse without registration")
+    }
+
+    fun android_unfunded_engine_cannot_register_from_faucet_ui() {
+        val engine = MobileValidatorEngine(
+            ownerAddressHex = "01".repeat(32),
+            keyVault = KeystoreKeyVault(JvmMemoryWrappingKeyProvider()),
+            custodyDir = newTestCustody(),
+            relays = emptyList(),
+            initialAvailableBytes = 8L * MobileConstants.GIB_BYTES,
+        )
+        check(engine.status().liquidBud == 0L, "no simulated faucet mint on construction")
+        check(
+            runCatching { engine.registerValidator("BIOMETRIC_VERIFIED_SESSION", "01".repeat(32)) }.isFailure,
+            "an unconnected wallet cannot fund registration through a faucet HTTP response",
+        )
+        check(engine.status().liquidBud == 0L && !engine.status().registered, "failed registration leaves state unchanged")
+    }
+
+    fun android_owner_string_never_unlocks_stake_rotation_or_duty() {
         val engine = MobileValidatorEngine(
             ownerAddressHex = "04".repeat(32),
-            keyVault = vault,
-            custodyDir = ShareCustodyDirectory(bud3) { Long.MAX_VALUE },
+            keyVault = KeystoreKeyVault(JvmMemoryWrappingKeyProvider()),
+            custodyDir = newTestCustody(),
             relays = listOf(RelayOffer("/ip4/203.0.113.7/udp/4001/quic-v1", 12_000L)),
             initialAvailableBytes = 12L * MobileConstants.GIB_BYTES,
+            initialSimulatedLiquidBud = 100L,
         )
-        check(engine.requestTestnetFaucet(powNonce = 42L) == 100L, "faucet drips 100 BUD")
-        engine.registerValidator("BIOMETRIC_VERIFIED_SESSION", "ef".repeat(32))
-        engine.startForegroundFromUi(isAppInForeground = true)
-        engine.acceptShare(AssignedShare("cafe01", 0, ByteArray(1024) { 0x11 }))
-        engine.answerAudit(StorageAudit("cafe01", challengeNonce = 99L))
-        val snap = engine.status()
-        check(snap.registered && snap.running, "onboarding reaches registered + running state")
-        check(snap.stakedBud == 10L && snap.liquidBud == 90L, "10 BUD staked, 90 BUD liquid")
-        check(snap.lastAudit == LastAudit.Passed, "audit answered")
-        check(snap.pendingRewardsAttos > 0L, "reward accrued after passed audit")
-
-        val rotated = engine.rotateOperatorKey("BIOMETRIC_VERIFIED_SESSION", "12".repeat(32))
-        check(rotated.newOperatorPubKeyHex == "12".repeat(32), "R-16 RotateOperatorKey succeeds")
+        val before = engine.status()
+        val oldToken = "BIOMETRIC_VERIFIED_SESSION"
+        check(runCatching { engine.registerValidator(oldToken, "ef".repeat(32)) }.isFailure,
+            "old public bearer string cannot stake simulated funds")
+        check(runCatching { engine.rotateOperatorKey(oldToken, "12".repeat(32)) }.isFailure,
+            "old public bearer string cannot rotate operator key")
+        check(runCatching { engine.leave(oldToken) }.isFailure,
+            "old public bearer string cannot release or unbond")
+        check(runCatching { engine.startForegroundFromUi(true) }.isFailure,
+            "not-onboarded engine cannot start foreground service")
+        check(runCatching { engine.acceptShare(AssignedShare("cafe01", 0, byteArrayOf(1))) }.isFailure,
+            "not-onboarded engine cannot accept shares or emit acknowledgments")
+        check(runCatching { engine.answerAudit(StorageAudit("cafe01", 99L)) }.isFailure,
+            "not-onboarded engine cannot claim an audit result or reward")
+        check(engine.status() == before && engine.drainOutbox().isEmpty(),
+            "all denied owner and duty calls leave state and outbox unchanged")
     }
 
-    fun android_workmanager_answers_audit_when_service_stopped() {
+    fun android_unbound_worker_cannot_claim_custody_audits_or_rewards() {
         val bud3 = newTempBud3Dir()
+        val custody = ShareCustodyDirectory(bud3) { Long.MAX_VALUE }
+        custody.putShare(AssignedShare("beef02", 2, ByteArray(512) { 0x7f }),
+            MobileConstants.QUOTA_DEFAULT_BYTES)
         val engine = MobileValidatorEngine(
             ownerAddressHex = "05".repeat(32),
             keyVault = KeystoreKeyVault(JvmMemoryWrappingKeyProvider()),
-            custodyDir = ShareCustodyDirectory(bud3) { Long.MAX_VALUE },
-            relays = listOf(RelayOffer("/ip4/203.0.113.9/udp/4001/quic-v1", 10_000L)),
+            custodyDir = custody,
+            relays = emptyList(),
             initialAvailableBytes = 12L * MobileConstants.GIB_BYTES,
         )
-        engine.requestTestnetFaucet(1L)
-        engine.registerValidator("BIOMETRIC_VERIFIED_SESSION", "99".repeat(32))
-        engine.stopForeground()
-        check(!engine.status().running, "foreground service is stopped")
-
         val txs = engine.runWorkManagerPeriodicTick(
-            window = 17L,
-            isUnmeteredWifi = true,
+            window = 17L, isUnmeteredWifi = true,
             pendingAudits = listOf(StorageAudit("beef02", challengeNonce = 7L)),
-            incomingShares = listOf(AssignedShare("beef02", 2, ByteArray(512) { 0x7f })),
+            incomingShares = listOf(AssignedShare("cafe03", 0, byteArrayOf(1))),
         )
-        check(txs.any { it is DutyTx.CustodyAck }, "WorkManager accepts share while service stopped")
-        check(txs.any { it is DutyTx.CustodyProofBatch }, "WorkManager answers audit while service stopped")
-        check(txs.any { it is DutyTx.Presence }, "WorkManager emits BLS presence preimage")
-        check(engine.status().lastAudit == LastAudit.Passed, "WorkManager updates audit state to Passed")
-
+        check(txs.isEmpty() && engine.drainOutbox().isEmpty(),
+            "unbound worker cannot claim successful audit, custody or presence")
+        check(engine.status().storedBytes == 512L && engine.status().lastAudit == LastAudit.None &&
+            engine.status().pendingRewardsAttos == 0L,
+            "unbound duty preserves previous files and earns no synthetic rewards")
         for (oem in listOf("Google", "Samsung", "Xiaomi", "OnePlus", "Motorola")) {
             val guide = OemBatteryGuide.forManufacturer(oem)
             check(!guide.usesIgnoreBatteryPermission, "OEM guide never requests ignore-battery permission")
@@ -383,39 +420,16 @@ object MobileValidatorUnitTest {
         check(logLine.contains("on_timeout=false"), "field harness formats TSV soak line")
     }
 
-    fun android_presence_matches_the_shared_sha3_vector() {
-        val engine = MobileValidatorEngine(
-            ownerAddressHex = "05".repeat(32),
-            keyVault = KeystoreKeyVault(JvmMemoryWrappingKeyProvider()),
-            custodyDir = newTestCustody(),
-            relays = listOf(RelayOffer("/ip4/203.0.113.9/udp/4001/quic-v1", 10_000L)),
-            initialAvailableBytes = 12L * MobileConstants.GIB_BYTES,
-        )
-        engine.requestTestnetFaucet(1L)
-        engine.registerValidator("BIOMETRIC_VERIFIED_SESSION", "99".repeat(32))
-        engine.stopForeground()
-        val presence = engine.runWorkManagerPeriodicTick(
-            window = 11L,
-            isUnmeteredWifi = true,
-            pendingAudits = emptyList(),
-            incomingShares = emptyList(),
-        ).filterIsInstance<DutyTx.Presence>().single()
-        check(
-            presence.preimageHex ==
-                "26a5bec8b11098debd4eeffbe797638d295a08aa570cb3c176d9c5e41bfbb2a3",
-            "Android signs the same length-prefixed SHA3-256 message as node and Rust core",
-        )
-        check(
-            runCatching {
-                engine.runWorkManagerPeriodicTick(
-                    window = -1L,
-                    isUnmeteredWifi = true,
-                    pendingAudits = emptyList(),
-                    incomingShares = emptyList(),
-                )
-            }.isFailure,
-            "negative presence windows are refused",
-        )
+    fun android_presence_digest_matches_shared_sha3_vector_without_claiming_a_signature() {
+        val digest = presenceSigningDigest(MobileConstants.TESTNET_CHAIN_ID, 11L,
+            network.budlum.validator.core.ValidatorClass.Mobile.tag)
+        check(digest.joinToString("") { "%02x".format(it) } ==
+            "26a5bec8b11098debd4eeffbe797638d295a08aa570cb3c176d9c5e41bfbb2a3",
+            "Android computes the shared preimage hash; no BLS signature or network duty is implied")
+        check(runCatching {
+            presenceSigningDigest(MobileConstants.TESTNET_CHAIN_ID, -1L,
+                network.budlum.validator.core.ValidatorClass.Mobile.tag)
+        }.isFailure, "negative presence windows are refused")
     }
 
     fun android_reproducible_build_matches() {
@@ -465,13 +479,16 @@ object MobileValidatorUnitTest {
         android_strongbox_fallback_is_narrow()
         android_share_admission_is_atomic_and_fail_closed()
         android_concurrent_share_admission_respects_quota()
-        android_metered_data_unknown_fails_closed()
-        android_leave_releases_shares_and_unbonds()
-        android_low_space_releases_shares()
-        android_onboarding_reaches_registered_state()
-        android_workmanager_answers_audit_when_service_stopped()
-        android_presence_matches_the_shared_sha3_vector()
+        android_unconnected_policy_and_stake_do_not_create_duties()
+        android_unbound_leave_keeps_local_shares()
+        android_unbound_low_space_does_not_silently_delete_shares()
+        android_release_requires_real_generated_wallet_binding()
+        android_unconnected_onboarding_is_fail_closed()
+        android_unfunded_engine_cannot_register_from_faucet_ui()
+        android_owner_string_never_unlocks_stake_rotation_or_duty()
+        android_unbound_worker_cannot_claim_custody_audits_or_rewards()
+        android_presence_digest_matches_shared_sha3_vector_without_claiming_a_signature()
         android_reproducible_build_matches()
-        println("ALL ANDROID VALIDATOR TESTS PASSED")
+        println("ANDROID JVM SAFETY TESTS PASSED; VALIDATOR DUTIES REMAIN DISABLED")
     }
 }

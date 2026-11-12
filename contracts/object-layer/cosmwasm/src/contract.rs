@@ -1,8 +1,8 @@
 //! Budlum settlement endpoint, CosmWasm family.
 //!
-//! Takes custody of CW20 and CW721 assets that enter the Budlum Universal
-//! Object Layer, carries home calls, and tracks the last accepted Budlum
-//! checkpoint for the silence window. Instantiated with no migrate admin:
+//! Custody and home calls are closed until departure and escape can return
+//! assets. Only finalized checkpoint tracking remains available. Instantiated
+//! with no migrate admin:
 //! no admin, no upgrade, no pause.
 //!
 //! Events are `wasm-budlum/object-layer/<name>/v1` with string attributes;
@@ -18,8 +18,15 @@ use cosmwasm_std::{
     StdResult, Uint128,
 };
 use cw20::Cw20ReceiveMsg;
-use cw721::Cw721ReceiveMsg;
 use cw_storage_plus::{Item, Map};
+
+/// Standard CW721 `SendNft` hook message (`cosmwasm-std 2` compatible).
+#[cw_serde]
+pub struct Cw721ReceiveMsg {
+    pub sender: String,
+    pub token_id: String,
+    pub msg: Binary,
+}
 
 /// Seconds without a newly accepted checkpoint before the exit opens.
 pub const SILENCE_WINDOW_SECS: u64 = 1_209_600;
@@ -39,10 +46,18 @@ pub enum ExecuteMsg {
     ReceiveNft(Cw721ReceiveMsg),
     /// Budlum runs `calls` (hex of the canonical call list) as the home
     /// identity of `info.sender`.
-    HomeCall { calls: Binary },
-    AcceptHeader { height: u64 },
-    Release { proof: Binary },
-    Escape { proof: Binary },
+    HomeCall {
+        calls: Binary,
+    },
+    AcceptHeader {
+        height: u64,
+    },
+    Release {
+        proof: Binary,
+    },
+    Escape {
+        proof: Binary,
+    },
 }
 
 #[cw_serde]
@@ -53,7 +68,12 @@ pub struct ArriveMsg {
 }
 
 #[entry_point]
-pub fn instantiate(deps: DepsMut, env: Env, info: MessageInfo, _msg: InstantiateMsg) -> StdResult<Response> {
+pub fn instantiate(
+    deps: DepsMut,
+    env: Env,
+    info: MessageInfo,
+    _msg: InstantiateMsg,
+) -> StdResult<Response> {
     if !info.funds.is_empty() {
         return Err(StdError::generic_err("no funds at instantiate"));
     }
@@ -63,17 +83,32 @@ pub fn instantiate(deps: DepsMut, env: Env, info: MessageInfo, _msg: Instantiate
 }
 
 fn recipient(msg: &Binary) -> StdResult<Option<String>> {
-    let parsed: ArriveMsg = if msg.is_empty() { ArriveMsg { recipient: None } } else { from_json(msg)? };
+    let parsed: ArriveMsg = if msg.is_empty() {
+        ArriveMsg { recipient: None }
+    } else {
+        from_json(msg)?
+    };
     if let Some(r) = &parsed.recipient {
-        let ok = r.len() == 64 && r.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
+        let ok = r.len() == 64
+            && r.bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
         if !ok {
-            return Err(StdError::generic_err("recipient must be 64 lower-case hex characters"));
+            return Err(StdError::generic_err(
+                "recipient must be 64 lower-case hex characters",
+            ));
         }
     }
     Ok(parsed.recipient)
 }
 
-fn arrive_event(kind: &str, token: &str, token_id: Option<&str>, amount: Uint128, depositor: &str, recipient: Option<String>) -> Event {
+fn arrive_event(
+    kind: &str,
+    token: &str,
+    token_id: Option<&str>,
+    amount: Uint128,
+    depositor: &str,
+    recipient: Option<String>,
+) -> Event {
     let mut e = Event::new("budlum/object-layer/arrive/v1")
         .add_attribute("kind", kind)
         .add_attribute("token", token)
@@ -93,6 +128,17 @@ pub fn execute(deps: DepsMut, env: Env, info: MessageInfo, msg: ExecuteMsg) -> S
     if !info.funds.is_empty() {
         return Err(StdError::generic_err("native funds are not taken"));
     }
+    // A Receive hook acknowledges a token transfer. With both exit paths
+    // closed, acknowledging it would permanently trap CW20/CW721 assets.
+    // Direct calls to hooks must not fabricate Arrive events either.
+    if matches!(
+        &msg,
+        ExecuteMsg::Receive(_) | ExecuteMsg::ReceiveNft(_) | ExecuteMsg::HomeCall { .. }
+    ) {
+        return Err(StdError::generic_err(
+            "not open: object-layer arrival and exit proofs",
+        ));
+    }
     match msg {
         ExecuteMsg::Receive(r) => {
             if r.amount.is_zero() {
@@ -101,7 +147,14 @@ pub fn execute(deps: DepsMut, env: Env, info: MessageInfo, msg: ExecuteMsg) -> S
             let to = recipient(&r.msg)?;
             // `info.sender` is the CW20 contract: the hook is only callable
             // by the token that moved the balance.
-            Ok(Response::new().add_event(arrive_event("fungible", info.sender.as_str(), None, r.amount, &r.sender, to)))
+            Ok(Response::new().add_event(arrive_event(
+                "fungible",
+                info.sender.as_str(),
+                None,
+                r.amount,
+                &r.sender,
+                to,
+            )))
         }
         ExecuteMsg::ReceiveNft(r) => {
             let to = recipient(&r.msg)?;
@@ -141,8 +194,44 @@ pub fn execute(deps: DepsMut, env: Env, info: MessageInfo, msg: ExecuteMsg) -> S
         }
         // Both need an opening of the object-layer root in an accepted
         // Budlum header.
-        ExecuteMsg::Release { .. } | ExecuteMsg::Escape { .. } => {
-            Err(StdError::generic_err("not open: needs the object-layer root opening"))
+        ExecuteMsg::Release { .. } | ExecuteMsg::Escape { .. } => Err(StdError::generic_err(
+            "not open: needs the object-layer root opening",
+        )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cosmwasm_std::testing::{message_info, mock_dependencies, mock_env};
+    use cosmwasm_std::Addr;
+
+    #[test]
+    fn custody_and_home_calls_stay_closed_without_exit_proofs() {
+        let mut deps = mock_dependencies();
+        let env = mock_env();
+        let info = message_info(&Addr::unchecked("token"), &[]);
+        for msg in [
+            ExecuteMsg::Receive(Cw20ReceiveMsg {
+                sender: "owner".into(),
+                amount: Uint128::new(10),
+                msg: Binary::default(),
+            }),
+            ExecuteMsg::ReceiveNft(Cw721ReceiveMsg {
+                sender: "owner".into(),
+                token_id: "unique-1".into(),
+                msg: Binary::default(),
+            }),
+            ExecuteMsg::HomeCall {
+                calls: Binary::default(),
+            },
+        ] {
+            let err = execute(deps.as_mut(), env.clone(), info.clone(), msg).unwrap_err();
+            assert!(err.to_string().contains("not open"), "{err}");
         }
+        assert!(HOME_NONCE
+            .may_load(&deps.storage, "token")
+            .unwrap()
+            .is_none());
     }
 }

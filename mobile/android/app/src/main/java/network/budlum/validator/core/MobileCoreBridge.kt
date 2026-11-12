@@ -10,9 +10,11 @@ import java.nio.file.LinkOption
 import java.security.MessageDigest
 
 /**
- * UniFFI / Kotlin domain bridge aligned 1-to-1 with `mobile/core` (`budlum-mobile-core`).
+ * Kotlin-only domain model for tests; this is NOT a live UniFFI connection.
+ * The production Android UI does not instantiate this simulated state machine;
+ * its wallet and duty paths fail closed until native/on-chain integration.
  *
- * Enforces Section 7.9 invariants:
+ * Models Section 7.9 invariants:
  * - `TESTNET_CHAIN_ID = 45261`
  * - Default network policy: `NetworkPolicy.UnmeteredOnly` (Wi-Fi only, R-33)
  * - Thermal pause: non-disablable (`thermalPause == true`, R-35)
@@ -28,16 +30,33 @@ object MobileConstants {
     const val QUOTA_MAX_BYTES: Long = 64L * GIB_BYTES
     const val FREE_SPACE_FLOOR_BYTES: Long = 2L * GIB_BYTES
     const val MOBILE_MIN_STAKE_BUD: Long = 10L
-    const val FAUCET_DRIP_BUD: Long = 100L
     const val WORKMANAGER_PERIOD_MINUTES: Long = 15L
     const val THERMAL_STATUS_MODERATE: Int = 2
+}
+
+/**
+ * The app has no owner ML-DSA wallet, confirmed on-chain registration or duty
+ * transport. Until those are actually bound, no caller may start a foreground
+ * validator or pretend a periodic job answered audits. An HTTP faucet receipt
+ * or RPC-reported balance does not satisfy any of these requirements.
+ */
+object ValidatorOnboardingGate {
+    fun readyForDuties(): Boolean = false
+
+    fun requireConnected() {
+        if (!readyForDuties()) {
+            throw IllegalStateException(
+                "mobile_validator_unconnected: owner wallet, final registration and duty transport are unavailable"
+            )
+        }
+    }
 }
 
 private fun littleEndianU64(value: Long): ByteArray =
     ByteBuffer.allocate(Long.SIZE_BYTES).order(ByteOrder.LITTLE_ENDIAN).putLong(value).array()
 
 /** SHA3-256 over the four length-prefixed fields in presence/v1 (G-5). */
-private fun presenceSigningDigest(chainId: Long, window: Long, classTag: Byte): ByteArray {
+internal fun presenceSigningDigest(chainId: Long, window: Long, classTag: Byte): ByteArray {
     require(chainId >= 0L) { "chain id must be an unsigned 64-bit value" }
     require(window >= 0L) { "presence window must be non-negative" }
     val digest = MessageDigest.getInstance("SHA3-256")
@@ -327,7 +346,17 @@ class MobileValidatorEngine(
     private val custodyDir: ShareCustodyDirectory,
     relays: List<RelayOffer>,
     initialAvailableBytes: Long,
+    // For deterministic engine tests only; the Android UI never instantiates
+    // this simulated state machine or treats it as a real wallet balance.
+    initialSimulatedLiquidBud: Long = 0L,
 ) {
+    init {
+        require(ownerAddressHex.length == 64 && ownerAddressHex.any { it != '0' } &&
+            ownerAddressHex.all { it in '0'..'9' || it in 'a'..'f' || it in 'A'..'F' }
+        ) { "mobile_owner_address: a nonzero 32-byte hex owner is required" }
+        require(initialSimulatedLiquidBud >= 0L)
+    }
+
     private var policy: Policy = Policy()
     private val relayOffers: List<RelayOffer> = relays.toList()
     private var availableBytes: Long = initialAvailableBytes
@@ -335,7 +364,7 @@ class MobileValidatorEngine(
     private var pausedForThermal: Boolean = false
     private var registered: Boolean = false
     private var unbonding: Boolean = false
-    private var liquidBud: Long = 0L
+    private var liquidBud: Long = initialSimulatedLiquidBud
     private var stakedBud: Long = 0L
     private var pendingRewardsAttos: Long = 0L
     private var lastAudit: LastAudit = LastAudit.None
@@ -345,6 +374,9 @@ class MobileValidatorEngine(
 
     fun setPolicy(next: Policy): List<DutyTx> {
         next.validate()
+        // Lowering quota deletes local shares; do not do so when no signed
+        // chain release can be submitted or even confirmed.
+        ValidatorOnboardingGate.requireConnected()
         val emitted = mutableListOf<DutyTx>()
         val trimmed = if (next.quotaBytes < custodyDir.storedBytes()) {
             custodyDir.trimToQuota(next.quotaBytes)
@@ -363,13 +395,8 @@ class MobileValidatorEngine(
         return emitted
     }
 
-    fun requestTestnetFaucet(powNonce: Long): Long {
-        require(powNonce >= 0L) { "invalid PoW nonce" }
-        liquidBud += MobileConstants.FAUCET_DRIP_BUD
-        return liquidBud
-    }
-
     fun registerValidator(biometricAuthToken: String, operatorPubKeyHex: String): DutyTx.RegisterValidator {
+        ValidatorOnboardingGate.requireConnected()
         keyVault.requireOwnerSpendAuthorization(biometricAuthToken)
         if (liquidBud < MobileConstants.MOBILE_MIN_STAKE_BUD) {
             throw IllegalStateException("insufficient BUD for 10 BUD mobile validator stake")
@@ -384,6 +411,7 @@ class MobileValidatorEngine(
     }
 
     fun rotateOperatorKey(biometricAuthToken: String, newOperatorPubKeyHex: String): DutyTx.RotateOperatorKey {
+        ValidatorOnboardingGate.requireConnected()
         keyVault.requireOwnerSpendAuthorization(biometricAuthToken)
         require(registered) { "validator must be registered to rotate operator key" }
         val tx = DutyTx.RotateOperatorKey(newOperatorPubKeyHex)
@@ -392,6 +420,7 @@ class MobileValidatorEngine(
     }
 
     fun startForegroundFromUi(isAppInForeground: Boolean) {
+        ValidatorOnboardingGate.requireConnected()
         if (!isAppInForeground) {
             throw IllegalStateException("specialUse foreground service may only start while app is visible")
         }
@@ -409,6 +438,9 @@ class MobileValidatorEngine(
 
     fun updateAvailableDiskBytes(freeBytes: Long): DutyTx.ReleaseShares? {
         availableBytes = freeBytes
+        // An unbound app cannot claim a chain release. Preserve any existing
+        // shares rather than silently deleting data during a worker retry.
+        if (!ValidatorOnboardingGate.readyForDuties()) return null
         if (availableBytes < MobileConstants.FREE_SPACE_FLOOR_BYTES) {
             val dropped = custodyDir.releaseAll()
             if (dropped.isNotEmpty()) {
@@ -421,6 +453,7 @@ class MobileValidatorEngine(
     }
 
     fun acceptShare(share: AssignedShare): DutyTx.CustodyAck {
+        ValidatorOnboardingGate.requireConnected()
         updateAvailableDiskBytes(availableBytes)?.let {
             throw IllegalStateException("mobile_free_space_floor: released shares below 2 GiB free space")
         }
@@ -442,6 +475,7 @@ class MobileValidatorEngine(
     }
 
     fun answerAudit(audit: StorageAudit): DutyTx.CustodyProofBatch {
+        ValidatorOnboardingGate.requireConnected()
         val share = custodyDir.getShare(audit.segmentIdHex)
         if (share == null) {
             lastAudit = LastAudit.Missed
@@ -470,7 +504,7 @@ class MobileValidatorEngine(
         incomingShares: List<AssignedShare>,
     ): List<DutyTx> {
         require(window >= 0L) { "presence window must be non-negative" }
-        if (!registered || unbonding || pausedForThermal) {
+        if (!ValidatorOnboardingGate.readyForDuties() || !registered || unbonding || pausedForThermal) {
             return emptyList()
         }
         when (val network = policy.network) {
@@ -507,6 +541,7 @@ class MobileValidatorEngine(
     }
 
     fun leave(biometricAuthToken: String): List<DutyTx> {
+        ValidatorOnboardingGate.requireConnected()
         keyVault.requireOwnerSpendAuthorization(biometricAuthToken)
         running = false
         registered = false

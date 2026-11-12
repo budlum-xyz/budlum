@@ -16,3 +16,9 @@ budlum-uel-abi = { path = "../../crates/uel-abi" }
 
 [workspace]
 resolver = "2"
+
+[profile.release]
+overflow-checks = true
+panic = "unwind"
+lto = true
+codegen-units = 1

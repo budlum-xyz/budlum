@@ -114,8 +114,7 @@ pub fn run(root: &Path) -> Result<String, String> {
 ///
 /// Returns an error if a clean synthetic tree fails or a broken canary passes.
 pub fn self_test() -> Result<String, String> {
-    let dir =
-        crate::gates::rust_literals::exclusive_scratch_dir("budlum-gates-bud3-repair-fires")?;
+    let dir = crate::gates::rust_literals::exclusive_scratch_dir("budlum-gates-bud3-repair-fires")?;
     let result = (|| {
         let put = |rel: &str, body: &str| -> Result<(), String> {
             let p = dir.join(rel);
