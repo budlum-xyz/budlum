@@ -371,14 +371,36 @@ fn log_prefix(s: &str, max_chars: usize) -> String {
 }
 
 /// Extract IPv4 /24 key from a multiaddr (first 3 octets), if present.
+///
+/// Loopback addresses (`127.0.0.0/8`) return `None` so local multi-validator
+/// rehearsals on a single host do not trip the public `/24` eclipse ceiling.
 pub fn ipv4_slash24(addr: &Multiaddr) -> Option<[u8; 3]> {
     for proto in addr.iter() {
         if let libp2p::multiaddr::Protocol::Ip4(ip) = proto {
+            if ip.is_loopback() {
+                return None;
+            }
             let o = ip.octets();
             return Some([o[0], o[1], o[2]]);
         }
     }
     None
+}
+
+/// Whether a `Blockchain::add_transaction` refusal reflects benign mempool or
+/// block-inclusion ordering rather than a malformed or forged gossip payload.
+fn tx_refusal_is_pool_race(tx: &crate::core::transaction::Transaction, err: &str) -> bool {
+    if err.contains("DuplicateTransaction")
+        || err.contains("PoolFull")
+        || err.contains("PoolBytesFull")
+        || err.contains("FeeTooLow")
+        || err.contains("RbfFeeTooLow")
+        || err.contains("SenderLimitReached")
+        || err.contains("TransactionExpired")
+    {
+        return true;
+    }
+    (err.contains("Invalid nonce:") || err.contains("InvalidNonce")) && tx.verify()
 }
 
 #[derive(NetworkBehaviour)]
@@ -2102,6 +2124,12 @@ impl Node {
             ip_colocation_factor_threshold: 4.0,
             ..Default::default()
         };
+        score_params
+            .ip_colocation_factor_whitelist
+            .insert(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST));
+        score_params
+            .ip_colocation_factor_whitelist
+            .insert(std::net::IpAddr::V6(std::net::Ipv6Addr::LOCALHOST));
         // The topics this node publishes on. Registering them keeps the
         // per-topic score caps meaningful; without an entry a topic
         // contributes nothing and only the global penalties apply.
@@ -3844,18 +3872,15 @@ impl Node {
 
                                     if !is_handshake_msg && !is_handshaked {
                                         warn!("Peer {} sent {:?} before completing handshake, dropping.", peer_id, msg);
-
-                                        {
-                                            let mut pm = self.peer_manager_lock();
-                                            pm.report_invalid_tx(&peer_id);
-                                        }
                                         // Dropped for the sender's state, not for the
-                                        // content: an honest copy must stay new.
+                                        // content: an honest copy must stay new, and a
+                                        // frame racing ahead of `/sync` HandshakeAck must
+                                        // be ignored rather than graylisting the peer.
                                         self.gossip_dedup
                                             .lock()
                                             .unwrap_or_else(|poisoned| poisoned.into_inner())
                                             .forget(&message.data);
-                                        self.report_gossip(&id, &peer_id, gossipsub::MessageAcceptance::Reject);
+                                        self.report_gossip(&id, &peer_id, gossipsub::MessageAcceptance::Ignore);
                                         continue;
                                     }
 
@@ -4030,7 +4055,7 @@ impl Node {
                                         let hash_prefix: String = tx.hash.chars().take(8).collect();
                                         info!("Broadcasted tx: {} from: {} to: {} amount: {}",
                                             hash_prefix, tx.from, tx.to, tx.amount);
-                                        match self.chain.add_transaction(tx).await {
+                                        match self.chain.add_transaction(tx.clone()).await {
                                             Ok(_) => {
                                                 {
                                                     let mut pm = self.peer_manager_lock();
@@ -4038,12 +4063,25 @@ impl Node {
                                                 }
                                             }
                                             Err(e) => {
-                                                warn!("Failed to add transaction: {e}");
-                                                {
+                                                let pool_race = tx_refusal_is_pool_race(&tx, &e);
+                                                warn!(
+                                                    peer = %peer_id,
+                                                    pool_race,
+                                                    "Failed to add transaction: {e}"
+                                                );
+                                                if !pool_race {
                                                     let mut pm = self.peer_manager_lock();
                                                     pm.report_invalid_tx(&peer_id);
                                                 }
-                                                self.report_gossip(&id, &peer_id, gossipsub::MessageAcceptance::Reject);
+                                                self.report_gossip(
+                                                    &id,
+                                                    &peer_id,
+                                                    if pool_race {
+                                                        gossipsub::MessageAcceptance::Ignore
+                                                    } else {
+                                                        gossipsub::MessageAcceptance::Reject
+                                                    },
+                                                );
                                                 continue;
                                             }
                                         }
@@ -6598,8 +6636,9 @@ mod gossip_author_tests {
 
 #[cfg(test)]
 mod finality_publish_tests {
-    use super::publish_reached_the_mesh;
+    use super::{ipv4_slash24, publish_reached_the_mesh, tx_refusal_is_pool_race};
     use libp2p::gossipsub::PublishError;
+    use libp2p::Multiaddr;
 
     /// RT-003: a re-published vote is not a failed vote.
     ///
@@ -6785,5 +6824,41 @@ mod finality_publish_tests {
             src.contains("let prevote_retry = agg_state.active\n                        && !agg_state.precommit_quorum_reached"),
             "prevote retry must stay active until precommit quorum is reached across 2-hop meshes"
         );
+    }
+
+    #[test]
+    fn loopback_subnet_exemption_and_signed_tx_pool_race_classification() {
+        let lo: Multiaddr = "/ip4/127.0.0.1/tcp/25001".parse().unwrap();
+        let pub_addr: Multiaddr = "/ip4/203.0.113.7/tcp/5001".parse().unwrap();
+        assert_eq!(ipv4_slash24(&lo), None);
+        assert_eq!(ipv4_slash24(&pub_addr), Some([203, 0, 113]));
+
+        let signer = crate::crypto::primitives::KeyPair::generate().unwrap();
+        let sender = crate::core::address::Address::from(signer.public_key_bytes());
+        let recipient = crate::core::address::Address::from([0x22; 32]);
+        let mut signed =
+            crate::core::transaction::Transaction::new(sender, recipient, 1_000, Vec::new());
+        signed.chain_id = 45261;
+        signed.nonce = 7;
+        signed.sign(&signer);
+        assert!(tx_refusal_is_pool_race(
+            &signed,
+            "Invalid transaction: Invalid nonce: expected 8, got 7"
+        ));
+        assert!(tx_refusal_is_pool_race(
+            &signed,
+            "Mempool error: DuplicateTransaction"
+        ));
+        assert!(!tx_refusal_is_pool_race(
+            &signed,
+            "Invalid transaction: Invalid Chain ID: expected 45261, got 1"
+        ));
+
+        let unsigned =
+            crate::core::transaction::Transaction::new(sender, recipient, 1_000, Vec::new());
+        assert!(!tx_refusal_is_pool_race(
+            &unsigned,
+            "Invalid transaction: Invalid nonce: expected 1, got 0"
+        ));
     }
 }

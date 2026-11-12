@@ -881,13 +881,15 @@ impl NodeConfig {
         }
 
         if let Some(metrics) = fc.metrics {
-            if let Some(listener) = metrics
-                .listener
-                .or_else(|| metrics.port.map(|p| format!("0.0.0.0:{p}")))
-            {
-                self.metrics_listener = Some(listener.clone());
-                if let Some((_, port)) = parse_listener(&listener) {
-                    self.metrics_port = port;
+            if self.metrics_listener.is_none() {
+                if let Some(listener) = metrics
+                    .listener
+                    .or_else(|| metrics.port.map(|p| format!("0.0.0.0:{p}")))
+                {
+                    self.metrics_listener = Some(listener.clone());
+                    if let Some((_, port)) = parse_listener(&listener) {
+                        self.metrics_port = port;
+                    }
                 }
             }
         }
