@@ -2921,7 +2921,7 @@ mod tests {
         let first_key = pub_up.record.commitment;
         r.register_object(addr(1), pub_up.record.clone(), pub_shares.clone(), 0, 10)
             .unwrap();
-        let mut second = pub_up.record;
+        let mut second = pub_up.record.clone();
         second.commitment = [0x9A; 32];
         r.register_object(addr(2), second, pub_shares, 0, 10).unwrap();
         for h in 10..=13u8 {

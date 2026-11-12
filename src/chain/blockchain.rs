@@ -8529,7 +8529,9 @@ impl Blockchain {
             .validators
             .iter()
             .any(|v| !v.bls_public_key.is_empty() || !v.pq_public_key.is_empty());
-        let record_at = |height: u64, active_table: &CommitteeTable| -> Option<SeatParticipation> {
+        let record_at =
+            |height: u64,
+             active_table: &CommitteeTable| -> Option<crate::validators::committee::SeatParticipation> {
             let block = block_at(height)?;
             let record = block.seat_participation.as_ref()?;
             let expected_cp = height.checked_sub(interval)?;
@@ -8554,7 +8556,7 @@ impl Blockchain {
                     .filter_map(|idx| snapshot.validators.get(*idx))
                     .map(|validator| validator.address)
                     .collect();
-                Some(SeatParticipation::collect(
+                Some(crate::validators::committee::SeatParticipation::collect(
                     active_table,
                     expected_cp,
                     signer_addrs.iter(),
