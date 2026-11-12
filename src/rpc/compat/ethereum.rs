@@ -628,7 +628,7 @@ impl EthereumCompatGateway {
                 JsonRpcResponse::ok(id, serde_json::json!(removed))
             }
             "bud_getExecutionProof" => {
-                let Some(ns) = req.params.first().and_then(serde_json::Value::as_str) else {
+                let Some(ns) = req.params.get(0).and_then(serde_json::Value::as_str) else {
                     return JsonRpcResponse::err(id, JSONRPC_INVALID_PARAMS, "missing namespace");
                 };
                 let Some(key_hex) = req.params.get(1).and_then(serde_json::Value::as_str) else {
