@@ -239,6 +239,27 @@ impl ExecutionState {
         Ok(())
     }
 
+    /// Resolves a registered `(ee, alias)` back to its canonical 32-byte [`Address`],
+    /// if `candidate` belongs to a native or foreign account registered in `uel/alias`.
+    #[must_use]
+    pub fn resolve_alias_owner(&self, ee: EeId, candidate: &[u8]) -> Option<Address> {
+        let bucket = self.namespaces.get(ALIAS_NAMESPACE)?;
+        for (hex_key, val) in bucket {
+            if val.as_slice() != candidate {
+                continue;
+            }
+            let Ok(raw_key) = hex::decode(hex_key) else {
+                continue;
+            };
+            if raw_key.len() == 33 && raw_key.get(32).copied() == Some(ee.0) {
+                let mut addr = [0u8; 32];
+                addr.copy_from_slice(&raw_key[..32]);
+                return Some(Address::from(addr));
+            }
+        }
+        None
+    }
+
     /// Returns `true` when `candidate` matches a registered native alias in `uel/alias` for `ee`.
     ///
     /// Closes  across EVM, WASM, SVM, and Move foreign envelope admission.

@@ -574,8 +574,9 @@ impl UploadSessionManager {
                 &syms,
                 |frame| {
                     let png = frame_to_png(frame)?;
-                    let mut sample_meter =
-                        super::meter::Meter::for_object((frame.data.len() as u64).saturating_add(128));
+                    let mut sample_meter = super::meter::Meter::for_object(
+                        (frame.data.len() as u64).saturating_add(128),
+                    );
                     png_to_frame(&png, &mut sample_meter)
                 },
             )?;

@@ -1608,8 +1608,7 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
             .assert_zero(cur[COL_GAS_USED].into());
         let cur_gas: AB::Expr = cur[COL_GAS_USED].into();
         let nxt_gas: AB::Expr = nxt[COL_GAS_USED].into();
-        let is_active_synth_halt: AB::Expr =
-            cpu_active.clone() * cur[COL_EXIT_CODE].into();
+        let is_active_synth_halt: AB::Expr = cpu_active.clone() * cur[COL_EXIT_CODE].into();
         builder
             .when_transition()
             .when(one.clone() - is_active_synth_halt)
@@ -1706,10 +1705,20 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
         }
 
         // (1) initial_state_root: first row, COL_INIT_ROOT_0..7 == public[10..18]
+        //
+        // Limbs 0..3 are anchored to the memory and register folds by (1b) and
+        // (1c). Limbs 4..7 correspond to `initial_state_root[16..32]` and are
+        // left zero by `initial_state_root_of`; constrain them to zero on the
+        // first row so an attacker cannot vary the upper 16 bytes unchecked.
         for j in 0..8 {
             builder
                 .when_first_row()
                 .assert_zero(cur[COL_INIT_ROOT_0 + j].into() - public_inputs[10 + j].into());
+        }
+        for j in 4..8 {
+            builder
+                .when_first_row()
+                .assert_zero(cur[COL_INIT_ROOT_0 + j].into());
         }
 
         // (1d) Limbs 4..7 of `initial_state_root` (bytes 16..32) carry no commitment:

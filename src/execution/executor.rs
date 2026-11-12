@@ -4175,6 +4175,28 @@ impl Executor {
                         hex::encode(justification_hash)
                     );
                 }
+                crate::core::governance::GovernanceAction::ResetConsensusDomainTip {
+                    domain_id,
+                    target_height,
+                    target_hash,
+                    justification_hash,
+                } => {
+                    state.pending_domain_tip_resets.push(
+                        crate::core::account::PendingDomainTipReset {
+                            domain_id,
+                            target_height,
+                            target_hash,
+                            justification_hash,
+                        },
+                    );
+                    tracing::info!(
+                        "Queued governance domain tip reset: domain={} target_height={} target_hash={} justification={}",
+                        domain_id,
+                        target_height,
+                        hex::encode(target_hash),
+                        hex::encode(justification_hash)
+                    );
+                }
                 crate::core::governance::GovernanceAction::PoaAddAdmin { .. }
                 | crate::core::governance::GovernanceAction::PoaRemoveAdmin { .. }
                 | crate::core::governance::GovernanceAction::FreezePoaAccount { .. }

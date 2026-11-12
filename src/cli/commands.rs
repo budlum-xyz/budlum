@@ -1981,7 +1981,7 @@ mod persona_config_tests {
             let config = format!("[features]\n{key} = false\n");
             let error = toml::from_str::<FileConfig>(&config)
                 .expect_err("removed feature keys must not parse");
-                assert!(error.to_string().contains(key), "unexpected error: {error}");
+            assert!(error.to_string().contains(key), "unexpected error: {error}");
         }
     }
 

@@ -4346,7 +4346,10 @@ impl BudlumApiServer for RpcServer {
     async fn get_charter(&self, domain_id: u32) -> Result<serde_json::Value, ErrorObjectOwned> {
         let chain_id = self.chain.get_chain_id().await;
         let height = self.chain.get_height().await;
-        if chain_id != crate::core::chain_config::Network::Devnet.chain_id().value()
+        if chain_id
+            != crate::core::chain_config::Network::Devnet
+                .chain_id()
+                .value()
             && !crate::object_layer::ACTIVATION.is_open_at(height)
         {
             return Err(ErrorObjectOwned::owned(
@@ -4375,7 +4378,10 @@ impl BudlumApiServer for RpcServer {
         })?;
         let chain_id = self.chain.get_chain_id().await;
         let height = self.chain.get_height().await;
-        if chain_id != crate::core::chain_config::Network::Devnet.chain_id().value()
+        if chain_id
+            != crate::core::chain_config::Network::Devnet
+                .chain_id()
+                .value()
             && !crate::object_layer::ACTIVATION.is_open_at(height)
         {
             return Err(ErrorObjectOwned::owned(
@@ -4404,7 +4410,10 @@ impl BudlumApiServer for RpcServer {
         })?;
         let chain_id = self.chain.get_chain_id().await;
         let height = self.chain.get_height().await;
-        if chain_id != crate::core::chain_config::Network::Devnet.chain_id().value()
+        if chain_id
+            != crate::core::chain_config::Network::Devnet
+                .chain_id()
+                .value()
             && !crate::object_layer::ACTIVATION.is_open_at(height)
         {
             return Err(ErrorObjectOwned::owned(

@@ -419,6 +419,15 @@ impl ProofClaimRegistry {
         self.claims.insert(claim.key, claim);
         Ok(())
     }
+
+    /// Prune every accepted proof claim for `domain_id` strictly above
+    /// `target_height` (used by governance-approved tip rollbacks).
+    pub fn rollback_domain_above(&mut self, domain_id: u32, target_height: u64) -> usize {
+        let before = self.claims.len();
+        self.claims
+            .retain(|k, _| !(k.domain_id == domain_id && k.target_height > target_height));
+        before.saturating_sub(self.claims.len())
+    }
 }
 
 /// Result of [`ProofClaimRegistry::classify`].

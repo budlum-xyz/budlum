@@ -274,6 +274,7 @@ pub fn default_domain(
         // Programs are added later, explicitly.
         zk_program_allowlist: Vec::new(),
         plugin_code_hash: None,
+        genesis_state_root: [0u8; 32],
         bridge_enabled: true,
         block_hash_scheme: RootScheme::BudlumBlockV2,
         state_root_scheme: RootScheme::BudlumBlockV2,

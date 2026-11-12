@@ -737,3 +737,201 @@ fn spending_exactly_the_declared_limit_is_allowed() {
         "the budget gate must name the declared limit: {err}"
     );
 }
+
+#[test]
+fn zk_domain_first_claim_must_match_genesis_state_root_and_reject_unanchored_advance() {
+    let mut bc = fresh_chain();
+    let (proof, pi, program) = real_proof();
+    let mut domain = crate::domain::plugin::default_domain(
+        9,
+        crate::domain::ConsensusKind::Zk,
+        45262 + 9,
+        "zk-proof-verification",
+        0,
+    );
+    domain
+        .zk_program_allowlist
+        .push(crate::prover::zk_program_hash(&program));
+    domain.genesis_state_root[0] = 0x42;
+
+    // Upper 16 bytes of genesis_state_root must be zero for ZK domains.
+    let mut bad_domain = domain.clone();
+    bad_domain.id = 10;
+    bad_domain.genesis_state_root[16] = 1;
+    assert!(
+        crate::settlement::domains::validate_domain_registration(&bad_domain)
+            .unwrap_err()
+            .contains("upper 16 bytes")
+    );
+
+    bc.state.settlement.domains.register(domain).unwrap();
+    let prover = addr(0x31);
+    let fee = bc.state.registry.params().proof_submission_fee;
+    bc.state.add_balance(&prover, fee * 10);
+
+    // Height 0 is reserved for domain genesis.
+    let h0 = bc.submit_zk_proof(submission(prover, 9, 0, &proof, &pi, &program));
+    let h0 = h0.unwrap_err();
+    assert!(h0.contains("height 0"), "{h0}");
+
+    // Mismatched initial_state_root against domain.genesis_state_root is refused.
+    let mismatch = bc.submit_zk_proof(submission(prover, 9, 1, &proof, &pi, &program));
+    let mismatch = mismatch.unwrap_err();
+    assert!(mismatch.contains("starts from"), "{mismatch}");
+
+    // Register a domain matching pi.initial_state_root ([0; 32]).
+    register_domain_allowing(&mut bc, 1, &program);
+    let first = bc.submit_zk_proof(submission(prover, 1, 1, &proof, &pi, &program));
+    assert!(first.is_ok(), "{first:?}");
+
+    // Subsequent advance (1 -> 2) cannot rely on a fold-consistent anchor.
+    let err = bc.submit_zk_proof(submission(prover, 1, 2, &proof, &pi, &program));
+    let err = err.unwrap_err();
+    assert!(err.contains("no derivable initial root"), "{err}");
+
+    // Claiming at the already-committed tip height with a different root is refused.
+    let mut different = pi.clone();
+    different.final_state_root[0] ^= 0xFF;
+    let tip_mismatch = bc
+        .submit_zk_proof(submission(prover, 1, 1, &proof, &different, &program))
+        .unwrap_err();
+    assert!(tip_mismatch.contains("different root"), "{tip_mismatch}");
+
+    // Governance tip reset rolls back to genesis and prunes claims above 0.
+    let reset = crate::core::account::PendingDomainTipReset {
+        domain_id: 1,
+        target_height: 0,
+        target_hash: [0u8; 32],
+        justification_hash: [0xAB; 32],
+    };
+    assert_eq!(
+        crate::settlement::domains::apply_domain_tip_resets(&mut bc.state, &[reset]),
+        vec![1]
+    );
+    let d = bc.state.settlement.domains.get(1).unwrap();
+    assert_eq!(d.last_committed_height, 0);
+    assert!(bc.state.settlement.proof_claims.is_empty());
+    let re_advance = bc.submit_zk_proof(submission(prover, 1, 1, &proof, &pi, &program));
+    assert!(re_advance.is_ok(), "{re_advance:?}");
+
+    // Non-zero genesis_state_root remains restartable after resetting to height 0.
+    let mut nonzero = crate::domain::plugin::default_domain(
+        11,
+        crate::domain::ConsensusKind::Zk,
+        45262 + 11,
+        "zk-proof-verification",
+        0,
+    );
+    nonzero.genesis_state_root[0] = 0x77;
+    assert_eq!(
+        crate::domain::expected_initial_root(&nonzero, &program),
+        Some(nonzero.genesis_state_root)
+    );
+    nonzero.last_committed_hash = nonzero.genesis_state_root;
+    assert_eq!(
+        crate::domain::expected_initial_root(&nonzero, &program),
+        Some(nonzero.genesis_state_root)
+    );
+    nonzero.last_committed_height = 1;
+    assert_eq!(
+        crate::domain::expected_initial_root(&nonzero, &program),
+        None
+    );
+}
+
+#[test]
+fn proof_market_zk_idempotent_claim_refunds_creator_without_paying_prover() {
+    let mut bc = fresh_chain();
+    let (proof, pi, program) = real_proof();
+    register_domain_allowing(&mut bc, 1, &program);
+
+    let creator = addr(0x41);
+    let first_prover = addr(0x42);
+    let second_prover = addr(0x43);
+    let reward = 2_000;
+    let stake = bc.state.registry.params().min_stake;
+    let fee = bc.state.registry.params().proof_submission_fee;
+
+    bc.state.epoch_index = 1;
+    bc.state.add_balance(&creator, reward + 100);
+    bc.state.add_balance(&first_prover, fee * 4);
+    bc.state.add_balance(&second_prover, stake + fee * 4);
+    bc.state
+        .registry
+        .register(
+            second_prover,
+            crate::registry::role::roles::PROVER,
+            stake,
+            1,
+        )
+        .unwrap();
+
+    // First prover advances domain 1 height 1 directly.
+    bc.submit_zk_proof(submission(first_prover, 1, 1, &proof, &pi, &program))
+        .unwrap();
+
+    // Creator funds a proof-market task for the already-proven (1, 1) claim.
+    let ctx = |sender| crate::settlement::domains::SettlementTxContext {
+        sender,
+        chain_id: bc.chain_id,
+        fee: 0,
+        bls: || Box::new(crate::cross_domain::external::ethereum::AcceptAllBls),
+    };
+    crate::settlement::domains::execute_settlement_tx(
+        &mut bc.state,
+        &ctx(creator),
+        &crate::settlement::domains::SettlementTx::ProofMarket(Box::new(
+            crate::settlement::proof_market::ProofMarketTx::FundEscrow { amount: reward },
+        )),
+    )
+    .unwrap();
+    crate::settlement::domains::execute_settlement_tx(
+        &mut bc.state,
+        &ctx(creator),
+        &crate::settlement::domains::SettlementTx::ProofMarket(Box::new(
+            crate::settlement::proof_market::ProofMarketTx::CreateTask {
+                kind: crate::settlement::proof_market::ProofTaskKind::ZkProof {
+                    circuit_id: crate::prover::zk_program_hash(&program),
+                    public_inputs_hash: pi.hash(),
+                },
+                deadline_epoch: 10,
+                reward,
+                slash_condition_hash: [0xAB; 32],
+                min_prover_stake: 1,
+            },
+        )),
+    )
+    .unwrap();
+    let task_id = bc.state.proof_market.active_tasks[0].task_id;
+    crate::settlement::domains::execute_settlement_tx(
+        &mut bc.state,
+        &ctx(second_prover),
+        &crate::settlement::domains::SettlementTx::ProofMarket(Box::new(
+            crate::settlement::proof_market::ProofMarketTx::AssignTask { task_id },
+        )),
+    )
+    .unwrap();
+
+    let prover_bal_before = bc.state.get_balance(&second_prover);
+    let creator_bal_before = bc.state.get_balance(&creator);
+    let sub = submission(second_prover, 1, 1, &proof, &pi, &program);
+    crate::settlement::domains::execute_settlement_tx(
+        &mut bc.state,
+        &ctx(second_prover),
+        &crate::settlement::domains::SettlementTx::ProofMarket(Box::new(
+            crate::settlement::proof_market::ProofMarketTx::SubmitZkProof {
+                task_id,
+                submission: Box::new(sub),
+            },
+        )),
+    )
+    .unwrap();
+
+    assert!(bc.state.proof_market.active_tasks.is_empty());
+    assert!(bc.state.proof_market.pending_receipts.is_empty());
+    assert_eq!(bc.state.get_balance(&creator), creator_bal_before + reward);
+    assert_eq!(
+        bc.state.get_balance(&second_prover),
+        prover_bal_before - fee
+    );
+}

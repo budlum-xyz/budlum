@@ -566,6 +566,25 @@ impl PoAOnboarding {
     ) -> bool {
         self.whitelist(domain, now_block).contains(account)
     }
+
+    /// Read-only live admission set at `now_block` (without mutating the
+    /// audit trail), keeping only administratively authorized members whose
+    /// KYC horizon has not elapsed.
+    #[must_use]
+    pub fn live_admitted_members(&self, domain: DomainId, now_block: u64) -> BTreeSet<Address> {
+        self.registry
+            .authorized_members(domain)
+            .into_iter()
+            .filter_map(|member| {
+                let expiry = self
+                    .kyc_expiry
+                    .get(&(domain, member.account))
+                    .copied()
+                    .unwrap_or(u64::MAX);
+                (now_block <= expiry).then_some(member.account)
+            })
+            .collect()
+    }
 }
 
 /// The PoA admission door at the transaction layer.

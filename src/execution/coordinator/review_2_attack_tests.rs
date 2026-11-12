@@ -871,11 +871,8 @@ fn review_2_risk_matrix_r01_r08_r18_r21_and_rpc_isolation() {
 
     // d76b9006: An overlay frame scoped to WASM cannot stage writes into EVM or
     // coordinator-owned namespaces.
-    let mut wasm_overlay = crate::execution::coordinator::overlay::TxOverlay::new(
-        &state,
-        EeId::WASM,
-        100_000,
-    );
+    let mut wasm_overlay =
+        crate::execution::coordinator::overlay::TxOverlay::new(&state, EeId::WASM, 100_000);
     assert!(wasm_overlay
         .write(
             crate::execution::coordinator::state::NS_WASM_STORE,

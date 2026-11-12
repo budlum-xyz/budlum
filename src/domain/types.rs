@@ -227,6 +227,38 @@ pub struct ConsensusDomain {
     /// When kind is `ConsensusKind::Custom(_)`, the plugin must match this committed hash.
     #[serde(default)]
     pub plugin_code_hash: Option<Hash32>,
+    /// The starting state root of this domain, declared at registration.
+    ///
+    /// A newly registered domain has a zero `last_committed_hash` until a
+    /// claim commits one, and a zero tip must not act as a wildcard that lets
+    /// the first proof choose any starting state. Appended last so existing
+    /// bincode records keep their field order and default to `[0; 32]`.
+    #[serde(default)]
+    pub genesis_state_root: Hash32,
+}
+
+/// Derive the expected `initial_state_root` for the next ZK transition on
+/// `domain` from consensus-registered state.
+///
+/// Until the first height commits (`last_committed_height == 0` with an unset
+/// `[0; 32]` tip or restored `genesis_state_root`), the domain starts from its
+/// registered `genesis_state_root`. Once a claim has committed beyond genesis,
+/// the AIR's `initial_state_root` only carries the linear Horner fold of seeded
+/// reads (not a collision-resistant state-tree digest over the prior write
+/// digest), so a subsequent advance has no cryptographically sound expected
+/// initial root until a full 32-byte starting-image commitment lands; returning
+/// `None` causes `submit_zk_proof` to refuse trust in prover-chosen fold
+/// anchors.
+#[must_use]
+pub fn expected_initial_root(domain: &ConsensusDomain, _program: &[u64]) -> Option<Hash32> {
+    if domain.last_committed_height == 0
+        && (domain.last_committed_hash == [0u8; 32]
+            || domain.last_committed_hash == domain.genesis_state_root)
+    {
+        Some(domain.genesis_state_root)
+    } else {
+        None
+    }
 }
 
 impl ConsensusDomain {

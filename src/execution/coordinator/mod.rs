@@ -917,10 +917,33 @@ impl HostApi for HostBridge<'_> {
                 return Err(e);
             }
         }
+        let child_caller = if call.from.ee != call.to_ee {
+            if let Some(owner) = self
+                .state
+                .execution_state
+                .resolve_alias_owner(call.from.ee, &call.from.id)
+            {
+                match self
+                    .state
+                    .execution_state
+                    .ensure_alias_registered(&owner, call.to_ee)
+                {
+                    Ok(alias) => match EeIdentity::new(call.to_ee, alias) {
+                        Ok(mapped) => mapped,
+                        Err(_) => call.from,
+                    },
+                    Err(_) => call.from,
+                }
+            } else {
+                call.from
+            }
+        } else {
+            call.from
+        };
         let child_depth = u32::try_from(self.overlay.universal_depth()).unwrap_or(u32::MAX);
         let child_call = EeCall {
             kind: EeCallKind::Call,
-            caller: call.from,
+            caller: child_caller,
             target: call.target,
             value: call.value,
             input: clean_input.to_vec(),
@@ -1005,10 +1028,7 @@ impl HostApi for HostBridge<'_> {
         let frame_src = resolve_identity_address(self.frame_actor.ee, &self.frame_actor.id);
         let frame_caller = resolve_identity_address(self.frame_caller.ee, &self.frame_caller.id);
         let ee_scoped_contract = from.ee == self.frame_actor.ee && from.id.len() != 32;
-        if src != frame_src
-            && src != frame_caller
-            && src != self.root_actor
-            && !ee_scoped_contract
+        if src != frame_src && src != frame_caller && src != self.root_actor && !ee_scoped_contract
         {
             return Err(HostError::Denied(String::from(
                 "bud transfer may only debit the executing frame or the transaction sender",

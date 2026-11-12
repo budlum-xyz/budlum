@@ -814,6 +814,18 @@ impl PoAFinalityAdapter {
         authorities: &[PoAAuthorityKey],
         signatures: &[PoAAuthoritySignature],
     ) -> Result<FinalityStatus, FinalityError> {
+        self.verify_poa_pq_admitted(registry, domain, commitment, authorities, signatures, None)
+    }
+
+    fn verify_poa_pq_admitted(
+        &self,
+        registry: &crate::crypto::scheme::SchemeStatusRegistry,
+        domain: &ConsensusDomain,
+        commitment: &DomainCommitment,
+        authorities: &[PoAAuthorityKey],
+        signatures: &[PoAAuthoritySignature],
+        admitted: Option<&std::collections::BTreeSet<crate::core::address::Address>>,
+    ) -> Result<FinalityStatus, FinalityError> {
         if let Some(rejected) = reject_commitment_domain_mismatch(domain, commitment) {
             return Ok(rejected);
         }
@@ -830,15 +842,56 @@ impl PoAFinalityAdapter {
             if let Some(rejected) = reject_unregistered_set_for_bridge(domain, "PoA") {
                 return Ok(rejected);
             }
+            if let Some(admitted_set) = admitted {
+                for authority in keys.keys() {
+                    if !admitted_set.contains(authority) {
+                        return Ok(FinalityStatus::Rejected(format!(
+                            "PoA domain {} commitment authority {authority} is not admitted: \
+                             the admission gate revoked it or its KYC horizon elapsed",
+                            domain.id
+                        )));
+                    }
+                }
+                if keys.len() != admitted_set.len() {
+                    return Ok(FinalityStatus::Rejected(format!(
+                        "PoA composite authority set does not match the admitted set for domain {}",
+                        domain.id
+                    )));
+                }
+            }
         } else if poa_pq_authority_set_hash(domain, authorities)? != domain.validator_set_hash {
             return Ok(FinalityStatus::Rejected(format!(
                 "PoA composite authority set does not match the set registered for domain {}",
                 domain.id
             )));
         }
+        let active_denominator = if let Some(admitted_set) = admitted {
+            let count = keys
+                .keys()
+                .filter(|authority| admitted_set.contains(authority))
+                .count();
+            if count == 0 {
+                return Ok(FinalityStatus::Rejected(format!(
+                    "PoA domain {} has no admitted authorities in the registered composite set",
+                    domain.id
+                )));
+            }
+            count
+        } else {
+            keys.len()
+        };
         let digest = poa_commit_digest(domain.domain_chain_id, domain.id, commitment);
         let mut valid_signers = std::collections::BTreeSet::new();
         for sig in signatures {
+            if let Some(admitted_set) = admitted {
+                if !admitted_set.contains(&sig.authority) {
+                    return Ok(FinalityStatus::Rejected(format!(
+                        "PoA domain {} commitment authority {} is not admitted: \
+                         the admission gate revoked it or its KYC horizon elapsed",
+                        domain.id, sig.authority
+                    )));
+                }
+            }
             let Some(public_key) = keys.get(&sig.authority) else {
                 return Ok(FinalityStatus::Rejected(
                     "PoA signature from a non-authority".into(),
@@ -859,7 +912,7 @@ impl PoAFinalityAdapter {
             }
             valid_signers.insert(sig.authority);
         }
-        let required = self.required_signatures(keys.len());
+        let required = self.required_signatures(active_denominator);
         if valid_signers.len() >= required {
             Ok(FinalityStatus::Finalized)
         } else {
@@ -867,6 +920,75 @@ impl PoAFinalityAdapter {
                 required_depth: required as u64,
                 observed_depth: valid_signers.len() as u64,
             })
+        }
+    }
+
+    /// Verify a PoA commitment against an optional live `poa_onboarding`
+    /// admission set, deriving the active authority set and quorum threshold
+    /// from currently admitted (unrevoked, non-expired) members.
+    pub(crate) fn verify_finality_admitted_observed_in(
+        &self,
+        registry: &crate::crypto::scheme::SchemeStatusRegistry,
+        domain: &ConsensusDomain,
+        commitment: &DomainCommitment,
+        proof: &FinalityProof,
+        admitted: Option<&std::collections::BTreeSet<crate::core::address::Address>>,
+        observer: &mut dyn CryptoObserver,
+    ) -> Result<FinalityStatus, FinalityError> {
+        let Some(admitted_set) = admitted else {
+            return self.verify_finality_observed_in(registry, domain, commitment, proof, observer);
+        };
+        if admitted_set.is_empty() {
+            return Ok(FinalityStatus::Rejected(format!(
+                "PoA domain {} has no currently admitted authorities: every authority is not admitted (revoked or KYC horizon elapsed)",
+                domain.id
+            )));
+        }
+        match proof {
+            FinalityProof::PoA {
+                authorities,
+                signatures,
+            } => {
+                for authority in authorities
+                    .iter()
+                    .chain(signatures.iter().map(|sig| &sig.authority))
+                {
+                    if !admitted_set.contains(authority) {
+                        return Ok(FinalityStatus::Rejected(format!(
+                            "PoA domain {} commitment authority {authority} is not admitted: \
+                             the admission gate revoked it or its KYC horizon elapsed",
+                            domain.id
+                        )));
+                    }
+                }
+                let mut live_domain = domain.clone();
+                let live_vec: Vec<crate::core::address::Address> =
+                    admitted_set.iter().copied().collect();
+                live_domain.validator_set_hash = poa_authority_set_hash(domain, &live_vec)?;
+                self.verify_finality_observed_in(
+                    registry,
+                    &live_domain,
+                    commitment,
+                    proof,
+                    observer,
+                )
+            }
+            FinalityProof::PoAPq {
+                authorities,
+                signatures,
+            } => {
+                let status = self.verify_poa_pq_admitted(
+                    registry,
+                    domain,
+                    commitment,
+                    authorities,
+                    signatures,
+                    Some(admitted_set),
+                )?;
+                self.observe_finalized(&status, proof, observer);
+                Ok(status)
+            }
+            _ => self.verify_finality_observed_in(registry, domain, commitment, proof, observer),
         }
     }
 }

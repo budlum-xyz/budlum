@@ -362,6 +362,31 @@ fn refusal_is_round_scope(error: &str) -> bool {
     .any(|refusal| error.contains(refusal))
 }
 
+fn refusal_is_benign_fork_or_lag(error: &str) -> bool {
+    [
+        "Prevote checkpoint hash mismatch",
+        "Precommit checkpoint hash mismatch",
+        "Rejecting early prevote beyond finality horizon",
+        "Rejecting early precommit beyond finality horizon",
+        "No validator snapshot for PQ attestation",
+        "PQ attestation signer is not in the validator snapshot",
+        "PQ attestation signer has no snapshot index",
+    ]
+    .iter()
+    .any(|refusal| error.contains(refusal))
+}
+
+fn budlum_topic_score_params() -> gossipsub::TopicScoreParams {
+    // Keep P1/P2/P4 active while disabling P3/P3b delivery-deficit penalties:
+    // sparse low-rate testnet meshes otherwise fall below the 20 msg/s default
+    // threshold and silently graylist honest validators across partitions.
+    gossipsub::TopicScoreParams {
+        mesh_message_deliveries_weight: 0.0,
+        mesh_failure_penalty_weight: 0.0,
+        ..Default::default()
+    }
+}
+
 /// First `max_chars` characters of a peer controlled string, for log lines.
 ///
 /// A byte slice such as `&s[..16]` panics when byte 16 is inside a multi byte
@@ -407,18 +432,28 @@ fn subnet_bucket(addr: &Multiaddr) -> Option<crate::network::peer_manager::Subne
 
 /// Whether a `Blockchain::add_transaction` refusal reflects benign mempool or
 /// block-inclusion ordering rather than a malformed or forged gossip payload.
-fn tx_refusal_is_pool_race(tx: &crate::core::transaction::Transaction, err: &str) -> bool {
-    if err.contains("DuplicateTransaction")
-        || err.contains("PoolFull")
-        || err.contains("PoolBytesFull")
-        || err.contains("FeeTooLow")
-        || err.contains("RbfFeeTooLow")
-        || err.contains("SenderLimitReached")
-        || err.contains("TransactionExpired")
+fn tx_refusal_is_pool_race(
+    tx: &crate::core::transaction::Transaction,
+    err: &str,
+    expected_chain_id: u64,
+) -> bool {
+    if tx.from == crate::core::address::Address::zero()
+        || tx.chain_id != expected_chain_id
+        || !tx.verify()
     {
-        return true;
+        return false;
     }
-    (err.contains("Invalid nonce:") || err.contains("InvalidNonce")) && tx.verify()
+    matches!(
+        err,
+        "Mempool error: DuplicateTransaction"
+            | "Mempool error: PoolFull"
+            | "Mempool error: PoolBytesFull"
+            | "Mempool error: FeeTooLow"
+            | "Mempool error: RbfFeeTooLow"
+            | "Mempool error: SenderLimitReached"
+            | "Mempool error: TransactionExpired"
+            | "Mempool error: InvalidNonce"
+    ) || err.starts_with("Invalid transaction: Invalid nonce:")
 }
 
 /// Whether an address a peer advertised may enter the routing table.
@@ -958,6 +993,11 @@ pub struct Node {
     /// Bounded in-progress deliveries: subsequent chunks spend the first
     /// chunk's blob rate token, never a new token per 256 KiB frame.
     qc_serves: QcServeTable,
+    /// Pending `/sync` finality certificate requests keyed by request id.
+    cert_fetches: HashMap<request_response::OutboundRequestId, (PeerId, u64)>,
+    sync_poll_cursor: usize,
+    last_observed_tip: u64,
+    stale_tip_ticks: u8,
     pub bootstrap_peers: Vec<String>,
     pub dns_seeds: Vec<String>,
     pub dns_seed_port: u16,
@@ -1266,7 +1306,242 @@ impl Node {
         let block_missing = error.contains("We don't have block at height");
         let sibling_fork =
             error.contains("Certificate hash") && error.contains("mismatch with our block hash");
-        block_missing || sibling_fork
+        let missing_epoch_set = error.contains("no validator set recorded for epoch");
+        block_missing || sibling_fork || missing_epoch_set
+    }
+
+    fn request_finality_cert(&mut self, peer: PeerId, checkpoint_height: u64) {
+        if checkpoint_height == 0
+            || self.cert_fetches.len() >= 8
+            || self
+                .cert_fetches
+                .values()
+                .any(|(_, h)| *h == checkpoint_height)
+        {
+            return;
+        }
+        let req = NetworkMessage::GetFinalityCert { checkpoint_height };
+        let req_id = self
+            .swarm
+            .behaviour_mut()
+            .sync
+            .send_request(&peer, req.to_bytes());
+        self.cert_fetches.insert(req_id, (peer, checkpoint_height));
+    }
+
+    async fn trigger_fork_sync(&mut self, peer_id: PeerId) {
+        if self.sync_state.load(Ordering::SeqCst) == 0 {
+            let locator = self.chain.get_locator().await;
+            let _ = self.request_headers_from_peer(Some(peer_id), locator, 500);
+        }
+    }
+
+    async fn request_next_finality_cert(&mut self, peer: PeerId) {
+        let chain_id = self.chain.get_chain_id().await;
+        let interval =
+            crate::core::chain_config::finality_checkpoint_interval_for_chain_id(chain_id);
+        let tip = self.chain.get_height().await;
+        let finalized = self.chain.get_finalized_height().await;
+        if interval > 0 && tip >= finalized.saturating_add(interval) {
+            let next_cp = (finalized / interval)
+                .saturating_add(1)
+                .saturating_mul(interval);
+            self.request_finality_cert(peer, next_cp);
+        }
+    }
+
+    async fn build_finality_cert_response(
+        chain: &ChainHandle,
+        checkpoint_height: u64,
+    ) -> NetworkMessage {
+        let chain_id = chain.get_chain_id().await;
+        let valid_cp = checkpoint_height > 0
+            && crate::chain::finality::is_checkpoint_height_for_chain(checkpoint_height, chain_id);
+        let mut cert = if valid_cp {
+            chain.get_finality_cert(checkpoint_height).await
+        } else {
+            None
+        };
+        if cert.is_none() && valid_cp {
+            let interval =
+                crate::core::chain_config::finality_checkpoint_interval_for_chain_id(chain_id);
+            let finalized = chain.get_finalized_height().await;
+            if interval > 0 && finalized > checkpoint_height {
+                let latest_cp = (finalized / interval).saturating_mul(interval);
+                if latest_cp >= checkpoint_height {
+                    cert = chain.get_finality_cert(latest_cp).await;
+                }
+            }
+        }
+        match cert {
+            Some(cert) => NetworkMessage::FinalityCertResponse {
+                found: true,
+                epoch: cert.epoch,
+                checkpoint_height: cert.checkpoint_height,
+                checkpoint_hash: cert.checkpoint_hash,
+                agg_sig_bls: cert.agg_sig_bls,
+                bitmap: cert.bitmap,
+                set_hash: cert.set_hash,
+                scheme_id: crate::chain::finality::BLS_SCHEME_RFC9380_V1.to_string(),
+                seat_table_version: cert.seat_table_version,
+            },
+            None => NetworkMessage::FinalityCertResponse {
+                found: false,
+                epoch: 0,
+                checkpoint_height: 0,
+                checkpoint_hash: String::new(),
+                agg_sig_bls: Vec::new(),
+                bitmap: Vec::new(),
+                set_hash: String::new(),
+                scheme_id: String::new(),
+                seat_table_version: 0,
+            },
+        }
+    }
+
+    async fn handle_finality_cert_response(
+        &mut self,
+        peer: PeerId,
+        expected_height: u64,
+        response: &[u8],
+    ) {
+        match NetworkMessage::from_bytes_validated(response) {
+            Ok(NetworkMessage::FinalityCertResponse { found: false, .. }) => {
+                let chain_id = self.chain.get_chain_id().await;
+                let interval =
+                    crate::core::chain_config::finality_checkpoint_interval_for_chain_id(chain_id);
+                let tip = self.chain.get_height().await;
+                let finalized = self.chain.get_finalized_height().await;
+                let next = expected_height.saturating_add(interval);
+                if interval > 0
+                    && next <= tip
+                    && next <= finalized.saturating_add(interval.saturating_mul(16))
+                {
+                    self.request_finality_cert(peer, next);
+                }
+            }
+            Ok(NetworkMessage::FinalityCertResponse {
+                found: true,
+                epoch,
+                checkpoint_height,
+                checkpoint_hash,
+                agg_sig_bls,
+                bitmap,
+                set_hash,
+                scheme_id,
+                seat_table_version,
+            }) => {
+                let cert_chain_id = self.chain.get_chain_id().await;
+                if checkpoint_height < expected_height
+                    || !crate::chain::finality::is_checkpoint_height_for_chain(
+                        checkpoint_height,
+                        cert_chain_id,
+                    )
+                    || scheme_id != crate::chain::finality::BLS_SCHEME_RFC9380_V1
+                {
+                    self.peer_manager_lock().report_bad_behavior(&peer);
+                    return;
+                }
+                let qc_checkpoint_hash = checkpoint_hash.clone();
+                let cert = crate::chain::finality::FinalityCert {
+                    epoch,
+                    checkpoint_height,
+                    checkpoint_hash,
+                    chain_id: cert_chain_id,
+                    agg_sig_bls,
+                    bitmap,
+                    set_hash,
+                    seat_table_version,
+                };
+                match self.chain.handle_finality_cert(cert).await {
+                    Ok(()) => {
+                        self.peer_manager_lock().report_good_behavior(&peer);
+                        let interval =
+                            crate::core::chain_config::finality_checkpoint_interval_for_chain_id(
+                                cert_chain_id,
+                            );
+                        let tip = self.chain.get_height().await;
+                        if interval > 0 && tip >= checkpoint_height.saturating_add(interval) {
+                            self.request_finality_cert(
+                                peer,
+                                checkpoint_height.saturating_add(interval),
+                            );
+                        }
+                    }
+                    Err(e) if e.contains("Missing verified QC blob") => {
+                        self.request_qc_blob(peer, epoch, checkpoint_height, qc_checkpoint_hash);
+                    }
+                    Err(e) if Self::finality_cert_names_a_block_we_lack(&e) => {
+                        self.sync_if_behind(peer, checkpoint_height).await;
+                        if e.contains("mismatch with our block hash") {
+                            self.trigger_fork_sync(peer).await;
+                        }
+                    }
+                    Err(e) => {
+                        warn!("Synced FinalityCert from {peer} rejected: {e}");
+                        self.peer_manager_lock().report_bad_behavior(&peer);
+                    }
+                }
+            }
+            Ok(_) | Err(_) => {
+                self.peer_manager_lock().report_bad_behavior(&peer);
+            }
+        }
+    }
+
+    async fn handle_sync_reconcile_tick(&mut self) {
+        self.expire_stuck_sync_round();
+        let tip = self.chain.get_height().await;
+        let finalized = self.chain.get_finalized_height().await;
+        if tip > self.last_observed_tip {
+            self.last_observed_tip = tip;
+            self.stale_tip_ticks = 0;
+        } else {
+            self.stale_tip_ticks = self.stale_tip_ticks.saturating_add(1);
+        }
+        let chain_id = self.chain.get_chain_id().await;
+        let interval =
+            crate::core::chain_config::finality_checkpoint_interval_for_chain_id(chain_id);
+        let (mut all_peers, mut sync_peers) = {
+            let pm = self.peer_manager_lock();
+            let active: Vec<PeerId> = pm
+                .connected_peers()
+                .into_iter()
+                .filter(|p| !pm.is_banned(p))
+                .collect();
+            let handshaked: Vec<PeerId> = active
+                .iter()
+                .copied()
+                .filter(|p| pm.is_handshaked(p))
+                .collect();
+            (active, handshaked)
+        };
+        all_peers.sort_by_key(|p| p.to_bytes());
+        sync_peers.sort_by_key(|p| p.to_bytes());
+        if !all_peers.is_empty() {
+            let peer = all_peers[self.sync_poll_cursor % all_peers.len()];
+            self.sync_poll_cursor = self.sync_poll_cursor.wrapping_add(1);
+            let hs = Self::handshake_message(&self.chain, false).await;
+            let sync = &mut self.swarm.behaviour_mut().sync;
+            let _ = sync.send_request(&peer, hs.to_bytes());
+        }
+        if !sync_peers.is_empty() {
+            let peer = sync_peers[self.sync_poll_cursor % sync_peers.len()];
+            let finality_lagging =
+                interval > 0 && tip >= finalized.saturating_add(interval.saturating_mul(2));
+            if self.sync_state.load(Ordering::SeqCst) == 0
+                && (self.stale_tip_ticks >= 2 || finality_lagging)
+            {
+                let locator = self.chain.get_locator().await;
+                let _ = self.request_headers_from_peer(Some(peer), locator, 500);
+            }
+            if interval > 0 && tip >= finalized.saturating_add(interval) {
+                let next_cp = (finalized / interval)
+                    .saturating_add(1)
+                    .saturating_mul(interval);
+                self.request_finality_cert(peer, next_cp);
+            }
+        }
     }
 
     /// Queue a validated missing QC, even when all fetch slots are busy.
@@ -2221,7 +2496,7 @@ impl Node {
         for topic in ["blocks", "transactions"] {
             score_params.topics.insert(
                 gossipsub::IdentTopic::new(topic).hash(),
-                gossipsub::TopicScoreParams::default(),
+                budlum_topic_score_params(),
             );
         }
         let score_thresholds = gossipsub::PeerScoreThresholds::default();
@@ -2375,6 +2650,10 @@ impl Node {
             qc_fetches: HashMap::new(),
             pending_qc_fetches: VecDeque::new(),
             qc_serves: HashMap::new(),
+            cert_fetches: HashMap::new(),
+            sync_poll_cursor: 0,
+            last_observed_tip: 0,
+            stale_tip_ticks: 0,
             bootstrap_peers: Vec::new(),
             dns_seeds: Vec::new(),
             dns_seed_port: 0,
@@ -2883,6 +3162,7 @@ impl Node {
         // finality beat, and at 250 ms it would fire four times a second.
         let mut finality_health_interval = tokio::time::interval(Duration::from_secs(30));
         let mut qc_retry_interval = tokio::time::interval(QC_RETRY_DELAY);
+        let mut sync_reconcile_interval = tokio::time::interval(Duration::from_secs(4));
         let mut slashing_gossip_interval = tokio::time::interval(Duration::from_secs(5));
         let mut dht_interval = tokio::time::interval(DHT_BOOTSTRAP_INTERVAL);
         let mut banning_interval = tokio::time::interval(Duration::from_secs(60));
@@ -2953,6 +3233,9 @@ impl Node {
                     let finalized = self.chain.get_finalized_height().await;
                     self.pending_qc_fetches.retain(|pending| pending.height > finalized);
                     self.drain_qc_fetches();
+                }
+                _ = sync_reconcile_interval.tick() => {
+                    self.handle_sync_reconcile_tick().await;
                 }
                 _ = finality_health_interval.tick() => {
                     // Every node checks its own view, validator or not,
@@ -3791,6 +4074,7 @@ impl Node {
                             // cid from `bitswap_requests` so unrelated peer churn never
                             // drains in-flight fetches (CWE-404).
                             if num_established == 0 {
+                                self.cert_fetches.retain(|_, (p, _)| *p != peer_id);
                                 let retired_ids: Vec<_> = self
                                     .bitswap_request_peers
                                     .iter()
@@ -4188,7 +4472,13 @@ impl Node {
                                                 }
                                             }
                                             Err(e) => {
-                                                let pool_race = tx_refusal_is_pool_race(&tx, &e);
+                                                let expected_chain_id =
+                                                    self.chain.get_chain_id().await;
+                                                let pool_race = tx_refusal_is_pool_race(
+                                                    &tx,
+                                                    &e,
+                                                    expected_chain_id,
+                                                );
                                                 warn!(
                                                     peer = %peer_id,
                                                     pool_race,
@@ -4635,6 +4925,40 @@ impl Node {
                                                     } else {
                                                         self.report_gossip(&id, &peer_id, gossipsub::MessageAcceptance::Ignore);
                                                     }
+                                                    if e.contains("epoch mismatch")
+                                                        || e.contains("height mismatch")
+                                                    {
+                                                        self.trigger_fork_sync(peer_id).await;
+                                                    }
+                                                    continue;
+                                                }
+                                                if refusal_is_benign_fork_or_lag(&e) {
+                                                    let authentic = self
+                                                        .chain
+                                                        .vote_is_from_registered_validator(
+                                                            voter_addr,
+                                                            prevote.auth_signing_message(),
+                                                            prevote.auth_sig.clone(),
+                                                            prevote.signing_message(),
+                                                            prevote.sig_bls.clone(),
+                                                        )
+                                                        .await;
+                                                    if !authentic {
+                                                        self.peer_manager_lock()
+                                                            .report_bad_behavior(&peer_id);
+                                                        self.report_gossip(
+                                                            &id,
+                                                            &peer_id,
+                                                            gossipsub::MessageAcceptance::Reject,
+                                                        );
+                                                        continue;
+                                                    }
+                                                    self.report_gossip(
+                                                        &id,
+                                                        &peer_id,
+                                                        gossipsub::MessageAcceptance::Ignore,
+                                                    );
+                                                    self.trigger_fork_sync(peer_id).await;
                                                     continue;
                                                 }
                                                 self.peer_manager_lock().report_bad_behavior(&peer_id);
@@ -4749,6 +5073,40 @@ impl Node {
                                                     } else {
                                                         self.report_gossip(&id, &peer_id, gossipsub::MessageAcceptance::Ignore);
                                                     }
+                                                    if e.contains("epoch mismatch")
+                                                        || e.contains("height mismatch")
+                                                    {
+                                                        self.trigger_fork_sync(peer_id).await;
+                                                    }
+                                                    continue;
+                                                }
+                                                if refusal_is_benign_fork_or_lag(&e) {
+                                                    let authentic = self
+                                                        .chain
+                                                        .vote_is_from_registered_validator(
+                                                            voter_addr,
+                                                            precommit.auth_signing_message(),
+                                                            precommit.auth_sig.clone(),
+                                                            precommit.signing_message(),
+                                                            precommit.sig_bls.clone(),
+                                                        )
+                                                        .await;
+                                                    if !authentic {
+                                                        self.peer_manager_lock()
+                                                            .report_bad_behavior(&peer_id);
+                                                        self.report_gossip(
+                                                            &id,
+                                                            &peer_id,
+                                                            gossipsub::MessageAcceptance::Reject,
+                                                        );
+                                                        continue;
+                                                    }
+                                                    self.report_gossip(
+                                                        &id,
+                                                        &peer_id,
+                                                        gossipsub::MessageAcceptance::Ignore,
+                                                    );
+                                                    self.trigger_fork_sync(peer_id).await;
                                                     continue;
                                                 }
                                                 self.peer_manager_lock().report_bad_behavior(&peer_id);
@@ -4841,6 +5199,9 @@ impl Node {
                                                     );
                                                     self.sync_if_behind(peer_id, checkpoint_height)
                                                         .await;
+                                                    if e.contains("mismatch with our block hash") {
+                                                        self.trigger_fork_sync(peer_id).await;
+                                                    }
                                                     self.report_gossip(&id, &peer_id, gossipsub::MessageAcceptance::Ignore);
                                                 } else {
                                                     self.peer_manager_lock().report_bad_behavior(&peer_id);
@@ -4849,6 +5210,27 @@ impl Node {
                                                 continue;
                                             }
                                         }
+                                    }
+
+                                    NetworkMessage::GetFinalityCert { checkpoint_height } => {
+                                        warn!(
+                                            "Ignoring gossip GetFinalityCert from {peer_id}: \
+                                             point-to-point /sync only (height={checkpoint_height})"
+                                        );
+                                        self.report_gossip(
+                                            &id,
+                                            &peer_id,
+                                            gossipsub::MessageAcceptance::Ignore,
+                                        );
+                                        continue;
+                                    }
+                                    NetworkMessage::FinalityCertResponse { .. } => {
+                                        self.report_gossip(
+                                            &id,
+                                            &peer_id,
+                                            gossipsub::MessageAcceptance::Reject,
+                                        );
+                                        continue;
                                     }
 
                                     NetworkMessage::GetQcBlob { epoch, checkpoint_height, .. } => {
@@ -5137,6 +5519,19 @@ impl Node {
                                                         let response = NetworkMessage::Blocks(blocks);
                                                         let _ = self.swarm.behaviour_mut().sync.send_response(channel, response.to_bytes());
                                                     }
+                                                    NetworkMessage::GetFinalityCert {
+                                                        checkpoint_height,
+                                                    } => {
+                                                        let ans = Self::build_finality_cert_response(
+                                                            &self.chain,
+                                                            checkpoint_height,
+                                                        )
+                                                        .await
+                                                        .to_bytes();
+                                                        let sync =
+                                                            &mut self.swarm.behaviour_mut().sync;
+                                                        let _ = sync.send_response(channel, ans);
+                                                    }
                                                     NetworkMessage::GetQcBlob { epoch, checkpoint_height, chunk_index } => {
                                                         let max_chunks = crate::consensus::qc::qc_blob_max_bytes(MAX_QC_WIRE_VALIDATORS)
                                                             .div_ceil(crate::consensus::qc::QC_CHUNK_BYTES);
@@ -5192,6 +5587,22 @@ impl Node {
                                             }
                                         }
                                         request_response::Message::Response { request_id, response } => {
+                                            if let Some((expected_peer, expected_height)) =
+                                                self.cert_fetches.remove(&request_id)
+                                            {
+                                                if peer != expected_peer {
+                                                    self.peer_manager_lock()
+                                                        .report_bad_behavior(&peer);
+                                                } else {
+                                                    self.handle_finality_cert_response(
+                                                        peer,
+                                                        expected_height,
+                                                        &response,
+                                                    )
+                                                    .await;
+                                                }
+                                                continue;
+                                            }
                                             if let Some(fetch) = self.qc_fetches.remove(&request_id) {
                                                 let key = (fetch.peer, fetch.epoch, fetch.height);
                                                 let result = NetworkMessage::from_bytes_validated(&response)
@@ -5659,6 +6070,10 @@ impl Node {
                                                         } else {
                                                             if joined > 0 {
                                                                 self.fork_rewalk.record_progress();
+                                                                self.request_next_finality_cert(
+                                                                    peer,
+                                                                )
+                                                                .await;
                                                             }
                                                             let mut pm = self.peer_manager_lock();
                                                             pm.report_good_behavior(&peer);
@@ -5681,6 +6096,7 @@ impl Node {
                                     }
                                 }
                                 request_response::Event::OutboundFailure { peer, request_id, error, .. } => {
+                                    self.cert_fetches.remove(&request_id);
                                     if let Some(fetch) = self.qc_fetches.remove(&request_id) {
                                         self.qc_assemblies.remove(&(fetch.peer, fetch.epoch, fetch.height));
                                         self.retry_qc_fetch(&fetch);
@@ -6475,6 +6891,9 @@ mod sync_handler_order_tests {
         assert!(!super::Node::finality_cert_names_a_block_we_lack(
             "Validator set hash mismatch"
         ));
+        assert!(super::Node::finality_cert_names_a_block_we_lack(
+            "Finality cert rejected: no validator set recorded for epoch 1"
+        ));
     }
 
     /// The cid a Bitswap response is checked against comes from the
@@ -7118,22 +7537,85 @@ mod finality_publish_tests {
         signed.sign(&signer);
         assert!(tx_refusal_is_pool_race(
             &signed,
-            "Invalid transaction: Invalid nonce: expected 8, got 7"
+            "Invalid transaction: Invalid nonce: expected 8, got 7",
+            45261,
         ));
         assert!(tx_refusal_is_pool_race(
             &signed,
-            "Mempool error: DuplicateTransaction"
+            "Mempool error: DuplicateTransaction",
+            45261,
         ));
         assert!(!tx_refusal_is_pool_race(
             &signed,
-            "Invalid transaction: Invalid Chain ID: expected 45261, got 1"
+            "Invalid transaction: Invalid Chain ID: expected 45261, got 1",
+            45261,
+        ));
+        assert!(!tx_refusal_is_pool_race(
+            &signed,
+            "Mempool error: DuplicateTransaction",
+            45262,
+        ));
+        assert!(!tx_refusal_is_pool_race(
+            &signed,
+            "custom wrapper mentioning DuplicateTransaction",
+            45261,
         ));
 
         let unsigned =
             crate::core::transaction::Transaction::new(sender, recipient, 1_000, Vec::new());
         assert!(!tx_refusal_is_pool_race(
             &unsigned,
-            "Invalid transaction: Invalid nonce: expected 1, got 0"
+            "Invalid transaction: Invalid nonce: expected 1, got 0",
+            45261,
+        ));
+        assert!(!tx_refusal_is_pool_race(
+            &unsigned,
+            "Mempool error: DuplicateTransaction",
+            45261,
+        ));
+    }
+
+    #[test]
+    fn budlum_topic_score_params_pass_validation_and_avoid_mesh_starvation() {
+        use libp2p::gossipsub;
+        let mut score_params = gossipsub::PeerScoreParams::default();
+        for topic in ["blocks", "transactions"] {
+            let params = super::budlum_topic_score_params();
+            assert_eq!(params.mesh_message_deliveries_weight, 0.0);
+            assert_eq!(params.mesh_failure_penalty_weight, 0.0);
+            score_params
+                .topics
+                .insert(gossipsub::IdentTopic::new(topic).hash(), params);
+        }
+        let kp = libp2p::identity::Keypair::generate_ed25519();
+        let mut gs: gossipsub::Behaviour = gossipsub::Behaviour::new(
+            gossipsub::MessageAuthenticity::Signed(kp),
+            gossipsub::Config::default(),
+        )
+        .expect("gossipsub config");
+        gs.with_peer_score(score_params, gossipsub::PeerScoreThresholds::default())
+            .expect("budlum topic score params must satisfy PeerScoreParams::validate");
+    }
+
+    #[test]
+    fn benign_fork_and_lag_refusals_do_not_match_bad_signatures() {
+        assert!(super::refusal_is_benign_fork_or_lag(
+            "Prevote checkpoint hash mismatch"
+        ));
+        assert!(super::refusal_is_benign_fork_or_lag(
+            "Precommit checkpoint hash mismatch"
+        ));
+        assert!(super::refusal_is_benign_fork_or_lag(
+            "Rejecting early precommit beyond finality horizon"
+        ));
+        assert!(super::refusal_is_benign_fork_or_lag(
+            "No validator snapshot for PQ attestation"
+        ));
+        assert!(!super::refusal_is_benign_fork_or_lag(
+            "Invalid precommit signature: verification failed"
+        ));
+        assert!(!super::refusal_is_benign_fork_or_lag(
+            "Invalid PQ attestation in precommit: forged"
         ));
     }
 }

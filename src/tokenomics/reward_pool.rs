@@ -465,8 +465,12 @@ mod tests {
             treasury_pool: 0,
             reward_pool_start_epoch: 0,
         };
-        let payouts =
-            reward_for_epoch(schedule, 0, 100, &[(addr(9), 1), (addr(1), 1), (addr(2), 1)]);
+        let payouts = reward_for_epoch(
+            schedule,
+            0,
+            100,
+            &[(addr(9), 1), (addr(1), 1), (addr(2), 1)],
+        );
         assert_eq!(total_epoch_payout(&payouts), 4);
         assert_eq!(payouts[0], (addr(1), 2));
         assert_eq!(payouts[1], (addr(2), 1));

@@ -78,6 +78,37 @@ contract FraudVerifierStub is IExternalFraudProofVerifier {
     }
 }
 
+/// Fraud verifier that checks the verifier contract has not mutated challenge
+/// or pending-root state prior to external verification (CEI compliance).
+contract InspectingFraudVerifier is IExternalFraudProofVerifier {
+    BudlumFinalityVerifier public target;
+    bool public answer;
+    bool public shouldRevert;
+
+    function setTarget(BudlumFinalityVerifier target_) external {
+        target = target_;
+    }
+
+    function configure(bool answer_, bool shouldRevert_) external {
+        answer = answer_;
+        shouldRevert = shouldRevert_;
+    }
+
+    function verifyFraud(bytes32 digest, bytes calldata) external view returns (bool) {
+        if (shouldRevert) {
+            revert("boom");
+        }
+        (, address challenger, uint64 openedAt, bool resolved, uint64 h, bytes32 root) = target.challenges(digest);
+        require(openedAt != 0, "challenge missing");
+        require(challenger == address(0), "challenger mutated before verifyFraud");
+        require(!resolved, "resolved mutated before verifyFraud");
+        require(!target.fraudulent(digest), "fraudulent mutated before verifyFraud");
+        require(target.pendingRootAtHeight(h) == root, "pending root cleared before verifyFraud");
+        require(target.pendingEnvelopeCount(target.pendingIdentity(h, root)) > 0, "envelope count decremented early");
+        return answer;
+    }
+}
+
 /// negative tests. The default profile runs on Cancun, which has
 /// neither the BLS nor the ML-DSA precompile: an attestation with no
 /// verification path at all is refused. The window tests (F02 pending, F05,
@@ -410,5 +441,33 @@ contract BudlumFinalityVerifierTest is Harness {
         vm.roll(block.number + WINDOW);
         bls2.settle(honestDigest);
         assertTrue(bls2.heightFinal(42), "honest height settled after early bad envelope challenged");
+    }
+
+    function test_F05_challenge_verifies_fraud_before_mutating_state() public {
+        InspectingFraudVerifier inspector = new InspectingFraudVerifier();
+        BudlumFinalityVerifier inspected = new BudlumFinalityVerifier(
+            CHAIN, WINDOW, address(inspector), keccak256(committee), keccak256(generator), keccak256(mlDsaKey)
+        );
+        inspector.setTarget(inspected);
+        assertTrue(address(inspector) == inspected.fraudProofVerifier(), "inspector address matched");
+
+        bytes32 digest = inspected.verify(_attestation(42, bytes32(uint256(7))));
+
+        // Reverting verifyFraud leaves pending state intact.
+        inspector.configure(false, true);
+        vm.expectPartialRevert(BudlumFinalityVerifier.FraudProofRejected.selector);
+        inspected.challenge(digest, hex"01");
+        assertTrue(!inspected.fraudulent(digest), "not fraudulent after revert");
+
+        // False verifyFraud still observed pre-mutation state and leaves pending state intact.
+        inspector.configure(false, false);
+        vm.expectPartialRevert(BudlumFinalityVerifier.FraudProofRejected.selector);
+        inspected.challenge(digest, hex"01");
+        assertTrue(!inspected.fraudulent(digest), "not fraudulent after false");
+
+        // True verifyFraud observes clean pre-mutation state, then commits fraud resolution.
+        inspector.configure(true, false);
+        inspected.challenge(digest, hex"01");
+        assertTrue(inspected.fraudulent(digest), "marked fraudulent after verification");
     }
 }

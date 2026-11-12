@@ -1028,15 +1028,16 @@ fn adopt_escape_record_v1_and_challenge_rebut_forgery_paths() {
         w.reg.adopt(alice_addr, &binding),
         Err(Refusal::NotAuthorized)
     );
-    let adopt_raw = w
-        .fx
-        .call(&w.endpoint, &depositor, 0, alice_addr.as_bytes());
+    let adopt_raw = w.fx.call(&w.endpoint, &depositor, 0, alice_addr.as_bytes());
     let adopt_proof = w.proof(adopt_raw);
     assert_eq!(
         w.reg.adopt_with_proof(bob_addr, &adopt_proof, &YES),
         Err(Refusal::NotAuthorized)
     );
-    assert_eq!(w.reg.adopt_with_proof(alice_addr, &adopt_proof, &YES), Ok(1));
+    assert_eq!(
+        w.reg.adopt_with_proof(alice_addr, &adopt_proof, &YES),
+        Ok(1)
+    );
     assert_eq!(w.reg.balance(&w.class(AssetKind::Fungible), &alice()), 9);
 }
 
