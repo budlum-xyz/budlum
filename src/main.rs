@@ -83,7 +83,7 @@ fn claim_new_key_file_or_exit(path: &str) {
 const PRODUCER_SYNC_HOLD: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// The daemon block-production loop runs for every engine that produces from this process.
-/// PoA is included: the engine signs only when this node is the elected leader, and
+/// `PoA` is included: the engine signs only when this node is the elected leader, and
 /// `produce_block` returns `None` for the other slots.
 fn daemon_producer_loop_runs(consensus_type: ConsensusType) -> bool {
     matches!(

@@ -1,7 +1,7 @@
 //! Conformance runners, BGU gas calibration, and cross-EE golden block harness.
 //!
 //! Implements section 8.9 item 4, section 8.13, section 8.15, and section 8.16:
-//! - Per-environment conformance suites across EVM, WASM, SVM, Move, and BudZero.
+//! - Per-environment conformance suites across EVM, WASM, SVM, Move, and `BudZero`.
 //! - P95 (`top 5%` worst-case) nanoseconds-per-BGU calibration (`<= 16 ns / BGU`).
 //! - Deterministic multi-environment golden block state-root verification.
 //!
@@ -90,6 +90,10 @@ fn funded_pair() -> (AccountState, Address, Address) {
 }
 
 /// Runs the Prague EVM conformance vector pack.
+///
+/// # Errors
+///
+/// Returns an error if the operation fails.
 pub fn run_evm_conformance() -> Result<ConformanceReport, String> {
     let ee = EvmEe::new();
     // EIP-3860 initcode > 49_152 bytes must be refused (documented limit).
@@ -176,7 +180,11 @@ pub fn run_evm_conformance() -> Result<ConformanceReport, String> {
     })
 }
 
-/// Runs the CosmWasm WASM conformance vector pack.
+/// Runs the `CosmWasm` WASM conformance vector pack.
+///
+/// # Errors
+///
+/// Returns an error if the operation fails.
 pub fn run_wasm_conformance() -> Result<ConformanceReport, String> {
     let wasm = WasmEe::new();
     let float_mod = build_valid_cosmwasm_module(&["execute"], &[0x92]);
@@ -225,6 +233,10 @@ pub fn run_wasm_conformance() -> Result<ConformanceReport, String> {
 }
 
 /// Runs the SBPF SVM conformance vector pack.
+///
+/// # Errors
+///
+/// Returns an error if the operation fails.
 pub fn run_svm_conformance() -> Result<ConformanceReport, String> {
     let svm = SvmEe::new();
     if svm.config().jit_enabled {
@@ -321,6 +333,10 @@ pub fn run_svm_conformance() -> Result<ConformanceReport, String> {
 }
 
 /// Runs the Aptos Move conformance vector pack.
+///
+/// # Errors
+///
+/// Returns an error if the operation fails.
 pub fn run_move_conformance() -> Result<ConformanceReport, String> {
     let mv = MoveEe::new();
     if mv.validate_deploy(b"bad").is_ok() {
@@ -388,7 +404,11 @@ pub fn run_move_conformance() -> Result<ConformanceReport, String> {
     })
 }
 
-/// Runs the BudZero native EE conformance vector pack.
+/// Runs the `BudZero` native EE conformance vector pack.
+///
+/// # Errors
+///
+/// Returns an error if the operation fails.
 pub fn run_budzero_conformance() -> Result<ConformanceReport, String> {
     let (mut state, sender, proposer) = funded_pair();
     let mut coord = ExecutionCoordinator::new();
@@ -429,6 +449,10 @@ pub fn run_budzero_conformance() -> Result<ConformanceReport, String> {
 
 /// Measures the p95 nanoseconds-per-BGU across `samples` executions and returns
 /// `(measured_p95_ns_per_bgu, recalibrated_schedule)`.
+///
+/// # Errors
+///
+/// Returns an error if the operation fails.
 pub fn calibrate_bgu_schedule(samples: usize) -> Result<(u64, CalibratedBguSchedule), String> {
     let count = samples.max(20);
     let mut ns_per_bgu_samples = Vec::with_capacity(count);

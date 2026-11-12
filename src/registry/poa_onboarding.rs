@@ -1,4 +1,4 @@
-//! PoA participant onboarding - the full KYC-gated admission lifecycle.
+//! `PoA` participant onboarding - the full KYC-gated admission lifecycle.
 //!
 //! Layered on [`PoaMembershipRegistry`], this module adds the production
 //! Compliance concerns that a bare status enum cannot express. The underlying
@@ -16,7 +16,7 @@
 //!    (`crate::ai::registry`).
 //! 3. **Whitelist enforcement view** - [`PoAWhitelist`] is the single object
 //!    Consensus code should query to answer *"is this account authorized to act
-//!    In the PoA domain **right now**"*, accounting for both status **and**
+//!    In the `PoA` domain **right now**"*, accounting for both status **and**
 //!    Expiry.
 //!
 //! ## Isolation (no change to the master-context invariant)
@@ -114,7 +114,7 @@ pub struct OnboardingEvent {
 }
 
 /// A point-in-time, expiry-aware snapshot of the accounts authorized to act in
-/// One PoA domain. This is the **enforcement object** consensus should consult.
+/// One `PoA` domain. This is the **enforcement object** consensus should consult.
 ///
 /// It is deliberately a *value* (snapshot), not a live view, so the answer
 /// Cannot change under the caller between construction and the gating check.
@@ -126,7 +126,7 @@ pub struct PoAWhitelist {
 
 impl PoAWhitelist {
     /// The single enforcement predicate. `true` ⇒ the account may produce
-    /// Blocks / validate in the PoA domain at the snapshot block.
+    /// Blocks / validate in the `PoA` domain at the snapshot block.
     #[must_use]
     pub fn contains(&self, account: &Address) -> bool {
         self.members.contains_key(account)
@@ -161,7 +161,7 @@ impl PoAWhitelist {
     }
 }
 
-/// The onboarding lifecycle manager for a set of PoA domains. Owns the
+/// The onboarding lifecycle manager for a set of `PoA` domains. Owns the
 /// Underlying [`PoaMembershipRegistry`] plus the compliance layer
 /// (audit trail + KYC expiry tracking).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -411,6 +411,10 @@ impl PoAOnboarding {
 
     /// Remove an admin from a domain (see
     /// [`PoaMembershipRegistry::remove_admin`] for the last-admin rule).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn remove_admin(
         &mut self,
         domain: DomainId,
@@ -587,7 +591,7 @@ impl PoAOnboarding {
     }
 }
 
-/// The PoA admission door at the transaction layer.
+/// The `PoA` admission door at the transaction layer.
 ///
 /// Carries the registry's own operations and nothing else - the shape and
 /// its semantics cannot drift from the one body
@@ -632,7 +636,7 @@ pub enum PoAOnboardingTx {
     },
 }
 
-/// Run one PoA admission operation with the authority the SENDER actually
+/// Run one `PoA` admission operation with the authority the SENDER actually
 /// has.
 ///
 /// Two doors and only two: a candidate applies for themselves, and an admin
@@ -640,6 +644,10 @@ pub enum PoAOnboardingTx {
 /// governance (`GovernanceAction::PoaAddAdmin`), never through this door -
 /// an open first-admin slot would let anyone appoint themselves to any
 /// domain.
+///
+/// # Errors
+///
+/// Returns an error if the operation fails.
 pub fn execute_poa_onboarding_tx(
     state: &mut PoAOnboarding,
     sender: &Address,

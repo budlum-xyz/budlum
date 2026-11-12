@@ -405,6 +405,10 @@ fn foreign_account_cannot_touch_pq_holdings() {
     let mut coord = ExecutionCoordinator::new();
     let pq_owner = Address::from([0x99u8; 32]);
     state.credit_account(&pq_owner, 100);
+    state
+        .execution_state
+        .foreign_lane
+        .register_native_pq_account(pq_owner);
 
     let eth_sk = [0x71u8; 32];
     let eth_raw = sign_eip1559_tx(
@@ -568,4 +572,19 @@ fn move_alias_scheme_byte_is_unused() {
     assert_eq!(PINNED_APTOS_SCHEME_BYTES, expected.as_slice());
     assert!(!expected.contains(&MOVE_ALIAS_SCHEME_BYTE));
     assert_eq!(pinned["reserved_byte_is_used"], serde_json::json!(false));
+}
+
+#[test]
+fn unregistered_address_fails_closed_as_classical() {
+    let lane = ForeignLaneState::new();
+    let unknown = Address::from([0xAAu8; 32]);
+    let target = Address::from([0xBBu8; 32]);
+    assert_eq!(
+        lane.quantum_class_of(&unknown),
+        AccountQuantumClass::Classical
+    );
+    assert_eq!(
+        lane.authorize_holding_access(&unknown, &target),
+        Err(ForeignAdmissionError::PqHoldingsProtected)
+    );
 }

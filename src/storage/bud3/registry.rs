@@ -22,8 +22,8 @@
 
 use super::content_id::{ContentId, ContentIdKind};
 use super::custody::{
-    audit_for, sub_block_count, Audit, CustodyProof, ProofContext, ShareRef, FULL_AUDIT_PPM,
-    MOBILE_AUDIT_PPM,
+    audit_for, sub_block_count, symbol_leaf, symbol_root, Audit, CustodyProof, ProofContext,
+    ShareRef, FULL_AUDIT_PPM, MOBILE_AUDIT_PPM,
 };
 use super::dedup_index::DedupIndex;
 use super::delete::{check_same_owner_dependency, GrantShredAuth, ShredOutcome};
@@ -32,10 +32,12 @@ use super::fees::{
     storage_fee_for_epochs, FeeParams, FeeRecord, ObjectEndowment, ShareRewardInput,
     PRESENCE_PPM_SCALE,
 };
+use super::fountain::Symbol;
 use super::grants::{GrantBud3Error, GrantRow};
 use super::pipeline::ObjectRecord;
 use super::placement::{Class, Share};
 use super::segment::Segmentation;
+use super::view::{PaidViewReceipt, MIN_PAID_VIEW_FEE_ATOMS};
 use crate::core::hash::hash_fields_bytes;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -126,6 +128,20 @@ pub struct ObjectEntry {
     /// Custody Endowment accounting for this object.
     #[serde(default)]
     pub endowment: ObjectEndowment,
+}
+
+/// On-chain record of a paid G8 fallback decode authorization.
+/// exposed for paid fallback-view ledger queries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PaidViewRecord {
+    /// Payer who funded the view.
+    pub payer: Address,
+    /// Target public object commitment.
+    pub object: ObjectKey,
+    /// Paid fee in BUD base units (`>= MIN_PAID_VIEW_FEE_ATOMS`).
+    pub amount_atoms: u64,
+    /// Epoch in which the payment was recorded.
+    pub paid_at_epoch: u64,
 }
 
 /// One replacement of an object: a second, better representation of the same
@@ -226,6 +242,8 @@ pub enum RegistryError {
     BadReplacement(super::replace::ReplaceError),
     /// Mobile custody quota outside `[mobile_quota_min_bytes, mobile_quota_max_bytes]`.
     BadQuota(super::limits::LimitError),
+    /// On-chain G8 paid fallback view payment was invalid or already recorded.
+    InvalidPaidView(&'static str),
 }
 
 impl From<GrantBud3Error> for RegistryError {
@@ -282,6 +300,9 @@ pub struct Bud3Registry {
     /// finalizes: it is the redirect the old commitment answers with.
     #[serde(with = "crate::core::map_keys")]
     replacements: BTreeMap<ObjectKey, Replacement>,
+    /// Verified on-chain paid G8 fallback view receipts (`receipt_id -> record`).
+    #[serde(with = "crate::core::map_keys")]
+    paid_views: BTreeMap<[u8; 32], PaidViewRecord>,
 }
 
 /// The serialized form of [`Bud3Registry`].
@@ -310,6 +331,8 @@ struct FlatRegistry {
     /// replacement and reads back as an empty map.
     #[serde(default)]
     replacements: Vec<(ObjectKey, Replacement)>,
+    #[serde(default)]
+    paid_views: Vec<([u8; 32], PaidViewRecord)>,
 }
 
 impl From<Bud3Registry> for FlatRegistry {
@@ -332,6 +355,7 @@ impl From<Bud3Registry> for FlatRegistry {
                 .collect(),
             validator_quotas: r.validator_quotas.into_iter().collect(),
             replacements: r.replacements.into_iter().collect(),
+            paid_views: r.paid_views.into_iter().collect(),
         }
     }
 }
@@ -356,6 +380,7 @@ impl From<FlatRegistry> for Bud3Registry {
                 .collect(),
             validator_quotas: f.validator_quotas.into_iter().collect(),
             replacements: f.replacements.into_iter().collect(),
+            paid_views: f.paid_views.into_iter().collect(),
         }
     }
 }
@@ -478,6 +503,12 @@ impl Bud3Registry {
         {
             return Err(RegistryError::CodecNotOpen(record.codec));
         }
+        super::limits::Bud3Limits::TESTNET_DEFAULT
+            .admit_content(record.content_id.len)
+            .map_err(|_| RegistryError::BadRecord("content length exceeds testnet ceiling"))?;
+        super::limits::Bud3Limits::TESTNET_DEFAULT
+            .admit_content(record.object_len)
+            .map_err(|_| RegistryError::BadRecord("object length exceeds testnet ceiling"))?;
         if lifetime_epochs == 0 {
             return Err(RegistryError::BadLifetime);
         }
@@ -503,8 +534,22 @@ impl Bud3Registry {
                 }
             }
         }
-        if self.objects.contains_key(&key) {
-            return Ok(Registered::Deduplicated(key));
+        if let Some(entry) = self.objects.get(&key) {
+            if entry.record.content_id.kind == ContentIdKind::Public {
+                if !entry.shares.is_empty()
+                    && entry
+                        .shares
+                        .iter()
+                        .all(|s| s.status == ShareStatus::Confirmed && !s.lost)
+                {
+                    return Ok(Registered::Deduplicated(key));
+                }
+                return Err(RegistryError::BadRecord("awaiting custody confirmation"));
+            }
+            if entry.owner == owner {
+                return Ok(Registered::Deduplicated(key));
+            }
+            return Err(RegistryError::NotAuthorized);
         }
         check_placement(&record, &shares)?;
         let digest = record.content_id.digest;
@@ -545,6 +590,63 @@ impl Bud3Registry {
         self.replacements.get(old)
     }
 
+    /// Record an on-chain G8 paid fallback decode authorization for a public object.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RegistryError::InvalidPaidView`] when the receipt ID was already
+    /// used, the amount is below `MIN_PAID_VIEW_FEE_ATOMS`, the object is missing or
+    /// tombstoned, or the object is sealed (G8 validator fallback is strictly forbidden).
+    pub fn record_paid_view(
+        &mut self,
+        payer: Address,
+        object: ObjectKey,
+        receipt_id: [u8; 32],
+        amount_atoms: u64,
+        epoch: u64,
+    ) -> Result<(), RegistryError> {
+        if amount_atoms < MIN_PAID_VIEW_FEE_ATOMS {
+            return Err(RegistryError::InvalidPaidView("paid view fee below minimum"));
+        }
+        if self.paid_views.contains_key(&receipt_id) {
+            return Err(RegistryError::InvalidPaidView("duplicate paid view receipt"));
+        }
+        if self.tombstones.contains_key(&object) {
+            return Err(RegistryError::Tombstoned);
+        }
+        let obj = self
+            .objects
+            .get_mut(&object)
+            .ok_or(RegistryError::UnknownObject)?;
+        if obj.record.content_id.kind != ContentIdKind::Public {
+            return Err(RegistryError::InvalidPaidView(
+                "fallback view only allowed for public objects",
+            ));
+        }
+        obj.endowment.deposit(split_storage_fee(amount_atoms));
+        self.paid_views.insert(
+            receipt_id,
+            PaidViewRecord {
+                payer,
+                object,
+                amount_atoms,
+                paid_at_epoch: epoch,
+            },
+        );
+        Ok(())
+    }
+
+    /// Verify that `receipt` corresponds to an on-chain [`PaidViewRecord`].
+    #[must_use]
+    pub fn verify_paid_view(&self, receipt: &PaidViewReceipt) -> bool {
+        self.paid_views.get(&receipt.receipt_id).is_some_and(|rec| {
+            rec.payer == receipt.payer
+                && rec.object == receipt.object
+                && rec.amount_atoms >= receipt.fee_paid_atoms
+                && rec.amount_atoms >= MIN_PAID_VIEW_FEE_ATOMS
+        })
+    }
+
     /// Item 6 of section 6.14: every new share of `key` is confirmed, so every
     /// object it replaced releases its shares. The old commitment keeps
     /// answering, as a redirect to `key`.
@@ -560,6 +662,9 @@ impl Bud3Registry {
             .collect();
         for old in superseded {
             if let Some(obj) = self.objects.remove(&old) {
+                if obj.record.content_id.kind == ContentIdKind::Public {
+                    self.public_index.insert(obj.record.content_id.digest, *key);
+                }
                 self.forfeited_pool_total = self
                     .forfeited_pool_total
                     .saturating_add(obj.endowment.remaining_balance);
@@ -578,8 +683,8 @@ impl Bud3Registry {
     ///
     /// # Errors
     ///
-    /// [`RegistryError::UnknownObject`], [`RegistryError::Tombstoned`] or
-    /// [`RegistryError::NftAlreadyBound`].
+    /// [`RegistryError::UnknownObject`], [`RegistryError::Tombstoned`],
+    /// [`RegistryError::NotAuthorized`], or [`RegistryError::NftAlreadyBound`].
     pub fn bind_nft(
         &mut self,
         nft: NftId,
@@ -596,6 +701,9 @@ impl Bud3Registry {
             .objects
             .get_mut(key)
             .ok_or(RegistryError::UnknownObject)?;
+        if obj.record.content_id.kind == ContentIdKind::Sealed && obj.owner != holder {
+            return Err(RegistryError::NotAuthorized);
+        }
         obj.references.insert(nft);
         self.nfts.insert(nft, (*key, holder));
         Ok(())
@@ -751,21 +859,48 @@ impl Bud3Registry {
         }
     }
 
-    /// `IssueViewGrant`: record an unlinkable [`GrantRow`] carrying no `content_id`,
-    /// `issuer`, or `grantee`.
+    /// `IssueViewGrant`: verify the signer holds `nft` and `row.grant_tag` binds to
+    /// `(nft, grant_nonce)`, then record an unlinkable [`GrantRow`] carrying no
+    /// `content_id`, `issuer`, or `grantee`.
     ///
     /// # Errors
     ///
-    /// [`RegistryError::Grant`] if the tag is duplicate/revoked, expired, or has
-    /// an invalid ML-DSA-65 one-time key or HPKE X-Wing (`0x647a`) package.
-    pub fn issue_view_grant(&mut self, row: GrantRow, epoch: u64) -> Result<(), RegistryError> {
-        self.validate_view_grant(&row, epoch)?;
+    /// [`RegistryError::UnknownNft`], [`RegistryError::NotAuthorized`],
+    /// [`RegistryError::UnknownObject`], or [`RegistryError::Grant`] if the tag is
+    /// mismatched, duplicate/revoked, expired, or has an invalid ML-DSA-65 one-time
+    /// key or HPKE X-Wing (`0x647a`) package.
+    pub fn issue_view_grant(
+        &mut self,
+        nft: &NftId,
+        grant_nonce: &[u8; 32],
+        signer: &Address,
+        row: GrantRow,
+        epoch: u64,
+    ) -> Result<(), RegistryError> {
+        self.validate_view_grant(nft, grant_nonce, signer, &row, epoch)?;
         self.grants.insert(row.grant_tag, row);
         Ok(())
     }
 
     /// Check grant issuance without changing registry state.
-    pub fn validate_view_grant(&self, row: &GrantRow, epoch: u64) -> Result<(), RegistryError> {
+    pub fn validate_view_grant(
+        &self,
+        nft: &NftId,
+        grant_nonce: &[u8; 32],
+        signer: &Address,
+        row: &GrantRow,
+        epoch: u64,
+    ) -> Result<(), RegistryError> {
+        let (key, holder) = *self.nfts.get(nft).ok_or(RegistryError::UnknownNft)?;
+        if holder != *signer {
+            return Err(RegistryError::NotAuthorized);
+        }
+        if self.tombstones.contains_key(&key) || !self.objects.contains_key(&key) {
+            return Err(RegistryError::UnknownObject);
+        }
+        if super::grants::compute_grant_tag(nft, grant_nonce) != row.grant_tag {
+            return Err(RegistryError::Grant(GrantBud3Error::InvalidGrantTag));
+        }
         if self.grants.contains_key(&row.grant_tag) || self.revoked_grants.contains(&row.grant_tag)
         {
             return Err(RegistryError::Grant(GrantBud3Error::DuplicateOrRevokedTag));
@@ -774,8 +909,15 @@ impl Bud3Registry {
     }
 
     /// Issue a view grant through the canonical issuance path.
-    pub fn issue_grant(&mut self, row: GrantRow, epoch: u64) -> Result<(), RegistryError> {
-        self.issue_view_grant(row, epoch)
+    pub fn issue_grant(
+        &mut self,
+        nft: &NftId,
+        grant_nonce: &[u8; 32],
+        signer: &Address,
+        row: GrantRow,
+        epoch: u64,
+    ) -> Result<(), RegistryError> {
+        self.issue_view_grant(nft, grant_nonce, signer, row, epoch)
     }
 
     /// Return a grant only while it is live at `current_epoch`.
@@ -986,6 +1128,12 @@ impl Bud3Registry {
         .map_err(RegistryError::BadReplacement)?;
 
         let new_key = new_record.commitment;
+        super::limits::Bud3Limits::TESTNET_DEFAULT
+            .admit_content(new_record.content_id.len)
+            .map_err(|_| RegistryError::BadRecord("content length exceeds testnet ceiling"))?;
+        super::limits::Bud3Limits::TESTNET_DEFAULT
+            .admit_content(new_record.object_len)
+            .map_err(|_| RegistryError::BadRecord("object length exceeds testnet ceiling"))?;
         if self.tombstones.contains_key(&new_key) || self.objects.contains_key(&new_key) {
             return Err(RegistryError::BadReplacement(
                 super::replace::ReplaceError::CommitmentAlreadyLive,
@@ -1198,7 +1346,13 @@ impl Bud3Registry {
         // (section 6.14, item 6).
         if n > 0 && complete {
             if let Some(digest) = public_digest {
-                self.public_index.insert(digest, *key);
+                let occupied_live = self
+                    .public_index
+                    .get(&digest)
+                    .is_some_and(|existing| existing != key && self.objects.contains_key(existing));
+                if !occupied_live {
+                    self.public_index.insert(digest, *key);
+                }
             }
             self.release_replaced(key);
         }
@@ -1646,6 +1800,7 @@ impl Bud3Registry {
         key: &ObjectKey,
         segment: u64,
         new_shares: Vec<Share>,
+        new_symbols: Vec<Symbol>,
         new_root: [u8; 32],
         epoch: u64,
     ) -> Result<(), RegistryError> {
@@ -1686,6 +1841,32 @@ impl Bud3Registry {
             return Err(RegistryError::BadRepair("fewer new symbols than lost"));
         }
         let count = u32::try_from(added).map_err(|_| RegistryError::BadRepair("ESI range"))?;
+        let symbol_bytes = usize::from(obj.record.profile.symbol_size);
+        let mut sorted_syms = new_symbols;
+        if sorted_syms.len() != count as usize {
+            return Err(RegistryError::BadRepair(
+                "new symbols count mismatch against shares",
+            ));
+        }
+        sorted_syms.sort_by_key(|s| s.esi);
+        let mut leaves = Vec::with_capacity(sorted_syms.len());
+        for (idx, sym) in sorted_syms.iter().enumerate() {
+            let expected_esi = first.saturating_add(u32::try_from(idx).unwrap_or(u32::MAX));
+            if sym.segment != segment
+                || sym.esi != expected_esi
+                || sym.data.len() != symbol_bytes
+            {
+                return Err(RegistryError::BadRepair(
+                    "repair symbol ESI, segment, or length mismatch",
+                ));
+            }
+            leaves.push((sym.esi, symbol_leaf(&sym.data)));
+        }
+        if symbol_root(&leaves) != new_root {
+            return Err(RegistryError::BadRepair(
+                "repair symbol root does not match supplied symbols",
+            ));
+        }
         obj.roots.push(SymbolRoot {
             segment,
             root: new_root,
@@ -1874,8 +2055,7 @@ impl Bud3Registry {
             && self.base_deps.is_empty()
             && self.validator_quotas.is_empty()
             && self.replacements.is_empty()
-            && self.nfts.is_empty()
-            && self.public_index.is_empty()
+            && self.paid_views.is_empty()
     }
 
     /// The registry state root over every serialized field, in deterministic order.
@@ -2032,6 +2212,16 @@ impl Bud3Registry {
                 &[u8::from(r.finalized)],
             ]);
         }
+        for (receipt_id, pv) in &self.paid_views {
+            fold(&[
+                b"paid_view",
+                receipt_id,
+                &pv.payer,
+                &pv.object,
+                &pv.amount_atoms.to_le_bytes(),
+                &pv.paid_at_epoch.to_le_bytes(),
+            ]);
+        }
         acc
     }
 }
@@ -2039,7 +2229,6 @@ impl Bud3Registry {
 #[cfg(test)]
 mod tests {
     use super::super::custody::prove;
-    use super::super::custody::symbol_leaf;
     use super::super::limits::{Bud3Limits, Profile};
     use super::super::pipeline::{prepare_public_upload, PreparedUpload};
     use super::*;
@@ -2512,7 +2701,7 @@ mod tests {
             ..new_share
         };
         assert!(matches!(
-            r.record_repair(&key, 0, vec![reuse], new_root, 100),
+            r.record_repair(&key, 0, vec![reuse], fresh.clone(), new_root, 100),
             Err(RegistryError::BadRepair(_))
         ));
         let short = Share {
@@ -2520,8 +2709,13 @@ mod tests {
             ..new_share
         };
         assert!(matches!(
-            r.record_repair(&key, 0, vec![short], new_root, 100),
+            r.record_repair(&key, 0, vec![short], fresh.clone(), new_root, 100),
             Err(RegistryError::BadRepair("fewer new symbols than lost"))
+        ));
+        // Forged or mismatched symbol root is refused.
+        assert!(matches!(
+            r.record_repair(&key, 0, vec![new_share], fresh.clone(), [0xFF; 32], 100),
+            Err(RegistryError::BadRepair(_))
         ));
         assert_eq!(
             super::super::tx::apply(
@@ -2531,6 +2725,7 @@ mod tests {
                     object: key,
                     segment: 0,
                     new_shares: vec![new_share],
+                    new_symbols: fresh.clone(),
                     new_root,
                 },
                 100,
@@ -2637,5 +2832,109 @@ mod tests {
         // 48 h, 6 s slots, 100-slot epochs: ceil(172800 / 600) = 288.
         assert_eq!(AuditParams::hours_to_epochs(48, 6, 100), 288);
         assert_eq!(AuditParams::hours_to_epochs(1, 7, 1000), 1);
+    }
+
+    #[test]
+    fn security_gates_enforce_content_ceiling_sealed_bind_nft_grant_signer_and_public_index() {
+        use super::super::grants::{compute_grant_tag, seal_grant_key_package, GrantRow};
+        use super::super::keys::{derive_grant_one_time_keypair, derive_object_content_key};
+        use super::super::pipeline::prepare_sealed_upload;
+        use crate::crypto::hpke::HpkeKeyPair;
+
+        let mut r = Bud3Registry::default();
+        let (mut big_up, big_shares) = upload(b"ceiling check");
+        big_up.record.object_len = Bud3Limits::TESTNET_DEFAULT.max_content_bytes + 1;
+        assert!(matches!(
+            r.register_object(addr(1), big_up.record, big_shares, 0, 10),
+            Err(RegistryError::BadRecord(_))
+        ));
+
+        // Non-owner cannot bind an NFT to someone else's sealed object.
+        let owner = addr(1);
+        let attacker = addr(9);
+        let owner_secret = [0x44u8; 32];
+        let content_key = derive_object_content_key(&owner_secret, 1);
+        let sealed_up = prepare_sealed_upload(
+            b"sealed private object",
+            &content_key,
+            [0x11; 24],
+            &P,
+            &Bud3Limits::default(),
+            20,
+        )
+        .unwrap();
+        let sealed_key = sealed_up.record.commitment;
+        let sealed_shares: Vec<(u64, Share)> = (0..sealed_up.segments.len() as u64)
+            .flat_map(|seg| {
+                (0..4u8).map(move |h| {
+                    (
+                        seg,
+                        Share {
+                            validator: addr(10 + h),
+                            class: if h == 3 { Class::Mobile } else { Class::Full },
+                            first_esi: u32::from(h) * 5,
+                            symbols: 5,
+                        },
+                    )
+                })
+            })
+            .collect();
+        r.register_object(owner, sealed_up.record, sealed_shares, 0, 10)
+            .unwrap();
+        assert_eq!(
+            r.bind_nft([0x77; 32], attacker, &sealed_key),
+            Err(RegistryError::NotAuthorized)
+        );
+        r.bind_nft([0x77; 32], owner, &sealed_key).unwrap();
+
+        // IssueViewGrant refuses non-holder signers and mismatched grant tags.
+        let grantee = HpkeKeyPair::from_seed(&[0x55u8; 32]).unwrap();
+        let nonce = [0x22u8; 32];
+        let tag = compute_grant_tag(&[0x77; 32], &nonce);
+        let (_, otpk) = derive_grant_one_time_keypair(&owner_secret, &[0x77; 32], &nonce).unwrap();
+        let pkg = seal_grant_key_package(
+            grantee.public_key(),
+            &tag,
+            &sealed_key,
+            &content_key,
+        )
+        .unwrap();
+        let row = GrantRow {
+            grant_tag: tag,
+            one_time_pk: otpk,
+            sealed_key_package: pkg,
+            expires_at_epoch: 10,
+        };
+        assert_eq!(
+            r.issue_view_grant(&[0x77; 32], &nonce, &attacker, row.clone(), 1),
+            Err(RegistryError::NotAuthorized)
+        );
+        assert_eq!(
+            r.issue_view_grant(&[0x77; 32], &[0x23u8; 32], &owner, row.clone(), 1),
+            Err(RegistryError::Grant(GrantBud3Error::InvalidGrantTag))
+        );
+        r.issue_view_grant(&[0x77; 32], &nonce, &owner, row, 1)
+            .unwrap();
+
+        // Already-confirmed public_index entry is not hijacked when a second upload confirms.
+        let (pub_up, pub_shares) = upload(b"canonical public bytes");
+        let first_key = pub_up.record.commitment;
+        r.register_object(addr(1), pub_up.record.clone(), pub_shares.clone(), 0, 10)
+            .unwrap();
+        let mut second = pub_up.record;
+        second.commitment = [0x9A; 32];
+        r.register_object(addr(2), second, pub_shares, 0, 10).unwrap();
+        for h in 10..=13u8 {
+            r.ack(&first_key, &addr(h)).unwrap();
+        }
+        assert_eq!(r.public_object(&pub_up.record.content_id.digest), Some(first_key));
+        for h in 10..=13u8 {
+            r.ack(&[0x9A; 32], &addr(h)).unwrap();
+        }
+        assert_eq!(
+            r.public_object(&pub_up.record.content_id.digest),
+            Some(first_key),
+            "existing confirmed public_index entry must not be overwritten"
+        );
     }
 }

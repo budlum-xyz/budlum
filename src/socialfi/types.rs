@@ -2,8 +2,8 @@ use crate::core::address::Address;
 use crate::storage::content_id::ContentId;
 use serde::{Deserialize, Serialize};
 
-/// Budlum NFT - Native support for SocialFi posts and D-Web content.
-/// Every SocialFi post is a permanent, owner-controlled NFT.
+/// Budlum NFT - Native support for `SocialFi` posts and D-Web content.
+/// Every `SocialFi` post is a permanent, owner-controlled NFT.
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Nft {

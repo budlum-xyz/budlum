@@ -207,6 +207,10 @@ pub fn encode_precompile_static_call(
 }
 
 /// Decodes calldata sent to `0x...B001`.
+///
+/// # Errors
+///
+/// Returns an error if the operation fails.
 pub fn decode_precompile_calldata(calldata: &[u8]) -> Result<DecodedPrecompileCall, String> {
     let sel = calldata
         .get(..4)
@@ -264,6 +268,10 @@ pub fn encode_precompile_return(ok: bool, ret: &[u8]) -> Vec<u8> {
 /// Decodes `(bool ok, bytes ret)` returned by `0x...B001`.
 ///
 /// exposed for: Solidity `BudlumUniversal` return-data SDK callers.
+///
+/// # Errors
+///
+/// Returns an error if the operation fails.
 pub fn decode_precompile_return(raw: &[u8]) -> Result<(bool, Vec<u8>), String> {
     let ok_u64 = read_u64_word(raw, 0)?;
     let ret = read_dyn_bytes(raw, 32)?;

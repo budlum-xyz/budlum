@@ -154,7 +154,7 @@ pub enum AdapterSpec {
         #[serde(default)]
         committee: Option<crate::cross_domain::external::ethereum::PinnedCommittee>,
     },
-    /// BudZKVM validity proofs for one network, pinned to one program and
+    /// `BudZKVM` validity proofs for one network, pinned to one program and
     /// one chain. A spec without the pins is
     /// the closed admission state: `register_domain` refuses it.
     ZkVm {

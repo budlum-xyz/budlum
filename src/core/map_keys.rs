@@ -3,7 +3,7 @@
 //! `serde_json` refuses to write a map whose key is not a string or an
 //! integer: `BTreeMap<[u8; 32], _>` fails with "key must be a string" at the
 //! first non-empty entry. The V2 state snapshot is JSON, and it carries the
-//! bridge, AI, storage, PoA and cross-domain registries, so the first bridge
+//! bridge, AI, storage, `PoA` and cross-domain registries, so the first bridge
 //! transfer on a chain made every later snapshot write fail. The failure was
 //! logged at `warn!` and nothing else noticed.
 //!
@@ -76,6 +76,10 @@ pub trait MapKey: Sized + Ord {
     /// The JSON key for this value.
     fn to_key_string(&self) -> String;
     /// Parse a key written by [`MapKey::to_key_string`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     fn from_key_string(s: &str) -> Result<Self, String>;
 }
 
@@ -269,6 +273,10 @@ impl MapKey for (ContentId, ContentId, Address) {
 
 /// `#[serde(with)]` half: string keys for JSON, the derived layout for
 /// binary formats.
+///
+/// # Errors
+///
+/// Returns an error if the operation fails.
 pub fn serialize<S, Key, Value>(
     map: &BTreeMap<Key, Value>,
     serializer: S,
@@ -321,6 +329,10 @@ where
 }
 
 /// `#[serde(with)]` half: the inverse of [`serialize`].
+///
+/// # Errors
+///
+/// Returns an error if the operation fails.
 pub fn deserialize<'de, D, Key, Value>(deserializer: D) -> Result<BTreeMap<Key, Value>, D::Error>
 where
     D: Deserializer<'de>,

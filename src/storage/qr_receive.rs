@@ -238,6 +238,10 @@ impl ProgressiveReceiver {
     }
 
     /// Finish and unpack A1 → (kind, raw body bytes).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn finish_unpacked(&self) -> Result<(PayloadKind, Vec<u8>), ReceiveError> {
         let packed = self.finish_packed()?;
         Ok(unpack_payload(&packed)?)

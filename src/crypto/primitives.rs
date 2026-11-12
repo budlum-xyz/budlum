@@ -103,6 +103,11 @@ impl Drop for BlsKeypair {
 }
 
 impl BlsKeypair {
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn generate() -> Result<Self, CryptoError> {
         use rand::Rng;
         let mut seed = [0u8; 64];
@@ -114,6 +119,10 @@ impl BlsKeypair {
     /// zero scalar (the all-zero seed, or any multiple of the group order) is
     /// refused: its public key is the identity point, which signs
     /// every message and aggregates into any set without changing it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn from_seed(seed: &[u8; 64]) -> Result<Self, CryptoError> {
         let sk = Scalar::from_bytes_wide(seed);
         if sk == Scalar::zero() {
@@ -135,6 +144,11 @@ impl BlsKeypair {
         bytes
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, CryptoError> {
         // Validate G2 encoding AND that pk matches sk. F10: the length is
         // exact - trailing garbage is not silently ignored - and the zero
@@ -217,15 +231,19 @@ impl BlsKeypair {
 
     /// Generate the canonical proof of possession for this public key,
     /// bound to the chain id and account address it will be registered
-    /// under (R11: a PoP over only the key replays across chains).
+    /// under (R11: a `PoP` over only the key replays across chains).
     pub fn generate_pop(&self, chain_id: u64, address: &crate::core::address::Address) -> Vec<u8> {
         let msg = crate::chain::finality::pop_signing_message(chain_id, address, &self.public_key);
         crate::chain::finality::sign_bls_pop(&self.secret_key, &msg)
     }
 
-    /// Verify the canonical PoP without a validator registration wrapper.
-    /// The PoP must be bound to the given chain id and address (R11): a
-    /// PoP produced for another chain or account is rejected.
+    /// Verify the canonical `PoP` without a validator registration wrapper.
+    /// The `PoP` must be bound to the given chain id and address (R11): a
+    /// `PoP` produced for another chain or account is rejected.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn verify_pop(
         public_key: &[u8],
         pop: &[u8],
@@ -310,6 +328,11 @@ impl PqKeyPair {
         }
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn from_bytes(public_key: &[u8], secret_key: &[u8]) -> Result<Self, CryptoError> {
         if public_key.len() != pq_public_key_len() {
             return Err(CryptoError::InvalidKey(format!(
@@ -346,6 +369,10 @@ impl PqKeyPair {
     }
 
     /// Sign `message` under the FIPS 204 context `ctx`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn sign(&self, ctx: &[u8], message: &[u8]) -> Result<Vec<u8>, CryptoError> {
         let seed: &[u8; pq::ML_DSA_SEED_LEN] = self
             .secret_key
@@ -363,6 +390,11 @@ impl PqKeyPair {
             .map_err(|e| CryptoError::Signing(e.to_string()))
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn validate_public_key(public_key: &[u8]) -> Result<(), CryptoError> {
         pq::validate_public_key(SchemeId::ML_DSA_65, public_key)
             .map_err(|_| CryptoError::InvalidKey("Invalid ML-DSA public key".to_string()))
@@ -371,6 +403,10 @@ impl PqKeyPair {
     /// Verify through the dual-verifier facade under the
     /// statuses of a fresh genesis. A chain reads its own registry through
     /// [`Self::verify_in`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn verify(
         public_key: &[u8],
         ctx: &[u8],
@@ -389,6 +425,10 @@ impl PqKeyPair {
     /// Verify through the dual-verifier facade under the scheme statuses of a
     /// chain: a family the registry deprecated past use or disabled
     /// stops verifying here in the same block on every node.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn verify_in(
         registry: &super::scheme::SchemeStatusRegistry,
         public_key: &[u8],
@@ -474,6 +514,11 @@ impl PqKeyPair {
 }
 
 impl ValidatorKeys {
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn generate() -> Result<Self, CryptoError> {
         let sig_key = KeyPair::generate()?;
         let mut csprng = rand_core::OsRng;
@@ -552,6 +597,10 @@ impl ValidatorKeys {
     /// Contents are **plaintext** (sig + VRF + optional PQ + BLS).
     /// File mode is `0o600` on Unix, but there is no password/KDF/AEAD.
     /// **Do not use on mainnet** - `validate_strict_rules` rejects this path.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn save<P: AsRef<Path>>(&self, path: P) -> Result<(), CryptoError> {
         tracing::warn!(
             "ValidatorKeys::save writes plaintext key material to {}; mainnet forbids this path",
@@ -570,6 +619,11 @@ impl ValidatorKeys {
         write_key_file(path.as_ref(), &bytes)?;
         Ok(())
     }
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn load<P: AsRef<Path>>(path: P) -> Result<Self, CryptoError> {
         // the write side is owner-only, so the read side refuses a file
         // that is not. Without this the narrow mode only protects keys this

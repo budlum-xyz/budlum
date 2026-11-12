@@ -54,10 +54,10 @@ impl std::fmt::Display for RoleId {
 /// Well-known protocol-level roles. These are *conveniences*, not an exhaustive
 /// List - the registry never checks membership against this set.
 ///
-/// Unified stake-based registry for v1 - master verifiers (DeEd),
-/// SocialFi content validator, relayer, supply-chain attester all share the
-/// Same primitive. RoleIds 1-8 are pinned from budzero/verifier-registry crate
-/// For consistency; 9 is new for SocialFi content validator.
+/// Unified stake-based registry for v1 - master verifiers (`DeEd`),
+/// `SocialFi` content validator, relayer, supply-chain attester all share the
+/// Same primitive. `RoleIds` 1-8 are pinned from budzero/verifier-registry crate
+/// For consistency; 9 is new for `SocialFi` content validator.
 pub mod roles {
     use super::RoleId;
 
@@ -65,12 +65,12 @@ pub mod roles {
     pub const VALIDATOR: RoleId = RoleId(1);
     /// Settlement / proof verifier (generic).
     pub const VERIFIER: RoleId = RoleId(2);
-    /// DeEd master verifier - alias to VERIFIER (RoleId 2), same primitive,
-    /// Distinct semantic label matrix. Preserves AI_OPERATOR=8.
+    /// `DeEd` master verifier - alias to VERIFIER (`RoleId` 2), same primitive,
+    /// Distinct semantic label matrix. Preserves `AI_OPERATOR`=8.
     pub const MASTER_VERIFIER: RoleId = RoleId(2);
     /// Cross-domain message relayer (permissionless).
     pub const RELAYER: RoleId = RoleId(3);
-    /// ZK proof producer (BudZKVM prover). Registration is OPTIONAL, proof
+    /// ZK proof producer (`BudZKVM` prover). Registration is OPTIONAL, proof
     /// Submission is fully permissionless (STARK proofs are self-verifying);
     /// Registering as a PROVER is only required to be eligible for rewards.
     pub const PROVER: RoleId = RoleId(4);
@@ -102,16 +102,16 @@ pub mod roles {
     pub const AI_VERIFIER: RoleId = RoleId(6);
 
     /// Supply-chain attester - submits finality / checkpoint attestations
-    /// For Budlum Go supply-chain and StorageAttestation domains.
-    /// Unified under PermissionlessRegistry.
+    /// For Budlum Go supply-chain and `StorageAttestation` domains.
+    /// Unified under `PermissionlessRegistry`.
     pub const ATTESTER: RoleId = RoleId(7);
 
-    /// An AI inference layer decentralized AI operator: a compute bond, independent of PoS.
-    /// Must be preserved acceptance (RoleId 8).
+    /// An AI inference layer decentralized AI operator: a compute bond, independent of `PoS`.
+    /// Must be preserved acceptance (`RoleId` 8).
     pub const AI_OPERATOR: RoleId = RoleId(8);
 
-    /// SocialFi content validator - validates D-Web content authenticity
-    /// For SocialFi NFT registry. New (RoleId 9).
+    /// `SocialFi` content validator - validates D-Web content authenticity
+    /// For `SocialFi` NFT registry. New (`RoleId` 9).
     pub const CONTENT_VALIDATOR: RoleId = RoleId(9);
 }
 

@@ -784,6 +784,18 @@ impl ContentManifest {
     /// what was missing was anything applying them to a manifest that arrived
     /// fully formed instead of being built locally.
     pub fn validate_untrusted(&self) -> Result<(), String> {
+        self.validate_with_options(true)
+    }
+
+    /// Structural validation used during local erasure reconstruction, where
+    /// legitimate periodic data can repeat a stripe digest across shards even
+    /// under `n > k` parity coding. Untrusted admission still calls
+    /// [`Self::validate_untrusted`].
+    pub(crate) fn validate_structural_for_reconstruct(&self) -> Result<(), String> {
+        self.validate_with_options(false)
+    }
+
+    fn validate_with_options(&self, reject_duplicate_parity_ids: bool) -> Result<(), String> {
         if self.shards.is_empty() {
             return Err("ContentManifest must have at least one shard".into());
         }
@@ -817,7 +829,10 @@ impl ContentManifest {
             if !seen.insert(s.index) {
                 return Err(format!("Duplicate shard index {}", s.index));
             }
-            if self.erasure.n > self.erasure.k && !seen_ids.insert(s.shard_id) {
+            if reject_duplicate_parity_ids
+                && self.erasure.n > self.erasure.k
+                && !seen_ids.insert(s.shard_id)
+            {
                 return Err(format!(
                     "Shard {} repeats the content id of another shard in the same code word",
                     s.index

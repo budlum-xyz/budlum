@@ -40,6 +40,11 @@ impl<'a> Reader<'a> {
         Self { bytes, at: 0 }
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn take(&mut self, n: usize) -> Result<&'a [u8], WireError> {
         let end = self.at.checked_add(n).ok_or(WireError("length overflow"))?;
         let slice = self
@@ -50,22 +55,42 @@ impl<'a> Reader<'a> {
         Ok(slice)
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn array32(&mut self) -> Result<[u8; 32], WireError> {
         let mut out = [0u8; 32];
         out.copy_from_slice(self.take(32)?);
         Ok(out)
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn u8(&mut self) -> Result<u8, WireError> {
         Ok(self.take(1)?[0])
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn u32_le(&mut self) -> Result<u32, WireError> {
         let mut b = [0u8; 4];
         b.copy_from_slice(self.take(4)?);
         Ok(u32::from_le_bytes(b))
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn u64_le(&mut self) -> Result<u64, WireError> {
         let mut b = [0u8; 8];
         b.copy_from_slice(self.take(8)?);
@@ -73,6 +98,10 @@ impl<'a> Reader<'a> {
     }
 
     /// BCS sequence length: ULEB128, at most 2^31 - 1, canonical form only.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn uleb128(&mut self) -> Result<u64, WireError> {
         let mut value: u64 = 0;
         for shift in (0..32).step_by(7) {
@@ -92,6 +121,10 @@ impl<'a> Reader<'a> {
     }
 
     /// Borsh / BCS `Option<T>` tag. Only 0 and 1 are valid.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn option_tag(&mut self) -> Result<bool, WireError> {
         match self.u8()? {
             0 => Ok(false),
@@ -102,6 +135,10 @@ impl<'a> Reader<'a> {
 
     /// The reader consumed every byte. Trailing bytes are refused so one
     /// event has exactly one encoding.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn finish(&self) -> Result<(), WireError> {
         if self.at == self.bytes.len() {
             Ok(())
@@ -114,6 +151,10 @@ impl<'a> Reader<'a> {
 // ---------------------------------------------------------------- EVM ABI
 
 /// The `index`-th 32-byte ABI word of `data`.
+///
+/// # Errors
+///
+/// Returns an error if the operation fails.
 pub fn abi_word(data: &[u8], index: usize) -> Result<[u8; 32], WireError> {
     let start = index.checked_mul(32).ok_or(WireError("word overflow"))?;
     let mut r = Reader::new(data);
@@ -122,6 +163,10 @@ pub fn abi_word(data: &[u8], index: usize) -> Result<[u8; 32], WireError> {
 }
 
 /// An ABI `address` word: twelve zero bytes, then twenty.
+///
+/// # Errors
+///
+/// Returns an error if the operation fails.
 pub fn abi_address(word: &[u8; 32]) -> Result<[u8; 20], WireError> {
     if word.iter().take(12).any(|b| *b != 0) {
         return Err(WireError("address word has dirty high bytes"));
@@ -134,6 +179,10 @@ pub fn abi_address(word: &[u8; 32]) -> Result<[u8; 20], WireError> {
 }
 
 /// An ABI unsigned word that must fit in `u128`.
+///
+/// # Errors
+///
+/// Returns an error if the operation fails.
 pub fn abi_u128(word: &[u8; 32]) -> Result<u128, WireError> {
     if word.iter().take(16).any(|b| *b != 0) {
         return Err(WireError("uint word above u128"));
@@ -146,6 +195,10 @@ pub fn abi_u128(word: &[u8; 32]) -> Result<u128, WireError> {
 }
 
 /// A dynamic ABI `bytes` value whose head word sits at `head_index`.
+///
+/// # Errors
+///
+/// Returns an error if the operation fails.
 pub fn abi_bytes(data: &[u8], head_index: usize) -> Result<Vec<u8>, WireError> {
     let offset = usize::try_from(abi_u128(&abi_word(data, head_index)?)?)
         .map_err(|_| WireError("offset too large"))?;

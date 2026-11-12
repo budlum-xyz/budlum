@@ -467,17 +467,46 @@ impl AptosUpstream {
             .path_and_query()
             .map(|value| value.as_str())
             .unwrap_or("/v1");
-        // `base` already ends in `/v1`; append only the route-relative part.
-        // Concatenating the complete downstream URI would duplicate the version prefix.
-        let relative = suffix.strip_prefix("/v1").unwrap_or(suffix);
-        let target = format!("{}{relative}", self.base.as_str().trim_end_matches('/'));
-        reqwest::Url::parse(&target).map_err(|_| {
+        let reject = || {
             Box::new(proxy_error(
                 StatusCode::BAD_REQUEST,
                 "invalid_aptos_path",
                 "The Aptos request path is not a valid upstream URL",
             ))
-        })
+        };
+        let path_only = uri.path();
+        let lower = suffix.to_ascii_lowercase();
+        if path_only.contains('\\')
+            || path_only.contains("//")
+            || path_only.contains('@')
+            || path_only.contains("..")
+            || lower.contains("%5c")
+            || lower.contains("%2f%2f")
+            || lower.contains("%2e%2e")
+            || lower.contains("%40")
+        {
+            return Err(reject());
+        }
+        // `base` already ends in `/v1`; require an exact `/v1` segment boundary
+        // so `/v1admin`, `/v1\...`, or host-override paths can never escape `/v1`.
+        let Some(relative) = suffix.strip_prefix("/v1") else {
+            return Err(reject());
+        };
+        if !relative.is_empty() && !relative.starts_with('/') && !relative.starts_with('?') {
+            return Err(reject());
+        }
+        let target = format!("{}{relative}", self.base.as_str().trim_end_matches('/'));
+        let parsed = reqwest::Url::parse(&target).map_err(|_| reject())?;
+        if parsed.scheme() != self.base.scheme()
+            || parsed.host_str() != self.base.host_str()
+            || parsed.port_or_known_default() != self.base.port_or_known_default()
+            || !parsed.username().is_empty()
+            || parsed.password().is_some()
+            || (parsed.path() != "/v1" && !parsed.path().starts_with("/v1/"))
+        {
+            return Err(reject());
+        }
+        Ok(parsed)
     }
 
     async fn forward<B>(&self, req: HttpRequest<B>, body_limit: usize) -> HttpResponse
@@ -916,4 +945,42 @@ pub fn handle_aptos_rest(
     let mut gw = AptosCompatGateway::new(AptosCompatConfig::default(), 0, 0);
     let resp = gw.handle_rest(method, path, body, state);
     (resp.status, resp.body.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn aptos_upstream_url_for_blocks_v1_prefix_escapes() {
+        let upstream = AptosUpstream::new("https://aptos.example.org/ignored").unwrap();
+
+        for bad in [
+            "/v1\\admin",
+            "/v1%5cadmin",
+            "/v1/../secret",
+            "/v1/..%2fsecret",
+            "/v1admin",
+            "/v1@evil.com/accounts",
+            "/v1//evil.com",
+            "/other",
+        ] {
+            let uri: hyper::Uri = bad.parse().unwrap();
+            assert!(
+                upstream.url_for(&uri).is_err(),
+                "expected url_for to reject escaping path `{bad}`"
+            );
+        }
+
+        for ok in ["/v1", "/v1/", "/v1/accounts/0x01", "/v1?limit=10"] {
+            let uri: hyper::Uri = ok.parse().unwrap();
+            let parsed = upstream.url_for(&uri).expect("valid /v1 path");
+            assert_eq!(parsed.host_str(), Some("aptos.example.org"));
+            assert!(
+                parsed.path() == "/v1" || parsed.path().starts_with("/v1/"),
+                "unexpected upstream path {}",
+                parsed.path()
+            );
+        }
+    }
 }

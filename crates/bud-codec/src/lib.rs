@@ -41,6 +41,11 @@ pub const ZSTD: CodecId = 1;
 /// history.
 pub const ZSTD_WINDOW_LOG: u32 = 23;
 
+/// Hard upper bound on a single decoded payload (64 MiB), preventing header
+/// length inflation from driving a decompression bomb (`CodecError::TooLong`).
+/// exposed for codec decompression bounds checks.
+pub const MAX_CODEC_DECODE_BYTES: u64 = 64 << 20;
+
 /// The level of the probe.
 pub const PROBE_LEVEL: i32 = 3;
 /// The level of the stored candidate.
@@ -75,15 +80,26 @@ pub const fn is_open(id: CodecId) -> bool {
 /// whose length is not `content_len`. The output never grows past
 /// `content_len`, whatever the stream claims.
 pub fn decode(codec: CodecId, payload: &[u8], content_len: u64) -> Result<Vec<u8>, CodecError> {
+    if content_len > MAX_CODEC_DECODE_BYTES {
+        return Err(CodecError::TooLong {
+            max: MAX_CODEC_DECODE_BYTES,
+        });
+    }
     let cap = usize::try_from(content_len).map_err(|_| CodecError::TooLong { max: content_len })?;
     let out = match codec {
-        RAW => payload.to_vec(),
+        RAW => {
+            if (payload.len() as u64) > content_len {
+                return Err(CodecError::TooLong { max: content_len });
+            }
+            payload.to_vec()
+        }
         ZSTD => {
             let mut dec = ruzstd::decoding::StreamingDecoder::new(payload)
                 .map_err(|e| CodecError::Malformed(e.to_string()))?;
-            let mut out = Vec::with_capacity(cap.min(1 << 24));
-            // Read one byte past the declared length to detect a longer stream.
-            let limit = content_len.saturating_add(1);
+            let mut out = Vec::with_capacity(cap.min(1 << 20));
+            // Read one byte past the declared length (bounded by MAX_CODEC_DECODE_BYTES)
+            // to detect a longer stream without allowing unbounded allocations.
+            let limit = content_len.min(MAX_CODEC_DECODE_BYTES).saturating_add(1);
             (&mut dec)
                 .take(limit)
                 .read_to_end(&mut out)
@@ -364,6 +380,23 @@ mod tests {
         assert!(
             selected.payload == probe || selected.payload == content,
             "selection holds the probe candidate or raw, nothing else"
+        );
+    }
+
+    #[test]
+    fn decode_refuses_header_above_max_codec_decode_bytes() {
+        let tiny = zstd_encode(&vec![0u8; 4096], 3, false).unwrap();
+        assert_eq!(
+            decode(ZSTD, &tiny, MAX_CODEC_DECODE_BYTES + 1),
+            Err(CodecError::TooLong {
+                max: MAX_CODEC_DECODE_BYTES
+            })
+        );
+        assert_eq!(
+            decode(RAW, b"hello", MAX_CODEC_DECODE_BYTES + 1),
+            Err(CodecError::TooLong {
+                max: MAX_CODEC_DECODE_BYTES
+            })
         );
     }
 }

@@ -16,7 +16,7 @@ const fn row(name: &'static str, effect: CompatEffect) -> CompatMethodClass {
     CompatMethodClass::new(name, CompatListener::Public, effect)
 }
 
-/// Complete CometBFT JSON-RPC method table (section 8.11.5 item 1, all 12 methods).
+/// Complete `CometBFT` JSON-RPC method table (section 8.11.5 item 1, all 12 methods).
 pub const COMETBFT_RPC_METHODS: &[CompatMethodClass] = &[
     row("status", CompatEffect::Read),
     row("abci_info", CompatEffect::Read),

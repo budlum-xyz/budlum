@@ -96,6 +96,11 @@ pub fn is_governance_parameter_whitelisted(key: &str) -> bool {
     GOVERNANCE_PARAMETER_WHITELIST.contains(&key)
 }
 
+/// Performs the requested operation.
+///
+/// # Errors
+///
+/// Returns an error if the operation fails.
 pub fn validate_governance_parameter_update(key: &str, value: &str) -> Result<(), String> {
     if !is_governance_parameter_whitelisted(key) {
         return Err(format!("governance parameter is not whitelisted: {key}"));
@@ -182,6 +187,10 @@ pub fn validate_governance_parameter_update(key: &str, value: &str) -> Result<()
 /// Governance parameter values travel as strings; a switch accepts exactly
 /// `true` or `false`. Any other spelling is refused rather than being read as
 /// off, so a mistyped activation cannot pass a vote as a no-op.
+///
+/// # Errors
+///
+/// Returns an error if the operation fails.
 pub fn parse_governance_bool(key: &str, value: &str) -> Result<bool, String> {
     match value {
         "true" => Ok(true),
@@ -219,9 +228,9 @@ pub enum ProposalType {
     /// Validated fail-closed and cannot be weakened by governance.
     SetConstitutionParameter(ConstitutionParameter),
     /// Governance-controlled domain unfreeze
-    /// - domain_id: target consensus domain to unfreeze
-    /// - expected_validator_set_hash: 32-byte hash that must match current domain's validator_set_hash (anti-grind / anti-replay binding)
-    /// - justification_hash: hash of frozen reason / evidence reference (e.g., hash of audit report / governance forum post)
+    /// - `domain_id`: target consensus domain to unfreeze
+    /// - `expected_validator_set_hash`: 32-byte hash that must match current domain's `validator_set_hash` (anti-grind / anti-replay binding)
+    /// - `justification_hash`: hash of frozen reason / evidence reference (e.g., hash of audit report / governance forum post)
     ///
     /// Anti-replay: proposal id itself is unique and executed only once (Passed->Executed).
     /// Award the governance verification badge to a `budlum.xyz` app.
@@ -247,21 +256,21 @@ pub enum ProposalType {
         expected_validator_set_hash: [u8; 32],
         justification_hash: [u8; 32],
     },
-    /// Bootstrap or extend a PoA domain's admin set.
+    /// Bootstrap or extend a `PoA` domain's admin set.
     /// Governance is the trust root: the first admin of a domain arrives
     /// here, never through a transaction that appoints itself.
     PoaAddAdmin {
         domain_id: u32,
         admin: Address,
     },
-    /// Remove a PoA domain's admin by governance decision. This
+    /// Remove a `PoA` domain's admin by governance decision. This
     /// is the only path that may take the last admin - the admin door
     /// refuses it, because unpermissioning a domain is a governance act.
     PoaRemoveAdmin {
         domain_id: u32,
         admin: Address,
     },
-    /// Freeze an account on a PoA domain's compliance ledger (
+    /// Freeze an account on a `PoA` domain's compliance ledger (
     ///). Replaces the bare `bool` authority: the vote IS the
     /// authority, the named admin is the audit trail, and the domain kind
     /// is read from the domain record at application.
@@ -356,6 +365,11 @@ impl Proposal {
         current_epoch >= self.activation_epoch()
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn add_vote(
         &mut self,
         voter: Address,
@@ -408,7 +422,7 @@ impl Proposal {
             .insert(*voter, current.saturating_sub(applied));
     }
 
-    /// Finalize proposal - now requires current_epoch >= end_epoch.
+    /// Finalize proposal - now requires `current_epoch` >= `end_epoch`.
     /// Previously, finalize could be called at any time, allowing early-finalize
     /// Attacks where a proposal with sufficient votes could be forced through
     /// Before the voting period ended.
@@ -439,7 +453,7 @@ pub struct GovernanceState {
     #[serde(default)]
     pub constitution: ConstitutionRegistry,
     /// Per-proposer current-epoch proposal count.
-    /// Key: (proposer_address, epoch). Value: accepted proposals submitted.
+    /// Key: (`proposer_address`, epoch). Value: accepted proposals submitted.
     /// The next proposal costs `2^count` times base fee; old epochs are pruned.
     #[serde(default, with = "proposer_epoch_count_as_seq")]
     pub proposer_epoch_count: std::collections::BTreeMap<(Address, u64), u64>,
@@ -550,6 +564,11 @@ impl GovernanceState {
         hasher.finalize().into()
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn create_proposal(
         &mut self,
         proposer: Address,
@@ -754,6 +773,11 @@ impl GovernanceState {
             .unwrap_or(u64::MAX)
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn cancel_proposal(&mut self, proposal_id: u64, caller: &Address) -> Result<(), String> {
         let proposal = self
             .proposals
@@ -864,21 +888,21 @@ pub enum GovernanceAction {
         expected_validator_set_hash: [u8; 32],
         justification_hash: [u8; 32],
     },
-    /// Bootstrap or extend a PoA domain's admin set.
+    /// Bootstrap or extend a `PoA` domain's admin set.
     /// Governance is the trust root: the first admin of a domain arrives
     /// here, never through a transaction that appoints itself.
     PoaAddAdmin {
         domain_id: u32,
         admin: Address,
     },
-    /// Remove a PoA domain's admin by governance decision. This
+    /// Remove a `PoA` domain's admin by governance decision. This
     /// is the only path that may take the last admin - the admin door
     /// refuses it, because unpermissioning a domain is a governance act.
     PoaRemoveAdmin {
         domain_id: u32,
         admin: Address,
     },
-    /// Freeze an account on a PoA domain's compliance ledger (
+    /// Freeze an account on a `PoA` domain's compliance ledger (
     ///). Replaces the bare `bool` authority: the vote IS the
     /// authority, the named admin is the audit trail, and the domain kind
     /// is read from the domain record at application.

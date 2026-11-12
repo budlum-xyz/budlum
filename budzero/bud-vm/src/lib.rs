@@ -300,12 +300,13 @@ impl Vm {
     }
 
     pub fn consume_gas(&mut self, amount: u64) -> Result<(), VmError> {
-        self.gas_used = self.gas_used.saturating_add(amount);
-        if self.gas_used > self.gas_limit {
+        let next = self.gas_used.saturating_add(amount);
+        if next > self.gas_limit {
             self.halted = true;
             self.error = Some(VmError::OutOfGas);
             return Err(VmError::OutOfGas);
         }
+        self.gas_used = next;
         Ok(())
     }
 
@@ -374,7 +375,19 @@ impl Vm {
         // Observed, so the trace still ends with a Halt row and the AIR
         // Termination constraint is satisfied. The set of fields that
         // `step` is allowed to mutate on error is: `halted` (set to true)
-        // And `error` (set to Some(...)). Do not push partial steps.
+        // And `error` (set to Some(...)). Do not push partial steps or
+        // advance `gas_used` for instructions absent from `self.trace`.
+        let prev_gas = self.gas_used;
+        match self.step_inner(program) {
+            Ok(()) => Ok(()),
+            Err(err) => {
+                self.gas_used = prev_gas;
+                Err(err)
+            }
+        }
+    }
+
+    fn step_inner(&mut self, program: &[u64]) -> Result<(), VmError> {
         self.registers[0] = 0; // Enforce r0 is always 0
         if self.halted {
             return Ok(());

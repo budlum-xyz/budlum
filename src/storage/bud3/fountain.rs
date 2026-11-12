@@ -1,4 +1,4 @@
-//! A2: the RFC 6330 (RaptorQ) fountain code.
+//! A2: the RFC 6330 (`RaptorQ`) fountain code.
 //!
 //! Each segment is one RFC 6330 source block, coded on its own with source
 //! block number 0, one sub-block and alignment 1. The code is systematic: the

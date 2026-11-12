@@ -218,7 +218,7 @@ pub struct PeerManager {
     /// Tokens refilled per second for general P2P messages.
     /// Derived from `SecurityConfig.peer_rate_limit_per_minute` when applied.
     pub(crate) msg_refill_rate: f64,
-    /// Soft ceiling on tracked peer score entries (memory DoS guard).
+    /// Soft ceiling on tracked peer score entries (memory `DoS` guard).
     pub(crate) max_tracked_peers: usize,
     /// H5.1 eclipse protection: max concurrent connections per subnet bucket
     /// (IPv4 `/24`, IPv6 `/64`).
@@ -228,7 +228,7 @@ pub struct PeerManager {
     /// Peer → subnet mapping for disconnect accounting.
     peer_subnets: HashMap<PeerId, SubnetKey>,
     /// Live peer set. Libp2p can emit multiple connection events for one peer;
-    /// This set makes peer_count and per-subnet accounting idempotent.
+    /// This set makes `peer_count` and per-subnet accounting idempotent.
     connected_peers: HashSet<PeerId>,
     /// H5.2 outbound diversity: max outbound connections per subnet bucket.
     pub(crate) max_outbound_per_subnet: usize,
@@ -367,7 +367,7 @@ impl PeerManager {
     ///
     /// Returns `true` only for the first live connection for `peer_id`.
     /// Libp2p may emit duplicate connection events for the same peer/address;
-    /// Counting those duplicates was causing peer_count drift and subnet
+    /// Counting those duplicates was causing `peer_count` drift and subnet
     /// overcount.
     pub fn note_connected<K: Into<SubnetKey>>(
         &mut self,
@@ -386,7 +386,7 @@ impl PeerManager {
     /// Drop subnet accounting when a peer disconnects.
     ///
     /// Returns `true` if this call removed a previously live peer. Duplicate
-    /// Disconnect events are ignored to prevent AtomicUsize underflow.
+    /// Disconnect events are ignored to prevent `AtomicUsize` underflow.
     pub fn note_disconnected(&mut self, peer_id: &PeerId) -> bool {
         if !self.connected_peers.remove(peer_id) {
             return false;

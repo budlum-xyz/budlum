@@ -123,7 +123,7 @@ pub enum SlashingProof {
 /// independently checkable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DoubleSignKind {
-    /// Two conflicting block headers at one height (PoS block equivocation).
+    /// Two conflicting block headers at one height (`PoS` block equivocation).
     BlockHeader,
     /// Two conflicting BLS prevotes at one checkpoint.
     Prevote,
@@ -411,7 +411,7 @@ impl SlashingReport {
 
     /// A relayer invalid proof - griefing, fronting or a wrong relay.
     /// Uses `Other` with tag `relayer_invalid_proof` and maps to MaliciousBehaviour (100% slash in default params).
-    /// Per decision reuse_malicious to avoid semver break.
+    /// Per decision `reuse_malicious` to avoid semver break.
     #[cfg(test)]
     pub fn consensus_invalid_relay_proof(
         offender: Address,

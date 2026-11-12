@@ -229,6 +229,10 @@ impl EvmHybridProof {
     }
 
     /// Performs shape and resource checks before selecting a verification mode.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn validate_shape(&self) -> Result<(), EvmPlanError> {
         let points = [
             ("g1_hashed_message", self.g1_hashed_message.len(), 128usize),
@@ -365,6 +369,10 @@ impl EvmFinalityAttestation {
     /// ABI encodes the call data for `verify(Attestation)` exactly as Solidity
     /// `abi.encodeWithSelector` does. The selector is included so the output
     /// can be sent directly to an EVM transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn encode_verify_calldata(&self, evm_chain_id: u64) -> Result<Vec<u8>, EvmEncodingError> {
         for (field, actual, expected) in [
             (

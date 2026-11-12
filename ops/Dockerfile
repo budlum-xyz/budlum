@@ -105,7 +105,7 @@ FROM cgr.dev/chainguard/wolfi-base@sha256:d13acb327aa77acf2752acea8c08456511a5b8
 # The eight-seat rehearsal's validator entrypoint is Python. The builder's
 # Python does not carry into this runtime image; install it explicitly.
 # hadolint ignore=DL3018
-RUN apk add --no-cache \
+RUN apk update && apk upgrade --no-cache && apk add --no-cache \
     bash \
     ca-certificates-bundle \
     coreutils \

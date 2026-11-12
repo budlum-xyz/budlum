@@ -126,6 +126,10 @@ pub fn bech32_contract_addr(digest32: &[u8; 32]) -> String {
 ///
 /// Returns `Err` only in the astronomically unreachable `2^-256` case where all
 /// 256 seeds land on the curve.
+///
+/// # Errors
+///
+/// Returns an error if the operation fails.
 pub fn derive_svm_alias(addr: &Address) -> Result<([u8; 32], u8), String> {
     for step in 0u8..=255u8 {
         let seed = 255u8.wrapping_sub(step);
@@ -166,6 +170,10 @@ pub const fn derive_budzero_alias(addr: &Address) -> [u8; 32] {
 }
 
 /// Derives the raw alias bytes for `addr` in environment `ee`.
+///
+/// # Errors
+///
+/// Returns an error if the operation fails.
 pub fn derive_alias_bytes(addr: &Address, ee: EeId) -> Result<Vec<u8>, String> {
     match ee {
         EeId::BUDZERO => Ok(derive_budzero_alias(addr).to_vec()),

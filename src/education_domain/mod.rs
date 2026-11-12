@@ -70,6 +70,10 @@ impl EducationArtifact {
     /// Validate non-zero identity and metadata fields.
     ///
     /// exposed for: `EducationDomainRegistry::register_artifact`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn validate(&self) -> Result<(), EducationDomainError> {
         if self.contributor == Address::zero() {
             return Err(EducationDomainError::InvalidArtifact(
@@ -169,6 +173,10 @@ impl EducationDomainRegistry {
     /// Register an artifact's B.U.D. 3.0 object via [`StorageTxV3::RegisterObject`].
     ///
     /// exposed for: Education Domain registration handlers.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn register_artifact(
         &mut self,
         bud3: &mut Bud3Registry,

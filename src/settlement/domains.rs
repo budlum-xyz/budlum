@@ -119,7 +119,7 @@ impl PartialEq for SettlementTx {
 impl Eq for SettlementTx {}
 
 /// Mainnet refuses a quorum proof that carries only classical signatures
-/// a PoS or BFT proof needs the ML-DSA QC of the same
+/// a `PoS` or BFT proof needs the ML-DSA QC of the same
 /// signers (`FinalityProof::PoSPq`, `FinalityProof::BftPq`), and a PoA proof
 /// needs composite authority signatures (`FinalityProof::PoAPq`).
 fn refuse_classical_only_quorum_on_mainnet(
@@ -382,7 +382,7 @@ pub fn validate_domain_registration(domain: &ConsensusDomain) -> Result<(), Stri
 ///
 /// # Errors
 ///
-/// A shape rule, a PoA admission set on a non-PoA kind, or a registry
+/// A shape rule, a `PoA` admission set on a non-`PoA` kind, or a registry
 /// refusal (duplicate id, bond, lifecycle, ceiling).
 pub fn register_domain(state: &mut AccountState, domain: ConsensusDomain) -> Result<(), String> {
     validate_domain_registration(&domain)?;
@@ -453,7 +453,7 @@ fn ensure_adapter_name(domain: &ConsensusDomain, expected: &'static str) -> Resu
 }
 
 /// Apply the same registry policy to classical addresses and composite-key
-/// records. A PoAPq authority record is not itself an Address.
+/// records. A `PoAPq` authority record is not itself an Address.
 fn require_active_attester_authorities(
     state: &AccountState,
     proof: &FinalityProof,
@@ -829,13 +829,13 @@ fn validate_commitment_state_updates(
 /// Every adapter checks the checkpoint `(chain_id, epoch, height, hash)`
 /// against the commitment. What differs is the rest of the commitment:
 ///
-/// - a PoA (and the storage/AI attestation adapters that reuse it) signs
+/// - a `PoA` (and the storage/AI attestation adapters that reuse it) signs
 ///   `poa_commit_signing_message`, which covers the parent, all three roots,
 ///   the sequence, the timestamp, the producer and the nonce writes;
-/// - a PoW header carries the parent and all three roots, and the adapter
+/// - a `PoW` header carries the parent and all three roots, and the adapter
 ///   compares each one with the commitment;
 /// - a ZK claim binds the state root, through the accepted proof claim;
-/// - a PoS or BFT certificate is an aggregate of precommits over the
+/// - a `PoS` or BFT certificate is an aggregate of precommits over the
 ///   checkpoint hash alone. Nothing else in the commitment is signed, so
 ///   every other field is chosen by whoever submits it.
 ///
@@ -1081,7 +1081,7 @@ fn apply_pending_commitments(
 /// Accept a verified commitment and anchor its state root as the domain's
 /// external root, the value the relayer gate reads.
 ///
-/// Only a proof that binds the root can anchor one. A PoS or BFT certificate
+/// Only a proof that binds the root can anchor one. A `PoS` or BFT certificate
 /// signs the checkpoint hash and nothing else, so a commitment under it carries
 /// no root this layer could honestly anchor - the anchor stays unwritten and
 /// the commitment advances the domain's height and hash alone. A relayer that
@@ -1123,6 +1123,11 @@ pub fn anchor_recognized_chain(id: u32) -> Option<crate::core::transaction::Exte
     ANCHOR_RECOGNIZED_CHAINS.contains(&chain).then_some(chain)
 }
 
+/// Performs the requested operation.
+///
+/// # Errors
+///
+/// Returns an error if the operation fails.
 pub fn accept_verified_commitment(
     state: &mut AccountState,
     commitment: DomainCommitment,

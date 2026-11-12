@@ -127,6 +127,11 @@ impl StateSnapshot {
         // Plain data type; a failure here is a deterministic bug.
         serde_json::to_vec(self).unwrap_or_else(|_| SNAPSHOT_SERIALIZE_FAILED.to_vec())
     }
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn from_bytes(data: &[u8]) -> Result<Self, String> {
         // The disk-read path enforces MAX_SNAPSHOT_BYTES; a snapshot handed
         // to this entry point directly (remote sync, tests, imports) must
@@ -237,6 +242,11 @@ impl PruningManager {
             .unwrap_or(0)
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn quarantine_snapshots_above_height(&self, max_height: u64) -> Result<usize, String> {
         use std::fs;
         use std::path::Path;
@@ -281,6 +291,11 @@ impl PruningManager {
         Ok(quarantined)
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn save_snapshot(&self, snapshot: &StateSnapshot) -> Result<(), String> {
         use std::fs;
         use std::path::Path;
@@ -300,6 +315,11 @@ impl PruningManager {
         );
         Ok(())
     }
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn load_latest_snapshot(&self) -> Result<Option<StateSnapshot>, String> {
         use std::fs;
         use std::path::Path;
@@ -382,6 +402,11 @@ impl PruningManager {
         Ok(None)
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn save_snapshot_v2(&self, snapshot: &StateSnapshotV2) -> Result<(), String> {
         use std::fs::{self, File};
         use std::io::Write as _;
@@ -414,6 +439,11 @@ impl PruningManager {
         Ok(())
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn load_latest_snapshot_v2(&self) -> Result<Option<StateSnapshotV2>, String> {
         use std::fs;
         use std::path::Path;
@@ -521,13 +551,13 @@ fn get_snapshot_height(path: &std::path::Path) -> Option<u64> {
 }
 
 /// Oldest `StateSnapshotV2` schema that this binary will accept during the
-/// Staged ConsensusStateV2 migration window. Older snapshots must be restored
+/// Staged `ConsensusStateV2` migration window. Older snapshots must be restored
 /// With an intermediate release first; silently accepting them would risk
 /// Losing registry/tokenomics metadata that was not present yet.
 pub const MIN_SUPPORTED_STATE_SNAPSHOT_SCHEMA_VERSION: u32 = 2;
 
 /// Current durable snapshot schema emitted by this binary. This is the
-/// ConsensusStateV2 migration target.
+/// `ConsensusStateV2` migration target.
 ///
 /// Schema 5 adds the identity registry root field. Unlike the `poa_onboarding`
 /// entry, which shipped at schema 4 without a bump (absent -> empty default ->
@@ -540,7 +570,7 @@ pub const MIN_SUPPORTED_STATE_SNAPSHOT_SCHEMA_VERSION: u32 = 2;
 /// screen a folder list that is not the chain's - so the field enters the
 /// digest under a `>= 6` gate and pre-vault pinned digests stay byte-exact.
 ///
-/// Schema 7 digests the PoA admission records and the compliance ledger
+/// Schema 7 digests the `PoA` admission records and the compliance ledger
 /// Both decide writes: a node that dropped an
 /// admission set or a freeze would serve a chain that is not the chain's,
 /// and the field shipped outside the digest was exactly the forgery surface
@@ -678,7 +708,7 @@ pub struct StateSnapshotV2 {
     pub note_registry: Option<crate::privacy::L1NoteRegistry>,
     #[serde(default)]
     pub bridge_state: Option<crate::cross_domain::BridgeState>,
-    /// PoA admission records: admins, approvals and the KYC horizons.
+    /// `PoA` admission records: admins, approvals and the KYC horizons.
     ///
     /// `#[serde(default)]` so older snapshots load; a chain with no
     /// permissioned domains restores an empty registry, which is the correct
@@ -688,7 +718,7 @@ pub struct StateSnapshotV2 {
     /// was derived from.
     #[serde(default)]
     pub poa_onboarding: Option<crate::registry::poa_onboarding::PoAOnboarding>,
-    /// The PoA compliance ledger (screening, freeze,
+    /// The `PoA` compliance ledger (screening, freeze,
     /// travel-rule) alongside the admission records, both digested from
     /// schema 7.
     #[serde(default)]
@@ -762,28 +792,28 @@ pub struct StateSnapshotV2 {
     // RFC_GAP1 section 7: Ed25519 single signature + trust list + AllowUnsigned transition.
     // `#[serde(default)]` -> legacy schema-3 snapshots (no field) load as None.
     /// Ed25519 public key of the party signing the snapshot (from the trust list). None =
-    /// AllowUnsigned (devnet / legacy-import transition window).
+    /// `AllowUnsigned` (devnet / legacy-import transition window).
     #[serde(default)]
     pub manifest_signer: Option<[u8; 32]>,
     /// `sign(calculate_digest)` Ed25519 signature (64 bytes). None = AllowUnsigned.
     #[serde(default)]
     pub manifest_signature: Option<Vec<u8>>,
-    /// Trust policy: AllowUnsigned (devnet/transition) | RequireSigned (production).
-    /// Default AllowUnsigned -> backward compatible (legacy snapshots load).
+    /// Trust policy: `AllowUnsigned` (devnet/transition) | `RequireSigned` (production).
+    /// Default `AllowUnsigned` -> backward compatible (legacy snapshots load).
     #[serde(default)]
     pub trust_policy: SnapshotTrustPolicy,
 
     pub snapshot_hash: String,
 }
 
-/// C4 trust policy (RFC_GAP1 section 7.1: C-hybrid Task-1 trust model).
+/// C4 trust policy (`RFC_GAP1` section 7.1: C-hybrid Task-1 trust model).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum SnapshotTrustPolicy {
     /// Signature optional: OK if the digest matches (devnet / legacy-import window).
-    /// Compile warning in a mainnet build (RequireSigned in production).
+    /// Compile warning in a mainnet build (`RequireSigned` in production).
     #[default]
     AllowUnsigned,
-    /// Signature REQUIRED: manifest_signer in the trust list + Ed25519 verify must pass.
+    /// Signature REQUIRED: `manifest_signer` in the trust list + Ed25519 verify must pass.
     /// Unsigned/corrupt snapshot -> `verify_authentic` Err -> loader quarantine.
     RequireSigned,
 }
@@ -996,10 +1026,10 @@ impl StateSnapshotV2 {
         snapshot
     }
 
-    /// (P2 schema-4) raw digest. Branches on schema_version:
+    /// (P2 schema-4) raw digest. Branches on `schema_version`:
     /// - `< 4`: legacy digest (backward compatible - verifies old on-disk snapshots).
     /// - `>= 4`: extended digest (`budlum.snapshot.v4` prefix + 15
-    ///   previously unhashed fields). Closes the forgery surface (RFC_GAP1, "remaining gaps").
+    ///   previously unhashed fields). Closes the forgery surface (`RFC_GAP1`, "remaining gaps").
     pub fn calculate_digest(&self) -> [u8; 32] {
         use sha3::{Digest, Sha3_256};
         let mut hasher = Sha3_256::new();
@@ -1255,7 +1285,7 @@ impl StateSnapshotV2 {
         self.bud3_payload_is_bound() && self.snapshot_hash == self.calculate_hash()
     }
 
-    /// C4: manifest authenticity verification (RFC_GAP1 section 7.1, Task-1).
+    /// C4: manifest authenticity verification (`RFC_GAP1` section 7.1, Task-1).
     ///
     /// - `AllowUnsigned` -> OK if `verify` (digest) passes (missing signer/sig accepted).
     /// - `RequireSigned` -> `manifest_signer` set + a valid `manifest_signature`
@@ -1263,6 +1293,10 @@ impl StateSnapshotV2 {
     ///
     /// `trust_list` = None accepts any signer, for tests and devnet; in production
     /// The loader supplies the trust list from config (genesis bundle + CLI override, section 7.2).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn verify_authentic(
         &self,
         trust_list: Option<&[[u8; 32]]>,
@@ -1322,6 +1356,10 @@ impl StateSnapshotV2 {
     /// Surfaces a serialization error to the caller instead of silently writing
     /// An empty/corrupt snapshot. This is the exact failure class that hid the
     /// Registry tuple-key bug.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn try_to_bytes(&self) -> Result<Vec<u8>, String> {
         serde_json::to_vec(self).map_err(|e| format!("Failed to serialize snapshot V2: {e}"))
     }
@@ -1338,6 +1376,10 @@ impl StateSnapshotV2 {
     /// As a *skeleton*: supported schema-2 snapshots deserialize through
     /// `#[serde(default)]` fields and are rewritten as schema 3 by
     /// `from_state`; unsupported versions fail closed instead of being guessed.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn migration_report(&self) -> Result<StateSnapshotV2MigrationReport, String> {
         if !self.bud3_payload_is_bound() {
             return Err(String::from(
@@ -1377,6 +1419,11 @@ impl StateSnapshotV2 {
         })
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn from_bytes(data: &[u8]) -> Result<Self, String> {
         // Same ceiling as the V1 entry point and the bounded disk reader:
         // no snapshot is parsed before its size is checked, whoever hands

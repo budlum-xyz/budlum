@@ -3,7 +3,7 @@
 //! The constitution layer binds governance to user-sovereignty guardrails. DAO
 //! Proposals may tune bounded operational parameters, but they must not weaken
 //! Hard rules such as AI default-deny, no decrypt override, permissionless core
-//! Operation, or PoA island isolation.
+//! Operation, or `PoA` island isolation.
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -125,6 +125,11 @@ impl ConstitutionParameter {
         }
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn validate_update(&self) -> Result<(), String> {
         self.validate_value()?;
         if self.key.is_hard_guardrail() {
@@ -204,6 +209,11 @@ impl ConstitutionRegistry {
         Self { parameters }
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn set_parameter(&mut self, parameter: ConstitutionParameter) -> Result<(), String> {
         parameter.validate_update()?;
         self.parameters.insert(parameter.key, parameter);
@@ -228,6 +238,11 @@ impl ConstitutionRegistry {
         }
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn assert_hard_guardrails(&self) -> Result<(), String> {
         for key in [
             ConstitutionParameterKey::AiReadRequiresPollenGrant,

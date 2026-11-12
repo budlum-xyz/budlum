@@ -81,7 +81,7 @@ impl std::fmt::Display for SocialFiBud3Error {
 
 impl std::error::Error for SocialFiBud3Error {}
 
-/// B.U.D. 3.0 commitment metadata attached to a minted SocialFi NFT (Section 6.4 Y15).
+/// B.U.D. 3.0 commitment metadata attached to a minted `SocialFi` NFT (Section 6.4 Y15).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Bud3NftCommitment {
     pub id: u64,
@@ -100,7 +100,7 @@ pub struct NftFolder {
     pub nft_ids: Vec<u64>,
 }
 
-/// Owner-checked NFT folder registry and B.U.D. 3.0 SocialFi bridge.
+/// Owner-checked NFT folder registry and B.U.D. 3.0 `SocialFi` bridge.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct NftFolderRegistry {
     commitments: BTreeMap<u64, Bud3NftCommitment>,
@@ -116,7 +116,7 @@ impl NftFolderRegistry {
         Self::default()
     }
 
-    /// Look up the B.U.D. 3.0 commitment record for a minted SocialFi NFT.
+    /// Look up the B.U.D. 3.0 commitment record for a minted `SocialFi` NFT.
     #[must_use]
     pub fn commitment(&self, id: u64) -> Option<&Bud3NftCommitment> {
         self.commitments.get(&id)
@@ -128,7 +128,7 @@ impl NftFolderRegistry {
         self.folders.get(&folder_id)
     }
 
-    /// Mint a SocialFi NFT bound to a registered B.U.D. 3.0 object.
+    /// Mint a `SocialFi` NFT bound to a registered B.U.D. 3.0 object.
     /// exposed for SocialFi mint transaction execution and RPC handlers.
     ///
     /// Enforces author-name bounds, sealed-object ownership, and increments the
@@ -184,7 +184,7 @@ impl NftFolderRegistry {
         Ok(meta)
     }
 
-    /// Burn a SocialFi NFT with strict owner verification and B.U.D. 3.0
+    /// Burn a `SocialFi` NFT with strict owner verification and B.U.D. 3.0
     /// reference release / cryptographic grant shredding.
     /// exposed for SocialFi burn transaction execution and RPC handlers.
     ///

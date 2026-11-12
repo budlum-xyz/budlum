@@ -255,6 +255,11 @@ impl QuantumAccount {
         Ok(())
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn validate_all(&self) -> Result<(), &'static str> {
         self.verify_no_duplicate_guardians()?;
         self.verify_multisig_threshold()?;

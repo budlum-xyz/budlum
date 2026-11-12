@@ -1,4 +1,4 @@
-//! The F10 EVM ChainAdapter - the Universal Relayer's real Ethereum bridge.
+//! The F10 EVM `ChainAdapter` - the Universal Relayer's real Ethereum bridge.
 //!
 //! This group of modules gives Budlum the ability to verify the Ethereum
 //! receipt proofs produced by the relayer **independently** and

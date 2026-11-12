@@ -105,6 +105,7 @@ jobs:
             mobile/android/app/src/main/java/network/budlum/validator/core/KeystoreKeyVault.kt \
             mobile/android/app/src/main/java/network/budlum/validator/core/OemBatteryGuide.kt \
             mobile/android/devicetests/DeviceFieldHarness.kt \
+            mobile/android/app/src/test/java/network/budlum/validator/core/JvmMemoryWrappingKeyProvider.kt \
             mobile/android/app/src/test/java/network/budlum/validator/MobileValidatorUnitTest.kt \
             -jvm-target 17 \
             -include-runtime -d /tmp/budlum-mobile-android-tests.jar

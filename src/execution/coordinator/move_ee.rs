@@ -57,6 +57,10 @@ impl Default for MoveRuntimeConfig {
 
 impl MoveRuntimeConfig {
     /// Verifies Block-STM parallel execution is disabled ( item 1).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn ensure_sequential(&self) -> Result<(), String> {
         if self.block_stm_parallel {
             return Err(String::from(
@@ -109,6 +113,11 @@ impl MoveEe {
         }
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn with_config(config: MoveRuntimeConfig) -> Result<Self, String> {
         config.ensure_sequential()?;
         Ok(Self { config })

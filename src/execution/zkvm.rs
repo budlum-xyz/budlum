@@ -27,9 +27,9 @@ const _: () = assert!(
 /// halts just under it. Sixty full calls per block.
 ///
 /// Section 8.9 fixes the hard block limit at 60,000,000 BGU and requires every
-/// per-environment soft limit to fit inside it. At one BudZero gas per BGU,
+/// per-environment soft limit to fit inside it. At one `BudZero` gas per BGU,
 /// the former `64 * DEFAULT_CONTRACT_GAS_LIMIT` budget exceeded the block that
-/// carried it. Keep the BudZero soft limit equal to the hard block ceiling.
+/// carried it. Keep the `BudZero` soft limit equal to the hard block ceiling.
 pub const MAX_BLOCK_CONTRACT_GAS: u64 = BLOCK_GAS_LIMIT_BGU;
 
 /// Hard block gas ceiling from Section 8.9 item 2 (`TESTNET-DEFAULT`).
@@ -134,6 +134,10 @@ impl ZkVmExecutor {
     /// than a zeroed one. The executor's `ContractCall` path is the caller.
     /// Execution-only gated VM run for consensus `ContractCall` (§8.8: deterministic
     /// execution without inline per-validator STARK proof generation).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn execute_bytecode_vm_only(
         bytecode: &[u8],
         gas_limit: u64,
@@ -167,6 +171,11 @@ impl ZkVmExecutor {
         })
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn execute_bytecode(
         bytecode: &[u8],
         gas_limit: u64,
@@ -178,6 +187,10 @@ impl ZkVmExecutor {
     /// Explicitly gated execution. Same behaviour as `execute_bytecode`; kept
     /// as a separate name because call sites use it to say the gating is the
     /// point, and because removing it would be a silent API break.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn execute_bytecode_mainnet(
         bytecode: &[u8],
         gas_limit: u64,

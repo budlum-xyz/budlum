@@ -346,6 +346,10 @@ impl ObjectLayerRegistry {
 
     /// `ObjectLayerTx::Charter`. Returns `false` when the same charter was
     /// already in place (idempotent), `true` when it was written.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn charter(
         &mut self,
         domain: DomainId,
@@ -416,6 +420,10 @@ impl ObjectLayerRegistry {
     // ------------------------------------------------------------ classes
 
     /// `ObjectLayerTx::RegisterClass`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn register_class(
         &mut self,
         registrant: Address,
@@ -471,6 +479,10 @@ impl ObjectLayerRegistry {
     /// `ObjectLayerTx::RefreshClass` with a final slice update. A change of
     /// the home code's upgrade authority freezes the class for new
     /// transitions; exits stay open (N-6).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn refresh_class(
         &mut self,
         caller: Address,
@@ -512,6 +524,10 @@ impl ObjectLayerRegistry {
     // ------------------------------------------------------------ arrival
 
     /// `ObjectLayerTx::Arrive`, final or opt-in single-dependency tentative phase.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn arrive(
         &mut self,
         proof: &HomeEventProof,
@@ -700,6 +716,10 @@ impl ObjectLayerRegistry {
     }
 
     /// `ObjectLayerTx::Call`: every call runs, or none does.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn call(&mut self, actor: Holder, calls: &[Call]) -> Result<(), Refusal> {
         self.check_composite(calls)?;
         self.atomic(|r| {
@@ -712,6 +732,10 @@ impl ObjectLayerRegistry {
 
     /// `ObjectLayerTx::Offer`. The maker's calls are checked when the offer
     /// is accepted, not now, so an offer locks nothing.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn offer(
         &mut self,
         maker: Holder,
@@ -745,6 +769,10 @@ impl ObjectLayerRegistry {
     /// `ObjectLayerTx::Accept`: both sides run, and every want of the maker
     /// holds afterwards, or nothing changes
     /// (`offer_accept_runs_both_sides_or_none`).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn accept(
         &mut self,
         taker: Holder,
@@ -817,6 +845,10 @@ impl ObjectLayerRegistry {
     /// `ObjectLayerTx::HomeCall`: the home event's sender acts as its home
     /// identity. The authority is the finality proof; the
     /// per-identity nonce stops a replay of an older call.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn home_call(
         &mut self,
         proof: &HomeEventProof,
@@ -858,6 +890,10 @@ impl ObjectLayerRegistry {
 
     /// `ObjectLayerTx::Depart`. Open for a frozen class too (N-6). The
     /// departing value is frozen until `ConfirmDeparture`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn depart(
         &mut self,
         actor: Holder,
@@ -917,6 +953,10 @@ impl ObjectLayerRegistry {
 
     /// `ObjectLayerTx::ConfirmDeparture`: the endpoint's `released` event
     /// returns the asset to `Home`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn confirm_departure(
         &mut self,
         proof: &HomeEventProof,
@@ -946,6 +986,10 @@ impl ObjectLayerRegistry {
     /// The endpoint's `escaped` event: after silence the home owner took a
     /// unique asset out by the emergency exit. The object layer lets go of
     /// it (`escape_removes_asset_from_object_layer`).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn record_escape(
         &mut self,
         proof: &HomeEventProof,
@@ -1010,6 +1054,10 @@ impl ObjectLayerRegistry {
 
     /// `ObjectLayerTx::AuditCustody`: compare the proven home custody with
     /// the record. A deficit freezes the class (N-4).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn audit_custody(
         &mut self,
         caller: Address,
@@ -1043,6 +1091,10 @@ impl ObjectLayerRegistry {
 
     /// `ObjectLayerTx::SetEscapeAddress`: register or clear an account's raw
     /// home escape/adoption binding (`<= MAX_ESCAPE_ADDRESS_BYTES`).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn set_escape_address(&mut self, account: Address, home: Vec<u8>) -> Result<(), Refusal> {
         if home.len() > MAX_ESCAPE_ADDRESS_BYTES {
             return Err(Refusal::EscapeAddressTooLong);
@@ -1067,6 +1119,10 @@ impl ObjectLayerRegistry {
 
     /// `ObjectLayerTx::Resolve`: clear an open tentative dependency once
     /// home finality settles.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn resolve(&mut self, dependency: DependencyId) -> Result<(), Refusal> {
         if !self.dependencies.contains_key(&dependency) {
             return Err(Refusal::UnknownDependency);
@@ -1078,6 +1134,10 @@ impl ObjectLayerRegistry {
     /// `ObjectLayerTx::Adopt`: refused on unverified `escape_addresses` blobs;
     /// callers must prove home-chain ownership via [`Self::adopt_with_proof`]
     /// or [`Self::home_call`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn adopt(&mut self, account: Address, home: &[u8]) -> Result<u64, Refusal> {
         let _ = (account, home);
         Err(Refusal::NotAuthorized)
@@ -1086,6 +1146,10 @@ impl ObjectLayerRegistry {
     /// Migrate assets held by `Holder::Home` to `Holder::Account(account)`
     /// using a finality-verified home event signed by the home address whose
     /// payload commits to `account.as_bytes()`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn adopt_with_proof(
         &mut self,
         account: Address,
@@ -1158,6 +1222,10 @@ impl ObjectLayerRegistry {
 
     /// `ObjectLayerTx::AuditCode`: verify that `class`'s charter remains active
     /// and its recorded upgrade-authority slice matches `upgrade_authority`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn audit_code(&mut self, class: AssetClassId) -> Result<ClassStatus, Refusal> {
         self.atomic(|r| {
             let domain = r.class(&class)?.home_domain;
@@ -1185,6 +1253,10 @@ impl ObjectLayerRegistry {
     /// `ObjectLayerTx::Challenge`: open a rule-fidelity challenge on an active
     /// class, or freeze the class if an existing challenge has passed the
     /// rebuttal window (`DEFAULT_CHALLENGE_WINDOW_BLOCKS`) without rebuttal.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn challenge(
         &mut self,
         challenger: Address,
@@ -1225,6 +1297,10 @@ impl ObjectLayerRegistry {
 
     /// `ObjectLayerTx::Rebut`: clear an open challenge or lift an
     /// `UnrebuttedChallenge` freeze when signed by the class registrant.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn rebut(
         &mut self,
         actor: Address,

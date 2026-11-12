@@ -56,7 +56,7 @@ impl SchemeId {
     /// ML-KEM-1024, FIPS 203.
     /// exposed for: the crypto/key registry's public labels and shapes - production readers land with the anchor-ceremony and key-config doors (wiring pending).
     pub const ML_KEM_1024: Self = Self(0x1003);
-    /// BudZero STARK, version 2.
+    /// `BudZero` STARK, version 2.
     /// exposed for: the crypto/key registry's public labels and shapes - production readers land with the anchor-ceremony and key-config doors (wiring pending).
     pub const BUDZERO_STARK_V2: Self = Self(0x2001);
 
@@ -369,7 +369,7 @@ pub struct SuiteId(pub u16);
 impl SuiteId {
     /// ML-DSA-87 + Ed25519, recovery SLH-DSA-SHAKE-256s. The user default.
     pub const USER: Self = Self(0x0001);
-    /// ML-DSA-65 + Ed25519. Validator block, evidence and PoA.
+    /// ML-DSA-65 + Ed25519. Validator block, evidence and `PoA`.
     pub const VALIDATOR: Self = Self(0x0002);
     /// FN-DSA-1024 + Ed25519. Second user suite, reserved.
     /// exposed for: the crypto/key registry's public labels and shapes - production readers land with the anchor-ceremony and key-config doors (wiring pending).

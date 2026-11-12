@@ -203,6 +203,10 @@ impl MultiLaneMempool {
     /// transaction hash identifies the entry; the fee-payer signature is the
     /// independent replay key. Both raw bytes and BGU/fee limits are retained
     /// for block selection and execution.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn admit_foreign_solana(
         &mut self,
         raw_wire: &[u8],
@@ -252,6 +256,10 @@ impl MultiLaneMempool {
     /// Admit `entry` into its dedicated lane after validating lane capacity and replay rules.
     ///
     /// Convenience: entry point for local, foreign-gateway, and duty transaction submission.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn admit(&mut self, entry: LaneEntry, now_unix_s: u64) -> Result<(), LaneAdmissionError> {
         // 1. Validate lane <-> replay rule match and replay/freshness BEFORE mutating!
         let nonce_pair: Option<([u8; 32], u64)> = match (&entry.lane, &entry.replay) {

@@ -163,7 +163,7 @@ pub struct EvmDepositProof<'a> {
     pub emitter_address: &'a [u8],
     /// Deposit event signature: `topic0 = keccak256("Deposit(...)")`.
     pub deposit_topic0: &'a [u8; 32],
-    /// Ethereum PoS attestation over the target header, when the relayer has
+    /// Ethereum `PoS` attestation over the target header, when the relayer has
     /// one.
     ///
     /// `None` keeps the previous behaviour exactly: finality rests on
@@ -175,7 +175,7 @@ pub struct EvmDepositProof<'a> {
     /// and `adapter.rs` have both said "F10.3 (sync-committee) is used"
     /// since they were written, and neither did: `verify_sync_aggregate`
     /// existed, was tested six ways, and no production path reached it. A
-    /// bridge whose documentation claims PoS finality and whose code counts
+    /// bridge whose documentation claims `PoS` finality and whose code counts
     /// confirmations is claiming a guarantee it does not have.
     ///
     /// The signed message is not the caller's. It is rebuilt from the beacon
@@ -254,6 +254,10 @@ pub struct SyncAttestation<'a> {
 /// On success the caller gets a `VerifiedDeposit` holding every proven field
 /// the mint needs. On failure it gets a `VerifyError` naming the step at which
 /// the proof turned out to be invalid.
+///
+/// # Errors
+///
+/// Returns an error if the operation fails.
 pub fn verify_evm_receipt(
     proof: &EvmDepositProof<'_>,
     trusted_checkpoint: Option<&(u64, [u8; 32])>,

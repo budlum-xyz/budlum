@@ -464,6 +464,10 @@ fn universal_call_log_is_visible_to_evm_indexers() {
     let router20 = dep[0].output.clone();
     let wasm_target = dep[1].output.clone();
 
+    let auth_msg = serde_json::to_vec(&serde_json::json!({
+        "execute": { "authorize_caller": { "caller": String::from_utf8_lossy(&router20) } }
+    }))
+    .expect("json");
     let put_msg = serde_json::to_vec(&serde_json::json!({
         "execute": { "put": { "key": "hello", "value": "world" } }
     }))
@@ -477,25 +481,42 @@ fn universal_call_log_is_visible_to_evm_indexers() {
             &mut coord,
             sample_ctx(),
             proposer,
-            &[UelTx {
-                tx_hash: [0x32; 32],
-                sender,
-                nonce: 2,
-                ee: EeId::EVM,
-                action: UelAction::Call {
-                    target: router20,
-                    input: router_cd,
+            &[
+                UelTx {
+                    tx_hash: [0x31; 32],
+                    sender,
+                    nonce: 2,
+                    ee: EeId::WASM,
+                    action: UelAction::Call {
+                        target: wasm_target,
+                        input: auth_msg,
+                    },
+                    value_attos: 0,
+                    gas_limit_bgu: 200_000,
+                    max_fee_per_bgu_attos: MIN_UEL_BASE_FEE_ATTOS * 2,
+                    max_priority_fee_per_bgu_attos: 100,
                 },
-                value_attos: 0,
-                gas_limit_bgu: 500_000,
-                max_fee_per_bgu_attos: MIN_UEL_BASE_FEE_ATTOS * 2,
-                max_priority_fee_per_bgu_attos: 100,
-            }],
+                UelTx {
+                    tx_hash: [0x32; 32],
+                    sender,
+                    nonce: 3,
+                    ee: EeId::EVM,
+                    action: UelAction::Call {
+                        target: router20,
+                        input: router_cd,
+                    },
+                    value_attos: 0,
+                    gas_limit_bgu: 500_000,
+                    max_fee_per_bgu_attos: MIN_UEL_BASE_FEE_ATTOS * 2,
+                    max_priority_fee_per_bgu_attos: 100,
+                },
+            ],
         )
         .expect("call router");
     assert_eq!(call_rec[0].status, UelReceiptStatus::Success);
+    assert_eq!(call_rec[1].status, UelReceiptStatus::Success);
     let expected_topic0 = universal_call_executed_topic0();
-    let found = call_rec[0].logs.iter().any(|(ee, log)| {
+    let found = call_rec[1].logs.iter().any(|(ee, log)| {
         *ee == EeId::EVM
             && log.emitter.id == EVM_UNIVERSAL_PRECOMPILE
             && log.topics == vec![expected_topic0]

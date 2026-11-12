@@ -29,15 +29,18 @@ use crate::execution::coordinator::universal_call::{
 use budlum_uel_abi::{
     BlockContext, BudAmount, CodeInfo, EeCall, EeCallKind, EeFault, EeId, EeIdentity, EeLog,
     EeOutcome, EeQuery, EeRefusal, ExecutionEnvironment, HostApi, HostError, HostRead, Namespace,
-    OutcomeStatus, RefusalCode, UniversalCall,
+    OutcomeStatus, OutOfGas, RefusalCode, UniversalCall, UniversalResult,
 };
 use serde::{Deserialize, Serialize};
 use sha3::{Digest, Keccak256};
+use std::collections::BTreeMap;
 
 /// Maximum deployed runtime EVM bytecode size (EIP-170: 24 KiB).
 pub const MAX_EVM_BYTECODE_BYTES: usize = 24_576;
 /// Maximum initcode size at deployment (EIP-3860: 48 KiB).
 pub const MAX_EVM_INITCODE_BYTES: usize = 49_152;
+/// Maximum EVM call/create nesting depth per EIP-150 (`1024`).
+pub const MAX_EVM_CALL_DEPTH: u32 = 1_024;
 /// Cold `SSTORE` zero-to-nonzero base cost in EVM gas / BGU.
 pub const GAS_SSTORE_SET: u64 = 20_000;
 /// Warm / nonzero-to-nonzero `SSTORE` reset cost in EVM gas / BGU.
@@ -90,7 +93,7 @@ pub fn solidity_selector(sig: &str) -> [u8; 4] {
 pub fn compute_create_address(sender: &[u8; 20], nonce: u64) -> [u8; 20] {
     let encoded = rlp::encode(&Item::List(vec![
         Item::String(sender.to_vec()),
-        Item::String(rlp::encode_uint(nonce)),
+        Item::String(rlp::encode_uint_bytes(nonce)),
     ]));
     let digest: [u8; 32] = Keccak256::digest(&encoded).into();
     let [_, _, _, _, _, _, _, _, _, _, _, _, addr @ ..] = digest;
@@ -269,6 +272,19 @@ impl U256Word {
     fn to_addr20(self) -> [u8; 20] {
         let [_, _, _, _, _, _, _, _, _, _, _, _, tail @ ..] = self.0;
         tail
+    }
+
+    fn to_u128_checked(self) -> Option<u128> {
+        if self
+            .0
+            .get(..16)
+            .is_some_and(|hi| hi.iter().any(|b| *b != 0))
+        {
+            return None;
+        }
+        let lo = self.0.get(16..32)?;
+        let arr: [u8; 16] = lo.try_into().ok()?;
+        Some(u128::from_be_bytes(arr))
     }
 
     fn to_u128_saturating(self) -> u128 {
@@ -912,6 +928,237 @@ fn mem_write(
     Ok(())
 }
 
+struct FrameMeterHost<'a> {
+    inner: &'a mut dyn HostApi,
+    gas_limit: u64,
+    gas_used: u64,
+}
+
+impl FrameMeterHost<'_> {
+    const fn remaining(&self) -> u64 {
+        self.gas_limit.saturating_sub(self.gas_used)
+    }
+}
+
+impl HostRead for FrameMeterHost<'_> {
+    fn read(&self, ns: &Namespace, key: &[u8]) -> Result<Option<Vec<u8>>, HostError> {
+        self.inner.read(ns, key)
+    }
+
+    fn bud_balance(&self, who: &EeIdentity) -> Result<BudAmount, HostError> {
+        self.inner.bud_balance(who)
+    }
+}
+
+impl HostApi for FrameMeterHost<'_> {
+    fn write(&mut self, ns: &Namespace, key: &[u8], value: Option<&[u8]>) -> Result<(), HostError> {
+        self.inner.write(ns, key, value)
+    }
+
+    fn universal_call(&mut self, call: UniversalCall) -> Result<UniversalResult, HostError> {
+        self.inner.universal_call(call)
+    }
+
+    fn emit_log(&mut self, log: EeLog) -> Result<(), HostError> {
+        self.inner.emit_log(log)
+    }
+
+    fn charge(&mut self, bgu: u64) -> Result<(), OutOfGas> {
+        let next = self.gas_used.checked_add(bgu).ok_or(OutOfGas)?;
+        if next > self.gas_limit {
+            let avail = self.remaining();
+            if avail > 0 {
+                let _ = self.inner.charge(avail);
+            }
+            self.gas_used = self.gas_limit;
+            return Err(OutOfGas);
+        }
+        self.inner.charge(bgu)?;
+        self.gas_used = next;
+        Ok(())
+    }
+
+    fn bud_transfer(
+        &mut self,
+        from: &EeIdentity,
+        to: &EeIdentity,
+        attos: u128,
+    ) -> Result<(), HostError> {
+        self.inner.bud_transfer(from, to, attos)
+    }
+}
+
+/// Undo-buffered sub-frame host wrapper enforcing the sub-call gas cap, static
+/// protection, and atomic state/balance/log rollback on revert or out-of-gas.
+struct EvmSubCallHost<'a> {
+    inner: &'a mut dyn HostApi,
+    gas_limit: u64,
+    gas_used: u64,
+    is_static: bool,
+    staged_writes: BTreeMap<(String, Vec<u8>), Option<Vec<u8>>>,
+    staged_logs: Vec<EeLog>,
+    staged_transfers: Vec<(EeIdentity, EeIdentity, u128)>,
+    balance_deltas: BTreeMap<(u8, Vec<u8>), i128>,
+}
+
+impl<'a> EvmSubCallHost<'a> {
+    fn new(inner: &'a mut dyn HostApi, gas_limit: u64, is_static: bool) -> Self {
+        Self {
+            inner,
+            gas_limit,
+            gas_used: 0,
+            is_static,
+            staged_writes: BTreeMap::new(),
+            staged_logs: Vec::new(),
+            staged_transfers: Vec::new(),
+            balance_deltas: BTreeMap::new(),
+        }
+    }
+
+    fn commit(self) -> Result<(), HostError> {
+        for (from, to, attos) in self.staged_transfers {
+            self.inner.bud_transfer(&from, &to, attos)?;
+        }
+        for ((ns_str, key), val) in self.staged_writes {
+            let ns = Namespace::new(&ns_str)
+                .map_err(|e| HostError::Invalid(format!("bad staged namespace: {e}")))?;
+            self.inner.write(&ns, &key, val.as_deref())?;
+        }
+        for log in self.staged_logs {
+            self.inner.emit_log(log)?;
+        }
+        Ok(())
+    }
+}
+
+impl HostRead for EvmSubCallHost<'_> {
+    fn read(&self, ns: &Namespace, key: &[u8]) -> Result<Option<Vec<u8>>, HostError> {
+        let lookup = (ns.as_str().to_string(), key.to_vec());
+        if let Some(staged) = self.staged_writes.get(&lookup) {
+            return Ok(staged.clone());
+        }
+        self.inner.read(ns, key)
+    }
+
+    fn bud_balance(&self, who: &EeIdentity) -> Result<BudAmount, HostError> {
+        let base = self.inner.bud_balance(who)?.0;
+        let delta = self
+            .balance_deltas
+            .get(&(who.ee.0, who.id.clone()))
+            .copied()
+            .unwrap_or(0);
+        let adjusted = if delta >= 0 {
+            base.saturating_add(delta.unsigned_abs())
+        } else {
+            base.saturating_sub(delta.unsigned_abs())
+        };
+        Ok(BudAmount(adjusted))
+    }
+}
+
+impl HostApi for EvmSubCallHost<'_> {
+    fn write(&mut self, ns: &Namespace, key: &[u8], value: Option<&[u8]>) -> Result<(), HostError> {
+        if self.is_static {
+            return Err(HostError::Denied(String::from(
+                "state write forbidden in static EVM sub-call",
+            )));
+        }
+        if crate::execution::coordinator::state::RootGroup::for_namespace(ns.as_str())
+            != Some(crate::execution::coordinator::state::RootGroup::Evm)
+        {
+            return Err(HostError::Denied(format!(
+                "EVM sub-call cannot write non-EVM namespace `{}`",
+                ns.as_str()
+            )));
+        }
+        self.staged_writes
+            .insert((ns.as_str().to_string(), key.to_vec()), value.map(<[u8]>::to_vec));
+        Ok(())
+    }
+
+    fn universal_call(&mut self, mut call: UniversalCall) -> Result<UniversalResult, HostError> {
+        if self.is_static {
+            call.is_static = true;
+            if call.value.0 > 0 {
+                return Err(HostError::Denied(String::from(
+                    "non-zero value transfer forbidden in static call",
+                )));
+            }
+        }
+        self.inner.universal_call(call)
+    }
+
+    fn emit_log(&mut self, log: EeLog) -> Result<(), HostError> {
+        if self.is_static {
+            return Err(HostError::Denied(String::from(
+                "LOG forbidden in static EVM sub-call",
+            )));
+        }
+        self.staged_logs.push(log);
+        Ok(())
+    }
+
+    fn charge(&mut self, bgu: u64) -> Result<(), OutOfGas> {
+        let next = self.gas_used.checked_add(bgu).ok_or(OutOfGas)?;
+        if next > self.gas_limit {
+            let avail = self.gas_limit.saturating_sub(self.gas_used);
+            if avail > 0 {
+                let _ = self.inner.charge(avail);
+            }
+            self.gas_used = self.gas_limit;
+            return Err(OutOfGas);
+        }
+        self.inner.charge(bgu)?;
+        self.gas_used = next;
+        Ok(())
+    }
+
+    fn bud_transfer(
+        &mut self,
+        from: &EeIdentity,
+        to: &EeIdentity,
+        attos: u128,
+    ) -> Result<(), HostError> {
+        if attos == 0 {
+            return Ok(());
+        }
+        if self.is_static {
+            return Err(HostError::Denied(String::from(
+                "value transfer forbidden in static EVM sub-call",
+            )));
+        }
+        let delta = i128::try_from(attos)
+            .map_err(|_| HostError::Invalid(String::from("transfer amount exceeds i128")))?;
+        let cur_from = self.bud_balance(from)?.0;
+        if cur_from < attos {
+            return Err(HostError::Denied(String::from("insufficient EVM balance")));
+        }
+        if from != to {
+            let from_key = (from.ee.0, from.id.clone());
+            let next_from = self
+                .balance_deltas
+                .get(&from_key)
+                .copied()
+                .unwrap_or(0)
+                .checked_sub(delta)
+                .ok_or_else(|| HostError::Invalid(String::from("balance delta underflow")))?;
+            let to_key = (to.ee.0, to.id.clone());
+            let next_to = self
+                .balance_deltas
+                .get(&to_key)
+                .copied()
+                .unwrap_or(0)
+                .checked_add(delta)
+                .ok_or_else(|| HostError::Invalid(String::from("balance delta overflow")))?;
+            self.balance_deltas.insert(from_key, next_from);
+            self.balance_deltas.insert(to_key, next_to);
+        }
+        self.staged_transfers
+            .push((from.clone(), to.clone(), attos));
+        Ok(())
+    }
+}
+
 struct EvmBytecodeCall<'a> {
     ctx: &'a BlockContext,
     self_addr: &'a [u8; 20],
@@ -921,6 +1168,7 @@ struct EvmBytecodeCall<'a> {
     calldata: &'a [u8],
     is_static: bool,
     gas_limit: u64,
+    depth: u32,
 }
 
 fn run_evm_bytecode(
@@ -936,7 +1184,17 @@ fn run_evm_bytecode(
         calldata,
         is_static,
         gas_limit,
+        depth,
     } = frame;
+    if depth >= MAX_EVM_CALL_DEPTH {
+        return Ok((OutcomeStatus::Revert, b"EVM call depth exceeded".to_vec()));
+    }
+    let mut metered = FrameMeterHost {
+        inner: host,
+        gas_limit,
+        gas_used: 0,
+    };
+    let host = &mut metered;
     let mut stack: Vec<U256Word> = Vec::with_capacity(64);
     let mut mem: Vec<u8> = Vec::new();
     let mut returndata: Vec<u8> = Vec::new();
@@ -988,6 +1246,22 @@ fn run_evm_bytecode(
                 stack.push(U256Word(digest));
             }
             0x30 => stack.push(U256Word::from_addr20(self_addr)),
+            0x31 => {
+                let Some(addr_w) = stack.pop() else {
+                    return Ok((OutcomeStatus::Revert, b"stack underflow".to_vec()));
+                };
+                host.charge(100)
+                    .map_err(|_| String::from("out of gas in BALANCE"))?;
+                let target = addr_w.to_addr20();
+                let bal = host
+                    .bud_balance(&EeIdentity {
+                        ee: EeId::EVM,
+                        id: target.to_vec(),
+                    })
+                    .map_err(|e| e.to_string())?
+                    .0;
+                stack.push(U256Word::from_u128(bal));
+            }
             0x33 => stack.push(U256Word::from_addr20(caller20)),
             0x34 => stack.push(U256Word::from_u128(value_wei)),
             0x35 => {
@@ -1056,6 +1330,18 @@ fn run_evm_bytecode(
                 mem_write(&mut mem, host, dst, slice)?;
             }
             0x46 => stack.push(U256Word::from_u64(BUDLUM_EVM_CHAIN_ID)),
+            0x47 => {
+                host.charge(5)
+                    .map_err(|_| String::from("out of gas in SELFBALANCE"))?;
+                let bal = host
+                    .bud_balance(&EeIdentity {
+                        ee: EeId::EVM,
+                        id: self_addr.to_vec(),
+                    })
+                    .map_err(|e| e.to_string())?
+                    .0;
+                stack.push(U256Word::from_u128(bal));
+            }
             0x48 => {
                 let _ = ctx;
                 stack.push(U256Word::from_u128(
@@ -1195,7 +1481,97 @@ fn run_evm_bytecode(
                 })
                 .map_err(|e| e.to_string())?;
             }
-            0xf1 | 0xfa => {
+            0xf0 | 0xf5 => {
+                if is_static {
+                    return Ok((OutcomeStatus::Revert, b"CREATE in static call".to_vec()));
+                }
+                let (Some(val_w), Some(off_w), Some(len_w)) =
+                    (stack.pop(), stack.pop(), stack.pop())
+                else {
+                    return Ok((OutcomeStatus::Revert, b"CREATE underflow".to_vec()));
+                };
+                let salt_opt = if op == 0xf5 {
+                    let Some(salt_w) = stack.pop() else {
+                        return Ok((OutcomeStatus::Revert, b"CREATE2 underflow".to_vec()));
+                    };
+                    Some(salt_w.0)
+                } else {
+                    None
+                };
+                let Some(val_u128) = val_w.to_u128_checked() else {
+                    return Ok((OutcomeStatus::Revert, b"CREATE value overflow".to_vec()));
+                };
+                let (Some(off), Some(len)) = (off_w.to_usize_checked(), len_w.to_usize_checked())
+                else {
+                    return Ok((OutcomeStatus::Revert, b"CREATE mem overflow".to_vec()));
+                };
+                if len > MAX_EVM_INITCODE_BYTES {
+                    return Ok((OutcomeStatus::Revert, b"CREATE initcode limit".to_vec()));
+                }
+                host.charge(
+                    32_000u64.saturating_add(2u64.saturating_mul((len as u64).div_ceil(32))),
+                )
+                .map_err(|_| String::from("out of gas in CREATE"))?;
+                grow_mem(&mut mem, host, off, len)?;
+                let init = mem.get(off..off + len).unwrap_or(&[]).to_vec();
+                if depth.saturating_add(1) >= MAX_EVM_CALL_DEPTH {
+                    returndata.clear();
+                    stack.push(U256Word::ZERO);
+                    continue;
+                }
+                let rem = host.remaining();
+                let max_forward = rem.saturating_sub(rem / 64);
+                let mut sub_host = EvmSubCallHost::new(host, max_forward, false);
+                let child20 = if let Some(salt) = salt_opt {
+                    compute_create2_address(self_addr, &salt, &init)
+                } else {
+                    let mut sender_rec = read_account_rec(&sub_host, self_addr)?;
+                    let addr = compute_create_address(self_addr, sender_rec.nonce);
+                    sender_rec.nonce = sender_rec.nonce.saturating_add(1);
+                    if write_account_rec(&mut sub_host, self_addr, &sender_rec).is_err() {
+                        returndata.clear();
+                        stack.push(U256Word::ZERO);
+                        continue;
+                    }
+                    addr
+                };
+                if target_collides_with_native_alias(&sub_host, &child20) {
+                    returndata.clear();
+                    stack.push(U256Word::ZERO);
+                    continue;
+                }
+                let existing = read_account_rec(&sub_host, &child20)?;
+                if existing.code_hash.is_some() || existing.nonce > 0 {
+                    returndata.clear();
+                    stack.push(U256Word::ZERO);
+                    continue;
+                }
+                if val_u128 > 0 {
+                    let from_id = EeIdentity {
+                        ee: EeId::EVM,
+                        id: self_addr.to_vec(),
+                    };
+                    let to_id = EeIdentity {
+                        ee: EeId::EVM,
+                        id: child20.to_vec(),
+                    };
+                    if sub_host.bud_transfer(&from_id, &to_id, val_u128).is_err() {
+                        returndata.clear();
+                        stack.push(U256Word::ZERO);
+                        continue;
+                    }
+                }
+                if deploy_runtime_code(&mut sub_host, &child20, &init).is_ok()
+                    && sub_host.commit().is_ok()
+                {
+                    returndata.clear();
+                    stack.push(U256Word::from_addr20(&child20));
+                } else {
+                    returndata.clear();
+                    stack.push(U256Word::ZERO);
+                }
+            }
+            0xf1 | 0xf2 | 0xf4 | 0xfa => {
                 let call_is_static = is_static || op == 0xfa;
                 let Some(gas_w) = stack.pop() else {
                     return Ok((OutcomeStatus::Revert, b"CALL underflow".to_vec()));
@@ -1203,11 +1579,16 @@ fn run_evm_bytecode(
                 let Some(addr_w) = stack.pop() else {
                     return Ok((OutcomeStatus::Revert, b"CALL underflow".to_vec()));
                 };
-                let val_u128 = if op == 0xf1 {
+                let val_u128 = if op == 0xf1 || op == 0xf2 {
                     let Some(vw) = stack.pop() else {
                         return Ok((OutcomeStatus::Revert, b"CALL value underflow".to_vec()));
                     };
-                    vw.to_u128_saturating()
+                    let Some(val) = vw.to_u128_checked() else {
+                        return Ok((OutcomeStatus::Revert, b"CALL value overflow".to_vec()));
+                    };
+                    val
+                } else if op == 0xf4 {
+                    value_wei
                 } else {
                     0
                 };
@@ -1224,106 +1605,100 @@ fn run_evm_bytecode(
                 ) else {
                     return Ok((OutcomeStatus::Revert, b"CALL mem overflow".to_vec()));
                 };
-                if val_u128 > 0 && addr_w.to_addr20() != EVM_UNIVERSAL_PRECOMPILE {
-                    if call_is_static {
-                        return Ok((OutcomeStatus::Revert, b"value in STATICCALL".to_vec()));
-                    }
-                    grow_mem(&mut mem, host, in_off, in_len)?;
-                    grow_mem(&mut mem, host, ret_off, ret_len)?;
-                    let sub_in = mem.get(in_off..in_off + in_len).unwrap_or(&[]).to_vec();
-                    let target20 = addr_w.to_addr20();
-                    let sub_gas = gas_w.to_u128_saturating().min(u128::from(gas_limit)) as u64;
-                    let ucall = budlum_uel_abi::UniversalCall {
-                        from: EeIdentity {
-                            ee: EeId::EVM,
-                            id: self_addr.to_vec(),
-                        },
-                        to_ee: EeId::EVM,
-                        target: EeIdentity {
-                            ee: EeId::EVM,
-                            id: target20.to_vec(),
-                        },
-                        value: BudAmount(val_u128),
-                        input: sub_in,
-                        gas_limit: sub_gas,
-                        is_static: false,
-                    };
-                    match host.universal_call(ucall) {
-                        Ok(ures) => {
-                            returndata = ures.output;
-                            let copy_n = ret_len.min(returndata.len());
-                            if let Some(s) = returndata.get(..copy_n) {
-                                mem_write(&mut mem, host, ret_off, s)?;
-                            }
-                            stack.push(U256Word::from_u64(u64::from(ures.success)));
-                        }
-                        Err(_) => {
-                            returndata.clear();
-                            stack.push(U256Word::ZERO);
-                        }
-                    }
-                    continue;
+                if op == 0xf1 && call_is_static && val_u128 > 0 {
+                    return Ok((OutcomeStatus::Revert, b"value in STATICCALL".to_vec()));
                 }
                 grow_mem(&mut mem, host, in_off, in_len)?;
                 grow_mem(&mut mem, host, ret_off, ret_len)?;
                 let sub_in = mem.get(in_off..in_off + in_len).unwrap_or(&[]).to_vec();
                 let target20 = addr_w.to_addr20();
-                let sub_gas = gas_w.to_u128_saturating().min(u128::from(gas_limit)) as u64;
-                let (sub_status, sub_out) = dispatch_evm_target(
+                if target20 == EVM_UNIVERSAL_PRECOMPILE && val_u128 > 0 {
+                    return Ok((
+                        OutcomeStatus::Revert,
+                        b"universal precompile rejects msg.value".to_vec(),
+                    ));
+                }
+                if depth.saturating_add(1) >= MAX_EVM_CALL_DEPTH {
+                    returndata.clear();
+                    stack.push(U256Word::ZERO);
+                    continue;
+                }
+                let rem = host.remaining();
+                let max_forward = rem.saturating_sub(rem / 64);
+                let sub_gas = gas_w.to_u128_saturating().min(u128::from(max_forward)) as u64;
+                let mut sub_host = EvmSubCallHost::new(host, sub_gas, call_is_static);
+                if op == 0xf1 && val_u128 > 0 {
+                    let from_id = EeIdentity {
+                        ee: EeId::EVM,
+                        id: self_addr.to_vec(),
+                    };
+                    let to_id = EeIdentity {
+                        ee: EeId::EVM,
+                        id: target20.to_vec(),
+                    };
+                    if sub_host.bud_transfer(&from_id, &to_id, val_u128).is_err() {
+                        returndata.clear();
+                        stack.push(U256Word::ZERO);
+                        continue;
+                    }
+                } else if op == 0xf2 && val_u128 > 0 {
+                    let self_id = EeIdentity {
+                        ee: EeId::EVM,
+                        id: self_addr.to_vec(),
+                    };
+                    let bal = sub_host.bud_balance(&self_id).map_err(|e| e.to_string())?;
+                    if bal.0 < val_u128 {
+                        returndata.clear();
+                        stack.push(U256Word::ZERO);
+                        continue;
+                    }
+                }
+                let (exec_addr, sub_caller) = match op {
+                    0xf2 => (Some(self_addr), self_addr),
+                    0xf4 => (Some(self_addr), caller20),
+                    _ => (None, self_addr),
+                };
+                let dispatch = dispatch_evm_target(
                     &EvmTargetDispatch {
                         ctx,
-                        target20: &target20,
-                        caller20: self_addr,
-                        value_wei: 0,
+                        code_addr: &target20,
+                        exec_addr,
+                        caller20: sub_caller,
+                        value_wei: val_u128,
                         input: &sub_in,
                         is_static: call_is_static,
                         gas_limit: sub_gas,
+                        depth: depth.saturating_add(1),
                     },
-                    host,
-                )?;
-                returndata = sub_out;
-                let copy_n = ret_len.min(returndata.len());
-                if let Some(s) = returndata.get(..copy_n) {
-                    mem_write(&mut mem, host, ret_off, s)?;
+                    &mut sub_host,
+                );
+                match dispatch {
+                    Ok((OutcomeStatus::Success, sub_out)) => {
+                        if sub_host.commit().is_ok() {
+                            returndata = sub_out;
+                            let copy_n = ret_len.min(returndata.len());
+                            if let Some(s) = returndata.get(..copy_n) {
+                                mem_write(&mut mem, host, ret_off, s)?;
+                            }
+                            stack.push(U256Word::from_u64(1));
+                        } else {
+                            returndata.clear();
+                            stack.push(U256Word::ZERO);
+                        }
+                    }
+                    Ok((_, sub_out)) => {
+                        returndata = sub_out;
+                        let copy_n = ret_len.min(returndata.len());
+                        if let Some(s) = returndata.get(..copy_n) {
+                            mem_write(&mut mem, host, ret_off, s)?;
+                        }
+                        stack.push(U256Word::ZERO);
+                    }
+                    Err(_) => {
+                        returndata.clear();
+                        stack.push(U256Word::ZERO);
+                    }
                 }
-                stack.push(U256Word::from_u64(u64::from(
-                    sub_status == OutcomeStatus::Success,
-                )));
-            }
-            0xf5 => {
-                if is_static {
-                    return Ok((OutcomeStatus::Revert, b"CREATE2 in static call".to_vec()));
-                }
-                let (Some(_val_w), Some(off_w), Some(len_w), Some(salt_w)) =
-                    (stack.pop(), stack.pop(), stack.pop(), stack.pop())
-                else {
-                    return Ok((OutcomeStatus::Revert, b"CREATE2 underflow".to_vec()));
-                };
-                let (Some(off), Some(len)) = (off_w.to_usize_checked(), len_w.to_usize_checked())
-                else {
-                    return Ok((OutcomeStatus::Revert, b"CREATE2 mem overflow".to_vec()));
-                };
-                if len > MAX_EVM_INITCODE_BYTES {
-                    return Ok((OutcomeStatus::Revert, b"CREATE2 initcode limit".to_vec()));
-                }
-                host.charge(
-                    32_000u64.saturating_add(2u64.saturating_mul((len as u64).div_ceil(32))),
-                )
-                .map_err(|_| String::from("out of gas in CREATE2"))?;
-                grow_mem(&mut mem, host, off, len)?;
-                let init = mem.get(off..off + len).unwrap_or(&[]).to_vec();
-                let child20 = compute_create2_address(self_addr, &salt_w.0, &init);
-                if target_collides_with_native_alias(host, &child20) {
-                    stack.push(U256Word::ZERO);
-                    continue;
-                }
-                let existing = read_account_rec(host, &child20)?;
-                if existing.code_hash.is_some() || existing.nonce > 0 {
-                    stack.push(U256Word::ZERO);
-                    continue;
-                }
-                deploy_runtime_code(host, &child20, &init)?;
-                stack.push(U256Word::from_addr20(&child20));
             }
             0xf3 => {
                 let (Some(off_w), Some(len_w)) = (stack.pop(), stack.pop()) else {
@@ -1409,12 +1784,14 @@ fn deploy_runtime_code(
 
 struct EvmTargetDispatch<'a> {
     ctx: &'a BlockContext,
-    target20: &'a [u8; 20],
+    code_addr: &'a [u8; 20],
+    exec_addr: Option<&'a [u8; 20]>,
     caller20: &'a [u8; 20],
     value_wei: u128,
     input: &'a [u8],
     is_static: bool,
     gas_limit: u64,
+    depth: u32,
 }
 
 fn dispatch_evm_target(
@@ -1423,17 +1800,23 @@ fn dispatch_evm_target(
 ) -> Result<(OutcomeStatus, Vec<u8>), String> {
     let EvmTargetDispatch {
         ctx,
-        target20,
+        code_addr,
+        exec_addr,
         caller20,
         value_wei,
         input,
         is_static,
         gas_limit,
+        depth,
     } = *req;
-    if target20 == &EVM_UNIVERSAL_PRECOMPILE {
+    if depth >= MAX_EVM_CALL_DEPTH {
+        return Ok((OutcomeStatus::Revert, b"EVM call depth exceeded".to_vec()));
+    }
+    let storage_addr = exec_addr.unwrap_or(code_addr);
+    if code_addr == &EVM_UNIVERSAL_PRECOMPILE {
         return invoke_universal_precompile(caller20, input, is_static, host);
     }
-    let code = load_contract_code(host, target20)?;
+    let code = load_contract_code(host, code_addr)?;
     if code.is_empty() {
         return Ok((OutcomeStatus::Success, Vec::new()));
     }
@@ -1441,18 +1824,19 @@ fn dispatch_evm_target(
         return execute_evm_pointer_to_wasm(&ptr, caller20, input, is_static, gas_limit, host);
     }
     if let Some(spec) = decode_std_evm_token_code(&code) {
-        return execute_std_evm_token(&spec, target20, caller20, input, is_static, host);
+        return execute_std_evm_token(&spec, storage_addr, caller20, input, is_static, host);
     }
     run_evm_bytecode(
         EvmBytecodeCall {
             ctx,
-            self_addr: target20,
+            self_addr: storage_addr,
             caller20,
             value_wei,
             code: &code,
             calldata: input,
             is_static,
             gas_limit,
+            depth,
         },
         host,
     )
@@ -1556,15 +1940,18 @@ impl ExecutionEnvironment for EvmEe {
                 }
             }
             EeCallKind::Call => {
+                let exec_gas = call.gas_limit.saturating_sub(21_000);
                 match dispatch_evm_target(
                     &EvmTargetDispatch {
                         ctx,
-                        target20: &target20,
+                        code_addr: &target20,
+                        exec_addr: None,
                         caller20: &caller20,
                         value_wei: call.value.0,
                         input: unwrapped_input,
                         is_static,
-                        gas_limit: call.gas_limit,
+                        gas_limit: exec_gas,
+                        depth: 0,
                     },
                     host,
                 ) {
@@ -1650,5 +2037,350 @@ impl ExecutionEnvironment for EvmEe {
             return Ok(word.to_vec());
         }
         Ok(code)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use budlum_uel_abi::mock::MemoryHost;
+
+    fn test_ctx() -> BlockContext {
+        BlockContext {
+            chain_id: 45261,
+            height: 1,
+            timestamp_ms: 1_762_000_000_000,
+        }
+    }
+
+    fn deploy(host: &mut MemoryHost, addr: [u8; 20], code: Vec<u8>) {
+        let mut ee = EvmEe::new();
+        let res = ee
+            .execute(
+                &test_ctx(),
+                &EeCall {
+                    kind: EeCallKind::Deploy,
+                    caller: EeIdentity {
+                        ee: EeId::EVM,
+                        id: vec![0x01; 20],
+                    },
+                    target: EeIdentity {
+                        ee: EeId::EVM,
+                        id: addr.to_vec(),
+                    },
+                    value: BudAmount(0),
+                    input: code,
+                    gas_limit: 500_000,
+                },
+                host,
+            )
+            .unwrap();
+        assert_eq!(res.status, OutcomeStatus::Success);
+    }
+
+    fn push20(out: &mut Vec<u8>, addr: [u8; 20]) {
+        out.push(0x73); // PUSH20
+        out.extend_from_slice(&addr);
+    }
+
+    fn push1(out: &mut Vec<u8>, v: u8) {
+        out.push(0x60);
+        out.push(v);
+    }
+
+    #[test]
+    fn evm_nested_call_rolls_back_storage_and_value_on_revert() {
+        let mut host = MemoryHost::new(2_000_000);
+        let caller = [0x11; 20];
+        let contract_a = [0xAA; 20];
+        let contract_b = [0xBB; 20];
+        host.balances.insert(
+            EeIdentity {
+                ee: EeId::EVM,
+                id: contract_a.to_vec(),
+            },
+            500,
+        );
+
+        // Contract B writes slot 1 = 0x42, then REVERT(0, 0).
+        let mut code_b = Vec::new();
+        push1(&mut code_b, 0x42);
+        push1(&mut code_b, 0x01);
+        code_b.push(0x55); // SSTORE
+        code_b.extend_from_slice(&[0x5f, 0x5f, 0xfd]); // PUSH0, PUSH0, REVERT
+        deploy(&mut host, contract_b, code_b);
+
+        // Contract A CALLs B with 100 wei and returns the CALL success flag (0).
+        let mut code_a = Vec::new();
+        code_a.extend_from_slice(&[0x5f, 0x5f, 0x5f, 0x5f]); // retLen, retOff, argsLen, argsOff
+        push1(&mut code_a, 100); // value = 100
+        push20(&mut code_a, contract_b);
+        code_a.extend_from_slice(&[0x62, 0x0f, 0x42, 0x40]); // PUSH3 1_000_000 gas
+        code_a.push(0xf1); // CALL
+        code_a.extend_from_slice(&[0x5f, 0x52]); // MSTORE at 0
+        push1(&mut code_a, 32);
+        code_a.extend_from_slice(&[0x5f, 0xf3]); // RETURN(0, 32)
+        deploy(&mut host, contract_a, code_a);
+
+        let mut ee = EvmEe::new();
+        let out = ee
+            .execute(
+                &test_ctx(),
+                &EeCall {
+                    kind: EeCallKind::Call,
+                    caller: EeIdentity {
+                        ee: EeId::EVM,
+                        id: caller.to_vec(),
+                    },
+                    target: EeIdentity {
+                        ee: EeId::EVM,
+                        id: contract_a.to_vec(),
+                    },
+                    value: BudAmount(0),
+                    input: Vec::new(),
+                    gas_limit: 500_000,
+                },
+                &mut host,
+            )
+            .unwrap();
+        assert_eq!(out.status, OutcomeStatus::Success);
+        assert_eq!(out.output, vec![0u8; 32], "CALL must push 0 on revert");
+        assert_eq!(
+            sload_word(&host, &contract_b, &U256Word::from_u64(1).0).unwrap(),
+            [0u8; 32],
+            "reverted callee storage write must be rolled back"
+        );
+        assert_eq!(
+            host.bud_balance(&EeIdentity {
+                ee: EeId::EVM,
+                id: contract_a.to_vec(),
+            })
+            .unwrap()
+            .0,
+            500,
+            "reverted CALL value must stay with caller"
+        );
+        assert_eq!(
+            host.bud_balance(&EeIdentity {
+                ee: EeId::EVM,
+                id: contract_b.to_vec(),
+            })
+            .unwrap()
+            .0,
+            0
+        );
+    }
+
+    #[test]
+    fn evm_nested_call_enforces_sub_gas_cap_without_draining_caller() {
+        let mut host = MemoryHost::new(1_000_000);
+        let contract_a = [0xA1; 20];
+        let contract_b = [0xB1; 20];
+
+        // Contract B attempts SSTORE (costs 20_000 gas).
+        let mut code_b = Vec::new();
+        push1(&mut code_b, 9);
+        push1(&mut code_b, 1);
+        code_b.extend_from_slice(&[0x55, 0x00]);
+        deploy(&mut host, contract_b, code_b);
+
+        // Contract A gives B only 500 gas, stores 0x77 if CALL pushes 0.
+        let mut code_a = Vec::new();
+        code_a.extend_from_slice(&[0x5f, 0x5f, 0x5f, 0x5f, 0x5f]);
+        push20(&mut code_a, contract_b);
+        code_a.extend_from_slice(&[0x61, 0x01, 0xf4]); // PUSH2 500 gas
+        code_a.push(0xf1); // CALL
+        code_a.push(0x15); // ISZERO -> 1
+        push1(&mut code_a, 0x77);
+        code_a.extend_from_slice(&[0x01, 0x5f, 0x52]); // ADD, PUSH0, MSTORE
+        push1(&mut code_a, 32);
+        code_a.extend_from_slice(&[0x5f, 0xf3]);
+        deploy(&mut host, contract_a, code_a);
+
+        let mut ee = EvmEe::new();
+        let out = ee
+            .execute(
+                &test_ctx(),
+                &EeCall {
+                    kind: EeCallKind::Call,
+                    caller: EeIdentity {
+                        ee: EeId::EVM,
+                        id: vec![0x01; 20],
+                    },
+                    target: EeIdentity {
+                        ee: EeId::EVM,
+                        id: contract_a.to_vec(),
+                    },
+                    value: BudAmount(0),
+                    input: Vec::new(),
+                    gas_limit: 500_000,
+                },
+                &mut host,
+            )
+            .unwrap();
+        assert_eq!(out.status, OutcomeStatus::Success);
+        assert_eq!(out.output, U256Word::from_u64(0x78).0.to_vec());
+        assert_eq!(
+            sload_word(&host, &contract_b, &U256Word::from_u64(1).0).unwrap(),
+            [0u8; 32]
+        );
+    }
+
+    #[test]
+    fn evm_recursive_call_depth_limit_stops_before_stack_overflow() {
+        let mut host = MemoryHost::new(u64::MAX / 4);
+        let self_rec = [0xCC; 20];
+        let mut code = Vec::new();
+        code.extend_from_slice(&[0x5f, 0x5f, 0x5f, 0x5f, 0x5f]); // value + IO
+        code.push(0x30); // ADDRESS
+        code.extend_from_slice(&[0x64, 0xff, 0xff, 0xff, 0xff, 0xff]); // large gas
+        code.extend_from_slice(&[0xf1, 0x5f, 0x52]); // CALL, MSTORE(0, ok)
+        push1(&mut code, 32);
+        code.extend_from_slice(&[0x5f, 0xf3]);
+        deploy(&mut host, self_rec, code);
+
+        let mut ee = EvmEe::new();
+        let out = ee
+            .execute(
+                &test_ctx(),
+                &EeCall {
+                    kind: EeCallKind::Call,
+                    caller: EeIdentity {
+                        ee: EeId::EVM,
+                        id: vec![0x01; 20],
+                    },
+                    target: EeIdentity {
+                        ee: EeId::EVM,
+                        id: self_rec.to_vec(),
+                    },
+                    value: BudAmount(0),
+                    input: Vec::new(),
+                    gas_limit: u64::MAX / 8,
+                },
+                &mut host,
+            )
+            .unwrap();
+        assert_eq!(out.status, OutcomeStatus::Success);
+        assert_eq!(out.output, U256Word::from_u64(1).0.to_vec());
+    }
+
+    #[test]
+    fn evm_balance_selfbalance_delegatecall_callcode_create_work() {
+        let mut host = MemoryHost::new(2_000_000);
+        let caller = [0x11; 20];
+        let contract_a = [0xD1; 20];
+        let contract_b = [0xD2; 20];
+        host.balances.insert(
+            EeIdentity {
+                ee: EeId::EVM,
+                id: contract_a.to_vec(),
+            },
+            777,
+        );
+
+        // B writes caller20 into slot 2 and self_addr into slot 3, returns SELFBALANCE.
+        let code_b = vec![
+            0x33, 0x60, 0x02, 0x55, // CALLER -> SSTORE(2)
+            0x30, 0x60, 0x03, 0x55, // ADDRESS -> SSTORE(3)
+            0x47, 0x5f, 0x52, // SELFBALANCE -> MSTORE(0)
+            0x60, 32, 0x5f, 0xf3, // RETURN(0, 32)
+        ];
+        deploy(&mut host, contract_b, code_b);
+
+        // A DELEGATECALLs B, returns retdata[..32].
+        let mut code_a = Vec::new();
+        code_a.extend_from_slice(&[0x60, 32, 0x5f, 0x5f, 0x5f]); // retLen=32, retOff=0, in=0
+        push20(&mut code_a, contract_b);
+        code_a.extend_from_slice(&[0x62, 0x07, 0xa1, 0x20, 0xf4]); // PUSH3 500_000, DELEGATECALL
+        code_a.push(0x50); // POP
+        code_a.extend_from_slice(&[0x60, 32, 0x5f, 0xf3]); // RETURN(0, 32)
+        deploy(&mut host, contract_a, code_a);
+
+        let mut ee = EvmEe::new();
+        let out = ee
+            .execute(
+                &test_ctx(),
+                &EeCall {
+                    kind: EeCallKind::Call,
+                    caller: EeIdentity {
+                        ee: EeId::EVM,
+                        id: caller.to_vec(),
+                    },
+                    target: EeIdentity {
+                        ee: EeId::EVM,
+                        id: contract_a.to_vec(),
+                    },
+                    value: BudAmount(0),
+                    input: Vec::new(),
+                    gas_limit: 800_000,
+                },
+                &mut host,
+            )
+            .unwrap();
+        assert_eq!(out.status, OutcomeStatus::Success);
+        assert_eq!(out.output, U256Word::from_u64(777).0.to_vec());
+        assert_eq!(
+            sload_word(&host, &contract_a, &U256Word::from_u64(2).0).unwrap(),
+            U256Word::from_addr20(&caller).0
+        );
+        assert_eq!(
+            sload_word(&host, &contract_a, &U256Word::from_u64(3).0).unwrap(),
+            U256Word::from_addr20(&contract_a).0
+        );
+    }
+
+    #[test]
+    fn evm_callcode_rejects_unbacked_value() {
+        let mut host = MemoryHost::new();
+        let caller = [0x11u8; 20];
+        let contract_a = [0xAAu8; 20];
+        let contract_b = [0xBBu8; 20];
+
+        // B would write slot 1 if entered.
+        deploy(&mut host, contract_b, vec![0x60, 0x42, 0x60, 0x01, 0x55, 0x00]);
+
+        // A executes CALLCODE with value 500 > balance 100 and returns the success flag.
+        let mut code_a = Vec::new();
+        code_a.extend_from_slice(&[0x5f, 0x5f, 0x5f, 0x5f]); // retLen, retOff, inLen, inOff
+        code_a.extend_from_slice(&[0x61, 0x01, 0xf4]); // PUSH2 500 (value)
+        push20(&mut code_a, contract_b);
+        code_a.extend_from_slice(&[0x62, 0x07, 0xa1, 0x20, 0xf2]); // PUSH3 500_000, CALLCODE
+        code_a.extend_from_slice(&[0x5f, 0x52, 0x60, 32, 0x5f, 0xf3]); // MSTORE(0), RETURN(0,32)
+        deploy(&mut host, contract_a, code_a);
+        host.set_bud_balance(
+            EeIdentity {
+                ee: EeId::EVM,
+                id: contract_a.to_vec(),
+            },
+            100,
+        );
+
+        let mut ee = EvmEe::new();
+        let out = ee
+            .execute(
+                &test_ctx(),
+                &EeCall {
+                    kind: EeCallKind::Call,
+                    caller: EeIdentity {
+                        ee: EeId::EVM,
+                        id: caller.to_vec(),
+                    },
+                    target: EeIdentity {
+                        ee: EeId::EVM,
+                        id: contract_a.to_vec(),
+                    },
+                    value: BudAmount(0),
+                    input: Vec::new(),
+                    gas_limit: 800_000,
+                },
+                &mut host,
+            )
+            .unwrap();
+        assert_eq!(out.status, OutcomeStatus::Success);
+        assert_eq!(out.output, U256Word::ZERO.0.to_vec());
+        assert_eq!(
+            sload_word(&host, &contract_a, &U256Word::from_u64(1).0),
+            None
+        );
     }
 }

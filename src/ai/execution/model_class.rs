@@ -22,7 +22,7 @@ pub const MAX_MLP_PARAMS: usize = 4096;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[repr(u8)]
 pub enum AiExecutionModelClass {
-    /// Integer fixed-point MLP, ReLU, bit-exact Goldilocks-friendly arithmetic.
+    /// Integer fixed-point MLP, `ReLU`, bit-exact Goldilocks-friendly arithmetic.
     FixedPointMlpV1 = 1,
 }
 

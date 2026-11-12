@@ -73,6 +73,10 @@ impl ValidatorSetSnapshot {
     }
 
     /// Validates that `set_hash` and `total_stake` match the computed values from `validators`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn validate_metadata(&self) -> Result<(), String> {
         let computed_hash = Self::compute_hash(&self.validators);
         if self.set_hash != computed_hash {
@@ -408,7 +412,7 @@ pub fn checkpoint_signing_message(chain_id: u64, epoch: u64, height: u64, hash: 
     msg
 }
 
-/// Proof-of-possession input from the IETF BLS PoP ciphersuite: the canonical
+/// Proof-of-possession input from the IETF BLS `PoP` ciphersuite: the canonical
 /// Serialized public key. Chain/address binding is provided separately by the
 /// Validator's signed `RegisterConsensusKeys` transaction.
 pub fn pop_signing_message(chain_id: u64, address: &Address, bls_pk: &[u8]) -> Vec<u8> {
@@ -509,6 +513,11 @@ pub fn sign_bls_pop(sk: &Scalar, msg: &[u8]) -> Vec<u8> {
     sig.to_compressed().to_vec()
 }
 
+/// Performs the requested operation.
+///
+/// # Errors
+///
+/// Returns an error if the operation fails.
 pub fn verify_bls_sig(pk: &[u8], msg: &[u8], sig: &[u8]) -> Result<(), String> {
     let pk_bytes: [u8; 96] = pk
         .try_into()
@@ -763,6 +772,11 @@ impl FinalityAggregator {
         std::mem::take(&mut self.detected_equivocations)
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn add_prevote(&mut self, vote: Prevote) -> Result<(), String> {
         if vote.epoch != self.epoch {
             return Err("Prevote epoch mismatch".into());
@@ -808,6 +822,11 @@ impl FinalityAggregator {
         Ok(())
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn add_precommit(&mut self, vote: Precommit) -> Result<(), String> {
         if vote.epoch != self.epoch {
             return Err("Precommit epoch mismatch".into());
@@ -1091,6 +1110,10 @@ impl FinalityCert {
     /// were counted under a handed-over table is refused here: this path holds
     /// only a snapshot and cannot derive that table. A caller that holds the
     /// chain uses [`Self::verify_with_committee`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn verify(&self, snapshot: &ValidatorSetSnapshot) -> Result<(), String> {
         let committee =
             crate::validators::committee::CommitteeTable::for_snapshot(snapshot, 0, self.chain_id);
