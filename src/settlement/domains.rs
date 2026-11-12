@@ -358,7 +358,9 @@ pub fn validate_domain_registration(domain: &ConsensusDomain) -> Result<(), Stri
             domain.id
         ));
     }
-    if matches!(domain.kind, ConsensusKind::Zk) && domain.genesis_state_root[16..32] != [0u8; 16] {
+    if matches!(domain.kind, ConsensusKind::Zk)
+        && domain.genesis_state_root.get(16..32) != Some(&[0u8; 16][..])
+    {
         return Err(format!(
             "Zk domain {} genesis_state_root upper 16 bytes must be zero",
             domain.id
@@ -1271,6 +1273,13 @@ pub fn submit_zk_proof(
             pi.gas_used, pi.gas_limit
         ));
     }
+    if claim_height == domain.last_committed_height
+        && pi.final_state_root != domain.last_committed_hash
+    {
+        return Err(format!(
+            "zk claim targets height {claim_height} of domain {claimed_domain}, which already commits a different root"
+        ));
+    }
     if pi.final_state_root != pi.state_writes_digest {
         return Err(
             "zk proof final_state_root is not the proven state_writes_digest; the committed root must be the value the circuit binds"
@@ -1281,13 +1290,7 @@ pub fn submit_zk_proof(
     // something if `initial_state_root` is anchored to registered state rather
     // than a prover-chosen Horner fold at fixed constants. Re-executing the
     // committed tip height may only repeat `last_committed_hash` idempotently.
-    if claim_height == domain.last_committed_height {
-        if pi.final_state_root != domain.last_committed_hash {
-            return Err(format!(
-                "zk claim targets height {claim_height} of domain {claimed_domain}, which already commits a different root"
-            ));
-        }
-    } else if claim_height > domain.last_committed_height {
+    if claim_height > domain.last_committed_height {
         let expected = crate::domain::expected_initial_root(domain, &submission.program)
             .ok_or_else(|| {
                 format!(
@@ -1862,6 +1865,31 @@ fn slash_failed_prover(
     Ok(())
 }
 
+fn fail_and_refund_zk_proof_task(
+    state: &mut AccountState,
+    task_id: u64,
+    creator: Address,
+    reward: u128,
+    reason: &str,
+    err_prefix: &str,
+) -> Result<(), SettlementTxError> {
+    let balance = state.get_balance(&creator);
+    if balance.checked_add(reward).is_none() {
+        return Err(SettlementTxError::Refused(format!(
+            "{err_prefix} would overflow balance"
+        )));
+    }
+    let (rooted_creator, refunded) = state
+        .proof_market
+        .fail_task(task_id, reason.into())
+        .map_err(SettlementTxError::Refused)?;
+    debug_assert_eq!(rooted_creator, creator);
+    debug_assert_eq!(refunded, reward);
+    state
+        .try_add_balance(&creator, reward)
+        .map_err(|e| SettlementTxError::Refused(format!("{err_prefix}: {e}")))
+}
+
 fn execute_proof_market_tx(
     state: &mut AccountState,
     ctx: &SettlementTxContext,
@@ -2033,23 +2061,14 @@ fn execute_proof_market_tx(
             .map_err(SettlementTxError::Refused)?;
             match acceptance {
                 ProofAcceptance::Rejected => {
-                    let creator = task.creator;
-                    let reward = task.reward;
-                    let balance = state.get_balance(&creator);
-                    if balance.checked_add(reward).is_none() {
-                        return Err(SettlementTxError::Refused(
-                            "proof-market failed-task refund would overflow balance".into(),
-                        ));
-                    }
-                    let (rooted_creator, failed_reward) = state
-                        .proof_market
-                        .fail_task(*task_id, "ZK proof verification failed".into())
-                        .map_err(SettlementTxError::Refused)?;
-                    debug_assert_eq!(rooted_creator, creator);
-                    debug_assert_eq!(failed_reward, reward);
-                    state.try_add_balance(&creator, reward).map_err(|e| {
-                        SettlementTxError::Refused(format!("proof-market failed-task refund: {e}"))
-                    })?;
+                    fail_and_refund_zk_proof_task(
+                        state,
+                        *task_id,
+                        task.creator,
+                        task.reward,
+                        "ZK proof verification failed",
+                        "proof-market failed-task refund",
+                    )?;
                     slash_failed_prover(state, &ctx.sender)
                 }
                 ProofAcceptance::Idempotent => {
@@ -2057,28 +2076,14 @@ fn execute_proof_market_tx(
                     // progress occurred, so do not mint a reward receipt.
                     // Refund the creator's reserved reward without slashing
                     // the prover whose proof verified cleanly.
-                    let creator = task.creator;
-                    let reward = task.reward;
-                    let balance = state.get_balance(&creator);
-                    if balance.checked_add(reward).is_none() {
-                        return Err(SettlementTxError::Refused(
-                            "proof-market duplicate-claim refund would overflow balance".into(),
-                        ));
-                    }
-                    let (rooted_creator, refunded) = state
-                        .proof_market
-                        .fail_task(
-                            *task_id,
-                            "ZK claim already accepted: the task bought no new progress".into(),
-                        )
-                        .map_err(SettlementTxError::Refused)?;
-                    debug_assert_eq!(rooted_creator, creator);
-                    debug_assert_eq!(refunded, reward);
-                    state.try_add_balance(&creator, reward).map_err(|e| {
-                        SettlementTxError::Refused(format!(
-                            "proof-market duplicate-claim refund: {e}"
-                        ))
-                    })
+                    fail_and_refund_zk_proof_task(
+                        state,
+                        *task_id,
+                        task.creator,
+                        task.reward,
+                        "ZK claim already accepted: the task bought no new progress",
+                        "proof-market duplicate-claim refund",
+                    )
                 }
                 ProofAcceptance::Accepted { .. } => {
                     let receipt = crate::settlement::proof_market::ProofReceipt::new(
@@ -4047,12 +4052,15 @@ mod tests {
         let authority = Address::from(authority_kp.public_key_bytes());
 
         let mut domain = default_domain(98, ConsensusKind::PoA, 98_001, "poa-authority-quorum", 1);
-        domain.validator_set_hash = [0u8; 32];
+        domain.validator_set_hash =
+            crate::domain::finality_adapter::poa_authority_set_hash(&domain, &[authority])
+                .expect("derive poa authority set hash");
         register_domain(&mut state, domain.clone()).unwrap();
 
         let ob = &mut state.poa_onboarding;
         ob.add_admin(domain.id, admin);
-        ob.submit_application(domain.id, authority, [0x44; 32], 1).unwrap();
+        ob.submit_application(domain.id, authority, [0x44; 32], 1)
+            .unwrap();
         ob.approve(domain.id, admin, authority, 1, 5).unwrap();
         state.current_block_height = 6;
 
@@ -4094,8 +4102,10 @@ mod tests {
 
         // Renew KYC then revoke the authority: revoked authorities must fail too.
         let ob = &mut state.poa_onboarding;
-        ob.renew_kyc(domain.id, admin, authority, [0x44; 32], 7, 100).unwrap();
-        ob.revoke(domain.id, admin, authority, 7, "revoked").unwrap();
+        ob.renew_kyc(domain.id, admin, authority, [0x44; 32], 7, 100)
+            .unwrap();
+        ob.revoke(domain.id, admin, authority, 7, "revoked")
+            .unwrap();
         let err = verify_commitment_finality(
             &state,
             &com,
@@ -4113,7 +4123,10 @@ mod tests {
         let attester = Address::from(kp.public_key_bytes());
         let stake = state.registry.params().min_stake;
         let attester_role = crate::registry::role::roles::ATTESTER;
-        state.registry.register(attester, attester_role, stake, 0).unwrap();
+        state
+            .registry
+            .register(attester, attester_role, stake, 0)
+            .unwrap();
         state
             .registry
             .slash_role_only(
@@ -4123,7 +4136,10 @@ mod tests {
                 500,
             )
             .unwrap();
-        state.registry.begin_unbonding(attester, attester_role, 1).unwrap();
+        state
+            .registry
+            .begin_unbonding(attester, attester_role, 1)
+            .unwrap();
 
         let proof = FinalityProof::PoA {
             authorities: vec![attester],
@@ -4136,7 +4152,10 @@ mod tests {
         // A recorded non-liveness slash report in slashing_history_for must also block finality.
         let mut jailed_state = AccountState::new();
         let attester2 = Address::from([0x77; 32]);
-        jailed_state.registry.register(attester2, attester_role, stake, 0).unwrap();
+        jailed_state
+            .registry
+            .register(attester2, attester_role, stake, 0)
+            .unwrap();
         let report = crate::registry::evidence::SlashingReport::consensus_invalid_attester_proof(
             attester2,
             "bad".into(),
