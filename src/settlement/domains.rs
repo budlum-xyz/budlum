@@ -4100,11 +4100,11 @@ mod tests {
         // Renew KYC then revoke the authority: revoked authorities must fail too.
         state
             .poa_onboarding
-            .renew_kyc(domain.id, admin, authority, 7, 100)
+            .renew_kyc(domain.id, admin, authority, [0x44; 32], 7, 100)
             .unwrap();
         state
             .poa_onboarding
-            .revoke(domain.id, admin, authority, b"revoked".to_vec(), 7)
+            .revoke(domain.id, admin, authority, 7, "revoked")
             .unwrap();
         let err = verify_commitment_finality(
             &state,
@@ -4144,8 +4144,8 @@ mod tests {
             authorities: vec![attester],
             signatures: Vec::new(),
         };
-        let err = require_active_attester_authorities(&state, &proof, "Storage attestation")
-            .unwrap_err();
+        let purpose = "Storage attestation";
+        let err = require_active_attester_authorities(&state, &proof, purpose).unwrap_err();
         assert!(err.contains("not an active attester"), "got: {err}");
 
         // A recorded non-liveness slash report in slashing_history_for must also block finality.
@@ -4165,9 +4165,7 @@ mod tests {
             authorities: vec![attester2],
             signatures: Vec::new(),
         };
-        let err2 =
-            require_active_attester_authorities(&jailed_state, &proof2, "Storage attestation")
-                .unwrap_err();
+        let err2 = require_active_attester_authorities(&jailed_state, &proof2, purpose).unwrap_err();
         assert!(err2.contains("not an active attester"), "got: {err2}");
     }
 }
