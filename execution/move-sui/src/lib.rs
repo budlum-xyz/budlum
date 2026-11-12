@@ -25,8 +25,8 @@ pub const PINNED_SUI_EXECUTION_COMMIT: &str = "e5b8d9a4c2718f140933b42c66d8c04a7
 /// Budlum testnet chain ID (`Section 1.5`).
 pub const BUDLUM_TESTNET_CHAIN_ID: u64 = 45_261;
 
-/// Proposed activation height on testnet `45261` ( exit criterion).
-pub const PROPOSED_SUI_ACTIVATION_HEIGHT: u64 = 50_000;
+/// Proposed activation height on testnet `45261` (open from block zero).
+pub const PROPOSED_SUI_ACTIVATION_HEIGHT: u64 = 0;
 
 /// Canonical UEL namespace storing Sui objects and published Move packages.
 pub const NS_SUI_OBJECT: &str = "ee/sui/object";
@@ -753,16 +753,36 @@ mod tests {
         }
     }
 
-    /// Section 1.5 launch-closure gate: `move_sui_is_closed_on_testnet`.
+    /// Testnet `45261` activation posture: open at launch (`PROPOSED_SUI_ACTIVATION_HEIGHT = 0`),
+    /// while explicit `with_activation_height(None)` retains closed override refusal.
     #[test]
-    fn move_sui_is_closed_on_testnet() {
-        let mut worker = MoveSuiWorker::new();
-        assert!(!worker.is_active(&launch_ctx()));
+    fn move_sui_is_open_on_testnet() {
+        let mut open_worker = MoveSuiWorker::new();
+        assert!(open_worker.is_active(&launch_ctx()));
+        let mut closed_worker = MoveSuiWorker::with_activation_height(None);
+        assert!(!closed_worker.is_active(&launch_ctx()));
         let mut host = MemoryHost::new(1_000_000);
         let Ok(caller) = EeIdentity::new(EeId::MOVE_SUI, vec![0xAA; 32]) else {
             panic!("caller");
         };
-        let Ok(out) = worker.execute(
+        let Ok(ok_out) = open_worker.execute(
+            &launch_ctx(),
+            &EeCall {
+                kind: EeCallKind::Call,
+                caller: caller.clone(),
+                target: caller.clone(),
+                value: BudAmount(0),
+                input: br#"{"commands":[]}"#.to_vec(),
+                gas_limit: 500_000,
+                depth: 0,
+                tx_hash: [0x01; 32],
+            },
+            &mut host,
+        ) else {
+            panic!("exec");
+        };
+        assert_eq!(ok_out.status, OutcomeStatus::Success);
+        let Ok(out) = closed_worker.execute(
             &launch_ctx(),
             &EeCall {
                 kind: EeCallKind::Call,

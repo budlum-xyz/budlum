@@ -11,6 +11,7 @@ pub mod assets;
 pub mod conformance;
 pub mod deploy_policy;
 pub mod evm_ee;
+pub mod expansion_ee;
 pub mod foreign;
 pub mod gas;
 pub mod migration;
@@ -29,6 +30,9 @@ use crate::core::address::Address;
 use crate::core::hash::hash_fields_bytes;
 use crate::execution::coordinator::alias::{derive_contract_account, ALIAS_NAMESPACE};
 use crate::execution::coordinator::evm_ee::EvmEe;
+use crate::execution::coordinator::expansion_ee::{
+    CairoEe, MoveSuiEe, NearWasmEe, PlutusEe, PolkaVmEe, TvmEe, UtxoEe,
+};
 use crate::execution::coordinator::foreign::{
     ForeignAdmissionError, ForeignTx, VerifiedForeignOutcome,
 };
@@ -405,6 +409,13 @@ impl ExecutionCoordinator {
         supervisor.register(WorkerEndpoint::in_process(|| Box::new(WasmEe::new())));
         supervisor.register(WorkerEndpoint::in_process(|| Box::new(SvmEe::new())));
         supervisor.register(WorkerEndpoint::in_process(|| Box::new(MoveEe::new())));
+        supervisor.register(WorkerEndpoint::in_process(|| Box::new(MoveSuiEe::new())));
+        supervisor.register(WorkerEndpoint::in_process(|| Box::new(CairoEe::new())));
+        supervisor.register(WorkerEndpoint::in_process(|| Box::new(NearWasmEe::new())));
+        supervisor.register(WorkerEndpoint::in_process(|| Box::new(PolkaVmEe::new())));
+        supervisor.register(WorkerEndpoint::in_process(|| Box::new(TvmEe::new())));
+        supervisor.register(WorkerEndpoint::in_process(|| Box::new(UtxoEe::new())));
+        supervisor.register(WorkerEndpoint::in_process(|| Box::new(PlutusEe::new())));
         Self { supervisor }
     }
 
@@ -915,8 +926,12 @@ impl HostApi for HostBridge<'_> {
             )));
         }
         let budget = call.gas_limit.min(self.overlay.remaining_bgu());
-        self.overlay
-            .push_universal_frame_with_budget(self.state, call.to_ee, is_static, Some(budget))?;
+        self.overlay.push_universal_frame_with_budget(
+            self.state,
+            call.to_ee,
+            is_static,
+            Some(budget),
+        )?;
         if call.value.0 > 0 {
             let unit = BudEnvUnit::for_ee(call.to_ee)
                 .ok_or_else(|| HostError::Invalid(String::from("unsupported target EE")))?;

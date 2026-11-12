@@ -177,10 +177,19 @@ pub const fn derive_budzero_alias(addr: &Address) -> [u8; 32] {
 pub fn derive_alias_bytes(addr: &Address, ee: EeId) -> Result<Vec<u8>, String> {
     match ee {
         EeId::BUDZERO => Ok(derive_budzero_alias(addr).to_vec()),
-        EeId::EVM => Ok(derive_evm_alias(addr).to_vec()),
+        EeId::EVM | EeId::POLKAVM => Ok(derive_evm_alias(addr).to_vec()),
         EeId::WASM => Ok(derive_wasm_alias(addr).into_bytes()),
         EeId::SVM => derive_svm_alias(addr).map(|(pk, _)| pk.to_vec()),
-        EeId::MOVE => Ok(derive_move_alias(addr).to_vec()),
+        EeId::MOVE | EeId::MOVE_SUI | EeId::CAIRO | EeId::TVM | EeId::UTXO | EeId::PLUTUS => {
+            Ok(derive_move_alias(addr).to_vec())
+        }
+        EeId::NEAR_WASM => {
+            let mut h = Sha256::new();
+            h.update(b"BDLM_NEAR_ALIAS_V1");
+            h.update(addr.0);
+            let digest: [u8; 32] = h.finalize().into();
+            Ok(format!("{}.budlum", hex::encode(&digest[..16])).into_bytes())
+        }
         other => Err(format!(
             "unsupported execution environment 0x{:02x}",
             other.0

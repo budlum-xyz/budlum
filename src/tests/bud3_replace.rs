@@ -610,9 +610,7 @@ fn bud3_object_replacement_refuses_a_closed_codec() {
             },
             1,
         ),
-        Err(RegistryError::BadReplacement(ReplaceError::CodecNotOpen(
-            9
-        )))
+        Err(RegistryError::BadReplacement(ReplaceError::CodecNotOpen(9)))
     );
 }
 

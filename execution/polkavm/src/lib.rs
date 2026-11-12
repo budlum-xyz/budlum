@@ -25,8 +25,8 @@ pub const POLKAVM_JIT_ENABLED: bool = false;
 /// Budlum testnet chain ID (`Section 1.5`).
 pub const BUDLUM_TESTNET_CHAIN_ID: u64 = 45_261;
 
-/// Proposed activation height on testnet `45261` ( 1/5).
-pub const PROPOSED_POLKAVM_ACTIVATION_HEIGHT: u64 = 60_000;
+/// Proposed activation height on testnet `45261` (open from block zero).
+pub const PROPOSED_POLKAVM_ACTIVATION_HEIGHT: u64 = 0;
 
 /// Canonical UEL namespace storing PolkaVM code blobs and contract key-value storage.
 pub const NS_POLKAVM_STATE: &str = "ee/polkavm/state";
@@ -298,11 +298,19 @@ impl Default for PolkaVmWorker {
 }
 
 impl PolkaVmWorker {
-    /// Closed on testnet `45261` until [`PROPOSED_POLKAVM_ACTIVATION_HEIGHT`].
+    /// Open on testnet `45261` from [`PROPOSED_POLKAVM_ACTIVATION_HEIGHT`] (`0`).
     #[must_use]
     pub const fn new() -> Self {
         Self {
             testnet_activation_height: Some(PROPOSED_POLKAVM_ACTIVATION_HEIGHT),
+        }
+    }
+
+    /// Override testnet activation height (or `None` to close PolkaVM on `45261`).
+    #[must_use]
+    pub const fn with_activation_height(testnet_activation_height: Option<u64>) -> Self {
+        Self {
+            testnet_activation_height,
         }
     }
 
@@ -492,14 +500,20 @@ mod tests {
     use budlum_uel_abi::{BudAmount, OutcomeStatus};
 
     #[test]
-    fn polkavm_is_closed_on_testnet() {
+    fn polkavm_is_open_on_testnet() {
         const { assert!(!POLKAVM_JIT_ENABLED) };
-        let mut worker = PolkaVmWorker::new();
+        let open_worker = PolkaVmWorker::new();
+        assert!(open_worker.is_active(&BlockContext {
+            chain_id: BUDLUM_TESTNET_CHAIN_ID,
+            height: 0,
+            timestamp_ms: 1_793_923_200_000,
+        }));
+        let mut closed_worker = PolkaVmWorker::with_activation_height(None);
         let mut host = MemoryHost::new(1_000_000);
         let Ok(caller) = EeIdentity::new(EeId::POLKAVM, vec![0xAA; 32]) else {
             panic!("caller");
         };
-        let Ok(out) = worker.execute(
+        let Ok(out) = closed_worker.execute(
             &BlockContext {
                 chain_id: BUDLUM_TESTNET_CHAIN_ID,
                 height: 100,
