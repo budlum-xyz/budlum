@@ -473,12 +473,18 @@ impl ObjectLayerRegistry {
     /// transitions; exits stay open (N-6).
     pub fn refresh_class(
         &mut self,
+        caller: Address,
         class: AssetClassId,
         updates: ClassSlice,
         phase: Phase,
     ) -> Result<ClassStatus, Refusal> {
         if phase == Phase::Tentative {
             return Err(Refusal::TentativeClosed);
+        }
+        // A refresh rewrites the class slice and can freeze the class, so
+        // only the account that registered (and bonded) the class may do it.
+        if self.class(&class)?.registrant != caller {
+            return Err(Refusal::NotAuthorized);
         }
         self.atomic(|r| {
             let domain = r
@@ -1006,9 +1012,17 @@ impl ObjectLayerRegistry {
     /// the record. A deficit freezes the class (N-4).
     pub fn audit_custody(
         &mut self,
+        caller: Address,
         class: AssetClassId,
         home_custody: u128,
     ) -> Result<CustodyAudit, Refusal> {
+        // `home_custody` is caller-asserted in this transaction: there is no
+        // home proof attached. Letting anyone assert a deficit would let
+        // anyone freeze any class, so only the registrant may audit until a
+        // proven custody attestation exists.
+        if self.class(&class)?.registrant != caller {
+            return Err(Refusal::NotAuthorized);
+        }
         self.atomic(|r| {
             let recorded = r.recorded_custody(&class);
             let delta = i128::try_from(home_custody).unwrap_or(i128::MAX)
