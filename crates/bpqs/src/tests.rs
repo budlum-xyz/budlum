@@ -233,10 +233,12 @@ fn bpqs_epoch_overflow_and_test_params_refused_in_production() {
             "epoch does not fit the tree's u32 headroom"
         ))
     );
-    assert!(ParamsL5::IS_PRODUCTION);
-    assert!(ParamsL3::IS_PRODUCTION);
-    assert!(!ParamsTestFast::IS_PRODUCTION);
-    assert!(!ParamsFastL3::IS_PRODUCTION);
+    const {
+        assert!(ParamsL5::IS_PRODUCTION);
+        assert!(ParamsL3::IS_PRODUCTION);
+        assert!(!ParamsTestFast::IS_PRODUCTION);
+        assert!(!ParamsFastL3::IS_PRODUCTION);
+    }
 
     let mut test_signer = BpqsSigner::<ParamsTestFast, H>::fresh_device([0x52; 32], window)
         .unwrap_or_else(|e| panic!("keygen: {e}"));

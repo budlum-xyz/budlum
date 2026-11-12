@@ -72,7 +72,10 @@ fn legacy_manifest_registration_is_refused_without_fee_nonce_or_root_change() {
 
     assert!(err.contains("storage_tx_failed"), "{err}");
     assert!(err.contains("B.U.D. 3.0"), "{err}");
-    assert!(state.storage_registry.get_manifest(&m.manifest_id).is_none());
+    assert!(state
+        .storage_registry
+        .get_manifest(&m.manifest_id)
+        .is_none());
     assert_eq!(state.get_balance(&alice), 1_000, "a refusal charges no fee");
     assert_eq!(state.get_nonce(&alice), 0, "a refusal spends no nonce");
     assert_eq!(state.calculate_state_root(), before);

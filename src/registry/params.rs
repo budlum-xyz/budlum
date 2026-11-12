@@ -7,6 +7,7 @@
 //! Are deliberately aligned with the existing consensus constants (see the
 //! `Default` impl) so introducing the registry does not change current
 //! Economic behaviour.
+//! Convenience: exposed for CLI, RPC, SDK, and multi-VM runtime callers.
 
 use crate::chain::fee_market::PPM_DENOMINATOR;
 use crate::core::chain_config::FIXED_POINT_SCALE;
@@ -336,22 +337,16 @@ impl RegistryParams {
             return Err("graft_registration_fee exceeds the maximum parameter amount".into());
         }
         if self.slashing_report_fee > MAX_PARAM_AMOUNT {
-            return Err(
-                "slashing_report_fee exceeds the maximum parameter amount".into(),
-            );
+            return Err("slashing_report_fee exceeds the maximum parameter amount".into());
         }
         if self.proof_submission_fee > MAX_PARAM_AMOUNT {
-            return Err(
-                "proof_submission_fee exceeds the maximum parameter amount".into(),
-            );
+            return Err("proof_submission_fee exceeds the maximum parameter amount".into());
         }
         if self.prover_reward > MAX_PARAM_AMOUNT {
             return Err("prover_reward exceeds the maximum parameter amount".into());
         }
         if self.liveness_max_missed_epochs == 0 || self.liveness_max_missed_epochs > 100_000 {
-            return Err(
-                "liveness_max_missed_epochs must be between 1 and 100,000".into(),
-            );
+            return Err("liveness_max_missed_epochs must be between 1 and 100,000".into());
         }
         if self.graft_default_intent_deadline_blocks == 0
             || self.graft_default_intent_deadline_blocks > 100_000

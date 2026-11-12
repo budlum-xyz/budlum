@@ -23,7 +23,7 @@ fn addr(b: u8) -> Address {
 fn chain_with_validators(producer: Address, absentee: Address) -> Blockchain {
     let consensus = Arc::new(PoWEngine::new(0));
     let mut bc = Blockchain::new(consensus, None, 45262, None);
- // Two validators: `producer` will produce every block; `absentee` never does.
+    // Two validators: `producer` will produce every block; `absentee` never does.
     bc.state.add_validator(producer, 10_000);
     bc.state.add_validator(absentee, 10_000);
     bc
@@ -46,16 +46,16 @@ fn absentee_miss_counter_increments_through_real_block_flow() {
     let absentee = addr(2);
     let mut bc = chain_with_validators(producer, absentee);
 
- // Before any epoch closes, no misses recorded.
+    // Before any epoch closes, no misses recorded.
     assert_eq!(bc.state.liveness.missed_count(&absentee), 0);
 
- // Produce exactly one full epoch (EPOCH_LENGTH blocks) -> epoch 0 closes.
+    // Produce exactly one full epoch (EPOCH_LENGTH blocks) -> epoch 0 closes.
     produce_n(&mut bc, producer, EPOCH_LENGTH);
 
- // The absentee (never a producer) missed epoch 0; the counter moved via the
- // Real apply/commit flow, not a manual record_liveness_epoch call.
+    // The absentee (never a producer) missed epoch 0; the counter moved via the
+    // Real apply/commit flow, not a manual record_liveness_epoch call.
     assert_eq!(bc.state.liveness.missed_count(&absentee), 1);
- // The active producer participated -> no miss streak.
+    // The active producer participated -> no miss streak.
     assert_eq!(bc.state.liveness.missed_count(&producer), 0);
 }
 
@@ -65,11 +65,11 @@ fn producer_participation_resets_across_epochs() {
     let absentee = addr(2);
     let mut bc = chain_with_validators(producer, absentee);
 
- // Two full epochs.
+    // Two full epochs.
     produce_n(&mut bc, producer, EPOCH_LENGTH * 2);
- // Absentee missed both epochs (consecutive).
+    // Absentee missed both epochs (consecutive).
     assert_eq!(bc.state.liveness.missed_count(&absentee), 2);
- // Producer participated in both -> zero.
+    // Producer participated in both -> zero.
     assert_eq!(bc.state.liveness.missed_count(&producer), 0);
 }
 
@@ -81,18 +81,18 @@ fn threshold_crossing_suspends_without_slashing_when_legacy_flag_is_disabled() {
     let absentee = addr(2);
     let mut bc = chain_with_validators(producer, absentee);
 
- // Lower the liveness threshold to 2 so we can cross it quickly.
- // Explicitly assert the observe-only (disabled) behavior, this is
- // Also the default, but we set it explicitly so the test documents intent
- // And stays correct even if the default ever changes.
+    // Lower the liveness threshold to 2 so we can cross it quickly.
+    // Explicitly assert the observe-only (disabled) behavior, this is
+    // Also the default, but we set it explicitly so the test documents intent
+    // And stays correct even if the default ever changes.
     bc.state.registry.set_params(RegistryParams {
         liveness_max_missed_epochs: 2,
         liveness_slashing_enabled: false,
         ..RegistryParams::default()
     });
- // `add_validator` already auto-registered the absentee in the registry
- // (sync), so a slash WOULD have something to cut, proving the
- // No-slash property is meaningful, not vacuous.
+    // `add_validator` already auto-registered the absentee in the registry
+    // (sync), so a slash WOULD have something to cut, proving the
+    // No-slash property is meaningful, not vacuous.
     let stake_before = bc
         .state
         .registry
@@ -101,13 +101,17 @@ fn threshold_crossing_suspends_without_slashing_when_legacy_flag_is_disabled() {
         .stake;
     assert!(bc.state.registry.is_active(&absentee, roles::VALIDATOR));
 
- // Produce 3 full epochs; absentee misses 3 consecutive (>= threshold 2).
+    // Produce 3 full epochs; absentee misses 3 consecutive (>= threshold 2).
     produce_n(&mut bc, producer, EPOCH_LENGTH * 3);
 
- // The miss counter clearly crossed the threshold..
-    assert_eq!(bc.state.liveness.missed_count(&absentee), 2, "a suspended validator leaves the expected set");
+    // The miss counter clearly crossed the threshold..
+    assert_eq!(
+        bc.state.liveness.missed_count(&absentee),
+        2,
+        "a suspended validator leaves the expected set"
+    );
 
- // ..but OBSERVE MODE means NO slash happened:
+    // ..but OBSERVE MODE means NO slash happened:
     let reg = bc.state.registry.get(&absentee, roles::VALIDATOR).unwrap();
     assert_eq!(
         reg.stake, stake_before,
@@ -117,7 +121,7 @@ fn threshold_crossing_suspends_without_slashing_when_legacy_flag_is_disabled() {
         bc.state.registry.is_active(&absentee, roles::VALIDATOR),
         "the bonded registry record is not slashed or unbonded"
     );
- // Validator-set stake also unchanged (belt and suspenders).
+    // Validator-set stake also unchanged (belt and suspenders).
     assert_eq!(
         bc.state.get_validator(&absentee).map(|v| v.stake),
         Some(10_000)
@@ -136,14 +140,14 @@ fn observe_liveness_epoch_returns_reports_without_slashing() {
         liveness_max_missed_epochs: 1,
         ..RegistryParams::default()
     });
- // Absentee is already registered as a validator via add_validator (sync).
+    // Absentee is already registered as a validator via add_validator (sync).
 
- // Nobody participates -> absentee misses; threshold 1 suspends.
+    // Nobody participates -> absentee misses; threshold 1 suspends.
     let empty: HashSet<Address> = HashSet::new();
     let suspended = bc.observe_liveness_epoch(0, &empty);
     assert!(suspended >= 1, "a suspension should be recorded");
 
- // But observe mode applied no slash.
+    // But observe mode applied no slash.
     assert_eq!(
         bc.state
             .registry
@@ -165,8 +169,8 @@ fn poa_domain_member_is_not_touched_by_liveness_flow() {
     let absentee = addr(2);
     let mut bc = chain_with_validators(producer, absentee);
 
- // A PoA domain with an approved member - kept in the SEPARATE membership
- // Registry, never in AccountState.validators.
+    // A PoA domain with an approved member - kept in the SEPARATE membership
+    // Registry, never in AccountState.validators.
     let mut poa = PoaMembershipRegistry::new();
     let poa_domain = 7u32;
     let admin = addr(0xAA);
@@ -177,11 +181,11 @@ fn poa_domain_member_is_not_touched_by_liveness_flow() {
     poa.approve(poa_domain, admin, poa_member).unwrap();
     assert!(poa.is_authorized(poa_domain, &poa_member));
 
- // Run several real epochs of the liveness flow.
+    // Run several real epochs of the liveness flow.
     produce_n(&mut bc, producer, EPOCH_LENGTH * 2);
 
- // The PoA member must NOT appear in the permissionless liveness/registry
- // Machinery at all.
+    // The PoA member must NOT appear in the permissionless liveness/registry
+    // Machinery at all.
     assert_eq!(bc.state.liveness.missed_count(&poa_member), 0);
     assert!(bc
         .state
@@ -189,10 +193,10 @@ fn poa_domain_member_is_not_touched_by_liveness_flow() {
         .get(&poa_member, roles::VALIDATOR)
         .is_none());
     assert!(bc.state.get_validator(&poa_member).is_none());
- // And PoA authorization is unaffected by the liveness flow.
+    // And PoA authorization is unaffected by the liveness flow.
     assert!(poa.is_authorized(poa_domain, &poa_member));
- // The "expected" liveness set is the validator set, which never includes the
- // PoA member.
+    // The "expected" liveness set is the validator set, which never includes the
+    // PoA member.
     assert!(bc.state.validators.contains_key(&producer));
     assert!(!bc.state.validators.contains_key(&poa_member));
 }
@@ -208,9 +212,9 @@ fn threshold_crossing_suspends_but_never_slashes_through_real_epoch_flow() {
     let absentee = addr(2);
     let mut bc = chain_with_validators(producer, absentee);
 
- // Low threshold so it triggers within a few epochs. The old
- // `liveness_slashing_enabled` flag no longer exists as a slash switch:
- // absence cannot slash, so the flag is irrelevant here.
+    // Low threshold so it triggers within a few epochs. The old
+    // `liveness_slashing_enabled` flag no longer exists as a slash switch:
+    // absence cannot slash, so the flag is irrelevant here.
     bc.state.registry.set_params(RegistryParams {
         liveness_max_missed_epochs: 2,
         ..RegistryParams::default()
@@ -223,7 +227,7 @@ fn threshold_crossing_suspends_but_never_slashes_through_real_epoch_flow() {
         .stake;
     assert_eq!(stake_before, 10_000);
 
- // Produce 3 full epochs; absentee misses >= threshold (2).
+    // Produce 3 full epochs; absentee misses >= threshold (2).
     produce_n(&mut bc, producer, EPOCH_LENGTH * 3);
 
     let reg = bc.state.registry.get(&absentee, roles::VALIDATOR).unwrap();
@@ -231,7 +235,7 @@ fn threshold_crossing_suspends_but_never_slashes_through_real_epoch_flow() {
         reg.stake, stake_before,
         "absence must never cut the stake (V-4)"
     );
- // The absentee is suspended: out of the active set, not slashed.
+    // The absentee is suspended: out of the active set, not slashed.
     let suspended = bc
         .state
         .validators
@@ -241,10 +245,7 @@ fn threshold_crossing_suspends_but_never_slashes_through_real_epoch_flow() {
         !suspended.active,
         "a suspended validator is out of the active set"
     );
-    assert!(
-        !suspended.slashed,
-        "absence is a suspension, not a slash"
-    );
+    assert!(!suspended.slashed, "absence is a suspension, not a slash");
     assert!(bc.state.liveness.is_suspended(&absentee));
 }
 
@@ -267,7 +268,7 @@ fn absence_never_reduces_stake_through_real_epoch_flow() {
         .unwrap()
         .stake;
 
- // One threshold crossing is enough (threshold = 1).
+    // One threshold crossing is enough (threshold = 1).
     produce_n(&mut bc, producer, EPOCH_LENGTH * 2);
 
     let reg = bc.state.registry.get(&absentee, roles::VALIDATOR).unwrap();
@@ -305,13 +306,13 @@ fn a_slashed_validator_stops_accruing_downtime() {
         ..RegistryParams::default()
     });
 
- // One epoch of absence while still active: the streak starts.
+    // One epoch of absence while still active: the streak starts.
     let only_producer: HashSet<Address> = std::iter::once(producer).collect();
     bc.record_liveness_epoch(1, &only_producer);
     let after_first = bc.state.liveness.missed_count(&offender);
     assert_eq!(after_first, 1, "an active absentee accrues a miss");
 
- // Now slash it for something else entirely (a double-sign), which jails it.
+    // Now slash it for something else entirely (a double-sign), which jails it.
     bc.state.slash_validator(
         &offender,
         crate::core::chain_config::FIXED_POINT_SCALE / 2,
@@ -326,7 +327,7 @@ fn a_slashed_validator_stops_accruing_downtime() {
         "and must still be in the validator map, which is where jail_until lives"
     );
 
- // Several more epochs pass. It cannot sign, it is jailed.
+    // Several more epochs pass. It cannot sign, it is jailed.
     for epoch in 2..=6 {
         bc.record_liveness_epoch(epoch, &only_producer);
     }
@@ -391,8 +392,8 @@ fn a_liveness_suspension_is_releasable_and_never_slashes() {
     let offender = addr(2);
     let mut bc = chain_with_validators(producer, offender);
     bc.state.registry.set_params(RegistryParams {
- // One missed epoch is enough to suspend. Zero would disable the
- // tracker entirely: `record_epoch` guards on `threshold > 0`.
+        // One missed epoch is enough to suspend. Zero would disable the
+        // tracker entirely: `record_epoch` guards on `threshold > 0`.
         liveness_max_missed_epochs: 1,
         ..RegistryParams::default()
     });
@@ -404,7 +405,7 @@ fn a_liveness_suspension_is_releasable_and_never_slashes() {
         .unwrap()
         .stake;
 
- // Record one epoch in which the offender did not participate.
+    // Record one epoch in which the offender did not participate.
     let participated: HashSet<Address> = std::iter::once(producer).collect();
     bc.record_liveness_epoch(1, &participated);
 
@@ -425,7 +426,7 @@ fn a_liveness_suspension_is_releasable_and_never_slashes() {
         "absence must never cut the stake"
     );
 
- // ResumeValidator lifts the suspension one epoch later.
+    // ResumeValidator lifts the suspension one epoch later.
     let epoch = bc.state.epoch_index;
     bc.state.liveness.request_resume(&offender, epoch);
     assert!(bc.state.liveness.activate_due_resumes(epoch).is_empty());

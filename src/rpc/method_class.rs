@@ -5,18 +5,18 @@
 //! reconstructing it from 156 handler bodies:
 //!
 //! * **Listener.** Which listener serves it. `Operator` methods call
-//! `require_operator` and are refused on the public listener; every other
-//! method is `Public`. The test below holds the table and the handlers to
-//! the same answer.
+//!   `require_operator` and are refused on the public listener; every other
+//!   method is `Public`. The test below holds the table and the handlers to
+//!   the same answer.
 //! * **Effect.** What a successful call does to state. The only acceptable
-//! effects are a read, a signed transaction handed to the mempool (or an
-//! unsigned one prepared for the caller to sign), and node-local work that
-//! no other node has to agree on, or a refusal that names the door. A
-//! method that changes consensus state outside block execution has no
-//! class: the node that served it would hold a state, a finality view or a
-//! registry its peers do not share. The last such
-//! rows became transaction doors or in-block work in and, and the
-//! class was removed with them, so a new one cannot be classified at all.
+//!   effects are a read, a signed transaction handed to the mempool (or an
+//!   unsigned one prepared for the caller to sign), and node-local work that
+//!   no other node has to agree on, or a refusal that names the door. A
+//!   method that changes consensus state outside block execution has no
+//!   class: the node that served it would hold a state, a finality view or a
+//!   registry its peers do not share. The last such
+//!   rows became transaction doors or in-block work in and, and the
+//!   class was removed with them, so a new one cannot be classified at all.
 //!
 //! `RpcServer::run` checks at startup that the methods it registers are
 //! exactly the rows of this table, so a new method cannot be served before
@@ -27,35 +27,36 @@ use Listener::{Operator, Public};
 
 /// Which listener serves a method.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Listener {
- /// Served on the public listener (and the operator listener).
+pub(crate) enum Listener {
+    /// Served on the public listener (and the operator listener).
     Public,
- /// Refused on the public listener: the handler calls `require_operator`.
+    /// Refused on the public listener: the handler calls `require_operator`.
     Operator,
 }
 
 /// What a successful call does to state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Effect {
- /// Reads state, or computes from its arguments. Changes nothing.
+pub(crate) enum Effect {
+    /// Reads state, or computes from its arguments. Changes nothing.
     Read,
- /// Hands a signed transaction to the mempool, or returns an unsigned
- /// transaction template for the caller to sign. State changes only when
- /// a block carries the transaction.
+    /// Hands a signed transaction to the mempool, or returns an unsigned
+    /// transaction template for the caller to sign. State changes only when
+    /// a block carries the transaction.
     TxSubmit,
- /// Changes node-local state that is not consensus state: peer bans,
- /// pruning of this node's own history, reveal sessions.
+    /// Changes node-local state that is not consensus state: peer bans,
+    /// pruning of this node's own history, reveal sessions.
     LocalAdmin,
- /// The method exists and refuses every call, saying which door to use.
+    /// The method exists and refuses every call, saying which door to use.
     Refused,
 }
 
 /// One row of the table.
+/// WIRING: Consumed by `check_served_methods` on `RpcServer::run` startup.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct MethodClass {
-    name: &'static str,
-    listener: Listener,
-    effect: Effect,
+pub(crate) struct MethodClass {
+    pub(crate) name: &'static str,
+    pub(crate) listener: Listener,
+    pub(crate) effect: Effect,
 }
 
 const fn row(name: &'static str, listener: Listener, effect: Effect) -> MethodClass {
@@ -67,11 +68,9 @@ const fn row(name: &'static str, listener: Listener, effect: Effect) -> MethodCl
 }
 
 /// The ratchet file that records the coverage gaps cannot close yet.
-#[cfg(test)]
-const COVERAGE_BASELINE_PATH: &str = ".github/rpc-method-coverage-baseline.txt";
-
 /// Every method `src/rpc/api.rs` declares, in declaration order.
-const METHOD_CLASSES: &[MethodClass] = &[
+/// WIRING: Audited at node startup via `check_served_methods` in `RpcServer::run`.
+pub(crate) const METHOD_CLASSES: &[MethodClass] = &[
     row("bud_chainId", Public, Read),
     row("bud_blockNumber", Public, Read),
     row("bud_getBlockByNumber", Public, Read),
@@ -80,9 +79,9 @@ const METHOD_CLASSES: &[MethodClass] = &[
     row("bud_getNonce", Public, Read),
     row("bud_getAccountProof", Public, Read),
     row("bud_sendRawTransaction", Public, TxSubmit),
- // A bundle is one composite witness over several V7 bodies: it is the
- // same door as `bud_sendRawTransaction`, admitting members instead of one
- // transaction, and it changes state only when a block carries them.
+    // A bundle is one composite witness over several V7 bodies: it is the
+    // same door as `bud_sendRawTransaction`, admitting members instead of one
+    // transaction, and it changes state only when a block carries them.
     row("bud_sendTxBundle", Public, TxSubmit),
     row("bud_getTransactionByHash", Public, Read),
     row("bud_getTransactionReceipt", Public, Read),
@@ -101,21 +100,21 @@ const METHOD_CLASSES: &[MethodClass] = &[
     row("bud_getGraftApplication", Public, Read),
     row("bud_getRestakedValidators", Public, Read),
     row("bud_graftPaymentProof", Public, Read),
- // /: refused; the door is `ExternalDomainTx::Register`.
+    // /: refused; the door is `ExternalDomainTx::Register`.
     row("bud_registerExternalDomain", Operator, Refused),
- // refused; the door is `ExternalDomainTx::SubmitEvidence`.
+    // refused; the door is `ExternalDomainTx::SubmitEvidence`.
     row("bud_submitExternalEvidence", Operator, Refused),
     row("bud_getExternalDomainProfile", Public, Read),
     row("bud_getExternalDomains", Public, Read),
     row("bud_getExternalIntakeDigest", Public, Read),
- // refused; the doors are `ExternalDomainTx::Readmit` and
- // `ExternalDomainTx::ScheduleFork`.
+    // refused; the doors are `ExternalDomainTx::Readmit` and
+    // `ExternalDomainTx::ScheduleFork`.
     row("bud_readmitExternalDomain", Operator, Refused),
     row("bud_scheduleExternalFork", Operator, Refused),
- // Closed: no proof that an attestation was false is defined yet.
+    // Closed: no proof that an attestation was false is defined yet.
     row("bud_slashExternalProver", Operator, Refused),
- // refused; the doors are `ExternalDomainTx::BondProver` and
- // `ExternalDomainTx::SetQuorumPolicy`.
+    // refused; the doors are `ExternalDomainTx::BondProver` and
+    // `ExternalDomainTx::SetQuorumPolicy`.
     row("bud_bondExternalProver", Operator, Refused),
     row("bud_setExternalQuorumPolicy", Operator, Refused),
     row("bud_getExternalQuorumRound", Public, Read),
@@ -125,24 +124,24 @@ const METHOD_CLASSES: &[MethodClass] = &[
     row("bud_replayExternalProbes", Public, Read),
     row("bud_inspectEthereumUpdate", Public, Read),
     row("bud_planEvmVerification", Public, Read),
- // /: refused; the doors are `SettlementTx::RegisterDomain` and
- // `SettlementTx::RegisterSovereignTemplate`.
+    // /: refused; the doors are `SettlementTx::RegisterDomain` and
+    // `SettlementTx::RegisterSovereignTemplate`.
     row("bud_registerConsensusDomain", Operator, Refused),
     row("bud_registerSovereignTemplate", Operator, Refused),
     row("bud_getSovereignTemplate", Public, Read),
     row("bud_validateSovereignAuditExport", Public, Read),
     row("bud_submitDomainCommitment", Public, Refused),
- // /: refused; the door is `SettlementTx::SubmitCommitment`.
+    // /: refused; the door is `SettlementTx::SubmitCommitment`.
     row("bud_submitVerifiedDomainCommitment", Operator, Refused),
- // refused; a relayed message is a `RelayCrossDomainMessage`
- // transaction now.
+    // refused; a relayed message is a `RelayCrossDomainMessage`
+    // transaction now.
     row("bud_submitCrossDomainMessage", Public, Refused),
     row("bud_getCrossDomainMessage", Public, Read),
     row("bud_getBridgeTransfer", Public, Read),
     row("bud_getRelayerStatus", Public, Read),
     row("bud_getRelayerIntent", Public, Read),
- // /: refused; the doors are the `BridgeTx` variants
- // (`RegisterAsset`, `Mint`, `BurnWithEvent`, `Unlock`, `RelayProof`).
+    // /: refused; the doors are the `BridgeTx` variants
+    // (`RegisterAsset`, `Mint`, `BurnWithEvent`, `Unlock`, `RelayProof`).
     row("bud_registerBridgeAsset", Operator, Refused),
     row("bud_mintBridgeTransfer", Operator, Refused),
     row("bud_burnBridgeTransfer", Operator, Refused),
@@ -150,35 +149,35 @@ const METHOD_CLASSES: &[MethodClass] = &[
     row("bud_unlockBridgeTransfer", Operator, Refused),
     row("bud_unlockBridgeTransferVerified", Operator, Refused),
     row("bud_submitRelayProof", Operator, Refused),
- // /: refused; headers are built in block at every checkpoint.
+    // /: refused; headers are built in block at every checkpoint.
     row("bud_sealGlobalHeader", Operator, Refused),
     row("bud_registryRegister", Public, TxSubmit),
- // refused; a role bond is a `RoleBond` transaction now.
+    // refused; a role bond is a `RoleBond` transaction now.
     row("bud_registryBondRelayer", Operator, Refused),
     row("bud_registryBondProver", Operator, Refused),
- // refused; the exits are `RoleUnbond` and `RoleWithdraw`.
+    // refused; the exits are `RoleUnbond` and `RoleWithdraw`.
     row("bud_registryBeginRoleBondUnbonding", Operator, Refused),
     row("bud_registryWithdrawRoleBond", Operator, Refused),
- // /: refused; the door is `SettlementTx::SubmitZkProof`.
+    // /: refused; the door is `SettlementTx::SubmitZkProof`.
     row("bud_submitZkProof", Operator, Refused),
     row("bud_registryQuery", Public, Read),
     row("bud_registryActiveMembers", Public, Read),
     row("bud_validatorProfile", Public, Read),
     row("bud_validatorList", Public, Read),
     row("bud_getValidatorDelegations", Public, Read),
- // The RPC marks every report `Unverified`, and unverified reports are
- // refused before any fee is charged.
+    // The RPC marks every report `Unverified`, and unverified reports are
+    // refused before any fee is charged.
     row("bud_submitSlashingReport", Public, Refused),
- // Both proof kinds refuse in `QcFaultProof::verify_against_blob` (a
- // signature that fails is not evidence, and the ZK verifier is not
- // integrated), so the finality invalidation behind it is unreachable.
+    // Both proof kinds refuse in `QcFaultProof::verify_against_blob` (a
+    // signature that fails is not evidence, and the ZK verifier is not
+    // integrated), so the finality invalidation behind it is unreachable.
     row("bud_submitQcFaultProof", Public, Refused),
     row("bud_health", Public, Read),
     row("bud_nodeInfo", Public, Read),
     row("bud_adminBanPeer", Operator, LocalAdmin),
     row("bud_adminUnbanPeer", Operator, LocalAdmin),
     row("bud_adminListBannedPeers", Operator, Read),
- // Refused on every chain until grants ride a block transaction.
+    // Refused on every chain until grants ride a block transaction.
     row("bud_storageIssueViewGrant", Public, Refused),
     row("bud_storageRevokeViewGrant", Public, Refused),
     row("bud_storageSocialDelete", Public, Refused),
@@ -263,13 +262,13 @@ const METHOD_CLASSES: &[MethodClass] = &[
     row("bud_getCharter", Public, Read),
     row("bud_getAssetClass", Public, Read),
     row("bud_getAsset", Public, Read),
- // WebSocket subscriptions: read-only feeds (src/rpc/subscriptions.rs).
+    // WebSocket subscriptions: read-only feeds (src/rpc/subscriptions.rs).
     row("bud_subscribe", Public, Read),
     row("bud_unsubscribe", Public, Read),
- // The Ethereum JSON-RPC compatibility gateway . Section 8.11.2
- // names the methods; `src/rpc/compat/ethereum/opening.rs` says what each one
- // answers. A row here is a read of chain state or a refusal that names the
- // Budlum door, so nothing in this namespace changes consensus state.
+    // The Ethereum JSON-RPC compatibility gateway . Section 8.11.2
+    // names the methods; `src/rpc/compat/ethereum/opening.rs` says what each one
+    // answers. A row here is a read of chain state or a refusal that names the
+    // Budlum door, so nothing in this namespace changes consensus state.
     row("web3_clientVersion", Public, Read),
     row("net_version", Public, Read),
     row("net_listening", Public, Read),
@@ -296,10 +295,10 @@ const METHOD_CLASSES: &[MethodClass] = &[
     row("eth_getTransactionReceipt", Public, Refused),
     row("eth_getBlockReceipts", Public, Refused),
     row("eth_getLogs", Public, Refused),
- // filter creation/removal administers the bounded, expiring,
- // per-connection table in `src/rpc/compat/ethereum/filters.rs`. The two
- // read methods validate that table but still have no successful answer
- // before the EVM execution environment, so they remain honest refusals rather than fake successes.
+    // filter creation/removal administers the bounded, expiring,
+    // per-connection table in `src/rpc/compat/ethereum/filters.rs`. The two
+    // read methods validate that table but still have no successful answer
+    // before the EVM execution environment, so they remain honest refusals rather than fake successes.
     row("eth_newFilter", Public, LocalAdmin),
     row("eth_newBlockFilter", Public, LocalAdmin),
     row("eth_getFilterChanges", Public, Refused),
@@ -308,11 +307,11 @@ const METHOD_CLASSES: &[MethodClass] = &[
     row("eth_accounts", Public, Read),
     row("debug_traceTransaction", Operator, Refused),
     row("debug_traceCall", Operator, Refused),
- // Section 8.10.6: the Budlum state root is not an MPT root, so the MPT
- // proof method answers `-32601` for good at the opening layer.
+    // Section 8.10.6: the Budlum state root is not an MPT root, so the MPT
+    // proof method answers `-32601` for good at the opening layer.
     row("eth_getProof", Public, Refused),
- // Solana compatibility: four chain reads, one bounded slot feed, generated
- // unsubscribe doors, and explicit refusals for every unwired state mapping.
+    // Solana compatibility: four chain reads, one bounded slot feed, generated
+    // unsubscribe doors, and explicit refusals for every unwired state mapping.
     row("getHealth", Public, Read),
     row("getVersion", Public, Read),
     row("getGenesisHash", Public, Refused),
@@ -372,11 +371,13 @@ pub fn check_served_methods<'a>(
             "{name} has a row in METHOD_CLASSES but is not served"
         ));
     }
- // A compatibility gateway answers a foreign namespace. Its table is the
- // second classification: a method there must be in the gateway table, and
- // a method the gateway marks pending must not be served at all
- // (`src/rpc/compat/ethereum/opening.rs`).
-    if let Err(problem) = crate::rpc::compat::ethereum::opening::check_served(registered.iter().copied()) {
+    // A compatibility gateway answers a foreign namespace. Its table is the
+    // second classification: a method there must be in the gateway table, and
+    // a method the gateway marks pending must not be served at all
+    // (`src/rpc/compat/ethereum/opening.rs`).
+    if let Err(problem) =
+        crate::rpc::compat::ethereum::opening::check_served(registered.iter().copied())
+    {
         problems.push(problem);
     }
     if let Err(problem) = crate::rpc::compat::solana::check_served(registered.iter().copied()) {
@@ -394,8 +395,8 @@ mod tests {
     use super::{check_served_methods, Effect, Listener, METHOD_CLASSES};
     use std::collections::BTreeSet;
 
- /// The method names `api.rs` declares, read from its source: each
- /// `#[method]`, and each `#[subscription]` with its unsubscribe method.
+    /// The method names `api.rs` declares, read from its source: each
+    /// `#[method]`, and each `#[subscription]` with its unsubscribe method.
     fn declared_methods() -> Vec<String> {
         let api = include_str!("api.rs");
         let mut found: Vec<(usize, String)> = Vec::new();
@@ -416,9 +417,9 @@ mod tests {
         found.into_iter().map(|(_, name)| name).collect()
     }
 
- /// The method names whose handlers call `require_operator`, read from
- /// the production part of `server.rs` (cut at its first test module,
- /// comment lines dropped).
+    /// The method names whose handlers call `require_operator`, read from
+    /// the production part of `server.rs` (cut at its first test module,
+    /// comment lines dropped).
     fn operator_gated_methods() -> BTreeSet<String> {
         let src = include_str!("server.rs");
         let cut = src.find("#[cfg(test)]").unwrap_or(src.len());
@@ -457,7 +458,7 @@ mod tests {
             declared_set, unique,
             "the table and api.rs disagree on which methods exist"
         );
- // Declaration order, so a reader can walk both files side by side.
+        // Declaration order, so a reader can walk both files side by side.
         assert_eq!(declared, rows, "rows are not in api.rs declaration order");
     }
 
@@ -480,41 +481,46 @@ mod tests {
         );
     }
 
- /// no method may change consensus state outside block execution.
- ///
- /// The finding is that the public listener could change consensus state:
- /// an RPC call wrote a registry row, a finality view or a state root that
- /// the node's peers did not share, and the two nodes then disagreed about
- /// the tip without either of them having produced a block. The class table
- /// is the fix - `Effect` has no variant for such a write, and every writer
- /// that remains is either a signed transaction handed to the mempool
- /// (`TxSubmit`), a node-local action (`LocalAdmin`), a read (`Read`) or a
- /// refusal that names a transaction door (`Refused`).
- ///
- /// Canary: add an `Effect` variant that mutates consensus state directly,
- /// or classify a `bud_lockBridgeTransfer`-shaped name as `Read`, and the
- /// assertions here fail.
+    /// no method may change consensus state outside block execution.
+    ///
+    /// The finding is that the public listener could change consensus state:
+    /// an RPC call wrote a registry row, a finality view or a state root that
+    /// the node's peers did not share, and the two nodes then disagreed about
+    /// the tip without either of them having produced a block. The class table
+    /// is the fix - `Effect` has no variant for such a write, and every writer
+    /// that remains is either a signed transaction handed to the mempool
+    /// (`TxSubmit`), a node-local action (`LocalAdmin`), a read (`Read`) or a
+    /// refusal that names a transaction door (`Refused`).
+    ///
+    /// Canary: add an `Effect` variant that mutates consensus state directly,
+    /// or classify a `bud_lockBridgeTransfer`-shaped name as `Read`, and the
+    /// assertions here fail.
     #[test]
     fn no_effect_can_change_consensus_state_outside_a_block() {
- // The whole variant set, spelled out. A new variant is added here
- // first, and the comment on it must say which of the four legitimate
- // effects it is. There is deliberately no `StateWrite` to add.
-        let legitimate_effects = [Effect::Read, Effect::TxSubmit, Effect::Refused, Effect::LocalAdmin];
+        // The whole variant set, spelled out. A new variant is added here
+        // first, and the comment on it must say which of the four legitimate
+        // effects it is. There is deliberately no `StateWrite` to add.
+        let legitimate_effects = [
+            Effect::Read,
+            Effect::TxSubmit,
+            Effect::Refused,
+            Effect::LocalAdmin,
+        ];
         for effect in legitimate_effects {
             match effect {
- // Reads change nothing.
+                // Reads change nothing.
                 Effect::Read => {}
- // A write reaches consensus only by being executed in a block.
+                // A write reaches consensus only by being executed in a block.
                 Effect::TxSubmit => {}
- // The call is refused and names the door that does the write.
+                // The call is refused and names the door that does the write.
                 Effect::Refused => {}
- // Node-local state no peer has to agree on.
+                // Node-local state no peer has to agree on.
                 Effect::LocalAdmin => {}
             }
         }
- // Every row's effect must be one the match above knows. The comparison
- // is by `Debug` name so the test names the offending class instead of
- // pointing at a line number.
+        // Every row's effect must be one the match above knows. The comparison
+        // is by `Debug` name so the test names the offending class instead of
+        // pointing at a line number.
         let known: Vec<String> = legitimate_effects
             .iter()
             .map(|effect| format!("{effect:?}"))
@@ -527,24 +533,34 @@ mod tests {
                 row.name
             );
         }
- // And each of the four is actually used, so the table is not
- // degenerate: a surface with no TxSubmit row would mean the mempool is
- // unreachable, and one with no Refused row would mean no writer was
- // moved to a door.
+        // And each of the four is actually used, so the table is not
+        // degenerate: a surface with no TxSubmit row would mean the mempool is
+        // unreachable, and one with no Refused row would mean no writer was
+        // moved to a door.
         for effect in legitimate_effects {
             let name = format!("{effect:?}");
             assert!(
-                METHOD_CLASSES.iter().any(|row| format!("{:?}", row.effect) == name),
+                METHOD_CLASSES
+                    .iter()
+                    .any(|row| format!("{:?}", row.effect) == name),
                 "no row is classified as {name}"
             );
         }
 
- // Rows whose name says they write are `Refused`, `TxSubmit` or
- // `LocalAdmin` - never `Read`: a handler named `bud_lock*` that reads
- // would be a name that lies about its effect.
+        // Rows whose name says they write are `Refused`, `TxSubmit` or
+        // `LocalAdmin` - never `Read`: a handler named `bud_lock*` that reads
+        // would be a name that lies about its effect.
         const WRITE_VERBS: &[&str] = &[
-            "bud_lock", "bud_mint", "bud_burn", "bud_unlock", "bud_register", "bud_submit",
-            "bud_bond", "bud_slash", "bud_set", "bud_schedule",
+            "bud_lock",
+            "bud_mint",
+            "bud_burn",
+            "bud_unlock",
+            "bud_register",
+            "bud_submit",
+            "bud_bond",
+            "bud_slash",
+            "bud_set",
+            "bud_schedule",
         ];
         for row in METHOD_CLASSES {
             if WRITE_VERBS.iter().any(|verb| row.name.starts_with(verb)) {
@@ -585,14 +601,19 @@ mod tests {
         let declared: BTreeSet<String> = declared_methods().into_iter().collect();
         let classified: BTreeSet<&str> = METHOD_CLASSES.iter().map(|row| row.name).collect();
         for name in REMOVED {
-            assert!(!declared.contains(*name), "{name} remains declared in api.rs");
-            assert!(!classified.contains(name), "{name} remains in METHOD_CLASSES");
+            assert!(
+                !declared.contains(*name),
+                "{name} remains declared in api.rs"
+            );
+            assert!(
+                !classified.contains(name),
+                "{name} remains in METHOD_CLASSES"
+            );
         }
     }
 
     #[test]
     fn the_startup_check_refuses_a_gap_in_either_direction() {
-
         let all: Vec<&str> = METHOD_CLASSES.iter().map(|row| row.name).collect();
         assert!(check_served_methods(all.iter().copied()).is_ok());
 
@@ -606,33 +627,33 @@ mod tests {
         assert!(err.contains(&format!("{} has a row", all[0])));
     }
 
- /// The rows the coverage ratchet reads: the method name, and whether a
- /// success answer exists at all. A `Refused` row answers every call with a
- /// refusal, so it has no success test to have.
+    /// The rows the coverage ratchet reads: the method name, and whether a
+    /// success answer exists at all. A `Refused` row answers every call with a
+    /// refusal, so it has no success test to have.
     fn coverage_targets() -> Vec<(&'static str, bool, bool)> {
         use super::Effect;
         METHOD_CLASSES
             .iter()
             .map(|row| {
- // A `Refused` row is asked for the refusal only: every call to
- // it is a refusal, so a success test would assert the row was
- // misclassified.
+                // A `Refused` row is asked for the refusal only: every call to
+                // it is a refusal, so a success test would assert the row was
+                // misclassified.
                 let refused_row = row.effect == Effect::Refused;
                 (row.name, !refused_row, wants_refusal(row.name))
             })
             .collect()
     }
 
- /// Whether a row is asked for a refusal test, which the trait declaration of
- /// `src/rpc/api.rs` decides. A method the trait declares with `&self` alone
- /// has no invalid call at this layer, so asking for a refusal test would ask
- /// for an invented one; the answer test is the whole requirement. A name the
- /// trait does not declare (a subscription, a method that arrives through an
- /// alias) is asked for both, because the rule cannot see its shape.
+    /// Whether a row is asked for a refusal test, which the trait declaration of
+    /// `src/rpc/api.rs` decides. A method the trait declares with `&self` alone
+    /// has no invalid call at this layer, so asking for a refusal test would ask
+    /// for an invented one; the answer test is the whole requirement. A name the
+    /// trait does not declare (a subscription, a method that arrives through an
+    /// alias) is asked for both, because the rule cannot see its shape.
     fn wants_refusal(method: &str) -> bool {
- // `get_charter` is total over its `u32` domain id: every value is a
- // well-formed lookup and an absent charter answers `null`. There is
- // no invalid call at this layer to invent a refusal test for.
+        // `get_charter` is total over its `u32` domain id: every value is a
+        // well-formed lookup and an absent charter answers `null`. There is
+        // no invalid call at this layer to invent a refusal test for.
         if method == "bud_getCharter" {
             return false;
         }
@@ -642,8 +663,8 @@ mod tests {
         }
     }
 
- /// The number of parameters a method takes, as the trait declares them, with
- /// the receiver excluded. `None` says the declaration was not found.
+    /// The number of parameters a method takes, as the trait declares them, with
+    /// the receiver excluded. `None` says the declaration was not found.
     fn declared_arguments(method: &str) -> Option<usize> {
         let api = include_str!("api.rs");
         let marker = format!("#[method(name = \"{method}\")]");
@@ -661,9 +682,9 @@ mod tests {
         )
     }
 
- /// The RPC behaviour corpus: the test functions that answer and refuse
- /// methods. Both files of the RPC test surface are read, so a coverage claim
- /// is a claim about a test a reader can open.
+    /// The RPC behaviour corpus: the test functions that answer and refuse
+    /// methods. Both files of the RPC test surface are read, so a coverage claim
+    /// is a claim about a test a reader can open.
     fn coverage_corpus() -> Vec<(String, String)> {
         let mut files = vec![(
             "src/rpc/tests.rs".to_string(),
@@ -686,8 +707,8 @@ mod tests {
         files
     }
 
- /// The `#[test]` and `#[tokio::test]` functions of one file: the name, and
- /// the text from the `fn` line to the brace that closes the function.
+    /// The `#[test]` and `#[tokio::test]` functions of one file: the name, and
+    /// the text from the `fn` line to the brace that closes the function.
     fn test_functions(text: &str) -> Vec<(String, String)> {
         let lines: Vec<&str> = text.lines().collect();
         let mut out = Vec::new();
@@ -739,7 +760,7 @@ mod tests {
         out
     }
 
- /// `bud_estimateGas` to `estimate_gas`: the handler name a test calls.
+    /// `bud_estimateGas` to `estimate_gas`: the handler name a test calls.
     fn handler_name(method: &str) -> String {
         let tail = method.strip_prefix("bud_").unwrap_or(method);
         let mut out = String::with_capacity(tail.len() + 4);
@@ -756,9 +777,9 @@ mod tests {
         out
     }
 
- /// The handler named by this method's trait declaration. RPC names and
- /// Rust handler names need not be generated from one another: the Data
- /// Market methods, for example, deliberately use `pollen_*` handlers.
+    /// The handler named by this method's trait declaration. RPC names and
+    /// Rust handler names need not be generated from one another: the Data
+    /// Market methods, for example, deliberately use `pollen_*` handlers.
     fn declared_handler(method: &str) -> Option<String> {
         let api = include_str!("api.rs");
         let marker = format!("#[method(name = \"{method}\")]");
@@ -771,8 +792,8 @@ mod tests {
         (!name.is_empty()).then_some(name)
     }
 
- /// Where a test names a method: the JSON-RPC name in quotes, which a
- /// dispatch test uses, or a call to either its derived or declared handler.
+    /// Where a test names a method: the JSON-RPC name in quotes, which a
+    /// dispatch test uses, or a call to either its derived or declared handler.
     fn mention_offsets(body: &str, method: &str) -> Vec<usize> {
         let quoted = format!("\"{method}\"");
         let mut handlers = vec![handler_name(method)];
@@ -783,19 +804,20 @@ mod tests {
         }
         let mut hits: Vec<usize> = body
             .match_indices(quoted.as_str())
-            .chain(handlers.iter().flat_map(|handler| {
-                body.match_indices(format!(".{handler}(").as_str())
-            }))
             .map(|(at, _)| at)
             .collect();
+        for handler in &handlers {
+            let pat = format!(".{handler}(");
+            hits.extend(body.match_indices(pat.as_str()).map(|(at, _)| at));
+        }
         hits.sort_unstable();
         hits.dedup();
         hits
     }
 
- /// The statement that starts at `from`, to and including its next `;`. The
- /// 400 byte cap keeps a call in a loop head from swallowing the loop body,
- /// so a mark found here is a mark on this method's own answer.
+    /// The statement that starts at `from`, to and including its next `;`. The
+    /// 400 byte cap keeps a call in a loop head from swallowing the loop body,
+    /// so a mark found here is a mark on this method's own answer.
     fn statement_at(body: &str, from: usize) -> &str {
         let bytes = body.as_bytes();
         let start = from.min(bytes.len());
@@ -810,17 +832,14 @@ mod tests {
         &body[start..end]
     }
 
- /// What proves that a method was answered.
+    /// What proves that a method was answered.
     const SUCCESS_MARKS: [&str; 3] = [".unwrap()", ".expect(", ".is_ok()"];
- /// What proves that a method refused a call.
+    /// What proves that a method refused a call.
     const REFUSAL_MARKS: [&str; 4] = [".is_err()", ".unwrap_err()", ".expect_err(", ".code()"];
 
- /// The rows whose required kind of test is missing, one
- /// `"<method> missing=<kind>"` line each, sorted so the output is stable.
-    fn missing_coverage(
-        targets: &[(&str, bool, bool)],
-        tests: &[(String, String)],
-    ) -> Vec<String> {
+    /// The rows whose required kind of test is missing, one
+    /// `"<method> missing=<kind>"` line each, sorted so the output is stable.
+    fn missing_coverage(targets: &[(&str, bool, bool)], tests: &[(String, String)]) -> Vec<String> {
         let mut missing = Vec::new();
         for (name, needs_success, needs_refusal) in targets {
             let mut saw_success = false;
@@ -843,9 +862,10 @@ mod tests {
         missing
     }
 
- /// The recorded gaps, one line each. Comments and blanks are dropped.
+    /// The recorded gaps, one line each. Comments and blanks are dropped.
     fn read_coverage_baseline() -> Vec<String> {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(COVERAGE_BASELINE_PATH);
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join(".github/rpc-test-coverage-baseline.txt");
         let text = std::fs::read_to_string(&path)
             .unwrap_or_else(|e| panic!("{} must exist: {e}", path.display()));
         text.lines()
@@ -855,17 +875,17 @@ mod tests {
             .collect()
     }
 
- /// . Every row of the table has a test that answers it and a test
- /// that refuses it, except a `Refused` row, which has no success answer to
- /// give. The gaps this delivery cannot close are recorded in the baseline
- /// file, and that file is a ratchet in the same shape as the concept-name
- /// counter: a row that gains its test must leave the file in the same change,
- /// so the only way to keep this green is to write tests.
- ///
- /// The rule is a coverage rule, not a proof. It reads whether a test calls
- /// the method and asserts on the answer; what each assertion establishes is
- /// the review of the test itself, and the directive's closure protocol
- /// (section 14.1 item 5) is where a finding is argued.
+    /// . Every row of the table has a test that answers it and a test
+    /// that refuses it, except a `Refused` row, which has no success answer to
+    /// give. The gaps this delivery cannot close are recorded in the baseline
+    /// file, and that file is a ratchet in the same shape as the concept-name
+    /// counter: a row that gains its test must leave the file in the same change,
+    /// so the only way to keep this green is to write tests.
+    ///
+    /// The rule is a coverage rule, not a proof. It reads whether a test calls
+    /// the method and asserts on the answer; what each assertion establishes is
+    /// the review of the test itself, and the directive's closure protocol
+    /// (section 14.1 item 5) is where a finding is argued.
     #[test]
     fn rpc_every_method_has_success_and_refusal_test() {
         let corpus = coverage_corpus();
@@ -883,7 +903,7 @@ mod tests {
         let baseline = read_coverage_baseline();
         let missing_set: BTreeSet<&str> = missing.iter().map(String::as_str).collect();
         let baseline_set: BTreeSet<&str> = baseline.iter().map(String::as_str).collect();
-        let path = COVERAGE_BASELINE_PATH;
+        let path = ".github/rpc-test-coverage-baseline.txt";
         for line in &baseline {
             assert!(
                 missing_set.contains(line.as_str()),
@@ -900,9 +920,9 @@ mod tests {
         }
     }
 
- /// The ratchet's own canary. A row that loses its refusal test is reported,
- /// a `Refused` row is not asked for a success test, and a mark sitting on a
- /// different statement covers nothing.
+    /// The ratchet's own canary. A row that loses its refusal test is reported,
+    /// a `Refused` row is not asked for a success test, and a mark sitting on a
+    /// different statement covers nothing.
     #[test]
     fn rpc_method_coverage_catches_an_injected_gap() {
         let tests = vec![
@@ -928,9 +948,9 @@ mod tests {
             ("bud_bnsResolveFull", true, true),
             ("bud_bnsResolveContent", true, true),
             ("bud_registerBridgeAsset", false, true),
- // The shape a `Read` row with no argument takes: the answer test is
- // required, the refusal test is not, and a missing answer is still
- // reported.
+            // The shape a `Read` row with no argument takes: the answer test is
+            // required, the refusal test is not, and a missing answer is still
+            // reported.
             ("bud_gasPrice", true, false),
         ];
         assert!(

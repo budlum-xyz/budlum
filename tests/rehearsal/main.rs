@@ -12,12 +12,13 @@ use budlum_core::registry::rehearsal::{
     MIN_T5_SMALL_OBJECT_COUNT, MIN_T5_TOTAL_UPLOAD_BYTES,
 };
 use budlum_core::storage::bud3::bof1::Object;
+use budlum_core::storage::bud3::content_id::ContentId;
 use budlum_core::storage::bud3::limits::{Bud3Limits, Profile};
 use budlum_core::storage::bud3::pipeline::prepare_public_upload;
 use budlum_core::storage::bud3::placement::{Class, Share};
 use budlum_core::storage::bud3::registry::Bud3Registry;
 use budlum_core::storage::bud3::view::{view_from_network, MemorySymbolNetwork};
-use budlum_core::storage::bud3::volume::{AggregationVolume, VolumeScope};
+use budlum_core::storage::bud3::volume::{root_of, AggregationVolume, Visibility};
 
 const P: Profile = Profile {
     id: 0,
@@ -56,13 +57,13 @@ fn rehearsal_t1_to_t7_drills_and_mobile_field_matrix_hold() {
     let mut bud3 = Bud3Registry::default();
     let mut presence = PresenceTracker::new(3, 50);
     for i in 0..8u8 {
-        presence.register_validator(Address([i + 1; 32]), PresenceClass::Full, vec![i + 1; 48], 0);
+        presence.register_validator(Address([i + 1; 32]), PresenceClass::Full, 10_000_000_000, 0);
     }
     for m in 0..4u8 {
         presence.register_validator(
             Address([100 + m; 32]),
             PresenceClass::Mobile,
-            vec![100 + m; 48],
+            100_000_000,
             0,
         );
     }
@@ -71,10 +72,8 @@ fn rehearsal_t1_to_t7_drills_and_mobile_field_matrix_hold() {
     let up = prepare_public_upload(&payload, &P, &Bud3Limits::default(), 16).unwrap();
     let key = up.record.commitment;
     let mut net = MemorySymbolNetwork::default();
-    for (_, syms) in &up.segments {
-        for sym in syms {
-            net.insert([1u8; 32], key, sym.clone());
-        }
+    for (seg_idx, syms) in up.segments.iter().enumerate() {
+        net.store_holder_share([1u8; 32], key, seg_idx as u64, syms.clone());
     }
     let shares = vec![
         (
@@ -105,8 +104,10 @@ fn rehearsal_t1_to_t7_drills_and_mobile_field_matrix_hold() {
     // Mobile validators transition to non-slashing suspension while Full-class reads succeed uninterrupted.
     let active_full: BTreeSet<Address> = (0..8u8).map(|i| Address([i + 1; 32])).collect();
     for epoch in 1..=26 {
-        presence.record_full_seat_participation(&active_full, epoch);
-        presence.advance_epoch(epoch);
+        for v in &active_full {
+            presence.record_full_seat_participation(v, epoch);
+        }
+        presence.advance_epoch(epoch).unwrap();
     }
     assert!(presence.state_of(&Address([100u8; 32])).unwrap().suspended);
     let read_t1 = view_from_network(&bud3, &key, None, &net).unwrap();
@@ -115,11 +116,13 @@ fn rehearsal_t1_to_t7_drills_and_mobile_field_matrix_hold() {
     // T-3: > 1/3 Full seats silent for 50 blocks triggers disaster recovery
     // after eight chain-specific checkpoints, then clears on finality.
     let mut handover = HandoverCoordinator::default();
-    let checkpoint = budlum_core::core::chain_config::finality_checkpoint_interval_for_chain_id(
-        topo.chain_id,
-    );
+    let checkpoint =
+        budlum_core::core::chain_config::finality_checkpoint_interval_for_chain_id(topo.chain_id);
     let stall_height = 8 * checkpoint;
-    assert_eq!(stall_height, 16, "the devnet rehearsal uses two-block checkpoints");
+    assert_eq!(
+        stall_height, 16,
+        "the devnet rehearsal uses two-block checkpoints"
+    );
     for h in 1..stall_height {
         handover.observe_block_at_interval(h, 1, None, checkpoint);
     }
@@ -134,14 +137,21 @@ fn rehearsal_t1_to_t7_drills_and_mobile_field_matrix_hold() {
     assert_eq!(handover.budlum_finality_stalled(), 0);
 
     // T-5 small-object packing smoke via AggregationVolume.
-    let mut vol = AggregationVolume::new(VolumeScope::Public, P, 1 << 20);
+    let mut vol = AggregationVolume::new(Visibility::Public, 1 << 20).unwrap();
     for idx in 0..32u16 {
         let small = idx.to_le_bytes();
         let obj = Object::raw_public(&small);
-        vol.insert(&obj, None).unwrap();
+        let cid = ContentId::public(&small);
+        vol.push(
+            &cid,
+            [idx as u8 + 1; 32],
+            &obj.encode(),
+            u32::from(P.symbol_size),
+        )
+        .unwrap();
     }
     assert!(!vol.bytes().is_empty());
-    assert_ne!(vol.root(), [0u8; 32]);
+    assert_ne!(root_of(vol.members()), [0u8; 32]);
 
     // Evaluate complete T-1..T-7 pass-criteria report.
     let report = RehearsalDrillReport {

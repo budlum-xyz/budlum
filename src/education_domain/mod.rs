@@ -137,6 +137,7 @@ pub struct ArtifactRegistrationSpec {
 /// Education Domain registry storing artifacts backed by `StorageTxV3::RegisterObject`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct EducationDomainRegistry {
+    #[serde(with = "crate::core::map_keys")]
     artifacts: BTreeMap<[u8; 32], EducationArtifact>,
 }
 

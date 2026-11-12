@@ -10,6 +10,7 @@ database directory.
 |---|---|---|---|
 | `<storage.data_dir>` (sled) | `src/storage/db.rs` | yes | yes, the `.budbak` file is a full dump of it |
 | `./data/<network>/vote-history.json` | `src/network/node.rs::save_vote_history` | **yes, every network** | **no**: copy it, and see below |
+| `/home/budlum/data/validator<seat>/vote-history.json` | local two-seat testnet (`ops/testnet-local-validator.py`) | **yes, one file per seat** | **no**: back up and restore each seat separately |
 | `./data/<network>/banned-peers.json` | `src/network/node.rs` | where `security.persist_banned_peers` is set | **no**: copy it |
 | faucet `--state-file` | `src/bin/budlum-faucet.rs` | when the faucet is enabled | **no**: copy it with the funding-key backup |
 | `relayer-pending.json` beside the relayer cursor | `src/relayer/worker.rs` | when the relayer is enabled | **no**: copy it before restarting external actions |
@@ -29,6 +30,13 @@ it can reopen limits after restart. The relayer pending store prevents an
 external action from being repeated while its result awaits finality. Both are
 required for a complete service restore, not just a database integrity check.
 
+The local testnet's `ceremony` volume is also outside every database backup.
+Preserve its genesis and all eight validator key, P2P identity and bootnode
+files together with `faucet.seed`: replacing the seed loses control of the
+community allocation. Do not rerun key generation or assemble a new genesis
+against restored validator databases. Keep an encrypted, access-controlled
+copy of the secret files separate from the public genesis and records.
+
 ## The drill
 
 The tool checks the database; the sidecar files are copied explicitly so the
@@ -44,11 +52,25 @@ cargo run --manifest-path xtask/tools/Cargo.toml -- backup-drill
 
 ```
 # 2. The files the drill does not carry, copied beside the restored database.
-install -m 600./data/testnet/vote-history.json <restored>/vote-history.json
-install -m 600./data/testnet/banned-peers.json <restored>/banned-peers.json
+# On a single-validator host, restore each sidecar to its configured path,
+# NOT inside the freshly restored database directory unless that is its path.
+install -m 600 <saved-vote-history-file> <configured-vote-history-path>
+# The ban file can be absent on a new node; restore it if it was backed up.
+install -m 600 <saved-banned-peers-file> <configured-banned-peer-path>
+# The local testnet puts two seats in each validator volume: 1+5, 2+6,
+# 3+7, 4+8. Copy BOTH stopped seats' histories into the same seat paths
+# in the replacement volume; never use one seat's file for the other.
+for seat in 1 5; do  # use 2 6, 3 7 or 4 8 for the other volumes
+    install -D -m 600 "<saved-volume>/validator${seat}/vote-history.json" \
+        "<restored-volume>/validator${seat}/vote-history.json"
+    if [ -f "<saved-volume>/validator${seat}/banned-peers.json" ]; then
+        install -D -m 600 "<saved-volume>/validator${seat}/banned-peers.json" \
+            "<restored-volume>/validator${seat}/banned-peers.json"
+    fi
+done
 # Restore the operator-selected faucet state and relayer cursor directory too.
-install -m 600 <faucet-state-file> <restored>/faucet-state.json
-install -m 600 <relayer-db>/relayer-pending.json <restored>/relayer-pending.json
+install -m 600 <faucet-state-file> <configured-faucet-state-path>
+install -m 600 <relayer-db>/relayer-pending.json <configured-relayer-pending-path>
 ```
 
 The drill drives the same three flags the runbook gives an operator

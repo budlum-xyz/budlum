@@ -4,6 +4,7 @@
 //! reader and writer in the crate (client, server, fuzz target) has the same
 //! two rules: a frame never exceeds [`MAX_FRAME_BYTES`], and an envelope on
 //! another ABI version is refused before its body is interpreted.
+//! Convenience: exposed for workspace subcrate consumers, SDK bindings, and integration callers.
 
 use crate::pb;
 use prost::Message;

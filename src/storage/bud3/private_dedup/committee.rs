@@ -91,7 +91,7 @@ pub const fn padme_bucket_bytes(raw_len: u64) -> u64 {
     let mask = (1u64 << low_bits).saturating_sub(1);
     match raw_len.checked_add(mask) {
         Some(sum) => sum & !mask,
-        None => u64::MAX & !mask,
+        None => !mask,
     }
 }
 
@@ -339,6 +339,20 @@ impl Default for PrivateDedupEngine {
     }
 }
 
+/// Input parameters for [`PrivateDedupEngine::submit_sealed_upload`].
+#[derive(Debug, Clone, Copy)]
+pub struct CommitteeUploadRequest<'a> {
+    pub uploader: Address,
+    pub epoch: u64,
+    pub nft_id: &'a [u8; 32],
+    pub nft_blinding_factor: &'a [u8; 32],
+    pub oprf_token: &'a [u8; 32],
+    pub expected_challenge: &'a [u8; 32],
+    pub plaintext: &'a [u8],
+    pub proof: &'a OwnershipProof,
+    pub candidate_object_commitment: [u8; 32],
+}
+
 impl PrivateDedupEngine {
     /// Request a rate-limited threshold OPRF token for `(account, epoch)`.
     ///
@@ -346,6 +360,7 @@ impl PrivateDedupEngine {
     ///
     /// Returns [`PrivateDedupError::RateLimited`] once `account` reaches
     /// `max_queries_per_epoch` in `epoch`.
+    /// Convenience: exposed for B.U.D. 3.0 threshold OPRF client request builder.
     pub fn request_oprf_token(
         &mut self,
         committee: &ThresholdOprfCommittee,
@@ -375,20 +390,22 @@ impl PrivateDedupEngine {
     /// # Errors
     ///
     /// Refuses invalid ownership proofs or insufficient fee balances.
-    #[allow(clippy::too_many_arguments)]
     pub fn submit_sealed_upload(
         &mut self,
-        uploader: Address,
         payer_balance: &mut u64,
-        epoch: u64,
-        nft_id: &[u8; 32],
-        nft_blinding_factor: &[u8; 32],
-        oprf_token: &[u8; 32],
-        expected_challenge: &[u8; 32],
-        plaintext: &[u8],
-        proof: &OwnershipProof,
-        candidate_object_commitment: [u8; 32],
+        req: &CommitteeUploadRequest<'_>,
     ) -> Result<PublicSealedNftView, PrivateDedupError> {
+        let CommitteeUploadRequest {
+            uploader,
+            epoch,
+            nft_id,
+            nft_blinding_factor,
+            oprf_token,
+            expected_challenge,
+            plaintext,
+            proof,
+            candidate_object_commitment,
+        } = *req;
         if !proof.is_authentic(plaintext, &uploader, epoch, oprf_token, expected_challenge) {
             return Err(PrivateDedupError::OwnershipProofInvalid);
         }
@@ -445,6 +462,7 @@ impl PrivateDedupEngine {
     /// Publicly visible epoch summary (batched counter only; zero hit/miss
     /// breakdown).
     #[must_use]
+    /// Convenience: exposed for B.U.D. 3.0 private-dedup epoch summary reader.
     pub fn public_epoch_summary(&self, epoch: u64) -> PublicEpochDedupSummary {
         self.epoch_summaries
             .get(&epoch)
@@ -488,7 +506,9 @@ mod tests {
     fn private_dedup_is_closed_on_testnet() {
         assert!(!ACTIVATION.is_active(0));
         assert!(!ACTIVATION.is_active(500_000));
-        let opened = PrivateDedupActivation { height: Some(2_000) };
+        let opened = PrivateDedupActivation {
+            height: Some(2_000),
+        };
         assert!(!opened.is_active(1_999));
         assert!(opened.is_active(2_000));
     }
@@ -500,8 +520,8 @@ mod tests {
             max_queries_per_epoch: 3,
             ..PrivateDedupEngine::default()
         };
-        let alice = Address::from_bytes([0x11; 20]);
-        let bob = Address::from_bytes([0x22; 20]);
+        let alice = Address([0x11; 32]);
+        let bob = Address([0x22; 32]);
 
         for idx in 0..3u8 {
             let digest = [idx; 32];
@@ -536,8 +556,8 @@ mod tests {
     fn bud3_private_dedup_needs_ownership_proof() {
         let committee = test_committee();
         let mut engine = PrivateDedupEngine::default();
-        let owner_a = Address::from_bytes([0xA1; 20]);
-        let attacker = Address::from_bytes([0xB2; 20]);
+        let owner_a = Address([0xA1; 32]);
+        let attacker = Address([0xB2; 32]);
         let secret_doc = b"confidential clinical dataset v1 - full bytes required".repeat(16);
         let digest: [u8; 32] = Sha256::digest(&secret_doc).into();
         let shares = collect_shares(&committee, &digest);
@@ -550,16 +570,18 @@ mod tests {
         let mut bal_a = 100_000u64;
         engine
             .submit_sealed_upload(
-                owner_a,
                 &mut bal_a,
-                10,
-                &[1u8; 32],
-                &[0xAA; 32],
-                &token_a,
-                &challenge_a,
-                &secret_doc,
-                &proof_a,
-                [0xC1; 32],
+                &CommitteeUploadRequest {
+                    uploader: owner_a,
+                    epoch: 10,
+                    nft_id: &[1u8; 32],
+                    nft_blinding_factor: &[0xAA; 32],
+                    oprf_token: &token_a,
+                    expected_challenge: &challenge_a,
+                    plaintext: &secret_doc,
+                    proof: &proof_a,
+                    candidate_object_commitment: [0xC1; 32],
+                },
             )
             .unwrap();
 
@@ -570,16 +592,18 @@ mod tests {
         let mut bal_attacker = 100_000u64;
         assert_eq!(
             engine.submit_sealed_upload(
-                attacker,
                 &mut bal_attacker,
-                10,
-                &[2u8; 32],
-                &[0xBB; 32],
-                &token_a,
-                &challenge_b,
-                &secret_doc,
-                &proof_a,
-                [0xC2; 32],
+                &CommitteeUploadRequest {
+                    uploader: attacker,
+                    epoch: 10,
+                    nft_id: &[2u8; 32],
+                    nft_blinding_factor: &[0xBB; 32],
+                    oprf_token: &token_a,
+                    expected_challenge: &challenge_b,
+                    plaintext: &secret_doc,
+                    proof: &proof_a,
+                    candidate_object_commitment: [0xC2; 32],
+                },
             ),
             Err(PrivateDedupError::OwnershipProofInvalid)
         );
@@ -592,8 +616,8 @@ mod tests {
         let mut hit_world = PrivateDedupEngine::default();
         let mut miss_world = PrivateDedupEngine::default();
 
-        let alice = Address::from_bytes([0x31; 20]);
-        let bob = Address::from_bytes([0x32; 20]);
+        let alice = Address([0x31; 32]);
+        let bob = Address([0x32; 32]);
         let shared_doc = vec![0x7Au8; 1_500];
         let distinct_doc = vec![0x4Bu8; 1_520]; // Different length inside same Padme bucket!
 
@@ -611,16 +635,18 @@ mod tests {
             let mut bal1 = 50_000u64;
             let view1 = engine
                 .submit_sealed_upload(
-                    alice,
                     &mut bal1,
-                    3,
-                    &[0x01; 32],
-                    &[0x91; 32],
-                    &tok1,
-                    &ch1,
-                    &shared_doc,
-                    &p1,
-                    [0xE1; 32],
+                    &CommitteeUploadRequest {
+                        uploader: alice,
+                        epoch: 3,
+                        nft_id: &[0x01; 32],
+                        nft_blinding_factor: &[0x91; 32],
+                        oprf_token: &tok1,
+                        expected_challenge: &ch1,
+                        plaintext: &shared_doc,
+                        proof: &p1,
+                        candidate_object_commitment: [0xE1; 32],
+                    },
                 )
                 .unwrap();
 
@@ -634,16 +660,18 @@ mod tests {
             let mut bal2 = 50_000u64;
             let view2 = engine
                 .submit_sealed_upload(
-                    bob,
                     &mut bal2,
-                    3,
-                    &[0x02; 32],
-                    &[0x92; 32],
-                    &tok2,
-                    &ch2,
-                    second_doc,
-                    &p2,
-                    [0xE2; 32],
+                    &CommitteeUploadRequest {
+                        uploader: bob,
+                        epoch: 3,
+                        nft_id: &[0x02; 32],
+                        nft_blinding_factor: &[0x92; 32],
+                        oprf_token: &tok2,
+                        expected_challenge: &ch2,
+                        plaintext: second_doc,
+                        proof: &p2,
+                        candidate_object_commitment: [0xE2; 32],
+                    },
                 )
                 .unwrap();
 

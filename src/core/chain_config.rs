@@ -1,3 +1,5 @@
+//! Convenience: exposed for CLI, RPC, SDK, and multi-VM runtime callers.
+
 use serde::{Deserialize, Serialize};
 pub const PROTOCOL_VERSION: u32 = 1;
 
@@ -285,7 +287,7 @@ impl Network {
                 peer_rate_limit_per_minute: 240,
                 max_peers_per_subnet: 4,
                 rpc_rate_limit_per_minute: 600,
-                rpc_auth_required: true,
+                rpc_auth_required: false,
                 persist_banned_peers: true,
                 mdns_enabled: false,
                 max_outbound_per_subnet: 4,

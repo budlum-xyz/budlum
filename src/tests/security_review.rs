@@ -234,7 +234,13 @@ fn pending_operator_key_cannot_be_claimed_twice() {
     reg3.peer_id = [0xEE; 32];
     let err_reg = Executor::apply_transaction_checked(
         &mut state,
-        &vtx(f3.owner, 1_000, 0, TESTNET, ValidatorTx::Register(Box::new(reg3))),
+        &vtx(
+            f3.owner,
+            1_000,
+            0,
+            TESTNET,
+            ValidatorTx::Register(Box::new(reg3)),
+        ),
     )
     .unwrap_err();
     assert_eq!(err_reg.code(), "validator_peer_or_operator_key_in_use");
@@ -357,12 +363,9 @@ fn randomized_bud_supply_conservation_and_atomic_rollback() {
     for addr in &accounts {
         state.add_balance(addr, 10_000);
     }
-    let initial_balances: u64 = accounts
-        .iter()
-        .map(|a| state.get_balance(a))
-        .sum::<u64>()
-        + state.get_balance(&producer);
-    let initial_burned = state.tokenomics.total_burned;
+    let initial_balances: u64 =
+        accounts.iter().map(|a| state.get_balance(a)).sum::<u64>() + state.get_balance(&producer);
+    let initial_burned = state.burned_total;
 
     let mut rng = 0xCAFE_BABE_1234_5678u64;
     for step in 0..80u64 {
@@ -409,12 +412,9 @@ fn randomized_bud_supply_conservation_and_atomic_rollback() {
                 "failed block at step {step} must leave state root unchanged"
             );
         }
-        let live_balances: u64 = accounts
-            .iter()
-            .map(|a| state.get_balance(a))
-            .sum::<u64>()
+        let live_balances: u64 = accounts.iter().map(|a| state.get_balance(a)).sum::<u64>()
             + state.get_balance(&producer);
-        let newly_burned = state.tokenomics.total_burned.saturating_sub(initial_burned);
+        let newly_burned = state.burned_total.saturating_sub(initial_burned);
         assert_eq!(
             live_balances + newly_burned,
             initial_balances,

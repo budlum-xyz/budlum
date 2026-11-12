@@ -37,7 +37,9 @@ fn object_layer_metrics_keep_the_last_256_observations() {
     assert!(metrics.get(8).is_none());
     metrics.record(8, Series::RuleLagBlocks, 5);
     assert_eq!(
-        metrics.get(8).and_then(|m| m.rule_lag_blocks.percentile(95)),
+        metrics
+            .get(8)
+            .and_then(|m| m.rule_lag_blocks.percentile(95)),
         Some(5)
     );
     assert_eq!(metrics.domains().count(), 2);
@@ -56,7 +58,11 @@ fn object_layer_metrics_percentiles_are_reader_computed() {
     assert_eq!(ring.median_and_tail(), (Some(5), Some(9)));
     // The same call twice cannot drift: no percentile is cached anywhere.
     assert_eq!(ring.percentile(50), ring.percentile(50));
-    assert_eq!(ring.samples(), vec![9, 1, 5, 5, 2], "the ring is not sorted");
+    assert_eq!(
+        ring.samples(),
+        vec![9, 1, 5, 5, 2],
+        "the ring is not sorted"
+    );
 
     // An empty ring is "no observation", not zero: the distinction the
     // signature exists to keep.
@@ -80,8 +86,10 @@ fn object_layer_metrics_are_not_consensus_state() {
         b.record(1, Series::OutboundLatencyBlocks, blocks);
     }
     assert_ne!(
-        a.get(1).and_then(|m| m.outbound_latency_blocks.percentile(50)),
-        b.get(1).and_then(|m| m.outbound_latency_blocks.percentile(50)),
+        a.get(1)
+            .and_then(|m| m.outbound_latency_blocks.percentile(50)),
+        b.get(1)
+            .and_then(|m| m.outbound_latency_blocks.percentile(50)),
         "a node that started later reports a smaller sample"
     );
     // Same observations, same answer: the surface is a pure function of the

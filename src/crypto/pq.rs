@@ -753,7 +753,10 @@ mod tests {
     #[test]
     fn an_unregistered_context_or_scheme_is_refused_before_the_keys() {
         let scheme = SchemeId::ML_DSA_65;
-        assert_eq!(verify(scheme, &[], &[], b"", &[]), Err(PqError::EmptyContext));
+        assert_eq!(
+            verify(scheme, &[], &[], b"", &[]),
+            Err(PqError::EmptyContext)
+        );
         let too_long = vec![b'C'; MAX_CONTEXT_LEN + 1];
         assert!(matches!(
             verify(scheme, &[], &[], &too_long, &[]),
@@ -953,8 +956,8 @@ mod tests {
     #[test]
     fn pq_verify_requires_registered_context_and_explicit_scheme() {
         let pk65 = ml_dsa_public_key(SchemeId::ML_DSA_65, &seed(11)).unwrap();
-        let sig65 = ml_dsa_sign(SchemeId::ML_DSA_65, &seed(11), MSG, ctx::TX_V7, &[0u8; 32])
-            .unwrap();
+        let sig65 =
+            ml_dsa_sign(SchemeId::ML_DSA_65, &seed(11), MSG, ctx::TX_V7, &[0u8; 32]).unwrap();
         assert_eq!(
             verify(SchemeId::ML_DSA_65, &pk65, MSG, b"", &sig65),
             Err(PqError::EmptyContext)

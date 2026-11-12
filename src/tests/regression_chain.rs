@@ -174,6 +174,7 @@ fn role_bond_is_additive_and_rpc_doors_are_refused() {
     assert!(rpc.contains("Out-of-block relayer bonding is refused"));
     assert!(rpc.contains("Out-of-block prover bonding is refused"));
     assert!(rpc.contains("Out-of-block role unbonding is refused"));
+    assert!(state.bond_relayer(&who, 0).is_err());
 }
 
 /// Closed proposals are dropped after a

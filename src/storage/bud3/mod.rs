@@ -74,16 +74,15 @@ pub mod view;
 pub mod volume;
 
 pub use access_tiering::{
-    AccessTier, AccessTierTracker, TierTransition, COLD_DWELL_FOR_ARCHIVE_SECS,
-    COLD_MAX_ACCESSES, COLD_WINDOW_SECS, HOT_MIN_ACCESSES, HOT_WINDOW_SECS,
+    AccessTier, AccessTierTracker, TierTransition, COLD_DWELL_FOR_ARCHIVE_SECS, COLD_MAX_ACCESSES,
+    COLD_WINDOW_SECS, HOT_MIN_ACCESSES, HOT_WINDOW_SECS,
 };
 pub use bof1::{Bof1Error, Flags, Header, Object};
 pub use content_gateway::{Bud3ContentGateway, GatewaySymbolBundle};
 pub use content_id::{ContentId, ContentKey};
 pub use content_ref::{ContentRef, ContentRefError};
 pub use delete::{
-    check_same_owner_dependency, requires_rehydration_before_transfer, GrantShredAuth,
-    ShredOutcome,
+    check_same_owner_dependency, requires_rehydration_before_transfer, GrantShredAuth, ShredOutcome,
 };
 pub use fees::{
     custody_endowment_account, distribute_object_endowment_epoch, renewal_fee_epochs,
@@ -127,8 +126,8 @@ pub use placement::{
     Share, MOBILE_SYMBOL_FLOOR_MILLI,
 };
 pub use qr::{
-    frame_to_matrix, frame_to_png, png_to_frame, render_optical_seconds,
-    render_p1_optical_seconds, Bud3QrError, OpticalSecond,
+    frame_to_matrix, frame_to_png, png_to_frame, render_optical_seconds, render_p1_optical_seconds,
+    Bud3QrError, OpticalSecond,
 };
 pub use repair::{
     assign_repairer, bad_repair_slash_amount, build_segment_repair, is_unseen_share_lost,
@@ -136,6 +135,12 @@ pub use repair::{
     RepairError, BAD_REPAIR_SLASH_BPS, FULL_UNSEEN_LOSS_SECS, MOBILE_UNSEEN_LOSS_SECS,
     REPAIR_AUDIT_PPM, REPAIR_HANDOVER_BLOCKS,
 };
+pub use replace::{
+    admit_object_replacement, select_codec_with_fast_probe, PendingReplacementBarrier,
+    ReplaceAttestation, ReplaceError, VerifiedCodecCandidate, FAST_PROBE_MIN_SAVINGS_BPS,
+    GENERIC_ENTROPY_CEILING_MILLIBITS, MIN_REPLACE_ATTESTATIONS,
+};
+pub use rpc::{Bud3RpcService, BUD3_RPC_METHODS};
 pub use seal::{
     open_sealed_object, padme_padded_len, seal_object, SealBud3Error, MIN_SEALED_BUCKET_BYTES,
     SEAL_AUTH_TAG_LEN, SEAL_SALT_LEN,
@@ -153,16 +158,6 @@ pub use two_path::{
     extract_object_from_optical_seconds, verify_upload_two_path_and_round_trip, TwoPathError,
     VerifiedOpticalObject,
 };
-pub use video::{
-    chain_segment_video_digests, fold_frame_digests, video_commitment,
-    video_commitment_from_frames,
-};
-pub use replace::{
-    admit_object_replacement, select_codec_with_fast_probe, PendingReplacementBarrier,
-    ReplaceAttestation, ReplaceError, VerifiedCodecCandidate, FAST_PROBE_MIN_SAVINGS_BPS,
-    GENERIC_ENTROPY_CEILING_MILLIBITS, MIN_REPLACE_ATTESTATIONS,
-};
-pub use rpc::{Bud3RpcService, BUD3_RPC_METHODS};
 pub use upload::{
     admit_testnet_flags, deterministic_pixel_sample_indices, max_two_segment_memory_bytes,
     FinishedUploadSession, UploadError, UploadSessionManager, CLOSED_FLAG_BIT3,
@@ -170,10 +165,13 @@ pub use upload::{
     MAX_DAILY_UPLOAD_BYTES_PER_ACCOUNT, MAX_GATEWAY_SESSIONS, MAX_OPEN_SESSIONS_PER_ACCOUNT,
     MAX_UPLOAD_SESSION_BYTES, UPLOAD_PROTOCOL_ID, UPLOAD_SESSION_TTL_SECS,
 };
+pub use video::{
+    chain_segment_video_digests, fold_frame_digests, video_commitment, video_commitment_from_frames,
+};
 pub use view::{
     collect_symbols_full_then_mobile, fallback_decode_public, view_from_network,
-    MemorySymbolNetwork, NetworkSymbolSource, PaidViewReceipt, RevealSessionManager,
-    ViewBud3Error, MIN_PAID_VIEW_FEE_ATOMS,
+    MemorySymbolNetwork, NetworkSymbolSource, PaidViewReceipt, RevealSessionManager, ViewBud3Error,
+    MIN_PAID_VIEW_FEE_ATOMS,
 };
 pub use volume::{
     proof_for, root_of, verify_member, volume_id_of, AggregationVolume, Freed, PathStep, Removal,

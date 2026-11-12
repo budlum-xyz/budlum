@@ -550,7 +550,7 @@ mod tests {
             "unexpected refusal: {err:?}"
         );
         assert_eq!(state.get_balance(&poster), bond() * 4);
-        assert!(state.external_bond_escrow.get(&poster).is_none());
+        assert!(!state.external_bond_escrow.contains_key(&poster));
         assert!(state.settlement.is_empty());
     }
 

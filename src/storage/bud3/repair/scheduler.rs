@@ -46,6 +46,7 @@ impl RepairTask {
 /// Deterministic scheduler tracking active segment repair tasks.
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct RepairScheduler {
+    #[serde(with = "crate::core::map_keys")]
     tasks: BTreeMap<(ObjectKey, u64), RepairTask>,
 }
 

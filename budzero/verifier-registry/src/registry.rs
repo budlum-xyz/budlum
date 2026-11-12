@@ -527,6 +527,7 @@ impl VerifierRegistry {
         reg.stake = reg
             .stake
             .checked_add(amount)
+            .filter(|&next| next <= MAX_VERIFIER_PARAM_AMOUNT)
             .ok_or(RegistryError::StakeOverflow { account, role })?;
         Ok(reg.stake)
     }
@@ -1531,7 +1532,7 @@ mod tests {
     #[test]
     fn add_stake_refuses_non_active_and_overflow() {
         let mut reg = VerifierRegistry::new();
-        reg.register_master_verifier(addr(31), u64::MAX - 1, 0)
+        reg.register_master_verifier(addr(31), MAX_VERIFIER_PARAM_AMOUNT - 1, 0)
             .unwrap();
         assert!(matches!(
             reg.add_stake(addr(31), roles::MASTER_VERIFIER, 2),
@@ -1539,7 +1540,7 @@ mod tests {
         ));
         assert_eq!(
             reg.add_stake(addr(31), roles::MASTER_VERIFIER, 1),
-            Ok(u64::MAX)
+            Ok(MAX_VERIFIER_PARAM_AMOUNT)
         );
         reg.begin_unbonding(addr(31), roles::MASTER_VERIFIER, 0)
             .unwrap();

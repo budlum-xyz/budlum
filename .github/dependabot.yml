@@ -104,7 +104,6 @@ updates:
     directories:
       - "/bud"
       - "/crates/ai-inference"
-      - "/crates/bpqs"
       - "/crates/budlum-explorer"
       - "/crates/note-packing"
       - "/crates/wallet-core"
@@ -122,6 +121,23 @@ updates:
     groups:
       rust-minor-patch:
         update-types: ["minor", "patch"]
+  - package-ecosystem: "cargo"
+    directory: "/crates/bpqs"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "Europe/Istanbul"
+    open-pull-requests-limit: 3
+    cooldown:
+      default-days: 7
+    groups:
+      rust-minor-patch:
+        update-types: ["minor", "patch"]
+    ignore:
+      # slh-dsa 0.1.0 requires rand_core =0.6.4 (CryptoRngCore trait boundary).
+      - dependency-name: "rand_core"
+        update-types: ["version-update:semver-major"]
   - package-ecosystem: "docker"
     # The Dockerfile lives under ops/; with directory: "/" Dependabot ERRORED
     # with "No Dockerfiles nor Kubernetes YAML found in /".

@@ -730,20 +730,12 @@ mod tests {
         let ws_res = catalog.insert("k.one", en.clone(), AccessibilityMode::UiText, "   ");
         assert_eq!(ws_res, Err(I18nError::EmptyText));
 
-        let bad_texts = [
-            "hello\u{202E}dlrow",
-            "zero\u{200B}width",
-            "nul\u{0000}byte",
-        ];
+        let bad_texts = ["hello\u{202E}dlrow", "zero\u{200B}width", "nul\u{0000}byte"];
         for bad_text in bad_texts {
             let cat_res = catalog.insert("k.one", en.clone(), AccessibilityMode::UiText, bad_text);
             assert_eq!(cat_res, Err(I18nError::ForbiddenCharacters));
-            let stt_res = AccessibilityTranscript::from_local_stt(
-                "stt-v1",
-                [1; 32],
-                en.clone(),
-                bad_text,
-            );
+            let stt_res =
+                AccessibilityTranscript::from_local_stt("stt-v1", [1; 32], en.clone(), bad_text);
             assert_eq!(stt_res, Err(I18nError::ForbiddenCharacters));
         }
     }

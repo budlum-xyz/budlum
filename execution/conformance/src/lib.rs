@@ -3,40 +3,21 @@
 
 #![forbid(unsafe_code)]
 
-use std::time::Instant;
-
 use bud_isa::{Instruction, Opcode};
 use budlum_ee_budzero::BudZeroWorker;
-use budlum_ee_cairo::{
-    encode_sierra_class, CairoAction, CairoEntrypoint, CairoSyscallOp, CairoWorker,
-    SierraContractClass, AUDITED_CAIRO_ENGINE_SPDX, PROPOSED_CAIRO_ACTIVATION_HEIGHT,
-};
-use budlum_ee_evm::db::NS_EVM_STORAGE;
 use budlum_ee_evm::EvmWorker;
-use budlum_ee_move::framework::{
-    encode_move_module, is_scheme_byte_unused_in_pinned_aptos, CompiledMoveModule, MoveFunctionDef,
-    MoveOp, BUDLUM_MOVE_ALIAS_SCHEME_BYTE, FRAMEWORK_ADDRESS,
-};
-use budlum_ee_move::{MovePayload, MoveQuery, MoveWorker, APTOS_GAS_TO_BGU, NS_MOVE_STATE};
-use budlum_ee_move_sui::{
-    MoveSuiWorker, SuiCompiledModule, SuiPtb, SuiPtbCommand, ATTO_PER_MIST,
-    PROPOSED_SUI_ACTIVATION_HEIGHT,
-};
-use budlum_ee_polkavm::{
-    encode_polkavm_blob, PolkaVmDispatch, PolkaVmInsn, PolkaVmProgram, PolkaVmWorker,
-    PROPOSED_POLKAVM_ACTIVATION_HEIGHT,
-};
+use budlum_ee_move::framework::{encode_move_module, CompiledMoveModule, MoveFunctionDef, MoveOp};
+use budlum_ee_move::{MovePayload, MoveWorker, APTOS_GAS_TO_BGU};
 use budlum_ee_svm::programs::{
-    SvmAccountMeta, SvmInstructionEnvelope, ATTOS_PER_LAMPORT, NS_SVM_ACCOUNT, STAKE_PROGRAM_ID,
-    SYSTEM_PROGRAM_ID, VOTE_PROGRAM_ID,
+    SvmAccountMeta, SvmInstructionEnvelope, ATTOS_PER_LAMPORT, SYSTEM_PROGRAM_ID,
 };
 use budlum_ee_svm::SvmWorker;
 use budlum_ee_wasm::abi::WasmTxAction;
 use budlum_ee_wasm::budlum_msg::{b64_encode, bud_addr_humanize};
-use budlum_ee_wasm::{WasmWorker, NS_WASM_STORE};
+use budlum_ee_wasm::WasmWorker;
 use budlum_uel_abi::mock::MemoryHost;
 use budlum_uel_abi::{
-    BlockContext, BudAmount, EeCall, EeCallKind, EeId, EeIdentity, EeQuery, ExecutionEnvironment,
+    BlockContext, BudAmount, EeCall, EeCallKind, EeId, EeIdentity, ExecutionEnvironment,
     OutcomeStatus,
 };
 use sha2::{Digest as _, Sha256};
@@ -84,12 +65,12 @@ pub fn compute_conformance_execution_root(host: &MemoryHost) -> [u8; 32] {
 /// Minimal EVM runtime contract storing `0x2A` at slot `0` and returning `0x2A` (`32` bytes).
 #[must_use]
 pub fn evm_sstore_initcode() -> Vec<u8> {
-    // Runtime (13 bytes):
+    // Runtime (15 bytes = 14-byte body + 0xf3 RETURN):
     // PUSH1 0x2a PUSH1 0x00 SSTORE PUSH1 0x2a PUSH1 0x00 MSTORE PUSH1 0x20 PUSH1 0x00 RETURN
-    let runtime: [u8; 13] = [
+    let runtime: [u8; 14] = [
         0x60, 0x2a, 0x60, 0x00, 0x55, 0x60, 0x2a, 0x60, 0x00, 0x52, 0x60, 0x20, 0x60, 0x00,
     ];
-    let mut full_rt = Vec::with_capacity(14);
+    let mut full_rt = Vec::with_capacity(15);
     full_rt.extend_from_slice(&runtime);
     full_rt.push(0xf3);
     // Initcode: PUSH1 14 DUP1 PUSH1 12 PUSH1 0 CODECOPY PUSH1 0 RETURN || runtime
@@ -368,7 +349,8 @@ pub fn run_canonical_multi_ee_block_with_wasm(
     let svm_prog_id = EeIdentity::new(EeId::SVM, svm_prog.to_vec()).map_err(|e| e.to_string())?;
     let svm_sys_id =
         EeIdentity::new(EeId::SVM, SYSTEM_PROGRAM_ID.to_vec()).map_err(|e| e.to_string())?;
-    host.balances.insert(svm_payer_id.clone(), 1_000_000 * ATTOS_PER_LAMPORT);
+    host.balances
+        .insert(svm_payer_id.clone(), 1_000_000 * ATTOS_PER_LAMPORT);
     let svm_dep = svm
         .execute(
             &ctx,
@@ -503,6 +485,28 @@ pub fn run_canonical_multi_ee_block_with_wasm(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Instant;
+
+    use budlum_ee_cairo::{
+        encode_sierra_class, CairoAction, CairoEntrypoint, CairoSyscallOp, CairoWorker,
+        SierraContractClass, AUDITED_CAIRO_ENGINE_SPDX, PROPOSED_CAIRO_ACTIVATION_HEIGHT,
+    };
+    use budlum_ee_evm::db::NS_EVM_STORAGE;
+    use budlum_ee_move::framework::{
+        is_scheme_byte_unused_in_pinned_aptos, BUDLUM_MOVE_ALIAS_SCHEME_BYTE, FRAMEWORK_ADDRESS,
+    };
+    use budlum_ee_move::{MoveQuery, NS_MOVE_STATE};
+    use budlum_ee_move_sui::{
+        MoveSuiWorker, SuiCompiledModule, SuiPtb, SuiPtbCommand, ATTO_PER_MIST,
+        PROPOSED_SUI_ACTIVATION_HEIGHT,
+    };
+    use budlum_ee_polkavm::{
+        encode_polkavm_blob, PolkaVmDispatch, PolkaVmInsn, PolkaVmProgram, PolkaVmWorker,
+        PROPOSED_POLKAVM_ACTIVATION_HEIGHT,
+    };
+    use budlum_ee_svm::programs::{NS_SVM_ACCOUNT, STAKE_PROGRAM_ID, VOTE_PROGRAM_ID};
+    use budlum_ee_wasm::NS_WASM_STORE;
+    use budlum_uel_abi::EeQuery;
 
     fn test_ctx() -> BlockContext {
         BlockContext {
@@ -658,7 +662,9 @@ mod tests {
     /// Directive IP-35 suite gate for Move (`0x04`).
     #[test]
     fn uel_conformance_move() {
-        assert!(is_scheme_byte_unused_in_pinned_aptos(BUDLUM_MOVE_ALIAS_SCHEME_BYTE));
+        assert!(is_scheme_byte_unused_in_pinned_aptos(
+            BUDLUM_MOVE_ALIAS_SCHEME_BYTE
+        ));
         let mut worker = MoveWorker::new();
         let mut host = MemoryHost::new(2_000_000);
         let Ok(caller) = EeIdentity::new(EeId::MOVE, vec![0x31; 32]) else {

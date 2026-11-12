@@ -41,9 +41,9 @@ fn first_party_name(line: &str) -> Option<&str> {
         t.split('.').count() == 3 && t.split('.').all(|p| p.parse::<u64>().is_ok())
     })?;
     let name = tokens.get(version_at.checked_sub(1)?)?;
- // `verifier-registry` is the eighth budzero member and does not match the
- // name pattern; if it were not listed by name it would count as third party.
- // The `budlum-*` crates and `budlum-explorer` are first-party path crates too.
+    // `verifier-registry` is the eighth budzero member and does not match the
+    // name pattern; if it were not listed by name it would count as third party.
+    // The `budlum-*` crates and `budlum-explorer` are first-party path crates too.
     is_first_party_name(name).then_some(*name)
 }
 
@@ -60,16 +60,16 @@ pub fn run(_root: &Path, out: &Path) -> Result<String, String> {
     let mut total = 0usize;
     let mut fp_seen = 0usize;
     for line in text.lines() {
- // A cargo-geiger row leads with five unsafe counters and ends with the
- // crate name and version:
- //
- // 0/0 0/0 0/0 0/0 0/0 ? budlum-core 0.1.0
- //
- // The ported shell gate matched on `starts_with`, which is where the
- // crate name sits in `cargo tree` output but not here - so no line
- // ever counted as first-party and the `fp_seen == 0` arm reported a
- // complete scan as a dead one. The crate name is the token before the
- // version, so that is what is read.
+        // A cargo-geiger row leads with five unsafe counters and ends with the
+        // crate name and version:
+        //
+        // 0/0 0/0 0/0 0/0 0/0 ? budlum-core 0.1.0
+        //
+        // The ported shell gate matched on `starts_with`, which is where the
+        // crate name sits in `cargo tree` output but not here - so no line
+        // ever counted as first-party and the `fp_seen == 0` arm reported a
+        // complete scan as a dead one. The crate name is the token before the
+        // version, so that is what is read.
         let Some(crate_name) = first_party_name(line) else {
             if line
                 .as_bytes()
@@ -82,17 +82,17 @@ pub fn run(_root: &Path, out: &Path) -> Result<String, String> {
         };
         let _ = crate_name;
         fp_seen += 1;
- // Counters are `used/total`; anything other than a `0/` numerator on
- // every one of them means unsafe was reached.
+        // Counters are `used/total`; anything other than a `0/` numerator on
+        // every one of them means unsafe was reached.
         if !counters(line).all(|c| c.starts_with("0/")) {
             fp_bad.push_str(line);
             fp_bad.push('\n');
         }
     }
- // A report with no first-party row is not a clean report, it is a report
- // about nothing: cargo-geiger died, or the crate names moved. The old
- // shape passed such a file, so a broken scan and a zero-unsafe scan were
- // indistinguishable at the gate.
+    // A report with no first-party row is not a clean report, it is a report
+    // about nothing: cargo-geiger died, or the crate names moved. The old
+    // shape passed such a file, so a broken scan and a zero-unsafe scan were
+    // indistinguishable at the gate.
     if fp_seen == 0 {
         return Err(format!(
             "the cargo-geiger output contains no first-party crate line; the scan\n\
@@ -117,11 +117,11 @@ pub fn self_test() -> Result<String, String> {
     let dir = crate::gates::rust_literals::exclusive_scratch_dir("budlum-gates-geiger")?;
     let clean = dir.join("clean.txt");
     let dirty = dir.join("dirty.txt");
- // The canary uses cargo-geiger's REAL line format: five counters,
- // then a marker column, and the crate name and version at the end. The old canary
- // wrote an invented format like "budlum-core 0/120" and the gate's
- // `starts_with` bug was invisible for exactly that reason - the canary had never
- // exercised what the gate would read in the field.
+    // The canary uses cargo-geiger's REAL line format: five counters,
+    // then a marker column, and the crate name and version at the end. The old canary
+    // wrote an invented format like "budlum-core 0/120" and the gate's
+    // `starts_with` bug was invisible for exactly that reason - the canary had never
+    // exercised what the gate would read in the field.
     std::fs::write(
         &clean,
         "0/0        0/0          0/0    0/0     0/0      ?  budlum-core 0.1.0\n\
@@ -138,8 +138,8 @@ pub fn self_test() -> Result<String, String> {
     .map_err(|e| e.to_string())?;
 
     let empty = dir.join("empty.txt");
- // A line without counters means the scan died. It is not enough for the crate name
- // to occur in the text, the line must be a report line.
+    // A line without counters means the scan died. It is not enough for the crate name
+    // to occur in the text, the line must be a report line.
     std::fs::write(&empty, "error: could not compile budlum-core\n").map_err(|e| e.to_string())?;
 
     let dirty_failed = run(&dir, &dirty).is_err();
@@ -184,8 +184,8 @@ mod tests {
         )
         .unwrap();
         assert!(run(&dir, &f).is_err());
- // Build noise is not a first-party line: in the line `Checking bud-isa
- // v0.1.0 (..)` the crate name occurs but there is no counter.
+        // Build noise is not a first-party line: in the line `Checking bud-isa
+        // v0.1.0 (..)` the crate name occurs but there is no counter.
         std::fs::write(
             &f,
             "    Checking bud-isa v0.1.0 (/w/budzero/bud-isa)\n    Checking bud-vm v0.1.0 (/w)\n",
@@ -195,7 +195,7 @@ mod tests {
             run(&dir, &f).is_err(),
             "build output must not count as a completed scan"
         );
- // No first-party row at all: an unfinished scan, not a clean one.
+        // No first-party row at all: an unfinished scan, not a clean one.
         std::fs::write(&f, "error: linking with cc failed\n").unwrap();
         assert!(run(&dir, &f).is_err());
         let _ = std::fs::remove_dir_all(&dir);

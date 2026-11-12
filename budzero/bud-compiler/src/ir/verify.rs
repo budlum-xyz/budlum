@@ -180,12 +180,13 @@ fn verify_function_call_signatures(
                 ret_ty,
             } = &node.instr
             {
-                let (param_tys, expected_ret) = signatures.get(function).ok_or_else(|| {
-                    VerifyError::UndefinedFunction {
-                        function: *function,
-                        in_caller: func.name.clone(),
-                    }
-                })?;
+                let (param_tys, expected_ret) =
+                    signatures
+                        .get(function)
+                        .ok_or_else(|| VerifyError::UndefinedFunction {
+                            function: *function,
+                            in_caller: func.name.clone(),
+                        })?;
                 if expected_ret != ret_ty {
                     return Err(VerifyError::ReturnTypeMismatch {
                         expected: expected_ret.clone(),

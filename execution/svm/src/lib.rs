@@ -107,14 +107,14 @@ fn load_and_verify_sbpf(
         ));
     }
     if code.starts_with(b"\x7fELF") {
-        let mut exe =
+        let exe =
             Executable::from_elf(code, loader).map_err(|e| format!("ELF load failed: {e}"))?;
         exe.verify::<RequisiteVerifier>()
             .map_err(|e| format!("sBPF verify failed: {e}"))?;
         return Ok(exe);
     }
     for ver in [SBPFVersion::V3, SBPFVersion::V0] {
-        if let Ok(mut exe) =
+        if let Ok(exe) =
             Executable::from_text_bytes(code, loader.clone(), ver, FunctionRegistry::default())
         {
             if exe.verify::<RequisiteVerifier>().is_ok() {
@@ -140,6 +140,11 @@ fn read_svm_account(host: &dyn HostRead, pubkey: &[u8; 32]) -> SvmAccountRecord 
         .unwrap_or_default()
 }
 
+fn svm_account_exists(host: &dyn HostRead, pubkey: &[u8; 32]) -> Result<bool, HostError> {
+    let ns = Namespace::new(NS_SVM_ACCOUNT).map_err(|e| HostError::Invalid(e.to_string()))?;
+    Ok(host.read(&ns, pubkey)?.is_some())
+}
+
 fn write_svm_account(
     host: &mut dyn HostApi,
     pubkey: &[u8; 32],
@@ -150,11 +155,9 @@ fn write_svm_account(
     host.write(&ns, pubkey, Some(&bytes))
 }
 
-fn execute_sbpf_bytecode(
-    code: &[u8],
-    input: &[u8],
-    cu_limit: u64,
-) -> Result<(u64, u64, Vec<u8>), (OutcomeStatus, String, u64)> {
+type SbpfExecResult = Result<(u64, u64, Vec<u8>), (OutcomeStatus, String, u64)>;
+
+fn execute_sbpf_bytecode(code: &[u8], input: &[u8], cu_limit: u64) -> SbpfExecResult {
     let loader = Arc::new(BuiltinProgram::new_loader(deterministic_sbpf_config()));
     let exe = load_and_verify_sbpf(code, loader.clone())
         .map_err(|m| (OutcomeStatus::InvalidCode, m, 0))?;
@@ -240,11 +243,7 @@ fn handle_system_program(
             if space > 1024 * 1024 {
                 return Err((OutcomeStatus::Revert, String::from("space > 1 MiB")));
             }
-            let to_pk = ix
-                .accounts
-                .get(1)
-                .map(|m| m.pubkey)
-                .unwrap_or([0u8; 32]);
+            let to_pk = ix.accounts.get(1).map(|m| m.pubkey).unwrap_or([0u8; 32]);
             if lamports > 0 {
                 let attos = u128::from(lamports).saturating_mul(ATTOS_PER_LAMPORT);
                 host.bud_transfer(
@@ -281,11 +280,7 @@ fn handle_system_program(
                     .and_then(|s| s.try_into().ok())
                     .unwrap_or([0; 8]),
             );
-            let to_pk = ix
-                .accounts
-                .get(1)
-                .map(|m| m.pubkey)
-                .unwrap_or([0u8; 32]);
+            let to_pk = ix.accounts.get(1).map(|m| m.pubkey).unwrap_or([0u8; 32]);
             if lamports > 0 {
                 let attos = u128::from(lamports).saturating_mul(ATTOS_PER_LAMPORT);
                 host.bud_transfer(
@@ -303,7 +298,10 @@ fn handle_system_program(
             }
             Ok((Vec::new(), 150))
         }
-        _ => Err((OutcomeStatus::Revert, format!("unsupported System tag {tag}"))),
+        _ => Err((
+            OutcomeStatus::Revert,
+            format!("unsupported System tag {tag}"),
+        )),
     }
 }
 
@@ -322,6 +320,14 @@ fn handle_spl_token(
             let Some(mint_meta) = ix.accounts.first() else {
                 return Err((OutcomeStatus::Revert, String::from("missing mint account")));
             };
+            if svm_account_exists(host, &mint_meta.pubkey)
+                .map_err(|e| (OutcomeStatus::Revert, e.to_string()))?
+            {
+                return Err((
+                    OutcomeStatus::Revert,
+                    String::from("mint already initialized"),
+                ));
+            }
             let decimals = ix.data.get(1).copied().unwrap_or(9);
             let auth: [u8; 32] = ix
                 .data
@@ -352,6 +358,21 @@ fn handle_spl_token(
             let acc_pk = ix.accounts.first().map(|m| m.pubkey).unwrap_or([0; 32]);
             let mint_pk = ix.accounts.get(1).map(|m| m.pubkey).unwrap_or([0; 32]);
             let own_pk = ix.accounts.get(2).map(|m| m.pubkey).unwrap_or([0; 32]);
+            if svm_account_exists(host, &acc_pk)
+                .map_err(|e| (OutcomeStatus::Revert, e.to_string()))?
+            {
+                return Err((
+                    OutcomeStatus::Revert,
+                    String::from("token account already initialized"),
+                ));
+            }
+            let mint_rec = read_svm_account(host, &mint_pk);
+            if mint_rec.owner != *program_id
+                || !serde_json::from_slice::<SplMintState>(&mint_rec.data)
+                    .is_ok_and(|mint| mint.is_initialized)
+            {
+                return Err((OutcomeStatus::Revert, String::from("invalid token mint")));
+            }
             let st = SplTokenAccountState {
                 mint: mint_pk,
                 owner: own_pk,
@@ -386,12 +407,29 @@ fn handle_spl_token(
             let mut mint_rec = read_svm_account(host, &mint_pk);
             let mut mint: SplMintState = serde_json::from_slice(&mint_rec.data)
                 .map_err(|_| (OutcomeStatus::Revert, String::from("uninitialized mint")))?;
-            if mint.mint_authority != Some(*caller) {
-                return Err((OutcomeStatus::Revert, String::from("mint authority mismatch")));
+            if mint_rec.owner != *program_id
+                || !mint.is_initialized
+                || mint.mint_authority != Some(*caller)
+            {
+                return Err((
+                    OutcomeStatus::Revert,
+                    String::from("mint authority mismatch"),
+                ));
             }
             let mut dst_rec = read_svm_account(host, &dst_pk);
-            let mut dst: SplTokenAccountState = serde_json::from_slice(&dst_rec.data)
-                .map_err(|_| (OutcomeStatus::Revert, String::from("uninitialized token acc")))?;
+            let mut dst: SplTokenAccountState =
+                serde_json::from_slice(&dst_rec.data).map_err(|_| {
+                    (
+                        OutcomeStatus::Revert,
+                        String::from("uninitialized token acc"),
+                    )
+                })?;
+            if dst_rec.owner != *program_id || !dst.is_initialized || dst.mint != mint_pk {
+                return Err((
+                    OutcomeStatus::Revert,
+                    String::from("destination mint mismatch"),
+                ));
+            }
             mint.supply = mint
                 .supply
                 .checked_add(amount)
@@ -427,8 +465,23 @@ fn handle_spl_token(
                 .map_err(|_| (OutcomeStatus::Revert, String::from("bad src token acc")))?;
             let mut dst: SplTokenAccountState = serde_json::from_slice(&dst_rec.data)
                 .map_err(|_| (OutcomeStatus::Revert, String::from("bad dst token acc")))?;
-            if src.owner != *caller || src.mint != dst.mint {
-                return Err((OutcomeStatus::Revert, String::from("SPL owner/mint mismatch")));
+            if src_rec.owner != *program_id
+                || dst_rec.owner != *program_id
+                || !src.is_initialized
+                || !dst.is_initialized
+                || src.owner != *caller
+                || src.mint != dst.mint
+            {
+                return Err((
+                    OutcomeStatus::Revert,
+                    String::from("SPL owner/mint mismatch"),
+                ));
+            }
+            if src_pk == dst_pk {
+                if src.amount < amount {
+                    return Err((OutcomeStatus::Revert, String::from("insufficient SPL")));
+                }
+                return Ok((Vec::new(), 2_500));
             }
             src.amount = src
                 .amount
@@ -508,6 +561,30 @@ impl SvmWorker {
                     gas_used: 0,
                 };
             }
+            match svm_account_exists(host, &target_pk) {
+                Ok(true) => {
+                    return EeOutcome {
+                        status: OutcomeStatus::Revert,
+                        output: b"SVM program account already exists".to_vec(),
+                        gas_used: 0,
+                    }
+                }
+                Err(e) => {
+                    return EeOutcome {
+                        status: OutcomeStatus::Revert,
+                        output: e.to_string().into_bytes(),
+                        gas_used: 0,
+                    }
+                }
+                Ok(false) => {}
+            }
+            if call.gas_limit < 2_000 || host.charge(2_000).is_err() {
+                return EeOutcome {
+                    status: OutcomeStatus::OutOfGas,
+                    output: Vec::new(),
+                    gas_used: call.gas_limit,
+                };
+            }
             let rec = SvmAccountRecord {
                 owner: BPF_LOADER_UPGRADEABLE_ID,
                 executable: true,
@@ -524,7 +601,7 @@ impl SvmWorker {
             return EeOutcome {
                 status: OutcomeStatus::Success,
                 output: target_pk.to_vec(),
-                gas_used: 2_000.min(call.gas_limit),
+                gas_used: 2_000,
             };
         }
 
@@ -689,7 +766,49 @@ impl SvmWorker {
                 .get(2)
                 .map(|m| m.pubkey)
                 .unwrap_or(SPL_TOKEN_PROGRAM_ID);
+            if tok_prog != SPL_TOKEN_PROGRAM_ID && tok_prog != SPL_TOKEN_2022_PROGRAM_ID {
+                return EeOutcome {
+                    status: OutcomeStatus::Revert,
+                    output: b"unsupported ATA token program".to_vec(),
+                    gas_used: 0,
+                };
+            }
+            let mint_rec = read_svm_account(host, &mint);
+            if mint_rec.owner != tok_prog
+                || !serde_json::from_slice::<SplMintState>(&mint_rec.data)
+                    .is_ok_and(|mint| mint.is_initialized)
+            {
+                return EeOutcome {
+                    status: OutcomeStatus::Revert,
+                    output: b"invalid ATA mint".to_vec(),
+                    gas_used: 0,
+                };
+            }
             let ata = derive_associated_token_address(&wallet, &tok_prog, &mint);
+            match svm_account_exists(host, &ata) {
+                Ok(true) => {
+                    return EeOutcome {
+                        status: OutcomeStatus::Revert,
+                        output: b"associated token account already exists".to_vec(),
+                        gas_used: 0,
+                    }
+                }
+                Err(e) => {
+                    return EeOutcome {
+                        status: OutcomeStatus::Revert,
+                        output: e.to_string().into_bytes(),
+                        gas_used: 0,
+                    }
+                }
+                Ok(false) => {}
+            }
+            if call.gas_limit < 2_000 || host.charge(2_000).is_err() {
+                return EeOutcome {
+                    status: OutcomeStatus::OutOfGas,
+                    output: Vec::new(),
+                    gas_used: call.gas_limit,
+                };
+            }
             let st = SplTokenAccountState {
                 mint,
                 owner: wallet,
@@ -711,11 +830,10 @@ impl SvmWorker {
                     gas_used: 0,
                 };
             }
-            let _ = host.charge(2_000);
             return EeOutcome {
                 status: OutcomeStatus::Success,
                 output: ata.to_vec(),
-                gas_used: 2_000.min(call.gas_limit),
+                gas_used: 2_000,
             };
         }
 
@@ -808,11 +926,12 @@ impl ExecutionEnvironment for SvmWorker {
         };
         let rec = read_svm_account(host, &pk);
         if rec.executable && !q.input.is_empty() {
-            let (_, _, out) = execute_sbpf_bytecode(&rec.data, &q.input, QUERY_CU_LIMIT)
-                .map_err(|(_, message, _)| EeRefusal {
+            let (_, _, out) = execute_sbpf_bytecode(&rec.data, &q.input, QUERY_CU_LIMIT).map_err(
+                |(_, message, _)| EeRefusal {
                     code: RefusalCode::Denied,
                     message,
-                })?;
+                },
+            )?;
             return Ok(out);
         }
         serde_json::to_vec(&rec).map_err(|e| EeRefusal {
@@ -845,6 +964,233 @@ mod tests {
         code
     }
 
+    fn test_call(target: [u8; 32], kind: EeCallKind, input: Vec<u8>, gas_limit: u64) -> EeCall {
+        EeCall {
+            kind,
+            caller: EeIdentity {
+                ee: EeId::SVM,
+                id: vec![0x11; 32],
+            },
+            target: EeIdentity {
+                ee: EeId::SVM,
+                id: target.to_vec(),
+            },
+            value: BudAmount(0),
+            input,
+            gas_limit,
+            depth: 0,
+            tx_hash: [0; 32],
+        }
+    }
+
+    fn test_ctx() -> BlockContext {
+        BlockContext {
+            chain_id: 205,
+            height: 10,
+            timestamp_ms: 1_762_000_000_000,
+        }
+    }
+
+    #[test]
+    fn svm_deploy_requires_gas_and_cannot_overwrite_existing_program() {
+        let target = [0x77; 32];
+        let code = minimal_sbpf_ok_program();
+        let mut worker = SvmWorker;
+        let mut host = MemoryHost::new(10_000);
+        let low_gas = test_call(target, EeCallKind::Deploy, code.clone(), 1_999);
+        let outcome = worker
+            .execute(&test_ctx(), &low_gas, &mut host)
+            .expect("worker must not fault");
+        assert_eq!(outcome.status, OutcomeStatus::OutOfGas);
+        assert!(host.state.is_empty());
+        assert_eq!(host.gas_charged, 0);
+
+        let call = test_call(target, EeCallKind::Deploy, code, 2_000);
+        let outcome = worker
+            .execute(&test_ctx(), &call, &mut host)
+            .expect("worker must not fault");
+        assert_eq!(outcome.status, OutcomeStatus::Success);
+        assert_eq!(outcome.gas_used, 2_000);
+        assert_eq!(host.gas_charged, 2_000);
+        let saved_state = host.state.clone();
+
+        let outcome = worker
+            .execute(&test_ctx(), &call, &mut host)
+            .expect("worker must not fault");
+        assert_eq!(outcome.status, OutcomeStatus::Revert);
+        assert_eq!(host.state, saved_state);
+        assert_eq!(host.gas_charged, 2_000);
+    }
+
+    #[test]
+    fn svm_ata_creation_preserves_existing_accounts_and_checks_gas() {
+        let wallet = [0x22; 32];
+        let mint = [0x33; 32];
+        let ata = derive_associated_token_address(&wallet, &SPL_TOKEN_PROGRAM_ID, &mint);
+        let instruction = SvmInstructionEnvelope {
+            accounts: vec![
+                SvmAccountMeta {
+                    pubkey: wallet,
+                    is_signer: false,
+                    is_writable: false,
+                },
+                SvmAccountMeta {
+                    pubkey: mint,
+                    is_signer: false,
+                    is_writable: false,
+                },
+                SvmAccountMeta {
+                    pubkey: SPL_TOKEN_PROGRAM_ID,
+                    is_signer: false,
+                    is_writable: false,
+                },
+            ],
+            data: Vec::new(),
+        };
+        let input = serde_json::to_vec(&instruction).expect("serializable instruction");
+        let mut worker = SvmWorker;
+        let mut host = MemoryHost::new(10_000);
+        let mint_record = SvmAccountRecord {
+            owner: SPL_TOKEN_PROGRAM_ID,
+            executable: false,
+            rent_epoch: u64::MAX,
+            data: serde_json::to_vec(&SplMintState {
+                mint_authority: Some(wallet),
+                supply: 0,
+                decimals: 6,
+                is_initialized: true,
+            })
+            .expect("serialize mint"),
+        };
+        write_svm_account(&mut host, &mint, &mint_record).expect("save mint");
+        let initial_state = host.state.clone();
+        let low_gas = test_call(
+            ASSOCIATED_TOKEN_PROGRAM_ID,
+            EeCallKind::Call,
+            input.clone(),
+            1_999,
+        );
+        let outcome = worker
+            .execute(&test_ctx(), &low_gas, &mut host)
+            .expect("worker must not fault");
+        assert_eq!(outcome.status, OutcomeStatus::OutOfGas);
+        assert_eq!(host.state, initial_state);
+
+        let call = test_call(ASSOCIATED_TOKEN_PROGRAM_ID, EeCallKind::Call, input, 2_000);
+        let outcome = worker
+            .execute(&test_ctx(), &call, &mut host)
+            .expect("worker must not fault");
+        assert_eq!(outcome.status, OutcomeStatus::Success);
+        assert_eq!(outcome.output, ata);
+        assert_eq!(host.gas_charged, 2_000);
+        let mut saved = read_svm_account(&host, &ata);
+        saved.data = b"existing funded account data".to_vec();
+        write_svm_account(&mut host, &ata, &saved).expect("store funded account");
+        let saved_state = host.state.clone();
+
+        let outcome = worker
+            .execute(&test_ctx(), &call, &mut host)
+            .expect("worker must not fault");
+        assert_eq!(outcome.status, OutcomeStatus::Revert);
+        assert_eq!(
+            host.state, saved_state,
+            "ATA creation must not zero an existing account"
+        );
+        assert_eq!(host.gas_charged, 2_000);
+    }
+
+    #[test]
+    fn spl_token_mint_to_rejects_wrong_mint_and_self_transfer_cannot_inflate_balance() {
+        let caller = [0x11; 32];
+        let mint = [0x22; 32];
+        let other_mint = [0x33; 32];
+        let token = [0x44; 32];
+        let mut host = MemoryHost::new(10_000);
+        let mint_record = SvmAccountRecord {
+            owner: SPL_TOKEN_PROGRAM_ID,
+            executable: false,
+            rent_epoch: u64::MAX,
+            data: serde_json::to_vec(&SplMintState {
+                mint_authority: Some(caller),
+                supply: 10,
+                decimals: 6,
+                is_initialized: true,
+            })
+            .expect("serialize mint"),
+        };
+        let token_record = SvmAccountRecord {
+            owner: SPL_TOKEN_PROGRAM_ID,
+            executable: false,
+            rent_epoch: u64::MAX,
+            data: serde_json::to_vec(&SplTokenAccountState {
+                mint: other_mint,
+                owner: caller,
+                amount: 10,
+                delegate: None,
+                delegated_amount: 0,
+                is_initialized: true,
+            })
+            .expect("serialize account"),
+        };
+        write_svm_account(&mut host, &mint, &mint_record).expect("save mint");
+        write_svm_account(&mut host, &token, &token_record).expect("save account");
+        let before = host.state.clone();
+        let mut mint_to = vec![7];
+        mint_to.extend_from_slice(&5u64.to_le_bytes());
+        let mint_ix = SvmInstructionEnvelope {
+            accounts: vec![
+                SvmAccountMeta {
+                    pubkey: mint,
+                    is_signer: false,
+                    is_writable: true,
+                },
+                SvmAccountMeta {
+                    pubkey: token,
+                    is_signer: false,
+                    is_writable: true,
+                },
+            ],
+            data: mint_to,
+        };
+        assert!(handle_spl_token(&SPL_TOKEN_PROGRAM_ID, &caller, &mint_ix, &mut host).is_err());
+        assert_eq!(
+            host.state, before,
+            "mint mismatch must not alter supply or account"
+        );
+
+        let mut token_record = token_record;
+        token_record.data = serde_json::to_vec(&SplTokenAccountState {
+            mint,
+            owner: caller,
+            amount: 10,
+            delegate: None,
+            delegated_amount: 0,
+            is_initialized: true,
+        })
+        .expect("serialize account");
+        write_svm_account(&mut host, &token, &token_record).expect("save matching token");
+        let before = host.state.clone();
+        let mut transfer = vec![3];
+        transfer.extend_from_slice(&5u64.to_le_bytes());
+        let transfer_ix = SvmInstructionEnvelope {
+            accounts: vec![
+                SvmAccountMeta {
+                    pubkey: token,
+                    is_signer: false,
+                    is_writable: true,
+                },
+                SvmAccountMeta {
+                    pubkey: token,
+                    is_signer: false,
+                    is_writable: true,
+                },
+            ],
+            data: transfer,
+        };
+        assert!(handle_spl_token(&SPL_TOKEN_PROGRAM_ID, &caller, &transfer_ix, &mut host).is_ok());
+        assert_eq!(host.state, before, "self-transfer cannot mint tokens");
+    }
+
     #[test]
     fn svm_jit_is_disabled() {
         let code = minimal_sbpf_ok_program();
@@ -869,7 +1215,10 @@ mod tests {
 
         // Calling with `interpreted = false` MUST fail with `JitNotCompiled`!
         let (_, jit_res) = vm.execute_program(&exe, false);
-        assert!(matches!(jit_res, ProgramResult::Err(EbpfError::JitNotCompiled)));
+        assert!(matches!(
+            jit_res,
+            ProgramResult::Err(EbpfError::JitNotCompiled)
+        ));
 
         // Calling with `interpreted = true` succeeds cleanly!
         let (insns, interp_res) = vm.execute_program(&exe, true);
@@ -899,11 +1248,9 @@ mod tests {
             let Some(alias) = found else {
                 panic!("off-curve alias not found");
             };
-            assert!(
-                curve25519_dalek::edwards::CompressedEdwardsY(alias)
-                    .decompress()
-                    .is_none()
-            );
+            assert!(curve25519_dalek::edwards::CompressedEdwardsY(alias)
+                .decompress()
+                .is_none());
         }
     }
 
@@ -980,7 +1327,7 @@ mod tests {
         };
         assert_eq!(m_out.status, OutcomeStatus::Success);
 
-        let create_ata = |w: [u8; 32], h: &mut MemoryHost, wrk: &mut SvmWorker| -> [u8; 32] {
+        let create_ata = |w: [u8; 32], h: &mut MemoryHost, worker: &mut SvmWorker| -> [u8; 32] {
             let env = SvmInstructionEnvelope {
                 accounts: vec![
                     SvmAccountMeta {
@@ -1001,7 +1348,7 @@ mod tests {
                 ],
                 data: Vec::new(),
             };
-            let Ok(res) = wrk.execute(
+            let Ok(res) = worker.execute(
                 &ctx,
                 &EeCall {
                     kind: EeCallKind::Call,

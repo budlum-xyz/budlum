@@ -6,6 +6,8 @@
 //! - WASM `BudlumMsg::UniversalCall` and `BudlumQuery::UniversalView`.
 //! - BudZero syscall `UNIVERSAL_CALL` (`0x40`).
 //! - Static-call envelope tagging enforced as read-only by `TxOverlay`.
+//!
+//! Convenience: exposed for CLI, RPC, SDK, and multi-VM runtime callers.
 
 use budlum_uel_abi::{EeId, EeLog};
 use serde::{Deserialize, Serialize};
@@ -212,8 +214,7 @@ pub fn decode_precompile_calldata(calldata: &[u8]) -> Result<DecodedPrecompileCa
     let args = calldata.get(4..).unwrap_or(&[]);
     if sel == evm_universal_call_selector() {
         let ee_u64 = read_u64_word(args, 0)?;
-        let ee_u8 =
-            u8::try_from(ee_u64).map_err(|_| String::from("target_ee exceeds uint8"))?;
+        let ee_u8 = u8::try_from(ee_u64).map_err(|_| String::from("target_ee exceeds uint8"))?;
         let target = read_dyn_bytes(args, 32)?;
         let input = read_dyn_bytes(args, 64)?;
         if has_reserved_static_prefix(&input) {
@@ -233,8 +234,7 @@ pub fn decode_precompile_calldata(calldata: &[u8]) -> Result<DecodedPrecompileCa
         })
     } else if sel == evm_universal_static_call_selector() {
         let ee_u64 = read_u64_word(args, 0)?;
-        let ee_u8 =
-            u8::try_from(ee_u64).map_err(|_| String::from("target_ee exceeds uint8"))?;
+        let ee_u8 = u8::try_from(ee_u64).map_err(|_| String::from("target_ee exceeds uint8"))?;
         let target = read_dyn_bytes(args, 32)?;
         let input = read_dyn_bytes(args, 64)?;
         let gas_bgu = read_u64_word(args, 96)?;
@@ -280,8 +280,11 @@ pub fn encode_evm_universal_call_log(target_ee: EeId, target: &[u8], ok: bool) -
     write_u64_word(u64::from(ok), &mut data);
     write_dyn_bytes(target, &mut data);
     EeLog {
-        address: EVM_UNIVERSAL_PRECOMPILE.to_vec(),
-        topics: vec![universal_call_executed_topic0()],
+        emitter: budlum_uel_abi::EeIdentity {
+            ee: EeId::EVM,
+            id: EVM_UNIVERSAL_PRECOMPILE.to_vec(),
+        },
+        topics: vec![universal_call_executed_topic0().to_vec()],
         data,
     }
 }

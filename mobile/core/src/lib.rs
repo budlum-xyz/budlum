@@ -117,7 +117,7 @@ mod tests {
         assert_eq!(*object, assigned.object);
         proof.verify(&audit, &ctx).expect("verify");
         assert_eq!(core.status().last_audit, LastAudit::Passed);
- // A proof for another sub-block still verifies against the same root.
+        // A proof for another sub-block still verifies against the same root.
         let extra = prove(1, &assigned.placed, 0, &symbol, 1).expect("second sub-block");
         extra
             .verify(
@@ -216,7 +216,7 @@ mod tests {
         assert!(!signal.verify_with(1, mock_verify));
         let message = presence_message(TESTNET_CHAIN_ID, 11, ValidatorClass::Mobile);
         assert_eq!(signal.sig_bls, mock_sign(&message));
- // Same window, different class: a double-sign.
+        // Same window, different class: a double-sign.
         let other = PresenceSignal::sign(
             OWNER.into(),
             TESTNET_CHAIN_ID,
@@ -259,7 +259,7 @@ mod tests {
         let mut core = fixture(8 * QUOTA_MIN_BYTES);
         core.accept_share(assigned.clone()).expect("accept");
         assert!(core.status().stored_bytes > 0);
- // Free space below 2 GB: the core releases shares.
+        // Free space below 2 GB: the core releases shares.
         core.set_available_bytes(FREE_SPACE_FLOOR_BYTES - 1);
         let released = core.drain_duties();
         assert!(matches!(
@@ -269,12 +269,12 @@ mod tests {
         assert_eq!(core.status().stored_bytes, 0);
         assert_eq!(core.policy().quota_bytes, QUOTA_MIN_BYTES);
         assert!(core.available_bytes() >= FREE_SPACE_FLOOR_BYTES);
- // After the floor fire, a new share is refused until space returns.
+        // After the floor fire, a new share is refused until space returns.
         core.set_available_bytes(FREE_SPACE_FLOOR_BYTES - 1);
         let err = core.accept_share(assigned).expect_err("floor");
         assert_eq!(err.code, "mobile_free_space_floor");
- // Quota itself refuses a share that does not fit. The store is tested
- // with a small quota so this test does not allocate a gibibyte.
+        // Quota itself refuses a share that does not fit. The store is tested
+        // with a small quota so this test does not allocate a gibibyte.
         let tiny = vec![0x22u8; 50];
         let (assigned_tiny, _) = placed_symbol(&tiny, 2);
         let mut store = ShareStore::new();

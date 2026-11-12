@@ -493,8 +493,8 @@ mod tests {
         let q = query::classify(&format!("bud://0x{}", "33".repeat(32)));
         let r = run(&view, &q);
         match r.hit {
-            Hit::Openable { ref target, .. } => {
-                assert!(target.starts_with("bud://0x"), "{target}");
+            Hit::Openable { ref input, .. } => {
+                assert!(input.starts_with("bud://0x"), "{input}");
             }
             other => panic!("expected Hit::Openable for ContentId, got {other:?}"),
         }

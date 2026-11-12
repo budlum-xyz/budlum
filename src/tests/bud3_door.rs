@@ -262,8 +262,8 @@ fn endowment_settles_custody_rewards_and_renewal_across_epochs() {
     state.add_balance(&uploader, 10_000);
     state.add_balance(&confirmed_holder, 1_000);
 
-    let up = prepare_public_upload(b"endowment-priced payload", &P, &Bud3Limits::default(), 12)
-        .unwrap();
+    let up =
+        prepare_public_upload(b"endowment-priced payload", &P, &Bud3Limits::default(), 12).unwrap();
     let key = up.record.commitment;
     let shares = vec![
         (
@@ -310,7 +310,13 @@ fn endowment_settles_custody_rewards_and_renewal_across_epochs() {
     // Only holder 30 acknowledges its share; holder 31 remains pending.
     apply(
         &mut state,
-        &storage_tx(confirmed_holder, 0, 1, 0, StorageTxV3::CustodyAck { object: key }),
+        &storage_tx(
+            confirmed_holder,
+            0,
+            1,
+            0,
+            StorageTxV3::CustodyAck { object: key },
+        ),
     )
     .unwrap();
 
@@ -785,10 +791,7 @@ fn bud3_public_dedup_sealed_isolation_and_dependency_rules() {
         12,
     )
     .unwrap();
-    assert_ne!(
-        alice_sealed.record.commitment,
-        bob_sealed.record.commitment
-    );
+    assert_ne!(alice_sealed.record.commitment, bob_sealed.record.commitment);
     let alice_base = alice_sealed.record.commitment;
     let bob_obj = bob_sealed.record.commitment;
     apply(
@@ -824,9 +827,7 @@ fn bud3_public_dedup_sealed_isolation_and_dependency_rules() {
 
     // Cross-owner base dependency is refused.
     assert_eq!(
-        state
-            .bud3_registry
-            .register_dependency(bob_obj, alice_base),
+        state.bud3_registry.register_dependency(bob_obj, alice_base),
         Err(RegistryError::CrossOwnerDependency)
     );
 
@@ -1060,8 +1061,8 @@ fn bud3_missed_audit_does_not_slash_and_custody_proof_verifies() {
         state.add_balance(&addr, 50_000);
     }
 
-    let up = prepare_public_upload(b"audited custody payload", &P, &Bud3Limits::default(), 12)
-        .unwrap();
+    let up =
+        prepare_public_upload(b"audited custody payload", &P, &Bud3Limits::default(), 12).unwrap();
     let obj_key = up.record.commitment;
     let shares = vec![
         (
@@ -1167,7 +1168,12 @@ fn bud3_missed_audit_does_not_slash_and_custody_proof_verifies() {
     let missed = state.bud3_registry.close_windows(3);
     assert_eq!(missed, 1);
     assert_eq!(state.get_balance(&sleepy_holder), sleepy_balance_before);
-    assert!(state.bud3_registry.validator_custody_credit(honest_holder.as_bytes()) > 0);
+    assert!(
+        state
+            .bud3_registry
+            .validator_custody_credit(honest_holder.as_bytes())
+            > 0
+    );
     assert_eq!(
         state
             .bud3_registry
@@ -1182,7 +1188,9 @@ fn bud3_e2e_upload_register_view() {
     use crate::storage::bud3::placement::PlacementRow;
     use crate::storage::bud3::rpc::Bud3RpcService;
     use crate::storage::bud3::upload::UploadSessionManager;
-    use crate::storage::bud3::view::{view_from_network, MemorySymbolNetwork, MIN_PAID_VIEW_FEE_ATOMS};
+    use crate::storage::bud3::view::{
+        view_from_network, MemorySymbolNetwork, MIN_PAID_VIEW_FEE_ATOMS,
+    };
 
     let uploader = Address::from([111u8; 32]);
     let payer = Address::from([112u8; 32]);
@@ -1206,7 +1214,8 @@ fn bud3_e2e_upload_register_view() {
         s_mobile: 0,
     };
 
-    let original = b"full B.U.D. 3.0 upload -> block register -> second-device network view".repeat(25);
+    let original =
+        b"full B.U.D. 3.0 upload -> block register -> second-device network view".repeat(25);
     let mut upload_mgr = UploadSessionManager::new(Bud3Limits::default());
     let sid = upload_mgr
         .open_session(
@@ -1227,7 +1236,11 @@ fn bud3_e2e_upload_register_view() {
     let obj_key = finished.record.commitment;
 
     // Commit RegisterObject on chain through Executor::apply_transaction.
-    apply(&mut state, &storage_tx(uploader, 0, 1, 0, finished.unsigned_tx.clone())).unwrap();
+    apply(
+        &mut state,
+        &storage_tx(uploader, 0, 1, 0, finished.unsigned_tx.clone()),
+    )
+    .unwrap();
 
     // Distribute coded symbols to the assigned custody holders on the network.
     let mut net = MemorySymbolNetwork::default();

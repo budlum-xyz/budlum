@@ -29,10 +29,7 @@ const DIRECTIVE_ROUTES: &[(Verb, &str)] = &[
     (Verb::Get, "/v1/estimate_gas_price"),
     (Verb::Get, "/v1/blocks/by_height/{h}"),
     (Verb::Post, "/v1/tables/{handle}/item"),
-    (
-        Verb::Get,
-        "/v1/accounts/{addr}/events/{creation_number}",
-    ),
+    (Verb::Get, "/v1/accounts/{addr}/events/{creation_number}"),
 ];
 
 fn method(verb: Verb) -> Method {
@@ -73,10 +70,9 @@ fn aptos_every_route_is_public_and_has_one_effect() {
         assert_eq!(endpoint.listener, Listener::Public);
         match endpoint.answer {
             Answer::ChainRead => assert_eq!(endpoint.effect, Effect::Read),
-            Answer::MoveUnavailable { .. } => assert!(matches!(
-                endpoint.effect,
-                Effect::Read | Effect::TxSubmit
-            )),
+            Answer::MoveUnavailable { .. } => {
+                assert!(matches!(endpoint.effect, Effect::Read | Effect::TxSubmit))
+            }
         }
     }
 }
@@ -102,7 +98,7 @@ fn aptos_dynamic_routes_match_exactly_one_path_shape() {
         let RouteMatch::Found(index) = classify(&Method::GET, path) else {
             panic!("{path} did not match {pattern}");
         };
-        assert_eq!(ENDPOINTS[index].pattern, pattern);
+        assert_eq!(ENDPOINTS.get(index).map(|e| e.pattern), Some(pattern));
     }
 
     assert_eq!(
@@ -168,10 +164,20 @@ fn aptos_move_refusals_name_an_existing_budlum_door() {
         assert_eq!(error.status, StatusCode::SERVICE_UNAVAILABLE);
         assert!(error.message.contains(door));
         let body = error.body();
-        assert_eq!(body["door"], door);
-        assert_eq!(body["package"], "Aptos REST compatibility");
         assert_eq!(
-            body["error_code"],
+            body.get("door").cloned().unwrap_or(serde_json::Value::Null),
+            door
+        );
+        assert_eq!(
+            body.get("package")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null),
+            "Aptos REST compatibility"
+        );
+        assert_eq!(
+            body.get("error_code")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null),
             "move_execution_environment_unavailable"
         );
     }
@@ -199,13 +205,48 @@ fn aptos_node_info_binds_aptos_id_to_the_real_head() {
     head.epoch = 7;
     head.timestamp = 1_762_400_000_123;
     let info = node_info_response(head, true).expect("node information is available");
-    assert_eq!(info["chain_id"], 205);
-    assert_eq!(info["epoch"], "7");
-    assert_eq!(info["ledger_version"], "41");
-    assert_eq!(info["block_height"], "41");
-    assert_eq!(info["oldest_ledger_version"], "0");
-    assert_eq!(info["ledger_timestamp"], "1762400000123000");
-    assert_eq!(info["node_role"], "full_node");
+    assert_eq!(
+        info.get("chain_id")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null),
+        205
+    );
+    assert_eq!(
+        info.get("epoch")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null),
+        "7"
+    );
+    assert_eq!(
+        info.get("ledger_version")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null),
+        "41"
+    );
+    assert_eq!(
+        info.get("block_height")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null),
+        "41"
+    );
+    assert_eq!(
+        info.get("oldest_ledger_version")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null),
+        "0"
+    );
+    assert_eq!(
+        info.get("ledger_timestamp")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null),
+        "1762400000123000"
+    );
+    assert_eq!(
+        info.get("node_role")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null),
+        "full_node"
+    );
 }
 
 #[test]
@@ -241,7 +282,9 @@ fn aptos_health_reports_ready_and_syncing_without_json_wrappers() {
 fn aptos_dedicated_listener_is_loopback_only() {
     assert_eq!(
         validate_listener("127.0.0.1:18549").expect("IPv4 loopback is valid"),
-        "127.0.0.1:18549".parse().expect("the expected socket is valid")
+        "127.0.0.1:18549"
+            .parse()
+            .expect("the expected socket is valid")
     );
     assert!(validate_listener("[::1]:18549").is_ok());
     for invalid in ["0.0.0.0:18549", "192.0.2.1:18549", "localhost:18549", "bad"] {
@@ -305,11 +348,11 @@ async fn aptos_proxy_forwards_only_the_request_and_response_contract() {
             if read == 0 {
                 break;
             }
-            request.extend_from_slice(&buffer[..read]);
+            request.extend_from_slice(buffer.get(..read).unwrap_or(&[]));
             let Some(head_end) = request.windows(4).position(|part| part == b"\r\n\r\n") else {
                 continue;
             };
-            let content_length = String::from_utf8_lossy(&request[..head_end])
+            let content_length = String::from_utf8_lossy(request.get(..head_end).unwrap_or(&[]))
                 .lines()
                 .find_map(|line| line.strip_prefix("content-length: "))
                 .and_then(|value| value.trim().parse::<usize>().ok())
@@ -344,8 +387,19 @@ async fn aptos_proxy_forwards_only_the_request_and_response_contract() {
     .await
     .expect("proxy response");
     assert_eq!(response.status(), StatusCode::CREATED);
-    assert_eq!(response.headers()["x-aptos-cursor"], "7");
-    let body = response.into_body().collect().await.expect("body").to_bytes();
+    assert_eq!(
+        response
+            .headers()
+            .get("x-aptos-cursor")
+            .and_then(|v| v.to_str().ok()),
+        Some("7")
+    );
+    let body = response
+        .into_body()
+        .collect()
+        .await
+        .expect("body")
+        .to_bytes();
     assert_eq!(body.as_ref(), b"{\"ok\":true}");
 
     let captured = String::from_utf8(captured_rx.await.expect("captured request"))

@@ -1,6 +1,6 @@
 # Google Play `specialUse` Declaration & Platform Policy Verification
 
-> **Draft only — do not submit with the current scaffold.** The mobile-core
+> **Draft only - do not submit with the current scaffold.** The mobile-core
 > network binding, signed duty transport and durable release/acknowledgement
 > protocol are not connected. Text below describes intended behavior, not a
 > completed device/testnet capability.
@@ -28,17 +28,21 @@
  `ForegroundServiceStartNotAllowedException`.
 - Implementation rule enforced in `BootCompletedReceiver.kt` (matching Directive
  Section 7.9.3 item 5 & 6):
- 1. `ValidatorService` is started **exclusively** while the user has the app open
- in the foreground.
+ 1. The current build does not start a working `ValidatorService`. Any future
+ start flow must require the app to be open in the foreground.
  2. On `ACTION_BOOT_COMPLETED`, `BootCompletedReceiver` **never** calls
- `startForegroundService`. Instead, it posts a tap-to-resume status
- notification so the user can reopen the app to restore persistent foreground
- serving, and immediately schedules `DutyPeriodicWorker` via `WorkManager`
- (15-minute interval, `NetworkType.UNMETERED` constraint). The worker is a
- local policy/storage shell only; no background audit or presence success is
- implied until the network duty binding exists.
+ `startForegroundService`. It may post an informational notification. While
+ onboarding remains disconnected, `DutyPeriodicWorker.enqueuePeriodic` refuses
+ to schedule work, and an older installation's existing worker returns failure
+ without deleting local shares or claiming a successful audit. The intended
+ unmetered 15-minute duty schedule is **not operating** in this build.
 
 ## 2. Google Play Console `specialUse` Foreground Service Declaration
+
+**Future release declaration, not current APK behavior.** The present UI
+requests a faucet transfer and reads an RPC-reported balance. A Play declaration
+for a validator must describe the behavior of its *shipped* build, including a
+working wallet, signed registration, transport and custody duties.
 
 - **Foreground service type:** `specialUse`
 - **Manifest property (`android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE`):**
@@ -53,28 +57,23 @@
  > 24 hours on Android 15+) nor `connectedDevice` / `remoteMessaging` applies to a
  > user-controlled decentralized storage custodian. A persistent notification
  > continuously displays stored bytes, the latest audit outcome, and connection
- > status, and includes a one-tap Stop action. No cryptocurrency PoW mining is
- > performed on the device.
-- **Reviewer walkthrough note:**
- 1. Launch **Budlum Validator** -> Create a 24-word wallet -> Tap **Request Testnet
- Faucet (100 BUD)** -> Tap **Register Mobile Validator (10 BUD)**.
- 2. Tap **Start Validator Duty** while the app is in the foreground. Observe the
- persistent notification showing stored bytes, last audit result, and relay
- connection state.
- 3. Tap **Pause** or reboot the emulator: observe that `BOOT_COMPLETED` does not
- auto-launch the foreground service, posts a resume notification instead, and
- continues 15-minute unmetered `WorkManager` audit/presence maintenance.
+ > status, and includes a one-tap Stop action. The faucet request performs a
+ > bounded anti-abuse work challenge; it does not mine blocks.
+- **Future reviewer walkthrough:** The review build must support wallet creation,
+ signed registration, foreground duty start/stop, service notification, audited
+ custody and a boot flow that does not auto-start a `specialUse` service. The
+ current debug build has none of those actions; it only exposes the faucet
+ request and RPC account view.
 
-## 3. Key Custody & Privacy Guarantees
+## 3. Key Custody & Privacy Status (not production guarantees)
 
-- **Owner key (`ML-DSA-87`, 24 words):** unlocks only with explicit user biometric
- or device PIN authentication for staking, unbonding, or `RotateOperatorKey`
- recovery (`R-16`).
-- **Operator (`ML-DSA-65`) & presence (`BLS12-381`) keys:** wrapped at rest under
- an Android Keystore `AES-256-GCM` hardware key (StrongBox preferred when present)
- with `setUserAuthenticationRequired(false)` and `setUnlockedDeviceRequired(false)`
- so background `WorkManager` audits succeed; an attacker with physical access could
- sign duty messages only, never move staked or liquid BUD.
-- **Zero telemetry:** no third-party analytics, ad, or crash-reporting SDK is
- included. Crash logs are exported strictly as local files upon explicit user
- confirmation. `REQUEST_IGNORE_BATTERY_OPTIMIZATIONS` is never requested.
+- **Owner key (`ML-DSA-87`, 24 words):** real wallet creation, biometric/PIN
+ authorization and signing are **not implemented**. All owner-key use, staking,
+ unbonding and rotation requests are refused, including any caller-supplied token.
+- **Operator (`ML-DSA-65`) & presence (`BLS12-381`) keys:** local AES-256-GCM
+ wrapping code prefers StrongBox when available; this code alone is neither
+ an operational duty signer nor a network audit. The unauthenticated local
+ operator wrapper must never be used as owner authorization.
+- **Telemetry:** no third-party analytics, ad, or crash-reporting SDK is
+ included. `REQUEST_IGNORE_BATTERY_OPTIMIZATIONS` is not requested. Privacy
+ assertions require device and dependency review before Play submission.

@@ -134,9 +134,7 @@ pub fn verify_symbol_range_response() {}
             "pub const MAX_SYMBOLS_PER_REQUEST: u32 = 999;\n",
         )?;
         if run(&dir).is_ok() {
-            return Err(String::from(
-                "canary: uncapped symbol_protocol.rs passed",
-            ));
+            return Err(String::from("canary: uncapped symbol_protocol.rs passed"));
         }
 
         Ok(())
