@@ -1731,9 +1731,14 @@ fn run_domain_selftest(
 /// chain id, nonce and receipt; no shell or PATH lookup is involved.
 fn run_faucet(action: &FaucetAction) -> Result<(), String> {
     match action {
-        FaucetAction::Request { url, address } => tokio::runtime::Runtime::new()
-            .map_err(|e| format!("tokio runtime: {e}"))
-            .and_then(|rt| rt.block_on(faucet_client::request_funds(url, address))),
+        FaucetAction::Request { url, address } => {
+            // This build uses reqwest's provider-less rustls mode. Install the
+            // same pinned crypto provider as the node before making HTTPS calls.
+            budlum_core::crypto::tls::install_default_provider();
+            tokio::runtime::Runtime::new()
+                .map_err(|e| format!("tokio runtime: {e}"))?
+                .block_on(faucet_client::request_funds(url, address))
+        }
     }
 }
 
