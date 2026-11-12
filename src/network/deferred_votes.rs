@@ -39,11 +39,11 @@ use crate::chain::finality::{Precommit, Prevote};
 /// Two votes per validator per round and a handful of rounds in flight is
 /// single digits; the cap is set far above that so a stall does not lose the
 /// vote that would have ended it, and far below anything a peer can grow.
-const DEFERRED_VOTE_CAP: usize = 64;
+const DEFERRED_VOTE_CAP: usize = 128;
 
 /// Maximum deferred slots one validator identity may occupy at once across
-/// upcoming rounds (prevote + precommit across two checkpoints).
-const MAX_DEFERRED_PER_VOTER: usize = 4;
+/// upcoming rounds (prevote + precommit across the 8-checkpoint early-vote horizon).
+const MAX_DEFERRED_PER_VOTER: usize = 16;
 
 /// A vote held for a round that is not open here yet.
 #[derive(Clone, Debug)]
