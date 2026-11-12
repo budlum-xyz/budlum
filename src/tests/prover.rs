@@ -848,7 +848,7 @@ fn proof_market_zk_idempotent_claim_refunds_creator_without_paying_prover() {
     // Creator funds a proof-market task for the already-proven (1, 1) claim.
     let ctx = |sender| crate::settlement::domains::SettlementTxContext {
         sender,
-        chain_id: bc.state.chain_id,
+        chain_id: bc.chain_id,
         fee: 0,
         bls: || Box::new(crate::cross_domain::external::ethereum::AcceptAllBls),
     };
@@ -866,9 +866,8 @@ fn proof_market_zk_idempotent_claim_refunds_creator_without_paying_prover() {
         &crate::settlement::domains::SettlementTx::ProofMarket(Box::new(
             crate::settlement::proof_market::ProofMarketTx::CreateTask {
                 kind: crate::settlement::proof_market::ProofTaskKind::ZkProof {
-                    domain_id: 1,
-                    target_height: 1,
-                    program_hash: crate::prover::zk_program_hash(&program),
+                    circuit_id: crate::prover::zk_program_hash(&program),
+                    public_inputs_hash: pi.hash(),
                 },
                 deadline_epoch: 10,
                 reward,
