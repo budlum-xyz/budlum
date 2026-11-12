@@ -2475,7 +2475,9 @@ impl StorageRegistry {
         if self
             .scoped_self_host_policies
             .keys()
-            .any(|(manifest_id, _, owner)| manifest_id == content_id && owner != burner)
+            .any(|(manifest_id, inner_cid, owner)| {
+                (manifest_id == content_id || inner_cid == content_id) && owner != burner
+            })
         {
             return false;
         }
@@ -9323,20 +9325,17 @@ mod tests {
         let mut reg = StorageRegistry::new();
         let m = good_manifest();
         let (deal_id, _) = open_one(&mut reg, &m);
-        let err = reg
-            .open_challenge(deal_id, 0, 4, 110, 120, operator(), 50)
-            .unwrap_err();
+        let err = reg.open_challenge(deal_id, 0, 4, 110, 120, operator(), 50);
+        let err = err.unwrap_err();
         assert!(matches!(err, StorageError::ChallengeOpenerIsOperator { .. }));
 
-        let cid = reg
-            .open_challenge(deal_id, 0, 4, 110, 120, opener(), 50)
-            .unwrap();
-        let res = reg
-            .answer_challenge(cid, ContentId([1u8; 32]), operator(), 115, Some(&[1u8; 16]))
-            .unwrap();
+        let cid = reg.open_challenge(deal_id, 0, 4, 110, 120, opener(), 50);
+        let cid = cid.unwrap();
+        let res = reg.answer_challenge(cid, ContentId([1u8; 32]), operator(), 115, Some(&[1u8; 16]));
+        let res = res.unwrap();
         assert_eq!(res.outcome, ChallengeOutcome::Answered);
         assert!(
-            reg.access_events.get(&m.manifest_id).is_none(),
+            !reg.access_events.contains_key(&m.manifest_id),
             "unverifiable proof must not credit a proven read"
         );
     }
