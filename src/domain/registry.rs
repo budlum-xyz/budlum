@@ -452,7 +452,11 @@ pub fn domain_leaf_hash(domain: &ConsensusDomain) -> Hash32 {
     if domain.genesis_state_root == [0u8; 32] {
         leaf
     } else {
-        hash_fields_bytes(&[b"BDLM_DOMAIN_REGISTRY_LEAF_V5", &leaf, &domain.genesis_state_root])
+        hash_fields_bytes(&[
+            b"BDLM_DOMAIN_REGISTRY_LEAF_V5",
+            &leaf,
+            &domain.genesis_state_root,
+        ])
     }
 }
 

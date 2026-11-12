@@ -1171,8 +1171,6 @@ pub enum StorageError {
     /// The primary is the copy a reader reaches first and a repair rebuilds
     /// from. A device that is online when its owner is awake cannot be it.
     MobileOperatorCannotHoldPrimary(Address),
-    /// A deal's own operator cannot open a retrieval challenge against itself.
-    ChallengeOpenerIsOperator { deal_id: u64, operator: Address },
 }
 
 impl std::fmt::Display for StorageError {
@@ -1204,10 +1202,6 @@ impl std::fmt::Display for StorageError {
                 "operator {operator} is registered as mobile and cannot hold \
                  replica_index 0; a phone is online when its owner is, which \
                  is not what a primary copy means"
-            ),
-            Self::ChallengeOpenerIsOperator { deal_id, operator } => write!(
-                f,
-                "operator {operator} cannot open a retrieval challenge against its own deal {deal_id}"
             ),
             Self::ZeroOpenerBond => write!(f, "opener_bond must be > 0"),
             Self::IdSpaceExhausted => write!(f, "registry id counter is exhausted"),
@@ -3515,9 +3509,6 @@ impl StorageRegistry {
             return Err(StorageError::DealNotActive(deal_id));
         }
         let operator = deal.operator;
-        if opener == operator {
-            return Err(StorageError::ChallengeOpenerIsOperator { deal_id, operator });
-        }
         let manifest_id = deal.manifest_id;
         let shard_id = deal.shard_id;
         let minimum_next_epoch = self
@@ -9321,17 +9312,46 @@ mod tests {
     }
 
     #[test]
-    fn operator_cannot_self_open_challenge_and_unverifiable_answer_never_credits_proven_read() {
+    fn self_opened_or_unverifiable_challenge_never_credits_proven_read() {
         let mut reg = StorageRegistry::new();
         let m = good_manifest();
         let (deal_id, _) = open_one(&mut reg, &m);
-        let err = reg.open_challenge(deal_id, 0, 4, 110, 120, operator(), 50);
-        let err = err.unwrap_err();
-        assert!(matches!(err, StorageError::ChallengeOpenerIsOperator { .. }));
+        // Any account - including the operator (Invariant 3) - can open a challenge,
+        // but neither a self-opened challenge nor an unverifiable answer may credit demand.
+        let self_cid = reg
+            .open_challenge(deal_id, 0, 4, 110, 120, operator(), 50)
+            .unwrap();
+        let self_res = reg
+            .answer_challenge(
+                self_cid,
+                ContentId([1u8; 32]),
+                operator(),
+                111,
+                Some(&[1u8; 16]),
+            )
+            .unwrap();
+        assert_eq!(self_res.outcome, ChallengeOutcome::Answered);
+        assert!(
+            !reg.access_events.contains_key(&m.manifest_id),
+            "self-opened challenge must never credit a proven read"
+        );
+        assert_eq!(
+            reg.verified_challenge_bytes_with_gate(deal_id, operator(), true),
+            0,
+            "self-opened challenge must never credit reward bytes even when proofs are checkable"
+        );
 
-        let cid = reg.open_challenge(deal_id, 0, 4, 110, 120, opener(), 50);
-        let cid = cid.unwrap();
-        let res = reg.answer_challenge(cid, ContentId([1u8; 32]), operator(), 115, Some(&[1u8; 16]));
+        let cooldown = StorageRegistry::MIN_OPERATOR_MANIFEST_CHALLENGE_EPOCHS;
+        let cid = reg
+            .open_challenge(deal_id, 0, 4, 110 + cooldown, 120 + cooldown, opener(), 50)
+            .unwrap();
+        let res = reg.answer_challenge(
+            cid,
+            ContentId([1u8; 32]),
+            operator(),
+            115 + cooldown,
+            Some(&[1u8; 16]),
+        );
         let res = res.unwrap();
         assert_eq!(res.outcome, ChallengeOutcome::Answered);
         assert!(
