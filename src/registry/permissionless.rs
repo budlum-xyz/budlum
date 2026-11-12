@@ -108,6 +108,10 @@ pub enum MemberStatus {
     Unbonding { release_epoch: u64 },
     /// Slashed and jailed.
     Slashed,
+    /// Exited from `Slashed` into an unbonding lock: stake stays locked and
+    /// slashable until `release_epoch`, after which `withdraw` honours exit,
+    /// but the entry never regains role/quorum authority.
+    SlashedUnbonding { release_epoch: u64 },
 }
 
 /// A single (account, role) registration.
@@ -147,6 +151,18 @@ impl Registration {
     /// submit its transaction and then immediately call `begin_unbonding` to
     /// step out of responsibility.
     pub fn is_slashable(&self) -> bool {
+        matches!(
+            self.status,
+            MemberStatus::Active
+                | MemberStatus::Unbonding { .. }
+                | MemberStatus::SlashedUnbonding { .. }
+        ) && self.stake > 0
+    }
+
+    /// Whether this registration currently holds operational authority to
+    /// act in its role (`Active`, or clean `Unbonding` whose bond is still
+    /// locked; never `Slashed` or `SlashedUnbonding`).
+    pub fn has_role_authority(&self) -> bool {
         matches!(
             self.status,
             MemberStatus::Active | MemberStatus::Unbonding { .. }
@@ -635,7 +651,10 @@ impl PermissionlessRegistry {
         let unbonding_epochs = self.params.unbonding_epochs;
         match self.registrations.get_mut(&key) {
             Some(reg) => {
-                if matches!(reg.status, MemberStatus::Slashed) {
+                if matches!(
+                    reg.status,
+                    MemberStatus::Slashed | MemberStatus::SlashedUnbonding { .. }
+                ) {
                     // A slashed entry may only shrink. Writing the caller's
                     // uncut total back would undo the slash on the next
                     // Stake or Unstake of the mirrored validator bond.
@@ -716,16 +735,19 @@ impl PermissionlessRegistry {
             .registrations
             .get_mut(&(role, account))
             .ok_or(RegistryError::NotRegistered { account, role })?;
-        // A Slashed member may exit. The
-        // alternative - only Active can unbond, only Unbonding can withdraw,
-        // and re-register says AlreadyRegistered - left the remaining bond
-        // locked for good. Unbonding is not an escape from a later slash: the
-        // unbonding queue is cut on any further report.
-        if !matches!(reg.status, MemberStatus::Active | MemberStatus::Slashed) {
-            return Err(RegistryError::NotActive { account, role });
-        }
+        // A Slashed member may exit via SlashedUnbonding, keeping the stake
+        // locked and slashable without restoring active/role authority.
+        let next_status = match reg.status {
+            MemberStatus::Active => MemberStatus::Unbonding {
+                release_epoch: current_epoch.saturating_add(unbonding_epochs),
+            },
+            MemberStatus::Slashed => MemberStatus::SlashedUnbonding {
+                release_epoch: current_epoch.saturating_add(unbonding_epochs),
+            },
+            _ => return Err(RegistryError::NotActive { account, role }),
+        };
         let release_epoch = current_epoch.saturating_add(unbonding_epochs);
-        reg.status = MemberStatus::Unbonding { release_epoch };
+        reg.status = next_status;
         Ok(release_epoch)
     }
 
@@ -740,7 +762,8 @@ impl PermissionlessRegistry {
             .get(&(role, account))
             .ok_or(RegistryError::NotRegistered { account, role })?;
         match reg.status {
-            MemberStatus::Unbonding { release_epoch } => {
+            MemberStatus::Unbonding { release_epoch }
+            | MemberStatus::SlashedUnbonding { release_epoch } => {
                 if current_epoch < release_epoch {
                     return Err(RegistryError::StillUnbonding {
                         release_epoch,
@@ -813,7 +836,10 @@ impl PermissionlessRegistry {
         // indistinguishable from a slash that legitimately cost nothing, so a
         // caller that logs `penalty` or counts successful slashes records a
         // second punishment that never occurred.
-        if matches!(reg.status, MemberStatus::Slashed) {
+        if matches!(
+            reg.status,
+            MemberStatus::Slashed | MemberStatus::SlashedUnbonding { .. }
+        ) {
             return Err(RegistryError::AlreadySlashed { account, role });
         }
 
@@ -856,7 +882,10 @@ impl PermissionlessRegistry {
 
         for role in other_keys {
             if let Some(reg) = self.registrations.get_mut(&(role, account)) {
-                if matches!(reg.status, MemberStatus::Slashed) {
+                if matches!(
+                    reg.status,
+                    MemberStatus::Slashed | MemberStatus::SlashedUnbonding { .. }
+                ) {
                     continue;
                 }
                 let penalty = slash_penalty(reg.stake, slash_ratio_fixed);
@@ -1017,7 +1046,7 @@ impl PermissionlessRegistry {
     // test, so the consensus behaviour fell into contradiction.
     pub fn is_active_relayer(&self, account: &Address) -> bool {
         self.get(account, crate::registry::role::roles::RELAYER)
-            .is_some_and(Registration::is_slashable)
+            .is_some_and(Registration::has_role_authority)
     }
 
     pub fn ensure_active_relayer(&self, account: &Address) -> Result<(), RegistryError> {
@@ -1030,7 +1059,7 @@ impl PermissionlessRegistry {
 
     pub fn is_active_attester(&self, account: &Address) -> bool {
         self.get(account, crate::registry::role::roles::ATTESTER)
-            .is_some_and(Registration::is_slashable)
+            .is_some_and(Registration::has_role_authority)
     }
 
     pub fn ensure_active_attester(&self, account: &Address) -> Result<(), RegistryError> {
@@ -1050,36 +1079,22 @@ impl PermissionlessRegistry {
 
     pub fn is_active_ai_operator(&self, account: &Address) -> bool {
         self.get(account, crate::registry::role::roles::AI_OPERATOR)
-            .is_some_and(Registration::is_slashable)
+            .is_some_and(Registration::has_role_authority)
     }
 
     pub fn is_active_content_validator(&self, account: &Address) -> bool {
         self.get(account, crate::registry::role::roles::CONTENT_VALIDATOR)
-            .is_some_and(Registration::is_slashable)
+            .is_some_and(Registration::has_role_authority)
     }
 
     pub fn is_active_ai_verifier(&self, account: &Address) -> bool {
-        match self.get(account, crate::registry::role::roles::AI_VERIFIER) {
-            Some(reg) => {
-                matches!(
-                    reg.status,
-                    MemberStatus::Active | MemberStatus::Unbonding { .. }
-                ) && reg.stake > 0
-            }
-            None => false,
-        }
+        self.get(account, crate::registry::role::roles::AI_VERIFIER)
+            .is_some_and(Registration::has_role_authority)
     }
 
     pub fn is_active_prover(&self, account: &Address) -> bool {
-        match self.get(account, crate::registry::role::roles::PROVER) {
-            Some(reg) => {
-                matches!(
-                    reg.status,
-                    MemberStatus::Active | MemberStatus::Unbonding { .. }
-                ) && reg.stake > 0
-            }
-            None => false,
-        }
+        self.get(account, crate::registry::role::roles::PROVER)
+            .is_some_and(Registration::has_role_authority)
     }
 
     pub fn total_stake(&self, role: RoleId) -> u64 {
@@ -2964,5 +2979,40 @@ mod tests {
         reg.set_validator_commission(validator, 110_000, 1).unwrap();
         assert_eq!(reg.validator_commission_ppm(&validator), 110_000);
         assert!(reg.set_validator_commission(validator, 200_001, 2).is_err());
+    }
+
+    #[test]
+    fn slashed_member_enters_slashed_unbonding_and_stays_ineligible() {
+        let mut reg = PermissionlessRegistry::new();
+        let attester = addr(0x55);
+        reg.register(attester, roles::ATTESTER, MIN_REGISTRATION_STAKE, 0)
+            .unwrap();
+        assert!(reg.is_active_attester(&attester));
+
+        let outcome = reg
+            .slash_role_only(
+                attester,
+                roles::ATTESTER,
+                SlashingCondition::DoubleSign,
+                500,
+            )
+            .unwrap();
+        assert!(outcome.remaining_stake > 0);
+        assert!(!reg.is_active_attester(&attester));
+
+        let release = reg.begin_unbonding(attester, roles::ATTESTER, 3).unwrap();
+        assert!(matches!(
+            reg.get(&attester, roles::ATTESTER).unwrap().status,
+            MemberStatus::SlashedUnbonding { release_epoch } if release_epoch == release
+        ));
+        assert!(
+            !reg.is_active_attester(&attester),
+            "a slashed attester must stay ineligible after entering unbonding"
+        );
+        assert!(reg.withdraw(attester, roles::ATTESTER, release - 1).is_err());
+        assert_eq!(
+            reg.withdraw(attester, roles::ATTESTER, release).unwrap(),
+            outcome.remaining_stake
+        );
     }
 }

@@ -360,6 +360,7 @@ mod tests {
             pow_parameters: None,
             zk_program_allowlist: Vec::new(),
             plugin_code_hash: None,
+            genesis_state_root: [0; 32],
         };
         let commitment = DomainCommitment {
             domain_id: 7,

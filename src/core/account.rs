@@ -41,6 +41,14 @@ pub struct PendingDomainUnfreeze {
     pub justification_hash: [u8; 32],
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PendingDomainTipReset {
+    pub domain_id: u32,
+    pub target_height: u64,
+    pub target_hash: [u8; 32],
+    pub justification_hash: [u8; 32],
+}
+
 /// A governance-queued PoA compliance freeze/unfreeze,
 /// applied by `Blockchain::apply_pending_poa_compliance` where the domain
 /// kind can be read from the domain record (never from the transaction).
@@ -462,6 +470,9 @@ pub struct AccountState {
     /// Populated by executor when `GovernanceAction::UnfreezeConsensusDomain` is executed,
     /// Drained by `Blockchain` after `apply_block_effects`.
     pub pending_domain_unfreezes: Vec<PendingDomainUnfreeze>,
+    /// Governance-controlled consensus-domain tip rollbacks awaiting deterministic
+    /// application inside `apply_block_effects` before `calculate_state_root`.
+    pub pending_domain_tip_resets: Vec<PendingDomainTipReset>,
     /// (F09): the PoA compliance ledger (screening,
     /// freeze, travel-rule) in consensus state - rooted and snapshotted
     /// with everything else that decides writes.
@@ -578,6 +589,7 @@ impl AccountState {
             pending_bud_boost_share: 0,
             pending_bridge_burns: Vec::new(),
             pending_domain_unfreezes: Vec::new(),
+            pending_domain_tip_resets: Vec::new(),
             poa_compliance: crate::registry::PoaComplianceRegistry::new(),
             burned_total: 0,
             pending_poa_freezes: Vec::new(),
@@ -641,6 +653,7 @@ impl AccountState {
             pending_bud_boost_share: 0,
             pending_bridge_burns: Vec::new(),
             pending_domain_unfreezes: Vec::new(),
+            pending_domain_tip_resets: Vec::new(),
             poa_compliance: crate::registry::PoaComplianceRegistry::new(),
             burned_total: 0,
             pending_poa_freezes: Vec::new(),
@@ -713,6 +726,7 @@ impl AccountState {
             pending_bud_boost_share: 0,
             pending_bridge_burns: Vec::new(),
             pending_domain_unfreezes: Vec::new(),
+            pending_domain_tip_resets: Vec::new(),
             poa_compliance: crate::registry::PoaComplianceRegistry::new(),
             burned_total: 0,
             pending_poa_freezes: Vec::new(),
@@ -828,6 +842,7 @@ impl AccountState {
             pending_bud_boost_share: 0,
             pending_bridge_burns: Vec::new(),
             pending_domain_unfreezes: Vec::new(),
+            pending_domain_tip_resets: Vec::new(),
             poa_compliance: snapshot.poa_compliance.clone().unwrap_or_default(),
             burned_total: snapshot.burned_total,
             pending_poa_freezes: Vec::new(),
@@ -2166,8 +2181,10 @@ impl AccountState {
                     .ok_or_else(|| "AI inference layer operator is not registered".to_string())?;
                 match registration.status {
                     crate::registry::MemberStatus::Unbonding { release_epoch }
+                    | crate::registry::MemberStatus::SlashedUnbonding { release_epoch }
                         if self.epoch_index >= release_epoch => {}
-                    crate::registry::MemberStatus::Unbonding { release_epoch } => {
+                    crate::registry::MemberStatus::Unbonding { release_epoch }
+                    | crate::registry::MemberStatus::SlashedUnbonding { release_epoch } => {
                         return Err(format!(
                             "AI inference layer bond remains locked until epoch {release_epoch}"
                         ));
@@ -2426,7 +2443,13 @@ impl AccountState {
         let already_slashed = self
             .registry
             .get(&report.offender, report.role)
-            .is_some_and(|entry| matches!(entry.status, crate::registry::MemberStatus::Slashed))
+            .is_some_and(|entry| {
+                matches!(
+                    entry.status,
+                    crate::registry::MemberStatus::Slashed
+                        | crate::registry::MemberStatus::SlashedUnbonding { .. }
+                )
+            })
             || self
                 .validators
                 .get(&report.offender)
@@ -3001,6 +3024,13 @@ impl AccountState {
                 // Domain unfreeze is handled via GovernanceAction -> pending_domain_unfreezes queue
                 // And applied in Blockchain layer to ConsensusDomainRegistry (durable).
                 tracing::info!("Executing Governance: UnfreezeConsensusDomain {domain_id} queued for Blockchain registry");
+            }
+            ProposalType::ResetConsensusDomainTip { domain_id, .. } => {
+                // Handled via GovernanceAction -> pending_domain_tip_resets queue
+                // and drained deterministically inside apply_block_effects.
+                tracing::info!(
+                    "Executing Governance: ResetConsensusDomainTip {domain_id} queued for Blockchain registry"
+                );
             }
         }
     }
@@ -3741,6 +3771,18 @@ impl AccountState {
         self.poa_admitted.get(&domain).cloned().unwrap_or_default()
     }
 
+    /// Whether `authority` is currently admitted in PoA `domain` at the
+    /// live block height (checking both active membership and KYC expiry).
+    #[must_use]
+    pub fn poa_authority_admitted(
+        &self,
+        domain: crate::domain::types::DomainId,
+        authority: &Address,
+    ) -> bool {
+        self.poa_onboarding
+            .is_member_admitted_at(domain, authority, self.current_block_height)
+    }
+
     /// The state root: the body digest of every committed field, folded
     /// with the global header summary when a checkpoint header exists
     /// ([`Self::root_from_opening`]).
@@ -4193,6 +4235,13 @@ impl AccountState {
             final_hasher.update(b"domain_unfreeze_v1");
             final_hasher.update(
                 bincode::serialize(&self.pending_domain_unfreezes)
+                    .unwrap_or_else(|_| STATE_SERIALIZE_FAILED.to_vec()),
+            );
+        }
+        if !self.pending_domain_tip_resets.is_empty() {
+            final_hasher.update(b"domain_tip_reset_v1");
+            final_hasher.update(
+                bincode::serialize(&self.pending_domain_tip_resets)
                     .unwrap_or_else(|_| STATE_SERIALIZE_FAILED.to_vec()),
             );
         }
