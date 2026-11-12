@@ -4050,15 +4050,10 @@ mod tests {
         domain.validator_set_hash = [0u8; 32];
         register_domain(&mut state, domain.clone()).unwrap();
 
-        state.poa_onboarding.add_admin(domain.id, admin);
-        state
-            .poa_onboarding
-            .submit_application(domain.id, authority, [0x44; 32], 1)
-            .unwrap();
-        state
-            .poa_onboarding
-            .approve(domain.id, admin, authority, 1, 5)
-            .unwrap();
+        let ob = &mut state.poa_onboarding;
+        ob.add_admin(domain.id, admin);
+        ob.submit_application(domain.id, authority, [0x44; 32], 1).unwrap();
+        ob.approve(domain.id, admin, authority, 1, 5).unwrap();
         state.current_block_height = 6;
 
         let blk = block(1, &"00".repeat(32), 1);
@@ -4098,14 +4093,9 @@ mod tests {
         assert!(err.contains("not admitted"), "got: {err}");
 
         // Renew KYC then revoke the authority: revoked authorities must fail too.
-        state
-            .poa_onboarding
-            .renew_kyc(domain.id, admin, authority, [0x44; 32], 7, 100)
-            .unwrap();
-        state
-            .poa_onboarding
-            .revoke(domain.id, admin, authority, 7, "revoked")
-            .unwrap();
+        let ob = &mut state.poa_onboarding;
+        ob.renew_kyc(domain.id, admin, authority, [0x44; 32], 7, 100).unwrap();
+        ob.revoke(domain.id, admin, authority, 7, "revoked").unwrap();
         let err = verify_commitment_finality(
             &state,
             &com,
@@ -4122,23 +4112,18 @@ mod tests {
         let kp = crate::crypto::primitives::KeyPair::generate().unwrap();
         let attester = Address::from(kp.public_key_bytes());
         let stake = state.registry.params().min_stake;
-        state
-            .registry
-            .register(attester, crate::registry::role::roles::ATTESTER, stake, 0)
-            .unwrap();
+        let attester_role = crate::registry::role::roles::ATTESTER;
+        state.registry.register(attester, attester_role, stake, 0).unwrap();
         state
             .registry
             .slash_role_only(
                 attester,
-                crate::registry::role::roles::ATTESTER,
+                attester_role,
                 crate::registry::permissionless::SlashingCondition::DoubleSign,
                 500,
             )
             .unwrap();
-        state
-            .registry
-            .begin_unbonding(attester, crate::registry::role::roles::ATTESTER, 1)
-            .unwrap();
+        state.registry.begin_unbonding(attester, attester_role, 1).unwrap();
 
         let proof = FinalityProof::PoA {
             authorities: vec![attester],
@@ -4151,10 +4136,7 @@ mod tests {
         // A recorded non-liveness slash report in slashing_history_for must also block finality.
         let mut jailed_state = AccountState::new();
         let attester2 = Address::from([0x77; 32]);
-        jailed_state
-            .registry
-            .register(attester2, crate::registry::role::roles::ATTESTER, stake, 0)
-            .unwrap();
+        jailed_state.registry.register(attester2, attester_role, stake, 0).unwrap();
         let report = crate::registry::evidence::SlashingReport::consensus_invalid_attester_proof(
             attester2,
             "bad".into(),
@@ -4165,7 +4147,8 @@ mod tests {
             authorities: vec![attester2],
             signatures: Vec::new(),
         };
-        let err2 = require_active_attester_authorities(&jailed_state, &proof2, purpose).unwrap_err();
+        let err2 = require_active_attester_authorities(&jailed_state, &proof2, purpose);
+        let err2 = err2.unwrap_err();
         assert!(err2.contains("not an active attester"), "got: {err2}");
     }
 }

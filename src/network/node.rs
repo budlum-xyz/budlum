@@ -4073,7 +4073,8 @@ impl Node {
                                                 }
                                             }
                                             Err(e) => {
-                                                let expected_chain_id = self.chain.get_chain_id().await;
+                                                let expected_chain_id =
+                                                    self.chain.get_chain_id().await;
                                                 let pool_race = tx_refusal_is_pool_race(
                                                     &tx,
                                                     &e,

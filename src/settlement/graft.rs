@@ -2023,10 +2023,8 @@ mod tests {
         execute_graft_tx(&mut state, &ctx(user), &intent_tx).unwrap();
         let intent_id = state.settlement.graft.intents.values().next().unwrap().intent_id;
         let stake = state.registry.params().min_stake;
-        state
-            .registry
-            .register(solver, crate::registry::role::roles::RELAYER, stake, 0)
-            .unwrap();
+        let relayer_role = crate::registry::role::roles::RELAYER;
+        state.registry.register(solver, relayer_role, stake, 0).unwrap();
         execute_graft_tx(
             &mut state,
             &ctx(solver),
@@ -2037,7 +2035,8 @@ mod tests {
             },
         )
         .unwrap();
-        execute_graft_tx(&mut state, &ctx(user), &GraftTx::Award { intent_id }).unwrap();
+        let award = execute_graft_tx(&mut state, &ctx(user), &GraftTx::Award { intent_id });
+        award.unwrap();
         let intent = state.settlement.graft.intents.get(&intent_id).unwrap().clone();
         let fulfill_msg = message(
             origin_emitter(&executor),
