@@ -4453,7 +4453,9 @@ impl Node {
                                                         }
                                                         continue;
                                                     }
-                                                    if !e.contains("Duplicate") {
+                                                    if !e.contains("Duplicate")
+                                                        && !e.contains("outside active window")
+                                                    {
                                                         // The round may simply not be
                                                         // open yet, and a vote is
                                                         // published once: hold it
@@ -4465,8 +4467,10 @@ impl Node {
                                                             prevote.checkpoint_height,
                                                             crate::network::deferred_votes::DeferredVote::Prevote(prevote),
                                                         );
+                                                        self.report_gossip(&id, &peer_id, gossipsub::MessageAcceptance::Accept);
+                                                    } else {
+                                                        self.report_gossip(&id, &peer_id, gossipsub::MessageAcceptance::Ignore);
                                                     }
-                                                    self.report_gossip(&id, &peer_id, gossipsub::MessageAcceptance::Ignore);
                                                     continue;
                                                 }
                                                 self.peer_manager_lock().report_bad_behavior(&peer_id);
@@ -4559,7 +4563,9 @@ impl Node {
                                                         }
                                                         continue;
                                                     }
-                                                    if !e.contains("Duplicate") {
+                                                    if !e.contains("Duplicate")
+                                                        && !e.contains("outside active window")
+                                                    {
                                                         // `Cannot precommit before
                                                         // prevote quorum` is the
                                                         // common case here: the
@@ -4574,8 +4580,10 @@ impl Node {
                                                             precommit.checkpoint_height,
                                                             crate::network::deferred_votes::DeferredVote::Precommit(precommit),
                                                         );
+                                                        self.report_gossip(&id, &peer_id, gossipsub::MessageAcceptance::Accept);
+                                                    } else {
+                                                        self.report_gossip(&id, &peer_id, gossipsub::MessageAcceptance::Ignore);
                                                     }
-                                                    self.report_gossip(&id, &peer_id, gossipsub::MessageAcceptance::Ignore);
                                                     continue;
                                                 }
                                                 self.peer_manager_lock().report_bad_behavior(&peer_id);
