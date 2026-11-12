@@ -659,6 +659,8 @@ message ProtoNetworkMessage {
         ProtoCrossDomainMessage cross_domain_message = 23;
         ProtoVerifiedDomainCommitment verified_domain_commitment = 24;
         ProtoSlashingEvidence slashing_evidence = 25;
+        ProtoGetFinalityCert get_finality_cert = 26;
+        ProtoFinalityCertResponse finality_cert_response = 27;
     }
 }
 
@@ -760,6 +762,15 @@ message ProtoFinalityCert {
     bytes bitmap = 5;
     string set_hash = 6;
     string scheme_id = 7;
+}
+
+message ProtoGetFinalityCert {
+    uint64 checkpoint_height = 1;
+}
+
+message ProtoFinalityCertResponse {
+    bool found = 1;
+    ProtoFinalityCert cert = 2;
 }
 
 message ProtoGetQcBlob {

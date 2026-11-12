@@ -127,6 +127,21 @@ pub enum NetworkMessage {
         scheme_id: String,
     },
 
+    GetFinalityCert {
+        checkpoint_height: u64,
+    },
+
+    FinalityCertResponse {
+        found: bool,
+        epoch: u64,
+        checkpoint_height: u64,
+        checkpoint_hash: String,
+        agg_sig_bls: Vec<u8>,
+        bitmap: Vec<u8>,
+        set_hash: String,
+        scheme_id: String,
+    },
+
     GetQcBlob {
         epoch: u64,
         checkpoint_height: u64,
