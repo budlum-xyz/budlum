@@ -1244,15 +1244,29 @@ impl Node {
         }
     }
 
-    async fn build_finality_cert_response(&self, checkpoint_height: u64) -> NetworkMessage {
-        let chain_id = self.chain.get_chain_id().await;
+    async fn build_finality_cert_response(
+        chain: &ChainHandle,
+        checkpoint_height: u64,
+    ) -> NetworkMessage {
+        let chain_id = chain.get_chain_id().await;
         let valid_cp = checkpoint_height > 0
             && crate::chain::finality::is_checkpoint_height_for_chain(checkpoint_height, chain_id);
-        let cert = if valid_cp {
-            self.chain.get_finality_cert(checkpoint_height).await
+        let mut cert = if valid_cp {
+            chain.get_finality_cert(checkpoint_height).await
         } else {
             None
         };
+        if cert.is_none() && valid_cp {
+            let interval =
+                crate::core::chain_config::finality_checkpoint_interval_for_chain_id(chain_id);
+            let finalized = chain.get_finalized_height().await;
+            if interval > 0 && finalized > checkpoint_height {
+                let latest_cp = (finalized / interval).saturating_mul(interval);
+                if latest_cp >= checkpoint_height {
+                    cert = chain.get_finality_cert(latest_cp).await;
+                }
+            }
+        }
         match cert {
             Some(cert) => NetworkMessage::FinalityCertResponse {
                 found: true,
@@ -1284,7 +1298,20 @@ impl Node {
         response: &[u8],
     ) {
         match NetworkMessage::from_bytes_validated(response) {
-            Ok(NetworkMessage::FinalityCertResponse { found: false, .. }) => {}
+            Ok(NetworkMessage::FinalityCertResponse { found: false, .. }) => {
+                let chain_id = self.chain.get_chain_id().await;
+                let interval =
+                    crate::core::chain_config::finality_checkpoint_interval_for_chain_id(chain_id);
+                let tip = self.chain.get_height().await;
+                let finalized = self.chain.get_finalized_height().await;
+                let next = expected_height.saturating_add(interval);
+                if interval > 0
+                    && next <= tip
+                    && next <= finalized.saturating_add(interval.saturating_mul(16))
+                {
+                    self.request_finality_cert(peer, next);
+                }
+            }
             Ok(NetworkMessage::FinalityCertResponse {
                 found: true,
                 epoch,
@@ -1295,13 +1322,17 @@ impl Node {
                 set_hash,
                 scheme_id,
             }) => {
-                if checkpoint_height != expected_height
+                let cert_chain_id = self.chain.get_chain_id().await;
+                if checkpoint_height < expected_height
+                    || !crate::chain::finality::is_checkpoint_height_for_chain(
+                        checkpoint_height,
+                        cert_chain_id,
+                    )
                     || scheme_id != crate::chain::finality::BLS_SCHEME_RFC9380_V1
                 {
                     self.peer_manager_lock().report_bad_behavior(&peer);
                     return;
                 }
-                let cert_chain_id = self.chain.get_chain_id().await;
                 let qc_checkpoint_hash = checkpoint_hash.clone();
                 let cert = crate::chain::finality::FinalityCert {
                     epoch,
@@ -1320,10 +1351,10 @@ impl Node {
                                 cert_chain_id,
                             );
                         let tip = self.chain.get_height().await;
-                        if interval > 0 && tip >= expected_height.saturating_add(interval) {
+                        if interval > 0 && tip >= checkpoint_height.saturating_add(interval) {
                             self.request_finality_cert(
                                 peer,
-                                expected_height.saturating_add(interval),
+                                checkpoint_height.saturating_add(interval),
                             );
                         }
                     }
@@ -4764,8 +4795,8 @@ impl Node {
                                                     } else {
                                                         self.report_gossip(&id, &peer_id, gossipsub::MessageAcceptance::Ignore);
                                                     }
-                                                    if (e.contains("epoch mismatch")
-                                                        || e.contains("height mismatch"))
+                                                    if e.contains("epoch mismatch")
+                                                        || e.contains("height mismatch")
                                                     {
                                                         self.trigger_fork_sync(peer_id).await;
                                                     }
@@ -4911,8 +4942,8 @@ impl Node {
                                                     } else {
                                                         self.report_gossip(&id, &peer_id, gossipsub::MessageAcceptance::Ignore);
                                                     }
-                                                    if (e.contains("epoch mismatch")
-                                                        || e.contains("height mismatch"))
+                                                    if e.contains("epoch mismatch")
+                                                        || e.contains("height mismatch")
                                                     {
                                                         self.trigger_fork_sync(peer_id).await;
                                                     }
@@ -5339,12 +5370,12 @@ impl Node {
                                                     NetworkMessage::GetFinalityCert {
                                                         checkpoint_height,
                                                     } => {
-                                                        let ans = self
-                                                            .build_finality_cert_response(
-                                                                checkpoint_height,
-                                                            )
-                                                            .await
-                                                            .to_bytes();
+                                                        let ans = Self::build_finality_cert_response(
+                                                            &self.chain,
+                                                            checkpoint_height,
+                                                        )
+                                                        .await
+                                                        .to_bytes();
                                                         let sync =
                                                             &mut self.swarm.behaviour_mut().sync;
                                                         let _ = sync.send_response(channel, ans);
@@ -7266,6 +7297,7 @@ mod finality_publish_tests {
 
     #[test]
     fn budlum_topic_score_params_pass_validation_and_avoid_mesh_starvation() {
+        use libp2p::gossipsub;
         let mut score_params = gossipsub::PeerScoreParams::default();
         for topic in ["blocks", "transactions"] {
             let params = super::budlum_topic_score_params();

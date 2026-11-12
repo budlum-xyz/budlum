@@ -12660,9 +12660,7 @@ mod bond_and_reorg_tests {
         let msg = crate::chain::finality::checkpoint_signing_message(45261, 1, 50, &cp_hash);
         let sig_bls = crate::chain::finality::sign_bls(&bls_kp.secret_key, &msg);
         let pq_msg = crate::consensus::qc::pq_signing_message(1, 50, &cp_hash, 0);
-        let pq_sig = pq_kp
-            .sign_in(&bc.state.scheme_registry, crate::crypto::ctx::QC_V2, &pq_msg)
-            .unwrap();
+        let pq_sig = pq_kp.sign(crate::crypto::ctx::QC_V2, &pq_msg).unwrap();
         let mut early = crate::chain::finality::Precommit {
             chain_id: 45261,
             epoch: 1,
@@ -12717,7 +12715,7 @@ mod bond_and_reorg_tests {
             &bls_kp.secret_key,
             &bad_early.auth_signing_message(),
         );
-        bc.early_finality_votes.precommits.push_front(bad_early);
+        bc.early_finality_votes.precommits.insert(0, bad_early);
 
         bc.replay_early_precommits();
         assert!(bc
