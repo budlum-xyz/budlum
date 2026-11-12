@@ -53,6 +53,10 @@ use bud_vm::Vm;
 use sha3::{Digest, Keccak256};
 
 /// Verifies an AI inference layer inference proof with a real plonky3 STARK (verify only).
+///
+/// # Errors
+///
+/// Returns an error if the operation fails.
 pub fn verify_inference_stark(
     proof_bytes: &[u8],
     expected_inputs: &ExecutionPublicInputs,
@@ -96,6 +100,10 @@ fn build_public_inputs(vm: &Vm, program: &[u64], chain_id: u64) -> ExecutionPubl
 ///
 /// Runs `program` on `vm`, produces a STARK proof from the trace, then verifies
 /// that proof. Returns a `ProofEnvelope`.
+///
+/// # Errors
+///
+/// Returns an error if the operation fails.
 pub fn generate_and_verify_proof(
     vm: &mut Vm,
     program: &[u64],

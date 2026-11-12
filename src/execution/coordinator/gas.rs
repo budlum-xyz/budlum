@@ -60,6 +60,10 @@ pub const fn soft_limit_for_ee(ee: EeId) -> Option<u64> {
 /// Converts environment-native gas units to BGU (section 8.9 item 3).
 ///
 /// exposed for: UEL environment adapters and gas calibration (..).
+///
+/// # Errors
+///
+/// Returns an error if the operation fails.
 pub fn native_gas_to_bgu(ee: EeId, native_units: u64) -> Result<u64, String> {
     match ee {
         EeId::EVM | EeId::WASM | EeId::SVM | EeId::BUDZERO => Ok(native_units),
@@ -96,6 +100,10 @@ impl BlockBguMeter {
 
     /// Checks whether a call in `ee` requesting up to `gas_limit_bgu` fits inside
     /// both `ee`'s soft cap and the block's hard `BLOCK_BGU_LIMIT`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn check_admissible(&self, ee: EeId, gas_limit_bgu: u64) -> Result<(), String> {
         let soft = soft_limit_for_ee(ee)
             .ok_or_else(|| format!("unsupported execution environment 0x{:02x}", ee.0))?;
@@ -116,6 +124,10 @@ impl BlockBguMeter {
     }
 
     /// Commits `gas_used_bgu` spent by a finalized transaction in `ee`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn record_used(&mut self, ee: EeId, gas_used_bgu: u64) -> Result<(), String> {
         self.check_admissible(ee, gas_used_bgu)?;
         self.total_used = self.total_used.saturating_add(gas_used_bgu);
@@ -150,6 +162,10 @@ pub fn next_uel_base_fee_attos(current_base_fee_attos: u128, block_gas_used_bgu:
 }
 
 /// Effective priority fee per BGU (`min(max_priority_fee_per_bgu, max_fee_per_bgu - base_fee)`).
+///
+/// # Errors
+///
+/// Returns an error if the operation fails.
 pub fn effective_priority_fee_attos(
     base_fee_attos: u128,
     max_fee_per_bgu_attos: u128,
@@ -181,6 +197,10 @@ pub struct UelFeeSettlement {
 /// Whole burned atoms increment `state.burned_total`; sub-atom burned dust is
 /// routed to `burn_reserve_address` when configured or else to `reward_pool_account()`
 /// so `Account` balances never leak unaccounted fractional supply.
+///
+/// # Errors
+///
+/// Returns an error if the operation fails.
 pub fn settle_uel_fee_attos(
     state: &mut AccountState,
     payer: &Address,

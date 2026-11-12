@@ -117,6 +117,10 @@ impl From<RecoverError> for DeploymentProofError {
 }
 
 /// Verifies deployment authority against finalized source-chain roots.
+///
+/// # Errors
+///
+/// Returns an error if the operation fails.
 pub fn verify_deployment(
     proof: &DeploymentProof,
     expected_source_chain_id: u64,

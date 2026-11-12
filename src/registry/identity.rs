@@ -490,7 +490,7 @@ pub fn merkle_root(leaves: &[[u8; 32]]) -> [u8; 32] {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IdentityRegistry {
     records: BTreeMap<Address, IdentityRecord>,
-    /// Credential id = H(root | issuer | issued_at): two credentials with
+    /// Credential id = H(root | issuer | `issued_at`): two credentials with
     /// the same fields at different times are different credentials, and
     /// neither can shadow the other's revocation.
     /// Hex-keyed on purpose: a `[u8; 32]` map key serializes as an array,
@@ -735,7 +735,7 @@ impl IdentityRegistry {
     /// iteration order is part of the format, so two honest nodes with equal
     /// state compute equal roots without coordinating anything.
     ///
-    /// The revocation set is inside on purpose: it is the note_registry
+    /// The revocation set is inside on purpose: it is the `note_registry`
     /// lesson stated at the root level - a peer that drops revocations from
     /// what it serves would otherwise keep a state root that verifies.
     #[must_use]

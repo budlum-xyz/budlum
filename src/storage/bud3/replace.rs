@@ -83,6 +83,10 @@ pub fn replace_attestation_digest(old_key: &ObjectKey, new_record: &ObjectRecord
 /// Sign a [`ReplaceAttestation`] with `validator`'s ML-DSA-65 seed under `ctx::STORAGE_V2`.
 ///
 /// Convenience: exposed for validator custody daemons and replacement tests.
+///
+/// # Errors
+///
+/// Returns an error if the operation fails.
 pub fn sign_replace_attestation(
     validator: Address,
     ml_dsa_seed: &[u8; 32],
@@ -210,6 +214,10 @@ pub enum ReplaceError {
 ///    `placement_group_full` signing `(old_record.commitment, new_record)` with their
 ///    registered consensus ML-DSA-65 keys, including at least one attester independent
 ///    of `sender`.
+///
+/// # Errors
+///
+/// Returns an error if the operation fails.
 pub fn admit_object_replacement(
     (sender, old_owner, proposer_stake): (&Address, &Address, u64),
     (old_record, new_record): (&ObjectRecord, &ObjectRecord),

@@ -1,4 +1,4 @@
-//! The first concrete adapter: an Ethereum-type PoS chain, verified through its
+//! The first concrete adapter: an Ethereum-type `PoS` chain, verified through its
 //! Altair sync committee.
 //!
 //! WIRING: wired - this adapter goes live through an admission into the
@@ -120,6 +120,10 @@ pub trait BlsVerifier: Send + Sync {
     /// constructing it is the caller's job and is the part most often got
     /// wrong, which is why it is a parameter and not something this module
     /// derives from a slot number it was handed.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     fn verify_aggregate(
         &self,
         signing_root: &[u8; 32],
@@ -282,7 +286,7 @@ pub fn committee_root(aggregate_pubkey: &[u8]) -> [u8; 32] {
 ///
 /// The v1 adapter signed a constant held in `AdapterSpec` - the signature
 /// bound nothing about the update, so one signature replayed under any
-/// state_root. v2 signs the update's OWN fields: the finalized and attested
+/// `state_root`. v2 signs the update's OWN fields: the finalized and attested
 /// slots, the period, the next committee root, the participation bits and
 /// the claimed state root all go under the signature.
 #[must_use]

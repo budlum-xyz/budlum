@@ -9,10 +9,10 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 /// Maximum allowed byte size for `input_ref` or `output_ref` payloads (`64 KiB`).
-/// Prevents state/mempool/snapshot DoS vectors via oversize inference references.
+/// Prevents state/mempool/snapshot `DoS` vectors via oversize inference references.
 pub const MAX_INFERENCE_REF_BYTES: usize = 65_536;
 
-/// Highest whitelisted execution class id (1 = FixedPointMlpV1, 0 = none).
+/// Highest whitelisted execution class id (1 = `FixedPointMlpV1`, 0 = none).
 const MAX_EXECUTION_CLASS: u8 = 1;
 
 /// Basis of the fixed-point reputation scores: one unit of trust is
@@ -140,6 +140,11 @@ impl TryFrom<Vec<u8>> for BoundedBytes {
 }
 
 impl BoundedBytes {
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn try_new(bytes: Vec<u8>) -> Result<Self, String> {
         if bytes.len() > MAX_INFERENCE_REF_BYTES {
             return Err(format!(
@@ -192,10 +197,10 @@ pub struct AiModelSpec {
     /// Default false = attestation-only (mainnet v1 compatible).
     #[serde(default)]
     pub require_execution_proof: bool,
-    /// BudZKVM guest program hash when execution class is registered.
+    /// `BudZKVM` guest program hash when execution class is registered.
     #[serde(default)]
     pub execution_program_hash: Option<[u8; 32]>,
-    /// Whitelisted execution class id (1 = FixedPointMlpV1). 0 = none.
+    /// Whitelisted execution class id (1 = `FixedPointMlpV1`). 0 = none.
     #[serde(default)]
     pub execution_class: u8,
     /// Digest of the model's weights and biases, as produced by
@@ -251,6 +256,11 @@ pub struct AiModelSpec {
 }
 
 impl AiModelSpec {
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn validate(&self) -> Result<(), String> {
         if self.min_verifier_count == 0 {
             return Err("min_verifier_count must be >= 1".into());
@@ -495,7 +505,7 @@ impl AiInferenceRequest {
     }
 }
 
-/// AI inference result submitted by an active bonded AI inference layer operator (RoleId 8).
+/// AI inference result submitted by an active bonded AI inference layer operator (`RoleId` 8).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AiInferenceResult {
     pub request_id: AiRequestId,
@@ -622,7 +632,7 @@ pub struct AiVerifierStakeInfo {
 /// research and integration task."
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AiExecutionProof {
-    /// The model that produced this inference. The ZKVM program_hash must
+    /// The model that produced this inference. The ZKVM `program_hash` must
     /// Match this model's registered `model_hash` - this is the cryptographic
     /// Binding between the proof and the model.
     pub model_id: AiModelId,
@@ -635,7 +645,7 @@ pub struct AiExecutionProof {
     /// The ZKVM program hash - keccak256 of the model's bytecode.
     /// This binds the proof to a specific model implementation.
     pub program_hash: [u8; 32],
-    /// The STARK proof envelope bytes produced by BudZKVM.
+    /// The STARK proof envelope bytes produced by `BudZKVM`.
     /// Contains the actual mathematical proof that can be verified.
     pub proof_bytes: Vec<u8>,
     /// Number of execution steps in the ZKVM trace.
@@ -797,7 +807,7 @@ impl AiExecutionProof {
     }
 }
 
-/// Verifier Quality of Service (QoS) reputation.
+/// Verifier Quality of Service (`QoS`) reputation.
 ///
 /// In the Agentic Economy paradigm, verifier stake is not just a slashing
 /// Deposit - it's also a service quality guarantee. Agents selecting verifiers
@@ -817,14 +827,14 @@ pub struct AiVerifierQos {
     /// Number of equivocation events (slashing events).
     pub equivocation_count: u64,
     /// Average response time in blocks (request submission to result submission).
-    /// Computed as sum_of_response_blocks / total_results_submitted.
+    /// Computed as `sum_of_response_blocks` / `total_results_submitted`.
     pub avg_response_blocks: u64,
     /// Last block at which this verifier submitted a result.
     pub last_active_block: u64,
 }
 
 impl AiVerifierQos {
-    /// Create a new QoS record with zero metrics.
+    /// Create a new `QoS` record with zero metrics.
     pub fn new(verifier: Address) -> Self {
         Self {
             verifier,
@@ -964,7 +974,7 @@ impl AiInferenceOutcome {
 /// or with humans." This type enables:
 ///
 /// 1. **Inference-linked payments** - agent pays for inference results
-///    (request_id binds the payment to a specific AI inference outcome)
+///    (`request_id` binds the payment to a specific AI inference outcome)
 /// 2. **Autonomous agent payments** - agent-to-agent value transfer without
 ///    Human intervention (the foundation of Agentic Economy)
 /// 3. **Escrow-gated** - payments can be escrowed until a condition is met
@@ -974,7 +984,7 @@ impl AiInferenceOutcome {
 /// Amount, sender loses amount + fee) or it fails (no state change).
 ///
 /// Future: ZKVM verification gate - payment only releases if an
-/// AiExecutionProof is attached and verified (trustless settlement).
+/// `AiExecutionProof` is attached and verified (trustless settlement).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AiAgentPayment {
     /// Unique payment identifier.
@@ -989,7 +999,7 @@ pub struct AiAgentPayment {
     /// If set, payment is escrowed until the outcome is finalized.
     pub request_id: Option<AiRequestId>,
     /// Optional: Require execution proof for payment release.
-    /// If true, the recipient must attach an AiExecutionProof before
+    /// If true, the recipient must attach an `AiExecutionProof` before
     /// The escrowed payment is released - this is the "trustless" path.
     pub require_proof: bool,
     /// Block when this payment was submitted.
@@ -1215,7 +1225,7 @@ pub enum AiPaymentEscrowStatus {
 }
 
 /// Immutable settlement receipt kept after a payment leaves the live escrow map.
-/// Prevents payment_id reuse and preserves audit/root inclusion.
+/// Prevents `payment_id` reuse and preserves audit/root inclusion.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AiAgentPaymentSettlement {
     pub payment_id: [u8; 32],

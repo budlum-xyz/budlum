@@ -444,6 +444,10 @@ impl RecoveryLedger {
     /// Serialization preserves bytes, not provenance. Recomputing the audit
     /// totals and checking event numbering prevents a tampered snapshot from
     /// erasing prior damage or presenting a wrapped history as healthy.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn validate(&self) -> Result<(), &'static str> {
         if self.reversion_events.len() > MAX_REVERSION_EVENTS as usize {
             return Err("reversion-history-over-capacity");

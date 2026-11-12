@@ -201,7 +201,7 @@ impl HandoverCoordinator {
     }
 
     /// Row 5 (New custody share assignment): hand over an unacknowledged share
-    /// after [`SHARE_ASSIGNMENT_ACK_DEADLINE_EPOCHS`] (3 epochs).
+    /// after `SHARE_ASSIGNMENT_ACK_DEADLINE_EPOCHS` (3 epochs).
     /// Convenience: exposed for epoch custody assignment audit.
     #[must_use]
     pub fn handover_unacked_share(
@@ -221,7 +221,7 @@ impl HandoverCoordinator {
     }
 
     /// Row 6 (Repair task): hand over an unstarted repair duty after
-    /// [`REPAIR_TASK_HANDOVER_BLOCKS`] (20 blocks).
+    /// `REPAIR_TASK_HANDOVER_BLOCKS` (20 blocks).
     /// Convenience: exposed for block-level repair task scheduler.
     #[must_use]
     pub fn handover_repair_duty(

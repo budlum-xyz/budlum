@@ -87,8 +87,8 @@ pub struct PoAEngine {
     pub config: PoAConfig,
     keypair: Option<KeyPair>,
     signer: Option<Arc<dyn ConsensusSigner>>,
-    /// Optional isolated PoA authority set. When non-empty, only these
-    /// Addresses can be considered for PoA leadership even if other validators
+    /// Optional isolated `PoA` authority set. When non-empty, only these
+    /// Addresses can be considered for `PoA` leadership even if other validators
     /// Are active in the permissionless state.
     authorities: Vec<Address>,
     /// The validator-suite composite key of the
@@ -155,7 +155,7 @@ impl PoAEngine {
         self
     }
 
-    /// Validators allowed to lead or validate in this PoA domain right now.
+    /// Validators allowed to lead or validate in this `PoA` domain right now.
     ///
     /// Admission is decided by [`crate::registry::poa_onboarding`], recomputed
     /// at each block close and held in [`AccountState`] so every node agrees.
@@ -180,7 +180,7 @@ impl PoAEngine {
     ///
     /// The first attempt treated an empty admission registry as "nobody is
     /// admitted", which is right for a permissioned domain and wrong for
-    /// every other chain: a plain PoA devnet that never opted into admission
+    /// every other chain: a plain `PoA` devnet that never opted into admission
     /// control would have been unable to produce its first block. Two
     /// different situations - *gated and nobody let in* versus *not gated* -
     /// had been collapsed into the same silence.
@@ -221,7 +221,7 @@ impl PoAEngine {
             .collect()
     }
 
-    /// Deterministic leader selection for PoA.
+    /// Deterministic leader selection for `PoA`.
     ///
     /// Replaces pure round-robin (`block_index % n`) with a hash mix over
     /// `block_index` and the active validator set fingerprint so the next

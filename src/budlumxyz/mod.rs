@@ -70,6 +70,11 @@ impl BudlumxyzRegistry {
         Self::default()
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn register_app(
         &mut self,
         name: String,
@@ -120,6 +125,11 @@ impl BudlumxyzRegistry {
         Ok(id)
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn update_app(
         &mut self,
         id: u64,
@@ -155,6 +165,10 @@ impl BudlumxyzRegistry {
     ///
     /// This does **not** set `verified` (DAO/governance badge).
     /// UI/indexers must not treat `developer_attested` as third-party audit.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn attest_app_as_developer(
         &mut self,
         id: u64,
@@ -186,6 +200,10 @@ impl BudlumxyzRegistry {
     ///
     /// Turning this back on takes populating the set, which is the same work
     /// as before, minus the trap.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn mark_verified_by_governance(
         &mut self,
         id: u64,

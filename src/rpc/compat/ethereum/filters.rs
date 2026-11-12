@@ -175,6 +175,10 @@ impl FilterPool {
     ///
     /// A call sweeps first, so an expired record never holds a slot against a
     /// new one. All three bounds are checked before any record is written.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn create(
         &mut self,
         peer: &str,
@@ -230,6 +234,10 @@ impl FilterPool {
     ///
     /// This validates ownership and freshness, then refuses. No log data is
     /// invented before the EVM execution environment. The slot stays bounded while the client waits.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn changes(
         &mut self,
         peer: &str,
@@ -247,6 +255,10 @@ impl FilterPool {
     }
 
     /// Drop one filter. Returns whether a live record was removed.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn uninstall(&mut self, peer: &str, id: &str, now: u64) -> Result<bool, FilterError> {
         let key = self.resolve(peer, id, now)?;
         Ok(self.entries.remove(&key).is_some())

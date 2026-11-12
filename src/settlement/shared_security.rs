@@ -7,7 +7,7 @@
 //! Mikoriza: shared security from restaked Ethereum collateral (testnet
 //!).
 //!
-//! An Ethereum operator that restakes (EigenLayer first; Symbiotic and
+//! An Ethereum operator that restakes (`EigenLayer` first; Symbiotic and
 //! Babylon are later sources behind the same [`SharedSecuritySource`] trait)
 //! allocates part of its collateral to a Budlum operator set and binds a
 //! Budlum validator address and BLS key to it on Ethereum. The registrar
@@ -16,7 +16,7 @@
 //! the bridge, the relayer intents and Graft use: no trusted party reports
 //! Ethereum state.
 //!
-//! Two separate PoS systems keep running: Gasper on Ethereum and Budlum PoS
+//! Two separate `PoS` systems keep running: Gasper on Ethereum and Budlum `PoS`
 //! (leader election and BLS + ML-DSA finality) here. Keys are separate; an
 //! Ethereum validator key is never reused on Budlum.
 //!
@@ -124,7 +124,7 @@ pub trait SharedSecuritySource {
     }
 }
 
-/// The first adapter: EigenLayer operator sets.
+/// The first adapter: `EigenLayer` operator sets.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct EigenLayerSource;
 
@@ -161,7 +161,7 @@ impl RestakeSource {
     /// source is chosen by the transaction sender. Without this binding an
     /// `EigenLayer` claim could point at evidence anchored on any domain the
     /// sender registered itself, which is a chain nobody else vouched for.
-    /// EigenLayer settles on Ethereum, so the evidence must be Ethereum's.
+    /// `EigenLayer` settles on Ethereum, so the evidence must be Ethereum's.
     #[must_use]
     pub const fn external_chain(self) -> crate::core::transaction::ExternalChain {
         match self {

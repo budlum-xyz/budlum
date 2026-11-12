@@ -1,4 +1,4 @@
-//! BudZKVM Proof Verification Integration.
+//! `BudZKVM` Proof Verification Integration.
 //!
 //! This module bridges the STARK proof system (`bud-proof`) with the
 //! Executor layer. When a ZKVM execution proof is submitted:
@@ -14,15 +14,15 @@
 //! - Failed verification is a validation error, NOT a panic, the network
 //!   Continues operating even with garbage proofs.
 //! - The verification gas cost is bounded by `proof.degree_bits` - larger
-//!   Proofs cost more gas, preventing DoS via huge proofs.
+//!   Proofs cost more gas, preventing `DoS` via huge proofs.
 
 use bud_proof::ProverAdapter;
 use sha3::{Digest, Keccak256};
 
-/// Maximum proof size in bytes (prevents DoS via oversized proofs).
+/// Maximum proof size in bytes (prevents `DoS` via oversized proofs).
 pub const MAX_PROOF_BYTES: usize = 1 << 20; // 1 MB
 
-/// Maximum degree bits (prevents DoS via huge trace).
+/// Maximum degree bits (prevents `DoS` via huge trace).
 pub const MAX_DEGREE_BITS: u32 = 24; // 2^24 = 16M rows
 
 /// Gas cost per degree bit (linear scaling).
@@ -205,9 +205,13 @@ impl ProofVerifier {
     /// Steps:
     /// 1. Validate the envelope structure (the one shared check: size,
     ///    degree, format version, backend allowlist, metadata presence)
-    /// 2. Verify public_inputs_hash matches
+    /// 2. Verify `public_inputs_hash` matches
     /// 3. Verify the STARK proof (when STARK backend is linked)
     /// 4. Return verified proof with state transition info
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn verify(
         envelope: &ProofEnvelope,
         expected_inputs: &ExecutionPublicInputs,
@@ -274,6 +278,10 @@ impl ProofVerifier {
 
     /// Quick structural validation without full STARK verification.
     /// Used for pre-flight checks before committing gas.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn validate_envelope_structure(envelope: &ProofEnvelope) -> Result<(), ProofVerifyError> {
         if envelope.proof_bytes.len() > MAX_PROOF_BYTES {
             return Err(ProofVerifyError::ProofTooLarge {

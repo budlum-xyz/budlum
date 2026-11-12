@@ -142,7 +142,7 @@ pub(crate) fn accrue_operator_rewards(state: &mut AccountState, epoch: u64) -> (
 
 /// Open a retrieval challenge for every active deal whose interval elapsed
 /// this epoch. The byte range comes from the block's VRF output, folded with
-/// the deal and shard identity; a block without VRF entropy (a PoW or PoA
+/// the deal and shard identity; a block without VRF entropy (a `PoW` or `PoA`
 /// block) issues none rather than fall back to arithmetic a prover could
 /// precompute. Returns the number of challenges opened.
 pub(crate) fn issue_challenges(

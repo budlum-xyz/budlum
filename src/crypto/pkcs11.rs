@@ -45,7 +45,7 @@ pub struct Pkcs11Signer {
     bls_mechanism: Option<u64>,
     pq_mechanism: Option<u64>,
     strict_vendor_native: bool,
-    /// HSM-held BLS public key, read from the slot's PUBLIC_KEY object
+    /// HSM-held BLS public key, read from the slot's `PUBLIC_KEY` object
     /// `None` when the slot carries no such object.
     bls_public_key_bytes: Option<Vec<u8>>,
     /// HSM-held PQ public key, read the same way.
@@ -76,6 +76,11 @@ struct Pkcs11Inner {
 }
 
 impl Pkcs11Signer {
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn new(
         module_path: String,
         slot_id: u64,
@@ -94,6 +99,10 @@ impl Pkcs11Signer {
     /// F12: there is no software fallback left to load, so this is the same
     /// extractable-free session as [`Self::new`]; the two names are kept
     /// because callers use both and the semantics each name promises.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn new_without_software_fallback(
         module_path: String,
         slot_id: u64,
@@ -248,6 +257,10 @@ impl Pkcs11Signer {
     /// With both sides present they must match byte for byte; with only the
     /// expectation present it becomes the announced key and the vendor
     /// binding test in [`Self::with_vendor_mechanisms`] proves the pairing.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn with_expected_consensus_public_keys(
         mut self,
         bls_public_key: Option<Vec<u8>>,
@@ -391,6 +404,10 @@ impl Pkcs11Signer {
     /// Announcing one BLS key and signing with another is a consensus fault
     /// with no recovery, so the pairing is proven once at startup against a
     /// fixed message instead of at the first checkpoint.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn verify_consensus_key_bindings(&self) -> Result<(), CryptoError> {
         const BINDING_MSG: &[u8] = b"BUDLUM_HSM_CONSENSUS_KEY_BINDING_V1";
         // , the second half: a vendor mechanism signs through whichever
@@ -587,6 +604,11 @@ impl Pkcs11Signer {
         }
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn store_bls_key(&self, _keypair: &BlsKeypair) -> Result<(), CryptoError> {
         // HIGH (CWE-922, 2026-08-17): storing a plaintext BLS key in a
         // DATA object is refused in EVERY mode. Hardware custody means
@@ -600,6 +622,11 @@ impl Pkcs11Signer {
         ))
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn store_pq_key(&self, _keypair: &PqKeyPair) -> Result<(), CryptoError> {
         // HIGH (CWE-922, 2026-08-17): the same reasoning - a PQ secret
         // cannot be stored as a DATA object; hardware custody is

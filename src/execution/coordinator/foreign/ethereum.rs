@@ -395,7 +395,7 @@ fn decode_legacy_eip155(
     let s = decode_scalar32(fields.get(8).ok_or(EthereumEnvelopeError::Empty)?)?;
 
     let mut unsigned_fields: Vec<Item> = fields.iter().take(6).cloned().collect();
-    unsigned_fields.push(Item::String(rlp::encode_uint(chain_id)));
+    unsigned_fields.push(Item::String(rlp::encode_uint_bytes(chain_id)));
     unsigned_fields.push(Item::String(Vec::new()));
     unsigned_fields.push(Item::String(Vec::new()));
     let sig_preimage = rlp::encode(&Item::List(unsigned_fields));
@@ -697,4 +697,31 @@ pub fn evm_address_from_secret_key(secret_key: &[u8; 32]) -> Result<[u8; 20], St
     let digest: [u8; 32] = Keccak256::digest(xy).into();
     let [_, _, _, _, _, _, _, _, _, _, _, _, addr @ ..] = digest;
     Ok(addr)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn budlum_evm_eip1559_accepts_testnet_chain_id_45261() {
+        let sk = [0x33u8; 32];
+        let expected_sender = evm_address_from_secret_key(&sk).unwrap();
+        let raw = sign_eip1559_tx(
+            &sk,
+            BUDLUM_EVM_CHAIN_ID,
+            7,
+            (1_000, 2_000, 50_000),
+            Some([0x44; 20]),
+            12_345,
+            (b"hello", &[]),
+        )
+        .unwrap();
+        let decoded = decode_ethereum_tx(&raw, 45_261).unwrap();
+        assert_eq!(decoded.chain_id, 45_261);
+        assert_eq!(decoded.sender, expected_sender);
+        assert_eq!(decoded.nonce, 7);
+        assert_eq!(decoded.value_wei, 12_345);
+        assert!(decode_ethereum_tx(&raw, 1).is_err());
+    }
 }

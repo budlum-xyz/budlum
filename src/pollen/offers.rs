@@ -126,6 +126,11 @@ impl PollenPurchaseReceipt {
         AssetId(hasher.finalize().into())
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn validate_shape(&self) -> Result<(), String> {
         if self.receipt_id == GrantId::zero() {
             return Err("PollenPurchaseReceipt receipt_id cannot be zero".into());
@@ -238,14 +243,14 @@ pub struct MarketplaceRegistry {
     #[serde(default)]
     pub next_offer_id: u64,
     /// Pollen: registered data buds. The asset is not sold; its
-    /// Access pollen is sold via AccessGrant.
+    /// Access pollen is sold via `AccessGrant`.
     #[serde(default)]
     pub data_assets: BTreeMap<AssetId, DataAsset>,
     /// Pollen: owner-signed access grants. Strict AI gate consumes these.
     #[serde(default)]
     pub access_grants: BTreeMap<GrantId, AccessGrant>,
     /// Pollen: seller/owner signed sale authorizations. These define the
-    /// Bounded pollen sale terms without transferring DataAsset ownership.
+    /// Bounded pollen sale terms without transferring `DataAsset` ownership.
     #[serde(default)]
     pub sale_authorizations: BTreeMap<SaleAuthorizationId, SaleAuthorization>,
     /// Pollen: purchase receipts produced from authorization-backed grant issue.
@@ -280,6 +285,10 @@ impl MarketplaceRegistry {
     /// `payment_commitment`, expiry. That way the buyer has signed what they
     /// accepted, and an attacker cannot produce a grant in somebody else's name
     /// or on altered terms.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn purchase_signing_hash(
         authorization: &SaleAuthorization,
         buyer: Address,
@@ -310,6 +319,11 @@ impl MarketplaceRegistry {
         Ok(hasher.finalize().into())
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn create_offer(
         &mut self,
         seller: Address,
@@ -354,6 +368,11 @@ impl MarketplaceRegistry {
         Ok(id)
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn close_offer(&mut self, id: u64, caller: &Address) -> Result<(), String> {
         let offer = self.offers.get_mut(&id).ok_or("Offer not found")?;
         if &offer.seller != caller {
@@ -367,6 +386,11 @@ impl MarketplaceRegistry {
         self.offers.get(&id)
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn register_data_asset(&mut self, asset: DataAsset) -> Result<AssetId, String> {
         asset.validate()?;
         if self.data_assets.contains_key(&asset.asset_id) {
@@ -380,6 +404,11 @@ impl MarketplaceRegistry {
         Ok(id)
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn revoke_data_asset(
         &mut self,
         asset_id: &AssetId,
@@ -397,6 +426,10 @@ impl MarketplaceRegistry {
     }
 
     /// exposed for: pollen surface - offer/data-rights readers land with the pollen rollout.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn create_access_grant(&mut self, grant: AccessGrant) -> Result<GrantId, String> {
         self.create_access_grant_checked(grant, true)
     }
@@ -517,6 +550,11 @@ impl MarketplaceRegistry {
         Ok(())
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn revoke_access_grant(
         &mut self,
         grant_id: &GrantId,
@@ -533,6 +571,11 @@ impl MarketplaceRegistry {
         Ok(())
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn set_encryption_policy(&mut self, policy: EncryptionPolicy) -> Result<(), String> {
         policy.validate()?;
         if !self.encryption_policies.contains_key(&policy.version)
@@ -555,6 +598,11 @@ impl MarketplaceRegistry {
             .collect()
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn create_sale_authorization(
         &mut self,
         authorization: SaleAuthorization,
@@ -619,6 +667,11 @@ impl MarketplaceRegistry {
         Ok(id)
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     #[allow(clippy::too_many_arguments)]
     pub fn issue_grant_from_sale_authorization(
         &mut self,
@@ -769,6 +822,10 @@ impl MarketplaceRegistry {
     /// Strict AI gate. Returns `Ok(None)` for non-Pollen input_ref payloads
     /// (legacy prompt/opaque bytes). Returns `Err` for Pollen references that
     /// Lack a valid grant. There is no DAO/admin override.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn validate_ai_read_ref(
         &self,
         input_ref: &[u8],
@@ -958,6 +1015,11 @@ impl MarketplaceRegistry {
             .map_err(|e| e.to_string())
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn consume_ai_read_grant(
         &mut self,
         grant_id: &GrantId,

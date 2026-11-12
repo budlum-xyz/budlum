@@ -10,7 +10,7 @@ use crate::storage::content_id::ContentId;
 /// B.U.D. Universal Gateway.
 /// Resolves a BNS name (.bud) to content stored in B.U.D.
 ///
-/// Bitswap + ContentDiscovery P2P fetch is integrated.
+/// Bitswap + `ContentDiscovery` `P2P` fetch is integrated.
 pub const MAX_GATEWAY_CONTENT_BYTES: usize = 10 * 1024 * 1024;
 
 fn checked_gateway_content(source: &str, data: Vec<u8>) -> Result<Vec<u8>, String> {

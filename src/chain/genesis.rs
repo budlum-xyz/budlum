@@ -25,7 +25,7 @@ pub const GENESIS_TIMESTAMP: u128 = 0;
 /// other scheme. Custom chains (`GenesisConfig::new`) still record the scheme
 /// of the build that created them.
 /// Minimum per-header difficulty (leading zero bits) of a mainnet
-/// bridge-enabled PoW domain. 2^64 hashes per header is out of reach
+/// bridge-enabled `PoW` domain. 2^64 hashes per header is out of reach
 /// for a self-mined forgery; the cumulative minimum scales with the
 /// confirmation depth.
 ///
@@ -49,20 +49,20 @@ pub struct BootstrapDomainConfig {
     pub finality_adapter: String,
     /// Bridge enabled (participation in the bridge lifecycle).
     pub bridge_enabled: bool,
-    /// The minimum confirmation count (the header-chain depth for PoW).
+    /// The minimum confirmation count (the header-chain depth for `PoW`).
     pub min_confirmations: u64,
-    /// The PoA authority placeholder addresses (only for a PoA domain).
+    /// The `PoA` authority placeholder addresses (only for a `PoA` domain).
     /// The launch ceremony replaces them with real institutional addresses.
     #[serde(default)]
     pub poa_authorities: Vec<String>,
 }
 
 impl BootstrapDomainConfig {
-    /// The four-domain bootstrap list for mainnet (PoW, PoS, BFT and PoA
+    /// The four-domain bootstrap list for mainnet (`PoW`, `PoS`, BFT and `PoA`
     /// placeholders).
     ///
-    /// The PoS and BFT entries are declared bridge-enabled but carry no
-    /// validator set (only a PoA entry can name one here), so they register
+    /// The `PoS` and BFT entries are declared bridge-enabled but carry no
+    /// validator set (only a `PoA` entry can name one here), so they register
     /// with a zero `validator_set_hash`. A set-bound finality adapter refuses
     /// every proof for a bridge-enabled domain in that state (see
     /// `reject_unregistered_set_for_bridge`), so until a launch ceremony
@@ -183,7 +183,7 @@ pub struct GenesisConfig {
 
     /// Optional $BUD tokenomics. When `Some`, genesis additionally
     /// Seeds the $BUD distribution accounts (Community/Liquidity/Ecosystem/Team/
-    /// BurnReserve) and configures the on-chain burn-reserve address + team
+    /// `BurnReserve`) and configures the on-chain burn-reserve address + team
     /// Vesting schedule. Default `None` - plain genesis is unchanged.
     #[serde(default)]
     pub bud_tokenomics: Option<crate::tokenomics::TokenomicsParams>,
@@ -194,16 +194,16 @@ pub struct GenesisConfig {
     #[serde(default)]
     pub tokenomics_addresses: Option<crate::tokenomics::TokenomicsAddresses>,
 
-    /// Address-only PoA authorities.
+    /// Address-only `PoA` authorities.
     ///
-    /// A PoA authority signs with an ordinary Ed25519 key and has no VRF, BLS
+    /// A `PoA` authority signs with an ordinary Ed25519 key and has no VRF, BLS
     /// or PQ registration, so a plain entry in `validators` lands inactive and
     /// `validate_candidate_chain` replays against an empty authority set and
-    /// fails with "No active PoA authorities". Listing the addresses here
+    /// fails with "No active `PoA` authorities". Listing the addresses here
     /// seeds them as active stake-1 authorities in `build_state`, so the
     /// genesis state the candidate replay starts from holds the same set the
     /// live node was started with. Ignored on chains that require consensus
-    /// keys; ceremony files for PoS chains must keep this empty.
+    /// keys; ceremony files for `PoS` chains must keep this empty.
     #[serde(default)]
     pub poa_authorities: Vec<Address>,
 
@@ -225,7 +225,7 @@ pub struct GenesisConfig {
 
     /// Bootstrap domain listesi. Her domain genesis'te otomatik
     /// Registered when storage is empty, which means a new chain. The four
-    /// domains PoW, PoS, BFT and PoA are the mainnet default. The default is
+    /// domains `PoW`, `PoS`, BFT and `PoA` are the mainnet default. The default is
     /// empty, for devnet and testnet backward compatibility.
     #[serde(default)]
     pub bootstrap_domains: Vec<BootstrapDomainConfig>,
@@ -324,6 +324,10 @@ impl GenesisConfig {
     /// This keeps the ceremony-facing genesis JSON as the single source of truth
     /// For the hybrid-domain topology. Invalid bootstrap entries fail closed so
     /// A node cannot silently start with a partial domain set.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn bootstrap_consensus_domains(
         &self,
     ) -> Result<Vec<crate::domain::ConsensusDomain>, String> {
@@ -415,6 +419,10 @@ impl GenesisConfig {
     /// node that accepts blocks but rejects every validator registration from
     /// its peers, which looks like a peering problem rather than a build
     /// problem and costs an operator hours to diagnose.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn validate_pq_scheme(&self) -> Result<(), String> {
         let Some(chain_scheme) = self.pq_scheme.as_deref() else {
             // Chain predates the field. Nothing to compare against; the
@@ -609,6 +617,11 @@ impl GenesisConfig {
             .map_err(|e| format!("Genesis anchor ledger refused: {e}"))
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn validate_consensus_ceremony(&self, network: Network) -> Result<(), String> {
         self.validate_pq_scheme()?;
         self.validate_anchor_ledger()?;
@@ -1053,7 +1066,7 @@ impl GenesisConfig {
             .map_or(0, |schedule| schedule.validation_reward_pool)
     }
 
-    /// The stake every genesis validator (including 1-atom bootstrap PoA
+    /// The stake every genesis validator (including 1-atom bootstrap `PoA`
     /// authorities not already in `validators`) is bonded with, summed.
     fn genesis_stake_total(&self) -> u64 {
         let base = u64::try_from(self.validators.len())
