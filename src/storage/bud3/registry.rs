@@ -606,10 +606,14 @@ impl Bud3Registry {
         epoch: u64,
     ) -> Result<(), RegistryError> {
         if amount_atoms < MIN_PAID_VIEW_FEE_ATOMS {
-            return Err(RegistryError::InvalidPaidView("paid view fee below minimum"));
+            return Err(RegistryError::InvalidPaidView(
+                "paid view fee below minimum",
+            ));
         }
         if self.paid_views.contains_key(&receipt_id) {
-            return Err(RegistryError::InvalidPaidView("duplicate paid view receipt"));
+            return Err(RegistryError::InvalidPaidView(
+                "duplicate paid view receipt",
+            ));
         }
         if self.tombstones.contains_key(&object) {
             return Err(RegistryError::Tombstoned);
@@ -1852,10 +1856,7 @@ impl Bud3Registry {
         let mut leaves = Vec::with_capacity(sorted_syms.len());
         for (idx, sym) in sorted_syms.iter().enumerate() {
             let expected_esi = first.saturating_add(u32::try_from(idx).unwrap_or(u32::MAX));
-            if sym.segment != segment
-                || sym.esi != expected_esi
-                || sym.data.len() != symbol_bytes
-            {
+            if sym.segment != segment || sym.esi != expected_esi || sym.data.len() != symbol_bytes {
                 return Err(RegistryError::BadRepair(
                     "repair symbol ESI, segment, or length mismatch",
                 ));
@@ -2892,13 +2893,8 @@ mod tests {
         let nonce = [0x22u8; 32];
         let tag = compute_grant_tag(&[0x77; 32], &nonce);
         let (_, otpk) = derive_grant_one_time_keypair(&owner_secret, &[0x77; 32], &nonce).unwrap();
-        let pkg = seal_grant_key_package(
-            grantee.public_key(),
-            &tag,
-            &sealed_key,
-            &content_key,
-        )
-        .unwrap();
+        let pkg =
+            seal_grant_key_package(grantee.public_key(), &tag, &sealed_key, &content_key).unwrap();
         let row = GrantRow {
             grant_tag: tag,
             one_time_pk: otpk,
@@ -2923,11 +2919,15 @@ mod tests {
             .unwrap();
         let mut second = pub_up.record.clone();
         second.commitment = [0x9A; 32];
-        r.register_object(addr(2), second, pub_shares, 0, 10).unwrap();
+        r.register_object(addr(2), second, pub_shares, 0, 10)
+            .unwrap();
         for h in 10..=13u8 {
             r.ack(&first_key, &addr(h)).unwrap();
         }
-        assert_eq!(r.public_object(&pub_up.record.content_id.digest), Some(first_key));
+        assert_eq!(
+            r.public_object(&pub_up.record.content_id.digest),
+            Some(first_key)
+        );
         for h in 10..=13u8 {
             r.ack(&[0x9A; 32], &addr(h)).unwrap();
         }

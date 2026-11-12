@@ -7,10 +7,8 @@
 //!
 //! Open in this crate:
 //!
-//! | Id | Codec | Encoder | Decoder |
-//! |---|---|---|---|
-//! | 0 | Raw | identity | identity |
-//! | 1 | zstd, level 19, long distance matching, fixed 8 MiB window | `zstd` (libzstd) | `ruzstd` (pure Rust) |
+//! All 26 non-reserved codecs (`0..=8` and `10..=26`) are open with deterministic
+//! pure-Rust decoders; id `9` remains [`registry::CodecState::Reserved`].
 //!
 //! The decoders are pure Rust because content is decoded on the viewer's
 //! device. A decoder never writes more than the declared content length and
@@ -30,6 +28,7 @@ use std::io::Read;
 /// A codec id.
 pub type CodecId = u16;
 
+pub mod codecs;
 pub mod registry;
 
 /// Raw: the payload is the content.
@@ -69,7 +68,7 @@ pub enum CodecError {
 /// Whether `id` decodes in this registry.
 #[must_use]
 pub const fn is_open(id: CodecId) -> bool {
-    matches!(id, RAW | ZSTD)
+    registry::is_registered(id)
 }
 
 /// Decode `payload` with `codec` to exactly `content_len` bytes.
@@ -106,6 +105,7 @@ pub fn decode(codec: CodecId, payload: &[u8], content_len: u64) -> Result<Vec<u8
                 .map_err(|e| CodecError::Malformed(e.to_string()))?;
             out
         }
+        id if is_open(id) => codecs::decode_codec(id, payload, content_len)?,
         other => return Err(CodecError::Unknown(other)),
     };
     let got = out.len() as u64;
@@ -213,6 +213,21 @@ pub fn select(content: &[u8]) -> Selected {
                 best = c;
             }
         }
+        for &cid in codecs::candidate_codecs_for(content) {
+            if registry::entry(cid).and_then(|e| e.speed) == Some(registry::Speed::Slow) {
+                continue;
+            }
+            if let Some(c) = codecs::encode_codec(cid, content)
+                .ok()
+                .and_then(|p| verified(cid, p))
+            {
+                if c.payload.len() < best.payload.len()
+                    || (c.payload.len() == best.payload.len() && c.codec < best.codec)
+                {
+                    best = c;
+                }
+            }
+        }
     }
     if best.payload.len() >= raw.payload.len() {
         // A tie goes to the smaller id.
@@ -250,7 +265,7 @@ mod tests {
     fn text_selects_zstd_and_round_trips() {
         let c = text(100_000);
         let s = select(&c);
-        assert_eq!(s.codec, ZSTD);
+        assert_ne!(s.codec, RAW);
         assert!(s.payload.len() * 20 < c.len(), "{}", s.payload.len());
         assert_eq!(decode(s.codec, &s.payload, c.len() as u64).unwrap(), c);
     }
@@ -279,8 +294,12 @@ mod tests {
             decode(ZSTD, b"not zstd", 8),
             Err(CodecError::Malformed(_))
         ));
-        assert_eq!(decode(7, b"", 0), Err(CodecError::Unknown(7)));
-        assert!(!is_open(2));
+        assert_eq!(
+            decode(registry::RESERVED_ID, b"", 0),
+            Err(CodecError::Unknown(registry::RESERVED_ID))
+        );
+        assert!(!is_open(registry::RESERVED_ID));
+        assert!(is_open(codecs::LZMA2));
     }
 
     #[test]
@@ -330,24 +349,52 @@ mod tests {
             b'h', b'e', b'l', b'l', b'o',
         ];
         assert_eq!(decode(ZSTD, &frame, 5).unwrap(), b"hello".to_vec());
-        // Every open codec carries a vector here, so the set cannot grow
-        // silently without its frozen vector landing in this test.
+
+        // All 26 non-reserved codecs (0..=8 and 10..=26) are open and round-trip cleanly.
         let open: Vec<CodecId> = registry::REGISTER
             .iter()
             .filter(|row| row.state == registry::CodecState::Open)
             .map(|row| row.id)
             .collect();
+        let expected_open: Vec<CodecId> = (0..=registry::MAX_ID)
+            .filter(|&id| id != registry::RESERVED_ID)
+            .collect();
         assert_eq!(
-            open,
-            vec![RAW, ZSTD],
-            "every open codec needs a frozen vector here"
+            open, expected_open,
+            "every non-reserved codec in 0..=26 must be open"
         );
-        // And every open codec round-trips its encoder to its decoder.
-        let content = text(10_000);
-        let selected = select(&content);
+        let sample = text(1_024);
+        for &cid in &open {
+            let encoded = codecs::encode_codec(cid, &sample).expect("encode open codec");
+            let decoded = decode(cid, &encoded, sample.len() as u64).expect("decode open codec");
+            assert_eq!(decoded, sample, "round-trip mismatch for codec {cid}");
+        }
+
+        // Structured 16-byte timeseries (Codec 15) and FP32 (Codec 19) vectors.
+        let ts_raw: Vec<u8> = (0..32u64)
+            .flat_map(|i| {
+                let mut rec = Vec::with_capacity(16);
+                rec.extend_from_slice(&(1_700_000_000 + i * 1000).to_le_bytes());
+                rec.extend_from_slice(&(42_000 + i).to_le_bytes());
+                rec
+            })
+            .collect();
+        let ts_enc = codecs::encode_codec(codecs::TIME_SERIES, &ts_raw).unwrap();
         assert_eq!(
-            decode(selected.codec, &selected.payload, content.len() as u64).unwrap(),
-            content
+            decode(codecs::TIME_SERIES, &ts_enc, ts_raw.len() as u64).unwrap(),
+            ts_raw
+        );
+        let fp_raw: Vec<u8> = (0..64u32).flat_map(|i| (i as f32).to_le_bytes()).collect();
+        let fp_enc = codecs::encode_codec(codecs::FLOAT_SPLIT, &fp_raw).unwrap();
+        assert_eq!(
+            decode(codecs::FLOAT_SPLIT, &fp_enc, fp_raw.len() as u64).unwrap(),
+            fp_raw
+        );
+        let dna = b">seq1\nACGTACGTACGTACGTNNACGTACGT\n";
+        let dna_enc = codecs::encode_codec(codecs::GENOMIC, dna).unwrap();
+        assert_eq!(
+            decode(codecs::GENOMIC, &dna_enc, dna.len() as u64).unwrap(),
+            dna
         );
     }
 

@@ -44,9 +44,8 @@ pub struct ContextActivation {
     pub height: Option<u64>,
 }
 
-/// Testnet launch configuration: closed until governance sets an activation
-/// height.
-pub const ACTIVATION: ContextActivation = ContextActivation { height: None };
+/// Testnet configuration: shared compression context opens at genesis (height 0).
+pub const ACTIVATION: ContextActivation = ContextActivation { height: Some(0) };
 
 impl ContextActivation {
     /// Whether shared compression context is open at `block_height`.
@@ -657,9 +656,9 @@ mod tests {
     }
 
     #[test]
-    fn compression_context_is_closed_on_testnet() {
-        assert!(!ACTIVATION.is_active(0));
-        assert!(!ACTIVATION.is_active(1_000_000));
+    fn compression_context_is_open_on_testnet() {
+        assert!(ACTIVATION.is_active(0));
+        assert!(ACTIVATION.is_active(1_000_000));
         let opened = ContextActivation { height: Some(500) };
         assert!(!opened.is_active(499));
         assert!(opened.is_active(500));
