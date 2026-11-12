@@ -12,7 +12,7 @@ use super::ethereum::{
 use super::solana::{sign_solana_tx, SolanaCompiledInstruction, SolanaEnvelopeError};
 use super::{
     adopt_signing_digest, AdoptForeignAccountTx, ClassicalAdoptProof, ForeignAdmissionError,
-    ForeignTx, QuantumAlertLevel, VerifiedForeignOutcome,
+    ForeignLaneState, ForeignTx, QuantumAlertLevel, VerifiedForeignOutcome,
 };
 use crate::core::account::{AccountState, ATTOS_PER_ATOM};
 use crate::core::address::Address;

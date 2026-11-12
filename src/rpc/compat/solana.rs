@@ -199,7 +199,12 @@ impl SolanaCompatGateway {
         }
         match req.method.as_str() {
             "getHealth" => JsonRpcResponse::ok(id, serde_json::json!("ok")),
-            "getVersion" => JsonRpcResponse::ok(id, serde_json::json!({ "solana-core": format!("budlum-core/{}", env!("CARGO_PKG_VERSION")) })),
+            "getVersion" => JsonRpcResponse::ok(
+                id,
+                serde_json::json!({
+                    "solana-core": format!("budlum-core/{}", env!("CARGO_PKG_VERSION"))
+                }),
+            ),
             "getSlot" | "getBlockHeight" => {
                 let no_config = req.params.is_null()
                     || req.params.as_array().is_some_and(|params| {
@@ -208,18 +213,24 @@ impl SolanaCompatGateway {
                                 && params[0].as_object().is_some_and(serde_json::Map::is_empty))
                     });
                 if !no_config {
-                    return JsonRpcResponse::err(id, JSONRPC_INVALID_PARAMS, "the standalone adapter cannot honor a slot commitment config");
+                    return JsonRpcResponse::err(
+                        id,
+                        JSONRPC_INVALID_PARAMS,
+                        "the standalone adapter cannot honor a slot commitment config",
+                    );
                 }
                 JsonRpcResponse::ok(id, serde_json::json!(self.slot))
             }
             "sendTransaction" => {
                 if !self.config.enabled {
+                    let door = native_door("sendTransaction")
+                        .unwrap_or("bud_sendRawTransaction");
                     return JsonRpcResponse::err(
                         id,
                         SOLANA_UNAVAILABLE,
                         format!(
-                            "sendTransaction: no production Solana implementation; no data was invented and no request was submitted; use {}",
-                            native_door("sendTransaction").unwrap_or("bud_sendRawTransaction")
+                            "sendTransaction: no production Solana implementation; \
+                             no data was invented and no request was submitted; use {door}"
                         ),
                     );
                 }
@@ -264,9 +275,10 @@ impl SolanaCompatGateway {
                     .admit_foreign_solana(&wire, 200_000, 1_000, 100, self.slot)
                 {
                     Ok(decoded) => {
-                        let sig = crate::execution::coordinator::foreign::solana::encode_solana_base58(
-                            &decoded.fee_payer_signature,
-                        );
+                        let sig =
+                            crate::execution::coordinator::foreign::solana::encode_solana_base58(
+                                &decoded.fee_payer_signature,
+                            );
                         JsonRpcResponse::ok(id, serde_json::json!(sig))
                     }
                     Err(err) => JsonRpcResponse::err(
@@ -290,14 +302,17 @@ impl SolanaCompatGateway {
                     "requestAirdrop is not wired to the faucet; no grant was queued",
                 )
             }
-            method => JsonRpcResponse::err(
-                id,
-                SOLANA_UNAVAILABLE,
-                format!(
-                    "{method}: no production Solana implementation; no data was invented and no request was submitted; use {}",
-                    native_door(method).unwrap_or("bud_getStatus")
-                ),
-            ),
+            method => {
+                let door = native_door(method).unwrap_or("bud_getStatus");
+                JsonRpcResponse::err(
+                    id,
+                    SOLANA_UNAVAILABLE,
+                    format!(
+                        "{method}: no production Solana implementation; \
+                         no data was invented and no request was submitted; use {door}"
+                    ),
+                )
+            }
         }
     }
 }
