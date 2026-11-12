@@ -4267,6 +4267,7 @@ fn encode_settlement_tx(tx: &crate::settlement::domains::SettlementTx, out: &mut
                 put_fixed(out, program);
             }
             put_option_fixed32(out, domain.plugin_code_hash);
+            put_fixed(out, &domain.genesis_state_root);
         }
         SettlementTx::SubmitCommitment(payload) => {
             put_u8(out, 1);
@@ -5010,6 +5011,7 @@ mod v29_signing_tests {
             pow_parameters: None,
             zk_program_allowlist: vec![[3u8; 32]],
             plugin_code_hash: None,
+            genesis_state_root: [0u8; 32],
         };
         let register = |d: ConsensusDomain| {
             TransactionType::Settlement(SettlementTx::RegisterDomain(Box::new(d)))
@@ -5048,6 +5050,9 @@ mod v29_signing_tests {
         variants.push(d);
         let mut d = domain.clone();
         d.plugin_code_hash = Some([6u8; 32]);
+        variants.push(d);
+        let mut d = domain.clone();
+        d.genesis_state_root = [7u8; 32];
         variants.push(d);
         for (i, changed) in variants.into_iter().enumerate() {
             assert_ne!(

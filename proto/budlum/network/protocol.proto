@@ -694,6 +694,8 @@ message ProtoNetworkMessage {
         ProtoCrossDomainMessage cross_domain_message = 23;
         ProtoVerifiedDomainCommitment verified_domain_commitment = 24;
         ProtoSlashingEvidence slashing_evidence = 25;
+        ProtoGetFinalityCert get_finality_cert = 26;
+        ProtoFinalityCertResponse finality_cert_response = 27;
     }
 }
 
@@ -798,6 +800,15 @@ message ProtoFinalityCert {
     // The seat table version the signers' seats were counted under (directive
     // section 7.4.4). Zero means the epoch's base table.
     uint64 seat_table_version = 8;
+}
+
+message ProtoGetFinalityCert {
+    uint64 checkpoint_height = 1;
+}
+
+message ProtoFinalityCertResponse {
+    bool found = 1;
+    ProtoFinalityCert cert = 2;
 }
 
 message ProtoGetQcBlob {

@@ -2427,45 +2427,70 @@ impl StorageRegistry {
     /// Who may speak for this content when a single canonical owner is queried
     /// (RPC read queries, marketplace asset binding, and whole-object prunes).
     ///
-    /// Because `manifest_id` is content-addressed and excludes `owner`, a bare
-    /// first-writer claim does not earn exclusive ownership over another
-    /// registrant: claimants backed by an active third-party operator-consented
-    /// `StorageDeal` (`payer == Some(claimant)` and `payer != Some(operator)`)
-    /// outrank unearned/self-dealt claims, and two competing claims at the same
-    /// tier stay ambiguous (`None`) rather than resolving by arrival order.
+    /// Because `manifest_id` is content-addressed and excludes `owner`, two
+    /// competing manifest claims keep ownership ambiguous (`None`) so a second
+    /// claimant cannot hijack ownership via a side deal or drive an NFT burn
+    /// over another registrant's data.
     #[must_use]
     pub fn owner_of(&self, content_id: &ContentId) -> Option<crate::core::address::Address> {
-        let claimants: Vec<Address> = self
+        let mut iter = self
             .manifest_claims
             .range((*content_id, Address::zero())..=(*content_id, Address::from([u8::MAX; 32])))
-            .map(|(_, claimant)| *claimant)
-            .collect();
-        if !claimants.is_empty() {
-            let earned: Vec<Address> = claimants
-                .iter()
-                .copied()
-                .filter(|claimant| {
-                    self.deals.values().any(|deal| {
-                        deal.manifest_id == *content_id
-                            && matches!(deal.status, DealStatus::Active)
-                            && deal.payer == Some(*claimant)
-                            && deal.payer != Some(deal.operator)
-                    })
-                })
-                .collect();
-            if earned.len() == 1 {
-                return Some(earned[0]);
-            }
-            if earned.len() > 1 {
-                return None;
-            }
-            return if claimants.len() == 1 {
-                Some(claimants[0])
-            } else {
+            .map(|(_, claimant)| *claimant);
+        if let Some(first) = iter.next() {
+            return if iter.next().is_some() {
                 None
+            } else {
+                Some(first)
             };
         }
         self.confidential_owners.get(content_id).copied()
+    }
+
+    /// True iff `burner` is the sole, uncontested owner of `content_id` across
+    /// manifest claims, active deals, confidential commits, self-host policies,
+    /// and live view grants, so burning an NFT cannot prune another party's
+    /// stored data or grants.
+    #[must_use]
+    pub fn can_prune_on_nft_burn(&self, content_id: &ContentId, burner: &Address) -> bool {
+        if *burner == Address::zero() || self.owner_of(content_id) != Some(*burner) {
+            return false;
+        }
+        if self.has_active_deal_for_other_payer(content_id, burner) {
+            return false;
+        }
+        if self
+            .confidential_owners
+            .get(content_id)
+            .is_some_and(|owner| owner != burner)
+        {
+            return false;
+        }
+        if self
+            .scoped_confidential_commits
+            .keys()
+            .any(|(owner, cid)| cid == content_id && owner != burner)
+        {
+            return false;
+        }
+        if self
+            .scoped_self_host_policies
+            .keys()
+            .any(|(manifest_id, inner_cid, owner)| {
+                (manifest_id == content_id || inner_cid == content_id) && owner != burner
+            })
+        {
+            return false;
+        }
+        if self
+            .view_grants
+            .live_for_content(content_id)
+            .into_iter()
+            .any(|grant| grant.issuer != *burner)
+        {
+            return false;
+        }
+        true
     }
 
     /// Validate that `shard_id` is a member of `manifest`. Used by
@@ -3498,7 +3523,12 @@ impl StorageRegistry {
             .values()
             .filter_map(|challenge| {
                 let challenged_deal = self.deals.get(&challenge.deal_id)?;
-                (challenged_deal.operator == operator && challenged_deal.manifest_id == manifest_id)
+                // A self-challenge never shields the operator's manifest from
+                // an independent challenger's rate-limit window.
+                let counts_for_opener = opener == operator || challenge.opener != operator;
+                (counts_for_opener
+                    && challenged_deal.operator == operator
+                    && challenged_deal.manifest_id == manifest_id)
                     .then_some(
                         challenge
                             .challenge_epoch
@@ -3626,6 +3656,8 @@ impl StorageRegistry {
         // Copied before the mutable borrows below; the object a proven read
         // belongs to is the deal's manifest, not the shard.
         let challenge_manifest_id = deal.manifest_id;
+        let challenge_opener = challenge.opener;
+        let deal_operator = deal.operator;
         if !deal.is_active() {
             return Err(StorageError::DealNotActive(deal.deal_id));
         }
@@ -3721,7 +3753,10 @@ impl StorageRegistry {
                 }
             }
         };
-        if result.outcome == ChallengeOutcome::Answered {
+        if result.outcome == ChallengeOutcome::Answered
+            && challenge_opener != deal_operator
+            && Self::storage_challenge_proofs_are_checkable()
+        {
             self.record_proven_read(challenge_manifest_id, response_epoch);
         }
         self.results.insert(challenge_id, result.clone());
@@ -9269,6 +9304,99 @@ mod tests {
             let back: StorageRegistry = bincode::deserialize(&bytes).expect("deserialize");
             assert_eq!(reg.root(), back.root());
         }
+    }
+
+    #[test]
+    fn self_opened_or_unverifiable_challenge_never_credits_proven_read() {
+        let mut reg = StorageRegistry::new();
+        let m = good_manifest();
+        let (deal_id, _) = open_one(&mut reg, &m);
+        // Any account - including the operator (Invariant 3) - can open a challenge,
+        // but neither a self-opened challenge nor an unverifiable answer may credit demand.
+        let self_cid = reg
+            .open_challenge(deal_id, 0, 4, 110, 120, operator(), 50)
+            .unwrap();
+        let self_res = reg
+            .answer_challenge(
+                self_cid,
+                ContentId([1u8; 32]),
+                operator(),
+                111,
+                Some(&[1u8; 16]),
+            )
+            .unwrap();
+        assert_eq!(self_res.outcome, ChallengeOutcome::Answered);
+        assert!(
+            !reg.access_events.contains_key(&m.manifest_id),
+            "self-opened challenge must never credit a proven read"
+        );
+        assert_eq!(
+            reg.verified_challenge_bytes_with_gate(deal_id, operator(), true),
+            0,
+            "self-opened challenge must never credit reward bytes even when proofs are checkable"
+        );
+
+        let cooldown = StorageRegistry::MIN_OPERATOR_MANIFEST_CHALLENGE_EPOCHS;
+        let cid = reg
+            .open_challenge(deal_id, 0, 4, 110 + cooldown, 120 + cooldown, opener(), 50)
+            .unwrap();
+        let res = reg.answer_challenge(
+            cid,
+            ContentId([1u8; 32]),
+            operator(),
+            115 + cooldown,
+            Some(&[1u8; 16]),
+        );
+        let res = res.unwrap();
+        assert_eq!(res.outcome, ChallengeOutcome::Answered);
+        assert!(
+            !reg.access_events.contains_key(&m.manifest_id),
+            "unverifiable proof must not credit a proven read"
+        );
+    }
+
+    #[test]
+    fn competing_manifest_and_paid_deal_cannot_hijack_owner_or_nft_burn_prune() {
+        let mut reg = StorageRegistry::new();
+        let alice = Address::from([0x11; 32]);
+        let mallory = Address::from([0x22; 32]);
+        let operator = Address::from([0x33; 32]);
+
+        let mut alice_manifest = good_manifest();
+        alice_manifest.owner = alice;
+        reg.register_manifest(&alice_manifest);
+        assert_eq!(reg.owner_of(&alice_manifest.manifest_id), Some(alice));
+        assert!(reg.can_prune_on_nft_burn(&alice_manifest.manifest_id, &alice));
+
+        let mut mallory_manifest = alice_manifest.clone();
+        mallory_manifest.owner = mallory;
+        reg.register_manifest(&mallory_manifest);
+
+        let shard_id = alice_manifest.shards[0].shard_id;
+        let deal_id = reg
+            .open_deal(
+                42,
+                &mallory_manifest,
+                shard_id,
+                operator,
+                1,
+                10,
+                20,
+                good_econ(),
+                &params(),
+                Some(valid_merkle_proof()),
+                Some([0x42u8; 32]),
+            )
+            .unwrap();
+        reg.set_deal_payer(deal_id, mallory);
+
+        assert_eq!(
+            reg.owner_of(&alice_manifest.manifest_id),
+            None,
+            "a competing manifest + side deal must keep owner_of ambiguous"
+        );
+        assert!(!reg.can_prune_on_nft_burn(&alice_manifest.manifest_id, &mallory));
+        assert!(!reg.can_prune_on_nft_burn(&alice_manifest.manifest_id, &alice));
     }
 }
 
