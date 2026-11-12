@@ -7281,6 +7281,35 @@ impl Blockchain {
         None
     }
 
+    /// Whether `voter_id` is a registered validator whose BLS key verifies
+    /// both the vote authentication preimage and the vote payload preimage.
+    ///
+    /// Used by the gossip layer before holding an early vote on a round-scope
+    /// refusal: `handle_prevote` / `handle_precommit` raise epoch and
+    /// round-membership refusals before signature checks, so an unauthenticated
+    /// vote must never claim a slot in `DeferredVotes`.
+    pub(crate) fn vote_is_from_registered_validator(
+        &self,
+        voter_id: &Address,
+        auth_msg: &[u8],
+        auth_sig: &[u8],
+        signing_msg: &[u8],
+        sig_bls: &[u8],
+    ) -> bool {
+        if auth_sig.len() > BLS_VOTE_SIGNATURE_BYTES || sig_bls.len() > BLS_VOTE_SIGNATURE_BYTES {
+            return false;
+        }
+        let Some(v) = self.state.validators.get(voter_id) else {
+            return false;
+        };
+        if v.bls_public_key.is_empty() {
+            return false;
+        }
+        crate::chain::finality::verify_bls_sig(&v.bls_public_key, auth_msg, auth_sig).is_ok()
+            && crate::chain::finality::verify_bls_sig(&v.bls_public_key, signing_msg, sig_bls)
+                .is_ok()
+    }
+
     pub fn handle_prevote(&mut self, vote: Prevote) -> Result<(), String> {
         if vote.checkpoint_hash.len() > MAX_CHECKPOINT_HASH_LEN {
             return Err("Rejecting prevote: checkpoint_hash is not a block hash".into());
@@ -11118,6 +11147,49 @@ mod tests {
         assert!(err.contains("not a registered validator"), "got: {err}");
         assert_eq!(bc.early_finality_votes.prevotes.len(), 1);
         assert_eq!(bc.early_finality_votes.prevotes[0].voter_id, honest_id);
+
+        let signed = sign_early_prevote(
+            &honest_bls,
+            Prevote {
+                chain_id: crate::core::transaction::DEFAULT_CHAIN_ID,
+                epoch: 99,
+                checkpoint_height: 10,
+                checkpoint_hash: "c".repeat(64),
+                voter_id: honest_id,
+                sig_bls: Vec::new(),
+                auth_sig: Vec::new(),
+            },
+        );
+        assert!(
+            bc.vote_is_from_registered_validator(
+                &honest_id,
+                &signed.auth_signing_message(),
+                &signed.auth_sig,
+                &signed.signing_message(),
+                &signed.sig_bls,
+            ),
+            "registered validator with valid BLS auth+payload must verify"
+        );
+        assert!(
+            !bc.vote_is_from_registered_validator(
+                &Address::from([0xFE; 32]),
+                &signed.auth_signing_message(),
+                &signed.auth_sig,
+                &signed.signing_message(),
+                &signed.sig_bls,
+            ),
+            "unknown voter must not verify"
+        );
+        assert!(
+            !bc.vote_is_from_registered_validator(
+                &honest_id,
+                &signed.auth_signing_message(),
+                &[0u8; 96],
+                &signed.signing_message(),
+                &signed.sig_bls,
+            ),
+            "forged auth_sig must not verify"
+        );
     }
 
     #[test]
