@@ -1535,7 +1535,12 @@ mod creator_gate_tests {
             execute_cosmwasm_json(contract, "bridge", &put_ok, false, 100_000, &mut host).unwrap();
         assert_eq!(st, OutcomeStatus::Success);
 
-        for reserved in ["cw20:bal:attacker", "cw721:owner:1", "sys:allowed_writer:x", ""] {
+        for reserved in [
+            "cw20:bal:attacker",
+            "cw721:owner:1",
+            "sys:allowed_writer:x",
+            "",
+        ] {
             let put_bad = serde_json::json!({"execute": {"put": {"key": reserved, "value": "x"}}});
             let (st, _) =
                 execute_cosmwasm_json(contract, "creator", &put_bad, false, 100_000, &mut host)

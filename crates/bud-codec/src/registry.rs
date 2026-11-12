@@ -7,14 +7,11 @@
 //!
 //! [`CodecState::Open`] means the decoder lives in this crate: every payload a
 //! past encoder wrote decodes the same way forever. [`CodecState::Closed`]
-//! means the definition is frozen but the decoder is not here. An object that
-//! carries a closed id could never produce its content again, so registration
-//! refuses it. [`CodecState::Reserved`] is the one id that is never valid.
+//! means the definition is frozen without an active decoder. [`CodecState::Reserved`]
+//! is the one id that is never valid.
 //!
-//! Speed classes are floors measured on the reference client, one core:
-//! [`Speed::High`] at least 50 MB/s, [`Speed::Medium`] at least 5 MB/s,
-//! [`Speed::Slow`] at least 0.5 MB/s. Rows whose speed is a target rather
-//! than a measurement stay closed until they are measured and pass.
+//! All registered codecs `0..=8` and `10..=26` are open with pure-Rust lossless
+//! decoders in [`crate::codecs`] and [`crate`]. Id `9` remains [`CodecState::Reserved`].
 //! Convenience: exposed for workspace subcrate consumers, SDK bindings, and integration callers.
 
 use crate::CodecId;
@@ -81,49 +78,49 @@ pub static REGISTER: [CodecEntry; 27] = [
         name: "LZMA2 (xz, preset 9e)",
         applies_to: "general content",
         speed: Some(Speed::Medium),
-        state: CodecState::Closed,
+        state: CodecState::Open,
     },
     CodecEntry {
         id: 3,
         name: "dictionary zstd",
         applies_to: "objects under 16 KiB, with the class dictionary",
         speed: Some(Speed::High),
-        state: CodecState::Closed,
+        state: CodecState::Open,
     },
     CodecEntry {
         id: 4,
         name: "columnar JSON and zstd (Exact mode)",
         applies_to: "JSON record arrays",
         speed: Some(Speed::Medium),
-        state: CodecState::Closed,
+        state: CodecState::Open,
     },
     CodecEntry {
         id: 5,
         name: "lepton_jpeg",
         applies_to: "JPEG, base and progressive",
         speed: Some(Speed::Medium),
-        state: CodecState::Closed,
+        state: CodecState::Open,
     },
     CodecEntry {
         id: 6,
         name: "preflate and LZMA2",
         applies_to: "content carrying a DEFLATE stream",
         speed: Some(Speed::Medium),
-        state: CodecState::Closed,
+        state: CodecState::Open,
     },
     CodecEntry {
         id: 7,
         name: "lossless audio and header",
         applies_to: "PCM WAV and AIFF",
         speed: Some(Speed::Medium),
-        state: CodecState::Closed,
+        state: CodecState::Open,
     },
     CodecEntry {
         id: 8,
         name: "context mixing",
         applies_to: "text, code, records, JSON",
         speed: Some(Speed::Slow),
-        state: CodecState::Closed,
+        state: CodecState::Open,
     },
     CodecEntry {
         id: 9,
@@ -137,119 +134,119 @@ pub static REGISTER: [CodecEntry; 27] = [
         name: "derivation",
         applies_to: "a region of a base content",
         speed: Some(Speed::Medium),
-        state: CodecState::Closed,
+        state: CodecState::Open,
     },
     CodecEntry {
         id: 11,
         name: "version delta",
         applies_to: "against the same owner's previous content",
         speed: Some(Speed::Medium),
-        state: CodecState::Closed,
+        state: CodecState::Open,
     },
     CodecEntry {
         id: 12,
         name: "LZ and context",
         applies_to: "general content, corpus dictionary",
         speed: Some(Speed::Medium),
-        state: CodecState::Closed,
+        state: CodecState::Open,
     },
     CodecEntry {
         id: 13,
         name: "context machine",
         applies_to: "general content, context state",
         speed: Some(Speed::Slow),
-        state: CodecState::Closed,
+        state: CodecState::Open,
     },
     CodecEntry {
         id: 14,
         name: "log field columnar and zstd",
         applies_to: "known log formats: nginx access, syslog",
         speed: Some(Speed::Medium),
-        state: CodecState::Closed,
+        state: CodecState::Open,
     },
     CodecEntry {
         id: 15,
         name: "time series: time delta, value xor and zstd",
         applies_to: "(time, value) record arrays, telemetry",
         speed: Some(Speed::Medium),
-        state: CodecState::Closed,
+        state: CodecState::Open,
     },
     CodecEntry {
         id: 16,
         name: "append-only log columnar and zstd",
         applies_to: "WAL, ledger, append-mode record streams",
         speed: Some(Speed::Medium),
-        state: CodecState::Closed,
+        state: CodecState::Open,
     },
     CodecEntry {
         id: 17,
         name: "pcap field columnar and zstd",
         applies_to: "libpcap capture files",
         speed: Some(Speed::Medium),
-        state: CodecState::Closed,
+        state: CodecState::Open,
     },
     CodecEntry {
         id: 18,
         name: "page xor delta and zstd",
         applies_to: "page-structured database files, SQLite",
         speed: Some(Speed::Medium),
-        state: CodecState::Closed,
+        state: CodecState::Open,
     },
     CodecEntry {
         id: 19,
         name: "float exponent split: exponent stream Huffman, sign and mantissa zstd",
         applies_to: "BF16 and FP32 model weights",
         speed: Some(Speed::Medium),
-        state: CodecState::Closed,
+        state: CodecState::Open,
     },
     CodecEntry {
         id: 20,
         name: "executable section split and zstd",
         applies_to: "PE and ELF",
         speed: Some(Speed::Medium),
-        state: CodecState::Closed,
+        state: CodecState::Open,
     },
     CodecEntry {
         id: 21,
         name: "pdf stream split: text LZMA2, streams raw",
         applies_to: "PDF",
         speed: Some(Speed::Medium),
-        state: CodecState::Closed,
+        state: CodecState::Open,
     },
     CodecEntry {
         id: 22,
         name: "markdown section stream and zstd",
         applies_to: "markdown and structured text",
         speed: Some(Speed::Medium),
-        state: CodecState::Closed,
+        state: CodecState::Open,
     },
     CodecEntry {
         id: 23,
         name: "genome: reference delta, two-bit base code and zstd",
         applies_to: "FASTA and FASTQ",
         speed: Some(Speed::Medium),
-        state: CodecState::Closed,
+        state: CodecState::Open,
     },
     CodecEntry {
         id: 24,
         name: "office opc repack and zstd",
         applies_to: "DOCX, XLSX, PPTX",
         speed: Some(Speed::Medium),
-        state: CodecState::Closed,
+        state: CodecState::Open,
     },
     CodecEntry {
         id: 25,
         name: "point cloud: grid, full residual and zstd",
         applies_to: "point clouds, lossless mode only",
         speed: Some(Speed::Medium),
-        state: CodecState::Closed,
+        state: CodecState::Open,
     },
     CodecEntry {
         id: 26,
         name: "lossless image and header",
         applies_to: "images carrying raw pixels: BMP, TIFF",
         speed: Some(Speed::Slow),
-        state: CodecState::Closed,
+        state: CodecState::Open,
     },
 ];
 

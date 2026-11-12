@@ -3383,18 +3383,14 @@ impl Executor {
                         object,
                         amount_atoms,
                         ..
-                    } => {
-                        if *amount_atoms >= crate::storage::bud3::view::MIN_PAID_VIEW_FEE_ATOMS
-                            && !state.bud3_registry.is_tombstoned(object)
-                            && state
-                                .bud3_registry
-                                .object(object)
-                                .is_some_and(|o| o.record.content_id.kind == ContentIdKind::Public)
-                        {
-                            *amount_atoms
-                        } else {
-                            0
-                        }
+                    } if *amount_atoms >= crate::storage::bud3::view::MIN_PAID_VIEW_FEE_ATOMS
+                        && !state.bud3_registry.is_tombstoned(object)
+                        && state
+                            .bud3_registry
+                            .object(object)
+                            .is_some_and(|o| o.record.content_id.kind == ContentIdKind::Public) =>
+                    {
+                        *amount_atoms
                     }
                     _ => 0,
                 };

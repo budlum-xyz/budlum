@@ -229,10 +229,8 @@ fn closed_codecs_refuse_on_testnet() {
             })
         })
         .collect();
-    // Ids the codec register marks closed at testnet launch. The expansion
-    // work may open some of them later; until a decoder lands, an object that
-    // carries one is refused with the codec named in the reason.
-    for closed in [6u16, 8, 23, 26] {
+    // Reserved (9) and unregistered (27+) codec ids are refused with CodecNotOpen.
+    for closed in [9u16, 27, 99] {
         let mut record = up.record.clone();
         record.codec = closed;
         let tx = Transaction::new_with_chain_id(
@@ -1372,7 +1370,10 @@ fn bud3_e2e_upload_register_view() {
         ),
     )
     .unwrap();
-    assert_eq!(state.get_balance(&payer), payer_before - 1 - MIN_PAID_VIEW_FEE_ATOMS);
+    assert_eq!(
+        state.get_balance(&payer),
+        payer_before - 1 - MIN_PAID_VIEW_FEE_ATOMS
+    );
     assert!(state.get_balance(&custody_endowment_account()) > endow_before);
     assert!(state.get_balance(&reward_pool_account()) > pool_before);
 
