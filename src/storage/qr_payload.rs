@@ -163,6 +163,10 @@ pub fn pack_payload(kind: PayloadKind, content: &[u8]) -> Result<Vec<u8>, Payloa
 /// CPU on bytes that cannot shrink. Passing `false` stores the body raw. The
 /// packed bytes a reader unpacks are identical either way; only the attempt is
 /// skipped.
+///
+/// # Errors
+///
+/// Returns an error if the operation fails.
 pub fn pack_payload_opts(
     kind: PayloadKind,
     content: &[u8],

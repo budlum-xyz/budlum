@@ -315,6 +315,10 @@ pub fn cosmos_addr20_from_compressed_pubkey(pubkey33: &[u8; 33]) -> [u8; 20] {
 }
 
 /// Decodes and verifies a `cosmos.tx.v1beta1.TxRaw` envelope.
+///
+/// # Errors
+///
+/// Returns an error if the operation fails.
 pub fn decode_cosmos_tx(
     tx_raw_bytes: &[u8],
     chain_id: &str,
@@ -453,6 +457,10 @@ pub fn decode_cosmos_tx(
 }
 
 /// Builds and signs a canonical `SIGN_MODE_DIRECT` Cosmos `TxRaw` envelope.
+///
+/// # Errors
+///
+/// Returns an error if the operation fails.
 pub fn sign_cosmos_tx_direct(
     secret_key: &[u8; 32],
     chain_id: &str,

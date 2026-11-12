@@ -74,11 +74,11 @@ pub struct AiRegistry {
     pub results: BTreeMap<AiRequestId, Vec<AiInferenceResult>>,
     #[serde(with = "crate::core::map_keys")]
     pub outcomes: BTreeMap<AiRequestId, AiInferenceOutcome>,
-    /// Set of request IDs whose max_fee has been reclaimed
+    /// Set of request IDs whose `max_fee` has been reclaimed
     /// After deadline expiry without finalization. Prevents double-reclaim.
     pub reclaimed_fees: BTreeSet<AiRequestId>,
     /// Equivocation event record with block timestamp.
-    /// Maps (request_id, verifier_bytes) → block_number when detected.
+    /// Maps (`request_id`, `verifier_bytes`) → `block_number` when detected.
     /// Dispute window enforcement - equivocation events
     /// Expire after `DISPUTE_WINDOW_BLOCKS` blocks, preventing stale slashing.
     #[serde(with = "crate::core::map_keys")]
@@ -113,7 +113,7 @@ pub struct AiRegistry {
     /// Results to registered callback addresses.
     pub callback_queue: BTreeMap<Address, Vec<AiCallbackEvent>>,
     /// Execution proof registry.
-    /// Maps (request_id, verifier) → AiExecutionProof. When a verifier
+    /// Maps (`request_id`, verifier) → `AiExecutionProof`. When a verifier
     /// Submits a ZKVM-verified inference result, the proof is stored here.
     /// This enables trustless verification - the paradigm shift from
     /// "verifier says so" to "mathematics prove it."
@@ -125,15 +125,15 @@ pub struct AiRegistry {
     /// `execution_proofs` alone and never unlock a proof-gated payment.
     pub fully_verified_proofs: BTreeSet<(AiRequestId, [u8; 32])>,
     /// Verifier Quality of Service registry.
-    /// Maps verifier address → QoS metrics. Enables QoS-aware verifier
+    /// Maps verifier address → `QoS` metrics. Enables `QoS`-aware verifier
     /// Selection for the Agentic Economy.
     pub verifier_qos: BTreeMap<Address, AiVerifierQos>,
     /// Agent-to-Agent payment registry.
-    /// Maps payment_id → AiAgentPayment. Enables trustless value transfer
+    /// Maps `payment_id` → `AiAgentPayment`. Enables trustless value transfer
     /// Between AI agents in the Agentic Economy.
     #[serde(with = "crate::core::map_keys")]
     pub agent_payments: BTreeMap<[u8; 32], AiAgentPayment>,
-    /// Finalized payment receipts (payment_id never reusable).
+    /// Finalized payment receipts (`payment_id` never reusable).
     #[serde(with = "crate::core::map_keys")]
     pub settled_agent_payments: BTreeMap<[u8; 32], AiAgentPaymentSettlement>,
     /// Verifier whitelist - only whitelisted verifiers
@@ -143,7 +143,7 @@ pub struct AiRegistry {
     /// Verifier onboarding for the Agentic Economy.
     pub verifier_whitelist: BTreeSet<Address>,
     /// Agent reputation registry.
-    /// Maps agent address → AiAgentReputation. Tracks payment reliability,
+    /// Maps agent address → `AiAgentReputation`. Tracks payment reliability,
     /// Inference quality, and uptime for trust scoring in the Agentic Economy.
     pub agent_reputations: BTreeMap<Address, AiAgentReputation>,
 }
@@ -221,6 +221,11 @@ impl AiRegistry {
             && self.agent_reputations.is_empty()
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn register_model(&mut self, spec: AiModelSpec) -> Result<AiModelId, String> {
         spec.validate()?;
         // A proof-required model cannot be satisfied while the
@@ -289,6 +294,10 @@ impl AiRegistry {
     /// or a non-canonical `input_commitment`. Every caller of this method
     /// passes the same gate as the transaction path, so there is no second
     /// door into the request table.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn submit_request(
         &mut self,
         request: AiInferenceRequest,
@@ -371,6 +380,10 @@ impl AiRegistry {
 
     /// Submit an inference result with deadline + dispute enforcement.
     /// `current_block` is provided by the executor layer (defense-in-depth).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn submit_result(
         &mut self,
         result: AiInferenceResult,
@@ -597,6 +610,10 @@ impl AiRegistry {
     /// Deactivate a model. Only the model owner can deactivate.
     /// An inactive model rejects new inference requests, but existing pending
     /// Requests/results continue to be processed normally.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn deactivate_model(
         &mut self,
         model_id: &AiModelId,
@@ -623,6 +640,10 @@ impl AiRegistry {
     }
 
     /// Reactivate a previously deactivated model. Only the model owner can reactivate.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn reactivate_model(
         &mut self,
         model_id: &AiModelId,
@@ -649,8 +670,12 @@ impl AiRegistry {
     }
 
     /// Update mutable model specification fields.
-    /// Only the model owner can update. Immutable fields (model_id, model_hash,
+    /// Only the model owner can update. Immutable fields (`model_id`, `model_hash`,
     /// Owner, version) cannot be changed - those require registering a new model.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     #[allow(clippy::too_many_arguments)]
     pub fn update_model_spec(
         &mut self,
@@ -742,6 +767,10 @@ impl AiRegistry {
     /// Transfer model ownership to a new address.
     /// Only the current owner can transfer. The new owner gains full control
     /// (deactivation, reactivation, spec updates, further transfers).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn transfer_model_ownership(
         &mut self,
         model_id: &AiModelId,
@@ -774,10 +803,10 @@ impl AiRegistry {
     /// Recently-expired data for a configurable retention window.
     ///
     /// Prunable items:
-    /// - Requests whose effective deadline has passed + retention_blocks,
+    /// - Requests whose effective deadline has passed + `retention_blocks`,
     ///   reclaimed and cancelled ones included
     /// - Results associated with pruned requests
-    /// - Outcomes that have been finalized + retention_blocks
+    /// - Outcomes that have been finalized + `retention_blocks`
     /// - Reclaimed and cancelled markers whose request row is gone
     ///
     /// Returns `(pruned, refunds)`. `refunds` holds one `(requester, max_fee)`
@@ -903,13 +932,17 @@ impl AiRegistry {
     }
     ///
     /// After a request's deadline has passed without reaching agreement threshold,
-    /// The requester can reclaim their escrowed max_fee. This prevents fee leaks
-    /// Where max_fee is deducted but never distributed (no verifiers, insufficient
+    /// The requester can reclaim their escrowed `max_fee`. This prevents fee leaks
+    /// Where `max_fee` is deducted but never distributed (no verifiers, insufficient
     /// Agreement, or deadline expiry before threshold reached).
     ///
     /// Returns `(requester_address, max_fee)` on success.
     /// Errors if: request not found, already finalized, not yet expired,
     /// already reclaimed, or already cancelled (the refund went out then).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn reclaim_fee(
         &mut self,
         request_id: &AiRequestId,
@@ -922,6 +955,10 @@ impl AiRegistry {
 
     /// Read-only form of [`Self::reclaim_fee`]: applies every rule and changes nothing.
     /// The status query uses it, so no registry copy is needed.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn check_reclaimable(
         &self,
         request_id: &AiRequestId,
@@ -986,6 +1023,10 @@ impl AiRegistry {
     /// Returns `(requester, max_fee)` on success for the executor to process refund.
     /// Errors if: request not found, not the requester, already finalized,
     /// already reclaimed, or already cancelled.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn cancel_request(
         &mut self,
         request_id: &AiRequestId,
@@ -1039,7 +1080,7 @@ impl AiRegistry {
     }
 
     /// Check if a verifier has equivocated on a request.
-    /// Returns true if the (request_id, verifier) pair is in the equivocation record
+    /// Returns true if the (`request_id`, verifier) pair is in the equivocation record
     /// AND the dispute window has not expired.
     pub fn has_equivocated(&self, request_id: &AiRequestId, verifier: &Address) -> bool {
         self.equivocation_events
@@ -1129,8 +1170,12 @@ impl AiRegistry {
     }
 
     /// Slash a verifier for equivocation.
-    /// Now enforces dispute window - cannot slash after DISPUTE_WINDOW_BLOCKS
+    /// Now enforces dispute window - cannot slash after `DISPUTE_WINDOW_BLOCKS`
     /// Have passed since the equivocation was detected.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn slash_equivocator(
         &mut self,
         request_id: &AiRequestId,
@@ -1176,6 +1221,10 @@ impl AiRegistry {
     /// Lock stake for an AI verifier.
     /// Verifiers must stake to participate in AI inference.
     /// This stake is slashable on equivocation, economic skin-in-the-game.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn lock_verifier_stake(&mut self, verifier: &Address, amount: u64) -> Result<u64, String> {
         if amount == 0 {
             return Err("Verifier stake must be > 0".into());
@@ -1194,6 +1243,10 @@ impl AiRegistry {
     /// Only an authorized operator, one that meets the stake threshold, may
     /// declare: otherwise an address with no stake could write a ceiling and
     /// pollute what `unservable_reason` reports.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn declare_effort_ceiling(
         &mut self,
         verifier: &Address,
@@ -1257,6 +1310,10 @@ impl AiRegistry {
     }
 
     /// Withdraw verifier stake (only if no pending equivocation).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn withdraw_verifier_stake(
         &mut self,
         verifier: &Address,
@@ -1416,6 +1473,10 @@ impl AiRegistry {
     /// Returns Ok if the proof commitments match the existing result.
     /// Returns Err if no result exists for this (request, verifier) pair,
     /// Or if commitments don't match.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn attach_execution_proof(
         &mut self,
         request_id: &AiRequestId,
@@ -1604,7 +1665,7 @@ impl AiRegistry {
 
     // ===================== Verifier QoS =====================
 
-    /// Get QoS metrics for a verifier.
+    /// Get `QoS` metrics for a verifier.
     pub fn get_verifier_qos(&self, verifier: &Address) -> Option<&AiVerifierQos> {
         self.verifier_qos.get(verifier)
     }
@@ -1629,6 +1690,10 @@ impl AiRegistry {
     // ===================== Agent-to-Agent Payment =====================
 
     /// Submit an agent-to-agent payment.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn submit_agent_payment(
         &mut self,
         payment: AiAgentPayment,
@@ -1686,6 +1751,10 @@ impl AiRegistry {
     }
 
     /// Release an escrowed payment to the recipient.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn release_agent_payment(
         &mut self,
         payment_id: &[u8; 32],
@@ -1735,6 +1804,10 @@ impl AiRegistry {
     }
 
     /// Reclaim an expired escrowed payment.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn reclaim_agent_payment(
         &mut self,
         payment_id: &[u8; 32],
@@ -1782,6 +1855,10 @@ impl AiRegistry {
 
     /// Record immediate (non-escrowed) settlement without dropping audit trail.
     /// Removes live escrow entry if present and inserts an immutable settlement receipt.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn settle_agent_payment_immediate(
         &mut self,
         payment_id: &[u8; 32],
@@ -2010,7 +2087,7 @@ impl AiRegistry {
     }
 
     /// Get all agents sorted by trust score (descending - highest trust first).
-    /// Returns Vec of (agent_address, trust_score) tuples.
+    /// Returns Vec of (`agent_address`, `trust_score`) tuples.
     ///
     /// The returned score is the `f64` display column, but the *ordering*
     /// comes from the integer permyriad score ( / ), with the

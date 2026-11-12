@@ -284,8 +284,14 @@ impl DataMarketRegistry {
         .map_err(DataMarketError::Grant)?;
 
         // Validate every grant-issuance condition BEFORE debiting the buyer.
-        bud3.validate_view_grant(&row, current_epoch)
-            .map_err(DataMarketError::Registry)?;
+        bud3.validate_view_grant(
+            &listing.nft_id,
+            &seller_grant.grant_nonce,
+            &listing.seller,
+            &row,
+            current_epoch,
+        )
+        .map_err(DataMarketError::Registry)?;
 
         let price_attos = u128::from(listing.price_atoms)
             .saturating_mul(u128::from(crate::core::account::ATTOS_PER_ATOM));
@@ -297,8 +303,14 @@ impl DataMarketRegistry {
                 crate::core::account::BudEnvUnit::BudZeroAtom,
             )
             .map_err(DataMarketError::PaymentFailed)?;
-        bud3.issue_grant(row.clone(), current_epoch)
-            .map_err(DataMarketError::Registry)?;
+        bud3.issue_grant(
+            &listing.nft_id,
+            &seller_grant.grant_nonce,
+            &listing.seller,
+            row.clone(),
+            current_epoch,
+        )
+        .map_err(DataMarketError::Registry)?;
         self.consumed_purchases.insert(purchase_key);
 
         let receipt = DataMarketPurchaseReceipt {

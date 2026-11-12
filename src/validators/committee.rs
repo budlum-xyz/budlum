@@ -494,12 +494,13 @@ impl CommitteeTable {
     }
 }
 
-/// Largest-remainder seat allocation with a per-validator cap.
+/// Iterative proportional largest-remainder seat allocation with a per-validator
+/// cap (water-filling).
 ///
-/// Each validator first takes `floor(S * w / W)` seats, capped. The leftover
-/// seats go one at a time to the largest fractional remainders, skipping any
-/// validator already at the cap, until the seats run out or every validator is
-/// capped. Remainder ties break on the address tie rank.
+/// Whenever one or more high-stake validators hit `cap`, the remaining seats are
+/// redistributed **proportionally by stake** among uncapped validators (`floor`
+/// + largest fractional remainder, ties broken by address tie rank), rather than
+/// flat round-robin across dust validators.
 fn allocate_seats(
     members: &[(Address, u64)],
     randomness: &[u8; 32],
@@ -507,41 +508,79 @@ fn allocate_seats(
     cap: usize,
 ) -> Vec<usize> {
     let mut alloc = vec![0usize; members.len()];
-    let total_weight: u128 = members.iter().map(|(_, weight)| u128::from(*weight)).sum();
-    if total_weight == 0 || seat_count == 0 || cap == 0 {
+    if seat_count == 0 || cap == 0 || members.is_empty() {
         return alloc;
     }
-    let seats = u128::try_from(seat_count).unwrap_or(0);
-    // Precompute the tie rank once per member: the comparator reads it instead
-    // of hashing on every comparison.
-    let mut remainders: Vec<(u128, [u8; 32], usize)> = Vec::with_capacity(members.len());
-    for (index, (address, weight)) in members.iter().enumerate() {
-        let ideal = seats * u128::from(*weight);
-        let base = ideal / total_weight;
-        if let Some(slot) = alloc.get_mut(index) {
-            *slot = usize::try_from(base).unwrap_or(0).min(cap);
+    let ranks: Vec<[u8; 32]> = members
+        .iter()
+        .map(|(address, _)| tie_rank(randomness, address))
+        .collect();
+    let mut remaining_seats = seat_count;
+    loop {
+        if remaining_seats == 0 {
+            break;
         }
-        remainders.push((ideal % total_weight, tie_rank(randomness, address), index));
-    }
-    remainders.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
-    let mut used: usize = alloc.iter().sum();
-    while used < seat_count {
-        let before = used;
-        for (_, _, index) in &remainders {
-            if used == seat_count {
-                break;
+        let uncapped_weight: u128 = members
+            .iter()
+            .zip(alloc.iter())
+            .filter(|(_, used)| **used < cap)
+            .map(|((_, weight), _)| u128::from(*weight))
+            .sum();
+        if uncapped_weight == 0 {
+            break;
+        }
+        let seats_u128 = u128::try_from(remaining_seats).unwrap_or(0);
+        let mut remainders: Vec<(u128, [u8; 32], usize)> = Vec::new();
+        let mut assigned_this_round = 0usize;
+        for (index, ((_, weight), rank)) in members.iter().zip(ranks.iter()).enumerate() {
+            let current = alloc.get(index).copied().unwrap_or(cap);
+            if current >= cap {
+                continue;
             }
-            let current_alloc = alloc.get(*index).copied().unwrap_or(0);
-            if current_alloc < cap {
-                if let Some(slot) = alloc.get_mut(*index) {
-                    *slot += 1;
-                    used += 1;
+            let headroom = cap.saturating_sub(current);
+            let ideal = seats_u128 * u128::from(*weight);
+            let base = usize::try_from(ideal / uncapped_weight)
+                .unwrap_or(headroom)
+                .min(headroom);
+            if base > 0 {
+                if let Some(slot) = alloc.get_mut(index) {
+                    *slot = current.saturating_add(base);
+                    assigned_this_round = assigned_this_round.saturating_add(base);
                 }
             }
+            if alloc.get(index).copied().unwrap_or(cap) < cap {
+                remainders.push((ideal % uncapped_weight, *rank, index));
+            }
         }
-        if used == before {
-            // Every validator is at the cap or its proportional share; remaining seats stay empty.
-            break;
+        remaining_seats = remaining_seats.saturating_sub(assigned_this_round);
+        let had_floor_progress = assigned_this_round > 0;
+        let has_capped_blocker = members
+            .iter()
+            .zip(alloc.iter())
+            .any(|((_, _), used)| *used >= cap)
+            && !remainders.is_empty();
+        // Only distribute fractional remainders once proportional floor passes
+        // stop saturating newly capped validators, so capped overflow redistributes
+        // proportionally instead of equally across tiny dust stakes.
+        if remaining_seats > 0 && (!had_floor_progress || !has_capped_blocker) {
+            remainders.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+            let mut rem_assigned = 0usize;
+            for (_, _, index) in &remainders {
+                if remaining_seats == 0 {
+                    break;
+                }
+                let current = alloc.get(*index).copied().unwrap_or(cap);
+                if current < cap {
+                    if let Some(slot) = alloc.get_mut(*index) {
+                        *slot = current.saturating_add(1);
+                        remaining_seats = remaining_seats.saturating_sub(1);
+                        rem_assigned = rem_assigned.saturating_add(1);
+                    }
+                }
+            }
+            if rem_assigned == 0 && !had_floor_progress {
+                break;
+            }
         }
     }
     alloc
@@ -918,5 +957,28 @@ mod tests {
         for index in table.seats_of(&addr(8)) {
             assert!(!record.seats.contains(index));
         }
+    }
+
+    #[test]
+    fn allocate_seats_water_fills_proportionally_without_inflating_dust_validators() {
+        // 1 whale (1_000_000_000) hits cap = 8, 7 real validators (1_000 each),
+        // and 1 dust Sybil (weight 1). Remaining 24 seats must water-fill
+        // proportionally to the 7 real validators rather than handing seats to dust.
+        let mut members = Vec::new();
+        members.push((addr(1), 1));
+        for i in 2..=8u8 {
+            members.push((addr(i), 1_000));
+        }
+        members.push((addr(9), 1_000_000_000));
+        let table = table_of(&members);
+        assert_eq!(table.seat_count(), 32);
+        assert_eq!(table.seats_of(&addr(9)).len(), 8);
+        assert_eq!(
+            table.seats_of(&addr(1)).len(),
+            0,
+            "dust Sybil must receive zero seats when real uncapped stake exists"
+        );
+        let real_total: usize = (2..=8u8).map(|i| table.seats_of(&addr(i)).len()).sum();
+        assert_eq!(real_total, 24);
     }
 }

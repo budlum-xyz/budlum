@@ -84,6 +84,10 @@ impl BnsRegistry {
     /// succeeded when the refusal below fires. The `Err` is the branch where
     /// nothing was evicted: no expired name existed, so the registry is at
     /// capacity and nothing was taken out. The two are exclusive.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn register(
         &mut self,
         name: String,
@@ -145,6 +149,10 @@ impl BnsRegistry {
     /// never shortens the registration. The transaction door charges the same
     /// duration-based cost as registration, while this method owns the
     /// lifecycle rule itself.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn renew(
         &mut self,
         name: &str,
@@ -174,6 +182,10 @@ impl BnsRegistry {
     /// (resolver, address, storage, content and subdomains) are cleared and the
     /// address points at the new owner, so the name never resolves to the
     /// previous owner after the transfer.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn transfer(
         &mut self,
         name: &str,
@@ -203,6 +215,11 @@ impl BnsRegistry {
         Ok(())
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn register_subdomain(
         &mut self,
         parent_name: &str,
@@ -246,6 +263,11 @@ impl BnsRegistry {
         }
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn set_content(
         &mut self,
         name: &str,
@@ -303,6 +325,11 @@ impl BnsRegistry {
         })
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn set_storage(
         &mut self,
         name: &str,

@@ -28,7 +28,7 @@ struct Cli {
     /// Public node JSON-RPC endpoint.
     #[arg(long, default_value = "http://127.0.0.1:8545")]
     rpc_url: String,
-    /// JSON file containing a VerifiedDomainCommitment.
+    /// JSON file containing a `VerifiedDomainCommitment`.
     #[arg(long)]
     payload: PathBuf,
     /// 32-byte proof-market task id, with an optional 0x prefix.

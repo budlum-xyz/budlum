@@ -12,7 +12,7 @@
 //! [`rotate_anchor_key_with_committee`] here. Rules are pinned by this
 //! file's tests.
 //!
-//! Budlum has four consensus domains (PoW, PoS, BFT, PoA), and each produces
+//! Budlum has four consensus domains (`PoW`, `PoS`, BFT, `PoA`), and each produces
 //! its own finality proof. Instead of making every domain separately
 //! post-quantum, this module binds them under a single PQ boundary: the
 //! domain finality records are aggregated into one Merkle tree, and
@@ -42,9 +42,9 @@
 //!   directly** (3-of-6 SLH-DSA-SHAKE-256s devices, no on-chain vote required
 //!   in the emergency), via [`rotate_anchor_key_with_committee`].
 //! - **VerifyMerkle only on the `stark_root` path.** The anchor
-//!   signature covers a local SHA3 Merkle root, and VerifyMerkle does not run
+//!   signature covers a local SHA3 Merkle root, and `VerifyMerkle` does not run
 //!   on that path. Only an anchor that carries a `stark_root` depends on the
-//!   VerifyMerkle audit.
+//!   `VerifyMerkle` audit.
 //!
 //! # What this is not
 //!

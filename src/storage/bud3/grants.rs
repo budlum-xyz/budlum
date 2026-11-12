@@ -89,6 +89,8 @@ pub enum GrantBud3Error {
     InvalidOneTimeKey,
     /// `sealed_key_package` is empty, exceeds [`MAX_SEALED_KEY_PACKAGE_BYTES`], or is not HPKE `0x647a`.
     InvalidKeyPackage,
+    /// `grant_tag` does not match `H(BDLM_BUD3_GRANT_V1 || nft_id || grant_nonce)`.
+    InvalidGrantTag,
     /// One-time ML-DSA-65 revocation signature failed verification.
     InvalidRevokeSignature,
 }

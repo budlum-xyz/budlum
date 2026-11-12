@@ -6,22 +6,40 @@ pub trait ConsensusSigner: Send + Sync {
     fn address(&self) -> Address {
         Address::from(self.public_key_bytes())
     }
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     fn sign_block(&self, block_hash: &[u8; 32]) -> Result<Vec<u8>, CryptoError>;
     /// Domain-separated default: a prevote over `msg` must never
     /// equal the block signature over the same bytes. The old default hashed
     /// the message bare, so one Ed25519 key produced interchangeable
     /// signatures for block, prevote and precommit.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     fn sign_prevote(&self, msg: &[u8]) -> Result<Vec<u8>, CryptoError> {
         let mut tagged = b"BDLM_PREVOTE_ED25519_V1".to_vec();
         tagged.extend_from_slice(msg);
         self.sign_block(&crate::core::hash::calculate_hash_bytes(&tagged))
     }
     /// Domain-separated default, see [`Self::sign_prevote`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     fn sign_precommit(&self, msg: &[u8]) -> Result<Vec<u8>, CryptoError> {
         let mut tagged = b"BDLM_PRECOMMIT_ED25519_V1".to_vec();
         tagged.extend_from_slice(msg);
         self.sign_block(&crate::core::hash::calculate_hash_bytes(&tagged))
     }
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     fn bls_sign(&self, _msg: &[u8]) -> Result<Vec<u8>, CryptoError> {
         Err(CryptoError::Signing(
             "BLS signing not supported by this backend".to_string(),
@@ -31,12 +49,20 @@ pub trait ConsensusSigner: Send + Sync {
     /// half of a composite signature signs the composite message
     /// representative. A backend that cannot sign arbitrary
     /// messages keeps the default refusal.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     fn ed25519_sign_message(&self, _msg: &[u8]) -> Result<Vec<u8>, CryptoError> {
         Err(CryptoError::Signing(
             "raw Ed25519 message signing not supported by this backend".to_string(),
         ))
     }
     /// Sign `msg` with the validator PQ key under the FIPS 204 context `ctx`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     fn pq_sign(&self, _ctx: &[u8], _msg: &[u8]) -> Result<Vec<u8>, CryptoError> {
         Err(CryptoError::Signing(
             "PQ signing not supported by this backend".to_string(),

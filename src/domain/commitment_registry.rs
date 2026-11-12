@@ -20,10 +20,20 @@ impl DomainCommitmentRegistry {
         }
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn insert(&mut self, commitment: DomainCommitment) -> Result<(), String> {
         self.insert_at_height(commitment, 0)
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn insert_at_height(
         &mut self,
         commitment: DomainCommitment,

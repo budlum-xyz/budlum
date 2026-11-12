@@ -202,6 +202,10 @@ pub fn aptos_singlekey_secp256k1_address(uncompressed_pk65: &[u8; 65]) -> [u8; 3
 }
 
 /// Decodes and verifies a BCS-encoded Aptos `SignedTransaction`.
+///
+/// # Errors
+///
+/// Returns an error if the operation fails.
 pub fn decode_aptos_tx(
     bcs_bytes: &[u8],
     expected_chain_id: u8,

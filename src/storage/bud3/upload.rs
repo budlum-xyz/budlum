@@ -377,6 +377,10 @@ impl UploadSessionManager {
 
     /// Open an upload session parameterized in storage `lifetime_days` (`[30, 3650]` on testnet),
     /// enforcing [`Bud3Limits::admit_lifetime`] and converting days to 150-second epochs.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn open_session_for_days(
         &mut self,
         client: (Address, [u8; 16]),

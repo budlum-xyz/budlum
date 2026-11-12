@@ -64,7 +64,7 @@ pub(crate) fn verify_in_context(
 
 /// How many signatures one anchor may carry: one per
 /// ledger key. Each costs an ML-DSA-87 verification; an unbounded list is a
-/// DoS multiplier.
+/// `DoS` multiplier.
 pub const MAX_ANCHOR_SIGNATURES: usize = ANCHOR_KEY_COUNT;
 
 /// Refuse oversized or self-duplicate signature lists before any

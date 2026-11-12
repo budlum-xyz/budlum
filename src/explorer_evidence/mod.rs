@@ -173,6 +173,11 @@ pub struct EvidenceRecord {
 }
 
 impl EvidenceRecord {
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn validate(&self) -> Result<(), String> {
         if self.domain_id == 0 {
             return Err("EvidenceRecord domain_id cannot be zero".into());
@@ -275,6 +280,11 @@ pub struct WalletContextGraph {
 }
 
 impl WalletContextGraph {
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn validate(&self) -> Result<(), String> {
         if self.center == Address::zero() {
             return Err("WalletContextGraph center cannot be zero".into());
@@ -327,6 +337,11 @@ pub struct DomainSummary {
 }
 
 impl DomainSummary {
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn validate(&self) -> Result<(), String> {
         if self.domain_id == 0 {
             return Err("DomainSummary domain_id cannot be zero".into());
@@ -361,6 +376,11 @@ pub struct CrossDomainTrace {
 }
 
 impl CrossDomainTrace {
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn validate(&self) -> Result<(), String> {
         if self.source_domain == 0 || self.target_domain == 0 {
             return Err("CrossDomainTrace domains cannot be zero".into());
@@ -411,6 +431,10 @@ impl AtlasQueryEngine {
     }
 
     /// exposed for: explorer evidence query engine.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn insert_evidence_record(&mut self, record: EvidenceRecord) -> Result<(), String> {
         record.validate()?;
         if self.evidence_records.len() >= MAX_ATLAS_EVIDENCE_RECORDS {
@@ -421,6 +445,10 @@ impl AtlasQueryEngine {
     }
 
     /// exposed for: explorer evidence query engine.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn upsert_domain_summary(&mut self, summary: DomainSummary) -> Result<(), String> {
         summary.validate()?;
         if !self.domain_summaries.contains_key(&summary.domain_id)

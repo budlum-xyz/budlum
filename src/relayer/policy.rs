@@ -79,6 +79,11 @@ pub enum RelayerActionKind {
 }
 
 impl RelayerActionKind {
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn validate(&self) -> Result<(), String> {
         match self {
             RelayerActionKind::ExternalTransaction {
@@ -130,6 +135,11 @@ pub struct PolicyEnvelope {
 }
 
 impl PolicyEnvelope {
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn validate_for_owner(&self, owner: &Address, current_block: u64) -> Result<(), String> {
         if self.owner == Address::zero() {
             return Err("PolicyEnvelope owner cannot be zero".into());
@@ -254,6 +264,11 @@ impl UserIntent {
         self.intent_id == self.calculate_id()
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn validate(&self, policy: &PolicyEnvelope, current_block: u64) -> Result<(), String> {
         if !self.verify_id() {
             return Err("UserIntent id mismatch".into());
@@ -302,6 +317,11 @@ pub struct SolverBid {
 }
 
 impl SolverBid {
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn validate_for_intent(
         &self,
         intent: &UserIntent,
@@ -361,6 +381,10 @@ pub struct IntentSettlement {
 /// result's chain, a well-formed message id with no sender envelope, and a
 /// Merkle path from the result leaf (which commits to the message fields)
 /// to that root. What the message must say is the caller's question.
+///
+/// # Errors
+///
+/// Returns an error if the operation fails.
 pub fn verify_anchored_result<'a>(
     external_roots: &BTreeMap<u32, [u8; 32]>,
     result: &'a RelayerExternalResult,
@@ -422,6 +446,10 @@ pub const INTENT_EXECUTED_KIND: &[u8] = b"budlum/relayer/intent-executed/v1";
 /// solver as recipient, and carry the intent-executed kind. A solver cannot
 /// settle with another solver's receipt or with a self-signed receipt,
 /// with a root nobody anchored, or with a real but unrelated event.
+///
+/// # Errors
+///
+/// Returns an error if the operation fails.
 pub fn verify_intent_result(
     external_roots: &BTreeMap<u32, [u8; 32]>,
     intent: &UserIntent,
@@ -508,6 +536,11 @@ impl RelayerPolicyRegistry {
             && self.awards.is_empty()
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn submit_intent(
         &mut self,
         intent: UserIntent,
@@ -527,6 +560,11 @@ impl RelayerPolicyRegistry {
         Ok(id)
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn lock_escrow(&mut self, intent_id: [u8; 32], amount: u64) -> Result<(), String> {
         if amount == 0 {
             return Err("RelayerPolicyRegistry cannot lock zero escrow".into());
@@ -560,6 +598,10 @@ impl RelayerPolicyRegistry {
     /// Remove an overdue intent and mark it settled as expired. The returned
     /// bids are the exact commitments that the transaction door must slash;
     /// pruning cannot silently erase an unhonoured bid or its owner's refund.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn expire_intent(
         &mut self,
         intent_id: [u8; 32],
@@ -608,6 +650,11 @@ impl RelayerPolicyRegistry {
         Ok((owner, escrow, bids))
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn submit_bid(&mut self, bid: SolverBid, current_block: u64) -> Result<(), String> {
         let intent = self
             .intents
@@ -651,6 +698,10 @@ impl RelayerPolicyRegistry {
 
     /// Lock a winner before external execution. An owner can replace an
     /// expired award, but never displace a still-live one with a later bid.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn award_intent(
         &mut self,
         intent_id: [u8; 32],
@@ -693,6 +744,11 @@ impl RelayerPolicyRegistry {
         Ok(award)
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn settle_intent(
         &mut self,
         intent_id: [u8; 32],

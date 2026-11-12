@@ -1,4 +1,4 @@
-//! Project Manifest / BudL SDK primitives.
+//! Project Manifest / `BudL` SDK primitives.
 //!
 //! This module defines deterministic project manifests and fixture bundles for
 //! Local Budlum development. It does not start a network, call external APIs, or
@@ -58,6 +58,11 @@ pub struct BudlPackageFixture {
 }
 
 impl BudlPackageFixture {
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn validate(&self) -> Result<(), ProjectManifestError> {
         validate_label("package_name", &self.package_name)?;
         validate_label("compiler_profile", &self.compiler_profile)?;
@@ -104,6 +109,11 @@ pub struct ProofFixture {
 }
 
 impl ProofFixture {
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn validate(&self) -> Result<(), ProjectManifestError> {
         validate_label("proof fixture name", &self.name)?;
         if self.input_commitment == [0u8; 32] {
@@ -170,6 +180,11 @@ pub struct PollenFixture {
 }
 
 impl PollenFixture {
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn validate(&self) -> Result<(), ProjectManifestError> {
         if self.asset_id == [0u8; 32] {
             return Err(ProjectManifestError::ZeroPollenAssetId);
@@ -197,6 +212,11 @@ pub struct RelayerPolicyFixture {
 }
 
 impl RelayerPolicyFixture {
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn validate(&self) -> Result<(), ProjectManifestError> {
         validate_label("intent_kind", &self.intent_kind)?;
         if self.policy_hash == [0u8; 32] {
@@ -262,6 +282,11 @@ impl ProjectManifest {
         }
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn validate(&self) -> Result<(), ProjectManifestError> {
         validate_label("project_name", &self.project_name)?;
         if self.chain_id == 0 {

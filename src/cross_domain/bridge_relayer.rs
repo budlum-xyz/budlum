@@ -130,6 +130,10 @@ impl<'a> BridgeRelayerPipeline<'a> {
     }
 
     /// Register an asset on a domain.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn register_asset(
         &mut self,
         asset_id: crate::cross_domain::bridge::AssetId,
@@ -155,6 +159,10 @@ impl<'a> BridgeRelayerPipeline<'a> {
         reason = ": the pipeline's lock mirrors BridgeState::lock's parameter set one-for-one"
     )]
     /// PARTIAL: allowed - rolls back the newly inserted message row and bridge lock if relay enqueueing fails.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn lock(
         &mut self,
         source_domain: DomainId,
@@ -225,6 +233,10 @@ impl<'a> BridgeRelayerPipeline<'a> {
     ///
     /// On success, returns the verified cross-domain message for bridge
     /// Processing (mint or unlock).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn relay(
         &mut self,
         message_id: MessageId,
@@ -254,6 +266,10 @@ impl<'a> BridgeRelayerPipeline<'a> {
     // ─── Stage 3: Mint (target domain) ────
 
     /// After relay verification, mint the asset on the target domain.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn mint(
         &mut self,
         message: &CrossDomainMessage,
@@ -284,6 +300,10 @@ impl<'a> BridgeRelayerPipeline<'a> {
     /// Burn the asset on the target domain to send it back.
     /// Returns the event for relay back to the source domain.
     /// PARTIAL: allowed - rolls back the newly inserted message row and bridge burn if relay enqueueing fails.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn burn(
         &mut self,
         message_id: MessageId,
@@ -348,6 +368,10 @@ impl<'a> BridgeRelayerPipeline<'a> {
 
     /// After relay verification of a burn, unlock the asset on the source domain.
     /// `current_height` is the block the unlock settles in.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn unlock(
         &mut self,
         message: &CrossDomainMessage,
@@ -404,7 +428,7 @@ impl<'a> BridgeRelayerPipeline<'a> {
         self.relayer
     }
 
-    /// Sweep expired bridge locks (DoS prevention).
+    /// Sweep expired bridge locks (`DoS` prevention).
     /// Returns (owner, amount) for balance refund.
     pub fn sweep_expired_locks(
         &mut self,

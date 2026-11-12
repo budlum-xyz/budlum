@@ -1,6 +1,6 @@
 //! B.U.D. storage + AI dataset entegrasyonu.
 //!
-//! Binds AI-dataset metadata to a StorageDeal - a training corpus or an
+//! Binds AI-dataset metadata to a `StorageDeal` - a training corpus or an
 //! inference cache. This completes the storage side of the closed-circuit
 //! principle: AI inference layer only reads data from B.U.D. storage that is labelled as an
 //! AI dataset.
@@ -9,7 +9,7 @@ use crate::domain::storage_deal::StorageDeal;
 
 use super::{AiDatasetKind, AiDatasetMetadata};
 
-/// A B.U.D. StorageDeal labelled as an AI dataset.
+/// A B.U.D. `StorageDeal` labelled as an AI dataset.
 #[derive(Clone, Debug)]
 pub struct AiDatasetStorageDeal {
     /// Temel storage deal (B.U.D. depolama).
@@ -19,7 +19,7 @@ pub struct AiDatasetStorageDeal {
 }
 
 impl AiDatasetStorageDeal {
-    /// Binds AI metadata to a StorageDeal.
+    /// Binds AI metadata to a `StorageDeal`.
     #[must_use]
     pub fn new(deal: StorageDeal, ai_metadata: AiDatasetMetadata) -> Self {
         Self { deal, ai_metadata }

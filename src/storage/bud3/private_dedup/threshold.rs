@@ -114,7 +114,7 @@ pub fn combine_threshold_oprf_shares(
     ]))
 }
 
-/// Experimental ownership transcript. This is not a BudZero STARK proof.
+/// Experimental ownership transcript. This is not a `BudZero` STARK proof.
 /// Convenience: exposed for upload prover and verifier.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OwnershipProofBundle {
@@ -288,7 +288,7 @@ impl PrivateDedupEngine {
 
     /// Process a sealed upload through private deduplication (`Section 6.20.2.6`).
     ///
-    /// Rejects requests until an actual BudZero ownership verifier and threshold
+    /// Rejects requests until an actual `BudZero` ownership verifier and threshold
     /// OPRF are integrated. A transcript hash alone does not prove ownership.
     /// Convenience: exposed for sealed upload pipeline.
     ///

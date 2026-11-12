@@ -161,12 +161,16 @@ mod tests {
             b"gateway delivered bud3 content"
         );
 
+        let receipt_id = [0x99; 32];
+        reg.record_paid_view([9; 32], key, receipt_id, MIN_PAID_VIEW_FEE_ATOMS, 1)
+            .unwrap();
         let fallback = Bud3ContentGateway::serve_paid_public_fallback(
             &reg,
             &cref,
             &PaidViewReceipt {
                 payer: [9; 32],
                 object: key,
+                receipt_id,
                 fee_paid_atoms: MIN_PAID_VIEW_FEE_ATOMS,
             },
             &net,

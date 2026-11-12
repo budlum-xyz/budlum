@@ -35,6 +35,10 @@ impl BlockReadCache {
     }
 
     /// Reads `(ns, key)` through the cache, populating from `committed` on miss.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn read(
         &self,
         committed: &ExecutionState,
@@ -138,6 +142,10 @@ impl TxOverlay {
     }
 
     /// Charges `bgu` against the transaction gas limit.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn charge_bgu(&mut self, bgu: u64) -> Result<(), budlum_uel_abi::OutOfGas> {
         let next = self
             .gas_used_bgu
@@ -153,6 +161,10 @@ impl TxOverlay {
 
     /// Opens a child `UniversalCall` frame, enforcing depth `<= 8` and
     /// cross-EE non-reentrancy (`ReentrancyForbidden`).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn push_universal_frame(
         &mut self,
         state: &AccountState,
@@ -229,6 +241,10 @@ impl TxOverlay {
     }
 
     /// Reads `(ns, key)` through the active overlay frame, falling back to `cache`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn read(
         &self,
         committed: &ExecutionState,
@@ -249,6 +265,10 @@ impl TxOverlay {
     }
 
     /// Stages a write (`Some`) or deletion (`None`) in the active overlay frame.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn write(&mut self, ns: &str, key: &[u8], value: Option<&[u8]>) -> Result<(), HostError> {
         if self.is_static() {
             return Err(HostError::Denied(String::from(
@@ -274,6 +294,10 @@ impl TxOverlay {
     }
 
     /// Moves `attos` attoBUD in `state` under `unit`, guarded against static frames.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn transfer_attos(
         &self,
         state: &mut AccountState,
@@ -293,6 +317,10 @@ impl TxOverlay {
     }
 
     /// Appends a log tagged with the emitting environment.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn emit_log(&mut self, log: EeLog) -> Result<(), HostError> {
         if self.is_static() {
             return Err(HostError::Denied(String::from(
@@ -306,6 +334,10 @@ impl TxOverlay {
 
     /// Flushes a succeeded root transaction's staged writes into `committed`
     /// and invalidates `cache`, returning emitted `(EeId, EeLog)` pairs.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn commit_root(
         mut self,
         committed: &mut ExecutionState,

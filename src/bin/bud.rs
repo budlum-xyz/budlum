@@ -627,7 +627,7 @@ enum ProjectAction {
         /// Project name.
         #[arg(long, required = true)]
         name: String,
-        /// The 32-byte hash of the BudL source tree (hex).
+        /// The 32-byte hash of the `BudL` source tree (hex).
         #[arg(long, required = true)]
         source_hash: String,
         /// Name of the proof record in the manifest.
@@ -740,7 +740,7 @@ fn parse_rpc_url(url: &str) -> Result<(String, u16), String> {
     Ok((host, port))
 }
 
-/// A minimal HTTP/1.1 POST over a std TcpStream, reading the whole response body.
+/// A minimal HTTP/1.1 POST over a std `TcpStream`, reading the whole response body.
 ///
 /// The operator RPC gate (`auth_required`, its default) reads an `x-api-key`
 /// header. This client sent none, so a correctly configured node answered every

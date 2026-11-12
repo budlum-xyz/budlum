@@ -161,6 +161,10 @@ fn read_exact_32(buf: &[u8], cursor: &mut usize) -> Result<[u8; 32], SolanaEnvel
 }
 
 /// Decodes a Solana wire transaction and verifies all required Ed25519 signatures.
+///
+/// # Errors
+///
+/// Returns an error if the operation fails.
 pub fn decode_solana_tx(raw: &[u8]) -> Result<DecodedSolanaTx, SolanaEnvelopeError> {
     if raw.len() > MAX_SOLANA_TRANSACTION_BYTES {
         return Err(SolanaEnvelopeError::PacketTooLarge);
@@ -338,6 +342,10 @@ pub fn decode_solana_tx(raw: &[u8]) -> Result<DecodedSolanaTx, SolanaEnvelopeErr
 const BASE58_ALPHABET: &[u8; 58] = b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
 
 /// Decodes a fixed-width Solana base58 value without truncating overflow.
+///
+/// # Errors
+///
+/// Returns an error if the operation fails.
 pub fn decode_solana_base58<const N: usize>(text: &str) -> Result<[u8; N], &'static str> {
     if text.len() > N.saturating_mul(2).saturating_add(2) {
         return Err("base58 value exceeds its fixed-width encoding bound");
@@ -425,6 +433,10 @@ fn base64_digit(byte: u8) -> Option<u8> {
 }
 
 /// Decodes canonical padded base64 for one bounded Solana transaction.
+///
+/// # Errors
+///
+/// Returns an error if the operation fails.
 pub fn decode_solana_base64(text: &str) -> Result<Vec<u8>, &'static str> {
     let input = text.as_bytes();
     if input.len() > MAX_SOLANA_BASE64_BYTES {

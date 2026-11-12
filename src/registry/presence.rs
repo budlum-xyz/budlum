@@ -51,6 +51,10 @@ const _: &[u8] = PRESENCE_DOMAIN_TAG;
 /// Convert an offline duration in hours to a ceiling epoch count (Section 6.21.3):
 /// `ceil(hours * 3600 / (slot_secs * epoch_len_blocks))`.
 /// Convenience: exposed for validator class and governance parameter checks.
+///
+/// # Errors
+///
+/// Returns an error if the operation fails.
 pub fn hours_to_epochs(
     hours: u64,
     slot_secs: u64,
@@ -134,6 +138,10 @@ pub struct PresenceGossipInbox {
 impl PresenceGossipInbox {
     /// Validate and ingest a `PresenceSignal` against `bls_public_key`.
     /// Convenience: exposed for `/budlum/presence/1` gossip handler.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn ingest(
         &mut self,
         signal: PresenceSignal,
@@ -185,6 +193,10 @@ pub struct PresenceAggregate {
 impl PresenceAggregate {
     /// Aggregate verified signals for `(window, class)` over an ordered `roster` of `(Address, bls_pk)`.
     /// Convenience: exposed for block proposer aggregate builder.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn build(
         window: u64,
         class: PresenceClass,
@@ -237,6 +249,10 @@ impl PresenceAggregate {
     /// Verify the aggregate in ONE BLS pairing check by summing the G2 public keys
     /// selected by `bitmap` and checking `verify_bls_sig(agg_pk, digest, aggregate_sig)`.
     /// Returns the verified present validator addresses.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn verify_single_pairing(
         &self,
         roster: &[(Address, Vec<u8>)],
@@ -350,6 +366,10 @@ impl PresenceTracker {
 
     /// Record verified block [`PresenceAggregate`] signers at `current_epoch`.
     /// Convenience: exposed for block execution presence aggregate hook.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn apply_aggregate(
         &mut self,
         aggregate: &PresenceAggregate,
@@ -420,6 +440,10 @@ impl PresenceTracker {
     /// 1-epoch delay has elapsed, and suspend validators exceeding their offline threshold.
     /// Stake is NEVER reduced by suspension (invariant V-4).
     /// Convenience: exposed for epoch boundary transition.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn advance_epoch(
         &mut self,
         current_epoch: u64,
@@ -452,6 +476,10 @@ impl PresenceTracker {
 
     /// Submit `ResumeValidator` (Section 7.8 item 7): reactivates after 1 full epoch.
     /// Convenience: exposed for `ResumeValidator` transaction execution.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn apply_resume_validator(
         &mut self,
         validator: &Address,
@@ -472,6 +500,10 @@ impl PresenceTracker {
     /// Verify and apply a 1% stake slash for signing two different [`PresenceClass`]
     /// tags in the same presence window (Section 7.8 item 8, Section 11.7).
     /// Convenience: exposed for equivocation evidence processing.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn slash_double_sign(
         &mut self,
         evidence: &PresenceDoubleSignEvidence,

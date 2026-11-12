@@ -126,6 +126,10 @@ fn fixed_hash(item: &Item) -> Result<[u8; 32], AccountProofError> {
 }
 
 /// Verifies the state-trie account proof of `address` against finalized `state_root`.
+///
+/// # Errors
+///
+/// Returns an error if the operation fails.
 pub fn verify_account(
     proof_nodes: &[Vec<u8>],
     state_root: &[u8; 32],
@@ -165,6 +169,10 @@ fn decode_account(value: &[u8]) -> Result<EvmAccount, AccountProofError> {
 /// Verifies a storage-trie proof for `slot` against `storage_root`.
 ///
 /// `Ok(None)` indicates canonical absence (zero slot in Ethereum storage).
+///
+/// # Errors
+///
+/// Returns an error if the operation fails.
 pub fn verify_storage(
     proof_nodes: &[Vec<u8>],
     storage_root: &[u8; 32],
@@ -196,6 +204,10 @@ pub fn code_hash(code: &[u8]) -> [u8; 32] {
 }
 
 /// Verifies that `code` hashes to `proven_code_hash`.
+///
+/// # Errors
+///
+/// Returns an error if the operation fails.
 pub fn check_code(code: &[u8], proven_code_hash: &[u8; 32]) -> Result<(), AccountProofError> {
     if code_hash(code) == *proven_code_hash {
         Ok(())

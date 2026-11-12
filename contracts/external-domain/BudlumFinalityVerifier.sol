@@ -91,6 +91,10 @@ contract BudlumFinalityVerifier is IBudlumFinality {
     mapping(bytes32 => Challenge) public challenges;
     mapping(bytes32 => bool) public fraudulent;
     mapping(bytes32 => uint256) public pendingEnvelopeCount;
+    uint256 private _reentrancyLock;
+
+    uint256 private constant _NOT_ENTERED = 1;
+    uint256 private constant _ENTERED = 2;
 
     bool public immutable hasBlsPrecompile;
     bool public immutable hasMlDsaPrecompile;
@@ -101,6 +105,7 @@ contract BudlumFinalityVerifier is IBudlumFinality {
     event ChallengeProven(bytes32 indexed digest, address indexed challenger, bool fraud);
 
     error WrongChainId(uint64 expected, uint64 got);
+    error ReentrantCall();
     error AlreadyAccepted(bytes32 digest);
     error BadSignatureLength(string what);
     error UntrustedKey(string what);
@@ -148,10 +153,20 @@ contract BudlumFinalityVerifier is IBudlumFinality {
         committeePubkeyHash = committeePubkeyHash_;
         g2GeneratorHash = g2GeneratorHash_;
         mlDsaPubkeyHash = mlDsaPubkeyHash_;
+        _reentrancyLock = _NOT_ENTERED;
         hasBlsPrecompile = _probeBlsPairing(new bytes(PAIRING_PROBE_BYTES));
         hasMlDsaPrecompile =
             _probeRejectsMalformed(PRECOMPILE_MLDSA)
                 || _probeRejectsMalformed(PRECOMPILE_MLDSA_ETH);
+    }
+
+    modifier nonReentrant() {
+        if (_reentrancyLock == _ENTERED) {
+            revert ReentrantCall();
+        }
+        _reentrancyLock = _ENTERED;
+        _;
+        _reentrancyLock = _NOT_ENTERED;
     }
 
     function pendingIdentity(uint64 height, bytes32 stateRoot) public pure returns (bytes32) {
@@ -189,7 +204,7 @@ contract BudlumFinalityVerifier is IBudlumFinality {
         );
     }
 
-    function verify(Attestation calldata a) external returns (bytes32 digest) {
+    function verify(Attestation calldata a) external nonReentrant returns (bytes32 digest) {
         if (a.chainId != budlumChainId) {
             revert WrongChainId(budlumChainId, a.chainId);
         }
@@ -294,7 +309,7 @@ contract BudlumFinalityVerifier is IBudlumFinality {
         emit AttestationOptimistic(digest, a.height, reason);
     }
 
-    function challenge(bytes32 digest, bytes calldata fraudProof) external {
+    function challenge(bytes32 digest, bytes calldata fraudProof) external nonReentrant {
         Challenge storage c = challenges[digest];
         if (c.openedAt == 0) {
             revert NoSuchChallenge(digest);
@@ -340,7 +355,7 @@ contract BudlumFinalityVerifier is IBudlumFinality {
         emit ChallengeProven(digest, msg.sender, true);
     }
 
-    function settle(bytes32 digest) external {
+    function settle(bytes32 digest) external nonReentrant {
         Challenge storage c = challenges[digest];
         if (c.openedAt == 0) {
             revert NoSuchChallenge(digest);

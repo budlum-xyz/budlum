@@ -330,7 +330,7 @@ where
         let _ = dec.push(s, &mut meter);
     }
     let cap = usize::try_from(record.object_len).map_err(|_| PipelineError::TooLarge)?;
-    let mut object = Vec::with_capacity(cap);
+    let mut object = Vec::with_capacity(cap.min(1 << 20));
     for (index, dec) in decoders.into_iter().enumerate() {
         let bytes = dec
             .into_bytes()
@@ -646,7 +646,7 @@ where
         let _ = dec.push(s, &mut meter);
     }
     let cap = usize::try_from(record.object_len).map_err(|_| PipelineError::TooLarge)?;
-    let mut object = Vec::with_capacity(cap);
+    let mut object = Vec::with_capacity(cap.min(1 << 20));
     for (index, dec) in decoders.into_iter().enumerate() {
         let bytes = dec
             .into_bytes()

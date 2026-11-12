@@ -906,6 +906,7 @@ async fn serve(
     trusted_proxies: Vec<IpAddr>,
     allow_direct: bool,
 ) -> Result<(), String> {
+    budlum_core::crypto::tls::install_default_provider();
     let identity = http_support::ClientIdentity::new(allow_direct, trusted_proxies)?;
     let seed = zeroize::Zeroizing::new(read_seed(key_file)?);
     let key = WalletKeyPair::from_seed(&seed);

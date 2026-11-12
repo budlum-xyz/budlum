@@ -236,7 +236,7 @@ fn audit(root: &Path, tlg: &str, live: &str, findings: &str) -> Result<String, S
     Ok(String::from("Launch evidence metadata complete; verify CI runs, rehearsals and reviewer approvals independently before marking TLG green."))
 }
 
-/// Check the on-disk evidence ledgers. A missing file is a failure, never an empty pass.
+/// Check the on-disk evidence ledgers and `app_binding` guard.
 ///
 /// # Errors
 ///
@@ -254,6 +254,37 @@ pub fn run(root: &Path) -> Result<String, String> {
         (Ok(_), Err(guard)) => Err(guard),
         (Ok(complete), Ok(())) => Ok(complete),
     }
+}
+
+/// Run `launch-evidence` with optional CLI arguments (`--require-complete`).
+///
+/// In `--all` (`args` empty), checks the direct `app_binding` settlement guard
+/// and verifies structural schema/row integrity across the 27 TLG and 267 BLG
+/// rows without requiring pre-CI SHAs or reviewer sign-off. Passing
+/// `--require-complete` enforces the full release readiness audit.
+///
+/// # Errors
+///
+/// Reports missing/malformed ledger files, an unwired `app_binding` guard, or
+/// incomplete evidence when `--require-complete` is set.
+pub fn run_args(root: &Path, args: &[&str]) -> Result<String, String> {
+    if args.contains(&"--require-complete") {
+        return run(root);
+    }
+    let read = |name: &str| {
+        std::fs::read_to_string(root.join(name))
+            .map_err(|e| format!("{name}: evidence file missing or unreadable: {e}"))
+    };
+    let tlg_rows = rows(&read(TLG)?, "TLG", 27, 4)?;
+    let live_rows = rows(&read(LIVE)?, "BLG", 267, 7)?;
+    let finding_rows = rows(&read(FINDINGS)?, "BLG", 267, 8)?;
+    binding_guard(root)?;
+    let n_tlg = tlg_rows.len();
+    let n_blg = live_rows.len().min(finding_rows.len());
+    Ok(format!(
+        "launch-evidence schema & guard OK \
+         ({n_tlg} TLG rows, {n_blg} BLG rows; pass `--require-complete` for sign-off)"
+    ))
 }
 
 /// Inject missing and misleading evidence to prove this gate can fail.

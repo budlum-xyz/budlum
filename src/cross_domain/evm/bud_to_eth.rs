@@ -97,6 +97,10 @@ pub const DEFAULT_BRIDGE_CAP: u128 = 1_000_000_000_000; // 1T $BUD (6 decimals)
 /// from a Budlum node and produces a `BudToEthClaim`, the calldata to be sent to
 /// the Ethereum bridge contract. The Ethereum contract verifies Budlum finality
 /// and unlocks.
+///
+/// # Errors
+///
+/// Returns an error if the operation fails.
 pub fn build_bud_to_eth_claim(
     bridge: &mut BridgeState,
     message_id: &MessageId,

@@ -53,6 +53,10 @@ impl DeployPolicy {
     /// Parse `--enable-ee-deploy=wasm,svm,move` on top of [`Self::phase1_default`].
     ///
     /// Convenience: exposed for CLI flag parsing in node startup.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn from_cli_csv(csv: &str) -> Result<Self, String> {
         let mut policy = Self::phase1_default();
         for raw in csv.split(',') {
@@ -92,6 +96,10 @@ impl DeployPolicy {
     /// Deterministic refusal when a deploy targets a frozen environment.
     ///
     /// Convenience: called by the execution coordinator before `validate_deploy` / `Deploy`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn check_deploy_allowed(&self, ee: EeId) -> Result<(), EeRefusal> {
         if self.is_deploy_enabled(ee) {
             Ok(())

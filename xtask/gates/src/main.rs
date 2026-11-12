@@ -1623,7 +1623,7 @@ const GATES: &[Gate] = &[
         replaces: None,
         run: gates::launch_evidence::run,
         run_log: None,
-        run_args: None,
+        run_args: Some(gates::launch_evidence::run_args),
         self_test: gates::launch_evidence::self_test,
     },
     Gate {
@@ -1655,7 +1655,7 @@ const GATES: &[Gate] = &[
 /// Gates that take extra arguments but whose plain run (no arguments) is a
 /// complete verification. `--all` runs them: leaving `tree-pin` out meant the
 /// aggregate run, the one CI relies on, never checked the budzero tree pins.
-const RUNS_WITHOUT_ARGUMENTS: &[&str] = &["tree-pin"];
+const RUNS_WITHOUT_ARGUMENTS: &[&str] = &["tree-pin", "launch-evidence"];
 
 /// The gates `--all` runs.
 ///

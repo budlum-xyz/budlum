@@ -132,7 +132,7 @@ pub struct ModelRecordV2 {
     pub weights_root: [u8; 32],
     /// Digest of the [`DeterministicInferenceProfile`].
     pub dip_digest: [u8; 32],
-    /// BudZero guest program hash for small-model proving.
+    /// `BudZero` guest program hash for small-model proving.
     pub program_hash: [u8; 32],
 }
 

@@ -283,7 +283,7 @@ impl GossipDedup {
     ///
     /// A peer producing an excessive message rate must be auto-banned, not
     /// merely scored. This engine only *decides* the ban; the caller (swarm /
-    /// peer-manager) is responsible for enforcing the disconnect so the DoS
+    /// peer-manager) is responsible for enforcing the disconnect so the `DoS`
     /// primitive stays self-contained and testable.
     pub fn peer_should_be_banned(&self, peer: &libp2p::PeerId) -> bool {
         match self.peer_scores.get(peer) {

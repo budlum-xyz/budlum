@@ -218,6 +218,11 @@ pub struct PeerQuotaTracker {
 }
 
 impl PeerQuotaTracker {
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn record_and_check(&mut self, peer: &str, max_per_window: u32) -> Result<(), String> {
         let entry = self.counts.entry(peer.to_string()).or_insert(0);
         if *entry >= max_per_window {

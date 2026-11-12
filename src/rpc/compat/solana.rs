@@ -213,6 +213,16 @@ impl SolanaCompatGateway {
                 JsonRpcResponse::ok(id, serde_json::json!(self.slot))
             }
             "sendTransaction" => {
+                if !self.config.enabled {
+                    return JsonRpcResponse::err(
+                        id,
+                        SOLANA_UNAVAILABLE,
+                        format!(
+                            "sendTransaction: no production Solana implementation; no data was invented and no request was submitted; use {}",
+                            native_door("sendTransaction").unwrap_or("bud_sendRawTransaction")
+                        ),
+                    );
+                }
                 let Some(raw_str) = req
                     .params
                     .as_array()

@@ -53,6 +53,19 @@ fn decode_database_backup(bytes: &[u8]) -> std::io::Result<DatabaseBackupV1> {
     })?;
     // Match bincode::deserialize's fixed-width format, but reject trailing
     // bytes and never let a declared allocation exceed the supplied input.
+    if let Some(count_slice) = bytes.get(36..44) {
+        let mut count_bytes = [0u8; 8];
+        count_bytes.copy_from_slice(count_slice);
+        let declared_entries = u64::from_le_bytes(count_bytes);
+        // Each `(Vec<u8>, Vec<u8>)` entry takes at least 16 bytes for its two lengths.
+        let tail_bytes = (bytes.len() - 44) as u64;
+        if declared_entries.saturating_mul(16) > tail_bytes {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "declared backup entry count exceeds input size limit",
+            ));
+        }
+    }
     let backup: DatabaseBackupV1 = bincode::DefaultOptions::new()
         .with_fixint_encoding()
         .with_limit(limit)

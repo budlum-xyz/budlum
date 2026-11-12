@@ -105,6 +105,10 @@ impl ReplayNonceStore {
     /// replay, and a nonce the mark already passed is spent (see the gap
     /// semantics on the struct). The height is recorded next to the mark and
     /// committed in [`ReplayNonceStore::root`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn mark_processed_at(
         &mut self,
         source_domain: DomainId,

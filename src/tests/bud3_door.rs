@@ -465,7 +465,17 @@ fn bud3_sealed_grant_issue_revoke_and_not_served() {
     };
     apply(
         &mut state,
-        &storage_tx(owner, 2, 1, 0, StorageTxV3::IssueViewGrant { row }),
+        &storage_tx(
+            owner,
+            2,
+            1,
+            0,
+            StorageTxV3::IssueViewGrant {
+                nft: nft_id,
+                grant_nonce,
+                row,
+            },
+        ),
     )
     .unwrap();
 
@@ -636,6 +646,8 @@ fn bud3_social_delete_crypto_shredding_and_tombstone() {
             1,
             0,
             StorageTxV3::IssueViewGrant {
+                nft: nft_id,
+                grant_nonce,
                 row: GrantRow {
                     grant_tag,
                     one_time_pk,
@@ -1052,6 +1064,7 @@ fn bud3_decline_content_reassigns_and_release_shares_lowers_quota_without_penalt
                 object: obj_key,
                 segment: 0,
                 new_shares: prep.new_shares,
+                new_symbols: prep.new_symbols,
                 new_root: prep.new_root,
             },
         ),
@@ -1306,7 +1319,8 @@ fn bud3_e2e_upload_register_view() {
     let recovered = view_from_network(&state.bud3_registry, &obj_key, None, &net).unwrap();
     assert_eq!(recovered, original);
 
-    // RPC service serves `bud_storageGetContent` only when paid and runs reveal sessions from network.
+    // RPC service serves `bud_storageGetContent` only after on-chain PayFallbackView and runs reveal sessions from network.
+    let receipt_id = [0x5A; 32];
     let mut rpc = Bud3RpcService::default();
     assert!(rpc
         .handle(
@@ -1314,6 +1328,7 @@ fn bud3_e2e_upload_register_view() {
             &serde_json::json!({
                 "payer": hex::encode(payer.as_bytes()),
                 "object": hex::encode(obj_key),
+                "receipt_id": hex::encode(receipt_id),
                 "fee_paid_atoms": 0
             }),
             &state.bud3_registry,
@@ -1321,12 +1336,51 @@ fn bud3_e2e_upload_register_view() {
             (&row, &candidates, 1_005),
         )
         .is_err());
+    // Spoofed off-chain receipt without an on-chain PayFallbackView tx must also fail.
+    assert!(rpc
+        .handle(
+            "bud_storageGetContent",
+            &serde_json::json!({
+                "payer": hex::encode(payer.as_bytes()),
+                "object": hex::encode(obj_key),
+                "receipt_id": hex::encode(receipt_id),
+                "fee_paid_atoms": MIN_PAID_VIEW_FEE_ATOMS
+            }),
+            &state.bud3_registry,
+            &net,
+            (&row, &candidates, 1_005),
+        )
+        .is_err());
+
+    let payer_before = state.get_balance(&payer);
+    let endow_before = state.get_balance(&custody_endowment_account());
+    let pool_before = state.get_balance(&reward_pool_account());
+    apply(
+        &mut state,
+        &storage_tx(
+            payer,
+            0,
+            1,
+            0,
+            StorageTxV3::PayFallbackView {
+                object: obj_key,
+                receipt_id,
+                amount_atoms: MIN_PAID_VIEW_FEE_ATOMS,
+            },
+        ),
+    )
+    .unwrap();
+    assert_eq!(state.get_balance(&payer), payer_before - 1 - MIN_PAID_VIEW_FEE_ATOMS);
+    assert!(state.get_balance(&custody_endowment_account()) > endow_before);
+    assert!(state.get_balance(&reward_pool_account()) > pool_before);
+
     let paid_resp = rpc
         .handle(
             "bud_storageGetContent",
             &serde_json::json!({
                 "payer": hex::encode(payer.as_bytes()),
                 "object": hex::encode(obj_key),
+                "receipt_id": hex::encode(receipt_id),
                 "fee_paid_atoms": MIN_PAID_VIEW_FEE_ATOMS
             }),
             &state.bud3_registry,

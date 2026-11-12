@@ -1,7 +1,7 @@
 //! In-tree Merkle-Patricia Trie (MPT) verifier - Ethereum Yellow Paper
 //! Appendix D.
 //!
-//! Verify only (RFC Q1 = relayer_produces): proof generation lives in the relayer binary;
+//! Verify only (RFC Q1 = `relayer_produces`): proof generation lives in the relayer binary;
 //! Budlum only verifies `(proof_nodes, root, key) -> value`.
 //! Deterministic and network free - critical for consensus safety.
 //!
@@ -57,7 +57,7 @@ use std::collections::HashMap;
 pub enum MptError {
     /// The key is not in the trie (null child / empty value slot).
     KeyNotFound,
-    /// A node is missing from the proof (the referenced hash is not in node_map).
+    /// A node is missing from the proof (the referenced hash is not in `node_map`).
     MissingNode,
     /// Node RLP decode error.
     Rlp(RlpError),
@@ -152,7 +152,11 @@ pub fn hp_encode(nibbles: &[u8], is_leaf: bool) -> Vec<u8> {
     out
 }
 
-/// Hex-prefix decode → (is_leaf, path_nibbles).
+/// Hex-prefix decode → (`is_leaf`, `path_nibbles`).
+///
+/// # Errors
+///
+/// Returns an error if the operation fails.
 pub fn hp_decode(bytes: &[u8]) -> Result<(bool, Vec<u8>), MptError> {
     if bytes.is_empty() {
         return Err(MptError::InvalidHpEncoding);
@@ -191,6 +195,10 @@ pub fn hp_decode(bytes: &[u8]) -> Result<(bool, Vec<u8>), MptError> {
 ///
 /// On success -> the value bytes (leaf value or branch value slot, raw).
 /// On failure -> the proof is invalid (MissingNode/PathMismatch/KeyNotFound and so on).
+///
+/// # Errors
+///
+/// Returns an error if the operation fails.
 pub fn verify(proof_nodes: &[Vec<u8>], root: &[u8; 32], key: &[u8]) -> Result<Vec<u8>, MptError> {
     // Node map: hash -> RLP bytes (from relayer proof).
     let mut node_map: HashMap<[u8; 32], Vec<u8>> = HashMap::new();
@@ -259,7 +267,7 @@ fn walk(
     }
 }
 
-/// Resolves a node reference: a 32-byte hash (node_map lookup) or an inline RLP node.
+/// Resolves a node reference: a 32-byte hash (`node_map` lookup) or an inline RLP node.
 fn resolve_ref(item: &Item, node_map: &HashMap<[u8; 32], Vec<u8>>) -> Result<Item, MptError> {
     match item {
         Item::String(b) if b.is_empty() => Err(MptError::KeyNotFound),

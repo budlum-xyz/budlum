@@ -45,7 +45,7 @@ pub struct TemplateParams {
 /// The kinds of class rule.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ClassRule {
-    /// A Budlum module's own code (BUD, SocialFi NFT, BNS name, data asset).
+    /// A Budlum module's own code (BUD, `SocialFi` NFT, BNS name, data asset).
     Native,
     Template {
         id: TemplateId,
@@ -172,6 +172,10 @@ fn is_set(slice: &ClassSlice, field: &Option<String>) -> bool {
 
 /// Run one verb under a class rule. Pure: the same inputs always give the
 /// same output, on every node.
+///
+/// # Errors
+///
+/// Returns an error if the operation fails.
 pub fn apply_rule(
     rule: &ClassRule,
     class_slice: &ClassSlice,
@@ -236,6 +240,10 @@ pub struct ReferenceSample {
 
 /// Run every sample under the rule. The output must equal the recorded
 /// after-slice byte for byte (compared in the canonical encoding).
+///
+/// # Errors
+///
+/// Returns an error if the operation fails.
 pub fn verify_samples(rule: &ClassRule, samples: &[ReferenceSample]) -> Result<(), usize> {
     for (index, sample) in samples.iter().enumerate() {
         let mut slice = sample.before.clone();

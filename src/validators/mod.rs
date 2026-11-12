@@ -1,6 +1,6 @@
 //! Validator classes and the single registration door.
 //!
-//! A validator is Full, Mobile or MobileOpportunistic. One transaction family,
+//! A validator is Full, Mobile or `MobileOpportunistic`. One transaction family,
 //! [`ValidatorTx`], registers a validator, changes its class, rotates its
 //! operator key and raises its custody quota. The owner account (the stake
 //! owner, who also receives the rewards) is the only signer of the registration,
@@ -90,7 +90,7 @@ pub struct LeaderCommitment {
 /// The fields only a Full validator carries.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SeatFields {
-    /// The slot VRF key. The PoS engine still draws with it until the hash
+    /// The slot VRF key. The `PoS` engine still draws with it until the hash
     /// chain election is the only election; it is refused for the
     /// mobile classes.
     pub vrf_key: Vec<u8>,
@@ -451,6 +451,11 @@ impl ValidatorDirectory {
         self.register(registration, bonded_stake, floor, epoch)
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn register(
         &mut self,
         registration: &ValidatorRegistration,

@@ -9,7 +9,7 @@
 //!
 //! The registry was written as a gate: an account gets in only if it passes
 //! `validate_all`. That way rules such as "the multisig threshold must be within 1..=16"
-//! or "pact_root must be zero while storage_root is zero" are really enforced once,
+//! or "`pact_root` must be zero while `storage_root` is zero" are really enforced once,
 //! at registration time - every later reader is spared from checking them
 //! again.
 //!

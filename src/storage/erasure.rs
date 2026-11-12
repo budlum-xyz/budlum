@@ -236,7 +236,11 @@ fn generator_matrix(k: usize, m: usize) -> GfMatrix {
     }
     for i in 0..m {
         for j in 0..k {
-            let x = (k + i) as u8;
+            // For k == 1, avoid x = 1, y = 0 whose Cauchy entry gf_inv(1) == 1
+            // makes parity shard 0 equal to data shard 0. Shifting X by 1 keeps
+            // X = {2 + i} disjoint from Y = {0} so the matrix stays MDS while
+            // ensuring non-zero single-data-shard payloads produce distinct parity.
+            let x = if k == 1 { (2 + i) as u8 } else { (k + i) as u8 };
             let y = j as u8;
             g.set(k + i, j, gf_inv(x ^ y));
         }
@@ -777,7 +781,7 @@ pub fn verify_object_encoding(data: &[u8], claimed: &ContentManifest) -> Result<
     // Structural lies are cheaper to catch first; the coder is the expensive
     // half and should not run on a manifest that already fails the free checks.
     claimed
-        .validate_untrusted()
+        .validate_structural_for_reconstruct()
         .map_err(ErasureError::InvalidScheme)?;
     let encoded = encode_object(data, claimed.erasure)?;
     let honest = encoded.to_manifest().map_err(ErasureError::InvalidScheme)?;

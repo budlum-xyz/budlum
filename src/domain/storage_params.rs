@@ -1,4 +1,4 @@
-//! B.U.D. (Broad Universal Database) - Storage ConsensusDomain parameters.
+//! B.U.D. (Broad Universal Database) - Storage `ConsensusDomain` parameters.
 //!
 //! Vision reference: the B.U.D. decentralised storage vision,
 //! The vision proposes `ConsensusKind::StorageAttestation(StorageDomainParams)`
@@ -59,7 +59,7 @@ pub struct StorageDomainParams {
     /// Domain. Bounded by [`MIN_CHUNK_SIZE`] / [`MAX_CHUNK_SIZE`].
     pub chunk_size: u32,
     /// Maximum number of committed chunks a single operator can hold under
-    /// This domain. Prevents an operator from DoS'ing on-chain state with
+    /// This domain. Prevents an operator from `DoS`'ing on-chain state with
     /// Millions of trivial commitments.
     pub max_committed_chunks: u64,
     /// Number of blocks between consecutive challenges issued to each
@@ -76,6 +76,10 @@ pub struct StorageDomainParams {
 impl StorageDomainParams {
     /// Validate the parameters at registration time. Returns the first
     /// Violation found (fail-fast, matches `PoWDomainParameters::validate`).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn validate(&self) -> Result<(), String> {
         if self.chunk_size < MIN_CHUNK_SIZE || self.chunk_size > MAX_CHUNK_SIZE {
             return Err(format!(

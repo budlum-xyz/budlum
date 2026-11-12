@@ -91,7 +91,7 @@ pub fn verify_execution_proof_structural_with_model(
 
 /// Deserialize postcard `bud_proof::ProofEnvelope` and STARK-verify against
 /// `program` words. Public inputs are taken from the envelope hash check via
-/// Adapter (expected_inputs must match what was proven).
+/// Adapter (`expected_inputs` must match what was proven).
 /// Re-derive `initial_state_root` for a fixed-point MLP inference.
 ///
 /// The AIR's initial-memory commitment is meaningful because the
@@ -108,6 +108,10 @@ pub fn verify_execution_proof_structural_with_model(
 /// the memory image, replay the reads and compute the commitment itself. A
 /// proof whose public input disagrees is rejected before the STARK is even
 /// checked.
+///
+/// # Errors
+///
+/// Returns an error if the operation fails.
 pub fn expected_initial_state_root(
     spec: &crate::ai::execution::FixedPointMlpSpec,
     input: &[i32],

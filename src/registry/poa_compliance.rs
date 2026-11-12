@@ -1,10 +1,10 @@
-//! MASAK/AML compliance primitives isolated to PoA domains.
+//! MASAK/AML compliance primitives isolated to `PoA` domains.
 //!
 //! The permissionless network must never inherit PoA-only compliance hooks. This
 //! Module therefore requires every state-changing operation to declare its
 //! Domain kind and fails closed for [`ComplianceDomainKind::Permissionless`].
 //!
-//! The compliance ledger for PoA domains: screening, freeze and travel-rule
+//! The compliance ledger for `PoA` domains: screening, freeze and travel-rule
 //! records, together with their audit trail.
 //!
 //! # A gate, not a ledger
@@ -18,7 +18,7 @@
 //!
 //!   * `Blockchain::freeze_poa_account` - the kind of the domain is read from
 //!     its **record**, not from the caller, so a caller cannot declare its own
-//!     domain to be "PoA" and manufacture freeze authority.
+//!     domain to be "`PoA`" and manufacture freeze authority.
 //!   * `Blockchain::validate_sovereign_audit_export` - the sovereign audit
 //!     bundle of a frozen operator is refused. The operator is read from the
 //!     **recorded template**, not from the bundle.
@@ -164,6 +164,11 @@ impl PoaComplianceRegistry {
         self.audit_log.push(event);
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn screen_address(
         &mut self,
         domain: ComplianceDomainKind,
@@ -194,6 +199,10 @@ impl PoaComplianceRegistry {
     /// Freeze on the authority of a NAMED admin, not a
     /// bare `bool` anybody could pass. The caller verifies the admin against
     /// the domain's admin set first; the name lands in the audit trail.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn freeze_suspicious(
         &mut self,
         domain: ComplianceDomainKind,
@@ -228,6 +237,10 @@ impl PoaComplianceRegistry {
     /// The missing reverse. A freeze with no unfreeze is
     /// a life sentence handed out by a compliance screen - the same named
     /// admin authority, and the audit log keeps both edges.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn unfreeze(
         &mut self,
         domain: ComplianceDomainKind,
@@ -252,6 +265,11 @@ impl PoaComplianceRegistry {
         Ok(())
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn record_travel_rule_metadata(
         &mut self,
         domain: ComplianceDomainKind,
@@ -290,7 +308,7 @@ impl PoaComplianceRegistry {
         self.travel_rules.get(tx_hash)
     }
 
-    /// Permissionless domains deliberately ignore PoA freeze state.
+    /// Permissionless domains deliberately ignore `PoA` freeze state.
     pub fn is_frozen(&self, domain: ComplianceDomainKind, address: &Address) -> bool {
         domain == ComplianceDomainKind::PoA && self.freezes.contains_key(address)
     }
@@ -342,6 +360,11 @@ impl PoaComplianceRegistry {
         hasher.finalize().into()
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn export_audit_json(&self) -> Result<String, serde_json::Error> {
         serde_json::to_string(&self.audit_log)
     }

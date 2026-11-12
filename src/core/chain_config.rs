@@ -375,6 +375,10 @@ pub fn epoch_seconds_for_chain_id(chain_id: u64) -> u64 {
 /// The state machine reads the epoch length from the chain id while the
 /// consensus engine reads it from the selected network. One chain must use
 /// one value, so a chain id that maps to another epoch length is refused.
+///
+/// # Errors
+///
+/// Returns an error if the operation fails.
 pub fn check_epoch_len_matches_chain_id(
     chain_id: u64,
     engine_epoch_len: u64,

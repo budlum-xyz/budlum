@@ -1,7 +1,7 @@
 //! $BUD tokenomics: genesis supply, distribution, vesting and burn schedules.
 //!
 //! Scope: ONLY genesis supply, distribution, team vesting and the two
-//! Burn mechanisms. PoSV consensus, $LUM, launchpad/presale are explicitly out
+//! Burn mechanisms. `PoSV` consensus, $LUM, launchpad/presale are explicitly out
 //! Of scope (separate future work).
 //!
 //! ## Key facts grounded in the existing codebase (research)
@@ -28,7 +28,7 @@ use serde::{Deserialize, Serialize};
 /// Decimal places for $BUD. Chosen as 6 so 100M whole tokens fit in `u64`.
 pub const BUD_DECIMALS: u32 = 6;
 
-/// Smallest-unit multiplier: 1 whole $BUD = 10^BUD_DECIMALS base units.
+/// Smallest-unit multiplier: 1 whole $BUD = 10^`BUD_DECIMALS` base units.
 pub const BUD_UNIT: u64 = 1_000_000; // 10^6
 
 /// Total genesis supply in base units: 100,000,000 $BUD.
@@ -403,7 +403,7 @@ impl TokenomicsAddresses {
 /// - Team: allocated to the team account but subject to [`VestingSchedule`]
 ///   (see [`TokenomicsParams::team_vesting`]); consumers enforce vesting when
 ///   Moving funds.
-/// - BurnReserve: held in the reserve account, consumed by the timed burn.
+/// - `BurnReserve`: held in the reserve account, consumed by the timed burn.
 ///
 /// # Errors
 ///

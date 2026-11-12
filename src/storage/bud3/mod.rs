@@ -7,25 +7,25 @@
 //!
 //! | Module | Content |
 //! |---|---|
-//! | [`content_id`] | `ContentId`: SHA-256 and length for public content, keyed HMAC-SHA-256 and length for sealed content |
-//! | [`limits`] | Profiles (P0) and the genesis limits |
-//! | [`meter`] | The parser and decoder budget |
-//! | [`varint`] | Bounded LEB128 |
-//! | [`bof1`] | The BOF-1 object: canonical binary header and payload |
-//! | [`segment`] | Segmentation, segment digests and the object commitment |
-//! | [`placement`] | Stake-weighted rendezvous placement, diversity caps, the placement table |
-//! | [`registry`] | Chain state: objects, dedup, references, deletion, shares, audits, object replacement |
-//! | [`tx`] | `StorageTx` v3 and its one apply door |
-//! | [`custody`] | Sub-block tree, symbol root, the audit draw and custody proofs |
-//! | [`fees`] | Physical-byte storage fees, Custody Endowment, 95/5 split and epoch custody rewards |
-//! | [`repair`] | Segment repair scheduling and Instant Duty Handover |
-//! | [`pipeline`] | Upload (content to record and symbols) and view (symbols to checked content) |
-//! | [`fountain`] | RFC 6330 per-segment encoder and decoder, and the streaming encoder |
-//! | [`live`] | Live stream T-Expansion: time segments, the `prev_object` chain, the ratioless send order |
-//! | [`live_broadcast`] | Post-launch live gateway and bounded-subscriber RFC 6330 broadcast driver |
-//! | [`compression_context`] | Post-launch shared compression context, corpus rotation and access tiering |
-//! | [`private_dedup`] | Post-launch threshold-OPRF private cross-owner deduplication |
-//! | [`upload`] | Rate-limited chunked upload sessions, streamed content identity and segment-coded finishes |
+//! | `content_id` | `ContentId`: SHA-256 and length for public content, keyed HMAC-SHA-256 and length for sealed content |
+//! | `limits` | Profiles (P0) and the genesis limits |
+//! | `meter` | The parser and decoder budget |
+//! | `varint` | Bounded LEB128 |
+//! | `bof1` | The BOF-1 object: canonical binary header and payload |
+//! | `segment` | Segmentation, segment digests and the object commitment |
+//! | `placement` | Stake-weighted rendezvous placement, diversity caps, the placement table |
+//! | `registry` | Chain state: objects, dedup, references, deletion, shares, audits, object replacement |
+//! | `tx` | `StorageTx` v3 and its one apply door |
+//! | `custody` | Sub-block tree, symbol root, the audit draw and custody proofs |
+//! | `fees` | Physical-byte storage fees, Custody Endowment, 95/5 split and epoch custody rewards |
+//! | `repair` | Segment repair scheduling and Instant Duty Handover |
+//! | `pipeline` | Upload (content to record and symbols) and view (symbols to checked content) |
+//! | `fountain` | RFC 6330 per-segment encoder and decoder, and the streaming encoder |
+//! | `live` | Live stream T-Expansion: time segments, the `prev_object` chain, the ratioless send order |
+//! | `live_broadcast` | Post-launch live gateway and bounded-subscriber RFC 6330 broadcast driver |
+//! | `compression_context` | Post-launch shared compression context, corpus rotation and access tiering |
+//! | `private_dedup` | Post-launch threshold-OPRF private cross-owner deduplication |
+//! | `upload` | Rate-limited chunked upload sessions, streamed content identity and segment-coded finishes |
 //!
 //! The commitment is fixed-size (32 bytes). The object is not fixed-size: it
 //! is the header plus the payload, and it is at most the header larger than

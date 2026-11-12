@@ -90,7 +90,15 @@ fn check_valtype_no_float(vt: u8) -> Result<(), String> {
 fn is_float_opcode(op: u8) -> bool {
     matches!(
         op,
-        0x2a | 0x2b | 0x38 | 0x39 | 0x43 | 0x44 | 0x5b..=0x66 | 0x8b..=0xa6 | 0xa8..=0xbf
+        0x2a | 0x2b
+            | 0x38
+            | 0x39
+            | 0x43
+            | 0x44
+            | 0x5b..=0x66
+            | 0x8b..=0xa6
+            | 0xa8..=0xab
+            | 0xae..=0xbf
     )
 }
 
@@ -349,13 +357,51 @@ fn write_store(
         .map_err(|e| e.to_string())
 }
 
-fn contract_creator(host: &dyn HostRead, contract: &[u8]) -> Option<String> {
-    let c_ns = Namespace::new(NS_WASM_CONTRACT).ok()?;
-    let meta_b = host.read(&c_ns, contract).ok()??;
-    let meta: serde_json::Value = serde_json::from_slice(&meta_b).ok()?;
-    meta.get("creator")
-        .and_then(|v| v.as_str())
-        .map(str::to_owned)
+fn load_contract_meta(
+    host: &dyn HostRead,
+    contract: &[u8],
+) -> Result<Option<WasmContractMeta>, String> {
+    let c_ns = Namespace::new(NS_WASM_CONTRACT).map_err(|e| e.to_string())?;
+    let Some(meta_b) = host.read(&c_ns, contract).map_err(|e| e.to_string())? else {
+        return Ok(None);
+    };
+    let meta: WasmContractMeta = serde_json::from_slice(&meta_b).map_err(|e| e.to_string())?;
+    Ok(Some(meta))
+}
+
+fn require_creator_or_self(
+    host: &dyn HostRead,
+    contract: &[u8],
+    sender_str: &str,
+) -> Result<(), String> {
+    let contract_str = String::from_utf8_lossy(contract);
+    if sender_str == contract_str.as_ref() {
+        return Ok(());
+    }
+    let Some(meta) = load_contract_meta(host, contract)? else {
+        return Err(String::from("unknown CosmWasm contract metadata"));
+    };
+    if meta.creator == sender_str {
+        Ok(())
+    } else {
+        Err(String::from("unauthorized CosmWasm creator action"))
+    }
+}
+
+fn require_authorized_writer(
+    host: &dyn HostRead,
+    contract: &[u8],
+    sender_str: &str,
+) -> Result<(), String> {
+    if require_creator_or_self(host, contract, sender_str).is_ok() {
+        return Ok(());
+    }
+    let allow_k = format!("sys:allowed_writer:{sender_str}");
+    if read_store(host, contract, allow_k.as_bytes())?.is_some_and(|v| v == b"1") {
+        Ok(())
+    } else {
+        Err(String::from("unauthorized CosmWasm storage write"))
+    }
 }
 
 fn load_wasm_code(host: &dyn HostRead, contract: &[u8]) -> Result<Vec<u8>, String> {
@@ -751,9 +797,25 @@ fn execute_cosmwasm_json(
 
     let exec_obj = msg_json.get("execute").unwrap_or(msg_json);
 
+    if let Some(auth) = exec_obj.get("authorize_caller") {
+        if let Err(reason) = require_creator_or_self(host, contract, sender_str) {
+            return Ok((OutcomeStatus::Revert, reason.into_bytes()));
+        }
+        let caller_str = auth
+            .get("caller")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        if caller_str.is_empty() {
+            return Ok((OutcomeStatus::Revert, b"empty authorized caller".to_vec()));
+        }
+        let allow_k = format!("sys:allowed_writer:{caller_str}");
+        write_store(host, contract, allow_k.as_bytes(), Some(b"1"))?;
+        return Ok((OutcomeStatus::Success, b"{\"ok\":true}".to_vec()));
+    }
+
     if let Some(init_cw20) = exec_obj.get("instantiate_cw20") {
-        if contract_creator(host, contract).as_deref() != Some(sender_str) {
-            return Ok((OutcomeStatus::Revert, b"not cw20 contract admin".to_vec()));
+        if let Err(reason) = require_creator_or_self(host, contract, sender_str) {
+            return Ok((OutcomeStatus::Revert, reason.into_bytes()));
         }
         if read_store(host, contract, b"cw20:info")?.is_some() {
             return Ok((OutcomeStatus::Revert, b"cw20 already instantiated".to_vec()));
@@ -777,12 +839,28 @@ fn execute_cosmwasm_json(
                     .get("address")
                     .and_then(|v| v.as_str())
                     .unwrap_or_default();
-                let amt: u128 = item
-                    .get("amount")
-                    .and_then(|v| v.as_str())
-                    .and_then(|s| s.parse().ok())
-                    .unwrap_or(0);
-                total = total.saturating_add(amt);
+                if addr.is_empty() {
+                    return Ok((
+                        OutcomeStatus::Revert,
+                        b"empty cw20 initial balance address".to_vec(),
+                    ));
+                }
+                let Some(amt_str) = item.get("amount").and_then(|v| v.as_str()) else {
+                    return Ok((
+                        OutcomeStatus::Revert,
+                        b"missing cw20 initial balance amount".to_vec(),
+                    ));
+                };
+                let Ok(amt) = amt_str.parse::<u128>() else {
+                    return Ok((
+                        OutcomeStatus::Revert,
+                        b"invalid cw20 initial balance amount".to_vec(),
+                    ));
+                };
+                let Some(next_total) = total.checked_add(amt) else {
+                    return Ok((OutcomeStatus::Revert, b"cw20 supply overflow".to_vec()));
+                };
+                total = next_total;
                 write_store(
                     host,
                     contract,
@@ -951,8 +1029,8 @@ fn execute_cosmwasm_json(
     }
 
     if let Some(mint_nft) = exec_obj.get("mint_nft") {
-        if contract_creator(host, contract).as_deref() != Some(sender_str) {
-            return Ok((OutcomeStatus::Revert, b"not cw721 minter".to_vec()));
+        if let Err(reason) = require_creator_or_self(host, contract, sender_str) {
+            return Ok((OutcomeStatus::Revert, reason.into_bytes()));
         }
         let tid = mint_nft
             .get("token_id")
@@ -1082,13 +1160,23 @@ fn execute_cosmwasm_json(
     }
 
     if let Some(kv) = exec_obj.get("put") {
-        // A raw store write rewrites any key in the contract's store,
-        // including `cw20:bal:*` and `cw721:owner:*`, so only the contract
-        // creator may use it.
-        if contract_creator(host, contract).as_deref() != Some(sender_str) {
-            return Ok((OutcomeStatus::Revert, b"not contract creator".to_vec()));
+        // A raw store write is restricted to the contract creator, self, or an
+        // explicitly authorized universal caller, and reserved state prefixes
+        // (`cw20:`, `cw721:`, `sys:`) may never be overwritten via `put`.
+        if let Err(reason) = require_authorized_writer(host, contract, sender_str) {
+            return Ok((OutcomeStatus::Revert, reason.into_bytes()));
         }
         let k = kv.get("key").and_then(|v| v.as_str()).unwrap_or_default();
+        if k.is_empty()
+            || k.starts_with("cw20:")
+            || k.starts_with("cw721:")
+            || k.starts_with("sys:")
+        {
+            return Ok((
+                OutcomeStatus::Revert,
+                b"reserved CosmWasm storage key prefix".to_vec(),
+            ));
+        }
         let v = kv.get("value").and_then(|v| v.as_str()).unwrap_or_default();
         let namespaced = format!("kv:{k}");
         write_store(host, contract, namespaced.as_bytes(), Some(v.as_bytes()))?;
@@ -1405,5 +1493,54 @@ mod creator_gate_tests {
             read_store(&host, contract, b"cw721:owner:1").unwrap(),
             Some(b"alice".to_vec())
         );
+    }
+
+    #[test]
+    fn authorize_caller_put_prefix_guard_and_integer_extend_opcodes() {
+        // 0xac (i64.extend_i32_s) and 0xad (i64.extend_i32_u) are integer ops, not floats.
+        let int_wasm =
+            build_valid_cosmwasm_module(&["instantiate", "execute", "query"], &[0xac, 0xad]);
+        assert!(validate_cosmwasm_bytecode(&int_wasm).is_ok());
+
+        let contract = b"contract-1";
+        let mut host = MockHost::with_creator(contract, "creator");
+        let auth_by_attacker =
+            serde_json::json!({"execute": {"authorize_caller": {"caller": "bridge"}}});
+        let (st, _) = execute_cosmwasm_json(
+            contract,
+            "attacker",
+            &auth_by_attacker,
+            false,
+            100_000,
+            &mut host,
+        )
+        .unwrap();
+        assert_eq!(st, OutcomeStatus::Revert);
+
+        let auth_by_creator =
+            serde_json::json!({"execute": {"authorize_caller": {"caller": "bridge"}}});
+        let (st, _) = execute_cosmwasm_json(
+            contract,
+            "creator",
+            &auth_by_creator,
+            false,
+            100_000,
+            &mut host,
+        )
+        .unwrap();
+        assert_eq!(st, OutcomeStatus::Success);
+
+        let put_ok = serde_json::json!({"execute": {"put": {"key": "hello", "value": "world"}}});
+        let (st, _) =
+            execute_cosmwasm_json(contract, "bridge", &put_ok, false, 100_000, &mut host).unwrap();
+        assert_eq!(st, OutcomeStatus::Success);
+
+        for reserved in ["cw20:bal:attacker", "cw721:owner:1", "sys:allowed_writer:x", ""] {
+            let put_bad = serde_json::json!({"execute": {"put": {"key": reserved, "value": "x"}}});
+            let (st, _) =
+                execute_cosmwasm_json(contract, "creator", &put_bad, false, 100_000, &mut host)
+                    .unwrap();
+            assert_eq!(st, OutcomeStatus::Revert);
+        }
     }
 }

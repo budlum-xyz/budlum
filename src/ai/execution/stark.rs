@@ -23,6 +23,10 @@ use bud_proof::{DefaultAdapter as Prover, ExecutionPublicInputs, ProofEnvelope, 
 /// envelope exists to make the node pay for.
 ///
 /// [`MAX_PROOF_BYTES`]: crate::execution::proof_verifier::MAX_PROOF_BYTES
+///
+/// # Errors
+///
+/// Returns an error if the operation fails.
 pub fn verify_execution_proof_stark(
     proof: &AiExecutionProof,
     program: &[u64],

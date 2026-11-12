@@ -140,6 +140,11 @@ pub enum RewardPoolError {
 }
 
 impl RewardPoolSchedule {
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn validate(&self) -> Result<(), RewardPoolError> {
         if self.validation_pool_epochs == 0 {
             return Err(RewardPoolError::EmptyEpochSchedule);

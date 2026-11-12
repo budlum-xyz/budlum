@@ -139,6 +139,10 @@ impl L1NoteRegistry {
 
     /// Insert a live note commitment bound to `owner`, so only `owner` may
     /// authorize spending it via `PrivateTransferSubmit`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn insert_note_for_owner(
         &mut self,
         commitment: NoteHash,
@@ -153,6 +157,10 @@ impl L1NoteRegistry {
     /// per-input note ownership and 1-for-1 note count conservation (preventing
     /// unbacked note creation while value-carrying confidential pools remain
     /// closed outside devnet).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn apply_transfer_for_owner(
         &mut self,
         spender: &Address,
@@ -204,6 +212,10 @@ impl L1NoteRegistry {
 
     /// Apply transfer with nullifier derivation proofs.
     /// Each `proof[i]` must satisfy: `nullifier[i] == derive_nullifier(commitment[i], proof[i])`, a domain-separated SHA-256.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn apply_transfer_with_proofs(
         &mut self,
         spent_commitments: &[NoteHash],
@@ -404,12 +416,12 @@ impl L1NoteRegistry {
 
     /// Enforce bounded storage via hard caps.
     /// Spent nullifiers are consensus replay protection, they cannot be deleted
-    /// Without breaking double-spend resistance. Instead, MAX_SPENT_NULLIFIERS
+    /// Without breaking double-spend resistance. Instead, `MAX_SPENT_NULLIFIERS`
     /// Enforces a hard ceiling (fail-closed): once the cap is reached, no new
     /// Private transfers are accepted until the chain performs a state migration
     /// To a non-deleting accumulator design (e.g., Bloom filter + Merkle mountain
     /// Range). This method is retained for API compatibility but pruning is now
-    /// Bounded by the MAX_SPENT_NULLIFIERS constant enforced at insertion time.
+    /// Bounded by the `MAX_SPENT_NULLIFIERS` constant enforced at insertion time.
     pub fn prune_spent_nullifiers(&mut self, _keep_count: usize) {
         // Intentional no-op: nullifiers are bounded by MAX_SPENT_NULLIFIERS
         // Enforced at insertion in apply_transfer_with_proofs. Deleting any

@@ -10,7 +10,7 @@
 //!   `ee/budzero/program`, initializes declared slots under `ee/budzero/storage`,
 //!   and registers the sender's alias in `uel/alias`.
 //! * `Call`: loads the deployed program from `ee/budzero/program` through
-//!   [`OverlayCore`] + [`BlockReadCache`], populates initial storage slots from
+//!   `OverlayCore` + [`BlockReadCache`], populates initial storage slots from
 //!   `ee/budzero/storage`, runs BudZero VM in execution-only mode, writes all
 //!   `vm.state_writes` back into `ee/budzero/storage`, and commits atomically
 //!   into [`AccountState`].

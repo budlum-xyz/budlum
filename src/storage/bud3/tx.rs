@@ -8,6 +8,7 @@
 use super::content_id::ContentId;
 use super::custody::CustodyProof;
 use super::delete::{GrantShredAuth, ShredOutcome};
+use super::fountain::Symbol;
 use super::grants::GrantRow;
 use super::pipeline::ObjectRecord;
 use super::placement::Share;
@@ -43,6 +44,8 @@ pub enum StorageTxV3 {
         segment: u64,
         /// New shares with fresh ESIs.
         new_shares: Vec<Share>,
+        /// Generated repair symbols matching `new_shares` and `new_root`.
+        new_symbols: Vec<Symbol>,
         /// Symbol root over the new symbols.
         new_root: [u8; 32],
     },
@@ -72,6 +75,10 @@ pub enum StorageTxV3 {
     },
     /// Issue an unlinkable view grant for a sealed object (`IssueViewGrant`).
     IssueViewGrant {
+        /// NFT reference whose holder authorizes the view grant.
+        nft: NftId,
+        /// Per-grant random nonce binding `row.grant_tag` to `nft`.
+        grant_nonce: [u8; 32],
         /// The unlinkable grant row (contains zero `content_id`, `issuer`, or `grantee`).
         row: GrantRow,
     },
@@ -112,6 +119,15 @@ pub enum StorageTxV3 {
         /// Proposer stake subject to 1% slash on `ContentId` mismatch.
         proposer_stake: u64,
     },
+    /// Pay on-chain for a G8 validator fallback decode receipt (`bud_storageGetContent`).
+    PayFallbackView {
+        /// Target public object commitment.
+        object: ObjectKey,
+        /// Unique receipt id matching the off-chain `PaidViewReceipt`.
+        receipt_id: [u8; 32],
+        /// Paid fee in BUD base units (`>= MIN_PAID_VIEW_FEE_ATOMS`).
+        amount_atoms: u64,
+    },
 }
 
 /// What an applied transaction did.
@@ -143,6 +159,8 @@ pub enum Applied {
     Released(usize),
     /// Object atomically replaced with a new commitment for the same `ContentId`.
     Replaced(ObjectKey),
+    /// On-chain paid fallback view receipt recorded.
+    PaidFallbackView,
 }
 
 /// Apply one transaction signed by `signer` at `epoch`.
@@ -194,6 +212,7 @@ pub fn apply_with_validators(
             object,
             segment,
             new_shares,
+            new_symbols,
             new_root,
         } => {
             // The repairer must not hold one of the new shares itself: a
@@ -204,7 +223,7 @@ pub fn apply_with_validators(
                 ));
             }
             registry
-                .record_repair(&object, segment, new_shares, new_root, epoch)
+                .record_repair(&object, segment, new_shares, new_symbols, new_root, epoch)
                 .map(|()| Applied::Repaired)
         }
         StorageTxV3::BindNft { nft, object } => registry
@@ -221,8 +240,12 @@ pub fn apply_with_validators(
             registry.decline(signer, &content);
             Ok(Applied::Declined)
         }
-        StorageTxV3::IssueViewGrant { row } => registry
-            .issue_view_grant(row, epoch)
+        StorageTxV3::IssueViewGrant {
+            nft,
+            grant_nonce,
+            row,
+        } => registry
+            .issue_view_grant(&nft, &grant_nonce, &signer, row, epoch)
             .map(|()| Applied::GrantIssued),
         StorageTxV3::RevokeViewGrant {
             grant_tag,
@@ -256,6 +279,13 @@ pub fn apply_with_validators(
                 (epoch, validator_keys),
             )
             .map(Applied::Replaced),
+        StorageTxV3::PayFallbackView {
+            object,
+            receipt_id,
+            amount_atoms,
+        } => registry
+            .record_paid_view(signer, object, receipt_id, amount_atoms, epoch)
+            .map(|()| Applied::PaidFallbackView),
     }
 }
 
@@ -422,6 +452,7 @@ mod tests {
                 first_esi: 8,
                 symbols: 4,
             }],
+            new_symbols: Vec::new(),
             new_root: [0; 32],
         };
         assert!(matches!(

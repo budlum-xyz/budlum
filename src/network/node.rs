@@ -34,7 +34,7 @@ fn publish_reached_the_mesh(error: &gossipsub::PublishError) -> bool {
 }
 
 /// Maximum seconds a sync cycle may remain in
-/// "syncing" state (sync_state == 1) before it is considered orphaned
+/// "syncing" state (`sync_state` == 1) before it is considered orphaned
 /// And automatically reset. Prevents nodes from reporting stale
 /// "syncing" status indefinitely when a peer disconnects mid-sync or
 /// When gossipsub publish fails without a corresponding reset.
@@ -555,7 +555,7 @@ pub struct BudlumBehaviour {
     /// pruned them, checked against the block's `witness_root`.
     witness: request_response::Behaviour<crate::network::witness_protocol::WitnessCodec>,
     /// Connection budget: without it a peer can open unbounded connections
-    /// and exhaust memory (libp2p resource-management DoS, RUSTSEC-2022-0084).
+    /// and exhaust memory (libp2p resource-management `DoS`, RUSTSEC-2022-0084).
     /// The incoming cap plus the per-peer cap also blunt eclipse attempts: an
     /// attacker cannot fill the routing table with connections from one
     /// identity, and inbound connections are capped below the total so a node
@@ -582,7 +582,7 @@ pub enum NodeCommand {
     BroadcastTx(crate::core::transaction::Transaction),
     ListPeers,
     /// Hard Pruning - physical deletion of B.U.D. content.
-    /// Triggered ONLY by local Executor after verified NftBurn (SECURITY_AUDIT_HACKER.md).
+    /// Triggered ONLY by local Executor after verified `NftBurn` (`SECURITY_AUDIT_HACKER`.md).
     /// Payload is 32-byte ContentId (mirrors budlum_core::storage::content_id::ContentId and bud_node::store::ContentId).
     StoragePrune {
         cid: [u8; 32],
@@ -670,6 +670,11 @@ impl NodeClient {
         let _ = self.sender.send(NodeCommand::StoragePrune { cid }).await;
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub async fn fetch_local_content(&self, cid: [u8; 32]) -> Result<Vec<u8>, String> {
         const LOCAL_FETCH_TIMEOUT: Duration = Duration::from_secs(5);
         let (tx, rx) = oneshot::channel();
@@ -683,6 +688,11 @@ impl NodeClient {
             .map_err(|e| format!("failed to receive local content response: {e}"))?
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub async fn fetch_remote_content(&self, cid: [u8; 32]) -> Result<Vec<u8>, String> {
         const REMOTE_FETCH_TIMEOUT: Duration = Duration::from_secs(10);
         let (tx, rx) = oneshot::channel();
@@ -699,6 +709,10 @@ impl NodeClient {
     /// Bans a peer by id through the node loop (`bud_adminBanPeer`). The
     /// public RPC listener never reaches this; the operator listener calls
     /// it after its own mode check.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub async fn admin_ban_peer(&self, peer_id: PeerId) -> Result<(), String> {
         const ADMIN_BAN_TIMEOUT: Duration = Duration::from_secs(5);
         let (tx, rx) = oneshot::channel();
@@ -716,6 +730,10 @@ impl NodeClient {
     }
 
     /// Lifts a ban by peer id (`bud_adminUnbanPeer`); operator listener only.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub async fn admin_unban_peer(&self, peer_id: PeerId) -> Result<(), String> {
         const ADMIN_UNBAN_TIMEOUT: Duration = Duration::from_secs(5);
         let (tx, rx) = oneshot::channel();
@@ -734,6 +752,10 @@ impl NodeClient {
 
     /// Lists currently banned peer ids (`bud_adminListBannedPeers`);
     /// operator listener only.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub async fn admin_list_banned_peers(&self) -> Result<Vec<String>, String> {
         const ADMIN_LIST_TIMEOUT: Duration = Duration::from_secs(5);
         let (tx, rx) = oneshot::channel();
@@ -1003,7 +1025,7 @@ pub struct Node {
     pub dns_seed_port: u16,
     pub peer_count: Arc<AtomicUsize>,
     pub sync_state: Arc<AtomicUsize>,
-    /// Timestamp when sync_state was set to 1.
+    /// Timestamp when `sync_state` was set to 1.
     pub sync_started_at: Arc<AtomicU64>,
     /// Outbound request currently responsible for the one active sync round.
     active_sync_request: Option<request_response::OutboundRequestId>,
@@ -1795,7 +1817,7 @@ impl Node {
 
     /// Open a sync round: ask one peer for headers over `/sync`.
     ///
-    /// Sync requests go over the peer-bound request_response protocol and
+    /// Sync requests go over the peer-bound `request_response` protocol and
     /// nowhere else. The gossip arms for `GetHeaders` and `GetBlocksRange`
     /// only log and drop (a reply published to the topic would reach the
     /// whole mesh, not the asker), so a request published to the topic is
@@ -2358,11 +2380,21 @@ impl Node {
             && block.hash == block.calculate_hash()
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn new(chain: ChainHandle) -> Result<Self, Box<dyn Error>> {
         let local_key = identity::Keypair::generate_ed25519();
         Self::with_key(chain, local_key, true, None, None)
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn with_key(
         chain: ChainHandle,
         local_key: identity::Keypair,
@@ -2788,6 +2820,11 @@ impl Node {
         self
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn new_with_bootstrap(
         chain: ChainHandle,
         bootstrap_peers: Vec<String>,
@@ -2880,6 +2917,11 @@ impl Node {
             sync_state: self.sync_state.clone(),
         }
     }
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn listen(&mut self, port: u16) -> Result<(), Box<dyn Error>> {
         let addr: Multiaddr = format!("/ip4/0.0.0.0/tcp/{port}").parse()?;
         self.swarm.listen_on(addr)?;
@@ -2891,12 +2933,22 @@ impl Node {
         info!("Listening on port {port}");
         Ok(())
     }
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn dial(&mut self, addr: &str) -> Result<(), Box<dyn Error>> {
         let remote: Multiaddr = addr.parse()?;
         self.swarm.dial(remote)?;
         info!("Dialing {addr}");
         Ok(())
     }
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn bootstrap(&mut self, addr: &str) -> Result<(), Box<dyn Error>> {
         let multiaddr: Multiaddr = addr.parse()?;
         let peer_id = match multiaddr

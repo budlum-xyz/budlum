@@ -182,6 +182,11 @@ impl NetworkMessage {
         proto_msg.encode_to_vec()
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, String> {
         use prost::Message;
         let proto_msg = crate::network::proto_conversions::pb::ProtoNetworkMessage::decode(bytes)
@@ -189,6 +194,11 @@ impl NetworkMessage {
         Self::try_from(proto_msg)
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn from_bytes_validated(bytes: &[u8]) -> Result<Self, MessageError> {
         if bytes.len() > MAX_MESSAGE_SIZE {
             return Err(MessageError::TooLarge(bytes.len()));
@@ -226,6 +236,11 @@ impl NetworkMessage {
         Ok(message)
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn validate_block_size(block: &Block) -> Result<(), MessageError> {
         use prost::Message;
         let proto_block = crate::network::proto_conversions::pb::ProtoBlock::from(block);
@@ -236,6 +251,11 @@ impl NetworkMessage {
         Ok(())
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn validate_tx_size(tx: &Transaction) -> Result<(), MessageError> {
         use prost::Message;
         let proto_tx = crate::network::proto_conversions::pb::ProtoTransaction::from(tx);
@@ -246,6 +266,11 @@ impl NetworkMessage {
         Ok(())
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn validate_header_request(locator: &[String], limit: u32) -> Result<(), MessageError> {
         if limit == 0 || limit > MAX_HEADERS_PER_REQUEST {
             return Err(MessageError::ParseError(format!(
@@ -265,6 +290,11 @@ impl NetworkMessage {
         Ok(())
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn validate_header_batch(
         headers: &[BlockHeader],
         expected_chain_id: u64,
