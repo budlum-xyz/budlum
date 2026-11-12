@@ -608,7 +608,7 @@ impl LocalStack {
         let rpc_peers: Vec<String> = self
             .bootnodes
             .iter()
-            .take(2)
+            .take(4)
             .map(|b| format!("\"{b}\""))
             .collect();
         let rpc_toml = rpc_dir.join("node.toml");

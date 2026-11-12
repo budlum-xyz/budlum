@@ -430,6 +430,19 @@ opt-level = 3
 opt-level = 3
 [profile.dev.package.p3-symmetric]
 opt-level = 3
+# Upstream rust-libp2p 0.54 uses `debug_assert!(false, ...)` on asynchronous
+# connection/substream teardown races (`libp2p-kad` handler.rs:860 / bootstrap.rs:90,
+# `libp2p-request-response` lib.rs:862..972, `libp2p-ping` handler.rs:202), which
+# panics dev-profile validator daemons (`exited=101`) when duplicate simultaneous
+# dials or stopped peers close a substream mid-flight while release builds ignore it.
+[profile.dev.package.libp2p-kad]
+debug-assertions = false
+[profile.dev.package.libp2p-request-response]
+debug-assertions = false
+[profile.dev.package.libp2p-ping]
+debug-assertions = false
+[profile.dev.package.libp2p-gossipsub]
+debug-assertions = false
 
 [profile.release]
 # Release hardening (research #196): panic=abort + overflow-checks + LTO +
