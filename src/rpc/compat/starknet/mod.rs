@@ -12,10 +12,10 @@ use serde_json::{json, Value};
 use crate::core::account::AccountState;
 use crate::execution::coordinator::assets::BUDLUM_TESTNET_CHAIN_ID;
 
-/// Proposed activation height for Cairo/Starknet on testnet `45261`.
+/// Proposed activation height for Cairo/Starknet on testnet `45261` (`0` = open).
 ///
-/// Convenience: shared by Starknet RPC policy and launch-closure checks.
-pub const PROPOSED_CAIRO_ACTIVATION_HEIGHT: u64 = 55_000;
+/// Convenience: shared by Starknet RPC policy and activation checks.
+pub const PROPOSED_CAIRO_ACTIVATION_HEIGHT: u64 = 0;
 
 /// Starknet JSON-RPC specification version supported by this gateway.
 ///
@@ -39,7 +39,7 @@ impl Default for StarknetActivationPolicy {
 }
 
 impl StarknetActivationPolicy {
-    /// Default launch posture on testnet `45261`: closed until `PROPOSED_CAIRO_ACTIVATION_HEIGHT`.
+    /// Default launch posture on testnet `45261`: open from block `0`.
     ///
     /// Convenience: default policy for Starknet RPC handlers.
     #[must_use]
@@ -183,11 +183,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn starknet_rpc_is_closed_on_testnet_before_activation_and_serves_reads_once_active() {
+    fn starknet_rpc_is_open_on_testnet_at_launch_and_respects_override() {
         let state = AccountState::new();
         let closed = handle_starknet_rpc(
             &state,
-            StarknetActivationPolicy::default(),
+            StarknetActivationPolicy {
+                chain_id: BUDLUM_TESTNET_CHAIN_ID,
+                block_height: 0,
+                activation_height: None,
+            },
             StarknetRpcRequest {
                 jsonrpc: "2.0".into(),
                 id: json!(1),
@@ -197,14 +201,9 @@ mod tests {
         );
         assert!(closed.error.is_some());
 
-        let active = StarknetActivationPolicy {
-            chain_id: BUDLUM_TESTNET_CHAIN_ID,
-            block_height: PROPOSED_CAIRO_ACTIVATION_HEIGHT,
-            activation_height: Some(PROPOSED_CAIRO_ACTIVATION_HEIGHT),
-        };
         let spec = handle_starknet_rpc(
             &state,
-            active,
+            StarknetActivationPolicy::default(),
             StarknetRpcRequest {
                 jsonrpc: "2.0".into(),
                 id: json!(2),

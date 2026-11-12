@@ -605,60 +605,87 @@ fn private_transfer_replayed_under_another_nonce_or_bare_digest_is_refused() {
     assert!(state.note_registry.contains_commitment(&c_in));
 }
 
-/// Testnet (`45261`) is a public network: the privacy note surface stays
-/// closed there until ownership, value-conservation and membership proofs are
-/// wired. The gate is the executor's, so a signed, well-formed
-/// transaction is refused before any arm runs.
+/// Testnet (`45261`) executes private transfers with authorization and
+/// ownership checks; Mainnet (`45260`) keeps the legacy boundary closed.
 #[test]
-fn private_transfer_is_closed_on_testnet() {
+fn private_transfer_is_open_on_testnet() {
     use crate::core::chain_config::Network;
+    let mainnet = Network::Mainnet.chain_id().value();
     let testnet = Network::Testnet.chain_id().value();
     let kp = KeyPair::generate().unwrap();
     let from = Address::from(kp.public_key_bytes());
     let mut state = funded_state(from, 1_000_000);
-    let (sub, c_in, c_out) = transfer_fixture(&kp, &mut state);
-    let tx = signed_tx(&kp, testnet, TransactionType::PrivateTransferSubmit(sub));
-    let err = crate::execution::executor::Executor::apply_transaction_checked(&mut state, &tx)
-        .expect_err("testnet must refuse the privacy surface");
+    let c_in = hash_from_field(11);
+    let proof = hash_from_field(0xA11CE);
+    let n1 = L1NoteRegistry::derive_nullifier(&c_in, &proof);
+    let c_out = hash_from_field(12);
+    state
+        .note_registry
+        .insert_note_for_owner(c_in, from)
+        .unwrap();
+    let digest = PrivateTransferSubmit::compute_public_digest(&[n1], &[c_out]);
+    let auth_msg =
+        PrivateTransferSubmit::authorization_message(testnet, from.as_bytes(), 0, &digest);
+    let sub = PrivateTransferSubmit {
+        spent_commitments: vec![c_in],
+        nullifiers: vec![n1],
+        output_commitments: vec![c_out],
+        nullifier_proofs: vec![proof],
+        authorization_sig: kp.sign(&auth_msg).to_vec(),
+        public_digest: digest,
+    };
+    let tx_testnet = signed_tx(&kp, testnet, TransactionType::PrivateTransferSubmit(sub.clone()));
+    crate::execution::executor::Executor::apply_transaction_checked(&mut state, &tx_testnet)
+        .expect("testnet 45261 executes private transfers");
+    assert!(!state.note_registry.contains_commitment(&c_in));
+    assert!(state.note_registry.contains_commitment(&c_out));
+
+    let tx_mainnet = signed_tx(&kp, mainnet, TransactionType::PrivateTransferSubmit(sub));
+    let err =
+        crate::execution::executor::Executor::apply_transaction_checked(&mut state, &tx_mainnet)
+            .expect_err("mainnet must keep the legacy privacy surface closed");
     match err {
         crate::error::BudlumError::Validation { code, .. } => {
-            assert_eq!(code, "privacy_testnet_closed");
+            assert_eq!(code, "privacy_mainnet_disabled");
         }
         other => panic!("expected a validation refusal, got {other:?}"),
     }
-    assert!(state.note_registry.contains_commitment(&c_in));
-    assert!(!state.note_registry.contains_commitment(&c_out));
 }
 
-/// The note registry is the other half of the same surface: insertion is
-/// refused on testnet for the same reason.
+/// Note insertion executes on testnet (`45261`) and remains refused on mainnet (`45260`).
 #[test]
-fn note_registry_is_closed_on_testnet() {
+fn note_registry_is_open_on_testnet() {
     use crate::core::chain_config::Network;
+    let mainnet = Network::Mainnet.chain_id().value();
     let testnet = Network::Testnet.chain_id().value();
     let kp = KeyPair::generate().unwrap();
     let from = Address::from(kp.public_key_bytes());
     let mut state = funded_state(from, 1_000_000);
     let c = hash_from_field(77);
-    let tx = signed_tx(&kp, testnet, TransactionType::PrivacyNoteInsert(c));
-    let err = crate::execution::executor::Executor::apply_transaction_checked(&mut state, &tx)
-        .expect_err("testnet must refuse note insertion");
+    let tx_testnet = signed_tx(&kp, testnet, TransactionType::PrivacyNoteInsert(c));
+    crate::execution::executor::Executor::apply_transaction_checked(&mut state, &tx_testnet)
+        .expect("testnet accepts note insertion");
+    assert!(state.note_registry.contains_commitment(&c));
+
+    let c_main = hash_from_field(78);
+    let tx_mainnet = signed_tx(&kp, mainnet, TransactionType::PrivacyNoteInsert(c_main));
+    let err =
+        crate::execution::executor::Executor::apply_transaction_checked(&mut state, &tx_mainnet)
+            .expect_err("mainnet must refuse note insertion");
     match err {
         crate::error::BudlumError::Validation { code, .. } => {
-            assert_eq!(code, "privacy_testnet_closed");
+            assert_eq!(code, "privacy_mainnet_disabled");
         }
         other => panic!("expected a validation refusal, got {other:?}"),
     }
-    assert!(!state.note_registry.contains_commitment(&c));
+    assert!(!state.note_registry.contains_commitment(&c_main));
 }
 
-/// AI execution proofs are closed on testnet while full STARK verification
-/// and the public-layer prerequisites are not live. The refusal must come
-/// from the layer gate, before the
-/// attach arm inspects the proof envelope.
+/// AI execution proofs are open on testnet (`45261`) and gated on mainnet (`45260`).
 #[test]
-fn ai_execution_proof_is_closed_on_testnet() {
+fn ai_execution_proof_is_open_on_testnet() {
     use crate::core::chain_config::Network;
+    let mainnet = Network::Mainnet.chain_id().value();
     let testnet = Network::Testnet.chain_id().value();
     let kp = KeyPair::generate().unwrap();
     let from = Address::from(kp.public_key_bytes());
@@ -674,16 +701,32 @@ fn ai_execution_proof_is_closed_on_testnet() {
         weights_digest: None,
         public_inputs: None,
     };
-    let tx = signed_tx(
+    let tx_testnet = signed_tx(
         &kp,
         testnet,
+        TransactionType::AiAttachExecutionProof {
+            request_id: crate::ai::types::AiRequestId::new([9u8; 32]),
+            proof: proof.clone(),
+        },
+    );
+    let err_testnet =
+        crate::execution::executor::Executor::apply_transaction_checked(&mut state, &tx_testnet)
+            .expect_err("unknown request must fail request lookup, not layer gate");
+    if let crate::error::BudlumError::Validation { code, .. } = err_testnet {
+        assert_ne!(code, "ai_layer_testnet_closed");
+    }
+
+    let tx_mainnet = signed_tx(
+        &kp,
+        mainnet,
         TransactionType::AiAttachExecutionProof {
             request_id: crate::ai::types::AiRequestId::new([9u8; 32]),
             proof,
         },
     );
-    let err = crate::execution::executor::Executor::apply_transaction_checked(&mut state, &tx)
-        .expect_err("testnet must refuse AI execution proofs");
+    let err =
+        crate::execution::executor::Executor::apply_transaction_checked(&mut state, &tx_mainnet)
+            .expect_err("mainnet must refuse AI execution proofs");
     match err {
         crate::error::BudlumError::Validation { code, .. } => {
             assert_eq!(code, "ai_layer_testnet_closed");
@@ -692,14 +735,13 @@ fn ai_execution_proof_is_closed_on_testnet() {
     }
 }
 
-/// Entry to the on-chain AI verification layer is closed on testnet:
-/// every entry variant in this fixture is refused with the layer's code,
-/// while devnet - the proving ground - is not refused by the gate.
+/// Entry to the on-chain AI verification layer is open on testnet (`45261`)
+/// and devnet (`45262`); mainnet (`45260`) keeps the closure boundary.
 #[test]
-fn ai_layer_is_closed_on_testnet() {
+fn ai_layer_is_open_on_testnet() {
     use crate::core::chain_config::Network;
+    let mainnet = Network::Mainnet.chain_id().value();
     let testnet = Network::Testnet.chain_id().value();
-    let devnet = Network::Devnet.chain_id().value();
     let kp = KeyPair::generate().unwrap();
     let from = Address::from(kp.public_key_bytes());
 
@@ -718,9 +760,9 @@ fn ai_layer_is_closed_on_testnet() {
     for tx_type in cases {
         let label = format!("{tx_type:?}");
         let mut state = funded_state(from, 1_000_000);
-        let tx = signed_tx(&kp, testnet, tx_type);
+        let tx = signed_tx(&kp, mainnet, tx_type);
         let err = crate::execution::executor::Executor::apply_transaction_checked(&mut state, &tx)
-            .expect_err("testnet must refuse the AI layer");
+            .expect_err("mainnet must refuse the AI layer");
         match err {
             crate::error::BudlumError::Validation { code, .. } => {
                 assert_eq!(code, "ai_layer_testnet_closed", "case {label}");
@@ -729,11 +771,8 @@ fn ai_layer_is_closed_on_testnet() {
         }
     }
 
-    // Devnet is the proving ground: the gate must not refuse there. The arm
-    // itself may still refuse (bond rules, escrow rules), but never with the
-    // layer's code.
     let mut state = funded_state(from, 1_000_000);
-    let tx = signed_tx(&kp, devnet, TransactionType::AiOperatorBond);
+    let tx = signed_tx(&kp, testnet, TransactionType::AiOperatorBond);
     if let Err(crate::error::BudlumError::Validation { code, .. }) =
         crate::execution::executor::Executor::apply_transaction_checked(&mut state, &tx)
     {
@@ -741,11 +780,10 @@ fn ai_layer_is_closed_on_testnet() {
     }
 }
 
-/// A native contract cannot reopen the closed AI layer through its receipt
-/// marker. The VM program is valid; the network refusal happens before any
-/// grant, request registry, escrow, balance or nonce write.
+/// A native contract can submit an AI inference marker on testnet (`45261`),
+/// while mainnet (`45260`) still enforces the layer closure before mutation.
 #[test]
-fn contract_inference_event_is_closed_on_testnet() {
+fn contract_inference_event_is_open_on_testnet() {
     use bud_isa::{Instruction, Opcode};
     let mut program = Vec::new();
     for value in [0x00A1_00A1, 7, 1, 10] {
@@ -782,30 +820,52 @@ fn contract_inference_event_is_closed_on_testnet() {
     );
     let kp = KeyPair::generate().unwrap();
     let from = Address::from(kp.public_key_bytes());
-    let mut tx = Transaction::new_with_chain_id(
+    let bytecode: Vec<u8> = program.into_iter().flat_map(u64::to_le_bytes).collect();
+
+    let mut tx_test = Transaction::new_with_chain_id(
         from,
         Address::zero(),
         0,
         100,
         0,
-        program.into_iter().flat_map(u64::to_le_bytes).collect(),
+        bytecode.clone(),
         crate::core::chain_config::Network::Testnet
             .chain_id()
             .value(),
         TransactionType::ContractCall,
     );
-    tx.sign(&kp);
+    tx_test.sign(&kp);
     let mut state = funded_state(from, 1_000_000);
-    let before = state.calculate_state_root();
-    let error = Executor::apply_transaction_checked(&mut state, &tx)
-        .expect_err("the native inference event must stay closed");
+    if let Err(crate::error::BudlumError::Validation { code, .. }) =
+        Executor::apply_transaction_checked(&mut state, &tx_test)
+    {
+        assert_ne!(code, "ai_layer_testnet_closed");
+    }
+
+    let mut tx_main = Transaction::new_with_chain_id(
+        from,
+        Address::zero(),
+        0,
+        100,
+        0,
+        bytecode,
+        crate::core::chain_config::Network::Mainnet
+            .chain_id()
+            .value(),
+        TransactionType::ContractCall,
+    );
+    tx_main.sign(&kp);
+    let mut main_state = funded_state(from, 1_000_000);
+    let before = main_state.calculate_state_root();
+    let error = Executor::apply_transaction_checked(&mut main_state, &tx_main)
+        .expect_err("the native inference event must stay closed on mainnet");
     match error {
         crate::error::BudlumError::Validation { code, .. } => {
             assert_eq!(code, "ai_layer_testnet_closed");
         }
         other => panic!("expected a validation refusal, got {other:?}"),
     }
-    assert_eq!(state.calculate_state_root(), before);
+    assert_eq!(main_state.calculate_state_root(), before);
 }
 
 #[test]

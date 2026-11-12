@@ -18,7 +18,8 @@
 use crate::cross_domain::evm::rlp::{self, Item};
 use crate::execution::coordinator::alias::{derive_foreign_cosmos_bech32, ALIAS_NAMESPACE};
 use crate::execution::coordinator::assets::{
-    decode_pointer_bytecode, AssetStandard, PointerDescriptor,
+    decode_pointer_bytecode, AssetStandard, MovePointerFlavor, MovePointerOp, PointerDescriptor,
+    SplPointerOp,
 };
 use crate::execution::coordinator::foreign::ethereum::BUDLUM_EVM_CHAIN_ID;
 use crate::execution::coordinator::state::{NS_EVM_ACCOUNT, NS_EVM_CODE, NS_EVM_STORAGE};
@@ -802,6 +803,174 @@ fn execute_evm_pointer_to_wasm(
     }
 }
 
+fn pad20_to_32(addr20: &[u8; 20]) -> [u8; 32] {
+    let mut out = [0u8; 32];
+    if let Some(tail) = out.get_mut(12..32) {
+        tail.copy_from_slice(addr20);
+    }
+    out
+}
+
+fn execute_evm_pointer_to_svm_or_move(
+    ptr: &PointerDescriptor,
+    caller20: &[u8; 20],
+    input: &[u8],
+    is_static: bool,
+    gas_budget: u64,
+    host: &mut dyn HostApi,
+) -> Result<(OutcomeStatus, Vec<u8>), String> {
+    let Some(sel) = input.get(..4) else {
+        return Ok((OutcomeStatus::Revert, b"missing selector".to_vec()));
+    };
+    let args = input.get(4..).unwrap_or(&[]);
+    if sel == solidity_selector("name()") {
+        return Ok((OutcomeStatus::Success, abi_encode_string(&ptr.name)));
+    }
+    if sel == solidity_selector("symbol()") {
+        return Ok((OutcomeStatus::Success, abi_encode_string(&ptr.symbol)));
+    }
+    if sel == solidity_selector("decimals()") {
+        return Ok((
+            OutcomeStatus::Success,
+            U256Word::from_u64(u64::from(ptr.decimals)).0.to_vec(),
+        ));
+    }
+
+    let home_ee = EeId(ptr.home_ee);
+    let mut read_only = false;
+    let payload_val: serde_json::Value = if sel == solidity_selector("balanceOf(address)") {
+        read_only = true;
+        let who20 = decode_abi_addr(args, 0)?;
+        let owner = pad20_to_32(&who20);
+        if home_ee == EeId::SVM {
+            serde_json::to_value(SplPointerOp::BalanceOf { owner }).map_err(|e| e.to_string())?
+        } else {
+            serde_json::to_value(MovePointerOp::Balance {
+                flavor: MovePointerFlavor::FungibleAsset,
+                owner,
+            })
+            .map_err(|e| e.to_string())?
+        }
+    } else if sel == solidity_selector("allowance(address,address)") {
+        read_only = true;
+        let ow20 = decode_abi_addr(args, 0)?;
+        let sp20 = decode_abi_addr(args, 32)?;
+        let owner = pad20_to_32(&ow20);
+        let party = pad20_to_32(&sp20);
+        if home_ee == EeId::SVM {
+            serde_json::to_value(SplPointerOp::Allowance {
+                owner,
+                delegate: party,
+            })
+            .map_err(|e| e.to_string())?
+        } else {
+            serde_json::to_value(MovePointerOp::Allowance {
+                flavor: MovePointerFlavor::FungibleAsset,
+                owner,
+                spender: party,
+            })
+            .map_err(|e| e.to_string())?
+        }
+    } else if is_static {
+        return Ok((OutcomeStatus::Revert, b"static pointer write".to_vec()));
+    } else if sel == solidity_selector("approve(address,uint256)") {
+        let sp20 = decode_abi_addr(args, 0)?;
+        let amt = decode_abi_u128(args, 32)?;
+        let party = pad20_to_32(&sp20);
+        if home_ee == EeId::SVM {
+            serde_json::to_value(SplPointerOp::Approve {
+                delegate: party,
+                amount: amt,
+            })
+            .map_err(|e| e.to_string())?
+        } else {
+            serde_json::to_value(MovePointerOp::Approve {
+                flavor: MovePointerFlavor::FungibleAsset,
+                spender: party,
+                amount: amt,
+            })
+            .map_err(|e| e.to_string())?
+        }
+    } else if sel == solidity_selector("transfer(address,uint256)") {
+        let to20 = decode_abi_addr(args, 0)?;
+        let amt = decode_abi_u128(args, 32)?;
+        let to = pad20_to_32(&to20);
+        if home_ee == EeId::SVM {
+            serde_json::to_value(SplPointerOp::Transfer { to, amount: amt })
+                .map_err(|e| e.to_string())?
+        } else {
+            serde_json::to_value(MovePointerOp::Transfer {
+                flavor: MovePointerFlavor::FungibleAsset,
+                to,
+                amount: amt,
+            })
+            .map_err(|e| e.to_string())?
+        }
+    } else if sel == solidity_selector("transferFrom(address,address,uint256)") {
+        let ow20 = decode_abi_addr(args, 0)?;
+        let to20 = decode_abi_addr(args, 32)?;
+        let amt = decode_abi_u128(args, 64)?;
+        let owner = pad20_to_32(&ow20);
+        let to = pad20_to_32(&to20);
+        if home_ee == EeId::SVM {
+            serde_json::to_value(SplPointerOp::TransferFrom {
+                owner,
+                to,
+                amount: amt,
+            })
+            .map_err(|e| e.to_string())?
+        } else {
+            serde_json::to_value(MovePointerOp::TransferFrom {
+                flavor: MovePointerFlavor::FungibleAsset,
+                owner,
+                to,
+                amount: amt,
+            })
+            .map_err(|e| e.to_string())?
+        }
+    } else {
+        return Ok((
+            OutcomeStatus::Revert,
+            b"unsupported pointer selector".to_vec(),
+        ));
+    };
+
+    let raw_json = serde_json::to_vec(&payload_val).map_err(|e| e.to_string())?;
+    let final_in = if read_only {
+        wrap_static_universal_input(&raw_json)
+    } else {
+        raw_json
+    };
+    let res = host
+        .universal_call(UniversalCall {
+            from: EeIdentity {
+                ee: EeId::EVM,
+                id: caller20.to_vec(),
+            },
+            to_ee: home_ee,
+            target: EeIdentity {
+                ee: home_ee,
+                id: ptr.home_ref.clone(),
+            },
+            value: BudAmount(0),
+            input: final_in,
+            gas_limit: gas_budget / 2 + 10_000,
+            is_static: read_only,
+        })
+        .map_err(|e| e.to_string())?;
+    let log = encode_evm_universal_call_log(home_ee, &ptr.home_ref, res.success);
+    host.emit_log(log).map_err(|e| e.to_string())?;
+    if !res.success {
+        return Ok((OutcomeStatus::Revert, res.output));
+    }
+    if read_only {
+        let num = <[u8; 16]>::try_from(res.output.as_slice()).map_or(0, u128::from_le_bytes);
+        Ok((OutcomeStatus::Success, U256Word::from_u128(num).0.to_vec()))
+    } else {
+        Ok((OutcomeStatus::Success, U256Word::from_u64(1).0.to_vec()))
+    }
+}
+
 fn invoke_universal_precompile(
     caller20: &[u8; 20],
     calldata: &[u8],
@@ -1562,8 +1731,7 @@ fn step_evm_frame(
                     let child20 = if let Some(salt) = salt_opt {
                         compute_create2_address(self_addr, &salt, &init)
                     } else {
-                        let mut sender_rec =
-                            read_account_rec(host, self_addr).map_err(|_| ())?;
+                        let mut sender_rec = read_account_rec(host, self_addr).map_err(|_| ())?;
                         let addr = compute_create_address(self_addr, sender_rec.nonce);
                         sender_rec.nonce = sender_rec.nonce.saturating_add(1);
                         write_account_rec(host, self_addr, &sender_rec).map_err(|_| ())?;
@@ -1899,8 +2067,11 @@ fn prepare_evm_target(
         return Ok(PreparedTarget::Finished(OutcomeStatus::Success, Vec::new()));
     }
     if let Some(ptr) = decode_pointer_bytecode(&code) {
-        let (st, out) =
-            execute_evm_pointer_to_wasm(&ptr, caller20, input, is_static, gas_limit, host)?;
+        let (st, out) = if EeId(ptr.home_ee) == EeId::WASM {
+            execute_evm_pointer_to_wasm(&ptr, caller20, input, is_static, gas_limit, host)?
+        } else {
+            execute_evm_pointer_to_svm_or_move(&ptr, caller20, input, is_static, gas_limit, host)?
+        };
         return Ok(PreparedTarget::Finished(st, out));
     }
     if let Some(spec) = decode_std_evm_token_code(&code) {

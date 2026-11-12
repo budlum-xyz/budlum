@@ -134,7 +134,7 @@ impl BlsVerifier for PairingBls {
     }
 
     fn sync_committee_closed(&self) -> bool {
-        true
+        false
     }
 }
 
@@ -1713,41 +1713,93 @@ mod tests {
         assert!(matches!(err, IntakeError::CommitteeNotPinned), "got: {err}");
     }
 
+    /// EthereumSync admission and evidence verification are open on Testnet
+    /// (`45261`) with pinned committee + `PairingBls`, while Mainnet (`45260`)
+    /// stays gated (`MainnetDisabled`).
     #[test]
-    fn ethereum_sync_committee_is_closed_on_testnet() {
+    fn ethereum_sync_committee_is_open_on_testnet() {
         use crate::core::account::AccountState;
         use crate::core::chain_config::Network;
+        use crate::cross_domain::external::ethereum::signing_root_v2;
         use crate::cross_domain::external::external_tx::{
             execute_external_domain_tx, ExternalDomainTx, ExternalDomainTxContext,
+            ExternalDomainTxError,
         };
+        use bls12_381::{G1Affine, G1Projective, G2Affine, G2Projective, Scalar};
 
         let mut state = AccountState::new();
         let poster = addr(9);
         let bond = u64::try_from(economics_bond()).unwrap();
         state.add_balance(&poster, bond.saturating_mul(4));
 
-        let spec = eth_spec();
+        let sk = Scalar::from(7u64);
+        let pk_compressed = G1Affine::from(G1Projective::generator() * sk).to_compressed();
+        let mut agg_pk = vec![0u8; 96];
+        agg_pk[..48].copy_from_slice(&pk_compressed);
+
+        let spec = AdapterSpec::EthereumSync {
+            network: "testnet".to_string(),
+            committee: Some(crate::cross_domain::external::ethereum::PinnedCommittee {
+                period: 0,
+                aggregate_pubkey: agg_pk.clone(),
+                next_committee_root: [0xbb; 32],
+            }),
+        };
+        let mut payload = vec![0u8; layout::LEN];
+        payload[layout::FINALIZED_ROOT].copy_from_slice(&[0xaa; 32]);
+        payload[layout::FINALIZED_SLOT].copy_from_slice(&64u64.to_le_bytes());
+        payload[layout::ATTESTED_SLOT].copy_from_slice(&128u64.to_le_bytes());
+        payload[layout::PERIOD].copy_from_slice(&0u64.to_le_bytes());
+        payload[layout::NEXT_COMMITTEE_ROOT].copy_from_slice(&[0xbb; 32]);
+        payload[layout::AGGREGATE_PUBKEY].copy_from_slice(&agg_pk);
+        payload[layout::PARTICIPATION_BITS].copy_from_slice(&[0xff; 64]);
+        payload[layout::STATE_ROOT].copy_from_slice(&[0xcc; 32]);
+        let update = crate::cross_domain::external::ethereum::parse_update(&payload).unwrap();
+        let root = signing_root_v2(&update);
+        let sig = G2Affine::from(
+            G2Projective::from(crate::chain::finality::hash_to_g2(&root)) * sk,
+        );
+        payload[layout::SIGNATURE].copy_from_slice(&sig.to_compressed());
+
+        let adapter = spec.build(Some(IntakeState::production_bls()), None);
+        let golden = RawConsensusEvidence {
+            adapter: adapter.descriptor().id,
+            evidence_version: 2,
+            network: "testnet".to_string(),
+            payload,
+            declared_height: 64,
+            declared_root: [0xcc; 32],
+            submitter: poster,
+        };
         let req = RegistrationRequest {
-            golden: golden_for(&spec),
-            versions: versions_for(&spec),
+            golden,
+            versions: VersionPolicy::single(adapter.descriptor().id, 2, 0),
             economics: IntakeState::conservative_economics(1_000_000),
             policy: VerificationPolicy::strict(1_000),
             bond_atoms: economics_bond(),
             poster,
             spec,
         };
-        let ctx = ExternalDomainTxContext {
+        let tx = ExternalDomainTx::Register(Box::new(req));
+
+        let ctx_testnet = ExternalDomainTxContext {
             sender: poster,
             chain_id: Network::Testnet.chain_id().value(),
             fee: 10,
             bls: IntakeState::production_bls,
         };
-        let tx = ExternalDomainTx::Register(Box::new(req));
-        let res = execute_external_domain_tx(&mut state, &ctx, &tx);
-        assert!(
-            res.is_err(),
-            "Ethereum sync-committee registration must be refused on testnet"
-        );
-        assert!(state.settlement.external_intake.entries.is_empty());
+        execute_external_domain_tx(&mut state, &ctx_testnet, &tx)
+            .expect("EthereumSync must succeed on testnet with real BLS signature");
+        assert_eq!(state.settlement.external_intake.entries.len(), 1);
+
+        let ctx_mainnet = ExternalDomainTxContext {
+            sender: poster,
+            chain_id: Network::Mainnet.chain_id().value(),
+            fee: 10,
+            bls: IntakeState::production_bls,
+        };
+        let err = execute_external_domain_tx(&mut state, &ctx_mainnet, &tx)
+            .expect_err("EthereumSync must stay closed on mainnet");
+        assert_eq!(err, ExternalDomainTxError::MainnetDisabled);
     }
 }
