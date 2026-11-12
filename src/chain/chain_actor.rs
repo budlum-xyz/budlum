@@ -88,6 +88,14 @@ pub enum ChainCommand {
         Precommit,
         oneshot::Sender<Result<Option<FinalityCert>, String>>,
     ),
+    VoteIsFromRegisteredValidator {
+        voter_id: Address,
+        auth_msg: Vec<u8>,
+        auth_sig: Vec<u8>,
+        signing_msg: Vec<u8>,
+        sig_bls: Vec<u8>,
+        response: oneshot::Sender<bool>,
+    },
     ImportQcBlob(QcBlob, oneshot::Sender<Result<(), String>>),
     HandleQcFaultProof(QcFaultProof, oneshot::Sender<Result<(), String>>),
     SubmitSlashingEvidence(
@@ -830,6 +838,29 @@ impl ChainHandle {
         res_rx
             .await
             .unwrap_or_else(|_| Err("Actor dropped".to_string()))
+    }
+
+    pub(crate) async fn vote_is_from_registered_validator(
+        &self,
+        voter_id: Address,
+        auth_msg: Vec<u8>,
+        auth_sig: Vec<u8>,
+        signing_msg: Vec<u8>,
+        sig_bls: Vec<u8>,
+    ) -> bool {
+        let (response, res_rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::VoteIsFromRegisteredValidator {
+                voter_id,
+                auth_msg,
+                auth_sig,
+                signing_msg,
+                sig_bls,
+                response,
+            })
+            .await;
+        res_rx.await.unwrap_or(false)
     }
 
     pub async fn sign_prevote(
@@ -2683,6 +2714,23 @@ impl ChainActor {
                 ChainCommand::HandlePrecommit(vote, res_tx) => {
                     let result = self.blockchain.handle_precommit(vote);
                     let _ = res_tx.send(result);
+                }
+                ChainCommand::VoteIsFromRegisteredValidator {
+                    voter_id,
+                    auth_msg,
+                    auth_sig,
+                    signing_msg,
+                    sig_bls,
+                    response,
+                } => {
+                    let ok = self.blockchain.vote_is_from_registered_validator(
+                        &voter_id,
+                        &auth_msg,
+                        &auth_sig,
+                        &signing_msg,
+                        &sig_bls,
+                    );
+                    let _ = response.send(ok);
                 }
                 ChainCommand::SignPrevote {
                     epoch,

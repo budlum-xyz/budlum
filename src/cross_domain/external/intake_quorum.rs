@@ -175,6 +175,8 @@ pub enum RoundError {
     RoundClosed { state: String },
     #[error("round is full: the policy admits {max} participants")]
     RoundFull { max: usize },
+    #[error("too many open rounds ({max}) already hold in-progress votes")]
+    TooManyOpenRounds { max: usize },
     /// Bytes that cannot be read as evidence
     /// at all are the caller's problem, never a vote. They must not open a
     /// round or count toward any threshold.
@@ -303,29 +305,65 @@ impl QuorumRounds {
                 // Only rounds still awaiting a decision occupy a cap slot;
                 // decided (`AgreedClaim`, `AgreedRefusal`) or `Disputed` rounds
                 // have closed voting and must not starve future heights (CWE-400).
+                // Bound each prover's share of open rounds and never evict a
+                // round that already holds another prover's collected vote.
+                let submitter = evidence.submitter;
+                let no_other_prover =
+                    |r: &QuorumRound| r.entries.iter().all(|e| e.prover == submitter);
+                let prover_open = self
+                    .rounds
+                    .iter()
+                    .filter(|(k, r)| {
+                        k.domain == domain
+                            && matches!(r.state, RoundState::Open)
+                            && r.entries.iter().any(|e| e.prover == submitter)
+                    })
+                    .count();
                 let open = self
                     .rounds
                     .iter()
                     .filter(|(k, r)| k.domain == domain && matches!(r.state, RoundState::Open))
                     .count();
-                if open >= MAX_OPEN_ROUNDS_PER_DOMAIN {
-                    // Evict the oldest open round instead of refusing the
-                    // submission. Refusing let one bonded prover squat the cap
-                    // with consensus-refused evidence at 64 heights of its
-                    // choosing and deny every honest height for the whole
-                    // retention window (CWE-770): a refusal is cheap and the
-                    // round it creates lives for `ROUND_RETENTION_BLOCKS`.
-                    // Eviction still bounds memory - it just cannot be used to
-                    // censor a height the squatter does not occupy.
-                    let oldest = self
+                let evict_key = if prover_open >= MAX_OPEN_ROUNDS_PER_PROVER {
+                    let Some(own_oldest) = self
                         .rounds
                         .iter()
-                        .filter(|(k, r)| k.domain == domain && matches!(r.state, RoundState::Open))
+                        .filter(|(k, r)| {
+                            k.domain == domain
+                                && matches!(r.state, RoundState::Open)
+                                && !r.entries.is_empty()
+                                && no_other_prover(r)
+                        })
                         .min_by_key(|(k, r)| (r.opened_at, **k))
-                        .map(|(k, _)| *k);
-                    if let Some(oldest) = oldest {
-                        self.rounds.remove(&oldest);
-                    }
+                        .map(|(k, _)| *k)
+                    else {
+                        return Err(RoundError::TooManyOpenRounds {
+                            max: MAX_OPEN_ROUNDS_PER_PROVER,
+                        });
+                    };
+                    Some(own_oldest)
+                } else if open >= MAX_OPEN_ROUNDS_PER_DOMAIN {
+                    let Some(oldest) = self
+                        .rounds
+                        .iter()
+                        .filter(|(k, r)| {
+                            k.domain == domain
+                                && matches!(r.state, RoundState::Open)
+                                && no_other_prover(r)
+                        })
+                        .min_by_key(|(k, r)| (r.opened_at, **k))
+                        .map(|(k, _)| *k)
+                    else {
+                        return Err(RoundError::TooManyOpenRounds {
+                            max: MAX_OPEN_ROUNDS_PER_DOMAIN,
+                        });
+                    };
+                    Some(oldest)
+                } else {
+                    None
+                };
+                if let Some(victim) = evict_key {
+                    self.rounds.remove(&victim);
                 }
                 self.rounds.insert(
                     key,
@@ -469,6 +507,10 @@ impl QuorumRounds {
 /// Convenience: pub so the intake side can refuse against the same
 /// per-domain round cap the quorum enforces in this module.
 pub const MAX_OPEN_ROUNDS_PER_DOMAIN: usize = 64;
+
+/// Maximum `Open` rounds one prover may hold in a single domain before its own
+/// solo rounds are recycled, preserving at least half the pool for peers.
+const MAX_OPEN_ROUNDS_PER_PROVER: usize = MAX_OPEN_ROUNDS_PER_DOMAIN / 2;
 
 /// Whether an adapter refusal says nothing about a claim - the bytes could
 /// not be read as evidence at all (wrong adapter, wrong version, malformed,
@@ -885,5 +927,45 @@ mod tests {
                 .unwrap_or_else(|e| panic!("decided height {h} must not trip open cap: {e:?}"));
             assert!(matches!(state, RoundState::AgreedClaim { .. }));
         }
+    }
+
+    #[test]
+    fn squatter_evicts_only_its_own_open_rounds_and_preserves_peer_votes() {
+        let mut rounds = QuorumRounds::default();
+        rounds.set_policy(key(), policy(2));
+
+        // Honest prover 1 opens height 5 and collects 1 of 2 needed votes.
+        let honest_att = Ok(attestation([0x11; 32], 5));
+        let initial = rounds
+            .submit(key(), &evidence(1, 5), &honest_att, 10)
+            .expect("honest round opens");
+        assert!(matches!(initial, RoundState::Open));
+
+        // Competing prover 99 floods more than MAX_OPEN_ROUNDS_PER_DOMAIN open rounds.
+        let refusal: Result<FinalityAttestation, AdapterError> = Err(AdapterError::ConsensusRule {
+            rule: "squat".to_string(),
+        });
+        for h in 1_000..(1_000 + MAX_OPEN_ROUNDS_PER_DOMAIN as u64 + 20) {
+            let state = rounds
+                .submit(key(), &evidence(99, h), &refusal, 20 + h)
+                .expect("squatter recycles its own oldest solo open round");
+            assert!(matches!(state, RoundState::Open));
+        }
+
+        // Honest prover 1's in-progress vote at height 5 is untouched, so
+        // honest prover 2 immediately completes quorum on height 5.
+        let kept = rounds
+            .round_of(&key(), 5)
+            .expect("honest round at height 5 must never be evicted by another prover");
+        assert_eq!(kept.entries.len(), 1);
+        assert_eq!(kept.entries[0].prover, Address::from([1u8; 32]));
+
+        let finalized = rounds
+            .submit(key(), &evidence(2, 5), &honest_att, 2_000)
+            .expect("second honest prover completes quorum");
+        assert!(matches!(
+            finalized,
+            RoundState::AgreedClaim { count: 2, .. }
+        ));
     }
 }

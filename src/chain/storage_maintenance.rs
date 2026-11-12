@@ -355,6 +355,19 @@ pub(crate) fn finalize_missed_challenges(
             .storage_registry
             .get_deal(deal_id)
             .map_or_else(Address::zero, |deal| deal.operator);
+        // The opener is not at fault for the operator's silence: the bond
+        // `open_challenge` debited comes back, matching `answer_challenge`.
+        // Automatic challenges carry `Address::zero()` and no debit.
+        let opener_refund = state
+            .storage_registry
+            .get_challenge(challenge_id)
+            .map(|challenge| (challenge.opener, challenge.opener_bond))
+            .filter(|(opener, bond)| *bond > 0 && *opener != Address::zero());
+        if let Some((opener, bond)) = opener_refund {
+            if state.get_balance(&opener).checked_add(bond).is_none() {
+                return Err(format!("opener bond refund overflow for {opener}"));
+            }
+        }
         let Ok(result) = state
             .storage_registry
             .finalize_missed_challenge(challenge_id, epoch)
@@ -371,6 +384,11 @@ pub(crate) fn finalize_missed_challenges(
                 result.slashed_bond,
                 "missed challenge",
             )?;
+        }
+        if let Some((opener, bond)) = opener_refund {
+            state
+                .try_add_balance(&opener, bond)
+                .map_err(|error| format!("opener bond refund overflow for {opener}: {error}"))?;
         }
         finalized += 1;
     }
