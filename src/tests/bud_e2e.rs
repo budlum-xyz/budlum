@@ -375,8 +375,13 @@ fn invariant_1_no_whitelist_for_deal_or_challenge() {
             Some([0x42u8; 32]),
         )
         .expect("stranger opens a deal without any prior approval");
-    let _ = reg
+    let err = reg
         .open_challenge(deal, 0, 4, 2, 5, stranger, 10)
+        .expect_err("operator cannot self-challenge own deal");
+    assert!(matches!(err, StorageError::ChallengeOpenerIsOperator { .. }));
+    let challenger = addr(0xEF);
+    let _ = reg
+        .open_challenge(deal, 0, 4, 2, 5, challenger, 10)
         .expect("stranger opens a challenge without any prior approval");
 }
 
@@ -446,13 +451,12 @@ fn invariant_3_any_account_can_challenge_any_deal() {
     // cooldown; opening in the same epoch is refused with ChallengeRateLimited.
     // Challenge_epoch is the 4th argument; deadline_epoch the 5th.
     let cooldown = StorageRegistry::MIN_OPERATOR_MANIFEST_CHALLENGE_EPOCHS;
-    // (a) the operator against its own deal
+    // (a) an operator cannot self-challenge its own deal (anti-farming)
+    let err = reg.open_challenge(deal, 0, 1, 2, 3, op, 5).unwrap_err();
+    assert!(matches!(err, StorageError::ChallengeOpenerIsOperator { .. }));
+    // (b) observer
     let _ = reg
-        .open_challenge(deal, 0, 1, 2, 3, op, 5)
-        .expect("operator can self-challenge");
-    // (b) izleyici
-    let _ = reg
-        .open_challenge(deal, 0, 1, 2 + cooldown, 3 + cooldown, addr(0xAA), 5)
+        .open_challenge(deal, 0, 1, 2, 3, addr(0xAA), 5)
         .expect("any account can challenge");
     // (c) a rival operator
     let _ = reg
@@ -460,8 +464,8 @@ fn invariant_3_any_account_can_challenge_any_deal() {
             deal,
             0,
             1,
-            2 + 2 * cooldown,
-            3 + 2 * cooldown,
+            2 + cooldown,
+            3 + cooldown,
             addr(0xBB),
             5,
         )
