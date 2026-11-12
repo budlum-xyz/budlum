@@ -1883,7 +1883,13 @@ impl AccountState {
         // into a bond the sender still owns, `Unstake` moves it back, and
         // charging a percentage of a bond every time it is adjusted would tax
         // participation rather than value movement.
-        let required_fee = self.required_transaction_fee(tx);
+        let required_fee = match tx.tx_type {
+            TransactionType::Transfer => self
+                .registry
+                .params()
+                .required_transfer_fee(tx.amount, self.base_fee),
+            _ => self.required_transaction_fee(tx),
+        };
         if tx.fee < required_fee {
             return Err(format!(
                 "Fee too low: fee {} < required {} (base_fee {}, amount {})",
@@ -3365,7 +3371,8 @@ impl AccountState {
     /// remove exactly what was counted.
     fn total_storage_escrowed_supply(&self) -> u128 {
         let epoch = self.epoch_index;
-        self.storage_registry
+        let deals_escrow = self
+            .storage_registry
             .all_deals()
             .iter()
             .filter(|deal| deal.is_active())
@@ -3378,7 +3385,21 @@ impl AccountState {
                 total
                     .saturating_add(u128::from(deal.economics.operator_bond))
                     .saturating_add(u128::from(unearned))
-            })
+            });
+        // User-opened challenges debit `opener_bond` from the opener's balance
+        // until the challenge resolves (`answer_challenge` or
+        // `finalize_missed_challenges`). Count unresolved non-zero opener bonds
+        // so an open challenge never reopens temporary minting headroom.
+        let challenge_bonds = self
+            .storage_registry
+            .all_challenges()
+            .iter()
+            .filter(|c| c.opener != Address::zero() && c.opener_bond > 0)
+            .filter(|c| self.storage_registry.get_result(c.challenge_id).is_none())
+            .fold(0u128, |acc, c| {
+                acc.saturating_add(u128::from(c.opener_bond))
+            });
+        deals_escrow.saturating_add(challenge_bonds)
     }
 
     /// Total $BUD escrowed as external-domain prover bonds. A

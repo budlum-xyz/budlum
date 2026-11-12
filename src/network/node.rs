@@ -4429,6 +4429,31 @@ impl Node {
                                             Err(e) => {
                                                 warn!("Prevote from {peer_id} rejected: {e}");
                                                 if refusal_is_round_scope(&e) {
+                                                    // Round-scope refusals are raised before
+                                                    // membership and BLS verification, so
+                                                    // buffering on the error text alone lets an
+                                                    // unauthenticated peer evict honest early
+                                                    // votes. Require a registered validator BLS
+                                                    // signature before taking a slot.
+                                                    let authentic = self
+                                                        .chain
+                                                        .vote_is_from_registered_validator(
+                                                            voter_addr,
+                                                            prevote.auth_signing_message(),
+                                                            prevote.auth_sig.clone(),
+                                                            prevote.signing_message(),
+                                                            prevote.sig_bls.clone(),
+                                                        )
+                                                        .await;
+                                                    if !authentic {
+                                                        if !e.contains("Voter not in validator set") {
+                                                            self.peer_manager_lock().report_bad_behavior(&peer_id);
+                                                            self.report_gossip(&id, &peer_id, gossipsub::MessageAcceptance::Reject);
+                                                        } else {
+                                                            self.report_gossip(&id, &peer_id, gossipsub::MessageAcceptance::Ignore);
+                                                        }
+                                                        continue;
+                                                    }
                                                     if !e.contains("Duplicate") {
                                                         // The round may simply not be
                                                         // open yet, and a vote is
@@ -4516,6 +4541,25 @@ impl Node {
                                             Err(e) => {
                                                 warn!("Precommit from {peer_id} rejected: {e}");
                                                 if refusal_is_round_scope(&e) {
+                                                    let authentic = self
+                                                        .chain
+                                                        .vote_is_from_registered_validator(
+                                                            voter_addr,
+                                                            precommit.auth_signing_message(),
+                                                            precommit.auth_sig.clone(),
+                                                            precommit.signing_message(),
+                                                            precommit.sig_bls.clone(),
+                                                        )
+                                                        .await;
+                                                    if !authentic {
+                                                        if !e.contains("Voter not in validator set") {
+                                                            self.peer_manager_lock().report_bad_behavior(&peer_id);
+                                                            self.report_gossip(&id, &peer_id, gossipsub::MessageAcceptance::Reject);
+                                                        } else {
+                                                            self.report_gossip(&id, &peer_id, gossipsub::MessageAcceptance::Ignore);
+                                                        }
+                                                        continue;
+                                                    }
                                                     if !e.contains("Duplicate") {
                                                         // `Cannot precommit before
                                                         // prevote quorum` is the
