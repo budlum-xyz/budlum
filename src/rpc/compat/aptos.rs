@@ -948,12 +948,12 @@ pub fn handle_aptos_rest(
 }
 
 #[cfg(test)]
-mod tests {
+mod upstream_tests {
     use super::*;
 
     #[test]
     fn aptos_upstream_url_for_blocks_v1_prefix_escapes() {
-        let upstream = AptosUpstream::new("https://aptos.example.org/ignored").unwrap();
+        let upstream = AptosUpstream::parse("https://aptos.example.org/ignored").unwrap();
 
         for bad in [
             "/v1\\admin",
