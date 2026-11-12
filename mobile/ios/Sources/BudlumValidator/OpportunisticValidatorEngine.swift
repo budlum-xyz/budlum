@@ -71,7 +71,7 @@ public final class OpportunisticValidatorEngine {
         }
         self.quotaBytes = quotaBytes
         self.auditSigner = auditSigner
-        let bud3Directory = baseDirectory.appendingPathComponent("bud3", isDirectory: true)
+        var bud3Directory = baseDirectory.appendingPathComponent("bud3", isDirectory: true)
         try FileManager.default.createDirectory(at: bud3Directory, withIntermediateDirectories: true)
         var resourceValues = URLResourceValues()
         resourceValues.isExcludedFromBackup = true

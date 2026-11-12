@@ -255,7 +255,9 @@ impl MobileValidatorPolicy {
     ) -> bool {
         if matches!(
             thermal,
-            DeviceThermalLevel::Moderate | DeviceThermalLevel::Severe | DeviceThermalLevel::Critical
+            DeviceThermalLevel::Moderate
+                | DeviceThermalLevel::Severe
+                | DeviceThermalLevel::Critical
         ) {
             return false;
         }
@@ -452,7 +454,11 @@ impl MobileValidatorController {
     /// # Errors
     ///
     /// Returns [`MobileRuntimeError::QuotaOutOfBounds`] if accepting `bytes` exceeds quota.
-    pub fn accept_share(&mut self, object: ObjectKey, bytes: u64) -> Result<(), MobileRuntimeError> {
+    pub fn accept_share(
+        &mut self,
+        object: ObjectKey,
+        bytes: u64,
+    ) -> Result<(), MobileRuntimeError> {
         let used: u64 = self.held_objects.iter().map(|(_, b)| *b).sum();
         let next = used.saturating_add(bytes);
         if next > self.policy.quota_bytes {
@@ -533,7 +539,9 @@ impl MobileValidatorController {
         if service_running || self.phase != MobileLifecyclePhase::Registered {
             return Ok(0);
         }
-        self.audits_answered = self.audits_answered.saturating_add(u64::from(pending_audits));
+        self.audits_answered = self
+            .audits_answered
+            .saturating_add(u64::from(pending_audits));
         self.presence_signals_emitted = self.presence_signals_emitted.saturating_add(1);
         Ok(pending_audits)
     }
@@ -565,7 +573,9 @@ impl MobileValidatorController {
         if self.phase != MobileLifecyclePhase::Registered {
             return Ok(0);
         }
-        self.audits_answered = self.audits_answered.saturating_add(u64::from(pending_audits));
+        self.audits_answered = self
+            .audits_answered
+            .saturating_add(u64::from(pending_audits));
         self.presence_signals_emitted = self.presence_signals_emitted.saturating_add(1);
         Ok(pending_audits)
     }
@@ -633,7 +643,9 @@ pub fn oem_battery_guidance(manufacturer: &str) -> OemBatteryGuidance {
 }
 
 /// Convenience: exposed for reproducible build probe on production paths.
-pub fn canonical_apk_reproducibility_probe(artifact: &[u8]) -> Result<[u8; 32], MobileRuntimeError> {
+pub fn canonical_apk_reproducibility_probe(
+    artifact: &[u8],
+) -> Result<[u8; 32], MobileRuntimeError> {
     verify_reproducible_apk_builds(artifact, artifact)
 }
 

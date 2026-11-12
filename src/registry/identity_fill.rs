@@ -792,13 +792,8 @@ mod tests {
             .verify_binding()
             .expect("the empty receipt has a valid subject signature");
 
-        let check_error = check_receipt(
-            &IdentityRegistry::new(),
-            &receipt,
-            &requester,
-            document,
-        )
-        .expect_err("an empty signed receipt must not count as credential evidence");
+        let check_error = check_receipt(&IdentityRegistry::new(), &receipt, &requester, document)
+            .expect_err("an empty signed receipt must not count as credential evidence");
         assert!(matches!(
             &check_error,
             FillError::MissingSlot { slot } if slot.is_empty()

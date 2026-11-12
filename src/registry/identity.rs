@@ -755,12 +755,8 @@ impl IdentityRegistry {
                 };
                 let present: u8 = u8::from(method.revoked_at.is_some());
                 let revoked = method.revoked_at.unwrap_or(u64::MAX).to_le_bytes();
-                methods = hash_fields_bytes(&[
-                    &methods,
-                    &[kind_tag, present],
-                    &method.key_id,
-                    &revoked,
-                ]);
+                methods =
+                    hash_fields_bytes(&[&methods, &[kind_tag, present], &method.key_id, &revoked]);
             }
             let credential_root = match record.credential_root {
                 Some(r) => hash_fields_bytes(&[b"some-root", &r]),
@@ -811,11 +807,8 @@ impl IdentityRegistry {
             acc = hash_fields_bytes(&[&acc, b"cred-subject", credential.subject.as_bytes()]);
             acc = hash_fields_bytes(&[&acc, b"cred-schema", credential.schema.as_bytes()]);
             acc = hash_fields_bytes(&[&acc, b"cred-root", &credential.root()]);
-            acc = hash_fields_bytes(&[
-                &acc,
-                b"cred-issued-at",
-                &credential.issued_at.to_le_bytes(),
-            ]);
+            acc =
+                hash_fields_bytes(&[&acc, b"cred-issued-at", &credential.issued_at.to_le_bytes()]);
             match credential.expires_at {
                 Some(expiry) => {
                     acc = hash_fields_bytes(&[&acc, b"cred-expiry", &expiry.to_le_bytes()]);
@@ -2350,7 +2343,10 @@ mod tests {
         )
         .expect_err("identity recovery must remain PoA-only");
         assert!(matches!(err, IdentityError::NotPoaDomain { .. }), "{err}");
-        assert_eq!(registry, before, "a refused recovery must not mutate the registry");
+        assert_eq!(
+            registry, before,
+            "a refused recovery must not mutate the registry"
+        );
     }
 
     #[test]
@@ -2615,7 +2611,10 @@ mod tests {
             1,
         )
         .expect_err("identity recovery is writable only in the PoA domain");
-        assert!(matches!(error, IdentityError::NotPoaDomain { .. }), "{error}");
+        assert!(
+            matches!(error, IdentityError::NotPoaDomain { .. }),
+            "{error}"
+        );
         assert_eq!(
             registry.record(&subject),
             Some(&before),

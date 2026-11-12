@@ -22,7 +22,9 @@ fn check(root: &Path) -> Result<String, String> {
     let validators = genesis
         .get("validators")
         .and_then(serde_json::Value::as_array)
-        .ok_or_else(|| String::from("`config/rehearsal-genesis.json` missing `validators` array"))?;
+        .ok_or_else(|| {
+            String::from("`config/rehearsal-genesis.json` missing `validators` array")
+        })?;
     if validators.len() < 8 {
         return Err(format!(
             "`config/rehearsal-genesis.json` has {} validators; at least 8 Full validators are required",
@@ -117,7 +119,10 @@ pub fn self_test() -> Result<String, String> {
         check(&dir).map_err(|e| format!("clean canary failed: {e}"))?;
 
         // Negative canary 1: fewer than 8 Full validators in rehearsal genesis must fail.
-        put("config/rehearsal-genesis.json", r#"{"validators":[1,2,3,4,5,6,7]}"#)?;
+        put(
+            "config/rehearsal-genesis.json",
+            r#"{"validators":[1,2,3,4,5,6,7]}"#,
+        )?;
         if check(&dir).is_ok() {
             return Err(String::from(
                 "canary failed: 7-validator rehearsal genesis passed",
@@ -126,7 +131,10 @@ pub fn self_test() -> Result<String, String> {
         put("config/rehearsal-genesis.json", clean_genesis)?;
 
         // Negative canary 2: missing mobile field log analyzer must fail.
-        put("src/registry/rehearsal.rs", "pub const MIN_REHEARSAL_FULL_VALIDATORS: usize = 8;\n")?;
+        put(
+            "src/registry/rehearsal.rs",
+            "pub const MIN_REHEARSAL_FULL_VALIDATORS: usize = 8;\n",
+        )?;
         if check(&dir).is_ok() {
             return Err(String::from(
                 "canary failed: rehearsal.rs without analyze_mobile_field_logs passed",

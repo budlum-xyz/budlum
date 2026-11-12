@@ -11,6 +11,8 @@
 //! because there is no storage: the network holds a marker, the user holds the
 //! bytes. The single screen assembles from these shares, so everything the
 //! user can see is shown in one place with its responsibility attributed.
+//!
+//! WIRING: unwired - legacy B.U.D. 1.0 marker projection retained for backward schema compatibility while B.U.D. 3.0 manifest deals own active routing.
 
 use crate::core::address::Address;
 use crate::storage::content_id::ContentId;
@@ -131,6 +133,7 @@ impl OneShareRegistry {
     }
 
     /// Every share as an endpoint ref, for the single screen.
+    /// WIRING: Device-screen RPC surface (`one_view::screen`).
     #[must_use]
     pub fn endpoint_refs(&self) -> Vec<EndpointRef> {
         self.shares

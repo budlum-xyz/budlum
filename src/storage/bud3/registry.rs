@@ -259,22 +259,28 @@ pub enum Registered {
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(from = "FlatRegistry", into = "FlatRegistry")]
 pub struct Bud3Registry {
+    #[serde(with = "crate::core::map_keys")]
     objects: BTreeMap<ObjectKey, ObjectEntry>,
     /// Content digest to the live object holding it. Lookups run through the
     /// node-local filter in front of it (the dedup index module).
     public_index: DedupIndex,
+    #[serde(with = "crate::core::map_keys")]
     nfts: BTreeMap<NftId, (ObjectKey, Address)>,
+    #[serde(with = "crate::core::map_keys")]
     tombstones: BTreeMap<ObjectKey, u64>,
     declines: BTreeSet<([u8; 32], Address)>,
     custody_credits: BTreeMap<Address, u64>,
     presence_ppm: BTreeMap<Address, u32>,
     forfeited_pool_total: u64,
+    #[serde(with = "crate::core::map_keys")]
     grants: BTreeMap<[u8; 32], GrantRow>,
     revoked_grants: BTreeSet<[u8; 32]>,
+    #[serde(with = "crate::core::map_keys")]
     base_deps: BTreeMap<ObjectKey, BTreeSet<ObjectKey>>,
     validator_quotas: BTreeMap<Address, u64>,
     /// The old commitment to its replacement. A record stays here after it
     /// finalizes: it is the redirect the old commitment answers with.
+    #[serde(with = "crate::core::map_keys")]
     replacements: BTreeMap<ObjectKey, Replacement>,
 }
 
@@ -596,10 +602,7 @@ impl Bud3Registry {
             .objects
             .get(key)
             .map_or(0, |o| o.references.len() as u64);
-        let dep_refs = self
-            .base_deps
-            .get(key)
-            .map_or(0, |d| d.len() as u64);
+        let dep_refs = self.base_deps.get(key).map_or(0, |d| d.len() as u64);
         nft_refs.saturating_add(dep_refs)
     }
 
@@ -744,8 +747,7 @@ impl Bud3Registry {
 
     /// Check grant issuance without changing registry state.
     pub fn validate_view_grant(&self, row: &GrantRow, epoch: u64) -> Result<(), RegistryError> {
-        if self.grants.contains_key(&row.grant_tag)
-            || self.revoked_grants.contains(&row.grant_tag)
+        if self.grants.contains_key(&row.grant_tag) || self.revoked_grants.contains(&row.grant_tag)
         {
             return Err(RegistryError::Grant(GrantBud3Error::DuplicateOrRevokedTag));
         }
@@ -926,11 +928,7 @@ impl Bud3Registry {
             .get(old_key)
             .ok_or(RegistryError::UnknownObject)?
             .clone();
-        if self
-            .replacements
-            .get(old_key)
-            .is_some_and(|r| !r.finalized)
-        {
+        if self.replacements.get(old_key).is_some_and(|r| !r.finalized) {
             return Err(RegistryError::BadReplacement(
                 super::replace::ReplaceError::ReplacementAlreadyPending,
             ));
@@ -1048,8 +1046,7 @@ impl Bud3Registry {
             .objects
             .iter()
             .filter(|(k, o)| {
-                o.expires_at < epoch
-                    && !self.replacements.get(k).is_some_and(|r| !r.finalized)
+                o.expires_at < epoch && !self.replacements.get(*k).is_some_and(|r| !r.finalized)
             })
             .map(|(k, _)| *k)
             .collect();
@@ -1195,10 +1192,8 @@ impl Bud3Registry {
             let digest = obj.record.content_id.digest;
             let len = obj.shares.len();
             for idx in 0..len {
-                let Some((segment, current_holder, class, assigned_epoch, confirmed, lost)) = obj
-                    .shares
-                    .get(idx)
-                    .map(|s| {
+                let Some((segment, current_holder, class, assigned_epoch, confirmed, lost)) =
+                    obj.shares.get(idx).map(|s| {
                         (
                             s.segment,
                             s.share.validator,
@@ -1610,8 +1605,9 @@ impl Bud3Registry {
     }
 
     /// `RecordRepair`: a Full repairer decoded the segment and placed new
-    /// symbols with new ESIs on new holders. The new shares start pending;
-    /// the lost shares they replace stay until every new share is confirmed.
+    /// symbols with new ESIs on new holders. The new shares start pending at
+    /// `epoch` (their three-epoch acknowledgment deadline begins here); the
+    /// lost shares they replace stay until every new share is confirmed.
     ///
     /// # Errors
     ///
@@ -1624,6 +1620,7 @@ impl Bud3Registry {
         segment: u64,
         new_shares: Vec<Share>,
         new_root: [u8; 32],
+        epoch: u64,
     ) -> Result<(), RegistryError> {
         if !self.repairs_due(key).contains(&segment) {
             return Err(RegistryError::BadRepair("segment needs no repair"));
@@ -1680,7 +1677,7 @@ impl Bud3Registry {
                 consecutive_misses: 0,
                 lost: false,
                 root,
-                assigned_epoch: 0,
+                assigned_epoch: epoch,
             });
         }
         if let Some(n) = obj.next_esi.get_mut(seg_idx) {
@@ -2452,7 +2449,7 @@ mod tests {
             ..new_share
         };
         assert!(matches!(
-            r.record_repair(&key, 0, vec![reuse], new_root),
+            r.record_repair(&key, 0, vec![reuse], new_root, 100),
             Err(RegistryError::BadRepair(_))
         ));
         let short = Share {
@@ -2460,11 +2457,61 @@ mod tests {
             ..new_share
         };
         assert!(matches!(
-            r.record_repair(&key, 0, vec![short], new_root),
+            r.record_repair(&key, 0, vec![short], new_root, 100),
             Err(RegistryError::BadRepair("fewer new symbols than lost"))
         ));
-        r.record_repair(&key, 0, vec![new_share], new_root).unwrap();
+        assert_eq!(
+            super::super::tx::apply(
+                &mut r,
+                addr(30),
+                super::super::tx::StorageTxV3::RecordRepair {
+                    object: key,
+                    segment: 0,
+                    new_shares: vec![new_share],
+                    new_root,
+                },
+                100,
+            ),
+            Ok(super::super::tx::Applied::Repaired)
+        );
         assert_eq!(r.object(&key).unwrap().next_esi, vec![25]);
+
+        // Repair placements get their own full three-epoch acknowledgement
+        // window; at epoch 100 an old epoch-zero assignment would hand over
+        // immediately, even though the replacement has not had time to ack.
+        assert_eq!(
+            r.object(&key)
+                .unwrap()
+                .shares
+                .iter()
+                .find(|s| s.share.validator == addr(20))
+                .unwrap()
+                .assigned_epoch,
+            100
+        );
+        assert_eq!(
+            r.handover_unacked_shares(102, &[(addr(21), Class::Full)]),
+            0
+        );
+        assert!(r
+            .object(&key)
+            .unwrap()
+            .shares
+            .iter()
+            .any(|s| s.share.validator == addr(20) && s.status == ShareStatus::Pending));
+        let mut restored: Bud3Registry =
+            serde_json::from_slice(&serde_json::to_vec(&r).unwrap()).unwrap();
+        assert_eq!(restored.state_root(), r.state_root());
+        assert_eq!(
+            restored.handover_unacked_shares(103, &[(addr(21), Class::Full)]),
+            1
+        );
+        assert!(restored
+            .object(&key)
+            .unwrap()
+            .shares
+            .iter()
+            .any(|s| s.share.validator == addr(21) && s.assigned_epoch == 103));
 
         // The lost share stays until the new one is confirmed.
         assert_eq!(r.settle_repairs(), 0);

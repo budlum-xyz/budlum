@@ -81,7 +81,7 @@ impl From<Bof1Error> for SealBud3Error {
 /// Rounds `raw_len` up so at most `O(log log L)` significant bits of length
 /// remain visible, capping padding overhead below 12% across all sizes.
 #[must_use]
-pub const fn padme_padded_len(raw_len: u64) -> u64 {
+pub fn padme_padded_len(raw_len: u64) -> u64 {
     let base = if raw_len < MIN_SEALED_BUCKET_BYTES {
         MIN_SEALED_BUCKET_BYTES
     } else {
@@ -153,7 +153,7 @@ pub fn seal_object(
     let aad = sealed_aad(&cid.digest);
     let ciphertext = cipher
         .encrypt(
-            XNonce::from_slice(&nonce_bytes),
+            &XNonce::from(nonce_bytes),
             Payload {
                 msg: &inner,
                 aad: &aad,
@@ -224,7 +224,7 @@ pub fn open_sealed_object(
     let aad = sealed_aad(&object.header.content_digest);
     let inner = cipher
         .decrypt(
-            XNonce::from_slice(&nonce_bytes),
+            &XNonce::from(nonce_bytes),
             Payload {
                 msg: ciphertext,
                 aad: &aad,
@@ -251,8 +251,7 @@ pub fn open_sealed_object(
         .ok_or(SealBud3Error::MalformedInnerFrame)?;
     let (comp_len_u64, used3) =
         varint::read(rest2, 9).map_err(|_| SealBud3Error::MalformedInnerFrame)?;
-    let comp_len =
-        usize::try_from(comp_len_u64).map_err(|_| SealBud3Error::MalformedInnerFrame)?;
+    let comp_len = usize::try_from(comp_len_u64).map_err(|_| SealBud3Error::MalformedInnerFrame)?;
     let after_vars = rest2
         .get(used3..)
         .ok_or(SealBud3Error::MalformedInnerFrame)?;
@@ -298,8 +297,14 @@ mod tests {
         assert_eq!(obj_a.header.payload_len, obj_b.header.payload_len);
 
         let mut m = Meter::for_object(1 << 20);
-        assert_eq!(open_sealed_object(&obj_a, &key, &mut m).unwrap(), vec![0xaa; 10]);
-        assert_eq!(open_sealed_object(&obj_b, &key, &mut m).unwrap(), vec![0xbb; 25]);
+        assert_eq!(
+            open_sealed_object(&obj_a, &key, &mut m).unwrap(),
+            vec![0xaa; 10]
+        );
+        assert_eq!(
+            open_sealed_object(&obj_b, &key, &mut m).unwrap(),
+            vec![0xbb; 25]
+        );
     }
 
     #[test]
@@ -313,7 +318,10 @@ mod tests {
         let sealed_b = seal_object(&content, &owner_b, [8u8; SEAL_SALT_LEN]).unwrap();
 
         // T19: Two owners sealing identical bytes produce completely unrelated public headers.
-        assert_ne!(sealed_a.header.content_digest, sealed_b.header.content_digest);
+        assert_ne!(
+            sealed_a.header.content_digest,
+            sealed_b.header.content_digest
+        );
         assert_eq!(sealed_a.header.content_len, 0);
         assert_eq!(sealed_b.header.content_len, 0);
 

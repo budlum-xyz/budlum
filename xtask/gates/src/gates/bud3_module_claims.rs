@@ -154,7 +154,9 @@ fn module_files(dir: &Path) -> Result<BTreeMap<String, Vec<String>>, String> {
             continue;
         }
         if let Some(stem) = name.strip_suffix(".rs") {
-            out.entry(stem.to_owned()).or_default().push(name.to_owned());
+            out.entry(stem.to_owned())
+                .or_default()
+                .push(name.to_owned());
         } else if path.is_dir() {
             let inner = path.join("mod.rs");
             if inner.is_file() {
@@ -204,13 +206,16 @@ pub fn run(root: &Path) -> Result<String, String> {
                     format!("line {} ({vis} {name};)", d.line)
                 })
                 .collect();
-            problems.push_str(&format!(
-                "  `{name}` is declared {} times: {}\n    One file cannot be two packages' \
-                 module. Section 15.3 item 3 gives a lock path to one package; a merged \
-                 conflict that kept both sides reads exactly like this.\n",
-                group.len(),
-                lines.join(", ")
-            ));
+            let _ = std::fmt::Write::write_fmt(
+                &mut problems,
+                format_args!(
+                    "  `{name}` is declared {} times: {}\n    One file cannot be two packages' \
+                     module. Section 15.3 item 3 gives a lock path to one package; a merged \
+                     conflict that kept both sides reads exactly like this.\n",
+                    group.len(),
+                    lines.join(", ")
+                ),
+            );
         }
     }
 
@@ -219,18 +224,23 @@ pub fn run(root: &Path) -> Result<String, String> {
     let declared: BTreeSet<&str> = decls.iter().map(|d| d.name.as_str()).collect();
     for (name, names) in &files {
         if names.len() > 1 {
-            problems.push_str(&format!(
-                "  `{name}` has ambiguous module layouts: {}. Keep exactly one of the file or directory form.\n",
-                names.join(" and ")
-            ));
+            let _ = std::fmt::Write::write_fmt(
+                &mut problems,
+                format_args!(
+                    "  `{name}` has ambiguous module layouts: {}. Keep exactly one of the file or directory form.\n",
+                    names.join(" and ")
+                ),
+            );
         }
         if !declared.contains(name.as_str()) {
-            problems.push_str(&format!(
-                "  `{}` names module `{name}`, which {} does not declare: the file is \
-                 compiled by nothing and tested by nothing.\n",
-                names.join(" and "),
-                format!("{DIR}/mod.rs")
-            ));
+            let _ = std::fmt::Write::write_fmt(
+                &mut problems,
+                format_args!(
+                    "  `{}` names module `{name}`, which {DIR}/mod.rs does not declare: the file is \
+                     compiled by nothing and tested by nothing.\n",
+                    names.join(" and ")
+                ),
+            );
         }
     }
 
@@ -244,6 +254,51 @@ pub fn run(root: &Path) -> Result<String, String> {
         "bud3 module claims do not collide OK: {} module(s) declared once each in {DIR}/mod.rs, \
          and every module file is reached",
         decls.len()
+    ))
+}
+
+/// The canaries, as the gate runner expects them.
+///
+/// # Errors
+///
+/// When a canary does not behave.
+pub fn self_test() -> Result<String, String> {
+    // The unit tests below are the canaries; this runs them from the binary so
+    // `--self-test` reports something even when the harness is not in play.
+    let root = crate::gates::rust_literals::exclusive_scratch_dir("budlum-gates-bud3-claims-self")?;
+    let inner = root.join(DIR);
+    std::fs::create_dir_all(&inner).map_err(|e| e.to_string())?;
+    let result = (|| {
+        std::fs::write(inner.join("mod.rs"), "pub mod a;\npub mod a;\n")
+            .map_err(|e| e.to_string())?;
+        std::fs::write(inner.join("a.rs"), "// a\n").map_err(|e| e.to_string())?;
+        match run(&root) {
+            Err(e) if e.contains("declared 2 times") => {}
+            other => {
+                return Err(format!(
+                    "canary: a duplicate module did not fail: {other:?}"
+                ))
+            }
+        }
+        std::fs::write(inner.join("mod.rs"), "pub mod a;\n").map_err(|e| e.to_string())?;
+        std::fs::create_dir_all(inner.join("a")).map_err(|e| e.to_string())?;
+        std::fs::write(inner.join("a/mod.rs"), "// duplicate layout\n")
+            .map_err(|e| e.to_string())?;
+        match run(&root) {
+            Err(e) if e.contains("ambiguous module layouts") => {}
+            other => {
+                return Err(format!(
+                    "canary: ambiguous module layouts did not fail: {other:?}"
+                ))
+            }
+        }
+        Ok(())
+    })();
+    let _ = std::fs::remove_dir_all(&root);
+    result?;
+    Ok(String::from(
+        "bud3-module-claims-do-not-collide canary OK: a module declared twice, the same module \
+         at two visibilities, ambiguous file/directory layouts, an orphan and an empty mod.rs all failed.",
     ))
 }
 
@@ -281,7 +336,10 @@ mod tests {
     /// The shape a bad merge leaves: both sides' declaration kept.
     #[test]
     fn a_module_declared_twice_fails_and_names_both_lines() {
-        let root = tree("pub mod volume;\npub mod a;\npub mod volume;\n", &["volume.rs", "a.rs"]);
+        let root = tree(
+            "pub mod volume;\npub mod a;\npub mod volume;\n",
+            &["volume.rs", "a.rs"],
+        );
         let err = check(&root).expect_err("a duplicate declaration must fail");
         assert!(err.contains("`volume` is declared 2 times"), "{err}");
         assert!(err.contains("line 1"), "{err}");
@@ -344,42 +402,4 @@ mod tests {
         let err = check(&root).expect_err("an empty file must fail");
         assert!(err.contains("declares no module"), "{err}");
     }
-}
-
-/// The canaries, as the gate runner expects them.
-///
-/// # Errors
-///
-/// When a canary does not behave.
-pub fn self_test() -> Result<String, String> {
-    // The unit tests above are the canaries; this runs them from the binary so
-    // `--self-test` reports something even when the harness is not in play.
-    let root = crate::gates::rust_literals::exclusive_scratch_dir("budlum-gates-bud3-claims-self")
-        .map_err(|e| e)?;
-    let inner = root.join(DIR);
-    std::fs::create_dir_all(&inner).map_err(|e| e.to_string())?;
-    let result = (|| {
-        std::fs::write(inner.join("mod.rs"), "pub mod a;\npub mod a;\n")
-            .map_err(|e| e.to_string())?;
-        std::fs::write(inner.join("a.rs"), "// a\n").map_err(|e| e.to_string())?;
-        match run(&root) {
-            Err(e) if e.contains("declared 2 times") => {}
-            other => return Err(format!("canary: a duplicate module did not fail: {other:?}")),
-        }
-        std::fs::write(inner.join("mod.rs"), "pub mod a;\n").map_err(|e| e.to_string())?;
-        std::fs::create_dir_all(inner.join("a")).map_err(|e| e.to_string())?;
-        std::fs::write(inner.join("a/mod.rs"), "// duplicate layout\n")
-            .map_err(|e| e.to_string())?;
-        match run(&root) {
-            Err(e) if e.contains("ambiguous module layouts") => {}
-            other => return Err(format!("canary: ambiguous module layouts did not fail: {other:?}")),
-        }
-        Ok(())
-    })();
-    let _ = std::fs::remove_dir_all(&root);
-    result?;
-    Ok(String::from(
-        "bud3-module-claims-do-not-collide canary OK: a module declared twice, the same module \
-         at two visibilities, ambiguous file/directory layouts, an orphan and an empty mod.rs all failed.",
-    ))
 }

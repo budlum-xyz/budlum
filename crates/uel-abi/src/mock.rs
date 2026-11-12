@@ -4,6 +4,7 @@
 //! [`MockEe`] is driven by the first byte of the call input, so a test states
 //! the behaviour it wants in the call itself; faults and panics are injected
 //! deterministically by call number.
+//! Convenience: exposed for workspace subcrate consumers, SDK bindings, and integration callers.
 
 use crate::host::{panic_digest, ExecutionEnvironment, HostApi, HostRead};
 use crate::types::{

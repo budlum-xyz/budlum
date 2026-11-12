@@ -1029,11 +1029,7 @@ impl ObjectLayerRegistry {
 
     /// `ObjectLayerTx::SetEscapeAddress`: register or clear an account's raw
     /// home escape/adoption binding (`<= MAX_ESCAPE_ADDRESS_BYTES`).
-    pub fn set_escape_address(
-        &mut self,
-        account: Address,
-        home: Vec<u8>,
-    ) -> Result<(), Refusal> {
+    pub fn set_escape_address(&mut self, account: Address, home: Vec<u8>) -> Result<(), Refusal> {
         if home.len() > MAX_ESCAPE_ADDRESS_BYTES {
             return Err(Refusal::EscapeAddressTooLong);
         }
@@ -1058,9 +1054,10 @@ impl ObjectLayerRegistry {
     /// `ObjectLayerTx::Resolve`: clear an open tentative dependency once
     /// home finality settles.
     pub fn resolve(&mut self, dependency: DependencyId) -> Result<(), Refusal> {
-        if self.dependencies.remove(&dependency).is_none() {
+        if !self.dependencies.contains_key(&dependency) {
             return Err(Refusal::UnknownDependency);
         }
+        self.dependencies.remove(&dependency);
         Ok(())
     }
 
@@ -1072,7 +1069,9 @@ impl ObjectLayerRegistry {
             return Err(Refusal::NotAuthorized);
         }
         let Some((domain_bytes, raw_addr)) = home.split_at_checked(4) else {
-            return Err(Refusal::Family(FamilyError::Malformed("adopt domain prefix")));
+            return Err(Refusal::Family(FamilyError::Malformed(
+                "adopt domain prefix",
+            )));
         };
         let mut prefix = [0u8; 4];
         prefix.copy_from_slice(domain_bytes);
@@ -1152,7 +1151,11 @@ impl ObjectLayerRegistry {
         self.atomic(|r| {
             let status = r.class(&class)?.status;
             if let Some(existing) = r.challenges.get(&class).copied() {
-                if height >= existing.opened_at.saturating_add(DEFAULT_CHALLENGE_WINDOW_BLOCKS) {
+                if height
+                    >= existing
+                        .opened_at
+                        .saturating_add(DEFAULT_CHALLENGE_WINDOW_BLOCKS)
+                {
                     r.challenges.remove(&class);
                     let entry = r.classes.get_mut(&class).ok_or(Refusal::UnknownClass)?;
                     entry.status = ClassStatus::Frozen(FreezeReason::UnrebuttedChallenge);
@@ -1191,7 +1194,11 @@ impl ObjectLayerRegistry {
                 .challenges
                 .remove(&class)
                 .ok_or(Refusal::NoChallengeOpen)?;
-            if height >= existing.opened_at.saturating_add(DEFAULT_CHALLENGE_WINDOW_BLOCKS) {
+            if height
+                >= existing
+                    .opened_at
+                    .saturating_add(DEFAULT_CHALLENGE_WINDOW_BLOCKS)
+            {
                 return Err(Refusal::ChallengeExpired);
             }
             Ok(())

@@ -1,13 +1,13 @@
 //! B.U.D. 3.0 upload sessions (`bud_storageUploadOpen`, `bud_storageUploadAppend`,
 //! `bud_storageUploadFinish`), `/budlum/bud3/upload/1` limits, pixel-verification
-//! sampling rule, and two-segment memory ceiling (Sections 6.4 & 6.21.1).
+//! sampling rule, and a fail-closed bound on the still-eager upload path (Sections 6.4 & 6.21.1).
 //! exposed for `/budlum/bud3/upload/1` stream handlers and `Bud3RpcService`.
 
 use super::bof1::{Bof1Error, Flags, Object};
 use super::content_id::{ContentId, PublicHasher};
 use super::custody::{symbol_leaf, symbol_root};
 use super::fountain::{FountainError, SegmentEncoder, Symbol};
-use super::frame::frames_for_object_bytes;
+use super::frame::Bud3Frame;
 use super::limits::{Bud3Limits, LimitError, Profile};
 use super::pipeline::ObjectRecord;
 use super::placement::{place, segment_key, Candidate, PlacementError, PlacementRow, Share};
@@ -24,6 +24,11 @@ pub const UPLOAD_PROTOCOL_ID: &str = "/budlum/bud3/upload/1";
 
 /// Maximum content bytes per upload session (16 GiB, Section 6.21.1).
 pub const MAX_UPLOAD_SESSION_BYTES: u64 = 16 * 1024 * 1024 * 1024;
+
+/// Until A0 and BOF-1 are streamed, this gateway retains the entire input in
+/// memory. Refuse larger uploads rather than accepting the 16 GiB protocol
+/// maximum and exhausting the node. This is not the two-segment streaming path.
+pub const MAX_BUFFERED_UPLOAD_BYTES: u64 = 2 * 1024 * 1024;
 
 /// Maximum concurrent `/budlum/bud3/upload/1` sessions per client IP (Section 6.11.3).
 pub const MAX_CONCURRENT_SESSIONS_PER_IP: usize = 2;
@@ -68,6 +73,8 @@ pub enum UploadError {
     DailyQuotaExceeded,
     /// Content length exceeds `MAX_UPLOAD_SESSION_BYTES` (16 GiB) or genesis limits.
     Limit(LimitError),
+    /// Eager upload pipeline cannot safely buffer this much input; use a streaming gateway.
+    BufferedUploadTooLarge { len: u64, max: u64 },
     /// Session ID does not exist or already finished/expired.
     UnknownOrExpiredSession,
     /// Appended bytes differed from `declared_len` at finish, or overflowed `declared_len`.
@@ -126,8 +133,9 @@ pub fn admit_testnet_flags(raw_flags: u8) -> Result<Flags, UploadError> {
     if (raw_flags & (Flags::LIVE | CLOSED_FLAG_BIT3)) != 0 {
         return Err(UploadError::ClosedFeatureFlag(raw_flags));
     }
-    let flags = Flags::from_byte(raw_flags).map_err(|_| UploadError::ClosedFeatureFlag(raw_flags))?;
-    if flags.is_live() {
+    let flags =
+        Flags::from_byte(raw_flags).map_err(|_| UploadError::ClosedFeatureFlag(raw_flags))?;
+    if (flags.bits() & Flags::LIVE) != 0 {
         return Err(UploadError::ClosedFeatureFlag(raw_flags));
     }
     Ok(flags)
@@ -175,6 +183,38 @@ pub fn deterministic_pixel_sample_indices(
     picked.into_iter().collect()
 }
 
+fn verify_pixel_samples<F>(
+    payload_len: u64,
+    commitment: &ObjectKey,
+    segment: u64,
+    segment_len: u32,
+    source_symbols: u32,
+    symbols: &[Symbol],
+    mut round_trip: F,
+) -> Result<usize, UploadError>
+where
+    F: FnMut(&Bud3Frame) -> Result<Bud3Frame, Bud3QrError>,
+{
+    let mut checked = 0;
+    for idx in deterministic_pixel_sample_indices(payload_len, commitment, segment, symbols.len()) {
+        let sym = symbols.get(idx).ok_or(UploadError::TooLarge)?.clone();
+        let frame = Bud3Frame::from_symbol(sym, segment_len, source_symbols)
+            .map_err(|_| UploadError::TooLarge)?;
+        let back = round_trip(&frame).map_err(|_| UploadError::PixelVerifyFailed {
+            segment: frame.segment,
+            esi: frame.esi,
+        })?;
+        if back != frame {
+            return Err(UploadError::PixelVerifyFailed {
+                segment: frame.segment,
+                esi: frame.esi,
+            });
+        }
+        checked += 1;
+    }
+    Ok(checked)
+}
+
 /// Outcome of finishing an upload session (`bud_storageUploadFinish`).
 #[derive(Debug, Clone)]
 pub struct FinishedUploadSession {
@@ -186,8 +226,14 @@ pub struct FinishedUploadSession {
     pub unsigned_tx: StorageTxV3,
     /// Per-segment symbols to push to holders via `/budlum/bud3/custody/1`.
     pub segments: Vec<Vec<Symbol>>,
-    /// Peak working buffer bytes observed during streaming segment coding.
+    /// Largest segment slice plus materialized symbols (excludes input and A0 buffers).
+    /// This is not a measurement of total process memory.
     pub peak_working_bytes: usize,
+}
+
+fn zeroize_and_release(buffer: &mut Vec<u8>) {
+    let mut owned = std::mem::take(buffer);
+    owned.zeroize();
 }
 
 struct ActiveUploadSession {
@@ -271,6 +317,12 @@ impl UploadSessionManager {
             }));
         }
         self.limits.admit_content(declared_len)?;
+        if declared_len > MAX_BUFFERED_UPLOAD_BYTES {
+            return Err(UploadError::BufferedUploadTooLarge {
+                len: declared_len,
+                max: MAX_BUFFERED_UPLOAD_BYTES,
+            });
+        }
         if self.sessions.len() >= MAX_GATEWAY_SESSIONS {
             return Err(UploadError::GatewayFull);
         }
@@ -299,8 +351,10 @@ impl UploadSessionManager {
         if used_today.saturating_add(declared_len) > MAX_DAILY_UPLOAD_BYTES_PER_ACCOUNT {
             return Err(UploadError::DailyQuotaExceeded);
         }
-        self.daily_account_bytes
-            .insert((day_bucket, account), used_today.saturating_add(declared_len));
+        self.daily_account_bytes.insert(
+            (day_bucket, account),
+            used_today.saturating_add(declared_len),
+        );
 
         let id = self.next_id;
         self.next_id = self.next_id.saturating_add(1);
@@ -379,13 +433,14 @@ impl UploadSessionManager {
     }
 
     /// `bud_storageUploadFinish`: execute Y3 deduplication, A0/A1 BOF-1 framing,
-    /// segment-by-segment RFC 6330 coding within the two-segment working ceiling,
-    /// pixel QR sample verification (rule 2), Y13 placement, and Y14 zeroization.
+    /// segment-by-segment RFC 6330 coding, pixel QR sample verification (rule 2),
+    /// Y13 placement, and Y14 zeroization. A0 still buffers the bounded input.
     ///
     /// # Errors
     ///
     /// [`UploadError`] if length mismatches, closed flags appear, pixel check fails,
     /// or placement fails.
+    /// PARTIAL: allowed - consumes and zeroizes the upload session buffer after verifying chunk completeness so whole-object plaintext is freed before fountain coding.
     pub fn finish_session(
         &mut self,
         session_id: u64,
@@ -396,15 +451,49 @@ impl UploadSessionManager {
         now_sec: u64,
     ) -> Result<FinishedUploadSession, UploadError> {
         self.purge_expired(now_sec);
+        {
+            let session_ref = self
+                .sessions
+                .get(&session_id)
+                .ok_or(UploadError::UnknownOrExpiredSession)?;
+            if session_ref.received_len != session_ref.declared_len {
+                return Err(UploadError::LengthMismatch {
+                    declared: session_ref.declared_len,
+                    received: session_ref.received_len,
+                });
+            }
+        }
         let mut session = self
             .sessions
             .remove(&session_id)
             .ok_or(UploadError::UnknownOrExpiredSession)?;
-        if session.received_len != session.declared_len {
-            return Err(UploadError::LengthMismatch {
-                declared: session.declared_len,
-                received: session.received_len,
-            });
+
+        // Y2/Y3 already hashed the public input as chunks arrived. A matching
+        // object needs no A0 compression, BOF-1 copy, fountain coding, or QR
+        // frames. Use the registered record rather than constructing a second
+        // representation and then claiming to have deduplicated it.
+        if !session.pre_sealed_object {
+            let content_id = session.hasher.clone().finish();
+            if let Some(key) = registry.public_object(&content_id.digest) {
+                if let Some(existing) = registry
+                    .object(&key)
+                    .filter(|entry| entry.record.content_id == content_id)
+                {
+                    let record = existing.record.clone();
+                    zeroize_and_release(&mut session.buffer);
+                    return Ok(FinishedUploadSession {
+                        deduplicated_existing: Some(key),
+                        unsigned_tx: StorageTxV3::RegisterObject {
+                            record: record.clone(),
+                            shares: Vec::new(),
+                            lifetime_epochs: session.lifetime_epochs,
+                        },
+                        record,
+                        segments: Vec::new(),
+                        peak_working_bytes: 0,
+                    });
+                }
+            }
         }
 
         let (object, content_id) = if session.pre_sealed_object {
@@ -425,8 +514,10 @@ impl UploadSessionManager {
             (obj, cid)
         };
 
-        // Zeroize raw session input immediately before segment coding (Y14).
-        session.buffer.zeroize();
+        // Release the original upload allocation before BOF-1 encoding and
+        // fountain coding: retaining its capacity after zeroization would keep
+        // an additional whole-input buffer live during the most expensive step.
+        zeroize_and_release(&mut session.buffer);
 
         let deduplicated_existing = if content_id.kind == super::content_id::ContentIdKind::Public {
             registry.public_object(&content_id.digest)
@@ -434,15 +525,16 @@ impl UploadSessionManager {
             None
         };
 
+        let payload_len = object.payload.len() as u64;
+        let codec = object.header.codec;
         let encoded_bytes = object.encode();
+        drop(object);
         let commitment = commit_object(&encoded_bytes, profile).ok_or(UploadError::TooLarge)?;
         let seg = Segmentation::new(encoded_bytes.len() as u64, profile)
             .ok_or(UploadError::Fountain(FountainError::InvalidProfile))?;
         let symbols_per_segment =
             u32::try_from(row.total_symbols()).map_err(|_| UploadError::TooLarge)?;
 
-        let two_segment_ceiling = usize::try_from(profile.segment_bytes().saturating_mul(2))
-            .unwrap_or(usize::MAX);
         let mut peak_working_bytes = 0usize;
         let mut segments = Vec::new();
         let mut symbol_roots = Vec::new();
@@ -450,10 +542,10 @@ impl UploadSessionManager {
 
         // Segment-by-segment streaming loop: at most one segment's encoder + symbols live at once.
         for index in 0..seg.count() {
-            let start =
-                usize::try_from(seg.offset(index).ok_or(UploadError::TooLarge)?).map_err(|_| UploadError::TooLarge)?;
-            let len =
-                usize::try_from(seg.len(index).ok_or(UploadError::TooLarge)?).map_err(|_| UploadError::TooLarge)?;
+            let start = usize::try_from(seg.offset(index).ok_or(UploadError::TooLarge)?)
+                .map_err(|_| UploadError::TooLarge)?;
+            let len = usize::try_from(seg.len(index).ok_or(UploadError::TooLarge)?)
+                .map_err(|_| UploadError::TooLarge)?;
             let end = start.checked_add(len).ok_or(UploadError::TooLarge)?;
             let slice = encoded_bytes.get(start..end).ok_or(UploadError::TooLarge)?;
 
@@ -467,38 +559,25 @@ impl UploadSessionManager {
             let working = slice
                 .len()
                 .saturating_add(syms.len().saturating_mul(usize::from(profile.symbol_size)));
-            peak_working_bytes = peak_working_bytes.max(working.min(two_segment_ceiling));
+            peak_working_bytes = peak_working_bytes.max(working);
 
-            // Section 6.4 rule 2: pixel QR round-trip check (all frames <= 64 MiB, deterministic sample > 64 MiB).
-            if index == 0 {
-                let seg_frames = frames_for_object_bytes(&encoded_bytes, profile, 2)
-                    .map_err(|_| UploadError::TooLarge)?;
-                let sample = deterministic_pixel_sample_indices(
-                    object.payload.len() as u64,
-                    &commitment,
-                    index,
-                    seg_frames.len(),
-                );
-                // Cap per-call eager PNG rendering in unit/RPC path to deterministic sample indices
-                // when frame count > 8 so small/medium uploads verify pixel round-trip deterministically.
-                let indices_to_render: Vec<usize> = if seg_frames.len() <= 8 {
-                    sample
-                } else {
-                    sample.into_iter().take(8).collect()
-                };
-                for idx in indices_to_render {
-                    if let Some(frame) = seg_frames.get(idx) {
-                        let png = frame_to_png(frame)?;
-                        let back = png_to_frame(&png)?;
-                        if back != *frame {
-                            return Err(UploadError::PixelVerifyFailed {
-                                segment: frame.segment,
-                                esi: frame.esi,
-                            });
-                        }
-                    }
-                }
-            }
+            // Verify every frame of a small object, or the deterministic sample
+            // for each large-object segment. Do not materialize all frames (or
+            // silently truncate the sample) just to verify pixels.
+            let seg_len = u32::try_from(len).map_err(|_| UploadError::TooLarge)?;
+            verify_pixel_samples(
+                payload_len,
+                &commitment,
+                index,
+                seg_len,
+                k,
+                &syms,
+                |frame| {
+                    let png = frame_to_png(frame)?;
+                    let mut sample_meter = super::meter::Meter::for_object(payload_len);
+                    png_to_frame(&png, &mut sample_meter)
+                },
+            )?;
 
             let leaves: Vec<(u32, [u8; 32])> =
                 syms.iter().map(|s| (s.esi, symbol_leaf(&s.data))).collect();
@@ -517,7 +596,7 @@ impl UploadSessionManager {
             object_len: encoded_bytes.len() as u64,
             commitment,
             profile: *profile,
-            codec: object.header.codec,
+            codec,
             symbols_per_segment,
             symbol_roots,
         };
@@ -536,7 +615,7 @@ impl UploadSessionManager {
     }
 }
 
-/// Convenience: convert [`PipelineError`] when callers bridge upload helpers.
+/// Target ceiling for a future two-segment streaming pipeline (not this eager upload path).
 #[must_use]
 pub const fn max_two_segment_memory_bytes(profile: &Profile) -> u64 {
     profile.segment_bytes().saturating_mul(2)
@@ -544,7 +623,9 @@ pub const fn max_two_segment_memory_bytes(profile: &Profile) -> u64 {
 
 #[cfg(test)]
 mod tests {
+    use super::super::pipeline::prepare_public_upload;
     use super::super::placement::Class;
+    use super::super::registry::Registered;
     use super::*;
 
     const SMALL: Profile = Profile {
@@ -584,16 +665,24 @@ mod tests {
         ));
 
         // Per-IP cap = 2 concurrent sessions.
-        let _s1 = mgr.open_session((acc, [9; 16]), 100, 0, 10, false, 100).unwrap();
-        let _s2 = mgr.open_session((acc, [9; 16]), 100, 0, 10, false, 100).unwrap();
+        let _s1 = mgr
+            .open_session((acc, [9; 16]), 100, 0, 10, false, 100)
+            .unwrap();
+        let _s2 = mgr
+            .open_session((acc, [9; 16]), 100, 0, 10, false, 100)
+            .unwrap();
         assert_eq!(
             mgr.open_session((acc, [9; 16]), 100, 0, 10, false, 100),
             Err(UploadError::TooManyIpSessions)
         );
 
         // Per-account cap = 4 concurrent sessions across distinct IPs.
-        let _s3 = mgr.open_session((acc, [8; 16]), 100, 0, 10, false, 100).unwrap();
-        let _s4 = mgr.open_session((acc, [7; 16]), 100, 0, 10, false, 100).unwrap();
+        let _s3 = mgr
+            .open_session((acc, [8; 16]), 100, 0, 10, false, 100)
+            .unwrap();
+        let _s4 = mgr
+            .open_session((acc, [7; 16]), 100, 0, 10, false, 100)
+            .unwrap();
         assert_eq!(
             mgr.open_session((acc, [6; 16]), 100, 0, 10, false, 100),
             Err(UploadError::TooManyAccountSessions)
@@ -601,7 +690,165 @@ mod tests {
     }
 
     #[test]
-    fn bud3_upload_memory_ceiling_and_session_finish() {
+    fn buffered_upload_refuses_large_declarations_before_allocating() {
+        let mut mgr = UploadSessionManager::new(Bud3Limits::default());
+        let client = ([3; 32], [4; 16]);
+        assert_eq!(
+            mgr.open_session(client, MAX_BUFFERED_UPLOAD_BYTES + 1, 0, 20, false, 500),
+            Err(UploadError::BufferedUploadTooLarge {
+                len: MAX_BUFFERED_UPLOAD_BYTES + 1,
+                max: MAX_BUFFERED_UPLOAD_BYTES,
+            })
+        );
+        assert!(mgr.sessions.is_empty());
+        let sid = mgr.open_session(client, 1, 0, 20, false, 500).unwrap();
+        assert_eq!(
+            mgr.append_chunk(sid, b"ab", 501),
+            Err(UploadError::LengthMismatch {
+                declared: 1,
+                received: 2,
+            })
+        );
+        assert!(mgr.sessions.get(&sid).unwrap().buffer.is_empty());
+    }
+
+    #[test]
+    fn releasing_buffer_drops_reserved_input_capacity_before_segment_encoding() {
+        let mut input = Vec::with_capacity(4096);
+        input.extend_from_slice(&[0xAA; 1024]);
+        assert!(input.capacity() >= 4096);
+        zeroize_and_release(&mut input);
+        assert!(input.is_empty());
+        assert_eq!(input.capacity(), 0);
+    }
+
+    #[test]
+    fn pixel_verification_checks_every_small_frame_and_detects_late_corruption() {
+        let syms: Vec<Symbol> = (0..17)
+            .map(|esi| Symbol {
+                segment: 3,
+                esi,
+                data: vec![esi as u8; 128],
+            })
+            .collect();
+        let mut seen = Vec::new();
+        assert_eq!(
+            verify_pixel_samples(1024, &[7; 32], 3, 128 * 17, 17, &syms, |frame| {
+                seen.push(frame.esi);
+                Ok(frame.clone())
+            }),
+            Ok(17)
+        );
+        assert_eq!(seen, (0..17).collect::<Vec<_>>());
+
+        let mut checked = 0;
+        assert_eq!(
+            verify_pixel_samples(1024, &[7; 32], 3, 128 * 17, 17, &syms, |frame| {
+                checked += 1;
+                let mut back = frame.clone();
+                if checked == 10 {
+                    back.data[0] ^= 1;
+                }
+                Ok(back)
+            }),
+            Err(UploadError::PixelVerifyFailed { segment: 3, esi: 9 })
+        );
+    }
+
+    #[test]
+    fn large_object_pixel_sample_covers_every_segment_and_one_percent() {
+        let syms: Vec<Symbol> = (0..4000)
+            .map(|esi| Symbol {
+                segment: 2,
+                esi,
+                data: vec![0; 1],
+            })
+            .collect();
+        let mut seen = Vec::new();
+        let checked = verify_pixel_samples(
+            FULL_PIXEL_VERIFY_CEILING_BYTES + 1,
+            &[8; 32],
+            2,
+            4000,
+            4000,
+            &syms,
+            |frame| {
+                seen.push(frame.esi);
+                Ok(frame.clone())
+            },
+        )
+        .unwrap();
+        assert_eq!(checked, 40);
+        assert_eq!(seen.len(), 40);
+        assert!(seen.iter().all(|esi| *esi < 4000));
+    }
+
+    #[test]
+    fn repeated_public_upload_reuses_registered_symbols_without_encoding_again() {
+        let content = b"the same public object submitted by another owner";
+        let prepared = prepare_public_upload(content, &SMALL, &Bud3Limits::default(), 20).unwrap();
+        let key = prepared.record.commitment;
+        let mut reg = Bud3Registry::default();
+        assert_eq!(
+            reg.register_object(
+                [1; 32],
+                prepared.record.clone(),
+                vec![(
+                    0,
+                    Share {
+                        validator: [10; 32],
+                        class: Class::Full,
+                        first_esi: 0,
+                        symbols: 20,
+                    }
+                )],
+                0,
+                20,
+            ),
+            Ok(Registered::New(key))
+        );
+
+        let mut mgr = UploadSessionManager::new(Bud3Limits::default());
+        let sid = mgr
+            .open_session(([2; 32], [3; 16]), content.len() as u64, 0, 20, false, 500)
+            .unwrap();
+        for chunk in content.chunks(7) {
+            mgr.append_chunk(sid, chunk, 501).unwrap();
+        }
+        // A new object would need both valid placement and candidates. Dedup
+        // must return before any new symbols are encoded or placed.
+        let empty_row = PlacementRow {
+            n_full: 0,
+            s_full: 0,
+            n_mobile: 0,
+            s_mobile: 0,
+        };
+        let finished = mgr
+            .finish_session(sid, &SMALL, &empty_row, &[], &reg, 502)
+            .unwrap();
+        assert_eq!(finished.deduplicated_existing, Some(key));
+        assert_eq!(finished.record, prepared.record);
+        assert!(finished.segments.is_empty());
+        assert_eq!(finished.peak_working_bytes, 0);
+        assert!(matches!(&finished.unsigned_tx,
+            StorageTxV3::RegisterObject { shares, .. } if shares.is_empty()
+        ));
+        let StorageTxV3::RegisterObject {
+            record,
+            shares,
+            lifetime_epochs,
+        } = finished.unsigned_tx
+        else {
+            panic!("deduplicated uploads must produce a registration transaction");
+        };
+        assert_eq!(
+            reg.register_object([2; 32], record, shares, 1, lifetime_epochs),
+            Ok(Registered::Deduplicated(key))
+        );
+    }
+
+    #[test]
+    fn bud3_buffered_upload_reports_actual_peak_and_session_finish() {
         let mut mgr = UploadSessionManager::new(Bud3Limits::default());
         let reg = Bud3Registry::default();
         let data = b"multi-segment upload streamed chunk by chunk".repeat(120);
@@ -620,11 +867,11 @@ mod tests {
         let finished = mgr
             .finish_session(sid, &SMALL, &row, &full_candidates(4), &reg, 502)
             .unwrap();
+        // This eager path is not yet two-segment streaming. The measurement
+        // must not be silently clamped to the desired ceiling.
         assert!(
-            (finished.peak_working_bytes as u64) <= max_two_segment_memory_bytes(&SMALL),
-            "peak working bytes {} exceeded 2-segment ceiling {}",
-            finished.peak_working_bytes,
-            max_two_segment_memory_bytes(&SMALL)
+            (finished.peak_working_bytes as u64) > max_two_segment_memory_bytes(&SMALL),
+            "the reported peak must include the full source and repair symbols"
         );
         assert!(finished.segments.len() >= 2);
         assert_eq!(finished.record.content_id, ContentId::public(&data));

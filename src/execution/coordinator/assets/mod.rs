@@ -9,17 +9,21 @@
 //!   `ERC20 -> CW20`, `ERC721 -> CW721`).
 //! - Pointer contracts hold zero balance storage and zero local allowance ledger:
 //!   every balance and approval operation executes at home via `UniversalCall`.
+//!
+//! Convenience: exposed for CLI, RPC, SDK, and multi-VM runtime callers.
 
 use crate::core::account::AccountState;
 use crate::execution::coordinator::alias::bech32_contract_addr;
 use crate::execution::coordinator::state::{
-    derive_uel_asset_id, NS_EVM_ACCOUNT, NS_EVM_CODE, NS_UEL_ASSETS, NS_WASM_CODE,
-    NS_WASM_CONTRACT,
+    derive_uel_asset_id, NS_EVM_ACCOUNT, NS_EVM_CODE, NS_UEL_ASSETS, NS_WASM_CODE, NS_WASM_CONTRACT,
 };
 use budlum_uel_abi::EeId;
 use serde::{Deserialize, Serialize};
 use sha3::{Digest, Keccak256, Sha3_256};
 use std::collections::BTreeMap;
+
+/// Canonical Budlum testnet chain ID (`45261`).
+pub const BUDLUM_TESTNET_CHAIN_ID: u64 = 45_261;
 
 /// Bytecode magic identifying an immutable UEL pointer contract in EVM or WASM.
 pub const POINTER_BYTECODE_PREFIX: &[u8] = b"BDLM_UEL_PTR_BYTECODE_V1";

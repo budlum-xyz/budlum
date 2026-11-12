@@ -9,6 +9,8 @@
 //!   fields (`core::hash::hash_fields_bytes`).
 //! - Permissionless Universal Asset ID derivation (`BDLM_UEL_ASSET_V1`) and
 //!   per-environment deploy feature flags (R-21).
+//!
+//! Convenience: exposed for CLI, RPC, SDK, and multi-VM runtime callers.
 
 use crate::core::address::Address;
 use crate::core::hash::hash_fields_bytes;
@@ -269,12 +271,8 @@ impl ExecutionState {
                     continue;
                 };
                 let path_key = hash_fields_bytes(&[b"BDLM_UEL_NS_KEY_V1", ns.as_bytes(), &raw_key]);
-                let leaf_hash = hash_fields_bytes(&[
-                    b"BDLM_UEL_NS_LEAF_V1",
-                    ns.as_bytes(),
-                    &raw_key,
-                    value,
-                ]);
+                let leaf_hash =
+                    hash_fields_bytes(&[b"BDLM_UEL_NS_LEAF_V1", ns.as_bytes(), &raw_key, value]);
                 leaves.insert(path_key, leaf_hash);
             }
         }

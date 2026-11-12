@@ -4,6 +4,8 @@
 //! - Per-environment conformance suites across EVM, WASM, SVM, Move, and BudZero.
 //! - P95 (`top 5%` worst-case) nanoseconds-per-BGU calibration (`<= 16 ns / BGU`).
 //! - Deterministic multi-environment golden block state-root verification.
+//!
+//! Convenience: exposed for CLI, RPC, SDK, and multi-VM runtime callers.
 
 use crate::core::account::AccountState;
 use crate::core::address::Address;
@@ -17,10 +19,8 @@ use crate::execution::coordinator::svm_ee::{
     FORBIDDEN_SVM_VOTE_PROGRAM_ID, SVM_MEMO_PROGRAM_ID,
 };
 use crate::execution::coordinator::wasm_ee::{build_valid_cosmwasm_module, WasmEe};
-use crate::execution::coordinator::{
-    ExecutionCoordinator, UelAction, UelReceiptStatus, UelTx,
-};
-use budlum_uel_abi::{BlockContext, BudAmount, EeId, ExecutionEnvironment};
+use crate::execution::coordinator::{ExecutionCoordinator, UelAction, UelReceiptStatus, UelTx};
+use budlum_uel_abi::{BlockContext, EeId, ExecutionEnvironment};
 use std::time::Instant;
 
 /// Target upper bound in nanoseconds per BGU at the 95th percentile (`section 8.9.4`).
@@ -74,9 +74,9 @@ fn conformance_ctx() -> BlockContext {
     BlockContext {
         height: 1_000,
         timestamp_ms: 1_700_100_000_000,
-        chain_id: 45_261,
-        randao: [0xC3; 32],
-        base_fee: BudAmount(MIN_UEL_BASE_FEE_ATTOS),
+        chain_id: crate::core::chain_config::Network::Testnet
+            .chain_id()
+            .value(),
     }
 }
 
@@ -84,8 +84,8 @@ fn funded_pair() -> (AccountState, Address, Address) {
     let sender = Address::from([0xA1; 32]);
     let proposer = Address::from([0xA2; 32]);
     let mut state = AccountState::new();
-    state.credit_account(&sender, 50_000);
-    state.credit_account(&proposer, 50_000);
+    state.add_balance(&sender, 50_000);
+    state.add_balance(&proposer, 50_000);
     (state, sender, proposer)
 }
 
@@ -95,7 +95,9 @@ pub fn run_evm_conformance() -> Result<ConformanceReport, String> {
     // EIP-3860 initcode > 49_152 bytes must be refused (documented limit).
     let oversized = vec![0x00u8; 49_153];
     if ee.validate_deploy(&oversized).is_ok() {
-        return Err(String::from("EIP-3860 initcode ceiling failed to refuse >49152 bytes"));
+        return Err(String::from(
+            "EIP-3860 initcode ceiling failed to refuse >49152 bytes",
+        ));
     }
 
     let (mut state, sender, proposer) = funded_pair();
@@ -160,7 +162,9 @@ pub fn run_evm_conformance() -> Result<ConformanceReport, String> {
         return Err(String::from("missing EVM call receipt"));
     };
     if call_rec.status != UelReceiptStatus::Success || call_rec.output.last() != Some(&7u8) {
-        return Err(String::from("EVM PUSH0+ADD+SSTORE conformance output mismatch"));
+        return Err(String::from(
+            "EVM PUSH0+ADD+SSTORE conformance output mismatch",
+        ));
     }
 
     let root = state.execution_state.execution_root();
@@ -300,10 +304,10 @@ pub fn run_svm_conformance() -> Result<ConformanceReport, String> {
             ],
         )
         .map_err(|e| format!("{e:?}"))?;
-    if recs.first().map(|r| r.status) != Some(UelReceiptStatus::Success)
-        || recs.get(1).map(|r| r.status) != Some(UelReceiptStatus::Success)
-        || recs.get(2).map(|r| r.status) != Some(UelReceiptStatus::Revert)
-        || recs.get(3).map(|r| r.status) != Some(UelReceiptStatus::Revert)
+    if recs.first().map(|r| r.status.clone()) != Some(UelReceiptStatus::Success)
+        || recs.get(1).map(|r| r.status.clone()) != Some(UelReceiptStatus::Success)
+        || recs.get(2).map(|r| r.status.clone()) != Some(UelReceiptStatus::Revert)
+        || recs.get(3).map(|r| r.status.clone()) != Some(UelReceiptStatus::Revert)
     {
         return Err(String::from("SVM conformance statuses unexpected"));
     }
@@ -370,8 +374,8 @@ pub fn run_move_conformance() -> Result<ConformanceReport, String> {
             ],
         )
         .map_err(|e| format!("{e:?}"))?;
-    if recs.first().map(|r| r.status) != Some(UelReceiptStatus::Success)
-        || recs.get(1).map(|r| r.status) != Some(UelReceiptStatus::Revert)
+    if recs.first().map(|r| r.status.clone()) != Some(UelReceiptStatus::Success)
+        || recs.get(1).map(|r| r.status.clone()) != Some(UelReceiptStatus::Revert)
     {
         return Err(String::from("Move conformance statuses unexpected"));
     }
@@ -411,7 +415,7 @@ pub fn run_budzero_conformance() -> Result<ConformanceReport, String> {
             }],
         )
         .map_err(|e| format!("{e:?}"))?;
-    if recs.first().map(|r| r.status) != Some(UelReceiptStatus::Success) {
+    if recs.first().map(|r| r.status.clone()) != Some(UelReceiptStatus::Success) {
         return Err(String::from("BudZero conformance deploy failed"));
     }
     let root = state.execution_state.execution_root();

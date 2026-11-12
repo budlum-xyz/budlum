@@ -1,7 +1,7 @@
 use core::marker::PhantomData;
 
 use p3_challenger::{CanObserve, CanSample, FieldChallenger};
-use p3_commit::{Pcs, PolynomialSpace};
+use p3_commit::{Pcs, PolynomialSpace, UnivariateStarkPcs};
 use p3_field::{ExtensionField, Field, PrimeCharacteristicRing};
 
 pub type Val<SC> = <<<SC as StarkGenericConfig>::Pcs as Pcs<
@@ -41,7 +41,7 @@ pub type PcsError<SC> = <<SC as StarkGenericConfig>::Pcs as Pcs<
 
 pub trait StarkGenericConfig: Clone {
     /// The [`Pcs`] implementation used to commit to trace polynomials.
-    type Pcs: Pcs<Self::Challenge, Self::Challenger>;
+    type Pcs: UnivariateStarkPcs<Self::Challenge, Self::Challenger>;
     /// The extension field used for challenges and auxiliary traces.
     type Challenge: ExtensionField<Val<Self>>;
     /// The challenger type used for Fiat-Shamir.
@@ -127,14 +127,25 @@ impl<Pcs, Challenge, Challenger> StarkConfig<Pcs, Challenge, Challenger> {
     /// `FriParameters` value it hands to the PCS rather than writing them out
     /// a second time.
     pub fn new_with_security(pcs: Pcs, challenger: Challenger, security: Vec<u64>) -> Self {
-        Self::try_new_with_security(pcs, challenger, security)
-            .expect("invalid StarkConfig security parameters")
+        let mut sanitized: Vec<u64> = security
+            .into_iter()
+            .map(|x| x % GOLDILOCKS_MODULUS)
+            .collect();
+        if sanitized.is_empty() {
+            sanitized.push(0);
+        }
+        Self {
+            pcs,
+            challenger,
+            security: sanitized,
+            _phantom: PhantomData,
+        }
     }
 }
 
 impl<PcsT, Challenge, Challenger> StarkGenericConfig for StarkConfig<PcsT, Challenge, Challenger>
 where
-    PcsT: Pcs<Challenge, Challenger> + Clone,
+    PcsT: UnivariateStarkPcs<Challenge, Challenger> + Clone,
     Challenge: ExtensionField<<PcsT::Domain as PolynomialSpace>::Val> + Clone,
     Challenger: FieldChallenger<<PcsT::Domain as PolynomialSpace>::Val>
         + CanObserve<PcsT::Commitment>

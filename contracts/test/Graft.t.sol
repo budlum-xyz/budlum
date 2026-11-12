@@ -32,9 +32,13 @@ contract ClaimingApp is BudlumGraftClaimer {
 
 contract FinalityStub is IBudlumFinality {
     mapping(uint64 => bytes32) public roots;
+    uint64 public latestFinalHeight;
 
     function set(uint64 height, bytes32 root) external {
         roots[height] = root;
+        if (root != bytes32(0) && height > latestFinalHeight) {
+            latestFinalHeight = height;
+        }
     }
 
     function rootAtHeight(uint64 height) external view returns (bytes32) {
@@ -47,7 +51,7 @@ contract FinalityStub is IBudlumFinality {
 }
 
 contract Receiver is BudlumPaymentReceiver {
-    constructor(IBudlumFinality finality_, bytes32 graftId_) BudlumPaymentReceiver(finality_, graftId_) {}
+    constructor(IBudlumFinality finality_, bytes32 appId_) BudlumPaymentReceiver(finality_, appId_) {}
 
     function consume(PaymentProof calldata proof) external returns (uint64) {
         return _consumePayment(proof).amount;
@@ -229,25 +233,28 @@ contract GraftTest is Harness {
         assertTrue(!executor.fulfilled(keccak256("intent"), address(this)), "not marked fulfilled");
     }
 
-    function _proof(Receiver receiver, FinalityStub finality, bytes32 graftId)
+    function _proof(Receiver receiver, FinalityStub finality, bytes32 appId)
         internal
         returns (PaymentProof memory proof)
     {
-        proof.payment = GraftPayment({
-            paymentId: keccak256("payment"),
-            graftId: graftId,
-            payer: bytes32(uint256(9)),
-            recipient: bytes32(uint256(10)),
-            amount: 500,
-            originRecipient: hex"aa",
-            memoHash: bytes32(0),
-            paidAtBlock: 3
-        });
+        proof.payment = GraftPayment(
+            keccak256("payment"),
+            appId,
+            bytes32(uint256(9)),
+            bytes32(uint256(10)),
+            500,
+            hex"aa",
+            bytes32(0),
+            3,
+            uint64(block.chainid),
+            abi.encodePacked(address(receiver))
+        );
         proof.index = 0;
         proof.path = new bytes32[](0);
         proof.paymentsRoot = receiver.paymentLeaf(proof.payment);
         proof.restHash = keccak256("rest");
         proof.header.version = 7;
+        proof.header.timestampMs = uint128(block.timestamp) * 1000;
         proof.header.checkpointHeight = 20;
         proof.header.hasGraftRoot = true;
         proof.header.graftRoot = receiver.graftRegistryRoot(proof.paymentsRoot, proof.restHash);
@@ -255,11 +262,68 @@ contract GraftTest is Harness {
         finality.set(20, receiver.stateRootFromOpening(proof.stateRootBody, receiver.headerHash(proof.header)));
     }
 
+    function _word(uint8 value) internal pure returns (bytes32) {
+        return bytes32(uint256(value) * (type(uint256).max / 255));
+    }
+
+    /// Independent SHA-256/LE-length vectors for the payment leaf, V7 header,
+    /// and state-root opening. Prior tests created their trusted state root
+    /// with the same Solidity functions under test and could miss a shared
+    /// Rust/Solidity encoding mismatch.
+    function test_payment_and_v7_header_match_independent_vectors() public {
+        Receiver receiver = new Receiver(new FinalityStub(), _word(1));
+        GraftPayment memory payment = GraftPayment(
+            _word(0x11),
+            _word(0x22),
+            _word(0x33),
+            _word(0x44),
+            500,
+            hex"deadbeef",
+            _word(0x55),
+            123,
+            1,
+            hex"1111111111111111111111111111111111111111"
+        );
+        assertEq(
+            receiver.paymentLeaf(payment),
+            hex"54cf08c62739918f841bd7f0a85b3e5586a21143168fb42236e9764d84d89290",
+            "payment leaf fixture"
+        );
+
+        GlobalHeader memory header;
+        header.version = 7;
+        header.globalHeight = 17;
+        header.previousGlobalHash = _word(1);
+        header.chainId = 45_261;
+        header.timestampMs = 123_456;
+        header.domainRegistryRoot = _word(2);
+        header.domainCommitmentRoot = _word(3);
+        header.messageRoot = _word(4);
+        header.bridgeStateRoot = _word(5);
+        header.replayNonceRoot = _word(6);
+        header.proposer = abi.encodePacked(_word(7));
+        header.settlementFinalityRoot = _word(8);
+        header.hasStorageRoot = true;
+        header.storageRoot = _word(9);
+        header.hasIdentityRoot = true;
+        header.identityRoot = _word(10);
+        header.checkpointHeight = 17;
+        header.hasGraftRoot = true;
+        header.graftRoot = _word(11);
+        bytes32 headerHash = receiver.headerHash(header);
+        assertEq(headerHash, hex"8eeb903d12a692364ee51fb93faba8d120b121e4cb90430e2984b7dc874eb6e2", "V7 header fixture");
+        assertEq(
+            receiver.stateRootFromOpening(_word(12), headerHash),
+            hex"ac3fa7a621e0b5186e35ec8ff0849f91825c3e88db79de9ddde1b110713bcbf6",
+            "state root opening fixture"
+        );
+    }
+
     function test_a_proven_payment_is_consumed_once() public {
         FinalityStub finality = new FinalityStub();
-        bytes32 graftId = keccak256("app");
-        Receiver receiver = new Receiver(finality, graftId);
-        PaymentProof memory proof = _proof(receiver, finality, graftId);
+        bytes32 appId = keccak256("app");
+        Receiver receiver = new Receiver(finality, appId);
+        PaymentProof memory proof = _proof(receiver, finality, appId);
         assertEq(receiver.consume(proof), 500, "amount");
         vm.expectPartialRevert(BudlumPaymentReceiver.AlreadyConsumed.selector);
         receiver.consume(proof);
@@ -267,12 +331,72 @@ contract GraftTest is Harness {
 
     function test_a_payment_under_another_root_is_refused() public {
         FinalityStub finality = new FinalityStub();
-        bytes32 graftId = keccak256("app");
-        Receiver receiver = new Receiver(finality, graftId);
-        PaymentProof memory proof = _proof(receiver, finality, graftId);
+        bytes32 appId = keccak256("app");
+        Receiver receiver = new Receiver(finality, appId);
+        PaymentProof memory proof = _proof(receiver, finality, appId);
         proof.payment.amount = 501;
         vm.expectPartialRevert(BudlumPaymentReceiver.ProofInvalid.selector);
         receiver.consume(proof);
+    }
+
+    function test_check_payment_refuses_wrong_graft() public {
+        FinalityStub finality = new FinalityStub();
+        bytes32 appA = keccak256("app-a");
+        bytes32 appB = keccak256("app-b");
+        Receiver receiver = new Receiver(finality, appA);
+        PaymentProof memory proof = _proof(receiver, finality, appB);
+        assertEq(keccak256(bytes(receiver.checkPayment(proof))), keccak256("wrong graft"), "wrong graft refused");
+        vm.expectPartialRevert(BudlumPaymentReceiver.WrongGraft.selector);
+        receiver.consume(proof);
+    }
+
+    function test_a_payment_bound_to_another_receiver_is_refused() public {
+        FinalityStub finality = new FinalityStub();
+        bytes32 appId = keccak256("app");
+        Receiver first = new Receiver(finality, appId);
+        Receiver second = new Receiver(finality, appId);
+        PaymentProof memory proof = _proof(first, finality, appId);
+        assertEq(keccak256(bytes(second.checkPayment(proof))), keccak256("receiver binding"), "wrong receiver refused");
+        vm.expectPartialRevert(BudlumPaymentReceiver.ProofInvalid.selector);
+        second.consume(proof);
+    }
+
+    function test_a_stale_payment_proof_is_refused() public {
+        FinalityStub finality = new FinalityStub();
+        bytes32 appId = keccak256("app");
+        Receiver receiver = new Receiver(finality, appId);
+        PaymentProof memory proof = _proof(receiver, finality, appId);
+        vm.warp(block.timestamp + 30 days + 1);
+        assertEq(keccak256(bytes(receiver.checkPayment(proof))), keccak256("proof too old"), "stale proof refused");
+        vm.expectPartialRevert(BudlumPaymentReceiver.ProofInvalid.selector);
+        receiver.consume(proof);
+    }
+
+    function test_proof_refuses_a_rewritten_header_or_payment_path() public {
+        FinalityStub finality = new FinalityStub();
+        bytes32 appId = keccak256("app");
+        Receiver receiver = new Receiver(finality, appId);
+        PaymentProof memory changed = _proof(receiver, finality, appId);
+        changed.header.hasAiRoot = true;
+        assertTrue(
+            keccak256(bytes(receiver.checkPayment(changed))) == keccak256("state root opening"),
+            "presence-tagged header must be bound to the finalized state root"
+        );
+
+        changed = _proof(receiver, finality, appId);
+        changed.path = new bytes32[](1);
+        changed.path[0] = bytes32(uint256(77));
+        assertTrue(
+            keccak256(bytes(receiver.checkPayment(changed))) == keccak256("payment path"),
+            "invented sibling cannot authenticate a single-payment window"
+        );
+
+        changed = _proof(receiver, finality, appId);
+        changed.restHash = bytes32(uint256(88));
+        assertTrue(
+            keccak256(bytes(receiver.checkPayment(changed))) == keccak256("graft root opening"),
+            "registry opening must match the finalized header"
+        );
     }
 
     function test_remote_accounts_land_at_their_predicted_address() public {

@@ -147,6 +147,11 @@ pub struct ZkVmFinalityAdapter {
     /// The pinned chain id: a proof under
     /// another chain's id attests another chain's state.
     chain_id: Option<u64>,
+    /// Whether the AIR binds `chain_id` to execution rather than only to a
+    /// prover-chosen witness column on the first row. Production constructors
+    /// keep this `false` until the VM and AIR expose and constrain a chain-id
+    /// context syscall across both limbs (`public_inputs[0..2]`).
+    chain_id_bound_in_air: bool,
     golden: Option<RawConsensusEvidence>,
 }
 
@@ -159,6 +164,7 @@ impl ZkVmFinalityAdapter {
             network: network.to_string(),
             program_hash,
             chain_id,
+            chain_id_bound_in_air: false,
             descriptor: AdapterDescriptor {
                 id,
                 name: format!("budzkvm-{network}"),
@@ -183,6 +189,13 @@ impl ZkVmFinalityAdapter {
     #[must_use]
     pub fn with_golden(mut self, golden: RawConsensusEvidence) -> Self {
         self.golden = Some(golden);
+        self
+    }
+
+    #[cfg(test)]
+    #[must_use]
+    fn with_air_chain_id_binding_for_test(mut self) -> Self {
+        self.chain_id_bound_in_air = true;
         self
     }
 }
@@ -292,6 +305,13 @@ impl ExternalFinalityAdapter for ZkVmFinalityAdapter {
                 rule: "the proved program is not the pinned program".to_string(),
             });
         }
+        // chain_id is a prover-chosen public input today: the AIR binds
+        // COL_CHAIN_ID to public_inputs[0] only, the high limb in
+        // public_inputs[1] is unconstrained, and the VM has no chain-id
+        // syscall, so nothing ties the declared id to the execution. A
+        // proof of one chain's state can be re-proved under another
+        // chain's id. Until the AIR binds chain_id to the trace,
+        // production admission remains closed.
         let Some(chain_id) = self.chain_id else {
             return Err(AdapterError::ConsensusRule {
                 rule: "no chain id pinned; ZkVm admission is closed".to_string(),
@@ -305,16 +325,23 @@ impl ExternalFinalityAdapter for ZkVmFinalityAdapter {
                 ),
             });
         }
+        if !self.chain_id_bound_in_air {
+            return Err(AdapterError::ConsensusRule {
+                rule: "chain id is not bound to execution; ZkVm admission is closed".to_string(),
+            });
+        }
 
         Ok(FinalityAttestation {
             adapter: self.descriptor.id,
             domain: DomainKey::from_parts(&self.descriptor.id, &evidence.network),
             height: decoded.inputs.block_height,
             state_root: decoded.inputs.final_state_root,
-            // The program's event digest is the event
-            // root this attestation covers.
+            // The program's event digest is an additive field sum, not a
+            // collision-resistant commitment to the event list: it is
+            // prover-chosen and cannot serve as an event root. Attest none
+            // until the AIR binds a real hash of the events.
             attested_block_hash: None,
-            attested_event_root: Some(decoded.inputs.event_digest),
+            attested_event_root: None,
             attested_tx_root: None,
             finalized_at: decoded.inputs.block_height,
             time_unit: TimeUnit::Height,
@@ -689,10 +716,13 @@ mod tests {
         };
         let canonical = bud_vm::syscall_context::build_syscall_context_check_program()
             .expect("canonical build");
-        // The success row needs the pin; the outside row
-        // is refused at the canonical-set gate before the pin is read.
+        // The canonical-set check runs before the AIR chain-id gate; the
+        // test-only opt-in exercises the attestation shape after canonicality
+        // while production `new` remains closed below.
         let pinned_hash = bud_proof::canonical_set::program_hash_of(&canonical);
-        let adapter = ZkVmFinalityAdapter::new("testnet", Some(pinned_hash), Some(1));
+        let prod_adapter = ZkVmFinalityAdapter::new("testnet", Some(pinned_hash), Some(1));
+        let adapter = ZkVmFinalityAdapter::new("testnet", Some(pinned_hash), Some(1))
+            .with_air_chain_id_binding_for_test();
         let outside = vec![
             inst(Opcode::Load, 1, 0, 7),
             inst(Opcode::Log, 0, 1, 0),
@@ -719,12 +749,31 @@ mod tests {
                 "row `{name}` is mislabeled"
             );
             let evidence = honest_evidence(&adapter, program);
+            if canonical {
+                // Production adapter refuses even a matching self-declared
+                // chain_id because the AIR does not yet bind chain_id to execution.
+                let mut prod_facts = crate::crypto::facts::CryptoFacts::new();
+                let prod_err = prod_adapter
+                    .verify_observed(&evidence, &VerificationPolicy::proven(10), &mut prod_facts)
+                    .unwrap_err();
+                match prod_err {
+                    AdapterError::ConsensusRule { rule } => assert!(
+                        rule.contains("chain id is not bound to execution"),
+                        "production refusal must name the unbound chain_id: {rule}"
+                    ),
+                    other => panic!("expected ConsensusRule refusal, got {other:?}"),
+                }
+            }
             let mut facts = crate::crypto::facts::CryptoFacts::new();
             let got =
                 adapter.verify_observed(&evidence, &VerificationPolicy::proven(10), &mut facts);
             if canonical {
                 let attestation = got.unwrap_or_else(|e| panic!("row `{name}`: {e:?}"));
                 assert_eq!(attestation.height, 1, "row `{name}`");
+                assert_eq!(
+                    attestation.attested_event_root, None,
+                    "additive event_digest must not be attested as event_root"
+                );
                 // the ZK adapter shows a hash assumption and nothing else.
                 assert_eq!(
                     facts.count(crate::crypto::facts::ObservedScheme::Proof(

@@ -22,6 +22,7 @@
 //! All arithmetic is integer. The rendezvous score compares `hash * weight`
 //! cross products in `u128`, so the order is identical on every architecture
 //! and no floating point enters consensus.
+//! Convenience: exposed for CLI, RPC, SDK, and multi-VM runtime callers.
 
 use crate::core::address::Address;
 use serde::{Deserialize, Serialize};
@@ -51,7 +52,10 @@ pub struct CommitteeParams {
 
 impl Default for CommitteeParams {
     fn default() -> Self {
-        Self { max_seats: COMMITTEE_MAX_SEATS, standby_depth: SEAT_STANDBY_DEPTH }
+        Self {
+            max_seats: COMMITTEE_MAX_SEATS,
+            standby_depth: SEAT_STANDBY_DEPTH,
+        }
     }
 }
 
@@ -77,7 +81,9 @@ impl SeatBitmap {
     /// An all-zero bitmap sized for `seat_count` seats.
     #[must_use]
     pub fn new(seat_count: usize) -> Self {
-        Self { bytes: vec![0u8; seat_count.div_ceil(8)] }
+        Self {
+            bytes: vec![0u8; seat_count.div_ceil(8)],
+        }
     }
 
     /// Set the bit for seat `index`. An out-of-range index is ignored.
@@ -120,6 +126,9 @@ impl SeatBitmap {
     /// A byte string longer than the ceiling can hold.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, String> {
         let max_bytes = COMMITTEE_MAX_SEATS.div_ceil(8);
+        if bytes.is_empty() {
+            return Err("seat bitmap is empty".into());
+        }
         if bytes.len() > max_bytes {
             return Err(format!(
                 "seat bitmap is {} bytes, at most {max_bytes}",
@@ -151,15 +160,38 @@ impl SeatParticipation {
     /// The record a proposer builds from the precommits it collected for
     /// `checkpoint`, mapped through the table those votes were counted under.
     #[must_use]
-    pub fn collect(
+    pub fn collect<'a>(
         table: &CommitteeTable,
         checkpoint: u64,
-        voters: impl IntoIterator<Item = &Address>,
+        voters: impl IntoIterator<Item = &'a Address>,
     ) -> Self {
         Self {
             checkpoint,
             seats: table.seat_bitmap(voters),
         }
+    }
+
+    /// Verify that a proposer-supplied `SeatParticipation` matches the finalized
+    /// certificate's actual signer set under `table` (prevents CWE-345 seat eviction).
+    pub fn verify_against_signers<'a>(
+        &self,
+        table: &CommitteeTable,
+        expected_checkpoint: u64,
+        cert_signers: impl IntoIterator<Item = &'a Address>,
+    ) -> Result<(), String> {
+        if self.checkpoint != expected_checkpoint {
+            return Err(format!(
+                "seat_participation checkpoint {} does not match finalized checkpoint {expected_checkpoint}",
+                self.checkpoint
+            ));
+        }
+        let expected_seats = table.seat_bitmap(cert_signers);
+        if self.seats != expected_seats {
+            return Err(
+                "seat_participation bitmap does not match finalized certificate signers".into(),
+            );
+        }
+        Ok(())
     }
 }
 
@@ -213,7 +245,10 @@ fn standby_rank(randomness: &[u8; 32], epoch: u64, seat: u64, address: &Address)
 
 /// The top 64 bits of a rank, read big-endian, used as the rendezvous hash.
 fn rank_head(rank: &[u8; 32]) -> u64 {
-    let head = <[u8; 8]>::try_from(&rank[..8]).unwrap_or([0u8; 8]);
+    let head = rank
+        .get(..8)
+        .and_then(|s| <[u8; 8]>::try_from(s).ok())
+        .unwrap_or([0u8; 8]);
     u64::from_be_bytes(head)
 }
 
@@ -257,19 +292,29 @@ impl CommitteeTable {
         // consecutive. Seats the cap could not fill stay empty at the end.
         let mut seats: Vec<Seat> = Vec::with_capacity(seat_count);
         for (index, (address, _)) in members.iter().enumerate() {
-            for _ in 0..alloc[index] {
-                seats.push(Seat { owner: Some(*address), standbys: Vec::new() });
+            for _ in 0..alloc.get(index).copied().unwrap_or(0) {
+                seats.push(Seat {
+                    owner: Some(*address),
+                    standbys: Vec::new(),
+                });
             }
         }
         while seats.len() < seat_count {
-            seats.push(Seat { owner: None, standbys: Vec::new() });
+            seats.push(Seat {
+                owner: None,
+                standbys: Vec::new(),
+            });
         }
 
         for (index, seat) in seats.iter_mut().enumerate() {
             seat.standbys = rank_standbys(&members, randomness, epoch, index, seat.owner, params);
         }
 
-        Self { epoch, version, seats }
+        Self {
+            epoch,
+            version,
+            seats,
+        }
     }
 
     /// Derive the committee from a finality snapshot, using the epoch
@@ -290,7 +335,13 @@ impl CommitteeTable {
             .map(|v| (v.address, v.stake))
             .collect();
         let randomness = crate::consensus::filiz::epoch_randomness(chain_id, snapshot.epoch, &[]);
-        Self::derive(snapshot.epoch, version, &randomness, &eligible, &CommitteeParams::default())
+        Self::derive(
+            snapshot.epoch,
+            version,
+            &randomness,
+            &eligible,
+            &CommitteeParams::default(),
+        )
     }
 
     /// The total number of seats, occupied or not.
@@ -302,7 +353,10 @@ impl CommitteeTable {
     /// The number of occupied seats, `A_x`: the quorum denominator.
     #[must_use]
     pub fn active_seats(&self) -> usize {
-        self.seats.iter().filter(|seat| seat.owner.is_some()).count()
+        self.seats
+            .iter()
+            .filter(|seat| seat.owner.is_some())
+            .count()
     }
 
     /// The seat quorum for `active` occupied seats: `floor(2 * active / 3) + 1`
@@ -338,7 +392,7 @@ impl CommitteeTable {
     /// The number of seats covered by a set of voters. A voter signs once and
     /// covers every seat it holds (section 7.4.3); a voter outside the
     /// committee covers nothing.
-    pub fn covered_seats(&self, voters: impl IntoIterator<Item = &Address>) -> usize {
+    pub fn covered_seats<'a>(&self, voters: impl IntoIterator<Item = &'a Address>) -> usize {
         // Count through the bitmap, not by summing per voter: a seat is covered
         // once however many times its holder appears in the input, so a
         // repeated address cannot inflate the count toward the quorum.
@@ -346,7 +400,10 @@ impl CommitteeTable {
     }
 
     /// The seat bitmap naming every seat held by the given voters.
-    pub(crate) fn seat_bitmap(&self, voters: impl IntoIterator<Item = &Address>) -> SeatBitmap {
+    pub(crate) fn seat_bitmap<'a>(
+        &self,
+        voters: impl IntoIterator<Item = &'a Address>,
+    ) -> SeatBitmap {
         let mut bitmap = SeatBitmap::new(self.seat_count());
         for voter in voters {
             for index in self.seats_of(voter) {
@@ -410,14 +467,19 @@ impl CommitteeTable {
             // still sit. A validator that already lost a seat this epoch does
             // not come back through a standby slot, and none may cross the
             // quarter cap by collecting handed-over seats.
-            let replacement = next.seats[index]
+            let Some(seat_ref) = next.seats.get(index) else {
+                continue;
+            };
+            let replacement = seat_ref
                 .standbys
                 .iter()
                 .find(|candidate| {
-                    !lost.contains(*candidate) && next.seats_of(*candidate).len() < cap
+                    !lost.contains(*candidate) && next.seats_of(candidate).len() < cap
                 })
                 .copied();
-            next.seats[index].owner = replacement;
+            if let Some(seat_mut) = next.seats.get_mut(index) {
+                seat_mut.owner = replacement;
+            }
             lost.insert(owner);
             moved += 1;
         }
@@ -456,7 +518,9 @@ fn allocate_seats(
     for (index, (address, weight)) in members.iter().enumerate() {
         let ideal = seats * u128::from(*weight);
         let base = ideal / total_weight;
-        alloc[index] = usize::try_from(base).unwrap_or(0).min(cap);
+        if let Some(slot) = alloc.get_mut(index) {
+            *slot = usize::try_from(base).unwrap_or(0).min(cap);
+        }
         remainders.push((ideal % total_weight, tie_rank(randomness, address), index));
     }
     remainders.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
@@ -467,13 +531,21 @@ fn allocate_seats(
             if used == seat_count {
                 break;
             }
-            if alloc[*index] < cap {
-                alloc[*index] += 1;
-                used += 1;
+            let weight = members.get(*index).map_or(0, |(_, w)| *w);
+            let current_alloc = alloc.get(*index).copied().unwrap_or(0);
+            let ideal = seats.saturating_mul(u128::from(weight));
+            let held = u128::try_from(current_alloc)
+                .unwrap_or(0)
+                .saturating_mul(total_weight);
+            if current_alloc < cap && held < ideal {
+                if let Some(slot) = alloc.get_mut(*index) {
+                    *slot += 1;
+                    used += 1;
+                }
             }
         }
         if used == before {
-            // Every validator is at the cap; the rest of the seats stay empty.
+            // Every validator is at the cap or its proportional share; remaining seats stay empty.
             break;
         }
     }
@@ -500,13 +572,19 @@ fn rank_standbys(
         .iter()
         .filter(|(address, _)| Some(*address) != owner)
         .map(|(address, weight)| {
-            (*address, *weight, standby_rank(randomness, epoch, seat, address))
+            (
+                *address,
+                *weight,
+                standby_rank(randomness, epoch, seat, address),
+            )
         })
         .collect();
     candidates.sort_by(|a, b| {
         let lhs = u128::from(rank_head(&a.2)) * u128::from(b.1);
         let rhs = u128::from(rank_head(&b.2)) * u128::from(a.1);
-        lhs.cmp(&rhs).then_with(|| a.2.cmp(&b.2)).then_with(|| a.0.cmp(&b.0))
+        lhs.cmp(&rhs)
+            .then_with(|| a.2.cmp(&b.2))
+            .then_with(|| a.0.cmp(&b.0))
     });
     candidates
         .into_iter()
@@ -610,7 +688,9 @@ mod tests {
         let mut a = equal_members(8, 1000);
         let mut b = a.clone();
         b.reverse();
-        a[0].1 = 9000;
+        if let Some(first) = a.first_mut() {
+            first.1 = 9000;
+        }
         b.last_mut().unwrap().1 = 9000;
         let ta = table_of(&a);
         let tb = table_of(&b);
@@ -678,7 +758,7 @@ mod tests {
     #[test]
     fn seat_bitmap_names_the_voters_seats() {
         let table = eight_equal();
-        let voters = vec![addr(1), addr(2)];
+        let voters = [addr(1), addr(2)];
         let bitmap = table.seat_bitmap(voters.iter());
         assert_eq!(bitmap.count(), 8);
         for index in table.seats_of(&addr(1)) {
@@ -721,10 +801,7 @@ mod tests {
             &equal_members(8, 1000),
             &CommitteeParams::default(),
         );
-        let present: Vec<Address> = (1..=8)
-            .map(addr)
-            .filter(|a| !missing.contains(a))
-            .collect();
+        let present: Vec<Address> = (1..=8).map(addr).filter(|a| !missing.contains(a)).collect();
         let record = SeatParticipation::collect(&table, 5, present.iter());
         (table, record)
     }
@@ -815,15 +892,10 @@ mod tests {
         // have a one-entry standby list whose only candidate is already at the
         // cap, so a departure empties the seat instead.
         let members = vec![(addr(1), 1000), (addr(2), 1000)];
-        let table = CommitteeTable::derive(
-            1,
-            5,
-            &randomness(),
-            &members,
-            &CommitteeParams::default(),
-        );
+        let table =
+            CommitteeTable::derive(1, 5, &randomness(), &members, &CommitteeParams::default());
         assert_eq!(table.active_seats(), 4);
-        let only_two = vec![addr(2)];
+        let only_two = [addr(2)];
         let record = SeatParticipation::collect(&table, 5, only_two.iter());
         let previous = prior(&record);
         let (next, _) = table.hand_over(&previous, &record, 10, &BTreeSet::new());

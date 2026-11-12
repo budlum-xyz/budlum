@@ -94,9 +94,9 @@ mod tests {
     #[test]
     fn blg_014_a_failed_integrity_check_fails_the_drill() {
         let drill = include_str!("../../xtask/tools/src/backup_drill.rs");
-        let start = drill
-            .find("\"--check-db\"")
-            .unwrap_or_else(|| panic!("the --check-db invocation is gone from xtask/tools/src/backup_drill.rs"));
+        let start = drill.find("\"--check-db\"").unwrap_or_else(|| {
+            panic!("the --check-db invocation is gone from xtask/tools/src/backup_drill.rs")
+        });
         // Look at the call site only, not the whole file: a status check
         // anywhere else would satisfy a weaker assertion.
         let tail = &drill[start..];
@@ -149,7 +149,7 @@ mod tests {
         use crate::crypto::primitives::KeyPair;
         use crate::crypto::signer::{ConsensusSigner, KeyPairSigner};
 
-        let signer = KeyPairSigner::new(KeyPair::from_seed(&[7u8; 64]));
+        let signer = KeyPairSigner::new(KeyPair::from_seed(&[7u8; 32]).unwrap());
         let msg = b"the same bytes, three different meanings";
 
         let prevote = signer.sign_prevote(msg).expect("a prevote signs");

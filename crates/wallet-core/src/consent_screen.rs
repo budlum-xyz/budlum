@@ -45,7 +45,7 @@ pub const fn padme_bucket_len(raw_len: u64) -> u64 {
     let mask = (1u64 << last_bits) - 1;
     match raw_len.checked_add(mask) {
         Some(sum) => sum & !mask,
-        None => u64::MAX & !mask,
+        None => !mask,
     }
 }
 
@@ -99,7 +99,12 @@ impl ConsentScreenPrompt {
         if blinding_salt.iter().all(|&b| b == 0) {
             return Err("consent blinding_salt must be non-zero".to_string());
         }
-        if matches!(self.mode, ConsentMode::PublicPublish { yk6_verified: false }) {
+        if matches!(
+            self.mode,
+            ConsentMode::PublicPublish {
+                yk6_verified: false
+            }
+        ) {
             return Err("public publication requires a verified YK6 predicate proof".to_string());
         }
         let mode_byte = match self.mode {
@@ -247,10 +252,7 @@ pub fn shamir_split_32(
 ///
 /// Refuses `< threshold` shares, `index == 0`, or duplicate share indices.
 /// exposed for: threshold escrow recovery ( Step 10).
-pub fn shamir_reconstruct_32(
-    shares: &[ShamirShare32],
-    threshold: u8,
-) -> Result<[u8; 32], String> {
+pub fn shamir_reconstruct_32(shares: &[ShamirShare32], threshold: u8) -> Result<[u8; 32], String> {
     let t = usize::from(threshold);
     if threshold < 2 || shares.len() < t {
         return Err("fewer shares than threshold".to_string());

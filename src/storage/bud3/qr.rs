@@ -74,7 +74,7 @@ impl From<QrVideoError> for Bud3QrError {
 /// Returns [`Bud3QrError`] if the encoded frame wire exceeds QR v40 ECC-L capacity.
 pub fn frame_to_matrix(frame: &Bud3Frame) -> Result<QrMatrix, Bud3QrError> {
     let wire = frame.encode_wire();
-    Ok(QrMatrix::encode_with_ec(&wire, THREE_QR_EC)?)
+    Ok(QrMatrix::encode_at(&wire, THREE_QR_EC)?)
 }
 
 /// Render one [`Bud3Frame`] into a deterministic grayscale PNG image.

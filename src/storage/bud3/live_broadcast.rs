@@ -1,4 +1,3 @@
-//! WIRING: unwired - T-Expansion live broadcast gateway is height-gated closed on testnet.
 //! the live broadcast driver and the gateway door.
 //!
 //! delivers the time-segment state machine, the
@@ -13,13 +12,14 @@
 //! refusal is proved by `live_stream_is_closed_on_testnet`, and the refusal
 //! is checked at the object door, not in a comment.
 //!
-//! WIRING: unwired - this module supplies [`LiveGateway`] and
+//! Supplies [`LiveGateway`] and
 //! [`BroadcastDriver`], but the current content gateway and block executor do
 //! not call them. The existing BOF-1 testnet admission path remains the live
 //! flag refusal of record until that wiring lands. No float or wall clock is
 //! used. Subscriber count and each subscriber queue have named bounds; the
 //! driver still snapshots every supplied segment and is not a bounded,
 //! persistent, incremental broadcast lifecycle.
+//! Convenience: exposed for CLI, RPC, SDK, and multi-VM runtime callers.
 
 use std::collections::{BTreeMap, VecDeque};
 
@@ -42,28 +42,28 @@ pub const MAX_LIVE_PENDING_SYMBOLS: usize = 4096;
 /// Why a live call was refused at the gateway or in the driver.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LiveGatewayRefusal {
- /// bit1 objects are refused on the testnet chain id at launch (6.16.6).
+    /// bit1 objects are refused on the testnet chain id at launch (6.16.6).
     ClosedOnTestnet {
- /// The chain that refused the object.
+        /// The chain that refused the object.
         chain_id: u64,
- /// The height the call was made at.
+        /// The height the call was made at.
         height: u64,
     },
- /// The activation height is set but the chain has not reached it.
+    /// The activation height is set but the chain has not reached it.
     BelowActivationHeight {
- /// The height the call was made at.
+        /// The height the call was made at.
         height: u64,
- /// The height live opens at.
+        /// The height live opens at.
         activation: u64,
     },
- /// Live is closed on a chain other than the testnet.
+    /// Live is closed on a chain other than the testnet.
     Closed {
- /// The height the call was made at.
+        /// The height the call was made at.
         height: u64,
     },
- /// An object without bit1 was presented to the live-only door.
+    /// An object without bit1 was presented to the live-only door.
     NotLive,
- /// The stream state machine refused the call.
+    /// The stream state machine refused the call.
     Stream(LiveError),
 }
 
@@ -81,7 +81,7 @@ pub struct LiveGateway {
 }
 
 impl LiveGateway {
- /// The gateway of `chain_id` with its activation schedule.
+    /// The gateway of `chain_id` with its activation schedule.
     #[must_use]
     pub const fn for_chain(chain_id: ChainId, activation: LiveActivation) -> Self {
         Self {
@@ -90,19 +90,19 @@ impl LiveGateway {
         }
     }
 
- /// The testnet launch gateway: bit1 objects are refused.
+    /// The testnet launch gateway: bit1 objects are refused.
     #[must_use]
     pub fn testnet() -> Self {
         Self::for_chain(Network::Testnet.chain_id(), ACTIVATION)
     }
 
- /// The activation schedule this gateway enforces.
+    /// The activation schedule this gateway enforces.
     #[must_use]
     pub const fn activation(&self) -> LiveActivation {
         self.activation
     }
 
- /// The context a stream is created with at `height`.
+    /// The context a stream is created with at `height`.
     #[must_use]
     pub const fn context(&self, height: u64) -> LiveContext {
         LiveContext {
@@ -116,7 +116,9 @@ impl LiveGateway {
             return Ok(());
         }
         match self.activation.height {
-            Some(activation) => Err(LiveGatewayRefusal::BelowActivationHeight { height, activation }),
+            Some(activation) => {
+                Err(LiveGatewayRefusal::BelowActivationHeight { height, activation })
+            }
             None if self.chain_id == Network::Testnet.chain_id() => {
                 Err(LiveGatewayRefusal::ClosedOnTestnet {
                     chain_id: self.chain_id.value(),
@@ -127,14 +129,14 @@ impl LiveGateway {
         }
     }
 
- /// Admit an object. Plain objects are unaffected; a bit1 live object is
- /// refused while live is closed.
- ///
- /// # Errors
- ///
- /// [`LiveGatewayRefusal::ClosedOnTestnet`],
- /// [`LiveGatewayRefusal::BelowActivationHeight`] or
- /// [`LiveGatewayRefusal::Closed`] for a live-flagged object.
+    /// Admit an object. Plain objects are unaffected; a bit1 live object is
+    /// refused while live is closed.
+    ///
+    /// # Errors
+    ///
+    /// [`LiveGatewayRefusal::ClosedOnTestnet`],
+    /// [`LiveGatewayRefusal::BelowActivationHeight`] or
+    /// [`LiveGatewayRefusal::Closed`] for a live-flagged object.
     pub fn admit_object(&self, object: &Object, height: u64) -> Result<(), LiveGatewayRefusal> {
         if object.header.flags.has(Flags::LIVE) {
             self.check_open(height)?;
@@ -142,13 +144,13 @@ impl LiveGateway {
         Ok(())
     }
 
- /// Admit an object that must be a live segment.
- ///
- /// # Errors
- ///
- /// [`LiveGatewayRefusal::NotLive`] when bit1 is absent, or the activation
- /// refusals of [`Self::admit_object`]. The later broadcast service must
- /// call this door explicitly; this module does not claim that wiring.
+    /// Admit an object that must be a live segment.
+    ///
+    /// # Errors
+    ///
+    /// [`LiveGatewayRefusal::NotLive`] when bit1 is absent, or the activation
+    /// refusals of [`Self::admit_object`]. The later broadcast service must
+    /// call this door explicitly; this module does not claim that wiring.
     pub fn admit_live_object(
         &self,
         object: &Object,
@@ -160,13 +162,13 @@ impl LiveGateway {
         self.admit_object(object, height)
     }
 
- /// Admit a viewer at `now_ms`. The stream's own join-latency budget is
- /// preserved; a closed chain is refused before the stream is asked.
- ///
- /// # Errors
- ///
- /// The activation refusals, or [`LiveGatewayRefusal::Stream`] when the
- /// stream has no head or its head is stale.
+    /// Admit a viewer at `now_ms`. The stream's own join-latency budget is
+    /// preserved; a closed chain is refused before the stream is asked.
+    ///
+    /// # Errors
+    ///
+    /// The activation refusals, or [`LiveGatewayRefusal::Stream`] when the
+    /// stream has no head or its head is stale.
     pub fn admit_viewer(
         &self,
         stream: &LiveStream,
@@ -181,19 +183,19 @@ impl LiveGateway {
 /// Why a broadcast step refused.
 #[derive(Debug, Clone, PartialEq)]
 pub enum BroadcastError {
- /// RFC 6330 could not code one segment.
+    /// RFC 6330 could not code one segment.
     Encode(FountainError),
- /// The ratioless plan rejected its per-segment repair limits.
+    /// The ratioless plan rejected its per-segment repair limits.
     Plan(LiveError),
- /// The subscriber cap was reached.
+    /// The subscriber cap was reached.
     TooManySubscribers,
- /// The frame names a segment that the driver does not hold.
+    /// The frame names a segment that the driver does not hold.
     UnknownSegment(u64),
- /// The frame names an ESI the encoder cannot produce.
+    /// The frame names an ESI the encoder cannot produce.
     BadEsi(u32),
- /// A segment has more source symbols than the 32-bit ESI space allows.
+    /// A segment has more source symbols than the 32-bit ESI space allows.
     TooManySources,
- /// The emitted-symbol counter cannot advance without wrapping.
+    /// The emitted-symbol counter cannot advance without wrapping.
     EmissionOverflow,
 }
 
@@ -227,13 +229,13 @@ pub struct BroadcastDriver {
 }
 
 impl BroadcastDriver {
- /// Build a driver over the segments of one stream. The segments are the
- /// P0 BOF-1 objects, so sender and receiver code the same bytes.
- ///
- /// # Errors
- ///
- /// [`BroadcastError::Encode`] when a segment cannot be coded under P0, or
- /// [`BroadcastError::Plan`] when the derived repair limits are invalid.
+    /// Build a driver over the segments of one stream. The segments are the
+    /// P0 BOF-1 objects, so sender and receiver code the same bytes.
+    ///
+    /// # Errors
+    ///
+    /// [`BroadcastError::Encode`] when a segment cannot be coded under P0, or
+    /// [`BroadcastError::Plan`] when the derived repair limits are invalid.
     pub fn new(segments: &[LiveSegment]) -> Result<Self, BroadcastError> {
         let mut sources = Vec::with_capacity(segments.len());
         let mut encoders = Vec::with_capacity(segments.len());
@@ -243,9 +245,7 @@ impl BroadcastDriver {
             let bytes = segment.object.encode();
             let encoder = SegmentEncoder::new(segment.index, &bytes, &Profile::P0)?;
             let source = encoder.source_symbols();
-            ks.push(
-                u32::try_from(source.len()).map_err(|_| BroadcastError::TooManySources)?,
-            );
+            ks.push(u32::try_from(source.len()).map_err(|_| BroadcastError::TooManySources)?);
             repair_limits.push(encoder.max_esi());
             sources.push(source);
             encoders.push(encoder);
@@ -261,7 +261,7 @@ impl BroadcastDriver {
         })
     }
 
- /// The number of source symbols of `segment`.
+    /// The number of source symbols of `segment`.
     #[must_use]
     pub fn source_count(&self, segment: u64) -> u32 {
         self.sources
@@ -269,7 +269,7 @@ impl BroadcastDriver {
             .map_or(0, |s| u32::try_from(s.len()).unwrap_or(u32::MAX))
     }
 
- /// How many symbols the driver has emitted.
+    /// How many symbols the driver has emitted.
     #[must_use]
     pub const fn emitted(&self) -> u64 {
         self.emitted
@@ -301,17 +301,17 @@ impl BroadcastDriver {
         }
     }
 
- /// Emit the next symbol of the ratioless order.
- ///
- /// Normal plan exhaustion is `Ok(None)`. A plan/encoder mismatch or an
- /// RFC 6330 bound violation is an error, never an end-of-stream signal.
- /// Coding errors are sticky: the driver must be rebuilt rather than
- /// skipping the offending frame on a later call. The emitted count
- /// changes only after a symbol is produced.
- ///
- /// # Errors
- /// [`BroadcastError::BadEsi`], [`BroadcastError::UnknownSegment`],
- /// [`BroadcastError::Encode`] or [`BroadcastError::EmissionOverflow`].
+    /// Emit the next symbol of the ratioless order.
+    ///
+    /// Normal plan exhaustion is `Ok(None)`. A plan/encoder mismatch or an
+    /// RFC 6330 bound violation is an error, never an end-of-stream signal.
+    /// Coding errors are sticky: the driver must be rebuilt rather than
+    /// skipping the offending frame on a later call. The emitted count
+    /// changes only after a symbol is produced.
+    ///
+    /// # Errors
+    /// [`BroadcastError::BadEsi`], [`BroadcastError::UnknownSegment`],
+    /// [`BroadcastError::Encode`] or [`BroadcastError::EmissionOverflow`].
     pub fn next_symbol(&mut self) -> Result<Option<Symbol>, BroadcastError> {
         if let Some(error) = &self.failure {
             return Err(error.clone());
@@ -335,11 +335,11 @@ impl BroadcastDriver {
         Ok(Some(symbol))
     }
 
- /// Register a viewer.
- ///
- /// # Errors
- ///
- /// [`BroadcastError::TooManySubscribers`] at the cap.
+    /// Register a viewer.
+    ///
+    /// # Errors
+    ///
+    /// [`BroadcastError::TooManySubscribers`] at the cap.
     pub fn subscribe(&mut self, id: u64) -> Result<(), BroadcastError> {
         if !self.subscribers.contains_key(&id) && self.subscribers.len() >= MAX_LIVE_SUBSCRIBERS {
             return Err(BroadcastError::TooManySubscribers);
@@ -349,13 +349,13 @@ impl BroadcastDriver {
         Ok(())
     }
 
- /// Remove a viewer and release its queue.
+    /// Remove a viewer and release its queue.
     pub fn unsubscribe(&mut self, id: u64) {
         self.subscribers.remove(&id);
         self.dropped.remove(&id);
     }
 
- /// Deliver one symbol to every viewer. Returns the number of viewers.
+    /// Deliver one symbol to every viewer. Returns the number of viewers.
     pub fn fan_out(&mut self, symbol: &Symbol) -> usize {
         let count = self.subscribers.len();
         for (id, queue) in &mut self.subscribers {
@@ -370,12 +370,12 @@ impl BroadcastDriver {
         count
     }
 
- /// Emit and fan out at most `limit` symbols. Returns the number emitted.
- /// A coding failure stops the drive and is returned to the caller.
- ///
- /// # Errors
- /// Propagates [`Self::next_symbol`] errors. Symbols fanned out before the
- /// failure remain in their subscriber queues and in `emitted`.
+    /// Emit and fan out at most `limit` symbols. Returns the number emitted.
+    /// A coding failure stops the drive and is returned to the caller.
+    ///
+    /// # Errors
+    /// Propagates [`Self::next_symbol`] errors. Symbols fanned out before the
+    /// failure remain in their subscriber queues and in `emitted`.
     pub fn drive(&mut self, limit: usize) -> Result<usize, BroadcastError> {
         let mut sent = 0usize;
         while sent < limit {
@@ -388,18 +388,18 @@ impl BroadcastDriver {
         Ok(sent)
     }
 
- /// Take the oldest pending symbol of viewer `id`.
+    /// Take the oldest pending symbol of viewer `id`.
     pub fn deliver(&mut self, id: u64) -> Option<Symbol> {
         self.subscribers.get_mut(&id)?.pop_front()
     }
 
- /// How many symbols viewer `id` lost to backpressure.
+    /// How many symbols viewer `id` lost to backpressure.
     #[must_use]
     pub fn dropped(&self, id: u64) -> u64 {
         self.dropped.get(&id).copied().unwrap_or(0)
     }
 
- /// How many symbols are pending for viewer `id`.
+    /// How many symbols are pending for viewer `id`.
     #[must_use]
     pub fn pending(&self, id: u64) -> usize {
         self.subscribers.get(&id).map_or(0, VecDeque::len)
@@ -425,12 +425,17 @@ mod tests {
     fn two_segments() -> Vec<LiveSegment> {
         let mut stream = LiveStream::begin(ORIGINATOR, NONCE, open_context()).unwrap();
         stream.push_segment(0, b"first segment").unwrap();
-        stream.push_segment(LIVE_SEGMENT_MS, b"second segment").unwrap();
+        stream
+            .push_segment(LIVE_SEGMENT_MS, b"second segment")
+            .unwrap();
         stream.segments().to_vec()
     }
 
     fn open_gateway() -> LiveGateway {
-        LiveGateway::for_chain(Network::Devnet.chain_id(), LiveActivation { height: Some(10) })
+        LiveGateway::for_chain(
+            Network::Devnet.chain_id(),
+            LiveActivation { height: Some(10) },
+        )
     }
 
     #[test]
@@ -451,7 +456,7 @@ mod tests {
                 height: 1_000_000,
             })
         );
- // A plain object is never refused by the live door.
+        // A plain object is never refused by the live door.
         let mut plain = segments[0].object.clone();
         plain.header.flags = Flags::from_byte(0).unwrap();
         assert_eq!(gateway.admit_object(&plain, 1), Ok(()));
@@ -459,15 +464,11 @@ mod tests {
             gateway.admit_live_object(&plain, 1),
             Err(LiveGatewayRefusal::NotLive)
         );
- // The viewer door refuses before it asks the stream.
+        // The viewer door refuses before it asks the stream.
         let stream = LiveStream::begin(ORIGINATOR, NONCE, gateway.context(1));
         assert!(stream.is_err());
         assert_eq!(
-            gateway.admit_viewer(
-                &two_segments_stream(),
-                0,
-                1,
-            ),
+            gateway.admit_viewer(&two_segments_stream(), 0, 1,),
             Err(LiveGatewayRefusal::ClosedOnTestnet {
                 chain_id: Network::Testnet.chain_id().value(),
                 height: 1,
@@ -478,7 +479,9 @@ mod tests {
     fn two_segments_stream() -> LiveStream {
         let mut stream = LiveStream::begin(ORIGINATOR, NONCE, open_context()).unwrap();
         stream.push_segment(0, b"first segment").unwrap();
-        stream.push_segment(LIVE_SEGMENT_MS, b"second segment").unwrap();
+        stream
+            .push_segment(LIVE_SEGMENT_MS, b"second segment")
+            .unwrap();
         stream
     }
 
@@ -506,7 +509,9 @@ mod tests {
     fn bud3_live_viewer_join_goes_through_the_gateway() {
         let gateway = open_gateway();
         let stream = two_segments_stream();
-        let ticket = gateway.admit_viewer(&stream, 2 * LIVE_SEGMENT_MS, 10).unwrap();
+        let ticket = gateway
+            .admit_viewer(&stream, 2 * LIVE_SEGMENT_MS, 10)
+            .unwrap();
         assert_eq!(ticket.start_index, 1);
         assert_eq!(
             gateway.admit_viewer(&stream, 20 * LIVE_SEGMENT_MS, 10),
@@ -535,8 +540,10 @@ mod tests {
         assert_eq!(&kinds[..2], &[SymbolKind::Source, SymbolKind::Source]);
         assert!(kinds[2..].iter().all(|k| *k == SymbolKind::Repair));
         assert_eq!(driver.emitted(), 8);
- // Every symbol carries exactly one P0 symbol's worth of bytes.
-        assert!(symbols.iter().all(|s| s.data.len() == Profile::P0.symbol_size as usize));
+        // Every symbol carries exactly one P0 symbol's worth of bytes.
+        assert!(symbols
+            .iter()
+            .all(|s| s.data.len() == Profile::P0.symbol_size as usize));
     }
 
     #[test]
@@ -587,7 +594,7 @@ mod tests {
             driver.subscribe(MAX_LIVE_SUBSCRIBERS as u64),
             Err(BroadcastError::TooManySubscribers)
         );
- // Re-subscribing an existing viewer is not a new subscriber.
+        // Re-subscribing an existing viewer is not a new subscriber.
         assert_eq!(driver.subscribe(0), Ok(()));
     }
 }

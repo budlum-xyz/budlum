@@ -106,40 +106,40 @@ fn rotr(x: u32, n: u32) -> u32 {
 
 /// One compression step over a 64-byte block.
 fn compress(state: &mut [u32; 8], block: &[u8]) {
-    let mut w = [0u32; 64];
+    let mut schedule = [0u32; 64];
     for (i, chunk) in block.chunks_exact(4).enumerate().take(16) {
-        w[i] = u32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+        schedule[i] = u32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
     }
     for i in 16..64 {
-        let s0 = rotr(w[i - 15], 7) ^ rotr(w[i - 15], 18) ^ (w[i - 15] >> 3);
-        let s1 = rotr(w[i - 2], 17) ^ rotr(w[i - 2], 19) ^ (w[i - 2] >> 10);
-        w[i] = w[i - 16]
+        let s0 = rotr(schedule[i - 15], 7) ^ rotr(schedule[i - 15], 18) ^ (schedule[i - 15] >> 3);
+        let s1 = rotr(schedule[i - 2], 17) ^ rotr(schedule[i - 2], 19) ^ (schedule[i - 2] >> 10);
+        schedule[i] = schedule[i - 16]
             .wrapping_add(s0)
-            .wrapping_add(w[i - 7])
+            .wrapping_add(schedule[i - 7])
             .wrapping_add(s1);
     }
-    let [mut a, mut b, mut c, mut d, mut e, mut f, mut g, mut h] = *state;
+    let [mut va, mut vb, mut vc, mut vd, mut ve, mut vf, mut vg, mut vh] = *state;
     for i in 0..64 {
-        let s1 = rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25);
-        let ch = (e & f) ^ ((!e) & g);
-        let t1 = h
+        let s1 = rotr(ve, 6) ^ rotr(ve, 11) ^ rotr(ve, 25);
+        let ch = (ve & vf) ^ ((!ve) & vg);
+        let t1 = vh
             .wrapping_add(s1)
             .wrapping_add(ch)
             .wrapping_add(K[i])
-            .wrapping_add(w[i]);
-        let s0 = rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22);
-        let maj = (a & b) ^ (a & c) ^ (b & c);
+            .wrapping_add(schedule[i]);
+        let s0 = rotr(va, 2) ^ rotr(va, 13) ^ rotr(va, 22);
+        let maj = (va & vb) ^ (va & vc) ^ (vb & vc);
         let t2 = s0.wrapping_add(maj);
-        h = g;
-        g = f;
-        f = e;
-        e = d.wrapping_add(t1);
-        d = c;
-        c = b;
-        b = a;
-        a = t1.wrapping_add(t2);
+        vh = vg;
+        vg = vf;
+        vf = ve;
+        ve = vd.wrapping_add(t1);
+        vd = vc;
+        vc = vb;
+        vb = va;
+        va = t1.wrapping_add(t2);
     }
-    for (slot, value) in state.iter_mut().zip([a, b, c, d, e, f, g, h]) {
+    for (slot, value) in state.iter_mut().zip([va, vb, vc, vd, ve, vf, vg, vh]) {
         *slot = slot.wrapping_add(value);
     }
 }

@@ -28,6 +28,7 @@
 //! 24-bit ESI with no degree counter, so independence does not saturate, and
 //! every length and offset is `u64`, so the only object ceiling is the genesis
 //! parameter `Bud3Limits::max_content_bytes`.
+//! Convenience: exposed for CLI, RPC, SDK, and multi-VM runtime callers.
 
 use super::limits::Profile;
 use super::meter::{Meter, MeterError};
@@ -45,7 +46,7 @@ pub const MAX_ESI: u32 = (1 << 24) - 1;
 pub const MAX_EXTRA_SYMBOLS: u32 = 1024;
 
 /// One coded symbol of one segment.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Symbol {
     /// Segment index in the object.
     pub segment: u64,
@@ -564,10 +565,8 @@ mod tests {
                 assert_eq!(n as u32, k + 2);
                 for trial in 0..trials {
                     let mode = if burst_loss { 1u64 } else { 0u64 };
-                    let mut state = 0xB0D3_0000_0001u64
-                        ^ u64::from(k)
-                        ^ ((trial as u64) << 32)
-                        ^ (mode << 63);
+                    let mut state =
+                        0xB0D3_0000_0001u64 ^ u64::from(k) ^ ((trial as u64) << 32) ^ (mode << 63);
                     let lost = usize::try_from(next(&mut state) % n as u64).unwrap();
                     let burst = usize::try_from(next(&mut state) % n as u64).unwrap();
                     let mut dec = SegmentDecoder::new(0, data.len() as u64, &p).unwrap();
@@ -686,7 +685,11 @@ mod tests {
         assert_eq!(repair.len(), 2048);
         let mut seen = std::collections::BTreeSet::new();
         for s in &repair {
-            assert!(seen.insert(s.esi), "repair ESI {} was produced twice", s.esi);
+            assert!(
+                seen.insert(s.esi),
+                "repair ESI {} was produced twice",
+                s.esi
+            );
         }
         let far = enc.repair_symbols(20_000, 4).unwrap();
         assert!(far.iter().all(|s| s.esi > 255));
@@ -698,7 +701,10 @@ mod tests {
         let far_one = enc.repair_symbols(20_000, 1).unwrap().remove(0);
         let mut symbols = enc.source_symbols();
         let same_as_source = symbols.iter().any(|s| s.data == far_one.data);
-        assert!(!same_as_source, "a far repair symbol repeated a source symbol");
+        assert!(
+            !same_as_source,
+            "a far repair symbol repeated a source symbol"
+        );
         symbols.push(far_one);
         let mut dec = SegmentDecoder::new(0, data.len() as u64, &p).unwrap();
         let mut meter = Meter::new(1 << 30, 1 << 20);
@@ -878,7 +884,7 @@ mod tests {
 
     #[test]
     #[ignore = "nightly T6: 10_000-trial RaptorQ acceptance across k in {100, 1000, 4096} under independent and burst loss"]
-    fn bud3_fountain_acceptance() {
+    fn bud3_fountain_acceptance_suite() {
         for &k_target in &[100u32, 1000, 4096] {
             let prof = Profile {
                 id: 0,

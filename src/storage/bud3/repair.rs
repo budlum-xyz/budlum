@@ -114,7 +114,8 @@ pub fn assign_repairer(
     if ordered.is_empty() {
         return None;
     }
-    let slot = usize::try_from(elapsed_blocks / REPAIR_HANDOVER_BLOCKS).unwrap_or(0) % ordered.len();
+    let slot =
+        usize::try_from(elapsed_blocks / REPAIR_HANDOVER_BLOCKS).unwrap_or(0) % ordered.len();
     ordered.get(slot).map(|c| c.validator)
 }
 
@@ -279,10 +280,9 @@ pub fn handover_expired_repair_duty(
     })
 }
 
-
 /// Deterministic lazy repair scheduler used by duty-handover simulations.
 pub mod scheduler;
-pub use scheduler::{RepairTask, RepairScheduler};
+pub use scheduler::{RepairScheduler, RepairTask};
 
 #[cfg(test)]
 mod tests {

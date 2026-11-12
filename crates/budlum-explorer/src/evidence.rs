@@ -184,19 +184,11 @@ mod tests {
 
     #[test]
     fn empty_or_whitespace_claim_reason_cannot_verify() {
-        let empty = Evidence::new().with(Claim::new(
-            "bud-fetcher",
-            Strength::Verified,
-            "",
-        ));
+        let empty = Evidence::new().with(Claim::new("bud-fetcher", Strength::Verified, ""));
         assert_eq!(empty.weakest(), Strength::Refused);
         assert!(!empty.is_displayable());
 
-        let ws = Evidence::new().with(Claim::new(
-            "bud-fetcher",
-            Strength::Verified,
-            "   ",
-        ));
+        let ws = Evidence::new().with(Claim::new("bud-fetcher", Strength::Verified, "   "));
         assert_eq!(ws.weakest(), Strength::Refused);
 
         let bypassed = Evidence {

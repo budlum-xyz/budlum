@@ -1,15 +1,12 @@
 use crate::core::account::{AccountState, ATTOS_PER_ATOM};
 use crate::core::address::Address;
 use crate::execution::coordinator::alias::{
-    derive_evm_alias, derive_foreign_account, derive_foreign_cosmos_bech32, derive_svm_alias,
-    ForeignScheme,
+    derive_evm_alias, derive_foreign_account, derive_foreign_cosmos_bech32, ForeignScheme,
 };
 use crate::execution::coordinator::assets::{
     deploy_asset_pointer, register_asset_entry, AssetStandard,
 };
-use crate::execution::coordinator::foreign::aptos::{
-    sign_aptos_ed25519_tx, AptosPayloadKind, BUDLUM_APTOS_CHAIN_ID,
-};
+use crate::execution::coordinator::foreign::aptos::{sign_aptos_ed25519_tx, AptosPayloadKind};
 use crate::execution::coordinator::foreign::cosmos::{
     sign_cosmos_tx_direct, BUDLUM_COSMOS_CHAIN_ID,
 };
@@ -33,17 +30,14 @@ use crate::execution::coordinator::universal_call::{
 };
 use crate::execution::coordinator::wasm_ee::build_valid_cosmwasm_module;
 use crate::execution::coordinator::worker::WorkerEndpoint;
-use crate::execution::coordinator::{
-    ExecutionCoordinator, UelAction, UelReceiptStatus, UelTx,
-};
+use crate::execution::coordinator::{ExecutionCoordinator, UelAction, UelReceiptStatus, UelTx};
 use crate::rpc::compat::{
     aptos::handle_aptos_rest, cosmos::handle_cosmos_rest, ethereum::handle_eth_jsonrpc,
     solana::handle_solana_jsonrpc,
 };
-use bud_isa::{encode_program, Instruction as BudInsn, Reg as BudReg};
+use bud_isa::{Instruction as BudInsn, Opcode as BudOp};
 use budlum_uel_abi::{
-    BlockContext, EeCall, EeFault, EeId, ExecutionEnvironment, HostApi, OutcomeStatus,
-    RefusalCode,
+    BlockContext, EeCall, EeFault, EeId, ExecutionEnvironment, HostApi, RefusalCode,
 };
 use k256::ecdsa::SigningKey as SecpSigningKey;
 
@@ -52,8 +46,6 @@ fn test_block_ctx(height: u64) -> BlockContext {
         height,
         timestamp_ms: 1_762_000_000_000 + height * 2_000,
         chain_id: BUDLUM_EVM_CHAIN_ID,
-        prev_randao: [0x5Au8; 32],
-        base_fee_per_bgu_attos: MIN_UEL_BASE_FEE_ATTOS,
     }
 }
 
@@ -81,13 +73,10 @@ fn review_2_refused_foreign_txs_never_mutate_state() {
         &eth_sk,
         BUDLUM_EVM_CHAIN_ID,
         7,
-        1_000,
-        2_000,
-        21_000,
+        (1_000, 2_000, 21_000),
         Some([0xAB; 20]),
         0,
-        &[],
-        &[],
+        (&[], &[]),
     )
     .expect("sign eth wrong nonce");
     let err1 = coord
@@ -115,13 +104,10 @@ fn review_2_refused_foreign_txs_never_mutate_state() {
         &eth_sk,
         BUDLUM_EVM_CHAIN_ID,
         0,
-        1_000,
-        2_000,
-        21_000,
+        (1_000, 2_000, 21_000),
         Some(pq_evm),
         5 * u128::from(ATTOS_PER_ATOM),
-        &[],
-        &[],
+        (&[], &[]),
     )
     .expect("sign unfunded transfer");
     assert!(coord
@@ -204,13 +190,10 @@ fn review_2_quantum_alert_level2_spoofed_recipient_refused() {
         &other_sk,
         BUDLUM_EVM_CHAIN_ID,
         0,
-        1_000,
-        2_000,
-        21_000,
+        (1_000, 2_000, 21_000),
         Some([0x01; 20]),
         0,
-        &[],
-        &[],
+        (&[], &[]),
     )
     .expect("sign other");
     coord
@@ -224,8 +207,7 @@ fn review_2_quantum_alert_level2_spoofed_recipient_refused() {
         )
         .expect("admit second classical account under Level 0");
     let other_addr = evm_address_from_secret_key(&other_sk).expect("other evm");
-    let other_classical_bud =
-        derive_foreign_account(ForeignScheme::EthereumSecp256k1, &other_addr);
+    let other_classical_bud = derive_foreign_account(ForeignScheme::EthereumSecp256k1, &other_addr);
 
     state.execution_state.foreign_lane.quantum_alert_level = QuantumAlertLevel::Level2Restricted;
 
@@ -234,13 +216,10 @@ fn review_2_quantum_alert_level2_spoofed_recipient_refused() {
         &eth_sk,
         BUDLUM_EVM_CHAIN_ID,
         0,
-        1_000,
-        2_000,
-        21_000,
+        (1_000, 2_000, 21_000),
         Some([0x99; 20]),
         u128::from(ATTOS_PER_ATOM),
-        &[],
-        &[],
+        (&[], &[]),
     )
     .expect("sign spoof_to");
     assert!(matches!(
@@ -260,13 +239,10 @@ fn review_2_quantum_alert_level2_spoofed_recipient_refused() {
         &eth_sk,
         BUDLUM_EVM_CHAIN_ID,
         0,
-        1_000,
-        2_000,
-        50_000,
+        (1_000, 2_000, 50_000),
         Some(pq_evm),
         0,
-        &[0xca, 0xfe],
-        &[],
+        (&[0xca, 0xfe], &[]),
     )
     .expect("sign spoof_calldata");
     assert!(matches!(
@@ -286,13 +262,10 @@ fn review_2_quantum_alert_level2_spoofed_recipient_refused() {
         &eth_sk,
         BUDLUM_EVM_CHAIN_ID,
         0,
-        1_000,
-        2_000,
-        21_000,
+        (1_000, 2_000, 21_000),
         Some(derive_evm_alias(&other_classical_bud)),
         u128::from(ATTOS_PER_ATOM),
-        &[],
-        &[],
+        (&[], &[]),
     )
     .expect("sign spoof_classical");
     assert!(matches!(
@@ -312,13 +285,10 @@ fn review_2_quantum_alert_level2_spoofed_recipient_refused() {
         &eth_sk,
         BUDLUM_EVM_CHAIN_ID,
         0,
-        1_000,
-        2_000,
-        21_000,
+        (1_000, 2_000, 21_000),
         Some(pq_evm),
         2 * u128::from(ATTOS_PER_ATOM),
-        &[],
-        &[],
+        (&[], &[]),
     )
     .expect("sign valid lvl2");
     coord
@@ -358,11 +328,13 @@ fn review_2_cross_ee_alias_collision_and_bounded_solana_window() {
 
     // Inject synthetic Cosmos bech32 alias collision and verify foreign Cosmos refuses it.
     let cosmos_sk = [0x41u8; 32];
-    let vk = SecpSigningKey::from_bytes((&cosmos_sk).into())
-        .expect("secp")
+    let sk_tmp = SecpSigningKey::from_bytes((&cosmos_sk).into()).expect("secp");
+    let pk33: [u8; 33] = sk_tmp
         .verifying_key()
-        .to_encoded_point(true);
-    let pk33: [u8; 33] = vk.as_bytes().try_into().expect("33");
+        .to_sec1_bytes()
+        .as_ref()
+        .try_into()
+        .expect("33");
     let addr20 =
         crate::execution::coordinator::foreign::cosmos::cosmos_addr20_from_compressed_pubkey(&pk33);
     let colliding_bech32 = derive_foreign_cosmos_bech32(&addr20);
@@ -468,13 +440,7 @@ fn review_2_cross_ee_alias_collision_and_bounded_solana_window() {
 #[test]
 fn review_2_static_prefix_spoofing_refused() {
     let forged_input = wrap_static_universal_input(b"spoofed_mutating_payload");
-    let calldata = encode_precompile_call(
-        EeId::WASM,
-        b"bud1target",
-        &forged_input,
-        1_000,
-        100_000,
-    );
+    let calldata = encode_precompile_call(EeId::WASM, b"bud1target", &forged_input, 1_000, 100_000);
     let err = decode_precompile_calldata(&calldata)
         .expect_err("non-static 0x...B001 call carrying STATIC_PREFIX must be refused");
     assert!(err.contains(""));
@@ -491,10 +457,11 @@ fn review_2_foreign_cross_scheme_signature_and_chain_id_confusion() {
     let bad_aptos = sign_aptos_ed25519_tx(
         &aptos_seed,
         0,
-        1,
+        &AptosPayloadKind::Script(b"transfer".to_vec()),
+        10_000,
+        100,
         now_secs + 60,
-        AptosPayloadKind::EntryFunction,
-        b"transfer",
+        1,
     );
     assert!(coord
         .process_foreign_envelope(
@@ -509,14 +476,11 @@ fn review_2_foreign_cross_scheme_signature_and_chain_id_confusion() {
 
     // 2. Adopt cross-scheme proof confusion: Ethereum scheme paired with Solana Ed25519 proof.
     let pq_seed = [0x62u8; 32];
-    let pq_pk = crate::crypto::pq::ml_dsa_public_key(
-        crate::crypto::scheme::SchemeId::ML_DSA_87,
-        &pq_seed,
-    )
-    .expect("ml-dsa-87 pk");
-    let pq_target =
-        crate::crypto::primitives::wallet_address_from_ml_dsa_87_public_key(&pq_pk)
-            .expect("pq addr");
+    let pq_pk =
+        crate::crypto::pq::ml_dsa_public_key(crate::crypto::scheme::SchemeId::ML_DSA_87, &pq_seed)
+            .expect("ml-dsa-87 pk");
+    let pq_target = crate::crypto::primitives::wallet_address_from_ml_dsa_87_public_key(&pq_pk)
+        .expect("pq addr");
     let eth_local = [0xAAu8; 20];
     let digest = adopt_signing_digest(
         ForeignScheme::EthereumSecp256k1,
@@ -594,17 +558,28 @@ fn review_2_random_cross_ee_bud_conservation_holds() {
             0x60, 0x05, 0x60, 0x0c, 0x60, 0x00, 0x39, 0x60, 0x05, 0x60, 0x00, 0xf3, 0x60, 0x2a,
             0x5f, 0x55, 0x00,
         ];
-        let wasm_mod = build_valid_cosmwasm_module(false, 16, &[]);
+        let wasm_mod = build_valid_cosmwasm_module(&["instantiate", "execute"], &[0x0b]);
         let mut move_mod = Vec::from(MOVE_BINARY_MAGIC);
         move_mod.extend_from_slice(b"review2_conservation_mod");
-        let bz_prog = encode_program(&[
-            BudInsn::AddImm {
-                dst: BudReg::R0,
-                src: BudReg::R0,
+        let bz_prog: Vec<u8> = [
+            BudInsn {
+                opcode: BudOp::Add,
+                rd: 0,
+                rs1: 0,
+                rs2: 0,
                 imm: 1,
             },
-            BudInsn::Halt,
-        ]);
+            BudInsn {
+                opcode: BudOp::Halt,
+                rd: 0,
+                rs1: 0,
+                rs2: 0,
+                imm: 0,
+            },
+        ]
+        .iter()
+        .flat_map(|i| i.try_encode().expect("encode").to_le_bytes())
+        .collect();
 
         let mut nonces = [0u64; 4];
         let deploys = [
@@ -655,10 +630,8 @@ fn review_2_random_cross_ee_bud_conservation_holds() {
         .expect("register asset");
         let wasm_ptr =
             deploy_asset_pointer(&mut state, &asset.asset_id, EeId::WASM).expect("wasm ptr");
-        let ptr_bud = crate::execution::coordinator::alias::derive_contract_account(
-            EeId::WASM,
-            &wasm_ptr,
-        );
+        let ptr_bud =
+            crate::execution::coordinator::alias::derive_contract_account(EeId::WASM, &wasm_ptr);
         assert_eq!(state.get_attos_balance(&ptr_bud), 0);
 
         // Deterministic SplitMix64 PRNG over 48 mixed cross-EE txs (including OOG/reverts).
@@ -676,11 +649,7 @@ fn review_2_random_cross_ee_bud_conservation_holds() {
             let selector = next_u64() % 5;
             let val_attos = (u128::from(next_u64() % 500_000)) * 1_000_000_000u128;
             // Deliberately inject occasional low gas limits to trigger deterministic OOG rollbacks.
-            let gas_limit_bgu = if step % 9 == 7 {
-                500
-            } else {
-                250_000
-            };
+            let gas_limit_bgu = if step % 9 == 7 { 500 } else { 250_000 };
 
             let (ee, target, input) = match selector {
                 0 => (EeId::EVM, deployed_targets[0].1.clone(), Vec::new()),
@@ -690,10 +659,8 @@ fn review_2_random_cross_ee_bud_conservation_holds() {
                     br#"{"set":{"key":"k","val":"v"}}"#.to_vec(),
                 ),
                 2 => {
-                    let svm_env = SvmInstructionEnvelope {
-                        program_id: SVM_MEMO_PROGRAM_ID,
-                        accounts: Vec::new(),
-                        data: b"bud-conservation".to_vec(),
+                    let svm_env = SvmInstructionEnvelope::Memo {
+                        utf8_memo: String::from("bud-conservation"),
                     };
                     (
                         EeId::SVM,
@@ -703,9 +670,10 @@ fn review_2_random_cross_ee_bud_conservation_holds() {
                 }
                 3 => {
                     let mv =
-                        crate::execution::coordinator::move_ee::MoveCallEnvelope::WriteResource {
-                            resource_tag: String::from("0x1::Vault::State"),
-                            payload: vec![step as u8],
+                        crate::execution::coordinator::move_ee::MoveCallEnvelope::EntryFunction {
+                            module_id: String::from("0x1::Vault"),
+                            function_name: String::from("touch"),
+                            args: vec![format!("{step}")],
                         };
                     (
                         EeId::MOVE,
@@ -772,36 +740,35 @@ impl ExecutionEnvironment for FaultingWorkerEe {
     fn id(&self) -> EeId {
         EeId::SVM
     }
-    fn version(&self) -> u32 {
-        1
-    }
-    fn execute(&mut self, _call: EeCall, _host: &mut dyn HostApi) -> budlum_uel_abi::EeOutcome {
-        budlum_uel_abi::EeOutcome {
-            status: OutcomeStatus::Fault(EeFault {
-                message: String::from("simulated worker crash R-01"),
-            }),
-            gas_used: 5_000,
-            output: Vec::new(),
-            logs: Vec::new(),
-        }
-    }
-    fn query(
-        &self,
-        _q: budlum_uel_abi::EeQuery,
-        _h: &dyn budlum_uel_abi::HostRead,
-    ) -> Result<Vec<u8>, budlum_uel_abi::EeRefusal> {
-        Err(budlum_uel_abi::EeRefusal {
-            code: RefusalCode::UnsupportedFeature,
-            detail: String::from("faulting worker"),
-        })
-    }
-    fn validate_code(
+    fn validate_deploy(
         &self,
         _code: &[u8],
     ) -> Result<budlum_uel_abi::CodeInfo, budlum_uel_abi::EeRefusal> {
         Err(budlum_uel_abi::EeRefusal {
             code: RefusalCode::InvalidCode,
-            detail: String::from("faulting worker"),
+            message: String::from("faulting worker"),
+        })
+    }
+    fn execute(
+        &mut self,
+        _ctx: &BlockContext,
+        _call: &EeCall,
+        _host: &mut dyn HostApi,
+    ) -> Result<budlum_uel_abi::EeOutcome, EeFault> {
+        Err(EeFault {
+            ee: EeId::SVM,
+            panic_digest: budlum_uel_abi::panic_digest(EeId::SVM, "simulated worker crash R-01"),
+        })
+    }
+    fn query(
+        &self,
+        _ctx: &BlockContext,
+        _q: &budlum_uel_abi::EeQuery,
+        _h: &dyn budlum_uel_abi::HostRead,
+    ) -> Result<Vec<u8>, budlum_uel_abi::EeRefusal> {
+        Err(budlum_uel_abi::EeRefusal {
+            code: RefusalCode::Unsupported,
+            message: String::from("faulting worker"),
         })
     }
 }
@@ -883,7 +850,7 @@ fn review_2_risk_matrix_r01_r08_r18_r21_and_rpc_isolation() {
     // and bound oversized/malformed requests deterministically.
     let root_pre_rpc = state.execution_state.execution_root();
     let oversized = "x".repeat(300 * 1024);
-    let eth_resp = handle_eth_jsonrpc(&state, &oversized);
+    let eth_resp = handle_eth_jsonrpc(&state, "127.0.0.1", &oversized);
     let sol_resp = handle_solana_jsonrpc(&state, &oversized);
     let (apt_code, _) = handle_aptos_rest(&state, "GET", "/v1", None);
     let (cos_code, _) = handle_cosmos_rest(

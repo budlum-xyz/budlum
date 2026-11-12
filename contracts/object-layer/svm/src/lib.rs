@@ -1,8 +1,8 @@
 //! Budlum settlement endpoint, SVM family.
 //!
-//! Takes custody of SPL tokens and NFT mints that enter the Budlum Universal
-//! Object Layer, carries home calls, and tracks the last accepted Budlum
-//! checkpoint for the silence window. Deployed with the upgrade authority
+//! Custody and home calls are closed until departure and escape can return
+//! assets. Only finalized checkpoint tracking remains available. The program
+//! is deployed with the upgrade authority
 //! set to none: no admin, no upgrade, no pause.
 //!
 //! Events follow the Anchor layout so standard indexers decode them:
@@ -102,11 +102,19 @@ pub enum Instruction {
         collection: Option<Pubkey>,
     },
     /// Accounts: sender (signer), sender's nonce PDA (writable).
-    HomeCall { calls: Vec<u8> },
+    HomeCall {
+        calls: Vec<u8>,
+    },
     /// Accounts: endpoint state PDA (writable).
-    AcceptHeader { height: u64 },
-    Release { proof: Vec<u8> },
-    Escape { proof: Vec<u8> },
+    AcceptHeader {
+        height: u64,
+    },
+    Release {
+        proof: Vec<u8>,
+    },
+    Escape {
+        proof: Vec<u8>,
+    },
 }
 
 fn emit<E: BorshSerialize>(name: &str, event: &E) -> ProgramResult {
@@ -139,9 +147,22 @@ pub fn process_instruction(
 ) -> ProgramResult {
     let instruction =
         Instruction::try_from_slice(input).map_err(|_| ProgramError::InvalidInstructionData)?;
+    // Until the exit proofs exist, a vault transfer would be irreversible.
+    // Refuse deposit and home-call events before touching any account.
+    if matches!(
+        &instruction,
+        Instruction::Deposit { .. } | Instruction::HomeCall { .. }
+    ) {
+        return Err(ProgramError::Custom(NOT_OPEN));
+    }
     let mut it = accounts.iter();
     match instruction {
-        Instruction::Deposit { kind, amount, recipient, collection } => {
+        Instruction::Deposit {
+            kind,
+            amount,
+            recipient,
+            collection,
+        } => {
             let depositor = next_account_info(&mut it)?;
             let from = next_account_info(&mut it)?;
             let vault = next_account_info(&mut it)?;
@@ -169,18 +190,34 @@ pub fn process_instruction(
                 }
             }
             let before = token_amount(vault)?;
-            let ix = spl_transfer(token_program.key, from.key, vault.key, depositor.key, amount);
+            let ix = spl_transfer(
+                token_program.key,
+                from.key,
+                vault.key,
+                depositor.key,
+                amount,
+            );
             solana_program::program::invoke(
                 &ix,
-                &[from.clone(), vault.clone(), depositor.clone(), token_program.clone()],
+                &[
+                    from.clone(),
+                    vault.clone(),
+                    depositor.clone(),
+                    token_program.clone(),
+                ],
             )?;
             let received = token_amount(vault)?.saturating_sub(before);
             if received == 0 {
                 return Err(ProgramError::Custom(NOTHING_RECEIVED));
             }
+            // The class of a unique asset is the collection its mint declares,
+            // never a value the caller asserts. Refuse the unique path until
+            // on-chain collection membership is read from the mint's metadata.
             let (class, native_id) = match (kind, collection) {
                 (FUNGIBLE, None) => (*mint.key, None),
-                (UNIQUE, Some(c)) if received == 1 => (c, Some(*mint.key)),
+                (UNIQUE, Some(_)) if received == 1 => {
+                    return Err(ProgramError::InvalidInstructionData);
+                }
                 _ => return Err(ProgramError::InvalidInstructionData),
             };
             emit(
@@ -206,14 +243,23 @@ pub fn process_instruction(
             if *nonce_account.key != expected || nonce_account.owner != program_id {
                 return Err(ProgramError::InvalidSeeds);
             }
-            let mut state = NonceState::try_from_slice(&nonce_account.try_borrow_data()?)
-                .unwrap_or_default();
+            let mut state =
+                NonceState::try_from_slice(&nonce_account.try_borrow_data()?).unwrap_or_default();
             let nonce = state.next;
-            state.next = nonce.checked_add(1).ok_or(ProgramError::ArithmeticOverflow)?;
+            state.next = nonce
+                .checked_add(1)
+                .ok_or(ProgramError::ArithmeticOverflow)?;
             state
                 .serialize(&mut &mut nonce_account.try_borrow_mut_data()?[..])
                 .map_err(|_| ProgramError::AccountDataTooSmall)?;
-            emit("HomeCallEvent", &HomeCallEvent { sender: *sender.key, nonce, calls })
+            emit(
+                "HomeCallEvent",
+                &HomeCallEvent {
+                    sender: *sender.key,
+                    nonce,
+                    calls,
+                },
+            )
         }
         Instruction::AcceptHeader { height } => {
             let state_account = next_account_info(&mut it)?;
@@ -263,5 +309,26 @@ fn spl_transfer(
             AccountMeta::new_readonly(*authority, true),
         ],
         data,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn custody_and_home_call_are_closed_before_accounts_are_touched() {
+        // Borsh enum discriminant 0 = Deposit, then kind, amount and two
+        // absent option fields. Empty accounts would otherwise fail later.
+        let mut deposit = vec![0, FUNGIBLE];
+        deposit.extend_from_slice(&1u64.to_le_bytes());
+        deposit.extend_from_slice(&[0, 0]);
+        let home_call = [1, 0, 0, 0, 0]; // variant 1, empty call vector
+        for input in [&deposit[..], &home_call[..]] {
+            assert_eq!(
+                process_instruction(&Pubkey::new_unique(), &[], input),
+                Err(ProgramError::Custom(NOT_OPEN))
+            );
+        }
     }
 }

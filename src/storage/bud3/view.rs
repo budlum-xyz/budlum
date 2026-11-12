@@ -134,7 +134,9 @@ pub fn collect_symbols_full_then_mobile<N: NetworkSymbolSource>(
     object: &ObjectKey,
     network: &N,
 ) -> Result<(ObjectRecord, Vec<Symbol>), ViewBud3Error> {
-    let entry = registry.object(object).ok_or(ViewBud3Error::UnknownObject)?;
+    let entry = registry
+        .object(object)
+        .ok_or(ViewBud3Error::UnknownObject)?;
     let record = entry.record.clone();
     let mut shares_ordered: Vec<(u64, Share)> = entry
         .shares
@@ -153,7 +155,8 @@ pub fn collect_symbols_full_then_mobile<N: NetworkSymbolSource>(
 
     let mut collected = Vec::new();
     for (seg, sh) in shares_ordered {
-        let syms = network.fetch_holder_symbols(&sh.validator, object, seg, sh.first_esi, sh.symbols);
+        let syms =
+            network.fetch_holder_symbols(&sh.validator, object, seg, sh.first_esi, sh.symbols);
         collected.extend(syms);
     }
     Ok((record, collected))
@@ -194,7 +197,9 @@ pub fn fallback_decode_public<N: NetworkSymbolSource>(
     receipt: &PaidViewReceipt,
     network: &N,
 ) -> Result<Vec<u8>, ViewBud3Error> {
-    let entry = registry.object(object).ok_or(ViewBud3Error::UnknownObject)?;
+    let entry = registry
+        .object(object)
+        .ok_or(ViewBud3Error::UnknownObject)?;
     if entry.record.content_id.kind == ContentIdKind::Sealed {
         return Err(ViewBud3Error::SealedFallbackForbidden);
     }
@@ -238,10 +243,11 @@ impl RevealSessionManager {
             return Err(ViewBud3Error::TooManyRevealSessions);
         }
         let (record, symbols) = collect_symbols_full_then_mobile(registry, object, network)?;
-        let seg = Segmentation::new(record.object_len, &record.profile)
-            .ok_or(ViewBud3Error::Pipeline(PipelineError::Fountain(FountainError::InvalidProfile)))?;
-        let seg_count =
-            usize::try_from(seg.count()).map_err(|_| ViewBud3Error::Pipeline(PipelineError::TooLarge))?;
+        let seg = Segmentation::new(record.object_len, &record.profile).ok_or(
+            ViewBud3Error::Pipeline(PipelineError::Fountain(FountainError::InvalidProfile)),
+        )?;
+        let seg_count = usize::try_from(seg.count())
+            .map_err(|_| ViewBud3Error::Pipeline(PipelineError::TooLarge))?;
         let mut decoders = Vec::with_capacity(seg_count.min(1 << 16));
         for index in 0..seg.count() {
             let len = seg
@@ -355,9 +361,13 @@ mod tests {
         let mut net = MemorySymbolNetwork::default();
 
         // Register public object across 1 Full + 1 Mobile holder.
-        let pub_up =
-            prepare_public_upload(b"network-collected reveal payload", &SMALL, &Bud3Limits::default(), 8)
-                .unwrap();
+        let pub_up = prepare_public_upload(
+            b"network-collected reveal payload",
+            &SMALL,
+            &Bud3Limits::default(),
+            8,
+        )
+        .unwrap();
         let pub_key = pub_up.record.commitment;
         let full_h = [10u8; 32];
         let mob_h = [11u8; 32];
@@ -439,9 +449,15 @@ mod tests {
 
         // Sealed content NEVER allows G8 validator fallback decode, even when paid!
         let ck = derive_object_content_key(&[0x77; 32], 1);
-        let sealed_up =
-            prepare_sealed_upload(b"private", &ck, [0x22; 24], &SMALL, &Bud3Limits::default(), 8)
-                .unwrap();
+        let sealed_up = prepare_sealed_upload(
+            b"private",
+            &ck,
+            [0x22; 24],
+            &SMALL,
+            &Bud3Limits::default(),
+            8,
+        )
+        .unwrap();
         let sealed_key = sealed_up.record.commitment;
         reg.register_object(
             [1; 32],

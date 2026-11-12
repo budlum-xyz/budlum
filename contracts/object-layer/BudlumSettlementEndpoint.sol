@@ -1,31 +1,35 @@
 // SPDX-License-Identifier: LicenseRef-PolyForm-Shield-1.0.0
+// EIP-2537/Cancun+ target chains support EIP-3855 PUSH0 natively.
+// aderyn-fp-next-line(push-zero-opcode)
 pragma solidity 0.8.26;
 
-interface IERC20Like {
-    function balanceOf(address who) external view returns (uint256);
-    function transferFrom(address from, address to, uint256 amount) external returns (bool);
-}
-
-interface IBudlumObjectLayerFinality {
-    function heightFinal(uint64 height) external view returns (bool);
-}
+import {BudlumHash} from "../lib/BudlumHash.sol";
+import {IBudlumObjectLayerFinality} from "./BudlumFinalityVerifier.sol";
 
 /// @title Budlum settlement endpoint (EVM family).
-/// @notice Takes custody of ERC-20 and ERC-721 assets that enter the Budlum
-///         Universal Object Layer, carries home calls, and tracks the last
-///         accepted Budlum checkpoint for the silence window.
+/// @notice Closed EVM endpoint for the Budlum Universal Object Layer. It
+///         tracks finalized checkpoints, but rejects custody and home calls
+///         until departure and emergency-exit proofs can release assets.
 ///         No admin key. Not upgradeable. Not pausable.
 /// @dev Event layouts are pinned by `src/object_layer/family/evm.rs`. Every
 ///      field sits in `data`; nothing is indexed.
 contract BudlumSettlementEndpoint {
     uint8 internal constant FUNGIBLE = 0;
     uint8 internal constant UNIQUE = 1;
+    uint256 private constant HASH_QUAD_FIELDS = 4;
+    uint256 private constant SHIFT_BYTE_1 = 8;
+    uint256 private constant SHIFT_BYTE_2 = 16;
+    uint256 private constant SHIFT_BYTE_3 = 24;
 
     IBudlumObjectLayerFinality public immutable verifier;
     /// Seconds without a newly accepted checkpoint before the exit opens.
     uint256 public immutable silenceWindow;
 
     uint64 public lastAcceptedHeight;
+    /// Authenticated header at `lastAcceptedHeight`. A future exit must prove
+    /// its object-layer state against this exact checkpoint, not a caller's
+    /// unbound choice of header at the same height.
+    bytes32 public lastAcceptedHeaderHash;
     uint256 public lastAcceptedAt;
     mapping(address => uint64) public homeNonce;
 
@@ -37,12 +41,13 @@ contract BudlumSettlementEndpoint {
     event Released(bytes32 departureId);
     /// budlum/object-layer/escaped/v1
     event Escaped(uint8 kind, address token, uint256 tokenId, address to);
+    /// budlum/object-layer/header-accepted/v1
+    event HeaderAccepted(uint64 height, bytes32 headerHash);
 
-    error NothingReceived();
-    error TransferFailed();
     error NotFinal();
     error NotNewer();
     error NotOpen(string step);
+    error InvalidAssetClass();
 
     constructor(IBudlumObjectLayerFinality verifier_, uint256 silenceWindow_) {
         require(silenceWindow_ > 0, "silence window");
@@ -51,43 +56,82 @@ contract BudlumSettlementEndpoint {
         lastAcceptedAt = block.timestamp;
     }
 
-    /// ERC-721 arrival. `data` is the 32-byte Budlum recipient, or empty to
-    /// keep the asset with the depositor's home identity.
-    function onERC721Received(address, address from, uint256 tokenId, bytes calldata data)
+    /// Until release and escape can verify finalized ownership, accepting an
+    /// ERC-721 would take custody without any possible exit. A caller can also
+    /// invoke this hook directly and forge an Arrive event without transferring
+    /// a token. Refuse both cases rather than returning the ERC-721 selector.
+    function onERC721Received(address, address, uint256, bytes calldata)
         external
+        pure
         returns (bytes4)
     {
-        bytes32 recipient = data.length == 32 ? bytes32(data) : bytes32(0);
-        emit Arrive(UNIQUE, msg.sender, tokenId, 1, from, recipient);
-        return this.onERC721Received.selector;
+        revert NotOpen("object-layer arrival and exit proofs");
     }
 
-    /// ERC-20 arrival. The amount is what the endpoint received (balance
-    /// difference), so fee-on-transfer tokens are measured, not trusted.
-    function deposit20(address token, uint256 amount, bytes32 budlumRecipient) external {
-        uint256 before = IERC20Like(token).balanceOf(address(this));
-        if (!IERC20Like(token).transferFrom(msg.sender, address(this), amount)) revert TransferFailed();
-        uint256 received = IERC20Like(token).balanceOf(address(this)) - before;
-        if (received == 0) revert NothingReceived();
-        emit Arrive(FUNGIBLE, token, 0, received, msg.sender, budlumRecipient);
+    /// ERC-20 transfers cannot be returned while departure and escape remain
+    /// closed. This door must not consume tokens or emit an arrival yet.
+    function deposit20(address, uint256, bytes32) external pure {
+        revert NotOpen("object-layer arrival and exit proofs");
     }
 
-    /// A home call: Budlum runs `calls` as the home identity of msg.sender.
-    function homeCall(bytes calldata calls) external {
-        uint64 nonce = homeNonce[msg.sender]++;
-        emit HomeCall(msg.sender, nonce, calls);
+    /// Home identity calls must not create apparently actionable events before
+    /// Budlum can verify and execute them through the object-layer door.
+    function homeCall(bytes calldata) external pure {
+        revert NotOpen("object-layer home call proof");
     }
 
-    /// Accept a newer final Budlum checkpoint and restart the silence clock.
+    /// Pin the exact authenticated header, not just a finality boolean, before
+    /// restarting the silence clock. This is a prerequisite for any later
+    /// departure/escape opening; it does not activate custody or exit.
     function acceptHeader(uint64 height) external {
         if (height <= lastAcceptedHeight) revert NotNewer();
-        if (!verifier.heightFinal(height)) revert NotFinal();
+        bytes32 headerHash = _readFinalHeader(height);
         lastAcceptedHeight = height;
+        lastAcceptedHeaderHash = headerHash;
         lastAcceptedAt = block.timestamp;
+        emit HeaderAccepted(height, headerHash);
     }
 
-    function silent() public view returns (bool) {
+    function silent() external view returns (bool) {
         return block.timestamp > lastAcceptedAt + silenceWindow;
+    }
+
+    /// EVM class identity is the Rust `AssetClassId::derive` value, not a
+    /// wrapped token address. The class reference is the kind byte followed
+    /// by the 20-byte *home* contract address. Read-only: this grants no
+    /// ownership or permission to release anything.
+    function assetClassId(uint32 homeDomain, uint8 kind, address token) public pure returns (bytes32) {
+        if (kind > UNIQUE || token == address(0)) revert InvalidAssetClass();
+        bytes memory classRef = bytes.concat(bytes1(kind), bytes20(token));
+        bytes[] memory fields = new bytes[](HASH_QUAD_FIELDS);
+        fields[0] = "BDLM_OBJECT_LAYER_CLASS_V1";
+        fields[1] = bytes.concat(
+            bytes1(uint8(homeDomain)),
+            bytes1(uint8(homeDomain >> SHIFT_BYTE_1)),
+            bytes1(uint8(homeDomain >> SHIFT_BYTE_2)),
+            bytes1(uint8(homeDomain >> SHIFT_BYTE_3))
+        );
+        fields[2] = BudlumHash.le64(uint64(classRef.length));
+        fields[3] = classRef;
+        return BudlumHash.hashFields(fields);
+    }
+
+    /// The Rust `AssetId::derive` value. Fungible units have no native id;
+    /// ERC-721 token ids are exactly one 32-byte big-endian ABI word. The
+    /// class and token id remain stable over repeated arrivals and round trips.
+    function assetId(uint32 homeDomain, uint8 kind, address token, uint256 tokenId)
+        external
+        pure
+        returns (bytes32)
+    {
+        if (kind == FUNGIBLE && tokenId != 0) revert InvalidAssetClass();
+        bytes memory nativeId = kind == FUNGIBLE ? new bytes(0) : bytes.concat(bytes32(tokenId));
+        bytes[] memory fields = new bytes[](HASH_QUAD_FIELDS);
+        fields[0] = "BDLM_OBJECT_LAYER_ASSET_V1";
+        fields[1] = bytes.concat(assetClassId(homeDomain, kind, token));
+        fields[2] = BudlumHash.le64(uint64(nativeId.length));
+        fields[3] = nativeId;
+        return BudlumHash.hashFields(fields);
     }
 
     /// Opens later: needs an opening of the object-layer root of
@@ -100,5 +144,12 @@ contract BudlumSettlementEndpoint {
     /// accepted header, which needs the same opening.
     function escape(bytes calldata) external pure {
         revert NotOpen("escape proof");
+    }
+
+    function _readFinalHeader(uint64 height) internal view returns (bytes32) {
+        if (!verifier.heightFinal(height)) revert NotFinal();
+        bytes32 headerHash = verifier.headerAt(height);
+        if (headerHash == bytes32(0)) revert NotFinal();
+        return headerHash;
     }
 }

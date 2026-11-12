@@ -59,12 +59,11 @@ pub use invalid_vote::InvalidVoteTracker;
 pub use liveness::{LivenessTracker, SuspensionNotice};
 pub use presence::{
     hours_to_epochs, presence_signing_digest, sign_presence_signal, GossipIngestOutcome,
-    PresenceAggregate,
-    PresenceClass, PresenceDoubleSignEvidence, PresenceError, PresenceGossipInbox, PresenceSignal,
-    PresenceTracker, ValidatorPresenceState, DUPLICATE_SIGNAL_PEER_PENALTY,
-    FULL_PRESENCE_WINDOW_EPOCHS, FULL_SUSPENSION_HOURS, IOS_OPPORTUNISTIC_SUSPENSION_HOURS,
-    MOBILE_PRESENCE_WINDOW_EPOCHS, MOBILE_SUSPENSION_HOURS, PRESENCE_DOUBLE_SIGN_SLASH_PPM,
-    PRESENCE_GOSSIP_TOPIC, RESUME_ACTIVATION_DELAY_EPOCHS,
+    PresenceAggregate, PresenceClass, PresenceDoubleSignEvidence, PresenceError,
+    PresenceGossipInbox, PresenceSignal, PresenceTracker, ValidatorPresenceState,
+    DUPLICATE_SIGNAL_PEER_PENALTY, FULL_PRESENCE_WINDOW_EPOCHS, FULL_SUSPENSION_HOURS,
+    IOS_OPPORTUNISTIC_SUSPENSION_HOURS, MOBILE_PRESENCE_WINDOW_EPOCHS, MOBILE_SUSPENSION_HOURS,
+    PRESENCE_DOUBLE_SIGN_SLASH_PPM, PRESENCE_GOSSIP_TOPIC, RESUME_ACTIVATION_DELAY_EPOCHS,
 };
 
 pub use evidence::{EvidenceError, ProofProvenance, SlashingProof, SlashingReport};

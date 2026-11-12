@@ -1,3 +1,5 @@
+//! Convenience: exposed for CLI, RPC, SDK, and multi-VM runtime callers.
+
 use crate::core::account::AccountState;
 use crate::core::address::Address;
 use crate::core::chain_config::privacy_transfers_enabled;
@@ -91,7 +93,6 @@ fn privacy_closed_refusal(chain_id: u64, mainnet_message: &'static str) -> Budlu
 /// the per-request lottery and commit-reveal must all be present before the
 /// layer can open on a public network. Only devnet is open; unknown chain ids
 /// fail closed rather than inheriting another network's policy.
-
 fn ai_layer_enabled(chain_id: u64) -> bool {
     chain_id
         == crate::core::chain_config::Network::Devnet
@@ -103,7 +104,6 @@ fn ai_layer_enabled(chain_id: u64) -> bool {
 ///
 /// The Data Market (`AiOfferData` and `AiPurchaseData`) is an open application
 /// surface with its own grant, replay and payment rules; it is not gated here.
-
 fn is_ai_layer_transaction(tx_type: &TransactionType) -> bool {
     match tx_type {
         TransactionType::AiModelRegister(_)
@@ -232,15 +232,32 @@ impl Executor {
         };
         let reward_per_verifier = max_fee / count;
         let remainder = max_fee % count;
+        // A later recipient can overflow after an earlier one has been paid.
+        // Aggregate duplicates and check every resulting balance before any
+        // write, so a refused transaction changes no account (G-4).
+        let mut payouts = std::collections::BTreeMap::<Address, u64>::new();
         for (i, verifier_addr) in verifiers.iter().enumerate() {
             let extra = u64::from((i as u64) < remainder);
             let reward = reward_per_verifier.checked_add(extra).ok_or_else(|| {
                 BudlumError::validation("balance_overflow", "AI verifier reward overflow")
             })?;
-            let acc = state.get_or_create(verifier_addr);
-            acc.balance = acc.balance.checked_add(reward).ok_or_else(|| {
+            let total = payouts.entry(*verifier_addr).or_default();
+            *total = total.checked_add(reward).ok_or_else(|| {
                 BudlumError::validation("balance_overflow", "AI verifier reward overflow")
             })?;
+        }
+        for (verifier_addr, reward) in &payouts {
+            state
+                .get_balance(verifier_addr)
+                .checked_add(*reward)
+                .ok_or_else(|| {
+                    BudlumError::validation("balance_overflow", "AI verifier reward overflow")
+                })?;
+        }
+        for (verifier_addr, reward) in payouts {
+            state
+                .try_add_balance(&verifier_addr, reward)
+                .map_err(|error| BudlumError::validation("balance_overflow", error))?;
         }
         Ok(())
     }
@@ -1645,6 +1662,17 @@ impl Executor {
                 // Root to be present in the consensus-owned, finalized
                 // External-root registry. A relayer cannot create that
                 // Anchor by submitting this transaction.
+                if let crate::core::transaction::ExternalChain::Custom(custom_id) = res.chain {
+                    if custom_id == 0
+                        || crate::core::transaction::ExternalChain::from_domain_id(custom_id)
+                            .is_some()
+                    {
+                        return Err(BudlumError::validation(
+                            "relayer_reserved_custom_chain",
+                            "custom external chain id collides with a reserved canonical chain slot",
+                        ));
+                    }
+                }
                 let domain_id = res.chain.domain_id();
                 match state.external_roots.get(&domain_id) {
                     Some(finalized_root) if finalized_root == &res.external_state_root => {}
@@ -2654,7 +2682,7 @@ impl Executor {
                 }
                 state
                     .note_registry
-                    .insert_note(*commitment)
+                    .insert_note_for_owner(*commitment, tx.from)
                     .map_err(|e| BudlumError::validation("privacy_note_insert", e))?;
                 let sender = state.get_or_create(&tx.from);
                 sender.balance = sender.balance.checked_sub(tx.fee).ok_or_else(|| {
@@ -2754,7 +2782,8 @@ impl Executor {
                 }
                 state
                     .note_registry
-                    .apply_transfer_with_proofs(
+                    .apply_transfer_for_owner(
+                        &tx.from,
                         &sub.spent_commitments,
                         &sub.nullifiers,
                         &sub.output_commitments,
@@ -3206,7 +3235,7 @@ impl Executor {
                         let floor = network.map_or(1, |n| n.class_floor(registration.class));
                         state
                             .validator_directory
-                            .register(registration, tx.amount, floor, epoch)
+                            .register_verified(registration, tx.amount, floor, epoch, tx.chain_id)
                             .map_err(refuse)?;
                         if let Some(seat) = &registration.seat {
                             if let Err(message) = state.install_full_validator(
@@ -3356,10 +3385,12 @@ impl Executor {
                          signature envelope must be empty",
                     ));
                 }
-                crate::cross_domain::message::register_cross_domain_on_state(state, message)
-                    .map_err(|e| {
-                        BudlumError::validation("cross_domain_message_failed", e.to_string())
-                    })?;
+                crate::cross_domain::message::register_relayed_cross_domain_on_state(
+                    state, message,
+                )
+                .map_err(|e| {
+                    BudlumError::validation("cross_domain_message_failed", e.to_string())
+                })?;
                 let sender = state.get_or_create(&tx.from);
                 sender.balance = sender.balance.checked_sub(tx.fee).ok_or_else(|| {
                     BudlumError::validation("balance_underflow", "balance underflow")
@@ -3452,7 +3483,7 @@ impl Executor {
                             "Unknown bridge transfer".to_string(),
                         )
                     })?;
-                burn.verify_holder_authorization(holder, tx.chain_id)
+                burn.verify_holder_authorization_in(&state.scheme_registry, holder, tx.chain_id)
                     .map_err(|e| BudlumError::validation("bridge_burn_failed", e))?;
                 // The refund window is a number of blocks past the burn, so
                 // its base is a height this chain has actually reached, not a
@@ -3785,10 +3816,7 @@ impl Executor {
     }
 
     /// Enforce the candidate nonce even when pruned witnesses skip admission.
-    fn check_block_transaction_nonce(
-        state: &AccountState,
-        tx: &Transaction,
-    ) -> BudlumResult<()> {
+    fn check_block_transaction_nonce(state: &AccountState, tx: &Transaction) -> BudlumResult<()> {
         let expected = state.get_nonce(&tx.from);
         if tx.nonce != expected {
             return Err(BudlumError::validation(
@@ -4001,12 +4029,13 @@ impl Executor {
 
 #[cfg(test)]
 mod tests {
-    use crate::core::chain_config::privacy_transfers_enabled;
     use super::{
         ai_execution_backend_allowed, ai_layer_enabled, check_ai_exec_dims,
+        check_transaction_features, is_ai_layer_exit, is_ai_layer_transaction,
     };
     use crate::core::account::AccountState;
     use crate::core::address::Address;
+    use crate::core::chain_config::privacy_transfers_enabled;
     use crate::core::transaction::{Transaction, TransactionType};
     use crate::execution::executor::Executor;
 
@@ -4398,10 +4427,7 @@ mod tests {
     #[test]
     fn no_executor_gate_reads_the_raw_sender_balance() {
         let src = include_str!("executor.rs");
-        let production = src
-            .split("#[cfg(test)]\nmod tests {")
-            .next()
-            .unwrap_or(src);
+        let production = src.split("#[cfg(test)]\nmod tests {").next().unwrap_or(src);
         assert!(
             !production.contains("get_balance(&tx.from) <"),
             "a fee or cost gate compares the raw balance; read `spendable_balance`"
@@ -4420,6 +4446,30 @@ mod tests {
         assert_eq!(state.get_balance(&vs[0]), 4);
         assert_eq!(state.get_balance(&vs[1]), 3);
         assert_eq!(state.get_balance(&vs[2]), 3);
+    }
+
+    #[test]
+    fn verifier_reward_overflow_refuses_without_partial_account_writes() {
+        let mut state = crate::core::account::AccountState::new();
+        let first = crate::core::address::Address::from([1u8; 32]);
+        let overflowing = crate::core::address::Address::from([2u8; 32]);
+        state.add_balance(&overflowing, u64::MAX);
+        let before = bincode::serialize(&state.accounts).unwrap();
+        assert!(
+            super::Executor::pay_agreeing_verifiers(&mut state, 2, &[first, overflowing],).is_err()
+        );
+        assert_eq!(bincode::serialize(&state.accounts).unwrap(), before);
+        assert_eq!(state.get_balance(&first), 0);
+        assert_eq!(state.get_balance(&overflowing), u64::MAX);
+
+        let duplicate = crate::core::address::Address::from([3u8; 32]);
+        state.add_balance(&duplicate, u64::MAX - 4);
+        let before = bincode::serialize(&state.accounts).unwrap();
+        assert!(
+            super::Executor::pay_agreeing_verifiers(&mut state, 6, &[duplicate, duplicate],)
+                .is_err()
+        );
+        assert_eq!(bincode::serialize(&state.accounts).unwrap(), before);
     }
 
     #[test]
@@ -4986,12 +5036,9 @@ mod tests {
         exhausted_state.add_balance(&sender, 100);
         exhausted_state.get_or_create(&sender).nonce = u64::MAX;
         let exhausted_root = exhausted_state.calculate_state_root();
-        let error = Executor::apply_block_checked(
-            &mut exhausted_state,
-            &[transfer(u64::MAX, 1)],
-            None,
-        )
-        .unwrap_err();
+        let error =
+            Executor::apply_block_checked(&mut exhausted_state, &[transfer(u64::MAX, 1)], None)
+                .unwrap_err();
         assert_eq!(error.code(), "nonce_exhausted");
         assert_eq!(exhausted_state.calculate_state_root(), exhausted_root);
         assert_eq!(exhausted_state.get_nonce(&sender), u64::MAX);
@@ -5026,5 +5073,4 @@ mod tests {
         assert_eq!(state.get_balance(&recipient), 0);
         assert_eq!(state.get_nonce(&sender), u64::MAX);
     }
-
 }

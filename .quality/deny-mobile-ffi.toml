@@ -1,0 +1,212 @@
+# deny.toml: the Budlum Core supply chain gate
+#
+# This file is a required CI gate through `cargo deny check` (strict mode:
+# a failing gate from day one; NO loosening). Its counterpart on the BudZero side
+# is budzero/deny.toml; the two graphs are checked in separate matrix steps.
+#
+# Schema: cargo-deny 0.20+ (the old keys were removed).
+# In the modern semantics every licence NOT on the `allow` list is an automatic FAIL
+# (this preserves the old `unlicensed = "deny"` plus copyleft ban behaviour;
+# the GPL/AGPL family is refused because it is not in allow).
+#
+# License additions are not made WITHOUT EVIDENCE: if CI turns red the allow list
+# is widened only for permissively licensed (OSI/FSF-free) crates, with the reason
+# written in the commit message (in the spirit of a ratchet).
+
+[graph]
+targets = []
+
+[licenses]
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "BSD-3-Clause",
+    "BSD-2-Clause",
+    "CC0-1.0",
+    "ISC",
+    "Zlib",
+    # A justified addition (first run, with evidence): the icu_* crate family
+    # (the idna_adapter <- url <- libp2p chain) is licensed Unicode-3.0.
+    # Unicode-3.0 is an OSI approved permissive license (NOT copyleft);
+    # SPDX: Unicode-3.0. In a local cargo-deny 0.20.2 run, this license was the sole
+    # cause of all 19 refusals (no other license violation).
+    "Unicode-3.0",
+    # For the D1 relayer, reqwest -> webpki-roots 1.0.9 is licensed CDLA-Permissive-2.0.
+    # CDLA-Permissive-2.0 is not OSI approved but it is permissive, a data license; required for the reqwest chain.
+    # Reason: webpki-roots uses CDLA-Permissive-2.0 for the Mozilla CA bundle data, which is permissive.
+    "CDLA-Permissive-2.0",
+    # PolyForm Shield 1.0.0: this repository's OWN license (a LicenseRef,
+    # outside SPDX). Because cargo-deny also checks the license of workspace members
+    # it goes into the allow list.
+    "LicenseRef-PolyForm-Shield-1.0.0",
+]
+
+# On copyleft (GPL / AGPL / LGPL / SSPL): there is deliberately no `deny`
+# list here. cargo-deny removed `[licenses] deny` in 0.20 because
+# the allow-list above is already closed, anything absent from it is
+# refused, so a separate deny list would be a second spelling of the same
+# rule and, worse, a place where someone could later "fix" a failure by
+# quietly editing one list while the other still passed.
+#
+# Verified rather than assumed (cargo-deny 0.20.2, 2026-07-27): a crate
+# declaring `GPL-3.0` against this exact config fails with
+#   error[rejected]: license is not explicitly allowed
+#   licenses FAILED   (exit 4)
+# The CI job carries a canary that re-proves the gate can reject, so a green
+# result cannot come from the check silently doing nothing.
+#
+# A dual-licensed crate is a different case and is accepted through its
+# permissive arm: r-efi is `MIT OR Apache-2.0 OR LGPL-2.1-or-later`, and
+# cargo-deny evaluates the SPDX expression, not the individual identifiers.
+# It is also only reachable on `target_os = "uefi"`, which Budlum never
+# builds for.
+confidence-threshold = 0.8
+
+[[licenses.exceptions]]
+crate = "uniffi@=0.32.2"
+allow = ["MPL-2.0"]
+
+[[licenses.exceptions]]
+crate = "uniffi_bindgen@=0.32.2"
+allow = ["MPL-2.0"]
+
+[[licenses.exceptions]]
+crate = "uniffi_core@=0.32.2"
+allow = ["MPL-2.0"]
+
+[[licenses.exceptions]]
+crate = "uniffi_internal_macros@=0.32.2"
+allow = ["MPL-2.0"]
+
+[[licenses.exceptions]]
+crate = "uniffi_macros@=0.32.2"
+allow = ["MPL-2.0"]
+
+[[licenses.exceptions]]
+crate = "uniffi_meta@=0.32.2"
+allow = ["MPL-2.0"]
+
+[[licenses.exceptions]]
+crate = "uniffi_pipeline@=0.32.2"
+allow = ["MPL-2.0"]
+
+[[licenses.exceptions]]
+crate = "uniffi_udl@=0.32.2"
+allow = ["MPL-2.0"]
+
+[bans]
+multiple-versions = "warn"
+deny = []
+skip = [
+    { crate = "aead@0.5.2", reason = "transitive major-semver split across pinned upstream ecosystems" },
+    { crate = "base64@0.22.1", reason = "transitive major-semver split across pinned upstream ecosystems" },
+    { crate = "bitflags@1.3.2", reason = "transitive major-semver split across pinned upstream ecosystems" },
+    { crate = "block-buffer@0.10.4", reason = "transitive major-semver split across pinned upstream ecosystems" },
+    { crate = "chacha20@0.9.1", reason = "transitive major-semver split across pinned upstream ecosystems" },
+    { crate = "chacha20poly1305@0.10.1", reason = "transitive major-semver split across pinned upstream ecosystems" },
+    { crate = "cipher@0.4.4", reason = "transitive major-semver split across pinned upstream ecosystems" },
+    { crate = "cpufeatures@0.2.17", reason = "transitive major-semver split across pinned upstream ecosystems" },
+    { crate = "crypto-common@0.1.7", reason = "transitive major-semver split across pinned upstream ecosystems" },
+    { crate = "curve25519-dalek@4.1.3", reason = "transitive major-semver split across pinned upstream ecosystems" },
+    { crate = "digest@0.10.7", reason = "transitive major-semver split across pinned upstream ecosystems" },
+    { crate = "ed25519@2.2.3", reason = "transitive major-semver split across pinned upstream ecosystems" },
+    { crate = "ed25519-dalek@2.2.0", reason = "transitive major-semver split across pinned upstream ecosystems" },
+    { crate = "fiat-crypto@0.2.9", reason = "transitive major-semver split across pinned upstream ecosystems" },
+    { crate = "foldhash@0.1.5", reason = "transitive major-semver split across pinned upstream ecosystems" },
+    { crate = "getrandom@0.2.17", reason = "transitive major-semver split across pinned upstream ecosystems" },
+    { crate = "getrandom@0.3.4", reason = "transitive major-semver split across pinned upstream ecosystems" },
+    { crate = "hashbrown@0.15.5", reason = "transitive major-semver split across pinned upstream ecosystems" },
+    { crate = "hax-lib@0.3.7", reason = "transitive major-semver split across pinned upstream ecosystems" },
+    { crate = "hax-lib-macros@0.3.7", reason = "transitive major-semver split across pinned upstream ecosystems" },
+    { crate = "hax-lib-macros-types@0.3.7", reason = "transitive major-semver split across pinned upstream ecosystems" },
+    { crate = "hkdf@0.12.4", reason = "transitive major-semver split across pinned upstream ecosystems" },
+    { crate = "hmac@0.12.1", reason = "transitive major-semver split across pinned upstream ecosystems" },
+    { crate = "inout@0.1.4", reason = "transitive major-semver split across pinned upstream ecosystems" },
+    { crate = "itertools@0.13.0", reason = "transitive major-semver split across pinned upstream ecosystems" },
+    { crate = "keccak@0.1.6", reason = "transitive major-semver split across pinned upstream ecosystems" },
+    { crate = "num-bigint@0.4.6", reason = "transitive major-semver split across pinned upstream ecosystems" },
+    { crate = "parking_lot@0.11.2", reason = "transitive major-semver split across pinned upstream ecosystems" },
+    { crate = "parking_lot_core@0.8.6", reason = "transitive major-semver split across pinned upstream ecosystems" },
+    { crate = "poly1305@0.8.0", reason = "transitive major-semver split across pinned upstream ecosystems" },
+    { crate = "r-efi@5.3.0", reason = "transitive major-semver split across pinned upstream ecosystems" },
+    { crate = "rand@0.8.6", reason = "transitive major-semver split across pinned upstream ecosystems" },
+    { crate = "rand@0.9.5", reason = "transitive major-semver split across pinned upstream ecosystems" },
+    { crate = "rand_chacha@0.3.1", reason = "transitive major-semver split across pinned upstream ecosystems" },
+    { crate = "rand_core@0.6.4", reason = "transitive major-semver split across pinned upstream ecosystems" },
+    { crate = "rand_core@0.9.5", reason = "transitive major-semver split across pinned upstream ecosystems" },
+    { crate = "redox_syscall@0.2.16", reason = "transitive major-semver split across pinned upstream ecosystems" },
+    { crate = "sha2@0.10.9", reason = "transitive major-semver split across pinned upstream ecosystems" },
+    { crate = "sha3@0.11.0", reason = "transitive major-semver split across pinned upstream ecosystems" },
+    { crate = "shlex@1.3.0", reason = "transitive major-semver split across pinned upstream ecosystems" },
+    { crate = "signature@2.2.0", reason = "transitive major-semver split across pinned upstream ecosystems" },
+    { crate = "spin@0.9.9", reason = "transitive major-semver split across pinned upstream ecosystems" },
+    { crate = "syn@2.0.117", reason = "transitive major-semver split across pinned upstream ecosystems" },
+    { crate = "thiserror@1.0.69", reason = "transitive major-semver split across pinned upstream ecosystems" },
+    { crate = "thiserror-impl@1.0.69", reason = "transitive major-semver split across pinned upstream ecosystems" },
+    { crate = "universal-hash@0.5.1", reason = "transitive major-semver split across pinned upstream ecosystems" },
+    { crate = "windows-sys@0.52.0", reason = "transitive major-semver split across pinned upstream ecosystems" },
+    { crate = "wit-bindgen@0.51.0", reason = "transitive major-semver split across pinned upstream ecosystems" },
+    { crate = "x25519-dalek@2.0.1", reason = "transitive major-semver split across pinned upstream ecosystems" },
+    { crate = "yasna@0.5.2", reason = "transitive major-semver split across pinned upstream ecosystems" },
+]
+skip-tree = []
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+# Exactly one git source is allowed: the rust-libp2p tree, pinned by revision
+# in every workspace manifest that depends on it.
+#
+# libp2p 0.57.0 is tagged upstream but unpublished, and it is the only build
+# that closes GHSA-vxx9-2994-q338 (yamux 0.12/0.13) plus GHSA-3v94-mw7p-v465
+# and GHSA-q2qq-hmj6-3wpp (hickory-proto 0.25.2). The alternative was to keep
+# ignoring three advisories, which this policy forbids.
+#
+# `unknown-git = "deny"` still holds: any other git dependency fails the gate,
+# and the pin is by full revision hash, so the source cannot move under us.
+# Delete this entry together with the [patch.crates-io] blocks once 0.57.0 is
+# on crates.io.
+allow-git = ["https://github.com/libp2p/rust-libp2p"]
+
+[advisories]
+# unmaintained = "none": the same as the old behaviour ("warn, no fail").
+#
+# The only justification for this decision is that the warnings stay visible somewhere else. Until
+# 2026-07-31 this line said "the cargo audit in the CI dependency-audit job reports
+# unmaintained warnings on every run" and that WAS NOT TRUE:
+# the old `audit-deps.sh` wrote the findings with `--json` into a temporary file and the raw output
+# into `target/audit/DEPENDENCY_AUDIT.md`; no workflow uploaded that report
+# as an artifact. The job came back green and not a single advisory name appeared
+# in the log.
+#
+# Somut bedeli: RUSTSEC-2024-0380 (`pqcrypto-dilithium` - `pqcrypto-mldsa`
+# was superseded by) sits on the mainnet default PQ signature path. The decision
+# was made and is recorded with its reason in `osv-scanner.toml`; even so
+# it never appeared on the cargo audit side in any run. Of the two tools scanning the
+# same tree only one result was readable - the visibility the "warn, no fail" decision
+# rested on stood on one leg.
+#
+# the `audit-deps` tool (xtask/tools) now prints the raw output of both lockfiles into the log and summarises the
+# RUSTSEC identifiers it saw in a single list. The justification for this line holds only as long
+# as that output stays there; if it is removed this decision must be reconsidered
+# as well.
+unmaintained = "none"
+# unsound: an unsound advisory in our direct dependencies = FAIL (strict).
+unsound = "workspace"
+ignore = [
+    # Deliberately empty.
+    #
+    # Until 2026-07-28 this carried RUSTSEC-2026-0118 and RUSTSEC-2026-0119
+    # (hickory-proto), argued as unreachable because DNSSEC was not compiled
+    # in. The argument was true but it was a workaround: libp2p 0.56 pinned
+    # hickory ^0.25.2 and the resolver rejected 0.26.1.
+    #
+    # They are patched now. The root Cargo.toml pins libp2p to the 0.57.0 tree,
+    # which moves libp2p-dns to hickory 0.26 and libp2p-yamux to yamux 0.14, so
+    # the advisories are fixed rather than carried.
+    #
+    # Before adding an entry here: upgrade the dependency. An exception needs a
+    # reachability proof locked by a test in src/tests/advisory_reachability.rs,
+    # not a note.
+]

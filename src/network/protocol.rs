@@ -445,7 +445,9 @@ mod tests {
         assert!(is_canonical_hash(&canonical));
         assert!(!is_canonical_hash(&canonical.to_uppercase()));
         assert!(!is_canonical_hash(&canonical[1..]));
-        assert!(NetworkMessage::validate_header_request(&[canonical.clone()], 1).is_ok());
+        assert!(
+            NetworkMessage::validate_header_request(std::slice::from_ref(&canonical), 1).is_ok()
+        );
         assert!(
             NetworkMessage::validate_header_request(&[canonical.to_uppercase()], 1).is_err(),
             "an upper-case locator entry names no block and must be refused, not answered with an empty batch"

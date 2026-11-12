@@ -37,19 +37,17 @@ impl SegmentBoundary {
         let rows = self.row_count.to_le_bytes();
         let spc = self.start_pc.to_le_bytes();
         let npc = self.next_pc.to_le_bytes();
-        hash_fields_bytes(
+        hash_fields_bytes(&[
             b"budlum/zkvm/segment-leaf/v1",
-            &[
-                &self.program_hash,
-                &idx,
-                &rows,
-                &spc,
-                &npc,
-                &self.pre_state_root,
-                &self.post_state_root,
-                &self.inner_proof_digest,
-            ],
-        )
+            &self.program_hash,
+            &idx,
+            &rows,
+            &spc,
+            &npc,
+            &self.pre_state_root,
+            &self.post_state_root,
+            &self.inner_proof_digest,
+        ])
     }
 }
 
@@ -116,16 +114,14 @@ pub fn fold_segment_tree(segments: &[SegmentBoundary]) -> Result<RecursiveAggreg
                 if left.final_state_root != right.initial_state_root {
                     return Err("segment state_root boundary mismatch (TS9)");
                 }
-                let digest = hash_fields_bytes(
+                let digest = hash_fields_bytes(&[
                     b"budlum/zkvm/recursion-node/v1",
-                    &[
-                        &left.program_hash,
-                        &left.initial_state_root,
-                        &right.final_state_root,
-                        &left.aggregate_digest,
-                        &right.aggregate_digest,
-                    ],
-                );
+                    &left.program_hash,
+                    &left.initial_state_root,
+                    &right.final_state_root,
+                    &left.aggregate_digest,
+                    &right.aggregate_digest,
+                ]);
                 next_layer.push(RecursiveAggregate {
                     program_hash: left.program_hash,
                     first_segment: left.first_segment,
@@ -219,10 +215,13 @@ impl BlockBatchProof {
         let sh = start_height.to_le_bytes();
         let ph = proven_height.to_le_bytes();
         let cnt = (digests.len() as u64).to_le_bytes();
-        hash_fields_bytes(
+        hash_fields_bytes(&[
             b"budlum/settlement/block-batch-proof/v1",
-            &[&sh, &ph, &cnt, &flat],
-        )
+            &sh,
+            &ph,
+            &cnt,
+            &flat,
+        ])
     }
 
     /// Recompute `proof_root` and confirm integrity against any inner tamper (`TA4`).
@@ -327,7 +326,10 @@ mod tests {
         assert!(!batch.matches_root());
 
         // TA5: unproven roots within D=8 show PendingProof, never Proven.
-        assert_eq!(classify_root_proof_status(100, 100), RootProofStatus::Proven);
+        assert_eq!(
+            classify_root_proof_status(100, 100),
+            RootProofStatus::Proven
+        );
         assert_eq!(
             classify_root_proof_status(108, 100),
             RootProofStatus::PendingProof { blocks_behind: 8 }

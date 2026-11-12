@@ -3,7 +3,7 @@ name = "budlum-ee-svm"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.97.1"
-license.workspace = true
+license = "LicenseRef-PolyForm-Shield-1.0.0"
 description = "Out-of-process SVM execution-environment worker on solana-sbpf (EeId::SVM = 0x03)"
 
 [workspace]

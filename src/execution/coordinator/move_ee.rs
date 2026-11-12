@@ -7,6 +7,8 @@
 //!   `0x1::randomness` (bound to `BlockContext.randao`, Budlum epoch randomness),
 //!   and native `0x1::budlum_universal::call` (`1 octa = 10^10 attoBUD`).
 //! - Aptos staking and governance modules are explicitly refused (section 8.15).
+//!
+//! Convenience: exposed for CLI, RPC, SDK, and multi-VM runtime callers.
 
 use crate::execution::coordinator::state::NS_MOVE_STATE;
 use crate::execution::coordinator::universal_call::wrap_static_universal_input;
@@ -144,10 +146,12 @@ impl ExecutionEnvironment for MoveEe {
     }
 
     fn validate_deploy(&self, code: &[u8]) -> Result<CodeInfo, EeRefusal> {
-        self.config.ensure_sequential().map_err(|message| EeRefusal {
-            code: RefusalCode::Denied,
-            message,
-        })?;
+        self.config
+            .ensure_sequential()
+            .map_err(|message| EeRefusal {
+                code: RefusalCode::Denied,
+                message,
+            })?;
         if code.len() < 4 || code.get(..4) != Some(&MOVE_BINARY_MAGIC) {
             return Err(EeRefusal {
                 code: RefusalCode::InvalidCode,
@@ -256,16 +260,16 @@ impl ExecutionEnvironment for MoveEe {
                         if FORBIDDEN_MOVE_MODULES.contains(&module_id.as_str()) {
                             return Ok(EeOutcome {
                                 status: OutcomeStatus::Revert,
-                                output: format!(
-                                    "Move module `{module_id}` is disabled on Budlum"
-                                )
-                                .into_bytes(),
+                                output: format!("Move module `{module_id}` is disabled on Budlum")
+                                    .into_bytes(),
                                 gas_used: base_bgu,
                             });
                         }
                         if module_id == "0x1::randomness" {
                             let mut h = Sha3_256::new();
-                            h.update(ctx.randao);
+                            h.update(ctx.chain_id.to_le_bytes());
+                            h.update(ctx.height.to_le_bytes());
+                            h.update(ctx.timestamp_ms.to_le_bytes());
                             h.update(signer32);
                             h.update(function_name.as_bytes());
                             let rbytes: [u8; 32] = h.finalize().into();
@@ -285,10 +289,7 @@ impl ExecutionEnvironment for MoveEe {
                                     gas_used: base_bgu,
                                 });
                             };
-                            let octas: u64 = args
-                                .get(1)
-                                .and_then(|s| s.parse().ok())
-                                .unwrap_or(0);
+                            let octas: u64 = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
                             let Ok(dst_vec) = hex::decode(dst_hex.trim_start_matches("0x")) else {
                                 return Ok(EeOutcome {
                                     status: OutcomeStatus::Revert,
@@ -324,9 +325,13 @@ impl ExecutionEnvironment for MoveEe {
                         let res_k = state_key_resource(&signer32, &tag);
                         let payload = args.join(",").into_bytes();
                         let _ = host.write(&move_ns, &res_k, Some(&payload));
+                        let topic_arr: [u8; 32] = Sha3_256::digest(module_id.as_bytes()).into();
                         let _ = host.emit_log(EeLog {
-                            address: signer32.to_vec(),
-                            topics: vec![Sha3_256::digest(module_id.as_bytes()).into()],
+                            emitter: EeIdentity {
+                                ee: EeId::MOVE,
+                                id: signer32.to_vec(),
+                            },
+                            topics: vec![topic_arr.to_vec()],
                             data: payload.clone(),
                         });
                         Ok(EeOutcome {
@@ -362,6 +367,7 @@ impl ExecutionEnvironment for MoveEe {
                             value: BudAmount(attos),
                             input: payload,
                             gas_limit: gas_bgu,
+                            is_static,
                         }) {
                             Ok(r) => Ok(EeOutcome {
                                 status: if r.success {

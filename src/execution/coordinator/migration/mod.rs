@@ -9,6 +9,8 @@
 //!    the complete storage trie, refuses occupied targets, charges the migration fee to
 //!    the migrator, leaves native ETH balance at `0`, and installs the contract at its
 //!    exact 20-byte address into `ee/evm/{account,code,storage}` with `imported_from`.
+//!
+//! Convenience: exposed for CLI, RPC, SDK, and multi-VM runtime callers.
 
 use std::collections::BTreeMap;
 
@@ -106,7 +108,10 @@ pub struct DeploymentEvidence {
 /// Deterministic migration refusal reason.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ImportError {
-    ChainMismatch { signed: u64, expected: u64 },
+    ChainMismatch {
+        signed: u64,
+        expected: u64,
+    },
     ContractMismatch,
     SourceBlockMismatch,
     DeploymentAfterSource {
@@ -126,14 +131,19 @@ pub enum ImportError {
     NoPendingMigration,
     ChunkContractMismatch,
     ChunkBlockMismatch,
-    ChunkTooLarge { slots: usize, max: usize },
+    ChunkTooLarge {
+        slots: usize,
+        max: usize,
+    },
     SlotAbsent([u8; 32]),
     SlotValueMismatch {
         slot: [u8; 32],
         claimed: [u8; 32],
         proven: [u8; 32],
     },
-    SlotConflicts { slot: [u8; 32] },
+    SlotConflicts {
+        slot: [u8; 32],
+    },
     StorageRootMismatch {
         expected: [u8; 32],
         computed: [u8; 32],
@@ -147,7 +157,10 @@ impl std::fmt::Display for ImportError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::ChainMismatch { signed, expected } => {
-                write!(f, "migration: signed for chain {signed}, running {expected}")
+                write!(
+                    f,
+                    "migration: signed for chain {signed}, running {expected}"
+                )
             }
             Self::ContractMismatch => write!(f, "migration: contract mismatch"),
             Self::SourceBlockMismatch => write!(f, "migration: source block mismatch"),
@@ -189,7 +202,11 @@ impl std::fmt::Display for ImportError {
                 hex::encode(proven)
             ),
             Self::SlotConflicts { slot } => {
-                write!(f, "migration: conflicting values for slot 0x{}", hex::encode(slot))
+                write!(
+                    f,
+                    "migration: conflicting values for slot 0x{}",
+                    hex::encode(slot)
+                )
             }
             Self::StorageRootMismatch { expected, computed } => write!(
                 f,
@@ -283,6 +300,7 @@ pub struct MigrationPlan {
     source: ImportSource,
     account: EvmAccount,
     code: Vec<u8>,
+    #[serde(with = "crate::core::map_keys")]
     storage: BTreeMap<[u8; 32], [u8; 32]>,
     proof_nodes: u64,
 }
@@ -301,8 +319,14 @@ pub enum MigrationTx {
 /// Outcome returned when applying a [`MigrationTx`] in a block.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MigrationTxOutcome {
-    Started { contract: [u8; 20], source_block: u64 },
-    ChunkImported { contract: [u8; 20], slots: usize },
+    Started {
+        contract: [u8; 20],
+        source_block: u64,
+    },
+    ChunkImported {
+        contract: [u8; 20],
+        slots: usize,
+    },
     Finalized(Box<MigrationRecord>),
 }
 
@@ -532,8 +556,7 @@ pub fn apply_migration_tx(
             {
                 return Err(ImportError::MigrationAlreadyPending);
             }
-            let live_occupied =
-                is_evm_address_occupied(state, &state.execution_state, &target)?;
+            let live_occupied = is_evm_address_occupied(state, &state.execution_state, &target)?;
             req.occupied = req.occupied || live_occupied;
             let plan = begin_import(*req)?;
             let actual = plan.source().address;
@@ -654,13 +677,10 @@ mod tests {
     use crate::core::account::ATTOS_PER_ATOM;
     use crate::cross_domain::evm::rlp::{self, Item};
     use crate::execution::coordinator::gas::MIN_UEL_BASE_FEE_ATTOS;
-    use crate::execution::coordinator::{
-        ExecutionCoordinator, UelAction, UelReceiptStatus, UelTx,
-    };
+    use crate::execution::coordinator::{ExecutionCoordinator, UelAction, UelReceiptStatus, UelTx};
     use crate::rpc::compat::ethereum::handle_eth_jsonrpc;
     use budlum_uel_abi::BlockContext;
 
-    const DEPLOYER: &str = "7e5f4552091a69125d5dfcb7b8c2659029395bdf";
     const CONTRACT: &str = "a3183498b579bd228aa2b62101c40cc1da978f24";
     const SOURCE_CHAIN_ID: u64 = 11_155_111;
     const DEPLOYMENT_TX_PARTS: &[&str] = &[
@@ -686,7 +706,10 @@ mod tests {
     }
 
     fn address_of(text: &str) -> [u8; 20] {
-        hex::decode(text).expect("hex").try_into().expect("20 bytes")
+        hex::decode(text)
+            .expect("hex")
+            .try_into()
+            .expect("20 bytes")
     }
 
     fn authorization() -> MigrationAuthorization {
@@ -706,10 +729,7 @@ mod tests {
 
     fn leaf(key: &[u8], value: Vec<u8>) -> Vec<u8> {
         let path = mpt::hp_encode(&mpt::to_nibbles(key), true);
-        rlp::encode(&Item::List(vec![
-            Item::String(path),
-            Item::String(value),
-        ]))
+        rlp::encode(&Item::List(vec![Item::String(path), Item::String(value)]))
     }
 
     fn deployment_proof() -> DeploymentProof {
@@ -726,10 +746,7 @@ mod tests {
             Item::String(path.clone()),
             Item::String(transaction.clone()),
         ]));
-        let rec_node = rlp::encode(&Item::List(vec![
-            Item::String(path),
-            Item::String(receipt),
-        ]));
+        let rec_node = rlp::encode(&Item::List(vec![Item::String(path), Item::String(receipt)]));
         DeploymentProof {
             deployment_block: SOURCE_BLOCK - 1_000,
             transaction_index: 0,
@@ -1033,8 +1050,6 @@ mod tests {
                     height: 1,
                     timestamp_ms: 1_762_000_000_000,
                     chain_id: CHAIN_ID,
-                    prev_randao: [0; 32],
-                    base_fee_per_bgu_attos: MIN_UEL_BASE_FEE_ATTOS,
                 },
                 proposer,
                 &[UelTx {
@@ -1070,7 +1085,8 @@ mod tests {
         })
         .to_string();
         let get_code_resp: serde_json::Value =
-            serde_json::from_str(&handle_eth_jsonrpc(&state, &get_code_req)).expect("json");
+            serde_json::from_str(&handle_eth_jsonrpc(&state, "127.0.0.1", &get_code_req))
+                .expect("json");
         assert_eq!(
             get_code_resp["result"].as_str(),
             Some(format!("0x{}", hex::encode(&code)).as_str())
@@ -1084,11 +1100,9 @@ mod tests {
         })
         .to_string();
         let get_imp_resp: serde_json::Value =
-            serde_json::from_str(&handle_eth_jsonrpc(&state, &get_imp_req)).expect("json");
+            serde_json::from_str(&handle_eth_jsonrpc(&state, "127.0.0.1", &get_imp_req))
+                .expect("json");
         assert_eq!(get_imp_resp["result"]["domain"].as_str(), Some("sepolia"));
-        assert_eq!(
-            get_imp_resp["result"]["block"].as_u64(),
-            Some(SOURCE_BLOCK)
-        );
+        assert_eq!(get_imp_resp["result"]["block"].as_u64(), Some(SOURCE_BLOCK));
     }
 }

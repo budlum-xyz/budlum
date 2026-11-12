@@ -50,6 +50,8 @@ pub enum ApbError {
     InvalidCalculatorProof { index: usize },
     /// Monotonic verification level refusal.
     LevelTransition(LevelRefusal),
+    /// The level attestation does not cover this bundle's prose.
+    LevelUnbound,
     /// Markdown container is missing a valid `apb` block or prose disagrees
     /// with `prose_digest`.
     MalformedMarkdown(&'static str),
@@ -163,6 +165,7 @@ impl CommittedSourceDocument {
     /// When `consent_granted` is `false`, `disclosed_excerpt` is omitted so
     /// only existence under `root` is conveyed.
     #[must_use]
+    /// Convenience: exposed for SDK/CLI proof-bundle chunk verifier.
     pub fn open_chunk(
         &self,
         chunk_index: usize,
@@ -221,7 +224,7 @@ impl SourceCitationProof {
         let mut acc = self.leaf_digest;
         let mut idx = self.chunk_index as usize;
         for sib in &self.merkle_siblings {
-            acc = if idx % 2 == 0 {
+            acc = if idx.is_multiple_of(2) {
                 hash_merkle_pair(&acc, sib)
             } else {
                 hash_merkle_pair(sib, &acc)
@@ -233,6 +236,7 @@ impl SourceCitationProof {
 
     /// Public view honoring owner consent.
     #[must_use]
+    /// Convenience: exposed for RPC/explorer proof-bundle projection.
     pub fn public_view(&self) -> PublicCitationView {
         PublicCitationView {
             document_root: self.document_root,
@@ -310,7 +314,7 @@ pub fn prove_calculator_in_vm(
         return Err(ApbError::InvalidCalculatorProof { index: 0 });
     }
     let vm_log_word = receipt
-        .logs
+        .events
         .first()
         .copied()
         .ok_or(ApbError::InvalidCalculatorProof { index: 0 })?;
@@ -372,12 +376,27 @@ pub struct VerifiedSentence {
     pub claim_kind: SentenceClaimKind,
 }
 
+/// Attestation that a verification level was earned on chain, bound to the
+/// prose it certifies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LevelAttestation {
+    /// The level the chain actually recorded for this answer.
+    pub level: VerificationLevel,
+    /// Prose digest the recording was made against.
+    pub prose_digest: [u8; 32],
+}
+
 /// Answer Proof Bundle (`APB`) pairing immutable response prose with
 /// per-sentence evidence and a monotonically rising [`LevelRecord`].
+///
+/// The level is chain-side state, not part of the document: it is never
+/// deserialized from the `apb` block, so a parsed document always starts at
+/// VL-0 until [`Self::upgrade_level`] is handed an attestation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AnswerProofBundle {
     pub sentences: Vec<VerifiedSentence>,
     pub prose_digest: [u8; 32],
+    #[serde(skip_deserializing)]
     pub verification_level: LevelRecord,
 }
 
@@ -471,9 +490,12 @@ impl AnswerProofBundle {
     /// # Errors
     ///
     /// Returns [`ApbError::LevelTransition`] on any attempt to lower the level.
-    pub fn upgrade_level(&mut self, next: VerificationLevel) -> Result<(), ApbError> {
+    pub fn upgrade_level(&mut self, attestation: &LevelAttestation) -> Result<(), ApbError> {
+        if attestation.prose_digest != self.prose_digest {
+            return Err(ApbError::LevelUnbound);
+        }
         self.verification_level
-            .raise(next)
+            .raise(attestation.level)
             .map_err(ApbError::LevelTransition)
     }
 
@@ -483,6 +505,7 @@ impl AnswerProofBundle {
     /// # Errors
     ///
     /// Returns [`ApbError::Json`] if JSON encoding fails.
+    /// Convenience: exposed for SDK/CLI proof-bundle markdown exporter.
     pub fn to_markdown_document(&self) -> Result<String, ApbError> {
         let json = match serde_json::to_string_pretty(self) {
             Ok(encoded) => encoded,
@@ -504,6 +527,7 @@ impl AnswerProofBundle {
     ///
     /// Refuses missing/multiple `apb` blocks, tampered prose outside the block,
     /// or invalid sentence proofs inside the block.
+    /// Convenience: exposed for SDK/CLI proof-bundle markdown parser.
     pub fn from_markdown_document(markdown: &str) -> Result<Self, ApbError> {
         let Some(fence_pos) = markdown.find(APB_FENCE_OPEN) else {
             return Err(ApbError::MalformedMarkdown("missing ```apb block"));
@@ -661,26 +685,50 @@ mod tests {
 
         let prose_before = bundle.prose_body();
         let digest_before = bundle.prose_digest;
-        assert_eq!(bundle.verification_level.level(), VerificationLevel::Receipt);
+        assert_eq!(
+            bundle.verification_level.level(),
+            VerificationLevel::Receipt
+        );
 
-        // proof arrives asynchronously -> level rises to VL-2 -> VL-3,
-        // prose text and prose_digest stay byte-identical.
+        // A chain-side attestation for this exact prose arrives -> the level
+        // rises to VL-2 -> VL-3, prose text and prose_digest stay identical.
+        let attest = |level: VerificationLevel| LevelAttestation {
+            level,
+            prose_digest: digest_before,
+        };
         bundle
-            .upgrade_level(VerificationLevel::CommitteeAgreement)
+            .upgrade_level(&attest(VerificationLevel::CommitteeAgreement))
             .unwrap();
         bundle
-            .upgrade_level(VerificationLevel::ChallengeWindowClosed)
+            .upgrade_level(&attest(VerificationLevel::ChallengeWindowClosed))
             .unwrap();
-        bundle.upgrade_level(VerificationLevel::FullProof).unwrap();
+        bundle
+            .upgrade_level(&attest(VerificationLevel::FullProof))
+            .unwrap();
         assert_eq!(bundle.prose_body(), prose_before);
         assert_eq!(bundle.prose_digest, digest_before);
 
-        // single Markdown file with embedded ```apb block round-trips and
-        // detects prose tampering.
+        // An attestation earned for other prose cannot raise this bundle.
+        assert_eq!(
+            bundle.upgrade_level(&LevelAttestation {
+                level: VerificationLevel::FullProof,
+                prose_digest: [0u8; 32],
+            }),
+            Err(ApbError::LevelUnbound)
+        );
+
+        // single Markdown file with embedded ```apb block round-trips prose and
+        // starts at VL-0 rather than trusting an embedded level claim.
         let md = bundle.to_markdown_document().unwrap();
         assert!(md.contains("```apb\n"));
         let parsed = AnswerProofBundle::from_markdown_document(&md).unwrap();
-        assert_eq!(parsed, bundle);
+        assert_eq!(parsed.prose_body(), bundle.prose_body());
+        assert_eq!(parsed.prose_digest, bundle.prose_digest);
+        assert_eq!(
+            parsed.verification_level,
+            LevelRecord::new(),
+            "a parsed document carries no earned level"
+        );
 
         let tampered_md = md.replacen("150 seconds", "999 seconds", 1);
         assert!(AnswerProofBundle::from_markdown_document(&tampered_md).is_err());

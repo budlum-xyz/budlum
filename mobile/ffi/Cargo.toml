@@ -29,6 +29,8 @@ budlum-mobile-core = { path = "../core" }
 # The section 7.2 class table, exported so the apps hold no copy (K-4).
 budlum-types = { path = "../../crates/budlum-types" }
 uniffi = { version = "=0.32.2", default-features = false }
+# The owner address is the wallet-core/node V2 SHA3-256 of the ML-DSA-87 key.
+sha3 = "=0.10.9"
 # Wipes the operator seed the host vault hands back (section 7.9.6).
 zeroize = "=1.9.1"
 
@@ -44,3 +46,9 @@ expect_used = "deny"
 
 [profile.release]
 overflow-checks = true
+
+[profile.test]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3

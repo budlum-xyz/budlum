@@ -85,6 +85,17 @@ groups:
 
   - name: budlum-disk
     rules:
+      - alert: BudlumNodeExporterUnavailable
+        # Both compose Prometheus profiles scrape a host-installed exporter,
+        # but neither installs it. Never mistake a missing disk series for
+        # a healthy disk: report when the host target is absent or unreachable.
+        expr: up{job="node"} == 0 or absent(up{job="node"})
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Host node_exporter unavailable; disk capacity is not monitored"
+
       - alert: BudlumDiskFillingUp
         # Needs node_exporter on the host; the node itself reports only its
         # database size (budlum_storage_db_size_bytes).

@@ -9,6 +9,7 @@
 //! torn (re-derivable from the schema), and a split with no strict majority
 //! fails closed - the caller escalates to the highest alarm and never
 //! guesses which side is right.
+//! Convenience: exposed for BudZero zkVM prover, compiler, and verifier callers.
 
 /// The number of independent pin sources the design carries.
 pub const PIN_SOURCE_COUNT: usize = 4;

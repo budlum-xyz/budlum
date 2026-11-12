@@ -80,8 +80,6 @@ fn component_match(pattern: &str, text: &str) -> bool {
 }
 
 fn glob_match(pattern: &str, text: &str) -> bool {
-    let p: Vec<&str> = pattern.split('/').collect();
-    let t: Vec<&str> = text.split('/').collect();
     fn go(p: &[&str], t: &[&str]) -> bool {
         match p.first() {
             None => t.is_empty(),
@@ -91,11 +89,17 @@ fn glob_match(pattern: &str, text: &str) -> bool {
             }
         }
     }
+    let p: Vec<&str> = pattern.split('/').collect();
+    let t: Vec<&str> = text.split('/').collect();
     go(&p, &t)
 }
 
 fn collect_manifests(root: &Path) -> Result<BTreeMap<String, toml::Value>, String> {
-    fn walk(dir: &Path, root: &Path, out: &mut BTreeMap<String, toml::Value>) -> Result<(), String> {
+    fn walk(
+        dir: &Path,
+        root: &Path,
+        out: &mut BTreeMap<String, toml::Value>,
+    ) -> Result<(), String> {
         let entries = std::fs::read_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
         for entry in entries {
             let entry = entry.map_err(|e| e.to_string())?;
@@ -111,8 +115,8 @@ fn collect_manifests(root: &Path) -> Result<BTreeMap<String, toml::Value>, Strin
             } else if name == "Cargo.toml" {
                 let text = std::fs::read_to_string(&path)
                     .map_err(|e| format!("{}: {e}", path.display()))?;
-                let value: toml::Value = toml::from_str(&text)
-                    .map_err(|e| format!("{}: {e}", path.display()))?;
+                let value: toml::Value =
+                    toml::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))?;
                 let relative = path
                     .parent()
                     .and_then(|p| p.strip_prefix(root).ok())
@@ -273,10 +277,7 @@ fn covered_workspaces(
             if block.softened.is_some() {
                 continue;
             }
-            let working_directory = block
-                .working_directory
-                .as_deref()
-                .unwrap_or(".");
+            let working_directory = block.working_directory.as_deref().unwrap_or(".");
             for line in &block.lines {
                 let Some(command) = cargo_command(line) else {
                     continue;
@@ -377,7 +378,10 @@ pub fn self_test() -> Result<String, String> {
         fixture(&dir, good)?;
         run(&dir)?;
 
-        fixture(&dir, "name: ci\non: [push]\njobs:\n  build:\n    steps:\n      - run: echo nothing\n")?;
+        fixture(
+            &dir,
+            "name: ci\non: [push]\njobs:\n  build:\n    steps:\n      - run: echo nothing\n",
+        )?;
         if run(&dir).is_ok() {
             return Err(String::from("canary: an uncovered workspace passed"));
         }
@@ -392,7 +396,10 @@ pub fn self_test() -> Result<String, String> {
             return Err(String::from("canary: a softened build counted"));
         }
 
-        fixture(&dir, "name: ci\njobs:\n  build:\n    steps:\n      - run: cargo fmt --all\n")?;
+        fixture(
+            &dir,
+            "name: ci\njobs:\n  build:\n    steps:\n      - run: cargo fmt --all\n",
+        )?;
         if run(&dir).is_ok() {
             return Err(String::from("canary: cargo fmt counted as a compile"));
         }

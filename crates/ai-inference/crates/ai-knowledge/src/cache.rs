@@ -60,7 +60,9 @@ impl LlmCache {
                 }
                 if let Ok(row) = serde_json::from_str::<CacheLine>(line) {
                     if row.key.starts_with(&format!("{SCHEMA_VERSION}|")) {
-                        cache.items.insert(row.key, redact_model_strings(&row.parsed));
+                        cache
+                            .items
+                            .insert(row.key, redact_model_strings(&row.parsed));
                     }
                 }
             }

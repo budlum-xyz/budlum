@@ -92,6 +92,14 @@ pub const MAX_V8_SIGNERS: usize = 16;
 /// door lands; until then the account-identity absorb in this file pins it.
 pub const ML_DSA_87_SCHEME_ID: &str = "ml-dsa-87-fips204-v1";
 
+/// Wire-level owner/signature cap for V6 threshold authorizations, kept
+/// available even when the `wallet-ml-dsa` verifier backend is disabled.
+pub(crate) const MAX_V6_THRESHOLD_OWNERS: usize = 16;
+
+#[cfg(feature = "wallet-ml-dsa")]
+const _: [(); MAX_V6_THRESHOLD_OWNERS] =
+    [(); crate::account_abstraction::threshold_mldsa::MAX_THRESHOLD_OWNERS];
+
 /// The address of a multisig account: the ML-DSA profile, owner set and threshold.
 ///
 /// The address is derived from the set itself. The threshold has to enter the
@@ -350,8 +358,26 @@ impl BridgeBurnTx {
     ///
     /// A missing authorization, a key that is not the holder, or a signature
     /// that does not open over the authorization hash.
+    /// Convenience: kept for the CLI and stateless callers; chain execution calls
+    /// [`Self::verify_holder_authorization_in`].
+    #[cfg(test)]
     pub fn verify_holder_authorization(
         &self,
+        holder: crate::core::address::Address,
+        chain_id: u64,
+    ) -> Result<(), String> {
+        self.verify_holder_authorization_in(
+            &crate::crypto::scheme::SchemeStatusRegistry::genesis(),
+            holder,
+            chain_id,
+        )
+    }
+
+    /// WIRING: wired into `Executor` bridge-burn verification so a quantum-alarm
+    /// disable of classical or ML-DSA-87 schemes takes effect immediately.
+    pub fn verify_holder_authorization_in(
+        &self,
+        scheme_registry: &crate::crypto::scheme::SchemeStatusRegistry,
         holder: crate::core::address::Address,
         chain_id: u64,
     ) -> Result<(), String> {
@@ -359,6 +385,9 @@ impl BridgeBurnTx {
             return Err("a bridge burn carries no holder authorization".into());
         }
         if self.holder_public_key.len() == 32 {
+            if !scheme_registry.scheme_verifies(crate::crypto::scheme::SchemeId::ED25519) {
+                return Err("bridge burn holder scheme Ed25519 is disabled".to_string());
+            }
             let mut pk = [0u8; 32];
             pk.copy_from_slice(&self.holder_public_key);
             if crate::core::address::Address::from(pk) != holder {
@@ -380,7 +409,8 @@ impl BridgeBurnTx {
         if addr != holder {
             return Err("bridge burn authorization is not from the transfer's holder".to_string());
         }
-        crate::crypto::primitives::verify_ml_dsa_87_signature(
+        crate::crypto::primitives::verify_ml_dsa_87_signature_in(
+            scheme_registry,
             crate::crypto::ctx::BRIDGE_V1,
             &self.authorization_hash(chain_id),
             &self.holder_signature,
@@ -826,6 +856,65 @@ pub struct Transaction {
     pub tx_type: TransactionType,
 }
 
+fn deserialize_bounded_vec<'de, D, T: Deserialize<'de>, const MAX: usize>(
+    deserializer: D,
+) -> Result<Vec<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct BoundedSeqVisitor<T, const MAX: usize>(std::marker::PhantomData<T>);
+
+    impl<'de, T: Deserialize<'de>, const MAX: usize> serde::de::Visitor<'de>
+        for BoundedSeqVisitor<T, MAX>
+    {
+        type Value = Vec<T>;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(formatter, "a sequence of at most {MAX} elements")
+        }
+
+        fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+        where
+            A: serde::de::SeqAccess<'de>,
+        {
+            if let Some(hint) = seq.size_hint() {
+                if hint > MAX {
+                    return Err(serde::de::Error::invalid_length(hint, &self));
+                }
+            }
+            let cap = seq.size_hint().unwrap_or(0).min(MAX);
+            let mut out = Vec::with_capacity(cap);
+            while let Some(item) = seq.next_element()? {
+                if out.len() >= MAX {
+                    return Err(serde::de::Error::invalid_length(out.len() + 1, &self));
+                }
+                out.push(item);
+            }
+            Ok(out)
+        }
+    }
+
+    deserializer.deserialize_seq(BoundedSeqVisitor::<T, MAX>(std::marker::PhantomData))
+}
+
+fn deserialize_bounded_owners<'de, D>(deserializer: D) -> Result<Vec<Vec<u8>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    deserialize_bounded_vec::<D, Vec<u8>, { crate::crypto::address_v3::MAX_MULTISIG_OWNERS }>(
+        deserializer,
+    )
+}
+
+type RawOwnerSignatures = Vec<(Vec<u8>, Vec<u8>)>;
+
+fn deserialize_bounded_signatures<'de, D>(deserializer: D) -> Result<RawOwnerSignatures, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    deserialize_bounded_vec::<D, (Vec<u8>, Vec<u8>), { MAX_V6_THRESHOLD_OWNERS }>(deserializer)
+}
+
 /// The owner set and signatures that authorize a V6 transaction.
 ///
 /// # Why the owner set lives inside the transaction
@@ -840,11 +929,13 @@ pub struct MultisigAuthorizationV6 {
     /// Explicit algorithm/profile id. Empty or unknown ids are refused; the
     /// verifier must never infer a scheme from a key length alone.
     pub scheme_id: String,
-    /// The owner ML-DSA-87 public keys.
+    /// The owner ML-DSA-87 public keys (or V8 32-byte owner leaves).
+    #[serde(deserialize_with = "deserialize_bounded_owners")]
     pub owners: Vec<Vec<u8>>,
     /// The number of valid signatures required.
     pub threshold: u32,
     /// `(owner public key, signature)` pairs.
+    #[serde(deserialize_with = "deserialize_bounded_signatures")]
     pub signatures: Vec<(Vec<u8>, Vec<u8>)>,
 }
 /// The witness of a transaction: everything that authorizes the body and is
@@ -859,7 +950,8 @@ pub struct TxWitness {
     pub signer_public_key: Vec<u8>,
     /// The single signature (V5, V7) or empty.
     pub signature: Vec<u8>,
-    /// The V6 owner signatures, empty for other versions.
+    /// The V6/V8 owner signatures, empty for other versions.
+    #[serde(deserialize_with = "deserialize_bounded_signatures")]
     pub authorization_signatures: Vec<(Vec<u8>, Vec<u8>)>,
 }
 
@@ -2093,6 +2185,10 @@ impl Transaction {
             debug!("V6 multisig policy is unsatisfiable");
             return false;
         };
+        if auth.signatures.len() > MAX_THRESHOLD_OWNERS {
+            debug!("V6 signature count exceeds the maximum owner set size");
+            return false;
+        }
         let mut signatures = Vec::with_capacity(auth.signatures.len());
         for (key, sig) in &auth.signatures {
             let Ok(public_key) = <[u8; ML_DSA_87_PUBLIC_KEY_LEN]>::try_from(key.as_slice()) else {
@@ -2627,6 +2723,26 @@ mod tests {
         assert_ne!(a, b);
         assert_ne!(a, c);
     }
+
+    #[test]
+    fn object_layer_and_relayer_intent_have_distinct_signed_tags() {
+        use crate::settlement::domains::SettlementTx;
+        let intent =
+            SettlementTx::RelayerIntent(Box::new(crate::relayer::policy::RelayerIntentTx::Award {
+                intent_id: [3; 32],
+            }));
+        let object = SettlementTx::ObjectLayer(Box::new(
+            crate::object_layer::ObjectLayerTx::SetTentativeConsent { consent: false },
+        ));
+        let mut intent_preimage = Vec::new();
+        let mut object_preimage = Vec::new();
+        encode_settlement_tx(&intent, &mut intent_preimage);
+        encode_settlement_tx(&object, &mut object_preimage);
+        assert_eq!(intent_preimage.first(), Some(&9));
+        assert_eq!(object_preimage.first(), Some(&10));
+        assert_ne!(intent_preimage, object_preimage);
+    }
+
     #[test]
     fn redelegation_and_claim_carry_their_addresses_and_pass_validation() {
         let delegator = test_addr_from_byte(7u8);
@@ -2712,7 +2828,9 @@ mod tests {
             TransactionType::Vote,
             TransactionType::Undelegate { validator },
             TransactionType::WithdrawDelegation { validator },
-            TransactionType::SetValidatorCommission { commission: 10 },
+            TransactionType::SetValidatorCommission {
+                commission_ppm: 100_000,
+            },
             TransactionType::Redelegate {
                 from_validator: validator,
                 to_validator: test_addr_from_byte(3u8),
@@ -2735,14 +2853,8 @@ mod tests {
             assert_eq!(tx.checked_liquid_cost(), Some(5));
         }
 
-        let mut transfer = Transaction::new_with_fee(
-            test_addr_from_byte(1u8),
-            validator,
-            u64::MAX,
-            1,
-            1,
-            vec![],
-        );
+        let mut transfer =
+            Transaction::new_with_fee(test_addr_from_byte(1u8), validator, u64::MAX, 1, 1, vec![]);
         transfer.tx_type = TransactionType::Transfer;
         assert_eq!(transfer.checked_liquid_cost(), None);
 
@@ -4257,7 +4369,9 @@ fn encode_settlement_tx(tx: &crate::settlement::domains::SettlementTx, out: &mut
             }
         }
         SettlementTx::ObjectLayer(uol_tx) => {
-            put_u8(out, 9);
+            // Keep this tag distinct from RelayerIntent (9): a signed
+            // settlement preimage must not cross transaction variants.
+            put_u8(out, 10);
             let bytes = postcard::to_allocvec(uol_tx.as_ref())
                 .unwrap_or_else(|_| b"budlum/object-layer/serialize-failed".to_vec());
             put_bytes(out, &bytes);
@@ -4382,14 +4496,11 @@ fn encode_storage_v3_content_id(
     put_u64(out, content_id.len);
 }
 
-fn encode_storage_v3_profile(
-    profile: &crate::storage::bud3::limits::Profile,
-    out: &mut Vec<u8>,
-) {
-    put_u8(out, profile.id);
+fn encode_storage_v3_profile(profile: &crate::storage::bud3::limits::Profile, out: &mut Vec<u8>) {
+    out.extend_from_slice(&profile.id.to_le_bytes());
     put_u8(out, profile.qr_version);
     out.extend_from_slice(&profile.symbol_size.to_le_bytes());
-    put_u8(out, profile.fps);
+    out.extend_from_slice(&profile.fps.to_le_bytes());
     put_u32(out, profile.k_max);
 }
 
@@ -4409,10 +4520,7 @@ fn encode_storage_v3_record(
     }
 }
 
-fn encode_storage_v3_share(
-    share: &crate::storage::bud3::placement::Share,
-    out: &mut Vec<u8>,
-) {
+fn encode_storage_v3_share(share: &crate::storage::bud3::placement::Share, out: &mut Vec<u8>) {
     use crate::storage::bud3::placement::Class;
     put_fixed(out, &share.validator);
     match share.class {
@@ -4423,10 +4531,7 @@ fn encode_storage_v3_share(
     put_u32(out, share.symbols);
 }
 
-fn encode_storage_v3_proof(
-    proof: &crate::storage::bud3::custody::CustodyProof,
-    out: &mut Vec<u8>,
-) {
+fn encode_storage_v3_proof(proof: &crate::storage::bud3::custody::CustodyProof, out: &mut Vec<u8>) {
     put_u64(out, proof.segment);
     put_u32(out, proof.esi);
     put_u64(out, proof.position);
@@ -4442,10 +4547,7 @@ fn encode_storage_v3_proof(
     }
 }
 
-fn encode_storage_v3_grant_row(
-    row: &crate::storage::bud3::grants::GrantRow,
-    out: &mut Vec<u8>,
-) {
+fn encode_storage_v3_grant_row(row: &crate::storage::bud3::grants::GrantRow, out: &mut Vec<u8>) {
     put_fixed(out, &row.grant_tag);
     put_bytes(out, &row.one_time_pk);
     put_bytes(out, &row.sealed_key_package);
@@ -4560,6 +4662,28 @@ fn encode_storage_v3_tx(tx: &crate::storage::bud3::tx::StorageTxV3, out: &mut Ve
                 None => put_u8(out, 0),
             }
             put_u64(out, *lower_quota_bytes);
+        }
+        StorageTxV3::ReplaceObject {
+            old_object,
+            new_record,
+            new_shares,
+            attestations,
+            proposer_stake,
+        } => {
+            put_u8(out, 11);
+            put_fixed(out, old_object);
+            encode_storage_v3_record(new_record, out);
+            put_u64(out, new_shares.len() as u64);
+            for (seg, share) in new_shares {
+                put_u64(out, *seg);
+                encode_storage_v3_share(share, out);
+            }
+            put_u64(out, attestations.len() as u64);
+            for att in attestations {
+                put_fixed(out, &att.validator);
+                encode_storage_v3_content_id(&att.verified_content_id, out);
+            }
+            put_u64(out, *proposer_stake);
         }
     }
 }
@@ -6001,6 +6125,27 @@ mod v29_signing_tests {
             tx.amount = tx.amount.saturating_add(1);
             tx.hash = tx.calculate_hash();
             assert!(!tx.verify(), "the amount is signed");
+        }
+
+        #[test]
+        fn a_v6_transaction_carrying_more_signatures_than_max_owners_is_refused() {
+            use crate::account_abstraction::threshold_mldsa::MAX_THRESHOLD_OWNERS;
+
+            let (keys, owners) = owner_set(2);
+            let mut tx = tx_for(multisig_address(&owners, 2));
+            tx.sign_v6(&owners, 2, &[&keys[0], &keys[1]]);
+            let sample_sig = tx.authorization.as_ref().unwrap().signatures[0].clone();
+            tx.authorization.as_mut().unwrap().signatures =
+                vec![sample_sig; MAX_THRESHOLD_OWNERS + 1];
+            assert!(
+                !tx.verify(),
+                "V6 must reject signature vectors larger than MAX_THRESHOLD_OWNERS before allocating"
+            );
+            let encoded = bincode::serialize(&tx).unwrap();
+            assert!(
+                bincode::deserialize::<Transaction>(&encoded).is_err(),
+                "bounded serde deserializer must refuse oversized V6 signature vectors"
+            );
         }
     }
 }

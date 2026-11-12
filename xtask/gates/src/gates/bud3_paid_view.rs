@@ -46,10 +46,8 @@ fn strip_line_comments(src: &str) -> String {
 /// Returns an error if G8 fallback decoding is unpaid, permits sealed content,
 /// or reveal sessions bypass `NetworkSymbolSource`.
 pub fn run(root: &Path) -> Result<String, String> {
-    let view_src = strip_line_comments(strip_cfg_test(&read_rel(
-        root,
-        "src/storage/bud3/view.rs",
-    )?));
+    let view_src =
+        strip_line_comments(strip_cfg_test(&read_rel(root, "src/storage/bud3/view.rs")?));
     for required in [
         "MIN_PAID_VIEW_FEE_ATOMS",
         "pub struct PaidViewReceipt",
@@ -66,10 +64,7 @@ pub fn run(root: &Path) -> Result<String, String> {
         }
     }
 
-    let rpc_src = strip_line_comments(strip_cfg_test(&read_rel(
-        root,
-        "src/storage/bud3/rpc.rs",
-    )?));
+    let rpc_src = strip_line_comments(strip_cfg_test(&read_rel(root, "src/storage/bud3/rpc.rs")?));
     for required in [
         "\"bud_storageGetContent\"",
         "fallback_decode_public",
@@ -132,13 +127,21 @@ pub fn h() { let _ = (\"bud_storageGetContent\", \"bud_storageOpenReveal\", fall
         put("src/storage/bud3/content_ref.rs", clean_cref)?;
         run(&dir).map_err(|e| format!("canary: clean tree failed: {e}"))?;
 
-        put("src/storage/bud3/content_ref.rs", "pub enum E { Bud3NotReady }\n")?;
+        put(
+            "src/storage/bud3/content_ref.rs",
+            "pub enum E { Bud3NotReady }\n",
+        )?;
         if run(&dir).is_ok() {
-            return Err(String::from("canary: Bud3NotReady in content_ref.rs passed"));
+            return Err(String::from(
+                "canary: Bud3NotReady in content_ref.rs passed",
+            ));
         }
         put("src/storage/bud3/content_ref.rs", clean_cref)?;
 
-        put("src/storage/bud3/view.rs", "pub fn fallback_decode_public() {}\n")?;
+        put(
+            "src/storage/bud3/view.rs",
+            "pub fn fallback_decode_public() {}\n",
+        )?;
         if run(&dir).is_ok() {
             return Err(String::from("canary: unpaid view.rs passed"));
         }

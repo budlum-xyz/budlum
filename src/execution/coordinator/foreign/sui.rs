@@ -5,6 +5,7 @@
 //! `PROPOSED_SUI_ACTIVATION_HEIGHT` (`foreign_sui_is_closed_on_testnet`), verifies
 //! `Ed25519` signatures (`0x00 || sig64 || pk32`) over `BLAKE2b-256([0, 0, 0] || tx_bytes)`,
 //! and derives the 32-byte Sui address `BLAKE2b-256(0x00 || pk32)`.
+//! Convenience: exposed for CLI, RPC, SDK, and multi-VM runtime callers.
 
 use std::fmt;
 
@@ -152,9 +153,8 @@ pub fn blake2b_256(data: &[u8]) -> [u8; 32] {
             let Some(s) = BLAKE2B_SIGMA.get(round % 10) else {
                 continue;
             };
-            let mw = |si: usize| -> u64 {
-                s.get(si).and_then(|&mi| m.get(mi)).copied().unwrap_or(0)
-            };
+            let mw =
+                |si: usize| -> u64 { s.get(si).and_then(|&mi| m.get(mi)).copied().unwrap_or(0) };
             blake2b_g(&mut v, 0, 4, 8, 12, mw(0), mw(1));
             blake2b_g(&mut v, 1, 5, 9, 13, mw(2), mw(3));
             blake2b_g(&mut v, 2, 6, 10, 14, mw(4), mw(5));
@@ -290,9 +290,15 @@ pub struct DecodedSuiTx {
 /// Refusal reasons when decoding a Sui foreign envelope.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SuiEnvelopeError {
-    ClosedOnTestnet { height: u64, activation: Option<u64> },
+    ClosedOnTestnet {
+        height: u64,
+        activation: Option<u64>,
+    },
     MalformedEnvelope(String),
-    WrongChainId { expected: u64, actual: u64 },
+    WrongChainId {
+        expected: u64,
+        actual: u64,
+    },
     InvalidSignatureLength(usize),
     UnsupportedSignatureScheme(u8),
     InvalidPublicKey,
@@ -309,7 +315,10 @@ impl fmt::Display for SuiEnvelopeError {
             ),
             Self::MalformedEnvelope(m) => write!(f, "malformed Sui envelope: {m}"),
             Self::WrongChainId { expected, actual } => {
-                write!(f, "Sui chain_id mismatch: expected {expected}, got {actual}")
+                write!(
+                    f,
+                    "Sui chain_id mismatch: expected {expected}, got {actual}"
+                )
             }
             Self::InvalidSignatureLength(n) => {
                 write!(f, "Sui Ed25519 signature must be 97 bytes, got {n}")
@@ -358,12 +367,15 @@ pub fn decode_and_recover_sui_tx(
     let sig_arr: [u8; 64] = sig_slice
         .try_into()
         .map_err(|_| SuiEnvelopeError::InvalidSignatureLength(sig_len))?;
-    let pk_arr: [u8; 32] = pk_slice.try_into().map_err(|_| SuiEnvelopeError::InvalidPublicKey)?;
+    let pk_arr: [u8; 32] = pk_slice
+        .try_into()
+        .map_err(|_| SuiEnvelopeError::InvalidPublicKey)?;
 
     let vk = VerifyingKey::from_bytes(&pk_arr).map_err(|_| SuiEnvelopeError::InvalidPublicKey)?;
     let sig = Signature::from_bytes(&sig_arr);
     let signing_digest = sui_transaction_signing_digest(&env.tx_data_bytes);
-    vk.verify_strict(&signing_digest, &sig).map_err(|_| SuiEnvelopeError::BadSignature)?;
+    vk.verify_strict(&signing_digest, &sig)
+        .map_err(|_| SuiEnvelopeError::BadSignature)?;
 
     let data: SuiTransactionData = serde_json::from_slice(&env.tx_data_bytes)
         .map_err(|e| SuiEnvelopeError::MalformedEnvelope(e.to_string()))?;

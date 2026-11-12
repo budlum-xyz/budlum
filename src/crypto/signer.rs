@@ -188,6 +188,7 @@ mod tests {
         let expected_bls_pk = bls.public_key.clone();
         let expected_pq_pk = pq.public_key_bytes().to_vec();
 
+        let keypair = KeyPair::generate().expect("ed25519 key");
         let signer = KeyPairSigner::new(keypair).with_bls(bls).with_pq(pq);
         assert!(signer.has_bls_key());
         assert!(signer.has_pq_key());
@@ -210,7 +211,10 @@ mod tests {
         let precommit = signer.sign_precommit(&msg).expect("precommit");
         assert_ne!(block, prevote, "a prevote must not be a block signature");
         assert_ne!(prevote, precommit, "a precommit must not be a prevote");
-        assert_ne!(block, precommit, "a precommit must not be a block signature");
+        assert_ne!(
+            block, precommit,
+            "a precommit must not be a block signature"
+        );
 
         // Each is a signature over its own tagged hash, under the same key.
         let public = signer.public_key_bytes();
@@ -262,9 +266,18 @@ mod tests {
         let block = signer
             .sign_block(&crate::core::hash::calculate_hash_bytes(message))
             .expect("block signature");
-        assert_ne!(prevote, precommit, "a prevote must not verify as a precommit");
-        assert_ne!(prevote, block, "a prevote must not verify as a block signature");
-        assert_ne!(precommit, block, "a precommit must not verify as a block signature");
+        assert_ne!(
+            prevote, precommit,
+            "a prevote must not verify as a precommit"
+        );
+        assert_ne!(
+            prevote, block,
+            "a prevote must not verify as a block signature"
+        );
+        assert_ne!(
+            precommit, block,
+            "a precommit must not verify as a block signature"
+        );
 
         // And each one verifies on the surface it claims: an inequality alone
         // would also hold if the signer had simply refused to produce one.
