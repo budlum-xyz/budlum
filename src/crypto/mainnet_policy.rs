@@ -15,7 +15,7 @@ fn is_software_token(value: &str) -> bool {
     lower.contains("softhsm") || lower.contains("kryoptic")
 }
 
-/// Whether a PKCS#11 module path names a software token (SoftHSM or
+/// Whether a PKCS#11 module path names a software token (`SoftHSM` or
 /// kryoptic). Case insensitive, and the symlink target counts too.
 #[must_use]
 pub fn is_software_token_path(path: &str) -> bool {
@@ -264,6 +264,10 @@ pub fn check_mainnet_validator_key_policy(
 /// A mechanism ID or an operator-supplied public key alone does not prove
 /// custody. The caller must set `hsm_binding_verified` only after a signature
 /// from the strict HSM path verifies against the announced key.
+///
+/// # Errors
+///
+/// Returns an error if the operation fails.
 pub fn check_mainnet_validator_pq_hsm_policy(
     pq_public_key: Option<&[u8]>,
     hsm_binding_verified: bool,
@@ -280,6 +284,10 @@ pub fn check_mainnet_validator_pq_hsm_policy(
 /// Check the anchor ceremony's three HSM vendor declarations.
 /// Separate physical devices must also be attested by the ceremony; vendor
 /// labels alone cannot establish physical separation.
+///
+/// # Errors
+///
+/// Returns an error if the operation fails.
 pub fn check_mainnet_anchor_vendor_policy(
     vendors: &[&str],
 ) -> Result<(), MainnetKeyPolicyViolation> {

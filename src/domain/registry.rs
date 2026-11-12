@@ -94,6 +94,11 @@ impl ConsensusDomainRegistry {
         self.register_inner(domain, false)
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn register(&mut self, domain: ConsensusDomain) -> Result<(), String> {
         self.register_inner(domain, true)
     }
@@ -259,6 +264,11 @@ impl ConsensusDomainRegistry {
         self.domains.get_mut(&id)
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn set_status(&mut self, id: DomainId, status: DomainStatus) -> Result<(), String> {
         let domain = self
             .domains
@@ -271,6 +281,10 @@ impl ConsensusDomainRegistry {
     /// Lifecycle guard: use this for governance/operator-driven
     /// Transitions. `set_status` remains for migration/tests, while this helper
     /// Prevents accidental Active→Retired jumps and makes Retired terminal.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn transition_status_checked(
         &mut self,
         id: DomainId,

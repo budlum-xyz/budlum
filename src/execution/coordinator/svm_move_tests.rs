@@ -195,6 +195,14 @@ fn svm_spl_token_and_vote_stake_refusal_and_universal_cpi() {
         .expect("deploy wasm");
     let wasm_contract = dep[0].output.clone();
 
+    let auth_msg = serde_json::to_vec(&serde_json::json!({
+        "execute": {
+            "authorize_caller": {
+                "caller": String::from_utf8_lossy(&svm_universal_program_id())
+            }
+        }
+    }))
+    .expect("json");
     let wasm_put = serde_json::to_vec(&serde_json::json!({
         "execute": { "put": { "key": "from_svm", "value": "ok" } }
     }))
@@ -213,23 +221,40 @@ fn svm_spl_token_and_vote_stake_refusal_and_universal_cpi() {
             &mut coord,
             sample_ctx(),
             proposer,
-            &[UelTx {
-                tx_hash: [0x67; 32],
-                sender: alice,
-                nonce: 6,
-                ee: EeId::SVM,
-                action: UelAction::Call {
-                    target: svm_universal_program_id().to_vec(),
-                    input: cpi_ix,
+            &[
+                UelTx {
+                    tx_hash: [0x66; 32],
+                    sender: alice,
+                    nonce: 6,
+                    ee: EeId::WASM,
+                    action: UelAction::Call {
+                        target: wasm_contract.clone(),
+                        input: auth_msg,
+                    },
+                    value_attos: 0,
+                    gas_limit_bgu: 150_000,
+                    max_fee_per_bgu_attos: MIN_UEL_BASE_FEE_ATTOS * 2,
+                    max_priority_fee_per_bgu_attos: 100,
                 },
-                value_attos: 0,
-                gas_limit_bgu: 300_000,
-                max_fee_per_bgu_attos: MIN_UEL_BASE_FEE_ATTOS * 2,
-                max_priority_fee_per_bgu_attos: 100,
-            }],
+                UelTx {
+                    tx_hash: [0x67; 32],
+                    sender: alice,
+                    nonce: 7,
+                    ee: EeId::SVM,
+                    action: UelAction::Call {
+                        target: svm_universal_program_id().to_vec(),
+                        input: cpi_ix,
+                    },
+                    value_attos: 0,
+                    gas_limit_bgu: 300_000,
+                    max_fee_per_bgu_attos: MIN_UEL_BASE_FEE_ATTOS * 2,
+                    max_priority_fee_per_bgu_attos: 100,
+                },
+            ],
         )
         .expect("svm universal cpi");
     assert_eq!(cpi_rec[0].status, UelReceiptStatus::Success);
+    assert_eq!(cpi_rec[1].status, UelReceiptStatus::Success);
 
     let mut store_k = wasm_contract;
     store_k.extend_from_slice(b":kv:from_svm");

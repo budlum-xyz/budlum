@@ -469,5 +469,12 @@ contract BudlumFinalityVerifierTest is Harness {
         inspector.configure(true, false);
         inspected.challenge(digest, hex"01");
         assertTrue(inspected.fraudulent(digest), "marked fraudulent after verification");
+
+        // Re-challenging or settling an already challenged/fraudulent attestation must fail.
+        vm.expectPartialRevert(BudlumFinalityVerifier.ChallengeResolved.selector);
+        inspected.challenge(digest, hex"01");
+        vm.roll(block.number + WINDOW);
+        vm.expectPartialRevert(BudlumFinalityVerifier.ChallengeResolved.selector);
+        inspected.settle(digest);
     }
 }

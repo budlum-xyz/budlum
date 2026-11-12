@@ -93,6 +93,10 @@ impl EffortTier {
     /// rejected rather than clamped, including the undocumented `0.6x..0.9x`
     /// gap (`6..10` tenths): a request asking for `20x` or `0.7x` is a mistake
     /// the caller should see, not one silently coerced to another tier.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn from_tenths(tenths: u16) -> Result<Self, String> {
         if tenths < TIER_MIN_TENTHS {
             return Err(format!(

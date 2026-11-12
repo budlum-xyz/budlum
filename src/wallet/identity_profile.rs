@@ -26,6 +26,11 @@ use sha2::{Digest, Sha256};
 
 pub const MAX_PASSPORT_EVIDENCE_ITEMS: usize = 64;
 
+/// Performs the requested operation.
+///
+/// # Errors
+///
+/// Returns an error if the operation fails.
 pub fn validate_passport_name(name: &str) -> Result<(), String> {
     let valid = !name.is_empty()
         && name.len() <= 253
@@ -70,6 +75,11 @@ pub struct EvidenceCard {
 }
 
 impl EvidenceCard {
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn validate(&self) -> Result<(), String> {
         validate_label("EvidenceCard subject", &self.subject)?;
         validate_label("EvidenceCard source", &self.source)?;
@@ -112,6 +122,11 @@ pub struct DwebPassportProfile {
 }
 
 impl DwebPassportProfile {
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn validate_public(&self) -> Result<(), String> {
         validate_passport_name(&self.name)?;
         if self.exists && self.owner.is_none() {
@@ -150,6 +165,11 @@ pub struct PassportProofBundle {
 }
 
 impl PassportProofBundle {
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn validate_against_profile(&self, profile: &DwebPassportProfile) -> Result<(), String> {
         profile.validate_public()?;
         validate_passport_name(&self.name)?;
@@ -322,6 +342,11 @@ pub fn build_passport_proof_bundle(
     }
 }
 
+/// Performs the requested operation.
+///
+/// # Errors
+///
+/// Returns an error if the operation fails.
 pub fn try_build_passport_proof_bundle(
     profile: &DwebPassportProfile,
     generated_at_block: u64,

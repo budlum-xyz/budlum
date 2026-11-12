@@ -713,7 +713,7 @@ fn pq_vectors_disagreement_is_counted_and_invalid() {
 
 /// The verdict of every replayed vector, hashed.
 ///
-/// Each platform of the determinism job (x86_64 portable, x86_64 with the
+/// Each platform of the determinism job (`x86_64` portable, `x86_64` with the
 /// native CPU, aarch64, wasm32) prints this digest and the compare step
 /// demands byte equality: one number that moves if any library gives any
 /// vector a different answer on any platform.

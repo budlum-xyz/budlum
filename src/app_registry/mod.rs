@@ -71,6 +71,10 @@ impl AppRegistry {
     /// Register a new application backed by a registered B.U.D. 3.0 bundle object.
     ///
     /// exposed for: App Registry registration transactions.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn register_app(
         &mut self,
         bud3: &Bud3Registry,

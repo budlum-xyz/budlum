@@ -1,7 +1,7 @@
 //! Home VM families.
 //!
 //! The object-layer core does not know any family. Everything that differs
-//! between an EVM chain, a Cosmos SDK chain with CosmWasm, a Solana-style SVM
+//! between an EVM chain, a Cosmos SDK chain with `CosmWasm`, a Solana-style SVM
 //! chain and a Move chain sits behind [`FamilyProfile`]. Each family delivers
 //! the ten parts of 9.3.11:
 //!

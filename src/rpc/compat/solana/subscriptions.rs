@@ -80,6 +80,10 @@ pub const fn catch_up_range(last: u64, tip: u64) -> Option<(u64, u64)> {
 
 /// Refuse an SVM-dependent subscription before accepting it, so no feed slot,
 /// subscription id or background task is created for an unavailable stream.
+///
+/// # Errors
+///
+/// Returns an error if the operation fails.
 pub async fn reject_svm(
     pending: PendingSubscriptionSink,
     method: &str,
@@ -90,6 +94,10 @@ pub async fn reject_svm(
 }
 
 /// Accept the one chain-backed feed and keep its permit until the client goes.
+///
+/// # Errors
+///
+/// Returns an error if the operation fails.
 pub async fn accept_slots(
     pending: PendingSubscriptionSink,
     chain: ChainHandle,

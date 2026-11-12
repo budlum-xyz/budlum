@@ -25,7 +25,7 @@ use super::verification_level::{LevelRecord, LevelRefusal, VerificationLevel};
 pub const APB_LEAF_TAG: &[u8] = b"BDLM_AI_APB_LEAF_V1";
 /// Domain tag for selective-opening internal Merkle nodes.
 pub const APB_NODE_TAG: &[u8] = b"BDLM_AI_APB_NODE_V1";
-/// Domain tag for BudZero calculator proof transcripts.
+/// Domain tag for `BudZero` calculator proof transcripts.
 pub const APB_CALCULATOR_TAG: &[u8] = b"BDLM_AI_APB_CALCULATOR_V1";
 /// Domain tag for canonical APB prose commitments.
 pub const APB_PROSE_TAG: &[u8] = b"BDLM_AI_APB_PROSE_V1";
@@ -46,7 +46,7 @@ pub enum ApbError {
     InvalidMerkleOpening { index: usize },
     /// Unconsented citation attempted to retain plaintext excerpt.
     UnconsentedExcerptLeak { index: usize },
-    /// BudZero calculator execution disagreed with claimed result.
+    /// `BudZero` calculator execution disagreed with claimed result.
     InvalidCalculatorProof { index: usize },
     /// Monotonic verification level refusal.
     LevelTransition(LevelRefusal),
@@ -59,7 +59,7 @@ pub enum ApbError {
     Json(String),
 }
 
-/// Arithmetic operations supported by the deterministic BudZero calculator
+/// Arithmetic operations supported by the deterministic `BudZero` calculator
 /// guest.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CalcOp {
@@ -250,7 +250,7 @@ impl SourceCitationProof {
     }
 }
 
-/// Deterministic BudZero VM proof for an arithmetic tool call.
+/// Deterministic `BudZero` VM proof for an arithmetic tool call.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CalculatorVmProof {
     pub lhs: i32,
@@ -358,7 +358,7 @@ impl CalculatorVmProof {
 pub enum SentenceClaimKind {
     /// Backed by a selective Merkle opening into a committed source document.
     SourceBacked(SourceCitationProof),
-    /// Backed by a deterministic BudZero VM calculator execution.
+    /// Backed by a deterministic `BudZero` VM calculator execution.
     ComputationBacked(CalculatorVmProof),
     /// Explicitly labeled unverified commentary (carries no factual claim).
     UnverifiedCommentary,

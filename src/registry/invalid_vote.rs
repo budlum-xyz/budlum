@@ -1,7 +1,7 @@
 //! Repeated invalid-signature vote tracking.
 //!
 //! Rejects every cryptographically-invalid finality vote at ingest
-//! (closing a single-signature DoS). But a rejected vote never enters the
+//! (closing a single-signature `DoS`). But a rejected vote never enters the
 //! Aggregate, so the sender paid nothing - a validator could spam garbage
 //! Signatures forever. This module closes that gap with the SAME pattern as
 //! [`LivenessTracker`](crate::registry::LivenessTracker): a persisted per-epoch

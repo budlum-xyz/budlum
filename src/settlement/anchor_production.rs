@@ -27,9 +27,9 @@
 //! 3. **Tests.** A self-test signs a probe under every signer and verifies it
 //!    against the ledger key before the first anchor is emitted.
 //!
-//! # VerifyMerkle
+//! # `VerifyMerkle`
 //!
-//! The anchor signature covers a local SHA3 Merkle root, and the VerifyMerkle
+//! The anchor signature covers a local SHA3 Merkle root, and the `VerifyMerkle`
 //! opcode does not run on that path. Only an anchor that carries a
 //! `stark_root` depends on the VerifyMerkle audit. Production mode therefore
 //! emits aggregate-root anchors without it and refuses a `stark_root` until an
@@ -138,7 +138,7 @@ pub fn verify_ceremony(
     .map_err(AnchorError::CommitteeQuorum)
 }
 
-/// The record of a third-party VerifyMerkle opcode audit. Without one, an
+/// The record of a third-party `VerifyMerkle` opcode audit. Without one, an
 /// anchor may not carry a `stark_root` in production.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VerifyMerkleAudit {
@@ -207,7 +207,7 @@ pub struct ProductionInputs<'a> {
     pub ceremony: Option<&'a CeremonyRecord>,
     /// The cold wallet whose committee attests the ceremony.
     pub cold: &'a ColdWalletState,
-    /// The VerifyMerkle audit record, if any.
+    /// The `VerifyMerkle` audit record, if any.
     pub verifymerkle_audit: Option<VerifyMerkleAudit>,
 }
 
@@ -466,12 +466,12 @@ pub struct CheckpointOutcome {
 /// written, under which mode, at which key epoch, with which keys, and the
 /// Root Seal state that follows it.
 ///
-/// The default is the GatedOff stub, so the trace takes the skipped arm and
+/// The default is the `GatedOff` stub, so the trace takes the skipped arm and
 /// nothing is written until a node configures its signers and a mode.
 pub struct AnchorEmission {
     /// Node-local anchor log path. The seal log sits next to it.
     pub log_path: std::path::PathBuf,
-    /// Enforcement mode (GatedOff skips; ProductionApproved needs its grant).
+    /// Enforcement mode (`GatedOff` skips; `ProductionApproved` needs its grant).
     pub mode: AnchorMode,
     /// The key epoch the emitted anchor is signed at.
     pub key_epoch: u32,

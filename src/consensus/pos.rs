@@ -203,6 +203,10 @@ impl PoSEngine {
 
     /// Prune old slashing evidence to prevent unbounded growth.
     /// Keeps only evidence with header1.index >= `min_height`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn prune_slashing_evidence(&self, min_height: u64) -> Result<usize, ConsensusError> {
         let mut guard = self.slashing_evidence.write().map_err(|_| {
             ConsensusError("Failed to acquire write lock on slashing evidence".into())

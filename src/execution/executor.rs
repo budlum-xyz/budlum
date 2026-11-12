@@ -3379,6 +3379,23 @@ impl Executor {
                             0
                         }
                     }
+                    StorageTxV3::PayFallbackView {
+                        object,
+                        amount_atoms,
+                        ..
+                    } => {
+                        if *amount_atoms >= crate::storage::bud3::view::MIN_PAID_VIEW_FEE_ATOMS
+                            && !state.bud3_registry.is_tombstoned(object)
+                            && state
+                                .bud3_registry
+                                .object(object)
+                                .is_some_and(|o| o.record.content_id.kind == ContentIdKind::Public)
+                        {
+                            *amount_atoms
+                        } else {
+                            0
+                        }
+                    }
                     _ => 0,
                 };
 
@@ -3452,9 +3469,9 @@ impl Executor {
 
                 let charged_storage_fee = match applied {
                     Applied::Registered(Registered::Deduplicated(_)) => 0,
-                    Applied::Registered(Registered::New(_)) | Applied::Renewed(_) => {
-                        pre_storage_fee
-                    }
+                    Applied::Registered(Registered::New(_))
+                    | Applied::Renewed(_)
+                    | Applied::PaidFallbackView => pre_storage_fee,
                     _ => 0,
                 };
                 let final_debit = total_cost.checked_add(charged_storage_fee).ok_or_else(|| {

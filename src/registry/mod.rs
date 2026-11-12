@@ -14,7 +14,7 @@
 //!
 //! The two are intentionally different types backed by different data
 //! Structures. There is no shared code path between them, which is what keeps
-//! The PoA domain's permissioned rules from leaking into the permissionless
+//! The `PoA` domain's permissioned rules from leaking into the permissionless
 //! Domains and vice-versa. The isolation is exercised by
 //! `tests::permissionless`.
 

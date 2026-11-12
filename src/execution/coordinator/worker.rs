@@ -120,6 +120,10 @@ impl WorkerEndpoint {
     }
 
     /// Restarts the worker cleanly after a caught engine panic or transport drop.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn restart(&mut self) -> Result<(), WorkerError> {
         match self {
             Self::InProcess {
@@ -193,6 +197,10 @@ impl WorkerEndpoint {
     /// Validates contract deployment bytecode on the worker.
     ///
     /// exposed for: UEL mempool admission preflight (..).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn validate_deploy(
         &mut self,
         code: &[u8],
@@ -227,6 +235,10 @@ impl WorkerEndpoint {
     }
 
     /// Executes one call on the worker, serving host callbacks through `host`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn execute(
         &mut self,
         ctx: &BlockContext,
@@ -264,6 +276,10 @@ impl WorkerEndpoint {
     /// Runs a read-only query on the worker.
     ///
     /// exposed for: compatibility RPC gateways and Universal Asset metadata (..).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn query(
         &mut self,
         ctx: &BlockContext,
@@ -321,6 +337,10 @@ impl WorkerSupervisor {
     }
 
     /// Mutable lookup of `ee`'s worker endpoint.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn get_mut(&mut self, ee: EeId) -> Result<&mut WorkerEndpoint, WorkerError> {
         self.workers
             .get_mut(&ee.0)
@@ -336,6 +356,10 @@ impl WorkerSupervisor {
 
     /// Records a caught deterministic panic fault for `ee` (`budlum_ee_fault_total{ee}`)
     /// and restarts the worker so subsequent transactions get a clean engine state.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn note_fault_and_restart(&mut self, ee: EeId) -> Result<(), WorkerError> {
         let count = self.fault_counts.entry(ee.0).or_insert(0);
         *count = count.saturating_add(1);
@@ -343,6 +367,10 @@ impl WorkerSupervisor {
     }
 
     /// Restarts all registered workers before a block-level retry.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn restart_all(&mut self) -> Result<(), WorkerError> {
         let ids: Vec<u8> = self.workers.keys().copied().collect();
         for raw_id in ids {

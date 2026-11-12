@@ -643,6 +643,10 @@ pub fn oem_battery_guidance(manufacturer: &str) -> OemBatteryGuidance {
 }
 
 /// Convenience: exposed for reproducible build probe on production paths.
+///
+/// # Errors
+///
+/// Returns an error if the operation fails.
 pub fn canonical_apk_reproducibility_probe(
     artifact: &[u8],
 ) -> Result<[u8; 32], MobileRuntimeError> {

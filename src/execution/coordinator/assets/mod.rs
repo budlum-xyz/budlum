@@ -64,6 +64,10 @@ pub struct PointerDescriptor {
 }
 
 /// Encodes `PointerDescriptor` as deterministic immutable pointer bytecode.
+///
+/// # Errors
+///
+/// Returns an error if the operation fails.
 pub fn encode_pointer_bytecode(desc: &PointerDescriptor) -> Result<Vec<u8>, String> {
     let json = serde_json::to_vec(desc).map_err(|e| format!("pointer descriptor encode: {e}"))?;
     let mut out = Vec::with_capacity(POINTER_BYTECODE_PREFIX.len() + json.len());
@@ -83,6 +87,10 @@ pub fn decode_pointer_bytecode(code: &[u8]) -> Option<PointerDescriptor> {
 ///
 /// - `EeId::EVM`: 20-byte address `keccak256("BDLM_UEL_POINTER_V1" || asset_id || 0x01)[12..32]`.
 /// - `EeId::WASM`: bech32 `bud1...` over `SHA3-256("BDLM_UEL_POINTER_V1" || asset_id || 0x02)`.
+///
+/// # Errors
+///
+/// Returns an error if the operation fails.
 pub fn derive_pointer_address(asset_id: &[u8; 32], target_ee: EeId) -> Result<Vec<u8>, String> {
     match target_ee {
         EeId::EVM => {
@@ -110,6 +118,10 @@ pub fn derive_pointer_address(asset_id: &[u8; 32], target_ee: EeId) -> Result<Ve
 }
 
 /// Reads a [`RegisteredAsset`] from `uel/assets` if present.
+///
+/// # Errors
+///
+/// Returns an error if the operation fails.
 pub fn read_registered_asset(
     state: &AccountState,
     asset_id: &[u8; 32],
@@ -123,6 +135,10 @@ pub fn read_registered_asset(
 }
 
 /// Permissionless `RegisterAsset { home_ee, home_ref }` registration into `uel/assets`.
+///
+/// # Errors
+///
+/// Returns an error if the operation fails.
 pub fn register_asset_entry(
     state: &mut AccountState,
     home_ee: EeId,
@@ -160,6 +176,10 @@ pub fn register_asset_entry(
 }
 
 /// Deploys an immutable zero-balance pointer contract for `asset_id` in `target_ee`.
+///
+/// # Errors
+///
+/// Returns an error if the operation fails.
 pub fn deploy_asset_pointer(
     state: &mut AccountState,
     asset_id: &[u8; 32],

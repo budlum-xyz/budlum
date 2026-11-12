@@ -111,6 +111,16 @@ def main(argv: list[str]) -> int:
     while all(proc.poll() is None for proc in procs):
         time.sleep(0.2)
 
+    if not stopping:
+        # Let sibling seats complete startup/early-exit before sending SIGTERM.
+        deadline = time.monotonic() + 1.0
+        while (
+            any(proc.poll() is None for proc in procs)
+            and time.monotonic() < deadline
+            and not stopping
+        ):
+            time.sleep(0.05)
+
     for proc in procs:
         if proc.poll() is None:
             proc.terminate()

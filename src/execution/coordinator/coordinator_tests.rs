@@ -696,3 +696,53 @@ fn budzero_stateful_storage_persists_across_blocks() {
         Some(b"persisted-budzero-state".to_vec())
     );
 }
+
+#[test]
+fn host_bridge_refuses_cross_ee_namespace_write_and_static_write() {
+    let actor = Address::from([0x11; 32]);
+    let mut state = funded_state(&[actor]);
+    let cache = BlockReadCache::new();
+    let mut supervisor = WorkerSupervisor::new();
+    let mut overlay = TxOverlay::new(&state, EeId::EVM, 100_000);
+    let ctx = sample_ctx();
+
+    let mut bridge = HostBridge {
+        supervisor: &mut supervisor,
+        state: &mut state,
+        cache: &cache,
+        overlay: &mut overlay,
+        ctx: &ctx,
+        tx_hash: [0x55; 32],
+        root_actor: actor,
+        frame_actor: EeIdentity {
+            ee: EeId::EVM,
+            id: vec![0xAA; 20],
+        },
+        frame_caller: EeIdentity {
+            ee: EeId::EVM,
+            id: vec![0x11; 20],
+        },
+        transport_failure: None,
+    };
+
+    let wasm_ns = Namespace::new("ee/wasm/store").unwrap();
+    let assets_ns = Namespace::new("uel/assets").unwrap();
+    let evm_ns = Namespace::new("ee/evm/storage").unwrap();
+
+    assert!(bridge.write(&wasm_ns, b"k", Some(b"v")).is_err());
+    assert!(bridge.write(&assets_ns, b"k", Some(b"v")).is_err());
+    bridge.write(&evm_ns, b"k", Some(b"v")).unwrap();
+
+    bridge
+        .overlay
+        .push_universal_frame(bridge.state, EeId::WASM, true)
+        .unwrap();
+    bridge.frame_actor = EeIdentity {
+        ee: EeId::WASM,
+        id: b"wasm-target".to_vec(),
+    };
+    assert!(
+        bridge.write(&wasm_ns, b"k2", Some(b"v")).is_err(),
+        "static frame must reject state write"
+    );
+}

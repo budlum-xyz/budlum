@@ -12,9 +12,9 @@ pub struct MigrationFeeSchedule {
     pub bgu_per_code_byte: u64,
     /// Additional BGU for each imported storage entry.
     pub bgu_per_storage_slot: u64,
-    /// AttoBUD charged for one BGU.
+    /// `AttoBUD` charged for one BGU.
     pub attos_per_bgu: u128,
-    /// AttoBUD charged for each stored byte.
+    /// `AttoBUD` charged for each stored byte.
     pub attos_per_storage_byte: u128,
 }
 
@@ -68,6 +68,10 @@ impl std::fmt::Display for MigrationFeeOverflow {
 impl std::error::Error for MigrationFeeOverflow {}
 
 /// Quotes proof verification gas and persistent storage for one migration.
+///
+/// # Errors
+///
+/// Returns an error if the operation fails.
 pub fn quote_migration_fee(
     usage: MigrationUsage,
     schedule: &MigrationFeeSchedule,

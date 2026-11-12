@@ -125,6 +125,10 @@ pub struct TxContext<'a> {
 
 impl ObjectLayerTx {
     /// Apply one transaction. N-8: this is the only door to the registry.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn apply(
         &self,
         registry: &mut ObjectLayerRegistry,

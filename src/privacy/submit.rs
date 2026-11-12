@@ -3,7 +3,7 @@
 use super::note_registry::{is_note_hash, NoteHash};
 use serde::{Deserialize, Serialize};
 
-/// Max inputs/outputs per private transfer (DoS bound).
+/// Max inputs/outputs per private transfer (`DoS` bound).
 pub const MAX_PRIVATE_IO: usize = 16;
 
 /// The length of the legacy Ed25519 authorisation signature.
@@ -16,7 +16,7 @@ pub const ML_DSA_87_AUTH_SIG_LEN: usize = crate::crypto::primitives::ML_DSA_87_S
 ///
 /// `spent_commitments` are required in v1 so the note set can be updated
 /// Without a full membership STARK inside the chain; nullifiers remain the public
-/// Double-spend tags. TEE path may later replace spent_commitments with a
+/// Double-spend tags. TEE path may later replace `spent_commitments` with a
 /// Proof-only membership argument.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PrivateTransferSubmit {
@@ -36,6 +36,11 @@ pub struct PrivateTransferSubmit {
 }
 
 impl PrivateTransferSubmit {
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn validate_shape(&self) -> Result<(), String> {
         if self.spent_commitments.is_empty() || self.nullifiers.is_empty() {
             return Err("private transfer: empty inputs".into());

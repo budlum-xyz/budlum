@@ -338,6 +338,10 @@ impl std::error::Error for SuiEnvelopeError {}
 /// Decode and strictly verify a [`SignedSuiEnvelope`] under `policy`.
 ///
 /// Convenience: coordinator and `sui_executeTransactionBlock` admission verifier.
+///
+/// # Errors
+///
+/// Returns an error if the operation fails.
 pub fn decode_and_recover_sui_tx(
     raw_envelope: &[u8],
     policy: SuiActivationPolicy,

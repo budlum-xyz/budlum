@@ -95,7 +95,7 @@ impl HandoffMember {
 }
 
 /// The digest of the validator set of `epoch` on `chain_id`: every member's
-/// address, BLS consensus key, PoP signature, ML-DSA-65 key and stake, length
+/// address, BLS consensus key, `PoP` signature, ML-DSA-65 key and stake, length
 /// prefixed, in set order.
 #[must_use]
 pub fn set_digest(chain_id: u64, epoch: u64, members: &[HandoffMember]) -> [u8; 32] {

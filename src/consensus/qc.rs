@@ -368,6 +368,10 @@ impl QcBlob {
     /// for the `n` validators of its snapshot. The bound grows with
     /// the validator set instead of stopping the set at a fixed byte count
     /// (the old 1 MiB cap refused a set of about 310 members).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn validate_size(&self, validators: usize) -> Result<(), String> {
         let encoded = self.encoded_len();
         let max = qc_blob_max_bytes(validators);
@@ -386,6 +390,10 @@ impl QcBlob {
 
     /// Verify under the scheme statuses of a fresh genesis. A chain calls
     /// [`Self::verify_against_snapshot_in`] with its state registry.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn verify_against_snapshot(
         &self,
         snapshot: &ValidatorSetSnapshot,
@@ -400,6 +408,11 @@ impl QcBlob {
         )
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn verify_against_snapshot_in(
         &self,
         registry: &crate::crypto::scheme::SchemeStatusRegistry,

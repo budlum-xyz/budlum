@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 pub mod education_domain;
 pub use education_domain::{EducationArtifact, EducationDomainError, EducationDomainRegistry};
 
-/// Permissionless DeEd participant roles.
+/// Permissionless `DeEd` participant roles.
 ///
 /// These IDs extend the open registry without changing the registry's policy:
 /// Registration still requires only the configured stake floor.
@@ -25,7 +25,7 @@ pub mod roles {
     pub const RESEARCH_CONTRIBUTOR: RoleId = RoleId(11);
 }
 
-/// DeEd artifact categories. The artifact bytes remain in B.U.D.; this enum
+/// `DeEd` artifact categories. The artifact bytes remain in B.U.D.; this enum
 /// Is the domain-level meaning committed by the manifest.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -66,7 +66,7 @@ impl Visibility {
     }
 }
 
-/// Canonical DeEd manifest. Content is addressed by B.U.D.; this record binds
+/// Canonical `DeEd` manifest. Content is addressed by B.U.D.; this record binds
 /// Its meaning, owner, visibility, and metadata into a deterministic identity.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Manifest {
@@ -79,6 +79,11 @@ pub struct Manifest {
 }
 
 impl Manifest {
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn validate(&self) -> Result<(), &'static str> {
         if self.contributor == Address::zero() {
             return Err("DeEd contributor cannot be the zero address");

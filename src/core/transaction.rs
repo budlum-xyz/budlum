@@ -4599,6 +4599,7 @@ fn encode_storage_v3_tx(tx: &crate::storage::bud3::tx::StorageTxV3, out: &mut Ve
             object,
             segment,
             new_shares,
+            new_symbols,
             new_root,
         } => {
             put_u8(out, 3);
@@ -4607,6 +4608,12 @@ fn encode_storage_v3_tx(tx: &crate::storage::bud3::tx::StorageTxV3, out: &mut Ve
             put_u64(out, new_shares.len() as u64);
             for share in new_shares {
                 encode_storage_v3_share(share, out);
+            }
+            put_u64(out, new_symbols.len() as u64);
+            for sym in new_symbols {
+                put_u64(out, sym.segment);
+                put_u32(out, sym.esi);
+                put_bytes(out, &sym.data);
             }
             put_fixed(out, new_root);
         }
@@ -4631,8 +4638,14 @@ fn encode_storage_v3_tx(tx: &crate::storage::bud3::tx::StorageTxV3, out: &mut Ve
             put_u8(out, 7);
             encode_storage_v3_content_id(content, out);
         }
-        StorageTxV3::IssueViewGrant { row } => {
+        StorageTxV3::IssueViewGrant {
+            nft,
+            grant_nonce,
+            row,
+        } => {
             put_u8(out, 8);
+            put_fixed(out, nft);
+            put_fixed(out, grant_nonce);
             encode_storage_v3_grant_row(row, out);
         }
         StorageTxV3::RevokeViewGrant {
@@ -4674,7 +4687,7 @@ fn encode_storage_v3_tx(tx: &crate::storage::bud3::tx::StorageTxV3, out: &mut Ve
             attestations,
             proposer_stake,
         } => {
-            put_u8(out, 11);
+            put_u8(out, 12);
             put_fixed(out, old_object);
             encode_storage_v3_record(new_record, out);
             put_u64(out, new_shares.len() as u64);
@@ -4690,6 +4703,16 @@ fn encode_storage_v3_tx(tx: &crate::storage::bud3::tx::StorageTxV3, out: &mut Ve
                 put_bytes(out, &att.signature);
             }
             put_u64(out, *proposer_stake);
+        }
+        StorageTxV3::PayFallbackView {
+            object,
+            receipt_id,
+            amount_atoms,
+        } => {
+            put_u8(out, 13);
+            put_fixed(out, object);
+            put_fixed(out, receipt_id);
+            put_u64(out, *amount_atoms);
         }
     }
 }
