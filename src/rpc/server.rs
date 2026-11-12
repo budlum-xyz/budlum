@@ -28,7 +28,7 @@ use tower::{Layer, Service};
 use tracing::info;
 
 /// Hard ceiling for the per-IP sliding-window map. Without a bound, an attacker
-/// Rotating source addresses can turn rate limiting itself into a memory DoS.
+/// Rotating source addresses can turn rate limiting itself into a memory `DoS`.
 const MAX_TRACKED_RPC_CLIENTS: usize = 10_000;
 
 /// Retrieval challenges establish only that an operator responded for the
@@ -41,7 +41,7 @@ const RPC_BODY_LIMIT_CEILING: u32 = 64 * 1024 * 1024;
 const RPC_CONNECTION_LIMIT_CEILING: u32 = 100_000;
 
 /// Deadline for the in-process TLS handshake. Without it a peer that opens a
-/// socket and never sends a ClientHello holds the connection task and its file
+/// socket and never sends a `ClientHello` holds the connection task and its file
 /// descriptor for the lifetime of the process.
 const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -119,6 +119,11 @@ impl RpcSecurityConfig {
         }
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn from_env(
         auth_required: bool,
         api_key_env: Option<&str>,
@@ -686,6 +691,11 @@ impl RpcServer {
         self
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub async fn run(self, addr: String) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         use jsonrpsee::core::server::Methods;
         use jsonrpsee::server::BatchRequestConfig;
@@ -2515,7 +2525,7 @@ impl BudlumApiServer for RpcServer {
         };
         #[derive(serde::Deserialize)]
         struct Params {
-            /// Full BudZKVM finality claim material; when present, the
+            /// Full `BudZKVM` finality claim material; when present, the
             /// payload is its encoding and the version is the adapter's.
             zk_evidence: Option<ZkFinalityEvidence>,
             /// Raw payload hex for adapters whose payloads are built
@@ -6433,7 +6443,7 @@ impl BudlumApiServer for RpcServer {
         }
     }
 
-    /// Query QoS metrics for a verifier.
+    /// Query `QoS` metrics for a verifier.
     async fn ai_verifier_qos(
         &self,
         verifier: String,

@@ -1,4 +1,4 @@
-//! A domain whose finality is *proven*, not voted: the BudZKVM adapter.
+//! A domain whose finality is *proven*, not voted: the `BudZKVM` adapter.
 //!
 //! WIRING: wired - like every adapter in this tree, it is reachable through
 //! registry admission (`AdapterSpec::ZkVm` in the consensus-resident intake)
@@ -10,7 +10,7 @@
 //! validator set justified, an authority set asserted. A vote has an honesty
 //! assumption attached to it, and the profile has to say so.
 //!
-//! This one does not. A BudZKVM proof is checked by the chain's own STARK
+//! This one does not. A `BudZKVM` proof is checked by the chain's own STARK
 //! verifier against the public inputs the program committed to. There is no
 //! committee to be honest or dishonest, no bond to slash, no window to
 //! challenge. `TrustModel::Trustless` is not a claim about the external

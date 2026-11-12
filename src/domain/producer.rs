@@ -1,10 +1,10 @@
-//! Producer kits for PoW, BFT and PoA domains.
+//! Producer kits for `PoW`, BFT and `PoA` domains.
 //!
-//! BFT and PoA kits sign with keys the caller loads: a BFT validator's BLS key
-//! (and its ML-DSA-65 key for the QC half), a PoA authority's composite key.
+//! BFT and `PoA` kits sign with keys the caller loads: a BFT validator's BLS key
+//! (and its ML-DSA-65 key for the QC half), a `PoA` authority's composite key.
 //! The kits never read a key from disk themselves.
 //!
-//! A PoW domain finalizes on Budlum only through the bounded header-chain
+//! A `PoW` domain finalizes on Budlum only through the bounded header-chain
 //! light client (`PoWHeaderChainFinalityAdapter`): a target header that binds
 //! the commitment, followed by enough contiguous descendants to reach the
 //! domain's confirmation depth and registered work. This module builds that
@@ -28,7 +28,7 @@ pub struct PowBlockContent {
     pub timestamp_ms: u128,
 }
 
-/// What a producer needs to build one PoW commitment: the registered domain,
+/// What a producer needs to build one `PoW` commitment: the registered domain,
 /// the parent of the target block, the target height, and the target block
 /// followed by its descendants (the confirmation headers).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -80,7 +80,7 @@ pub fn mine_pow_header(
 /// # Errors
 ///
 /// An empty block list, a difficulty outside the domain's registered range,
-/// a domain without PoW parameters, or a header that cannot be mined.
+/// a domain without `PoW` parameters, or a header that cannot be mined.
 pub fn build_pow_commitment(spec: &PowChainSpec) -> Result<VerifiedDomainCommitment, String> {
     let params = spec
         .domain
@@ -149,7 +149,7 @@ pub fn build_pow_commitment(spec: &PowChainSpec) -> Result<VerifiedDomainCommitm
     Ok(VerifiedDomainCommitment { commitment, proof })
 }
 
-/// The block a BFT or PoA domain finalized, as its producer states it.
+/// The block a BFT or `PoA` domain finalized, as its producer states it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QuorumBlockSpec {
     pub domain: ConsensusDomain,
@@ -298,7 +298,7 @@ pub fn build_bft_commitment(
     Ok(VerifiedDomainCommitment { commitment, proof })
 }
 
-/// Build a PoA commitment with composite authority signatures
+/// Build a `PoA` commitment with composite authority signatures
 ///. `authorities` is the whole registered
 /// set; `signers` are the key pairs that sign (each must be in the set).
 ///

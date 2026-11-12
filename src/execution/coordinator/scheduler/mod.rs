@@ -515,6 +515,8 @@ fn isolated_transfer_state(base: &AccountState, tx: &Transaction) -> AccountStat
     local.base_fee = base.base_fee;
     local.current_block_height = base.current_block_height;
     local.current_block_unix_secs = base.current_block_unix_secs;
+    local.accounts_root_cache = base.accounts_root_cache;
+    local.accounts_root_dirty = false;
     if let Some(sender) = base.accounts.get(&tx.from) {
         local.accounts.insert(tx.from, sender.clone());
     }

@@ -43,14 +43,14 @@
 //! The dedicated listeners (`127.0.0.1:18547`, HTTP and WebSocket), the
 //! subscription pool, the block and receipt shapes with `stateRoot` set to
 //! `execution_root`, and the nightly tool tests. `eth_subscribe` and
-//! `eth_unsubscribe` stay in the table marked [`Answer::Pending`], so a client
+//! `eth_unsubscribe` stay in the table marked `Answer::Pending`, so a client
 //! that asks for them gets `-32601` from the dispatcher. Those rows name their
 //! owner package in the error, not a delivery number that has already landed.
 //!
 //! # The three tables agree
 //!
 //! A method is served only when three places say the same thing:
-//! [`METHODS`] here (listener and answer), the declaration in
+//! `METHODS` here (listener and answer), the declaration in
 //! `src/rpc/api.rs` (the wire name the client sends), and the row in
 //! `src/rpc/method_class.rs` (listener and effect, checked at every server
 //! start). The unit tests compare all three, so a method cannot be

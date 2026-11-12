@@ -26,7 +26,7 @@
 //!   launch (M7), and bit1 objects are accepted only at and above it.
 //!
 //! WIRING: unwired - the block executor reaches live segments through the
-//! live StorageTx variants once the activation height is set, and the final
+//! live `StorageTx` variants once the activation height is set, and the final
 //! NFT binding is written through `StorageTxV3::BindNft`. Until then the
 //! state machine is exercised by its tests, like the rest of `bud3`.
 

@@ -1,4 +1,4 @@
-//! B.U.D. Marketplace - AccessGrant v2 (APPROVED RFC) section 3.1 base types (P0).
+//! B.U.D. Marketplace - `AccessGrant` v2 (APPROVED RFC) section 3.1 base types (P0).
 //!
 //! Scope (the P0 pattern, one atomic piece of work): `AssetId`, `Signature64`,
 //! `GrantId`. P1 (primitives) starts once these types are green on main.
@@ -24,6 +24,11 @@ use std::str::FromStr;
 pub struct AssetId(pub [u8; 32]);
 
 impl AssetId {
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn from_hex(s: &str) -> Result<Self, String> {
         let s = s.strip_prefix("0x").unwrap_or(s);
         let bytes = hex::decode(s).map_err(|e| e.to_string())?;
@@ -117,6 +122,11 @@ impl Signature64 {
         self.0 == [0u8; 64]
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn from_hex(s: &str) -> Result<Self, String> {
         let s = s.strip_prefix("0x").unwrap_or(s);
         let bytes = hex::decode(s).map_err(|e| e.to_string())?;

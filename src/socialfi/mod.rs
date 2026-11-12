@@ -35,7 +35,7 @@ pub const MAX_AUTHOR_NAME_BYTES: usize = 64;
 pub struct NftRegistry {
     /// Id -> nft
     pub nfts: BTreeMap<u64, Nft>,
-    /// Owner -> set of nft_ids
+    /// Owner -> set of `nft_ids`
     pub ownership: BTreeMap<Address, Vec<u64>>,
     pub next_id: u64,
 }
@@ -109,6 +109,11 @@ impl NftRegistry {
         Ok(id)
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn add_tag(&mut self, id: u64, tag: String) -> Result<(), NftError> {
         if tag.is_empty() || tag.len() > MAX_TAG_BYTES {
             return Err(NftError::InvalidTag);
@@ -123,6 +128,11 @@ impl NftRegistry {
         Ok(())
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn update_luminance(&mut self, id: u64, delta_mcd: i64) -> Result<(), NftError> {
         let nft = self.nfts.get_mut(&id).ok_or(NftError::NotFound)?;
         let mut new_val = i128::from(nft.luminance) + i128::from(delta_mcd);
@@ -138,6 +148,11 @@ impl NftRegistry {
         Ok(())
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn transfer(&mut self, id: u64, from: &Address, to: Address) -> Result<(), NftError> {
         let nft = self.nfts.get_mut(&id).ok_or(NftError::NotFound)?;
         if &nft.owner != from {
@@ -159,6 +174,11 @@ impl NftRegistry {
         Ok(())
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn burn(&mut self, id: u64, owner: &Address) -> Result<ContentId, NftError> {
         let nft = self.nfts.get(&id).ok_or(NftError::NotFound)?;
         if &nft.owner != owner {

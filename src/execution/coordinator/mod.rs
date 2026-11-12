@@ -578,6 +578,18 @@ impl ExecutionCoordinator {
                 continue;
             }
 
+            if !state
+                .execution_state
+                .foreign_lane
+                .accounts
+                .contains_key(&tx.sender)
+            {
+                state
+                    .execution_state
+                    .foreign_lane
+                    .register_native_pq_account(tx.sender);
+            }
+
             let caller_alias = state
                 .execution_state
                 .ensure_alias_registered(&tx.sender, tx.ee)
@@ -871,6 +883,26 @@ impl HostRead for HostBridge<'_> {
 
 impl HostApi for HostBridge<'_> {
     fn write(&mut self, ns: &Namespace, key: &[u8], value: Option<&[u8]>) -> Result<(), HostError> {
+        let caller_group =
+            crate::execution::coordinator::state::RootGroup::for_ee(self.frame_actor.ee)
+                .ok_or_else(|| HostError::Denied(String::from("unknown execution environment")))?;
+        let target_group =
+            crate::execution::coordinator::state::RootGroup::for_namespace(ns.as_str())
+                .ok_or_else(|| {
+                    HostError::Denied(format!("unknown UEL namespace `{}`", ns.as_str()))
+                })?;
+        if target_group != caller_group {
+            return Err(HostError::Denied(format!(
+                "EE {:?} cannot write foreign namespace `{}`",
+                self.frame_actor.ee,
+                ns.as_str()
+            )));
+        }
+        if self.overlay.is_static() {
+            return Err(HostError::Denied(String::from(
+                "state write forbidden in static call",
+            )));
+        }
         self.overlay.write(ns.as_str(), key, value)
     }
 
@@ -1027,9 +1059,7 @@ impl HostApi for HostBridge<'_> {
         let dst = resolve_identity_address(to.ee, &to.id);
         let frame_src = resolve_identity_address(self.frame_actor.ee, &self.frame_actor.id);
         let frame_caller = resolve_identity_address(self.frame_caller.ee, &self.frame_caller.id);
-        let ee_scoped_contract = from.ee == self.frame_actor.ee && from.id.len() != 32;
-        if src != frame_src && src != frame_caller && src != self.root_actor && !ee_scoped_contract
-        {
+        if src != frame_src && src != frame_caller && src != self.root_actor {
             return Err(HostError::Denied(String::from(
                 "bud transfer may only debit the executing frame or the transaction sender",
             )));

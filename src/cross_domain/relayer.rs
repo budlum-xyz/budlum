@@ -1,7 +1,7 @@
 //! Universal Relayer - permissionless cross-domain relay orchestrator.
 //!
 //! Architecture:
-//! - Any account with the RELAYER role (staked via PermissionlessRegistry) can
+//! - Any account with the RELAYER role (staked via `PermissionlessRegistry`) can
 //!   relay cross-domain messages. That check is the chain's
 //!   (`Blockchain::submit_relayed_cross_domain_message` calls `ensure_active_relayer` before this
 //!   module sees the submission); `process_relay` itself does not know the
@@ -77,7 +77,7 @@ impl std::error::Error for RelayerError {}
 /// Used for replay protection and slashing evidence.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct RelayLedger {
-    /// Message_id → (relayer_address, relay_height, proof_hash)
+    /// Message_id → (`relayer_address`, `relay_height`, `proof_hash`)
     #[serde(with = "crate::core::map_keys")]
     relayed: BTreeMap<MessageId, RelayRecord>,
 }
@@ -95,6 +95,10 @@ impl RelayLedger {
     }
 
     /// Record a relay. Returns Err if already relayed (replay).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn record(
         &mut self,
         message_id: MessageId,
@@ -195,7 +199,7 @@ pub struct RelayerConfig {}
 pub struct UniversalRelayer {
     pub config: RelayerConfig,
     pub ledger: RelayLedger,
-    /// Pending relay requests: message_id → (source_event, target_domain).
+    /// Pending relay requests: `message_id` → (`source_event`, `target_domain`).
     /// Populated when a bridge lock/burn creates a cross-domain message.
     #[serde(with = "crate::core::map_keys")]
     pending: BTreeMap<MessageId, PendingRelay>,
@@ -232,6 +236,10 @@ impl UniversalRelayer {
 
     /// Register a new relay request from a bridge lock event.
     /// Called by the bridge state machine when a lock creates a cross-domain message.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn enqueue_relay(
         &mut self,
         source_event: DomainEvent,
@@ -274,6 +282,10 @@ impl UniversalRelayer {
     /// The caller's identity is not checked here; see the module docs. On
     /// success the relay is recorded and the verified cross-domain message is
     /// returned for the target domain's bridge to process (mint/unlock).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn process_relay(
         &mut self,
         message_id: MessageId,

@@ -53,6 +53,11 @@ impl CrossDomainMessageRegistry {
         before - self.messages.len()
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn insert(&mut self, message: CrossDomainMessage) -> Result<(), String> {
         if !message.verify_id() {
             return Err("Invalid message id".into());

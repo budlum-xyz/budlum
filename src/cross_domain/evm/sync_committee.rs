@@ -1,5 +1,5 @@
 //! WIRING: unwired - verify_execution_block_finality is reached in this tree only through the adapter modules that declare themselves unwired; the relayer path wires it.
-//! F10.3 Ethereum PoS sync committee light client, Altair-and-later finality.
+//! F10.3 Ethereum `PoS` sync committee light client, Altair-and-later finality.
 //!
 //! **BLS variant.** This module follows the Altair *structure* - 512 keys,
 //! sync periods, two-thirds threshold, fork-domain signing root - with
@@ -22,7 +22,7 @@
 //! verified here as a BLS12-381 aggregate over the caller-supplied state.
 //! That state is NOT yet authenticated to a finalized beacon state
 //! The rotation refuses without the
-//! finality branch, and this module makes no PoS finality claim beyond what
+//! finality branch, and this module makes no `PoS` finality claim beyond what
 //! the supplied state and aggregate prove.
 //!
 //! # The model, Ethereum Altair `BeaconSyncCommittee`
@@ -499,6 +499,10 @@ impl BeaconBinding {
 /// parameters, and before any curve arithmetic the binding must place
 /// `execution_block_hash` inside the header's body and the header's slot
 /// inside the committee state's period.
+///
+/// # Errors
+///
+/// Returns an error if the operation fails.
 pub fn verify_execution_block_finality(
     state: &SyncCommitteeState,
     aggregate: &SyncAggregate,
@@ -544,6 +548,10 @@ pub fn verify_execution_block_finality(
 /// committee: always possible". The branch format (decision A) lands with
 /// the committee work; until then no rotation runs. `state` is taken so the
 /// signature does not pretend rotation is possible without evidence.
+///
+/// # Errors
+///
+/// Returns an error if the operation fails.
 pub fn rotate_period(state: &mut SyncCommitteeState) -> Result<(), SyncCommitteeError> {
     let _never_rotates_without_the_branch = state.current_period;
     Err(SyncCommitteeError::RotationBranchRequired)

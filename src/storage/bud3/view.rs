@@ -38,6 +38,8 @@ pub struct PaidViewReceipt {
     pub payer: Address,
     /// Target object commitment.
     pub object: ObjectKey,
+    /// Unique on-chain receipt identifier written by `StorageTxV3::PayFallbackView`.
+    pub receipt_id: [u8; 32],
     /// Paid fee in BUD base units (`>= MIN_PAID_VIEW_FEE_ATOMS`).
     pub fee_paid_atoms: u64,
 }
@@ -203,7 +205,10 @@ pub fn fallback_decode_public<N: NetworkSymbolSource>(
     if entry.record.content_id.kind == ContentIdKind::Sealed {
         return Err(ViewBud3Error::SealedFallbackForbidden);
     }
-    if receipt.object != *object || receipt.fee_paid_atoms < MIN_PAID_VIEW_FEE_ATOMS {
+    if receipt.object != *object
+        || receipt.fee_paid_atoms < MIN_PAID_VIEW_FEE_ATOMS
+        || !registry.verify_paid_view(receipt)
+    {
         return Err(ViewBud3Error::UnpaidFallbackView);
     }
     let (record, symbols) = collect_symbols_full_then_mobile(registry, object, network)?;
@@ -274,7 +279,7 @@ impl RevealSessionManager {
         }
         let cap = usize::try_from(record.object_len)
             .map_err(|_| ViewBud3Error::Pipeline(PipelineError::TooLarge))?;
-        let mut object_bytes = Vec::with_capacity(cap);
+        let mut object_bytes = Vec::with_capacity(cap.min(1 << 20));
         for (idx, dec) in decoders.into_iter().enumerate() {
             let bytes = dec
                 .into_bytes()
@@ -420,7 +425,8 @@ mod tests {
             Err(ViewBud3Error::UnknownRevealSession)
         );
 
-        // Unpaid G8 fallback is refused; paid G8 fallback succeeds on public content.
+        let receipt_id = [0xA5; 32];
+        // Unpaid or unrecorded off-chain G8 fallback is refused; on-chain paid G8 fallback succeeds on public content.
         assert_eq!(
             fallback_decode_public(
                 &reg,
@@ -428,18 +434,36 @@ mod tests {
                 &PaidViewReceipt {
                     payer: [2; 32],
                     object: pub_key,
+                    receipt_id,
                     fee_paid_atoms: MIN_PAID_VIEW_FEE_ATOMS - 1,
                 },
                 &net,
             ),
             Err(ViewBud3Error::UnpaidFallbackView)
         );
+        assert_eq!(
+            fallback_decode_public(
+                &reg,
+                &pub_key,
+                &PaidViewReceipt {
+                    payer: [2; 32],
+                    object: pub_key,
+                    receipt_id,
+                    fee_paid_atoms: MIN_PAID_VIEW_FEE_ATOMS,
+                },
+                &net,
+            ),
+            Err(ViewBud3Error::UnpaidFallbackView)
+        );
+        reg.record_paid_view([2; 32], pub_key, receipt_id, MIN_PAID_VIEW_FEE_ATOMS, 1)
+            .unwrap();
         let decoded = fallback_decode_public(
             &reg,
             &pub_key,
             &PaidViewReceipt {
                 payer: [2; 32],
                 object: pub_key,
+                receipt_id,
                 fee_paid_atoms: MIN_PAID_VIEW_FEE_ATOMS,
             },
             &net,
@@ -482,6 +506,7 @@ mod tests {
                 &PaidViewReceipt {
                     payer: [2; 32],
                     object: sealed_key,
+                    receipt_id: [0xA6; 32],
                     fee_paid_atoms: 10_000,
                 },
                 &net,

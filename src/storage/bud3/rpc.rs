@@ -254,6 +254,7 @@ impl Bud3RpcService {
             "bud_storageGetContent" => {
                 let payer: Address = parse_hex32(params.get("payer"), "payer")?;
                 let object: ObjectKey = parse_hex32(params.get("object"), "object")?;
+                let receipt_id: [u8; 32] = parse_hex32(params.get("receipt_id"), "receipt_id")?;
                 let fee_paid_atoms = params
                     .get("fee_paid_atoms")
                     .and_then(Value::as_u64)
@@ -261,6 +262,7 @@ impl Bud3RpcService {
                 let receipt = PaidViewReceipt {
                     payer,
                     object,
+                    receipt_id,
                     fee_paid_atoms,
                 };
                 let content = fallback_decode_public(registry, &object, &receipt, network)
@@ -315,6 +317,8 @@ impl Bud3RpcService {
                 Ok(json!({ "ready": true, "via": "bud_storageUploadFinish" }))
             }
             "bud_storageIssueViewGrant" => {
+                let nft = parse_hex32(params.get("nft"), "nft")?;
+                let grant_nonce = parse_hex32(params.get("grant_nonce"), "grant_nonce")?;
                 let grant_tag = parse_hex32(params.get("grant_tag"), "grant_tag")?;
                 let one_time_pk = parse_hex_bytes(params.get("one_time_pk"), "one_time_pk")?;
                 let sealed_key_package =
@@ -324,6 +328,8 @@ impl Bud3RpcService {
                     .and_then(Value::as_u64)
                     .ok_or_else(|| String::from("missing `expires_at_epoch`"))?;
                 let tx = StorageTxV3::IssueViewGrant {
+                    nft,
+                    grant_nonce,
                     row: GrantRow {
                         grant_tag,
                         one_time_pk,

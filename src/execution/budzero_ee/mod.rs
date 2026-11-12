@@ -150,7 +150,7 @@ fn apply_caller_words(vm: &mut Vm, caller_id: &[u8]) {
 pub struct BudZeroEe;
 
 impl BudZeroEe {
-    /// Construct a new execution-only BudZero environment.
+    /// Construct a new execution-only `BudZero` environment.
     ///
     /// Convenience: instantiated by UEL worker hosts and integration tests.
     #[must_use]
@@ -439,11 +439,19 @@ pub struct OptionalProofJobReceipt {
 
 /// Decode BudZero bytecode under testnet/mainnet phase-1 opcode closure (`VerifyMerkle` and
 /// `VerifyInference` refused).
+///
+/// # Errors
+///
+/// Returns an error if the operation fails.
 pub fn decode_budzero_for_testnet(code: &[u8]) -> Result<Vec<u64>, String> {
     decode_gated_program(code).map_err(|r| r.message)
 }
 
-/// Validate verifier DoS bounds and charge setup BGU before accepting preprocessed trace data.
+/// Validate verifier `DoS` bounds and charge setup BGU before accepting preprocessed trace data.
+///
+/// # Errors
+///
+/// Returns an error if the operation fails.
 pub fn evaluate_preprocessed_setup(
     degree_bits: usize,
     preprocessed_bytes: usize,
@@ -466,6 +474,10 @@ pub fn evaluate_preprocessed_setup(
 }
 
 /// Evaluate an optional off-consensus proof job without mutating consensus execution state.
+///
+/// # Errors
+///
+/// Returns an error if the operation fails.
 pub fn evaluate_optional_proof_job(
     job_id: [u8; 32],
     degree_bits: usize,

@@ -15,7 +15,7 @@ pub enum FinalityStatus {
     Rejected(String),
 }
 
-/// Canonical header consumed by the bounded PoW light client.
+/// Canonical header consumed by the bounded `PoW` light client.
 ///
 /// The target header binds the commitment roots; descendant headers provide
 /// Confirmation work. `difficulty_bits` is consensus data but is accepted only
@@ -51,6 +51,10 @@ impl PoWHeader {
 /// Calculate a header hash with the immutable hash scheme registered for the
 /// Source domain. Custom schemes require a domain plugin and are deliberately
 /// Rejected by this generic light client.
+///
+/// # Errors
+///
+/// Returns an error if the operation fails.
 pub fn hash_pow_header(
     domain: &ConsensusDomain,
     header: &PoWHeader,
@@ -89,8 +93,8 @@ pub enum FinalityProof {
         validator_snapshot: ValidatorSetSnapshot,
     },
     PoA {
-        /// The KYC-approved authority set for this PoA domain (equal-weight, no
-        /// Stake - PoA deliberately has no stake concept). Order-independent;
+        /// The KYC-approved authority set for this `PoA` domain (equal-weight, no
+        /// Stake - `PoA` deliberately has no stake concept). Order-independent;
         /// Duplicates are ignored during verification.
         #[serde(default)]
         authorities: Vec<crate::core::address::Address>,
@@ -130,7 +134,7 @@ pub enum FinalityProof {
     PoWHeaderChain {
         headers: Vec<PoWHeader>,
     },
-    /// PoS finality with the post-quantum half: the BLS
+    /// `PoS` finality with the post-quantum half: the BLS
     /// certificate and the ML-DSA-65 QC blob of the same signers over the
     /// same checkpoint. Appended so earlier bincode indices stay stable.
     PoSPq {
@@ -138,7 +142,7 @@ pub enum FinalityProof {
         validator_snapshot: ValidatorSetSnapshot,
         qc: crate::consensus::qc::QcBlob,
     },
-    /// PoA finality with composite authority signatures: each
+    /// `PoA` finality with composite authority signatures: each
     /// authority signs with the validator suite (`0x0002`, ML-DSA-65 and
     /// Ed25519, context `BDLM/POA/V2`), and the registered set hash commits
     /// to every authority's composite key.
@@ -158,7 +162,7 @@ pub enum FinalityProof {
 
 impl FinalityProof {
     /// A quorum proof that carries only classical signatures: the BLS-only
-    /// PoS and BFT certificates and the Ed25519-only PoA signatures. Mainnet
+    /// `PoS` and BFT certificates and the Ed25519-only `PoA` signatures. Mainnet
     /// refuses these.
     #[must_use]
     pub const fn is_classical_only_quorum(&self) -> bool {
@@ -166,7 +170,7 @@ impl FinalityProof {
     }
 }
 
-/// A PoA authority with its composite key. The address is the
+/// A `PoA` authority with its composite key. The address is the
 /// Ed25519 half of the key, as for a validator.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PoAAuthorityKey {
@@ -175,7 +179,7 @@ pub struct PoAAuthorityKey {
     pub public_key: Vec<u8>,
 }
 
-/// The digest a PoA authority signs with its composite key.
+/// The digest a `PoA` authority signs with its composite key.
 #[must_use]
 pub fn poa_commit_digest(
     chain_id: u64,
@@ -187,7 +191,7 @@ pub fn poa_commit_digest(
     )])
 }
 
-/// The set hash a PoA domain with composite authorities registers: the
+/// The set hash a `PoA` domain with composite authorities registers: the
 /// same derivation as [`poa_authority_set_hash`] with each authority's
 /// composite key in the entry's PQ key field.
 ///
@@ -256,7 +260,7 @@ pub fn verify_pq_quorum(
         .map(|_| ())
 }
 
-/// A single PoA authority's ed25519 signature over a commitment binding message.
+/// A single `PoA` authority's ed25519 signature over a commitment binding message.
 /// The `authority` address doubles as the ed25519 public key (chain-wide
 /// Convention, same as block producers).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -265,7 +269,7 @@ pub struct PoAAuthoritySignature {
     pub signature: Vec<u8>,
 }
 
-/// Canonical message a PoA authority signs to attest a commitment. Binds the
+/// Canonical message a `PoA` authority signs to attest a commitment. Binds the
 /// signature to the network (`chain_id`), the domain, the height, the block
 /// hash, parent, sequence, timestamp, producer, roots and nonce writes: a quorum
 /// captured over one commitment must not be replayable under a different
@@ -349,6 +353,11 @@ impl std::error::Error for FinalityError {}
 pub trait DomainFinalityAdapter: Send + Sync {
     fn adapter_name(&self) -> &'static str;
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     fn verify_finality(
         &self,
         domain: &ConsensusDomain,
@@ -460,7 +469,7 @@ fn certificate_schemes(
 }
 
 /// Count leading zero bits in a 32-byte block hash (big-endian byte order).
-/// Used as a minimal PoW difficulty check for declared domain heads.
+/// Used as a minimal `PoW` difficulty check for declared domain heads.
 pub fn leading_zero_bits(hash: &crate::domain::Hash32) -> u32 {
     let mut bits = 0u32;
     for b in hash {
@@ -474,7 +483,7 @@ pub fn leading_zero_bits(hash: &crate::domain::Hash32) -> u32 {
     bits
 }
 
-/// Bounded, deterministic PoW light client used by bridge-enabled PoW domains.
+/// Bounded, deterministic `PoW` light client used by bridge-enabled `PoW` domains.
 #[derive(Debug, Clone, Default)]
 pub struct PoWHeaderChainFinalityAdapter;
 
@@ -676,7 +685,7 @@ impl DomainFinalityAdapter for PoSFinalityAdapter {
     }
 }
 
-/// The BLS half of a PoS proof: binding to the commitment, the registered
+/// The BLS half of a `PoS` proof: binding to the commitment, the registered
 /// set and the certificate itself.
 fn verify_pos_cert(
     domain: &ConsensusDomain,
@@ -779,8 +788,8 @@ fn verify_pos_cert(
 
 #[derive(Debug, Clone)]
 pub struct PoAFinalityAdapter {
-    /// Count-based quorum numerator (PoA is equal-weight, NOT stake-weighted -
-    /// PoA deliberately has no stake concept, preserving-2 isolation).
+    /// Count-based quorum numerator (`PoA` is equal-weight, NOT stake-weighted -
+    /// `PoA` deliberately has no stake concept, preserving-2 isolation).
     pub quorum_numerator: u64,
     /// Count-based quorum denominator.
     pub quorum_denominator: u64,
@@ -1006,6 +1015,10 @@ impl PoAFinalityAdapter {
 /// `compute_hash` sorts by address, so the ordering of `authorities` does not
 /// matter, and duplicates must be removed by the caller before hashing,
 /// otherwise a proof could pad its list to change the digest.
+///
+/// # Errors
+///
+/// Returns an error if the operation fails.
 pub fn poa_authority_set_hash(
     domain: &ConsensusDomain,
     authorities: &[crate::core::address::Address],
@@ -1033,7 +1046,7 @@ pub fn poa_authority_set_hash(
 
 /// A commitment must name the domain whose adapter is judging it.
 ///
-/// PoS and BFT certificates bind only a height and a block hash, so without this
+/// `PoS` and BFT certificates bind only a height and a block hash, so without this
 /// check a proof made for one domain would finalize the same height and hash on
 /// another domain that shares a validator set.
 fn reject_commitment_domain_mismatch(
@@ -1060,7 +1073,7 @@ fn reject_commitment_domain_mismatch(
 /// validator snapshot, the stakes and the keys are all the submitter's, the
 /// certificate verifies against the set it names for itself, and a forged
 /// finality settles a bridge mint. The shipped mainnet bootstrap list has
-/// exactly this shape for its PoS and BFT domains (bridge on, no set), so
+/// exactly this shape for its `PoS` and BFT domains (bridge on, no set), so
 /// until a launch ceremony registers their validator sets those two
 /// domains finalize nothing, which is the honest state of a bridge with no
 /// one behind it.
@@ -1086,7 +1099,7 @@ fn reject_unregistered_set_for_bridge(
 /// stake-weighted adapter here already binds its validator set to
 /// `domain.validator_set_hash` (`PoSFinalityAdapter`, `BftFinalityAdapter`,
 /// and both certificate branches of `StorageAttestationFinalityAdapter`); the
-/// two count-weighted PoA branches were the ones that did not.
+/// two count-weighted `PoA` branches were the ones that did not.
 ///
 /// A domain with a zero `validator_set_hash` has no registered set to compare
 /// against, the same convention the stake-weighted adapters use, and is left
@@ -1117,7 +1130,7 @@ impl DomainFinalityAdapter for PoAFinalityAdapter {
     }
 
     /// The authority signatures this adapter checks are Ed25519 today. The
-    /// composite PoA signature (suite 0x0002) adds ML-DSA-65 when lands.
+    /// composite `PoA` signature (suite 0x0002) adds ML-DSA-65 when lands.
     fn observed_schemes(&self, proof: &FinalityProof) -> Vec<ObservedScheme> {
         match proof {
             FinalityProof::PoA { .. } => vec![ObservedScheme::Scheme(SchemeId::ED25519)],
@@ -1333,7 +1346,7 @@ impl DomainFinalityAdapter for BftFinalityAdapter {
 }
 
 /// The BLS half of a BFT proof. BFT verifies a real commit certificate (BLS
-/// aggregate over the validator set) with the same primitive as PoS
+/// aggregate over the validator set) with the same primitive as `PoS`
 /// (`FinalityCert::verify`), instead of trusting a self-reported
 /// `signer_count`.
 fn verify_bft_cert(
@@ -1468,6 +1481,10 @@ impl ZkFinalityAdapter {
     ///
     /// `domain` and `commitment` are now genuinely USED (the audit flagged their
     /// Former underscore-ignored state).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn verify_finality_with_claim(
         &self,
         domain: &ConsensusDomain,
@@ -1531,7 +1548,7 @@ impl DomainFinalityAdapter for ZkFinalityAdapter {
         "zk-proof-verification"
     }
 
-    /// The claim the proof refers to was verified as a BudZero STARK, which
+    /// The claim the proof refers to was verified as a `BudZero` STARK, which
     /// rests on a hash function only.
     fn observed_schemes(&self, proof: &FinalityProof) -> Vec<ObservedScheme> {
         match proof {

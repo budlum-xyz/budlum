@@ -7069,6 +7069,19 @@ impl Blockchain {
                     committee.quorum_seats()
                 ));
             }
+            let voted_stake: u128 = verified_signers
+                .iter()
+                .filter_map(|idx| snapshot.validators.get(*idx))
+                .fold(0u128, |acc, validator| {
+                    acc.saturating_add(u128::from(validator.stake))
+                });
+            let required_stake = snapshot.quorum_stake();
+            if voted_stake < required_stake {
+                return Err(format!(
+                    "ML-DSA QC stake quorum not met under the quantum alarm: \
+                     {voted_stake} < {required_stake} stake"
+                ));
+            }
         }
         self.maybe_apply_detected_qc_faults(&snapshot, &blob)?;
 
@@ -8512,8 +8525,46 @@ impl Blockchain {
         // reinterpreted under a later set of seat owners.
         let mut table = CommitteeTable::for_snapshot(snapshot, 0, self.chain_id);
         let mut lost = std::collections::BTreeSet::new();
-        let record_at =
-            |height: u64| block_at(height).and_then(|block| block.seat_participation.clone());
+        let snapshot_has_keys = snapshot
+            .validators
+            .iter()
+            .any(|v| !v.bls_public_key.is_empty() || !v.pq_public_key.is_empty());
+        let record_at = |height: u64, active_table: &CommitteeTable| -> Option<SeatParticipation> {
+            let block = block_at(height)?;
+            let record = block.seat_participation.as_ref()?;
+            let expected_cp = height.checked_sub(interval)?;
+            if record.checkpoint != expected_cp {
+                return None;
+            }
+            if let Some(blob) = self.get_qc_blob(expected_cp) {
+                let cp_block = block_at(expected_cp)?;
+                if blob.checkpoint_hash != cp_block.hash {
+                    return None;
+                }
+                let signers = blob
+                    .verify_against_snapshot_in(
+                        &self.state.scheme_registry,
+                        snapshot,
+                        None,
+                        Some(epoch),
+                    )
+                    .ok()?;
+                let signer_addrs: Vec<crate::core::address::Address> = signers
+                    .iter()
+                    .filter_map(|idx| snapshot.validators.get(*idx))
+                    .map(|validator| validator.address)
+                    .collect();
+                Some(SeatParticipation::collect(
+                    active_table,
+                    expected_cp,
+                    signer_addrs.iter(),
+                ))
+            } else if snapshot_has_keys {
+                None
+            } else {
+                Some(record.clone())
+            }
+        };
         // A pair is (block at h-I, block at h): their records report the two
         // checkpoints before h. Both are canonical, below the target and in
         // this epoch; the live round starts only after that prefix is final.
@@ -8543,9 +8594,10 @@ impl Blockchain {
                 height = next_height;
                 continue;
             }
-            if let (Some(previous), Some(current)) =
-                (record_at(previous_height), record_at(current_height))
-            {
+            if let (Some(previous), Some(current)) = (
+                record_at(previous_height, &table),
+                record_at(current_height, &table),
+            ) {
                 // A record must name the checkpoint it reports for; a misplaced
                 // one is ignored rather than trusted to move a seat.
                 if previous.checkpoint == previous_height.saturating_sub(interval)
@@ -13343,6 +13395,169 @@ mod bond_and_reorg_tests {
                 .unwrap()
                 .is_none(),
             "unaligned fork invalidation at height 7 must clear checkpoint 10"
+        );
+    }
+
+    #[test]
+    fn quantum_alarm_finality_requires_stake_quorum_as_well_as_seat_quorum() {
+        use crate::chain::finality::{pop_signing_message, sign_bls_pop};
+        use crate::core::chain_config::FINALITY_CHECKPOINT_INTERVAL;
+
+        let make_val = |seed: u8| {
+            let mut sk_bytes = [0u8; 64];
+            sk_bytes[0] = seed;
+            let bls_sk = bls12_381::Scalar::from_bytes_wide(&sk_bytes);
+            let bls_pk = bls12_381::G2Affine::from(bls12_381::G2Projective::generator() * bls_sk)
+                .to_compressed()
+                .to_vec();
+            let support = crate::crypto::primitives::ValidatorKeys::generate().unwrap();
+            let vrf_pk = support.vrf_key.public.to_bytes().to_vec();
+            let pq_kp = support.pq_key.unwrap();
+            let addr = Address::from([seed; 32]);
+            (addr, bls_sk, bls_pk, vrf_pk, pq_kp)
+        };
+        let (whale, w_sk, w_pk, w_vrf, _w_pq) = make_val(21);
+        let (s1, sk1, pk1, vrf1, pq1) = make_val(22);
+        let (s2, sk2, pk2, vrf2, pq2) = make_val(23);
+        let (s3, sk3, pk3, vrf3, pq3) = make_val(24);
+        let (s4, sk4, pk4, vrf4, pq4) = make_val(25);
+        let (s5, sk5, pk5, vrf5, pq5) = make_val(26);
+        let (s6, sk6, pk6, vrf6, pq6) = make_val(27);
+        let (s7, sk7, pk7, vrf7, pq7) = make_val(28);
+
+        let mut state = AccountState::new();
+        // Whale holds >50% of stake (capped at 8/32 seats); 7 small validators hold
+        // 24/32 seats (>22 seat quorum) yet only 7/1007 stake (< 2/3 stake quorum).
+        for (v, stake, sk, pk, vrf_pk, pq) in [
+            (whale, 100_000u64, &w_sk, w_pk, w_vrf, &_w_pq),
+            (s1, 100u64, &sk1, pk1, vrf1, &pq1),
+            (s2, 100u64, &sk2, pk2, vrf2, &pq2),
+            (s3, 100u64, &sk3, pk3, vrf3, &pq3),
+            (s4, 100u64, &sk4, pk4, vrf4, &pq4),
+            (s5, 100u64, &sk5, pk5, vrf5, &pq5),
+            (s6, 100u64, &sk6, pk6, vrf6, &pq6),
+            (s7, 100u64, &sk7, pk7, vrf7, &pq7),
+        ] {
+            state.add_balance(&v, 200_000);
+            state.add_validator(v, stake);
+            let pop_msg = pop_signing_message(45262, &v, &pk);
+            let entry = state.validators.get_mut(&v).unwrap();
+            entry.vrf_public_key = vrf_pk;
+            entry.bls_public_key = pk;
+            entry.pop_signature = sign_bls_pop(sk, &pop_msg);
+            entry.pq_public_key = pq.public_key_bytes().to_vec();
+            entry.active = true;
+        }
+        state.settlement.quantum.force_solved(
+            crate::security::quantum_canary::CanaryId::BlsG1,
+            crate::security::quantum_canary::CanaryClaim {
+                commit_height: 0,
+                claimer: Address::zero(),
+                accepted_height: 1,
+            },
+        );
+
+        let consensus = std::sync::Arc::new(crate::consensus::PoWEngine::new(0));
+        let mut bc = Blockchain::new(consensus, None, 45262, None);
+        bc.state = state;
+        bc.record_validator_snapshot(0);
+
+        let cp_height = FINALITY_CHECKPOINT_INTERVAL;
+        for _ in 1..=cp_height {
+            bc.produce_block(whale).unwrap();
+        }
+        let cp_hash = bc.chain.get(cp_height as usize).unwrap().hash.clone();
+        let epoch = bc.state.epoch_index;
+        let snapshot = bc.validator_snapshot_for_epoch(epoch).unwrap();
+
+        let small_signers = [
+            (&s1, &pq1),
+            (&s2, &pq2),
+            (&s3, &pq3),
+            (&s4, &pq4),
+            (&s5, &pq5),
+            (&s6, &pq6),
+            (&s7, &pq7),
+        ];
+        let mut pq_signatures = Vec::new();
+        for (addr, pq_kp) in small_signers {
+            let pos = snapshot
+                .validators
+                .iter()
+                .position(|val| &val.address == addr)
+                .unwrap();
+            let pq_msg =
+                crate::consensus::qc::pq_signing_message(epoch, cp_height, &cp_hash, pos as u32);
+            pq_signatures.push(crate::consensus::qc::PqSignatureEntry {
+                validator_index: pos as u32,
+                validator_address: addr.to_hex(),
+                pq_signature: pq_kp.sign(crate::crypto::ctx::QC_V2, &pq_msg).unwrap(),
+            });
+        }
+        let blob =
+            crate::consensus::qc::QcBlob::new(epoch, cp_height, cp_hash.clone(), pq_signatures);
+        // Seed verified_qc_blobs directly to exercise handle_finality_cert's alarm guard.
+        bc.verified_qc_blobs.insert(cp_height, blob);
+        let committee = bc
+            .derive_seat_table_for_checkpoint(epoch, cp_height, &snapshot, None)
+            .unwrap();
+        let cert = crate::chain::finality::FinalityCert {
+            chain_id: 45262,
+            epoch,
+            checkpoint_height: cp_height,
+            checkpoint_hash: cp_hash,
+            agg_sig_bls: vec![],
+            bitmap: vec![0xfe],
+            set_hash: snapshot.set_hash.clone(),
+            seat_table_version: committee.version,
+        };
+        let err = bc.handle_finality_cert(cert).unwrap_err();
+        assert!(err.contains("stake quorum"), "got: {err}");
+    }
+
+    #[test]
+    fn derive_seat_table_ignores_forged_participation_without_verified_qc() {
+        let interval =
+            crate::core::chain_config::finality_checkpoint_interval_for_chain_id(45262);
+        let mut bc = Blockchain::new(
+            std::sync::Arc::new(crate::consensus::PoWEngine::new(0)),
+            None,
+            45262,
+            None,
+        );
+        let validators = (1u8..=8)
+            .map(|byte| crate::chain::finality::ValidatorEntry {
+                address: Address::from([byte; 32]),
+                stake: 1_000,
+                bls_public_key: vec![byte; 96],
+                pop_signature: Vec::new(),
+                pq_public_key: vec![byte; 32],
+            })
+            .collect();
+        let snapshot = ValidatorSetSnapshot::new(0, validators);
+        let empty = crate::validators::committee::SeatBitmap::new(32);
+        for height in 1..=interval * 4 {
+            let mut block = crate::core::block::Block::new_with_chain_id(
+                height,
+                "0".repeat(64),
+                Vec::new(),
+                45262,
+            );
+            block.epoch = 0;
+            if height == interval * 2 || height == interval * 3 {
+                block.seat_participation = Some(crate::validators::committee::SeatParticipation {
+                    checkpoint: height - interval,
+                    seats: empty.clone(),
+                });
+            }
+            bc.chain.push(block);
+        }
+        let table = bc
+            .derive_seat_table_for_checkpoint(0, interval * 4, &snapshot, None)
+            .unwrap();
+        assert_eq!(
+            table.version, 0,
+            "producer bitmap without a verified QC blob must never hand over seats"
         );
     }
 }

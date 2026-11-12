@@ -832,6 +832,9 @@ impl Metrics {
         )?;
         bud3_custody_bytes.with_label_values(&["full"]).set(0);
         bud3_custody_bytes.with_label_values(&["mobile"]).set(0);
+        bud3_custody_bytes
+            .with_label_values(&["mobile_opportunistic"])
+            .set(0);
 
         registry.register(Box::new(chain_height.clone()))?;
         registry.register(Box::new(account_rows.clone()))?;

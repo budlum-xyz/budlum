@@ -331,6 +331,10 @@ pub enum MigrationTxOutcome {
 }
 
 /// Verifies deployment authority and the finalized source account proof.
+///
+/// # Errors
+///
+/// Returns an error if the operation fails.
 pub fn begin_import(request: MigrationRequest) -> Result<MigrationPlan, ImportError> {
     if request.authorization.budlum_chain_id != request.chain_id {
         return Err(ImportError::ChainMismatch {
@@ -404,6 +408,10 @@ impl MigrationPlan {
     }
 
     /// Atomically verifies and imports one chunk of storage slots (`G-4`: all or nothing).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn import_chunk(&mut self, chunk: &ImportEvmStorageChunk) -> Result<usize, ImportError> {
         if chunk.contract != self.source.address {
             return Err(ImportError::ChunkContractMismatch);
@@ -453,6 +461,10 @@ impl MigrationPlan {
     }
 
     /// Finalizes the staged migration into a complete [`MigrationRecord`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn finalize(
         self,
         fee_schedule: &MigrationFeeSchedule,
@@ -498,6 +510,10 @@ impl MigrationPlan {
 
 /// Returns `true` when `addr20` is occupied in UEL EVM state, collides with a native alias
 /// or precompile, or already carries native balance (`8.12.2 item 6`).
+///
+/// # Errors
+///
+/// Returns an error if the operation fails.
 pub fn is_evm_address_occupied(
     account_state: &AccountState,
     exec_state: &ExecutionState,
@@ -539,6 +555,10 @@ fn evm_storage_key(addr: &[u8; 20], slot: &[u8; 32]) -> [u8; 52] {
 /// Charges the verified migration fee from `migrator` to `reward_pool_account()` on
 /// `FinalizeEvmImport`, installs code and storage at `record.address`, records
 /// `imported_from`, and leaves the contract's native balance at `0`.
+///
+/// # Errors
+///
+/// Returns an error if the operation fails.
 pub fn apply_migration_tx(
     state: &mut AccountState,
     migrator: &Address,

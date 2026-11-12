@@ -539,7 +539,7 @@ pub struct RetrievalResponse {
     /// Challenge_id, range_hash, responder, response_epoch])`. 64 bytes.
     #[serde(default)]
     pub responder_signature: Option<Vec<u8>>,
-    /// ZK proof bytes (ProofEnvelope) certifying the correct challenge answer
+    /// ZK proof bytes (`ProofEnvelope`) certifying the correct challenge answer
     #[serde(default)]
     pub proof_bytes: Option<Vec<u8>>,
 }
@@ -874,14 +874,14 @@ pub struct StorageRegistry {
     /// root and restored from a side store.
     #[serde(default)]
     pub economics: StorageEconomicsLedger,
-    /// Per-(owner, content_id) confidential body commits so a squatter naming
+    /// Per-(owner, `content_id`) confidential body commits so a squatter naming
     /// another party's content id cannot block or hijack the real owner's
     /// confidential commit, grant or social-delete surface.
     #[serde(default)]
     #[serde(with = "crate::core::map_keys")]
     scoped_confidential_commits:
         BTreeMap<(Address, ContentId), crate::storage::ConfidentialBodyCommit>,
-    /// Per-(manifest_id, content_id, owner) self-host policies so a squatter's
+    /// Per-(`manifest_id`, `content_id`, owner) self-host policies so a squatter's
     /// policy applies only to its own deals and cannot block another owner.
     #[serde(default)]
     #[serde(with = "crate::core::map_keys")]
@@ -1121,11 +1121,11 @@ pub enum StorageError {
         parity_index: u32,
         column: u64,
     },
-    /// B.U.D.: merkle_proof and storage_root are mandatory
-    /// Now that VerifyMerkle production gate is open.
+    /// B.U.D.: `merkle_proof` and `storage_root` are mandatory
+    /// Now that `VerifyMerkle` production gate is open.
     MerkleProofRequired,
     /// B.U.D.: the provided merkle proof failed format validation
-    /// Or STARK verification. The proof must be a valid ProofEnvelope.
+    /// Or STARK verification. The proof must be a valid `ProofEnvelope`.
     InvalidMerkleProof(String),
     /// The replica index is not below [`STORAGE_REPLICATION_TARGET`]. No
     /// object has more replica slots than that, so a larger index names a
@@ -1631,6 +1631,10 @@ impl StorageRegistry {
 
     /// Owner-scoped check for mobile self-hosting so a squatter's policy on a
     /// shared `manifest_id` governs only its own deals, never another owner's.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn check_self_host_allowed_for_owner(
         &self,
         manifest_id: &ContentId,
@@ -2121,6 +2125,10 @@ impl StorageRegistry {
     /// the recorded owner instead of being believed, because a caller that could
     /// name any issuer could hand out public view access to bytes it does not
     /// own.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn issue_view_grant(
         &mut self,
         chain_id: u64,
@@ -2496,6 +2504,10 @@ impl StorageRegistry {
     /// Validate that `shard_id` is a member of `manifest`. Used by
     /// `open_deal`; exposed so the E2E test can exercise the failure
     /// Path.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn validate_shard_membership(
         &self,
         manifest: &ContentManifest,
@@ -2514,6 +2526,10 @@ impl StorageRegistry {
     /// Open a new `StorageDeal`. The caller supplies the
     /// `ContentManifest` so we can validate shard membership on-chain
     /// (no off-chain indexer dependency).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     #[allow(clippy::too_many_arguments)]
     pub fn open_deal(
         &mut self,
@@ -2769,17 +2785,17 @@ impl StorageRegistry {
     }
 
     /// Open a retrieval challenge. Anyone can call this (no role
-    /// Required) - the opener_bond is the anti-spam mechanism.
+    /// Required) - the `opener_bond` is the anti-spam mechanism.
     #[allow(clippy::too_many_arguments)]
     /// Maximum concurrent open challenges per deal.
     /// Prevents spam attacks where a single deal gets unlimited challenges,
-    /// Growing the StorageRegistry's challenge BTreeMap without bound.
+    /// Growing the `StorageRegistry`'s challenge BTreeMap without bound.
     const MAX_OPEN_CHALLENGES_PER_DEAL: usize = 10;
 
     /// Opener bond charged per KiB of the challenged byte range.
     ///
     /// A challenge costs the operator a read plus a hash over the range. On
-    /// commodity NVMe that is roughly 20 ms for the 16 MiB maximum chunk and
+    /// commodity NVMe that is roughly 20 ms for the 16 `MiB` maximum chunk and
     /// 0.3 ms for the 256 KiB default - small individually, but the rate limit
     /// is keyed on `(operator, manifest)`, so an operator serving 1000
     /// manifests can be made to spend seconds of I/O per epoch by an attacker
@@ -2827,6 +2843,10 @@ impl StorageRegistry {
     /// rate limit minimum out for good) and must close within
     /// `MAX_CHALLENGE_WINDOW_EPOCHS` (a huge `deadline_epoch` would never
     /// finalize as missed).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn validate_challenge_window(
         challenge_epoch: u64,
         deadline_epoch: u64,
@@ -2844,6 +2864,11 @@ impl StorageRegistry {
         Ok(())
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn open_challenge_with_entropy(
         &mut self,
         request: &RetrievalChallengeRequest,
@@ -3426,6 +3451,11 @@ impl StorageRegistry {
         dropped
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn derive_challenge_range(
         input: StorageChallengeRangeInput<'_>,
     ) -> Result<(u64, u64), StorageError> {
@@ -3470,6 +3500,11 @@ impl StorageRegistry {
         Ok((offset, offset + range_len))
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     #[allow(clippy::too_many_arguments)]
     pub fn open_challenge(
         &mut self,
@@ -3608,6 +3643,10 @@ impl StorageRegistry {
     ///
     /// Range_hash must be non-zero (empty hash = invalid response).
     /// Full hash verification deferred to ZK proof integration.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn answer_challenge(
         &mut self,
         challenge_id: u64,
@@ -3626,6 +3665,11 @@ impl StorageRegistry {
         )
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn answer_challenge_with_chain_id(
         &mut self,
         chain_id: u64,
@@ -3944,6 +3988,10 @@ impl StorageRegistry {
     /// Response. The deal transitions to `Slashed` and the operator
     /// Bond is *recorded* as slashed (not burned - burning is a
     /// Higher-layer `Blockchain` accounting decision).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn finalize_missed_challenge(
         &mut self,
         challenge_id: u64,
@@ -4024,6 +4072,11 @@ impl StorageRegistry {
         Ok(result)
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     #[allow(clippy::too_many_arguments)]
     pub fn accept_reallocation_ticket(
         &mut self,
@@ -4437,6 +4490,10 @@ impl StorageRegistry {
     /// held `Active` instead: the missed-answer slash needs the row to still
     /// be `Active`, so expiring under an open challenge would strand the
     /// opener's bond ([`StorageError::OpenChallengeBlocksExpiry`]).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn expire_deal(&mut self, deal_id: u64, now_epoch: u64) -> Result<u64, StorageError> {
         let deal = self
             .deals
@@ -4517,9 +4574,13 @@ impl StorageRegistry {
     }
 
     /// B.U.D.: validate merkle proof format.
-    /// Checks that proof_bytes deserializes to a valid ProofEnvelope.
+    /// Checks that `proof_bytes` deserializes to a valid `ProofEnvelope`.
     /// Full STARK verification (Plonky3Adapter::verify) is deferred to
     /// Nodes with the bud-proof crate and prover capability.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn validate_merkle_proof_format(
         proof_bytes: &[u8],
         storage_root: &Hash32,

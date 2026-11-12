@@ -57,6 +57,10 @@ struct Escrow {
 ///
 /// `payer_reserve` is a balance the payer must keep after paying. It is
 /// required, not spent.
+///
+/// # Errors
+///
+/// Returns an error if the operation fails.
 pub fn open_deal_escrowed(
     state: &mut AccountState,
     terms: &DealOpenTerms<'_>,

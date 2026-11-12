@@ -62,6 +62,11 @@ pub struct ResolvedHead {
 }
 
 pub trait ConsensusDomainForkChoice {
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     fn fork_choice(&self, candidates: &[ForkCandidate]) -> Result<ResolvedHead, ForkChoiceError>;
 }
 

@@ -7,7 +7,7 @@
 //!   account, and increases the base object's live dependency count so the base
 //!   object cannot be deleted until dependent objects are detached/rehydrated.
 //! * Cryptographic erasure (`SocialDelete` / sealed NFT burn): atomically shreds
-//!   every listed unlinkable [`GrantRow`] (verified via one-time ML-DSA-65
+//!   every listed unlinkable `GrantRow` (verified via one-time ML-DSA-65
 //!   signatures) so the network stops serving those key packages immediately,
 //!   removes the NFT reference, and writes a permanent tombstone once zero
 //!   references remain.
