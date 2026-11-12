@@ -66,7 +66,7 @@ jobs:
       - name: Genesis hash (run 1)
         run: |
           set -euo pipefail
-          cargo test --release -- genesis_hash_deterministic --nocapture 2>&1 | tee /tmp/genesis_run1.txt
+          cargo test --release --lib -- genesis_hash_deterministic --nocapture 2>&1 | tee /tmp/genesis_run1.txt
           HASH1=$(grep "GENESIS_HASH=" /tmp/genesis_run1.txt | tail -1 | cut -d= -f2)
           echo "Run 1 hash: ${HASH1}"
           test -n "${HASH1}"
@@ -80,7 +80,7 @@ jobs:
       - name: Genesis hash (run 2)
         run: |
           set -euo pipefail
-          cargo test --release -- genesis_hash_deterministic --nocapture 2>&1 | tee /tmp/genesis_run2.txt
+          cargo test --release --lib -- genesis_hash_deterministic --nocapture 2>&1 | tee /tmp/genesis_run2.txt
           HASH2=$(grep "GENESIS_HASH=" /tmp/genesis_run2.txt | tail -1 | cut -d= -f2)
           echo "Run 2 hash: ${HASH2}"
           test -n "${HASH2}"
@@ -168,15 +168,15 @@ jobs:
           $url = "https://github.com/protocolbuffers/protobuf/releases/download/v$ver/protoc-$ver-win64.zip"
           Invoke-WebRequest -Uri $url -OutFile protoc.zip -MaximumRetryCount 5 -RetryIntervalSec 10
           $got = (Get-FileHash protoc.zip -Algorithm SHA256).Hash
-          if ($got -ne $sha) { throw "protoc SHA256 uyusmadi: $got != $sha" }
+          if ($got -ne $sha) { throw "protoc SHA256 mismatch: $got != $sha" }
           Expand-Archive protoc.zip -DestinationPath "$env:RUNNER_TEMP\protoc"
           echo "$env:RUNNER_TEMP\protoc\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
           & "$env:RUNNER_TEMP\protoc\bin\protoc.exe" --version
-      - name: Determinism testleri (mevcut suite)
+      - name: Determinism tests (current suite)
         shell: bash
         run: |
           set -euo pipefail
-          cargo test --release -- determinism --nocapture 2>&1 | tee det-${{ matrix.os }}.txt
+          cargo test --release --lib -- determinism --nocapture 2>&1 | tee det-${{ matrix.os }}.txt
           # `grep -c` exits 1 when it matches nothing and >1 when it could not
           # read the file at all. `|| true` collapsed those two into the same
           # thing, and the second one is a missing measurement, not a zero.

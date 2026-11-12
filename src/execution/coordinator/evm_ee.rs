@@ -29,7 +29,7 @@ use crate::execution::coordinator::universal_call::{
 use budlum_uel_abi::{
     BlockContext, BudAmount, CodeInfo, EeCall, EeCallKind, EeFault, EeId, EeIdentity, EeLog,
     EeOutcome, EeQuery, EeRefusal, ExecutionEnvironment, HostApi, HostError, HostRead, Namespace,
-    OutcomeStatus, OutOfGas, RefusalCode, UniversalCall, UniversalResult,
+    OutOfGas, OutcomeStatus, RefusalCode, UniversalCall, UniversalResult,
 };
 use serde::{Deserialize, Serialize};
 use sha3::{Digest, Keccak256};
@@ -928,70 +928,7 @@ fn mem_write(
     Ok(())
 }
 
-struct FrameMeterHost<'a> {
-    inner: &'a mut dyn HostApi,
-    gas_limit: u64,
-    gas_used: u64,
-}
-
-impl FrameMeterHost<'_> {
-    const fn remaining(&self) -> u64 {
-        self.gas_limit.saturating_sub(self.gas_used)
-    }
-}
-
-impl HostRead for FrameMeterHost<'_> {
-    fn read(&self, ns: &Namespace, key: &[u8]) -> Result<Option<Vec<u8>>, HostError> {
-        self.inner.read(ns, key)
-    }
-
-    fn bud_balance(&self, who: &EeIdentity) -> Result<BudAmount, HostError> {
-        self.inner.bud_balance(who)
-    }
-}
-
-impl HostApi for FrameMeterHost<'_> {
-    fn write(&mut self, ns: &Namespace, key: &[u8], value: Option<&[u8]>) -> Result<(), HostError> {
-        self.inner.write(ns, key, value)
-    }
-
-    fn universal_call(&mut self, call: UniversalCall) -> Result<UniversalResult, HostError> {
-        self.inner.universal_call(call)
-    }
-
-    fn emit_log(&mut self, log: EeLog) -> Result<(), HostError> {
-        self.inner.emit_log(log)
-    }
-
-    fn charge(&mut self, bgu: u64) -> Result<(), OutOfGas> {
-        let next = self.gas_used.checked_add(bgu).ok_or(OutOfGas)?;
-        if next > self.gas_limit {
-            let avail = self.remaining();
-            if avail > 0 {
-                let _ = self.inner.charge(avail);
-            }
-            self.gas_used = self.gas_limit;
-            return Err(OutOfGas);
-        }
-        self.inner.charge(bgu)?;
-        self.gas_used = next;
-        Ok(())
-    }
-
-    fn bud_transfer(
-        &mut self,
-        from: &EeIdentity,
-        to: &EeIdentity,
-        attos: u128,
-    ) -> Result<(), HostError> {
-        self.inner.bud_transfer(from, to, attos)
-    }
-}
-
-/// Undo-buffered sub-frame host wrapper enforcing the sub-call gas cap, static
-/// protection, and atomic state/balance/log rollback on revert or out-of-gas.
-struct EvmSubCallHost<'a> {
-    inner: &'a mut dyn HostApi,
+struct EvmFrameOverlay {
     gas_limit: u64,
     gas_used: u64,
     is_static: bool,
@@ -1001,10 +938,9 @@ struct EvmSubCallHost<'a> {
     balance_deltas: BTreeMap<(u8, Vec<u8>), i128>,
 }
 
-impl<'a> EvmSubCallHost<'a> {
-    fn new(inner: &'a mut dyn HostApi, gas_limit: u64, is_static: bool) -> Self {
+impl EvmFrameOverlay {
+    fn new(gas_limit: u64, is_static: bool) -> Self {
         Self {
-            inner,
             gas_limit,
             gas_used: 0,
             is_static,
@@ -1015,38 +951,101 @@ impl<'a> EvmSubCallHost<'a> {
         }
     }
 
-    fn commit(self) -> Result<(), HostError> {
-        for (from, to, attos) in self.staged_transfers {
-            self.inner.bud_transfer(&from, &to, attos)?;
-        }
-        for ((ns_str, key), val) in self.staged_writes {
-            let ns = Namespace::new(&ns_str)
-                .map_err(|e| HostError::Invalid(format!("bad staged namespace: {e}")))?;
-            self.inner.write(&ns, &key, val.as_deref())?;
-        }
-        for log in self.staged_logs {
-            self.inner.emit_log(log)?;
-        }
-        Ok(())
+    const fn remaining(&self) -> u64 {
+        self.gas_limit.saturating_sub(self.gas_used)
     }
 }
 
-impl HostRead for EvmSubCallHost<'_> {
+/// Heap-backed stack of EVM frame overlays providing bounded nested gas
+/// accounting, static-context propagation, and atomic rollback on revert or OOG.
+struct EvmStackHost<'a> {
+    root: &'a mut dyn HostApi,
+    overlays: Vec<EvmFrameOverlay>,
+}
+
+impl<'a> EvmStackHost<'a> {
+    fn new(root: &'a mut dyn HostApi) -> Self {
+        Self {
+            root,
+            overlays: Vec::new(),
+        }
+    }
+
+    fn push_overlay(&mut self, gas_limit: u64, is_static: bool) {
+        let inherited_static = is_static || self.overlays.iter().any(|o| o.is_static);
+        self.overlays
+            .push(EvmFrameOverlay::new(gas_limit, inherited_static));
+    }
+
+    fn remaining(&self) -> u64 {
+        self.overlays.last().map_or(0, EvmFrameOverlay::remaining)
+    }
+
+    fn discard_top_overlay(&mut self) {
+        self.overlays.pop();
+    }
+
+    fn commit_top_overlay(&mut self) -> Result<(), HostError> {
+        let Some(top) = self.overlays.pop() else {
+            return Ok(());
+        };
+        if let Some(parent) = self.overlays.last_mut() {
+            for (k, d) in &top.balance_deltas {
+                let cur = parent.balance_deltas.get(k).copied().unwrap_or(0);
+                let _ = cur
+                    .checked_add(*d)
+                    .ok_or_else(|| HostError::Invalid(String::from("balance delta overflow")))?;
+            }
+            for (k, d) in top.balance_deltas {
+                let entry = parent.balance_deltas.entry(k).or_insert(0);
+                *entry += d;
+            }
+            parent.staged_transfers.extend(top.staged_transfers);
+            parent.staged_writes.extend(top.staged_writes);
+            parent.staged_logs.extend(top.staged_logs);
+            return Ok(());
+        }
+        for (from, to, attos) in top.staged_transfers {
+            self.root.bud_transfer(&from, &to, attos)?;
+        }
+        for ((ns_str, key), val) in top.staged_writes {
+            let ns = Namespace::new(&ns_str)
+                .map_err(|e| HostError::Invalid(format!("bad staged namespace: {e}")))?;
+            self.root.write(&ns, &key, val.as_deref())?;
+        }
+        for log in top.staged_logs {
+            self.root.emit_log(log)?;
+        }
+        Ok(())
+    }
+
+    fn active_is_static(&self) -> bool {
+        self.overlays.iter().any(|o| o.is_static)
+    }
+}
+
+impl HostRead for EvmStackHost<'_> {
     fn read(&self, ns: &Namespace, key: &[u8]) -> Result<Option<Vec<u8>>, HostError> {
         let lookup = (ns.as_str().to_string(), key.to_vec());
-        if let Some(staged) = self.staged_writes.get(&lookup) {
-            return Ok(staged.clone());
+        for overlay in self.overlays.iter().rev() {
+            if let Some(staged) = overlay.staged_writes.get(&lookup) {
+                return Ok(staged.clone());
+            }
         }
-        self.inner.read(ns, key)
+        self.root.read(ns, key)
     }
 
     fn bud_balance(&self, who: &EeIdentity) -> Result<BudAmount, HostError> {
-        let base = self.inner.bud_balance(who)?.0;
-        let delta = self
-            .balance_deltas
-            .get(&(who.ee.0, who.id.clone()))
-            .copied()
-            .unwrap_or(0);
+        let base = self.root.bud_balance(who)?.0;
+        let key = (who.ee.0, who.id.clone());
+        let mut delta: i128 = 0;
+        for overlay in &self.overlays {
+            if let Some(&d) = overlay.balance_deltas.get(&key) {
+                delta = delta
+                    .checked_add(d)
+                    .ok_or_else(|| HostError::Invalid(String::from("balance delta overflow")))?;
+            }
+        }
         let adjusted = if delta >= 0 {
             base.saturating_add(delta.unsigned_abs())
         } else {
@@ -1056,28 +1055,35 @@ impl HostRead for EvmSubCallHost<'_> {
     }
 }
 
-impl HostApi for EvmSubCallHost<'_> {
+impl HostApi for EvmStackHost<'_> {
     fn write(&mut self, ns: &Namespace, key: &[u8], value: Option<&[u8]>) -> Result<(), HostError> {
-        if self.is_static {
+        if self.active_is_static() {
             return Err(HostError::Denied(String::from(
                 "state write forbidden in static EVM sub-call",
             )));
         }
-        if crate::execution::coordinator::state::RootGroup::for_namespace(ns.as_str())
-            != Some(crate::execution::coordinator::state::RootGroup::Evm)
+        if self.overlays.len() > 1
+            && crate::execution::coordinator::state::RootGroup::for_namespace(ns.as_str())
+                != Some(crate::execution::coordinator::state::RootGroup::Evm)
         {
             return Err(HostError::Denied(format!(
                 "EVM sub-call cannot write non-EVM namespace `{}`",
                 ns.as_str()
             )));
         }
-        self.staged_writes
-            .insert((ns.as_str().to_string(), key.to_vec()), value.map(<[u8]>::to_vec));
-        Ok(())
+        if let Some(top) = self.overlays.last_mut() {
+            top.staged_writes.insert(
+                (ns.as_str().to_string(), key.to_vec()),
+                value.map(<[u8]>::to_vec),
+            );
+            Ok(())
+        } else {
+            self.root.write(ns, key, value)
+        }
     }
 
     fn universal_call(&mut self, mut call: UniversalCall) -> Result<UniversalResult, HostError> {
-        if self.is_static {
+        if self.active_is_static() {
             call.is_static = true;
             if call.value.0 > 0 {
                 return Err(HostError::Denied(String::from(
@@ -1085,31 +1091,48 @@ impl HostApi for EvmSubCallHost<'_> {
                 )));
             }
         }
-        self.inner.universal_call(call)
+        call.gas_limit = call.gas_limit.min(self.remaining());
+        self.root.universal_call(call)
     }
 
     fn emit_log(&mut self, log: EeLog) -> Result<(), HostError> {
-        if self.is_static {
+        if self.active_is_static() {
             return Err(HostError::Denied(String::from(
                 "LOG forbidden in static EVM sub-call",
             )));
         }
-        self.staged_logs.push(log);
-        Ok(())
+        if let Some(top) = self.overlays.last_mut() {
+            top.staged_logs.push(log);
+            Ok(())
+        } else {
+            self.root.emit_log(log)
+        }
     }
 
     fn charge(&mut self, bgu: u64) -> Result<(), OutOfGas> {
-        let next = self.gas_used.checked_add(bgu).ok_or(OutOfGas)?;
-        if next > self.gas_limit {
-            let avail = self.gas_limit.saturating_sub(self.gas_used);
-            if avail > 0 {
-                let _ = self.inner.charge(avail);
-            }
-            self.gas_used = self.gas_limit;
-            return Err(OutOfGas);
+        if self.overlays.is_empty() {
+            return self.root.charge(bgu);
         }
-        self.inner.charge(bgu)?;
-        self.gas_used = next;
+        for overlay in self.overlays.iter().rev() {
+            let next = overlay.gas_used.checked_add(bgu).ok_or(OutOfGas)?;
+            if next > overlay.gas_limit {
+                let avail = self.overlays.last().map_or(0, EvmFrameOverlay::remaining);
+                if avail > 0 {
+                    let _ = self.root.charge(avail);
+                    for ov in &mut self.overlays {
+                        ov.gas_used = ov.gas_used.saturating_add(avail).min(ov.gas_limit);
+                    }
+                }
+                if let Some(top) = self.overlays.last_mut() {
+                    top.gas_used = top.gas_limit;
+                }
+                return Err(OutOfGas);
+            }
+        }
+        self.root.charge(bgu)?;
+        for overlay in &mut self.overlays {
+            overlay.gas_used = overlay.gas_used.saturating_add(bgu);
+        }
         Ok(())
     }
 
@@ -1122,7 +1145,7 @@ impl HostApi for EvmSubCallHost<'_> {
         if attos == 0 {
             return Ok(());
         }
-        if self.is_static {
+        if self.active_is_static() {
             return Err(HostError::Denied(String::from(
                 "value transfer forbidden in static EVM sub-call",
             )));
@@ -1133,114 +1156,127 @@ impl HostApi for EvmSubCallHost<'_> {
         if cur_from < attos {
             return Err(HostError::Denied(String::from("insufficient EVM balance")));
         }
-        if from != to {
-            let from_key = (from.ee.0, from.id.clone());
-            let next_from = self
-                .balance_deltas
-                .get(&from_key)
-                .copied()
-                .unwrap_or(0)
-                .checked_sub(delta)
-                .ok_or_else(|| HostError::Invalid(String::from("balance delta underflow")))?;
-            let to_key = (to.ee.0, to.id.clone());
-            let next_to = self
-                .balance_deltas
-                .get(&to_key)
-                .copied()
-                .unwrap_or(0)
-                .checked_add(delta)
-                .ok_or_else(|| HostError::Invalid(String::from("balance delta overflow")))?;
-            self.balance_deltas.insert(from_key, next_from);
-            self.balance_deltas.insert(to_key, next_to);
+        if let Some(top) = self.overlays.last_mut() {
+            if from != to {
+                let from_key = (from.ee.0, from.id.clone());
+                let next_from = top
+                    .balance_deltas
+                    .get(&from_key)
+                    .copied()
+                    .unwrap_or(0)
+                    .checked_sub(delta)
+                    .ok_or_else(|| HostError::Invalid(String::from("balance delta underflow")))?;
+                let to_key = (to.ee.0, to.id.clone());
+                let next_to = top
+                    .balance_deltas
+                    .get(&to_key)
+                    .copied()
+                    .unwrap_or(0)
+                    .checked_add(delta)
+                    .ok_or_else(|| HostError::Invalid(String::from("balance delta overflow")))?;
+                top.balance_deltas.insert(from_key, next_from);
+                top.balance_deltas.insert(to_key, next_to);
+            }
+            top.staged_transfers.push((from.clone(), to.clone(), attos));
+            Ok(())
+        } else {
+            self.root.bud_transfer(from, to, attos)
         }
-        self.staged_transfers
-            .push((from.clone(), to.clone(), attos));
-        Ok(())
     }
 }
 
-struct EvmBytecodeCall<'a> {
-    ctx: &'a BlockContext,
-    self_addr: &'a [u8; 20],
-    caller20: &'a [u8; 20],
+struct EvmExecFrame {
+    self_addr: [u8; 20],
+    caller20: [u8; 20],
     value_wei: u128,
-    code: &'a [u8],
-    calldata: &'a [u8],
+    code: Vec<u8>,
+    calldata: Vec<u8>,
     is_static: bool,
-    gas_limit: u64,
     depth: u32,
+    stack: Vec<U256Word>,
+    mem: Vec<u8>,
+    returndata: Vec<u8>,
+    pc: usize,
+    pending_ret: Option<(usize, usize)>,
 }
 
-fn run_evm_bytecode(
-    frame: EvmBytecodeCall<'_>,
-    host: &mut dyn HostApi,
-) -> Result<(OutcomeStatus, Vec<u8>), String> {
-    let EvmBytecodeCall {
-        ctx,
+enum EvmFrameOutcome {
+    Done(OutcomeStatus, Vec<u8>),
+    CallChild(Box<EvmExecFrame>),
+}
+
+fn evm_revert(msg: &[u8]) -> Result<EvmFrameOutcome, String> {
+    Ok(EvmFrameOutcome::Done(OutcomeStatus::Revert, msg.to_vec()))
+}
+
+fn step_evm_frame(
+    ctx: &BlockContext,
+    frame: &mut EvmExecFrame,
+    host: &mut EvmStackHost<'_>,
+) -> Result<EvmFrameOutcome, String> {
+    let EvmExecFrame {
         self_addr,
         caller20,
         value_wei,
         code,
         calldata,
         is_static,
-        gas_limit,
         depth,
+        stack,
+        mem,
+        returndata,
+        pc,
+        pending_ret,
     } = frame;
-    if depth >= MAX_EVM_CALL_DEPTH {
-        return Ok((OutcomeStatus::Revert, b"EVM call depth exceeded".to_vec()));
-    }
-    let mut metered = FrameMeterHost {
-        inner: host,
-        gas_limit,
-        gas_used: 0,
-    };
-    let host = &mut metered;
-    let mut stack: Vec<U256Word> = Vec::with_capacity(64);
-    let mut mem: Vec<u8> = Vec::new();
-    let mut returndata: Vec<u8> = Vec::new();
-    let mut pc = 0usize;
+    let self_addr = &*self_addr;
+    let caller20 = &*caller20;
+    let value_wei = *value_wei;
+    let code = code.as_slice();
+    let calldata = calldata.as_slice();
+    let is_static = *is_static;
+    let depth = *depth;
 
-    while let Some(&op) = code.get(pc) {
-        pc += 1;
+    while let Some(&op) = code.get(*pc) {
+        *pc += 1;
         host.charge(3).map_err(|_| String::from("out of gas"))?;
         match op {
-            0x00 => return Ok((OutcomeStatus::Success, Vec::new())),
+            0x00 => return Ok(EvmFrameOutcome::Done(OutcomeStatus::Success, Vec::new())),
             0x01 => {
                 let (Some(a), Some(b)) = (stack.pop(), stack.pop()) else {
-                    return Ok((OutcomeStatus::Revert, b"stack underflow".to_vec()));
+                    return evm_revert(b"stack underflow");
                 };
                 stack.push(a.wrapping_add(b));
             }
             0x03 => {
                 let (Some(a), Some(b)) = (stack.pop(), stack.pop()) else {
-                    return Ok((OutcomeStatus::Revert, b"stack underflow".to_vec()));
+                    return evm_revert(b"stack underflow");
                 };
                 stack.push(a.wrapping_sub(b));
             }
             0x14 => {
                 let (Some(a), Some(b)) = (stack.pop(), stack.pop()) else {
-                    return Ok((OutcomeStatus::Revert, b"stack underflow".to_vec()));
+                    return evm_revert(b"stack underflow");
                 };
                 stack.push(U256Word::from_u64(u64::from(a == b)));
             }
             0x15 => {
                 let Some(a) = stack.pop() else {
-                    return Ok((OutcomeStatus::Revert, b"stack underflow".to_vec()));
+                    return evm_revert(b"stack underflow");
                 };
                 stack.push(U256Word::from_u64(u64::from(a.is_zero())));
             }
             0x20 => {
                 let (Some(off_w), Some(len_w)) = (stack.pop(), stack.pop()) else {
-                    return Ok((OutcomeStatus::Revert, b"stack underflow".to_vec()));
+                    return evm_revert(b"stack underflow");
                 };
                 let (Some(off), Some(len)) = (off_w.to_usize_checked(), len_w.to_usize_checked())
                 else {
-                    return Ok((OutcomeStatus::Revert, b"memory overflow".to_vec()));
+                    return evm_revert(b"memory overflow");
                 };
                 let words = (len as u64).div_ceil(32);
                 host.charge(30u64.saturating_add(words.saturating_mul(6)))
                     .map_err(|_| String::from("out of gas"))?;
-                grow_mem(&mut mem, host, off, len)?;
+                grow_mem(mem, host, off, len)?;
                 let digest: [u8; 32] =
                     Keccak256::digest(mem.get(off..off + len).unwrap_or(&[])).into();
                 stack.push(U256Word(digest));
@@ -1248,7 +1284,7 @@ fn run_evm_bytecode(
             0x30 => stack.push(U256Word::from_addr20(self_addr)),
             0x31 => {
                 let Some(addr_w) = stack.pop() else {
-                    return Ok((OutcomeStatus::Revert, b"stack underflow".to_vec()));
+                    return evm_revert(b"stack underflow");
                 };
                 host.charge(100)
                     .map_err(|_| String::from("out of gas in BALANCE"))?;
@@ -1266,7 +1302,7 @@ fn run_evm_bytecode(
             0x34 => stack.push(U256Word::from_u128(value_wei)),
             0x35 => {
                 let Some(off_w) = stack.pop() else {
-                    return Ok((OutcomeStatus::Revert, b"stack underflow".to_vec()));
+                    return evm_revert(b"stack underflow");
                 };
                 let off = off_w.to_usize_checked().unwrap_or(calldata.len());
                 let mut w = [0u8; 32];
@@ -1283,18 +1319,18 @@ fn run_evm_bytecode(
                 let (Some(dst_w), Some(off_w), Some(len_w)) =
                     (stack.pop(), stack.pop(), stack.pop())
                 else {
-                    return Ok((OutcomeStatus::Revert, b"stack underflow".to_vec()));
+                    return evm_revert(b"stack underflow");
                 };
                 let (Some(dst), Some(off), Some(len)) = (
                     dst_w.to_usize_checked(),
                     off_w.to_usize_checked(),
                     len_w.to_usize_checked(),
                 ) else {
-                    return Ok((OutcomeStatus::Revert, b"calldatacopy overflow".to_vec()));
+                    return evm_revert(b"calldatacopy overflow");
                 };
                 host.charge(3u64.saturating_mul((len as u64).div_ceil(32)))
                     .map_err(|_| String::from("out of gas in CALLDATACOPY"))?;
-                grow_mem(&mut mem, host, dst, len)?;
+                grow_mem(mem, host, dst, len)?;
                 if let Some(d) = mem.get_mut(dst..dst + len) {
                     d.fill(0);
                     if let Some(rem) = calldata.get(off..) {
@@ -1310,24 +1346,24 @@ fn run_evm_bytecode(
                 let (Some(dst_w), Some(off_w), Some(len_w)) =
                     (stack.pop(), stack.pop(), stack.pop())
                 else {
-                    return Ok((OutcomeStatus::Revert, b"stack underflow".to_vec()));
+                    return evm_revert(b"stack underflow");
                 };
                 let (Some(dst), Some(off), Some(len)) = (
                     dst_w.to_usize_checked(),
                     off_w.to_usize_checked(),
                     len_w.to_usize_checked(),
                 ) else {
-                    return Ok((OutcomeStatus::Revert, b"returndatacopy overflow".to_vec()));
+                    return evm_revert(b"returndatacopy overflow");
                 };
                 let Some(end) = off.checked_add(len) else {
-                    return Ok((OutcomeStatus::Revert, b"returndatacopy oob".to_vec()));
+                    return evm_revert(b"returndatacopy oob");
                 };
                 let Some(slice) = returndata.get(off..end) else {
-                    return Ok((OutcomeStatus::Revert, b"returndatacopy oob".to_vec()));
+                    return evm_revert(b"returndatacopy oob");
                 };
                 host.charge(3u64.saturating_mul((len as u64).div_ceil(32)))
                     .map_err(|_| String::from("out of gas in RETURNDATACOPY"))?;
-                mem_write(&mut mem, host, dst, slice)?;
+                mem_write(mem, host, dst, slice)?;
             }
             0x46 => stack.push(U256Word::from_u64(BUDLUM_EVM_CHAIN_ID)),
             0x47 => {
@@ -1350,69 +1386,69 @@ fn run_evm_bytecode(
             }
             0x50 => {
                 if stack.pop().is_none() {
-                    return Ok((OutcomeStatus::Revert, b"stack underflow".to_vec()));
+                    return evm_revert(b"stack underflow");
                 }
             }
             0x51 => {
                 let Some(off_w) = stack.pop() else {
-                    return Ok((OutcomeStatus::Revert, b"stack underflow".to_vec()));
+                    return evm_revert(b"stack underflow");
                 };
                 let Some(off) = off_w.to_usize_checked() else {
-                    return Ok((OutcomeStatus::Revert, b"mload overflow".to_vec()));
+                    return evm_revert(b"mload overflow");
                 };
-                stack.push(U256Word(mem_read_32(&mut mem, host, off)?));
+                stack.push(U256Word(mem_read_32(mem, host, off)?));
             }
             0x52 => {
                 let (Some(off_w), Some(val_w)) = (stack.pop(), stack.pop()) else {
-                    return Ok((OutcomeStatus::Revert, b"stack underflow".to_vec()));
+                    return evm_revert(b"stack underflow");
                 };
                 let Some(off) = off_w.to_usize_checked() else {
-                    return Ok((OutcomeStatus::Revert, b"mstore overflow".to_vec()));
+                    return evm_revert(b"mstore overflow");
                 };
-                mem_write(&mut mem, host, off, &val_w.0)?;
+                mem_write(mem, host, off, &val_w.0)?;
             }
             0x54 => {
                 host.charge(2_100)
                     .map_err(|_| String::from("out of gas in SLOAD"))?;
                 let Some(slot_w) = stack.pop() else {
-                    return Ok((OutcomeStatus::Revert, b"stack underflow".to_vec()));
+                    return evm_revert(b"stack underflow");
                 };
                 let val = sload_word(host, self_addr, &slot_w.0)?;
                 stack.push(U256Word(val));
             }
             0x55 => {
                 if is_static {
-                    return Ok((OutcomeStatus::Revert, b"SSTORE in static call".to_vec()));
+                    return evm_revert(b"SSTORE in static call");
                 }
                 let (Some(slot_w), Some(val_w)) = (stack.pop(), stack.pop()) else {
-                    return Ok((OutcomeStatus::Revert, b"stack underflow".to_vec()));
+                    return evm_revert(b"stack underflow");
                 };
                 let _ = sstore_word(host, self_addr, &slot_w.0, &val_w.0)?;
             }
             0x56 => {
                 let Some(dest_w) = stack.pop() else {
-                    return Ok((OutcomeStatus::Revert, b"stack underflow".to_vec()));
+                    return evm_revert(b"stack underflow");
                 };
                 let Some(dest) = dest_w.to_usize_checked() else {
-                    return Ok((OutcomeStatus::Revert, b"bad jump dest".to_vec()));
+                    return evm_revert(b"bad jump dest");
                 };
                 if code.get(dest).copied() != Some(0x5b) {
-                    return Ok((OutcomeStatus::Revert, b"invalid JUMPDEST".to_vec()));
+                    return evm_revert(b"invalid JUMPDEST");
                 }
-                pc = dest + 1;
+                (*pc) = dest + 1;
             }
             0x57 => {
                 let (Some(dest_w), Some(cond_w)) = (stack.pop(), stack.pop()) else {
-                    return Ok((OutcomeStatus::Revert, b"stack underflow".to_vec()));
+                    return evm_revert(b"stack underflow");
                 };
                 if !cond_w.is_zero() {
                     let Some(dest) = dest_w.to_usize_checked() else {
-                        return Ok((OutcomeStatus::Revert, b"bad jumpi dest".to_vec()));
+                        return evm_revert(b"bad jumpi dest");
                     };
                     if code.get(dest).copied() != Some(0x5b) {
-                        return Ok((OutcomeStatus::Revert, b"invalid JUMPDEST".to_vec()));
+                        return evm_revert(b"invalid JUMPDEST");
                     }
-                    pc = dest + 1;
+                    (*pc) = dest + 1;
                 }
             }
             0x5b => {}
@@ -1420,18 +1456,18 @@ fn run_evm_bytecode(
             0x60..=0x7f => {
                 let n = usize::from(op - 0x5f);
                 let mut w = [0u8; 32];
-                let slice = code.get(pc..pc.saturating_add(n)).unwrap_or(&[]);
+                let slice = code.get((*pc)..(*pc).saturating_add(n)).unwrap_or(&[]);
                 let pad = 32usize.saturating_sub(slice.len());
                 if let Some(dst) = w.get_mut(pad..pad + slice.len()) {
                     dst.copy_from_slice(slice);
                 }
-                pc = pc.saturating_add(n);
+                (*pc) = (*pc).saturating_add(n);
                 stack.push(U256Word(w));
             }
             0x80..=0x8f => {
                 let depth = usize::from(op - 0x7f);
                 let Some(idx) = stack.len().checked_sub(depth) else {
-                    return Ok((OutcomeStatus::Revert, b"DUP underflow".to_vec()));
+                    return evm_revert(b"DUP underflow");
                 };
                 let val = *stack.get(idx).unwrap_or(&U256Word::ZERO);
                 stack.push(val);
@@ -1440,26 +1476,26 @@ fn run_evm_bytecode(
                 let depth = usize::from(op - 0x8f);
                 let top_idx = stack.len().saturating_sub(1);
                 let Some(other_idx) = top_idx.checked_sub(depth) else {
-                    return Ok((OutcomeStatus::Revert, b"SWAP underflow".to_vec()));
+                    return evm_revert(b"SWAP underflow");
                 };
                 stack.swap(top_idx, other_idx);
             }
             0xa0..=0xa4 => {
                 if is_static {
-                    return Ok((OutcomeStatus::Revert, b"LOG in static call".to_vec()));
+                    return evm_revert(b"LOG in static call");
                 }
                 let topic_count = usize::from(op - 0xa0);
                 let (Some(off_w), Some(len_w)) = (stack.pop(), stack.pop()) else {
-                    return Ok((OutcomeStatus::Revert, b"LOG underflow".to_vec()));
+                    return evm_revert(b"LOG underflow");
                 };
                 let (Some(off), Some(len)) = (off_w.to_usize_checked(), len_w.to_usize_checked())
                 else {
-                    return Ok((OutcomeStatus::Revert, b"LOG mem overflow".to_vec()));
+                    return evm_revert(b"LOG mem overflow");
                 };
                 let mut topics = Vec::with_capacity(topic_count);
                 for _ in 0..topic_count {
                     let Some(tw) = stack.pop() else {
-                        return Ok((OutcomeStatus::Revert, b"LOG topic underflow".to_vec()));
+                        return evm_revert(b"LOG topic underflow");
                     };
                     topics.push(tw.0);
                 }
@@ -1469,7 +1505,7 @@ fn run_evm_bytecode(
                         .saturating_add(8u64.saturating_mul(len as u64)),
                 )
                 .map_err(|_| String::from("out of gas in LOG"))?;
-                grow_mem(&mut mem, host, off, len)?;
+                grow_mem(mem, host, off, len)?;
                 let data = mem.get(off..off + len).unwrap_or(&[]).to_vec();
                 host.emit_log(EeLog {
                     emitter: EeIdentity {
@@ -1483,36 +1519,36 @@ fn run_evm_bytecode(
             }
             0xf0 | 0xf5 => {
                 if is_static {
-                    return Ok((OutcomeStatus::Revert, b"CREATE in static call".to_vec()));
+                    return evm_revert(b"CREATE in static call");
                 }
                 let (Some(val_w), Some(off_w), Some(len_w)) =
                     (stack.pop(), stack.pop(), stack.pop())
                 else {
-                    return Ok((OutcomeStatus::Revert, b"CREATE underflow".to_vec()));
+                    return evm_revert(b"CREATE underflow");
                 };
                 let salt_opt = if op == 0xf5 {
                     let Some(salt_w) = stack.pop() else {
-                        return Ok((OutcomeStatus::Revert, b"CREATE2 underflow".to_vec()));
+                        return evm_revert(b"CREATE2 underflow");
                     };
                     Some(salt_w.0)
                 } else {
                     None
                 };
                 let Some(val_u128) = val_w.to_u128_checked() else {
-                    return Ok((OutcomeStatus::Revert, b"CREATE value overflow".to_vec()));
+                    return evm_revert(b"CREATE value overflow");
                 };
                 let (Some(off), Some(len)) = (off_w.to_usize_checked(), len_w.to_usize_checked())
                 else {
-                    return Ok((OutcomeStatus::Revert, b"CREATE mem overflow".to_vec()));
+                    return evm_revert(b"CREATE mem overflow");
                 };
                 if len > MAX_EVM_INITCODE_BYTES {
-                    return Ok((OutcomeStatus::Revert, b"CREATE initcode limit".to_vec()));
+                    return evm_revert(b"CREATE initcode limit");
                 }
                 host.charge(
                     32_000u64.saturating_add(2u64.saturating_mul((len as u64).div_ceil(32))),
                 )
                 .map_err(|_| String::from("out of gas in CREATE"))?;
-                grow_mem(&mut mem, host, off, len)?;
+                grow_mem(mem, host, off, len)?;
                 let init = mem.get(off..off + len).unwrap_or(&[]).to_vec();
                 if depth.saturating_add(1) >= MAX_EVM_CALL_DEPTH {
                     returndata.clear();
@@ -1521,70 +1557,78 @@ fn run_evm_bytecode(
                 }
                 let rem = host.remaining();
                 let max_forward = rem.saturating_sub(rem / 64);
-                let mut sub_host = EvmSubCallHost::new(host, max_forward, false);
-                let child20 = if let Some(salt) = salt_opt {
-                    compute_create2_address(self_addr, &salt, &init)
-                } else {
-                    let mut sender_rec = read_account_rec(&sub_host, self_addr)?;
-                    let addr = compute_create_address(self_addr, sender_rec.nonce);
-                    sender_rec.nonce = sender_rec.nonce.saturating_add(1);
-                    if write_account_rec(&mut sub_host, self_addr, &sender_rec).is_err() {
+                host.push_overlay(max_forward, false);
+                let created = (|| -> Result<[u8; 20], ()> {
+                    let child20 = if let Some(salt) = salt_opt {
+                        compute_create2_address(self_addr, &salt, &init)
+                    } else {
+                        let mut sender_rec =
+                            read_account_rec(host, self_addr).map_err(|_| ())?;
+                        let addr = compute_create_address(self_addr, sender_rec.nonce);
+                        sender_rec.nonce = sender_rec.nonce.saturating_add(1);
+                        write_account_rec(host, self_addr, &sender_rec).map_err(|_| ())?;
+                        addr
+                    };
+                    if target_collides_with_native_alias(host, &child20) {
+                        return Err(());
+                    }
+                    let existing = read_account_rec(host, &child20).map_err(|_| ())?;
+                    if existing.code_hash.is_some() || existing.nonce > 0 {
+                        return Err(());
+                    }
+                    if val_u128 > 0 {
+                        let from_id = EeIdentity {
+                            ee: EeId::EVM,
+                            id: self_addr.to_vec(),
+                        };
+                        let to_id = EeIdentity {
+                            ee: EeId::EVM,
+                            id: child20.to_vec(),
+                        };
+                        host.bud_transfer(&from_id, &to_id, val_u128)
+                            .map_err(|_| ())?;
+                    }
+                    deploy_runtime_code(host, &child20, &init).map_err(|_| ())?;
+                    Ok(child20)
+                })();
+                match created {
+                    Ok(child20) if host.commit_top_overlay().is_ok() => {
+                        returndata.clear();
+                        stack.push(U256Word::from_addr20(&child20));
+                    }
+                    _ => {
+                        host.discard_top_overlay();
                         returndata.clear();
                         stack.push(U256Word::ZERO);
-                        continue;
                     }
-                    addr
-                };
-                if target_collides_with_native_alias(&sub_host, &child20) {
-                    returndata.clear();
-                    stack.push(U256Word::ZERO);
-                    continue;
-                }
-                let existing = read_account_rec(&sub_host, &child20)?;
-                if existing.code_hash.is_some() || existing.nonce > 0 {
-                    returndata.clear();
-                    stack.push(U256Word::ZERO);
-                    continue;
-                }
-                if val_u128 > 0 {
-                    let from_id = EeIdentity {
-                        ee: EeId::EVM,
-                        id: self_addr.to_vec(),
-                    };
-                    let to_id = EeIdentity {
-                        ee: EeId::EVM,
-                        id: child20.to_vec(),
-                    };
-                    if sub_host.bud_transfer(&from_id, &to_id, val_u128).is_err() {
-                        returndata.clear();
-                        stack.push(U256Word::ZERO);
-                        continue;
-                    }
-                }
-                if deploy_runtime_code(&mut sub_host, &child20, &init).is_ok()
-                    && sub_host.commit().is_ok()
-                {
-                    returndata.clear();
-                    stack.push(U256Word::from_addr20(&child20));
-                } else {
-                    returndata.clear();
-                    stack.push(U256Word::ZERO);
                 }
             }
             0xf1 | 0xf2 | 0xf4 | 0xfa => {
                 let call_is_static = is_static || op == 0xfa;
                 let Some(gas_w) = stack.pop() else {
-                    return Ok((OutcomeStatus::Revert, b"CALL underflow".to_vec()));
+                    return Ok(EvmFrameOutcome::Done(
+                        OutcomeStatus::Revert,
+                        b"CALL underflow".to_vec(),
+                    ));
                 };
                 let Some(addr_w) = stack.pop() else {
-                    return Ok((OutcomeStatus::Revert, b"CALL underflow".to_vec()));
+                    return Ok(EvmFrameOutcome::Done(
+                        OutcomeStatus::Revert,
+                        b"CALL underflow".to_vec(),
+                    ));
                 };
                 let val_u128 = if op == 0xf1 || op == 0xf2 {
                     let Some(vw) = stack.pop() else {
-                        return Ok((OutcomeStatus::Revert, b"CALL value underflow".to_vec()));
+                        return Ok(EvmFrameOutcome::Done(
+                            OutcomeStatus::Revert,
+                            b"CALL value underflow".to_vec(),
+                        ));
                     };
                     let Some(val) = vw.to_u128_checked() else {
-                        return Ok((OutcomeStatus::Revert, b"CALL value overflow".to_vec()));
+                        return Ok(EvmFrameOutcome::Done(
+                            OutcomeStatus::Revert,
+                            b"CALL value overflow".to_vec(),
+                        ));
                     };
                     val
                 } else if op == 0xf4 {
@@ -1595,7 +1639,10 @@ fn run_evm_bytecode(
                 let (Some(in_off_w), Some(in_len_w), Some(ret_off_w), Some(ret_len_w)) =
                     (stack.pop(), stack.pop(), stack.pop(), stack.pop())
                 else {
-                    return Ok((OutcomeStatus::Revert, b"CALL args underflow".to_vec()));
+                    return Ok(EvmFrameOutcome::Done(
+                        OutcomeStatus::Revert,
+                        b"CALL args underflow".to_vec(),
+                    ));
                 };
                 let (Some(in_off), Some(in_len), Some(ret_off), Some(ret_len)) = (
                     in_off_w.to_usize_checked(),
@@ -1603,22 +1650,29 @@ fn run_evm_bytecode(
                     ret_off_w.to_usize_checked(),
                     ret_len_w.to_usize_checked(),
                 ) else {
-                    return Ok((OutcomeStatus::Revert, b"CALL mem overflow".to_vec()));
+                    return Ok(EvmFrameOutcome::Done(
+                        OutcomeStatus::Revert,
+                        b"CALL mem overflow".to_vec(),
+                    ));
                 };
-                if op == 0xf1 && call_is_static && val_u128 > 0 {
-                    return Ok((OutcomeStatus::Revert, b"value in STATICCALL".to_vec()));
+                if (op == 0xf1 || op == 0xf2) && call_is_static && val_u128 > 0 {
+                    return Ok(EvmFrameOutcome::Done(
+                        OutcomeStatus::Revert,
+                        b"value in STATICCALL".to_vec(),
+                    ));
                 }
-                grow_mem(&mut mem, host, in_off, in_len)?;
-                grow_mem(&mut mem, host, ret_off, ret_len)?;
+                grow_mem(mem, host, in_off, in_len)?;
+                grow_mem(mem, host, ret_off, ret_len)?;
                 let sub_in = mem.get(in_off..in_off + in_len).unwrap_or(&[]).to_vec();
                 let target20 = addr_w.to_addr20();
                 if target20 == EVM_UNIVERSAL_PRECOMPILE && val_u128 > 0 {
-                    return Ok((
+                    return Ok(EvmFrameOutcome::Done(
                         OutcomeStatus::Revert,
                         b"universal precompile rejects msg.value".to_vec(),
                     ));
                 }
-                if depth.saturating_add(1) >= MAX_EVM_CALL_DEPTH {
+                let next_depth = depth.saturating_add(1);
+                if next_depth >= MAX_EVM_CALL_DEPTH {
                     returndata.clear();
                     stack.push(U256Word::ZERO);
                     continue;
@@ -1626,7 +1680,7 @@ fn run_evm_bytecode(
                 let rem = host.remaining();
                 let max_forward = rem.saturating_sub(rem / 64);
                 let sub_gas = gas_w.to_u128_saturating().min(u128::from(max_forward)) as u64;
-                let mut sub_host = EvmSubCallHost::new(host, sub_gas, call_is_static);
+                host.push_overlay(sub_gas, call_is_static);
                 if op == 0xf1 && val_u128 > 0 {
                     let from_id = EeIdentity {
                         ee: EeId::EVM,
@@ -1636,7 +1690,8 @@ fn run_evm_bytecode(
                         ee: EeId::EVM,
                         id: target20.to_vec(),
                     };
-                    if sub_host.bud_transfer(&from_id, &to_id, val_u128).is_err() {
+                    if host.bud_transfer(&from_id, &to_id, val_u128).is_err() {
+                        host.discard_top_overlay();
                         returndata.clear();
                         stack.push(U256Word::ZERO);
                         continue;
@@ -1646,8 +1701,14 @@ fn run_evm_bytecode(
                         ee: EeId::EVM,
                         id: self_addr.to_vec(),
                     };
-                    let bal = sub_host.bud_balance(&self_id).map_err(|e| e.to_string())?;
+                    let Ok(bal) = host.bud_balance(&self_id) else {
+                        host.discard_top_overlay();
+                        returndata.clear();
+                        stack.push(U256Word::ZERO);
+                        continue;
+                    };
                     if bal.0 < val_u128 {
+                        host.discard_top_overlay();
                         returndata.clear();
                         stack.push(U256Word::ZERO);
                         continue;
@@ -1658,7 +1719,7 @@ fn run_evm_bytecode(
                     0xf4 => (Some(self_addr), caller20),
                     _ => (None, self_addr),
                 };
-                let dispatch = dispatch_evm_target(
+                match prepare_evm_target(
                     &EvmTargetDispatch {
                         ctx,
                         code_addr: &target20,
@@ -1668,17 +1729,20 @@ fn run_evm_bytecode(
                         input: &sub_in,
                         is_static: call_is_static,
                         gas_limit: sub_gas,
-                        depth: depth.saturating_add(1),
+                        depth: next_depth,
                     },
-                    &mut sub_host,
-                );
-                match dispatch {
-                    Ok((OutcomeStatus::Success, sub_out)) => {
-                        if sub_host.commit().is_ok() {
-                            returndata = sub_out;
+                    host,
+                ) {
+                    Ok(PreparedTarget::Bytecode(child)) => {
+                        *pending_ret = Some((ret_off, ret_len));
+                        return Ok(EvmFrameOutcome::CallChild(Box::new(child)));
+                    }
+                    Ok(PreparedTarget::Finished(OutcomeStatus::Success, sub_out)) => {
+                        if host.commit_top_overlay().is_ok() {
+                            *returndata = sub_out;
                             let copy_n = ret_len.min(returndata.len());
                             if let Some(s) = returndata.get(..copy_n) {
-                                mem_write(&mut mem, host, ret_off, s)?;
+                                mem_write(mem, host, ret_off, s)?;
                             }
                             stack.push(U256Word::from_u64(1));
                         } else {
@@ -1686,15 +1750,17 @@ fn run_evm_bytecode(
                             stack.push(U256Word::ZERO);
                         }
                     }
-                    Ok((_, sub_out)) => {
-                        returndata = sub_out;
+                    Ok(PreparedTarget::Finished(_, sub_out)) => {
+                        host.discard_top_overlay();
+                        *returndata = sub_out;
                         let copy_n = ret_len.min(returndata.len());
                         if let Some(s) = returndata.get(..copy_n) {
-                            mem_write(&mut mem, host, ret_off, s)?;
+                            mem_write(mem, host, ret_off, s)?;
                         }
                         stack.push(U256Word::ZERO);
                     }
                     Err(_) => {
+                        host.discard_top_overlay();
                         returndata.clear();
                         stack.push(U256Word::ZERO);
                     }
@@ -1702,36 +1768,39 @@ fn run_evm_bytecode(
             }
             0xf3 => {
                 let (Some(off_w), Some(len_w)) = (stack.pop(), stack.pop()) else {
-                    return Ok((OutcomeStatus::Revert, b"RETURN underflow".to_vec()));
+                    return Ok(EvmFrameOutcome::Done(
+                        OutcomeStatus::Revert,
+                        b"RETURN underflow".to_vec(),
+                    ));
                 };
                 let (Some(off), Some(len)) = (off_w.to_usize_checked(), len_w.to_usize_checked())
                 else {
                     return Err(String::from("out of gas: RETURN mem overflow"));
                 };
-                grow_mem(&mut mem, host, off, len)?;
-                return Ok((
+                grow_mem(mem, host, off, len)?;
+                return Ok(EvmFrameOutcome::Done(
                     OutcomeStatus::Success,
                     mem.get(off..off + len).unwrap_or(&[]).to_vec(),
                 ));
             }
             0xfd => {
                 let (Some(off_w), Some(len_w)) = (stack.pop(), stack.pop()) else {
-                    return Ok((OutcomeStatus::Revert, Vec::new()));
+                    return Ok(EvmFrameOutcome::Done(OutcomeStatus::Revert, Vec::new()));
                 };
                 let (Some(off), Some(len)) = (off_w.to_usize_checked(), len_w.to_usize_checked())
                 else {
                     return Err(String::from("out of gas: REVERT mem overflow"));
                 };
-                grow_mem(&mut mem, host, off, len)?;
-                return Ok((
+                grow_mem(mem, host, off, len)?;
+                return Ok(EvmFrameOutcome::Done(
                     OutcomeStatus::Revert,
                     mem.get(off..off + len).unwrap_or(&[]).to_vec(),
                 ));
             }
-            _ => return Ok((OutcomeStatus::Revert, vec![op])),
+            _ => return Ok(EvmFrameOutcome::Done(OutcomeStatus::Revert, vec![op])),
         }
     }
-    Ok((OutcomeStatus::Success, Vec::new()))
+    Ok(EvmFrameOutcome::Done(OutcomeStatus::Success, Vec::new()))
 }
 
 fn deploy_runtime_code(
@@ -1794,12 +1863,17 @@ struct EvmTargetDispatch<'a> {
     depth: u32,
 }
 
-fn dispatch_evm_target(
+enum PreparedTarget {
+    Finished(OutcomeStatus, Vec<u8>),
+    Bytecode(EvmExecFrame),
+}
+
+fn prepare_evm_target(
     req: &EvmTargetDispatch<'_>,
     host: &mut dyn HostApi,
-) -> Result<(OutcomeStatus, Vec<u8>), String> {
+) -> Result<PreparedTarget, String> {
     let EvmTargetDispatch {
-        ctx,
+        ctx: _,
         code_addr,
         exec_addr,
         caller20,
@@ -1810,36 +1884,147 @@ fn dispatch_evm_target(
         depth,
     } = *req;
     if depth >= MAX_EVM_CALL_DEPTH {
-        return Ok((OutcomeStatus::Revert, b"EVM call depth exceeded".to_vec()));
+        return Ok(PreparedTarget::Finished(
+            OutcomeStatus::Revert,
+            b"EVM call depth exceeded".to_vec(),
+        ));
     }
     let storage_addr = exec_addr.unwrap_or(code_addr);
     if code_addr == &EVM_UNIVERSAL_PRECOMPILE {
-        return invoke_universal_precompile(caller20, input, is_static, host);
+        let (st, out) = invoke_universal_precompile(caller20, input, is_static, host)?;
+        return Ok(PreparedTarget::Finished(st, out));
     }
     let code = load_contract_code(host, code_addr)?;
     if code.is_empty() {
-        return Ok((OutcomeStatus::Success, Vec::new()));
+        return Ok(PreparedTarget::Finished(OutcomeStatus::Success, Vec::new()));
     }
     if let Some(ptr) = decode_pointer_bytecode(&code) {
-        return execute_evm_pointer_to_wasm(&ptr, caller20, input, is_static, gas_limit, host);
+        let (st, out) =
+            execute_evm_pointer_to_wasm(&ptr, caller20, input, is_static, gas_limit, host)?;
+        return Ok(PreparedTarget::Finished(st, out));
     }
     if let Some(spec) = decode_std_evm_token_code(&code) {
-        return execute_std_evm_token(&spec, storage_addr, caller20, input, is_static, host);
+        let (st, out) =
+            execute_std_evm_token(&spec, storage_addr, caller20, input, is_static, host)?;
+        return Ok(PreparedTarget::Finished(st, out));
     }
-    run_evm_bytecode(
-        EvmBytecodeCall {
-            ctx,
-            self_addr: storage_addr,
-            caller20,
-            value_wei,
-            code: &code,
-            calldata: input,
-            is_static,
-            gas_limit,
-            depth,
-        },
-        host,
-    )
+    Ok(PreparedTarget::Bytecode(EvmExecFrame {
+        self_addr: *storage_addr,
+        caller20: *caller20,
+        value_wei,
+        code,
+        calldata: input.to_vec(),
+        is_static,
+        depth,
+        stack: Vec::with_capacity(64),
+        mem: Vec::new(),
+        returndata: Vec::new(),
+        pc: 0,
+        pending_ret: None,
+    }))
+}
+
+fn dispatch_evm_target(
+    req: &EvmTargetDispatch<'_>,
+    root_host: &mut dyn HostApi,
+) -> Result<(OutcomeStatus, Vec<u8>), String> {
+    let mut host = EvmStackHost::new(root_host);
+    host.push_overlay(req.gas_limit, req.is_static);
+    let root_frame = match prepare_evm_target(req, &mut host) {
+        Ok(PreparedTarget::Finished(OutcomeStatus::Success, out)) => {
+            host.commit_top_overlay().map_err(|e| e.to_string())?;
+            return Ok((OutcomeStatus::Success, out));
+        }
+        Ok(PreparedTarget::Finished(status, out)) => {
+            host.discard_top_overlay();
+            return Ok((status, out));
+        }
+        Ok(PreparedTarget::Bytecode(frame)) => frame,
+        Err(e) => {
+            host.discard_top_overlay();
+            return Err(e);
+        }
+    };
+
+    let mut frames = Vec::with_capacity(16);
+    frames.push(root_frame);
+    let mut pending_finish: Option<Result<(OutcomeStatus, Vec<u8>), String>> = None;
+
+    while !frames.is_empty() {
+        let step_result = if let Some(done) = pending_finish.take() {
+            match done {
+                Ok((st, out)) => Ok(EvmFrameOutcome::Done(st, out)),
+                Err(e) => Err(e),
+            }
+        } else if let Some(cur) = frames.last_mut() {
+            step_evm_frame(req.ctx, cur, &mut host)
+        } else {
+            break;
+        };
+
+        let child_res = match step_result {
+            Ok(EvmFrameOutcome::CallChild(child)) => {
+                frames.push(*child);
+                continue;
+            }
+            Ok(EvmFrameOutcome::Done(st, out)) => Ok((st, out)),
+            Err(e) => Err(e),
+        };
+
+        frames.pop();
+        if frames.is_empty() {
+            match child_res {
+                Ok((OutcomeStatus::Success, out)) => {
+                    host.commit_top_overlay().map_err(|e| e.to_string())?;
+                    return Ok((OutcomeStatus::Success, out));
+                }
+                other => {
+                    host.discard_top_overlay();
+                    return other;
+                }
+            }
+        }
+
+        if let Some(caller) = frames.last_mut() {
+            let (ret_off, ret_len) = caller.pending_ret.take().unwrap_or((0, 0));
+            match child_res {
+                Ok((OutcomeStatus::Success, sub_out)) => {
+                    if host.commit_top_overlay().is_ok() {
+                        caller.returndata = sub_out;
+                        let copy_n = ret_len.min(caller.returndata.len());
+                        if let Some(s) = caller.returndata.get(..copy_n) {
+                            if let Err(e) = mem_write(&mut caller.mem, &mut host, ret_off, s) {
+                                pending_finish = Some(Err(e));
+                                continue;
+                            }
+                        }
+                        caller.stack.push(U256Word::from_u64(1));
+                    } else {
+                        caller.returndata.clear();
+                        caller.stack.push(U256Word::ZERO);
+                    }
+                }
+                Ok((_, sub_out)) => {
+                    host.discard_top_overlay();
+                    caller.returndata = sub_out;
+                    let copy_n = ret_len.min(caller.returndata.len());
+                    if let Some(s) = caller.returndata.get(..copy_n) {
+                        if let Err(e) = mem_write(&mut caller.mem, &mut host, ret_off, s) {
+                            pending_finish = Some(Err(e));
+                            continue;
+                        }
+                    }
+                    caller.stack.push(U256Word::ZERO);
+                }
+                Err(_) => {
+                    host.discard_top_overlay();
+                    caller.returndata.clear();
+                    caller.stack.push(U256Word::ZERO);
+                }
+            }
+        }
+    }
+    Ok((OutcomeStatus::Success, Vec::new()))
 }
 
 fn coerce_addr20(raw: &[u8]) -> [u8; 20] {
@@ -2347,7 +2532,11 @@ mod tests {
         let contract_b = [0xBBu8; 20];
 
         // B would write slot 1 if entered.
-        deploy(&mut host, contract_b, vec![0x60, 0x42, 0x60, 0x01, 0x55, 0x00]);
+        deploy(
+            &mut host,
+            contract_b,
+            vec![0x60, 0x42, 0x60, 0x01, 0x55, 0x00],
+        );
 
         // A executes CALLCODE with value 500 > balance 100 and returns the success flag.
         let mut code_a = Vec::new();
@@ -2389,6 +2578,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(out.status, OutcomeStatus::Success);
+        assert_ne!(out.output, U256Word::from_u64(1).0.to_vec());
         assert_eq!(out.output, U256Word::ZERO.0.to_vec());
         assert_eq!(
             sload_word(&host, &contract_a, &U256Word::from_u64(1).0).unwrap(),

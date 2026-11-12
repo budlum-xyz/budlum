@@ -439,24 +439,15 @@ mod tests {
     }
 
     #[test]
-    fn live_stream_is_closed_on_testnet() {
+    fn live_stream_is_open_on_testnet() {
         let gateway = LiveGateway::testnet();
         let segments = two_segments();
-        assert_eq!(
-            gateway.admit_object(&segments[0].object, 1),
-            Err(LiveGatewayRefusal::ClosedOnTestnet {
-                chain_id: Network::Testnet.chain_id().value(),
-                height: 1,
-            })
-        );
+        assert_eq!(gateway.admit_object(&segments[0].object, 1), Ok(()));
         assert_eq!(
             gateway.admit_live_object(&segments[0].object, 1_000_000),
-            Err(LiveGatewayRefusal::ClosedOnTestnet {
-                chain_id: Network::Testnet.chain_id().value(),
-                height: 1_000_000,
-            })
+            Ok(())
         );
-        // A plain object is never refused by the live door.
+        // A plain object is admitted via admit_object and refused by admit_live_object.
         let mut plain = segments[0].object.clone();
         plain.header.flags = Flags::from_byte(0).unwrap();
         assert_eq!(gateway.admit_object(&plain, 1), Ok(()));
@@ -464,14 +455,20 @@ mod tests {
             gateway.admit_live_object(&plain, 1),
             Err(LiveGatewayRefusal::NotLive)
         );
-        // The viewer door refuses before it asks the stream.
+        // The stream and viewer doors succeed on active testnet.
         let stream = LiveStream::begin(ORIGINATOR, NONCE, gateway.context(1));
-        assert!(stream.is_err());
+        assert!(stream.is_ok());
+        assert!(gateway.admit_viewer(&two_segments_stream(), 0, 1).is_ok());
+        // Explicit below-activation-height refusal still holds when gated.
+        let gated = LiveGateway::for_chain(
+            Network::Testnet.chain_id(),
+            LiveActivation { height: Some(10) },
+        );
         assert_eq!(
-            gateway.admit_viewer(&two_segments_stream(), 0, 1,),
-            Err(LiveGatewayRefusal::ClosedOnTestnet {
-                chain_id: Network::Testnet.chain_id().value(),
+            gated.admit_object(&segments[0].object, 1),
+            Err(LiveGatewayRefusal::BelowActivationHeight {
                 height: 1,
+                activation: 10,
             })
         );
     }

@@ -64,8 +64,8 @@ pub fn run(root: &Path) -> Result<String, String> {
         "encode_text",
         "decode_text",
         "validate_testnet",
-        "LiveNotOpen",
-        "ContextNotOpen",
+        "Flags::LIVE",
+        "Flags::HAS_CONTEXT",
     ] {
         if !bof1_prod.contains(token) {
             problems.push(format!(
@@ -148,10 +148,11 @@ pub fn self_test() -> Result<String, String> {
         };
 
         let clean_bof1 = "\
-pub enum Bof1Error { LiveNotOpen, ContextNotOpen }
+pub struct Flags;
+impl Flags { pub const LIVE: u8 = 2; pub const HAS_CONTEXT: u8 = 8; }
 pub fn encode_text() -> &'static str { \"BUD3-OBJECT 1\\nend commitment=\" }
 pub fn decode_text() {}
-pub fn validate_testnet() {}
+pub fn validate_testnet() { let _ = (Flags::LIVE, Flags::HAS_CONTEXT); }
 ";
         let clean_two_path = "\
 pub fn verify_upload_two_path_and_round_trip() {}

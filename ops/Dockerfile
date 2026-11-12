@@ -79,7 +79,7 @@ RUN pinned="$(sed -n 's/^channel *= *"\(.*\)"/\1/p' rust-toolchain.toml)" && \
     actual="${version_line#rustc }" && \
     actual="${actual%% *}" && \
     if [ "$pinned" != "$actual" ]; then \
-      echo "HATA: imaj rustc $actual tasiyor, rust-toolchain.toml $pinned pinliyor" >&2; \
+      echo "ERROR: image carries rustc $actual while rust-toolchain.toml pins $pinned" >&2; \
       exit 1; \
     fi && \
     echo "toolchain OK: rustc $actual == rust-toolchain.toml $pinned"
