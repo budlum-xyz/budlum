@@ -1,0 +1,228 @@
+# Testnet gereksinimleri
+
+Aşağıdaki başlıklar yalnızca ön dizindir. Tüm maddeler henüz çıkarılmadı ve doğrulanmadı.
+
+- [ ] İçindekiler
+- [ ] 0. Belge bilgisi ve okuma kuralları
+- [ ] 0.1 Konum
+- [ ] 0.2 Bağlayıcılık
+- [ ] 0.3 Ajanın davranışı
+- [ ] 0.4 Canlı durum kuralı
+- [ ] 0.5 Ölçü kuralı
+- [ ] 1. Hedef ve testnet tanımı
+- [ ] 1.1 Budlum'un tanımı
+- [ ] 1.2 Yedi köklü değişiklik
+- [ ] 1.3 Testnet'e hazır tanımı
+- [ ] 1.4 Kapsam katmanları
+- [ ] 1.5 Testnet özellik matrisi
+- [ ] 2. Terim politikası ve yeniden adlandırma
+- [ ] 2.1 Kural
+- [ ] 2.2 Yeniden adlandırma tablosu
+- [ ] 2.3 Yeniden adlandırma yöntemi
+- [ ] 2.4 Ana terimler sözlüğü
+- [ ] 3. Değişmezler
+- [ ] 3.1 Genel
+- [ ] 3.2 Depolama (B.U.D. 3.0)
+- [ ] 3.3 Doğrulayıcı ağı
+- [ ] 3.4 Yürütme
+- [ ] 3.5 Kriptografi ve gizlilik
+- [ ] 3.6 Süreç
+- [ ] 4. Hedef mimari
+- [ ] 4.1 Katmanlar
+- [ ] 4.2 Bir uygulamanın Budlum'a gelmesinin üç yolu
+- [ ] 4.3 Hedef depo yerleşimi
+- [ ] 5. Kaldırma planı: B.U.D. 3.0 dışındaki depolama sistemleri
+- [ ] 5.1 İlke
+- [ ] 5.2 Dosya düzeyinde karar tablosu
+- [ ] 5.3 İşlem ve RPC değişimi
+- [ ] 5.4 CI kapısı değişimi
+- [ ] 5.5 `no_legacy_storage` kapısının yasak listesi
+- [ ] 5.6 Bağımlı modüllerin geçişi
+- [ ] 5.7 Geçici arayüz
+- [ ] 6. B.U.D. 3.0: tek depolama sistemi
+- [ ] 6.1 Amaç ve ilkeler
+- [ ] 6.2 Terimler
+- [ ] 6.3 Nesne biçimi: BOF-1
+- [ ] 6.4 Yükleme akışı
+- [ ] 6.5 Görüntüleme akışı
+- [ ] 6.6 A0: kodek kayıt defteri
+- [ ] 6.7 A2: fountain kodu (RFC 6330)
+- [ ] 6.8 Tekilleştirme, başvuru, silme
+- [ ] 6.9 Sınıf duyarlı geniş şeritli yerleşim
+- [ ] 6.10 Onarım
+- [ ] 6.11 Saklama kanıtı ve sembol protokolü
+- [ ] 6.12 Toplama hacmi
+- [ ] 6.13 Ağ küçülmesi
+- [ ] 6.14 Nesne değişimi ve erişim katmanı
+- [ ] 6.15 Video taahhüdü
+- [ ] 6.16 Canlı yayın (T-Genişleme, İP-55)
+- [ ] 6.17 Profiller
+- [ ] 6.18 Ücretler ve saklama ödülleri
+- [ ] 6.19 Doğrulayıcının depolama görevleri
+- [ ] 6.20 Paylaşılan sıkıştırma bağlamı ve gizli tekilleştirme (T-Genişleme)
+- [ ] 6.21 Sertleştirme kuralları
+- [ ] 6.22 İşlemler ve RPC
+- [ ] 6.23 Kabul testleri
+- [ ] 7. Doğrulayıcı ağı: sınıflar, mobil doğrulayıcı ve Anında Görev Devri
+- [ ] 7.1 Temel karar
+- [ ] 7.2 Sınıflar
+- [ ] 7.3 Kayıt
+- [ ] 7.4 Kurul tabanlı kesinlik
+- [ ] 7.5 Anında Koltuk Devri
+- [ ] 7.6 Anında Görev Devri (bütün görevler)
+- [ ] 7.7 Felaket durumu
+- [ ] 7.8 Varlık protokolü
+- [ ] 7.9 Android mobil doğrulayıcı uygulaması
+- [ ] 7.10 iOS fırsatçı mobil doğrulayıcı
+- [ ] 7.11 Ağ değişiklikleri
+- [ ] 7.12 Testler
+- [ ] 8. Evrensel Yürütme Katmanı (UEL)
+- [ ] 8.1 Amaç ve ilke
+- [ ] 8.2 Yürütme ortamı kataloğu
+- [ ] 8.3 Mimari
+- [ ] 8.4 Birleşik hesap ve adres modeli
+- [ ] 8.5 BUD her ortamda
+- [ ] 8.6 İşlem zarfları
+- [ ] 8.7 Evrensel Çağrı
+- [ ] 8.8 Evrensel Varlık Kaydı ve işaretçiler
+- [ ] 8.9 Gaz ve ücret
+- [ ] 8.10 Durum taahhüdü
+- [ ] 8.11 Uyumluluk RPC ağ geçitleri
+- [ ] 8.12 Göç Kiti
+- [ ] 8.13 Araç uyumluluğu ve uygunluk
+- [ ] 8.14 Güvenlik ve tedarik zinciri
+- [ ] 8.15 "Değişmeden çalışır" iddiasının sınırları
+- [ ] 8.16 Testler
+- [ ] 9. Evrensel Nesne Katmanı (UOL)
+- [ ] 9.1 Tez
+- [ ] 9.2 Değişmezler
+- [ ] 9.3 Bileşenler
+- [ ] 9.4 UEL ile birleşme
+- [ ] 9.5 Durum, işlem, başlık, RPC
+- [ ] 9.6 Ekonomi
+- [ ] 9.7 Testler
+- [ ] 9.8 Kapalı kapılar
+- [ ] 10. BudZero: güvenlik, gizlilik ve doğrulama paketi
+- [ ] 10.1 Testnet açılışında BudZero
+- [ ] 10.2 Değişmezler
+- [ ] 10.3 Çekirdek yol haritası
+- [ ] 10.4 Mühürlü nesne, rıza ve gizli transfer
+- [ ] 10.5 Domain kesinlik kanıtı ve blok toplu kanıtı
+- [ ] 10.6 AI Doğrulama Katmanı
+- [ ] 10.7 Testler
+- [ ] 11. Ekonomi
+- [ ] 11.1 İlkeler
+- [ ] 11.2 Arz ve testnet dağılımı
+- [ ] 11.3 Gelir kaynakları
+- [ ] 11.4 Ağ Güvenliği Havuzu
+- [ ] 11.5 Depolama ücreti ve Saklama Vakfı
+- [ ] 11.6 Stake ve sınıflar
+- [ ] 11.7 Kesinti ve askıya alma
+- [ ] 11.8 Evrensel Nesne Katmanı ekonomisi
+- [ ] 11.9 Musluk
+- [ ] 11.10 Parametre tablosu
+- [ ] 11.11 Hesap örneği (ölçüm değildir)
+- [ ] 12. Çekirdek sertleştirme
+- [ ] 12.1 Konsensüs ve kesinlik
+- [ ] 12.2 Ağ
+- [ ] 12.3 RPC
+- [ ] 12.4 Durum geçişi
+- [ ] 12.5 Genesis ve tören
+- [ ] 12.6 Egemen domainler ve köprü
+- [ ] 12.7 Kriptografi ve anahtarlar
+- [ ] 13. Pre-mortem
+- [ ] 14. Birleşik bulgu defteri
+- [ ] 14.1 Kurallar
+- [ ] 14.2 Özet
+- [ ] 14.3 Defterden gelen bulgular (BLG-001 ile BLG-207)
+- [ ] 14.4 Kaynak direktiflerden gelen kod bulguları (BLG-208 ile BLG-245)
+- [ ] 14.5 Bu direktifin yeni bulguları (BLG-246 ile BLG-267)
+- [ ] 14.6 Defter arşiv aileleri
+- [ ] 14.7 Kaynak direktif maddeleri
+- [ ] 15. İş paketleri ve dört ajan modeli
+- [ ] 15.1 Çalışma modeli
+- [ ] 15.2 Şeritler ve sahiplik haritası
+- [ ] 15.3 Kuyruk ve kilit kuralları
+- [ ] 15.4 Öncelik kuralı
+- [ ] 15.5 Dal, PR ve kanıt kuralları
+- [ ] 15.6 Kilometre taşları
+- [ ] 15.7 Bağımlılık tablosu
+- [ ] 15.8 İş paketi kartları
+- [ ] 16. Testler ve CI kapıları
+- [ ] 16.1 Test katmanları
+- [ ] 16.2 İş akışları
+- [ ] 16.3 Kapı envanteri
+- [ ] 16.4 Test adı kuralları
+- [ ] 16.5 Ölçüm kuralları
+- [ ] 17. Testnet açılış planı
+- [ ] 17.1 Roller
+- [ ] 17.2 Açılış öncesi (M6 sonrası)
+- [ ] 17.3 Açılış günü
+- [ ] 17.4 İlk 14 gün
+- [ ] 17.5 İlk 90 gün
+- [ ] 17.6 Yükseltme yöntemi
+- [ ] 18. Testnet Açılış Kapısı (TLG)
+- [ ] 19. Kararlar
+- [ ] 20. Kaynaklar
+- [ ] 20.1 Platform ve ağ
+- [ ] 20.2 Depolama
+- [ ] 20.3 Yürütme
+- [ ] 20.4 Kriptografi ve doğrulama
+- [ ] 20.5 Nesne katmanı
+- [ ] 20.6 Kaynak kaydı olan eski belgeler
+- [ ] Ek A. `README.md` hedef metni
+- [ ] Contents
+- [ ] What Budlum is
+- [ ] Testnet at a glance
+- [ ] Join the testnet
+- [ ] 1. Create a wallet and get testnet BUD
+- [ ] 2. Become a validator on an Android phone
+- [ ] 3. Run a Full validator
+- [ ] 4. Use the tools you already use
+- [ ] 5. Store content on B.U.D. 3.0
+- [ ] How it works
+- [ ] Universal Settlement Layer
+- [ ] B.U.D. 3.0
+- [ ] Universal Execution Layer
+- [ ] BudZero
+- [ ] Validator classes
+- [ ] Testnet feature status
+- [ ] Measured on the testnet rehearsal
+- [ ] Repository layout
+- [ ] Build from source
+- [ ] JSON-RPC and compatibility gateways
+- [ ] Engineering standards
+- [ ] Security
+- [ ] Project status
+- [ ] Documentation
+- [ ] Contributing
+- [ ] License
+- [ ] Ek B. `README.tr.md` hedef metni
+- [ ] İçindekiler
+- [ ] Budlum nedir
+- [ ] Bir bakışta testnet
+- [ ] Testnete katılın
+- [ ] 1. Cüzdan oluşturun ve testnet BUD'u alın
+- [ ] 2. Android telefonda doğrulayıcı olun
+- [ ] 3. Tam doğrulayıcı çalıştırın
+- [ ] 4. Zaten kullandığınız araçları kullanın
+- [ ] 5. B.U.D. 3.0 üzerinde içerik saklayın
+- [ ] Nasıl çalışır
+- [ ] Evrensel Uzlaşma Katmanı
+- [ ] B.U.D. 3.0
+- [ ] Evrensel Yürütme Katmanı
+- [ ] BudZero
+- [ ] Doğrulayıcı sınıfları
+- [ ] Testnette özelliklerin durumu
+- [ ] Testnet provasında ölçülenler
+- [ ] Depo yerleşimi
+- [ ] Kaynaktan derleme
+- [ ] JSON-RPC ve uyumluluk ağ geçitleri
+- [ ] Mühendislik standartları
+- [ ] Güvenlik
+- [ ] Proje durumu
+- [ ] Belgeler
+- [ ] Katkı
+- [ ] Lisans
+- [ ] Ek C. Kavram adı haritası (`config/naming/concept_map.toml`)
+- [ ] Ek D. Ar-Ge kaydı
