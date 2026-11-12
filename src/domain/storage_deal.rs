@@ -9317,6 +9317,73 @@ mod tests {
             assert_eq!(reg.root(), back.root());
         }
     }
+
+    #[test]
+    fn operator_cannot_self_open_challenge_and_unverifiable_answer_never_credits_proven_read() {
+        let mut reg = StorageRegistry::new();
+        let m = good_manifest();
+        let (deal_id, _) = open_one(&mut reg, &m);
+        let err = reg
+            .open_challenge(deal_id, 0, 4, 110, 120, operator(), 50)
+            .unwrap_err();
+        assert!(matches!(err, StorageError::ChallengeOpenerIsOperator { .. }));
+
+        let cid = reg
+            .open_challenge(deal_id, 0, 4, 110, 120, opener(), 50)
+            .unwrap();
+        let res = reg
+            .answer_challenge(cid, ContentId([1u8; 32]), operator(), 115, Some(&[1u8; 16]))
+            .unwrap();
+        assert_eq!(res.outcome, ChallengeOutcome::Answered);
+        assert!(
+            reg.access_events.get(&m.manifest_id).is_none(),
+            "unverifiable proof must not credit a proven read"
+        );
+    }
+
+    #[test]
+    fn competing_manifest_and_paid_deal_cannot_hijack_owner_or_nft_burn_prune() {
+        let mut reg = StorageRegistry::new();
+        let alice = Address::from([0x11; 32]);
+        let mallory = Address::from([0x22; 32]);
+        let operator = Address::from([0x33; 32]);
+
+        let mut alice_manifest = good_manifest();
+        alice_manifest.owner = alice;
+        reg.register_manifest(&alice_manifest);
+        assert_eq!(reg.owner_of(&alice_manifest.manifest_id), Some(alice));
+        assert!(reg.can_prune_on_nft_burn(&alice_manifest.manifest_id, &alice));
+
+        let mut mallory_manifest = alice_manifest.clone();
+        mallory_manifest.owner = mallory;
+        reg.register_manifest(&mallory_manifest);
+
+        let shard_id = alice_manifest.shards[0].shard_id;
+        let deal_id = reg
+            .open_deal(
+                42,
+                &mallory_manifest,
+                shard_id,
+                operator,
+                1,
+                10,
+                20,
+                good_econ(),
+                &params(),
+                Some(valid_merkle_proof()),
+                Some([0x42u8; 32]),
+            )
+            .unwrap();
+        reg.set_deal_payer(deal_id, mallory);
+
+        assert_eq!(
+            reg.owner_of(&alice_manifest.manifest_id),
+            None,
+            "a competing manifest + side deal must keep owner_of ambiguous"
+        );
+        assert!(!reg.can_prune_on_nft_burn(&alice_manifest.manifest_id, &mallory));
+        assert!(!reg.can_prune_on_nft_burn(&alice_manifest.manifest_id, &alice));
+    }
 }
 
 #[cfg(test)]
@@ -9907,72 +9974,5 @@ mod demand_driven_replication_tests {
             .expect("a correct recipe must be accepted");
         let id = manifest.manifest_id;
         (reg, id)
-    }
-
-    #[test]
-    fn operator_cannot_self_open_challenge_and_unverifiable_answer_never_credits_proven_read() {
-        let mut reg = StorageRegistry::new();
-        let m = good_manifest();
-        let (deal_id, _) = open_one(&mut reg, &m);
-        let err = reg
-            .open_challenge(deal_id, 0, 4, 110, 120, operator(), 50)
-            .unwrap_err();
-        assert!(matches!(err, StorageError::ChallengeOpenerIsOperator { .. }));
-
-        let cid = reg
-            .open_challenge(deal_id, 0, 4, 110, 120, opener(), 50)
-            .unwrap();
-        let res = reg
-            .answer_challenge(cid, ContentId([1u8; 32]), operator(), 115, Some(&[1u8; 16]))
-            .unwrap();
-        assert_eq!(res.outcome, ChallengeOutcome::Answered);
-        assert!(
-            reg.access_events.get(&m.manifest_id).is_none(),
-            "unverifiable proof must not credit a proven read"
-        );
-    }
-
-    #[test]
-    fn competing_manifest_and_paid_deal_cannot_hijack_owner_or_nft_burn_prune() {
-        let mut reg = StorageRegistry::new();
-        let alice = Address::from([0x11; 32]);
-        let mallory = Address::from([0x22; 32]);
-        let operator = Address::from([0x33; 32]);
-
-        let mut alice_manifest = good_manifest();
-        alice_manifest.owner = alice;
-        reg.register_manifest(&alice_manifest);
-        assert_eq!(reg.owner_of(&alice_manifest.manifest_id), Some(alice));
-        assert!(reg.can_prune_on_nft_burn(&alice_manifest.manifest_id, &alice));
-
-        let mut mallory_manifest = alice_manifest.clone();
-        mallory_manifest.owner = mallory;
-        reg.register_manifest(&mallory_manifest);
-
-        let shard_id = alice_manifest.shards[0].shard_id;
-        let _deal_id = reg
-            .open_deal_with_payer(
-                0,
-                &mallory_manifest,
-                shard_id,
-                operator,
-                mallory,
-                1,
-                10,
-                20,
-                good_econ(),
-                None,
-                None,
-                None,
-            )
-            .unwrap();
-
-        assert_eq!(
-            reg.owner_of(&alice_manifest.manifest_id),
-            None,
-            "a competing manifest + side deal must keep owner_of ambiguous"
-        );
-        assert!(!reg.can_prune_on_nft_burn(&alice_manifest.manifest_id, &mallory));
-        assert!(!reg.can_prune_on_nft_burn(&alice_manifest.manifest_id, &alice));
     }
 }
