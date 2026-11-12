@@ -179,7 +179,7 @@ mod tests {
         let branch = Item::List(fields);
         let extension = Item::List(vec![
             Item::String(mpt::hp_encode(&[0], false)),
-            Item::String(mpt::keccak256(&rlp::encode(&branch)).to_vec()),
+            node_reference(branch),
         ]);
         assert_eq!(
             mpt::keccak256(&rlp::encode(&build_node(&entries, 0))),

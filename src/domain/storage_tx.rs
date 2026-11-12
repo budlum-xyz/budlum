@@ -224,9 +224,6 @@ pub enum StorageTxError {
     /// always-on class was priced and placed on that claim. Switching to
     /// mobile would walk around the placement and self-host checks.
     MobileHoldsActiveDeal { deal_id: u64 },
-    /// The manifest declares a generated source. Registering one runs the
-    /// recipe, which costs far more than the flat fee a transaction pays.
-    GeneratedRegistrationNotPriced,
     /// The manifest a self-host policy names is not registered.
     ManifestNotRegistered,
     /// The payer is not the authority for the manifest a deal names.
@@ -303,10 +300,6 @@ impl fmt::Display for StorageTxError {
             Self::MobileHoldsActiveDeal { deal_id } => write!(
                 f,
                 "cannot declare Mobile while operating the active deal {deal_id}"
-            ),
-            Self::GeneratedRegistrationNotPriced => write!(
-                f,
-                "registering a generated source in block is not priced yet"
             ),
             Self::ManifestNotRegistered => write!(f, "manifest is not registered"),
             Self::DealManifestNotOwned { sender } => write!(
@@ -943,24 +936,6 @@ fn register_manifest(
             sender: *sender,
         });
     }
-    if let Some(asset_owner) = state.marketplace.bound_asset_owner(&manifest.manifest_id) {
-        if asset_owner != *sender {
-            return Err(StorageTxError::OwnerIsNotSender {
-                owner: asset_owner,
-                sender: *sender,
-            });
-        }
-    }
-    if state.storage_registry.is_registered(&manifest.manifest_id)
-        && state
-            .storage_registry
-            .has_manifest_claim(&manifest.manifest_id, sender)
-    {
-        return Err(StorageTxError::AlreadyRegistered);
-    }
-    if matches!(manifest.source, crate::storage::ContentSource::Generated(_)) {
-        return Err(StorageTxError::GeneratedRegistrationNotPriced);
-    }
     if matches!(
         manifest.encryption,
         crate::storage::ContentEncryption::Plaintext
@@ -968,9 +943,9 @@ fn register_manifest(
         state
             .marketplace
             .check_content_may_be_public(&manifest.manifest_id)
-            .map_err(|e| StorageTxError::Refused(e.to_string()))?;
+            .map_err(|e| StorageTxError::Refused(format!("{}: {e}", StorageError::Bud3NotReady)))?;
     }
-    // Legacy content registration is closed; B.U.D. 3.0 uses StorageTxV3.
+    // Legacy content registration (including generated recipe sources) is closed; B.U.D. 3.0 uses StorageTxV3.
     Err(StorageTxError::Refused(
         StorageError::Bud3NotReady.to_string(),
     ))

@@ -466,12 +466,18 @@ pub fn trace_matrix(
     {
         let prog_len = program.len();
         let mut mult = vec![0u64; prog_len];
-        for step in trace {
+        for (step_idx, step) in trace.iter().enumerate() {
             // Expansion rows reuse the same (pc, raw_inst) tuple as the
             // original step; because the CTL excludes them via `is_expand`
             // they do not join the multiplicity either. If they did, a single
             // VerifyMerkle step would be counted 65 times.
             if step.merkle_is_expand || step.inference_is_expand {
+                continue;
+            }
+            if step_idx + 1 == trace.len()
+                && matches!(step.instruction.opcode, bud_isa::Opcode::Halt)
+                && public_inputs.exit_code != 0
+            {
                 continue;
             }
             if step.pc < prog_len {
@@ -1188,7 +1194,11 @@ pub fn trace_matrix(
             values[row_start + COL_EXIT_CODE] = values[last_start + COL_EXIT_CODE];
             values[row_start + COL_TRACE_LEN_CTR] = values[last_start + COL_TRACE_LEN_CTR];
         }
-        values[row_start + COL_GAS_USED] = Goldilocks::new(running_gas);
+        values[row_start + COL_GAS_USED] = if public_inputs.exit_code != 0 {
+            Goldilocks::new(public_inputs.gas_used)
+        } else {
+            Goldilocks::new(running_gas)
+        };
         values[row_start + COL_RAW_INST] = Goldilocks::new(
             bud_isa::Instruction {
                 opcode: bud_isa::Opcode::Halt,
@@ -1740,8 +1750,9 @@ fn aux_trace_generator(
             // COL_INFERENCE_IS_EXPAND here, 8 phantom demands per step were
             // added to the program LogUp partial sum while the AIR excluded
             // them, and every clean VerifyInference proof failed at OOD.
-            let is_expand_row = row[COL_VM_MERKLE_IS_EXPAND] + row[COL_INFERENCE_IS_EXPAND];
-            if i < trace_len && is_expand_row == Goldilocks::ZERO {
+            let is_non_prog_fetch =
+                row[COL_VM_MERKLE_IS_EXPAND] + row[COL_INFERENCE_IS_EXPAND] + row[COL_EXIT_CODE];
+            if i < trace_len && is_non_prog_fetch == Goldilocks::ZERO {
                 s_prog += diff_cpu_prog.inverse();
             }
             // The ROM-side weight is the multiplicity column, not a constant
@@ -1843,6 +1854,31 @@ impl ProverAdapter for Plonky3Adapter {
         public_inputs: &ExecutionPublicInputs,
         program: &[u64],
     ) -> Result<ProofEnvelope, ProverError> {
+        let Some(last) = trace.last() else {
+            return Err(ProverError::TraceGenerationError(
+                "cannot prove an empty trace".to_string(),
+            ));
+        };
+        let rom_word_is_halt = program
+            .get(last.pc)
+            .and_then(|&w| bud_isa::Instruction::decode_any(w).ok())
+            .is_some_and(|inst| matches!(inst.opcode, bud_isa::Opcode::Halt));
+        let is_synthetic_halt = matches!(last.instruction.opcode, bud_isa::Opcode::Halt)
+            && (!rom_word_is_halt || public_inputs.gas_used > public_inputs.gas_limit);
+        if is_synthetic_halt {
+            if public_inputs.exit_code != 1 {
+                return Err(ProverError::TraceGenerationError(format!(
+                    "synthetic fault Halt requires exit_code == 1, got {}",
+                    public_inputs.exit_code
+                )));
+            }
+        } else if public_inputs.exit_code != 0 {
+            return Err(ProverError::TraceGenerationError(format!(
+                "clean execution requires exit_code == 0, got {}",
+                public_inputs.exit_code
+            )));
+        }
+
         info!(trace_len = trace.len(), "Building trace matrix");
         let (matrix, trace_len) = trace_matrix(trace, program, public_inputs);
         let config = build_config();
@@ -2029,6 +2065,12 @@ impl Plonky3Adapter {
                 .next_power_of_two()
                 .max(16),
         );
+        if envelope.degree_bits != degree_bits as u32 {
+            return Err(VerifyError::InvalidEnvelope(format!(
+                "envelope degree_bits {} disagrees with expected trace degree_bits {}",
+                envelope.degree_bits, degree_bits
+            )));
+        }
         let preprocessed = setup_preprocessed(&config, &air, degree_bits);
         let preprocessed_vk_ref = preprocessed.as_ref().map(|(_, vk)| vk);
 

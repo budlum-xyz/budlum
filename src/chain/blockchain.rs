@@ -5879,6 +5879,9 @@ impl Blockchain {
             .ok_or_else(|| "Candidate chain is empty".to_string())?;
         let expected_genesis = self.genesis_config.build_genesis_block();
         if genesis != &expected_genesis {
+            if genesis.state_root != expected_genesis.state_root {
+                self.record_state_root_mismatch();
+            }
             return Err("Candidate genesis does not match configured genesis".into());
         }
 
@@ -7439,6 +7442,35 @@ impl Blockchain {
             }
         }
         None
+    }
+
+    /// Whether `voter_id` is a registered validator whose BLS key verifies
+    /// both the vote authentication preimage and the vote payload preimage.
+    ///
+    /// Used by the gossip layer before holding an early vote on a round-scope
+    /// refusal: `handle_prevote` / `handle_precommit` raise epoch and
+    /// round-membership refusals before signature checks, so an unauthenticated
+    /// vote must never claim a slot in `DeferredVotes`.
+    pub(crate) fn vote_is_from_registered_validator(
+        &self,
+        voter_id: &Address,
+        auth_msg: &[u8],
+        auth_sig: &[u8],
+        signing_msg: &[u8],
+        sig_bls: &[u8],
+    ) -> bool {
+        if auth_sig.len() > BLS_VOTE_SIGNATURE_BYTES || sig_bls.len() > BLS_VOTE_SIGNATURE_BYTES {
+            return false;
+        }
+        let Some(v) = self.state.validators.get(voter_id) else {
+            return false;
+        };
+        if v.bls_public_key.is_empty() {
+            return false;
+        }
+        crate::chain::finality::verify_bls_sig(&v.bls_public_key, auth_msg, auth_sig).is_ok()
+            && crate::chain::finality::verify_bls_sig(&v.bls_public_key, signing_msg, sig_bls)
+                .is_ok()
     }
 
     pub fn handle_prevote(&mut self, vote: Prevote) -> Result<(), String> {
@@ -11340,8 +11372,16 @@ mod tests {
     fn test_start_prevote_task_creates_aggregator() {
         let consensus = Arc::new(PoWEngine::new(0));
         let mut bc = Blockchain::new(consensus, None, 45262, None);
-        let cp_height = crate::core::chain_config::FINALITY_CHECKPOINT_INTERVAL;
+        let cp_height = crate::core::chain_config::finality_checkpoint_interval_for_chain_id(45262);
         let cp_hash = "a".repeat(64);
+        for height in 1..=cp_height {
+            bc.chain.push(crate::core::block::Block::new_with_chain_id(
+                height,
+                "0".repeat(64),
+                Vec::new(),
+                45262,
+            ));
+        }
 
         bc.start_prevote_task(cp_height, cp_hash.clone());
 
@@ -11501,7 +11541,16 @@ mod tests {
         let voter_id = Address::from([1u8; 32]);
         let bls = register_signed_early_voter(&mut bc, voter_id);
         let checkpoint_hash = "a".repeat(64);
-        let checkpoint_height = 10;
+        let checkpoint_height =
+            crate::core::chain_config::finality_checkpoint_interval_for_chain_id(45262);
+        for height in 1..=checkpoint_height {
+            bc.chain.push(crate::core::block::Block::new_with_chain_id(
+                height,
+                "0".repeat(64),
+                Vec::new(),
+                45262,
+            ));
+        }
         // The round's epoch is derived from the height, and a vote for another
         // epoch is not the round's vote.
         let epoch = checkpoint_height
@@ -11532,7 +11581,10 @@ mod tests {
 
         bc.start_prevote_task(checkpoint_height, checkpoint_hash);
         let round = bc.finality_aggregator.as_ref().expect("round");
-        assert_eq!(round.checkpoint_height, 10, "the round is the kept vote's");
+        assert_eq!(
+            round.checkpoint_height, checkpoint_height,
+            "the round is the kept vote's"
+        );
         assert!(
             bc.early_finality_votes.prevotes.is_empty(),
             "the round that started here took the kept vote"
@@ -11579,7 +11631,16 @@ mod tests {
         let voter_id = Address::from([3u8; 32]);
         let bls = register_signed_early_voter(&mut bc, voter_id);
         let checkpoint_hash = "a".repeat(64);
-        let checkpoint_height = 10;
+        let checkpoint_height =
+            crate::core::chain_config::finality_checkpoint_interval_for_chain_id(45262);
+        for height in 1..=checkpoint_height {
+            bc.chain.push(crate::core::block::Block::new_with_chain_id(
+                height,
+                "0".repeat(64),
+                Vec::new(),
+                45262,
+            ));
+        }
         bc.start_prevote_task(checkpoint_height, checkpoint_hash.clone());
         let epoch = bc.finality_aggregator.as_ref().expect("round").epoch;
         let vote = sign_early_precommit(
@@ -11655,6 +11716,49 @@ mod tests {
         assert!(err.contains("not a registered validator"), "got: {err}");
         assert_eq!(bc.early_finality_votes.prevotes.len(), 1);
         assert_eq!(bc.early_finality_votes.prevotes[0].voter_id, honest_id);
+
+        let signed = sign_early_prevote(
+            &honest_bls,
+            Prevote {
+                chain_id: crate::core::transaction::DEFAULT_CHAIN_ID,
+                epoch: 99,
+                checkpoint_height: 10,
+                checkpoint_hash: "c".repeat(64),
+                voter_id: honest_id,
+                sig_bls: Vec::new(),
+                auth_sig: Vec::new(),
+            },
+        );
+        assert!(
+            bc.vote_is_from_registered_validator(
+                &honest_id,
+                &signed.auth_signing_message(),
+                &signed.auth_sig,
+                &signed.signing_message(),
+                &signed.sig_bls,
+            ),
+            "registered validator with valid BLS auth+payload must verify"
+        );
+        assert!(
+            !bc.vote_is_from_registered_validator(
+                &Address::from([0xFE; 32]),
+                &signed.auth_signing_message(),
+                &signed.auth_sig,
+                &signed.signing_message(),
+                &signed.sig_bls,
+            ),
+            "unknown voter must not verify"
+        );
+        assert!(
+            !bc.vote_is_from_registered_validator(
+                &honest_id,
+                &signed.auth_signing_message(),
+                &[0u8; 96],
+                &signed.signing_message(),
+                &signed.sig_bls,
+            ),
+            "forged auth_sig must not verify"
+        );
     }
 
     #[test]

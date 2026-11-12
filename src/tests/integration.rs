@@ -2,7 +2,7 @@
 mod integration_tests {
     use crate::chain::blockchain::Blockchain;
     use crate::chain::finality::{
-        checkpoint_signing_message, is_checkpoint_height, sign_bls, verify_bls_sig,
+        checkpoint_signing_message, is_checkpoint_height_for_chain, sign_bls, verify_bls_sig,
         FinalityAggregator, Precommit, Prevote, ValidatorEntry, ValidatorSetSnapshot,
     };
     use crate::consensus::poa::PoAConfig;
@@ -847,7 +847,6 @@ mod integration_tests {
     #[test]
     fn test_prevote_precommit_full_lifecycle() {
         use crate::chain::finality::sign_bls;
-        use crate::core::chain_config::FINALITY_CHECKPOINT_INTERVAL;
         let keypair = KeyPair::generate().unwrap();
         let validator_addr = Address::from(keypair.public_key_bytes());
 
@@ -871,13 +870,13 @@ mod integration_tests {
         let mut bc = Blockchain::new(consensus, None, 45262, None);
         bc.state = state;
 
-        let cp_height = FINALITY_CHECKPOINT_INTERVAL;
+        let cp_height = crate::core::chain_config::finality_checkpoint_interval_for_chain_id(45262);
         for _ in 1..cp_height {
             let _ = bc.produce_block(validator_addr);
         }
         let (block, _) = bc.produce_block(validator_addr).unwrap();
         assert_eq!(block.index, cp_height);
-        assert!(is_checkpoint_height(block.index));
+        assert!(is_checkpoint_height_for_chain(block.index, 45262));
 
         bc.start_prevote_task(block.index, block.hash.clone());
         assert!(bc.finality_aggregator.is_some());
@@ -944,7 +943,7 @@ mod integration_tests {
             .to_vec();
         install_finality_keys(&mut bc.state, v_addr, &bls_sk, bls_pk, pq_public);
 
-        let cp_height = crate::core::chain_config::FINALITY_CHECKPOINT_INTERVAL;
+        let cp_height = crate::core::chain_config::finality_checkpoint_interval_for_chain_id(45262);
         for _ in 1..cp_height {
             let _ = bc.produce_block(v_addr);
         }
@@ -1811,10 +1810,10 @@ mod integration_tests {
             0,
             "no locked bridge inventory at genesis"
         );
-        // finality_lag = height - finalized, from the same scrape.
+        // finality_lag = tip.index - finalized, from the same scrape.
         assert_eq!(
             metrics.finality_lag.get(),
-            metrics.chain_height.get() - metrics.finalized_height.get()
+            metrics.chain_height.get().saturating_sub(1) - metrics.finalized_height.get()
         );
     }
 

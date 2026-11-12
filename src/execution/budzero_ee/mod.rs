@@ -383,7 +383,7 @@ impl ExecutionEnvironment for BudZeroEe {
 /// Maximum preprocessed trace bytes accepted in an optional proof setup (`2 MiB`).
 pub const MAX_SETUP_PREPROCESSED_BYTES: usize = 2 * 1024 * 1024;
 
-/// Four-word (`256-bit`) BudZero caller context preserving all 32 bytes of [`Address`].
+/// Four-word (`256-bit`) BudZero caller context preserving all 32 bytes of [`crate::core::address::Address`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BudZeroVmContext {
     pub sender_words: [u64; 4],
@@ -392,7 +392,7 @@ pub struct BudZeroVmContext {
 }
 
 impl BudZeroVmContext {
-    /// Build a 4-word VM context from a 32-byte Budlum [`Address`].
+    /// Build a 4-word VM context from a 32-byte Budlum [`crate::core::address::Address`].
     #[must_use]
     pub fn from_sender(
         sender: &crate::core::address::Address,
@@ -414,7 +414,7 @@ impl BudZeroVmContext {
         }
     }
 
-    /// Reconstruct the 32-byte Budlum [`Address`] from `sender_words`.
+    /// Reconstruct the 32-byte Budlum [`crate::core::address::Address`] from `sender_words`.
     #[must_use]
     pub fn sender_address(&self) -> crate::core::address::Address {
         let mut out = [0u8; 32];
@@ -587,8 +587,8 @@ mod tests {
             Instruction {
                 opcode: Opcode::SWrite,
                 rd: 0,
-                rs1: 5,
-                rs2: 3,
+                rs1: 3,
+                rs2: 0,
                 imm: 0,
             },
             Instruction {

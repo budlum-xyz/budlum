@@ -3681,7 +3681,10 @@ mod tests {
         forged.extend_from_slice(&[0xaa; 4]);
         let err = decode_bounded_bincode::<Vec<u8>>(&forged, MAX_WIRE_NESTED_PAYLOAD_BYTES)
             .expect_err("crafted multi-exabyte length prefix must be refused before allocation");
-        assert!(err.contains("payload length"), "got: {err}");
+        assert!(
+            err.contains("payload-derived budget") || err.contains("payload length"),
+            "got: {err}"
+        );
     }
 
     #[test]

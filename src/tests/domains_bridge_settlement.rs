@@ -178,12 +178,13 @@ fn zk_domain_refuses_empty_halt_proof() {
         kind: MessageKind::Custom(b"zk-proof".to_vec()),
         expiry_height: 0,
     });
-    let sub = ZkProofSubmission {
+    let mut sub = ZkProofSubmission {
         message: msg,
         proof: envelope.clone(),
         public_inputs: pi.clone(),
         program: halt_words.clone(),
     };
+    sub.message.payload_hash = sub.expected_payload_hash();
     let err = submit_zk_proof(&mut state, &sub, TESTNET_CHAIN_ID, 1, 10)
         .expect_err("bare Halt proof must be refused by submit_zk_proof");
     assert!(err.contains("Halt"), "unexpected error: {err}");
@@ -410,6 +411,15 @@ fn bridge_e2e_lock_mint_burn_unlock() {
     let owner = addr(0x44);
     let recipient = addr(0x45);
     let min_relayer = bc.state.registry.params().min_stake;
+    let seed_total = min_relayer.saturating_mul(2) + 10_000 + 100 + 1_000;
+    let rich_genesis = *bc
+        .state
+        .get_all_balances()
+        .iter()
+        .max_by_key(|(_, bal)| **bal)
+        .expect("genesis balance")
+        .0;
+    bc.state.get_or_create(&rich_genesis).balance -= seed_total;
     bc.state
         .add_balance(&relayer, min_relayer.saturating_mul(2));
     bc.state
@@ -497,6 +507,10 @@ fn bridge_e2e_lock_mint_burn_unlock() {
     )
     .expect("fee split");
     assert_eq!(bc.state.get_balance(&recipient), 100 + held_bud.get());
+    assert_eq!(
+        bc.state.get_balance(&relayer),
+        min_relayer + relayer_fee_bud.get()
+    );
 
     // 4) Recipient burns minted units to return to source domain.
     let burn_event = burn_with_event(
@@ -550,7 +564,7 @@ fn bridge_e2e_lock_mint_burn_unlock() {
         bc.state.get_balance(&owner)
             + bc.state.get_balance(&recipient)
             + bc.state.get_balance(&relayer),
-        10_000 + 100 + min_relayer + relayer_fee_bud.get(),
+        10_000 + 100 + min_relayer,
         "full bridge round-trip conserves every atom"
     );
 }
@@ -909,7 +923,7 @@ fn external_registry_readmit_requires_probes_and_height_is_monotonic() {
     let key = intake
         .register_domain(
             RegistrationRequest {
-                spec,
+                spec: spec.clone(),
                 policy: VerificationPolicy::strict(1_000),
                 bond_atoms: economics.required_bond_atoms(),
                 economics,
@@ -966,8 +980,11 @@ fn external_registry_readmit_requires_probes_and_height_is_monotonic() {
         ExternalRegistryError::AdmissionFailed { .. }
     ));
 
-    let mut wrong_ver =
-        crate::cross_domain::external::admit(adapter.as_ref(), &VerificationPolicy::strict(1_000));
+    let adapter_with_golden = spec.build(Some(test_bls()), Some(make_ev(64, 0xcc)));
+    let mut wrong_ver = crate::cross_domain::external::admit(
+        adapter_with_golden.as_ref(),
+        &VerificationPolicy::strict(1_000),
+    );
     wrong_ver.evidence_version = 999;
     let err_ver = intake
         .registry

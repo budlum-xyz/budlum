@@ -460,17 +460,17 @@ mod tests {
     #[test]
     fn reward_pool_rounding_remainder_deterministic() {
         let schedule = RewardPoolSchedule {
-            validation_reward_pool: 10,
+            validation_reward_pool: 100,
             validation_pool_epochs: 10,
             treasury_pool: 0,
             reward_pool_start_epoch: 0,
         };
         let payouts =
-            reward_for_epoch(schedule, 0, 10, &[(addr(9), 1), (addr(1), 1), (addr(2), 1)]);
-        assert_eq!(total_epoch_payout(&payouts), 1);
-        assert_eq!(payouts[0], (addr(1), 1));
-        assert_eq!(payouts[1], (addr(2), 0));
-        assert_eq!(payouts[2], (addr(9), 0));
+            reward_for_epoch(schedule, 0, 100, &[(addr(9), 1), (addr(1), 1), (addr(2), 1)]);
+        assert_eq!(total_epoch_payout(&payouts), 4);
+        assert_eq!(payouts[0], (addr(1), 2));
+        assert_eq!(payouts[1], (addr(2), 1));
+        assert_eq!(payouts[2], (addr(9), 1));
     }
 
     /// The pool splits 40 / 50 / 10 and the three parts always add back up:
@@ -527,13 +527,13 @@ mod tests {
     #[test]
     fn reward_pool_ignores_zero_stake() {
         let schedule = RewardPoolSchedule {
-            validation_reward_pool: 10,
+            validation_reward_pool: 100,
             validation_pool_epochs: 10,
             treasury_pool: 0,
             reward_pool_start_epoch: 0,
         };
-        let payouts = reward_for_epoch(schedule, 0, 10, &[(addr(1), 0), (addr(2), 5)]);
-        assert_eq!(payouts, vec![(addr(2), 1)]);
+        let payouts = reward_for_epoch(schedule, 0, 100, &[(addr(1), 0), (addr(2), 5)]);
+        assert_eq!(payouts, vec![(addr(2), 4)]);
     }
 
     fn funded_state(validators: &[(u8, u64, bool)]) -> crate::core::account::AccountState {
@@ -602,7 +602,7 @@ mod tests {
             validation_reward_pool: 1_100,
             validation_pool_epochs: 1,
             treasury_pool: 0,
-            reward_pool_start_epoch: 0,
+            reward_pool_start_epoch: 1,
         };
         // The epoch budget is 1,100; the consensus share of it is 440, and the
         // other 660 stay in the pool.

@@ -357,6 +357,9 @@ mod tests {
         assert!(t.activate_due_resumes(5).is_empty());
         assert_eq!(t.activate_due_resumes(6), vec![v]);
         assert!(!t.is_suspended(&v));
+        // Resume keeps the historical streak until real epoch participation.
+        assert_eq!(t.missed_count(&v), 1);
+        t.record_epoch(6, &[v], |_| true, &p);
         assert_eq!(t.missed_count(&v), 0);
     }
 
