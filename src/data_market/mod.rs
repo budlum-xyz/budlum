@@ -367,6 +367,17 @@ mod tests {
         bud3.bind_nft(nft_id, seller.0, &obj_key).expect("bind nft");
 
         let mut market = DataMarketRegistry::new();
+        assert_eq!(
+            market.create_listing(&bud3, Address([0x42; 32]), (cid, obj_key, nft_id), 25, 10),
+            Err(DataMarketError::NotObjectOwner),
+            "a different account cannot list the object"
+        );
+        assert_eq!(
+            market.create_listing(&bud3, seller, (cid, obj_key, [0x98; 32]), 25, 10),
+            Err(DataMarketError::NotObjectOwner),
+            "the seller cannot list an NFT not bound to this object"
+        );
+        assert!(market.listings.is_empty(), "rejections leave no listing");
         let listing = market
             .create_listing(&bud3, seller, (cid, obj_key, nft_id), 25, 10)
             .expect("listing");
@@ -391,6 +402,37 @@ mod tests {
             &[0u8; 32],
         )
         .expect("sign87");
+
+        // A listing cannot remain purchasable after its NFT reference is
+        // burned, even while the object survives under a different NFT.
+        let mut stale_bud3 = bud3.clone();
+        stale_bud3
+            .bind_nft([0x98; 32], seller.0, &obj_key)
+            .expect("keep object alive under another NFT");
+        assert!(!stale_bud3
+            .burn_reference(&nft_id, &seller.0, 2)
+            .expect("burn listed NFT only"));
+        let mut stale_accounts = accounts.clone();
+        let mut stale_market = market.clone();
+        let before_stale_object = stale_bud3.state_root();
+        assert_eq!(
+            stale_market.settle_purchase_with_grant(
+                &mut stale_accounts,
+                &mut stale_bud3,
+                45_261,
+                &auth,
+                &SellerGrantBundle {
+                    grant_nonce: [0x71; 32],
+                    one_time_ml_dsa_65_pk: Vec::new(),
+                    content_key: ContentKey([0x77; 32]),
+                },
+                2,
+            ),
+            Err(DataMarketError::NotObjectOwner)
+        );
+        assert_eq!(stale_accounts.get_balance(&buyer), 500);
+        assert_eq!(stale_bud3.state_root(), before_stale_object);
+        assert!(stale_market.receipts.is_empty());
 
         // An attacker must not sign a valid digest naming somebody else's
         // funded buyer address: signature and payer must refer to the same
