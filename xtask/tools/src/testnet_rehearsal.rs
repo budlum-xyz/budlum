@@ -1318,6 +1318,61 @@ fn offline_progress(stopped_finality: u64, finality: u64, stopped_tip: u64, tip:
     finality > stopped_finality && tip >= stopped_tip.saturating_add(16)
 }
 
+/// Extract a canonical block producer, refusing JSON-RPC errors or missing
+/// data instead of silently treating them as blocks by another validator.
+fn block_producer_result(height: u64, body: &str) -> Result<String, String> {
+    let value = crate::json::parse(body)
+        .map_err(|error| format!("block {height} returned invalid JSON: {error}"))?;
+    if value.get("error").is_some() {
+        return Err(format!("block {height} returned a JSON-RPC error"));
+    }
+    value
+        .get("result")
+        .and_then(|block| block.get("producer"))
+        .and_then(crate::json::Value::as_str)
+        .filter(|producer| !producer.is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| format!("block {height} has no canonical producer"))
+}
+
+fn read_block_producer(height: u64) -> Result<String, String> {
+    let body = rpc::call(
+        RPC_PORT,
+        "bud_getBlockByNumber",
+        &format!("[{height}]"),
+        Duration::from_secs(5),
+    )
+    .map_err(|error| format!("block {height}: {error}"))?;
+    block_producer_result(height, &body)
+}
+
+/// Scan a bounded, monotonic slice of the canonical RPC chain. Retrying the
+/// whole range on every poll can exhaust the public listener's per-IP quota;
+/// treating a rate-limited or not-yet-available block as scanned can instead
+/// silently miss the returning validator. Neither failure is a rehearsal pass.
+fn scan_rejoined_producer(
+    scanned: &mut u64,
+    tip: u64,
+    watched: &[String],
+    mut lookup: impl FnMut(u64) -> Result<String, String>,
+) -> Result<Option<u64>, String> {
+    const MAX_BLOCKS_PER_POLL: u64 = 5;
+    let end = tip.min(scanned.saturating_add(MAX_BLOCKS_PER_POLL));
+    while *scanned < end {
+        let next = scanned.saturating_add(1);
+        let producer = lookup(next)?; // Do not skip a failed RPC read.
+        *scanned = next;
+        let clean = producer.trim_start_matches("0x");
+        if watched
+            .iter()
+            .any(|address| clean.eq_ignore_ascii_case(address.trim_start_matches("0x")))
+        {
+            return Ok(Some(next));
+        }
+    }
+    Ok(None)
+}
+
 fn scenario_chaos(backend: &mut Backend<'_>) -> Result<String, String> {
     let watched: Vec<String> = match &*backend {
         Backend::Compose { eight_seat, .. } => {
@@ -1363,26 +1418,31 @@ fn scenario_chaos(backend: &mut Backend<'_>) -> Result<String, String> {
             stopped_tip.saturating_add(16)
         )
     })?;
+    // Use the last tip recorded while the seat was *still stopped*. A block
+    // produced as soon as the restart command returns must not be skipped.
+    let rejoined_from = observed_tip;
     restart?;
-    let rejoined_from = tip();
+    let mut scanned = rejoined_from;
+    let mut last_probe_error = None;
+    let mut observed_tip = rejoined_from;
     let rejoined = wait_for(150, || {
-        let height = tip();
-        (rejoined_from + 1..=height).find(|h| {
-            call("bud_getBlockByNumber", &format!("[{h}]"))
-                .as_ref()
-                .and_then(|block| block.get("producer"))
-                .and_then(crate::json::Value::as_str)
-                .is_some_and(|producer| {
-                    let clean = producer.trim_start_matches("0x");
-                    watched.iter().any(|addr| clean.eq_ignore_ascii_case(addr))
-                })
-        })
+        observed_tip = tip();
+        match scan_rejoined_producer(&mut scanned, observed_tip, &watched, read_block_producer) {
+            Ok(found) => found,
+            Err(error) => {
+                last_probe_error = Some(error);
+                None
+            }
+        }
     });
     match rejoined {
         Some(height) => Ok(format!(
             "finality {stopped_at} -> {advanced} with seat offline (tip {stopped_tip} -> {rejoined_from}); caught up and produced block {height}"
         )),
-        None => Err("restarted validator did not catch up and produce a block within 300 s".into()),
+        None => Err(format!(
+            "restarted validator was not seen producing on the canonical RPC chain within 300 s: tip {rejoined_from}->{observed_tip}, scanned through {scanned}, last block-read error: {}; check seat logs, address mapping and RPC responses",
+            last_probe_error.unwrap_or_else(|| String::from("none observed"))
+        )),
     }
 }
 
@@ -1645,6 +1705,70 @@ mod tests {
         assert!(!offline_progress(30, 30, 31, 47), "no new finality");
         assert!(!offline_progress(30, 35, 31, 46), "only 15 new blocks");
         assert!(offline_progress(30, 35, 31, 47), "both conditions met");
+    }
+
+    #[test]
+    fn rejoin_scan_is_bounded_and_does_not_repeat_the_entire_chain() {
+        let watched = vec!["0xA4".to_string()];
+        let mut scanned = 60;
+        let mut requests = Vec::new();
+        let result = scan_rejoined_producer(&mut scanned, 90, &watched, |h| {
+            requests.push(h);
+            Ok(if h == 68 { "a4" } else { "bb" }.into())
+        });
+        assert_eq!(result, Ok(None));
+        assert_eq!(scanned, 65);
+        assert_eq!(requests, vec![61, 62, 63, 64, 65]);
+        let result = scan_rejoined_producer(&mut scanned, 90, &watched, |h| {
+            requests.push(h);
+            Ok(if h == 68 { "0xA4" } else { "bb" }.into())
+        });
+        assert_eq!(result, Ok(Some(68)));
+        assert_eq!(scanned, 68);
+        assert_eq!(requests, vec![61, 62, 63, 64, 65, 66, 67, 68]);
+    }
+
+    #[test]
+    fn rejoin_scan_retries_a_missing_or_rate_limited_block() {
+        let mut scanned = 70;
+        let watched = vec!["af".to_string()];
+        assert_eq!(
+            scan_rejoined_producer(&mut scanned, 78, &watched, |h| {
+                if h == 72 {
+                    Err(format!("block {h} answered HTTP 429"))
+                } else {
+                    Ok("bb".into())
+                }
+            }),
+            Err(String::from("block 72 answered HTTP 429"))
+        );
+        assert_eq!(scanned, 71, "unread block must not be skipped");
+        assert_eq!(
+            scan_rejoined_producer(&mut scanned, 78, &watched, |h| {
+                Ok(if h == 72 { "0xAF" } else { "bb" }.into())
+            }),
+            Ok(Some(72))
+        );
+    }
+
+    #[test]
+    fn rejoin_probe_refuses_missing_producer_or_rpc_error() {
+        assert_eq!(
+            block_producer_result(12, r#"{"result":{"producer":"0xAb"}}"#),
+            Ok(String::from("0xAb"))
+        );
+        for bad in [
+            r#"{"error":{"code":-32000,"message":"rate limit"}}"#,
+            r#"{"result":null}"#,
+            r#"{"result":{"producer":null}}"#,
+            r#"{"result":{"producer":""}}"#,
+            "not JSON",
+        ] {
+            assert!(
+                block_producer_result(12, bad).is_err(),
+                "malformed or missing block must not be treated as another producer"
+            );
+        }
     }
 
     #[test]
