@@ -155,13 +155,13 @@ impl ObjectLayerTx {
                 updates,
                 phase,
             } => {
-                registry.refresh_class(*class, updates.clone(), *phase)?;
+                registry.refresh_class(ctx.signer, *class, updates.clone(), *phase)?;
             }
             Self::AuditCustody {
                 class,
                 home_custody,
             } => {
-                registry.audit_custody(*class, *home_custody)?;
+                registry.audit_custody(ctx.signer, *class, *home_custody)?;
             }
             Self::Arrive(proof) => {
                 registry.arrive(proof, ctx.finality)?;

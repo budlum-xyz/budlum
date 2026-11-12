@@ -451,14 +451,22 @@ fn upgrade_authority_change_freezes_class(family: HomeVmFamily) {
     w.arrive_unique(1, &w.fx.address(0x31), Some(alice()))
         .unwrap();
 
+    // A non-registrant cannot refresh (and thereby freeze) the class.
     let same: ClassSlice = [(field.clone(), vec![1])].into_iter().collect();
     assert_eq!(
-        w.reg.refresh_class(class, same, Phase::Final),
+        w.reg
+            .refresh_class(Address([8; 32]), class, same.clone(), Phase::Final),
+        Err(Refusal::NotAuthorized)
+    );
+    assert_eq!(
+        w.reg
+            .refresh_class(Address([9; 32]), class, same, Phase::Final),
         Ok(ClassStatus::Active)
     );
     let changed: ClassSlice = [(field, vec![2])].into_iter().collect();
     assert_eq!(
-        w.reg.refresh_class(class, changed, Phase::Final),
+        w.reg
+            .refresh_class(Address([9; 32]), class, changed, Phase::Final),
         Ok(ClassStatus::Frozen(FreezeReason::UpgradeAuthorityChanged))
     );
     assert_eq!(
@@ -490,13 +498,17 @@ fn custody_parity_holds(family: HomeVmFamily) {
     assert_eq!(w.reg.balance(&class, &bob()), 30);
     assert_eq!(w.reg.recorded_custody(&class), 100);
 
-    let audit = w.reg.audit_custody(class, 100).unwrap();
+    assert_eq!(
+        w.reg.audit_custody(Address([8; 32]), class, 99),
+        Err(Refusal::NotAuthorized)
+    );
+    let audit = w.reg.audit_custody(Address([9; 32]), class, 100).unwrap();
     assert_eq!(audit.delta, 0);
     assert_eq!(
         w.reg.classes.get(&class).unwrap().status,
         ClassStatus::Active
     );
-    let audit = w.reg.audit_custody(class, 99).unwrap();
+    let audit = w.reg.audit_custody(Address([9; 32]), class, 99).unwrap();
     assert_eq!(audit.delta, -1);
     assert_eq!(
         w.reg.classes.get(&class).unwrap().status,
