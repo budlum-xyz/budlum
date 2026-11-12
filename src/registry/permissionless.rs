@@ -162,7 +162,7 @@ impl Registration {
     /// Whether this registration currently holds operational authority to
     /// act in its role (`Active`, or clean `Unbonding` whose bond is still
     /// locked; never `Slashed` or `SlashedUnbonding`).
-    pub fn has_role_authority(&self) -> bool {
+    fn has_role_authority(&self) -> bool {
         matches!(
             self.status,
             MemberStatus::Active | MemberStatus::Unbonding { .. }
@@ -2985,11 +2985,17 @@ mod tests {
     fn slashed_member_enters_slashed_unbonding_and_stays_ineligible() {
         let mut reg = PermissionlessRegistry::new();
         let attester = addr(0x55);
-        reg.register(attester, roles::ATTESTER, MIN_REGISTRATION_STAKE, 0).unwrap();
+        reg.register(attester, roles::ATTESTER, MIN_REGISTRATION_STAKE, 0)
+            .unwrap();
         assert!(reg.is_active_attester(&attester));
 
         let outcome = reg
-            .slash_role_only(attester, roles::ATTESTER, SlashingCondition::DoubleSign, 500)
+            .slash_role_only(
+                attester,
+                roles::ATTESTER,
+                SlashingCondition::DoubleSign,
+                500,
+            )
             .unwrap();
         assert!(outcome.remaining_stake > 0);
         assert!(!reg.is_active_attester(&attester));
@@ -3003,7 +3009,9 @@ mod tests {
             !reg.is_active_attester(&attester),
             "a slashed attester must stay ineligible after entering unbonding"
         );
-        assert!(reg.withdraw(attester, roles::ATTESTER, release - 1).is_err());
+        assert!(reg
+            .withdraw(attester, roles::ATTESTER, release - 1)
+            .is_err());
         assert_eq!(
             reg.withdraw(attester, roles::ATTESTER, release).unwrap(),
             outcome.remaining_stake

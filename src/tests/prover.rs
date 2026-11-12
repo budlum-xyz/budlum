@@ -833,7 +833,10 @@ fn zk_domain_first_claim_must_match_genesis_state_root_and_reject_unanchored_adv
         Some(nonzero.genesis_state_root)
     );
     nonzero.last_committed_height = 1;
-    assert_eq!(crate::domain::expected_initial_root(&nonzero, &program), None);
+    assert_eq!(
+        crate::domain::expected_initial_root(&nonzero, &program),
+        None
+    );
 }
 
 #[test]
@@ -855,7 +858,12 @@ fn proof_market_zk_idempotent_claim_refunds_creator_without_paying_prover() {
     bc.state.add_balance(&second_prover, stake + fee * 4);
     bc.state
         .registry
-        .register(second_prover, crate::registry::role::roles::PROVER, stake, 1)
+        .register(
+            second_prover,
+            crate::registry::role::roles::PROVER,
+            stake,
+            1,
+        )
         .unwrap();
 
     // First prover advances domain 1 height 1 directly.
@@ -922,5 +930,8 @@ fn proof_market_zk_idempotent_claim_refunds_creator_without_paying_prover() {
     assert!(bc.state.proof_market.active_tasks.is_empty());
     assert!(bc.state.proof_market.pending_receipts.is_empty());
     assert_eq!(bc.state.get_balance(&creator), creator_bal_before + reward);
-    assert_eq!(bc.state.get_balance(&second_prover), prover_bal_before - fee);
+    assert_eq!(
+        bc.state.get_balance(&second_prover),
+        prover_bal_before - fee
+    );
 }
