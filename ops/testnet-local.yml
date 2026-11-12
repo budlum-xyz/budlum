@@ -77,8 +77,10 @@ services:
     # Two seats share a container, never a key, port, database, or process.
     entrypoint: ["python3", "/home/budlum/testnet-local-validator.py"]
     command: ["1", "5", "validator2"]
+    # Two validator seats start in this container. Wait for both P2P sockets;
+    # a single ready seat cannot bootstrap all eight peers safely.
     healthcheck:
-      test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/127.0.0.1/5001'"]
+      test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/127.0.0.1/5001 && exec 4<>/dev/tcp/127.0.0.1/5002'"]
       interval: 2s
       timeout: 3s
       retries: 30
