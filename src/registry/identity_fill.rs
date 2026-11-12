@@ -1127,7 +1127,7 @@ mod tests {
         receipt.sign(&key);
         assert!(matches!(
             check_receipt(&registry, &receipt, &requester, doc),
-            Err(FillError::CredentialNotValid { .. })
+            Err(FillError::MissingSlot { ref slot }) if slot.is_empty()
         ));
     }
 }

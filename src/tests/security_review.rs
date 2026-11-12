@@ -90,13 +90,14 @@ fn vtx(from: Address, amount: u64, nonce: u64, chain_id: u64, inner: ValidatorTx
 #[test]
 fn opportunistic_quota_cap_enforced_across_pending_class_and_quota() {
     let f = make_fixture(0x21, TESTNET);
+    let mobile_floor = crate::core::chain_config::Network::Testnet.min_stake_mobile();
     let mut state_a = AccountState::new();
-    state_a.add_balance(&f.owner, 1_000_000);
+    state_a.add_balance(&f.owner, mobile_floor + 1_000_000);
 
     // Register as Mobile with 2 GiB quota.
     let reg = vtx(
         f.owner,
-        1_000,
+        mobile_floor,
         0,
         TESTNET,
         ValidatorTx::Register(Box::new(make_reg(&f, ValidatorClass::Mobile, 1))),
@@ -134,7 +135,7 @@ fn opportunistic_quota_cap_enforced_across_pending_class_and_quota() {
 
     // Order B: queue UpdateCustodyQuota to 16 GiB while Mobile, then try ChangeClass -> MobileOpportunistic.
     let mut state_b = AccountState::new();
-    state_b.add_balance(&f.owner, 1_000_000);
+    state_b.add_balance(&f.owner, mobile_floor + 1_000_000);
     Executor::apply_transaction_checked(&mut state_b, &reg).unwrap();
     let raise_first = vtx(
         f.owner,
@@ -169,16 +170,17 @@ fn pending_operator_key_cannot_be_claimed_twice() {
     let f1 = make_fixture(0x31, TESTNET);
     let f2 = make_fixture(0x32, TESTNET);
     let f3 = make_fixture(0x33, TESTNET);
+    let mobile_floor = crate::core::chain_config::Network::Testnet.min_stake_mobile();
     let mut state = AccountState::new();
-    state.add_balance(&f1.owner, 1_000_000);
-    state.add_balance(&f2.owner, 1_000_000);
-    state.add_balance(&f3.owner, 1_000_000);
+    state.add_balance(&f1.owner, mobile_floor + 1_000_000);
+    state.add_balance(&f2.owner, mobile_floor + 1_000_000);
+    state.add_balance(&f3.owner, mobile_floor + 1_000_000);
 
     Executor::apply_transaction_checked(
         &mut state,
         &vtx(
             f1.owner,
-            1_000,
+            mobile_floor,
             0,
             TESTNET,
             ValidatorTx::Register(Box::new(make_reg(&f1, ValidatorClass::Mobile, 10))),
@@ -189,7 +191,7 @@ fn pending_operator_key_cannot_be_claimed_twice() {
         &mut state,
         &vtx(
             f2.owner,
-            1_000,
+            mobile_floor,
             0,
             TESTNET,
             ValidatorTx::Register(Box::new(make_reg(&f2, ValidatorClass::Mobile, 11))),
@@ -236,7 +238,7 @@ fn pending_operator_key_cannot_be_claimed_twice() {
         &mut state,
         &vtx(
             f3.owner,
-            1_000,
+            mobile_floor,
             0,
             TESTNET,
             ValidatorTx::Register(Box::new(reg3)),
@@ -249,14 +251,15 @@ fn pending_operator_key_cannot_be_claimed_twice() {
 #[test]
 fn stolen_operator_key_frozen_during_rotation_window() {
     let f = make_fixture(0x41, TESTNET);
+    let mobile_floor = crate::core::chain_config::Network::Testnet.min_stake_mobile();
     let mut state = AccountState::new();
-    state.add_balance(&f.owner, 1_000_000);
+    state.add_balance(&f.owner, mobile_floor + 1_000_000);
 
     Executor::apply_transaction_checked(
         &mut state,
         &vtx(
             f.owner,
-            1_000,
+            mobile_floor,
             0,
             TESTNET,
             ValidatorTx::Register(Box::new(make_reg(&f, ValidatorClass::Mobile, 20))),

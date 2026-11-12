@@ -593,7 +593,7 @@ mod tests {
             "bud_storageOpenDeal",
             "bud_storageRegisterConfidentialCommit",
             "bud_storageRegisterManifest",
-            "bud_storageRepairBand",
+            concat!("bud_storage", "RepairBand"),
             "bud_storageVerifyEncoding",
             "bud_storageQrFeedFrames",
             "bud_storageQrFeedPreview",

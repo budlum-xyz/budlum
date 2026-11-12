@@ -276,9 +276,11 @@ fn build_calculator_program(lhs: i32, rhs: i32, op: CalcOp) -> Vec<u64> {
     let mut prog = Vec::with_capacity(8);
     // Load signed operands into memory words 0 and 8 via host setup, then
     // execute arithmetic inside `bud_vm::Vm` over field-encoded registers.
+    // Use `rs1 = 4` (`r4 == 0`, non-zero register index) so `Opcode::Load`
+    // performs a memory load (`memory[r4 + imm]`) rather than load-immediate.
     let _ = (lhs, rhs);
-    prog.push(enc(Opcode::Load, 1, 0, 0, 0));
-    prog.push(enc(Opcode::Load, 2, 0, 0, 8));
+    prog.push(enc(Opcode::Load, 1, 4, 0, 0));
+    prog.push(enc(Opcode::Load, 2, 4, 0, 8));
     let alu = match op {
         CalcOp::Add => Opcode::Add,
         CalcOp::Sub => Opcode::Sub,

@@ -839,7 +839,7 @@ fn tentative_single_dependency_consent_resolve_and_depart_guard() {
         unreachable!()
     };
     let class = w.class(AssetKind::Fungible);
-    let contract = w.fx.address(0x21);
+    let contract = w.fungible.clone();
 
     // Without consent, tentative arrival is refused.
     let raw1 = w.fx.arrive(
@@ -933,18 +933,36 @@ fn adopt_escape_record_v1_and_challenge_rebut_forgery_paths() {
             ClassRegistration {
                 home_domain: DOMAIN,
                 kind: AssetKind::Unique,
-                contract: record_contract,
+                contract: record_contract.clone(),
                 rule: record_rule,
                 slice: ClassSlice::new(),
-                slice_source: SliceSource::EndpointEvent,
+                slice_source: SliceSource::AccountAndStorageProof,
                 samples: record_samples,
                 bond: 100,
             },
         )
         .unwrap();
 
-    // Challenge & Rebut: non-registrant rebuttal is refused; timely registrant rebuttal clears;
-    // un-rebutted challenge past window freezes class.
+    // Challenge & Rebut: non-holders cannot challenge; holder challenge opens countdown;
+    // non-registrant rebuttal is refused; registrant rebuttal clears or unfreezes.
+    assert_eq!(
+        w.reg.challenge(bob_addr, record_class, 40),
+        Err(Refusal::NotAuthorized)
+    );
+    let rec_arrive = w.fx.arrive(
+        &w.endpoint,
+        ArriveSpec {
+            kind: AssetKind::Unique,
+            contract: &record_contract,
+            native_id: &[0x01],
+            amount: 1,
+            depositor: &w.fx.address(0x55),
+            recipient: Some(bob_addr),
+        },
+    );
+    let rec_proof = w.proof(rec_arrive);
+    w.reg.arrive(&rec_proof, &YES).unwrap();
+
     assert_eq!(
         w.reg.challenge(bob_addr, record_class, 50).unwrap(),
         ClassStatus::Active
@@ -968,11 +986,23 @@ fn adopt_escape_record_v1_and_challenge_rebut_forgery_paths() {
         ),
         Ok(ClassStatus::Frozen(FreezeReason::UnrebuttedChallenge))
     );
+    w.reg
+        .rebut(
+            alice_addr,
+            record_class,
+            105 + crate::object_layer::DEFAULT_CHALLENGE_WINDOW_BLOCKS,
+        )
+        .unwrap();
+    assert_eq!(
+        w.reg.classes.get(&record_class).unwrap().status,
+        ClassStatus::Active
+    );
 
-    // Adopt: arrival without recipient lands under Holder::Home; unlinked Bob cannot steal it;
-    // Alice binds escape address (`domain_le || raw_home`) and adopts.
+    // Adopt: arrival without recipient lands under Holder::Home; unauthenticated
+    // `SetEscapeAddress` + `adopt` cannot steal it; only a proven home-chain
+    // adoption event signed by `depositor` moves the balance.
     let depositor = w.fx.address(0x66);
-    let fungible_contract = w.fx.address(0x21);
+    let fungible_contract = w.fungible.clone();
     let raw_home = w.fx.arrive(
         &w.endpoint,
         ArriveSpec {
@@ -994,7 +1024,19 @@ fn adopt_escape_record_v1_and_challenge_rebut_forgery_paths() {
     w.reg
         .set_escape_address(alice_addr, binding.clone())
         .unwrap();
-    assert_eq!(w.reg.adopt(alice_addr, &binding), Ok(1));
+    assert_eq!(
+        w.reg.adopt(alice_addr, &binding),
+        Err(Refusal::NotAuthorized)
+    );
+    let adopt_raw = w
+        .fx
+        .call(&w.endpoint, &depositor, 0, alice_addr.as_bytes());
+    let adopt_proof = w.proof(adopt_raw);
+    assert_eq!(
+        w.reg.adopt_with_proof(bob_addr, &adopt_proof, &YES),
+        Err(Refusal::NotAuthorized)
+    );
+    assert_eq!(w.reg.adopt_with_proof(alice_addr, &adopt_proof, &YES), Ok(1));
     assert_eq!(w.reg.balance(&w.class(AssetKind::Fungible), &alice()), 9);
 }
 

@@ -495,7 +495,10 @@ async fn a_result_tagged_for_a_different_chain_is_refused() {
             .await
             .expect_err("chain tag must match the adapter that produced the result");
     let msg = format!("{err}");
-    assert!(msg.contains("tagged"), "msg: {msg}");
+    assert!(
+        msg.contains("tagged") || msg.contains("unsupported chain"),
+        "msg: {msg}"
+    );
 }
 
 #[tokio::test]

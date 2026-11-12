@@ -22,10 +22,11 @@ value moves between domains without trusting an intermediary.
 ---
 
 > [!WARNING]
-> **No public testnet launch or mainnet launch is evidenced here; no external audit
-> has been performed.** This is development software. Do not use it for
-> real-value traffic. The [testnet launch-gate ledger](docs/audit/TLG_REPORT.md)
-> distinguishes in-tree code and synthetic fixtures from verified deployments.
+> **Budlum has not launched a mainnet and has not been audited.** No public testnet
+> launch or mainnet launch is evidenced here. No external audit has been performed.
+> This is development software. Do not use it for real-value traffic. The
+> [testnet launch-gate ledger](docs/audit/TLG_REPORT.md) distinguishes in-tree code
+> and synthetic fixtures from verified deployments.
 
 ---
 

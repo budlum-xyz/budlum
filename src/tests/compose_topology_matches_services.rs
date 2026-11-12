@@ -33,6 +33,9 @@ fn services(compose: &str) -> Vec<String> {
     // at this indentation.
     let mut in_services = false;
     for line in compose.lines() {
+        if line.trim().is_empty() || line.trim_start().starts_with('#') {
+            continue;
+        }
         // A top-level key starts in column zero. The `x-node: &node` anchor
         // above `services:` is such a key, and so are `volumes:` and `networks:`
         // below it, which is exactly why the scan is bounded at both ends.

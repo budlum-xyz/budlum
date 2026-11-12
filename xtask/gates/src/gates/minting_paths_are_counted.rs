@@ -123,15 +123,17 @@ const TRANSFER_JUSTIFICATIONS: &[(&str, usize, &str)] = &[
     ),
     (
         "src/chain/storage_maintenance.rs",
-        3,
+        4,
         "the storage reward tick pays the operator out of the fee that \
          `open_deal` debited from the payer, as the difference of two \
          cumulative totals so the sum cannot pass the escrowed fee; the \
          refund of a slashed deal returns the unserved part of that same \
-         prepaid fee to the payer the ledger took it from; and the storage \
-         deal expiry sweep returns the operator bond that `open_deal` debited \
-         when the deal's term ends unrenewed. Each line puts back money this \
-         ledger already took, so none of them creates supply.",
+         prepaid fee to the payer the ledger took it from; the missed-challenge \
+         settlement returns the opener bond that `open_challenge` debited from \
+         the challenger; and the storage deal expiry sweep returns the operator \
+         bond that `open_deal` debited when the deal's term ends unrenewed. \
+         Each line puts back money this ledger already took, so none of them \
+         creates supply.",
     ),
     (
         "src/cross_domain/bridge_tx.rs",

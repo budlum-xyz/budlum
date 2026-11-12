@@ -504,6 +504,9 @@ impl ConsensusKeyRegistration {
                 self.scheme_id
             ));
         }
+        if self.vrf_public_key.iter().all(|&b| b == 0) {
+            return Err("VRF public key must not be the identity element".into());
+        }
         schnorrkel::PublicKey::from_bytes(&self.vrf_public_key)
             .map_err(|_| "VRF public key must be a valid 32-byte Ristretto key".to_string())?;
         let entry = crate::chain::finality::ValidatorEntry {
@@ -4682,6 +4685,8 @@ fn encode_storage_v3_tx(tx: &crate::storage::bud3::tx::StorageTxV3, out: &mut Ve
             for att in attestations {
                 put_fixed(out, &att.validator);
                 encode_storage_v3_content_id(&att.verified_content_id, out);
+                put_fixed(out, &att.new_commitment);
+                put_bytes(out, &att.signature);
             }
             put_u64(out, *proposer_stake);
         }
