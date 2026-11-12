@@ -1096,7 +1096,7 @@ mod tests {
 
     #[tokio::test]
     async fn faucet_pow_difficulty_adjusts_and_replay_is_refused() {
-        let _ = budlum_core::crypto::tls::install_default_provider();
+        budlum_core::crypto::tls::install_default_provider();
         let dir = tempfile::tempdir().unwrap();
         let state_file = dir.path().join("faucet-state.json");
         let key = budlum_core::crypto::primitives::WalletKeyPair::from_seed(&[5u8; 32]);

@@ -478,8 +478,12 @@ fn check_volume_layout(members: &[VolumeMember], bytes: &[u8]) -> Result<(), Pip
         if offset < expect || end > bytes.len() {
             return Err(PipelineError::Volume(VolumeError::LayoutMismatch));
         }
-        bytes.get(offset..end).ok_or(PipelineError::Volume(VolumeError::LayoutMismatch))?;
-        let hole = bytes.get(expect..offset).ok_or(PipelineError::Volume(VolumeError::LayoutMismatch))?;
+        bytes
+            .get(offset..end)
+            .ok_or(PipelineError::Volume(VolumeError::LayoutMismatch))?;
+        let hole = bytes
+            .get(expect..offset)
+            .ok_or(PipelineError::Volume(VolumeError::LayoutMismatch))?;
         if !hole.iter().all(|byte| *byte == 0) {
             return Err(PipelineError::Volume(VolumeError::LayoutMismatch));
         }

@@ -2457,6 +2457,40 @@ impl From<&NetworkMessage> for pb::ProtoNetworkMessage {
                 scheme_id: scheme_id.clone(),
                 seat_table_version: *seat_table_version,
             }),
+            NetworkMessage::GetFinalityCert { checkpoint_height } => {
+                pb::proto_network_message::Payload::GetFinalityCert(pb::ProtoGetFinalityCert {
+                    checkpoint_height: *checkpoint_height,
+                })
+            }
+            NetworkMessage::FinalityCertResponse {
+                found,
+                epoch,
+                checkpoint_height,
+                checkpoint_hash,
+                agg_sig_bls,
+                bitmap,
+                set_hash,
+                scheme_id,
+                seat_table_version,
+            } => pb::proto_network_message::Payload::FinalityCertResponse(
+                pb::ProtoFinalityCertResponse {
+                    found: *found,
+                    cert: if *found {
+                        Some(pb::ProtoFinalityCert {
+                            epoch: *epoch,
+                            checkpoint_height: *checkpoint_height,
+                            checkpoint_hash: checkpoint_hash.clone(),
+                            agg_sig_bls: agg_sig_bls.clone(),
+                            bitmap: bitmap.clone(),
+                            set_hash: set_hash.clone(),
+                            scheme_id: scheme_id.clone(),
+                            seat_table_version: *seat_table_version,
+                        })
+                    } else {
+                        None
+                    },
+                },
+            ),
             NetworkMessage::GetQcBlob {
                 epoch,
                 checkpoint_height,
@@ -2651,6 +2685,45 @@ impl TryFrom<pb::ProtoNetworkMessage> for NetworkMessage {
             }),
             pb::proto_network_message::Payload::FinalityCert(f) => {
                 Ok(NetworkMessage::FinalityCert {
+                    epoch: f.epoch,
+                    checkpoint_height: f.checkpoint_height,
+                    checkpoint_hash: f.checkpoint_hash,
+                    agg_sig_bls: f.agg_sig_bls,
+                    bitmap: f.bitmap,
+                    set_hash: f.set_hash,
+                    scheme_id: f.scheme_id,
+                    seat_table_version: f.seat_table_version,
+                })
+            }
+            pb::proto_network_message::Payload::GetFinalityCert(q) => {
+                Ok(NetworkMessage::GetFinalityCert {
+                    checkpoint_height: q.checkpoint_height,
+                })
+            }
+            pb::proto_network_message::Payload::FinalityCertResponse(r) => {
+                if !r.found {
+                    if r.cert.is_some() {
+                        return Err(
+                            "FinalityCertResponse with found=false must not carry cert".into()
+                        );
+                    }
+                    return Ok(NetworkMessage::FinalityCertResponse {
+                        found: false,
+                        epoch: 0,
+                        checkpoint_height: 0,
+                        checkpoint_hash: String::new(),
+                        agg_sig_bls: Vec::new(),
+                        bitmap: Vec::new(),
+                        set_hash: String::new(),
+                        scheme_id: String::new(),
+                        seat_table_version: 0,
+                    });
+                }
+                let f = r
+                    .cert
+                    .ok_or("FinalityCertResponse with found=true is missing cert")?;
+                Ok(NetworkMessage::FinalityCertResponse {
+                    found: true,
                     epoch: f.epoch,
                     checkpoint_height: f.checkpoint_height,
                     checkpoint_hash: f.checkpoint_hash,
@@ -3233,6 +3306,7 @@ mod tests {
                     pow_parameters: None,
                     zk_program_allowlist: vec![[3u8; 32]],
                     plugin_code_hash: None,
+                    genesis_state_root: [0u8; 32],
                 }),
             )),
             TransactionType::Bridge(crate::cross_domain::bridge_tx::BridgeTx::RegisterAsset {
@@ -3710,5 +3784,68 @@ mod tests {
         let oversize = vec![b'{'; MAX_WIRE_NESTED_PAYLOAD_BYTES + 1];
         let err = decode_bounded_json::<serde_json::Value>(&oversize, "test json").unwrap_err();
         assert!(err.contains("exceeds size limit"));
+    }
+
+    #[test]
+    fn finality_cert_sync_messages_roundtrip_and_reject_malformed_missing() {
+        let req = NetworkMessage::GetFinalityCert {
+            checkpoint_height: 30,
+        };
+        let req_bytes = req.to_bytes();
+        assert!(matches!(
+            NetworkMessage::from_bytes_validated(&req_bytes),
+            Ok(NetworkMessage::GetFinalityCert {
+                checkpoint_height: 30
+            })
+        ));
+
+        let resp_found = NetworkMessage::FinalityCertResponse {
+            found: true,
+            epoch: 1,
+            checkpoint_height: 50,
+            checkpoint_hash: "aa".repeat(32),
+            agg_sig_bls: vec![1u8; 48],
+            bitmap: vec![0b0111],
+            set_hash: "bb".repeat(32),
+            scheme_id: crate::chain::finality::BLS_SCHEME_RFC9380_V1.to_string(),
+            seat_table_version: 2,
+        };
+        let resp_bytes = resp_found.to_bytes();
+        assert!(matches!(
+            NetworkMessage::from_bytes_validated(&resp_bytes),
+            Ok(NetworkMessage::FinalityCertResponse {
+                found: true,
+                epoch: 1,
+                checkpoint_height: 50,
+                seat_table_version: 2,
+                ..
+            })
+        ));
+
+        let resp_missing = NetworkMessage::FinalityCertResponse {
+            found: false,
+            epoch: 0,
+            checkpoint_height: 0,
+            checkpoint_hash: String::new(),
+            agg_sig_bls: Vec::new(),
+            bitmap: Vec::new(),
+            set_hash: String::new(),
+            scheme_id: String::new(),
+            seat_table_version: 0,
+        };
+        assert!(matches!(
+            NetworkMessage::from_bytes_validated(&resp_missing.to_bytes()),
+            Ok(NetworkMessage::FinalityCertResponse { found: false, .. })
+        ));
+
+        let malformed = pb::ProtoNetworkMessage {
+            payload: Some(pb::proto_network_message::Payload::FinalityCertResponse(
+                pb::ProtoFinalityCertResponse {
+                    found: false,
+                    cert: Some(pb::ProtoFinalityCert::default()),
+                },
+            )),
+        };
+        assert!(NetworkMessage::try_from(malformed).is_err());
     }
 }

@@ -130,6 +130,22 @@ pub enum NetworkMessage {
         seat_table_version: u64,
     },
 
+    GetFinalityCert {
+        checkpoint_height: u64,
+    },
+
+    FinalityCertResponse {
+        found: bool,
+        epoch: u64,
+        checkpoint_height: u64,
+        checkpoint_hash: String,
+        agg_sig_bls: Vec<u8>,
+        bitmap: Vec<u8>,
+        set_hash: String,
+        scheme_id: String,
+        seat_table_version: u64,
+    },
+
     GetQcBlob {
         epoch: u64,
         checkpoint_height: u64,
