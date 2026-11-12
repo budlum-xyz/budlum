@@ -492,7 +492,25 @@ impl ExecutionEnvironment for SvmEe {
                                 gas_used: 5_000,
                             });
                         };
-                        let mut src_acc = read_svm_account(host, &src_ata).unwrap_or_default();
+                        let mut src_acc = match read_svm_account(host, &src_ata) {
+                            Ok(acc) => acc,
+                            Err(e) => {
+                                return Ok(EeOutcome {
+                                    status: OutcomeStatus::Revert,
+                                    output: e.into_bytes(),
+                                    gas_used: 5_000,
+                                });
+                            }
+                        };
+                        if src_acc.owner != SVM_SPL_TOKEN_PROGRAM_ID
+                            && src_acc.owner != SVM_TOKEN_2022_PROGRAM_ID
+                        {
+                            return Ok(EeOutcome {
+                                status: OutcomeStatus::Revert,
+                                output: b"invalid source SPL token account owner".to_vec(),
+                                gas_used: 6_000,
+                            });
+                        }
                         let src_bal = src_acc
                             .data
                             .get(..8)
@@ -505,18 +523,57 @@ impl ExecutionEnvironment for SvmEe {
                                 gas_used: 8_000,
                             });
                         }
-                        src_acc.data = (src_bal - amount).to_le_bytes().to_vec();
-                        let _ = write_svm_account(host, &src_ata, &src_acc);
 
-                        let mut dst_acc = read_svm_account(host, &dst_ata).unwrap_or_default();
+                        let mut dst_acc = match read_svm_account(host, &dst_ata) {
+                            Ok(acc) => acc,
+                            Err(e) => {
+                                return Ok(EeOutcome {
+                                    status: OutcomeStatus::Revert,
+                                    output: e.into_bytes(),
+                                    gas_used: 5_000,
+                                });
+                            }
+                        };
+                        if dst_acc.lamports == 0 || dst_acc.owner != src_acc.owner {
+                            return Ok(EeOutcome {
+                                status: OutcomeStatus::Revert,
+                                output: b"uninitialized or mismatched destination SPL token account"
+                                    .to_vec(),
+                                gas_used: 7_000,
+                            });
+                        }
                         let dst_bal = dst_acc
                             .data
                             .get(..8)
                             .and_then(|s| <[u8; 8]>::try_from(s).ok())
                             .map_or(0u64, u64::from_le_bytes);
-                        dst_acc.owner = SVM_SPL_TOKEN_PROGRAM_ID;
-                        dst_acc.data = dst_bal.saturating_add(amount).to_le_bytes().to_vec();
-                        let _ = write_svm_account(host, &dst_ata, &dst_acc);
+                        let Some(new_dst_bal) = dst_bal.checked_add(amount) else {
+                            return Ok(EeOutcome {
+                                status: OutcomeStatus::Revert,
+                                output: b"SPL destination balance overflow".to_vec(),
+                                gas_used: 8_000,
+                            });
+                        };
+
+                        if src_ata == dst_ata {
+                            return Ok(EeOutcome {
+                                status: OutcomeStatus::Success,
+                                output: dst_ata.to_vec(),
+                                gas_used: 10_000,
+                            });
+                        }
+
+                        src_acc.data = (src_bal - amount).to_le_bytes().to_vec();
+                        write_svm_account(host, &src_ata, &src_acc).map_err(|e| EeFault {
+                            ee: EeId::SVM,
+                            message: e,
+                        })?;
+
+                        dst_acc.data = new_dst_bal.to_le_bytes().to_vec();
+                        write_svm_account(host, &dst_ata, &dst_acc).map_err(|e| EeFault {
+                            ee: EeId::SVM,
+                            message: e,
+                        })?;
                         Ok(EeOutcome {
                             status: OutcomeStatus::Success,
                             output: dst_ata.to_vec(),

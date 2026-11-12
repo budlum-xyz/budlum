@@ -14,7 +14,11 @@ use crate::ai::AiRegistry;
 use crate::core::address::Address;
 use crate::pollen::data_rights::AccessGrant;
 
-/// Register an AI inference layer model on chain (AiModelSpec + register_model).
+/// Register an AI inference layer model on chain (`AiModelSpec` + `register_model`).
+///
+/// # Errors
+///
+/// Returns an error if the operation fails.
 pub fn register_ai_model(
     registry: &mut AiRegistry,
     owner: Address,
@@ -42,7 +46,7 @@ pub fn register_ai_model(
     registry.register_model(spec)
 }
 
-/// Build a closed-circuit AI inference layer inference request (with a canonical request_id).
+/// Build a closed-circuit AI inference layer inference request (with a canonical `request_id`).
 ///
 /// `input_ref` = the reference to the data used (an AiDataInputRef encoding or
 /// an opaque value).
@@ -97,6 +101,10 @@ pub fn build_ai_request(
 }
 
 /// Build an AI inference layer inference result (the operator's answer).
+///
+/// # Errors
+///
+/// Returns an error if the operation fails.
 pub fn build_ai_result(
     request_id: AiRequestId,
     verifier: Address,

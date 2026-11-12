@@ -6,7 +6,7 @@
 //! proof again in the block; this tool never writes consensus state locally.
 //!
 //! The payload file is JSON so an adapter can be implemented in another
-//! process without linking node internals. For a PoW domain the tool can
+//! process without linking node internals. For a `PoW` domain the tool can
 //! build the payload itself: `--pow-spec` takes the domain, the parent and
 //! the block contents, mines the header chain and binds the commitment to it
 //! (`domain::producer`). For a BFT domain `--bft-spec` signs the checkpoint
@@ -33,7 +33,7 @@ struct Cli {
     /// Public node JSON-RPC endpoint.
     #[arg(long, default_value = "http://127.0.0.1:8545")]
     rpc_url: String,
-    /// JSON file containing a VerifiedDomainCommitment.
+    /// JSON file containing a `VerifiedDomainCommitment`.
     #[arg(
         long,
         required_unless_present_any = ["pow_spec", "bft_spec", "poa_spec"],
@@ -118,7 +118,7 @@ struct BftJob {
     signers: Vec<usize>,
 }
 
-/// A PoA block to sign.
+/// A `PoA` block to sign.
 #[derive(Debug, serde::Deserialize)]
 struct PoaJob {
     block: budlum_core::domain::producer::QuorumBlockSpec,

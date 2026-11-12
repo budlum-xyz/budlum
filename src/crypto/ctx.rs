@@ -22,9 +22,9 @@
 /// The longest context FIPS 204 and FIPS 205 accept, in bytes.
 pub const MAX_CONTEXT_LEN: usize = 255;
 
-/// User transaction and bundle (TxV7).
+/// User transaction and bundle (`TxV7`).
 pub const TX_V7: &[u8] = b"BDLM/TX/V7";
-/// Multisig transaction (TxV8).
+/// Multisig transaction (`TxV8`).
 pub const TX_V8: &[u8] = b"BDLM/TX/V8";
 /// Block.
 pub const BLOCK_V6: &[u8] = b"BDLM/BLOCK/V6";
@@ -42,7 +42,7 @@ pub const COLD_V1: &[u8] = b"BDLM/COLD/V1";
 pub const EVIDENCE_V2: &[u8] = b"BDLM/EVIDENCE/V2";
 /// Snapshot manifest.
 pub const SNAPSHOT_V2: &[u8] = b"BDLM/SNAPSHOT/V2";
-/// PoA authority signature.
+/// `PoA` authority signature.
 pub const POA_V2: &[u8] = b"BDLM/POA/V2";
 /// Storage deal and channel.
 pub const STORAGE_V2: &[u8] = b"BDLM/STORAGE/V2";
@@ -66,9 +66,9 @@ pub const RESEAL_V1: &[u8] = b"BDLM/RESEAL/V1";
 /// exposed for: the crypto/key registry's public labels and shapes - production readers land with the anchor-ceremony and key-config doors (wiring pending).
 pub const RELEASE_V1: &[u8] = b"BDLM/RELEASE/V1";
 
-/// V5 user transaction (ML-DSA-87 alone). Devnet only: TxV7 replaces it.
+/// V5 user transaction (ML-DSA-87 alone). Devnet only: `TxV7` replaces it.
 pub const TX_V5: &[u8] = b"BDLM/TX/V5";
-/// V6 threshold multisig transaction. Devnet only: TxV8 replaces it.
+/// V6 threshold multisig transaction. Devnet only: `TxV8` replaces it.
 pub const TX_V6: &[u8] = b"BDLM/TX/V6";
 /// Guardian vote on a wallet recovery proposal.
 pub const GUARDIAN_V1: &[u8] = b"BDLM/GUARDIAN/V1";

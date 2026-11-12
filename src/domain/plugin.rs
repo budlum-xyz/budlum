@@ -42,6 +42,11 @@ pub trait ConsensusDomainPlugin: Send + Sync {
     fn consensus(&self) -> &dyn ConsensusEngine;
     fn finality_adapter(&self) -> &dyn DomainFinalityAdapter;
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     fn validate_domain_block(
         &self,
         block: &Block,
@@ -52,6 +57,11 @@ pub trait ConsensusDomainPlugin: Send + Sync {
             .map_err(DomainError::from)
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     fn extract_commitment(
         &self,
         block: &Block,

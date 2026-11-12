@@ -8,7 +8,7 @@
 //!   video is byte-for-byte identical to the encoder's candidate object,
 //!   returning the video-extracted object as authoritative.
 //! * **Y12 (`round_trip_gate`)**: re-emits logical frames from the extracted
-//!   object, checks [`video_commitment`] equality, reconstructs the content,
+//!   object, checks `video_commitment` equality, reconstructs the content,
 //!   and checks [`ContentId`] equality.
 //! * **G4 / G5 (`decode_logical_path` / `decode_optical_path`)**: reconstructs
 //!   public content from logical frames (no pixels) and from QR-PNG pixels,

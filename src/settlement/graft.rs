@@ -3,10 +3,10 @@
 //! bids, fulfilment and refunds run in block through `SettlementTx::app_binding`;
 //! the Ethereum-side `app_bindingExecutor` contract is ().
 //!
-//! app_binding: an application that lives on another network is used from
+//! `app_binding`: an application that lives on another network is used from
 //! Budlum and paid for in BUD, without moving there.
 //!
-//! A app_binding row binds an application on an origin domain to one deterministic,
+//! A `app_binding` row binds an application on an origin domain to one deterministic,
 //! keyless Budlum mirror account. Nothing leaves the mirror except by a rule
 //! of this module; there is no administrator key.
 //!
@@ -18,7 +18,7 @@
 //!   mirror balance moves to it. A later claim event rotates the owner.
 //! - **Pay** moves BUD from a user to the application: to its owner, or into
 //!   the mirror while nobody has claimed it.
-//! - **OpenIntent / Bid / Award / Fulfill / Refund** let a user ask a solver
+//! - **`OpenIntent` / Bid / Award / Fulfill / Refund** let a user ask a solver
 //!   to make a call on the origin chain. The owner awards the cheapest bid
 //!   before any solver acts; that choice is frozen in consensus state. An
 //!   anchored executor event then pays only that solver. On expiry the owner
@@ -41,7 +41,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 /// Event kind an origin application emits to name its Budlum payout.
 pub const GRAFT_CLAIM_KIND: &[u8] = b"budlum/graft/claim/v1";
-/// Event kind a domain's app_binding executor emits after carrying out a call.
+/// Event kind a domain's `app_binding` executor emits after carrying out a call.
 pub const GRAFT_FULFILLED_KIND: &[u8] = b"budlum/graft/fulfilled/v1";
 /// Upper bound of an origin application, executor or recipient identifier.
 pub const MAX_GRAFT_IDENTIFIER_BYTES: usize = 256;
@@ -171,7 +171,7 @@ pub struct GraftIntent {
     pub awarded_solver: Option<Address>,
 }
 
-/// State-rooted app_binding writes. Every variant is carried by a signed settlement
+/// State-rooted `app_binding` writes. Every variant is carried by a signed settlement
 /// transaction, so the sender is `ctx.sender`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum GraftTx {
@@ -204,7 +204,7 @@ pub enum GraftTx {
         graft_id: [u8; 32],
         status: GraftStatus,
     },
-    /// Name the app_binding executor contract of a domain (that domain's operator
+    /// Name the `app_binding` executor contract of a domain (that domain's operator
     /// only). Fulfilment events count only from this emitter.
     SetExecutor { domain_key: u32, executor: Vec<u8> },
     /// Ask a solver to make a call on the origin chain; escrow the maximum.
@@ -276,7 +276,7 @@ pub struct GraftRegistry {
     #[serde(with = "crate::core::map_keys")]
     pub intents: BTreeMap<[u8; 32], GraftIntent>,
     pub intent_count: u64,
-    /// The app_binding executor of each domain, set by the domain's operator.
+    /// The `app_binding` executor of each domain, set by the domain's operator.
     pub executors: BTreeMap<u32, Vec<u8>>,
     /// Claim message ids already used: an anchored claim works once.
     pub used_messages: BTreeSet<[u8; 32]>,
@@ -334,7 +334,7 @@ pub fn window_proof(
     ))
 }
 
-/// Everything an application needs to check a app_binding payment itself
+/// Everything an application needs to check a `app_binding` payment itself
 /// the payment, its path to the payment window root, the
 /// other half of the registry root, and the checkpoint header that commits
 /// that root with the material that ties the header to a finalized block.
@@ -349,7 +349,7 @@ pub struct GraftPaymentProof {
     pub state_root_body: Option<[u8; 32]>,
 }
 
-/// Why a app_binding payment proof does not hold.
+/// Why a `app_binding` payment proof does not hold.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum GraftProofError {
     #[error("the payment does not hash to the proven leaf")]
@@ -587,6 +587,10 @@ impl GraftRegistry {
 
     /// Register an application. `Ok(true)` when a row was written,
     /// `Ok(false)` when the identical application was already registered.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn register(
         &mut self,
         domain_key: u32,
@@ -646,8 +650,8 @@ impl GraftRegistry {
 
 /// The account that receives the application share of `tx`'s protocol fee.
 ///
-/// Only a registered, active app_binding application earns a share, and the
-/// application is identified from the transaction's own effect: the app_binding id
+/// Only a registered, active `app_binding` application earns a share, and the
+/// application is identified from the transaction's own effect: the `app_binding` id
 /// of a payment or an intent, or the mirror account a contract call names.
 /// A share never returns to the sender itself, so a sender cannot discount
 /// its own fee by naming its own application.
@@ -779,7 +783,11 @@ fn preflight_credits(
     Ok(())
 }
 
-/// Execute one app_binding transaction through the settlement door.
+/// Execute one `app_binding` transaction through the settlement door.
+///
+/// # Errors
+///
+/// Returns an error if the operation fails.
 pub fn execute_graft_tx(
     state: &mut AccountState,
     ctx: &SettlementTxContext,

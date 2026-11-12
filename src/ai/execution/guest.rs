@@ -1,11 +1,11 @@
-//! Fixed-point MLP guest + host evaluator for BudZKVM AI execution.
+//! Fixed-point MLP guest + host evaluator for `BudZKVM` AI execution.
 //!
 //! Hardening goals:
-//! - Bit-exact host forward pass (i32 MAC, ReLU)
+//! - Bit-exact host forward pass (i32 MAC, `ReLU`)
 //! - Domain-separated input/output commitments
 //! - Guest bytecode computes the forward pass in-VM over a host-published
 //!   memory image, and its result is checked against the host evaluator
-//! - Optional STARK prove/verify via ZkVmExecutor / DefaultAdapter
+//! - Optional STARK prove/verify via `ZkVmExecutor` / `DefaultAdapter`
 
 use super::model_class::{AiExecutionModelClass, MAX_MLP_LAYERS, MAX_MLP_PARAMS, MAX_MLP_WIDTH};
 use bud_isa::{Instruction, Opcode};
@@ -16,7 +16,7 @@ pub const MLP_GUEST_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FixedPointMlpSpec {
-    /// Layer sizes: input_dim, hidden..., output_dim (len = layers+1).
+    /// Layer sizes: `input_dim`, hidden..., `output_dim` (len = layers+1).
     pub dims: Vec<u16>,
     /// Row-major weights per layer, concatenated.
     pub weights: Vec<i32>,
@@ -42,6 +42,11 @@ fn check_dims_shape(dims: &[u16]) -> Result<(), String> {
 }
 
 impl FixedPointMlpSpec {
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn validate(&self) -> Result<(), String> {
         check_dims_shape(&self.dims)?;
         let mut expected_w = 0usize;
@@ -123,7 +128,11 @@ impl FixedPointMlpSpec {
 }
 
 /// Bit-exact fixed-point forward pass: y = ReLU(W x + b) per hidden layer;
-/// Final layer is linear (no ReLU) so regression outputs can be negative.
+/// Final layer is linear (no `ReLU`) so regression outputs can be negative.
+///
+/// # Errors
+///
+/// Returns an error if the operation fails.
 pub fn eval_fixed_point_mlp(spec: &FixedPointMlpSpec, input: &[i32]) -> Result<Vec<i32>, String> {
     spec.validate()?;
     if input.len() != spec.input_dim() {
@@ -220,6 +229,10 @@ pub fn weights_digest(spec: &FixedPointMlpSpec) -> [u8; 32] {
 /// limb down to its low 31 bits, which left ~31 bits of the commitment bound
 /// instead of 64 and put a birthday collision within reach of roughly 2^15.5
 /// attempts.
+///
+/// # Errors
+///
+/// Returns an error if the operation fails.
 pub fn build_fixed_point_mlp_guest(
     spec: &FixedPointMlpSpec,
     input_commit: &[u8; 32],
@@ -321,7 +334,11 @@ pub fn words_to_bytecode(words: &[u64]) -> Vec<u8> {
     words.iter().flat_map(|w| w.to_le_bytes()).collect()
 }
 
-/// End-to-end: eval MLP, build guest, STARK-prove, package AiExecutionProof.
+/// End-to-end: eval MLP, build guest, STARK-prove, package `AiExecutionProof`.
+///
+/// # Errors
+///
+/// Returns an error if the operation fails.
 pub fn prove_mlp_inference(
     spec: &FixedPointMlpSpec,
     model_id: crate::ai::types::AiModelId,

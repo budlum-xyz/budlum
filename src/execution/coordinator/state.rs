@@ -251,10 +251,12 @@ impl ExecutionState {
             let Ok(raw_key) = hex::decode(hex_key) else {
                 continue;
             };
-            if raw_key.len() == 33 && raw_key.get(32).copied() == Some(ee.0) {
-                let mut addr = [0u8; 32];
-                addr.copy_from_slice(&raw_key[..32]);
-                return Some(Address::from(addr));
+            if let Some(prefix) = raw_key.get(..32) {
+                if raw_key.len() == 33 && raw_key.get(32).copied() == Some(ee.0) {
+                    let mut addr = [0u8; 32];
+                    addr.copy_from_slice(prefix);
+                    return Some(Address::from(addr));
+                }
             }
         }
         None

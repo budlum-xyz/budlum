@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 
 /// B.U.D. Name Service (BNS) - decentralized naming for the Budlum network.
-/// Full_impl per Q10 (storage_root + full resolve) + lifecycle integration.
+/// Full_impl per Q10 (`storage_root` + full resolve) + lifecycle integration.
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct NameRecord {
@@ -28,6 +28,10 @@ impl NameRecord {
     /// Convenience: validated constructor enforcing the BNS character-set and
     /// 3..=32 length rule, a non-zero owner, and a live expiry past
     /// `current_epoch`; wired through `BnsRegistry::register`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn try_new(
         name: String,
         owner: Address,

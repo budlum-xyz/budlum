@@ -1,9 +1,9 @@
 //! WIRING: unwired - verify_chain is reached in this tree only through adapter.rs and evm/verify.rs, both of which declare themselves unwired; the relayer path wires it.
 //! Minimal Ethereum block header decode + chain-link + N-confirmation finality.
 //!
-//! Sync-committee light-client finality = **F10.3** (PoS, BLS12-381 sync-aggregate).
+//! Sync-committee light-client finality = **F10.3** (`PoS`, BLS12-381 sync-aggregate).
 //! This module provides **bounded k-confirmation** (RFC Q2 = both -> N-conf
-//! fallback; the PoS sync committee is added later as an option).
+//! fallback; the `PoS` sync committee is added later as an option).
 //!
 //! # Fork tolerance
 //!
@@ -40,7 +40,7 @@ pub enum HeaderError {
     Rlp(RlpError),
     /// Invalid header structure (missing field / wrong size).
     InvalidHeader,
-    /// The chain is broken (parent_hash -> child.hash / number+1 mismatch).
+    /// The chain is broken (`parent_hash` -> child.hash / number+1 mismatch).
     ChainBroken,
     /// The chain never touches the trusted checkpoint.
     CheckpointNotReached,
@@ -87,6 +87,10 @@ pub const DEFAULT_CONFIRMATIONS: u32 = 64;
 /// Yellow Paper field order (front canonical):
 /// `[parentHash(32), ommersHash(32), coinbase(20), stateRoot(32),
 ///   TransactionsRoot(32), receiptsRoot(32), logsBloom(256), difficulty, number, ...]`
+///
+/// # Errors
+///
+/// Returns an error if the operation fails.
 pub fn decode_header(raw: &[u8]) -> Result<EthHeader, HeaderError> {
     let item = rlp::decode(raw)?;
     let list = match item {
@@ -122,7 +126,7 @@ fn arr32(b: &[u8]) -> Result<[u8; 32], HeaderError> {
 
 /// N-confirmation finality: verifies that `required` confirmation headers sit
 /// above the target header and that their chain is canonical
-/// (parent_hash -> child.hash, number+1). Once the reorg window has passed, the
+/// (`parent_hash` -> child.hash, number+1). Once the reorg window has passed, the
 /// target counts as finalized.
 ///
 /// `required` is the caller's demand and it must be at least one: with zero

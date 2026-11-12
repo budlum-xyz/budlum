@@ -1,4 +1,4 @@
-//! Permissionless ZK proof submission and the chain ↔ BudZKVM bridge.
+//! Permissionless ZK proof submission and the chain ↔ `BudZKVM` bridge.
 //!
 //! ## Model (decided this turn: "Option B" - fully open submission)
 //! Anyone may submit a proof; registration is NOT required to have a valid proof
@@ -56,7 +56,7 @@ use std::collections::BTreeMap;
 /// Commits to.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ZkProofSubmission {
-    /// Transport envelope over the shared CrossDomainMessage primitive.
+    /// Transport envelope over the shared `CrossDomainMessage` primitive.
     /// `message.target_domain` is the domain being advanced, `message.source_height`
     /// Is the proven target height, and `message.sender` is the submitter (the
     /// Account charged the fee and, if registered, rewarded).
@@ -389,6 +389,10 @@ impl ProofClaimRegistry {
     /// Decide how a verified proof claim should be handled under the
     /// "first valid wins" policy. Does NOT mutate on the idempotent/conflict
     /// Paths; call [`Self::record`] to persist an accepted claim.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn classify(
         &self,
         key: ProofClaimKey,
@@ -410,6 +414,10 @@ impl ProofClaimRegistry {
     ///
     /// Refuses at [`MAX_PROOF_CLAIMS`] rather than growing without
     /// bound; the caller maps the refusal onto the submission path.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn record(&mut self, claim: AcceptedProofClaim) -> Result<(), ProofError> {
         if self.claims.len() >= MAX_PROOF_CLAIMS {
             return Err(ProofError::RegistryFull {

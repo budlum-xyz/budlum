@@ -83,7 +83,7 @@ fn decode_validator_tx(data: &[u8]) -> Result<crate::validators::ValidatorTx, St
         .map_err(|e| format!("Invalid validator transaction payload: {e}"))
 }
 
-/// The largest StorageTx v3 payload a peer may send.
+/// The largest `StorageTx` v3 payload a peer may send.
 const MAX_STORAGE_V3_TX_BYTES: usize = 1 << 20;
 
 fn decode_storage_v3_tx(data: &[u8]) -> Result<crate::storage::bud3::tx::StorageTxV3, String> {

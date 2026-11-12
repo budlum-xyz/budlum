@@ -491,12 +491,18 @@ impl ForeignLaneState {
         self.recent_blockhashes.push_back(blockhash);
     }
 
-    /// Returns the quantum class of `address` (`Classical` if foreign, else `PostQuantum`).
+    /// Returns the quantum class of `address` (`PostQuantum` only if explicitly
+    /// proven/registered as a native PQ account; `Classical` for foreign accounts
+    /// and unknown/unregistered addresses so direct-PQ and holding guards fail closed).
     #[must_use]
     pub fn quantum_class_of(&self, address: &Address) -> AccountQuantumClass {
-        self.accounts
-            .get(address)
-            .map_or(AccountQuantumClass::PostQuantum, |rec| rec.quantum_class)
+        if let Some(rec) = self.accounts.get(address) {
+            return rec.quantum_class;
+        }
+        if self.native_pq_accounts.contains(address) {
+            return AccountQuantumClass::PostQuantum;
+        }
+        AccountQuantumClass::Classical
     }
 
     /// Enforces section 8.4.2 rule 6 / K-3: a classical foreign account may only

@@ -312,7 +312,18 @@ fn decode_list_items(
 // leading zero.
 // ---------------------------------------------------------------------------
 
+/// Encodes a `u64` as minimal big-endian bytes (empty for `0`, no RLP string prefix).
+///
+/// Use this inside [`Item::String`] when constructing RLP lists (e.g. legacy
+/// transaction fields or `CREATE` nonces) so values `>= 128` are encoded once by
+/// [`encode`] rather than double-RLP-prefixed.
+#[must_use]
+pub fn encode_uint_bytes(n: u64) -> Vec<u8> {
+    trim_leading_zeros_u64(n)
+}
+
 /// Encodes a `u64` as an RLP integer; zero becomes the empty string, 0x80.
+#[must_use]
 pub fn encode_uint(n: u64) -> Vec<u8> {
     let bytes = trim_leading_zeros_u64(n);
     encode(&Item::String(bytes))
@@ -653,5 +664,18 @@ mod tests {
         let mut leading_zero = vec![0xb9, 0x00, 56];
         leading_zero.extend_from_slice(&[0xaa; 56]);
         assert_eq!(decode(&leading_zero), Err(RlpError::NonCanonical));
+    }
+
+    #[test]
+    fn encode_uint_bytes_avoids_double_prefix_for_large_integers() {
+        assert_eq!(encode_uint_bytes(0), Vec::<u8>::new());
+        assert_eq!(encode_uint_bytes(1), vec![0x01]);
+        assert_eq!(encode_uint_bytes(127), vec![0x7f]);
+        assert_eq!(encode_uint_bytes(128), vec![0x80]);
+        assert_eq!(encode_uint_bytes(45_261), vec![0xb0, 0xcd]);
+        // Wrapping encode_uint_bytes in Item::String matches standalone encode_uint.
+        for n in [0u64, 1, 127, 128, 255, 45_261, u64::MAX] {
+            assert_eq!(encode(&Item::String(encode_uint_bytes(n))), encode_uint(n));
+        }
     }
 }

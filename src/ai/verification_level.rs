@@ -95,6 +95,10 @@ impl LevelRecord {
 
     /// Raise the level. Raising to the current level is a no-op; lowering
     /// is refused; a refuted record does not rise.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn raise(&mut self, to: VerificationLevel) -> Result<(), LevelRefusal> {
         if self.refuted {
             return Err(LevelRefusal::Refuted);

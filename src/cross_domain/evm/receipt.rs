@@ -63,6 +63,10 @@ impl From<RlpError> for ReceiptError {
 }
 
 /// Decodes raw envelope bytes into a receipt (both typed and legacy).
+///
+/// # Errors
+///
+/// Returns an error if the operation fails.
 pub fn decode_receipt(envelope: &[u8]) -> Result<EthReceipt, ReceiptError> {
     if envelope.is_empty() {
         return Err(ReceiptError::InvalidEnvelope);

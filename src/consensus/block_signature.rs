@@ -4,7 +4,7 @@
 //! representative, both required. The validator address stays its Ed25519 public key, so a block
 //! signature is accepted only when the Ed25519 half of the signing key is the producer's
 //! address: a valid composite signature by some other key never stands in for the producer.
-//! PoA and evidence signatures use the same suite and the same address rule under their own
+//! `PoA` and evidence signatures use the same suite and the same address rule under their own
 //! contexts (`BDLM/POA/V2`, `BDLM/EVIDENCE/V2`), so a signature made for one purpose is no
 //! signature for another.
 
@@ -63,7 +63,7 @@ pub fn sign_block(
     sign_with_context(keypair, ctx::BLOCK_V6, block_hash, rnd)
 }
 
-/// Signs a PoA proposal digest under the PoA context.
+/// Signs a `PoA` proposal digest under the `PoA` context.
 ///
 /// # Errors
 ///
@@ -112,7 +112,7 @@ pub fn verify_block(
     )
 }
 
-/// Verifies a PoA signature. A block signature does not verify here: the contexts differ.
+/// Verifies a `PoA` signature. A block signature does not verify here: the contexts differ.
 ///
 /// # Errors
 ///

@@ -1,4 +1,4 @@
-//! The CosmWasm and Cosmos SDK family.
+//! The `CosmWasm` and Cosmos SDK family.
 //!
 //! * Addresses are 20-byte accounts or 32-byte contract addresses, shown in
 //!   bech32 under the charter's prefix (`wasm`, `osmo`, `neutron`, ...).
@@ -8,7 +8,7 @@
 //!   with string attributes; the event type is in `topics[0]`. The parser is
 //!   strict: every attribute is known, none repeats, and
 //!   `_contract_address` (when present) is the emitter.
-//! * The app hash in the CometBFT header commits the contract store, so the
+//! * The app hash in the `CometBFT` header commits the contract store, so the
 //!   class slice is read with an ICS-23 proof (`AccountAndStorageProof`).
 //! * The upgrade authority is the contract's migrate admin.
 //!

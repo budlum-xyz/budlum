@@ -658,6 +658,11 @@ impl Block {
             .map(|public| public.pq)
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn sign_with_signer(&mut self, signer: &dyn ConsensusSigner) -> Result<(), String> {
         // A backend that holds the validator's ML-DSA-65 key signs the
         // composite form, the only one mainnet admits. Off mainnet a

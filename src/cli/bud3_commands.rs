@@ -255,7 +255,14 @@ pub fn cli_storage_grant(
         current_epoch,
     )
     .map_err(CliBud3Error::Grant)?;
-    Ok((row.clone(), StorageTxV3::IssueViewGrant { row }))
+    Ok((
+        row.clone(),
+        StorageTxV3::IssueViewGrant {
+            nft: req.nft_id,
+            grant_nonce: req.grant_nonce,
+            row,
+        },
+    ))
 }
 
 /// Build a `bud storage revoke` transaction (`StorageTxV3::RevokeViewGrant`).

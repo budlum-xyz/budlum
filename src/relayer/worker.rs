@@ -7,7 +7,7 @@ use std::sync::Arc;
 use tracing::{error, info, warn};
 
 /// Universal Relayer Worker.
-/// Watches the Budlum chain for UniversalRelay transactions and
+/// Watches the Budlum chain for `UniversalRelay` transactions and
 /// relays them to external chains (EVM, Solana, etc.).
 ///
 /// # What this worker is allowed to assert
@@ -1046,6 +1046,10 @@ impl RelayerWorker {
     /// directly testable without a running chain actor: the interesting
     /// property is that no input can make this return a `success: true`
     /// result the adapter did not verify.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub async fn build_verified_result(
         adapters: &AdapterRegistry,
         ext_tx: &crate::core::transaction::ExternalTransaction,

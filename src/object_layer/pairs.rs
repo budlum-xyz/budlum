@@ -17,6 +17,11 @@ use serde::de::{Deserialize, Deserializer, Error};
 use serde::ser::{Serialize, Serializer};
 use std::collections::BTreeMap;
 
+/// Performs the requested operation.
+///
+/// # Errors
+///
+/// Returns an error if the operation fails.
 pub fn serialize<Key, Value, S>(
     map: &BTreeMap<Key, Value>,
     serializer: S,
@@ -29,6 +34,11 @@ where
     serializer.collect_seq(map.iter())
 }
 
+/// Performs the requested operation.
+///
+/// # Errors
+///
+/// Returns an error if the operation fails.
 pub fn deserialize<'de, Key, Value, D>(deserializer: D) -> Result<BTreeMap<Key, Value>, D::Error>
 where
     Key: Deserialize<'de> + Ord,

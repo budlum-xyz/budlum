@@ -255,6 +255,10 @@ impl Mempool {
     /// Enqueues a typed UEL or duty envelope into its isolated lane.
     ///
     /// exposed for: compatibility RPC gateways and duty gossip.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn enqueue_lane_envelope(
         &mut self,
         entry: crate::mempool::lanes::LaneEntry,
@@ -586,6 +590,10 @@ impl Mempool {
     /// state it was in before the call - not merely free of the bundle, which
     /// is what the previous remove-only rollback achieved while leaving the
     /// evicted victims deleted.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn add_transaction_bundle(&mut self, txs: Vec<Transaction>) -> Result<(), BundleRefusal> {
         if self.journal.is_some() {
             // Nested admission would journal the inner call's removals into

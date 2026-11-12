@@ -217,7 +217,7 @@ pub struct NodeConfig {
     #[arg(long)]
     pub restore_backup: Option<String>,
 
-    /// Migrate an existing database at path to ConsensusStateV2 schema (requires atomic backup first) and exit.
+    /// Migrate an existing database at path to `ConsensusStateV2` schema (requires atomic backup first) and exit.
     #[arg(long)]
     pub migrate_v2: Option<String>,
 
@@ -306,7 +306,7 @@ pub struct NodeConfig {
     #[arg(long)]
     pub pkcs11_pq_mechanism: Option<String>,
     /// Operator-configured BLS public key (hex), cross-checked against the
-    /// HSM-held PUBLIC_KEY object at startup.
+    /// HSM-held `PUBLIC_KEY` object at startup.
     #[arg(long)]
     pub pkcs11_bls_public_key: Option<String>,
     /// Operator-configured PQ public key (hex), cross-checked the same way.
@@ -675,7 +675,7 @@ pub struct Pkcs11Section {
 #[serde(deny_unknown_fields)]
 pub struct FeaturesSection {
     pub pruning: Option<bool>,
-    /// F2 config-driven: VerifyMerkle staged rollout gate controlled via config
+    /// F2 config-driven: `VerifyMerkle` staged rollout gate controlled via config
     /// True = gate open (MainnetActivation::full), false = gate closed (default reject)
     /// Default: true (gate opened, 4e2b920)
     pub verify_merkle: Option<bool>,
@@ -1202,6 +1202,11 @@ impl NodeConfig {
         self.max_peers.unwrap_or(profile_cap).clamp(1, profile_cap)
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn pruning_policy(&self) -> Result<crate::persistence::PruningPolicy, String> {
         let mode = crate::persistence::NodeMode::from_role(&self.role)
             .ok_or_else(|| format!("unknown node role '{}'", self.role))?;
@@ -1475,7 +1480,11 @@ impl NodeConfig {
 
     /// Reads the validators file. A missing file is an empty list (the
     /// default path is optional); an unreadable, oversized or malformed file
-    /// is an error, so a PoA node never starts on a silently empty set.
+    /// is an error, so a `PoA` node never starts on a silently empty set.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn load_validators(&self) -> Result<Vec<String>, String> {
         let path = Path::new(&self.validators_file);
         if !path.exists() {

@@ -46,7 +46,7 @@ pub enum DeviceType {
     Tablet,
     /// A laptop on a mobile connection.
     Laptop,
-    /// An IoT device.
+    /// An `IoT` device.
     IoT,
 }
 
@@ -91,6 +91,11 @@ impl BatteryStatus {
         }
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn validate(&self) -> Result<(), String> {
         if self.level_pct > 100 {
             return Err("BatteryStatus level_pct must be <= 100".into());
@@ -158,6 +163,11 @@ pub enum NatType {
 }
 
 impl NetworkStatus {
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn validate(&self) -> Result<(), String> {
         if self.bandwidth_kbps == 0 {
             return Err("NetworkStatus bandwidth_kbps must be >= 1".into());
@@ -184,6 +194,11 @@ pub struct StorageStatus {
 }
 
 impl StorageStatus {
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn validate(&self) -> Result<(), String> {
         if self.total_bytes == 0 {
             return Err("StorageStatus total_bytes must be >= 1".into());
@@ -276,6 +291,10 @@ impl MobileValidatorRuntimePolicy {
     }
 
     /// Convenience: validates Android 15+ foreground service & WorkManager bounds.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn validate(&self) -> Result<(), String> {
         if !self.foreground_kind.supports_24h_validator_duty() {
             return Err(
@@ -404,6 +423,11 @@ pub struct NatTraversalStatus {
 }
 
 impl NatTraversalStatus {
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn validate(&self) -> Result<(), String> {
         if self.using_relay && self.relay_address.is_none() {
             return Err("NatTraversalStatus relay_address required when using_relay".into());
@@ -451,6 +475,11 @@ impl MobileNodeProfile {
         }
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn validate(&self) -> Result<(), String> {
         if self.address == Address::zero() {
             return Err("MobileNodeProfile address cannot be zero".into());
@@ -476,6 +505,11 @@ impl MobileNodeProfile {
         Ok(())
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn try_update_battery(
         &mut self,
         level_pct: u8,
@@ -494,6 +528,10 @@ impl MobileNodeProfile {
     }
 
     /// Updates the battery state and retunes the challenge policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn update_battery(
         &mut self,
         level_pct: u8,
@@ -531,6 +569,11 @@ impl MobileNodeProfile {
         Ok(())
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn set_relay_address(&mut self, relay_address: String) -> Result<(), String> {
         // Validate a candidate first, like `update_nat`: a refused address leaves the
         // profile as it was.

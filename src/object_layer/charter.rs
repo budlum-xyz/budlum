@@ -103,6 +103,10 @@ pub enum CharterRefusal {
 }
 
 /// Check one charter against the proofs and the canonical hashes.
+///
+/// # Errors
+///
+/// Returns an error if the operation fails.
 pub fn check_charter(
     charter: &DomainCharter,
     proof: &CodeProof,

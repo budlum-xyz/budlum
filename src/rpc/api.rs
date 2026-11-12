@@ -244,7 +244,7 @@ pub trait BudlumApi {
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
     /// Assembles submission material for an external domain from its parts,
-    /// without submitting anything. For the BudZKVM adapter it encodes a
+    /// without submitting anything. For the `BudZKVM` adapter it encodes a
     /// `ZkFinalityEvidence` (envelope + public inputs + program) into the
     /// adapter's payload and wraps the whole evidence into the raw finality
     /// carrier used by consensus domains bridged through the external
@@ -531,7 +531,7 @@ pub trait BudlumApi {
         role_id: u32,
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
-    /// Refused: a ZK proof (chain ↔ BudZKVM bridge) rides a signed
+    /// Refused: a ZK proof (chain ↔ `BudZKVM` bridge) rides a signed
     /// `Settlement` transaction (`SettlementTx::SubmitZkProof`) from the
     /// submitter the proof names. The door stays permissionless: a valid
     /// proof is accepted regardless of registration, registered provers earn
@@ -610,12 +610,12 @@ pub trait BudlumApi {
     #[method(name = "bud_nodeInfo")]
     async fn node_info(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
 
-    /// Operator-only: ban a peer by its libp2p PeerId. The public listener
+    /// Operator-only: ban a peer by its libp2p `PeerId`. The public listener
     /// refuses with -32004 before any node state is touched.
     #[method(name = "bud_adminBanPeer")]
     async fn admin_ban_peer(&self, peer_id: String) -> Result<serde_json::Value, ErrorObjectOwned>;
 
-    /// Operator-only: lift a ban on a peer by its libp2p PeerId.
+    /// Operator-only: lift a ban on a peer by its libp2p `PeerId`.
     #[method(name = "bud_adminUnbanPeer")]
     async fn admin_unban_peer(
         &self,
@@ -728,7 +728,7 @@ pub trait BudlumApi {
     #[method(name = "bud_bnsResolve")]
     async fn bns_resolve(&self, name: String) -> Result<Option<String>, ErrorObjectOwned>;
 
-    /// Resolve a name to full BNS record (address, storage_root, etc).
+    /// Resolve a name to full BNS record (address, `storage_root`, etc).
     #[method(name = "bud_bnsResolveFull")]
     async fn bns_resolve_full(&self, name: String) -> Result<serde_json::Value, ErrorObjectOwned>;
 
@@ -804,7 +804,7 @@ pub trait BudlumApi {
         address: String,
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
-    /// B.U.D. SocialFi: Get global social feed.
+    /// B.U.D. `SocialFi`: Get global social feed.
     #[method(name = "bud_socialGetFeed")]
     async fn social_get_feed(&self, limit: usize) -> Result<serde_json::Value, ErrorObjectOwned>;
 
@@ -896,15 +896,15 @@ pub trait BudlumApi {
         offer_id: u64,
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
-    /// List Data Market DataAsset records visible in chain state.
+    /// List Data Market `DataAsset` records visible in chain state.
     #[method(name = "bud_dataMarketGetDataAssets")]
     async fn pollen_get_data_assets(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
 
-    /// List Data Market AccessGrant records visible in chain state.
+    /// List Data Market `AccessGrant` records visible in chain state.
     #[method(name = "bud_dataMarketGetAccessGrants")]
     async fn pollen_get_access_grants(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
 
-    /// List Data Market SaleAuthorization records visible in chain state.
+    /// List Data Market `SaleAuthorization` records visible in chain state.
     #[method(name = "bud_dataMarketGetSaleAuthorizations")]
     async fn pollen_get_sale_authorizations(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
 
@@ -912,7 +912,7 @@ pub trait BudlumApi {
     #[method(name = "bud_dataMarketGetPurchaseReceipts")]
     async fn pollen_get_purchase_receipts(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
 
-    /// Build canonical AiInferenceRequest.input_ref for grant-gated data reads.
+    /// Build canonical `AiInferenceRequest`.`input_ref` for grant-gated data reads.
     #[method(name = "bud_dataMarketBuildAiInputRef")]
     async fn pollen_build_ai_input_ref(
         &self,
@@ -920,7 +920,7 @@ pub trait BudlumApi {
         grant_id: String,
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
-    /// Prepare unsigned owner/seller authorization for selling a DataAsset.
+    /// Prepare unsigned owner/seller authorization for selling a `DataAsset`.
     #[method(name = "bud_dataMarketPrepareSaleAuthorization")]
     async fn pollen_prepare_sale_authorization(
         &self,
@@ -935,8 +935,8 @@ pub trait BudlumApi {
     /// Prepare an authorization-backed Data Market purchase without mutating state.
     ///
     /// `buyer_signature`: an ed25519 signature by the buyer bound to the whole
-    /// purchase set (authorization, price, duration, max_reads,
-    /// payment_commitment, expiry): an unsigned purchase is not accepted.
+    /// purchase set (authorization, price, duration, `max_reads`,
+    /// `payment_commitment`, expiry): an unsigned purchase is not accepted.
     #[method(name = "bud_dataMarketPreparePurchase")]
     async fn pollen_prepare_purchase(
         &self,
@@ -1006,7 +1006,7 @@ pub trait BudlumApi {
 
     // ---: AI Inference & Verifier Layer ---
 
-    /// Query registered AI model specification by model_id hex.
+    /// Query registered AI model specification by `model_id` hex.
     #[method(name = "bud_aiGetModel")]
     async fn ai_get_model(&self, model_id: String) -> Result<serde_json::Value, ErrorObjectOwned>;
 
@@ -1074,7 +1074,7 @@ pub trait BudlumApi {
     #[method(name = "bud_aiOpenRequests")]
     async fn ai_open_requests(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
 
-    /// Query finalized AI inference outcome by request_id hex.
+    /// Query finalized AI inference outcome by `request_id` hex.
     #[method(name = "bud_aiGetOutcome")]
     async fn ai_get_outcome(
         &self,
@@ -1085,7 +1085,7 @@ pub trait BudlumApi {
     #[method(name = "bud_aiGetActiveVerifiers")]
     async fn ai_get_active_verifiers(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
 
-    /// Reclaim escrowed max_fee for expired unfinalized AI inference request.
+    /// Reclaim escrowed `max_fee` for expired unfinalized AI inference request.
     #[method(name = "bud_aiReclaimFee")]
     async fn ai_reclaim_fee(
         &self,
@@ -1108,7 +1108,7 @@ pub trait BudlumApi {
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
     /// Prepare a dispute slash transaction for an equivocating verifier.
-    /// This creates an AiDisputeSlash transaction template that must be signed
+    /// This creates an `AiDisputeSlash` transaction template that must be signed
     /// And submitted via bud_sendRawTransaction.
     #[method(name = "bud_aiDisputeSlash")]
     async fn ai_dispute_slash(
@@ -1155,7 +1155,7 @@ pub trait BudlumApi {
         verifier: String,
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
-    /// Query QoS metrics for a verifier.
+    /// Query `QoS` metrics for a verifier.
     /// Returns reliability score, finalization rate, equivocation count,
     /// And response time metrics. Enables QoS-aware verifier selection.
     #[method(name = "bud_aiVerifierQos")]

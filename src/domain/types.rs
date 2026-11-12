@@ -36,7 +36,7 @@ pub enum ConsensusKind {
     Bft,
     Zk,
     Custom(String),
-    /// B.U.D. Storage ConsensusDomain.
+    /// B.U.D. Storage `ConsensusDomain`.
     ///
     /// Carries the bounded `StorageDomainParams` so the type system forces
     /// Every consumer to handle the storage-specific limits. We use a new
@@ -133,7 +133,7 @@ fn default_domain_operator_bond() -> u64 {
     crate::domain::registry::MIN_DOMAIN_OPERATOR_BOND
 }
 
-/// Consensus-critical limits for the bounded PoW header-chain verifier.
+/// Consensus-critical limits for the bounded `PoW` header-chain verifier.
 ///
 /// These parameters are fixed when a domain is registered. In particular,
 /// Difficulty is never accepted from a relayer without checking it against
@@ -147,6 +147,11 @@ pub struct PoWDomainParameters {
 }
 
 impl PoWDomainParameters {
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn validate(&self, min_confirmations: u64) -> Result<(), String> {
         if self.min_difficulty_bits == 0 || self.max_difficulty_bits > 120 {
             return Err("PoW difficulty range must be within 1..=120 bits".into());
@@ -292,6 +297,11 @@ pub struct DomainCommitment {
 }
 
 impl DomainCommitment {
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn from_block(
         domain: &ConsensusDomain,
         block: &Block,
@@ -429,6 +439,10 @@ pub fn validator_set_commitment(
 /// That pass-through means `tag`, `domain_id` and `scheme` only take effect
 /// for inputs that are *not* 32 bytes. Do not use this to commit to something
 /// that must be unique per domain - see [`validator_set_commitment`].
+///
+/// # Errors
+///
+/// Returns an error if the operation fails.
 pub fn normalize_hash32(
     tag: &[u8],
     domain_id: DomainId,
