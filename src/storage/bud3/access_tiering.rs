@@ -61,11 +61,12 @@ pub struct AccessTierTracker {
 }
 
 impl AccessTierTracker {
-    /// On testnet launch, `SlowY` codecs are closed so tiering logs observations only.
+    /// On testnet (`45261`), `SlowY` codecs are open and archival tiering converts
+    /// cold public objects.
     /// Convenience: exposed for maintenance policy inspection.
     #[must_use]
     pub const fn testnet_converts_objects() -> bool {
-        false
+        true
     }
 
     /// Track a newly observed object (`is_sealed` prevents validator-side tier conversion).
@@ -192,8 +193,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn hot_and_cold_thresholds_record_transitions_without_converting() {
-        assert!(!AccessTierTracker::testnet_converts_objects());
+    fn hot_and_cold_thresholds_record_transitions_and_convert() {
+        assert!(AccessTierTracker::testnet_converts_objects());
         let mut tracker = AccessTierTracker::default();
         let obj = [0x42u8; 32];
         tracker.track_object(obj, false);

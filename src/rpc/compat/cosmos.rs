@@ -8,9 +8,11 @@ use crate::execution::coordinator::foreign::ForeignTx;
 use crate::execution::coordinator::state::{NS_WASM_CODE, NS_WASM_CONTRACT, NS_WASM_STORE};
 use crate::rpc::compat::{
     CompatEffect, CompatListener, CompatMethodClass, CosmosCompatConfig, JsonRpcRequest,
-    JsonRpcResponse, JSONRPC_INVALID_PARAMS, JSONRPC_LIMIT_EXCEEDED, JSONRPC_METHOD_NOT_FOUND,
-    JSONRPC_TX_REJECTED,
+    JsonRpcResponse, PeerQuotaTracker, JSONRPC_INVALID_PARAMS, JSONRPC_LIMIT_EXCEEDED,
+    JSONRPC_METHOD_NOT_FOUND, JSONRPC_TX_REJECTED,
 };
+
+const DEFAULT_COSMOS_MAX_REQUESTS_PER_WINDOW: u32 = 120;
 
 const fn row(name: &'static str, effect: CompatEffect) -> CompatMethodClass {
     CompatMethodClass::new(name, CompatListener::Public, effect)
@@ -51,16 +53,38 @@ pub const ABCI_QUERY_PATHS: &[&str] = &[
 pub struct CosmosCompatGateway {
     config: CosmosCompatConfig,
     height: u64,
+    quotas: PeerQuotaTracker,
+    max_requests_per_window: u32,
 }
 
 impl CosmosCompatGateway {
     #[must_use]
     pub fn new(config: CosmosCompatConfig, height: u64) -> Self {
-        Self { config, height }
+        Self {
+            config,
+            height,
+            quotas: PeerQuotaTracker::default(),
+            max_requests_per_window: DEFAULT_COSMOS_MAX_REQUESTS_PER_WINDOW,
+        }
     }
 
     pub fn handle_rpc(&mut self, req: &JsonRpcRequest, state: &AccountState) -> JsonRpcResponse {
+        self.handle_rpc_for_peer("local", req, state)
+    }
+
+    pub(crate) fn handle_rpc_for_peer(
+        &mut self,
+        peer: &str,
+        req: &JsonRpcRequest,
+        state: &AccountState,
+    ) -> JsonRpcResponse {
         let id = req.id.clone();
+        if let Err(msg) = self
+            .quotas
+            .record_and_check(peer, self.max_requests_per_window)
+        {
+            return JsonRpcResponse::err(id, JSONRPC_LIMIT_EXCEEDED, msg);
+        }
         if !COMETBFT_RPC_METHODS.iter().any(|m| m.name == req.method) {
             return JsonRpcResponse::err(id, JSONRPC_METHOD_NOT_FOUND, "Method not found");
         }
@@ -123,6 +147,15 @@ impl CosmosCompatGateway {
                 let Some(tx_hex) = req.params.get("tx").and_then(serde_json::Value::as_str) else {
                     return JsonRpcResponse::err(id, JSONRPC_INVALID_PARAMS, "missing tx hex");
                 };
+                if tx_hex.len()
+                    > crate::rpc::compat::ethereum::MAX_COMPAT_REQUEST_BYTES.saturating_mul(2)
+                {
+                    return JsonRpcResponse::err(
+                        id,
+                        JSONRPC_LIMIT_EXCEEDED,
+                        "broadcast_tx payload exceeds MAX_COMPAT_REQUEST_BYTES",
+                    );
+                }
                 let Ok(tx_raw_bytes) = hex::decode(tx_hex.trim_start_matches("0x")) else {
                     return JsonRpcResponse::err(id, JSONRPC_INVALID_PARAMS, "invalid tx hex");
                 };
@@ -265,5 +298,38 @@ pub fn handle_cosmos_rest(
             404,
             serde_json::json!({ "message": "cosmos LCD route not found" }).to_string(),
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cosmos_compat_peer_quota_enforces_limit_and_payload_bound() {
+        let state = AccountState::new(45261);
+        let mut gw = CosmosCompatGateway::new(CosmosCompatConfig::default(), 7);
+        let req = JsonRpcRequest {
+            jsonrpc: String::from("2.0"),
+            id: serde_json::json!(1),
+            method: String::from("status"),
+            params: serde_json::json!({}),
+        };
+        for _ in 0..DEFAULT_COSMOS_MAX_REQUESTS_PER_WINDOW {
+            assert!(gw.handle_rpc_for_peer("peer-a", &req, &state).error.is_none());
+        }
+        let limited = gw.handle_rpc_for_peer("peer-a", &req, &state);
+        assert_eq!(limited.error.as_ref().map(|e| e.code), Some(JSONRPC_LIMIT_EXCEEDED));
+        assert!(gw.handle_rpc_for_peer("peer-b", &req, &state).error.is_none());
+
+        let oversized = "ab".repeat(crate::rpc::compat::ethereum::MAX_COMPAT_REQUEST_BYTES + 8);
+        let big_tx = JsonRpcRequest {
+            jsonrpc: String::from("2.0"),
+            id: serde_json::json!(2),
+            method: String::from("broadcast_tx_sync"),
+            params: serde_json::json!({ "tx": oversized }),
+        };
+        let big_resp = gw.handle_rpc_for_peer("peer-b", &big_tx, &state);
+        assert_eq!(big_resp.error.as_ref().map(|e| e.code), Some(JSONRPC_LIMIT_EXCEEDED));
     }
 }

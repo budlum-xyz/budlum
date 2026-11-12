@@ -275,15 +275,15 @@ pub fn run_args(root: &Path, args: &[&str]) -> Result<String, String> {
         std::fs::read_to_string(root.join(name))
             .map_err(|e| format!("{name}: evidence file missing or unreadable: {e}"))
     };
-    let tlg_rows = rows(&read(TLG)?, "TLG", 27, 4)?;
+    let tlg_entries = rows(&read(TLG)?, "TLG", 27, 4)?;
     let live_rows = rows(&read(LIVE)?, "BLG", 267, 7)?;
     let finding_rows = rows(&read(FINDINGS)?, "BLG", 267, 8)?;
     binding_guard(root)?;
-    let n_tlg = tlg_rows.len();
-    let n_blg = live_rows.len().min(finding_rows.len());
+    let tlg_count = tlg_entries.len();
+    let blg_count = live_rows.len().min(finding_rows.len());
     Ok(format!(
         "launch-evidence schema & guard OK \
-         ({n_tlg} TLG rows, {n_blg} BLG rows; pass `--require-complete` for sign-off)"
+         ({tlg_count} TLG rows, {blg_count} BLG rows; pass `--require-complete` for sign-off)"
     ))
 }
 

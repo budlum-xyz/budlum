@@ -338,7 +338,7 @@ mod tests {
         let pg: BTreeSet<Address> = [[1u8; 32], [2u8; 32], [3u8; 32]].into();
         let keys = key_map(&[1, 2, 3]);
 
-        for closed in [2u16, 6, 7, 8, 9, 12, 13, 14, 15, 22, 26] {
+        for closed in [9u16, 27u16] {
             let bad = sample_record([2u8; 32], cid, closed);
             let atts: Vec<ReplaceAttestation> = [1u8, 2, 3]
                 .into_iter()

@@ -223,8 +223,7 @@ impl SolanaCompatGateway {
             }
             "sendTransaction" => {
                 if !self.config.enabled {
-                    let door = native_door("sendTransaction")
-                        .unwrap_or("bud_sendRawTransaction");
+                    let door = native_door("sendTransaction").unwrap_or("bud_sendRawTransaction");
                     return JsonRpcResponse::err(
                         id,
                         SOLANA_UNAVAILABLE,

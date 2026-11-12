@@ -68,8 +68,8 @@ impl LiveActivation {
     }
 }
 
-/// TESTNET-DEFAULT: closed. The activation height is set after launch (M7).
-pub const ACTIVATION: LiveActivation = LiveActivation { height: None };
+/// Testnet configuration: live streaming opens at genesis (height 0).
+pub const ACTIVATION: LiveActivation = LiveActivation { height: Some(0) };
 
 /// The gate context of one live call.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -81,11 +81,20 @@ pub struct LiveContext {
 }
 
 impl LiveContext {
-    /// The testnet launch context: closed, at height 1.
+    /// Explicitly closed live-stream gate context (used by unit tests verifying gated refusal).
     #[must_use]
     pub const fn closed() -> Self {
         Self {
             height: 1,
+            activation: LiveActivation { height: None },
+        }
+    }
+
+    /// The active testnet live-stream context at `height`.
+    #[must_use]
+    pub const fn testnet(height: u64) -> Self {
+        Self {
+            height,
             activation: ACTIVATION,
         }
     }
@@ -590,8 +599,9 @@ mod tests {
     }
 
     #[test]
-    fn bud3_live_is_closed_on_testnet() {
-        assert_eq!(ACTIVATION.height, None);
+    fn bud3_live_is_open_on_testnet() {
+        assert_eq!(ACTIVATION.height, Some(0));
+        assert!(LiveStream::begin(ORIGINATOR, NONCE, LiveContext::testnet(0)).is_ok());
         assert_eq!(
             LiveStream::begin(ORIGINATOR, NONCE, LiveContext::closed()).map(|_| ()),
             Err(LiveError::Closed)
