@@ -31,6 +31,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 const COMPOSE_FILE: &str = "ops/testnet-local.yml";
 /// Loopback ports `ops/testnet-local.yml` and `--local` publish.
 const RPC_PORT: u16 = 28545;
+/// Keep the native node's bounded per-IP budget in sync with config/testnet.toml.
+const TESTNET_RPC_RATE_LIMIT_PER_MINUTE: u64 = 600;
 const RPC_OPERATOR_PORT: u16 = 28546;
 const FAUCET_PORT: u16 = 28600;
 const INDEXER_PORT: u16 = 28700;
@@ -149,6 +151,11 @@ fn preflight(root: &Path) -> Result<Vec<String>, String> {
     let compose = required_file(root, COMPOSE_FILE, &mut checks)?;
     let profile = required_file(root, "config/testnet.toml", &mut checks)?;
     require_text(&profile, "chain_id = 45261", "testnet profile")?;
+    require_text(
+        &profile,
+        &format!("rate_limit_per_minute = {TESTNET_RPC_RATE_LIMIT_PER_MINUTE}"),
+        "testnet profile",
+    )?;
     if compose.contains("\n  validator8:\n") {
         require_text(&profile, "auth_required = false", "testnet profile")?;
         require_text(&profile, "operator_auth_required = true", "testnet profile")?;
@@ -655,6 +662,13 @@ impl LocalStack {
             .env("RUST_LOG", "info")
             .env("BUDLUM_RPC_AUTH_REQUIRED", "0")
             .env("BUDLUM_RPC_ALLOWED_IPS", "")
+            // Native CLI, faucet and indexer all use loopback, so they share
+            // one per-IP budget. Use the actual testnet profile's 600/minute,
+            // not the server's fallback 120; retain a bounded limiter.
+            .env(
+                "BUDLUM_RPC_RATE_LIMIT_PER_MINUTE",
+                TESTNET_RPC_RATE_LIMIT_PER_MINUTE.to_string(),
+            )
             .env(
                 "BUDLUM_RPC_API_KEY",
                 "rehearsal-operator-key-0123456789abcdef",
@@ -1300,6 +1314,10 @@ fn scenario_load(backend: &Backend<'_>, wallets: &Wallets) -> Result<String, Str
     ))
 }
 
+fn offline_progress(stopped_finality: u64, finality: u64, stopped_tip: u64, tip: u64) -> bool {
+    finality > stopped_finality && tip >= stopped_tip.saturating_add(16)
+}
+
 fn scenario_chaos(backend: &mut Backend<'_>) -> Result<String, String> {
     let watched: Vec<String> = match &*backend {
         Backend::Compose { eight_seat, .. } => {
@@ -1324,19 +1342,27 @@ fn scenario_chaos(backend: &mut Backend<'_>) -> Result<String, String> {
     }
     let stopped_at = finalized();
     let stopped_tip = tip();
+    let mut observed_finality = stopped_at;
+    let mut observed_tip = stopped_tip;
     let advanced = wait_for(90, || {
-        let height = finalized();
-        let cur_tip = tip();
+        observed_finality = finalized();
+        observed_tip = tip();
         // Ensure >16 blocks elapse while the seat is offline so restarting
         // exercises multi-chunk `/sync` catch-up as well as >2/3 finality.
-        (height > stopped_at && cur_tip >= stopped_tip.saturating_add(16)).then_some(height)
+        offline_progress(stopped_at, observed_finality, stopped_tip, observed_tip)
+            .then_some(observed_finality)
     });
     let restart = match backend {
         Backend::Compose { root, .. } => compose(root, &["start", "validator4"]).map(|_| ()),
         Backend::Local { root, stack } => stack.spawn_validator(root, stack.seats),
     };
-    let advanced = advanced
-        .ok_or_else(|| format!("finality stayed at {stopped_at} with one validator down"))?;
+    let advanced = advanced.ok_or_else(|| {
+        format!(
+            "validator offline: finalized {stopped_at}->{observed_finality}, tip \
+             {stopped_tip}->{observed_tip}; require finalized > {stopped_at} AND tip >= {}",
+            stopped_tip.saturating_add(16)
+        )
+    })?;
     restart?;
     let rejoined_from = tip();
     let rejoined = wait_for(150, || {
@@ -1535,6 +1561,15 @@ mod tests {
     }
 
     #[test]
+    fn native_rpc_budget_matches_the_bounded_testnet_profile() {
+        let profile = include_str!("../../../config/testnet.toml");
+        let needle = format!("rate_limit_per_minute = {TESTNET_RPC_RATE_LIMIT_PER_MINUTE}");
+        assert!(require_text(profile, &needle, "testnet profile").is_ok());
+        let drifted = profile.replace(&needle, "rate_limit_per_minute = 120");
+        assert!(require_text(&drifted, &needle, "testnet profile").is_err());
+    }
+
+    #[test]
     fn compose_dialers_wait_for_a_listening_bootnode() {
         // A previous rehearsal had producing validators but RPC remained at
         // genesis: it dialed validator1 before port 5001 was open, got two
@@ -1603,6 +1638,13 @@ mod tests {
             assert_eq!(peers.len(), 3);
             assert!(!peers.contains(&four[idx]));
         }
+    }
+
+    #[test]
+    fn validator_offline_needs_both_finality_and_sixteen_new_blocks() {
+        assert!(!offline_progress(30, 30, 31, 47), "no new finality");
+        assert!(!offline_progress(30, 35, 31, 46), "only 15 new blocks");
+        assert!(offline_progress(30, 35, 31, 47), "both conditions met");
     }
 
     #[test]

@@ -774,6 +774,17 @@ fn http_post_json_with_key(
             budlum_core::rpc::client_auth::API_KEY_FILE_ENV
         ));
     }
+    let code = status.ok_or("RPC response has no valid HTTP status code")?;
+    if !(200..300).contains(&code) {
+        // The node can answer a burst with plain-text HTTP 429, which the
+        // caller previously reported as a JSON parse error. Never retry a
+        // transaction automatically: its submission outcome may be unknown.
+        let preview: String = body.trim().chars().take(160).collect();
+        return Err(format!("RPC HTTP {code}: {preview:?}"));
+    }
+    if body.trim().is_empty() {
+        return Err(format!("RPC HTTP {code} returned an empty body"));
+    }
     Ok(body.to_string())
 }
 
@@ -2747,6 +2758,35 @@ mod rpc_auth_tests {
             !request.to_ascii_lowercase().contains("x-api-key"),
             "an unset key must not be sent as an empty header: {request}"
         );
+    }
+
+    #[test]
+    fn a_429_names_the_rate_limit_instead_of_a_json_parse_error() {
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let port = serve_once(
+            "HTTP/1.1 429 Too Many Requests\r\nContent-Type: text/plain\r\nContent-Length: 17\r\n\r\nToo many requests",
+            Arc::clone(&captured),
+        );
+        let error = http_post_json_with_key("127.0.0.1", port, "{}", Some("private-api-key"))
+            .expect_err("a throttled write must fail closed, never parse plain text as JSON");
+        assert!(error.contains("RPC HTTP 429"), "{error}");
+        assert!(error.contains("Too many requests"), "{error}");
+        assert!(!error.contains("private-api-key"), "no key in diagnostics");
+        assert_eq!(
+            request_text(&captured).matches("POST / HTTP/1.1").count(),
+            1
+        );
+    }
+
+    #[test]
+    fn an_empty_success_reply_is_not_a_json_result() {
+        let port = serve_once(
+            "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n",
+            Arc::new(Mutex::new(Vec::new())),
+        );
+        let error = http_post_json_with_key("127.0.0.1", port, "{}", None)
+            .expect_err("empty body must be attributed to HTTP, not JSON parsing");
+        assert!(error.contains("HTTP 200 returned an empty body"), "{error}");
     }
 
     #[test]
