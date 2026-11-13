@@ -4263,6 +4263,7 @@ impl BudlumApiServer for RpcServer {
                 "storage_root": resolved.storage_root.map(|r| format!("0x{}", hex::encode(r))),
                 "storage_domain_id": resolved.storage_domain_id,
                 "content_id": resolved.content_id.map(|c| format!("0x{}", hex::encode(c.0))),
+                "records": resolved.records,
                 "is_expired": resolved.is_expired,
             }))
         } else {
@@ -4671,6 +4672,107 @@ impl BudlumApiServer for RpcServer {
         Ok(serde_json::json!({
             "caller": caller,
             "name": name,
+            "tx_template": tx,
+        }))
+    }
+
+    async fn bns_get_records(&self, name: String) -> Result<serde_json::Value, ErrorObjectOwned> {
+        if !crate::bns::BnsRegistry::is_valid_name(&name) {
+            return Err(ErrorObjectOwned::owned(
+                -32602,
+                "Invalid BNS name: expected <label>.bud with 3..=32 lowercase label characters",
+                None::<()>,
+            ));
+        }
+        match self.chain.bns_get_records(name.clone()).await {
+            Some(records) => Ok(serde_json::json!({
+                "name": name,
+                "records": records,
+            })),
+            None => Ok(serde_json::Value::Null),
+        }
+    }
+
+    async fn bns_prepare_set_records(
+        &self,
+        name: String,
+        owner: String,
+        updates: std::collections::BTreeMap<String, Option<String>>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        if !crate::bns::BnsRegistry::is_valid_name(&name) {
+            return Err(ErrorObjectOwned::owned(
+                -32602,
+                "Invalid BNS name: expected <label>.bud with 3..=32 lowercase label characters",
+                None::<()>,
+            ));
+        }
+        if updates.is_empty() || updates.len() > crate::bns::MAX_RECORDS_PER_NAME {
+            return Err(ErrorObjectOwned::owned(
+                -32602,
+                format!(
+                    "Record updates must contain 1..={} entries",
+                    crate::bns::MAX_RECORDS_PER_NAME
+                ),
+                None::<()>,
+            ));
+        }
+        for (k, v) in &updates {
+            if !crate::bns::BnsRegistry::is_valid_record_key(k) {
+                return Err(ErrorObjectOwned::owned(
+                    -32602,
+                    format!("Invalid BNS record key `{k}`"),
+                    None::<()>,
+                ));
+            }
+            if let Some(val) = v {
+                if !crate::bns::BnsRegistry::is_safe_record_value(val) {
+                    return Err(ErrorObjectOwned::owned(
+                        -32602,
+                        format!("Unsafe or oversized BNS record value for `{k}`"),
+                        None::<()>,
+                    ));
+                }
+            }
+        }
+        let clean_owner = owner.strip_prefix("0x").unwrap_or(&owner);
+        let owner_addr = Address::from_hex(clean_owner).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Invalid owner address: {e}"), None::<()>)
+        })?;
+        if owner_addr == Address::zero() {
+            return Err(ErrorObjectOwned::owned(
+                -32602,
+                "Owner address cannot be the zero address",
+                None::<()>,
+            ));
+        }
+        let data = bincode::serialize(&(name.clone(), updates.clone()))
+            .map_err(|e| ErrorObjectOwned::owned(-32000, e.to_string(), None::<()>))?;
+        let tx = crate::core::transaction::Transaction {
+            from: owner_addr,
+            to: Address::zero(),
+            amount: 0,
+            fee: 1000,
+            max_fee: 1000,
+            priority_fee: 0,
+            nonce: self.chain.get_nonce(&owner_addr).await,
+            data,
+            timestamp: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis(),
+            hash: String::new(),
+            signature: None,
+            signer_public_key: Vec::new(),
+            authorization: None,
+            chain_id: self.chain.get_chain_id().await,
+            signature_version: crate::core::transaction::SIGNATURE_VERSION_V5,
+            tx_type: crate::core::transaction::TransactionType::BnsSetRecords,
+        };
+        let tx = self.finish_template(tx).await?;
+        Ok(serde_json::json!({
+            "name": name,
+            "owner": owner,
+            "updates": updates,
             "tx_template": tx,
         }))
     }
