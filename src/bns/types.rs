@@ -140,6 +140,57 @@ pub struct BnsMerkleBranch {
     pub leaf: [u8; 32],
     pub siblings: Vec<[u8; 32]>,
     pub directions: Vec<bool>,
+    /// Position of this leaf in the ordered name list the branch was built
+    /// from, and the size of that list.
+    ///
+    /// Absence proofs need both. Without them a verifier can only compare the
+    /// disclosed names lexicographically, and every branch in the tree sorts
+    /// next to *some* target, so an honest inclusion branch of one name can be
+    /// relabelled to prove any other name absent. With the index and the count
+    /// the verifier can require the two boundary branches to be adjacent
+    /// positions, which is what "no name sorts between them" actually means.
+    ///
+    /// Absent means "position unknown": such a branch still verifies for
+    /// inclusion, and is refused for non-inclusion.
+    #[serde(default)]
+    pub leaf_index: Option<u64>,
+    #[serde(default)]
+    pub tree_size: Option<u64>,
+    /// The pre-image of `extras_digest`, when the prover ships it.
+    ///
+    /// `extras_digest` is a commitment, not a disclosure: on its own the leaf
+    /// binds `address`, the records, the subdomains and the B.U.D. 3.0
+    /// reference, but a verifier that only sees the 32 opaque bytes cannot tell
+    /// what they commit to. The branch already discloses `address` next to the
+    /// digest, so before this field those disclosed values were whatever the
+    /// answering node chose, and an identity profile that trusted them could
+    /// show a Verified badge over a swapped forwarding address.
+    ///
+    /// A verifier that receives this recomputes `extras_digest` from it and
+    /// refuses the branch on any mismatch, so every disclosed field is bound to
+    /// the header root. Absent means "the prover did not disclose the extras":
+    /// the branch still proves the fields that sit outside the digest, and a
+    /// caller that needs `address` or the records must not use it.
+    #[serde(default)]
+    pub extras: Option<BnsBranchExtras>,
+}
+
+/// The verified pre-image of [`BnsMerkleBranch::extras_digest`].
+///
+/// Field order and encoding mirror the registry's own extras commitment, so a
+/// verifier can recompute the digest without trusting the prover for anything
+/// but the values themselves - and those values either fold to the digest the
+/// header root commits to, or they do not.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BnsBranchExtras {
+    pub resolver: Option<Address>,
+    pub address: Option<Address>,
+    pub consensus_domain_id: Option<u32>,
+    pub storage_domain_id: Option<u32>,
+    pub storage_root_height: Option<u64>,
+    pub bud3_content: Option<crate::storage::bud3::content_ref::ContentRef>,
+    pub subdomains: std::collections::BTreeMap<String, Address>,
+    pub records: std::collections::BTreeMap<String, String>,
 }
 
 /// Compact per-name inclusion or lexicographic non-existence proof against `BnsRegistry::root()`.

@@ -1410,14 +1410,25 @@ fn settle_expired_intent(
             .is_some_and(crate::registry::permissionless::Registration::is_slashable);
         if domain_deliverable && slashable {
             let ratio = state.registry.params().liveness_slash_ratio_fixed;
-            state
-                .slash_role_destroying(
-                    solver,
-                    crate::registry::role::roles::RELAYER,
-                    crate::registry::permissionless::SlashingCondition::LivenessFault,
-                    ratio,
-                )
-                .map_err(|e| refused(e.to_string()))?;
+            // Same rule as `RelayerIntentTx::Expire`: the escrow refund is not
+            // welded to the penalty. `is_slashable()` accepts
+            // `SlashedUnbonding`, `slash_role_only` refuses it with
+            // `AlreadySlashed`, and propagating that here aborted the block-end
+            // sweep, so every following expired intent stayed in the map and
+            // the owner's escrow stayed locked. An already-punished solver has
+            // nothing left to take; that is not a reason to keep the owner's
+            // money.
+            match state.slash_role_destroying(
+                solver,
+                crate::registry::role::roles::RELAYER,
+                crate::registry::permissionless::SlashingCondition::LivenessFault,
+                ratio,
+            ) {
+                Ok(_) => {}
+                Err(crate::registry::RegistryError::AlreadySlashed { .. })
+                | Err(crate::registry::RegistryError::NotRegistered { .. }) => {}
+                Err(e) => return Err(refused(e.to_string())),
+            }
         }
     }
     credit(state, &intent.owner, intent.max_payment)
