@@ -1071,6 +1071,78 @@ impl Storage {
         Ok(out)
     }
 
+    /// Rebuild the Handoff Certificate chain from disk and verify every step.
+    ///
+    /// This is the restore half of the pair `save_handoff_cert` /
+    /// `load_handoff_certs`. A stored certificate is only evidence if it still
+    /// verifies against the validator set its epoch names, so the walk pairs
+    /// each certificate with the persisted snapshot of the same epoch and
+    /// hands the whole chain to `follow_handoffs`.
+    ///
+    /// A certificate whose epoch has no persisted snapshot cannot be checked.
+    /// The walk stops at the first such epoch and returns the chain it did
+    /// verify, together with the epoch the caller may continue from. Refusing
+    /// the whole load instead would turn one pruned snapshot into a node that
+    /// cannot boot.
+    ///
+    /// # Errors
+    ///
+    /// Returns the underlying I/O error when a scan fails, and a refused
+    /// certificate as `InvalidData` when a stored step does not verify.
+    pub fn restore_handoff_chain(
+        &self,
+        registry: &crate::crypto::scheme::SchemeStatusRegistry,
+        chain_id: u64,
+        start_epoch: u64,
+        epoch_randomness: &dyn Fn(u64) -> [u8; 32],
+    ) -> std::io::Result<(
+        u64,
+        Vec<crate::consensus::handoff::HandoffMember>,
+        Vec<crate::consensus::handoff::HandoffCertificate>,
+    )> {
+        use crate::consensus::handoff::{follow_handoffs, HandoffCertificate, HandoffMember};
+        let mut snapshots: std::collections::BTreeMap<u64, Vec<HandoffMember>> =
+            std::collections::BTreeMap::new();
+        for (epoch, snapshot) in self.load_validator_snapshots()? {
+            snapshots.insert(epoch, HandoffMember::from_snapshot(&snapshot));
+        }
+        let Some(trusted) = snapshots.get(&start_epoch).cloned() else {
+            return Ok((start_epoch, Vec::new(), Vec::new()));
+        };
+        // A certificate hands over FROM its own epoch, so the step for epoch
+        // `e` needs the set of `e` (which `verify_in` checks through the
+        // outgoing digest) and the set of `e + 1` (which `follow_handoffs`
+        // checks against `incoming_set`).
+        let mut steps: Vec<(HandoffCertificate, Vec<HandoffMember>)> = Vec::new();
+        let mut epoch = start_epoch;
+        for cert in self.load_handoff_certs()? {
+            if cert.epoch < epoch {
+                continue;
+            }
+            if cert.epoch != epoch {
+                break;
+            }
+            let Some(incoming) = snapshots.get(&epoch.saturating_add(1)) else {
+                break;
+            };
+            steps.push((cert, incoming.clone()));
+            epoch = epoch.saturating_add(1);
+        }
+        // `follow_handoffs` borrows its inputs for the length of the walk, so
+        // the verified chain is collected after the borrow ends.
+        follow_handoffs(
+            registry,
+            chain_id,
+            start_epoch,
+            &trusted,
+            &steps,
+            epoch_randomness,
+        )
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
+        let verified: Vec<HandoffCertificate> = steps.into_iter().map(|(cert, _)| cert).collect();
+        Ok((epoch, trusted, verified))
+    }
+
     pub fn save_finality_cert(
         &self,
         height: u64,
@@ -2441,6 +2513,111 @@ mod tests {
     /// node booting: a row with NO tag is the legacy row this build still
     /// writes and must load; a row with a FOREIGN tag is refused.
     #[test]
+    /// The loop a restarting node runs. Certificates and validator snapshots
+    /// are written at the epoch boundary, the process goes away, and the chain
+    /// is rebuilt from disk without trusting a byte of it.
+    #[test]
+    fn a_stored_handoff_chain_survives_a_restart_and_verifies() {
+        use crate::chain::finality::{ValidatorEntry, ValidatorSetSnapshot};
+        use crate::consensus::handoff::{HandoffCertificate, HandoffMember};
+
+        // Two epochs of a one-validator chain: epoch 4 hands the set to epoch
+        // 5, and the stake changes, so the two set digests differ and a
+        // certificate that named the wrong one would fail.
+        let key = crate::crypto::primitives::PqKeyPair::generate();
+        let mut entry = ValidatorEntry {
+            address: Address::from([9u8; 32]),
+            stake: 10,
+            bls_public_key: vec![1; 48],
+            pop_signature: vec![2; 96],
+            pq_public_key: key.public_key_bytes().to_vec(),
+        };
+        let snapshot = |epoch: u64, entry: &ValidatorEntry| ValidatorSetSnapshot {
+            epoch,
+            validators: vec![entry.clone()],
+            set_hash: String::new(),
+            total_stake: entry.stake,
+        };
+        let epoch4 = snapshot(4, &entry);
+        entry.stake = 20;
+        let epoch5 = snapshot(5, &entry);
+
+        let outgoing = HandoffMember::from_snapshot(&epoch4);
+        let incoming = HandoffMember::from_snapshot(&epoch5);
+        let mut cert = HandoffCertificate::unsigned(7, 4, &outgoing, &incoming, [3; 32]);
+        let signature = key
+            .sign(crate::crypto::ctx::HANDOFF_V1, &cert.signing_message())
+            .expect("signs");
+        cert.insert_signature(0, signature);
+
+        let dir = tempdir().unwrap();
+        let path = dir.path().to_str().unwrap();
+        {
+            let storage = Storage::new(path).unwrap();
+            storage.save_validator_snapshot(4, &epoch4).unwrap();
+            storage.save_validator_snapshot(5, &epoch5).unwrap();
+            storage.save_handoff_cert(&cert).unwrap();
+        }
+
+        let reopened = Storage::new(path).unwrap();
+        let registry = crate::crypto::scheme::SchemeStatusRegistry::genesis();
+        let (reached, trusted, verified) = reopened
+            .restore_handoff_chain(&registry, 7, 4, &|_| [3; 32])
+            .unwrap();
+        assert_eq!(
+            reached, 5,
+            "the walk reaches the epoch the certificate names"
+        );
+        assert_eq!(trusted.len(), 1, "the trusted set is the one of epoch 4");
+        assert_eq!(verified.len(), 1, "exactly the stored certificate verifies");
+        assert_eq!(verified[0].incoming_set, cert.incoming_set);
+    }
+
+    /// A stored certificate whose randomness is not the epoch's is refused on
+    /// restore. Persistence is not trust.
+    #[test]
+    fn a_stored_handoff_chain_with_the_wrong_randomness_is_refused() {
+        use crate::chain::finality::{ValidatorEntry, ValidatorSetSnapshot};
+        use crate::consensus::handoff::{HandoffCertificate, HandoffMember};
+
+        let key = crate::crypto::primitives::PqKeyPair::generate();
+        let entry = ValidatorEntry {
+            address: Address::from([9u8; 32]),
+            stake: 10,
+            bls_public_key: vec![1; 48],
+            pop_signature: vec![2; 96],
+            pq_public_key: key.public_key_bytes().to_vec(),
+        };
+        let snap = |epoch: u64| ValidatorSetSnapshot {
+            epoch,
+            validators: vec![entry.clone()],
+            set_hash: String::new(),
+            total_stake: entry.stake,
+        };
+        let (e4, e5) = (snap(4), snap(5));
+        let outgoing = HandoffMember::from_snapshot(&e4);
+        let incoming = HandoffMember::from_snapshot(&e5);
+        let mut cert = HandoffCertificate::unsigned(7, 4, &outgoing, &incoming, [3; 32]);
+        let signature = key
+            .sign(crate::crypto::ctx::HANDOFF_V1, &cert.signing_message())
+            .expect("signs");
+        cert.insert_signature(0, signature);
+
+        let dir = tempdir().unwrap();
+        let storage = Storage::new(dir.path().to_str().unwrap()).unwrap();
+        storage.save_validator_snapshot(4, &e4).unwrap();
+        storage.save_validator_snapshot(5, &e5).unwrap();
+        storage.save_handoff_cert(&cert).unwrap();
+
+        let registry = crate::crypto::scheme::SchemeStatusRegistry::genesis();
+        assert!(
+            storage
+                .restore_handoff_chain(&registry, 7, 4, &|_| [0xFF; 32])
+                .is_err(),
+            "a certificate whose randomness is not the epochs must not restore"
+        );
+    }
+
     fn qc_blob_binary_storage_and_legacy_bincode_are_readable() {
         use crate::consensus::qc::{PqSignatureEntry, QcBlob};
         let dir = tempdir().unwrap();
