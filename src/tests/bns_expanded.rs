@@ -901,3 +901,92 @@ fn bns_duration_and_owner_name_limits_enforced() {
     );
     let _ = bob;
 }
+
+#[test]
+fn bns_forward_target_address_and_bidirectional_reverse_resolution() {
+    use crate::core::account::AccountState;
+    use crate::crypto::primitives::KeyPair;
+    use crate::execution::executor::Executor;
+
+    let alice_kp = KeyPair::generate().unwrap();
+    let alice = Address::from(alice_kp.public_key_bytes());
+    let vault_kp = KeyPair::generate().unwrap();
+    let vault = Address::from(vault_kp.public_key_bytes());
+    let bob_kp = KeyPair::generate().unwrap();
+    let bob = Address::from(bob_kp.public_key_bytes());
+
+    let mut state = AccountState::new();
+    state.epoch_index = 1;
+    state.add_balance(&alice, 1_000_000);
+    state.add_balance(&vault, 1_000_000);
+    state.add_balance(&bob, 1_000_000);
+    state
+        .bns_registry
+        .register("ayaz.bud".to_string(), alice, 1, 100)
+        .unwrap();
+
+    // Initially forward resolution returns `alice`, reverse resolution is None.
+    assert_eq!(state.bns_registry.resolve("ayaz.bud", 2), Some(alice));
+    assert_eq!(state.bns_registry.reverse_resolve(&alice, 2), None);
+
+    // Outsider cannot claim `ayaz.bud` as primary name.
+    let mut bob_claim = lifecycle_tx(
+        bob,
+        0,
+        1,
+        0,
+        TransactionType::BnsSetPrimaryName,
+        bincode::serialize(&Some("ayaz.bud".to_string())).unwrap(),
+    );
+    bob_claim.sign(&bob_kp);
+    assert_eq!(
+        Executor::apply_transaction_checked(&mut state, &bob_claim)
+            .unwrap_err()
+            .code(),
+        "bns_set_primary_failed"
+    );
+
+    // Alice routes `ayaz.bud` -> `vault` (domain 2) and both Alice (owner) and
+    // Vault (routed target) can set `ayaz.bud` as their verified primary name.
+    let mut set_addr = lifecycle_tx(
+        alice,
+        0,
+        1,
+        0,
+        TransactionType::BnsSetAddress,
+        bincode::serialize(&("ayaz.bud".to_string(), Some(vault), Some(2u32))).unwrap(),
+    );
+    set_addr.sign(&alice_kp);
+    Executor::apply_transaction_checked(&mut state, &set_addr).unwrap();
+    assert_eq!(state.bns_registry.resolve("ayaz.bud", 2), Some(vault));
+    assert_eq!(state.bns_registry.resolve_owner("ayaz.bud", 2), Some(alice));
+
+    let mut vault_primary = lifecycle_tx(
+        vault,
+        0,
+        1,
+        0,
+        TransactionType::BnsSetPrimaryName,
+        bincode::serialize(&Some("ayaz.bud".to_string())).unwrap(),
+    );
+    vault_primary.sign(&vault_kp);
+    Executor::apply_transaction_checked(&mut state, &vault_primary).unwrap();
+    assert_eq!(
+        state.bns_registry.reverse_resolve(&vault, 2).as_deref(),
+        Some("ayaz.bud")
+    );
+
+    // Transferring `ayaz.bud` to `bob` clears `vault`'s stale primary-name mapping!
+    let mut transfer_tx = lifecycle_tx(
+        alice,
+        0,
+        1,
+        1,
+        TransactionType::BnsTransfer,
+        bincode::serialize(&("ayaz.bud".to_string(), bob)).unwrap(),
+    );
+    transfer_tx.sign(&alice_kp);
+    Executor::apply_transaction_checked(&mut state, &transfer_tx).unwrap();
+    assert_eq!(state.bns_registry.resolve("ayaz.bud", 2), Some(bob));
+    assert_eq!(state.bns_registry.reverse_resolve(&vault, 2), None);
+}

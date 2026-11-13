@@ -1496,6 +1496,73 @@ impl Executor {
                 })?;
                 sender.nonce = Self::checked_next_nonce(sender.nonce)?;
             }
+            TransactionType::BnsSetAddress => {
+                if tx.amount != 0 || tx.to != Address::zero() {
+                    return Err(BudlumError::validation(
+                        "bns_invalid_set_address",
+                        "BNS set address carries no header amount or recipient",
+                    ));
+                }
+                if state.spendable_balance(&tx.from) < tx.fee {
+                    return Err(BudlumError::validation(
+                        "bns_vesting_locked",
+                        format!(
+                            "BNS set address fee exceeds spendable balance: need {}, spendable {}",
+                            tx.fee,
+                            state.spendable_balance(&tx.from)
+                        ),
+                    ));
+                }
+                let (name, target, domain_id): (String, Option<Address>, Option<u32>) =
+                    bincode::deserialize(&tx.data)
+                        .map_err(|e| BudlumError::validation("bns_invalid_data", e.to_string()))?;
+
+                state
+                    .bns_registry
+                    .set_address(&name, &tx.from, target, domain_id, state.epoch_index)
+                    .map_err(|e| {
+                        BudlumError::validation("bns_set_address_failed", e.to_string())
+                    })?;
+
+                let sender = state.get_or_create(&tx.from);
+                sender.balance = sender.balance.checked_sub(tx.fee).ok_or_else(|| {
+                    BudlumError::validation("balance_underflow", "balance underflow")
+                })?;
+                sender.nonce = Self::checked_next_nonce(sender.nonce)?;
+            }
+            TransactionType::BnsSetPrimaryName => {
+                if tx.amount != 0 || tx.to != Address::zero() {
+                    return Err(BudlumError::validation(
+                        "bns_invalid_set_primary",
+                        "BNS set primary name carries no header amount or recipient",
+                    ));
+                }
+                if state.spendable_balance(&tx.from) < tx.fee {
+                    return Err(BudlumError::validation(
+                        "bns_vesting_locked",
+                        format!(
+                            "BNS set primary name fee exceeds spendable balance: need {}, spendable {}",
+                            tx.fee,
+                            state.spendable_balance(&tx.from)
+                        ),
+                    ));
+                }
+                let primary: Option<String> = bincode::deserialize(&tx.data)
+                    .map_err(|e| BudlumError::validation("bns_invalid_data", e.to_string()))?;
+
+                state
+                    .bns_registry
+                    .set_primary_name(&tx.from, primary, state.epoch_index)
+                    .map_err(|e| {
+                        BudlumError::validation("bns_set_primary_failed", e.to_string())
+                    })?;
+
+                let sender = state.get_or_create(&tx.from);
+                sender.balance = sender.balance.checked_sub(tx.fee).ok_or_else(|| {
+                    BudlumError::validation("balance_underflow", "balance underflow")
+                })?;
+                sender.nonce = Self::checked_next_nonce(sender.nonce)?;
+            }
             TransactionType::BnsSetContent => {
                 let (name, cid): (String, crate::storage::content_id::ContentId) =
                     bincode::deserialize(&tx.data)

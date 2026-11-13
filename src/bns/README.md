@@ -45,6 +45,14 @@
     duration above `MAX_DURATION`) return `BnsError::InvalidDuration`, and
     holding `MAX_NAMES_PER_OWNER` live/grace names blocks further purchases or
     incoming transfers with `BnsError::OwnerNameLimitExceeded`.
+  - **B4 (forward target address and bidirectional reverse resolution):**
+    separates `resolve_owner` (authorization) from `resolve` (`record.address`
+    forwarding target), adds `BnsSetAddress` (wire tag `74`) and
+    `BnsSetPrimaryName` (wire tag `75`), stores `primary_names` committed into
+    `BnsRegistry::root()`, enforces two-way live ownership/target verification on
+    `reverse_resolve`, clears stale reverse mappings on `transfer` / target
+    rotation, and exposes `bud_bnsReverseResolve`, `bud_bnsPrepareSetAddress`,
+    `bud_bnsPrepareSetPrimaryName`, and `bud bns {set-address,set-primary,reverse}`.
 
 ## Current behaviour (locked by tests)
 
