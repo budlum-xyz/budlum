@@ -4871,6 +4871,46 @@ impl StorageRegistry {
         self.results.values().collect()
     }
 
+    /// Drop settled retrieval challenges (and their results) once their
+    /// answer deadline is `MAX_CHALLENGE_WINDOW_EPOCHS` or more epochs old.
+    ///
+    /// Unresolved challenges (`!self.results.contains_key(&id)`) are never
+    /// dropped here. Both `challenges` and `results` are included in the
+    /// deterministic registry root and rescanned each block, so bounded
+    /// retention keeps per-block cost and state size bounded.
+    pub fn prune_settled_challenges(&mut self, now_epoch: u64) -> usize {
+        let Some(cutoff) = now_epoch.checked_sub(Self::MAX_CHALLENGE_WINDOW_EPOCHS) else {
+            return 0;
+        };
+        let due: Vec<u64> = self
+            .challenges
+            .iter()
+            .filter_map(|(&id, challenge)| {
+                (self.results.contains_key(&id) && challenge.deadline_epoch <= cutoff).then_some(id)
+            })
+            .collect();
+        let mut dropped = 0;
+        for id in due {
+            let removed_challenge = self.challenges.remove(&id).is_some();
+            let removed_result = self.results.remove(&id).is_some();
+            if removed_challenge || removed_result {
+                dropped += 1;
+            }
+        }
+        let orphan_results: Vec<u64> = self
+            .results
+            .keys()
+            .filter(|id| !self.challenges.contains_key(id))
+            .copied()
+            .collect();
+        for id in orphan_results {
+            if self.results.remove(&id).is_some() {
+                dropped += 1;
+            }
+        }
+        dropped
+    }
+
     pub fn active_replica_count(&self, manifest_id: &ContentId, shard_id: &ContentId) -> usize {
         self.deals_for_shard(manifest_id, shard_id)
             .into_iter()
@@ -5080,6 +5120,11 @@ impl StorageRegistry {
         manifest_id: &ContentId,
         now_epoch: u64,
     ) -> (u64, Vec<(Address, u64)>) {
+        let all_deal_ids: Vec<u64> = self
+            .deals_for_manifest(manifest_id)
+            .iter()
+            .map(|d| d.deal_id)
+            .collect();
         let deals: Vec<(u64, Address, u64)> = self
             .deals_for_manifest(manifest_id)
             .iter()
@@ -5141,6 +5186,12 @@ impl StorageRegistry {
         // repair it.
         self.manifest_claims
             .retain(|(claimed, _)| claimed != manifest_id);
+        if !all_deal_ids.is_empty() {
+            self.challenges
+                .retain(|_, challenge| !all_deal_ids.contains(&challenge.deal_id));
+            self.results
+                .retain(|_, result| !all_deal_ids.contains(&result.deal_id));
+        }
 
         (pruned, bond_returns)
     }
@@ -8133,6 +8184,59 @@ mod tests {
         let (pruned, bond_returns) = reg.prune_content(&bogus, 100);
         assert_eq!(pruned, 0);
         assert!(bond_returns.is_empty());
+    }
+
+    #[test]
+    fn prune_settled_challenges_sweeps_expired_settled_rows_only() {
+        let m = good_manifest();
+        let mut reg = StorageRegistry::new();
+        let (deal_id, _) = open_one(&mut reg, &m);
+        let settled_id = reg
+            .open_challenge(deal_id, 0, 4, 110, 120, opener(), 50)
+            .unwrap();
+        reg.answer_challenge(
+            settled_id,
+            ContentId([1u8; 32]),
+            operator(),
+            115,
+            Some(&valid_merkle_proof()),
+        )
+        .unwrap();
+        let open_id = reg
+            .open_challenge(deal_id, 0, 4, 125, 135, opener(), 50)
+            .unwrap();
+
+        let last_kept = 120 + StorageRegistry::MAX_CHALLENGE_WINDOW_EPOCHS - 1;
+        assert_eq!(reg.prune_settled_challenges(last_kept), 0);
+        assert!(reg.get_challenge(settled_id).is_some());
+        assert!(reg.get_result(settled_id).is_some());
+
+        let root_before = reg.root();
+        assert_eq!(reg.prune_settled_challenges(last_kept + 1), 1);
+        assert!(reg.get_challenge(settled_id).is_none());
+        assert!(reg.get_result(settled_id).is_none());
+        assert_ne!(reg.root(), root_before);
+
+        assert!(reg.get_challenge(open_id).is_some());
+        assert_eq!(reg.prune_settled_challenges(last_kept + 10_000), 0);
+        assert!(reg.get_challenge(open_id).is_some());
+    }
+
+    #[test]
+    fn prune_content_clears_challenges_and_results_for_pruned_manifest() {
+        let m = good_manifest();
+        let mut reg = StorageRegistry::new();
+        let (deal_id, _) = open_one(&mut reg, &m);
+        let cid = reg
+            .open_challenge(deal_id, 0, 4, 110, 120, opener(), 50)
+            .unwrap();
+        reg.answer_challenge(cid, ContentId([2u8; 32]), operator(), 115, None)
+            .unwrap();
+        assert_eq!(reg.all_challenges().len(), 1);
+        assert_eq!(reg.all_results().len(), 1);
+        reg.prune_content(&m.manifest_id, 150);
+        assert!(reg.all_challenges().is_empty());
+        assert!(reg.all_results().is_empty());
     }
     /// REGRESSION: max concurrent open challenges per deal.
     #[test]

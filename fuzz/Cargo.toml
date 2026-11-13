@@ -36,7 +36,7 @@ bud-vm = { path = "../budzero/bud-vm" }
 # here it fuzzes its own verify walk, which the root never links.
 budlum-bpqs = { path = "../crates/bpqs" }
 libfuzzer-sys = "0.4"
-libp2p = { git = "https://github.com/libp2p/rust-libp2p", rev = "38b8a2c0e91bf6955f5357adcdd40d3b6683a0dd" }
+libp2p = "0.57.1"
 
 [[bin]]
 name = "block_deserialize"

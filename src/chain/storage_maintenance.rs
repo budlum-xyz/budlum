@@ -59,6 +59,12 @@ pub(crate) fn apply(state: &mut AccountState, block: &Block) -> Result<(), Strin
     accrue_operator_rewards(state, epoch);
     issue_challenges(state, block.chain_id, epoch, &block.vrf_output);
     finalize_missed_challenges(state, epoch)?;
+    let swept_challenges = state.storage_registry.prune_settled_challenges(epoch);
+    if swept_challenges > 0 {
+        tracing::info!(
+            "B.U.D. storage maintenance dropped {swept_challenges} settled retrieval challenges at epoch {epoch}"
+        );
+    }
     finalize_expired_deals(state, epoch)?;
     open_repair_band_tickets(state, epoch);
     annotate_placements(state, block.chain_id, epoch, &block.previous_hash);

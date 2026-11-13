@@ -571,6 +571,18 @@ fn open_challenge(
     let epoch = state.epoch_index;
     StorageRegistry::validate_challenge_window(epoch, deadline_epoch, epoch)
         .map_err(|e| StorageTxError::ChallengeRefused(e.to_string()))?;
+    // A question about these bytes must be answerable inside the term it is
+    // asked about. A deadline past the deal's own end holds the row `Active`
+    // (the missed-answer slash needs it), blocking expiry, bond return, and
+    // repair reallocation for the whole window the opener chose.
+    if let Some(deal) = state.storage_registry.get_deal(deal_id) {
+        if deadline_epoch > deal.deal_end_epoch {
+            return Err(StorageTxError::ChallengeRefused(format!(
+                "deadline epoch {deadline_epoch} runs past the deal term {}",
+                deal.deal_end_epoch
+            )));
+        }
+    }
     let balance = state.get_balance(&ctx.sender);
     let needed = opener_bond.saturating_add(ctx.fee);
     if balance < needed {
@@ -2514,5 +2526,32 @@ mod tests {
             0,
             "self-challenge via tx must never credit reward bytes"
         );
+    }
+
+    #[test]
+    fn open_challenge_refuses_deadline_past_deal_end_epoch() {
+        let mut state = AccountState::new();
+        let (_op, opener, deal_id) = challengeable(&mut state);
+        let deal_end_epoch = state
+            .storage_registry
+            .get_deal(deal_id)
+            .expect("deal exists")
+            .deal_end_epoch;
+        let root = state.storage_registry.root();
+        let err = execute_storage_tx(
+            &mut state,
+            &ctx(opener),
+            &StorageTx::OpenChallenge {
+                deal_id,
+                range_len: 16,
+                deadline_epoch: deal_end_epoch + 1,
+                opener_bond: StorageRegistry::required_opener_bond(16),
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(err, StorageTxError::ChallengeRefused(_)), "{err}");
+        assert_eq!(state.get_balance(&opener), OPENER_FUNDS);
+        assert!(state.storage_registry.all_challenges().is_empty());
+        assert_eq!(state.storage_registry.root(), root);
     }
 }

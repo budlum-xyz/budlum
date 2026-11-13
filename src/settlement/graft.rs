@@ -244,9 +244,12 @@ pub enum GraftTx {
         valid_until_block: u64,
         signature: Vec<u8>,
     },
-    /// Freeze the cheapest existing bid (owner only). Appended to preserve
-    /// earlier bincode enum discriminants.
-    Award { intent_id: [u8; 32] },
+    /// Freeze a specific solver's existing bid (owner only). Appended to
+    /// preserve earlier bincode enum discriminants.
+    Award {
+        intent_id: [u8; 32],
+        solver: Address,
+    },
 }
 
 /// The 32-byte message an externally owned application signs (EIP-191
@@ -1158,7 +1161,7 @@ pub fn execute_graft_tx(
             });
             Ok(())
         }
-        GraftTx::Award { intent_id } => {
+        GraftTx::Award { intent_id, solver } => {
             let intent = state
                 .settlement
                 .graft
@@ -1174,14 +1177,11 @@ pub fn execute_graft_tx(
             if intent.deadline_block.saturating_sub(block) < MIN_GRAFT_AWARD_WINDOW_BLOCKS {
                 return Err(refused("Graft award leaves too little time to fulfil"));
             }
-            // Bids were overflow-checked at admission. `min_by_key` keeps the
-            // first bid in a tie, so the ordering is deterministic and a
-            // later bid cannot displace an equal offer.
             let winner = intent
                 .bids
                 .iter()
-                .min_by_key(|bid| bid.cost.saturating_add(bid.fee))
-                .ok_or_else(|| refused("Graft intent has no bids"))?
+                .find(|bid| bid.solver == *solver)
+                .ok_or_else(|| refused("selected solver has not bid on the Graft intent"))?
                 .solver;
             intent.awarded_solver = Some(winner);
             Ok(())
@@ -1604,7 +1604,8 @@ mod tests {
             &mut state,
             &ctx(solver),
             &GraftTx::Award {
-                intent_id: intent.intent_id
+                intent_id: intent.intent_id,
+                solver,
             }
         )
         .is_err());
@@ -1614,6 +1615,7 @@ mod tests {
             &ctx(user),
             &GraftTx::Award {
                 intent_id: intent.intent_id,
+                solver,
             },
         )
         .unwrap();
@@ -1766,7 +1768,12 @@ mod tests {
                 .stake,
             bond
         );
-        execute_graft_tx(&mut state, &ctx(user), &GraftTx::Award { intent_id }).unwrap();
+        execute_graft_tx(
+            &mut state,
+            &ctx(user),
+            &GraftTx::Award { intent_id, solver },
+        )
+        .unwrap();
         assert!(execute_graft_tx(&mut state, &ctx(user), &refund).is_err());
         state.current_block_height = 601;
         let before = state.get_balance(&user);
@@ -2124,7 +2131,11 @@ mod tests {
             },
         )
         .unwrap();
-        let award = execute_graft_tx(&mut state, &ctx(user), &GraftTx::Award { intent_id });
+        let award = execute_graft_tx(
+            &mut state,
+            &ctx(user),
+            &GraftTx::Award { intent_id, solver },
+        );
         award.unwrap();
         let intent = state
             .settlement
@@ -2273,7 +2284,8 @@ mod tests {
                 &mut state,
                 &ctx(user),
                 &GraftTx::Award {
-                    intent_id: short_id
+                    intent_id: short_id,
+                    solver,
                 }
             )
             .is_err(),
@@ -2330,6 +2342,7 @@ mod tests {
             &ctx(user),
             &GraftTx::Award {
                 intent_id: awarded_id,
+                solver,
             },
         )
         .unwrap();
@@ -2358,5 +2371,101 @@ mod tests {
             },
         )
         .expect("expired intents must not pin SetExecutor");
+    }
+    #[test]
+    fn owner_can_award_performing_solver_over_zero_value_bid_and_refuses_non_bidder() {
+        let operator = Address::from([0x01; 32]);
+        let user = Address::from([0x03; 32]);
+        let solver = Address::from([0x05; 32]);
+        let griefer = Address::from([0x06; 32]);
+        let bystander = Address::from([0x07; 32]);
+        let origin = vec![0xEE; 20];
+        let mut state = state_with_domain(operator);
+        state.add_balance(&user, 10_000);
+        let bond = state.registry.params().min_stake;
+        let epoch = state.epoch_index;
+        for addr in [solver, griefer] {
+            state
+                .registry
+                .register(addr, crate::registry::role::roles::RELAYER, bond, epoch)
+                .unwrap();
+        }
+        state
+            .settlement
+            .graft
+            .register(DOMAIN, origin.clone(), [0x11; 32], 0)
+            .unwrap();
+        execute_graft_tx(
+            &mut state,
+            &ctx(operator),
+            &GraftTx::SetExecutor {
+                domain_key: DOMAIN,
+                executor: vec![0x88; 20],
+            },
+        )
+        .unwrap();
+        let id = graft_id(DOMAIN, &origin);
+        execute_graft_tx(
+            &mut state,
+            &ctx(user),
+            &GraftTx::OpenIntent {
+                graft_id: id,
+                call_hash: [0x95; 32],
+                value: 0,
+                max_payment: 1_000,
+                solver_fee_cap: 100,
+                service_price: 200,
+                origin_beneficiary: vec![0x33; 20],
+                deadline_block: 1_000,
+            },
+        )
+        .unwrap();
+        let intent_id = *state.settlement.graft.intents.keys().next().unwrap();
+        // Griefer undercuts with a zero-value bid; real solver posts a nonzero offer.
+        execute_graft_tx(
+            &mut state,
+            &ctx(griefer),
+            &GraftTx::Bid {
+                intent_id,
+                cost: 0,
+                fee: 0,
+            },
+        )
+        .unwrap();
+        execute_graft_tx(
+            &mut state,
+            &ctx(solver),
+            &GraftTx::Bid {
+                intent_id,
+                cost: 400,
+                fee: 50,
+            },
+        )
+        .unwrap();
+
+        let non_bidder_err = execute_graft_tx(
+            &mut state,
+            &ctx(user),
+            &GraftTx::Award {
+                intent_id,
+                solver: bystander,
+            },
+        )
+        .unwrap_err();
+        assert!(
+            non_bidder_err.to_string().contains("has not bid"),
+            "{non_bidder_err}"
+        );
+
+        execute_graft_tx(
+            &mut state,
+            &ctx(user),
+            &GraftTx::Award { intent_id, solver },
+        )
+        .unwrap();
+        assert_eq!(
+            state.settlement.graft.intents[&intent_id].awarded_solver,
+            Some(solver)
+        );
     }
 }
