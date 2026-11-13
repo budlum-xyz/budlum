@@ -510,12 +510,14 @@ enum GraftAction {
         #[arg(long, required = true)]
         fee: u64,
     },
-    /// Award the cheapest bid; only the intent owner can do this.
+    /// Award a recorded bid from `--solver`; only the intent owner can do this.
     Award {
         #[command(flatten)]
         signer: V5Signer,
         #[arg(long, required = true)]
         intent_id: String,
+        #[arg(long, required = true)]
+        solver: String,
     },
     /// Claim an application for a payout with an anchored claim event
     /// (a `RelayerExternalResult` JSON file).
@@ -1978,10 +1980,15 @@ fn run_graft(rpc_url: &str, action: &GraftAction) -> Result<(), String> {
                 fee: *fee,
             },
         ),
-        GraftAction::Award { signer, intent_id } => (
+        GraftAction::Award {
+            signer,
+            intent_id,
+            solver,
+        } => (
             signer,
             GraftTx::Award {
                 intent_id: hex32(intent_id, "--intent-id")?,
+                solver: parse_address(solver.strip_prefix("0x").unwrap_or(solver))?,
             },
         ),
         GraftAction::Claim {

@@ -22,74 +22,10 @@ url = "https://raw.githubusercontent.com/mozilla/supply-chain/main/audits.toml"
 [imports.zcash]
 url = "https://raw.githubusercontent.com/zcash/rust-ecosystem/main/supply-chain/audits.toml"
 
-[policy.libp2p]
-audit-as-crates-io = true
-
-[policy.libp2p-allow-block-list]
-audit-as-crates-io = true
-
-[policy.libp2p-connection-limits]
-audit-as-crates-io = true
-
-[policy.libp2p-core]
-audit-as-crates-io = true
-
-[policy.libp2p-dns]
-audit-as-crates-io = true
-
-[policy.libp2p-gossipsub]
-audit-as-crates-io = true
-
-[policy.libp2p-identify]
-audit-as-crates-io = true
-
-[policy.libp2p-kad]
-audit-as-crates-io = true
-
-[policy.libp2p-mdns]
-audit-as-crates-io = true
-
-[policy.libp2p-metrics]
-audit-as-crates-io = true
-
-[policy.libp2p-noise]
-audit-as-crates-io = true
-
-[policy.libp2p-ping]
-audit-as-crates-io = true
-
-[policy.libp2p-quic]
-audit-as-crates-io = true
-
-[policy.libp2p-request-response]
-audit-as-crates-io = true
-
-[policy.libp2p-swarm]
-audit-as-crates-io = true
-
-[policy.libp2p-swarm-derive]
-audit-as-crates-io = true
-
-[policy.libp2p-tcp]
-audit-as-crates-io = true
-
-[policy.libp2p-tls]
-audit-as-crates-io = true
-
-[policy.libp2p-upnp]
-audit-as-crates-io = true
-
-[policy.libp2p-yamux]
-audit-as-crates-io = true
-
-[policy.multistream-select]
-audit-as-crates-io = true
-
-[policy.prost-codec]
-audit-as-crates-io = true
-
-[policy.rw-stream-sink]
-audit-as-crates-io = true
+# libp2p 0.57.1 and its subcrates now come from crates.io (see Cargo.lock).
+# The normal cargo-vet policy audits registry crates. The old
+# audit-as-crates-io overrides were only for the unpublished git tree; keeping
+# them makes cargo-vet refuse to run because these crates are no longer forks.
 
 [[exemptions.bindgen]]
 version = "0.72.1"

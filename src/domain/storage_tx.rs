@@ -564,6 +564,18 @@ fn open_challenge(
     let epoch = state.epoch_index;
     StorageRegistry::validate_challenge_window(epoch, deadline_epoch, epoch)
         .map_err(|e| StorageTxError::ChallengeRefused(e.to_string()))?;
+    // A question about these bytes must be answerable inside the term it is
+    // asked about. A deadline past the deal's own end holds the row `Active`
+    // (the missed-answer slash needs it), blocking expiry, bond return, and
+    // repair reallocation for the whole window the opener chose.
+    if let Some(deal) = state.storage_registry.get_deal(deal_id) {
+        if deadline_epoch > deal.deal_end_epoch {
+            return Err(StorageTxError::ChallengeRefused(format!(
+                "deadline epoch {deadline_epoch} runs past the deal term {}",
+                deal.deal_end_epoch
+            )));
+        }
+    }
     let balance = state.get_balance(&ctx.sender);
     let needed = opener_bond.saturating_add(ctx.fee);
     if balance < needed {
@@ -2223,6 +2235,108 @@ mod tests {
             .view_grants
             .live_for_content(&mid)
             .is_empty());
+
+        // Competing RegisterManifest is recorded rather than refused, while a
+        // custody-proven owner retains `owner_of`, `proven_owner_of`, grant,
+        // social-delete, and data-asset registration authority.
+        execute_storage_tx(
+            &mut state,
+            &ctx(squatter),
+            &StorageTx::RegisterManifest {
+                manifest: squatter_manifest.clone(),
+            },
+        )
+        .expect("competing manifest claim is recorded");
+        assert_eq!(state.storage_registry.owner_of(&mid), Some(victim));
+        assert_eq!(state.storage_registry.proven_owner_of(&mid), Some(victim));
+
+        execute_storage_tx(
+            &mut state,
+            &ctx(victim),
+            &StorageTx::IssueViewGrant {
+                content_id: mid,
+                grantee: Some(grantee),
+                key_id: [0x66; 32],
+                policy: ViewPolicy::NamedGrantee,
+            },
+        )
+        .expect("custody-proven owner keeps view grant authority after rival manifest");
+        execute_storage_tx(
+            &mut state,
+            &ctx(victim),
+            &StorageTx::SocialDelete { content_id: mid },
+        )
+        .expect("custody-proven owner keeps social delete authority after rival manifest");
+
+        assert_eq!(
+            execute_storage_tx(
+                &mut state,
+                &ctx(squatter),
+                &StorageTx::RegisterManifest {
+                    manifest: squatter_manifest.clone(),
+                },
+            )
+            .unwrap_err(),
+            StorageTxError::AlreadyRegistered
+        );
+
+        state.add_balance(&victim, 1_000);
+        let asset = crate::pollen::DataAsset::new(victim, mid, [0x77; 32], true);
+        let tx = crate::core::transaction::Transaction::new_with_chain_id(
+            victim,
+            Address::zero(),
+            0,
+            1,
+            0,
+            vec![],
+            crate::core::transaction::DEFAULT_CHAIN_ID,
+            crate::core::transaction::TransactionType::PollenRegisterDataAsset(asset),
+        );
+        crate::execution::executor::Executor::apply_transaction_checked(&mut state, &tx)
+            .expect("custody-proven owner keeps data asset registration authority");
+
+        assert_eq!(
+            execute_storage_tx(
+                &mut state,
+                &ctx(squatter),
+                &StorageTx::RegisterManifest {
+                    manifest: squatter_manifest,
+                },
+            )
+            .unwrap_err(),
+            StorageTxError::OwnerIsNotSender {
+                owner: victim,
+                sender: squatter,
+            }
+        );
+    }
+
+    #[test]
+    fn open_challenge_refuses_deadline_shorter_than_minimum_window() {
+        let mut state = AccountState::new();
+        let (_op, opener, deal_id) = challengeable(&mut state);
+        let epoch = state.epoch_index;
+        let root = state.storage_registry.root();
+        for too_short in [
+            epoch + 1,
+            epoch + StorageRegistry::MIN_CHALLENGE_WINDOW_EPOCHS - 1,
+        ] {
+            let err = execute_storage_tx(
+                &mut state,
+                &ctx(opener),
+                &StorageTx::OpenChallenge {
+                    deal_id,
+                    range_len: 16,
+                    deadline_epoch: too_short,
+                    opener_bond: StorageRegistry::required_opener_bond(16),
+                },
+            )
+            .unwrap_err();
+            assert!(matches!(err, StorageTxError::ChallengeRefused(_)), "{err}");
+        }
+        assert_eq!(state.get_balance(&opener), OPENER_FUNDS);
+        assert!(state.storage_registry.all_challenges().is_empty());
+        assert_eq!(state.storage_registry.root(), root);
     }
 
     #[test]
@@ -2288,5 +2402,32 @@ mod tests {
             0,
             "self-challenge via tx must never credit reward bytes"
         );
+    }
+
+    #[test]
+    fn open_challenge_refuses_deadline_past_deal_end_epoch() {
+        let mut state = AccountState::new();
+        let (_op, opener, deal_id) = challengeable(&mut state);
+        let deal_end_epoch = state
+            .storage_registry
+            .get_deal(deal_id)
+            .expect("deal exists")
+            .deal_end_epoch;
+        let root = state.storage_registry.root();
+        let err = execute_storage_tx(
+            &mut state,
+            &ctx(opener),
+            &StorageTx::OpenChallenge {
+                deal_id,
+                range_len: 16,
+                deadline_epoch: deal_end_epoch + 1,
+                opener_bond: StorageRegistry::required_opener_bond(16),
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(err, StorageTxError::ChallengeRefused(_)), "{err}");
+        assert_eq!(state.get_balance(&opener), OPENER_FUNDS);
+        assert!(state.storage_registry.all_challenges().is_empty());
+        assert_eq!(state.storage_registry.root(), root);
     }
 }

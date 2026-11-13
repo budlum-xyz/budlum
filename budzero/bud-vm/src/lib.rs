@@ -71,6 +71,9 @@ pub struct Vm {
     pub gas_limit: u64,
     pub error: Option<VmError>,
     pub state_writes: Vec<(u64, u64)>,
+    /// Optional execution step cap (checked against `trace.len()`) so a loop with
+    /// cheap gas per step cannot inflate the witness matrix into multi-GB OOM.
+    step_limit: Option<usize>,
     /// F2: Mainnet mode flag. When true, VerifyMerkle is gated behind
     /// `MainnetActivation::full`. Set by `ZkVmExecutor::execute_bytecode`
     /// When network is Mainnet.
@@ -227,6 +230,11 @@ pub fn field_mul_goldilocks(a: u64, b: u64) -> u64 {
     ((a as u128 * b as u128) % GOLDILOCKS_P as u128) as u64
 }
 
+/// Maximum trace steps a single BudZKVM contract invocation may record (`2^14`).
+/// Keeps `(3 * trace.len() + 1).next_power_of_two()` at <= 2^16 rows (~562 MiB witness)
+/// instead of letting a 1M-gas `Jmp 0` loop expand into a 2^22-row (~36 GiB) trace.
+pub const MAX_CONTRACT_TRACE_STEPS: usize = 1 << 14;
+
 /// The most memory a VM may hold, in bytes. The memory table of the proof
 /// names an address with 32 bits, so a larger memory could run but not be
 /// proved.
@@ -269,8 +277,16 @@ impl Vm {
             gas_limit,
             error: None,
             state_writes: Vec::new(),
+            step_limit: None,
             mainnet_mode: false,
         }
+    }
+
+    /// Bound the total trace rows recorded by this VM instance.
+    #[must_use]
+    pub fn with_step_limit(mut self, max_steps: usize) -> Self {
+        self.step_limit = Some(max_steps);
+        self
     }
 
     /// F2: Create a VM in mainnet mode where VerifyMerkle is gated
@@ -391,6 +407,11 @@ impl Vm {
         };
 
         let cur_pc = self.pc;
+        if self.step_limit.is_some_and(|cap| self.trace.len() >= cap) {
+            self.halted = true;
+            self.error = Some(VmError::OutOfGas);
+            return Err(VmError::OutOfGas);
+        }
         self.consume_gas(Self::gas_cost(inst.opcode))?;
 
         let src1_idx = inst.rs1;
@@ -2167,7 +2188,30 @@ mod poseidon_parameter_tests {
         let receipt = vm.run_receipt(&program);
         assert!(!receipt.success);
         assert_eq!(receipt.error, Some(VmError::OutOfGas));
-        assert!(receipt.gas_used <= 4_096);
+        // `consume_gas` adds the cost of the refused instruction to the counter
+        // before it compares against the limit, and the receipt keeps that
+        // addition: the loop always stops past the limit, but never further
+        // past it than one `VerifyMerkle` costs. That one-instruction overshoot
+        // is the DoS bound this calibration promises.
+        assert!(receipt.gas_used > 4_096);
+        assert!(receipt.gas_used <= 4_096 + Vm::gas_cost(Opcode::VerifyMerkle));
         assert!(vm.trace.len() <= 410 * (1 + MERKLE_ROUNDS) + 1);
+    }
+
+    #[test]
+    fn step_limit_halts_infinite_loop_before_unbounded_trace() {
+        let jump = Instruction {
+            opcode: Opcode::Jmp,
+            rd: 0,
+            rs1: 0,
+            rs2: 0,
+            imm: 0,
+        }
+        .encode();
+        let mut vm = Vm::with_gas_limit(8192, 1_000_000).with_step_limit(MAX_CONTRACT_TRACE_STEPS);
+        let receipt = vm.run_receipt(&[jump]);
+        assert!(!receipt.success);
+        assert_eq!(receipt.error, Some(VmError::OutOfGas));
+        assert!(vm.trace.len() <= MAX_CONTRACT_TRACE_STEPS + 1);
     }
 }

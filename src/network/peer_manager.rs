@@ -679,6 +679,16 @@ impl PeerManager {
             return;
         };
         score.valid_contributions += 1;
+        score.score = (score.score + GOOD_BEHAVIOR_REWARD).min(MAX_SCORE);
+        score.last_seen = Some(Instant::now());
+    }
+    /// Reset consecutive unanswered-sync strikes only after the peer actually
+    /// delivers valid sync data that advances or feeds our chain.
+    pub fn report_sync_success(&mut self, peer_id: &PeerId) {
+        let Some(score) = self.get_or_create(peer_id) else {
+            return;
+        };
+        score.valid_contributions += 1;
         score.unanswered_sync_strikes = 0;
         score.score = (score.score + GOOD_BEHAVIOR_REWARD).min(MAX_SCORE);
         score.last_seen = Some(Instant::now());
@@ -2058,21 +2068,34 @@ mod tests {
     #[test]
     fn repeated_unanswered_sync_strikes_ban_after_grace_window() {
         let mut pm = PeerManager::new();
+        let handshaker = test_peer_id();
         let flaky = test_peer_id();
         let staller = test_peer_id();
 
-        pm.report_unanswered_request(&flaky);
-        pm.report_unanswered_request(&flaky);
+        pm.report_unanswered_request(&handshaker);
+        pm.report_unanswered_request(&handshaker);
         assert!(
-            !pm.is_banned(&flaky),
+            !pm.is_banned(&handshaker),
             "isolated unanswered sync requests must only demote, not ban"
         );
-        pm.report_good_behavior(&flaky);
+        // Non-sync good behavior (e.g. handshakes or gossip) must NOT clear
+        // unanswered sync strikes.
+        pm.report_good_behavior(&handshaker);
+        pm.report_unanswered_request(&handshaker);
+        pm.report_unanswered_request(&handshaker);
+        assert!(
+            pm.is_banned(&handshaker),
+            "non-sync good behavior must not prevent banning after MAX_UNANSWERED_SYNC_STRIKES"
+        );
+
+        pm.report_unanswered_request(&flaky);
+        pm.report_unanswered_request(&flaky);
+        pm.report_sync_success(&flaky);
         pm.report_unanswered_request(&flaky);
         pm.report_unanswered_request(&flaky);
         assert!(
             !pm.is_banned(&flaky),
-            "valid contributions must reset consecutive unanswered sync strikes"
+            "actual sync data delivery must reset consecutive unanswered sync strikes"
         );
 
         for _ in 0..MAX_UNANSWERED_SYNC_STRIKES {
