@@ -130,13 +130,15 @@ pub enum Location {
     },
 }
 
+type StorageSlotProof = ([u8; 32], [u8; 32], Vec<Vec<u8>>);
+
 /// Home-chain state-inclusion proof anchoring a contract's state slice to
 /// a finalized home `state_root`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HomeSliceProof {
     pub state_root: Hash32,
     pub contract_account_proof: Vec<Vec<u8>>,
-    pub storage_proofs: Vec<([u8; 32], [u8; 32], Vec<Vec<u8>>)>,
+    pub storage_proofs: Vec<StorageSlotProof>,
 }
 
 /// Verify that `proof` proves `slice` at `contract` against `state_root`.
@@ -665,7 +667,7 @@ impl ObjectLayerRegistry {
         updates: ClassSlice,
         phase: Phase,
     ) -> Result<ClassStatus, Refusal> {
-        self.refresh_class_verified(caller, class, updates, phase, None, None, false)
+        self.refresh_class_verified(caller, class, updates, phase, (None, None, false))
     }
 
     /// `ObjectLayerTx::RefreshClass` verifying `proof` against
@@ -681,9 +683,11 @@ impl ObjectLayerRegistry {
         class: AssetClassId,
         updates: ClassSlice,
         phase: Phase,
-        proof: Option<&HomeSliceProof>,
-        expected_home_state_root: Option<Hash32>,
-        require_home_proof: bool,
+        (proof, expected_home_state_root, require_home_proof): (
+            Option<&HomeSliceProof>,
+            Option<Hash32>,
+            bool,
+        ),
     ) -> Result<ClassStatus, Refusal> {
         if phase == Phase::Tentative {
             return Err(Refusal::TentativeClosed);
