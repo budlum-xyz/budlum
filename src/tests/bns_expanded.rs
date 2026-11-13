@@ -1156,3 +1156,114 @@ fn bns_subdomains_resolve_fqdn_remove_cleanly_and_expire_with_parent() {
         .list_subdomains("studio.bud", 21)
         .is_none());
 }
+
+#[test]
+fn bns_consensus_bud3_content_ref_validates_against_bud3_registry_and_serves_view() {
+    use crate::bns::bud3::{BnsViewAccess, Bud3BnsResolver};
+    use crate::core::account::AccountState;
+    use crate::crypto::primitives::KeyPair;
+    use crate::execution::executor::Executor;
+    use crate::storage::bud3::content_ref::ContentRef;
+    use crate::storage::bud3::limits::{Bud3Limits, Profile};
+    use crate::storage::bud3::pipeline::prepare_public_upload;
+    use crate::storage::bud3::placement::{Class, Share};
+    use crate::storage::bud3::view::MemorySymbolNetwork;
+
+    const PROFILE: Profile = Profile {
+        id: 0,
+        qr_version: 40,
+        symbol_size: 128,
+        fps: 10,
+        k_max: 16,
+    };
+
+    let alice_kp = KeyPair::generate().unwrap();
+    let alice = Address::from(alice_kp.public_key_bytes());
+    let bob = addr(21);
+
+    let mut state = AccountState::new();
+    state.epoch_index = 1;
+    state.add_balance(&alice, 1_000_000);
+    state
+        .bns_registry
+        .register("dweb.bud".to_string(), alice, 1, 50)
+        .unwrap();
+
+    let html = b"<html><body>On-chain B.U.D. 3.0 site</body></html>".repeat(6);
+    let up = prepare_public_upload(&html, &PROFILE, &Bud3Limits::default(), 8).unwrap();
+    let obj_key = up.record.commitment;
+    let cid = up.record.content_id;
+    let holder = [7u8; 32];
+
+    let mut net = MemorySymbolNetwork::default();
+    for (seg_idx, syms) in up.segments.iter().enumerate() {
+        net.store_holder_share(holder, obj_key, seg_idx as u64, syms.clone());
+    }
+
+    // Before registering the object in `bud3_registry`, `BnsSetBud3Content` fails closed!
+    let cref = ContentRef::new(cid, obj_key, None).unwrap();
+    let mut premature_tx = lifecycle_tx(
+        alice,
+        0,
+        1,
+        0,
+        TransactionType::BnsSetBud3Content,
+        bincode::serialize(&("dweb.bud".to_string(), Some(cref))).unwrap(),
+    );
+    premature_tx.sign(&alice_kp);
+    assert_eq!(
+        Executor::apply_transaction_checked(&mut state, &premature_tx)
+            .unwrap_err()
+            .code(),
+        "bns_set_bud3_content_failed"
+    );
+
+    // Register object in `state.bud3_registry`, then execute `BnsSetBud3Content`.
+    state
+        .bud3_registry
+        .register_object(
+            alice.0,
+            up.record,
+            vec![(
+                0,
+                Share {
+                    validator: holder,
+                    class: Class::Full,
+                    first_esi: 0,
+                    symbols: 8,
+                },
+            )],
+            1,
+            50,
+        )
+        .unwrap();
+
+    let root_before = state.bns_registry.root();
+    Executor::apply_transaction_checked(&mut state, &premature_tx).unwrap();
+    assert_ne!(state.bns_registry.root(), root_before);
+    assert_eq!(
+        state.bns_registry.resolve_bud3_content("dweb.bud", 2),
+        Some(cref)
+    );
+
+    // `Bud3BnsResolver` reconstructs the exact payload directly from on-chain `NameRecord::bud3_content`!
+    let resolver = Bud3BnsResolver::new();
+    let reconstructed = resolver
+        .resolve_via_bud3_view(
+            &state.bns_registry,
+            &state.bud3_registry,
+            &net,
+            "dweb.bud",
+            2,
+            &BnsViewAccess::default(),
+        )
+        .unwrap();
+    assert_eq!(reconstructed, html);
+
+    // Ownership transfer clears `bud3_content`.
+    state
+        .bns_registry
+        .transfer("dweb.bud", &alice, bob, 3)
+        .unwrap();
+    assert_eq!(state.bns_registry.resolve_bud3_content("dweb.bud", 3), None);
+}
