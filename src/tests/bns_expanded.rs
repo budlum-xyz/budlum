@@ -7,7 +7,7 @@ use crate::core::address::Address;
 use crate::core::transaction::{Transaction, TransactionType, DEFAULT_CHAIN_ID};
 use crate::crypto::primitives::KeyPair;
 use crate::execution::executor::Executor;
-use proptest::proptest;
+use proptest::{prop_assert_eq, proptest};
 
 fn addr(b: u8) -> Address {
     Address::from([b; 32])
