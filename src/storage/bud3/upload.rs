@@ -123,22 +123,17 @@ impl From<Bud3QrError> for UploadError {
     }
 }
 
-/// Whether raw BOF-1 flag byte `raw_flags` carries any closed feature on testnet
-/// (`Flags::LIVE` bit1 `0x02` or closed bit3 `0x08`, plus unknown high bits).
+/// Whether raw BOF-1 flag byte `raw_flags` is admitted on testnet.
+///
+/// All defined BOF-1 flags (`SEALED` bit0, `LIVE` bit1, `HAS_BASE` bit2,
+/// `HAS_CONTEXT` bit3) are active on testnet; unknown high bits (`>= 0x10`)
+/// are refused.
 ///
 /// # Errors
 ///
-/// [`UploadError::ClosedFeatureFlag`] when `raw_flags` carries bit1, bit3, or unknown bits.
+/// [`UploadError::ClosedFeatureFlag`] when `raw_flags` carries unknown high bits.
 pub fn admit_testnet_flags(raw_flags: u8) -> Result<Flags, UploadError> {
-    if (raw_flags & (Flags::LIVE | CLOSED_FLAG_BIT3)) != 0 {
-        return Err(UploadError::ClosedFeatureFlag(raw_flags));
-    }
-    let flags =
-        Flags::from_byte(raw_flags).map_err(|_| UploadError::ClosedFeatureFlag(raw_flags))?;
-    if (flags.bits() & Flags::LIVE) != 0 {
-        return Err(UploadError::ClosedFeatureFlag(raw_flags));
-    }
-    Ok(flags)
+    Flags::from_byte(raw_flags).map_err(|_| UploadError::ClosedFeatureFlag(raw_flags))
 }
 
 /// Deterministically choose which frame indices of a segment must undergo pixel
@@ -660,15 +655,19 @@ mod tests {
         let mut mgr = UploadSessionManager::new(Bud3Limits::default());
         let acc = [1u8; 32];
 
-        // T41: bit1 (LIVE) and bit3 (0x08) refuse on testnet.
+        // Both LIVE (bit1) and HAS_CONTEXT (bit3) are open on testnet; unknown high
+        // bits (0x10+) remain refused.
+        assert!(mgr
+            .open_session((acc, [1; 16]), 16, Flags::LIVE, 10, false, 100)
+            .is_ok());
+        assert!(mgr
+            .open_session((acc, [2; 16]), 16, CLOSED_FLAG_BIT3, 10, false, 100)
+            .is_ok());
         assert!(matches!(
-            mgr.open_session((acc, [1; 16]), 16, Flags::LIVE, 10, false, 100),
-            Err(UploadError::ClosedFeatureFlag(_))
+            mgr.open_session((acc, [1; 16]), 16, 0x10, 10, false, 100),
+            Err(UploadError::ClosedFeatureFlag(0x10))
         ));
-        assert!(matches!(
-            mgr.open_session((acc, [1; 16]), 16, CLOSED_FLAG_BIT3, 10, false, 100),
-            Err(UploadError::ClosedFeatureFlag(_))
-        ));
+        mgr = UploadSessionManager::new(Bud3Limits::default());
 
         // Per-IP cap = 2 concurrent sessions.
         let _s1 = mgr

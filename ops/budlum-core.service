@@ -31,6 +31,7 @@ ExecStart=/usr/local/bin/budlum-core \
     --port=4001 \
     --rpc-public-listener=127.0.0.1:8545 \
     --rpc-operator-listener=127.0.0.1:8546 \
+    --rpc-trusted-proxies=127.0.0.1 \
     --metrics-port=9090 \
     --db-path=/var/lib/budlum/data \
     --snapshot-dir=/var/lib/budlum/snapshots \

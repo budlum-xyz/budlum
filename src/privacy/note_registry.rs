@@ -155,8 +155,7 @@ impl L1NoteRegistry {
 
     /// Apply a confidential transfer authorized by `spender`, enforcing both
     /// per-input note ownership and 1-for-1 note count conservation (preventing
-    /// unbacked note creation while value-carrying confidential pools remain
-    /// closed outside devnet).
+    /// unbacked note creation across active testnet and devnet privacy pools).
     ///
     /// # Errors
     ///

@@ -689,12 +689,26 @@ mod tests {
     fn the_door_is_closed_where_the_genesis_flag_is_off() {
         let operator = Address::from([1u8; 32]);
         let mut state = AccountState::new();
+        let mut domain = crate::domain::plugin::default_domain(
+            DOMAIN,
+            crate::domain::ConsensusKind::PoW,
+            45262,
+            crate::domain::POW_HEADER_CHAIN_ADAPTER,
+            1,
+        );
+        domain.domain_chain_id = 1;
+        domain.operator = Some(operator);
+        state.add_balance(&operator, domain.operator_bond.saturating_add(FEE));
+        crate::settlement::domains::register_domain(&mut state, domain).expect("domain");
+        let mainnet = crate::core::chain_config::Network::Mainnet
+            .chain_id()
+            .value();
         let testnet = crate::core::chain_config::Network::Testnet
             .chain_id()
             .value();
         let err = execute_shared_security_tx(
             &mut state,
-            &ctx(operator, testnet),
+            &ctx(operator, mainnet),
             &SharedSecurityTx::SetRegistrar {
                 domain_key: DOMAIN,
                 registrar: REGISTRAR.to_vec(),
@@ -702,6 +716,15 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.to_string().contains("not enabled"), "{err}");
+        assert!(execute_shared_security_tx(
+            &mut state,
+            &ctx(operator, testnet),
+            &SharedSecurityTx::SetRegistrar {
+                domain_key: DOMAIN,
+                registrar: REGISTRAR.to_vec(),
+            },
+        )
+        .is_ok());
     }
 
     #[test]

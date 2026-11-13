@@ -95,44 +95,56 @@ fn control_honest_logging_proof_is_accepted() {
     );
 }
 
-/// No trace containing the reserved VerifyInference opcode can be proven.
+/// A valid VerifyInference trace proves and verifies end-to-end under default
+/// activation, and fails under explicit `MainnetActivation::closed()`.
 #[test]
 fn verify_inference_is_refused_in_any_trace() {
     let model_c = 0xABCD_EF01_2345_6789u64;
     let input_c = 0x1122_3344_5566_7788u64;
-    let output_c = bud_vm::poseidon4_hash(model_c, input_c);
     let program = vec![
-        inst(Opcode::VerifyInference, 2, 1, 0, 0),
+        inst(Opcode::VerifyInference, 2, 1, 3, 5),
         inst(Opcode::Halt, 0, 0, 0, 0),
     ];
     let mut vm = Vm::new(1024);
-    vm.memory[64..72].copy_from_slice(&model_c.to_le_bytes());
-    vm.memory[72..80].copy_from_slice(&input_c.to_le_bytes());
-    vm.memory[80..88].copy_from_slice(&output_c.to_le_bytes());
-    vm.registers[1] = 64;
+    vm.registers[1] = model_c;
+    vm.registers[3] = input_c;
     let receipt = vm.run_receipt(&program);
     assert!(receipt.success);
+    assert_eq!(
+        vm.registers[2],
+        bud_vm::verify_inference_digest(model_c, input_c, 5)
+    );
     assert!(vm
         .trace
         .iter()
         .any(|s| s.instruction.opcode == Opcode::VerifyInference));
     let pi = honest_inputs(&vm, &program, &receipt.events);
-    let res = Plonky3Adapter::prove(&vm.trace, &pi, &program)
-        .map_err(|e| format!("prove refused: {e:?}"))
-        .and_then(|envelope| {
-            Plonky3Adapter::verify_with_activation(
-                &envelope,
-                &pi,
-                &program,
-                MainnetActivation::full(),
-            )
-            .map_err(|e| format!("verify refused: {e:?}"))
-        });
-    assert!(res.is_err(), "a trace with VerifyInference must be refused");
-    let err = res.unwrap_err();
+    let envelope = must_ok(
+        Plonky3Adapter::prove(&vm.trace, &pi, &program),
+        "VerifyInference prove",
+    );
+    must_ok(
+        Plonky3Adapter::verify(&envelope, &pi, &program),
+        "VerifyInference default verify",
+    );
+    must_ok(
+        Plonky3Adapter::verify_with_activation(
+            &envelope,
+            &pi,
+            &program,
+            MainnetActivation::full(),
+        ),
+        "VerifyInference full verify",
+    );
     assert!(
-        err.starts_with("verify refused"),
-        "the AIR must refuse it, got {err}"
+        Plonky3Adapter::verify_with_activation(
+            &envelope,
+            &pi,
+            &program,
+            MainnetActivation::closed(),
+        )
+        .is_err(),
+        "VerifyInference must be refused when explicitly closed"
     );
 }
 

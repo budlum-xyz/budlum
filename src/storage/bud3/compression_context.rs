@@ -1,9 +1,8 @@
 //! Shared compression context implementations.
 //!
-//! `committed` retains the existing committed-manifest/local-cache API and
-//! fee/rotation engine. `corpus` preserves the source branch's corpus frame,
-//! activation and access-observation model without replacing that API. Both
-//! remain closed on testnet until their independent activation gates open.
+//! `committed` retains the committed-manifest/local-cache API and fee/rotation
+//! engine. `corpus` provides the corpus frame, activation, and access-observation
+//! model, active on testnet `45261` from genesis (`ACTIVATION` height `Some(0)`).
 
 pub mod committed;
 pub mod corpus;

@@ -171,7 +171,20 @@ message HostRequest {
     HostCharge charge = 5;
     Identity bud_balance = 6;
     HostTransfer bud_transfer = 7;
+    HostCheckpoint checkpoint = 8;
   }
+}
+
+enum CheckpointOp {
+  CHECKPOINT_OP_UNSPECIFIED = 0;
+  CHECKPOINT_OP_BEGIN = 1;
+  CHECKPOINT_OP_COMMIT = 2;
+  CHECKPOINT_OP_ROLLBACK = 3;
+}
+
+message HostCheckpoint {
+  CheckpointOp op = 1;
+  uint64 id = 2;
 }
 
 message HostRead {
@@ -219,6 +232,7 @@ message HostResponse {
     UniversalResult universal = 3;
     Amount balance = 4;
     HostError error = 5;
+    uint64 checkpoint_id = 6;
   }
 }
 

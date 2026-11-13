@@ -323,6 +323,14 @@ pub const FINALIZED_ROOT_GINDEX_DENEB: u64 = 105;
 /// fields, so the state tree is one level deeper: `84 * 2 + 1 = 169`.
 pub const FINALIZED_ROOT_GINDEX_ELECTRA: u64 = 169;
 
+/// `NEXT_SYNC_COMMITTEE_GINDEX_DENEB`: `next_sync_committee` is BeaconState
+/// field index 23 in a 32-leaf container (`32 + 23 = 55`).
+pub const NEXT_SYNC_COMMITTEE_GINDEX_DENEB: u64 = 55;
+
+/// `NEXT_SYNC_COMMITTEE_GINDEX_ELECTRA`: Electra BeaconState container depth
+/// is 6 (`64 + 23 = 87`).
+pub const NEXT_SYNC_COMMITTEE_GINDEX_ELECTRA: u64 = 87;
+
 /// The proof that the header a deposit is about is final.
 ///
 /// A sync committee signs a recent *attested* header, which is the chain's
@@ -342,7 +350,7 @@ pub struct FinalityUpdate {
 }
 
 /// Walk an SSZ Merkle branch for generalized index `gindex`.
-fn walk_branch(leaf: [u8; 32], branch: &[[u8; 32]], gindex: u64) -> Option<[u8; 32]> {
+pub(crate) fn walk_branch(leaf: [u8; 32], branch: &[[u8; 32]], gindex: u64) -> Option<[u8; 32]> {
     if gindex < 2 {
         return None;
     }
@@ -391,22 +399,60 @@ pub struct BeaconBinding {
     pub execution_block_hash_branch: Vec<[u8; 32]>,
 }
 
-fn sha256_pair(left: &[u8; 32], right: &[u8; 32]) -> [u8; 32] {
+pub(crate) fn sha256_pair(left: &[u8; 32], right: &[u8; 32]) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(left);
     hasher.update(right);
     hasher.finalize().into()
 }
 
-fn u64_chunk(value: u64) -> [u8; 32] {
+pub(crate) fn u64_chunk(value: u64) -> [u8; 32] {
     let mut chunk = [0u8; 32];
     chunk[..8].copy_from_slice(&value.to_le_bytes());
     chunk
 }
 
+/// SSZ `hash_tree_root` of a `BeaconBlockHeader`: five fields padded to eight.
+pub(crate) fn beacon_header_hash_tree_root(
+    slot: u64,
+    proposer_index: u64,
+    parent_root: [u8; 32],
+    state_root: [u8; 32],
+    body_root: [u8; 32],
+) -> [u8; 32] {
+    merkleize_chunks(&[
+        u64_chunk(slot),
+        u64_chunk(proposer_index),
+        parent_root,
+        state_root,
+        body_root,
+    ])
+}
+
+/// SSZ `hash_tree_root` of a 48-byte BLS pubkey (padded to 64 bytes -> 2 chunks).
+fn pubkey_hash_tree_root(pubkey: &[u8; BLS_PUBKEY_LEN]) -> [u8; 32] {
+    let mut c0 = [0u8; 32];
+    let mut c1 = [0u8; 32];
+    c0.copy_from_slice(&pubkey[..32]);
+    c1[..16].copy_from_slice(&pubkey[32..48]);
+    sha256_pair(&c0, &c1)
+}
+
+/// SSZ `hash_tree_root(SyncCommittee)` for Altair-and-later committees.
+#[must_use]
+pub fn sync_committee_hash_tree_root(
+    pubkeys: &[[u8; BLS_PUBKEY_LEN]; SYNC_COMMITTEE_SIZE],
+    aggregate_pubkey: &[u8; BLS_PUBKEY_LEN],
+) -> [u8; 32] {
+    let pk_roots: Vec<[u8; 32]> = pubkeys.iter().map(pubkey_hash_tree_root).collect();
+    let pubkeys_root = merkleize_chunks(&pk_roots);
+    let agg_root = pubkey_hash_tree_root(aggregate_pubkey);
+    sha256_pair(&pubkeys_root, &agg_root)
+}
+
 /// SSZ `hash_tree_root` of a fixed list of 32-byte chunks, padded with zero
 /// chunks to the next power of two.
-fn merkleize_chunks(chunks: &[[u8; 32]]) -> [u8; 32] {
+pub(crate) fn merkleize_chunks(chunks: &[[u8; 32]]) -> [u8; 32] {
     let mut width = 1usize;
     while width < chunks.len() {
         width *= 2;
@@ -555,6 +601,44 @@ pub fn verify_execution_block_finality(
 pub fn rotate_period(state: &mut SyncCommitteeState) -> Result<(), SyncCommitteeError> {
     let _never_rotates_without_the_branch = state.current_period;
     Err(SyncCommitteeError::RotationBranchRequired)
+}
+
+/// Rotate the sync committee using a finalized BeaconState SSZ branch proving
+/// the incoming `next_sync_committee` against `finalized_state_root`.
+///
+/// # Errors
+///
+/// Returns an error when the period does not advance sequentially, the
+/// generalized index is unsupported, or the SSZ Merkle branch does not reconstruct
+/// `finalized_state_root`.
+pub fn rotate_period_with_branch(
+    state: &mut SyncCommitteeState,
+    new_period: u64,
+    finalized_state_root: &[u8; 32],
+    new_next_committee: [[u8; BLS_PUBKEY_LEN]; SYNC_COMMITTEE_SIZE],
+    new_next_aggregate_pubkey: &[u8; BLS_PUBKEY_LEN],
+    next_sync_committee_branch: &[[u8; 32]],
+    gindex: u64,
+) -> Result<(), SyncCommitteeError> {
+    if new_period != state.current_period.saturating_add(1) {
+        return Err(SyncCommitteeError::PeriodMismatch {
+            slot_period: new_period,
+            state_period: state.current_period,
+        });
+    }
+    if gindex != NEXT_SYNC_COMMITTEE_GINDEX_DENEB && gindex != NEXT_SYNC_COMMITTEE_GINDEX_ELECTRA {
+        return Err(SyncCommitteeError::RotationBranchRequired);
+    }
+    let leaf = sync_committee_hash_tree_root(&new_next_committee, new_next_aggregate_pubkey);
+    let proven_root = walk_branch(leaf, next_sync_committee_branch, gindex)
+        .ok_or(SyncCommitteeError::RotationBranchRequired)?;
+    if &proven_root != finalized_state_root {
+        return Err(SyncCommitteeError::NotFinalized);
+    }
+    state.current_sync_committee = state.next_sync_committee;
+    state.next_sync_committee = new_next_committee;
+    state.current_period = new_period;
+    Ok(())
 }
 
 /// Test-only builders shared with `verify.rs`.

@@ -334,6 +334,78 @@ pub fn words_to_bytecode(words: &[u64]) -> Vec<u8> {
     words.iter().flat_map(|w| w.to_le_bytes()).collect()
 }
 
+/// Transaction binding context for AI inference STARK proof generation.
+///
+/// Convenience: exposed for prover clients submitting `AiAttachExecutionProof`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProveInferenceContext {
+    pub chain_id: u64,
+    pub sender: crate::core::address::Address,
+    pub nonce: u64,
+    pub block_height: u64,
+}
+
+/// End-to-end: eval MLP, build guest, STARK-prove bound to transaction context,
+/// and package [`crate::ai::types::AiExecutionProof`].
+///
+/// Convenience: exposed for prover clients submitting replay-protected proofs to
+/// `AiAttachExecutionProof`.
+///
+/// # Errors
+///
+/// Returns an error if evaluation, memory setup, or STARK proving fails.
+pub fn prove_mlp_inference_with_context(
+    spec: &FixedPointMlpSpec,
+    model_id: crate::ai::types::AiModelId,
+    input: &[i32],
+    gas_limit: u64,
+    ctx: ProveInferenceContext,
+) -> Result<(crate::ai::types::AiExecutionProof, Vec<i32>), String> {
+    let host_output = eval_fixed_point_mlp(spec, input)?;
+    let (guest_output, _receipt) = run_matmul_guest(spec, input, gas_limit)?;
+    if guest_output != host_output {
+        return Err(format!(
+            "guest output {guest_output:?} != host output {host_output:?}"
+        ));
+    }
+
+    let in_c = input_commitment(input);
+    let out_c = output_commitment(&host_output);
+    let words = build_matmul_guest_program(spec)?;
+    let program_hash = stark_program_hash_from_words(&words);
+    let bytecode = words_to_bytecode(&words);
+
+    let sender_words = crate::execution::zkvm::address_to_four_words(&ctx.sender);
+    let tx_ctx = crate::execution::zkvm::TxContext {
+        sender: sender_words[0],
+        sender_words,
+        nonce: ctx.nonce,
+        block_height: ctx.block_height,
+    };
+    let (envelope, pi, _prog) = crate::execution::zkvm::prove_bytecode_with_memory_context(
+        &bytecode,
+        gas_limit,
+        ctx.chain_id,
+        tx_ctx,
+        |memory| setup_guest_memory(memory, spec, input).map(|_| ()),
+    )?;
+    let proof_bytes =
+        postcard::to_allocvec(&envelope).map_err(|e| format!("postcard serialize proof: {e}"))?;
+
+    let proof = crate::ai::types::AiExecutionProof {
+        model_id,
+        input_commitment: in_c,
+        output_commitment: out_c,
+        program_hash,
+        proof_bytes,
+        steps: pi.trace_len,
+        gas_used: pi.gas_used,
+        weights_digest: Some(weights_digest(spec)),
+        public_inputs: Some(crate::ai::types::AiExecutionPublicInputs::from_execution_inputs(&pi)),
+    };
+    Ok((proof, host_output))
+}
+
 /// End-to-end: eval MLP, build guest, STARK-prove, package `AiExecutionProof`.
 ///
 /// # Errors

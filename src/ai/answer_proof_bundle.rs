@@ -486,6 +486,13 @@ impl AnswerProofBundle {
         })
     }
 
+    /// Whether this verified proof bundle may carry economic value (`>= VL-2`
+    /// and not refuted, with every internal prose and sentence proof valid).
+    #[must_use]
+    pub fn may_carry_value(&self) -> bool {
+        self.is_authentic() && self.verification_level.may_carry_value()
+    }
+
     /// Monotonically raise the bundle's verification level when asynchronous
     /// committee or STARK proofs arrive. Never alters sentence prose.
     ///
@@ -731,6 +738,8 @@ mod tests {
             LevelRecord::new(),
             "a parsed document carries no earned level"
         );
+        assert!(!parsed.may_carry_value());
+        assert!(bundle.may_carry_value());
 
         let tampered_md = md.replacen("150 seconds", "999 seconds", 1);
         assert!(AnswerProofBundle::from_markdown_document(&tampered_md).is_err());

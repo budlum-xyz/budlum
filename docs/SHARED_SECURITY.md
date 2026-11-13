@@ -6,9 +6,10 @@ piece of software, a Budlum validator. The same collateral backs two networks.
 There are two separate proof-of-stake systems: Gasper on Ethereum and Budlum
 PoS (leader election plus BLS and ML-DSA finality) here. The keys are separate.
 
-Status: the Budlum side is wired behind a genesis flag. It is on for devnet
-and **closed on testnet** (`45261`, proven by `shared_security_is_closed_on_testnet`)
-until the end-to-end Sepolia test passes; the mainnet decision is not taken.
+Status: enabled on devnet (`45262`) and **active on testnet** (`45261`) from
+genesis behind the `shared_security` chain config (`shared_security_is_closed_on_testnet`
+verifies explicit opt-out / unconfigured chain behavior); mainnet activation
+remains gated.
 The Ethereum contracts (`BudlumRegistrar`, `BudlumSlasher`) implement the
 origin-side registration and slashing interface.
 
@@ -74,7 +75,7 @@ validators. Leader election and the finality snapshot read
 
 | Parameter | Testnet default | Note |
 |---|---|---|
-| `enabled` | `false` | Closed on testnet (`45261`); open on devnet (`45262`) for rehearsal. |
+| `enabled` | `true` | Active on testnet (`45261`) and devnet (`45262`). |
 | `max_restaked_share_ppm` | `300_000` | TESTNET-DEFAULT. Below one third: ETH-backed validators cannot finalize alone. |
 | `units_to_weight_ppm` | `1_000_000` | TESTNET-DEFAULT. One BUD weight atom per allocated unit (one gwei of allocated ETH magnitude). |
 | minimum BUD bond | `min_stake` | Testnet activation requires `min_stake`. |

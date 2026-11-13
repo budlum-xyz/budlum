@@ -945,9 +945,10 @@ impl ExecutionEnvironment for SvmEe {
                                 });
                             }
                         };
-                        if from_pointer_op
-                            && dst_acc.lamports == 0
+                        let _ = from_pointer_op;
+                        if dst_acc.lamports == 0
                             && dst_acc.owner == SVM_SYSTEM_PROGRAM_ID
+                            && dst_acc.data.is_empty()
                         {
                             dst_acc.lamports = 1;
                             dst_acc.owner = src_acc.owner;

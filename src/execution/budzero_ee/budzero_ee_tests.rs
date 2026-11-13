@@ -33,8 +33,22 @@ fn sample_ctx(height: u64) -> BlockContext {
 fn verify_merkle_is_closed_on_testnet() {
     let bytecode = encode_program(&[
         Instruction {
+            opcode: Opcode::Load,
+            rd: 1,
+            rs1: 0,
+            rs2: 0,
+            imm: 1,
+        },
+        Instruction {
+            opcode: Opcode::Load,
+            rd: 2,
+            rs1: 0,
+            rs2: 0,
+            imm: 2,
+        },
+        Instruction {
             opcode: Opcode::VerifyMerkle,
-            rd: 0,
+            rd: 4,
             rs1: 1,
             rs2: 2,
             imm: 0,
@@ -47,22 +61,32 @@ fn verify_merkle_is_closed_on_testnet() {
             imm: 0,
         },
     ]);
-    assert!(
-        decode_budzero_for_testnet(&bytecode).is_err(),
-        "VerifyMerkle must be refused at BudZero EE deploy validation on testnet"
-    );
-    assert!(
-        ZkVmExecutor::execute_bytecode_mainnet(&bytecode, DEFAULT_CONTRACT_GAS_LIMIT).is_err(),
-        "VerifyMerkle must be refused at BudZero VM execution on testnet"
-    );
+    decode_budzero_for_testnet(&bytecode)
+        .expect("VerifyMerkle is enabled at BudZero EE deploy validation on testnet");
+    ZkVmExecutor::execute_bytecode_mainnet(&bytecode, DEFAULT_CONTRACT_GAS_LIMIT)
+        .expect("VerifyMerkle executes and proves on testnet under MainnetActivation::default()");
 }
 
 #[test]
 fn verify_inference_is_closed_on_testnet() {
     let bytecode = encode_program(&[
         Instruction {
+            opcode: Opcode::Load,
+            rd: 1,
+            rs1: 0,
+            rs2: 0,
+            imm: 7,
+        },
+        Instruction {
+            opcode: Opcode::Load,
+            rd: 2,
+            rs1: 0,
+            rs2: 0,
+            imm: 11,
+        },
+        Instruction {
             opcode: Opcode::VerifyInference,
-            rd: 0,
+            rd: 4,
             rs1: 1,
             rs2: 2,
             imm: 3,
@@ -75,14 +99,10 @@ fn verify_inference_is_closed_on_testnet() {
             imm: 0,
         },
     ]);
-    assert!(
-        decode_budzero_for_testnet(&bytecode).is_err(),
-        "VerifyInference must be refused at BudZero EE deploy validation on testnet"
-    );
-    assert!(
-        ZkVmExecutor::execute_bytecode_mainnet(&bytecode, DEFAULT_CONTRACT_GAS_LIMIT).is_err(),
-        "VerifyInference must be refused at BudZero VM execution on testnet"
-    );
+    decode_budzero_for_testnet(&bytecode)
+        .expect("VerifyInference is enabled at BudZero EE deploy validation on testnet");
+    ZkVmExecutor::execute_bytecode_mainnet(&bytecode, DEFAULT_CONTRACT_GAS_LIMIT)
+        .expect("VerifyInference executes and proves on testnet under MainnetActivation::default()");
 }
 
 #[test]

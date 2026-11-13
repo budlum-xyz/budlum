@@ -3,10 +3,10 @@
 //! A closed-loop AI layer. This module binds the AI inference layer to real budlum-core
 //! primitives (no mocks):
 //!
-//! **Scope boundary:** verifiable here refers to the access and bond checks,
-//! not to cryptographic verification of the inference. On-chain inference
-//! proof is not verified today; the transaction path refuses models that request
-//! `require_execution_proof` fail-closed. Details: `docs/AI_VERIFICATION_STATUS.md`.
+//! **Scope boundary:** access grants, compute bonds, perception limits, and
+//! Plonky3 STARK verification for registered `require_execution_proof` MLP models
+//! are active on testnet (`FULL_AI_STARK_VERIFICATION_LIVE = true`). Details:
+//! `docs/AI_VERIFICATION_STATUS.md`.
 //!
 //! - **Operator compute bond** = `AiRegistry` verifier stake (the AI-layer-first decision).
 //! - **Closed-loop data** = real `Pollen` `AccessGrant` verification.

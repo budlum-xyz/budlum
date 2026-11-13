@@ -18,8 +18,9 @@ use crate::execution::coordinator::alias::{
     bech32_contract_addr, derive_evm_alias, derive_wasm_alias, is_ed25519_on_curve, ALIAS_NAMESPACE,
 };
 use crate::execution::coordinator::state::{
-    derive_uel_asset_id, NS_EVM_ACCOUNT, NS_EVM_CODE, NS_MOVE_STATE, NS_SVM_ACCOUNT, NS_UEL_ASSETS,
-    NS_WASM_CODE, NS_WASM_CONTRACT,
+    derive_uel_asset_id, NS_CAIRO_STATE, NS_EVM_ACCOUNT, NS_EVM_CODE, NS_MOVE_STATE,
+    NS_NEAR_STATE, NS_PLUTUS_STATE, NS_POLKAVM_STATE, NS_RV32_STATE, NS_SUI_OBJECT,
+    NS_SVM_ACCOUNT, NS_TVM_STATE, NS_UEL_ASSETS, NS_UTXO_STATE, NS_WASM_CODE, NS_WASM_CONTRACT,
 };
 use budlum_uel_abi::{EeId, HostRead, Namespace};
 use serde::{Deserialize, Serialize};
@@ -229,11 +230,19 @@ pub fn derive_pointer_address(asset_id: &[u8; 32], target_ee: EeId) -> Result<Ve
             }
             Err(String::from("failed to derive off-curve SVM pointer PDA"))
         }
-        EeId::MOVE => {
+        EeId::MOVE
+        | EeId::MOVE_SUI
+        | EeId::CAIRO
+        | EeId::NEAR_WASM
+        | EeId::POLKAVM
+        | EeId::TVM
+        | EeId::UTXO
+        | EeId::PLUTUS
+        | EeId::RV32 => {
             let mut h = Sha3_256::new();
             h.update(b"BDLM_UEL_POINTER_V1");
             h.update(asset_id);
-            h.update([EeId::MOVE.0]);
+            h.update([target_ee.0]);
             let digest: [u8; 32] = h.finalize().into();
             Ok(digest.to_vec())
         }
@@ -275,9 +284,23 @@ pub fn register_asset_entry(
     symbol: String,
     name: String,
 ) -> Result<RegisteredAsset, String> {
-    if !matches!(home_ee, EeId::EVM | EeId::WASM | EeId::SVM | EeId::MOVE) {
+    if !matches!(
+        home_ee,
+        EeId::EVM
+            | EeId::WASM
+            | EeId::SVM
+            | EeId::MOVE
+            | EeId::MOVE_SUI
+            | EeId::CAIRO
+            | EeId::NEAR_WASM
+            | EeId::POLKAVM
+            | EeId::TVM
+            | EeId::UTXO
+            | EeId::PLUTUS
+            | EeId::RV32
+    ) {
         return Err(format!(
-            "asset registration supports EVM, WASM, SVM, and Move homes; got 0x{:02x}",
+            "asset registration supports catalog execution environments (0x01..0x0C); got 0x{:02x}",
             home_ee.0
         ));
     }
@@ -398,6 +421,31 @@ pub fn deploy_asset_pointer(
                 .execution_state
                 .write(NS_MOVE_STATE, &mod_key, Some(&code))?;
         }
+        EeId::MOVE_SUI
+        | EeId::CAIRO
+        | EeId::NEAR_WASM
+        | EeId::POLKAVM
+        | EeId::TVM
+        | EeId::UTXO
+        | EeId::PLUTUS
+        | EeId::RV32 => {
+            let ns = match target_ee {
+                EeId::MOVE_SUI => NS_SUI_OBJECT,
+                EeId::CAIRO => NS_CAIRO_STATE,
+                EeId::NEAR_WASM => NS_NEAR_STATE,
+                EeId::POLKAVM => NS_POLKAVM_STATE,
+                EeId::TVM => NS_TVM_STATE,
+                EeId::UTXO => NS_UTXO_STATE,
+                EeId::PLUTUS => NS_PLUTUS_STATE,
+                EeId::RV32 => NS_RV32_STATE,
+                other => return Err(format!("unsupported pointer target EE 0x{:02x}", other.0)),
+            };
+            let mut code_key = Vec::with_capacity(6 + ptr_addr.len());
+            code_key.extend_from_slice(b"code:");
+            code_key.push(target_ee.0);
+            code_key.extend_from_slice(&ptr_addr);
+            state.execution_state.write(ns, &code_key, Some(&code))?;
+        }
         other => {
             return Err(format!("unsupported pointer target EE 0x{:02x}", other.0));
         }
@@ -409,4 +457,41 @@ pub fn deploy_asset_pointer(
         .execution_state
         .write(NS_UEL_ASSETS, asset_id, Some(&updated))?;
     Ok(ptr_addr)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn expansion_ees_support_asset_registration_and_pointers() {
+        let mut state = AccountState::default();
+        let entry = register_asset_entry(
+            &mut state,
+            EeId::MOVE_SUI,
+            b"0x2::sui::SUI",
+            AssetStandard::Fungible,
+            9,
+            "SUI".into(),
+            "Sui Native".into(),
+        )
+        .expect("Sui home asset registers cleanly");
+        assert!(derive_pointer_address(&entry.asset_id, EeId::BUDZERO).is_err());
+
+        for target in [
+            EeId::CAIRO,
+            EeId::NEAR_WASM,
+            EeId::POLKAVM,
+            EeId::TVM,
+            EeId::UTXO,
+            EeId::PLUTUS,
+            EeId::RV32,
+        ] {
+            let ptr = deploy_asset_pointer(&mut state, &entry.asset_id, target)
+                .expect("expansion EE deploys asset pointer");
+            assert_eq!(ptr.len(), 32);
+        }
+        let reloaded = read_registered_asset(&state, &entry.asset_id).unwrap().unwrap();
+        assert_eq!(reloaded.pointers.len(), 7);
+    }
 }

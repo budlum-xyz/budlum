@@ -81,6 +81,7 @@ pub use bof1::{Bof1Error, Flags, Header, Object};
 pub use content_gateway::{Bud3ContentGateway, GatewaySymbolBundle};
 pub use content_id::{ContentId, ContentKey};
 pub use content_ref::{ContentRef, ContentRefError};
+pub use custody::{prove_symbol_root_path, verify_symbol_root_path};
 pub use delete::{
     check_same_owner_dependency, requires_rehydration_before_transfer, GrantShredAuth, ShredOutcome,
 };
@@ -130,10 +131,12 @@ pub use qr::{
     Bud3QrError, OpticalSecond,
 };
 pub use repair::{
-    assign_repairer, bad_repair_slash_amount, build_segment_repair, is_unseen_share_lost,
-    repair_task_key, should_audit_repair_batch, verify_repaired_symbol, PreparedRepair,
-    RepairError, BAD_REPAIR_SLASH_BPS, FULL_UNSEEN_LOSS_SECS, MOBILE_UNSEEN_LOSS_SECS,
-    REPAIR_AUDIT_PPM, REPAIR_HANDOVER_BLOCKS,
+    assign_repairer, bad_repair_slash_amount, build_repair_proven_witness, build_segment_repair,
+    is_unseen_share_lost, repair_attestation_digest, repair_task_key, should_audit_repair_batch,
+    sign_repair_attestation, verify_repaired_symbol, PreparedRepair, RepairAttestation, RepairError,
+    RepairSymbolProof, RepairWitness, BAD_REPAIR_SLASH_BPS, FULL_UNSEEN_LOSS_SECS,
+    MAX_REPAIR_WITNESS_SYMBOLS, MIN_REPAIR_ATTESTATIONS, MOBILE_UNSEEN_LOSS_SECS, REPAIR_AUDIT_PPM,
+    REPAIR_ATTEST_DOMAIN, REPAIR_HANDOVER_BLOCKS,
 };
 pub use replace::{
     admit_object_replacement, select_codec_with_fast_probe, PendingReplacementBarrier,

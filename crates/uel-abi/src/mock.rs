@@ -260,6 +260,13 @@ impl ExecutionEnvironment for MockEe {
 /// What a [`MemoryHost`] does with a Universal Call.
 pub type UniversalHandler = Box<dyn FnMut(UniversalCall) -> Result<UniversalResult, HostError>>;
 
+struct MemoryCheckpoint {
+    id: u64,
+    state: BTreeMap<(String, Vec<u8>), Vec<u8>>,
+    balances: BTreeMap<EeIdentity, u128>,
+    logs: Vec<EeLog>,
+}
+
 /// An in-memory host: state, balances, logs and a gas budget. Enough to test a
 /// coordinator-side flow and a worker round trip without the real overlay.
 pub struct MemoryHost {
@@ -276,6 +283,8 @@ pub struct MemoryHost {
     /// Universal calls received.
     pub universal_calls: Vec<UniversalCall>,
     handler: Option<UniversalHandler>,
+    next_checkpoint: u64,
+    checkpoints: Vec<MemoryCheckpoint>,
 }
 
 impl MemoryHost {
@@ -290,6 +299,8 @@ impl MemoryHost {
             gas_charged: 0,
             universal_calls: Vec::new(),
             handler: None,
+            next_checkpoint: 1,
+            checkpoints: Vec::new(),
         }
     }
 
@@ -372,6 +383,52 @@ impl HostApi for MemoryHost {
             .ok_or_else(|| HostError::Invalid("balance overflow".into()))?;
         self.balances.insert(from.clone(), left);
         self.balances.insert(to.clone(), gained);
+        Ok(())
+    }
+
+    fn checkpoint_begin(&mut self) -> Result<u64, HostError> {
+        let id = self.next_checkpoint;
+        self.next_checkpoint = self
+            .next_checkpoint
+            .checked_add(1)
+            .ok_or_else(|| HostError::Invalid("checkpoint id overflow".into()))?;
+        self.checkpoints.push(MemoryCheckpoint {
+            id,
+            state: self.state.clone(),
+            balances: self.balances.clone(),
+            logs: self.logs.clone(),
+        });
+        Ok(id)
+    }
+
+    fn checkpoint_commit(&mut self, id: u64) -> Result<(), HostError> {
+        let Some(pos) = self.checkpoints.iter().rposition(|cp| cp.id == id) else {
+            return Err(HostError::Invalid(format!("unknown checkpoint {id}")));
+        };
+        if pos + 1 != self.checkpoints.len() {
+            return Err(HostError::Invalid(format!(
+                "out-of-order checkpoint commit {id}"
+            )));
+        }
+        self.checkpoints.pop();
+        Ok(())
+    }
+
+    fn checkpoint_rollback(&mut self, id: u64) -> Result<(), HostError> {
+        let Some(pos) = self.checkpoints.iter().rposition(|cp| cp.id == id) else {
+            return Err(HostError::Invalid(format!("unknown checkpoint {id}")));
+        };
+        if pos + 1 != self.checkpoints.len() {
+            return Err(HostError::Invalid(format!(
+                "out-of-order checkpoint rollback {id}"
+            )));
+        }
+        let Some(cp) = self.checkpoints.pop() else {
+            return Err(HostError::Invalid("missing checkpoint".into()));
+        };
+        self.state = cp.state;
+        self.balances = cp.balances;
+        self.logs = cp.logs;
         Ok(())
     }
 }

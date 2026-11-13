@@ -756,17 +756,28 @@ mod tests {
         assert!(report.relay_token_line().contains("relay-status alarm"));
     }
 
-    /// A relay on the default activation state does not accept the canonical
-    /// storage challenge: it uses `VerifyMerkle`, which is closed until it is
-    /// activated, and being in the canonical set does not open it.
+    /// A relay on `MainnetActivation::default()` accepts the canonical storage
+    /// challenge (`VerifyMerkle` is active), while `MainnetActivation::closed()`
+    /// refuses it cleanly with an alarm naming `VerifyMerkle`.
     #[test]
     fn default_activation_refuses_the_canonical_verify_merkle_program() {
         let (envelope, pi, program) = prove_canonical();
-        let report = verify_and_report_at(
+        let accepted = verify_and_report_at(
             &envelope,
             &pi,
             &program,
             MainnetActivation::default(),
+            1_700_000_000,
+        );
+        assert_eq!(accepted.status, RelayStatus::Ok);
+        assert!(accepted.is_canonical);
+        assert!(accepted.verify_report_sig());
+
+        let report = verify_and_report_at(
+            &envelope,
+            &pi,
+            &program,
+            MainnetActivation::closed(),
             1_700_000_000,
         );
         assert_ne!(

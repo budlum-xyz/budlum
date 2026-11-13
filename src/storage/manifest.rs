@@ -784,6 +784,15 @@ impl ContentManifest {
     /// what was missing was anything applying them to a manifest that arrived
     /// fully formed instead of being built locally.
     pub fn validate_untrusted(&self) -> Result<(), String> {
+        if self.shards.is_empty() {
+            return Err("ContentManifest must have at least one shard".into());
+        }
+        if self.shards.len() > MAX_MANIFEST_SHARDS {
+            return Err(format!(
+                "ContentManifest lists {} shards, above the {MAX_MANIFEST_SHARDS} allowed",
+                self.shards.len()
+            ));
+        }
         self.erasure.validate()?;
         if self.erasure.n != self.shard_count {
             return Err(format!(

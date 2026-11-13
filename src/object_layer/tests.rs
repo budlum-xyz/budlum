@@ -6,7 +6,7 @@ use crate::core::address::Address;
 use crate::domain::types::DomainId;
 use crate::object_layer::charter::CharterRefusal;
 use crate::object_layer::charter::{
-    CanonicalCodeHashes, CharterStatus, CodeProof, DataPolicy, DomainCharter,
+    CanonicalCodeHashes, CharterStatus, CodeProof, DataPolicy, DomainCharter, HomeCodeStateProof,
 };
 use crate::object_layer::family::class_ref_bytes;
 use crate::object_layer::family::{
@@ -15,8 +15,9 @@ use crate::object_layer::family::{
 };
 use crate::object_layer::ids::{AssetClassId, AssetId, HomeIdentity};
 use crate::object_layer::registry::{
-    Call, ClassRegistration, ClassStatus, FreezeReason, HomeEventProof, HomeFinality, Location,
-    ObjectLayerParams, ObjectLayerRegistry, Phase, Refusal,
+    Call, ClassRegistration, ClassStatus, FreezeReason, HomeEventProof, HomeFinality,
+    HomeSliceProof, Location, ObjectLayerParams, ObjectLayerRegistry, Phase, Refusal,
+    DEFAULT_MIN_CLASS_BOND,
 };
 use crate::object_layer::rule::{
     AssetSlice, ClassRule, ClassSlice, Condition, Holder, ReferenceSample, TemplateId,
@@ -79,6 +80,7 @@ fn good_proof() -> CodeProof {
     CodeProof {
         endpoint_code_hash: CANON_ENDPOINT,
         verifier_code_hash: CANON_VERIFIER,
+        home_proof: None,
     }
 }
 
@@ -162,7 +164,8 @@ fn registration(
         slice,
         slice_source: source,
         samples: samples(kind),
-        bond: 0,
+        bond: DEFAULT_MIN_CLASS_BOND,
+        state_proof: None,
     }
 }
 
@@ -294,6 +297,7 @@ fn charter_refuses_non_canonical_endpoint(family: HomeVmFamily) {
     let proof = CodeProof {
         endpoint_code_hash: [0xee; 32],
         verifier_code_hash: CANON_VERIFIER,
+        home_proof: None,
     };
     assert_eq!(
         reg.charter(DOMAIN, bad, &proof, true),
@@ -303,6 +307,7 @@ fn charter_refuses_non_canonical_endpoint(family: HomeVmFamily) {
     let wrong = CodeProof {
         endpoint_code_hash: [0xee; 32],
         verifier_code_hash: CANON_VERIFIER,
+        home_proof: None,
     };
     assert_eq!(
         reg.charter(DOMAIN, charter_for(family, fx), &wrong, true),
@@ -766,11 +771,19 @@ fn class_registration_refuses_closed_rules_and_wrong_templates() {
         w.fx.address(0x16),
         ClassSlice::new(),
     );
-    reg.rule = ClassRule::Program;
+    reg.rule = ClassRule::Native;
     assert_eq!(
         w.reg.register_class(Address([9; 32]), reg.clone()),
         Err(Refusal::ClassClosedRule)
     );
+    reg.rule = ClassRule::Program;
+    assert!(w.reg.register_class(Address([9; 32]), reg.clone()).is_ok());
+
+    reg.contract = w.fx.address(0x17);
+    reg.rule = ClassRule::Replica;
+    assert!(w.reg.register_class(Address([9; 32]), reg.clone()).is_ok());
+
+    reg.contract = w.fx.address(0x18);
     reg.rule = template(TemplateId::UniqueV1);
     assert_eq!(
         w.reg.register_class(Address([9; 32]), reg.clone()),
@@ -793,22 +806,26 @@ fn object_layer_is_closed_on_testnet() {
         activation: ACTIVATION,
         finality: &YES,
         domain_active: &|_| true,
+        home_state_root: None,
+        require_home_state_proofs: false,
+        home_stipend_verifier: None,
     };
-    let tx = ObjectLayerTx::Call { calls: Vec::new() };
-    assert_eq!(tx.apply(&mut reg, &ctx), Err(TxRefusal::Closed));
-    assert!(reg.is_empty());
-
-    let open = TxContext {
-        activation: ObjectLayerActivation { height: Some(10) },
-        ..ctx
-    };
+    assert!(ACTIVATION.is_open_at(0));
     assert_eq!(
         ObjectLayerTx::Challenge {
             class: AssetClassId([0; 32])
         }
-        .apply(&mut reg, &open),
+        .apply(&mut reg, &ctx),
         Err(TxRefusal::Refused(Refusal::UnknownClass))
     );
+
+    let closed = TxContext {
+        activation: ObjectLayerActivation { height: None },
+        ..ctx
+    };
+    let tx = ObjectLayerTx::Call { calls: Vec::new() };
+    assert_eq!(tx.apply(&mut reg, &closed), Err(TxRefusal::Closed));
+    assert!(reg.is_empty());
 }
 
 #[test]
@@ -826,10 +843,9 @@ fn settlement_door_refuses_object_layer_on_testnet() {
     let tx = crate::settlement::domains::SettlementTx::ObjectLayer(Box::new(
         ObjectLayerTx::SetTentativeConsent { consent: true },
     ));
-    let err = crate::settlement::domains::execute_settlement_tx(&mut state, &ctx, &tx)
-        .expect_err("object layer door must stay closed on testnet 45261");
-    assert!(err.to_string().contains("object_layer_closed"));
-    assert!(state.settlement.object_layer.is_empty());
+    crate::settlement::domains::execute_settlement_tx(&mut state, &ctx, &tx)
+        .expect("object layer door is open on testnet 45261 from height 0");
+    assert!(!state.settlement.object_layer.is_empty());
 }
 
 #[test]
@@ -938,7 +954,8 @@ fn adopt_escape_record_v1_and_challenge_rebut_forgery_paths() {
                 slice: ClassSlice::new(),
                 slice_source: SliceSource::AccountAndStorageProof,
                 samples: record_samples,
-                bond: 100,
+                bond: DEFAULT_MIN_CLASS_BOND,
+                state_proof: None,
             },
         )
         .unwrap();
@@ -1066,4 +1083,342 @@ fn object_layer_root_changes_with_content() {
     };
     w.arrive_fungible(5, a).unwrap();
     assert_ne!(r0, w.reg.root());
+}
+
+#[test]
+fn default_min_class_bond_and_charter_home_proof_enforced() {
+    use crate::consensus::merkle_tree::merkle_proof;
+    use crate::core::hash::hash_fields_bytes;
+    use crate::cross_domain::event_tree::MerkleProof;
+    use crate::settlement::commitment_tree::{
+        merkle_node_hash, merkle_odd_promote_hash, merkle_root,
+    };
+
+    assert_ne!(DEFAULT_MIN_CLASS_BOND, 0);
+    let fx = fixture_for(HomeVmFamily::CosmWasm);
+    let mut reg = ObjectLayerRegistry::with_params(params(HomeVmFamily::CosmWasm));
+    let ch = charter_for(HomeVmFamily::CosmWasm, fx);
+    let l0 = hash_fields_bytes(&[
+        b"BDLM_UOL_HOME_CODE_V1",
+        ch.chain_reference.as_bytes(),
+        &ch.endpoint,
+        &ch.endpoint_code_hash,
+    ]);
+    let l1 = hash_fields_bytes(&[
+        b"BDLM_UOL_HOME_CODE_V1",
+        ch.chain_reference.as_bytes(),
+        &ch.verifier,
+        &ch.verifier_code_hash,
+    ]);
+    let leaves = vec![l0, l1];
+    let state_root = merkle_root(&leaves);
+    let p0 = MerkleProof {
+        leaf: l0,
+        index: 0,
+        siblings: merkle_proof(&leaves, 0, merkle_node_hash, merkle_odd_promote_hash).unwrap(),
+    };
+    let p1 = MerkleProof {
+        leaf: l1,
+        index: 1,
+        siblings: merkle_proof(&leaves, 1, merkle_node_hash, merkle_odd_promote_hash).unwrap(),
+    };
+    let proven = CodeProof {
+        endpoint_code_hash: CANON_ENDPOINT,
+        verifier_code_hash: CANON_VERIFIER,
+        home_proof: Some(HomeCodeStateProof {
+            state_root,
+            endpoint_proof: vec![bincode::serialize(&p0).unwrap()],
+            verifier_proof: vec![bincode::serialize(&p1).unwrap()],
+        }),
+    };
+
+    assert_eq!(
+        reg.charter_verified(DOMAIN, ch.clone(), &good_proof(), true, Some(state_root), true),
+        Err(Refusal::Charter(CharterRefusal::ProofDisagrees))
+    );
+    assert_eq!(
+        reg.charter_verified(DOMAIN, ch.clone(), &proven, true, Some([0xEE; 32]), true),
+        Err(Refusal::Charter(CharterRefusal::ProofDisagrees))
+    );
+    assert_eq!(
+        reg.charter_verified(DOMAIN, ch, &proven, true, Some(state_root), true),
+        Ok(true)
+    );
+
+    let mut small_bond = registration(
+        HomeVmFamily::CosmWasm,
+        AssetKind::Fungible,
+        fx.address(0x70),
+        ClassSlice::new(),
+    );
+    small_bond.bond = DEFAULT_MIN_CLASS_BOND - 1;
+    assert_eq!(
+        reg.register_class(Address([9; 32]), small_bond),
+        Err(Refusal::BondTooSmall)
+    );
+}
+
+#[test]
+fn settlement_charter_requires_domain_operator_and_refresh_requires_state_proof() {
+    use crate::core::hash::hash_fields_bytes;
+    use crate::cross_domain::event_tree::MerkleProof;
+    use crate::domain::plugin::default_domain;
+    use crate::domain::types::ConsensusKind;
+    use crate::settlement::commitment_tree::{
+        merkle_node_hash, merkle_odd_promote_hash, merkle_root,
+    };
+
+    let mut state = crate::core::account::AccountState::new();
+    let dom = default_domain(DOMAIN, ConsensusKind::PoS, 45262, "pos-committee-v1", 1);
+    let operator = dom.operator.expect("operator set");
+    state.settlement.domains.register(dom).unwrap();
+
+    let fx = fixture_for(HomeVmFamily::CosmWasm);
+    let ch = charter_for(HomeVmFamily::CosmWasm, fx);
+    let attacker = Address([0x55; 32]);
+    assert_ne!(attacker, operator);
+    let ctx_attacker = crate::settlement::domains::SettlementTxContext {
+        sender: attacker,
+        chain_id: crate::core::chain_config::Network::Testnet
+            .chain_id()
+            .value(),
+        fee: 0,
+        bls: || Box::new(crate::cross_domain::external::intake::PairingBls),
+    };
+    let tx = crate::settlement::domains::SettlementTx::ObjectLayer(Box::new(
+        ObjectLayerTx::Charter {
+            domain: DOMAIN,
+            charter: ch.clone(),
+            proof: good_proof(),
+        },
+    ));
+    let err = crate::settlement::domains::execute_settlement_tx(&mut state, &ctx_attacker, &tx)
+        .unwrap_err();
+    assert!(format!("{err:?}").contains("operator"));
+
+    let mut w = World::new(HomeVmFamily::CosmWasm);
+    let class = w.class(AssetKind::Unique);
+    let field = profile_for(HomeVmFamily::CosmWasm)
+        .upgrade_authority_field()
+        .to_string();
+    let updates: ClassSlice = [(field.clone(), vec![2])].into_iter().collect();
+    assert_eq!(
+        w.reg.refresh_class_verified(
+            Address([9; 32]),
+            class,
+            updates.clone(),
+            Phase::Final,
+            None,
+            Some([0x11; 32]),
+            true,
+        ),
+        Err(Refusal::UnprovenEvent)
+    );
+
+    let mut slice_bytes = Vec::new();
+    let k_bytes = field.as_bytes();
+    slice_bytes.extend_from_slice(&u32::try_from(k_bytes.len()).unwrap().to_le_bytes());
+    slice_bytes.extend_from_slice(k_bytes);
+    slice_bytes.extend_from_slice(&1u32.to_le_bytes());
+    slice_bytes.extend_from_slice(&[2]);
+    let leaf = hash_fields_bytes(&[
+        b"BDLM_UOL_SLICE_PROOF_V1",
+        ch.chain_reference.as_bytes(),
+        &w.unique,
+        &slice_bytes,
+    ]);
+    let root = merkle_root(&[leaf]);
+    let merkle = MerkleProof {
+        leaf,
+        index: 0,
+        siblings: Vec::new(),
+    };
+    let sp = HomeSliceProof {
+        state_root: root,
+        contract_account_proof: vec![bincode::serialize(&merkle).unwrap()],
+        storage_proofs: Vec::new(),
+    };
+    assert_eq!(
+        w.reg.refresh_class_verified(
+            Address([9; 32]),
+            class,
+            updates,
+            Phase::Final,
+            Some(&sp),
+            Some(root),
+            true,
+        ),
+        Ok(ClassStatus::Frozen(FreezeReason::UpgradeAuthorityChanged))
+    );
+}
+
+#[test]
+fn uol_k2_guest_placement_preserves_custody_and_returns_on_proof() {
+    let mut w = World::new(HomeVmFamily::CosmWasm);
+    let guest_domain: DomainId = 99;
+    let guest_fx = fixture_for(HomeVmFamily::Svm);
+    w.reg.params.canonical.insert(
+        HomeVmFamily::Svm,
+        CanonicalCodeHashes {
+            endpoint: CANON_ENDPOINT,
+            verifier: CANON_VERIFIER,
+        },
+    );
+    w.reg
+        .charter(
+            guest_domain,
+            charter_for(HomeVmFamily::Svm, guest_fx),
+            &good_proof(),
+            true,
+        )
+        .unwrap();
+
+    let depositor = w.fx.address(0x31);
+    let asset = w.arrive_unique(77, &depositor, Some(alice())).unwrap();
+    let class = w.class(AssetKind::Unique);
+    let native = w.fx.native_id(77);
+    assert_eq!(w.reg.recorded_custody(&class), 1);
+
+    w.reg
+        .guest_place(alice(), class, &native, guest_domain, bob())
+        .unwrap();
+    assert_eq!(
+        w.reg.unique.get(&asset).unwrap().location,
+        Location::Guest {
+            domain: guest_domain,
+            holder: bob(),
+        }
+    );
+    assert_eq!(w.reg.recorded_custody(&class), 1);
+
+    let ret_raw = guest_fx.call(&guest_fx.address(0xe0), &guest_fx.address(0x22), 1, b"return");
+    let ret_proof = HomeEventProof {
+        domain: guest_domain,
+        home_height: 55,
+        home_block_hash: [0x55; 32],
+        event_id: b"guest-return-1".to_vec(),
+        event: ret_raw,
+        phase: Phase::Final,
+        inclusion: Vec::new(),
+    };
+    w.reg
+        .guest_return(class, &native, alice(), &ret_proof, &YES)
+        .unwrap();
+    assert_eq!(w.reg.unique.get(&asset).unwrap().location, Location::ObjectLayer);
+    assert_eq!(w.reg.unique.get(&asset).unwrap().holder, Some(alice()));
+    assert_eq!(w.reg.recorded_custody(&class), 1);
+}
+
+#[test]
+fn home_stipend_call_requires_verifier_and_enforces_nonce_and_cap() {
+    use crate::object_layer::registry::{MAX_HOME_STIPEND_ATTOS, MAX_HOME_STIPEND_TOTAL_ATTOS};
+    use crate::object_layer::tx::{HomeKeyScheme, HomeKeyStipendAuth, HomeStipendVerifier};
+
+    let mut w = World::new(HomeVmFamily::Evm);
+    let class = w.class(AssetKind::Fungible);
+    let home_addr = w.fx.address(0x55);
+    let home = HomeIdentity::derive(DOMAIN, &home_addr);
+    let home_holder = Holder::Home(home);
+    w.reg.balances.insert((class, home_holder), 500);
+
+    let action = ObjectLayerTx::Call {
+        calls: vec![Call {
+            class,
+            native_id: Vec::new(),
+            verb: Verb::Transfer {
+                from: home_holder,
+                to: bob(),
+                amount: 10,
+            },
+        }],
+    };
+    let auth = HomeKeyStipendAuth {
+        scheme: HomeKeyScheme::EthereumSecp256k1,
+        home_address: home_addr.clone(),
+        signer_pubkey: Vec::new(),
+        signature: vec![0xAA; 65],
+        nonce: 0,
+        requested_stipend_attos: MAX_HOME_STIPEND_ATTOS,
+    };
+
+    // Without a verifier (`None`), `HomeStipendCall` must fail closed.
+    assert_eq!(
+        w.reg
+            .home_stipend_call(DOMAIN, &auth, &action, 1, None),
+        Err(Refusal::NotAuthorized)
+    );
+
+    struct AllowAllVerifier;
+    impl HomeStipendVerifier for AllowAllVerifier {
+        fn verify_stipend(
+            &self,
+            _domain: DomainId,
+            _auth: &HomeKeyStipendAuth,
+            _action_digest: &crate::domain::types::Hash32,
+        ) -> Result<(), Refusal> {
+            Ok(())
+        }
+    }
+
+    // Valid stipend call succeeds, increments nonce, and updates bob's balance.
+    w.reg
+        .home_stipend_call(DOMAIN, &auth, &action, 1, Some(&AllowAllVerifier))
+        .unwrap();
+    assert_eq!(w.reg.balance(&class, &bob()), 10);
+    assert_eq!(w.reg.home_stipend_nonces.get(&home).copied(), Some(1));
+
+    // Replaying nonce 0 is refused.
+    assert_eq!(
+        w.reg
+            .home_stipend_call(DOMAIN, &auth, &action, 2, Some(&AllowAllVerifier)),
+        Err(Refusal::HomeNonce {
+            expected: 1,
+            got: 0
+        })
+    );
+
+    // Nested `HomeStipendCall` and admin variants (`Challenge`) are refused.
+    let nested = ObjectLayerTx::HomeStipendCall {
+        domain: DOMAIN,
+        auth: HomeKeyStipendAuth { nonce: 1, ..auth.clone() },
+        action: Box::new(action.clone()),
+    };
+    assert_eq!(
+        w.reg.home_stipend_call(
+            DOMAIN,
+            &HomeKeyStipendAuth { nonce: 1, ..auth.clone() },
+            &nested,
+            2,
+            Some(&AllowAllVerifier),
+        ),
+        Err(Refusal::NotAuthorized)
+    );
+    assert_eq!(
+        w.reg.home_stipend_call(
+            DOMAIN,
+            &HomeKeyStipendAuth { nonce: 1, ..auth.clone() },
+            &ObjectLayerTx::Challenge { class },
+            2,
+            Some(&AllowAllVerifier),
+        ),
+        Err(Refusal::NotAuthorized)
+    );
+
+    // Exceeding cumulative lifetime stipend cap is refused.
+    let rounds = u64::try_from(MAX_HOME_STIPEND_TOTAL_ATTOS / MAX_HOME_STIPEND_ATTOS).unwrap();
+    for nonce in 1..rounds {
+        let next_auth = HomeKeyStipendAuth { nonce, ..auth.clone() };
+        w.reg
+            .home_stipend_call(DOMAIN, &next_auth, &action, 2 + nonce, Some(&AllowAllVerifier))
+            .unwrap();
+    }
+    let over_cap = HomeKeyStipendAuth {
+        nonce: rounds,
+        ..auth
+    };
+    assert_eq!(
+        w.reg
+            .home_stipend_call(DOMAIN, &over_cap, &action, 100, Some(&AllowAllVerifier)),
+        Err(Refusal::NotAuthorized)
+    );
 }

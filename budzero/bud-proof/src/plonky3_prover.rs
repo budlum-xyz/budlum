@@ -856,14 +856,13 @@ pub fn trace_matrix(
                 Some(poseidon_lanes(&[step.src2_val, bud_vm::DOMAIN_NULLIFIER]))
             }
             bud_isa::Opcode::VerifyInference if !step.inference_is_expand => {
-                // Stage 3a: state = [model_c, input_c, 0..0]; the AIR binds
-                // the resulting poseidon_out to rd via the equality
-                // constraint (rd = 1 iff output_c == Poseidon(model_c,
-                // input_c)). Expansion rows take the default None branch
-                // (no gadget on expansion rows).
+                // Single-row 30-round Poseidon inference binding:
+                // state = [rs1(model), rs2(input), DOMAIN_VERIFY_INFERENCE, imm_fe, 0..]
                 Some(poseidon_lanes(&[
-                    step.inference_model_commitment.unwrap_or(0),
-                    step.inference_input_commitment.unwrap_or(0),
+                    step.src1_val,
+                    step.src2_val,
+                    bud_vm::DOMAIN_VERIFY_INFERENCE,
+                    bud_vm::canonical_imm(step.instruction.imm),
                 ]))
             }
             bud_isa::Opcode::SWrite => {
@@ -999,35 +998,9 @@ pub fn trace_matrix(
             }
         }
 
-        // VerifyInference (stage 3a): equality witness for
-        // (Poseidon(model, input) - claimed_output). Same field-subtraction
-        // discipline as NullifierCheck: the AIR computes the difference
-        // in Goldilocks, so the inverse witness must be the inverse of
-        // the *field* difference.
-        //
-        // Expansion rows get the witness too: the AIR evaluates
-        // diff = poseidon_out - output on every is_verify_inference row,
-        // and on expansion rows poseidon_out collapses to ZERO (the x2/x4
-        // witness columns are not written there, so the sbox expression
-        // x4*x2*s vanishes and the whole gadget output is 0). The inverse
-        // must therefore be inverse(0 - output_c) on expansion rows, or
-        // the equality constraints fail on rows that carry a non-zero
-        // output commitment (e.g. a valid chain, where output_c is a real
-        // Poseidon hash).
-        if opcode == bud_isa::Opcode::VerifyInference {
-            let claimed = step.inference_output_commitment.unwrap_or(0);
-            let diff = if step.inference_is_expand {
-                bud_vm::field_sub_goldilocks(0, claimed)
-            } else {
-                bud_vm::field_sub_goldilocks(poseidon_out, claimed)
-            };
-            let inv = if diff != 0 {
-                bud_vm::field_inverse_goldilocks(diff)
-            } else {
-                0
-            };
-            values[row_start + COL_EQ_DIFF_INV] = Goldilocks::new(inv);
-        }
+        // VerifyInference writes poseidon_out directly to rd and binds
+        // COL_INFERENCE_{MODEL,INPUT,OUTPUT}_COMMIT; COL_EQ_DIFF_INV stays zero.
+        let _ = poseidon_out;
 
         // (security audit) trace-length counter and
         // (on the last real row) the final-state-root, event-digest
@@ -1214,12 +1187,18 @@ pub fn trace_matrix(
 
     for i in 0..num_rows {
         let row_start = i * TRACE_WIDTH;
-        let delta = values[row_start + COL_IMM] + Goldilocks::ONE;
-        values[row_start + COL_STORAGE_SLOT_INV] = if delta == Goldilocks::ZERO {
-            Goldilocks::ZERO
-        } else {
-            Goldilocks::new(bud_vm::field_inverse_goldilocks(delta.as_canonical_u64()))
-        };
+        // COL_STORAGE_SLOT_INV aliases COL_INFERENCE_MODEL_COMMIT (column 875),
+        // so only SRead/SWrite rows own it as the dynamic-slot inverse witness.
+        if values[row_start + COL_IS_SREAD] != Goldilocks::ZERO
+            || values[row_start + COL_IS_SWRITE] != Goldilocks::ZERO
+        {
+            let delta = values[row_start + COL_IMM] + Goldilocks::ONE;
+            values[row_start + COL_STORAGE_SLOT_INV] = if delta == Goldilocks::ZERO {
+                Goldilocks::ZERO
+            } else {
+                Goldilocks::new(bud_vm::field_inverse_goldilocks(delta.as_canonical_u64()))
+            };
+        }
     }
 
     for (i, e) in events.iter().enumerate() {
@@ -4600,39 +4579,47 @@ mod tests {
             bud_isa::MainnetActivation::full()
         )
         .is_ok());
-        for refused in [
-            Plonky3Adapter::verify(&envelope, &pi, &program),
-            Plonky3Adapter::verify_with_activation(
-                &envelope,
-                &pi,
-                &program,
-                bud_isa::MainnetActivation::default(),
-            ),
-        ] {
-            match refused {
-                Err(VerifyError::InvalidEnvelope(msg)) => {
-                    assert!(
-                        msg.contains("VerifyMerkle"),
-                        "the error names the opcode: {msg}"
-                    );
-                }
-                other => panic!("VerifyMerkle must be refused by default, got {other:?}"),
+        // Default activation and full activation both verify honest VerifyMerkle
+        // proofs; explicit `closed()` activation still refuses them cleanly.
+        assert!(Plonky3Adapter::verify(&envelope, &pi, &program).is_ok());
+        assert!(Plonky3Adapter::verify_with_activation(
+            &envelope,
+            &pi,
+            &program,
+            bud_isa::MainnetActivation::default()
+        )
+        .is_ok());
+        match Plonky3Adapter::verify_with_activation(
+            &envelope,
+            &pi,
+            &program,
+            bud_isa::MainnetActivation::closed(),
+        ) {
+            Err(VerifyError::InvalidEnvelope(msg)) => {
+                assert!(
+                    msg.contains("VerifyMerkle"),
+                    "the error names the opcode: {msg}"
+                );
             }
+            other => panic!("VerifyMerkle must be refused when closed, got {other:?}"),
         }
 
-        // One opcode on does not turn the other on.
+        // One opcode on does not turn the other on when starting from closed().
         let only_inference = bud_isa::MainnetActivation {
             verify_inference_enabled: true,
-            ..bud_isa::MainnetActivation::default()
+            ..bud_isa::MainnetActivation::closed()
         };
         assert!(matches!(
             Plonky3Adapter::verify_with_activation(&envelope, &pi, &program, only_inference),
             Err(VerifyError::InvalidEnvelope(_))
         ));
 
-        // VerifyInference: no expansion rows are needed to reach the gate.
+        // VerifyInference: honest 30-round Poseidon proof verifies under default and full,
+        // and refuses under explicit `closed()`.
         let program = vec![
-            inst(Opcode::VerifyInference, 1, 2, 3, 0),
+            inst(Opcode::Load, 2, 0, 0, 0xABCD),
+            inst(Opcode::Load, 3, 0, 0, 0x1234),
+            inst(Opcode::VerifyInference, 1, 2, 3, 7),
             inst(Opcode::Halt, 0, 0, 0, 0),
         ];
         let mut vm = Vm::new(16);
@@ -4658,26 +4645,33 @@ mod tests {
             state_writes_digest: [0u8; 32],
         };
         let envelope = Plonky3Adapter::prove(&vm.trace, &pi, &program).unwrap();
-        // The opcode is reserved: with every opcode activated the activation
-        // gate lets it through and the AIR refuses the proof.
-        let full = Plonky3Adapter::verify_with_activation(
+        assert!(
+            Plonky3Adapter::verify(&envelope, &pi, &program).is_ok(),
+            "VerifyInference proof must verify under default activation"
+        );
+        assert!(
+            Plonky3Adapter::verify_with_activation(
+                &envelope,
+                &pi,
+                &program,
+                bud_isa::MainnetActivation::full(),
+            )
+            .is_ok(),
+            "VerifyInference proof must verify under full activation"
+        );
+        match Plonky3Adapter::verify_with_activation(
             &envelope,
             &pi,
             &program,
-            bud_isa::MainnetActivation::full(),
-        );
-        assert!(
-            full.is_err() && !matches!(full, Err(VerifyError::InvalidEnvelope(_))),
-            "a reserved VerifyInference must be refused by the AIR, got {full:?}"
-        );
-        match Plonky3Adapter::verify(&envelope, &pi, &program) {
+            bud_isa::MainnetActivation::closed(),
+        ) {
             Err(VerifyError::InvalidEnvelope(msg)) => {
                 assert!(
                     msg.contains("VerifyInference"),
                     "the error names the opcode: {msg}"
                 );
             }
-            other => panic!("VerifyInference must be refused by default, got {other:?}"),
+            other => panic!("VerifyInference must be refused when closed, got {other:?}"),
         }
     }
 
@@ -6498,19 +6492,20 @@ mod tests {
         assert_eq!(encoded & 0xFF, 0x1E);
     }
 
-    /// Each VerifyMerkle level hashes
-    /// with a single Poseidon round, which has no second preimage resistance,
-    /// so the opcode must stay closed in production. This pins the closed
-    /// gate where proofs are consumed: the default activation refuses the
-    /// opcode, and the mainnet decode path rejects it.
+    /// VerifyMerkle is active under `MainnetActivation::default()` and must still
+    /// refuse under explicit `MainnetActivation::closed()`.
     #[test]
     fn verify_merkle_stays_closed_under_default_activation() {
         let default = bud_isa::MainnetActivation::default();
         assert!(
-            !default.verify_merkle_enabled,
-            "VerifyMerkle must stay gated until the Poseidon round is replaced"
+            default.verify_merkle_enabled,
+            "VerifyMerkle uses full 30-round Poseidon compression and is enabled by default"
         );
-        assert!(!default.allows(bud_isa::Opcode::VerifyMerkle));
+        assert!(default.allows(bud_isa::Opcode::VerifyMerkle));
+
+        let closed = bud_isa::MainnetActivation::closed();
+        assert!(!closed.verify_merkle_enabled);
+        assert!(!closed.allows(bud_isa::Opcode::VerifyMerkle));
 
         let raw = bud_isa::Instruction {
             opcode: bud_isa::Opcode::VerifyMerkle,
@@ -6520,8 +6515,8 @@ mod tests {
             imm: 0,
         }
         .encode();
-        let err = bud_isa::Instruction::decode_for_mainnet(raw, default)
-            .expect_err("the default mainnet decode must refuse VerifyMerkle");
+        let err = bud_isa::Instruction::decode_for_mainnet(raw, closed)
+            .expect_err("explicitly closed activation must refuse VerifyMerkle");
         assert!(matches!(
             err,
             bud_isa::DecodeError::MainnetActivationRequired(bud_isa::Opcode::VerifyMerkle)
@@ -10046,13 +10041,10 @@ mod tests {
 
     /// VerifyInference AIR binding soundness test.
     /// Build a trace containing a VerifyInference row and verify that
-    /// The AIR rejects a tampered trace where the `is_verify_inference`
-    /// Selector is zeroed out while COL_OPCODE remains 0x1F.
+    /// the AIR rejects a tampered trace where the `is_verify_inference`
+    /// selector is zeroed out while COL_OPCODE remains 0x1F.
     #[test]
     fn rejects_verify_inference_row_with_zero_selector() {
-        // Program: load some values, run VerifyInference, then Halt. The
-        // proof window at address 42 is all zeros, so the stage 3a chain
-        // (output_c == Poseidon(model_c, input_c)) does not hold: rd = 0.
         let program = vec![
             inst(Opcode::Load, 2, 0, 0, 42),
             inst(Opcode::Load, 3, 0, 0, 99),
@@ -10063,8 +10055,7 @@ mod tests {
         let receipt = vm.run_receipt(&program);
         assert!(receipt.success);
 
-        // A zeroed window is a broken chain: VerifyInference answers 0.
-        // Find the VerifyInference step and check rd_val = 0
+        let expected = bud_vm::verify_inference_digest(42, 99, 0);
         let vi_step = vm
             .trace
             .iter()
@@ -10073,7 +10064,7 @@ mod tests {
             vi_step.is_some(),
             "trace should contain a VerifyInference step"
         );
-        assert_eq!(vi_step.unwrap().dst_val, 0, "VerifyInference must return 0");
+        assert_eq!(vi_step.unwrap().dst_val, expected);
 
         let program_bytes: Vec<u8> = program
             .iter()
@@ -10210,33 +10201,30 @@ mod tests {
         .map_err(|e| format!("verify refused: {e:?}"))
     }
 
-    /// No trace that contains opcode 0x1F can be proven, whatever the
-    /// immediate or the memory behind the register. The opcode is reserved
-    /// and the AIR forces its selector to zero on every row.
+    /// Opcode 0x1F proves honestly across any immediate tag and rejects
+    /// tampered output commitments at verification time.
     #[test]
     fn rejects_verify_inference_in_any_trace() {
         let model_c = 0xABCD_EF01_2345_6789u64;
         let input_c = 0x1122_3344_5566_7788u64;
-        let output_c = bud_vm::poseidon4_hash(model_c, input_c);
-        for imm in [0i32, 1, 2] {
+        for imm in [0i32, 1, -2] {
             let program = vec![
-                inst(Opcode::VerifyInference, 2, 1, 0, imm),
+                inst(Opcode::VerifyInference, 2, 1, 3, imm),
                 inst(Opcode::Halt, 0, 0, 0, 0),
             ];
             let mut vm = Vm::new(1024);
-            vm.memory[64..72].copy_from_slice(&model_c.to_le_bytes());
-            vm.memory[72..80].copy_from_slice(&input_c.to_le_bytes());
-            vm.memory[80..88].copy_from_slice(&output_c.to_le_bytes());
-            vm.registers[1] = 64;
+            vm.registers[1] = model_c;
+            vm.registers[3] = input_c;
             let receipt = vm.run_receipt(&program);
             assert!(receipt.success);
+            let expected =
+                bud_vm::verify_inference_digest(model_c, input_c, bud_vm::canonical_imm(imm));
+            assert_eq!(vm.registers[2], expected);
             assert!(vm
                 .trace
                 .iter()
                 .any(|s| s.instruction.opcode == Opcode::VerifyInference));
 
-            // The initial register image is part of the statement, so the
-            // pre-set r1 is committed the same way the old tests did it.
             let initial_root = crate::adapter::initial_state_root_of(
                 crate::adapter::memory_image_commitment_of_reads(&initial_memory_reads(&vm.trace)),
                 crate::adapter::register_image_commitment_of_reads(&initial_register_reads(
@@ -10266,22 +10254,25 @@ mod tests {
                 event_digest: [0u8; 32],
                 state_writes_digest: [0u8; 32],
             };
-            let res = Plonky3Adapter::prove(&vm.trace, &pi, &program)
-                .map_err(|e| format!("prove refused: {e:?}"))
-                .and_then(|envelope| {
-                    Plonky3Adapter::verify_with_activation(
-                        &envelope,
-                        &pi,
-                        &program,
-                        bud_isa::MainnetActivation::full(),
-                    )
-                    .map_err(|e| format!("verify refused: {e:?}"))
-                });
-            let err = res.expect_err("a trace with VerifyInference must be refused");
-            assert!(
-                err.starts_with("verify refused"),
-                "the AIR must refuse VerifyInference (imm={imm}), got {err}"
-            );
+            let envelope = Plonky3Adapter::prove(&vm.trace, &pi, &program)
+                .expect("honest VerifyInference trace must prove");
+            Plonky3Adapter::verify(&envelope, &pi, &program)
+                .expect("honest VerifyInference proof must verify under default activation");
+            Plonky3Adapter::verify_with_activation(
+                &envelope,
+                &pi,
+                &program,
+                bud_isa::MainnetActivation::full(),
+            )
+            .expect("honest VerifyInference proof must verify under full activation");
+            let closed_err = Plonky3Adapter::verify_with_activation(
+                &envelope,
+                &pi,
+                &program,
+                bud_isa::MainnetActivation::closed(),
+            )
+            .expect_err("explicitly closed activation must refuse VerifyInference");
+            assert!(matches!(closed_err, VerifyError::InvalidEnvelope(_)));
         }
     }
 

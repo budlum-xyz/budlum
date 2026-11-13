@@ -20,7 +20,7 @@ struct GraftPayment {
     bytes targetReceiver;
 }
 
-/// @notice A Budlum checkpoint header (`GlobalBlockHeader`, V7).
+/// @notice A Budlum checkpoint header (`GlobalBlockHeader`, V9).
 struct GlobalHeader {
     uint16 version;
     uint64 globalHeight;
@@ -47,6 +47,11 @@ struct GlobalHeader {
     bytes32 graftRoot;
     bool hasDelegationRoot;
     bytes32 delegationRoot;
+    bool hasObjectLayerRoot;
+    bytes32 objectLayerRoot;
+    bool hasProofRoot;
+    bytes32 proofRoot;
+    uint64 provenHeight;
 }
 
 /// @notice Everything `bud_graftPaymentProof` returns, in EVM form.
@@ -65,7 +70,7 @@ struct PaymentProof {
 abstract contract BudlumPaymentReceiver {
     uint256 private constant PAYMENT_LEAF_FIELDS = 13;
     uint256 private constant OPENING_TRIPLE_FIELDS = 3;
-    uint256 private constant HEADER_V7_FIELDS = 20;
+    uint256 private constant HEADER_V9_FIELDS = 23;
     uint256 private constant U128_BYTE_LEN = 16;
     uint256 private constant EVM_ADDRESS_BYTE_LEN = 20;
     uint256 private constant BITS_PER_BYTE = 8;
@@ -193,8 +198,8 @@ abstract contract BudlumPaymentReceiver {
     }
 
     function headerHash(GlobalHeader calldata h) public pure returns (bytes32) {
-        bytes[] memory fields = new bytes[](HEADER_V7_FIELDS);
-        fields[0] = "BDLM_GLOBAL_BLOCK_V7";
+        bytes[] memory fields = new bytes[](HEADER_V9_FIELDS);
+        fields[0] = "BDLM_GLOBAL_BLOCK_V9";
         fields[1] = _le16(h.version);
         fields[2] = BudlumHash.le64(h.globalHeight);
         fields[3] = bytes.concat(h.previousGlobalHash);
@@ -214,6 +219,9 @@ abstract contract BudlumPaymentReceiver {
         fields[17] = _tagged(h.hasExternalIntakeRoot, h.externalIntakeRoot);
         fields[18] = _tagged(h.hasGraftRoot, h.graftRoot);
         fields[19] = _tagged(h.hasDelegationRoot, h.delegationRoot);
+        fields[20] = _tagged(h.hasObjectLayerRoot, h.objectLayerRoot);
+        fields[21] = _tagged(h.hasProofRoot, h.proofRoot);
+        fields[22] = BudlumHash.le64(h.provenHeight);
         return BudlumHash.hashFields(fields);
     }
 

@@ -953,7 +953,7 @@ mod upstream_tests {
 
     #[test]
     fn aptos_upstream_url_for_blocks_v1_prefix_escapes() {
-        let upstream = AptosUpstream::parse("https://aptos.example.org/ignored").unwrap();
+        let upstream = AptosUpstream::parse("https://aptos.example.org/v1").unwrap();
 
         for bad in [
             "/v1\\admin",

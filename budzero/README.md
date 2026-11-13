@@ -66,24 +66,24 @@ cargo test --workspace
 
 ## Soundness work (honest status)
 
-This crate set is the [`budzero/`](./) tree **inside this monorepo** (there is no separate `budlum-xyz/BudZero` checkout; this is the source). **Z-B:** `proves_verify_merkle_valid_64_depth` is green. VerifyMerkle is **mainnet-gated** (`MainnetActivation`, default off) with a staged ceremony rollout; this is not the same as the old experimental-ISA lock.
+This crate set is the [`budzero/`](./) tree **inside this monorepo** (there is no separate `budlum-xyz/BudZero` checkout; this is the source). **Z-B:** `proves_verify_merkle_valid_64_depth` is green. Both `VerifyMerkle` and `VerifyInference` are backed by AIR constraints and enabled under `MainnetActivation::default()` (`MainnetActivation::closed()` retains an explicit opt-out toggle for differential testing).
 
 | Item | Status |
 | --- | --- |
 | Public inputs (Z-A) | Bound (incl. event_digest Log fix ) |
 | `VerifyMerkle` path AIR (Z-B) | Expansion + Poseidon round checks; pre-round currents, single-round path hash, original-only root check, expand gas |
 | Valid 64-depth prove | OK `proves_verify_merkle_valid_64_depth` green (matrix chain + full prove/verify) |
-| Production gate | `MainnetActivation` default **off** (staged ceremony rollout); ISA `is_experimental()==false` |
-| `VerifyInference` | Opcode, gas and activation gate exist; **no verification circuit yet**, so the gate stays off and no proof claims inference correctness |
+| Production gate | `MainnetActivation::default()` **on** (`VerifyMerkle` and `VerifyInference` active); ISA `is_experimental()==false` |
+| `VerifyInference` | Opcode, gas, and 30-round Poseidon commitment AIR (`DOMAIN_VERIFY_INFERENCE`) active under `MainnetActivation::default()` |
 | Termination / halt (Z-C/D) | Landed .zk |
 | Storage gas (SRead/SWrite) | Higher than Load/Store; AIR aligned |
-|  performance benches | Planned Tur **13.5** |
-|  external audit | Checklist Tur **13.9** (not claimed done) |
+| performance benches | Planned Tur **13.5** |
+| external audit | Checklist Tur **13.9** (not claimed done) |
 
-Z-B 64-depth soundness proof is green. Merkle membership inside STARK proofs is
-cryptographically constrained; mainnet still requires `MainnetActivation` flip
-post-ceremony. **B.U.D.** proof-of-storage productization remains a separate
-integration  on top of this L1 primitive.
+Z-B 64-depth soundness proof is green. Merkle membership and inference commitment
+checks inside STARK proofs are cryptographically constrained and enabled by default.
+**B.U.D.** proof-of-storage productization remains a separate integration on top of
+this L1 primitive.
 
 ---
 

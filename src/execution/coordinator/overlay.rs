@@ -70,6 +70,16 @@ impl BlockReadCache {
 }
 
 #[derive(Debug, Clone)]
+struct FrameCheckpoint {
+    id: u64,
+    frame_idx: usize,
+    writes: BTreeMap<(String, String), Option<Vec<u8>>>,
+    touched_keys: BTreeSet<(String, String)>,
+    accounts_snapshot: BTreeMap<Address, (u64, u64)>,
+    logs_len: usize,
+}
+
+#[derive(Debug, Clone)]
 struct FrameSnapshot {
     ee: EeId,
     is_static: bool,
@@ -87,17 +97,23 @@ pub struct TxOverlay {
     logs: Vec<(EeId, EeLog)>,
     gas_limit_bgu: u64,
     gas_used_bgu: u64,
+    next_checkpoint_id: u64,
+    checkpoints: Vec<FrameCheckpoint>,
+}
+
+fn snapshot_accounts(state: &AccountState) -> BTreeMap<Address, (u64, u64)> {
+    state
+        .accounts
+        .iter()
+        .map(|(addr, a)| (*addr, (a.balance, a.frac_attos)))
+        .collect()
 }
 
 impl TxOverlay {
     /// Opens a root transaction overlay for `root_ee` with `gas_limit_bgu`.
     #[must_use]
     pub fn new(state: &AccountState, root_ee: EeId, gas_limit_bgu: u64) -> Self {
-        let accounts_snapshot = state
-            .accounts
-            .iter()
-            .map(|(addr, a)| (*addr, (a.balance, a.frac_attos)))
-            .collect();
+        let accounts_snapshot = snapshot_accounts(state);
         Self {
             frames: vec![FrameSnapshot {
                 ee: root_ee,
@@ -112,6 +128,8 @@ impl TxOverlay {
             logs: Vec::new(),
             gas_limit_bgu,
             gas_used_bgu: 0,
+            next_checkpoint_id: 1,
+            checkpoints: Vec::new(),
         }
     }
 
@@ -251,6 +269,8 @@ impl TxOverlay {
         if self.frames.len() <= 1 {
             return;
         }
+        let popped_idx = self.frames.len() - 1;
+        self.checkpoints.retain(|cp| cp.frame_idx < popped_idx);
         if let Some(child) = self.frames.pop() {
             cache.invalidate(&child.touched_keys);
             if let Some(parent) = self.frames.last_mut() {
@@ -266,6 +286,8 @@ impl TxOverlay {
         if self.frames.len() <= 1 {
             return;
         }
+        let popped_idx = self.frames.len() - 1;
+        self.checkpoints.retain(|cp| cp.frame_idx < popped_idx);
         if let Some(child) = self.frames.pop() {
             restore_accounts(state, &child.accounts_snapshot);
             self.logs.truncate(child.logs_len);
@@ -277,6 +299,7 @@ impl TxOverlay {
         while self.frames.len() > 1 {
             let _ = self.frames.pop();
         }
+        self.checkpoints.clear();
         if let Some(root) = self.frames.first() {
             restore_accounts(state, &root.accounts_snapshot);
         }
@@ -285,6 +308,82 @@ impl TxOverlay {
             root.touched_keys.clear();
         }
         self.logs.clear();
+    }
+
+    /// Opens a LIFO checkpoint inside the active frame for sub-call rollback.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the frame stack is empty or checkpoint IDs overflow.
+    pub fn begin_checkpoint(&mut self, state: &AccountState) -> Result<u64, HostError> {
+        let Some(top) = self.frames.last() else {
+            return Err(HostError::Invalid(String::from("no active overlay frame")));
+        };
+        let id = self.next_checkpoint_id;
+        self.next_checkpoint_id = self
+            .next_checkpoint_id
+            .checked_add(1)
+            .ok_or_else(|| HostError::Invalid(String::from("checkpoint id overflow")))?;
+        self.checkpoints.push(FrameCheckpoint {
+            id,
+            frame_idx: self.frames.len() - 1,
+            writes: top.writes.clone(),
+            touched_keys: top.touched_keys.clone(),
+            accounts_snapshot: snapshot_accounts(state),
+            logs_len: self.logs.len(),
+        });
+        Ok(id)
+    }
+
+    /// Commits checkpoint `id` into the active overlay frame.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `id` does not match the innermost active checkpoint.
+    pub fn commit_checkpoint(&mut self, id: u64) -> Result<(), HostError> {
+        let cur_idx = self.frames.len().saturating_sub(1);
+        let Some(top) = self.checkpoints.last() else {
+            return Err(HostError::Invalid(format!("unknown checkpoint {id}")));
+        };
+        if top.id != id || top.frame_idx != cur_idx {
+            return Err(HostError::Invalid(format!(
+                "out-of-order checkpoint commit {id}"
+            )));
+        }
+        self.checkpoints.pop();
+        Ok(())
+    }
+
+    /// Rolls back checkpoint `id` inside the active overlay frame, restoring
+    /// writes, touched keys, account balances, and emitted logs.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `id` does not match the innermost active checkpoint.
+    pub fn rollback_checkpoint(
+        &mut self,
+        state: &mut AccountState,
+        id: u64,
+    ) -> Result<(), HostError> {
+        let cur_idx = self.frames.len().saturating_sub(1);
+        let Some(top) = self.checkpoints.last() else {
+            return Err(HostError::Invalid(format!("unknown checkpoint {id}")));
+        };
+        if top.id != id || top.frame_idx != cur_idx {
+            return Err(HostError::Invalid(format!(
+                "out-of-order checkpoint rollback {id}"
+            )));
+        }
+        let Some(cp) = self.checkpoints.pop() else {
+            return Err(HostError::Invalid(String::from("missing checkpoint")));
+        };
+        if let Some(frame) = self.frames.last_mut() {
+            frame.writes = cp.writes;
+            frame.touched_keys = cp.touched_keys;
+        }
+        restore_accounts(state, &cp.accounts_snapshot);
+        self.logs.truncate(cp.logs_len);
+        Ok(())
     }
 
     /// Reads `(ns, key)` through the active overlay frame, falling back to `cache`.
@@ -325,7 +424,10 @@ impl TxOverlay {
         let Some(group) = RootGroup::for_namespace(ns) else {
             return Err(HostError::Denied(format!("unknown UEL namespace `{ns}`")));
         };
-        if RootGroup::for_ee(self.current_ee()) != Some(group) {
+        let uol_write = ns == crate::execution::coordinator::state::NS_UEL_ASSETS
+            && self.current_ee() == EeId::EVM
+            && key.starts_with(b"uol:");
+        if RootGroup::for_ee(self.current_ee()) != Some(group) && !uol_write {
             return Err(HostError::Denied(format!(
                 "environment 0x{:02x} may not write namespace `{ns}`",
                 self.current_ee().0
