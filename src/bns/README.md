@@ -106,6 +106,12 @@
     bidirectional primary `.bud` names, and per-name `BnsStateProof` Merkle
     verification into `build_identity_profile_verified`, and attaches
     reverse-resolved `author_bud_name` handles to SocialFi RPC posts and feeds.
+  - **B12 (complete `bud bns` CLI and static site publishing):**
+    completes `bud bns` with `resolve [--verify-proof]`, `info`, `offers`,
+    `get-offer`, and `publish-site` (packaging single files or static site
+    directories into B.U.D. 3.0 via `StorageTxV3::RegisterObject` +
+    `BnsSetBud3Content` + `BnsSetRecords`), and upgrades `bud tx send --to` to
+    verify `.bud` recipient Merkle proofs client-side.
 
 ## Current behaviour (locked by tests)
 
