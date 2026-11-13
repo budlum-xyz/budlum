@@ -84,6 +84,15 @@
     while keeping resolution, mutations, and third-party registration fail-closed,
     automatically invalidates stale `Resale` marketplace offers on `transfer` /
     `buy`, and exposes `bud_bnsListNamesByOwner` and `bud bns list --owner`.
+  - **B9 ($O(\log N)$ per-name Merkle state proofs and browser verification):**
+    upgrades `BnsRegistry::root()` (`BDLM_BNS_REGISTRY_V3`) to commit
+    `meta_digest` (`BDLM_BNS_META_V1`) + binary `names_merkle_root`
+    (`BDLM_BNS_LEAF_V1`, `BDLM_BNS_EXTRAS_V1`, `BDLM_BNS_NODE_V1`), adds
+    `prove_name` / `verify_state_proof` (supporting both inclusion and adjacent
+    boundary non-existence proofs), upgrades `budlum-explorer`
+    `BnsInclusionProof::PerName` to produce `Strength::Verified` against
+    `bns_v1` while refusing expired or forged proofs, and exposes
+    `bud_bnsGetProof` and `bud bns proof --name`.
 
 ## Current behaviour (locked by tests)
 

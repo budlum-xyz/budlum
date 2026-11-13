@@ -10,4 +10,4 @@ pub use crate::registry::params::{
 pub use bud3::{BnsBud3Error, Bud3BnsResolver, Bud3NameBinding};
 pub use offers::{CreateNameOffer, NameOffer, OfferKind};
 pub use registry::{BnsRegistry, BNS_PRIMARY_SELLERS};
-pub use types::{BnsError, NameRecord, NameStatus};
+pub use types::{BnsError, BnsMerkleBranch, BnsStateProof, NameRecord, NameStatus};
