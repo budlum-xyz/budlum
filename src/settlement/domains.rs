@@ -3468,6 +3468,123 @@ mod tests {
     }
 
     #[test]
+    fn relayer_intent_expiry_refunds_owner_when_awarded_bidder_is_slashed_unbonding() {
+        let owner = Address::from([0x61; 32]);
+        let relayer = Address::from([0x62; 32]);
+        let role = crate::registry::role::roles::RELAYER;
+        let mut state = AccountState::new();
+        state.current_block_height = 10;
+        state.add_balance(&owner, 50 + FEE);
+        let initial_stake = state.registry.params().min_stake;
+        state
+            .registry
+            .register(relayer, role, initial_stake, 0)
+            .unwrap();
+        let policy = crate::relayer::PolicyEnvelope {
+            owner,
+            session_key: None,
+            spending_cap: 50,
+            allowed_domains: vec![1, 2],
+            requires_multisig: false,
+            requires_hsm: false,
+            expires_at_block: 100,
+        };
+        let intent = crate::relayer::UserIntent::new(
+            owner,
+            1,
+            2,
+            crate::relayer::RelayerActionKind::ExternalTransaction {
+                chain: crate::core::transaction::ExternalChain::Ethereum,
+                target_address: "0x0000000000000000000000000000000000000062".into(),
+                payload_hash: [0x61; 32],
+            },
+            50,
+            20,
+            1,
+            policy.policy_hash(),
+            relayer,
+        );
+        execute_settlement_tx(
+            &mut state,
+            &ctx(owner),
+            &SettlementTx::RelayerIntent(Box::new(crate::relayer::RelayerIntentTx::Open {
+                intent: Box::new(intent.clone()),
+                policy: Box::new(policy),
+            })),
+        )
+        .unwrap();
+        execute_settlement_tx(
+            &mut state,
+            &ctx(relayer),
+            &SettlementTx::RelayerIntent(Box::new(crate::relayer::RelayerIntentTx::Bid(Box::new(
+                crate::relayer::SolverBid {
+                    intent_id: intent.intent_id,
+                    relayer,
+                    quoted_fee: 40,
+                    proof_commitment: [0x63; 32],
+                    bond: 10,
+                    expires_at_block: 21,
+                },
+            )))),
+        )
+        .unwrap();
+        execute_settlement_tx(
+            &mut state,
+            &ctx(owner),
+            &SettlementTx::RelayerIntent(Box::new(crate::relayer::RelayerIntentTx::Award {
+                intent_id: intent.intent_id,
+            })),
+        )
+        .unwrap();
+
+        state
+            .registry
+            .slash_role_only(
+                relayer,
+                role,
+                crate::registry::permissionless::SlashingCondition::DoubleSign,
+                crate::core::chain_config::FIXED_POINT_SCALE / 2,
+            )
+            .unwrap();
+        state
+            .registry
+            .begin_unbonding(relayer, role, state.epoch_index)
+            .unwrap();
+        let slashed_stake = state.registry.get(&relayer, role).unwrap().stake;
+        assert!(slashed_stake > 0 && slashed_stake < initial_stake);
+        assert!(matches!(
+            state.registry.get(&relayer, role).unwrap().status,
+            crate::registry::permissionless::MemberStatus::SlashedUnbonding { .. }
+        ));
+
+        state.current_block_height = 20;
+        execute_settlement_tx(
+            &mut state,
+            &ctx(owner),
+            &SettlementTx::RelayerIntent(Box::new(crate::relayer::RelayerIntentTx::Expire {
+                intent_id: intent.intent_id,
+            })),
+        )
+        .expect("an already-slashed bidder must not block the owner's refund");
+
+        assert_eq!(state.get_balance(&owner), 50 + FEE);
+        assert_eq!(
+            state.registry.get(&relayer, role).unwrap().stake,
+            slashed_stake
+        );
+        assert!(matches!(
+            state
+                .settlement
+                .relayer_policy
+                .settlements
+                .get(&intent.intent_id)
+                .unwrap()
+                .status,
+            crate::relayer::IntentSettlementStatus::Expired
+        ));
+    }
+
+    #[test]
     fn relayer_intent_expiry_drops_a_bid_that_lapsed_before_the_deadline() {
         // The sibling of the slash rule: a bid is a promise for its own
         // window. A solver whose bid expires before the intent's deadline
