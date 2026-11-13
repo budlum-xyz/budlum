@@ -580,7 +580,9 @@ impl ConsensusEngine for PoWEngine {
         // then block hash, then proposer, so every node that sees the same
         // two tips picks the same one regardless of arrival order. Work
         // that saturates U256 still compares equal here, and the
-        // low-128-bit score must never decide this branch.
+        // low-128-bit score must never decide this branch. The u128 score
+        // is informational here. U256 equality already decided this branch,
+        // so a saturated score does not order the tips.
         resolve_split_tie(
             &SplitCandidate::from_chain_tip(current, current_work.saturating_to_u128()),
             &SplitCandidate::from_chain_tip(candidate, candidate_work.saturating_to_u128()),
@@ -608,6 +610,23 @@ mod tests {
         let mut tampered = block.clone();
         tampered.hash = "invalid_hash".to_string();
         assert!(engine.validate_block(&tampered, &[], &state).is_err());
+    }
+    #[test]
+    fn saturated_work_tie_falls_through_to_height() {
+        assert_eq!(U256::MAX.saturating_to_u128(), u128::MAX);
+        let left = SplitCandidate {
+            block_hash: [1; 32],
+            proposer: [0; 32],
+            height: 10,
+            weight: u128::MAX,
+        };
+        let right = SplitCandidate {
+            block_hash: [2; 32],
+            proposer: [0; 32],
+            height: 11,
+            weight: u128::MAX,
+        };
+        assert_eq!(resolve_split_tie(&left, &right), SplitDecision::RightWins);
     }
     #[test]
     fn test_difficulty_levels() {
