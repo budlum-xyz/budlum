@@ -317,10 +317,10 @@ pub fn build_valid_cosmwasm_module(export_names: &[&str], body_ops: &[u8]) -> Ve
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct WasmContractMeta {
-    code_hash: String,
-    creator: String,
-    label: String,
+pub(crate) struct WasmContractMeta {
+    pub(crate) code_hash: String,
+    pub(crate) creator: String,
+    pub(crate) label: String,
 }
 
 /// Stateless WASM (CosmWasm ABI) execution environment worker (`budlum-ee-wasm`).
@@ -334,7 +334,7 @@ impl WasmEe {
     }
 }
 
-fn wasm_store_key(contract: &[u8], key: &[u8]) -> Vec<u8> {
+pub(crate) fn wasm_store_key(contract: &[u8], key: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(contract.len() + 1 + key.len());
     out.extend_from_slice(contract);
     out.push(b':');
@@ -1364,6 +1364,9 @@ fn execute_cosmwasm_json(
     }
 
     if let Some(custom_val) = exec_obj.get("budlum_msg") {
+        if let Err(reason) = require_creator_or_self(host, contract, sender_str) {
+            return Ok((OutcomeStatus::Revert, reason.into_bytes()));
+        }
         let bmsg: BudlumMsg = serde_json::from_value(custom_val.clone())
             .map_err(|e| format!("invalid BudlumMsg: {e}"))?;
         match bmsg {

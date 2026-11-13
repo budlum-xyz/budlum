@@ -4601,6 +4601,7 @@ fn encode_storage_v3_tx(tx: &crate::storage::bud3::tx::StorageTxV3, out: &mut Ve
             new_shares,
             new_symbols,
             new_root,
+            witness,
         } => {
             put_u8(out, 3);
             put_fixed(out, object);
@@ -4616,6 +4617,37 @@ fn encode_storage_v3_tx(tx: &crate::storage::bud3::tx::StorageTxV3, out: &mut Ve
                 put_bytes(out, &sym.data);
             }
             put_fixed(out, new_root);
+            match witness {
+                crate::storage::bud3::repair::RepairWitness::ProvenSymbols(proofs) => {
+                    put_u8(out, 0);
+                    put_u64(out, proofs.len() as u64);
+                    for p in proofs {
+                        put_u32(out, p.root_index);
+                        put_u64(out, p.position);
+                        put_u64(out, p.root_path.len() as u64);
+                        for step in &p.root_path {
+                            match step {
+                                None => put_u8(out, 0),
+                                Some(h) => {
+                                    put_u8(out, 1);
+                                    put_fixed(out, h);
+                                }
+                            }
+                        }
+                        put_u64(out, p.symbol.segment);
+                        put_u32(out, p.symbol.esi);
+                        put_bytes(out, &p.symbol.data);
+                    }
+                }
+                crate::storage::bud3::repair::RepairWitness::ValidatorAttestations(atts) => {
+                    put_u8(out, 1);
+                    put_u64(out, atts.len() as u64);
+                    for att in atts {
+                        put_fixed(out, &att.validator);
+                        put_bytes(out, &att.signature);
+                    }
+                }
+            }
         }
         StorageTxV3::BindNft { nft, object } => {
             put_u8(out, 4);

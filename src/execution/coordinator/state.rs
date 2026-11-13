@@ -68,10 +68,13 @@ pub const NS_UTXO_STATE: &str = "ee/utxo/state";
 /// Canonical Plutus (Cardano) namespace (`EeId::PLUTUS = 0x0B`).
 pub const NS_PLUTUS_STATE: &str = "ee/plutus/state";
 
+/// Canonical RISC-V 32-bit namespace (`EeId::RV32 = 0x0C`).
+pub const NS_RV32_STATE: &str = "ee/rv32/state";
+
 /// Canonical Universal Asset Registry namespace.
 pub const NS_UEL_ASSETS: &str = "uel/assets";
 
-/// All nineteen canonical UEL namespaces in deterministic order.
+/// All twenty canonical UEL namespaces in deterministic order.
 pub const ALL_NAMESPACES: &[&str] = &[
     NS_EVM_ACCOUNT,
     NS_EVM_CODE,
@@ -92,9 +95,10 @@ pub const ALL_NAMESPACES: &[&str] = &[
     NS_TVM_STATE,
     NS_UTXO_STATE,
     NS_PLUTUS_STATE,
+    NS_RV32_STATE,
 ];
 
-/// Fourteen root groups folded into `execution_root` (seven core V1 + seven expansion groups).
+/// Fifteen root groups folded into `execution_root` (seven core V1 + eight expansion groups).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum RootGroup {
     Evm,
@@ -111,6 +115,7 @@ pub enum RootGroup {
     Tvm,
     Utxo,
     Plutus,
+    Rv32,
 }
 
 impl RootGroup {
@@ -133,6 +138,7 @@ impl RootGroup {
             NS_TVM_STATE => Some(Self::Tvm),
             NS_UTXO_STATE => Some(Self::Utxo),
             NS_PLUTUS_STATE => Some(Self::Plutus),
+            NS_RV32_STATE => Some(Self::Rv32),
             _ => None,
         }
     }
@@ -153,6 +159,7 @@ impl RootGroup {
             EeId::TVM => Some(Self::Tvm),
             EeId::UTXO => Some(Self::Utxo),
             EeId::PLUTUS => Some(Self::Plutus),
+            EeId::RV32 => Some(Self::Rv32),
             _ => None,
         }
     }
@@ -402,12 +409,16 @@ impl ExecutionState {
             self.group_root(RootGroup::Utxo),
             self.group_root(RootGroup::Plutus),
         ];
-        fold_execution_root_v1_or_v2(v1, expansion)
+        fold_execution_root_v1_or_v2_or_v3(v1, expansion, self.group_root(RootGroup::Rv32))
     }
 }
 
-fn fold_execution_root_v1_or_v2(v1: [u8; 32], expansion: [[u8; 32]; 7]) -> [u8; 32] {
-    if expansion.iter().all(|r| *r == [0u8; 32]) {
+fn fold_execution_root_v1_or_v2_or_v3(
+    v1: [u8; 32],
+    expansion: [[u8; 32]; 7],
+    rv32: [u8; 32],
+) -> [u8; 32] {
+    let base = if expansion.iter().all(|r| *r == [0u8; 32]) {
         v1
     } else {
         hash_fields_bytes(&[
@@ -421,6 +432,11 @@ fn fold_execution_root_v1_or_v2(v1: [u8; 32], expansion: [[u8; 32]; 7]) -> [u8; 
             &expansion[5],
             &expansion[6],
         ])
+    };
+    if rv32 == [0u8; 32] {
+        base
+    } else {
+        hash_fields_bytes(&[b"BDLM_UEL_ROOT_V3", &base, &rv32])
     }
 }
 
@@ -463,6 +479,9 @@ pub struct UelExecutionProof {
     /// Seven expansion group roots `[sui, cairo, near, polkavm, tvm, utxo, plutus]`.
     #[serde(default)]
     pub expansion_roots: [[u8; 32]; 7],
+    /// RV32 expansion group root (`EeId::RV32 = 0x0C`).
+    #[serde(default)]
+    pub rv32_root: [u8; 32],
 }
 
 impl ExecutionState {
@@ -511,6 +530,7 @@ impl ExecutionState {
             self.group_root(RootGroup::Utxo),
             self.group_root(RootGroup::Plutus),
         ];
+        let rv32_root = self.group_root(RootGroup::Rv32);
         Ok(UelExecutionProof {
             namespace: String::from(ns),
             key: key.to_vec(),
@@ -518,6 +538,7 @@ impl ExecutionState {
             non_zero_siblings: siblings,
             group_roots,
             expansion_roots,
+            rv32_root,
         })
     }
 }
@@ -603,11 +624,13 @@ pub fn uel_proof_matches_root(
         RootGroup::Tvm => proof.expansion_roots.get(4),
         RootGroup::Utxo => proof.expansion_roots.get(5),
         RootGroup::Plutus => proof.expansion_roots.get(6),
+        RootGroup::Rv32 => Some(&proof.rv32_root),
     };
     if expected_group_root != Some(&cur) {
         return false;
     }
     let [g0, g1, g2, g3, g4, g5, g6] = proof.group_roots;
     let v1 = hash_fields_bytes(&[b"BDLM_UEL_ROOT_V1", &g0, &g1, &g2, &g3, &g4, &g5, &g6]);
-    fold_execution_root_v1_or_v2(v1, proof.expansion_roots) == *expected_execution_root
+    fold_execution_root_v1_or_v2_or_v3(v1, proof.expansion_roots, proof.rv32_root)
+        == *expected_execution_root
 }

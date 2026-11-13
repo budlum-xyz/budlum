@@ -318,39 +318,77 @@ fn ai_mlp_host_eval_and_commitments() {
 
 #[test]
 fn ai_require_execution_proof_blocks_finalize_without_proof() {
-    use crate::ai::registry::AiRegistry;
+    use crate::ai::execution::{matmul_program_hash, weights_digest, FixedPointMlpSpec};
+    use crate::ai::registry::{AiRegistry, MIN_VERIFIER_STAKE};
     use crate::ai::types::*;
 
     let owner = test_addr_from_byte(1u8);
     let verifier = test_addr_from_byte(2u8);
     let mut reg = AiRegistry::new();
+    let spec_mlp = FixedPointMlpSpec {
+        dims: vec![2, 1],
+        weights: vec![2, 3],
+        biases: vec![1],
+    };
     let mid = AiModelId::of(&owner, &[9u8; 32], 1);
-    let err = reg
-        .register_model(AiModelSpec {
-            model_id: mid,
-            model_hash: [9u8; 32],
-            owner,
-            min_verifier_count: 1,
-            agreement_threshold: 1,
-            max_input_ref_bytes: 1024,
-            max_output_ref_bytes: 1024,
-            request_deadline_blocks: 100,
-            result_deadline_blocks: 100,
-            version: 1,
-            active: true,
-            require_execution_proof: true,
-            execution_program_hash: Some([7u8; 32]),
-            execution_class: 1,
-            execution_dims: None,
-            execution_weights_digest: Some([11u8; 32]),
-            modalities: crate::ai_inference::perception::ModalitySet::text_only(),
-        })
-        .expect_err("proof-required models cannot register while STARK verification is not live");
+    reg.register_model(AiModelSpec {
+        model_id: mid,
+        model_hash: [9u8; 32],
+        owner,
+        min_verifier_count: 1,
+        agreement_threshold: 1,
+        max_input_ref_bytes: 1024,
+        max_output_ref_bytes: 1024,
+        request_deadline_blocks: 100,
+        result_deadline_blocks: 100,
+        version: 1,
+        active: true,
+        require_execution_proof: true,
+        execution_program_hash: Some(matmul_program_hash(&spec_mlp).unwrap()),
+        execution_class: 1,
+        execution_dims: Some(spec_mlp.dims.clone()),
+        execution_weights_digest: Some(weights_digest(&spec_mlp)),
+        modalities: crate::ai_inference::perception::ModalitySet::text_only(),
+    })
+    .expect("proof-required model registers cleanly when FULL_AI_STARK_VERIFICATION_LIVE is true");
+
+    reg.lock_verifier_stake(&verifier, MIN_VERIFIER_STAKE).unwrap();
+    let mut req = AiInferenceRequest {
+        request_id: AiRequestId::default(),
+        requester: owner,
+        model_id: mid,
+        input_commitment: crate::ai::execution::input_commitment(&[4, 5]),
+        input_ref: BoundedBytes::empty(),
+        max_fee: 10,
+        callback: None,
+        submitted_at_block: 0,
+        deadline_block: 100,
+        perception: Some(crate::ai_inference::perception::PerceptionRequest {
+            asset_id: crate::ai_inference::perception::DataAssetId([0xAA; 32]),
+            content_id: crate::storage::content_id::ContentId([0xBB; 32]),
+            kind: crate::ai_inference::perception::PerceptionKind::Text,
+            declared_units: 4,
+        }),
+        effort: crate::ai_inference::effort::EffortTier::default(),
+    };
+    req.request_id = req.calculate_id();
+    let req_id = reg.submit_request(req, 0).unwrap();
+
+    let res = AiInferenceResult {
+        request_id: req_id,
+        verifier,
+        output_commitment: crate::ai::execution::output_commitment(&[23]),
+        output_ref: BoundedBytes::try_new(vec![23]).unwrap(),
+        result_nonce: 0,
+        signature: Vec::new(),
+        submitted_at_block: 0,
+    };
+    let outcome = reg.submit_result(res, 0).unwrap();
     assert!(
-        err.contains("full AI STARK"),
-        "registration must name the missing verifier, got {err}"
+        outcome.is_none(),
+        "proof-required model must block finalization before verified STARK proof attach"
     );
-    let _ = verifier;
+    assert!(reg.try_finalize_with_proofs(&req_id).is_none());
 }
 
 fn transfer_fixture(
@@ -634,11 +672,7 @@ fn private_transfer_is_open_on_testnet() {
         authorization_sig: kp.sign(&auth_msg).to_vec(),
         public_digest: digest,
     };
-    let tx_testnet = signed_tx(
-        &kp,
-        testnet,
-        TransactionType::PrivateTransferSubmit(sub.clone()),
-    );
+    let tx_testnet = signed_tx(&kp, testnet, TransactionType::PrivateTransferSubmit(sub.clone()));
     crate::execution::executor::Executor::apply_transaction_checked(&mut state, &tx_testnet)
         .expect("testnet 45261 executes private transfers");
     assert!(!state.note_registry.contains_commitment(&c_in));
@@ -958,4 +992,187 @@ fn attacker_cannot_spend_victim_live_note_or_inflate_outputs() {
         "got: {inf_err}"
     );
     assert!(state.note_registry.contains_commitment(&victim_note));
+}
+
+#[test]
+fn privacy_confidential_bundle_hiding_stark_and_predicates_on_testnet() {
+    use crate::core::chain_config::Network;
+    use crate::crypto::primitives::KeyPair;
+    use crate::privacy::{L1NoteRegistry, PrivateTransferSubmit};
+
+    let testnet = Network::Testnet.chain_id().value();
+    let sender_kp = KeyPair::generate().unwrap();
+    let sender = Address::from(sender_kp.public_key_bytes());
+    let spent = L1NoteRegistry::derive_commitment(&sender, &hash_from_field(404));
+    let proof_note = hash_from_field(505);
+    let nf = L1NoteRegistry::derive_nullifier(&spent, &proof_note);
+    let out = hash_from_field(606);
+    let digest = PrivateTransferSubmit::compute_public_digest(&[nf], &[out]);
+    let auth_msg = PrivateTransferSubmit::authorization_message(testnet, sender.as_bytes(), 0, &digest);
+    let sub = PrivateTransferSubmit {
+        spent_commitments: vec![spent],
+        nullifiers: vec![nf],
+        output_commitments: vec![out],
+        nullifier_proofs: vec![proof_note],
+        authorization_sig: sender_kp.sign(&auth_msg).to_vec(),
+        public_digest: digest,
+    };
+
+    let salt = [0x42u8; 32];
+    let bundle = sub
+        .prove_confidential_bundle(testnet, &salt, 1_000, 1_000)
+        .expect("prove Hiding + YK1..YK4 bundle on testnet");
+    Executor::process_confidential_transfer_bundle(&sub, &bundle, testnet)
+        .expect("full confidential STARK + predicate bundle verifies on testnet 45261");
+
+    // Unrecognized / Mainnet chain_ids fail closed with privacy_mainnet_disabled.
+    let err = Executor::process_confidential_transfer_bundle(&sub, &bundle, testnet + 99)
+        .expect_err("wrong chain_id must be refused");
+    assert_eq!(err.code(), "privacy_mainnet_disabled");
+    let mainnet_err = Executor::process_confidential_transfer_bundle(
+        &sub,
+        &bundle,
+        Network::Mainnet.chain_id().value(),
+    )
+    .expect_err("mainnet must remain refused until launch sign-off");
+    assert_eq!(mainnet_err.code(), "privacy_mainnet_disabled");
+
+    // Unconserved input vs output value fails closed during proving.
+    assert!(sub
+        .prove_confidential_bundle(testnet, &salt, 1_000, 999)
+        .is_err());
+
+    // Tampered YK2 conservation proof fails verification.
+    let mut tampered = bundle.clone();
+    tampered.conservation_proof.statement.lhs ^= 1;
+    assert!(Executor::process_confidential_transfer_bundle(&sub, &tampered, testnet).is_err());
+}
+
+#[test]
+fn privacy_threshold_escrow_7_of_4_unlocks_on_testnet() {
+    use crate::core::chain_config::Network;
+    use crate::privacy::{
+        EscrowCommittee, ThresholdEscrow, ThresholdEscrowError, THRESHOLD_ESCROW_N,
+        THRESHOLD_ESCROW_T,
+    };
+
+    assert_eq!(THRESHOLD_ESCROW_N, 7);
+    assert_eq!(THRESHOLD_ESCROW_T, 4);
+    let testnet = Network::Testnet.chain_id().value();
+    let recipient = Address::from([0x77u8; 32]);
+    let seeds: [[u8; 32]; 7] = std::array::from_fn(|i| {
+        let mut s = [0u8; 32];
+        s[0] = (i as u8) + 1;
+        s[31] = 0x5A;
+        s
+    });
+    let members = (0..THRESHOLD_ESCROW_N)
+        .map(|i| EscrowCommittee::member_from_seed(i as u8, &seeds[i]).unwrap())
+        .collect();
+    let committee = EscrowCommittee {
+        escrow_id: [0x19u8; 32],
+        chain_id: testnet,
+        epoch: 1,
+        nonce: 0,
+        members,
+    };
+    let mut escrow = ThresholdEscrow::open(committee, [0x88u8; 32]).unwrap();
+    let shares: Vec<_> = (0..4)
+        .map(|i| escrow.sign_share(i as u8, &seeds[i], &recipient).unwrap())
+        .collect();
+    let quorum_proof = escrow.prove_quorum_predicate(4, &recipient).unwrap();
+
+    // Duplicate signer is refused.
+    let dup_shares = vec![
+        shares[0].clone(),
+        shares[0].clone(),
+        shares[1].clone(),
+        shares[2].clone(),
+    ];
+    assert_eq!(
+        escrow.unlock(&recipient, &dup_shares, &quorum_proof),
+        Err(ThresholdEscrowError::DuplicateSigner(0))
+    );
+
+    // Fewer than t = 4 valid shares is refused.
+    assert_eq!(
+        escrow.unlock(&recipient, &shares[..3], &quorum_proof),
+        Err(ThresholdEscrowError::InsufficientShares { got: 3, need: 4 })
+    );
+
+    // 4 valid ML-DSA-65 committee shares + YK6 STARK unlock cleanly via Executor.
+    let receipt =
+        Executor::process_threshold_escrow_unlock(&mut escrow, &recipient, &shares, &quorum_proof)
+            .expect("7-of-4 threshold escrow unlocks on testnet 45261");
+    assert_ne!(receipt, [0u8; 32]);
+    assert!(escrow.unlocked);
+
+    // Replay unlock fails closed.
+    assert_eq!(
+        escrow.unlock(&recipient, &shares, &quorum_proof),
+        Err(ThresholdEscrowError::AlreadyUnlocked)
+    );
+}
+
+#[test]
+fn ai_verification_layer_apb_tile64_and_bound_small_model_on_testnet() {
+    use crate::ai::answer_proof_bundle::{
+        prove_calculator_in_vm, AnswerProofBundle, CalcOp, CandidateSentence, SentenceClaimKind,
+    };
+    use crate::ai::execution::{input_commitment, FixedPointMlpSpec};
+    use crate::ai::types::{AiModelId, AiRequestId};
+    use crate::ai::verification_layer::{
+        prove_small_model_bound, prove_tile_64x64, DeterministicInferenceProfile, ModelRecordV2,
+        TILE_CELLS,
+    };
+    use crate::ai::{
+        audit_answer_proof_markdown, audit_bound_small_model_inference, audit_tile_64x64_proof,
+        verification_layer_capabilities,
+    };
+
+    assert_eq!(
+        verification_layer_capabilities(),
+        "vl0_to_vl3_dip_apb_bisection_tile64_wired"
+    );
+
+    // 1. ModelRecordV2 + DIP + request-bound small-model proof.
+    let spec = FixedPointMlpSpec {
+        dims: vec![2, 2, 1],
+        weights: vec![1, 2, 3, -1, 2, 1],
+        biases: vec![1, 0, 2],
+    };
+    let dip = DeterministicInferenceProfile {
+        quantization_bits: 16,
+        fixed_scale_shift: 1,
+        sampling_seed: 7,
+        tokenizer_digest: [0x11; 32],
+        runtime_digest: [0x22; 32],
+    };
+    let model_id = AiModelId::of(&Address::from([1u8; 32]), &[2u8; 32], 1);
+    let model = ModelRecordV2::from_mlp_spec(model_id, &spec, &dip).unwrap();
+    let req_id = AiRequestId([0x33; 32]);
+    let input = [4, 5];
+    let bound = prove_small_model_bound(req_id, &model, &spec, &input).unwrap();
+    assert_eq!(bound.input_commit, input_commitment(&input));
+    assert!(audit_bound_small_model_inference(&bound, &req_id, &model, &spec, &input).is_ok());
+
+    // 2. 64x64 tile step dispute proof.
+    let a = vec![2i32; TILE_CELLS];
+    let b = vec![3i32; TILE_CELLS];
+    let tile = prove_tile_64x64(&a, &b).unwrap();
+    assert!(audit_tile_64x64_proof(&tile, &a, &b).is_ok());
+
+    // 3. Answer Proof Bundle round-trip & prose tamper refusal.
+    let calc = prove_calculator_in_vm(6, 7, CalcOp::Mul).unwrap();
+    assert_eq!(calc.result_i32, 42);
+    let bundle = AnswerProofBundle::build(vec![CandidateSentence {
+        text: "Six times seven equals 42.".into(),
+        claim_kind: Some(SentenceClaimKind::ComputationBacked(calc)),
+    }])
+    .unwrap();
+    let md = bundle.to_markdown_document().unwrap();
+    let audited = audit_answer_proof_markdown(&md).expect("valid APB markdown audits cleanly");
+    assert!(audited.is_authentic());
+    let tampered_md = md.replace("equals 42.", "equals 43.");
+    assert!(audit_answer_proof_markdown(&tampered_md).is_err());
 }

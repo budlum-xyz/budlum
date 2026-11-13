@@ -868,6 +868,10 @@ mod tests {
             }
             Ok(())
         }
+
+        fn sync_committee_closed(&self) -> bool {
+            false
+        }
     }
 
     fn eth_spec() -> AdapterSpec {
@@ -886,16 +890,20 @@ mod tests {
     /// A well-formed sync-committee evidence sample against the fixture
     /// layout, mirroring the framework's own golden builder.
     fn golden_for(spec: &AdapterSpec) -> RawConsensusEvidence {
-        let mut payload = vec![0u8; layout::LEN];
-        payload[layout::FINALIZED_ROOT].copy_from_slice(&[0xaa; 32]);
-        payload[layout::FINALIZED_SLOT].copy_from_slice(&64u64.to_le_bytes());
-        payload[layout::ATTESTED_SLOT].copy_from_slice(&128u64.to_le_bytes());
-        payload[layout::PERIOD].copy_from_slice(&0u64.to_le_bytes());
-        payload[layout::NEXT_COMMITTEE_ROOT].copy_from_slice(&[0xbb; 32]);
-        payload[layout::AGGREGATE_PUBKEY].copy_from_slice(&[0x11; 96]);
-        payload[layout::SIGNATURE].copy_from_slice(&[0x22; 96]);
-        payload[layout::PARTICIPATION_BITS].copy_from_slice(&[0xff; 64]);
-        payload[layout::STATE_ROOT].copy_from_slice(&[0xcc; 32]);
+        let committee = crate::cross_domain::external::ethereum::PinnedCommittee {
+            period: 0,
+            aggregate_pubkey: vec![0x11; 96],
+            next_committee_root: [0xbb; 32],
+        };
+        let payload = crate::cross_domain::external::ethereum::build_deneb_update_payload(
+            64,
+            128,
+            0,
+            &committee,
+            &[0x22; 96],
+            &[0xff; 64],
+            [0xcc; 32],
+        );
         let adapter = spec.build(Some(Box::new(StrictTestBls)), None);
         RawConsensusEvidence {
             adapter: adapter.descriptor().id,
@@ -1422,12 +1430,18 @@ mod tests {
         // A rival claim: same well-formed payload, different state root, so
         // the adapter derives a different claim for the same height.
         let mut rival = quorum_evidence(&spec, addr(3));
-        rival.payload[layout::STATE_ROOT].copy_from_slice(&[0xdd; 32]);
+        crate::cross_domain::external::ethereum::set_deneb_state_root(
+            &mut rival.payload,
+            [0xdd; 32],
+        );
         rival.declared_root = [0xdd; 32];
         // A third, different claim from the bonded poster: three seats, three
         // distinct answers, threshold 2.
         let mut rival_b = quorum_evidence(&spec, addr(9));
-        rival_b.payload[layout::STATE_ROOT].copy_from_slice(&[0xee; 32]);
+        crate::cross_domain::external::ethereum::set_deneb_state_root(
+            &mut rival_b.payload,
+            [0xee; 32],
+        );
         rival_b.declared_root = [0xee; 32];
         let _ = state.submit_evidence(&honest_a, Some(Box::new(StrictTestBls)));
         let _ = state.submit_evidence(&rival, Some(Box::new(StrictTestBls)));
@@ -1481,10 +1495,16 @@ mod tests {
         let spec = eth_spec();
         let a = quorum_evidence(&spec, addr(2));
         let mut b = quorum_evidence(&spec, addr(3));
-        b.payload[layout::STATE_ROOT].copy_from_slice(&[0xdd; 32]);
+        crate::cross_domain::external::ethereum::set_deneb_state_root(
+            &mut b.payload,
+            [0xdd; 32],
+        );
         b.declared_root = [0xdd; 32];
         let mut c = quorum_evidence(&spec, addr(4));
-        c.payload[layout::STATE_ROOT].copy_from_slice(&[0xee; 32]);
+        crate::cross_domain::external::ethereum::set_deneb_state_root(
+            &mut c.payload,
+            [0xee; 32],
+        );
         c.declared_root = [0xee; 32];
         let _ = state.submit_evidence(&a, Some(Box::new(StrictTestBls)));
         let _ = state.submit_evidence(&b, Some(Box::new(StrictTestBls)));
@@ -1737,23 +1757,24 @@ mod tests {
         let mut agg_pk = vec![0u8; 96];
         agg_pk[..48].copy_from_slice(&pk_compressed);
 
+        let committee = crate::cross_domain::external::ethereum::PinnedCommittee {
+            period: 0,
+            aggregate_pubkey: agg_pk.clone(),
+            next_committee_root: [0xbb; 32],
+        };
         let spec = AdapterSpec::EthereumSync {
             network: "testnet".to_string(),
-            committee: Some(crate::cross_domain::external::ethereum::PinnedCommittee {
-                period: 0,
-                aggregate_pubkey: agg_pk.clone(),
-                next_committee_root: [0xbb; 32],
-            }),
+            committee: Some(committee.clone()),
         };
-        let mut payload = vec![0u8; layout::LEN];
-        payload[layout::FINALIZED_ROOT].copy_from_slice(&[0xaa; 32]);
-        payload[layout::FINALIZED_SLOT].copy_from_slice(&64u64.to_le_bytes());
-        payload[layout::ATTESTED_SLOT].copy_from_slice(&128u64.to_le_bytes());
-        payload[layout::PERIOD].copy_from_slice(&0u64.to_le_bytes());
-        payload[layout::NEXT_COMMITTEE_ROOT].copy_from_slice(&[0xbb; 32]);
-        payload[layout::AGGREGATE_PUBKEY].copy_from_slice(&agg_pk);
-        payload[layout::PARTICIPATION_BITS].copy_from_slice(&[0xff; 64]);
-        payload[layout::STATE_ROOT].copy_from_slice(&[0xcc; 32]);
+        let mut payload = crate::cross_domain::external::ethereum::build_deneb_update_payload(
+            64,
+            128,
+            0,
+            &committee,
+            &[0u8; 96],
+            &[0xff; 64],
+            [0xcc; 32],
+        );
         let update = crate::cross_domain::external::ethereum::parse_update(&payload).unwrap();
         let root = signing_root_v2(&update);
         let sig =

@@ -10,9 +10,8 @@
 //!    pricing, and epoch-batched submission counters so public state never
 //!    reveals whether two owners hold the same sealed bytes.
 //!
-//! WIRING: unwired - post-launch T-Expansion private cross-owner deduplication
-//! ; closed on testnet 45261 until activation height is set by
-//! governance.
+//! WIRING: private cross-owner deduplication, active on testnet `45261` from
+//! genesis (`ACTIVATION` height `Some(0)`).
 
 use std::collections::{BTreeMap, BTreeSet};
 

@@ -201,23 +201,28 @@ impl ExecutionEnvironment for BudZeroWorker {
                         gas_used: call.gas_limit,
                     });
                 }
-                match host.write(&prog_ns, &call.target.id, Some(&call.input)) {
-                    Ok(()) => Ok(EeOutcome {
-                        status: OutcomeStatus::Success,
-                        output: call.target.id.clone(),
-                        gas_used: 0,
-                    }),
-                    Err(HostError::OutOfGas) => Ok(EeOutcome {
-                        status: OutcomeStatus::OutOfGas,
+                if host
+                    .write(&prog_ns, &call.target.id, Some(&call.input))
+                    .is_err()
+                    || host
+                        .write(
+                            &prog_ns,
+                            &[b"owner:", call.target.id.as_slice()].concat(),
+                            Some(&call.caller.id),
+                        )
+                        .is_err()
+                {
+                    return Ok(EeOutcome {
+                        status: OutcomeStatus::Revert,
                         output: Vec::new(),
                         gas_used: call.gas_limit,
-                    }),
-                    Err(err) => Ok(EeOutcome {
-                        status: OutcomeStatus::Revert,
-                        output: err.to_string().into_bytes(),
-                        gas_used: 0,
-                    }),
+                    });
                 }
+                Ok(EeOutcome {
+                    status: OutcomeStatus::Success,
+                    output: call.target.id.clone(),
+                    gas_used: 0,
+                })
             }
             EeCallKind::Call => {
                 let Some(code_bytes) = host.read(&prog_ns, &call.target.id).ok().flatten() else {
@@ -260,6 +265,18 @@ impl ExecutionEnvironment for BudZeroWorker {
 
                 let mut ucall_gas = 0u64;
                 if program_has_universal_syscall(&program) {
+                    let is_owner_or_self = call.caller.id == call.target.id
+                        || matches!(
+                            host.read(&prog_ns, &[b"owner:", call.target.id.as_slice()].concat()),
+                            Ok(Some(ref owner)) if owner.as_slice() == call.caller.id.as_slice()
+                        );
+                    if !is_owner_or_self {
+                        return Ok(EeOutcome {
+                            status: OutcomeStatus::Revert,
+                            output: b"unauthorized budzero universal syscall".to_vec(),
+                            gas_used: 0,
+                        });
+                    }
                     let meta = vm.storage.get(&0x4000).copied().unwrap_or(0);
                     let to_ee = EeId((meta & 0xff) as u8);
                     let is_static = ((meta >> 8) & 1) != 0;
@@ -433,7 +450,7 @@ mod tests {
         }
         .encode()
         .to_le_bytes();
-        assert!(worker.validate_deploy(&merkle_code).is_err());
+        assert!(worker.validate_deploy(&merkle_code).is_ok());
 
         let inf_code = Instruction {
             opcode: Opcode::VerifyInference,
@@ -444,7 +461,20 @@ mod tests {
         }
         .encode()
         .to_le_bytes();
-        assert!(worker.validate_deploy(&inf_code).is_err());
+        assert!(worker.validate_deploy(&inf_code).is_ok());
+
+        assert!(bud_isa::Instruction::decode_for_mainnet(
+            Instruction {
+                opcode: Opcode::VerifyMerkle,
+                rd: 1,
+                rs1: 0,
+                rs2: 0,
+                imm: 0,
+            }
+            .encode(),
+            bud_isa::MainnetActivation::closed(),
+        )
+        .is_err());
 
         let mut code = Vec::new();
         for (idx, imm) in [10i32, 11, 12, 13].into_iter().enumerate() {

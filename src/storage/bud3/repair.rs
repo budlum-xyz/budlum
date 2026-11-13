@@ -17,16 +17,168 @@
 //!    a repaired symbol from source symbols; a mismatch proves a bad repair and
 //!    slashes 1% of the repairer's stake (`BAD_REPAIR_SLASH_BPS = 100`).
 
-use super::custody::{symbol_leaf, symbol_root};
+use super::custody::{prove_symbol_root_path, symbol_leaf, symbol_root, PathStep};
 use super::fountain::{FountainError, SegmentDecoder, SegmentEncoder, Symbol};
 use super::limits::Profile;
 use super::meter::Meter;
 use super::placement::{rank, Candidate, Class, Share};
 use super::registry::{Address, ObjectKey};
 use crate::core::hash::hash_fields_bytes;
+use crate::crypto::ctx::STORAGE_V2;
+use crate::crypto::pq::{ml_dsa_sign, PqError};
+use crate::crypto::scheme::SchemeId;
 
 /// Domain tag for rendezvous repairer assignment and 1% repair-audit draw.
 pub const REPAIR_TAG: &[u8] = b"BDLM_BUD3_REPAIR_V1";
+
+/// Domain tag binding independent Full-validator repair attestations.
+pub const REPAIR_ATTEST_DOMAIN: &[u8] = b"BDLM_BUD3_REPAIR_ATTEST_V1";
+
+/// Minimum independent active Full-validator attestations required when repair
+/// does not carry an inline Merkle-verified symbol witness.
+pub const MIN_REPAIR_ATTESTATIONS: usize = 3;
+
+/// Maximum inline Merkle-verified witness symbols accepted in one `RecordRepair` tx.
+pub const MAX_REPAIR_WITNESS_SYMBOLS: usize = 256;
+
+/// One symbol proven against an existing on-chain `SymbolRoot` (`obj.roots[root_index]`).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RepairSymbolProof {
+    /// Index in `obj.roots` whose Merkle root commits to this symbol.
+    pub root_index: u32,
+    /// Zero-based position of `symbol.esi` under `obj.roots[root_index]`.
+    pub position: u64,
+    /// Merkle path from `leaf_hash(SYMBOLS_TAG, esi, symbol_leaf)` to `root`.
+    pub root_path: Vec<PathStep>,
+    /// The verified coded symbol.
+    pub symbol: Symbol,
+}
+
+/// Independent Full-validator attestation verifying repaired symbols for a segment.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RepairAttestation {
+    /// Attesting active `Class::Full` validator address.
+    pub validator: Address,
+    /// ML-DSA-65 signature over [`repair_attestation_digest`] (`ctx::STORAGE_V2`).
+    pub signature: Vec<u8>,
+}
+
+/// Cryptographic witness proving `RecordRepair.new_symbols` and `new_root`
+/// are derived from the object's committed segment rather than fabricated bytes.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum RepairWitness {
+    /// Merkle-verified live symbols from existing `obj.roots` entries that decode
+    /// the segment and deterministically reproduce `new_symbols`.
+    ProvenSymbols(Vec<RepairSymbolProof>),
+    /// Independent Full-validator ML-DSA-65 attestations over `new_root` bound
+    /// to the segment's original committed root (`>= MIN_REPAIR_ATTESTATIONS`).
+    ValidatorAttestations(Vec<RepairAttestation>),
+}
+
+/// Canonical domain-separated digest signed by each independent Full validator
+/// attesting a segment repair.
+#[must_use]
+pub fn repair_attestation_digest(
+    object: &ObjectKey,
+    segment: u64,
+    first_esi: u32,
+    count: u32,
+    new_root: &[u8; 32],
+    original_segment_root: &[u8; 32],
+) -> [u8; 32] {
+    hash_fields_bytes(&[
+        REPAIR_ATTEST_DOMAIN,
+        object,
+        &segment.to_le_bytes(),
+        &first_esi.to_le_bytes(),
+        &count.to_le_bytes(),
+        new_root,
+        original_segment_root,
+    ])
+}
+
+/// Sign a [`RepairAttestation`] with `validator`'s ML-DSA-65 seed under `ctx::STORAGE_V2`.
+///
+/// Convenience: exposed for repair attester daemons and witness tests.
+///
+/// # Errors
+///
+/// Returns [`PqError`] if `ml_dsa_seed` fails to sign.
+pub fn sign_repair_attestation(
+    validator: Address,
+    ml_dsa_seed: &[u8; 32],
+    object: &ObjectKey,
+    segment: u64,
+    first_esi: u32,
+    count: u32,
+    new_root: &[u8; 32],
+    original_segment_root: &[u8; 32],
+) -> Result<RepairAttestation, PqError> {
+    let digest = repair_attestation_digest(
+        object,
+        segment,
+        first_esi,
+        count,
+        new_root,
+        original_segment_root,
+    );
+    let signature = ml_dsa_sign(
+        SchemeId::ML_DSA_65,
+        ml_dsa_seed,
+        &digest,
+        STORAGE_V2,
+        &[0u8; 32],
+    )?;
+    Ok(RepairAttestation {
+        validator,
+        signature,
+    })
+}
+
+/// Build `RepairSymbolProof` witnesses for `live_subset` against the full list of
+/// symbols committed under `obj.roots[root_index]` (sorted by ESI).
+///
+/// Convenience: exposed for repairers constructing inline witnesses for `RecordRepair`.
+#[must_use]
+pub fn build_repair_proven_witness(
+    root_index: u32,
+    placed_root_symbols: &[Symbol],
+    live_subset: &[Symbol],
+) -> Option<Vec<RepairSymbolProof>> {
+    if placed_root_symbols.is_empty()
+        || live_subset.is_empty()
+        || live_subset.len() > MAX_REPAIR_WITNESS_SYMBOLS
+    {
+        return None;
+    }
+    let first_esi = placed_root_symbols.first()?.esi;
+    let seg = placed_root_symbols.first()?.segment;
+    for (idx, s) in placed_root_symbols.iter().enumerate() {
+        let expected_esi = first_esi.checked_add(u32::try_from(idx).ok()?)?;
+        if s.segment != seg || s.esi != expected_esi {
+            return None;
+        }
+    }
+    let placed_leaves: Vec<(u32, [u8; 32])> = placed_root_symbols
+        .iter()
+        .map(|s| (s.esi, symbol_leaf(&s.data)))
+        .collect();
+    let mut proofs = Vec::with_capacity(live_subset.len());
+    for sym in live_subset {
+        if sym.segment != seg || sym.esi < first_esi {
+            return None;
+        }
+        let pos = usize::try_from(sym.esi - first_esi).ok()?;
+        let root_path = prove_symbol_root_path(&placed_leaves, pos)?;
+        proofs.push(RepairSymbolProof {
+            root_index,
+            position: u64::try_from(pos).ok()?,
+            root_path,
+            symbol: sym.clone(),
+        });
+    }
+    Some(proofs)
+}
 
 /// Blocks before an unstarted repair task hands over to the next Full validator (Section 6.10.3).
 pub const REPAIR_HANDOVER_BLOCKS: u64 = 20;
@@ -75,6 +227,9 @@ pub struct PreparedRepair {
     pub new_symbols: Vec<Symbol>,
     /// Merkle symbol root over `new_symbols`.
     pub new_root: [u8; 32],
+    /// Inline Merkle-verified symbol proofs (populated when `live_symbols` is a
+    /// contiguous `obj.roots[0]` set within `MAX_REPAIR_WITNESS_SYMBOLS`).
+    pub witness: Vec<RepairSymbolProof>,
 }
 
 /// Whether `unseen_secs` exceeds the class-specific unseen loss window (`T_F = 1d`, `T_M = 7d`).
@@ -145,20 +300,32 @@ where
     {
         return Err(RepairError::InvalidNewHolders);
     }
+    let live_vec: Vec<Symbol> = live_symbols.into_iter().collect();
     let mut dec = SegmentDecoder::new(segment, segment_len, profile)?;
     let mut meter = Meter::new(
         segment_len.saturating_mul(4).saturating_add(1 << 20),
         1 << 20,
     );
-    for sym in live_symbols {
+    for sym in &live_vec {
         if dec.is_done() {
             break;
         }
-        let _ = dec.push(sym, &mut meter);
+        let _ = dec.push(sym.clone(), &mut meter);
     }
     let bytes = dec.into_bytes().ok_or(RepairError::SegmentUnrecoverable)?;
     let enc = SegmentEncoder::new(segment, &bytes, profile)?;
     let k = enc.k();
+    let witness_need = usize::try_from(k)
+        .unwrap_or(MAX_REPAIR_WITNESS_SYMBOLS)
+        .saturating_add(2);
+    let witness = if live_vec.first().is_some_and(|s| s.esi == 0)
+        && witness_need <= MAX_REPAIR_WITNESS_SYMBOLS
+    {
+        let subset = &live_vec[..live_vec.len().min(witness_need)];
+        build_repair_proven_witness(0, &live_vec, subset).unwrap_or_default()
+    } else {
+        Vec::new()
+    };
     if next_esi < k {
         return Err(RepairError::InvalidFreshEsi);
     }
@@ -193,6 +360,7 @@ where
         new_shares,
         new_symbols,
         new_root,
+        witness,
     })
 }
 

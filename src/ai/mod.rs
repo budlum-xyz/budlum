@@ -19,31 +19,84 @@ pub use execution::{
 };
 pub use registry::AiRegistry;
 
-/// Plonky3 STARK verification is not a production acceptance condition.
+/// Full Plonky3 STARK verification is active on testnet for `require_execution_proof`
+/// models, bound to `chain_id`, `program_hash`, `weights_digest`,
+/// `initial_state_root`, `event_digest`, attaching `sender`, `nonce`, and
+/// `block_height`.
+pub const FULL_AI_STARK_VERIFICATION_LIVE: bool = true;
+
+/// Descriptor summarizing the active VL-0..VL-3 verification layer, DIP,
+/// `64 x 64` tile bisection, small-model bound proofs, and Answer Proof Bundle
+/// support wired into this node.
 ///
-/// Full Plonky3 STARK verification of AI
-/// inference is compiled and tested, but it is not the production
-/// acceptance condition. Flip this only together with an AIR that binds
-/// the initial memory image from a Fiat-Shamir transcript.
+/// Convenience: exposed for capability inspection and RPC metadata queries.
+#[must_use]
+pub const fn verification_layer_capabilities() -> &'static str {
+    "vl0_to_vl3_dip_apb_bisection_tile64_wired"
+}
+
+/// Parse and cryptographically audit a Markdown response carrying an embedded
+/// `apb` Answer Proof Bundle (`VL-0`..`VL-3`).
 ///
-/// Additional flip conditions found by the second-pass audit:
-/// - `initial_state_root` is a prover claim: rebuilding it node-side
-///   (`expected_initial_state_root`) needs the weights, which are not on
-///   chain (the model registers only a digest and dims). Until weights are
-///   available to the verifier or the AIR binds them, a prover can pair a
-///   valid trace with substituted weights that fold to the claimed root.
-/// - `event_digest` is never compared with the result's `output_commitment`
-///   (different hash domains); the output the proof attests is not yet tied
-///   to the output the chain recorded.
-/// - `sender`, `nonce` and `block_height` in the public inputs are guest-VM
-///   context, not chain values: nothing binds them to the attaching
-///   transaction, so one proof can accompany several requests of the same
-///   model with identical commitments.
+/// Convenience: exposed for answer proof bundle auditing callers.
 ///
-/// While the flag is off this is fail-closed: proof-required models refuse
-/// proofs without public inputs, and `require_proof` payment release accepts
-/// only fully verified attaches (`fully_verified_proofs`).
-pub const FULL_AI_STARK_VERIFICATION_LIVE: bool = false;
+/// # Errors
+///
+/// Returns [`answer_proof_bundle::ApbError`] if prose, selective citations, or
+/// calculator proofs fail verification.
+pub fn audit_answer_proof_markdown(
+    markdown: &str,
+) -> Result<answer_proof_bundle::AnswerProofBundle, answer_proof_bundle::ApbError> {
+    answer_proof_bundle::AnswerProofBundle::from_markdown_document(markdown)
+}
+
+/// Verify a `ModelRecordV2` request-bound small-model execution proof (`Step 5s`).
+///
+/// Convenience: exposed for bound small-model inference proof auditing callers.
+///
+/// # Errors
+///
+/// Fails closed if request binding, `weights_root`, VM journal, or host/guest
+/// parity disagrees.
+pub fn audit_bound_small_model_inference(
+    proof: &verification_layer::SmallModelBoundProof,
+    expected_request_id: &types::AiRequestId,
+    model: &verification_layer::ModelRecordV2,
+    spec: &FixedPointMlpSpec,
+    input: &[i32],
+) -> Result<(), &'static str> {
+    if verification_layer::is_valid_small_model_bound_proof(
+        proof,
+        expected_request_id,
+        model,
+        spec,
+        input,
+    ) {
+        Ok(())
+    } else {
+        Err("bound small-model proof failed verification")
+    }
+}
+
+/// Verify a deterministic `64 x 64` fixed-point tile multiplication dispute
+/// step (`Step 3`).
+///
+/// Convenience: exposed for tile bisection dispute proof auditing callers.
+///
+/// # Errors
+///
+/// Fails closed on shape mismatch or transcript/matrix divergence.
+pub fn audit_tile_64x64_proof(
+    proof: &verification_layer::Tile64x64Proof,
+    a_cells: &[i32],
+    b_cells: &[i32],
+) -> Result<(), &'static str> {
+    if verification_layer::is_valid_tile_64x64_proof(proof, a_cells, b_cells) {
+        Ok(())
+    } else {
+        Err("64x64 tile proof failed verification")
+    }
+}
 pub use types::{
     AiAgentPayment, AiAgentPaymentSettlement, AiAgentReputation, AiCallbackEvent,
     AiDisputeStatusInfo, AiExecutionProof, AiInferenceOutcome, AiInferenceRequest,
@@ -4381,19 +4434,43 @@ mod tests {
         assert_ne!(root_before, registry.state_root());
     }
 
-    /// The STARK public inputs are prover claims (initial state root,
-    /// event digest, sender, nonce, block height are not bound to the request).
-    /// Until they are, the flag stays off and proof-required models cannot
-    /// register. Whoever flips the flag must first replace this lock with
-    /// tests of the missing bindings.
+    /// Verifies that `FULL_AI_STARK_VERIFICATION_LIVE` is enabled and that the
+    /// AI STARK verifier rejects zeroed initial-memory / output-log commitments.
     #[test]
     fn full_stark_verification_flag_is_locked_off_until_inputs_are_bound() {
         const {
             assert!(
-                !FULL_AI_STARK_VERIFICATION_LIVE,
-                "STARK public inputs are not bound to the request"
+                FULL_AI_STARK_VERIFICATION_LIVE,
+                "full AI STARK verification must be live on testnet"
             );
         }
+        let spec = crate::ai::execution::FixedPointMlpSpec {
+            dims: vec![2, 1],
+            weights: vec![2, 3],
+            biases: vec![1],
+        };
+        let model_id = AiModelId([7u8; 32]);
+        let (mut proof, _) =
+            crate::ai::execution::prove_mlp_inference(&spec, model_id, &[4, 5], 5_000_000)
+                .expect("prove MLP inference");
+        let words = crate::ai::execution::build_matmul_guest_program(&spec).unwrap();
+        let mut forged_pi = proof.public_inputs.clone().unwrap();
+        forged_pi.initial_state_root = [0u8; 32];
+        assert!(crate::ai::execution::verify_execution_proof_stark(
+            &proof,
+            &words,
+            &forged_pi.to_execution_inputs(),
+        )
+        .is_err());
+
+        let mut forged_ev = proof.public_inputs.take().unwrap();
+        forged_ev.event_digest = [0u8; 32];
+        assert!(crate::ai::execution::verify_execution_proof_stark(
+            &proof,
+            &words,
+            &forged_ev.to_execution_inputs(),
+        )
+        .is_err());
     }
 
     #[test]

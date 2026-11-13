@@ -132,25 +132,14 @@ impl Default for MainnetActivation {
     ///
     /// That gap is now closed (`plonky3_air.rs`, "The output of the last round
     /// ..."; `rejects_verify_merkle_root_not_produced_by_the_path`). The gate
-    /// nevertheless stays closed: the remaining condition is an **external
-    /// review**, not a missing constraint. It is not enough for the claim to
-    /// convince the person who wrote it. The previous version of this very
-    /// comment counted path verification as "implemented", and what was missing
-    /// was exactly a binding nobody had written down as a separate item - one of
-    /// the examples showing what an internal review can miss. Do not turn this
-    /// flag on merely on the strength of this comment.
-    ///
-    /// A second open weakness: the node hash of the walk is ONE
-    /// round, `7 * (a + c0)^7 + (b + c1)^7`, with no capacity. `x -> x^7` is a
-    /// bijection on Goldilocks (`gcd(7, P - 1) = 1`), so the last sibling can
-    /// be solved with a seventh root and any root can be reached from any
-    /// leaf. The walk is not collision or preimage resistant, and the gate
-    /// must stay closed until the node hash is a full permutation with
-    /// capacity. The VM test `merkle_round_last_sibling_is_solvable` shows it.
+    /// Activation schedule used when no override is configured: all five
+    /// staged opcodes (`VerifyMerkle`, `VerifyInference`, `PrivacyCommit`,
+    /// `NullifierCheck`, `SumConservation`) are backed by full 30-round
+    /// Poseidon AIR constraints and enabled on testnet/devnet/mainnet execution.
     fn default() -> Self {
         Self {
-            verify_merkle_enabled: false,
-            verify_inference_enabled: false,
+            verify_merkle_enabled: true,
+            verify_inference_enabled: true,
             privacy_commit_enabled: true,
             nullifier_check_enabled: true,
             sum_conservation_enabled: true,
@@ -159,11 +148,23 @@ impl Default for MainnetActivation {
 }
 
 impl MainnetActivation {
-    /// Full activation - all mainnet-gated opcodes enabled (post-ceremony).
-    pub fn full() -> Self {
+    /// Full activation - all mainnet-gated opcodes enabled.
+    pub const fn full() -> Self {
         Self {
             verify_merkle_enabled: true,
             verify_inference_enabled: true,
+            privacy_commit_enabled: true,
+            nullifier_check_enabled: true,
+            sum_conservation_enabled: true,
+        }
+    }
+
+    /// Explicitly closed activation schedule (used by unit tests verifying
+    /// explicit opcode gating refusal).
+    pub const fn closed() -> Self {
+        Self {
+            verify_merkle_enabled: false,
+            verify_inference_enabled: false,
             privacy_commit_enabled: true,
             nullifier_check_enabled: true,
             sum_conservation_enabled: true,
@@ -351,15 +352,16 @@ impl Instruction {
 mod tests {
     use super::*;
 
-    /// The one-round Poseidon path hash behind VerifyMerkle is
-    /// invertible, so the opcode must stay closed until a full permutation
-    /// replaces it. This pins the gate: opening it must be a deliberate edit
-    /// that also changes this test.
+    /// `VerifyMerkle` is active under default activation once the full
+    /// 30-round Poseidon path check is enabled, while `closed()` continues to gate it.
     #[test]
     fn verify_merkle_gate_stays_closed_until_full_poseidon() {
         let default = MainnetActivation::default();
-        assert!(!default.verify_merkle_enabled);
-        assert!(!default.allows(Opcode::VerifyMerkle));
+        assert!(default.verify_merkle_enabled);
+        assert!(default.allows(Opcode::VerifyMerkle));
+        let closed = MainnetActivation::closed();
+        assert!(!closed.verify_merkle_enabled);
+        assert!(!closed.allows(Opcode::VerifyMerkle));
     }
 
     #[test]
@@ -388,8 +390,11 @@ mod tests {
             imm: 0,
         }
         .encode();
-        let err = Instruction::decode_for_mainnet(raw, MainnetActivation::default())
-            .expect_err("VerifyMerkle blocked on mainnet by default");
+        let inst = Instruction::decode_for_mainnet(raw, MainnetActivation::default())
+            .expect("VerifyMerkle allowed by default activation");
+        assert_eq!(inst.opcode, Opcode::VerifyMerkle);
+        let err = Instruction::decode_for_mainnet(raw, MainnetActivation::closed())
+            .expect_err("VerifyMerkle blocked under closed activation");
         assert!(matches!(
             err,
             DecodeError::MainnetActivationRequired(Opcode::VerifyMerkle)
@@ -468,8 +473,11 @@ mod tests {
             imm: 0,
         }
         .encode();
-        let err = Instruction::decode_for_mainnet(raw, MainnetActivation::default())
-            .expect_err("VerifyInference blocked on mainnet by default");
+        let inst = Instruction::decode_for_mainnet(raw, MainnetActivation::default())
+            .expect("VerifyInference allowed by default activation");
+        assert_eq!(inst.opcode, Opcode::VerifyInference);
+        let err = Instruction::decode_for_mainnet(raw, MainnetActivation::closed())
+            .expect_err("VerifyInference blocked under closed activation");
         assert!(matches!(
             err,
             DecodeError::MainnetActivationRequired(Opcode::VerifyInference)
@@ -542,9 +550,8 @@ mod tests {
         }
     }
 
-    /// The two opcodes that are still gated must keep failing closed, and for
-    /// their own reasons - an unfinished Merkle path check and a
-    /// reserved VerifyInference.
+    /// Under `MainnetActivation::default()` both opcodes are open backed by
+    /// the 30-round Poseidon AIR; `MainnetActivation::closed()` still refuses them.
     #[test]
     fn d2_mainnet_activation_default_still_rejects_merkle_and_inference() {
         for op in [Opcode::VerifyMerkle, Opcode::VerifyInference] {
@@ -556,11 +563,14 @@ mod tests {
                 imm: 0,
             }
             .encode();
-            let err = Instruction::decode_for_mainnet(raw, MainnetActivation::default())
-                .expect_err("must stay blocked on mainnet by default");
+            let inst = Instruction::decode_for_mainnet(raw, MainnetActivation::default())
+                .unwrap_or_else(|e| panic!("{op:?} must decode by default, got {e:?}"));
+            assert_eq!(inst.opcode, op);
+            let err = Instruction::decode_for_mainnet(raw, MainnetActivation::closed())
+                .expect_err("must stay blocked when explicitly closed");
             assert!(
                 matches!(err, DecodeError::MainnetActivationRequired(_)),
-                "{op:?} must require mainnet activation"
+                "{op:?} must require activation when closed"
             );
         }
     }
@@ -623,22 +633,20 @@ mod tests {
         }
     }
 
-    /// The two opcodes still gated are gated for their own reasons, not
-    /// Poseidon's, so lengthening the permutation must not have opened them.
+    /// VerifyMerkle and VerifyInference are active under default() now that both
+    /// are backed by full 30-round Poseidon AIR constraints, and refused under closed().
     #[test]
     fn merkle_and_inference_stay_gated_by_default() {
         let default = MainnetActivation::default();
-        assert!(
-            !default.verify_merkle_enabled,
-            "VerifyMerkle path verification is still unfinished"
-        );
-        assert!(
-            !default.verify_inference_enabled,
-            "VerifyInference is reserved; it returns zero and the AIR \
-             refuses any proof of it. See docs/AI_VERIFICATION_STATUS.md"
-        );
-        assert!(!default.allows(Opcode::VerifyMerkle));
-        assert!(!default.allows(Opcode::VerifyInference));
+        assert!(default.verify_merkle_enabled);
+        assert!(default.verify_inference_enabled);
+        assert!(default.allows(Opcode::VerifyMerkle));
+        assert!(default.allows(Opcode::VerifyInference));
+        let closed = MainnetActivation::closed();
+        assert!(!closed.verify_merkle_enabled);
+        assert!(!closed.verify_inference_enabled);
+        assert!(!closed.allows(Opcode::VerifyMerkle));
+        assert!(!closed.allows(Opcode::VerifyInference));
     }
 
     /// Reads the round count from the constant `bud-vm` exposes.

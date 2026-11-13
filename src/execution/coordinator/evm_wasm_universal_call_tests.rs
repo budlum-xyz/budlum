@@ -551,7 +551,9 @@ fn asset_id_is_deterministic() {
 
     let ptr_wasm = derive_pointer_address(&id1, EeId::WASM).expect("wasm ptr");
     assert!(String::from_utf8_lossy(&ptr_wasm).starts_with("bud1"));
-    assert!(derive_pointer_address(&id1, EeId::SVM).is_err());
+    assert!(derive_pointer_address(&id1, EeId::SVM).is_ok());
+    assert!(derive_pointer_address(&id1, EeId::MOVE).is_ok());
+    assert!(derive_pointer_address(&id1, EeId::BUDZERO).is_err());
 }
 
 #[test]

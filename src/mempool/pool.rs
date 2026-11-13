@@ -237,6 +237,27 @@ pub fn charged_bytes(tx: &Transaction) -> usize {
     proto.encoded_len()
 }
 
+fn is_uol_home_stipend_tx(tx: &Transaction) -> bool {
+    let crate::core::transaction::TransactionType::Settlement(
+        crate::settlement::domains::SettlementTx::ObjectLayer(uol),
+    ) = &tx.tx_type
+    else {
+        return false;
+    };
+    matches!(
+        uol.as_ref(),
+        crate::object_layer::ObjectLayerTx::HomeStipendCall { auth, action, .. }
+            if auth.requested_stipend_attos > 0
+                && auth.requested_stipend_attos <= crate::object_layer::MAX_HOME_STIPEND_ATTOS
+                && !auth.home_address.is_empty()
+                && auth.home_address.len() <= crate::object_layer::MAX_ESCAPE_ADDRESS_BYTES
+                && !matches!(
+                    action.as_ref(),
+                    crate::object_layer::ObjectLayerTx::HomeStipendCall { .. }
+                )
+    )
+}
+
 impl Mempool {
     pub fn new(config: MempoolConfig) -> Self {
         Mempool {
@@ -347,7 +368,7 @@ impl Mempool {
             block_bytes: duty_lane::block_bytes(&tx),
         });
 
-        if duty.is_none() && tx.fee < self.config.min_fee {
+        if duty.is_none() && !is_uol_home_stipend_tx(&tx) && tx.fee < self.config.min_fee {
             return Err(MempoolError::FeeTooLow);
         }
 

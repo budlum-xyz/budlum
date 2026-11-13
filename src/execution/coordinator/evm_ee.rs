@@ -22,10 +22,13 @@ use crate::execution::coordinator::assets::{
     SplPointerOp,
 };
 use crate::execution::coordinator::foreign::ethereum::BUDLUM_EVM_CHAIN_ID;
-use crate::execution::coordinator::state::{NS_EVM_ACCOUNT, NS_EVM_CODE, NS_EVM_STORAGE};
+use crate::execution::coordinator::state::{
+    NS_EVM_ACCOUNT, NS_EVM_CODE, NS_EVM_STORAGE, NS_UEL_ASSETS,
+};
 use crate::execution::coordinator::universal_call::{
-    decode_precompile_calldata, encode_evm_universal_call_log, encode_precompile_return,
-    wrap_static_universal_input, EVM_UNIVERSAL_PRECOMPILE,
+    decode_precompile_calldata, decode_uol_precompile_calldata, encode_evm_universal_call_log,
+    encode_precompile_return, uol_selector, wrap_static_universal_input, DecodedUolPrecompileCall,
+    EVM_UNIVERSAL_PRECOMPILE, EVM_UOL_PRECOMPILE,
 };
 use budlum_uel_abi::{
     BlockContext, BudAmount, CodeInfo, EeCall, EeCallKind, EeFault, EeId, EeIdentity, EeLog,
@@ -180,7 +183,7 @@ fn target_collides_with_native_alias(host: &dyn HostRead, addr20: &[u8; 20]) -> 
     };
     // Direct probe key convention `[0xff, 'e', 'v', 'm', addr20]` if indexed, plus
     // coordinator-side check at deploy boundary; also refuse reserved precompile range.
-    if addr20 == &EVM_UNIVERSAL_PRECOMPILE {
+    if addr20 == &EVM_UNIVERSAL_PRECOMPILE || addr20 == &EVM_UOL_PRECOMPILE {
         return true;
     }
     let mut probe = Vec::with_capacity(24);
@@ -971,6 +974,478 @@ fn execute_evm_pointer_to_svm_or_move(
     }
 }
 
+fn execute_evm_pointer_to_expansion(
+    ptr: &PointerDescriptor,
+    caller20: &[u8; 20],
+    input: &[u8],
+    is_static: bool,
+    gas_budget: u64,
+    host: &mut dyn HostApi,
+) -> Result<(OutcomeStatus, Vec<u8>), String> {
+    let home_ee = EeId(ptr.home_ee);
+    if home_ee == EeId::MOVE_SUI {
+        return execute_evm_pointer_to_svm_or_move(ptr, caller20, input, is_static, gas_budget, host);
+    }
+    let payload = serde_json::to_vec(&serde_json::json!({
+        "op": "pointer_call",
+        "home_ee": home_ee.0,
+        "caller_evm": hex::encode(caller20),
+        "calldata": hex::encode(input),
+        "is_static": is_static,
+    }))
+    .map_err(|e| e.to_string())?;
+    let final_in = if is_static {
+        wrap_static_universal_input(&payload)
+    } else {
+        payload
+    };
+    let res = host
+        .universal_call(UniversalCall {
+            from: EeIdentity {
+                ee: EeId::EVM,
+                id: caller20.to_vec(),
+            },
+            to_ee: home_ee,
+            target: EeIdentity {
+                ee: home_ee,
+                id: ptr.home_ref.clone(),
+            },
+            value: BudAmount(0),
+            input: final_in,
+            gas_limit: gas_budget / 2 + 10_000,
+            is_static,
+        })
+        .map_err(|e| e.to_string())?;
+    let log = encode_evm_universal_call_log(home_ee, &ptr.home_ref, res.success);
+    host.emit_log(log).map_err(|e| e.to_string())?;
+    if !res.success {
+        return Ok((OutcomeStatus::Revert, res.output));
+    }
+    Ok((OutcomeStatus::Success, res.output))
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PrecompileUolOffer {
+    maker: [u8; 20],
+    class_id: [u8; 32],
+    asset_id: [u8; 32],
+    taker: Vec<u8>,
+    payment: Vec<u8>,
+    amount: u128,
+    expiry: u64,
+}
+
+fn uol_bal_key(class_id: &[u8; 32], holder: &[u8]) -> Vec<u8> {
+    let mut k = Vec::with_capacity(8 + 32 + holder.len());
+    k.extend_from_slice(b"uol:bal:");
+    k.extend_from_slice(class_id);
+    k.extend_from_slice(holder);
+    k
+}
+
+fn uol_holder_key(asset_id: &[u8; 32]) -> Vec<u8> {
+    let mut k = Vec::with_capacity(11 + 32);
+    k.extend_from_slice(b"uol:holder:");
+    k.extend_from_slice(asset_id);
+    k
+}
+
+fn uol_offer_key(offer_id: &[u8; 32]) -> Vec<u8> {
+    let mut k = Vec::with_capacity(10 + 32);
+    k.extend_from_slice(b"uol:offer:");
+    k.extend_from_slice(offer_id);
+    k
+}
+
+fn encode_uol_offer_bytes(offer: &PrecompileUolOffer) -> Vec<u8> {
+    let mut out = Vec::with_capacity(116 + offer.taker.len() + offer.payment.len());
+    out.extend_from_slice(&offer.maker);
+    out.extend_from_slice(&offer.class_id);
+    out.extend_from_slice(&offer.asset_id);
+    out.extend_from_slice(&offer.amount.to_le_bytes());
+    out.extend_from_slice(&offer.expiry.to_le_bytes());
+    out.extend_from_slice(&(offer.taker.len() as u32).to_le_bytes());
+    out.extend_from_slice(&offer.taker);
+    out.extend_from_slice(&(offer.payment.len() as u32).to_le_bytes());
+    out.extend_from_slice(&offer.payment);
+    out
+}
+
+fn decode_uol_offer_bytes(raw: &[u8]) -> Result<PrecompileUolOffer, String> {
+    if raw.len() < 116 {
+        return Err(String::from("corrupt UOL offer record"));
+    }
+    let mut maker = [0u8; 20];
+    maker.copy_from_slice(&raw[..20]);
+    let mut class_id = [0u8; 32];
+    class_id.copy_from_slice(&raw[20..52]);
+    let mut asset_id = [0u8; 32];
+    asset_id.copy_from_slice(&raw[52..84]);
+    let amount = u128::from_le_bytes(
+        raw[84..100]
+            .try_into()
+            .map_err(|_| String::from("corrupt UOL offer amount"))?,
+    );
+    let expiry = u64::from_le_bytes(
+        raw[100..108]
+            .try_into()
+            .map_err(|_| String::from("corrupt UOL offer expiry"))?,
+    );
+    let taker_len = u32::from_le_bytes(
+        raw[108..112]
+            .try_into()
+            .map_err(|_| String::from("corrupt UOL offer taker_len"))?,
+    ) as usize;
+    let taker_end = 112usize
+        .checked_add(taker_len)
+        .ok_or_else(|| String::from("UOL offer taker overflow"))?;
+    if raw.len() < taker_end + 4 {
+        return Err(String::from("truncated UOL offer taker"));
+    }
+    let taker = raw[112..taker_end].to_vec();
+    let pay_len = u32::from_le_bytes(
+        raw[taker_end..taker_end + 4]
+            .try_into()
+            .map_err(|_| String::from("corrupt UOL offer pay_len"))?,
+    ) as usize;
+    let pay_end = taker_end + 4 + pay_len;
+    if raw.len() != pay_end {
+        return Err(String::from("corrupt UOL offer trailing bytes"));
+    }
+    let payment = raw[taker_end + 4..pay_end].to_vec();
+    Ok(PrecompileUolOffer {
+        maker,
+        class_id,
+        asset_id,
+        taker,
+        payment,
+        amount,
+        expiry,
+    })
+}
+
+fn uol_read_balance(host: &dyn HostRead, ns: &Namespace, class_id: &[u8; 32], holder: &[u8]) -> Result<u128, String> {
+    let key = uol_bal_key(class_id, holder);
+    let Some(bytes) = host.read(ns, &key).map_err(|e| e.to_string())? else {
+        return Ok(0);
+    };
+    let arr: [u8; 16] = bytes
+        .as_slice()
+        .try_into()
+        .map_err(|_| String::from("corrupt UOL balance record"))?;
+    Ok(u128::from_le_bytes(arr))
+}
+
+fn uol_write_balance(
+    host: &mut dyn HostApi,
+    ns: &Namespace,
+    class_id: &[u8; 32],
+    holder: &[u8],
+    bal: u128,
+) -> Result<(), String> {
+    let val = (bal > 0).then(|| bal.to_le_bytes());
+    host.write(ns, &uol_bal_key(class_id, holder), val.as_ref().map(<[u8; 16]>::as_slice))
+        .map_err(|e| e.to_string())
+}
+
+fn invoke_uol_precompile(
+    block_height: u64,
+    caller20: &[u8; 20],
+    calldata: &[u8],
+    is_static: bool,
+    host: &mut dyn HostApi,
+) -> Result<(OutcomeStatus, Vec<u8>), String> {
+    host.charge(2_600)
+        .map_err(|_| String::from("out of gas entering 0x...B002"))?;
+    let decoded = match decode_uol_precompile_calldata(calldata) {
+        Ok(d) => d,
+        Err(msg) => return Ok((OutcomeStatus::Revert, msg.into_bytes())),
+    };
+    let ns = Namespace::new(NS_UEL_ASSETS).map_err(|e| e.to_string())?;
+    match decoded {
+        DecodedUolPrecompileCall::BalanceOf { class_id, holder } => {
+            let bal = uol_read_balance(host, &ns, &class_id, &holder)?;
+            Ok((OutcomeStatus::Success, U256Word::from_u128(bal).0.to_vec()))
+        }
+        DecodedUolPrecompileCall::HolderOf { asset_id } => {
+            let holder = host
+                .read(&ns, &uol_holder_key(&asset_id))
+                .map_err(|e| e.to_string())?
+                .unwrap_or_default();
+            let mut out = vec![0u8; 64 + holder.len().div_ceil(32) * 32];
+            out[31] = 32;
+            out[56..64].copy_from_slice(&(holder.len() as u64).to_be_bytes());
+            if !holder.is_empty() {
+                out[64..64 + holder.len()].copy_from_slice(&holder);
+            }
+            Ok((OutcomeStatus::Success, out))
+        }
+        DecodedUolPrecompileCall::Transfer {
+            class_id,
+            asset_id,
+            to,
+            amount,
+        } => {
+            if is_static {
+                return Ok((OutcomeStatus::Revert, b"UOL transfer inside static call".to_vec()));
+            }
+            if to.is_empty() {
+                return Ok((OutcomeStatus::Revert, b"UOL empty recipient".to_vec()));
+            }
+            if asset_id == [0u8; 32] && amount == 0 {
+                return Ok((
+                    OutcomeStatus::Revert,
+                    b"UOL transfer requires asset or non-zero amount".to_vec(),
+                ));
+            }
+            let cp = host.checkpoint_begin().map_err(|e| e.to_string())?;
+            if asset_id != [0u8; 32] {
+                let hk = uol_holder_key(&asset_id);
+                let Some(cur) = host.read(&ns, &hk).map_err(|e| e.to_string())? else {
+                    let _ = host.checkpoint_rollback(cp);
+                    return Ok((OutcomeStatus::Revert, b"UOL unknown asset".to_vec()));
+                };
+                if cur.as_slice() != caller20 {
+                    let _ = host.checkpoint_rollback(cp);
+                    return Ok((OutcomeStatus::Revert, b"UOL caller is not asset holder".to_vec()));
+                }
+                if let Err(e) = host.write(&ns, &hk, Some(&to)) {
+                    let _ = host.checkpoint_rollback(cp);
+                    return Err(e.to_string());
+                }
+            }
+            if amount > 0 {
+                let from_bal = uol_read_balance(host, &ns, &class_id, caller20)?;
+                let Some(rem) = from_bal.checked_sub(amount) else {
+                    let _ = host.checkpoint_rollback(cp);
+                    return Ok((OutcomeStatus::Revert, b"UOL insufficient balance".to_vec()));
+                };
+                if let Err(e) = uol_write_balance(host, &ns, &class_id, caller20, rem) {
+                    let _ = host.checkpoint_rollback(cp);
+                    return Err(e);
+                }
+                let to_bal = uol_read_balance(host, &ns, &class_id, &to)?;
+                let Some(next_to) = to_bal.checked_add(amount) else {
+                    let _ = host.checkpoint_rollback(cp);
+                    return Ok((OutcomeStatus::Revert, b"UOL balance overflow".to_vec()));
+                };
+                if let Err(e) = uol_write_balance(host, &ns, &class_id, &to, next_to) {
+                    let _ = host.checkpoint_rollback(cp);
+                    return Err(e);
+                }
+            }
+            if let Err(e) = host.emit_log(EeLog {
+                ee: EeId::EVM,
+                address: EVM_UOL_PRECOMPILE.to_vec(),
+                topics: vec![{
+                    let mut t = [0u8; 32];
+                    t[..4].copy_from_slice(&uol_selector("transfer(bytes32,bytes32,bytes,uint128)"));
+                    t
+                }],
+                data: asset_id.to_vec(),
+            }) {
+                let _ = host.checkpoint_rollback(cp);
+                return Err(e.to_string());
+            }
+            host.checkpoint_commit(cp).map_err(|e| e.to_string())?;
+            Ok((OutcomeStatus::Success, U256Word::from_u64(1).0.to_vec()))
+        }
+        DecodedUolPrecompileCall::Offer {
+            class_id,
+            asset_id,
+            taker,
+            payment,
+            amount,
+            expiry,
+        } => {
+            if is_static {
+                return Ok((OutcomeStatus::Revert, b"UOL offer inside static call".to_vec()));
+            }
+            if asset_id == [0u8; 32] && amount == 0 {
+                return Ok((
+                    OutcomeStatus::Revert,
+                    b"UOL offer requires asset or non-zero amount".to_vec(),
+                ));
+            }
+            if expiry > 0 && block_height > expiry {
+                return Ok((OutcomeStatus::Revert, b"UOL offer already expired".to_vec()));
+            }
+            if !payment.is_empty() && payment.len() != 16 && payment.len() != 48 {
+                return Ok((
+                    OutcomeStatus::Revert,
+                    b"unsupported UOL offer payment encoding".to_vec(),
+                ));
+            }
+            if asset_id != [0u8; 32] {
+                let hk = uol_holder_key(&asset_id);
+                let Some(cur) = host.read(&ns, &hk).map_err(|e| e.to_string())? else {
+                    return Ok((OutcomeStatus::Revert, b"UOL unknown asset".to_vec()));
+                };
+                if cur.as_slice() != caller20 {
+                    return Ok((OutcomeStatus::Revert, b"UOL offerer does not hold asset".to_vec()));
+                }
+            }
+            if amount > 0 && uol_read_balance(host, &ns, &class_id, caller20)? < amount {
+                return Ok((OutcomeStatus::Revert, b"UOL offerer balance exhausted".to_vec()));
+            }
+            let mut preimage = Vec::with_capacity(96 + taker.len() + payment.len());
+            preimage.extend_from_slice(b"BDLM_UOL_OFFER_V1");
+            preimage.extend_from_slice(caller20);
+            preimage.extend_from_slice(&class_id);
+            preimage.extend_from_slice(&asset_id);
+            preimage.extend_from_slice(&taker);
+            preimage.extend_from_slice(&payment);
+            preimage.extend_from_slice(&amount.to_le_bytes());
+            preimage.extend_from_slice(&expiry.to_le_bytes());
+            let offer_id: [u8; 32] = Keccak256::digest(&preimage).into();
+            let rec = PrecompileUolOffer {
+                maker: *caller20,
+                class_id,
+                asset_id,
+                taker,
+                payment,
+                amount,
+                expiry,
+            };
+            let enc = encode_uol_offer_bytes(&rec);
+            host.write(&ns, &uol_offer_key(&offer_id), Some(&enc))
+                .map_err(|e| e.to_string())?;
+            Ok((OutcomeStatus::Success, offer_id.to_vec()))
+        }
+        DecodedUolPrecompileCall::Accept { offer_id } => {
+            if is_static {
+                return Ok((OutcomeStatus::Revert, b"UOL accept inside static call".to_vec()));
+            }
+            let ok = uol_offer_key(&offer_id);
+            let Some(raw) = host.read(&ns, &ok).map_err(|e| e.to_string())? else {
+                return Ok((OutcomeStatus::Revert, b"UOL unknown offerId".to_vec()));
+            };
+            let offer = decode_uol_offer_bytes(&raw)?;
+            if offer.expiry > 0 && block_height > offer.expiry {
+                return Ok((OutcomeStatus::Revert, b"UOL offer expired".to_vec()));
+            }
+            if !offer.taker.is_empty() && offer.taker.as_slice() != caller20 {
+                return Ok((OutcomeStatus::Revert, b"UOL unauthorized taker".to_vec()));
+            }
+            let cp = host.checkpoint_begin().map_err(|e| e.to_string())?;
+            if offer.payment.len() == 16 {
+                let mut arr = [0u8; 16];
+                arr.copy_from_slice(&offer.payment);
+                let pay_attos = u128::from_le_bytes(arr);
+                if pay_attos > 0
+                    && host
+                        .bud_transfer(
+                            &EeIdentity {
+                                ee: EeId::EVM,
+                                id: caller20.to_vec(),
+                            },
+                            &EeIdentity {
+                                ee: EeId::EVM,
+                                id: offer.maker.to_vec(),
+                            },
+                            pay_attos,
+                        )
+                        .is_err()
+                {
+                    let _ = host.checkpoint_rollback(cp);
+                    return Ok((OutcomeStatus::Revert, b"UOL native payment failed".to_vec()));
+                }
+            } else if offer.payment.len() == 48 {
+                let mut pay_class = [0u8; 32];
+                pay_class.copy_from_slice(&offer.payment[..32]);
+                let mut pay_arr = [0u8; 16];
+                pay_arr.copy_from_slice(&offer.payment[32..48]);
+                let pay_amt = u128::from_le_bytes(pay_arr);
+                if pay_amt > 0 {
+                    let payer_bal = uol_read_balance(host, &ns, &pay_class, caller20)?;
+                    let Some(rem_pay) = payer_bal.checked_sub(pay_amt) else {
+                        let _ = host.checkpoint_rollback(cp);
+                        return Ok((OutcomeStatus::Revert, b"UOL taker payment balance exhausted".to_vec()));
+                    };
+                    if let Err(e) = uol_write_balance(host, &ns, &pay_class, caller20, rem_pay) {
+                        let _ = host.checkpoint_rollback(cp);
+                        return Err(e);
+                    }
+                    let maker_pay_bal = uol_read_balance(host, &ns, &pay_class, &offer.maker)?;
+                    let Some(next_maker_pay) = maker_pay_bal.checked_add(pay_amt) else {
+                        let _ = host.checkpoint_rollback(cp);
+                        return Ok((OutcomeStatus::Revert, b"UOL payment overflow".to_vec()));
+                    };
+                    if let Err(e) =
+                        uol_write_balance(host, &ns, &pay_class, &offer.maker, next_maker_pay)
+                    {
+                        let _ = host.checkpoint_rollback(cp);
+                        return Err(e);
+                    }
+                }
+            } else if !offer.payment.is_empty() {
+                let _ = host.checkpoint_rollback(cp);
+                return Ok((
+                    OutcomeStatus::Revert,
+                    b"unsupported UOL offer payment encoding".to_vec(),
+                ));
+            }
+            if offer.asset_id != [0u8; 32] {
+                let hk = uol_holder_key(&offer.asset_id);
+                let Some(cur_holder) = host.read(&ns, &hk).map_err(|e| e.to_string())? else {
+                    let _ = host.checkpoint_rollback(cp);
+                    return Ok((OutcomeStatus::Revert, b"UOL offer asset missing".to_vec()));
+                };
+                if cur_holder.as_slice() != offer.maker {
+                    let _ = host.checkpoint_rollback(cp);
+                    return Ok((
+                        OutcomeStatus::Revert,
+                        b"UOL maker no longer holds offered asset".to_vec(),
+                    ));
+                }
+                if let Err(e) = host.write(&ns, &hk, Some(caller20)) {
+                    let _ = host.checkpoint_rollback(cp);
+                    return Err(e.to_string());
+                }
+            }
+            if offer.amount > 0 {
+                let bal = uol_read_balance(host, &ns, &offer.class_id, &offer.maker)?;
+                let Some(rem) = bal.checked_sub(offer.amount) else {
+                    let _ = host.checkpoint_rollback(cp);
+                    return Ok((OutcomeStatus::Revert, b"UOL maker balance exhausted".to_vec()));
+                };
+                if let Err(e) = uol_write_balance(host, &ns, &offer.class_id, &offer.maker, rem) {
+                    let _ = host.checkpoint_rollback(cp);
+                    return Err(e);
+                }
+                let taker_bal = uol_read_balance(host, &ns, &offer.class_id, caller20)?;
+                let Some(next) = taker_bal.checked_add(offer.amount) else {
+                    let _ = host.checkpoint_rollback(cp);
+                    return Ok((OutcomeStatus::Revert, b"UOL balance overflow".to_vec()));
+                };
+                if let Err(e) = uol_write_balance(host, &ns, &offer.class_id, caller20, next) {
+                    let _ = host.checkpoint_rollback(cp);
+                    return Err(e);
+                }
+            }
+            if let Err(e) = host.write(&ns, &ok, None) {
+                let _ = host.checkpoint_rollback(cp);
+                return Err(e.to_string());
+            }
+            if let Err(e) = host.emit_log(EeLog {
+                ee: EeId::EVM,
+                address: EVM_UOL_PRECOMPILE.to_vec(),
+                topics: vec![{
+                    let mut t = [0u8; 32];
+                    t[..4].copy_from_slice(&uol_selector("accept(bytes32)"));
+                    t
+                }],
+                data: offer_id.to_vec(),
+            }) {
+                let _ = host.checkpoint_rollback(cp);
+                return Err(e.to_string());
+            }
+            host.checkpoint_commit(cp).map_err(|e| e.to_string())?;
+            Ok((OutcomeStatus::Success, U256Word::from_u64(1).0.to_vec()))
+        }
+    }
+}
+
 fn invoke_universal_precompile(
     caller20: &[u8; 20],
     calldata: &[u8],
@@ -1105,10 +1580,11 @@ struct EvmFrameOverlay {
     staged_logs: Vec<EeLog>,
     staged_transfers: Vec<(EeIdentity, EeIdentity, u128)>,
     balance_deltas: BTreeMap<(u8, Vec<u8>), i128>,
+    root_cp_id: Option<u64>,
 }
 
 impl EvmFrameOverlay {
-    fn new(gas_limit: u64, is_static: bool) -> Self {
+    fn new(gas_limit: u64, is_static: bool, root_cp_id: Option<u64>) -> Self {
         Self {
             gas_limit,
             gas_used: 0,
@@ -1117,6 +1593,7 @@ impl EvmFrameOverlay {
             staged_logs: Vec::new(),
             staged_transfers: Vec::new(),
             balance_deltas: BTreeMap::new(),
+            root_cp_id,
         }
     }
 
@@ -1125,11 +1602,23 @@ impl EvmFrameOverlay {
     }
 }
 
+struct EvmHostCheckpoint {
+    id: u64,
+    overlay_idx: usize,
+    staged_writes: BTreeMap<(String, Vec<u8>), Option<Vec<u8>>>,
+    staged_logs_len: usize,
+    staged_transfers_len: usize,
+    balance_deltas: BTreeMap<(u8, Vec<u8>), i128>,
+    root_cp_id: Option<u64>,
+}
+
 /// Heap-backed stack of EVM frame overlays providing bounded nested gas
 /// accounting, static-context propagation, and atomic rollback on revert or OOG.
 struct EvmStackHost<'a> {
     root: &'a mut dyn HostApi,
     overlays: Vec<EvmFrameOverlay>,
+    next_checkpoint_id: u64,
+    checkpoints: Vec<EvmHostCheckpoint>,
 }
 
 impl<'a> EvmStackHost<'a> {
@@ -1137,13 +1626,16 @@ impl<'a> EvmStackHost<'a> {
         Self {
             root,
             overlays: Vec::new(),
+            next_checkpoint_id: 1,
+            checkpoints: Vec::new(),
         }
     }
 
     fn push_overlay(&mut self, gas_limit: u64, is_static: bool) {
         let inherited_static = is_static || self.overlays.iter().any(|o| o.is_static);
+        let root_cp_id = self.root.checkpoint_begin().ok();
         self.overlays
-            .push(EvmFrameOverlay::new(gas_limit, inherited_static));
+            .push(EvmFrameOverlay::new(gas_limit, inherited_static, root_cp_id));
     }
 
     fn remaining(&self) -> u64 {
@@ -1151,39 +1643,91 @@ impl<'a> EvmStackHost<'a> {
     }
 
     fn discard_top_overlay(&mut self) {
-        self.overlays.pop();
+        if let Some(top) = self.overlays.pop() {
+            let depth = self.overlays.len();
+            self.checkpoints.retain(|cp| cp.overlay_idx < depth);
+            if let Some(cp_id) = top.root_cp_id {
+                let _ = self.root.checkpoint_rollback(cp_id);
+            }
+        }
     }
 
     fn commit_top_overlay(&mut self) -> Result<(), HostError> {
         let Some(top) = self.overlays.pop() else {
             return Ok(());
         };
+        let depth = self.overlays.len();
+        self.checkpoints.retain(|cp| cp.overlay_idx < depth);
+
+        let mut parsed_writes = Vec::with_capacity(top.staged_writes.len());
+        for ((ns_str, key), val) in top.staged_writes {
+            match Namespace::new(&ns_str) {
+                Ok(ns) => parsed_writes.push((ns_str, ns, key, val)),
+                Err(e) => {
+                    if let Some(cp_id) = top.root_cp_id {
+                        let _ = self.root.checkpoint_rollback(cp_id);
+                    }
+                    return Err(HostError::Invalid(format!("bad staged namespace: {e}")));
+                }
+            }
+        }
+
         if let Some(parent) = self.overlays.last_mut() {
             for (k, d) in &top.balance_deltas {
                 let cur = parent.balance_deltas.get(k).copied().unwrap_or(0);
-                let _ = cur
-                    .checked_add(*d)
-                    .ok_or_else(|| HostError::Invalid(String::from("balance delta overflow")))?;
+                if cur.checked_add(*d).is_none() {
+                    if let Some(cp_id) = top.root_cp_id {
+                        let _ = self.root.checkpoint_rollback(cp_id);
+                    }
+                    return Err(HostError::Invalid(String::from("balance delta overflow")));
+                }
+            }
+            if let Some(cp_id) = top.root_cp_id {
+                if let Err(e) = self.root.checkpoint_commit(cp_id) {
+                    let _ = self.root.checkpoint_rollback(cp_id);
+                    return Err(e);
+                }
             }
             for (k, d) in top.balance_deltas {
                 let entry = parent.balance_deltas.entry(k).or_insert(0);
                 *entry += d;
             }
             parent.staged_transfers.extend(top.staged_transfers);
-            parent.staged_writes.extend(top.staged_writes);
+            for (ns_str, _, key, val) in parsed_writes {
+                parent.staged_writes.insert((ns_str, key), val);
+            }
             parent.staged_logs.extend(top.staged_logs);
             return Ok(());
         }
         for (from, to, attos) in top.staged_transfers {
-            self.root.bud_transfer(&from, &to, attos)?;
+            if let Err(e) = self.root.bud_transfer(&from, &to, attos) {
+                if let Some(cp_id) = top.root_cp_id {
+                    let _ = self.root.checkpoint_rollback(cp_id);
+                }
+                return Err(e);
+            }
         }
-        for ((ns_str, key), val) in top.staged_writes {
-            let ns = Namespace::new(&ns_str)
-                .map_err(|e| HostError::Invalid(format!("bad staged namespace: {e}")))?;
-            self.root.write(&ns, &key, val.as_deref())?;
+        for (_, ns, key, val) in parsed_writes {
+            if let Err(e) = self.root.write(&ns, &key, val.as_deref()) {
+                if let Some(cp_id) = top.root_cp_id {
+                    let _ = self.root.checkpoint_rollback(cp_id);
+                }
+                return Err(e);
+            }
         }
         for log in top.staged_logs {
-            self.root.emit_log(log)?;
+            if let Err(e) = self.root.emit_log(log) {
+                if let Some(cp_id) = top.root_cp_id {
+                    let _ = self.root.checkpoint_rollback(cp_id);
+                }
+                return Err(e);
+            }
+        }
+        if let Some(cp_id) = top.root_cp_id {
+            if let Err(e) = self.root.checkpoint_commit(cp_id) {
+                let _ = self.root.checkpoint_rollback(cp_id);
+                return Err(e);
+            }
         }
         Ok(())
     }
@@ -1231,7 +1775,9 @@ impl HostApi for EvmStackHost<'_> {
                 "state write forbidden in static EVM sub-call",
             )));
         }
+        let is_uol_write = ns.as_str() == NS_UEL_ASSETS && key.starts_with(b"uol:");
         if self.overlays.len() > 1
+            && !is_uol_write
             && crate::execution::coordinator::state::RootGroup::for_namespace(ns.as_str())
                 != Some(crate::execution::coordinator::state::RootGroup::Evm)
         {
@@ -1351,6 +1897,78 @@ impl HostApi for EvmStackHost<'_> {
         } else {
             self.root.bud_transfer(from, to, attos)
         }
+    }
+
+    fn checkpoint_begin(&mut self) -> Result<u64, HostError> {
+        let Some(top) = self.overlays.last() else {
+            return self.root.checkpoint_begin();
+        };
+        let id = self.next_checkpoint_id;
+        self.next_checkpoint_id = self
+            .next_checkpoint_id
+            .checked_add(1)
+            .ok_or_else(|| HostError::Invalid(String::from("checkpoint id overflow")))?;
+        let root_cp_id = Some(self.root.checkpoint_begin()?);
+        self.checkpoints.push(EvmHostCheckpoint {
+            id,
+            overlay_idx: self.overlays.len() - 1,
+            staged_writes: top.staged_writes.clone(),
+            staged_logs_len: top.staged_logs.len(),
+            staged_transfers_len: top.staged_transfers.len(),
+            balance_deltas: top.balance_deltas.clone(),
+            root_cp_id,
+        });
+        Ok(id)
+    }
+
+    fn checkpoint_commit(&mut self, id: u64) -> Result<(), HostError> {
+        if self.overlays.is_empty() {
+            return self.root.checkpoint_commit(id);
+        }
+        let cur_idx = self.overlays.len() - 1;
+        let Some(top) = self.checkpoints.last() else {
+            return Err(HostError::Invalid(format!("unknown checkpoint {id}")));
+        };
+        if top.id != id || top.overlay_idx != cur_idx {
+            return Err(HostError::Invalid(format!(
+                "out-of-order checkpoint commit {id}"
+            )));
+        }
+        let Some(cp) = self.checkpoints.pop() else {
+            return Err(HostError::Invalid(String::from("missing checkpoint")));
+        };
+        if let Some(rcp) = cp.root_cp_id {
+            self.root.checkpoint_commit(rcp)?;
+        }
+        Ok(())
+    }
+
+    fn checkpoint_rollback(&mut self, id: u64) -> Result<(), HostError> {
+        if self.overlays.is_empty() {
+            return self.root.checkpoint_rollback(id);
+        }
+        let cur_idx = self.overlays.len() - 1;
+        let Some(top_cp) = self.checkpoints.last() else {
+            return Err(HostError::Invalid(format!("unknown checkpoint {id}")));
+        };
+        if top_cp.id != id || top_cp.overlay_idx != cur_idx {
+            return Err(HostError::Invalid(format!(
+                "out-of-order checkpoint rollback {id}"
+            )));
+        }
+        let Some(cp) = self.checkpoints.pop() else {
+            return Err(HostError::Invalid(String::from("missing checkpoint")));
+        };
+        if let Some(ov) = self.overlays.last_mut() {
+            ov.staged_writes = cp.staged_writes;
+            ov.staged_logs.truncate(cp.staged_logs_len);
+            ov.staged_transfers.truncate(cp.staged_transfers_len);
+            ov.balance_deltas = cp.balance_deltas;
+        }
+        if let Some(rcp) = cp.root_cp_id {
+            self.root.checkpoint_rollback(rcp)?;
+        }
+        Ok(())
     }
 }
 
@@ -1833,7 +2451,9 @@ fn step_evm_frame(
                 grow_mem(mem, host, ret_off, ret_len)?;
                 let sub_in = mem.get(in_off..in_off + in_len).unwrap_or(&[]).to_vec();
                 let target20 = addr_w.to_addr20();
-                if target20 == EVM_UNIVERSAL_PRECOMPILE && val_u128 > 0 {
+                if (target20 == EVM_UNIVERSAL_PRECOMPILE || target20 == EVM_UOL_PRECOMPILE)
+                    && val_u128 > 0
+                {
                     return Ok(EvmFrameOutcome::Done(
                         OutcomeStatus::Revert,
                         b"universal precompile rejects msg.value".to_vec(),
@@ -2041,7 +2661,7 @@ fn prepare_evm_target(
     host: &mut dyn HostApi,
 ) -> Result<PreparedTarget, String> {
     let EvmTargetDispatch {
-        ctx: _,
+        ctx,
         code_addr,
         exec_addr,
         caller20,
@@ -2062,15 +2682,22 @@ fn prepare_evm_target(
         let (st, out) = invoke_universal_precompile(caller20, input, is_static, host)?;
         return Ok(PreparedTarget::Finished(st, out));
     }
+    if code_addr == &EVM_UOL_PRECOMPILE {
+        let (st, out) = invoke_uol_precompile(ctx.height, caller20, input, is_static, host)?;
+        return Ok(PreparedTarget::Finished(st, out));
+    }
     let code = load_contract_code(host, code_addr)?;
     if code.is_empty() {
         return Ok(PreparedTarget::Finished(OutcomeStatus::Success, Vec::new()));
     }
     if let Some(ptr) = decode_pointer_bytecode(&code) {
-        let (st, out) = if EeId(ptr.home_ee) == EeId::WASM {
+        let home = EeId(ptr.home_ee);
+        let (st, out) = if home == EeId::WASM {
             execute_evm_pointer_to_wasm(&ptr, caller20, input, is_static, gas_limit, host)?
-        } else {
+        } else if home == EeId::SVM || home == EeId::MOVE {
             execute_evm_pointer_to_svm_or_move(&ptr, caller20, input, is_static, gas_limit, host)?
+        } else {
+            execute_evm_pointer_to_expansion(&ptr, caller20, input, is_static, gas_limit, host)?
         };
         return Ok(PreparedTarget::Finished(st, out));
     }
@@ -2755,5 +3382,87 @@ mod tests {
             sload_word(&host, &contract_a, &U256Word::from_u64(1).0).unwrap(),
             [0u8; 32]
         );
+    }
+
+    #[test]
+    fn evm_uol_precompile_b002_offers_transfers_and_accepts() {
+        let mut host = MemoryHost::new(2_000_000);
+        let maker = [0x11u8; 20];
+        let taker = [0x22u8; 20];
+        let class_id = [0xAAu8; 32];
+        let asset_id = [0xBBu8; 32];
+        let ns = Namespace::new(NS_UEL_ASSETS).unwrap();
+        host.write(&ns, &uol_holder_key(&asset_id), Some(&maker))
+            .unwrap();
+        host.write(&ns, &uol_bal_key(&class_id, &maker), Some(&100u128.to_le_bytes()))
+            .unwrap();
+
+        let mut offer_calldata = Vec::new();
+        offer_calldata.extend_from_slice(&uol_selector(
+            "offer(bytes32,bytes32,bytes,bytes,uint128,uint64)",
+        ));
+        offer_calldata.extend_from_slice(&class_id);
+        offer_calldata.extend_from_slice(&asset_id);
+        let mut head = [0u8; 32];
+        head[24..32].copy_from_slice(&192u64.to_be_bytes());
+        offer_calldata.extend_from_slice(&head);
+        head[24..32].copy_from_slice(&256u64.to_be_bytes());
+        offer_calldata.extend_from_slice(&head);
+        let mut amt = [0u8; 32];
+        amt[16..32].copy_from_slice(&40u128.to_be_bytes());
+        offer_calldata.extend_from_slice(&amt);
+        let mut exp = [0u8; 32];
+        exp[24..32].copy_from_slice(&999u64.to_be_bytes());
+        offer_calldata.extend_from_slice(&exp);
+        // taker dynamic bytes at offset 192
+        let mut len_word = [0u8; 32];
+        len_word[31] = 20;
+        offer_calldata.extend_from_slice(&len_word);
+        let mut taker_padded = [0u8; 32];
+        taker_padded[..20].copy_from_slice(&taker);
+        offer_calldata.extend_from_slice(&taker_padded);
+        // empty payment dynamic bytes at offset 256
+        offer_calldata.extend_from_slice(&[0u8; 32]);
+
+        let (st, offer_out) =
+            invoke_uol_precompile(10, &maker, &offer_calldata, false, &mut host).unwrap();
+        assert_eq!(st, OutcomeStatus::Success);
+        assert_eq!(offer_out.len(), 32);
+
+        let mut accept_cd = Vec::from(uol_selector("accept(bytes32)"));
+        accept_cd.extend_from_slice(&offer_out);
+        let (st_static, _) = invoke_uol_precompile(10, &taker, &accept_cd, true, &mut host).unwrap();
+        assert_eq!(st_static, OutcomeStatus::Revert);
+
+        let (st2, _) = invoke_uol_precompile(10, &taker, &accept_cd, false, &mut host).unwrap();
+        assert_eq!(st2, OutcomeStatus::Success);
+
+        let holder_cd = [uol_selector("holderOf(bytes32)").as_slice(), &asset_id].concat();
+        let (st_h, holder_out) =
+            invoke_uol_precompile(10, &taker, &holder_cd, true, &mut host).unwrap();
+        assert_eq!(st_h, OutcomeStatus::Success);
+        assert_eq!(&holder_out[64..84], &taker);
+
+        // Expired offers revert and unknown asset transfers revert cleanly.
+        let (st_exp, _) =
+            invoke_uol_precompile(1_000, &maker, &offer_calldata, false, &mut host).unwrap();
+        assert_eq!(st_exp, OutcomeStatus::Revert);
+
+        let mut bad_xfer = Vec::from(uol_selector("transfer(bytes32,bytes32,bytes,uint128)"));
+        bad_xfer.extend_from_slice(&class_id);
+        bad_xfer.extend_from_slice(&[0xEEu8; 32]);
+        let mut off_word = [0u8; 32];
+        off_word[31] = 128;
+        bad_xfer.extend_from_slice(&off_word);
+        bad_xfer.extend_from_slice(&[0u8; 32]);
+        let mut tlen = [0u8; 32];
+        tlen[31] = 20;
+        bad_xfer.extend_from_slice(&tlen);
+        let mut tpad = [0u8; 32];
+        tpad[..20].copy_from_slice(&taker);
+        bad_xfer.extend_from_slice(&tpad);
+        let (st_bad_asset, _) =
+            invoke_uol_precompile(10, &maker, &bad_xfer, false, &mut host).unwrap();
+        assert_eq!(st_bad_asset, OutcomeStatus::Revert);
     }
 }
