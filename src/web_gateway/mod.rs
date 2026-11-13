@@ -1,9 +1,14 @@
-//! WIRING: unwired - the rules are complete and gated by name, but no server
-//! process mounts them yet. `src/bin/budlum-gateway.rs`, the TLS terminator,
-//! the sealed-content symbol-bundle path and `ops/gateway/` remain, and each
-//! needs a live certificate, a DNS provider and a host. Nothing in this module
-//! is reached from a running binary today; the layer that would reach it is the
-//! one not written yet.
+//! WIRING: wired - `src/bin/budlum-gateway.rs` mounts every layer here on a
+//! socket. The binary holds no rules of its own: it parses the configuration,
+//! reads the RPC answers into the proof type, and hands each decision to the
+//! function in this module that has a test.
+//!
+//! Still absent, and named so they are not mistaken for done: the B.U.D. 3.0
+//! content source (the binary uses a directory source today and refuses to
+//! start without one), the light client that would fill `PinnedHeaderRoots`
+//! with verified roots, the sealed-content symbol-bundle path, TLS termination
+//! and `ops/gateway/`. A gateway whose pinned root set is empty answers 502 to
+//! every request, which is the honest state until the light client is wired.
 //!
 //! The `budlum.xyz` network gateway (B14).
 //!
