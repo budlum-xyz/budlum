@@ -1857,7 +1857,7 @@ impl StorageRegistry {
         })
     }
 
-    /// True when `claimant` has funded an operator-consented storage custody
+    /// True when `claimant` has an active operator-consented storage custody
     /// deal on `content_id`. Opening a deal requires storage-operator shard
     /// consent signatures (`DealConsent`) and locked escrow, whereas a bare
     /// `RegisterManifest` on a content-addressed `manifest_id` excludes `owner`
@@ -1867,7 +1867,7 @@ impl StorageRegistry {
         *claimant != Address::zero()
             && self.deals.values().any(|d| {
                 d.manifest_id == *content_id
-                    && matches!(d.status, DealStatus::Active | DealStatus::Expired)
+                    && matches!(d.status, DealStatus::Active)
                     && d.payer == Some(*claimant)
             })
     }
@@ -9739,6 +9739,53 @@ mod tests {
         );
         assert!(!reg.can_prune_on_nft_burn(&alice_manifest.manifest_id, &mallory));
         assert!(!reg.can_prune_on_nft_burn(&alice_manifest.manifest_id, &alice));
+    }
+
+    #[test]
+    fn expired_competing_custody_deal_does_not_keep_owner_contested() {
+        let mut reg = StorageRegistry::new();
+        let victim = Address::from([0x41; 32]);
+        let stranger = Address::from([0x42; 32]);
+        let operator = Address::from([0x43; 32]);
+
+        let mut victim_manifest = good_manifest();
+        victim_manifest.owner = victim;
+        let content_id = victim_manifest.manifest_id;
+        reg.register_manifest(&victim_manifest);
+        reg.record_test_custody_for_manifest(&victim_manifest, victim);
+
+        let mut stranger_manifest = victim_manifest.clone();
+        stranger_manifest.owner = stranger;
+        reg.register_manifest(&stranger_manifest);
+        let deal_id = reg
+            .open_deal(
+                42,
+                &stranger_manifest,
+                stranger_manifest.shards[0].shard_id,
+                operator,
+                1,
+                10,
+                20,
+                good_econ(),
+                &params(),
+                Some(valid_merkle_proof()),
+                Some([0x42u8; 32]),
+            )
+            .unwrap();
+        reg.set_deal_payer(deal_id, stranger);
+
+        assert_eq!(reg.owner_of(&content_id), None);
+        assert!(reg.has_custody_deal(&content_id, &stranger));
+
+        reg.deals.get_mut(&deal_id).unwrap().status = DealStatus::Expired;
+
+        assert!(!reg.has_custody_deal(&content_id, &stranger));
+        assert_eq!(
+            reg.owner_of(&content_id),
+            Some(victim),
+            "expired custody is history, not continuing authority over the content id"
+        );
+        assert!(reg.has_proven_ownership(&content_id, &victim));
     }
 
     #[test]
