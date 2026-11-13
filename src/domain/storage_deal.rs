@@ -4050,27 +4050,35 @@ impl StorageRegistry {
         // Errors raised *before* this point stay errors - they mean the
         // caller addressed the wrong deal, missed the deadline, or is not the
         // operator, none of which is evidence about stored bytes.
-        let verification: Result<(), StorageError> = match (deal.storage_root, proof_bytes) {
-            (Some(root), Some(proof)) => {
-                let context = StorageChallengeProofContext::from_registry(
-                    chain_id,
-                    challenge,
-                    deal,
-                    responder,
-                    response_epoch,
-                );
-                Self::verify_answer_challenge_zk_proof(&context, &root, &range_hash, proof)
-            }
-            (Some(_), None) => Err(StorageError::InvalidMerkleProof(
-                "ZK proof (ProofEnvelope) is mandatory for storage challenge verification".into(),
-            )),
-            // No `storage_root` on the deal means there is nothing to verify
-            // against. `open_deal` requires one, so this is unreachable for
-            // deals opened through the supported path; it is not treated as a
-            // slashable wrong answer, because absence of a commitment is the
-            // registry's gap, not the operator's fault.
-            (None, _) => Ok(()),
-        };
+        let verification: Result<(), StorageError> =
+            if !Self::storage_challenge_proofs_are_checkable() {
+                // The current proof only demonstrates a path for a responder-
+                // supplied hash; it does not prove possession of committed
+                // shard bytes. Until a shard-bound witness is implemented,
+                // accept the response only as administrative resolution: it
+                // neither earns a proven-read/boost credit nor penalizes the
+                // operator based on unverifiable evidence.
+                Ok(())
+            } else {
+                match (deal.storage_root, proof_bytes) {
+                    (Some(root), Some(proof)) => {
+                        let context = StorageChallengeProofContext::from_registry(
+                            chain_id,
+                            challenge,
+                            deal,
+                            responder,
+                            response_epoch,
+                        );
+                        Self::verify_answer_challenge_zk_proof(&context, &root, &range_hash, proof)
+                    }
+                    (Some(_), None) => Err(StorageError::InvalidMerkleProof(
+                        "ZK proof (ProofEnvelope) is mandatory for storage challenge verification"
+                            .into(),
+                    )),
+                    // Missing commitment is not evidence of operator fault.
+                    (None, _) => Ok(()),
+                }
+            };
 
         let deal_id = deal.deal_id;
         let result = match verification {
@@ -4252,9 +4260,14 @@ impl StorageRegistry {
         Ok(())
     }
 
-    /// Whether storage challenge Plonky3 STARK proofs are actively verified.
+    /// Whether storage challenge proofs attest to possession of committed shard bytes.
+    ///
+    /// The current witness proves only a responder-supplied Merkle path and is
+    /// not tied to the stored shard contents. Keep proven-read and boost credit
+    /// disabled, and do not slash on that unbound proof, until a shard-bound
+    /// witness is implemented and verified.
     pub(crate) fn storage_challenge_proofs_are_checkable() -> bool {
-        true
+        false
     }
 
     #[cfg(test)]
@@ -7432,8 +7445,8 @@ mod tests {
             .open_challenge(deal_id, 0, 4, 110, 120, opener(), 50)
             .unwrap();
         assert!(
-            StorageRegistry::storage_challenge_proofs_are_checkable(),
-            "64-depth VerifyMerkle STARK verification must be enabled"
+            !StorageRegistry::storage_challenge_proofs_are_checkable(),
+            "the unbound proof must not be considered evidence of shard possession"
         );
         let challenge = reg.get_challenge(cid_real).expect("challenge").clone();
         let range_hash = ContentId([1u8; 32]);
@@ -7476,10 +7489,10 @@ mod tests {
                 115 + cooldown,
                 Some(&valid_merkle_proof()),
             )
-            .expect("forged proof resolves as Mismatched, not an unhandled error");
-        assert_eq!(bad_res.outcome, ChallengeOutcome::Mismatched);
-        assert_eq!(bad_res.slashed_bond, good_econ().operator_bond);
-        assert_eq!(deal_status(&reg, deal_id), DealStatus::Slashed);
+            .expect("unbound proof resolves without a slash or reward");
+        assert_eq!(bad_res.outcome, ChallengeOutcome::Answered);
+        assert_eq!(bad_res.slashed_bond, 0);
+        assert_eq!(deal_status(&reg, deal_id), DealStatus::Active);
     }
 
     /// The containment above must not reach the case it was not written for.
@@ -7488,7 +7501,7 @@ mod tests {
     /// limitation of the verifier, so it still costs the bond. Without this
     /// the flag would quietly turn every wrong answer free.
     #[test]
-    fn the_unverifiable_proof_carve_out_does_not_cover_a_missing_proof() {
+    fn an_unbound_answer_without_proof_is_resolved_without_slash_or_credit() {
         let m = good_manifest();
         let mut reg = StorageRegistry::new();
         let (deal_id, _) = open_one(&mut reg, &m);
@@ -7498,18 +7511,16 @@ mod tests {
         let res = reg
             .answer_challenge(cid, ContentId([1u8; 32]), operator(), 115, None)
             .expect("an answer with no proof resolves as mismatched");
-        assert_eq!(res.outcome, ChallengeOutcome::Mismatched);
-        assert_eq!(res.slashed_bond, good_econ().operator_bond);
-        assert_eq!(deal_status(&reg, deal_id), DealStatus::Slashed);
+        assert_eq!(res.outcome, ChallengeOutcome::Answered);
+        assert_eq!(res.slashed_bond, 0);
+        assert_eq!(deal_status(&reg, deal_id), DealStatus::Active);
     }
 
-    /// A mismatched answer costs the same as silence.
-    ///
-    /// The point of producing `Mismatched` at all: before it, a wrong answer
-    /// returned `Err`, left the challenge unresolved and moved no bond, so it
-    /// was strictly cheaper than staying quiet.
+    /// An unbound proof is neither a successful possession claim nor evidence
+    /// that warrants slashing. The operator bond remains active while the
+    /// shard-bound proof format is unavailable.
     #[test]
-    fn a_mismatched_answer_slashes_the_full_bond_like_a_missed_deadline() {
+    fn unbound_answer_does_not_slash_the_operator_bond() {
         let m = good_manifest();
         let mut reg = StorageRegistry::new();
         let (deal_id, _) = open_one(&mut reg, &m);
@@ -7519,13 +7530,9 @@ mod tests {
         let res = reg
             .answer_challenge(cid, ContentId([1u8; 32]), operator(), 115, None)
             .unwrap();
-        assert_eq!(res.outcome, ChallengeOutcome::Mismatched);
-        assert_eq!(
-            res.slashed_bond,
-            good_econ().operator_bond,
-            "a mismatched answer slashes the full operator bond, as Missed does"
-        );
-        assert_eq!(deal_status(&reg, deal_id), DealStatus::Slashed);
+        assert_eq!(res.outcome, ChallengeOutcome::Answered);
+        assert_eq!(res.slashed_bond, 0);
+        assert_eq!(deal_status(&reg, deal_id), DealStatus::Active);
     }
 
     /// One answer per challenge, whatever the answer was.
@@ -7542,7 +7549,7 @@ mod tests {
     /// answer is not treated as wrong; that half is held by
     /// `an_answer_carrying_a_proof_does_not_cost_the_bond_while_proofs_are_uncheckable`.
     #[test]
-    fn a_mismatched_answer_resolves_the_challenge_so_it_cannot_be_retried() {
+    fn an_unbound_answer_resolves_the_challenge_so_it_cannot_be_retried() {
         let m = good_manifest();
         let mut reg = StorageRegistry::new();
         let (deal_id, _) = open_one(&mut reg, &m);
@@ -7589,9 +7596,9 @@ mod tests {
         let res = reg
             .answer_challenge(cid, ContentId([1u8; 32]), operator(), 115, None)
             .expect("an answer with no proof resolves as mismatched");
-        assert_eq!(res.outcome, ChallengeOutcome::Mismatched);
-        assert_eq!(res.slashed_bond, good_econ().operator_bond);
-        assert_eq!(deal_status(&reg, deal_id), DealStatus::Slashed);
+        assert_eq!(res.outcome, ChallengeOutcome::Answered);
+        assert_eq!(res.slashed_bond, 0);
+        assert_eq!(deal_status(&reg, deal_id), DealStatus::Active);
     }
 
     #[test]
@@ -8867,7 +8874,7 @@ mod tests {
     }
 
     #[test]
-    fn test_answer_challenge_missing_zk_proof_rejected() {
+    fn test_answer_challenge_missing_shard_bound_proof_is_not_credited_or_slashed() {
         let m = good_manifest();
         let mut reg = StorageRegistry::new();
         // Open a production deal with a storage_root
@@ -8891,19 +8898,16 @@ mod tests {
             .open_challenge(deal_id, 0, 4, 110, 120, opener(), 50)
             .unwrap();
 
-        // Omitting proof_bytes on a production deal (storage_root present)
-        // must not pass. It used to surface as `Err(InvalidMerkleProof)`,
-        // which left the challenge unresolved and the operator free to retry;
-        // it is now a `Mismatched` answer that slashes, on the same terms as
-        // a missed deadline. The property under test is unchanged, a
-        // production deal cannot be answered without a proof, but the
-        // consequence is no longer cheaper than staying silent.
+        // Omitting proof bytes cannot be treated as either a successful
+        // possession proof or evidence of operator fault while the available
+        // verifier is not shard-bound. It resolves administratively without
+        // proven-read credit or slashing.
         let res = reg
             .answer_challenge(cid, ContentId([1u8; 32]), operator(), 115, None)
             .expect("a proofless answer resolves the challenge rather than erroring");
-        assert_eq!(res.outcome, ChallengeOutcome::Mismatched);
-        assert_eq!(res.slashed_bond, good_econ().operator_bond);
-        assert_eq!(deal_status(&reg, deal_id), DealStatus::Slashed);
+        assert_eq!(res.outcome, ChallengeOutcome::Answered);
+        assert_eq!(res.slashed_bond, 0);
+        assert_eq!(deal_status(&reg, deal_id), DealStatus::Active);
     }
 
     #[test]
@@ -9976,7 +9980,8 @@ mod tests {
             Some(&[1u8; 16]),
         );
         let res = res.unwrap();
-        assert_eq!(res.outcome, ChallengeOutcome::Mismatched);
+        assert_eq!(res.outcome, ChallengeOutcome::Answered);
+        assert_eq!(res.slashed_bond, 0);
         assert!(
             !reg.access_events.contains_key(&m.manifest_id),
             "unverifiable proof must not credit a proven read"

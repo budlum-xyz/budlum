@@ -242,7 +242,7 @@ pub fn content_ref_of(branch: &BnsMerkleBranch) -> Option<ContentRef> {
 /// # Errors
 ///
 /// [`GatewayError::Site`] carrying the manifest's own reason.
-pub fn route_of(manifest: &SiteManifest, path: &str) -> Result<&Route, GatewayError> {
+pub fn route_of<'a>(manifest: &'a SiteManifest, path: &str) -> Result<&'a Route, GatewayError> {
     manifest.resolve(path).map_err(GatewayError::Site)
 }
 
