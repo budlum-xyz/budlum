@@ -910,6 +910,11 @@ pub struct Node {
     pub sync_started_at: Arc<AtomicU64>,
     /// Outbound request currently responsible for the one active sync round.
     active_sync_request: Option<request_response::OutboundRequestId>,
+    /// Peer currently serving the active single-flight sync round.
+    active_sync_peer: Option<PeerId>,
+    /// Peer whose most recent sync round stalled or failed unanswered, so the
+    /// next round prefers a different connected peer when one exists.
+    last_stalled_sync_peer: Option<PeerId>,
     /// Multi-chunk range-sync cursor for the active sync round.
     sync_range_cursor: Option<SyncRangeCursor>,
     /// Spacing between the locator re-walks a fork signal triggers. Without it
@@ -1716,12 +1721,23 @@ impl Node {
         let target = {
             let pm = self.peer_manager_lock();
             let eligible = |p: &PeerId| pm.is_handshaked(p) && !pm.is_banned(p);
-            match preferred.filter(eligible) {
+            let stalled = self.last_stalled_sync_peer;
+            match preferred.filter(|p| eligible(p) && Some(*p) != stalled) {
                 Some(p) => Some(p),
-                None => pm
-                    .get_best_peers(MAX_PEERS)
-                    .into_iter()
-                    .find(|p| pm.connected_peers().contains(p) && eligible(p)),
+                None => {
+                    let best = pm.get_best_peers(MAX_PEERS);
+                    best.iter()
+                        .copied()
+                        .find(|p| {
+                            pm.connected_peers().contains(p) && eligible(p) && Some(*p) != stalled
+                        })
+                        .or_else(|| {
+                            preferred.filter(eligible).or_else(|| {
+                                best.into_iter()
+                                    .find(|p| pm.connected_peers().contains(p) && eligible(p))
+                            })
+                        })
+                }
             }
         };
         let Some(peer) = target else {
@@ -1741,6 +1757,7 @@ impl Node {
             m.p2p_sync_requests.inc();
         }
         let sync = &mut self.swarm.behaviour_mut().sync;
+        self.active_sync_peer = Some(peer);
         self.active_sync_request = Some(sync.send_request(&peer, req.to_bytes()));
         info!("Requesting headers from {peer} over /sync (limit {limit})");
         true
@@ -1937,6 +1954,7 @@ impl Node {
         self.sync_state.store(0, Ordering::SeqCst);
         self.sync_started_at.store(0, Ordering::SeqCst);
         self.active_sync_request = None;
+        self.active_sync_peer = None;
         self.sync_range_cursor = None;
     }
 
@@ -1954,6 +1972,12 @@ impl Node {
                         now.saturating_sub(started),
                         SYNC_TIMEOUT_SECS,
                     );
+                    if let Some(stalled_peer) = self.active_sync_peer {
+                        self.last_stalled_sync_peer = Some(stalled_peer);
+                        let mut pm = self.peer_manager_lock();
+                        pm.report_unanswered_request(&stalled_peer);
+                        pm.report_slow_sync(&stalled_peer);
+                    }
                     self.clear_sync_round();
                 }
             }
@@ -2569,6 +2593,8 @@ impl Node {
             sync_state,
             sync_started_at,
             active_sync_request: None,
+            active_sync_peer: None,
+            last_stalled_sync_peer: None,
             sync_range_cursor: None,
             fork_rewalk: crate::network::fork_rewalk::ForkRewalkGate::new(),
             deferred_votes: crate::network::deferred_votes::DeferredVotes::new(),
@@ -4255,7 +4281,9 @@ impl Node {
                                                     // (AF-09). The sender is still demoted, never
                                                     // silenced; every other refusal keeps the
                                                     // banning verdict.
-                                                    let unjoined = e.contains("Previous hash mismatch");
+                                                    let unjoined = e.contains("Previous hash mismatch")
+                                                        || e.contains("Block height discontinuity")
+                                                        || block.index <= self.chain.get_height().await;
                                                     warn!(
                                                         peer = %peer_id,
                                                         "Block validation failed (unjoined={unjoined}): {e}"
@@ -4710,7 +4738,15 @@ impl Node {
                                     }
 
                                     NetworkMessage::Prevote { epoch, checkpoint_height, checkpoint_hash, voter_id, sig_bls, auth_sig } => {
-                                        let rate_limit_ok = self.peer_manager_lock().check_vote_rate_limit(&peer_id);
+                                        let authored = handshake_origin_matches_peer(peer_id, message.source);
+                                        let rate_limit_ok = {
+                                            let mut pm = self.peer_manager_lock();
+                                            if authored {
+                                                pm.check_vote_rate_limit(&peer_id)
+                                            } else {
+                                                pm.check_vote_rate_limit_from(&peer_id, false)
+                                            }
+                                        };
                                         if !rate_limit_ok {
                                             warn!("Peer {peer_id} exceeded vote rate limit or lock error. Ignoring Prevote.");
                                             self.report_gossip(&id, &peer_id, gossipsub::MessageAcceptance::Ignore);
@@ -4841,7 +4877,15 @@ impl Node {
                                     }
 
                                     NetworkMessage::Precommit { epoch, checkpoint_height, checkpoint_hash, voter_id, sig_bls, auth_sig, pq_sig } => {
-                                        let rate_limit_ok = self.peer_manager_lock().check_vote_rate_limit(&peer_id);
+                                        let authored = handshake_origin_matches_peer(peer_id, message.source);
+                                        let rate_limit_ok = {
+                                            let mut pm = self.peer_manager_lock();
+                                            if authored {
+                                                pm.check_vote_rate_limit(&peer_id)
+                                            } else {
+                                                pm.check_vote_rate_limit_from(&peer_id, false)
+                                            }
+                                        };
                                         if !rate_limit_ok {
                                             warn!("Peer {peer_id} exceeded vote rate limit or lock error. Ignoring Precommit.");
                                             self.report_gossip(&id, &peer_id, gossipsub::MessageAcceptance::Ignore);
@@ -4996,7 +5040,15 @@ impl Node {
                                         set_hash,
                                         scheme_id,
                                     } => {
-                                        let rate_limit_ok = self.peer_manager_lock().check_vote_rate_limit(&peer_id);
+                                        let authored = handshake_origin_matches_peer(peer_id, message.source);
+                                        let rate_limit_ok = {
+                                            let mut pm = self.peer_manager_lock();
+                                            if authored {
+                                                pm.check_vote_rate_limit(&peer_id)
+                                            } else {
+                                                pm.check_vote_rate_limit_from(&peer_id, false)
+                                            }
+                                        };
                                         if !rate_limit_ok {
                                             warn!("Peer {peer_id} exceeded vote rate limit or lock error. Ignoring FinalityCert.");
                                             self.report_gossip(&id, &peer_id, gossipsub::MessageAcceptance::Ignore);
@@ -5115,7 +5167,15 @@ impl Node {
                                     }
 
                                     NetworkMessage::QcFaultProof { proof_data } => {
-                                        let rate_limit_ok = self.peer_manager_lock().check_blob_rate_limit(&peer_id);
+                                        let authored = handshake_origin_matches_peer(peer_id, message.source);
+                                        let rate_limit_ok = {
+                                            let mut pm = self.peer_manager_lock();
+                                            if authored {
+                                                pm.check_blob_rate_limit(&peer_id)
+                                            } else {
+                                                pm.check_blob_rate_limit_from(&peer_id, false)
+                                            }
+                                        };
                                         if !rate_limit_ok {
                                             warn!("Peer {peer_id} exceeded blob rate limit or lock error. Ignoring QcFaultProof.");
                                             self.report_gossip(&id, &peer_id, gossipsub::MessageAcceptance::Ignore);
@@ -5401,7 +5461,7 @@ impl Node {
                                                         // honest peer. Reply missing so the fetcher can retry.
                                                         let busy = admission == QcServeAdmission::Busy
                                                             || (admission == QcServeAdmission::Start
-                                                                && !self.peer_manager_lock().check_blob_rate_limit(&peer));
+                                                                && !self.peer_manager_lock().check_blob_rate_limit_from(&peer, false));
                                                         if busy {
                                                             if let Ok(answer) = qc_chunk_response(epoch, checkpoint_height, chunk_index, None) {
                                                                 let _ = self.swarm.behaviour_mut().sync.send_response(channel, answer.to_bytes());
@@ -5750,7 +5810,10 @@ impl Node {
                                                                                     }
                                                                                 }
                                                                                 Err(e) => {
-                                                                                    if e.contains("Previous hash mismatch") {
+                                                                                    if e.contains("Previous hash mismatch")
+                                                                                        || e.contains("Block height discontinuity")
+                                                                                        || index <= self.chain.get_height().await
+                                                                                    {
                                                                                         fork_retry = true;
                                                                                     } else {
                                                                                         non_fork_refusal = true;
@@ -5848,7 +5911,10 @@ impl Node {
                                                                                 }
                                                                             }
                                                                             Err(e) => {
-                                                                                if e.contains("Previous hash mismatch") {
+                                                                                if e.contains("Previous hash mismatch")
+                                                                                    || e.contains("Block height discontinuity")
+                                                                                    || index <= self.chain.get_height().await
+                                                                                {
                                                                                     fork_retry = true;
                                                                                 } else {
                                                                                     non_fork_refusal = true;
@@ -5935,6 +6001,9 @@ impl Node {
                                                             }
                                                         } else {
                                                             if joined > 0 {
+                                                                if self.last_stalled_sync_peer == Some(peer) {
+                                                                    self.last_stalled_sync_peer = None;
+                                                                }
                                                                 self.fork_rewalk.record_progress();
                                                                 self.request_next_finality_cert(
                                                                     peer,
@@ -5982,6 +6051,7 @@ impl Node {
                                     // Only the request that owns the active round may
                                     // close it; an unrelated failure must leave it alone.
                                     if self.active_sync_request == Some(request_id) {
+                                        self.last_stalled_sync_peer = Some(peer);
                                         self.clear_sync_round();
                                     }
                                 }
