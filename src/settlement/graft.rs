@@ -51,6 +51,8 @@ pub const MAX_GRAFT_APPS: usize = 10_000;
 pub const GRAFT_PAYMENT_WINDOW: usize = 10_000;
 /// Open intents held in state.
 pub const MAX_GRAFT_OPEN_INTENTS: usize = 10_000;
+/// Unrefunded intents one sender may hold at once.
+pub const MAX_BINDING_INTENTS_PER_SENDER: usize = 16;
 /// Bids one intent may hold.
 pub const MAX_GRAFT_BIDS_PER_INTENT: usize = 16;
 /// Claim messages remembered for replay protection.
@@ -59,7 +61,7 @@ pub const MAX_GRAFT_USED_MESSAGES: usize = 100_000;
 pub const MAX_GRAFT_INTENT_HORIZON_BLOCKS: u64 = 100_000;
 /// The award must leave a bidder time to act, rather than imposing a
 /// liveness obligation on a bid just as the intent expires.
-pub const MIN_GRAFT_AWARD_WINDOW_BLOCKS: u64 = 8;
+pub const MIN_GRAFT_AWARD_WINDOW_BLOCKS: u64 = 600;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum GraftStatus {
@@ -974,12 +976,18 @@ pub fn execute_graft_tx(
             // anchored fulfilment is authenticated by `origin_emitter(executor)`.
             // Rotating the executor while intents remain open makes `Fulfill`
             // impossible and turns an honest solver into a liveness fault.
+            // Only an awarded, unexpired intent imposes a solver liveness
+            // obligation; bare unawarded or expired rows are permissionless and
+            // refundable, so letting them hold rotation open would let one atom
+            // pin the domain executor indefinitely.
             let live_intent = state.settlement.graft.intents.values().any(|intent| {
-                state
-                    .settlement
-                    .graft
-                    .get(&intent.graft_id)
-                    .is_some_and(|app| app.domain_key == *domain_key)
+                intent.awarded_solver.is_some()
+                    && block <= intent.deadline_block
+                    && state
+                        .settlement
+                        .graft
+                        .get(&intent.graft_id)
+                        .is_some_and(|app| app.domain_key == *domain_key)
             });
             if live_intent {
                 return Err(refused(
@@ -1058,7 +1066,24 @@ pub fn execute_graft_tx(
             {
                 return Err(refused("Graft intent deadline is out of range"));
             }
-            if state.settlement.graft.intents.len() >= MAX_GRAFT_OPEN_INTENTS {
+            let sender_rows = state
+                .settlement
+                .graft
+                .intents
+                .values()
+                .filter(|intent| intent.owner == ctx.sender)
+                .count();
+            if sender_rows >= MAX_BINDING_INTENTS_PER_SENDER {
+                return Err(refused("too many open intents for this account"));
+            }
+            let live_open = state
+                .settlement
+                .graft
+                .intents
+                .values()
+                .filter(|intent| block <= intent.deadline_block)
+                .count();
+            if live_open >= MAX_GRAFT_OPEN_INTENTS {
                 return Err(refused("Graft intent registry is full"));
             }
             debit(state, ctx, *max_payment)?;
@@ -1691,7 +1716,7 @@ mod tests {
                 solver_fee_cap: 100,
                 service_price: 0,
                 origin_beneficiary: vec![0x33; 20],
-                deadline_block: 10,
+                deadline_block: 600,
             },
         )
         .unwrap();
@@ -1723,7 +1748,7 @@ mod tests {
         .unwrap();
         let refund = GraftTx::Refund { intent_id };
         let mut unawarded = state.clone();
-        unawarded.current_block_height = 11;
+        unawarded.current_block_height = 601;
         execute_graft_tx(&mut unawarded, &ctx(user), &refund).unwrap();
         assert_eq!(
             unawarded
@@ -1743,7 +1768,7 @@ mod tests {
         );
         execute_graft_tx(&mut state, &ctx(user), &GraftTx::Award { intent_id }).unwrap();
         assert!(execute_graft_tx(&mut state, &ctx(user), &refund).is_err());
-        state.current_block_height = 11;
+        state.current_block_height = 601;
         let before = state.get_balance(&user);
         execute_graft_tx(&mut state, &ctx(user), &refund).unwrap();
         assert_eq!(state.get_balance(&user), before + 1_000);
@@ -2072,7 +2097,7 @@ mod tests {
             solver_fee_cap: 100,
             service_price: 200,
             origin_beneficiary: vec![0x33; 20],
-            deadline_block: 100,
+            deadline_block: 600,
         };
         execute_graft_tx(&mut state, &ctx(user), &intent_tx).unwrap();
         let intent_id = state
@@ -2171,7 +2196,7 @@ mod tests {
                     solver_fee_cap: 50,
                     service_price: 50,
                     origin_beneficiary: vec![0x33; 20],
-                    deadline_block: 120,
+                    deadline_block: 720,
                 },
             )
             .unwrap_err();
@@ -2193,7 +2218,7 @@ mod tests {
         // When an intent expires while the domain is Frozen/Retired, Refund
         // returns the user's escrow without slashing the awarded solver that
         // was forbidden from calling Fulfill.
-        state.current_block_height = 101;
+        state.current_block_height = 601;
         let user_before = state.get_balance(&user);
         execute_graft_tx(&mut state, &ctx(user), &GraftTx::Refund { intent_id }).unwrap();
         assert_eq!(state.get_balance(&user), user_before + 1_000);
@@ -2208,6 +2233,65 @@ mod tests {
 
         state.settlement.domains.get_mut(DOMAIN).unwrap().status =
             crate::domain::DomainStatus::Active;
+
+        // Short-window intent (< MIN_GRAFT_AWARD_WINDOW_BLOCKS remaining) cannot be awarded.
+        execute_graft_tx(
+            &mut state,
+            &ctx(user),
+            &GraftTx::OpenIntent {
+                graft_id: id,
+                call_hash: [0x94; 32],
+                value: 0,
+                max_payment: 500,
+                solver_fee_cap: 50,
+                service_price: 50,
+                origin_beneficiary: vec![0x33; 20],
+                deadline_block: 1_000,
+            },
+        )
+        .unwrap();
+        let short_id = state
+            .settlement
+            .graft
+            .intents
+            .values()
+            .find(|i| i.call_hash == [0x94; 32])
+            .unwrap()
+            .intent_id;
+        execute_graft_tx(
+            &mut state,
+            &ctx(solver),
+            &GraftTx::Bid {
+                intent_id: short_id,
+                cost: 50,
+                fee: 10,
+            },
+        )
+        .unwrap();
+        assert!(
+            execute_graft_tx(
+                &mut state,
+                &ctx(user),
+                &GraftTx::Award {
+                    intent_id: short_id
+                }
+            )
+            .is_err(),
+            "Award with < MIN_GRAFT_AWARD_WINDOW_BLOCKS remaining must be refused"
+        );
+
+        // Unawarded intents must NOT pin executor rotation.
+        execute_graft_tx(
+            &mut state,
+            &ctx(operator),
+            &GraftTx::SetExecutor {
+                domain_key: DOMAIN,
+                executor: vec![0x87; 20],
+            },
+        )
+        .expect("unawarded intents must not block SetExecutor");
+
+        // Open an intent with >= 600 blocks remaining, bid, and award -> now rotation IS blocked.
         execute_graft_tx(
             &mut state,
             &ctx(user),
@@ -2219,7 +2303,33 @@ mod tests {
                 solver_fee_cap: 50,
                 service_price: 50,
                 origin_beneficiary: vec![0x33; 20],
-                deadline_block: 200,
+                deadline_block: 1_300,
+            },
+        )
+        .unwrap();
+        let awarded_id = state
+            .settlement
+            .graft
+            .intents
+            .values()
+            .find(|i| i.call_hash == [0x93; 32])
+            .unwrap()
+            .intent_id;
+        execute_graft_tx(
+            &mut state,
+            &ctx(solver),
+            &GraftTx::Bid {
+                intent_id: awarded_id,
+                cost: 50,
+                fee: 10,
+            },
+        )
+        .unwrap();
+        execute_graft_tx(
+            &mut state,
+            &ctx(user),
+            &GraftTx::Award {
+                intent_id: awarded_id,
             },
         )
         .unwrap();
@@ -2234,7 +2344,19 @@ mod tests {
         .unwrap_err();
         assert!(
             rotate_err.to_string().contains("open intents"),
-            "SetExecutor must refuse rotation while intents are live: {rotate_err}"
+            "SetExecutor must refuse rotation while awarded intents are live: {rotate_err}"
         );
+
+        // Once the awarded intent expires without fulfilment, it no longer pins SetExecutor.
+        state.current_block_height = 1_301;
+        execute_graft_tx(
+            &mut state,
+            &ctx(operator),
+            &GraftTx::SetExecutor {
+                domain_key: DOMAIN,
+                executor: vec![0x88; 20],
+            },
+        )
+        .expect("expired intents must not pin SetExecutor");
     }
 }
