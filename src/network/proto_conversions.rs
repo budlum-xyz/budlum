@@ -197,7 +197,13 @@ impl From<&Transaction> for pb::ProtoTransaction {
             TransactionType::Unstake => (pb::ProtoTransactionType::Unstake as i32, None),
             TransactionType::Vote => (pb::ProtoTransactionType::Vote as i32, None),
             TransactionType::ContractCall => (pb::ProtoTransactionType::ContractCall as i32, None),
-            TransactionType::BnsRegister => (pb::ProtoTransactionType::BnsRegister as i32, None),
+            TransactionType::BnsCreateOffer => {
+                (pb::ProtoTransactionType::BnsCreateOffer as i32, None)
+            }
+            TransactionType::BnsCancelOffer => {
+                (pb::ProtoTransactionType::BnsCancelOffer as i32, None)
+            }
+            TransactionType::BnsBuyName => (pb::ProtoTransactionType::BnsBuyName as i32, None),
             TransactionType::BnsSetContent => {
                 (pb::ProtoTransactionType::BnsSetContent as i32, None)
             }
@@ -1225,7 +1231,9 @@ impl TryFrom<pb::ProtoTransaction> for Transaction {
             pb::ProtoTransactionType::Unstake => TransactionType::Unstake,
             pb::ProtoTransactionType::Vote => TransactionType::Vote,
             pb::ProtoTransactionType::ContractCall => TransactionType::ContractCall,
-            pb::ProtoTransactionType::BnsRegister => TransactionType::BnsRegister,
+            pb::ProtoTransactionType::BnsCreateOffer => TransactionType::BnsCreateOffer,
+            pb::ProtoTransactionType::BnsCancelOffer => TransactionType::BnsCancelOffer,
+            pb::ProtoTransactionType::BnsBuyName => TransactionType::BnsBuyName,
             pb::ProtoTransactionType::BnsSetContent => TransactionType::BnsSetContent,
             pb::ProtoTransactionType::BnsRegisterSubdomain => TransactionType::BnsRegisterSubdomain,
             pb::ProtoTransactionType::BnsSetStorage => TransactionType::BnsSetStorage,
@@ -3097,7 +3105,9 @@ mod tests {
             TransactionType::Unstake,
             TransactionType::Vote,
             TransactionType::ContractCall,
-            TransactionType::BnsRegister,
+            TransactionType::BnsCreateOffer,
+            TransactionType::BnsCancelOffer,
+            TransactionType::BnsBuyName,
             TransactionType::BnsSetContent,
             TransactionType::BnsRegisterSubdomain,
             TransactionType::BnsSetStorage,
