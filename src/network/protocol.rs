@@ -189,6 +189,7 @@ impl NetworkMessage {
         if bytes.len() > MAX_MESSAGE_SIZE {
             return Err(MessageError::TooLarge(bytes.len()));
         }
+        validate_wire_frame_caps(bytes)?;
         // Only the canonical encoding is accepted. Dedup keys and
         // gossipsub ids hash the raw bytes, but prost skips unknown fields and
         // accepts any field order and overlong varints, so one signed object
@@ -300,6 +301,258 @@ impl NetworkMessage {
 
 pub fn is_canonical_hash(hash: &str) -> bool {
     hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+const MAX_SLASHING_ITEMS_PER_CONTAINER: usize = 64;
+const MAX_SLASHING_REPORT_BYTES: usize = 65_536;
+const MAX_FRAME_SLASHING_EVIDENCE: usize = 256;
+const MAX_SLASHING_EVIDENCE_NESTING: usize = 2;
+
+fn skip_wire_field(
+    buf: &mut &[u8],
+    wire_type: prost::encoding::WireType,
+) -> Result<(), MessageError> {
+    use prost::encoding::{decode_varint, WireType};
+    match wire_type {
+        WireType::Varint => {
+            decode_varint(buf)
+                .map_err(|e| MessageError::ParseError(format!("Protobuf varint error: {e}")))?;
+            Ok(())
+        }
+        WireType::SixtyFourBit => {
+            *buf = buf.get(8..).ok_or_else(|| {
+                MessageError::ParseError("Truncated 64-bit protobuf field".into())
+            })?;
+            Ok(())
+        }
+        WireType::ThirtyTwoBit => {
+            *buf = buf.get(4..).ok_or_else(|| {
+                MessageError::ParseError("Truncated 32-bit protobuf field".into())
+            })?;
+            Ok(())
+        }
+        WireType::LengthDelimited => {
+            let _ = take_len_delimited(buf, wire_type)?;
+            Ok(())
+        }
+        WireType::StartGroup | WireType::EndGroup => Err(MessageError::ParseError(
+            "Deprecated protobuf group wire type refused".into(),
+        )),
+    }
+}
+
+fn take_len_delimited<'a>(
+    buf: &mut &'a [u8],
+    wire_type: prost::encoding::WireType,
+) -> Result<&'a [u8], MessageError> {
+    use prost::encoding::{decode_varint, WireType};
+    if wire_type != WireType::LengthDelimited {
+        return Err(MessageError::ParseError(
+            "Expected length-delimited protobuf field".into(),
+        ));
+    }
+    let raw_len = decode_varint(buf)
+        .map_err(|e| MessageError::ParseError(format!("Protobuf length varint error: {e}")))?;
+    let len = usize::try_from(raw_len)
+        .map_err(|_| MessageError::ParseError("Protobuf field length overflow".into()))?;
+    if buf.len() < len {
+        return Err(MessageError::ParseError(
+            "Truncated length-delimited protobuf field".into(),
+        ));
+    }
+    let (head, tail) = buf.split_at(len);
+    *buf = tail;
+    Ok(head)
+}
+
+fn scan_proto_slashing_evidence(
+    mut slice: &[u8],
+    depth: usize,
+    frame_evidence_total: &mut usize,
+) -> Result<(), MessageError> {
+    if depth > MAX_SLASHING_EVIDENCE_NESTING {
+        return Err(MessageError::ParseError(
+            "Nested slashing evidence exceeds depth limit".into(),
+        ));
+    }
+    *frame_evidence_total = frame_evidence_total.saturating_add(1);
+    if *frame_evidence_total > MAX_FRAME_SLASHING_EVIDENCE {
+        return Err(MessageError::ParseError(
+            "Frame slashing evidence count exceeds limit".into(),
+        ));
+    }
+    while !slice.is_empty() {
+        let (tag, wire_type) = prost::encoding::decode_key(&mut slice)
+            .map_err(|e| MessageError::ParseError(format!("Protobuf key error: {e}")))?;
+        match tag {
+            1 | 2 => {
+                let header_bytes = take_len_delimited(&mut slice, wire_type)?;
+                if header_bytes.len() > MAX_BLOCK_SIZE {
+                    return Err(MessageError::TooLarge(header_bytes.len()));
+                }
+                scan_proto_block_header(header_bytes, depth, frame_evidence_total)?;
+            }
+            _ => skip_wire_field(&mut slice, wire_type)?,
+        }
+    }
+    Ok(())
+}
+
+fn scan_proto_block_header(
+    mut slice: &[u8],
+    depth: usize,
+    frame_evidence_total: &mut usize,
+) -> Result<(), MessageError> {
+    let mut evidence_count = 0usize;
+    let mut report_count = 0usize;
+    while !slice.is_empty() {
+        let (tag, wire_type) = prost::encoding::decode_key(&mut slice)
+            .map_err(|e| MessageError::ParseError(format!("Protobuf key error: {e}")))?;
+        match tag {
+            9 => {
+                evidence_count = evidence_count.saturating_add(1);
+                if evidence_count > MAX_SLASHING_ITEMS_PER_CONTAINER {
+                    return Err(MessageError::ParseError(
+                        "Too many slashing evidence entries in block header".into(),
+                    ));
+                }
+                let evidence_bytes = take_len_delimited(&mut slice, wire_type)?;
+                scan_proto_slashing_evidence(
+                    evidence_bytes,
+                    depth.saturating_add(1),
+                    frame_evidence_total,
+                )?;
+            }
+            18 => {
+                report_count = report_count.saturating_add(1);
+                if report_count > MAX_SLASHING_ITEMS_PER_CONTAINER {
+                    return Err(MessageError::ParseError(
+                        "Too many slashing reports in block header".into(),
+                    ));
+                }
+                let report_bytes = take_len_delimited(&mut slice, wire_type)?;
+                if report_bytes.len() > MAX_SLASHING_REPORT_BYTES {
+                    return Err(MessageError::ParseError(
+                        "Slashing report entry exceeds size limit".into(),
+                    ));
+                }
+            }
+            _ => skip_wire_field(&mut slice, wire_type)?,
+        }
+    }
+    Ok(())
+}
+
+fn scan_proto_block(
+    mut slice: &[u8],
+    frame_evidence_total: &mut usize,
+) -> Result<(), MessageError> {
+    if slice.len() > MAX_BLOCK_SIZE {
+        return Err(MessageError::TooLarge(slice.len()));
+    }
+    let mut evidence_count = 0usize;
+    let mut report_count = 0usize;
+    while !slice.is_empty() {
+        let (tag, wire_type) = prost::encoding::decode_key(&mut slice)
+            .map_err(|e| MessageError::ParseError(format!("Protobuf key error: {e}")))?;
+        match tag {
+            11 => {
+                evidence_count = evidence_count.saturating_add(1);
+                if evidence_count > MAX_SLASHING_ITEMS_PER_CONTAINER {
+                    return Err(MessageError::ParseError(
+                        "Too many slashing evidence entries in block".into(),
+                    ));
+                }
+                let evidence_bytes = take_len_delimited(&mut slice, wire_type)?;
+                scan_proto_slashing_evidence(evidence_bytes, 1, frame_evidence_total)?;
+            }
+            22 => {
+                report_count = report_count.saturating_add(1);
+                if report_count > MAX_SLASHING_ITEMS_PER_CONTAINER {
+                    return Err(MessageError::ParseError(
+                        "Too many slashing reports in block".into(),
+                    ));
+                }
+                let report_bytes = take_len_delimited(&mut slice, wire_type)?;
+                if report_bytes.len() > MAX_SLASHING_REPORT_BYTES {
+                    return Err(MessageError::ParseError(
+                        "Slashing report entry exceeds size limit".into(),
+                    ));
+                }
+            }
+            _ => skip_wire_field(&mut slice, wire_type)?,
+        }
+    }
+    Ok(())
+}
+
+fn validate_wire_frame_caps(mut slice: &[u8]) -> Result<(), MessageError> {
+    let mut frame_evidence_total = 0usize;
+    while !slice.is_empty() {
+        let (tag, wire_type) = prost::encoding::decode_key(&mut slice)
+            .map_err(|e| MessageError::ParseError(format!("Protobuf key error: {e}")))?;
+        match tag {
+            3 => {
+                let block_bytes = take_len_delimited(&mut slice, wire_type)?;
+                scan_proto_block(block_bytes, &mut frame_evidence_total)?;
+            }
+            4 => {
+                let tx_bytes = take_len_delimited(&mut slice, wire_type)?;
+                if tx_bytes.len() > MAX_TX_SIZE {
+                    return Err(MessageError::TooLarge(tx_bytes.len()));
+                }
+            }
+            6 => {
+                let mut batch_payload = take_len_delimited(&mut slice, wire_type)?;
+                let mut header_count = 0usize;
+                while !batch_payload.is_empty() {
+                    let (inner_tag, inner_wire) = prost::encoding::decode_key(&mut batch_payload)
+                        .map_err(|e| {
+                        MessageError::ParseError(format!("Protobuf key error: {e}"))
+                    })?;
+                    if inner_tag == 1 {
+                        header_count = header_count.saturating_add(1);
+                        if header_count > MAX_HEADERS_PER_REQUEST as usize {
+                            return Err(MessageError::ParseError(format!(
+                                "header batch exceeds {MAX_HEADERS_PER_REQUEST}"
+                            )));
+                        }
+                        let header_bytes = take_len_delimited(&mut batch_payload, inner_wire)?;
+                        if header_bytes.len() > MAX_BLOCK_SIZE {
+                            return Err(MessageError::TooLarge(header_bytes.len()));
+                        }
+                        scan_proto_block_header(header_bytes, 0, &mut frame_evidence_total)?;
+                    } else {
+                        skip_wire_field(&mut batch_payload, inner_wire)?;
+                    }
+                }
+            }
+            8 | 10 => {
+                let mut batch_payload = take_len_delimited(&mut slice, wire_type)?;
+                while !batch_payload.is_empty() {
+                    let (inner_tag, inner_wire) = prost::encoding::decode_key(&mut batch_payload)
+                        .map_err(|e| {
+                        MessageError::ParseError(format!("Protobuf key error: {e}"))
+                    })?;
+                    if inner_tag == 1 {
+                        let block_bytes = take_len_delimited(&mut batch_payload, inner_wire)?;
+                        scan_proto_block(block_bytes, &mut frame_evidence_total)?;
+                    } else {
+                        skip_wire_field(&mut batch_payload, inner_wire)?;
+                    }
+                }
+            }
+            25 => {
+                let evidence_bytes = take_len_delimited(&mut slice, wire_type)?;
+                if evidence_bytes.len() > MAX_BLOCK_SIZE {
+                    return Err(MessageError::TooLarge(evidence_bytes.len()));
+                }
+                scan_proto_slashing_evidence(evidence_bytes, 1, &mut frame_evidence_total)?;
+            }
+            _ => skip_wire_field(&mut slice, wire_type)?,
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -449,5 +702,57 @@ mod tests {
         disconnected[1].previous_hash = "11".repeat(32);
         disconnected[1].hash = disconnected[1].calculate_hash();
         assert!(NetworkMessage::validate_header_batch(&disconnected, 45262).is_err());
+    }
+
+    #[test]
+    fn unbounded_slashing_evidence_wire_frame_is_refused() {
+        // Build a raw ProtoNetworkMessage (field 3 = ProtoBlock, wire type 2)
+        // carrying 65 minimal ProtoSlashingEvidence entries (field 11, 2 wire bytes each).
+        let mut proto_block = Vec::with_capacity(65 * 2);
+        for _ in 0..65 {
+            // tag 11 (11 << 3 | 2 = 0x5a), length 0
+            proto_block.extend_from_slice(&[0x5a, 0x00]);
+        }
+        let mut frame = Vec::new();
+        // outer tag 3 (3 << 3 | 2 = 0x1a)
+        frame.push(0x1a);
+        prost::encoding::encode_varint(proto_block.len() as u64, &mut frame);
+        frame.extend_from_slice(&proto_block);
+
+        assert!(matches!(
+            NetworkMessage::from_bytes_validated(&frame),
+            Err(MessageError::ParseError(msg)) if msg.contains("Too many slashing evidence")
+        ));
+
+        // Nested recursive ProtoSlashingEvidence exceeding MAX_SLASHING_EVIDENCE_NESTING is also refused.
+        // Inner ProtoSlashingEvidence: empty (0 bytes) -> wrapped in header1 (field 9 = 0x4a, len 0) -> ...
+        let mut inner_payload = Vec::new();
+        for _ in 0..4 {
+            // Wrap current evidence inside a ProtoBlockHeader's field 9 (0x4a)
+            let mut wrapped_header = Vec::new();
+            wrapped_header.push(0x4a);
+            prost::encoding::encode_varint(inner_payload.len() as u64, &mut wrapped_header);
+            wrapped_header.extend_from_slice(&inner_payload);
+            // Wrap header inside a ProtoSlashingEvidence's field 1 (0x0a)
+            let mut wrapped_evidence = Vec::new();
+            wrapped_evidence.push(0x0a);
+            prost::encoding::encode_varint(wrapped_header.len() as u64, &mut wrapped_evidence);
+            wrapped_evidence.extend_from_slice(&wrapped_header);
+            inner_payload = wrapped_evidence;
+        }
+        let mut nested_frame = Vec::new();
+        // outer tag 25 (25 << 3 | 2 = 0xca, 0x01)
+        prost::encoding::encode_key(
+            25,
+            prost::encoding::WireType::LengthDelimited,
+            &mut nested_frame,
+        );
+        prost::encoding::encode_varint(inner_payload.len() as u64, &mut nested_frame);
+        nested_frame.extend_from_slice(&inner_payload);
+
+        assert!(matches!(
+            NetworkMessage::from_bytes_validated(&nested_frame),
+            Err(MessageError::ParseError(msg)) if msg.contains("depth limit")
+        ));
     }
 }
