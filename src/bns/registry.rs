@@ -1,6 +1,9 @@
 use crate::bns::types::{BnsError, BnsResolved, NameRecord};
 use crate::core::address::Address;
-use crate::registry::params::{MAX_DURATION, MAX_NAMES_PER_OWNER, MIN_DURATION, RESERVED_LABELS};
+use crate::registry::params::{
+    MAX_DURATION, MAX_NAMES_PER_OWNER, MAX_RECORDS_PER_NAME, MAX_RECORD_KEY_LEN,
+    MAX_RECORD_VALUE_BYTES, MIN_DURATION, RESERVED_LABELS,
+};
 use crate::storage::content_id::ContentId;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -387,6 +390,7 @@ impl BnsRegistry {
         record.storage_root_height = None;
         record.content_id = None;
         record.subdomains.clear();
+        record.records.clear();
         if current_owner != new_owner
             && self
                 .primary_names
@@ -619,6 +623,105 @@ impl BnsRegistry {
         })
     }
 
+    /// Whether `key` is a valid BNS text/profile/multi-chain record key
+    /// (`1..=MAX_RECORD_KEY_LEN`, lowercase ASCII `[a-z0-9._-]`, no leading or
+    /// trailing `.` or `-`).
+    #[must_use]
+    pub fn is_valid_record_key(key: &str) -> bool {
+        let len = key.len();
+        (1..=MAX_RECORD_KEY_LEN).contains(&len)
+            && !key.starts_with('.')
+            && !key.ends_with('.')
+            && !key.starts_with('-')
+            && !key.ends_with('-')
+            && !key.contains("..")
+            && key.bytes().all(|b| {
+                b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'.' | b'_' | b'-')
+            })
+    }
+
+    /// Whether `value` is a safe bounded UTF-8 record value (`<= MAX_RECORD_VALUE_BYTES`,
+    /// no control characters except `\n`, and no dangerous script/file URI schemes).
+    #[must_use]
+    pub fn is_safe_record_value(value: &str) -> bool {
+        if value.len() > MAX_RECORD_VALUE_BYTES {
+            return false;
+        }
+        if value.chars().any(|c| c.is_control() && c != '\n') {
+            return false;
+        }
+        let lower = value.trim_start().to_ascii_lowercase();
+        for forbidden in ["javascript:", "vbscript:", "data:", "file:"] {
+            if lower.starts_with(forbidden) {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Atomically insert, update, or delete (`None`) text/profile/multi-chain
+    /// records on a live `.bud` name owned by `caller`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BnsError`] if the name is unknown, expired, not owned by
+    /// `caller`, or any key/value/count bound fails.
+    pub fn set_records(
+        &mut self,
+        name: &str,
+        caller: &Address,
+        updates: &BTreeMap<String, Option<String>>,
+        current_epoch: u64,
+    ) -> Result<(), BnsError> {
+        if updates.is_empty() || updates.len() > MAX_RECORDS_PER_NAME {
+            return Err(BnsError::InvalidRecord);
+        }
+        for (k, v) in updates {
+            if !Self::is_valid_record_key(k) {
+                return Err(BnsError::InvalidRecord);
+            }
+            if let Some(val) = v {
+                if !Self::is_safe_record_value(val) {
+                    return Err(BnsError::InvalidRecord);
+                }
+            }
+        }
+        let record = self.names.get(name).ok_or(BnsError::InvalidName)?;
+        if &record.owner != caller {
+            return Err(BnsError::NotOwner);
+        }
+        if record.expires_at <= current_epoch {
+            return Err(BnsError::Expired);
+        }
+        let mut next = record.records.clone();
+        for (k, v) in updates {
+            match v {
+                Some(val) => {
+                    next.insert(k.clone(), val.clone());
+                }
+                None => {
+                    next.remove(k);
+                }
+            }
+        }
+        if next.len() > MAX_RECORDS_PER_NAME {
+            return Err(BnsError::InvalidRecord);
+        }
+        let record = self.names.get_mut(name).ok_or(BnsError::InvalidName)?;
+        record.records = next;
+        Ok(())
+    }
+
+    /// Read all text/profile/multi-chain records of a live `.bud` name.
+    #[must_use]
+    pub fn get_records(&self, name: &str, current_epoch: u64) -> Option<BTreeMap<String, String>> {
+        let record = self.names.get(name)?;
+        if record.expires_at <= current_epoch {
+            return None;
+        }
+        Some(record.records.clone())
+    }
+
     pub fn resolve_full(&self, name: &str, current_epoch: u64) -> Option<BnsResolved> {
         self.names.get(name).map(|record| {
             let expired = record.expires_at <= current_epoch;
@@ -633,6 +736,11 @@ impl BnsRegistry {
                     record.storage_domain_id
                 },
                 content_id: if expired { None } else { record.content_id },
+                records: if expired {
+                    BTreeMap::new()
+                } else {
+                    record.records.clone()
+                },
                 is_expired: expired,
             }
         })
@@ -675,7 +783,7 @@ impl BnsRegistry {
     pub fn root(&self) -> [u8; 32] {
         use sha2::{Digest, Sha256};
         let mut hasher = Sha256::new();
-        hasher.update(b"BDLM_BNS_REGISTRY_V2");
+        hasher.update(b"BDLM_BNS_REGISTRY_V3");
         hasher.update(self.base_cost.to_le_bytes());
         hasher.update(b"reserved_labels");
         hasher.update((self.reserved_labels.len() as u64).to_le_bytes());
@@ -759,6 +867,13 @@ impl BnsRegistry {
                 hasher.update((sub_label.len() as u64).to_le_bytes());
                 hasher.update(sub_label.as_bytes());
                 hasher.update(sub_owner.0);
+            }
+            hasher.update((record.records.len() as u64).to_le_bytes());
+            for (rec_key, rec_val) in &record.records {
+                hasher.update((rec_key.len() as u64).to_le_bytes());
+                hasher.update(rec_key.as_bytes());
+                hasher.update((rec_val.len() as u64).to_le_bytes());
+                hasher.update(rec_val.as_bytes());
             }
         }
         hasher.finalize().into()

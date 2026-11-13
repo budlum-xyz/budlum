@@ -210,6 +210,9 @@ impl From<&Transaction> for pb::ProtoTransaction {
             TransactionType::BnsSetPrimaryName => {
                 (pb::ProtoTransactionType::BnsSetPrimaryName as i32, None)
             }
+            TransactionType::BnsSetRecords => {
+                (pb::ProtoTransactionType::BnsSetRecords as i32, None)
+            }
             TransactionType::BnsSetContent => {
                 (pb::ProtoTransactionType::BnsSetContent as i32, None)
             }
@@ -1242,6 +1245,7 @@ impl TryFrom<pb::ProtoTransaction> for Transaction {
             pb::ProtoTransactionType::BnsBuyName => TransactionType::BnsBuyName,
             pb::ProtoTransactionType::BnsSetAddress => TransactionType::BnsSetAddress,
             pb::ProtoTransactionType::BnsSetPrimaryName => TransactionType::BnsSetPrimaryName,
+            pb::ProtoTransactionType::BnsSetRecords => TransactionType::BnsSetRecords,
             pb::ProtoTransactionType::BnsSetContent => TransactionType::BnsSetContent,
             pb::ProtoTransactionType::BnsRegisterSubdomain => TransactionType::BnsRegisterSubdomain,
             pb::ProtoTransactionType::BnsSetStorage => TransactionType::BnsSetStorage,
@@ -3118,6 +3122,7 @@ mod tests {
             TransactionType::BnsBuyName,
             TransactionType::BnsSetAddress,
             TransactionType::BnsSetPrimaryName,
+            TransactionType::BnsSetRecords,
             TransactionType::BnsSetContent,
             TransactionType::BnsRegisterSubdomain,
             TransactionType::BnsSetStorage,

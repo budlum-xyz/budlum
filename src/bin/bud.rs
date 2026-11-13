@@ -655,6 +655,24 @@ enum BnsAction {
         #[arg(long, required = true)]
         address: String,
     },
+    /// Set or delete (`--delete`) a text/profile/multi-chain record on a live `.bud` name.
+    SetRecord {
+        #[command(flatten)]
+        signer: V5Signer,
+        #[arg(long, required = true)]
+        name: String,
+        #[arg(long, required = true)]
+        key: String,
+        #[arg(long)]
+        value: Option<String>,
+        #[arg(long, default_value_t = false)]
+        delete: bool,
+    },
+    /// Print all text/profile/multi-chain records of a live `.bud` name.
+    GetRecords {
+        #[arg(long, required = true)]
+        name: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -2600,6 +2618,48 @@ fn run_bns_reverse(rpc_url: &str, address: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn run_bns_set_record(
+    rpc_url: &str,
+    signer: &V5Signer,
+    name: &str,
+    record_key: &str,
+    value: Option<&str>,
+    delete: bool,
+) -> Result<(), String> {
+    if delete && value.is_some() {
+        return Err("pass either --value or --delete, not both".into());
+    }
+    if !delete && value.is_none() {
+        return Err("either --value <text> or --delete is required".into());
+    }
+    let key = open_wallet(signer)?;
+    let mut updates = std::collections::BTreeMap::new();
+    updates.insert(record_key.to_string(), value.map(str::to_string));
+    let _prepared = rpc_call(
+        rpc_url,
+        "bud_bnsPrepareSetRecords",
+        serde_json::json!([name, key.address().to_hex(), updates]),
+    )?;
+    let data = bincode::serialize(&(name.to_string(), updates)).map_err(|e| e.to_string())?;
+    send_bns(
+        rpc_url,
+        signer,
+        &key,
+        TransactionType::BnsSetRecords,
+        0,
+        data,
+    )
+}
+
+fn run_bns_get_records(rpc_url: &str, name: &str) -> Result<(), String> {
+    let ans = rpc_call(rpc_url, "bud_bnsGetRecords", serde_json::json!([name]))?;
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&ans).map_err(|e| e.to_string())?
+    );
+    Ok(())
+}
+
 /// The multiaddr peers dial: `/ip4/...` for an address, `/dns4/...` for a
 /// name.
 fn bootnode_multiaddr(host: &str, port: u16, peer_id: &str) -> String {
@@ -2904,6 +2964,14 @@ fn main() {
                 clear,
             } => run_bns_set_primary(&cli.rpc_url, signer, name.as_deref(), *clear),
             BnsAction::Reverse { address } => run_bns_reverse(&cli.rpc_url, address),
+            BnsAction::SetRecord {
+                signer,
+                name,
+                key,
+                value,
+                delete,
+            } => run_bns_set_record(&cli.rpc_url, signer, name, key, value.as_deref(), *delete),
+            BnsAction::GetRecords { name } => run_bns_get_records(&cli.rpc_url, name),
         },
         Command::Node { action } => match action {
             NodeAction::Identity {

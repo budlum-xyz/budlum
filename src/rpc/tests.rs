@@ -1756,6 +1756,35 @@ mod rpc_tests {
             .unwrap_err()
             .message()
             .contains("Invalid BNS name"));
+        assert!(server
+            .bns_get_records("bids.bud".to_string())
+            .await
+            .unwrap()
+            .is_null());
+        assert!(server
+            .bns_get_records("bids".to_string())
+            .await
+            .unwrap_err()
+            .message()
+            .contains("Invalid BNS name"));
+        let mut updates = std::collections::BTreeMap::new();
+        updates.insert(
+            "com.github".to_string(),
+            Some("https://github.com/budlum-xyz".to_string()),
+        );
+        let prepared_records = server
+            .bns_prepare_set_records("bids.bud".to_string(), seller.to_hex(), updates)
+            .await
+            .unwrap();
+        assert!(prepared_records["tx_template"].is_object());
+        let mut bad_updates = std::collections::BTreeMap::new();
+        bad_updates.insert("url".to_string(), Some("javascript:alert(1)".to_string()));
+        assert!(server
+            .bns_prepare_set_records("bids.bud".to_string(), seller.to_hex(), bad_updates)
+            .await
+            .unwrap_err()
+            .message()
+            .contains("Unsafe or oversized"));
     }
 
     #[tokio::test]

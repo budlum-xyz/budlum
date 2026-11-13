@@ -53,6 +53,14 @@
     `reverse_resolve`, clears stale reverse mappings on `transfer` / target
     rotation, and exposes `bud_bnsReverseResolve`, `bud_bnsPrepareSetAddress`,
     `bud_bnsPrepareSetPrimaryName`, and `bud bns {set-address,set-primary,reverse}`.
+  - **B5 (bounded text/profile/multi-chain records and `BDLM_BNS_REGISTRY_V3`):**
+    adds `NameRecord::records` (`MAX_RECORDS_PER_NAME = 32`,
+    `MAX_RECORD_KEY_LEN = 64`, `MAX_RECORD_VALUE_BYTES = 512`, rejecting
+    `javascript:`/`vbscript:`/`data:`/`file:` URIs and control bytes), bumps
+    `BnsRegistry::root()` and `budlum-explorer` to `BDLM_BNS_REGISTRY_V3`
+    (registered in `src/crypto/domain_tags.rs`), adds `BnsSetRecords` (wire tag
+    `76`), clears `records` on `transfer`, and exposes `bud_bnsGetRecords`,
+    `bud_bnsPrepareSetRecords`, and `bud bns {set-record,get-records}`.
 
 ## Current behaviour (locked by tests)
 
