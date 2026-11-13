@@ -266,7 +266,7 @@ mod tests {
     fn bns_resolves_bud3_content() {
         let alice = Address([0x11; 32]);
         let mut bns = BnsRegistry::new();
-        bns.register(String::from("budlum.bud"), alice, 1, 20)
+        bns.register(String::from("portal.bud"), alice, 1, 20)
             .unwrap();
 
         let mut bud3 = Bud3Registry::default();
@@ -305,7 +305,7 @@ mod tests {
             .set_bud3_content(
                 &bns,
                 &bud3,
-                ("budlum.bud", &alice),
+                ("portal.bud", &alice),
                 (cid, key, Some(nft_id)),
                 2,
             )
@@ -318,7 +318,7 @@ mod tests {
                 &bns,
                 &bud3,
                 &net,
-                "budlum.bud",
+                "portal.bud",
                 2,
                 &BnsViewAccess::default(),
             )
@@ -326,13 +326,13 @@ mod tests {
         assert_eq!(body, html);
 
         let new_owner = Address([0x33; 32]);
-        bns.transfer("budlum.bud", &alice, new_owner, 3).unwrap();
+        bns.transfer("portal.bud", &alice, new_owner, 3).unwrap();
         assert!(matches!(
             resolver.resolve_via_bud3_view(
                 &bns,
                 &bud3,
                 &net,
-                "budlum.bud",
+                "portal.bud",
                 3,
                 &BnsViewAccess::default(),
             ),

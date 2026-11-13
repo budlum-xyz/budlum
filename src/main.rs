@@ -425,6 +425,7 @@ async fn main() {
             // was launched from (testnet item 8).
             reward_pool: network_defaults.reward_pool,
             bns_primary_sellers: network_defaults.bns_primary_sellers,
+            bns_reserved_labels: network_defaults.bns_reserved_labels,
         };
 
         let data = match serde_json::to_string_pretty(&genesis_config) {
