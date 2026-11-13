@@ -208,12 +208,15 @@ impl Bud3BnsResolver {
         let active_owner = bns
             .resolve_owner(&canonical, current_epoch)
             .ok_or(BnsBud3Error::Bns(BnsError::Expired))?;
-        let binding = self
-            .binding(&canonical)
-            .ok_or(BnsBud3Error::NoContentBound)?;
-        if binding.owner != active_owner {
-            return Err(BnsBud3Error::Bns(BnsError::NotOwner));
-        }
+        let content_ref = if let Some(binding) = self.binding(&canonical) {
+            if binding.owner != active_owner {
+                return Err(BnsBud3Error::Bns(BnsError::NotOwner));
+            }
+            binding.content_ref
+        } else {
+            bns.resolve_bud3_content(&canonical, current_epoch)
+                .ok_or(BnsBud3Error::NoContentBound)?
+        };
 
         if let Some(tag) = access.grant_tag {
             let row = bud3
@@ -227,18 +230,18 @@ impl Bud3BnsResolver {
         if let Some(receipt) = &access.paid_receipt {
             return Bud3ContentGateway::serve_paid_public_fallback(
                 bud3,
-                &binding.content_ref,
+                &content_ref,
                 receipt,
                 network,
             )
             .map_err(BnsBud3Error::Gateway);
         }
 
-        let _bundle = Bud3ContentGateway::fetch_symbol_bundle(bud3, &binding.content_ref, network)
+        let _bundle = Bud3ContentGateway::fetch_symbol_bundle(bud3, &content_ref, network)
             .map_err(BnsBud3Error::Gateway)?;
         view_from_network(
             bud3,
-            &binding.content_ref.object_commitment,
+            &content_ref.object_commitment,
             access.content_key.as_ref(),
             network,
         )
