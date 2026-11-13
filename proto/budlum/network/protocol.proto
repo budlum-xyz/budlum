@@ -147,6 +147,8 @@ enum ProtoTransactionType {
     BNS_SET_RECORDS = 76;
     // Remove an existing subdomain under a live .bud parent name owned by the signer.
     BNS_REMOVE_SUBDOMAIN = 77;
+    // Bind or clear a verified B.U.D. 3.0 ContentRef on a live .bud name.
+    BNS_SET_BUD3_CONTENT = 78;
 }
 
 message ProtoTransaction {
