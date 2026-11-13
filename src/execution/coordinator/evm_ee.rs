@@ -1278,8 +1278,10 @@ fn invoke_uol_precompile(
                 }
             }
             if let Err(e) = host.emit_log(EeLog {
-                ee: EeId::EVM,
-                address: EVM_UOL_PRECOMPILE.to_vec(),
+                emitter: EeIdentity {
+                    ee: EeId::EVM,
+                    id: EVM_UOL_PRECOMPILE.to_vec(),
+                },
                 topics: vec![{
                     let mut t = [0u8; 32];
                     if let Some(dst) = t.get_mut(..4) {
@@ -1287,7 +1289,7 @@ fn invoke_uol_precompile(
                             "transfer(bytes32,bytes32,bytes,uint128)",
                         ));
                     }
-                    t
+                    t.to_vec()
                 }],
                 data: asset_id.to_vec(),
             }) {
@@ -1492,14 +1494,16 @@ fn invoke_uol_precompile(
                 return Err(e.to_string());
             }
             if let Err(e) = host.emit_log(EeLog {
-                ee: EeId::EVM,
-                address: EVM_UOL_PRECOMPILE.to_vec(),
+                emitter: EeIdentity {
+                    ee: EeId::EVM,
+                    id: EVM_UOL_PRECOMPILE.to_vec(),
+                },
                 topics: vec![{
                     let mut t = [0u8; 32];
                     if let Some(dst) = t.get_mut(..4) {
                         dst.copy_from_slice(&uol_selector("accept(bytes32)"));
                     }
-                    t
+                    t.to_vec()
                 }],
                 data: offer_id.to_vec(),
             }) {

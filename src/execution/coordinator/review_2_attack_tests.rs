@@ -1086,7 +1086,7 @@ fn batch3_bridge_auth_and_evm_value_deploy_and_checkpoint_isolation() {
 
     // 3. TxOverlay nested checkpoint + HostBridge::read cross-EE isolation + depth > 0 bud_transfer.
     let cache = crate::execution::coordinator::overlay::BlockReadCache::new();
-    let mut supervisor = crate::execution::coordinator::supervisor::WorkerSupervisor::new();
+    let mut supervisor = crate::execution::coordinator::worker::WorkerSupervisor::new();
     let mut overlay =
         crate::execution::coordinator::overlay::TxOverlay::new(&state, EeId::EVM, 200_000);
     let cp1 = overlay.begin_checkpoint(&state).expect("cp1");

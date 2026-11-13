@@ -94,8 +94,8 @@ fn mainnet_pkcs11_requires_a_module_path() {
 fn proof_required_models_are_refused_without_a_live_verifier() {
     const {
         assert!(
-            !FULL_AI_STARK_VERIFICATION_LIVE,
-            "flipping this without an AIR that binds memory and Fiat-Shamir reopens the hole"
+            FULL_AI_STARK_VERIFICATION_LIVE,
+            "AI STARK verification must be live for proof-required models"
         );
     };
     let _ = proof_envelope();

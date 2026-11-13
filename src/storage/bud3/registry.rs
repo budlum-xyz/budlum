@@ -2051,6 +2051,7 @@ impl Bud3Registry {
                             "repair attester has no active consensus Full key",
                         ))?;
                     crate::crypto::pq::verify(
+                        crate::crypto::scheme::SchemeId::ML_DSA_65,
                         pk,
                         &digest,
                         crate::crypto::ctx::STORAGE_V2,

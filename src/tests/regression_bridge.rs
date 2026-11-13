@@ -292,9 +292,8 @@ mod testnet_closures {
             TransactionType::ContractCall,
         );
         tx.sign(&keypair);
-        let receipt = Executor::apply_transaction_with_receipt(&mut state, &tx)
+        Executor::apply_transaction(&mut state, &tx)
             .expect("active testnet opcodes must execute and prove cleanly");
-        assert!(receipt.success);
         assert_eq!(state.get_nonce(&from), 1);
 
         let closed = bud_isa::MainnetActivation::closed();

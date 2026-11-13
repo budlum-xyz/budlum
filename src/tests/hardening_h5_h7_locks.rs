@@ -45,7 +45,7 @@ mod tests {
     /// Eclipse /24 bound still enforced at PeerManager.
     #[test]
     fn eclipse_bound_still_active() {
-        use crate::network::peer_manager::{PeerManager, SubnetKey};
+        use crate::network::peer_manager::PeerManager;
         let mut pm = PeerManager::new();
         assert_eq!(pm.max_peers_per_subnet(), 4);
         let s: [u8; 3] = [198, 51, 100];

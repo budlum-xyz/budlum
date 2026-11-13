@@ -45,7 +45,7 @@ use crate::core::address::Address;
 use crate::cross_domain::external::BlsVerifier;
 use crate::domain::{
     hash_finality_proof, BftFinalityAdapter, ConsensusDomain, ConsensusKind, DomainCommitment,
-    DomainFinalityAdapter, DomainId, DomainStatus, FinalityProof, FinalityStatus,
+    DomainFinalityAdapter, DomainId, DomainStatus, FinalityProof, FinalityStatus, Hash32,
     PoAFinalityAdapter, PoSFinalityAdapter, PoWHeaderChainFinalityAdapter, ZkFinalityAdapter,
     AI_INFERENCE_ADAPTER, POW_HEADER_CHAIN_ADAPTER,
 };

@@ -364,7 +364,7 @@ fn ai_require_execution_proof_blocks_finalize_without_proof() {
         submitted_at_block: 0,
         deadline_block: 100,
         perception: Some(crate::ai_inference::perception::PerceptionRequest {
-            asset_id: crate::ai_inference::perception::DataAssetId([0xAA; 32]),
+            asset_id: crate::pollen::AssetId([0xAA; 32]),
             content_id: crate::storage::content_id::ContentId([0xBB; 32]),
             kind: crate::ai_inference::perception::PerceptionKind::Text,
             declared_units: 4,
@@ -377,9 +377,9 @@ fn ai_require_execution_proof_blocks_finalize_without_proof() {
     let res = AiInferenceResult {
         request_id: req_id,
         verifier,
-        output_commitment: crate::ai::execution::output_commitment(&[23]),
+        output_commitment: crate::ai::types::canonical_output_commitment(&[23]),
         output_ref: BoundedBytes::try_new(vec![23]).unwrap(),
-        result_nonce: 0,
+        result_nonce: 1,
         signature: Vec::new(),
         submitted_at_block: 0,
     };
