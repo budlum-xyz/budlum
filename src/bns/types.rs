@@ -94,6 +94,8 @@ pub struct BnsResolved {
     pub storage_domain_id: Option<u32>,
     pub content_id: Option<ContentId>,
     #[serde(default)]
+    pub subdomains: std::collections::BTreeMap<String, Address>,
+    #[serde(default)]
     pub records: std::collections::BTreeMap<String, String>,
     pub is_expired: bool,
 }
