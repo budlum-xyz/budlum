@@ -744,6 +744,31 @@ pub trait BudlumApi {
         sub_label: String,
     ) -> Result<Option<String>, ErrorObjectOwned>;
 
+    /// Bidirectionally verified reverse `.bud` resolution for an address.
+    #[method(name = "bud_bnsReverseResolve")]
+    async fn bns_reverse_resolve(
+        &self,
+        address: String,
+    ) -> Result<Option<String>, ErrorObjectOwned>;
+
+    /// Prepare a signed `BnsSetAddress` forwarding/target update transaction.
+    #[method(name = "bud_bnsPrepareSetAddress")]
+    async fn bns_prepare_set_address(
+        &self,
+        name: String,
+        owner: String,
+        target: Option<String>,
+        consensus_domain_id: Option<u32>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Prepare a signed `BnsSetPrimaryName` reverse-name claim/clear transaction.
+    #[method(name = "bud_bnsPrepareSetPrimaryName")]
+    async fn bns_prepare_set_primary_name(
+        &self,
+        caller: String,
+        name: Option<String>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
     /// Fetch a single `.bud` domain offer by id (`null` if unknown).
     #[method(name = "bud_bnsGetOffer")]
     async fn bns_get_offer(&self, offer_id: u64) -> Result<serde_json::Value, ErrorObjectOwned>;

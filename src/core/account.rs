@@ -2380,6 +2380,49 @@ impl AccountState {
                     return Err("Owner name limit exceeded".into());
                 }
             }
+            TransactionType::BnsSetAddress => {
+                if tx.amount != 0 || tx.to != Address::zero() {
+                    return Err("BNS set address requires zero amount and recipient".into());
+                }
+                let (name, target, _domain_id): (String, Option<Address>, Option<u32>) =
+                    bincode::deserialize(&tx.data)
+                        .map_err(|e| format!("Invalid BNS set address data: {e}"))?;
+                if !crate::bns::BnsRegistry::is_valid_name(&name) {
+                    return Err("Invalid BNS name".into());
+                }
+                if target == Some(Address::zero()) {
+                    return Err("BNS target address cannot be the zero address".into());
+                }
+                if !self
+                    .bns_registry
+                    .is_live_owned_by(&name, &tx.from, self.epoch_index)
+                {
+                    return Err("BNS set address requires a live name owned by the signer".into());
+                }
+            }
+            TransactionType::BnsSetPrimaryName => {
+                if tx.amount != 0 || tx.to != Address::zero() {
+                    return Err("BNS set primary name requires zero amount and recipient".into());
+                }
+                let primary: Option<String> = bincode::deserialize(&tx.data)
+                    .map_err(|e| format!("Invalid BNS set primary name data: {e}"))?;
+                if let Some(ref name) = primary {
+                    if !crate::bns::BnsRegistry::is_valid_name(name) {
+                        return Err("Invalid BNS name".into());
+                    }
+                    let Some(record) = self.bns_registry.names.get(name) else {
+                        return Err("BNS primary name not found".into());
+                    };
+                    if record.expires_at <= self.epoch_index {
+                        return Err("BNS primary name is expired".into());
+                    }
+                    if record.owner != tx.from && record.address != Some(tx.from) {
+                        return Err(
+                            "BNS primary name must be owned by or routed to the signer".into()
+                        );
+                    }
+                }
+            }
             TransactionType::Validator(ref validator_tx) => {
                 self.check_validator_tx(tx, validator_tx)
                     .map_err(|error| error.to_string())?;
