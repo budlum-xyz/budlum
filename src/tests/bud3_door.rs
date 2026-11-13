@@ -1650,7 +1650,7 @@ fn testnet_sealed_field_native_remote_view_and_blind_compute_work_end_to_end() {
         identity_root: None,
         checkpoint_height: 10,
         external_intake_root: None,
-        graft_root: None,
+        app_binding_root: None,
         delegation_root: None,
         object_layer_root: None,
         proof_root: Some([7u8; 32]),

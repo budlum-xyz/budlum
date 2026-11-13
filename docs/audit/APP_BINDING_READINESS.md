@@ -2,26 +2,21 @@
 
 Inspected source at `62b7beeca453dda88693b928c69f7e5c8d585490`.
 **Do not advertise another network's application as working through the
-Budlum testnet.** The directive Section 1.5 (`THE_BUDLUM_DIREKTIF.md:164-166`)
-closes the Universal Object Layer at launch and closes remote app binding
-until a separate decision after WP-49. Section 19, KR-29 repeats that launch
-boundary. `docs/APP_BINDING.md:6-13` also says closed on chain `45261` and
-devnet-only for integration. A fixture or a configured chain flag cannot
-replace a working origin-chain user journey.
+Budlum testnet.** The transaction door is open on chain `45261`
+(`docs/APP_BINDING.md`), but an open door is not an origin-chain user journey.
+A fixture or a configured chain flag cannot replace one.
 
 ## Activation gate: wired, not runtime-verified
 
-`src/core/chain_config.rs:229-236,340-341` defines
-`app_binding_enabled_for_chain_id`, true only on devnet. The earlier audit
-found that the flag was **not called** from the direct AppBinding transaction door.
-That contradiction was addressed in commit `eb79e144`: the pre-match guard in
-`src/settlement/app_binding.rs:735` now refuses chain `45261` before moving a
-balance or registering an application. The outer `SettlementTx::AppBinding` arm
-uses that same door. `src/tests/domains_bridge_settlement.rs:335` tests both
-entry points, and the new `launch-evidence` gate checks for a production
-preflight rather than accepting the profile flag alone. **The core Rust test
-has not executed** because its build requires unavailable `protoc`; the guard
-and named test are source evidence, not a successful testnet rehearsal.
+`src/core/chain_config.rs` defines `app_binding_enabled_for_chain_id`, true
+on testnet (`45261`) and devnet (`45262`) and false on mainnet and on an
+unknown chain. The pre-match guard in `execute_app_binding_tx`
+(`src/settlement/app_binding.rs`) refuses a closed chain before moving a
+balance or registering an application. The outer `SettlementTx::AppBinding`
+arm uses that same door. `app_binding_is_open_on_testnet` in
+`src/tests/domains_bridge_settlement.rs` tests both entry points and the
+mainnet refusal. The guard and the named test are source evidence, not a
+successful testnet rehearsal.
 
 ## Devnet implementation by level, not an end-to-end assertion
 
@@ -33,18 +28,16 @@ and named test are source evidence, not a successful testnet rehearsal.
 | **3: remote origin account** | `contracts/app_binding/BudlumRemoteAccountFactory.sol` and the payment-receiver contract provide a proposed CREATE2/pay-to-authorize surface (`contracts/README.md:18-24`). | Deployed factory and verifier, externally verified finality and authorization, actual contract call and replay/double-spend refusal. `config/testnet-ethereum.toml:38-40` leaves AppBinding executor/factory addresses empty. No evidence of a user-operated remote account on the testnet. |
 
 These entries identify **source call sites**, not passing tests or live
-operation. The CLI `bud app_binding id` computes an identifier and mirror address
+operation. The CLI `bud app-binding id` computes an identifier and mirror address
 locally; it does not register the app or interact with the origin chain.
 Even a devnet `register` or `pay` receipt alone does not demonstrate that a
 foreign app performed the requested action.
 
 ## Conditions for future public testnet instructions
 
-1. Keep `45261` closed until WP-49's object-layer prerequisite and a
-   **separate app-binding activation decision** are recorded; do not bypass
-   the chain-ID gate for a demo. Run `app_binding_is_closed_on_testnet` at
-   both direct and signed/in-block entry points on the shipped SHA; the
-   source-level guard alone is not a passing test.
+1. Run `app_binding_is_open_on_testnet` at both direct and signed/in-block
+   entry points on the shipped SHA; the source-level guard alone is not a
+   passing test. Mainnet stays closed until its own activation decision.
 2. Complete origin-domain verifier/executor configuration, deploy contracts,
    pin addresses and finality trust roots, and pass both positive and negative
    cross-chain tests. Record real genesis, network URL, activation height,
@@ -64,7 +57,7 @@ origin-app and manifest identifiers. `--signing-chain-id` is required for
 signing; the remote network's chain ID is **not** the Budlum signing chain ID.
 
 ```bash
-bud app_binding id --domain "$DOMAIN" --origin-app "$ORIGIN_APP_HEX"
+bud app-binding id --domain "$DOMAIN" --origin-app "$ORIGIN_APP_HEX"
 bud --rpc-url "$RPC_URL" --signing-chain-id "$CHAIN_ID" app_binding register \
   --key-file "$KEY_FILE" --domain "$DOMAIN" --origin-app "$ORIGIN_APP_HEX" \
   --manifest "$MANIFEST_HEX"
@@ -77,8 +70,8 @@ For Level 1, query `bud_app_bindingPaymentProof` with a payment ID
 (`src/rpc/api.rs:130-138`) and verify the returned proof at the origin app
 against its own finalized checkpoint anchor. This requires a live receipt,
 not a source-only method name.
-For Level 2, `bud app_binding intent`, `bud app_binding bid`, `bud app_binding award`, and
-`bud app_binding fulfill --evidence <anchored-result.json>` require bonded actors,
-origin-chain execution and a valid anchored event. Do not treat `bud app_binding
+For Level 2, `bud app-binding intent`, `bud app-binding bid`, `bud app-binding award`, and
+`bud app-binding fulfill --evidence <anchored-result.json>` require bonded actors,
+origin-chain execution and a valid anchored event. Do not treat `bud app-binding
 pay` as an immediate call into an application. The Level 3 factory has no
 published testnet address, so there is no Level 3 user command yet.

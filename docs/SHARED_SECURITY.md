@@ -7,8 +7,8 @@ There are two separate proof-of-stake systems: Gasper on Ethereum and Budlum
 PoS (leader election plus BLS and ML-DSA finality) here. The keys are separate.
 
 Status: enabled on devnet (`45262`) and **active on testnet** (`45261`) from
-genesis behind the `shared_security` chain config (`shared_security_is_closed_on_testnet`
-verifies explicit opt-out / unconfigured chain behavior); mainnet activation
+genesis behind the `shared_security` chain config (`shared_security_is_open_on_testnet`
+also verifies that mainnet and an unconfigured chain stay closed); mainnet activation
 remains gated.
 The Ethereum contracts (`BudlumRegistrar`, `BudlumSlasher`) implement the
 origin-side registration and slashing interface.

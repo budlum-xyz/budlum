@@ -2,15 +2,15 @@
 pragma solidity ^0.8.24;
 
 import {Harness} from "./Harness.sol";
-import {GraftExecutor, BudlumGraftClaimer} from "../graft/GraftExecutor.sol";
+import {AppBindingExecutor, BudlumAppBindingClaimer} from "../app_binding/AppBindingExecutor.sol";
 import {
     BudlumPaymentReceiver,
     GlobalHeader,
-    GraftPayment,
+    AppBindingPayment,
     IBudlumFinality,
     PaymentProof
-} from "../graft/BudlumPaymentReceiver.sol";
-import {BudlumRemoteAccountFactory} from "../graft/BudlumRemoteAccountFactory.sol";
+} from "../app_binding/BudlumPaymentReceiver.sol";
+import {BudlumRemoteAccountFactory} from "../app_binding/BudlumRemoteAccountFactory.sol";
 
 contract Counter {
     uint256 public count;
@@ -24,7 +24,7 @@ contract Counter {
     }
 }
 
-contract ClaimingApp is BudlumGraftClaimer {
+contract ClaimingApp is BudlumAppBindingClaimer {
     function claim(uint32 domainKey, bytes32 payout) external {
         _claimBudlumPayout(domainKey, payout);
     }
@@ -61,11 +61,11 @@ contract Receiver is BudlumPaymentReceiver {
 /// A second account that fulfils through the executor: the per-account guard
 /// must let it through even after the test contract has used its own slot.
 contract Filler {
-    function bind(GraftExecutor executor, bytes32 solver) external {
+    function bind(AppBindingExecutor executor, bytes32 solver) external {
         executor.registerSolverKey(solver);
     }
 
-    function run(GraftExecutor executor, bytes32 intent, address target) external {
+    function run(AppBindingExecutor executor, bytes32 intent, address target) external {
         executor.execute(intent, target, abi.encodeCall(Counter.bump, ()), hex"01");
     }
 }
@@ -73,29 +73,29 @@ contract Filler {
 /// An account that binds somebody else's solver key and fulfils with its own
 /// harmless call: the griefing move the per-account slot has to absorb.
 contract Attacker {
-    function bind(GraftExecutor executor, bytes32 solver) external {
+    function bind(AppBindingExecutor executor, bytes32 solver) external {
         executor.registerSolverKey(solver);
     }
 
-    function run(GraftExecutor executor, bytes32 intent, address target) external {
+    function run(AppBindingExecutor executor, bytes32 intent, address target) external {
         executor.execute(intent, target, abi.encodeCall(Counter.bump, ()), hex"01");
     }
 }
 
-contract GraftTest is Harness {
-    GraftExecutor internal executor;
+contract AppBindingTest is Harness {
+    AppBindingExecutor internal executor;
     Counter internal counter;
 
     bytes32 internal constant SOLVER = bytes32(uint256(1));
 
     function setUp() public {
-        executor = new GraftExecutor();
+        executor = new AppBindingExecutor();
         counter = new Counter();
         executor.registerSolverKey(SOLVER);
     }
 
     /// Same values as `event_payload_hashes_match_the_solidity_known_answers`
-    /// in src/settlement/graft.rs.
+    /// in src/settlement/app_binding.rs.
     function test_payload_hashes_match_the_rust_known_answers() public {
         bytes memory beneficiary = new bytes(20);
         for (uint256 i = 0; i < 20; i++) {
@@ -111,7 +111,7 @@ contract GraftTest is Harness {
         );
         assertEq(
             fulfilledHash,
-            0xf7d3f98632aa75076903668db4def05736bf895dafa1e6f23c94d87c9a0b3192,
+            0x6adf4090bb15ec7ee9af78d320f48e22c0eb09b68dd2a3a4ea36db9eeb0c5097,
             "fulfilled payload hash"
         );
         ClaimingApp app = new ClaimingApp();
@@ -120,7 +120,7 @@ contract GraftTest is Harness {
                 bytes32(uint256(0x6666666666666666666666666666666666666666666666666666666666666666)),
                 bytes32(uint256(0x7777777777777777777777777777777777777777777777777777777777777777))
             ),
-            0x331af272e430b9515307696fd158d2eef3760d1e18c6cb5cc5f85450302b1e05,
+            0xdf19fce601b54d83b5233db52f5c9d767af6e434f4839e9382aeae049349d7c1,
             "claim payload hash"
         );
     }
@@ -130,7 +130,7 @@ contract GraftTest is Harness {
         executor.execute(intent, address(counter), abi.encodeCall(Counter.bump, ()), hex"01");
         assertEq(counter.count(), 1, "the call was made");
         assertTrue(executor.fulfilled(intent, address(this)), "the caller's own slot is used");
-        vm.expectPartialRevert(GraftExecutor.AlreadyFulfilled.selector);
+        vm.expectPartialRevert(AppBindingExecutor.AlreadyFulfilled.selector);
         executor.execute(intent, address(counter), abi.encodeCall(Counter.bump, ()), hex"01");
     }
 
@@ -181,7 +181,7 @@ contract GraftTest is Harness {
     /// address, so it must not accept one it was merely told about.
     function test_an_unbound_account_cannot_fulfil() public {
         Filler stranger = new Filler();
-        vm.expectPartialRevert(GraftExecutor.SolverKeyNotBound.selector);
+        vm.expectPartialRevert(AppBindingExecutor.SolverKeyNotBound.selector);
         stranger.run(executor, keccak256("unbound"), address(counter));
         assertEq(counter.count(), 0, "no call was made");
     }
@@ -190,7 +190,7 @@ contract GraftTest is Harness {
     /// fulfilments at another solver's address after the fact.
     function test_a_solver_key_cannot_be_repointed() public {
         assertEq(executor.solverKey(address(this)), SOLVER, "the binding is in place");
-        vm.expectPartialRevert(GraftExecutor.SolverKeyAlreadyBound.selector);
+        vm.expectPartialRevert(AppBindingExecutor.SolverKeyAlreadyBound.selector);
         executor.registerSolverKey(bytes32(uint256(3)));
         assertEq(executor.solverKey(address(this)), SOLVER, "the binding did not move");
     }
@@ -199,7 +199,7 @@ contract GraftTest is Harness {
     /// treated as an unbound account that later cannot be bound.
     function test_a_zero_solver_key_is_refused() public {
         Filler filler = new Filler();
-        vm.expectPartialRevert(GraftExecutor.SolverKeyIsZero.selector);
+        vm.expectPartialRevert(AppBindingExecutor.SolverKeyIsZero.selector);
         filler.bind(executor, bytes32(0));
     }
 
@@ -221,12 +221,12 @@ contract GraftTest is Harness {
     }
 
     function test_a_call_to_an_address_with_no_code_is_refused() public {
-        vm.expectPartialRevert(GraftExecutor.CallFailed.selector);
+        vm.expectPartialRevert(AppBindingExecutor.CallFailed.selector);
         executor.execute(keccak256("no-code"), address(0xdead), hex"", hex"01");
     }
 
     function test_a_failed_call_emits_nothing_and_reverts() public {
-        vm.expectPartialRevert(GraftExecutor.CallFailed.selector);
+        vm.expectPartialRevert(AppBindingExecutor.CallFailed.selector);
         executor.execute(
             keccak256("intent"), address(counter), abi.encodeCall(Counter.fail, ()), hex"01"
         );
@@ -237,7 +237,7 @@ contract GraftTest is Harness {
         internal
         returns (PaymentProof memory proof)
     {
-        proof.payment = GraftPayment(
+        proof.payment = AppBindingPayment(
             keccak256("payment"),
             appId,
             bytes32(uint256(9)),
@@ -256,8 +256,8 @@ contract GraftTest is Harness {
         proof.header.version = 8;
         proof.header.timestampMs = uint128(block.timestamp) * 1000;
         proof.header.checkpointHeight = 20;
-        proof.header.hasGraftRoot = true;
-        proof.header.graftRoot = receiver.graftRegistryRoot(proof.paymentsRoot, proof.restHash);
+        proof.header.hasAppBindingRoot = true;
+        proof.header.appBindingRoot = receiver.appBindingRegistryRoot(proof.paymentsRoot, proof.restHash);
         proof.stateRootBody = keccak256("body");
         finality.set(20, receiver.stateRootFromOpening(proof.stateRootBody, receiver.headerHash(proof.header)));
     }
@@ -272,7 +272,7 @@ contract GraftTest is Harness {
     /// Rust/Solidity encoding mismatch.
     function test_payment_and_v8_header_match_independent_vectors() public {
         Receiver receiver = new Receiver(new FinalityStub(), _word(1));
-        GraftPayment memory payment = GraftPayment(
+        AppBindingPayment memory payment = AppBindingPayment(
             _word(0x11),
             _word(0x22),
             _word(0x33),
@@ -286,7 +286,7 @@ contract GraftTest is Harness {
         );
         assertEq(
             receiver.paymentLeaf(payment),
-            hex"54cf08c62739918f841bd7f0a85b3e5586a21143168fb42236e9764d84d89290",
+            hex"510b31874ed3e3e1a879168ea6bffc8269ae75d7c30c3c4158001878b45abfd9",
             "payment leaf fixture"
         );
 
@@ -308,8 +308,8 @@ contract GraftTest is Harness {
         header.hasIdentityRoot = true;
         header.identityRoot = _word(10);
         header.checkpointHeight = 17;
-        header.hasGraftRoot = true;
-        header.graftRoot = _word(11);
+        header.hasAppBindingRoot = true;
+        header.appBindingRoot = _word(11);
         bytes32 headerHash = receiver.headerHash(header);
         assertEq(headerHash, hex"570f166c9fc7b73b4fd2934964752678d7789ce7ece8da2552f7f184becd8151", "V9 header fixture");
         assertEq(
@@ -339,14 +339,14 @@ contract GraftTest is Harness {
         receiver.consume(proof);
     }
 
-    function test_check_payment_refuses_wrong_graft() public {
+    function test_check_payment_refuses_wrong_app_binding() public {
         FinalityStub finality = new FinalityStub();
         bytes32 appA = keccak256("app-a");
         bytes32 appB = keccak256("app-b");
         Receiver receiver = new Receiver(finality, appA);
         PaymentProof memory proof = _proof(receiver, finality, appB);
-        assertEq(keccak256(bytes(receiver.checkPayment(proof))), keccak256("wrong graft"), "wrong graft refused");
-        vm.expectPartialRevert(BudlumPaymentReceiver.WrongGraft.selector);
+        assertEq(keccak256(bytes(receiver.checkPayment(proof))), keccak256("wrong app_binding"), "wrong app_binding refused");
+        vm.expectPartialRevert(BudlumPaymentReceiver.WrongAppBinding.selector);
         receiver.consume(proof);
     }
 
@@ -394,7 +394,7 @@ contract GraftTest is Harness {
         changed = _proof(receiver, finality, appId);
         changed.restHash = bytes32(uint256(88));
         assertTrue(
-            keccak256(bytes(receiver.checkPayment(changed))) == keccak256("graft root opening"),
+            keccak256(bytes(receiver.checkPayment(changed))) == keccak256("app_binding root opening"),
             "registry opening must match the finalized header"
         );
     }
