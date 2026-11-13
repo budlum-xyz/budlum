@@ -11,13 +11,22 @@ import {
 /// A fraud verifier whose answer the test sets.
 contract FraudVerifierStub is IExternalFraudProofVerifier {
     bool public answer;
+    bool public substanceAnswer;
 
     function set(bool value) external {
         answer = value;
     }
 
+    function setSubstance(bool value) external {
+        substanceAnswer = value;
+    }
+
     function verifyFraud(bytes32, bytes calldata) external view returns (bool) {
         return answer;
+    }
+
+    function verifyFraudSubstance(uint64, bytes32, bytes calldata) external view returns (bool) {
+        return substanceAnswer;
     }
 }
 
@@ -27,6 +36,7 @@ contract InspectingFraudVerifier is IExternalFraudProofVerifier {
     BudlumFinalityVerifier public target;
     bool public answer;
     bool public shouldRevert;
+    bool public substanceAnswer;
 
     function setTarget(BudlumFinalityVerifier target_) external {
         target = target_;
@@ -35,6 +45,10 @@ contract InspectingFraudVerifier is IExternalFraudProofVerifier {
     function configure(bool answer_, bool shouldRevert_) external {
         answer = answer_;
         shouldRevert = shouldRevert_;
+    }
+
+    function setSubstance(bool substanceAnswer_) external {
+        substanceAnswer = substanceAnswer_;
     }
 
     function verifyFraud(bytes32 digest, bytes calldata) external view returns (bool) {
@@ -46,9 +60,17 @@ contract InspectingFraudVerifier is IExternalFraudProofVerifier {
         require(challenger == address(0), "challenger mutated before verifyFraud");
         require(!resolved, "resolved mutated before verifyFraud");
         require(!target.fraudulent(digest), "fraudulent mutated before verifyFraud");
+        require(!target.fraudulentRoot(h, root), "fraudulentRoot mutated before verifyFraud");
         require(target.pendingRootAtHeight(h) == root, "pending root cleared before verifyFraud");
         require(target.pendingEnvelopeCount(target.pendingIdentity(h, root)) > 0, "envelope count decremented early");
         return answer;
+    }
+
+    function verifyFraudSubstance(uint64 h, bytes32 root, bytes calldata) external view returns (bool) {
+        require(!target.fraudulentRoot(h, root), "fraudulentRoot mutated before verifyFraudSubstance");
+        require(target.pendingRootAtHeight(h) == root, "pending root cleared before verifyFraudSubstance");
+        require(target.pendingEnvelopeCount(target.pendingIdentity(h, root)) > 0, "envelope count decremented early");
+        return substanceAnswer;
     }
 }
 
@@ -289,7 +311,37 @@ contract BudlumFinalityVerifierTest is Harness {
 
         // True verifyFraud observes clean pre-mutation state, then commits fraud resolution.
         inspector.configure(true, false);
+        inspector.setSubstance(true);
         inspected.challenge(digest, hex"01");
         assertTrue(inspected.fraudulent(digest), "marked fraudulent after verification");
+        assertTrue(inspected.fraudulentRoot(42, bytes32(uint256(7))), "marked substance fraudulent after verification");
+    }
+
+    function test_F05_a_disproved_substance_cannot_be_represented_with_mutated_blob() public {
+        BudlumFinalityVerifier bls = verifier;
+        bytes32 disprovedRoot = bytes32(uint256(7));
+
+        Attestation memory first = _attestation(42, disprovedRoot);
+        bytes32 firstDigest = bls.verify(first);
+
+        Attestation memory sibling = _attestation(42, disprovedRoot);
+        sibling.mlDsaSignature = _filled(3309, 0xAA);
+        bytes32 siblingDigest = bls.verify(sibling);
+
+        fraud.set(true);
+        fraud.setSubstance(true);
+        bls.challenge(firstDigest, hex"01");
+        assertTrue(bls.fraudulentRoot(42, disprovedRoot), "substance tombstone latched");
+
+        // Re-submitting the same disproved (height, stateRoot) under a fresh ML-DSA blob is refused.
+        Attestation memory rePresented = _attestation(42, disprovedRoot);
+        rePresented.mlDsaSignature = _filled(3309, 0xBB);
+        vm.expectPartialRevert(BudlumFinalityVerifier.AlreadyFraudulent.selector);
+        bls.verify(rePresented);
+
+        // An already-pending sibling envelope for the disproved substance cannot settle after the window.
+        vm.roll(block.number + WINDOW);
+        vm.expectPartialRevert(BudlumFinalityVerifier.AlreadyFraudulent.selector);
+        bls.settle(siblingDigest);
     }
 }
