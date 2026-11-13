@@ -435,6 +435,9 @@ mod tests {
             bud3_content: None,
             subdomains: Default::default(),
             records: Default::default(),
+            status: crate::bns::types::NameStatus::Active,
+            expires_at: 100,
+            grace_expires_at: 3100,
             is_expired: false,
         }
     }
@@ -709,6 +712,9 @@ mod tests {
             bud3_content: None,
             subdomains: Default::default(),
             records: Default::default(),
+            status: crate::bns::types::NameStatus::Active,
+            expires_at: 100,
+            grace_expires_at: 3100,
             is_expired: false,
         };
         let ids = pollen_guard_ids(&resolved);
