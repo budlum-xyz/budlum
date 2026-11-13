@@ -4609,9 +4609,9 @@ impl BudlumApiServer for RpcServer {
                     "object_commitment": format!("0x{}", hex::encode(c.object_commitment)),
                     "nft_id": c.nft_id.map(|n| format!("0x{}", hex::encode(n))),
                 })),
-                "subdomains": e.subdomains.iter()
+                "subdomains": serde_json::json!(e.subdomains.iter()
                     .map(|(label, owner)| (label.clone(), Self::to_0x_hash(owner.to_hex())))
-                    .collect::<serde_json::Map<_, _>>(),
+                    .collect::<std::collections::BTreeMap<_, _>>()),
                 "records": e.records,
             })
         };
