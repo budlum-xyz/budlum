@@ -2259,8 +2259,11 @@ impl Node {
         );
         {
             let mut pm = self.peer_manager_lock();
+            let was_handshaked = pm.is_handshaked(&peer_id);
             pm.set_handshaked(&peer_id, true);
-            pm.report_good_behavior(&peer_id);
+            if !was_handshaked {
+                pm.report_good_behavior(&peer_id);
+            }
         }
         Some(best_height)
     }
@@ -5672,12 +5675,12 @@ impl Node {
                                                                         chunks_remaining: max_chunks.saturating_sub(1),
                                                                         staged_suffix: Vec::new(),
                                                                     });
+                                                                    self.peer_manager_lock()
+                                                                        .report_good_behavior(
+                                                                            &peer,
+                                                                        );
                                                                 }
                                                             }
-                                                        }
-                                                        {
-                                                            let mut pm = self.peer_manager_lock();
-                                                            pm.report_good_behavior(&peer);
                                                         }
                                                     }
                                                     NetworkMessage::Blocks(blocks) => {
@@ -6012,7 +6015,7 @@ impl Node {
                                                                 if !non_fork_refusal {
                                                                     let mut pm =
                                                                         self.peer_manager_lock();
-                                                                    pm.report_good_behavior(&peer);
+                                                                    pm.report_sync_success(&peer);
                                                                 }
                                                             }
                                                         }

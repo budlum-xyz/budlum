@@ -439,6 +439,11 @@ pub fn initial_memory_reads(trace: &[Step]) -> Vec<(u64, u64)> {
         .collect()
 }
 
+/// Upper bound on witness matrix rows (`num_rows`) allocated by `Plonky3Adapter::prove`.
+/// At `TRACE_WIDTH = 1073` Goldilocks elements (8 bytes each), `2^17` rows caps a single
+/// base witness matrix at ~1.12 GiB instead of allowing multi-gigabyte OOM allocations.
+pub const MAX_PROVER_WITNESS_ROWS: usize = 1 << 17;
+
 #[doc(hidden)]
 pub fn trace_matrix(
     trace: &[Step],
@@ -450,7 +455,16 @@ pub fn trace_matrix(
     let n_cpu = trace.len();
     let n_reg = events.len();
     let n_mem = mem_events.len();
-    let num_rows = (3 * n_cpu + 1).next_power_of_two().max(16);
+    let num_rows = n_cpu
+        .checked_mul(3)
+        .and_then(|n| n.checked_add(1))
+        .expect("trace row count overflow")
+        .next_power_of_two()
+        .max(16);
+    assert!(
+        num_rows <= MAX_PROVER_WITNESS_ROWS,
+        "trace matrix rows {num_rows} exceed prover limit {MAX_PROVER_WITNESS_ROWS}"
+    );
 
     let mut values = vec![Goldilocks::new(0); num_rows * TRACE_WIDTH];
 
@@ -1840,6 +1854,19 @@ impl ProverAdapter for Plonky3Adapter {
         public_inputs: &ExecutionPublicInputs,
         program: &[u64],
     ) -> Result<ProofEnvelope, ProverError> {
+        let num_rows = trace
+            .len()
+            .checked_mul(3)
+            .and_then(|n| n.checked_add(1))
+            .map(|n| n.next_power_of_two().max(16))
+            .ok_or_else(|| {
+                ProverError::TraceGenerationError("trace length overflow".to_string())
+            })?;
+        if num_rows > MAX_PROVER_WITNESS_ROWS {
+            return Err(ProverError::TraceGenerationError(format!(
+                "trace matrix rows {num_rows} exceed prover limit {MAX_PROVER_WITNESS_ROWS}"
+            )));
+        }
         info!(trace_len = trace.len(), "Building trace matrix");
         let (matrix, trace_len) = trace_matrix(trace, program, public_inputs);
         let config = build_config();
@@ -10449,5 +10476,41 @@ mod tests {
                  witness; update that story before pinning the new value here."
             );
         }
+    }
+
+    #[test]
+    fn prove_refuses_oversized_trace_before_matrix_allocation() {
+        let halt = bud_isa::Instruction {
+            opcode: bud_isa::Opcode::Halt,
+            rd: 0,
+            rs1: 0,
+            rs2: 0,
+            imm: 0,
+        }
+        .encode();
+        let mut vm = Vm::with_gas_limit(1024, 1_000);
+        let receipt = vm.run_receipt(&[halt]);
+        assert!(receipt.success);
+        let step = vm.trace[0].clone();
+        // Exceeds MAX_PROVER_WITNESS_ROWS (2^17):
+        // (3 * 50_000 + 1).next_power_of_two() = 2^18.
+        let huge_trace = vec![step; 50_000];
+        let pi = ExecutionPublicInputs {
+            chain_id: 45261,
+            program_hash: [0u8; 32],
+            initial_state_root: [0u8; 32],
+            final_state_root: [0u8; 32],
+            sender: 0,
+            nonce: 0,
+            block_height: 0,
+            gas_limit: 1_000_000,
+            gas_used: 1,
+            exit_code: 0,
+            trace_len: huge_trace.len() as u64,
+            event_digest: [0u8; 32],
+            state_writes_digest: [0u8; 32],
+        };
+        let err = Plonky3Adapter::prove(&huge_trace, &pi, &[halt]).unwrap_err();
+        assert!(matches!(err, ProverError::TraceGenerationError(_)));
     }
 }
