@@ -148,7 +148,7 @@ impl Bud3BnsResolver {
         let (name, caller) = owner_claim;
         let canonical = name.trim().to_ascii_lowercase();
         let owner = bns
-            .resolve(&canonical, current_epoch)
+            .resolve_owner(&canonical, current_epoch)
             .ok_or(BnsBud3Error::Bns(BnsError::InvalidName))?;
         if &owner != caller {
             return Err(BnsBud3Error::Bns(BnsError::NotOwner));
@@ -206,7 +206,7 @@ impl Bud3BnsResolver {
     ) -> Result<Vec<u8>, BnsBud3Error> {
         let canonical = name.trim().to_ascii_lowercase();
         let active_owner = bns
-            .resolve(&canonical, current_epoch)
+            .resolve_owner(&canonical, current_epoch)
             .ok_or(BnsBud3Error::Bns(BnsError::Expired))?;
         let binding = self
             .binding(&canonical)
