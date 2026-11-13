@@ -1594,8 +1594,26 @@ mod rpc_tests {
                 .is_none(),
             "a subdomain of an absent parent is absent too"
         );
+        assert!(
+            server
+                .bns_prepare_register("bids".to_string(), owner.to_hex(), 365)
+                .await
+                .unwrap_err()
+                .message()
+                .contains("Invalid BNS name"),
+            "missing .bud suffix must be refused at RPC prepare"
+        );
+        assert!(
+            server
+                .bns_prepare_register("ab.bud".to_string(), owner.to_hex(), 365)
+                .await
+                .unwrap_err()
+                .message()
+                .contains("Invalid BNS name"),
+            "label shorter than 3 chars must be refused at RPC prepare"
+        );
         let prepared = server
-            .bns_prepare_register("bids".to_string(), owner.to_hex(), 365)
+            .bns_prepare_register("bids.bud".to_string(), owner.to_hex(), 365)
             .await
             .unwrap();
         assert!(
@@ -1604,7 +1622,7 @@ mod rpc_tests {
         );
         assert!(
             server
-                .bns_prepare_register("bids".to_string(), "0xzz".to_string(), 365)
+                .bns_prepare_register("bids.bud".to_string(), "0xzz".to_string(), 365)
                 .await
                 .unwrap_err()
                 .message()
