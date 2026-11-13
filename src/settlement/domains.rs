@@ -1386,6 +1386,18 @@ pub fn submit_zk_proof(
     state.mark_dirty(&submitter);
     state.burned_total = state.burned_total.saturating_add(fee);
 
+    let max_witness_rows =
+        u64::try_from(bud_proof::plonky3_prover::MAX_PROVER_WITNESS_ROWS).unwrap_or(u64::MAX);
+    let trace_rows_within_limit = pi
+        .trace_len
+        .checked_mul(3)
+        .and_then(|n| n.checked_add(1))
+        .and_then(u64::checked_next_power_of_two)
+        .is_some_and(|rows| rows.max(16) <= max_witness_rows);
+    if !trace_rows_within_limit {
+        return Ok(ProofAcceptance::Rejected);
+    }
+
     if bud_proof::DefaultAdapter::verify(&submission.proof, pi, &submission.program).is_err() {
         return Ok(ProofAcceptance::Rejected);
     }

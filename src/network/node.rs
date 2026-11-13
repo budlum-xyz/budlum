@@ -39,6 +39,19 @@ fn publish_reached_the_mesh(error: &gossipsub::PublishError) -> bool {
 /// "syncing" status indefinitely when a peer disconnects mid-sync or
 /// When gossipsub publish fails without a corresponding reset.
 const SYNC_TIMEOUT_SECS: u64 = 15;
+/// Total lifetime one single-flight sync round may buy from its peer's own
+/// answers.
+///
+/// `SYNC_TIMEOUT_SECS` is the stall deadline for one unanswered request, and a
+/// multi-chunk round refreshes it on every answer. Without a ceiling on the
+/// round itself, a peer that keeps answering index-contiguous, hash-chained
+/// chunks - data the fork-recovery path stages without validating it against
+/// consensus - holds the node's only sync round for `chunks x SYNC_TIMEOUT_SECS`
+/// and never accrues an unanswered-sync strike, so the four-strike ban can never
+/// engage and no other peer can be asked. Four stall windows is enough for an
+/// honest but slow peer to finish a round; past it the round is closed and the
+/// peer is charged, which is what makes the strike path reachable.
+const MAX_SYNC_ROUND_SECS: u64 = SYNC_TIMEOUT_SECS.saturating_mul(4);
 /// Concurrent request/response streams per connection. The libp2p default is
 /// 100; with a 1 MiB request ceiling that pins 100 MiB or more per peer.
 const MAX_SYNC_CONCURRENT_STREAMS: usize = 16;
@@ -1027,6 +1040,12 @@ pub struct Node {
     pub sync_state: Arc<AtomicUsize>,
     /// Timestamp when `sync_state` was set to 1.
     pub sync_started_at: Arc<AtomicU64>,
+    /// Timestamp when the current sync *round* was opened.
+    ///
+    /// `sync_started_at` moves forward on every answered chunk, so it measures
+    /// the stall since the last answer; this one does not move until the round
+    /// is cleared, which is what bounds the round's total lifetime.
+    sync_round_started_at: Arc<AtomicU64>,
     /// Outbound request currently responsible for the one active sync round.
     active_sync_request: Option<request_response::OutboundRequestId>,
     /// Peer currently serving the active single-flight sync round.
@@ -1876,13 +1895,11 @@ impl Node {
             return false;
         };
         let req = NetworkMessage::GetHeaders { locator, limit };
-        self.sync_state.store(1, Ordering::SeqCst);
-        self.sync_started_at.store(
+        self.begin_sync_round(
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs(),
-            Ordering::SeqCst,
         );
         if let Some(ref m) = self.metrics {
             m.p2p_sync_requests.inc();
@@ -2084,9 +2101,31 @@ impl Node {
     fn clear_sync_round(&mut self) {
         self.sync_state.store(0, Ordering::SeqCst);
         self.sync_started_at.store(0, Ordering::SeqCst);
+        self.sync_round_started_at.store(0, Ordering::SeqCst);
         self.active_sync_request = None;
         self.active_sync_peer = None;
         self.sync_range_cursor = None;
+    }
+
+    /// Open the round clock: stamped once per round, never refreshed by an
+    /// answer, so [`MAX_SYNC_ROUND_SECS`] bounds the round and not the stall.
+    fn begin_sync_round(&mut self, now_secs: u64) {
+        self.sync_state.store(1, Ordering::SeqCst);
+        self.sync_started_at.store(now_secs, Ordering::SeqCst);
+        if self.sync_round_started_at.load(Ordering::SeqCst) == 0 {
+            self.sync_round_started_at.store(now_secs, Ordering::SeqCst);
+        }
+    }
+
+    /// Whether the active round may still buy time from its peer's answers.
+    ///
+    /// `false` once the round is older than [`MAX_SYNC_ROUND_SECS`]: the refresh
+    /// is then skipped, the stall sweep closes the round on its own clock and
+    /// charges `report_unanswered_request`, which is the only path that accrues
+    /// the four strikes a pinned peer is banned on.
+    fn sync_round_may_refresh(&self, now_secs: u64) -> bool {
+        let round_start = self.sync_round_started_at.load(Ordering::SeqCst);
+        round_start == 0 || now_secs.saturating_sub(round_start) < MAX_SYNC_ROUND_SECS
     }
 
     fn expire_stuck_sync_round(&mut self) {
@@ -2127,6 +2166,7 @@ impl Node {
         flight_guard: ReorgFlightGuard,
         last_completed: Arc<AtomicU64>,
         strikes: Arc<AtomicU32>,
+        peer_manager: Arc<Mutex<PeerManager>>,
     ) {
         // Peer-independent throttle (CWE-407). A batch is cheap to send and
         // proportional to the node's own chain to act on, so an attacker who
@@ -2216,6 +2256,15 @@ impl Node {
         match chain.try_reorg_suffix(suffix).await {
             Ok(true) => {
                 strikes.store(0, Ordering::Release);
+                // The round ceiling can now close a round against an honest but
+                // slow peer, charging it an unanswered-sync strike for a suffix
+                // that was delivered and accepted. Credit those strikes back
+                // here, where the chain has actually adopted the peer's blocks,
+                // so genuine fork recovery is never punished.
+                peer_manager
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .report_sync_success(&peer);
                 info!("Reorg to the chain of {peer} done");
             }
             Ok(false) => {
@@ -2390,8 +2439,11 @@ impl Node {
         );
         {
             let mut pm = self.peer_manager_lock();
+            let was_handshaked = pm.is_handshaked(&peer_id);
             pm.set_handshaked(&peer_id, true);
-            pm.report_good_behavior(&peer_id);
+            if !was_handshaked {
+                pm.report_good_behavior(&peer_id);
+            }
         }
         Some(best_height)
     }
@@ -2714,6 +2766,7 @@ impl Node {
         let peer_count = Arc::new(AtomicUsize::new(0));
         let sync_state = Arc::new(AtomicUsize::new(0));
         let sync_started_at = Arc::new(AtomicU64::new(0));
+        let sync_round_started_at = Arc::new(AtomicU64::new(0));
         Ok(Node {
             swarm,
             peer_id,
@@ -2736,6 +2789,7 @@ impl Node {
             peer_count,
             sync_state,
             sync_started_at,
+            sync_round_started_at,
             active_sync_request: None,
             active_sync_peer: None,
             last_stalled_sync_peer: None,
@@ -5857,13 +5911,11 @@ impl Node {
                                                                         from,
                                                                         to: chunk_to,
                                                                     };
-                                                                    self.sync_state.store(1, Ordering::SeqCst);
-                                                                    self.sync_started_at.store(
+                                                                    self.begin_sync_round(
                                                                         SystemTime::now()
                                                                             .duration_since(UNIX_EPOCH)
                                                                             .unwrap_or_default()
                                                                             .as_secs(),
-                                                                        Ordering::SeqCst,
                                                                     );
                                                                     if let Some(ref m) = self.metrics {
                                                                         m.p2p_sync_requests.inc();
@@ -5882,12 +5934,12 @@ impl Node {
                                                                         chunks_remaining: max_chunks.saturating_sub(1),
                                                                         staged_suffix: Vec::new(),
                                                                     });
+                                                                    self.peer_manager_lock()
+                                                                        .report_good_behavior(
+                                                                            &peer,
+                                                                        );
                                                                 }
                                                             }
-                                                        }
-                                                        {
-                                                            let mut pm = self.peer_manager_lock();
-                                                            pm.report_good_behavior(&peer);
                                                         }
                                                     }
                                                     NetworkMessage::Blocks(blocks) => {
@@ -5964,14 +6016,22 @@ impl Node {
                                                                         from: cur.next_from,
                                                                         to: chunk_to,
                                                                     };
-                                                                    self.sync_state.store(1, Ordering::SeqCst);
-                                                                    self.sync_started_at.store(
-                                                                        SystemTime::now()
-                                                                            .duration_since(UNIX_EPOCH)
-                                                                            .unwrap_or_default()
-                                                                            .as_secs(),
-                                                                        Ordering::SeqCst,
-                                                                    );
+                                                                    // A chunk answer refreshes the stall
+                                                                    // deadline only while the round is inside
+                                                                    // its total budget. The fork-recovery path
+                                                                    // stages what the peer sent without
+                                                                    // validating it against consensus, so an
+                                                                    // unbounded refresh let one peer hold the
+                                                                    // node's only sync round and never accrue a
+                                                                    // strike.
+                                                                    let now_secs = SystemTime::now()
+                                                                        .duration_since(UNIX_EPOCH)
+                                                                        .unwrap_or_default()
+                                                                        .as_secs();
+                                                                    if self.sync_round_may_refresh(now_secs) {
+                                                                        self.sync_started_at
+                                                                            .store(now_secs, Ordering::SeqCst);
+                                                                    }
                                                                     if let Some(ref m) = self.metrics {
                                                                         m.p2p_sync_requests.inc();
                                                                     }
@@ -6066,14 +6126,19 @@ impl Node {
                                                                             from: cur.next_from,
                                                                             to: chunk_to,
                                                                         };
-                                                                        self.sync_state.store(1, Ordering::SeqCst);
-                                                                        self.sync_started_at.store(
-                                                                            SystemTime::now()
-                                                                                .duration_since(UNIX_EPOCH)
-                                                                                .unwrap_or_default()
-                                                                                .as_secs(),
-                                                                            Ordering::SeqCst,
-                                                                        );
+                                                                        // Same round ceiling as the
+                                                                        // fork-recovery continuation: validated
+                                                                        // progress refreshes the stall deadline,
+                                                                        // but no peer's answers may extend the
+                                                                        // round past `MAX_SYNC_ROUND_SECS`.
+                                                                        let now_secs = SystemTime::now()
+                                                                            .duration_since(UNIX_EPOCH)
+                                                                            .unwrap_or_default()
+                                                                            .as_secs();
+                                                                        if self.sync_round_may_refresh(now_secs) {
+                                                                            self.sync_started_at
+                                                                                .store(now_secs, Ordering::SeqCst);
+                                                                        }
                                                                         if let Some(ref m) = self.metrics {
                                                                             m.p2p_sync_requests.inc();
                                                                         }
@@ -6154,6 +6219,7 @@ impl Node {
                                                                 let reorg_peer = peer;
                                                                 let last_completed = Arc::clone(&self.reorg_last_completed_at);
                                                                 let strikes = Arc::clone(&self.reorg_strikes);
+                                                                let reorg_pm = Arc::clone(&self.peer_manager);
                                                                 tokio::spawn(async move {
                                                                     Self::reorg_to_peer_suffix(
                                                                         reorg_chain,
@@ -6162,6 +6228,7 @@ impl Node {
                                                                         flight_guard,
                                                                         last_completed,
                                                                         strikes,
+                                                                        reorg_pm,
                                                                     )
                                                                     .await;
                                                                 });
@@ -6222,7 +6289,7 @@ impl Node {
                                                                 if !non_fork_refusal {
                                                                     let mut pm =
                                                                         self.peer_manager_lock();
-                                                                    pm.report_good_behavior(&peer);
+                                                                    pm.report_sync_success(&peer);
                                                                 }
                                                             }
                                                         }
@@ -7329,6 +7396,60 @@ mod sync_handler_order_tests {
         assert!(
             prod.contains("\"sync response refused or empty; closing sync round\""),
             "an empty or refused /sync response must close the active sync round"
+        );
+    }
+
+    /// One peer must not be able to hold the node's single-flight sync round
+    /// open by answering every chunk.
+    ///
+    /// The fork-recovery continuation stages what the peer sent - index
+    /// contiguous and hash chained, but never validated against consensus - and
+    /// used to refresh the stall deadline on each answer, so a peer that keeps
+    /// replying keeps the round alive, never accrues an unanswered-sync strike,
+    /// and the four-strike ban cannot engage. The round now has its own ceiling:
+    /// past it the refresh is skipped, the stall sweep closes the round and
+    /// charges the peer, which is the only path that reaches a ban.
+    #[test]
+    fn a_sync_round_cannot_be_extended_past_its_ceiling_by_peer_answers() {
+        assert_eq!(
+            super::MAX_SYNC_ROUND_SECS,
+            super::SYNC_TIMEOUT_SECS.saturating_mul(4),
+            "four stall windows is the budget one round may buy from its peer"
+        );
+        let body = production();
+        let mut cursor = 0usize;
+        let mut stores = 0usize;
+        let mut bounded = 0usize;
+        while let Some(rel) = body[cursor..].find("sync_started_at") {
+            let at = cursor + rel;
+            cursor = at + 1;
+            // The continuations are nested deep enough that the `.store(` call
+            // sits on a line of its own, so the window has to span indentation.
+            if !body[at..body.len().min(at + 200)].contains(".store(") {
+                continue;
+            }
+            stores += 1;
+            let before = &body[at.saturating_sub(400)..at];
+            if before.contains("fn begin_sync_round")
+                || before.contains("fn clear_sync_round")
+                || before.contains("sync_round_may_refresh")
+            {
+                bounded += 1;
+            }
+        }
+        assert!(
+            stores >= 3,
+            "the round open, the round clear and the continuations all stamp the deadline"
+        );
+        assert_eq!(
+            stores, bounded,
+            "every write of the stall deadline must either open/close the round or sit \
+             behind the round ceiling; an unguarded refresh lets one peer pin the round"
+        );
+        assert!(
+            body.contains("report_sync_success(&peer)"),
+            "an accepted fork suffix must credit the peer's strikes back, so an honest \
+             but slow peer is not banned by the ceiling"
         );
     }
 }

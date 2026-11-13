@@ -424,6 +424,9 @@ fn invariant_3_any_account_can_challenge_any_deal() {
     let shard_id = manifest.shards[0].shard_id;
     let dp = domain_params();
     let op = addr(0x99);
+    // The term has to cover the third challenge's deadline (epoch 11): a
+    // challenge may not outlive the deal it asks about, because an unresolved
+    // challenge holds the deal `Active` past its expiry.
     let deal = reg
         .open_deal(
             1,
@@ -432,7 +435,7 @@ fn invariant_3_any_account_can_challenge_any_deal() {
             op,
             0,
             1,
-            10,
+            40,
             good_econ(),
             &dp,
             Some(valid_merkle_proof()),
