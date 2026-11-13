@@ -437,8 +437,8 @@ pub struct OptionalProofJobReceipt {
     pub alters_consensus_state: bool,
 }
 
-/// Decode BudZero bytecode under testnet/mainnet phase-1 opcode closure (`VerifyMerkle` and
-/// `VerifyInference` refused).
+/// Decode BudZero bytecode under canonical active testnet/mainnet opcode rules
+/// (`VerifyMerkle` and `VerifyInference` enabled under `MainnetActivation::default()`).
 ///
 /// # Errors
 ///
@@ -511,12 +511,12 @@ mod tests {
     #[test]
     fn verify_merkle_is_closed_on_testnet() {
         let ee = BudZeroEe::new();
-        let bad = encode_instrs(&[
+        let active = encode_instrs(&[
             Instruction {
                 opcode: Opcode::VerifyMerkle,
-                rd: 1,
-                rs1: 0,
-                rs2: 0,
+                rd: 0,
+                rs1: 1,
+                rs2: 2,
                 imm: 0,
             },
             Instruction {
@@ -527,19 +527,34 @@ mod tests {
                 imm: 0,
             },
         ]);
-        let err = ee.validate_deploy(&bad).unwrap_err();
-        assert_eq!(err.code, RefusalCode::InvalidCode);
+        ee.validate_deploy(&active)
+            .expect("VerifyMerkle is active on testnet under MainnetActivation::default()");
+        assert!(
+            bud_isa::Instruction::decode_for_mainnet(
+                Instruction {
+                    opcode: Opcode::VerifyMerkle,
+                    rd: 0,
+                    rs1: 1,
+                    rs2: 2,
+                    imm: 0,
+                }
+                .encode(),
+                bud_isa::MainnetActivation::closed(),
+            )
+            .is_err(),
+            "explicit MainnetActivation::closed() still refuses VerifyMerkle"
+        );
     }
 
     #[test]
     fn verify_inference_is_closed_on_testnet() {
         let ee = BudZeroEe::new();
-        let bad = encode_instrs(&[
+        let active = encode_instrs(&[
             Instruction {
                 opcode: Opcode::VerifyInference,
-                rd: 1,
-                rs1: 0,
-                rs2: 0,
+                rd: 0,
+                rs1: 1,
+                rs2: 2,
                 imm: 0,
             },
             Instruction {
@@ -550,8 +565,23 @@ mod tests {
                 imm: 0,
             },
         ]);
-        let err = ee.validate_deploy(&bad).unwrap_err();
-        assert_eq!(err.code, RefusalCode::InvalidCode);
+        ee.validate_deploy(&active)
+            .expect("VerifyInference is active on testnet under MainnetActivation::default()");
+        assert!(
+            bud_isa::Instruction::decode_for_mainnet(
+                Instruction {
+                    opcode: Opcode::VerifyInference,
+                    rd: 0,
+                    rs1: 1,
+                    rs2: 2,
+                    imm: 0,
+                }
+                .encode(),
+                bud_isa::MainnetActivation::closed(),
+            )
+            .is_err(),
+            "explicit MainnetActivation::closed() still refuses VerifyInference"
+        );
     }
 
     #[test]

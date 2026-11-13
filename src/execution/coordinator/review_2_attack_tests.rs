@@ -37,7 +37,8 @@ use crate::rpc::compat::{
 };
 use bud_isa::{Instruction as BudInsn, Opcode as BudOp};
 use budlum_uel_abi::{
-    BlockContext, EeCall, EeFault, EeId, ExecutionEnvironment, HostApi, RefusalCode,
+    BlockContext, EeCall, EeFault, EeId, EeIdentity, ExecutionEnvironment, HostApi, HostRead,
+    RefusalCode,
 };
 use k256::ecdsa::SigningKey as SecpSigningKey;
 
@@ -894,4 +895,262 @@ fn review_2_risk_matrix_r01_r08_r18_r21_and_rpc_isolation() {
             Some(b"1")
         )
         .is_err());
+}
+
+#[test]
+fn batch3_bridge_auth_and_evm_value_deploy_and_checkpoint_isolation() {
+    let mut state = AccountState::new();
+    let alice = Address::from([0x21u8; 32]);
+    let bob = Address::from([0x22u8; 32]);
+    let proposer = Address::from([0x23u8; 32]);
+    state.credit_account(&alice, 1_000);
+    state.credit_account(&bob, 1_000);
+    let mut coord = ExecutionCoordinator::new();
+
+    // 1. EVM Deploy with value_attos funds the exact 20-byte contract address returned in output.
+    // Runtime bytecode: STOP (`0x00`).
+    let deploy_evm = UelTx {
+        tx_hash: [0xC1u8; 32],
+        sender: alice,
+        nonce: 0,
+        ee: EeId::EVM,
+        action: UelAction::Deploy {
+            code: vec![0x00],
+            salt: [0x11u8; 32],
+        },
+        value_attos: 5_000,
+        gas_limit_bgu: 250_000,
+        max_fee_per_bgu_attos: MIN_UEL_BASE_FEE_ATTOS * 2,
+        max_priority_fee_per_bgu_attos: 0,
+    };
+    let r_ev = state
+        .execute_uel_block(&mut coord, test_block_ctx(1), proposer, &[deploy_evm])
+        .expect("evm value deploy");
+    assert_eq!(r_ev[0].status, UelReceiptStatus::Success);
+    assert_eq!(r_ev[0].output.len(), 20);
+    let c_addr = r_ev[0].contract_address.expect("contract addr");
+    assert_eq!(
+        c_addr,
+        crate::execution::coordinator::alias::derive_contract_account(EeId::EVM, &r_ev[0].output)
+    );
+    assert_eq!(state.get_attos_balance(&c_addr), 5_000);
+
+    // Non-20-byte target on a value-bearing EVM call is refused deterministically.
+    let bad_val_call = UelTx {
+        tx_hash: [0xC2u8; 32],
+        sender: alice,
+        nonce: 1,
+        ee: EeId::EVM,
+        action: UelAction::Call {
+            target: c_addr.0.to_vec(),
+            input: Vec::new(),
+        },
+        value_attos: 100,
+        gas_limit_bgu: 250_000,
+        max_fee_per_bgu_attos: MIN_UEL_BASE_FEE_ATTOS * 2,
+        max_priority_fee_per_bgu_attos: 0,
+    };
+    assert!(state
+        .execute_uel_block(&mut coord, test_block_ctx(2), proposer, &[bad_val_call])
+        .is_err());
+
+    // 2. WASM `budlum_msg` and BudZero `0x40` / storage writes enforce creator/owner checks.
+    let wasm_mod = crate::execution::coordinator::wasm_ee::build_valid_cosmwasm_module(
+        &["instantiate", "execute", "query"],
+        &[],
+    );
+    let r_w = state
+        .execute_uel_block(
+            &mut coord,
+            test_block_ctx(3),
+            proposer,
+            &[UelTx {
+                tx_hash: [0xC3u8; 32],
+                sender: alice,
+                nonce: 1,
+                ee: EeId::WASM,
+                action: UelAction::Deploy {
+                    code: wasm_mod,
+                    salt: [0x22u8; 32],
+                },
+                value_attos: 0,
+                gas_limit_bgu: 300_000,
+                max_fee_per_bgu_attos: MIN_UEL_BASE_FEE_ATTOS * 2,
+                max_priority_fee_per_bgu_attos: 0,
+            }],
+        )
+        .expect("wasm deploy");
+    assert_eq!(r_w[0].status, UelReceiptStatus::Success);
+    let wasm_target = r_w[0].output.clone();
+
+    let forged_msg = serde_json::json!({
+        "execute": {
+            "budlum_msg": {
+                "UniversalCall": {
+                    "target_ee": EeId::EVM.0,
+                    "target_hex": hex::encode(&r_ev[0].output),
+                    "input_hex": "",
+                    "value_attos": 0,
+                    "gas_limit_bgu": 50_000
+                }
+            }
+        }
+    });
+    let r_w_att = state
+        .execute_uel_block(
+            &mut coord,
+            test_block_ctx(4),
+            proposer,
+            &[UelTx {
+                tx_hash: [0xC4u8; 32],
+                sender: bob,
+                nonce: 0,
+                ee: EeId::WASM,
+                action: UelAction::Call {
+                    target: wasm_target,
+                    input: serde_json::to_vec(&forged_msg).expect("json"),
+                },
+                value_attos: 0,
+                gas_limit_bgu: 250_000,
+                max_fee_per_bgu_attos: MIN_UEL_BASE_FEE_ATTOS * 2,
+                max_priority_fee_per_bgu_attos: 0,
+            }],
+        )
+        .expect("wasm attacker call");
+    assert_eq!(r_w_att[0].status, UelReceiptStatus::Revert);
+
+    // BudZero deploy by Alice rejects Bob calling 0x40 or writing storage.
+    let bz_prog: Vec<u8> = [BudInsn {
+        opcode: BudOp::Halt,
+        rd: 0,
+        rs1: 0,
+        rs2: 0,
+        imm: 0,
+    }]
+    .iter()
+    .flat_map(|i| i.try_encode().expect("encode").to_le_bytes())
+    .collect();
+    let r_bz = state
+        .execute_uel_block(
+            &mut coord,
+            test_block_ctx(5),
+            proposer,
+            &[UelTx {
+                tx_hash: [0xC5u8; 32],
+                sender: alice,
+                nonce: 2,
+                ee: EeId::BUDZERO,
+                action: UelAction::Deploy {
+                    code: bz_prog,
+                    salt: [0x33u8; 32],
+                },
+                value_attos: 0,
+                gas_limit_bgu: 200_000,
+                max_fee_per_bgu_attos: MIN_UEL_BASE_FEE_ATTOS * 2,
+                max_priority_fee_per_bgu_attos: 0,
+            }],
+        )
+        .expect("bz deploy");
+    assert_eq!(r_bz[0].status, UelReceiptStatus::Success);
+    let bz_target = r_bz[0].output.clone();
+
+    let mut bz_0x40 = vec![
+        super::BUDZERO_SYSCALL_UNIVERSAL_CALL,
+        EeId::EVM.0,
+        20,
+        0,
+    ];
+    bz_0x40.extend_from_slice(&r_ev[0].output);
+    let r_bz_att = state
+        .execute_uel_block(
+            &mut coord,
+            test_block_ctx(6),
+            proposer,
+            &[UelTx {
+                tx_hash: [0xC6u8; 32],
+                sender: bob,
+                nonce: 1,
+                ee: EeId::BUDZERO,
+                action: UelAction::Call {
+                    target: bz_target,
+                    input: bz_0x40,
+                },
+                value_attos: 0,
+                gas_limit_bgu: 200_000,
+                max_fee_per_bgu_attos: MIN_UEL_BASE_FEE_ATTOS * 2,
+                max_priority_fee_per_bgu_attos: 0,
+            }],
+        )
+        .expect("bz attacker call");
+    assert_eq!(r_bz_att[0].status, UelReceiptStatus::Revert);
+
+    // 3. TxOverlay nested checkpoint + HostBridge::read cross-EE isolation + depth > 0 bud_transfer.
+    let cache = crate::execution::coordinator::overlay::BlockReadCache::new();
+    let mut supervisor = crate::execution::coordinator::supervisor::WorkerSupervisor::new();
+    let mut overlay =
+        crate::execution::coordinator::overlay::TxOverlay::new(&state, EeId::EVM, 200_000);
+    let cp1 = overlay.begin_checkpoint(&state).expect("cp1");
+    overlay
+        .write(
+            crate::execution::coordinator::state::NS_EVM_STORAGE,
+            b"rolled-back-slot",
+            Some(b"dirty"),
+        )
+        .expect("write");
+    overlay.rollback_checkpoint(&mut state, cp1).expect("rb1");
+    assert_eq!(
+        overlay
+            .read(
+                &state.execution_state,
+                &cache,
+                crate::execution::coordinator::state::NS_EVM_STORAGE,
+                b"rolled-back-slot",
+            )
+            .expect("read"),
+        None
+    );
+
+    let ctx = test_block_ctx(7);
+    let mut bridge = super::HostBridge {
+        supervisor: &mut supervisor,
+        state: &mut state,
+        cache: &cache,
+        overlay: &mut overlay,
+        ctx: &ctx,
+        tx_hash: [0xC7u8; 32],
+        root_actor: alice,
+        frame_actor: EeIdentity {
+            ee: EeId::EVM,
+            id: r_ev[0].output.clone(),
+        },
+        frame_caller: EeIdentity {
+            ee: EeId::EVM,
+            id: vec![0x99u8; 20],
+        },
+        transport_failure: None,
+    };
+    let wasm_ns = budlum_uel_abi::Namespace::new(
+        crate::execution::coordinator::state::NS_WASM_STORE,
+    )
+    .expect("wasm ns");
+    assert!(bridge.read(&wasm_ns, b"secret").is_err());
+
+    bridge
+        .overlay
+        .push_universal_frame(bridge.state, EeId::WASM, false)
+        .expect("push universal");
+    bridge.frame_actor = EeIdentity {
+        ee: EeId::WASM,
+        id: b"nested-wasm".to_vec(),
+    };
+    let alice_id = EeIdentity {
+        ee: EeId::EVM,
+        id: alice.0.to_vec(),
+    };
+    let bob_id = EeIdentity {
+        ee: EeId::EVM,
+        id: bob.0.to_vec(),
+    };
+    assert!(bridge.bud_transfer(&alice_id, &bob_id, 100).is_err());
+    bridge.overlay.rollback_universal_frame(bridge.state);
 }

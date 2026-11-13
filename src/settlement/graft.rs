@@ -2003,7 +2003,15 @@ mod tests {
         testnet_payment.chain_id = crate::core::chain_config::Network::Testnet
             .chain_id()
             .value();
-        assert_eq!(application_fee_recipient(&state, &testnet_payment), None);
+        assert_eq!(
+            application_fee_recipient(&state, &testnet_payment),
+            Some(mirror_account(id))
+        );
+        let mut mainnet_payment = pay(user);
+        mainnet_payment.chain_id = crate::core::chain_config::Network::Mainnet
+            .chain_id()
+            .value();
+        assert_eq!(application_fee_recipient(&state, &mainnet_payment), None);
         state.settlement.domains.get_mut(DOMAIN).unwrap().status =
             crate::domain::DomainStatus::Frozen;
         assert_eq!(application_fee_recipient(&state, &pay(user)), None);
@@ -2196,6 +2204,9 @@ mod tests {
                 external_intake_root: None,
                 graft_root: None,
                 delegation_root: None,
+                object_layer_root: None,
+                proof_root: None,
+                proven_height: 0,
             },
             block_height: 15,
             state_root: "00".repeat(32),

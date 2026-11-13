@@ -230,6 +230,34 @@ pub fn prove(
     })
 }
 
+/// Convenience: build a Merkle inclusion path from a symbol leaf at `position`
+/// up to the segment symbol root (`SYMBOLS_TAG`) over `placed`.
+#[must_use]
+pub fn prove_symbol_root_path(
+    placed: &[(u32, [u8; 32])],
+    position: usize,
+) -> Option<Vec<PathStep>> {
+    if position >= placed.len() {
+        return None;
+    }
+    Some(merkle(SYMBOLS_TAG, symbol_root_leaves(placed), Some(position)).1)
+}
+
+/// Verify that `(esi, sym_leaf)` at `position` under a `symbol_count`-leaf
+/// `SYMBOLS_TAG` tree folds to `expected_root`.
+#[must_use]
+pub fn verify_symbol_root_path(
+    expected_root: [u8; 32],
+    symbol_count: u64,
+    position: u64,
+    esi: u32,
+    sym_leaf: [u8; 32],
+    path: &[PathStep],
+) -> bool {
+    let entry = leaf_hash(SYMBOLS_TAG, u64::from(esi), &sym_leaf);
+    fold(SYMBOLS_TAG, symbol_count, position, entry, path) == Some(expected_root)
+}
+
 /// Why a proof failed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProofError {

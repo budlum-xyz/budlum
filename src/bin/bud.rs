@@ -2686,7 +2686,7 @@ fn run_cli_conformance(samples: usize) -> Result<(), String> {
     }
 
     let mut pdedup =
-        budlum_core::storage::bud3::private_dedup::threshold::PrivateDedupEngine::new(false, 0);
+        budlum_core::storage::bud3::private_dedup::threshold::PrivateDedupEngine::new(true, 0);
     let _ = (pdedup.public_epoch_ref_total(), pdedup.flush_epoch_batch());
 
     let live_gw = budlum_core::storage::bud3::live_broadcast::LiveGateway::testnet();

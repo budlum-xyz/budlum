@@ -13,7 +13,7 @@ the layer asks which finality proof holds for a fact, never which consensus prod
 value moves between domains without trusting an intermediary.
 
 [![CI](https://github.com/budlum-xyz/budlum/actions/workflows/ci.yml/badge.svg?branch=main&event=push)](https://github.com/budlum-xyz/budlum/actions/workflows/ci.yml?query=branch%3Amain+event%3Apush)
-[![Tests](https://img.shields.io/badge/tests-5426%20lib-blue)](https://github.com/budlum-xyz/budlum/actions/workflows/ci.yml?query=branch%3Amain+event%3Apush)
+[![Tests](https://img.shields.io/badge/tests-5444%20lib-blue)](https://github.com/budlum-xyz/budlum/actions/workflows/ci.yml?query=branch%3Amain+event%3Apush)
 [![Rust](https://img.shields.io/badge/rust-1.97.1-orange?logo=rust)](rust-toolchain.toml)
 [![License](https://img.shields.io/badge/license-PolyForm%20Shield%201.0.0-blue)](LICENSE.md)
 
@@ -56,7 +56,7 @@ value moves between domains without trusting an intermediary.
 | **Bridge risk.** Custodial and multisig bridges have lost billions; the failures are almost always missing verification, not broken cryptography. | A `lock → mint → burn → unlock` lifecycle where every mint recomputes a bounded proof and re-derives the payload hash from `(asset_id, amount)` before crediting anything. |
 | **The quantum horizon.** Ed25519 and ECDSA are expected to be breakable within the lifetime of a chain launched today. | Hybrid finality: BLS12-381 aggregate signatures alongside a post-quantum scheme (ML-DSA-65 by default - FIPS 204 NIST final; legacy Dilithium5 available only for migration). <!-- claim:L-FINALITY-01 --> |
 | **Operator custody of user data.** "Decentralized" networks whose storage, RPC and inference all terminate at one company. | No admin key, no pause hook, no whitelist. Storage, RPC and AI endpoints run on any node; participation is stake-gated, not permission-gated. |
-| **Unverifiable off-chain compute.** AI output presented as fact with nothing behind it. | An in-tree zkVM (BudZero) that produces STARK proofs of execution. Inference proof *verification* is not yet enabled, the transaction path [fails closed](docs/AI_VERIFICATION_STATUS.md) rather than trusting an unverified result. |
+| **Unverifiable off-chain compute.** AI output presented as fact with nothing behind it. | An in-tree zkVM (BudZero) that produces and verifies Plonky3 STARK proofs for registered proof-required models bound to chain, model architecture, weights digest, and sender context ([status details](docs/AI_VERIFICATION_STATUS.md)). |
 
 **The data-sovereignty invariant.** No critical function in the network depends on a service
 operated by the Budlum team. This is not a value statement, it is a property the test suite

@@ -34,8 +34,8 @@
 //! `Rebut`, escape records, and the four family profiles.
 //!
 //! WIRING: wired - the block executor reaches this module through the
-//! `SettlementTx::ObjectLayer(Box<ObjectLayerTx>)` door (closed on testnet
-//! `45261` by `ACTIVATION`), and RPC reads it through `bud_getCharter`,
+//! `SettlementTx::ObjectLayer(Box<ObjectLayerTx>)` door (open from genesis on
+//! testnet `45261` and devnet `45262`), and RPC reads it through `bud_getCharter`,
 //! `bud_getAssetClass`, and `bud_getAsset`.
 
 pub mod charter;
@@ -47,15 +47,22 @@ pub mod registry;
 pub mod rule;
 pub mod tx;
 
-pub use charter::{CanonicalCodeHashes, CharterStatus, CodeProof, DataPolicy, DomainCharter};
+pub use charter::{
+    CanonicalCodeHashes, CharterStatus, CodeProof, DataPolicy, DomainCharter, HomeCodeStateProof,
+};
 pub use family::{profile_for, AssetKind, FamilyProfile, HomeVmFamily};
 pub use ids::{AssetClassId, AssetId, DepartureId, DependencyId, HomeIdentity};
 pub use metrics::{DomainMetrics, ObjectLayerMetrics, Ring, Series};
 pub use registry::{
-    ChallengeRecord, ObjectLayerParams, ObjectLayerRegistry, Refusal, TentativeDependency,
+    ChallengeRecord, HomeSliceProof, Location, ObjectLayerParams, ObjectLayerRegistry, Refusal,
+    TentativeDependency, DEFAULT_MIN_CLASS_BOND, MAX_HOME_STIPEND_ATTOS,
+    MAX_HOME_STIPEND_TOTAL_ATTOS,
 };
 pub use rule::{ClassRule, Holder, TemplateId};
-pub use tx::{ObjectLayerActivation, ObjectLayerTx, ACTIVATION};
+pub use tx::{
+    home_stipend_action_digest, HomeKeyScheme, HomeKeyStipendAuth, HomeStipendVerifier,
+    ObjectLayerActivation, ObjectLayerTx, ACTIVATION,
+};
 
 /// The hard ceiling of calls in one composite.
 pub const MAX_COMPOSITE_CALLS: u8 = 16;

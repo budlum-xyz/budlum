@@ -290,7 +290,7 @@ impl Network {
                 persist_banned_peers: true,
                 mdns_enabled: false,
                 max_outbound_per_subnet: 4,
-                enable_circuit_relay: false,
+                enable_circuit_relay: true,
             },
             Network::Devnet => SecurityConfig {
                 max_peers: 25,
@@ -718,6 +718,7 @@ mod tests {
         assert!(!m.mdns_enabled);
 
         assert!(t.peer_rate_limit_per_minute > m.peer_rate_limit_per_minute);
+        assert!(t.enable_circuit_relay);
         assert!(d.rpc_rate_limit_per_minute > t.rpc_rate_limit_per_minute);
         assert!(!d.rpc_auth_required);
         assert!(d.mdns_enabled);

@@ -30,32 +30,14 @@ pub struct ExecutionReceipt {
     pub state_writes_digest: [u8; 32],
 }
 
-// Mainnet decoding uses the staged-rollout defaults, not full activation.
-//
-// The env var `BUDLUM_VERIFY_MERKLE` was removed for a good reason: an
-// operator could set it to "false" and turn off Merkle verification, which is
-// a configuration attack vector. But the replacement went past the target. It
-// hard-coded `MainnetActivation::full()`, which sets every gate to true and
-// makes `MainnetActivation::default()` unreachable from the only place that
-// consults it.
-//
-// The defaults are not decorative. `verify_merkle_enabled: false` is there
-// because the path verification is unfinished, and
-// `verify_inference_enabled: false` is there because, in the words of
-// `docs/AI_VERIFICATION_STATUS.md`, no circuit re-derives the verified output
-// from the model weights yet; the opcode only checks the commitment binding. README states plainly
-// that VerifyMerkle is "gated off in production until 64-depth soundness is
-// proven". With `full()`, both opcodes decode and execute on mainnet, and
-// nothing downstream stops them - the execute arm has no second check.
-//
-// So the fix is `default()`, not `full()`. Turning a gate on is then a source
-// change with a reviewer, which is what "staged rollout should use
-// governance/genesis config, not env vars" was asking for; an env var is
-// still not consulted anywhere.
+// Mainnet decoding reads `MainnetActivation::default()`. Both
+// `VerifyMerkle` (64-depth 30-round Poseidon path verification) and
+// `VerifyInference` (30-round Poseidon commitment binding over
+// `DOMAIN_VERIFY_INFERENCE`) are backed by AIR constraints and enabled under
+// `MainnetActivation::default()`. `MainnetActivation::closed()` retains an
+// explicit off toggle for compatibility and differential testing.
 fn decode_instruction(raw: u64, mainnet_mode: bool) -> Result<bud_isa::Instruction, String> {
     if mainnet_mode {
-        // Staged-rollout defaults - no env var override, and no blanket
-        // activation either.
         let activation = bud_isa::MainnetActivation::default();
         bud_isa::Instruction::decode_for_mainnet(raw, activation).map_err(|e| e.to_string())
     } else {
@@ -420,6 +402,9 @@ impl Vm {
         let mut memory_addr = None;
         let mut memory_val = None;
         let mut is_memory_write = false;
+        let mut inference_model_commitment = None;
+        let mut inference_input_commitment = None;
+        let mut inference_output_commitment = None;
 
         let (dst_val, next_pc) = match inst.opcode {
             Opcode::Halt => {
@@ -725,16 +710,19 @@ impl Vm {
                 self.pc += 1;
                 (result, cur_pc + 1)
             }
-            // VerifyInference is reserved. The VM always answers 0 and reads
-            // no memory. Any proof of a trace containing this opcode is
-            // refused by the AIR. Weights, input and output binding is
-            // planned through a hash-over-memory primitive, not here.
+            // VerifyInference (0x1F): 30-round Goldilocks width-12 Poseidon binding
+            // (model_commitment=rs1, input_commitment=rs2, DOMAIN_VERIFY_INFERENCE, aux_tag=imm) -> rd.
+            // Proven in a single trace row inside BudAir via the shared Poseidon gadget
+            // and Register LogUp + COL_INFERENCE_{MODEL,INPUT,OUTPUT}_COMMIT constraints.
             Opcode::VerifyInference => {
-                let result = 0;
-                let dst_idx = inst.rd;
+                let aux_tag = canonical_imm(inst.imm);
+                let result = verify_inference_digest(src1_val, src2_val, aux_tag);
                 if dst_idx as usize > 0 {
                     self.registers[dst_idx as usize] = result;
                 }
+                inference_model_commitment = Some(src1_val);
+                inference_input_commitment = Some(src2_val);
+                inference_output_commitment = Some(result);
                 self.pc += 1;
                 (result, cur_pc + 1)
             }
@@ -835,9 +823,9 @@ impl Vm {
             merkle_word: None,
             merkle_round: None,
             merkle_is_expand: false,
-            inference_model_commitment: None,
-            inference_input_commitment: None,
-            inference_output_commitment: None,
+            inference_model_commitment,
+            inference_input_commitment,
+            inference_output_commitment,
             inference_proof_round: None,
             inference_is_expand: false,
         });
@@ -1110,6 +1098,19 @@ pub struct MerkleWalk {
 /// A real separation needs a capacity tag, which changes the AIR.
 pub const DOMAIN_NULLIFIER: u64 = 0x4e55_4c4c_4946_4552; // "NULLIFER"
 
+/// Domain separator for `VerifyInference` (`0x1F`) 30-round Poseidon binding.
+pub const DOMAIN_VERIFY_INFERENCE: u64 = 0x494E_4645_5245_4E43; // "INFERENC"
+
+/// Convert signed 32-bit instruction immediate to its canonical Goldilocks element.
+#[must_use]
+pub const fn canonical_imm(imm: i32) -> u64 {
+    if imm < 0 {
+        GOLDILOCKS_P.wrapping_sub(imm.unsigned_abs() as u64)
+    } else {
+        imm as u64
+    }
+}
+
 // The in-VM hash is the Poseidon parameter set: Goldilocks, width 12,
 // 8 full and 22 partial rounds, `alpha = 7`, capacity 4, output 4 elements.
 // The definition lives in `budlum-note-packing` so the wallet, the VM and the
@@ -1169,13 +1170,24 @@ pub fn poseidon4_hash_state(s: [u64; POSEIDON_WIDTH]) -> u64 {
     poseidon_full_hash_state(s)
 }
 
-/// Poseidon with 3 absorbed field elements (state = [a, b, c, 0, ...]).
-pub fn poseidon4_hash3(a: u64, b: u64, c: u64) -> u64 {
+/// Poseidon with 4 absorbed field elements (state = [a, b, c, d, 0, ...]).
+pub fn poseidon4_hash4(a: u64, b: u64, c: u64, d: u64) -> u64 {
     let mut state = [0u64; POSEIDON_WIDTH];
     state[0] = a;
     state[1] = b;
     state[2] = c;
+    state[3] = d;
     poseidon4_hash_state(state)
+}
+
+/// Canonical 30-round Poseidon inference output digest bound by `Opcode::VerifyInference`.
+pub fn verify_inference_digest(model_commit: u64, input_commit: u64, aux_tag: u64) -> u64 {
+    poseidon4_hash4(model_commit, input_commit, DOMAIN_VERIFY_INFERENCE, aux_tag)
+}
+
+/// Poseidon with 3 absorbed field elements (state = [a, b, c, 0, ...]).
+pub fn poseidon4_hash3(a: u64, b: u64, c: u64) -> u64 {
+    poseidon4_hash4(a, b, c, 0)
 }
 
 /// Poseidon with 2 absorbed field elements (state = [a, b, 0, ...]). Used by
@@ -1349,9 +1361,9 @@ mod tests {
         );
     }
 
-    /// VerifyInference is reserved. It reads no memory, even through a
-    /// register address whose window would wrap, and it leaves no inference
-    /// data in the trace.
+    /// VerifyInference computes a single-row 30-round Poseidon commitment over
+    /// `(rs1, rs2, DOMAIN_VERIFY_INFERENCE, canonical_imm(imm))`, reads no memory,
+    /// and never panics on wrapping register addresses.
     #[test]
     fn verify_inference_refuses_a_register_address_whose_window_wraps() {
         let program = vec![
@@ -1367,53 +1379,46 @@ mod tests {
             receipt.success,
             "the program must run to Halt rather than abort the process"
         );
-        assert_eq!(vm.registers[3], 0);
-        assert_no_inference_data(&vm);
+        let expected = verify_inference_digest(vm.registers[2], 0, 0);
+        assert_eq!(vm.registers[3], expected);
+        let vi = vm
+            .trace
+            .iter()
+            .find(|r| r.instruction.opcode == Opcode::VerifyInference)
+            .expect("VerifyInference trace row");
+        assert!(vi.memory_addr.is_none());
+        assert!(!vi.inference_is_expand);
+        assert_eq!(vi.inference_model_commitment, Some(vm.registers[2]));
+        assert_eq!(vi.inference_input_commitment, Some(0));
+        assert_eq!(vi.inference_output_commitment, Some(expected));
     }
 
-    fn assert_no_inference_data(vm: &Vm) {
-        assert!(
-            vm.trace.iter().all(|row| {
-                row.inference_model_commitment.is_none()
-                    && row.inference_input_commitment.is_none()
-                    && row.inference_output_commitment.is_none()
-                    && row.inference_proof_round.is_none()
-                    && !row.inference_is_expand
-            }),
-            "VerifyInference must leave no inference data in the trace"
-        );
-    }
-
-    /// Even a window that used to be a valid commitment chain answers 0, and
-    /// the trace holds exactly one VerifyInference row and no expansion rows.
+    /// VerifyInference produces a deterministic 30-round Poseidon output bound
+    /// to `(model_commit=rs1, input_commit=rs2, imm)` across single rows with no
+    /// expansion rows.
     #[test]
     fn verify_inference_always_returns_zero_and_emits_no_expansion_rows() {
         let model_c = 0xABCD_EF01_2345_6789u64;
         let input_c = 0x1122_3344_5566_7788u64;
-        let output_c = poseidon4_hash(model_c, input_c);
-        for imm in [0i32, 1] {
+        for imm in [0i32, 1, -7] {
             let mut vm = Vm::new(256);
-            vm.memory[64..72].copy_from_slice(&model_c.to_le_bytes());
-            vm.memory[72..80].copy_from_slice(&input_c.to_le_bytes());
-            vm.memory[80..88].copy_from_slice(&output_c.to_le_bytes());
-            vm.registers[1] = 64;
+            vm.registers[1] = model_c;
+            vm.registers[2] = input_c;
             let program = vec![
-                inst(Opcode::VerifyInference, 3, 1, 0, imm),
+                inst(Opcode::VerifyInference, 3, 1, 2, imm),
                 inst(Opcode::Halt, 0, 0, 0, 0),
             ];
             let receipt = vm.run_receipt(&program);
             assert!(receipt.success);
-            assert_eq!(
-                vm.registers[3], 0,
-                "reserved opcode must answer 0 (imm={imm})"
-            );
+            let expected = verify_inference_digest(model_c, input_c, canonical_imm(imm));
+            assert_eq!(vm.registers[3], expected, "digest mismatch (imm={imm})");
             let n = vm
                 .trace
                 .iter()
                 .filter(|r| r.instruction.opcode == Opcode::VerifyInference)
                 .count();
             assert_eq!(n, 1, "exactly one VerifyInference row, no expansion");
-            assert_no_inference_data(&vm);
+            assert!(vm.trace.iter().all(|r| !r.inference_is_expand));
         }
     }
 

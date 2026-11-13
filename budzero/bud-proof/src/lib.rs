@@ -7,10 +7,13 @@ pub mod bud_stark;
 pub mod canonical_boot;
 pub mod canonical_recovery;
 pub mod canonical_set;
+pub mod hiding;
 pub mod plonky3_air;
 pub mod plonky3_prover;
+pub mod predicates;
 pub mod quarantine;
 pub mod relayer;
+pub mod sigagg;
 pub mod transfer_verdict;
 
 #[cfg(test)]

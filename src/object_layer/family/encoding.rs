@@ -277,10 +277,11 @@ fn base58_decode(text: &str) -> Result<Vec<u8>, WireError> {
     let zeros = text.bytes().take_while(|b| *b == b'1').count();
     let mut bytes: Vec<u8> = Vec::new();
     for c in text.bytes().skip(zeros) {
-        let value = BASE58_ALPHABET
+        let pos = BASE58_ALPHABET
             .iter()
             .position(|a| *a == c)
-            .ok_or(WireError("not a base58 character"))? as u32;
+            .ok_or(WireError("not a base58 character"))?;
+        let value = u32::try_from(pos).map_err(|_| WireError("base58 index overflow"))?;
         let mut carry = value;
         for byte in &mut bytes {
             carry += u32::from(*byte) * 58;

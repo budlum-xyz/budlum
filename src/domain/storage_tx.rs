@@ -2238,16 +2238,38 @@ mod tests {
         execute_storage_tx(&mut state, &ctx(op), &open_challenge_tx(deal_id))
             .expect("permissionless challenge invariant allows self-challenge");
         let cid = state.storage_registry.all_challenges()[0].challenge_id;
+        let deal = state.storage_registry.get_deal(deal_id).expect("deal").clone();
+        let ch = state
+            .storage_registry
+            .get_challenge(cid)
+            .expect("challenge")
+            .clone();
+        let range_hash = ContentId([0x44; 32]);
+        let proof_ctx = crate::domain::storage_deal::StorageChallengeProofContext::from_registry(
+            crate::core::chain_config::Network::Testnet
+                .chain_id()
+                .value(),
+            &ch,
+            &deal,
+            op,
+            state.epoch_index,
+        );
+        let real_proof = crate::domain::storage_deal::prove_storage_challenge_proof(
+            &proof_ctx,
+            &[0x42u8; 32],
+            &range_hash,
+        )
+        .expect("real self-challenge STARK proof");
         execute_storage_tx(
             &mut state,
             &ctx(op),
             &StorageTx::AnswerChallenge {
                 challenge_id: cid,
-                range_hash: ContentId([0x44; 32]),
-                proof: vec![0xAB; 16],
+                range_hash,
+                proof: real_proof,
             },
         )
-        .expect("self-challenge answer settles bond cleanly");
+        .expect("self-challenge answer settles cleanly");
         assert_eq!(
             state
                 .storage_registry

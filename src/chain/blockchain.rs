@@ -1922,6 +1922,21 @@ impl Blockchain {
                 Some(state.settlement.graft.root())
             },
             delegation_root: state.registry.delegation_root(),
+            object_layer_root: if state.settlement.object_layer.is_empty() {
+                None
+            } else {
+                Some(state.settlement.object_layer.root())
+            },
+            proof_root: if state.settlement.proof_claims.is_empty() {
+                None
+            } else {
+                Some(state.settlement.proof_claims.root())
+            },
+            proven_height: if state.settlement.proof_claims.is_empty() {
+                0
+            } else {
+                block.index
+            },
         }
     }
 
@@ -2412,6 +2427,21 @@ impl Blockchain {
                 Some(self.state.settlement.graft.root())
             },
             delegation_root: self.state.registry.delegation_root(),
+            object_layer_root: if self.state.settlement.object_layer.is_empty() {
+                None
+            } else {
+                Some(self.state.settlement.object_layer.root())
+            },
+            proof_root: if self.state.settlement.proof_claims.is_empty() {
+                None
+            } else {
+                Some(self.state.settlement.proof_claims.root())
+            },
+            proven_height: if self.state.settlement.proof_claims.is_empty() {
+                0
+            } else {
+                self.chain.last().map_or(0, |b| b.index)
+            },
         }
     }
 

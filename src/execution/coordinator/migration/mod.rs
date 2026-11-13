@@ -32,6 +32,7 @@ use serde::{Deserialize, Serialize};
 pub mod dependencies;
 pub mod deployment;
 pub mod fee;
+pub mod non_evm;
 pub mod storage_root;
 
 pub use dependencies::{dependency_report, DependencyReport};
@@ -39,6 +40,12 @@ pub use deployment::{create_address, verify_deployment, DeploymentProof, Deploym
 pub use fee::{
     quote_migration_fee, MigrationFeeOverflow, MigrationFeeQuote, MigrationFeeSchedule,
     MigrationUsage,
+};
+pub use non_evm::{
+    compute_ics23_leaf_hash, fold_sha256_merkle, fold_sha3_merkle, move_migration_digest,
+    move_state_leaf, svm_account_leaf, svm_migration_digest, verify_ics23_existence,
+    wasm_migration_digest, Ics23ExistenceProof, Ics23InnerOp, MoveMigrationEntryKind,
+    MoveMigrationRequest, MoveStateProofEntry, SvmMigrationRequest, WasmMigrationRequest,
 };
 
 const DOMAIN_NAME: &str = "Budlum Migration";
@@ -305,7 +312,7 @@ pub struct MigrationPlan {
     proof_nodes: u64,
 }
 
-/// Consensus-level EVM migration transaction variants ( 2/3 door).
+/// Consensus-level EVM & non-EVM migration transaction variants (`8.12.2` & `8.12.3`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MigrationTx {
     /// Verifies deployment authority + account proof and stages a [`MigrationPlan`].
@@ -314,6 +321,12 @@ pub enum MigrationTx {
     ImportEvmStorageChunk(ImportEvmStorageChunk),
     /// Verifies complete `storage_root`, charges migration fee, and installs EVM state.
     FinalizeEvmImport { contract: [u8; 20] },
+    /// Verifies CosmWasm bytecode, Cosmos creator signature, and ICS-23 proofs, and installs WASM state (`8.12.3`).
+    ImportWasmContract(Box<WasmMigrationRequest>),
+    /// Verifies Solana account Merkle proof and Ed25519 authority signature, and installs SVM state (`8.12.3`).
+    ImportSvmAccount(Box<SvmMigrationRequest>),
+    /// Verifies Aptos Move module/resource proofs and Ed25519 signature, and installs Move state (`8.12.3`).
+    ImportMoveResource(Box<MoveMigrationRequest>),
 }
 
 /// Outcome returned when applying a [`MigrationTx`] in a block.
@@ -328,6 +341,22 @@ pub enum MigrationTxOutcome {
         slots: usize,
     },
     Finalized(Box<MigrationRecord>),
+    WasmImported {
+        contract: Vec<u8>,
+        code_hash: [u8; 32],
+        keys: usize,
+        fee: MigrationFeeQuote,
+    },
+    SvmImported {
+        pubkey: [u8; 32],
+        data_len: usize,
+        fee: MigrationFeeQuote,
+    },
+    MoveImported {
+        account: [u8; 32],
+        entries: usize,
+        fee: MigrationFeeQuote,
+    },
 }
 
 /// Verifies deployment authority and the finalized source account proof.
@@ -671,6 +700,34 @@ pub fn apply_migration_tx(
                 .remove(&hex_addr);
 
             Ok(MigrationTxOutcome::Finalized(Box::new(record)))
+        }
+        MigrationTx::ImportWasmContract(req) => {
+            let (code_hash, contract, keys, fee) =
+                non_evm::apply_wasm_migration(state, migrator, *req, fee_schedule)?;
+            Ok(MigrationTxOutcome::WasmImported {
+                contract,
+                code_hash,
+                keys,
+                fee,
+            })
+        }
+        MigrationTx::ImportSvmAccount(req) => {
+            let (pubkey, data_len, fee) =
+                non_evm::apply_svm_migration(state, migrator, *req, fee_schedule)?;
+            Ok(MigrationTxOutcome::SvmImported {
+                pubkey,
+                data_len,
+                fee,
+            })
+        }
+        MigrationTx::ImportMoveResource(req) => {
+            let (account, entries, fee) =
+                non_evm::apply_move_migration(state, migrator, *req, fee_schedule)?;
+            Ok(MigrationTxOutcome::MoveImported {
+                account,
+                entries,
+                fee,
+            })
         }
     }
 }

@@ -736,6 +736,89 @@ impl LightClient {
         Ok(())
     }
 
+    /// Generates a checkpoint-aware committee aggregate proof check via `bud_proof::sigagg` (`BLG-239`).
+    ///
+    /// Convenience: exposed for light-client committee batch callers.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LightClientError::VerificationFailed`] when the aggregated
+    /// batch does not meet `required_weight` or fails commitment verification.
+    pub fn verify_committee_batch(
+        batch: &bud_proof::sigagg::AggregatedSignatureBatch,
+        expected_committee_root: &[u8; 32],
+        required_weight: u64,
+    ) -> Result<(), LightClientError> {
+        bud_proof::sigagg::verify_aggregated_batch(batch, expected_committee_root, required_weight)
+            .map_err(|e| {
+                LightClientError::VerificationFailed(format!(
+                    "BLG-239 aggregated committee batch failed: {e:?}"
+                ))
+            })
+    }
+
+    /// Verifies an aggregated committee batch against `checkpoint.block_hash`
+    /// and `expected_committee_root`, ensuring `BLG-239` batch verification stays
+    /// wired on the production light-client path.
+    ///
+    /// Convenience: exposed for light-client checkpoint batch verification callers.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LightClientError`] if `checkpoint.block_hash` is not a 32-byte
+    /// hex digest, does not match `batch.message_digest`, or fails
+    /// [`Self::verify_committee_batch`].
+    pub fn apply_committee_batch_checkpoint(
+        &self,
+        checkpoint: &VerifiedCheckpoint,
+        batch: &bud_proof::sigagg::AggregatedSignatureBatch,
+        expected_committee_root: &[u8; 32],
+        required_weight: u64,
+    ) -> Result<(), LightClientError> {
+        let _ = &self.trusted;
+        let hash_bytes = hex::decode(&checkpoint.block_hash)
+            .map_err(|_| LightClientError::MalformedHash(checkpoint.block_hash.clone()))?;
+        if hash_bytes.as_slice() != batch.message_digest.as_slice() {
+            return Err(LightClientError::CertificateBinding(
+                "aggregated committee batch message_digest does not bind to checkpoint block_hash"
+                    .to_string(),
+            ));
+        }
+        Self::verify_committee_batch(batch, expected_committee_root, required_weight)
+    }
+
+    /// Evaluates Phase-A dual finality parity between the native finality path
+    /// and a secondary zkVM proof (`TA8`).
+    ///
+    /// Convenience: exposed for checkpoint dual-finality callers.
+    #[must_use]
+    pub fn evaluate_checkpoint_phase_a(
+        domain_id: crate::domain::types::DomainId,
+        native_result: (bool, crate::domain::types::Hash32),
+        zkvm_result: Option<(bool, crate::domain::types::Hash32)>,
+    ) -> crate::cross_domain::external::phase_a_dual::PhaseAVerdict {
+        crate::cross_domain::external::phase_a_dual::evaluate_phase_a_dual(
+            domain_id,
+            native_result,
+            zkvm_result,
+        )
+    }
+
+    /// Classifies a finalized checkpoint height against `proven_height` under
+    /// the bounded batch-proof lag rule (`TA5`).
+    ///
+    /// Convenience: exposed for checkpoint batch-proof status callers.
+    #[must_use]
+    pub const fn checkpoint_proof_status(
+        block_height: u64,
+        proven_height: u64,
+    ) -> crate::cross_domain::external::phase_a_dual::RootProofStatus {
+        crate::cross_domain::external::phase_a_dual::classify_root_proof_status(
+            block_height,
+            proven_height,
+        )
+    }
+
     /// The wire requests a transport must issue from this anchor: a
     /// `GetHeaders` locator rooted at the trusted hash, and the next
     /// checkpoint height a certificate is needed for.
@@ -1403,6 +1486,9 @@ mod tests {
             external_intake_root: None,
             graft_root: None,
             delegation_root: None,
+            object_layer_root: None,
+            proof_root: Some([7u8; 32]),
+            proven_height: 10,
         };
         state.global_header_summary = header.calculate_hash_bytes();
         let body = state.state_root_body();

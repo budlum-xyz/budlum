@@ -383,6 +383,11 @@ impl Object {
         } else {
             None
         };
+        let context_manifest = if flags.has(Flags::HAS_CONTEXT) {
+            Some(r.array32("context_manifest")?)
+        } else {
+            None
+        };
         let rest = r.rest();
         let rest_len = rest.len() as u64;
         if rest_len < payload_len {
@@ -403,7 +408,7 @@ impl Object {
                 content_digest,
                 payload_len,
                 prev_object,
-                context_manifest: None,
+                context_manifest,
             },
             payload: rest.to_vec(),
         })
@@ -1010,9 +1015,18 @@ mod tests {
 
         let mut b = good.clone();
         b[3] = Flags::HAS_CONTEXT;
-        let ctx_obj = Object::decode(&b, &mut m).unwrap();
-        assert!(ctx_obj.header.flags.has(Flags::HAS_CONTEXT));
-        assert_eq!(ctx_obj.validate_testnet(), Ok(()));
+        assert_eq!(
+            Object::decode(&b, &mut m),
+            Err(Bof1Error::Truncated("context_manifest"))
+        );
+
+        let mut ctx_obj = Object::raw_public(b"abc");
+        ctx_obj.header.flags = Flags::from_byte(Flags::HAS_CONTEXT).unwrap();
+        ctx_obj.header.context_manifest = Some([0x55u8; 32]);
+        let decoded_ctx = Object::decode(&ctx_obj.encode(), &mut m).unwrap();
+        assert_eq!(decoded_ctx, ctx_obj);
+        assert!(decoded_ctx.header.flags.has(Flags::HAS_CONTEXT));
+        assert_eq!(decoded_ctx.validate_testnet(), Ok(()));
 
         let mut b = good.clone();
         b[4] = 1;

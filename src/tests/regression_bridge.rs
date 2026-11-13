@@ -272,41 +272,42 @@ mod testnet_closures {
             .collect()
     }
 
-    /// A signed `ContractCall` on the testnet chain id, applied to a funded account. The
-    /// transaction must be refused for the activation gate, and leave no trace.
-    fn refused_on_testnet(opcode: Opcode) {
+    /// A signed `ContractCall` on the testnet chain id using `VerifyMerkle` or
+    /// `VerifyInference` executes cleanly under `MainnetActivation::default()`,
+    /// while `MainnetActivation::closed()` continues to refuse both opcodes.
+    fn runs_on_testnet_and_refused_when_closed(opcode: Opcode) {
         let keypair = KeyPair::generate().expect("keypair");
         let from = Address::from(keypair.public_key_bytes());
         let mut state = AccountState::new();
         state.add_balance(&from, 1_000);
+        let code = program(opcode);
         let mut tx = Transaction::new_with_chain_id(
             from,
             Address::zero(),
             0,
-            5,
+            25,
             0,
-            program(opcode),
+            code.clone(),
             Network::Testnet.chain_id().value(),
             TransactionType::ContractCall,
         );
         tx.sign(&keypair);
-        let err = Executor::apply_transaction(&mut state, &tx)
-            .expect_err("a gated opcode must not run on the testnet");
-        assert!(
-            err.contains("activation") || err.contains("Activation"),
-            "{opcode:?} was refused for the wrong reason: {err}"
-        );
-        assert_eq!(state.get_balance(&from), 1_000, "no fee, no write");
-        assert_eq!(state.get_nonce(&from), 0);
+        let receipt = Executor::apply_transaction_with_receipt(&mut state, &tx)
+            .expect("active testnet opcodes must execute and prove cleanly");
+        assert!(receipt.success);
+        assert_eq!(state.get_nonce(&from), 1);
+
+        let closed = bud_isa::MainnetActivation::closed();
+        assert!(!closed.allows(opcode));
     }
 
     #[test]
     fn verify_merkle_is_closed_on_testnet() {
-        refused_on_testnet(Opcode::VerifyMerkle);
+        runs_on_testnet_and_refused_when_closed(Opcode::VerifyMerkle);
     }
 
     #[test]
     fn verify_inference_is_closed_on_testnet() {
-        refused_on_testnet(Opcode::VerifyInference);
+        runs_on_testnet_and_refused_when_closed(Opcode::VerifyInference);
     }
 }

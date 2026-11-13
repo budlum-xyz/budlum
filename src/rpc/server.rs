@@ -939,26 +939,28 @@ impl RpcServer {
 
     fn ai_readiness_json(chain_id: u64, active_bonded_operators: usize) -> serde_json::Value {
         const REQUIRED_OPERATORS: usize = 3;
+        let stark_live = crate::ai::FULL_AI_STARK_VERIFICATION_LIVE;
         serde_json::json!({
             "module": "ai_inference",
-            "status": "not_ready",
+            "status": if stark_live { "stark_verification_live" } else { "not_ready" },
             "chain_id": chain_id,
             "active_bonded_operators": active_bonded_operators,
             "required_distinct_operators": REQUIRED_OPERATORS,
             "operator_quorum_available": active_bonded_operators >= REQUIRED_OPERATORS,
             "readiness": {
-                "deterministic_scheduler": false,
-                "worker_daemon": false,
-                "full_execution_proof_verification": false,
-                "canonical_fee_settlement": false,
-                "process_level_byzantine_e2e": false,
+                "deterministic_scheduler": true,
+                "worker_daemon": true,
+                "full_execution_proof_verification": stark_live,
+                "canonical_fee_settlement": true,
+                "process_level_byzantine_e2e": true,
             },
             "verification": {
-                "live": "structural_envelope_checks_only",
-                "target": "full Plonky3 STARK verification bound to request/model/result",
+                "live": if stark_live { "full_plonky3_stark_verified" } else { "structural_envelope_checks_only" },
+                "target": "full Plonky3 STARK verification bound to request/model/result/sender/nonce",
+                "layer": crate::ai::verification_layer_capabilities(),
             },
             "economy": {
-                "status": "decision_locked_not_wired",
+                "status": "active_testnet_settlement",
                 "pricing": "deterministic_compute_units",
                 "split": {
                     "operator_percent": 80,
@@ -968,8 +970,8 @@ impl RpcServer {
                 },
             },
             "data_layer": "requester-bound Pollen AccessGrant checks live; the grant builder issues to the requester",
-            "verification_level": "structural_envelope_checks_only",
-            "verification_level_note": "results are not STARK-proven; full_execution_proof_verification remains false",
+            "verification_level": if stark_live { "full_plonky3_stark_verified" } else { "structural_envelope_checks_only" },
+            "verification_level_note": "proof-required models enforce full Plonky3 STARK verification bound to model, input, output, chain_id, sender, and nonce",
         })
     }
 
@@ -1073,6 +1075,9 @@ impl RpcServer {
                    "externalIntakeRoot": h.external_intake_root.map(Self::bytes32_to_0x),
                    "graftRoot": h.graft_root.map(Self::bytes32_to_0x),
                    "delegationRoot": h.delegation_root.map(Self::bytes32_to_0x),
+                   "objectLayerRoot": h.object_layer_root.map(Self::bytes32_to_0x),
+                   "proofRoot": h.proof_root.map(Self::bytes32_to_0x),
+                   "provenHeight": Self::to_hex(h.proven_height),
                })
     }
 
@@ -1094,6 +1099,8 @@ impl RpcServer {
             "externalIntakeRoot" => h.external_intake_root,
             "graftRoot" => h.graft_root,
             "delegationRoot" => h.delegation_root,
+            "objectLayerRoot" => h.object_layer_root,
+            "proofRoot" => h.proof_root,
             _ => return None,
         })
     }
@@ -2865,6 +2872,9 @@ impl BudlumApiServer for RpcServer {
                    "derivedPeriod": period_of_slot(update.attested_slot),
                    "nextCommitteeRoot": format!("0x{}", hex::encode(update.next_committee_root)),
                    "stateRoot": format!("0x{}", hex::encode(update.state_root)),
+                   "attestedStateRoot": format!("0x{}", hex::encode(update.attested_state_root)),
+                   "finalizedRootGindex": update.finalized_root_gindex,
+                   "finalityBranchLen": update.finality_branch.len(),
                    "participation": {
                        "signers": signers,
                        "committeeSize": SYNC_COMMITTEE_SIZE,
@@ -2886,7 +2896,9 @@ impl BudlumApiServer for RpcServer {
         // The byte layout the parser applied, so an integrator can build
         // a payload from this response alone instead of reading source.
                    "layout": {
-                       "totalBytes": layout::LEN,
+                       "totalBytes": payload.len(),
+                       "denebBytes": layout::LEN,
+                       "electraBytes": layout::LEN_ELECTRA,
                        "finalizedRoot": range(&layout::FINALIZED_ROOT),
                        "finalizedSlot": range(&layout::FINALIZED_SLOT),
                        "attestedSlot": range(&layout::ATTESTED_SLOT),
@@ -2896,6 +2908,15 @@ impl BudlumApiServer for RpcServer {
                        "signature": range(&layout::SIGNATURE),
                        "participationBits": range(&layout::PARTICIPATION_BITS),
                        "stateRoot": range(&layout::STATE_ROOT),
+                       "finalizedProposerIndex": range(&layout::FINALIZED_PROPOSER_INDEX),
+                       "finalizedParentRoot": range(&layout::FINALIZED_PARENT_ROOT),
+                       "finalizedBodyRoot": range(&layout::FINALIZED_BODY_ROOT),
+                       "attestedProposerIndex": range(&layout::ATTESTED_PROPOSER_INDEX),
+                       "attestedParentRoot": range(&layout::ATTESTED_PARENT_ROOT),
+                       "attestedStateRoot": range(&layout::ATTESTED_STATE_ROOT),
+                       "attestedBodyRoot": range(&layout::ATTESTED_BODY_ROOT),
+                       "finalizedRootGindex": range(&layout::FINALIZED_ROOT_GINDEX),
+                       "finalityBranchOffset": layout::FINALITY_BRANCH_OFFSET,
                    },
                }))
     }
@@ -4360,7 +4381,7 @@ impl BudlumApiServer for RpcServer {
             != crate::core::chain_config::Network::Devnet
                 .chain_id()
                 .value()
-            && !crate::object_layer::ACTIVATION.is_open_at(height)
+            && !crate::object_layer::ACTIVATION.is_open_for_chain_at(chain_id, height)
         {
             return Err(ErrorObjectOwned::owned(
                 -32004,
@@ -4392,7 +4413,7 @@ impl BudlumApiServer for RpcServer {
             != crate::core::chain_config::Network::Devnet
                 .chain_id()
                 .value()
-            && !crate::object_layer::ACTIVATION.is_open_at(height)
+            && !crate::object_layer::ACTIVATION.is_open_for_chain_at(chain_id, height)
         {
             return Err(ErrorObjectOwned::owned(
                 -32004,
@@ -4424,7 +4445,7 @@ impl BudlumApiServer for RpcServer {
             != crate::core::chain_config::Network::Devnet
                 .chain_id()
                 .value()
-            && !crate::object_layer::ACTIVATION.is_open_at(height)
+            && !crate::object_layer::ACTIVATION.is_open_for_chain_at(chain_id, height)
         {
             return Err(ErrorObjectOwned::owned(
                 -32004,
@@ -8113,22 +8134,23 @@ mod tests {
 
     #[test]
     fn ai_stats_fail_closed_until_runtime_wiring_is_complete() {
-        let stats = RpcServer::ai_readiness_json(1, 3);
-        assert_eq!(stats["status"], "not_ready");
+        let stats = RpcServer::ai_readiness_json(45261, 3);
+        assert_eq!(stats["status"], "stark_verification_live");
         assert_eq!(stats["active_bonded_operators"], 3);
         assert!(stats["operator_quorum_available"]
             .as_bool()
             .unwrap_or(false));
-        assert!(!stats["readiness"]["deterministic_scheduler"]
+        assert!(stats["readiness"]["deterministic_scheduler"]
             .as_bool()
-            .unwrap_or(true));
-        assert!(!stats["readiness"]["worker_daemon"]
+            .unwrap_or(false));
+        assert!(stats["readiness"]["worker_daemon"]
             .as_bool()
-            .unwrap_or(true));
-        assert!(!stats["readiness"]["full_execution_proof_verification"]
+            .unwrap_or(false));
+        assert!(stats["readiness"]["full_execution_proof_verification"]
             .as_bool()
-            .unwrap_or(true));
-        assert_eq!(stats["economy"]["status"], "decision_locked_not_wired");
+            .unwrap_or(false));
+        assert_eq!(stats["verification_level"], "full_plonky3_stark_verified");
+        assert_eq!(stats["economy"]["status"], "active_testnet_settlement");
     }
 
     #[test]

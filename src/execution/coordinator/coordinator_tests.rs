@@ -769,6 +769,7 @@ fn expansion_ee_all_twelve_environments_execute_on_testnet() {
         (EeId::TVM, state::NS_TVM_STATE),
         (EeId::UTXO, state::NS_UTXO_STATE),
         (EeId::PLUTUS, state::NS_PLUTUS_STATE),
+        (EeId::RV32, state::NS_RV32_STATE),
     ];
 
     let mut nonce = 0u64;

@@ -1,9 +1,9 @@
 //! Verification levels of an AI result.
 //!
-//! WIRING: the AI registry records a level per finalized outcome and the
-//! value-bearing doors (data market, application payments) ask
-//! [`LevelRecord::may_carry_value`] once the challenge
-//! window lands; until then the testnet AI layer runs at VL-1 or stays closed.
+//! WIRING: the AI registry records a verification level per finalized outcome
+//! and value-bearing doors (data market, application payments, answer proof
+//! bundles) ask [`LevelRecord::may_carry_value`] so unchallenged (`VL-2`) or
+//! STARK-proven (`VL-3`) outcomes move value safely on testnet and devnet.
 //!
 //! | Level | Meaning |
 //! |---|---|

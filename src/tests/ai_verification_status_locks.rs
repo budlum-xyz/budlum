@@ -71,6 +71,13 @@ fn execution_path_verifies_the_stark_for_proof_required_models() {
         // The envelope and the proof struct are two claims about one run:
         // disagreeing `gas_used` means they describe different executions.
         "ai_exec_gas_mismatch",
+        // Non-zero memory/log commitments plus tx-context binding prevent
+        // empty commitments or cross-request/cross-sender replay.
+        "ai_exec_empty_initial_state",
+        "ai_exec_empty_event_digest",
+        "ai_exec_sender_mismatch",
+        "ai_exec_nonce_mismatch",
+        "ai_exec_block_height_mismatch",
         "ai_exec_stark",
     ] {
         assert!(
@@ -125,13 +132,8 @@ fn stark_verification_helpers_have_no_production_callers() {
     );
 }
 
-/// The opcode is reserved: the VM arm answers a constant zero and reads no
-/// memory, so no shape of operands can reach a non-zero answer.
-///
-/// The earlier lock pinned a Poseidon commitment binding. That binding is
-/// removed (see the zkVM opcode section of docs/AI_VERIFICATION_STATUS.md), so
-/// the lock now pins the reserved behavior instead. The status document moves
-/// with this file.
+/// `VerifyInference` checks the 30-round Poseidon inference commitment digest in
+/// the VM and AIR and is active under `MainnetActivation::default()`.
 #[test]
 fn verify_inference_opcode_is_reserved_and_answers_zero() {
     let src = read("budzero/bud-vm/src/lib.rs");
@@ -139,25 +141,27 @@ fn verify_inference_opcode_is_reserved_and_answers_zero() {
     let at = src.find(head).expect("VerifyInference arm must exist");
     let arm = squash(block_after(&src[at + head.len()..]));
     assert!(
-        arm.contains("let result = 0;"),
-        "VerifyInference must answer a constant zero; if it gains a real \
-         answer, update docs/AI_VERIFICATION_STATUS.md in the same change"
+        arm.contains("verify_inference_digest") && arm.contains("self.activation.verify_inference_enabled"),
+        "VerifyInference must check the activation gate and evaluate verify_inference_digest; \
+         keep docs/AI_VERIFICATION_STATUS.md synchronized with any change"
     );
+    let air = read("budzero/bud-proof/src/plonky3_air.rs");
     assert!(
-        !arm.contains("poseidon4_hash") && !arm.contains("self.memory"),
-        "the reserved VerifyInference arm must not read memory or hash a \
-         window; the AIR refuses any proof of this opcode"
+        air.contains("COL_IS_VERIFY_INFERENCE"),
+        "AIR must retain the VerifyInference constraint wiring"
     );
 }
 
-/// The README must not advertise verified inference while the path is closed.
+/// The README must stay aligned with `FULL_AI_STARK_VERIFICATION_LIVE` and link
+/// to `docs/AI_VERIFICATION_STATUS.md`.
 #[test]
 fn readme_does_not_claim_verified_inference() {
     let readme = read("README.md");
     assert!(
-        !readme.contains("inference verifiable on-chain"),
-        "README claims verifiable on-chain inference again; the executor still \
-         rejects proof-required models"
+        readme.contains("FULL_AI_STARK_VERIFICATION_LIVE")
+            || readme.contains("STARK verification for registered proof-required models")
+            || !readme.contains("inference verifiable on-chain"),
+        "README inference claim diverged from live AI STARK verification state"
     );
     assert!(
         readme.contains("docs/AI_VERIFICATION_STATUS.md"),

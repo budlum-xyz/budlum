@@ -306,7 +306,8 @@ pub(crate) mod fixture {
         ) -> RawEndpointEvent {
             let mut d = sender.to_vec();
             d.extend_from_slice(&nonce.to_le_bytes());
-            d.extend_from_slice(&(calls.len() as u32).to_le_bytes());
+            let calls_len = u32::try_from(calls.len()).unwrap_or(u32::MAX);
+            d.extend_from_slice(&calls_len.to_le_bytes());
             d.extend_from_slice(calls);
             event(endpoint, HOME_CALL_EVENT, d)
         }
@@ -355,7 +356,8 @@ mod tests {
         let mut data = discriminator(HOME_CALL_EVENT).to_vec();
         data.extend([1u8; 32]);
         data.extend(0u64.to_le_bytes());
-        data.extend(((MAX_CALL_BYTES + 1) as u32).to_le_bytes());
+        let len_plus_one = u32::try_from(MAX_CALL_BYTES + 1).unwrap();
+        data.extend(len_plus_one.to_le_bytes());
         data.extend(vec![0u8; MAX_CALL_BYTES + 1]);
         let raw = RawEndpointEvent {
             emitter: vec![2; 32],

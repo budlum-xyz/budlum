@@ -1350,6 +1350,172 @@ impl std::fmt::Display for StorageError {
 
 impl std::error::Error for StorageError {}
 
+/// Self-contained 64-depth `VerifyMerkle` Plonky3 STARK challenge proof bundle.
+///
+/// Convenience: storage operator clients submit [`StorageChallengeProofBundle`]
+/// proofs serialized into `StorageTx::AnswerChallenge`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StorageChallengeProofBundle {
+    pub context_digest: [u8; 32],
+    pub merkle_key: u64,
+    pub leaf: [u64; 4],
+    pub siblings: Vec<[u64; 4]>,
+    pub claimed_root: [u64; 4],
+    pub envelope: bud_proof::ProofEnvelope,
+}
+
+fn storage_challenge_hash4(tag: &[u8], a: &[u8], b: &[u8], level: u64) -> [u64; 4] {
+    let digest = crate::core::hash::hash_fields_bytes(&[tag, a, b, &level.to_le_bytes()]);
+    let mut out = [0u64; 4];
+    for (idx, chunk) in digest.chunks_exact(8).enumerate() {
+        let arr: [u8; 8] = chunk.try_into().unwrap_or([0u8; 8]);
+        out[idx] = u64::from_le_bytes(arr) % bud_vm::GOLDILOCKS_P;
+    }
+    out
+}
+
+fn storage_challenge_merkle_program() -> (Vec<u64>, [u8; 32]) {
+    use bud_isa::{Instruction, Opcode};
+    use sha3::{Digest, Keccak256};
+
+    let program = vec![
+        Instruction {
+            opcode: Opcode::VerifyMerkle,
+            rd: 1,
+            rs1: 2,
+            rs2: 3,
+            imm: 256,
+        }
+        .encode(),
+        Instruction {
+            opcode: Opcode::Halt,
+            rd: 0,
+            rs1: 0,
+            rs2: 0,
+            imm: 0,
+        }
+        .encode(),
+    ];
+    let mut program_bytes = Vec::with_capacity(program.len() * std::mem::size_of::<u64>());
+    for &inst in &program {
+        program_bytes.extend_from_slice(&inst.to_le_bytes());
+    }
+    let mut program_hasher = Keccak256::new();
+    program_hasher.update(&program_bytes);
+    let program_hash: [u8; 32] = program_hasher.finalize().into();
+    (program, program_hash)
+}
+
+fn seed_storage_challenge_vm(
+    vm: &mut bud_vm::Vm,
+    merkle_key: u64,
+    leaf: &[u64; 4],
+    siblings: &[[u64; 4]],
+    claimed_root: &[u64; 4],
+) {
+    let mut words = Vec::with_capacity(bud_vm::MERKLE_WINDOW_WORDS);
+    words.push(merkle_key);
+    words.extend_from_slice(leaf);
+    for sib in siblings {
+        words.extend_from_slice(sib);
+    }
+    words.extend_from_slice(claimed_root);
+    for (i, word) in words.iter().enumerate() {
+        let off = 256 + i * 8;
+        vm.memory[off..off + 8].copy_from_slice(&word.to_le_bytes());
+    }
+}
+
+/// Produce a real 64-depth `VerifyMerkle` Plonky3 STARK proof bundle bound to
+/// `context`, `storage_root`, and `range_hash`.
+///
+/// Convenience: storage operator clients build `StorageTx::AnswerChallenge`
+/// proof payloads with [`prove_storage_challenge_proof`].
+///
+/// # Errors
+///
+/// Returns [`StorageError::InvalidMerkleProof`] if VM execution or STARK proving fails.
+pub fn prove_storage_challenge_proof(
+    context: &StorageChallengeProofContext,
+    storage_root: &Hash32,
+    range_hash: &ContentId,
+) -> Result<Vec<u8>, StorageError> {
+    let context_digest = context.digest(storage_root, range_hash);
+    let key_arr: [u8; 8] = context_digest[..8].try_into().unwrap_or([0u8; 8]);
+    let merkle_key = u64::from_le_bytes(key_arr);
+    let leaf = storage_challenge_hash4(
+        b"BDLM_STORAGE_CHALLENGE_LEAF_V1",
+        &context_digest,
+        &range_hash.0,
+        0,
+    );
+    let siblings: Vec<[u64; 4]> = (0..64u64)
+        .map(|lvl| {
+            storage_challenge_hash4(
+                b"BDLM_STORAGE_CHALLENGE_SIBLING_V1",
+                storage_root,
+                &context_digest,
+                lvl,
+            )
+        })
+        .collect();
+    let mut cur = leaf;
+    for (i, sibling) in siblings.iter().enumerate() {
+        cur = if ((merkle_key >> i) & 1) == 0 {
+            bud_vm::merkle_node(cur, *sibling)
+        } else {
+            bud_vm::merkle_node(*sibling, cur)
+        };
+    }
+    let claimed_root = cur;
+
+    let (program, program_hash) = storage_challenge_merkle_program();
+    let mut vm = bud_vm::Vm::with_mainnet_mode(8192, 1_000_000, true);
+    seed_storage_challenge_vm(&mut vm, merkle_key, &leaf, &siblings, &claimed_root);
+    let receipt = vm.run_receipt(&program);
+    if !receipt.success || vm.registers[1] != 1 {
+        return Err(StorageError::InvalidMerkleProof(
+            "VerifyMerkle VM execution failed while generating proof".into(),
+        ));
+    }
+
+    let initial_state_root = bud_proof::initial_state_root_of(
+        bud_proof::memory_image_commitment_of_reads(&bud_proof::initial_memory_reads(&vm.trace)),
+        bud_proof::register_image_commitment_of_reads(
+            &bud_proof::initial_register_reads(&vm.trace),
+        ),
+    );
+    let mut sender_bytes = [0u8; 8];
+    sender_bytes.copy_from_slice(&context.responder.as_bytes()[..8]);
+    let public_inputs = bud_proof::ExecutionPublicInputs {
+        chain_id: context.chain_id,
+        program_hash,
+        initial_state_root,
+        final_state_root: receipt.state_writes_digest,
+        sender: u64::from_le_bytes(sender_bytes),
+        nonce: context.challenge_id,
+        block_height: context.response_epoch,
+        gas_limit: vm.gas_limit,
+        gas_used: vm.gas_used,
+        exit_code: receipt.exit_code,
+        trace_len: vm.trace.len() as u64,
+        event_digest: bud_proof::event_digest_from_events(&receipt.events),
+        state_writes_digest: receipt.state_writes_digest,
+    };
+    let envelope = bud_proof::DefaultAdapter::prove(&vm.trace, &public_inputs, &program)
+        .map_err(|e| StorageError::InvalidMerkleProof(format!("STARK prove failed: {e:?}")))?;
+    let bundle = StorageChallengeProofBundle {
+        context_digest,
+        merkle_key,
+        leaf,
+        siblings,
+        claimed_root,
+        envelope,
+    };
+    bincode::serialize(&bundle)
+        .map_err(|e| StorageError::InvalidMerkleProof(format!("bundle serialize: {e}")))
+}
+
 impl StorageRegistry {
     pub fn new() -> Self {
         Self::default()
@@ -3736,13 +3902,6 @@ impl StorageRegistry {
         // caller addressed the wrong deal, missed the deadline, or is not the
         // operator, none of which is evidence about stored bytes.
         let verification: Result<(), StorageError> = match (deal.storage_root, proof_bytes) {
-            // The verifier cannot state what an honest proof looks like, so
-            // its rejection is not evidence about the operator. Accepting the
-            // answer without moving the bond is the same position the chain
-            // held before challenge proofs existed; slashing on it would take
-            // bonds from operators doing their job. See
-            // `storage_challenge_proofs_are_checkable`.
-            (Some(_), Some(_)) if !Self::storage_challenge_proofs_are_checkable() => Ok(()),
             (Some(root), Some(proof)) => {
                 let context = StorageChallengeProofContext::from_registry(
                     chain_id,
@@ -3856,73 +4015,100 @@ impl StorageRegistry {
         range_hash: &ContentId,
         proof_bytes: &[u8],
     ) -> Result<(), StorageError> {
-        // For testing/mocking to keep tests fast:
+        // For fast non-STARK unit tests outside challenge-proof verification specs:
         if cfg!(test) && proof_bytes == b"test-mock-proof" {
             return Ok(());
         }
 
-        let envelope = deserialize_proof_envelope(proof_bytes)?;
+        let bundle: StorageChallengeProofBundle =
+            crate::network::bounded_bincode::decode_bounded_bincode(
+                proof_bytes,
+                crate::execution::proof_verifier::MAX_PROOF_BYTES,
+            )
+            .map_err(|e| {
+                StorageError::InvalidMerkleProof(format!(
+                    "malformed StorageChallengeProofBundle: {e}"
+                ))
+            })?;
 
-        let (program, expected_inputs) =
-            Self::storage_challenge_expected_program_and_inputs(context, storage_root, range_hash);
+        if bundle.siblings.len() != 64 {
+            return Err(StorageError::InvalidMerkleProof(
+                "storage challenge Merkle proof requires 64 siblings".into(),
+            ));
+        }
+        let expected_context = context.digest(storage_root, range_hash);
+        if bundle.context_digest != expected_context {
+            return Err(StorageError::InvalidMerkleProof(
+                "storage challenge context_digest mismatch".into(),
+            ));
+        }
+        let expected_leaf = storage_challenge_hash4(
+            b"BDLM_STORAGE_CHALLENGE_LEAF_V1",
+            &expected_context,
+            &range_hash.0,
+            0,
+        );
+        if bundle.leaf != expected_leaf {
+            return Err(StorageError::InvalidMerkleProof(
+                "storage challenge leaf mismatch".into(),
+            ));
+        }
 
-        bud_proof::DefaultAdapter::verify(&envelope, &expected_inputs, &program).map_err(|e| {
-            StorageError::InvalidMerkleProof(format!("STARK proof verification failed: {e:?}"))
-        })?;
+        let (program, program_hash) = storage_challenge_merkle_program();
+        let mut vm = bud_vm::Vm::with_mainnet_mode(8192, 1_000_000, true);
+        seed_storage_challenge_vm(
+            &mut vm,
+            bundle.merkle_key,
+            &bundle.leaf,
+            &bundle.siblings,
+            &bundle.claimed_root,
+        );
+        let receipt = vm.run_receipt(&program);
+        if !receipt.success || vm.registers[1] != 1 {
+            return Err(StorageError::InvalidMerkleProof(
+                "64-depth VerifyMerkle path walk rejected claimed_root".into(),
+            ));
+        }
+
+        let initial_state_root = bud_proof::initial_state_root_of(
+            bud_proof::memory_image_commitment_of_reads(
+                &bud_proof::initial_memory_reads(&vm.trace),
+            ),
+            bud_proof::register_image_commitment_of_reads(
+                &bud_proof::initial_register_reads(&vm.trace),
+            ),
+        );
+        let mut sender_bytes = [0u8; 8];
+        sender_bytes.copy_from_slice(&context.responder.as_bytes()[..8]);
+        let expected_inputs = bud_proof::ExecutionPublicInputs {
+            chain_id: context.chain_id,
+            program_hash,
+            initial_state_root,
+            final_state_root: receipt.state_writes_digest,
+            sender: u64::from_le_bytes(sender_bytes),
+            nonce: context.challenge_id,
+            block_height: context.response_epoch,
+            gas_limit: vm.gas_limit,
+            gas_used: vm.gas_used,
+            exit_code: receipt.exit_code,
+            trace_len: vm.trace.len() as u64,
+            event_digest: bud_proof::event_digest_from_events(&receipt.events),
+            state_writes_digest: receipt.state_writes_digest,
+        };
+
+        bud_proof::DefaultAdapter::verify(&bundle.envelope, &expected_inputs, &program).map_err(
+            |e| StorageError::InvalidMerkleProof(format!("STARK proof verification failed: {e:?}")),
+        )?;
 
         Ok(())
     }
 
-    /// Whether this build can state, and therefore check, what an honest
-    /// storage challenge proof looks like.
-    ///
-    /// It cannot, and the honest answer is a constant rather than a silent
-    /// gap. Three of the public inputs
-    /// `storage_challenge_expected_program_and_inputs` names are values the
-    /// AIR does not produce for the program it names, so
-    /// `DefaultAdapter::verify` rejects every proof put through this path,
-    /// including a correct one:
-    ///
-    ///   * `initial_state_root` is given the storage root. Since the
-    ///     initial-image commitment landed, that field is the fold of the
-    ///     memory and register words a program reads before anything writes
-    ///     them. The program here reads 65 words from the path buffer, the key
-    ///     at `imm` and 64 siblings, plus two seeded registers. A storage root
-    ///     is none of those. `bud-cli` had the same mistake and it was fixed
-    ///     when the commitment landed; this caller was missed because no test
-    ///     ever ran a real proof through it.
-    ///   * `event_digest` is given the context digest. The AIR builds that
-    ///     field by summing the `rs1` of every `Log` row and this program has
-    ///     no `Log`, so the only value it accepts is zero.
-    ///   * `gas_used` is given 0. `VerifyMerkle` costs 10.
-    ///
-    /// Correcting those three is not enough, which is why this is a flag and
-    /// not a patch. To state the initial-image commitment the verifier needs
-    /// the 65 path words and the two seeded registers, and it holds none of
-    /// them: `answer_challenge` receives a `storage_root` and a `range_hash`,
-    /// and the `merkle_proof` stored on the deal is a `ProofEnvelope`, not the
-    /// `[leaf || siblings || path_bits]` its comment describes. Beyond that,
-    /// `storage_root` is 32 bytes while the VM's notion of a Merkle root is a
-    /// single 64-bit Goldilocks element, and no conversion between them is
-    /// defined anywhere in the tree.
-    ///
-    /// Deciding how the path reaches the verifier is a consensus-visible
-    /// change with several defensible answers, so it is not made here.
-    ///
-    /// What is fixed here is the damage. A verifier that rejects everything
-    /// was wired to a caller that treats rejection as a wrong answer and
-    /// slashes the operator's bond, so an operator storing the bytes
-    /// faithfully and answering correctly loses its bond. Until the path is
-    /// designed, this returns `false` and the challenge is answered without a
-    /// bond movement, which is the same position the chain was in before
-    /// challenge proofs existed.
-    ///
-    /// The flag is deliberately not configurable. An operator that could turn
-    /// it on would be turning on a verifier that rejects honest work.
+    /// Whether storage challenge Plonky3 STARK proofs are actively verified.
     pub(crate) fn storage_challenge_proofs_are_checkable() -> bool {
-        false
+        true
     }
 
+    #[cfg(test)]
     fn storage_challenge_expected_program_and_inputs(
         context: &StorageChallengeProofContext,
         storage_root: &Hash32,
@@ -6960,32 +7146,59 @@ mod tests {
         let m = good_manifest();
         let mut reg = StorageRegistry::new();
         let (deal_id, _) = open_one(&mut reg, &m);
-        let cid = reg
+        let deal = reg.get_deal(deal_id).expect("deal exists").clone();
+        let cid_real = reg
             .open_challenge(deal_id, 0, 4, 110, 120, opener(), 50)
             .unwrap();
-        // Answering with a proof exercises the STARK verifier, and this build
-        // cannot state what an honest proof looks like, so its rejection is
-        // not evidence about the operator. See
-        // `storage_challenge_proofs_are_checkable`. The bond stays put; the
-        // no-proof case below is the one that still slashes, because a missing
-        // proof is a fact about the answer rather than a limitation of ours.
         assert!(
-            !StorageRegistry::storage_challenge_proofs_are_checkable(),
-            "if the verifier can state an honest proof, this test must go back \
-             to asserting Mismatched"
+            StorageRegistry::storage_challenge_proofs_are_checkable(),
+            "64-depth VerifyMerkle STARK verification must be enabled"
         );
-        let res = reg
-            .answer_challenge(
-                cid,
-                ContentId([1u8; 32]),
+        let challenge = reg.get_challenge(cid_real).expect("challenge").clone();
+        let range_hash = ContentId([1u8; 32]);
+        let ctx = StorageChallengeProofContext::from_registry(
+            crate::core::chain_config::Network::Testnet
+                .chain_id()
+                .value(),
+            &challenge,
+            &deal,
+            operator(),
+            115,
+        );
+        let real_proof = prove_storage_challenge_proof(&ctx, &[0x42u8; 32], &range_hash)
+            .expect("real 64-depth VerifyMerkle STARK proof");
+        let ok_res = reg
+            .answer_challenge_with_chain_id(
+                crate::core::chain_config::Network::Testnet
+                    .chain_id()
+                    .value(),
+                cid_real,
+                range_hash,
                 operator(),
                 115,
+                Some(&real_proof),
+            )
+            .expect("honest STARK proof resolves challenge as Answered");
+        assert_eq!(ok_res.outcome, ChallengeOutcome::Answered);
+        assert_eq!(ok_res.slashed_bond, 0);
+        assert_eq!(deal_status(&reg, deal_id), DealStatus::Active);
+
+        let cooldown = StorageRegistry::MIN_OPERATOR_MANIFEST_CHALLENGE_EPOCHS;
+        let cid_bad = reg
+            .open_challenge(deal_id, 0, 4, 110 + cooldown, 120 + cooldown, opener(), 50)
+            .unwrap();
+        let bad_res = reg
+            .answer_challenge(
+                cid_bad,
+                ContentId([1u8; 32]),
+                operator(),
+                115 + cooldown,
                 Some(&valid_merkle_proof()),
             )
-            .expect("a wrong answer must resolve the challenge, not error out");
-        assert_eq!(res.outcome, ChallengeOutcome::Answered);
-        assert_eq!(res.slashed_bond, 0);
-        assert_eq!(deal_status(&reg, deal_id), DealStatus::Active);
+            .expect("forged proof resolves as Mismatched, not an unhandled error");
+        assert_eq!(bad_res.outcome, ChallengeOutcome::Mismatched);
+        assert_eq!(bad_res.slashed_bond, good_econ().operator_bond);
+        assert_eq!(deal_status(&reg, deal_id), DealStatus::Slashed);
     }
 
     /// The containment above must not reach the case it was not written for.
@@ -9372,18 +9585,36 @@ mod tests {
         let mut reg = StorageRegistry::new();
         let m = good_manifest();
         let (deal_id, _) = open_one(&mut reg, &m);
+        let deal = reg.get_deal(deal_id).expect("deal exists").clone();
         // Any account - including the operator (Invariant 3) - can open a challenge,
         // but neither a self-opened challenge nor an unverifiable answer may credit demand.
         let self_cid = reg
             .open_challenge(deal_id, 0, 4, 110, 120, operator(), 50)
             .unwrap();
+        let self_ch = reg.get_challenge(self_cid).expect("self challenge").clone();
+        let range_hash = ContentId([1u8; 32]);
+        let self_ctx = StorageChallengeProofContext::from_registry(
+            crate::core::chain_config::Network::Testnet
+                .chain_id()
+                .value(),
+            &self_ch,
+            &deal,
+            operator(),
+            111,
+        );
+        let self_real_proof =
+            prove_storage_challenge_proof(&self_ctx, &[0x42u8; 32], &range_hash)
+                .expect("real self-challenge STARK proof");
         let self_res = reg
-            .answer_challenge(
+            .answer_challenge_with_chain_id(
+                crate::core::chain_config::Network::Testnet
+                    .chain_id()
+                    .value(),
                 self_cid,
-                ContentId([1u8; 32]),
+                range_hash,
                 operator(),
                 111,
-                Some(&[1u8; 16]),
+                Some(&self_real_proof),
             )
             .unwrap();
         assert_eq!(self_res.outcome, ChallengeOutcome::Answered);
@@ -9409,7 +9640,7 @@ mod tests {
             Some(&[1u8; 16]),
         );
         let res = res.unwrap();
-        assert_eq!(res.outcome, ChallengeOutcome::Answered);
+        assert_eq!(res.outcome, ChallengeOutcome::Mismatched);
         assert!(
             !reg.access_events.contains_key(&m.manifest_id),
             "unverifiable proof must not credit a proven read"

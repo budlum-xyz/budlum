@@ -1,11 +1,16 @@
 //! Solidity ABI codec for the UEL Universal Call precompile at
-//! `0x000000000000000000000000000000000000B001` (`Section 8.7.2`).
+//! `0x000000000000000000000000000000000000B001` (`Section 8.7.2`) and the
+//! Universal Object Layer precompile at `0x000000000000000000000000000000000000B002`
+//! (`Section 9.4`).
 
-use revm::primitives::{address, Address};
+use revm::primitives::{address, keccak256, Address};
 
 /// Canonical EVM precompile address for cross-EE Universal Calls (`0x...B001`).
 pub const UNIVERSAL_CALL_PRECOMPILE: Address =
     address!("0x000000000000000000000000000000000000b001");
+
+/// Canonical EVM precompile address for Universal Object Layer (`0x...B002`).
+pub const UOL_PRECOMPILE: Address = address!("0x000000000000000000000000000000000000b002");
 
 /// `keccak256("call(uint8,bytes,bytes,uint256,uint64)")[..4]`.
 pub const SEL_UNIVERSAL_CALL: [u8; 4] = [0x25, 0xd4, 0xd8, 0x1b];
@@ -15,6 +20,12 @@ pub const SEL_UNIVERSAL_STATIC_CALL: [u8; 4] = [0xf9, 0xe4, 0x11, 0xde];
 
 /// Base BGU cost charged for invoking the `0x...B001` precompile skeleton.
 pub const PRECOMPILE_BASE_GAS: u64 = 500;
+
+/// Base BGU cost charged for invoking the `0x...B002` UOL precompile.
+pub const UOL_PRECOMPILE_GAS: u64 = 2_600;
+
+/// Host namespace storing canonical UOL balances, asset holders, and offers.
+pub const NS_UEL_ASSETS: &str = "uel/assets";
 
 /// Parsed invocation of `IBudlumUniversalPrecompile`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -179,4 +190,165 @@ pub fn encode_universal_call_input(
     body[input_offset + 24..input_offset + 32].copy_from_slice(&(input.len() as u64).to_be_bytes());
     body[input_offset + 32..input_offset + 32 + input.len()].copy_from_slice(input);
     out
+}
+
+/// Decoded invocation targeting `UOL_PRECOMPILE` (`0x...B002`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DecodedUolCall {
+    BalanceOf {
+        class_id: [u8; 32],
+        holder: Vec<u8>,
+    },
+    HolderOf {
+        asset_id: [u8; 32],
+    },
+    Transfer {
+        class_id: [u8; 32],
+        asset_id: [u8; 32],
+        to: Vec<u8>,
+        amount: u128,
+    },
+    Offer {
+        class_id: [u8; 32],
+        asset_id: [u8; 32],
+        taker: Vec<u8>,
+        payment: Vec<u8>,
+        amount: u128,
+        expiry: u64,
+    },
+    Accept {
+        offer_id: [u8; 32],
+    },
+}
+
+/// Stored UOL precompile offer record.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UolOfferRecord {
+    pub maker: [u8; 20],
+    pub class_id: [u8; 32],
+    pub asset_id: [u8; 32],
+    pub taker: Vec<u8>,
+    pub payment: Vec<u8>,
+    pub amount: u128,
+    pub expiry: u64,
+}
+
+#[must_use]
+pub fn uol_selector(sig: &str) -> [u8; 4] {
+    let d: [u8; 32] = keccak256(sig.as_bytes()).into();
+    [d[0], d[1], d[2], d[3]]
+}
+
+#[must_use]
+pub fn decode_uol_call(calldata: &[u8]) -> Option<DecodedUolCall> {
+    let sel = calldata.get(..4)?;
+    let args = calldata.get(4..)?;
+    if sel == uol_selector("balanceOf(bytes32,bytes)") {
+        let mut class_id = [0u8; 32];
+        class_id.copy_from_slice(read_word(args, 0)?);
+        let holder = read_dyn_bytes(args, 32)?;
+        return Some(DecodedUolCall::BalanceOf { class_id, holder });
+    }
+    if sel == uol_selector("holderOf(bytes32)") {
+        let mut asset_id = [0u8; 32];
+        asset_id.copy_from_slice(read_word(args, 0)?);
+        return Some(DecodedUolCall::HolderOf { asset_id });
+    }
+    if sel == uol_selector("transfer(bytes32,bytes32,bytes,uint128)") {
+        let mut class_id = [0u8; 32];
+        class_id.copy_from_slice(read_word(args, 0)?);
+        let mut asset_id = [0u8; 32];
+        asset_id.copy_from_slice(read_word(args, 32)?);
+        let to = read_dyn_bytes(args, 64)?;
+        let amount = read_u128_word(args, 96)?;
+        return Some(DecodedUolCall::Transfer {
+            class_id,
+            asset_id,
+            to,
+            amount,
+        });
+    }
+    if sel == uol_selector("offer(bytes32,bytes32,bytes,bytes,uint128,uint64)") {
+        let mut class_id = [0u8; 32];
+        class_id.copy_from_slice(read_word(args, 0)?);
+        let mut asset_id = [0u8; 32];
+        asset_id.copy_from_slice(read_word(args, 32)?);
+        let taker = read_dyn_bytes(args, 64)?;
+        let payment = read_dyn_bytes(args, 96)?;
+        let amount = read_u128_word(args, 128)?;
+        let expiry = read_u64_word(args, 160)?;
+        return Some(DecodedUolCall::Offer {
+            class_id,
+            asset_id,
+            taker,
+            payment,
+            amount,
+            expiry,
+        });
+    }
+    if sel == uol_selector("accept(bytes32)") {
+        let mut offer_id = [0u8; 32];
+        offer_id.copy_from_slice(read_word(args, 0)?);
+        return Some(DecodedUolCall::Accept { offer_id });
+    }
+    None
+}
+
+#[must_use]
+pub fn encode_uol_offer_bytes(offer: &UolOfferRecord) -> Vec<u8> {
+    let mut out = Vec::with_capacity(116 + offer.taker.len() + offer.payment.len());
+    out.extend_from_slice(&offer.maker);
+    out.extend_from_slice(&offer.class_id);
+    out.extend_from_slice(&offer.asset_id);
+    out.extend_from_slice(&offer.amount.to_le_bytes());
+    out.extend_from_slice(&offer.expiry.to_le_bytes());
+    let taker_len = u32::try_from(offer.taker.len()).unwrap_or(u32::MAX);
+    out.extend_from_slice(&taker_len.to_le_bytes());
+    out.extend_from_slice(&offer.taker);
+    let pay_len = u32::try_from(offer.payment.len()).unwrap_or(u32::MAX);
+    out.extend_from_slice(&pay_len.to_le_bytes());
+    out.extend_from_slice(&offer.payment);
+    out
+}
+
+#[must_use]
+pub fn decode_uol_offer_bytes(raw: &[u8]) -> Option<UolOfferRecord> {
+    if raw.len() < 116 {
+        return None;
+    }
+    let mut maker = [0u8; 20];
+    maker.copy_from_slice(raw.get(..20)?);
+    let mut class_id = [0u8; 32];
+    class_id.copy_from_slice(raw.get(20..52)?);
+    let mut asset_id = [0u8; 32];
+    asset_id.copy_from_slice(raw.get(52..84)?);
+    let mut amt_arr = [0u8; 16];
+    amt_arr.copy_from_slice(raw.get(84..100)?);
+    let amount = u128::from_le_bytes(amt_arr);
+    let mut exp_arr = [0u8; 8];
+    exp_arr.copy_from_slice(raw.get(100..108)?);
+    let expiry = u64::from_le_bytes(exp_arr);
+    let mut tl_arr = [0u8; 4];
+    tl_arr.copy_from_slice(raw.get(108..112)?);
+    let taker_len = usize::try_from(u32::from_le_bytes(tl_arr)).ok()?;
+    let taker_end = 112usize.checked_add(taker_len)?;
+    let taker = raw.get(112..taker_end)?.to_vec();
+    let mut pl_arr = [0u8; 4];
+    let pl_end = taker_end.checked_add(4)?;
+    pl_arr.copy_from_slice(raw.get(taker_end..pl_end)?);
+    let pay_len = usize::try_from(u32::from_le_bytes(pl_arr)).ok()?;
+    let pay_end = pl_end.checked_add(pay_len)?;
+    if raw.len() != pay_end {
+        return None;
+    }
+    let payment = raw.get(pl_end..pay_end)?.to_vec();
+    Some(UolOfferRecord {
+        maker,
+        class_id,
+        asset_id,
+        taker,
+        payment,
+        amount,
+        expiry,
+    })
 }

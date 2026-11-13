@@ -14,7 +14,7 @@ hangi kesinlik kanıtının geçerli olduğunu sorar. Böylece değer, bir arac�
 alanlar arasında hareket eder.
 
 [![CI](https://github.com/budlum-xyz/budlum/actions/workflows/ci.yml/badge.svg?branch=main&event=push)](https://github.com/budlum-xyz/budlum/actions/workflows/ci.yml?query=branch%3Amain+event%3Apush)
-[![Tests](https://img.shields.io/badge/tests-5426%20lib-blue)](https://github.com/budlum-xyz/budlum/actions/workflows/ci.yml?query=branch%3Amain+event%3Apush)
+[![Tests](https://img.shields.io/badge/tests-5444%20lib-blue)](https://github.com/budlum-xyz/budlum/actions/workflows/ci.yml?query=branch%3Amain+event%3Apush)
 [![Rust](https://img.shields.io/badge/rust-1.97.1-orange?logo=rust)](rust-toolchain.toml)
 [![License](https://img.shields.io/badge/license-PolyForm%20Shield%201.0.0-blue)](LICENSE.md)
 
@@ -56,7 +56,7 @@ alanlar arasında hareket eder.
 | **Köprü riski.** Emanetçi ve çoklu imza köprüleri milyarlarca dolar kaybettirdi; arızalar neredeyse her zaman eksik doğrulamadan kaynaklandı, kırık kriptografiden değil. | Her mint işleminin sınırlı bir kanıtı yeniden hesapladığı ve alacak yazmadan önce yük özetini `(asset_id, amount)` değerlerinden yeniden türettiği bir `lock -> mint -> burn -> unlock` yaşam döngüsü. |
 | **Kuantum ufku.** Ed25519 ve ECDSA'nın, bugün başlatılan bir zincirin ömrü içinde kırılabilir olması bekleniyor. | Melez kesinlik: BLS12-381 toplu imzaların yanında kuantum sonrası bir şema (varsayılan ML-DSA-65 - FIPS 204 NIST nihai; eski Dilithium5 yalnızca göç için mevcut). <!-- claim:L-FINALITY-01 --> |
 | **Kullanıcı verisinin operatör emanetinde olması.** Depolaması, RPC'si ve çıkarımı tek bir şirkette sonlanan "merkeziyetsiz" ağlar. | Yönetici anahtarı yok, duraklatma kancası yok, beyaz liste yok. Depolama, RPC ve yapay zeka uç noktaları herhangi bir düğümde çalışır; katılım izinle değil, teminatla kapılanır. |
-| **Doğrulanamayan zincir dışı hesaplama.** Arkasında hiçbir şey olmadan olgu diye sunulan yapay zeka çıktısı. | Yürütmenin STARK kanıtlarını üreten, ağaç içi bir zkVM (BudZero). Çıkarım kanıtı *doğrulaması* henüz etkin değildir; işlem yolu doğrulanmamış bir sonuca güvenmek yerine [kapalı biçimde başarısız olur](docs/AI_VERIFICATION_STATUS.md). |
+| **Doğrulanamayan zincir dışı hesaplama.** Arkasında hiçbir şey olmadan olgu diye sunulan yapay zeka çıktısı. | Kayıtlı `require_execution_proof` modelleri için zincir, model mimarisi, ağırlık özeti ve gönderici bağlamına bağlı Plonky3 STARK yürütme kanıtları üreten ve doğrulayan ağaç içi zkVM (BudZero) ([durum ayrıntıları](docs/AI_VERIFICATION_STATUS.md)). |
 
 **Veri egemenliği değişmezi.** Ağdaki hiçbir kritik işlev, Budlum ekibinin işlettiği bir
 servise bağlı değildir. Bu bir değer beyanı değil, test paketinin ve CI kapılarının

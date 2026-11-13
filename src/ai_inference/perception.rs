@@ -43,6 +43,11 @@ use crate::core::hash::hash_fields_bytes;
 use crate::pollen::AssetId;
 use crate::storage::content_id::ContentId;
 
+/// Alias for perception data-asset identifiers.
+///
+/// Convenience: exposed for AI perception request construction across callers.
+pub type DataAssetId = AssetId;
+
 /// The largest text input a model may be asked to read, in bytes.
 ///
 /// UTF-8 bytes rather than characters or tokens: bytes are the only unit both
