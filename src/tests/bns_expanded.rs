@@ -16,15 +16,17 @@ fn addr(b: u8) -> Address {
 fn test_bns_cost_scaling() {
     let reg = BnsRegistry::new();
 
-    // Short names cost more (multiplier 100)
-    let cost_short = reg.calculate_cost("abc", 1); // 100 * 100 * 1 = 10,000 (x2 for short) -> 20,000
+    // 3-char label (excluding `.bud`) pays 100x base cost
+    let cost_short = reg.calculate_cost("abc.bud", 1); // 100 * 100 * 1 = 10,000
 
-    // Medium names (multiplier 10)
-    let cost_med = reg.calculate_cost("abcde", 1); // 100 * 10 * 1 = 1,000 (x2 for med) -> 2,000
+    // 4..=6-char label pays 10x base cost
+    let cost_med = reg.calculate_cost("abcde.bud", 1); // 100 * 10 * 1 = 1,000
 
-    // Long names (multiplier 1)
-    let cost_long = reg.calculate_cost("abcdefgh", 1); // 100 * 1 * 1 = 100
+    // 7..=32-char label pays 1x base cost
+    let cost_long = reg.calculate_cost("abcdefgh.bud", 1); // 100 * 1 * 1 = 100
 
+    assert_eq!(cost_short, 100 * cost_long);
+    assert_eq!(cost_med, 10 * cost_long);
     assert!(cost_short > cost_med);
     assert!(cost_med > cost_long);
 }
@@ -93,11 +95,29 @@ fn test_bns_invalid_names() {
     let alice = addr(1);
 
     // Empty name
-    assert!(reg.register(String::new(), alice, 0, 100).is_err());
+    assert_eq!(
+        reg.register(String::new(), alice, 0, 100),
+        Err(BnsError::InvalidName)
+    );
 
-    // Name too long
-    let long_name = "a".repeat(256);
-    assert!(reg.register(long_name, alice, 0, 100).is_err());
+    // Suffixless label `bids` is rejected; `bids.bud` is accepted; `ab.bud` (< 3 label chars) is rejected.
+    assert_eq!(
+        reg.register("bids".to_string(), alice, 0, 100),
+        Err(BnsError::InvalidName)
+    );
+    assert_eq!(
+        reg.register("ab.bud".to_string(), alice, 0, 100),
+        Err(BnsError::InvalidName)
+    );
+    reg.register("bids.bud".to_string(), alice, 0, 100).unwrap();
+
+    // Label length excludes `.bud`: 32-char label passes, 33-char label fails.
+    reg.register(format!("{}.bud", "a".repeat(32)), alice, 0, 100)
+        .unwrap();
+    assert_eq!(
+        reg.register(format!("{}.bud", "a".repeat(33)), alice, 0, 100),
+        Err(BnsError::InvalidName)
+    );
 }
 
 #[test]
@@ -262,7 +282,7 @@ fn bns_renew_and_transfer_execute_through_consensus_doors() {
     let name = "term.bud".to_string();
     let duration = 100;
     let mut state = AccountState::new();
-    state.add_balance(&alice, 100_000);
+    state.add_balance(&alice, 500_000);
     state
         .bns_registry
         .register(name.clone(), alice, 0, duration)
@@ -285,7 +305,7 @@ fn bns_renew_and_transfer_execute_through_consensus_doors() {
         200,
         "renewal extends from the old expiry"
     );
-    assert_eq!(state.get_balance(&alice), 100_000 - cost - 1);
+    assert_eq!(state.get_balance(&alice), 500_000 - cost - 1);
     assert_eq!(state.get_nonce(&alice), 1);
 
     let mut transfer = lifecycle_tx(

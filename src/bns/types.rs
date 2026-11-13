@@ -25,8 +25,8 @@ pub struct NameRecord {
 }
 
 impl NameRecord {
-    /// Convenience: validated constructor enforcing the BNS character-set and
-    /// 3..=32 length rule, a non-zero owner, and a live expiry past
+    /// Convenience: validated constructor enforcing a single 3..=32 character
+    /// label plus `.bud` suffix, a non-zero owner, and a live expiry past
     /// `current_epoch`; wired through `BnsRegistry::register`.
     ///
     /// # Errors
@@ -38,11 +38,7 @@ impl NameRecord {
         current_epoch: u64,
         expires_at: u64,
     ) -> Result<Self, BnsError> {
-        let char_count = name.chars().count();
-        if !(3..=32).contains(&char_count)
-            || !crate::bns::registry::BnsRegistry::is_valid_name(&name)
-            || owner == Address::zero()
-        {
+        if !crate::bns::registry::BnsRegistry::is_valid_name(&name) || owner == Address::zero() {
             return Err(BnsError::InvalidName);
         }
         if expires_at <= current_epoch {
@@ -127,8 +123,21 @@ mod tests {
         let alice = Address::from([1u8; 32]);
         let valid = NameRecord::try_new(String::from("ayaz.bud"), alice, 5, 10);
         assert!(valid.is_ok());
+        assert!(NameRecord::try_new(format!("{}.bud", "a".repeat(32)), alice, 5, 10).is_ok());
         assert_eq!(
-            NameRecord::try_new(String::from("ab"), alice, 5, 10),
+            NameRecord::try_new(String::from("bids"), alice, 5, 10),
+            Err(BnsError::InvalidName)
+        );
+        assert_eq!(
+            NameRecord::try_new(String::from("ab.bud"), alice, 5, 10),
+            Err(BnsError::InvalidName)
+        );
+        assert_eq!(
+            NameRecord::try_new(format!("{}.bud", "a".repeat(33)), alice, 5, 10),
+            Err(BnsError::InvalidName)
+        );
+        assert_eq!(
+            NameRecord::try_new(String::from("sub.ayaz.bud"), alice, 5, 10),
             Err(BnsError::InvalidName)
         );
         assert_eq!(
