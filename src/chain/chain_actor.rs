@@ -503,6 +503,10 @@ pub enum ChainCommand {
         parent_name: String,
         response: oneshot::Sender<Option<std::collections::BTreeMap<String, Address>>>,
     },
+    BnsResolveBud3Content {
+        name: String,
+        response: oneshot::Sender<Option<crate::storage::bud3::content_ref::ContentRef>>,
+    },
     IdentityResolve {
         subject: Address,
         response: oneshot::Sender<Option<(crate::registry::IdentityRecord, u64)>>,
@@ -2340,6 +2344,18 @@ impl ChainHandle {
         rx.await.unwrap_or(None)
     }
 
+    pub async fn bns_resolve_bud3_content(
+        &self,
+        name: String,
+    ) -> Option<crate::storage::bud3::content_ref::ContentRef> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::BnsResolveBud3Content { name, response: tx })
+            .await;
+        rx.await.unwrap_or(None)
+    }
+
     pub async fn identity_resolve(
         &self,
         subject: Address,
@@ -3941,6 +3957,14 @@ impl ChainActor {
                             .state
                             .bns_registry
                             .list_subdomains(&parent_name, self.blockchain.state.epoch_index),
+                    );
+                }
+                ChainCommand::BnsResolveBud3Content { name, response } => {
+                    let _ = response.send(
+                        self.blockchain
+                            .state
+                            .bns_registry
+                            .resolve_bud3_content(&name, self.blockchain.state.epoch_index),
                     );
                 }
                 ChainCommand::IdentityResolve { subject, response } => {

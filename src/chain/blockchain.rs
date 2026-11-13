@@ -4200,6 +4200,34 @@ impl Blockchain {
                     Err(_) => reasons.push("invalid_bns_remove_subdomain_data".to_string()),
                 }
             }
+            crate::core::transaction::TransactionType::BnsSetBud3Content => {
+                if tx.amount != 0 || tx.to != Address::zero() {
+                    reasons.push("invalid_bns_bud3_content_shape".to_string());
+                }
+                match bincode::deserialize::<(
+                    String,
+                    Option<crate::storage::bud3::content_ref::ContentRef>,
+                )>(&tx.data)
+                {
+                    Ok((name, cref)) => {
+                        if !crate::bns::BnsRegistry::is_valid_name(&name) {
+                            reasons.push("invalid_bns_name".to_string());
+                        }
+                        if let Some(c) = cref {
+                            if crate::storage::bud3::content_ref::ContentRef::new(
+                                c.content_id,
+                                c.object_commitment,
+                                c.nft_id,
+                            )
+                            .is_err()
+                            {
+                                reasons.push("invalid_bns_bud3_content_ref".to_string());
+                            }
+                        }
+                    }
+                    Err(_) => reasons.push("invalid_bns_bud3_content_data".to_string()),
+                }
+            }
             crate::core::transaction::TransactionType::RegisterConsensusKeys(ref registration) => {
                 if tx.amount != 0 || tx.to != Address::zero() || !tx.data.is_empty() {
                     reasons.push("invalid_consensus_key_registration_shape".to_string());

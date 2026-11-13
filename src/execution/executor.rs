@@ -1633,6 +1633,48 @@ impl Executor {
                 })?;
                 sender.nonce = Self::checked_next_nonce(sender.nonce)?;
             }
+            TransactionType::BnsSetBud3Content => {
+                if tx.amount != 0 || tx.to != Address::zero() {
+                    return Err(BudlumError::validation(
+                        "bns_invalid_set_bud3_content",
+                        "BNS set B.U.D. 3.0 content carries no header amount or recipient",
+                    ));
+                }
+                if state.spendable_balance(&tx.from) < tx.fee {
+                    return Err(BudlumError::validation(
+                        "bns_vesting_locked",
+                        format!(
+                            "BNS set B.U.D. 3.0 content fee exceeds spendable balance: need {}, spendable {}",
+                            tx.fee,
+                            state.spendable_balance(&tx.from)
+                        ),
+                    ));
+                }
+                let (name, cref): (
+                    String,
+                    Option<crate::storage::bud3::content_ref::ContentRef>,
+                ) = bincode::deserialize(&tx.data)
+                    .map_err(|e| BudlumError::validation("bns_invalid_data", e.to_string()))?;
+
+                state
+                    .bns_registry
+                    .set_bud3_content(
+                        &name,
+                        &tx.from,
+                        &state.bud3_registry,
+                        cref,
+                        state.epoch_index,
+                    )
+                    .map_err(|e| {
+                        BudlumError::validation("bns_set_bud3_content_failed", e.to_string())
+                    })?;
+
+                let sender = state.get_or_create(&tx.from);
+                sender.balance = sender.balance.checked_sub(tx.fee).ok_or_else(|| {
+                    BudlumError::validation("balance_underflow", "balance underflow")
+                })?;
+                sender.nonce = Self::checked_next_nonce(sender.nonce)?;
+            }
             TransactionType::BnsRegisterSubdomain => {
                 if tx.amount != 0 || tx.to != Address::zero() {
                     return Err(BudlumError::validation(

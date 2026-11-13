@@ -21,6 +21,8 @@ pub struct NameRecord {
     pub storage_root_height: Option<u64>,
 
     pub content_id: Option<ContentId>,
+    #[serde(default)]
+    pub bud3_content: Option<crate::storage::bud3::content_ref::ContentRef>,
     pub subdomains: std::collections::BTreeMap<String, Address>,
     #[serde(default)]
     pub records: std::collections::BTreeMap<String, String>,
@@ -61,6 +63,7 @@ impl NameRecord {
             storage_domain_id: None,
             storage_root_height: None,
             content_id: None,
+            bud3_content: None,
             subdomains: std::collections::BTreeMap::new(),
             records: std::collections::BTreeMap::new(),
         }
@@ -93,6 +96,8 @@ pub struct BnsResolved {
     pub storage_root: Option<[u8; 32]>,
     pub storage_domain_id: Option<u32>,
     pub content_id: Option<ContentId>,
+    #[serde(default)]
+    pub bud3_content: Option<crate::storage::bud3::content_ref::ContentRef>,
     #[serde(default)]
     pub subdomains: std::collections::BTreeMap<String, Address>,
     #[serde(default)]

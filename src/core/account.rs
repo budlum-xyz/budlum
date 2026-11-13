@@ -2470,6 +2470,53 @@ impl AccountState {
                     return Err("BNS set content requires a live name owned by the signer".into());
                 }
             }
+            TransactionType::BnsSetBud3Content => {
+                if tx.amount != 0 || tx.to != Address::zero() {
+                    return Err(
+                        "BNS set B.U.D. 3.0 content requires zero amount and recipient".into(),
+                    );
+                }
+                let (name, cref): (
+                    String,
+                    Option<crate::storage::bud3::content_ref::ContentRef>,
+                ) = bincode::deserialize(&tx.data)
+                    .map_err(|e| format!("Invalid BNS B.U.D. 3.0 content data: {e}"))?;
+                if !crate::bns::BnsRegistry::is_valid_name(&name) {
+                    return Err("Invalid BNS name".into());
+                }
+                if !self
+                    .bns_registry
+                    .is_live_owned_by(&name, &tx.from, self.epoch_index)
+                {
+                    return Err(
+                        "BNS set B.U.D. 3.0 content requires a live name owned by the signer"
+                            .into(),
+                    );
+                }
+                if let Some(cref) = cref {
+                    let checked = crate::storage::bud3::content_ref::ContentRef::new(
+                        cref.content_id,
+                        cref.object_commitment,
+                        cref.nft_id,
+                    )
+                    .map_err(|e| format!("Invalid B.U.D. 3.0 ContentRef: {e:?}"))?;
+                    let obj = self
+                        .bud3_registry
+                        .object(&checked.object_commitment)
+                        .ok_or_else(|| "Unknown B.U.D. 3.0 object commitment".to_string())?;
+                    if obj.record.content_id != checked.content_id {
+                        return Err(
+                            "BNS ContentRef does not match registered object ContentId".into()
+                        );
+                    }
+                    if checked.content_id.kind
+                        == crate::storage::bud3::content_id::ContentIdKind::Sealed
+                        && checked.nft_id.is_none()
+                    {
+                        return Err("Sealed BNS target requires an NFT binding".into());
+                    }
+                }
+            }
             TransactionType::BnsRegisterSubdomain => {
                 if tx.amount != 0 || tx.to != Address::zero() {
                     return Err("BNS register subdomain requires zero amount and recipient".into());
