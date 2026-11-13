@@ -30,11 +30,15 @@ impl BnsRegistry {
     /// Maximum subdomains per name.
     pub const MAX_SUBDOMAINS_PER_NAME: usize = 1_000;
 
+    /// Required top-level suffix for every registrable BNS name.
+    const SUFFIX: &'static str = ".bud";
+
     /// One label: lowercase ASCII letters, digits and hyphens, not empty, no
     /// hyphen at either edge. The same table the browser name rule applies, so
     /// the registry cannot sell a name the rest of the stack refuses or one
     /// that differs from another only by case or by a look-alike letter.
-    fn is_valid_label(label: &str) -> bool {
+    #[must_use]
+    pub fn is_valid_label(label: &str) -> bool {
         !label.is_empty()
             && !label.starts_with('-')
             && !label.ends_with('-')
@@ -43,14 +47,22 @@ impl BnsRegistry {
                 .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
     }
 
-    /// A full name: dot separated valid labels (no empty label, so no leading,
-    /// trailing or doubled dot).
-    ///
-    /// Convenience: the full-name rule over `is_valid_label`, pub so
-    /// registration and resolution ask one definition; the label rule
-    /// is the half on the in-tree path today.
+    /// Extracts `<label>` from `<label>.bud` when `<label>` is a single valid
+    /// label of 3..=32 characters (counted excluding `.bud`).
+    fn bud_label(name: &str) -> Option<&str> {
+        let label = name.strip_suffix(Self::SUFFIX)?;
+        let char_count = label.chars().count();
+        if !(3..=32).contains(&char_count) || !Self::is_valid_label(label) {
+            return None;
+        }
+        Some(label)
+    }
+
+    /// A registrable BNS name: exactly one valid 3..=32 character label
+    /// followed by `.bud` (e.g. `ayaz.bud`).
+    #[must_use]
     pub fn is_valid_name(name: &str) -> bool {
-        name.split('.').all(Self::is_valid_label)
+        Self::bud_label(name).is_some()
     }
 
     pub fn new() -> Self {
@@ -61,23 +73,16 @@ impl BnsRegistry {
     }
 
     pub fn calculate_cost(&self, name: &str, duration: u64) -> u64 {
-        // Use char count instead of byte length for Unicode support
-        let char_count = name.chars().count();
+        let label = name.strip_suffix(Self::SUFFIX).unwrap_or(name);
+        let char_count = label.chars().count();
         let multiplier: u64 = match char_count {
             1..=3 => 100,
             4..=6 => 10,
             _ => 1,
         };
-        // Use saturating_mul to prevent overflow
-        let base = self
-            .base_cost
+        self.base_cost
             .saturating_mul(multiplier)
-            .saturating_mul(duration);
-        if multiplier >= 10 || duration >= 100 {
-            base.saturating_mul(2)
-        } else {
-            base
-        }
+            .saturating_mul(duration)
     }
 
     /// PARTIAL: allowed - the removal is an eviction that has already
@@ -95,9 +100,7 @@ impl BnsRegistry {
         current_epoch: u64,
         duration: u64,
     ) -> Result<(), BnsError> {
-        // Use char count instead of byte length for Unicode support
-        let char_count = name.chars().count();
-        if !(3..=32).contains(&char_count) || !Self::is_valid_name(&name) {
+        if !Self::is_valid_name(&name) {
             return Err(BnsError::InvalidName);
         }
         // Duration must be > 0. Zero-duration registration
@@ -564,5 +567,48 @@ mod tests {
         reg.set_content("portal.bud", &owner, cid, 2).unwrap();
         assert_eq!(reg.resolve_content("portal.bud", 5), Some(cid));
         assert_eq!(reg.resolve_content("portal.bud", 11), None);
+    }
+
+    #[test]
+    fn bud_suffix_and_label_bounds_are_enforced_and_tiered_on_label_length() {
+        let mut reg = BnsRegistry::new();
+        let owner = Address::from([0x41; 32]);
+
+        // Acceptance criteria: `bids` refused, `bids.bud` accepted, `ab.bud` refused.
+        assert_eq!(
+            reg.register("bids".into(), owner, 1, 10),
+            Err(BnsError::InvalidName)
+        );
+        assert_eq!(
+            reg.register("ab.bud".into(), owner, 1, 10),
+            Err(BnsError::InvalidName)
+        );
+        assert_eq!(
+            reg.register("sub.bids.bud".into(), owner, 1, 10),
+            Err(BnsError::InvalidName)
+        );
+        assert_eq!(
+            reg.register("bids.eth".into(), owner, 1, 10),
+            Err(BnsError::InvalidName)
+        );
+        reg.register("bids.bud".into(), owner, 1, 10).unwrap();
+
+        // Label length excludes `.bud`: 32-char label (36 total chars) passes; 33-char label fails.
+        let max_label = format!("{}.bud", "a".repeat(32));
+        let too_long_label = format!("{}.bud", "a".repeat(33));
+        reg.register(max_label, owner, 1, 10).unwrap();
+        assert_eq!(
+            reg.register(too_long_label, owner, 1, 10),
+            Err(BnsError::InvalidName)
+        );
+
+        // 3-character label pays 100x the standard (7+ char label) cost.
+        let three_char = reg.calculate_cost("abc.bud", 10);
+        let four_char = reg.calculate_cost("bids.bud", 10);
+        let long_char = reg.calculate_cost("abcdefgh.bud", 10);
+        assert_eq!(three_char, reg.base_cost * 100 * 10);
+        assert_eq!(four_char, reg.base_cost * 10 * 10);
+        assert_eq!(long_char, reg.base_cost * 10);
+        assert_eq!(three_char, long_char * 100);
     }
 }
