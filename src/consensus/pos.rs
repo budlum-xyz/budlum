@@ -576,7 +576,7 @@ impl PoSEngine {
         // Now we require at least one active, consensus-ready validator.
         if active_validators.is_empty() {
             return Err(ConsensusError(
-                "No active validators - PoS block production requires at least one                  consensus-ready validator. Bootstrap via genesis validator set or                  RegisterConsensusKeys transaction."
+                "No active validators - PoS block production requires at least one consensus-ready validator. Bootstrap via genesis validator set or RegisterConsensusKeys transaction."
                     .into(),
             ));
         }
@@ -1844,6 +1844,21 @@ mod tests {
             1,
             "a dropped block must not consume the evidence pool"
         );
+    }
+
+    #[test]
+    fn empty_validator_error_message_has_no_extra_spaces() {
+        let engine = PoSEngine::new(PoSConfig::default(), None);
+        let genesis = Block::genesis();
+        let mut candidate = Block::new(1, genesis.hash.clone(), vec![]);
+        let error = engine
+            .preview_block_with_chain(&mut candidate, &AccountState::new(), &[genesis])
+            .unwrap_err();
+        assert_eq!(
+            error.0,
+            "No active validators - PoS block production requires at least one consensus-ready validator. Bootstrap via genesis validator set or RegisterConsensusKeys transaction."
+        );
+        assert!(!error.0.contains("  "), "message has extra spaces");
     }
 
     /// A block below the local checkpoint is part of every candidate
