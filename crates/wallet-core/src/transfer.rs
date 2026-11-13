@@ -32,6 +32,49 @@ pub struct UnsignedTransfer {
 }
 
 impl UnsignedTransfer {
+    /// Construct an [`UnsignedTransfer`] targeting a `.bud` name ONLY after
+    /// verifying `proof` against `expected_bns_root` at `current_epoch`.
+    ///
+    /// # Errors
+    ///
+    /// Refuses malformed names, expired registrations, Merkle root mismatches,
+    /// or unauthenticated target substitution.
+    #[allow(clippy::too_many_arguments)]
+    pub fn to_verified_bud_recipient(
+        from: [u8; 32],
+        bud_name: &str,
+        claimed_target: &[u8; 32],
+        proof: &crate::bns::WalletBnsProof,
+        expected_bns_root: &[u8; 32],
+        current_epoch: u64,
+        amount: u64,
+        fee: u64,
+        max_fee: u64,
+        priority_fee: u64,
+        nonce: u64,
+        timestamp_ms: u128,
+        chain_id: u64,
+    ) -> Result<Self, String> {
+        let verified_to = crate::bns::verify_bns_recipient_proof(
+            bud_name,
+            claimed_target,
+            proof,
+            expected_bns_root,
+            current_epoch,
+        )?;
+        Ok(Self {
+            from,
+            to: verified_to,
+            amount,
+            fee,
+            max_fee,
+            priority_fee,
+            nonce,
+            timestamp_ms,
+            chain_id,
+        })
+    }
+
     /// The hash the node verifies the signature over (V5).
     #[must_use]
     pub fn signing_hash(&self) -> [u8; 32] {
