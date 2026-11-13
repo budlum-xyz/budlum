@@ -1371,3 +1371,49 @@ fn bns_grace_period_owner_rescue_resale_invalidation_and_owner_listing() {
     assert_eq!(alice_names_after[0].status, NameStatus::Active);
     assert_eq!(alice_names_after[0].expires_at, 80);
 }
+
+#[test]
+fn bns_per_name_merkle_proofs_verify_inclusion_absence_tampering_and_expiry() {
+    use crate::storage::ContentId;
+
+    let mut reg = BnsRegistry::new();
+    let alice = addr(1);
+    let bob = addr(2);
+    let carol = addr(3);
+
+    reg.register("alpha.bud".to_string(), alice, 1, 50).unwrap();
+    reg.register("gamma.bud".to_string(), bob, 1, 50).unwrap();
+    reg.register("omega.bud".to_string(), carol, 1, 10).unwrap();
+    reg.set_content("gamma.bud", &bob, ContentId([0xAB; 32]), 2)
+        .unwrap();
+
+    let expected_root = reg.root();
+
+    // 1. Inclusion proof for `gamma.bud` verifies at live epoch 5.
+    let inc = reg.prove_name("gamma.bud", 5);
+    assert!(inc.included);
+    let verified = BnsRegistry::verify_state_proof(&inc, &expected_root, 5)
+        .unwrap()
+        .unwrap();
+    assert_eq!(verified.owner, bob);
+    assert_eq!(verified.content_id, Some(ContentId([0xAB; 32])));
+    assert_eq!(verified.siblings.len(), 2);
+
+    // 2. Tampering with owner or root fails closed!
+    let mut forged = inc.clone();
+    forged.entry.as_mut().unwrap().owner = alice;
+    assert!(BnsRegistry::verify_state_proof(&forged, &expected_root, 5).is_err());
+
+    // 3. Expired proven entry (`omega.bud` expires at 11) is refused at epoch 15!
+    let expired_proof = reg.prove_name("omega.bud", 15);
+    assert!(BnsRegistry::verify_state_proof(&expired_proof, &expected_root, 15).is_err());
+
+    // 4. Non-existence proof for `beta.bud` (between `alpha.bud` and `gamma.bud`) verifies!
+    let abs = reg.prove_name("beta.bud", 5);
+    assert!(!abs.included);
+    assert_eq!(abs.predecessor.as_ref().unwrap().name, "alpha.bud");
+    assert_eq!(abs.successor.as_ref().unwrap().name, "gamma.bud");
+    assert!(BnsRegistry::verify_state_proof(&abs, &expected_root, 5)
+        .unwrap()
+        .is_none());
+}

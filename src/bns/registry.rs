@@ -1,4 +1,6 @@
-use crate::bns::types::{BnsError, BnsResolved, NameRecord, NameStatus};
+use crate::bns::types::{
+    BnsError, BnsMerkleBranch, BnsResolved, BnsStateProof, NameRecord, NameStatus,
+};
 use crate::core::address::Address;
 use crate::registry::params::{
     GRACE_PERIOD, MAX_DURATION, MAX_NAMES_PER_OWNER, MAX_RECORDS_PER_NAME, MAX_RECORD_KEY_LEN,
@@ -1002,10 +1004,172 @@ impl BnsRegistry {
             && self.primary_names.is_empty()
     }
 
-    pub fn root(&self) -> [u8; 32] {
+    /// Canonical SHA-256 commitment over the auxiliary fields of `record` not
+    /// carried directly in the top-level browser `ResolvedName` tuple.
+    #[must_use]
+    pub fn record_extras_digest(record: &NameRecord) -> [u8; 32] {
         use sha2::{Digest, Sha256};
         let mut hasher = Sha256::new();
-        hasher.update(b"BDLM_BNS_REGISTRY_V3");
+        hasher.update(b"BDLM_BNS_EXTRAS_V1");
+        match record.resolver {
+            Some(resolver) => {
+                hasher.update([1u8]);
+                hasher.update(resolver.0);
+            }
+            None => hasher.update([0u8]),
+        }
+        match record.address {
+            Some(address) => {
+                hasher.update([1u8]);
+                hasher.update(address.0);
+            }
+            None => hasher.update([0u8]),
+        }
+        match record.consensus_domain_id {
+            Some(domain_id) => {
+                hasher.update([1u8]);
+                hasher.update(domain_id.to_le_bytes());
+            }
+            None => hasher.update([0u8]),
+        }
+        match record.storage_domain_id {
+            Some(domain_id) => {
+                hasher.update([1u8]);
+                hasher.update(domain_id.to_le_bytes());
+            }
+            None => hasher.update([0u8]),
+        }
+        match record.storage_root_height {
+            Some(height) => {
+                hasher.update([1u8]);
+                hasher.update(height.to_le_bytes());
+            }
+            None => hasher.update([0u8]),
+        }
+        match record.bud3_content {
+            Some(cref) => {
+                hasher.update([1u8]);
+                let kind_byte = match cref.content_id.kind {
+                    crate::storage::bud3::content_id::ContentIdKind::Public => 0u8,
+                    crate::storage::bud3::content_id::ContentIdKind::Sealed => 1u8,
+                };
+                hasher.update([kind_byte]);
+                hasher.update(cref.content_id.digest);
+                hasher.update(cref.content_id.len.to_le_bytes());
+                hasher.update(cref.object_commitment);
+                match cref.nft_id {
+                    Some(nft) => {
+                        hasher.update([1u8]);
+                        hasher.update(nft);
+                    }
+                    None => hasher.update([0u8]),
+                }
+            }
+            None => hasher.update([0u8]),
+        }
+        hasher.update((record.subdomains.len() as u64).to_le_bytes());
+        for (sub_label, sub_owner) in &record.subdomains {
+            hasher.update((sub_label.len() as u64).to_le_bytes());
+            hasher.update(sub_label.as_bytes());
+            hasher.update(sub_owner.0);
+        }
+        hasher.update((record.records.len() as u64).to_le_bytes());
+        for (rec_key, rec_val) in &record.records {
+            hasher.update((rec_key.len() as u64).to_le_bytes());
+            hasher.update(rec_key.as_bytes());
+            hasher.update((rec_val.len() as u64).to_le_bytes());
+            hasher.update(rec_val.as_bytes());
+        }
+        hasher.finalize().into()
+    }
+
+    /// Canonical per-name Merkle leaf digest (`BDLM_BNS_LEAF_V1`).
+    #[must_use]
+    pub fn compute_leaf_digest(
+        name: &str,
+        owner: &Address,
+        expires_at: u64,
+        content_id: Option<ContentId>,
+        storage_root: Option<[u8; 32]>,
+        extras_digest: [u8; 32],
+    ) -> [u8; 32] {
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        hasher.update(b"BDLM_BNS_LEAF_V1");
+        hasher.update((name.len() as u64).to_le_bytes());
+        hasher.update(name.as_bytes());
+        hasher.update(owner.0);
+        hasher.update(expires_at.to_le_bytes());
+        match content_id {
+            Some(cid) => {
+                hasher.update([1u8]);
+                hasher.update(cid.0);
+            }
+            None => hasher.update([0u8]),
+        }
+        match storage_root {
+            Some(sr) => {
+                hasher.update([1u8]);
+                hasher.update(sr);
+            }
+            None => hasher.update([0u8]),
+        }
+        hasher.update(extras_digest);
+        hasher.finalize().into()
+    }
+
+    /// Canonical leaf digest for an existing [`NameRecord`].
+    #[must_use]
+    pub fn record_leaf_digest(record: &NameRecord) -> [u8; 32] {
+        let extras = Self::record_extras_digest(record);
+        Self::compute_leaf_digest(
+            &record.name,
+            &record.owner,
+            record.expires_at,
+            record.content_id,
+            record.storage_root,
+            extras,
+        )
+    }
+
+    fn hash_merkle_pair(left: &[u8; 32], right: &[u8; 32]) -> [u8; 32] {
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        hasher.update(b"BDLM_BNS_NODE_V1");
+        hasher.update(left);
+        hasher.update(right);
+        hasher.finalize().into()
+    }
+
+    /// Fold a Merkle branch `(siblings, directions)` from `leaf` up to `names_merkle_root`.
+    #[must_use]
+    pub fn fold_merkle_branch(
+        leaf: [u8; 32],
+        siblings: &[[u8; 32]],
+        directions: &[bool],
+    ) -> Option<[u8; 32]> {
+        if siblings.len() != directions.len() || siblings.len() > 32 {
+            return None;
+        }
+        let mut acc = leaf;
+        for (sib, is_right_child) in siblings.iter().zip(directions.iter()) {
+            acc = if *is_right_child {
+                Self::hash_merkle_pair(sib, &acc)
+            } else {
+                Self::hash_merkle_pair(&acc, sib)
+            };
+        }
+        Some(acc)
+    }
+
+    /// Registry-wide metadata commitment (`BDLM_BNS_META_V1`) covering non-leaf
+    /// registry configuration (`base_cost`, `reserved_labels`, `primary_sellers`,
+    /// `primary_names`, and `names.len()`).
+    #[must_use]
+    pub fn meta_digest(&self) -> [u8; 32] {
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        hasher.update(b"BDLM_BNS_META_V1");
         hasher.update(self.base_cost.to_le_bytes());
         hasher.update(b"reserved_labels");
         hasher.update((self.reserved_labels.len() as u64).to_le_bytes());
@@ -1030,96 +1194,247 @@ impl BnsRegistry {
             }
         }
         hasher.update((self.names.len() as u64).to_le_bytes());
-        for (name, record) in &self.names {
-            hasher.update((name.len() as u64).to_le_bytes());
-            hasher.update(name.as_bytes());
-            hasher.update(record.owner.0);
-            hasher.update(record.expires_at.to_le_bytes());
-            match record.resolver {
-                Some(resolver) => {
-                    hasher.update([1u8]);
-                    hasher.update(resolver.0);
+        hasher.finalize().into()
+    }
+
+    /// Combine `(meta_digest, names_merkle_root)` into `BDLM_BNS_REGISTRY_V3`.
+    #[must_use]
+    pub fn root_from_parts(meta_digest: [u8; 32], names_merkle_root: [u8; 32]) -> [u8; 32] {
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        hasher.update(b"BDLM_BNS_REGISTRY_V3");
+        hasher.update(meta_digest);
+        hasher.update(names_merkle_root);
+        hasher.finalize().into()
+    }
+
+    /// Binary Merkle root over all ordered `NameRecord` leaves (`[0u8; 32]` when empty).
+    #[must_use]
+    pub fn names_merkle_root(&self) -> [u8; 32] {
+        if self.names.is_empty() {
+            return [0u8; 32];
+        }
+        let mut level: Vec<[u8; 32]> = self.names.values().map(Self::record_leaf_digest).collect();
+        while level.len() > 1 {
+            let mut next = Vec::with_capacity(level.len().div_ceil(2));
+            let mut i = 0;
+            while i < level.len() {
+                if i + 1 < level.len() {
+                    next.push(Self::hash_merkle_pair(&level[i], &level[i + 1]));
+                } else {
+                    next.push(level[i]);
                 }
-                None => hasher.update([0u8]),
+                i += 2;
             }
-            match record.address {
-                Some(address) => {
-                    hasher.update([1u8]);
-                    hasher.update(address.0);
+            level = next;
+        }
+        level[0]
+    }
+
+    fn build_branch_at(
+        records: &[&NameRecord],
+        leaves: &[[u8; 32]],
+        target_idx: usize,
+    ) -> BnsMerkleBranch {
+        let rec = records[target_idx];
+        let extras_digest = Self::record_extras_digest(rec);
+        let leaf = leaves[target_idx];
+        let mut siblings = Vec::new();
+        let mut directions = Vec::new();
+        let mut idx = target_idx;
+        let mut level = leaves.to_vec();
+        while level.len() > 1 {
+            if idx.is_multiple_of(2) {
+                if idx + 1 < level.len() {
+                    siblings.push(level[idx + 1]);
+                    directions.push(false);
                 }
-                None => hasher.update([0u8]),
+            } else {
+                siblings.push(level[idx - 1]);
+                directions.push(true);
             }
-            match record.consensus_domain_id {
-                Some(domain_id) => {
-                    hasher.update([1u8]);
-                    hasher.update(domain_id.to_le_bytes());
+            let mut next = Vec::with_capacity(level.len().div_ceil(2));
+            let mut i = 0;
+            while i < level.len() {
+                if i + 1 < level.len() {
+                    next.push(Self::hash_merkle_pair(&level[i], &level[i + 1]));
+                } else {
+                    next.push(level[i]);
                 }
-                None => hasher.update([0u8]),
+                i += 2;
             }
-            match record.storage_root {
-                Some(storage_root) => {
-                    hasher.update([1u8]);
-                    hasher.update(storage_root);
-                }
-                None => hasher.update([0u8]),
-            }
-            match record.storage_domain_id {
-                Some(domain_id) => {
-                    hasher.update([1u8]);
-                    hasher.update(domain_id.to_le_bytes());
-                }
-                None => hasher.update([0u8]),
-            }
-            match record.storage_root_height {
-                Some(height) => {
-                    hasher.update([1u8]);
-                    hasher.update(height.to_le_bytes());
-                }
-                None => hasher.update([0u8]),
-            }
-            match record.content_id {
-                Some(content_id) => {
-                    hasher.update([1u8]);
-                    hasher.update(content_id.0);
-                }
-                None => hasher.update([0u8]),
-            }
-            match record.bud3_content {
-                Some(cref) => {
-                    hasher.update([1u8]);
-                    let kind_byte = match cref.content_id.kind {
-                        crate::storage::bud3::content_id::ContentIdKind::Public => 0u8,
-                        crate::storage::bud3::content_id::ContentIdKind::Sealed => 1u8,
-                    };
-                    hasher.update([kind_byte]);
-                    hasher.update(cref.content_id.digest);
-                    hasher.update(cref.content_id.len.to_le_bytes());
-                    hasher.update(cref.object_commitment);
-                    match cref.nft_id {
-                        Some(nft) => {
-                            hasher.update([1u8]);
-                            hasher.update(nft);
-                        }
-                        None => hasher.update([0u8]),
+            idx /= 2;
+            level = next;
+        }
+        BnsMerkleBranch {
+            name: rec.name.clone(),
+            owner: rec.owner,
+            address: rec.address,
+            expires_at: rec.expires_at,
+            content_id: rec.content_id,
+            storage_root: rec.storage_root,
+            extras_digest,
+            leaf,
+            siblings,
+            directions,
+        }
+    }
+
+    /// Produce an $O(\log N)$ per-name Merkle state proof (inclusion when `name`
+    /// is present, or adjacent lexicographic boundary proof when `name` is absent).
+    #[must_use]
+    pub fn prove_name(&self, name: &str, current_epoch: u64) -> BnsStateProof {
+        let meta_digest = self.meta_digest();
+        let records: Vec<&NameRecord> = self.names.values().collect();
+        let leaves: Vec<[u8; 32]> = records
+            .iter()
+            .map(|r| Self::record_leaf_digest(r))
+            .collect();
+        let names_root = if leaves.is_empty() {
+            [0u8; 32]
+        } else {
+            let mut lvl = leaves.clone();
+            while lvl.len() > 1 {
+                let mut next = Vec::with_capacity(lvl.len().div_ceil(2));
+                let mut i = 0;
+                while i < lvl.len() {
+                    if i + 1 < lvl.len() {
+                        next.push(Self::hash_merkle_pair(&lvl[i], &lvl[i + 1]));
+                    } else {
+                        next.push(lvl[i]);
                     }
+                    i += 2;
                 }
-                None => hasher.update([0u8]),
+                lvl = next;
             }
-            hasher.update((record.subdomains.len() as u64).to_le_bytes());
-            for (sub_label, sub_owner) in &record.subdomains {
-                hasher.update((sub_label.len() as u64).to_le_bytes());
-                hasher.update(sub_label.as_bytes());
-                hasher.update(sub_owner.0);
-            }
-            hasher.update((record.records.len() as u64).to_le_bytes());
-            for (rec_key, rec_val) in &record.records {
-                hasher.update((rec_key.len() as u64).to_le_bytes());
-                hasher.update(rec_key.as_bytes());
-                hasher.update((rec_val.len() as u64).to_le_bytes());
-                hasher.update(rec_val.as_bytes());
+            lvl[0]
+        };
+        let bns_root = Self::root_from_parts(meta_digest, names_root);
+
+        match records.binary_search_by(|r| r.name.as_str().cmp(name)) {
+            Ok(idx) => BnsStateProof {
+                name: name.to_string(),
+                included: true,
+                bns_root,
+                meta_digest,
+                names_count: records.len() as u64,
+                epoch: current_epoch,
+                entry: Some(Self::build_branch_at(&records, &leaves, idx)),
+                predecessor: None,
+                successor: None,
+            },
+            Err(insert_idx) => {
+                let predecessor = insert_idx
+                    .checked_sub(1)
+                    .map(|p| Self::build_branch_at(&records, &leaves, p));
+                let successor = if insert_idx < records.len() {
+                    Some(Self::build_branch_at(&records, &leaves, insert_idx))
+                } else {
+                    None
+                };
+                BnsStateProof {
+                    name: name.to_string(),
+                    included: false,
+                    bns_root,
+                    meta_digest,
+                    names_count: records.len() as u64,
+                    epoch: current_epoch,
+                    entry: None,
+                    predecessor,
+                    successor,
+                }
             }
         }
-        hasher.finalize().into()
+    }
+
+    /// Verify a [`BnsStateProof`] against `expected_bns_root` at `current_epoch`,
+    /// returning `Ok(Some(resolved_entry))` on valid live inclusion, `Ok(None)`
+    /// on verified non-existence, and `Err(reason)` if forged or expired.
+    ///
+    /// # Errors
+    ///
+    /// Returns a human-readable refusal reason if any digest, Merkle path,
+    /// boundary order, or expiry check fails.
+    pub fn verify_state_proof<'a>(
+        proof: &'a BnsStateProof,
+        expected_bns_root: &[u8; 32],
+        current_epoch: u64,
+    ) -> Result<Option<&'a BnsMerkleBranch>, String> {
+        if &proof.bns_root != expected_bns_root {
+            return Err("proof bns_root does not match expected header bns_root".into());
+        }
+        let check_branch = |branch: &BnsMerkleBranch| -> Result<[u8; 32], String> {
+            let recomputed_leaf = Self::compute_leaf_digest(
+                &branch.name,
+                &branch.owner,
+                branch.expires_at,
+                branch.content_id,
+                branch.storage_root,
+                branch.extras_digest,
+            );
+            if recomputed_leaf != branch.leaf {
+                return Err("branch leaf digest mismatch".into());
+            }
+            Self::fold_merkle_branch(recomputed_leaf, &branch.siblings, &branch.directions)
+                .ok_or_else(|| "malformed Merkle branch".to_string())
+        };
+
+        if proof.included {
+            let entry = proof
+                .entry
+                .as_ref()
+                .ok_or_else(|| "included proof missing entry branch".to_string())?;
+            if entry.name != proof.name {
+                return Err("entry name does not match queried name".into());
+            }
+            let names_root = check_branch(entry)?;
+            if Self::root_from_parts(proof.meta_digest, names_root) != *expected_bns_root {
+                return Err("Merkle inclusion branch did not reproduce expected bns_root".into());
+            }
+            if entry.expires_at <= current_epoch {
+                return Err("proven BNS entry has expired at current_epoch".into());
+            }
+            Ok(Some(entry))
+        } else {
+            if proof.entry.is_some() {
+                return Err("non-inclusion proof must not carry an entry branch".into());
+            }
+            if proof.names_count == 0 {
+                if proof.predecessor.is_some() || proof.successor.is_some() {
+                    return Err("empty registry proof cannot carry boundary branches".into());
+                }
+                if Self::root_from_parts(proof.meta_digest, [0u8; 32]) != *expected_bns_root {
+                    return Err("empty registry root mismatch".into());
+                }
+                return Ok(None);
+            }
+            if proof.predecessor.is_none() && proof.successor.is_none() {
+                return Err("non-empty registry absence proof requires a boundary branch".into());
+            }
+            if let Some(pred) = &proof.predecessor {
+                if pred.name.as_str() >= proof.name.as_str() {
+                    return Err("predecessor name is not strictly less than target".into());
+                }
+                let root = check_branch(pred)?;
+                if Self::root_from_parts(proof.meta_digest, root) != *expected_bns_root {
+                    return Err("predecessor branch did not reproduce expected bns_root".into());
+                }
+            }
+            if let Some(succ) = &proof.successor {
+                if succ.name.as_str() <= proof.name.as_str() {
+                    return Err("successor name is not strictly greater than target".into());
+                }
+                let root = check_branch(succ)?;
+                if Self::root_from_parts(proof.meta_digest, root) != *expected_bns_root {
+                    return Err("successor branch did not reproduce expected bns_root".into());
+                }
+            }
+            Ok(None)
+        }
+    }
+
+    pub fn root(&self) -> [u8; 32] {
+        Self::root_from_parts(self.meta_digest(), self.names_merkle_root())
     }
 }
 
