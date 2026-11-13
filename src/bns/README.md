@@ -77,6 +77,13 @@
     resolves on-chain bindings directly in `Bud3BnsResolver::resolve_via_bud3_view`,
     and exposes `bud_bnsGetBud3Content`, `bud_bnsPrepareSetBud3Content`, and
     `bud bns {set-bud3,get-bud3}`.
+  - **B8 (grace-period owner rescue, lifecycle status, and owner enumeration):**
+    exports `GRACE_PERIOD = 3_000` in `src/registry/params.rs` and `NameStatus`
+    (`Active`, `Grace`, `Expired`), allows the current owner to rescue a name in
+    `Grace` via `BnsRenew` (`new_expires_at = max(expires_at, current_epoch) + duration`)
+    while keeping resolution, mutations, and third-party registration fail-closed,
+    automatically invalidates stale `Resale` marketplace offers on `transfer` /
+    `buy`, and exposes `bud_bnsListNamesByOwner` and `bud bns list --owner`.
 
 ## Current behaviour (locked by tests)
 
