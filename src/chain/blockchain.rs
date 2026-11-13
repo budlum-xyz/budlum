@@ -4155,6 +4155,36 @@ impl Blockchain {
                     Err(_) => reasons.push("invalid_bns_set_primary_data".to_string()),
                 }
             }
+            crate::core::transaction::TransactionType::BnsSetRecords => {
+                if tx.amount != 0 || tx.to != Address::zero() {
+                    reasons.push("invalid_bns_set_records_shape".to_string());
+                }
+                match bincode::deserialize::<(
+                    String,
+                    std::collections::BTreeMap<String, Option<String>>,
+                )>(&tx.data)
+                {
+                    Ok((name, updates)) => {
+                        if !crate::bns::BnsRegistry::is_valid_name(&name) {
+                            reasons.push("invalid_bns_name".to_string());
+                        }
+                        if updates.is_empty() || updates.len() > crate::bns::MAX_RECORDS_PER_NAME {
+                            reasons.push("invalid_bns_records_count".to_string());
+                        }
+                        for (k, v) in &updates {
+                            if !crate::bns::BnsRegistry::is_valid_record_key(k)
+                                || v.as_deref().is_some_and(|val| {
+                                    !crate::bns::BnsRegistry::is_safe_record_value(val)
+                                })
+                            {
+                                reasons.push("invalid_bns_record_entry".to_string());
+                                break;
+                            }
+                        }
+                    }
+                    Err(_) => reasons.push("invalid_bns_set_records_data".to_string()),
+                }
+            }
             crate::core::transaction::TransactionType::RegisterConsensusKeys(ref registration) => {
                 if tx.amount != 0 || tx.to != Address::zero() || !tx.data.is_empty() {
                     reasons.push("invalid_consensus_key_registration_shape".to_string());

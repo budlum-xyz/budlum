@@ -143,6 +143,8 @@ enum ProtoTransactionType {
     BNS_SET_ADDRESS = 74;
     // Set or clear the signer's reverse primary .bud name.
     BNS_SET_PRIMARY_NAME = 75;
+    // Atomically set or delete bounded text/profile/multi-chain records on a live .bud name.
+    BNS_SET_RECORDS = 76;
 }
 
 message ProtoTransaction {
