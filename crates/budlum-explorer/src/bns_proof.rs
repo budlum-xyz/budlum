@@ -267,10 +267,7 @@ fn evaluate_per_name_claim(
     }
 }
 
-/// Canonical per-name Merkle leaf digest (`BDLM_BNS_LEAF_V1`), matching
-/// `BnsRegistry::compute_leaf_digest` in `src/bns/registry.rs`.
-#[must_use]
-pub fn bns_leaf_digest(
+fn bns_leaf_digest(
     name: &str,
     owner: [u8; 32],
     expires_at: u64,
@@ -302,9 +299,7 @@ pub fn bns_leaf_digest(
     hasher.finalize().into()
 }
 
-/// Fold a binary Merkle branch (`BDLM_BNS_NODE_V1`) from `leaf` up to `names_merkle_root`.
-#[must_use]
-pub fn fold_bns_merkle_branch(
+fn fold_bns_merkle_branch(
     leaf: [u8; 32],
     siblings: &[[u8; 32]],
     directions: &[bool],
@@ -328,13 +323,7 @@ pub fn fold_bns_merkle_branch(
     Some(acc)
 }
 
-/// Combine `(meta_digest, names_merkle_root)` under `BDLM_BNS_REGISTRY_V3`,
-/// matching `BnsRegistry::root_from_parts` in `src/bns/registry.rs`.
-#[must_use]
-pub fn bns_registry_root_from_parts(
-    meta_digest: [u8; 32],
-    names_merkle_root: [u8; 32],
-) -> [u8; 32] {
+fn bns_registry_root_from_parts(meta_digest: [u8; 32], names_merkle_root: [u8; 32]) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(b"BDLM_BNS_REGISTRY_V3");
     hasher.update(meta_digest);

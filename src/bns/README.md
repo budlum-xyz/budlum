@@ -100,6 +100,12 @@
     `BDLM_BNS_REGISTRY_V3`), `UnsignedTransfer::to_verified_bud_recipient`, and
     transport-free `bud_bns{Resolve,ResolveFull,GetProof,ReverseResolve}` JSON-RPC
     builders/readers in `crates/wallet-core/src/rpc.rs`.
+  - **B11 (identity profile and SocialFi `.bud` integration):**
+    enforces canonical `.bud` validation on identity profiles, binds V3 text and
+    social records (`IdentitySocialSummary`), B.U.D. 3.0 `ContentRef`,
+    bidirectional primary `.bud` names, and per-name `BnsStateProof` Merkle
+    verification into `build_identity_profile_verified`, and attaches
+    reverse-resolved `author_bud_name` handles to SocialFi RPC posts and feeds.
 
 ## Current behaviour (locked by tests)
 

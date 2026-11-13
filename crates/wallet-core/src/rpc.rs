@@ -68,6 +68,7 @@ pub fn send_raw_transaction(signed_json: &str) -> String {
 /// # Errors
 ///
 /// Refuses malformed or non-`.bud` names before constructing the RPC body.
+/// exposed for: the wallet crate's SDK surface - browser and mobile hosts call these directly.
 pub fn bns_resolve(name: &str) -> Result<String, String> {
     if !crate::bns::is_valid_resolvable_bud_name(name) {
         return Err(format!("invalid .bud name '{name}'"));
@@ -81,6 +82,7 @@ pub fn bns_resolve(name: &str) -> Result<String, String> {
 /// # Errors
 ///
 /// Refuses malformed or non-`.bud` names before constructing the RPC body.
+/// exposed for: the wallet crate's SDK surface - browser and mobile hosts call these directly.
 pub fn bns_resolve_full(name: &str) -> Result<String, String> {
     if !crate::bns::is_valid_bud_name(name) {
         return Err(format!("invalid .bud name '{name}'"));
@@ -98,6 +100,7 @@ pub fn bns_resolve_full(name: &str) -> Result<String, String> {
 /// # Errors
 ///
 /// Refuses malformed or non-`.bud` names before constructing the RPC body.
+/// exposed for: the wallet crate's SDK surface - browser and mobile hosts call these directly.
 pub fn bns_get_proof(name: &str) -> Result<String, String> {
     if !crate::bns::is_valid_bud_name(name) {
         return Err(format!("invalid .bud name '{name}'"));
@@ -107,6 +110,7 @@ pub fn bns_get_proof(name: &str) -> Result<String, String> {
 }
 
 /// `bud_bnsReverseResolve` of a hex address.
+/// exposed for: the wallet crate's SDK surface - browser and mobile hosts call these directly.
 #[must_use]
 pub fn bns_reverse_resolve(address_hex: &str) -> String {
     let address = json_escape_str(strip_hex_prefix(address_hex));
@@ -245,6 +249,7 @@ pub fn quantity_result(answer: &str) -> Result<u64, String> {
 /// # Errors
 ///
 /// Refuses RPC error responses, malformed hex, or the zero address.
+/// exposed for: the wallet crate's SDK surface - browser and mobile hosts call these directly.
 pub fn optional_address_result(answer: &str) -> Result<Option<[u8; 32]>, String> {
     let text = string_result(answer)?;
     if text == "null" {
@@ -269,6 +274,7 @@ pub fn optional_address_result(answer: &str) -> Result<Option<[u8; 32]>, String>
 /// # Errors
 ///
 /// Refuses RPC error responses or any returned string that violates `.bud` label rules.
+/// exposed for: the wallet crate's SDK surface - browser and mobile hosts call these directly.
 pub fn optional_bud_name_result(answer: &str) -> Result<Option<String>, String> {
     let text = string_result(answer)?;
     if text == "null" {
