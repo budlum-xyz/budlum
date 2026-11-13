@@ -127,7 +127,8 @@ impl ZkVmExecutor {
         }
 
         let program = decode_program(bytecode)?;
-        let mut vm = Vm::with_mainnet_mode(CONTRACT_VM_MEMORY_BYTES, gas_limit, mainnet);
+        let mut vm = Vm::with_mainnet_mode(CONTRACT_VM_MEMORY_BYTES, gas_limit, mainnet)
+            .with_step_limit(bud_vm::MAX_CONTRACT_TRACE_STEPS);
         vm.context.sender = ctx.sender;
         vm.context.nonce = ctx.nonce;
         vm.context.block_height = ctx.block_height;
@@ -242,7 +243,13 @@ fn prove_bytecode_inner_with_memory(
         return Err("BudZKVM bytecode length must be a multiple of 8 bytes".into());
     }
     let program = decode_program(bytecode)?;
-    let mut vm = Vm::with_mainnet_mode(CONTRACT_VM_MEMORY_BYTES, gas_limit, mainnet);
+    let max_steps = if setup.is_some() {
+        bud_vm::MAX_CONTRACT_TRACE_STEPS.saturating_mul(2)
+    } else {
+        bud_vm::MAX_CONTRACT_TRACE_STEPS
+    };
+    let mut vm = Vm::with_mainnet_mode(CONTRACT_VM_MEMORY_BYTES, gas_limit, mainnet)
+        .with_step_limit(max_steps);
     if let Some(setup) = setup {
         setup(&mut vm.memory)?;
     }
@@ -856,5 +863,24 @@ mod tests {
             err.contains("activation") || err.contains("Activation"),
             "VerifyInference was refused, but not by the activation gate: {err}"
         );
+    }
+
+    #[test]
+    fn contract_infinite_loop_stops_within_step_limit_without_prover_oom() {
+        let jump = Instruction {
+            opcode: Opcode::Jmp,
+            rd: 0,
+            rs1: 0,
+            rs2: 0,
+            imm: 0,
+        };
+        let bytecode: Vec<u8> = jump.encode().to_le_bytes().to_vec();
+        let err = ZkVmExecutor::execute_bytecode(
+            &bytecode,
+            DEFAULT_CONTRACT_GAS_LIMIT,
+            TxContext::default(),
+        )
+        .expect_err("infinite loop must terminate via OutOfGas within step limit");
+        assert!(err.contains("OutOfGas"), "unexpected error: {err}");
     }
 }

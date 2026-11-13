@@ -2374,18 +2374,89 @@ mod tests {
             .live_for_content(&mid)
             .is_empty());
 
-        // Competing RegisterManifest is recorded rather than refused, leaving
-        // `owner_of(&mid)` and `proven_owner_of(&mid)` ambiguous (`None`).
+        // Competing RegisterManifest is recorded rather than refused, while a
+        // custody-proven owner retains `owner_of`, `proven_owner_of`, grant,
+        // social-delete, and data-asset registration authority.
         execute_storage_tx(
             &mut state,
             &ctx(squatter),
             &StorageTx::RegisterManifest {
-                manifest: squatter_manifest,
+                manifest: squatter_manifest.clone(),
             },
         )
         .expect("competing manifest claim is recorded");
-        assert_eq!(state.storage_registry.owner_of(&mid), None);
-        assert_eq!(state.storage_registry.proven_owner_of(&mid), None);
+        assert_eq!(state.storage_registry.owner_of(&mid), Some(victim));
+        assert_eq!(state.storage_registry.proven_owner_of(&mid), Some(victim));
+
+        execute_storage_tx(
+            &mut state,
+            &ctx(victim),
+            &StorageTx::IssueViewGrant {
+                content_id: mid,
+                grantee: Some(grantee),
+                key_id: [0x66; 32],
+                policy: ViewPolicy::NamedGrantee,
+            },
+        )
+        .expect("custody-proven owner keeps view grant authority after rival manifest");
+        execute_storage_tx(
+            &mut state,
+            &ctx(victim),
+            &StorageTx::SocialDelete { content_id: mid },
+        )
+        .expect("custody-proven owner keeps social delete authority after rival manifest");
+
+        state.add_balance(&victim, 1_000);
+        let asset = crate::pollen::DataAsset::new(victim, mid, [0x77; 32], true);
+        let tx = crate::core::transaction::Transaction::new_with_chain_id(
+            victim,
+            Address::zero(),
+            0,
+            1,
+            0,
+            vec![],
+            crate::core::transaction::DEFAULT_CHAIN_ID,
+            crate::core::transaction::TransactionType::PollenRegisterDataAsset(asset),
+        );
+        crate::execution::executor::Executor::apply_transaction_checked(&mut state, &tx)
+            .expect("custody-proven owner keeps data asset registration authority");
+
+        assert_eq!(
+            execute_storage_tx(
+                &mut state,
+                &ctx(squatter),
+                &StorageTx::RegisterManifest {
+                    manifest: squatter_manifest,
+                },
+            )
+            .unwrap_err(),
+            StorageTxError::AlreadyRegistered
+        );
+    }
+
+    #[test]
+    fn open_challenge_refuses_deadline_shorter_than_minimum_window() {
+        let mut state = AccountState::new();
+        let (_op, opener, deal_id) = challengeable(&mut state);
+        let epoch = state.epoch_index;
+        let root = state.storage_registry.root();
+        for too_short in [epoch + 1, epoch + StorageRegistry::MIN_CHALLENGE_WINDOW_EPOCHS - 1] {
+            let err = execute_storage_tx(
+                &mut state,
+                &ctx(opener),
+                &StorageTx::OpenChallenge {
+                    deal_id,
+                    range_len: 16,
+                    deadline_epoch: too_short,
+                    opener_bond: StorageRegistry::required_opener_bond(16),
+                },
+            )
+            .unwrap_err();
+            assert!(matches!(err, StorageTxError::ChallengeRefused(_)), "{err}");
+        }
+        assert_eq!(state.get_balance(&opener), OPENER_FUNDS);
+        assert!(state.storage_registry.all_challenges().is_empty());
+        assert_eq!(state.storage_registry.root(), root);
     }
 
     #[test]
