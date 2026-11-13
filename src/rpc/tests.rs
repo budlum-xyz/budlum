@@ -1854,6 +1854,17 @@ mod rpc_tests {
             .unwrap_err()
             .message()
             .contains("requires nft_id"));
+        let listed_names = server
+            .bns_list_names_by_owner(seller.to_hex())
+            .await
+            .unwrap();
+        assert!(listed_names["names"].is_array());
+        assert!(server
+            .bns_list_names_by_owner("0xnot-hex".to_string())
+            .await
+            .unwrap_err()
+            .message()
+            .contains("Invalid owner address"));
     }
 
     #[tokio::test]
