@@ -1,4 +1,4 @@
-# Settlement and Graft
+# Settlement and AppBinding
 
 Settlement writes are block-only. A signed `TransactionType::Settlement`
 transaction is the only production write path for the settlement registries;
@@ -13,11 +13,11 @@ RPC methods expose reads and point writers at `bud_sendRawTransaction`.
 | `RegisterDomain`, `SubmitCommitment`, `RegisterSovereignTemplate`, `SetZkProgram`, `SubmitZkProof` | consensus domains, their commitments and anchors |
 | `ProofMarket` | proof-market escrow, tasks, receipts, payments and refunds |
 | `RelayerIntent` | outbound relayer intents, solver bids, settlement and expiry |
-| `Graft` | Graft applications, payments, ownership claims and solver intents |
+| `AppBinding` | AppBinding applications, payments, ownership claims and solver intents |
 
 ## External evidence
 
-A relayer intent, a Graft claim and a Graft fulfilment prove something that
+A relayer intent, an AppBinding claim and an AppBinding fulfilment prove something that
 happened on another domain the same way the bridge relay does: a
 `RelayerExternalResult` whose cross-domain message is committed by its
 result leaf, and a Merkle path from that leaf to the external root consensus
@@ -39,7 +39,7 @@ is the integrator guide; active on testnet `45261` and devnet `45262` from genes
 
 The registry, the payment window, open intents, domain executors and the
 claim replay set are part of the settlement root and of the global header
-(`graft_root`, V7). `bud_getGraftApplication`, `bud_graftPaymentProof` and the
+(`app_binding_root`, V7). `bud_getAppBindingApplication`, `bud_appBindingPaymentProof` and the
 remote-app-binding fields of `bud_getSettlementInfo` are read-only; these
 legacy wire identifiers remain unchanged for compatibility.
 

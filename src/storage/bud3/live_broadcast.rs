@@ -7,10 +7,11 @@
 //! objects on the testnet chain id, and the activation-height check that opens
 //! the feature after launch (M7). This module delivers all three.
 //!
-//! Directive 6.16 and 1.5: a live segment is a T-Expansion feature. It is
-//! closed on the testnet chain id and opens only at an activation height. A
-//! refusal is proved by `live_stream_is_closed_on_testnet`, and the refusal
-//! is checked at the object door, not in a comment.
+//! Directive 6.16 and 1.5: a live segment is a T-Expansion feature behind an
+//! activation height. The testnet gateway activates it at height zero and a
+//! gateway with no activation height refuses every bit1 object. Both verdicts
+//! are proved by `live_stream_is_open_on_testnet`, and the refusal is checked
+//! at the object door, not in a comment.
 //!
 //! Supplies [`LiveGateway`] and
 //! [`BroadcastDriver`], but the current content gateway and block executor do

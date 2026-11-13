@@ -134,7 +134,7 @@ fn proof_record(root: &Path, path: &str) -> bool {
 
 /// A profile helper and a named test do not close the direct settlement API.
 fn binding_direct_guard(source: &str) -> bool {
-    let Some(start) = source.find(concat!("pub fn execute_gr", "aft_tx(")) else {
+    let Some(start) = source.find("pub fn execute_app_binding_tx(") else {
         return false;
     };
     let body = &source[start..];
@@ -149,7 +149,7 @@ fn binding_direct_guard(source: &str) -> bool {
 }
 
 fn binding_guard(root: &Path) -> Result<(), String> {
-    let path = concat!("src/settlement/gr", "aft.rs");
+    let path = "src/settlement/app_binding.rs";
     let code = std::fs::read_to_string(root.join(path))
         .map_err(|e| format!("{path}: cannot inspect settlement door: {e}"))?;
     let production = super::capability_modules_are_wired::code_only(&code);
@@ -324,14 +324,8 @@ pub fn self_test() -> Result<String, String> {
     {
         return Err(String::from("duplicate or malformed evidence rows passed"));
     }
-    let good = concat!(
-        "pub fn execute_gr",
-        "aft_tx(ctx: C, tx: T) -> R { if !app_binding_enabled_for_chain_id(ctx.chain_id) { return Err(refused()); } match tx { _ => Ok(()) } }"
-    );
-    let bad = concat!(
-        "pub fn execute_gr",
-        "aft_tx(ctx: C, tx: T) -> R { // app_binding_enabled_for_chain_id(ctx.chain_id) return Err(..);\n match tx { _ => Ok(()) } }"
-    );
+    let good = "pub fn execute_app_binding_tx(ctx: C, tx: T) -> R { if !app_binding_enabled_for_chain_id(ctx.chain_id) { return Err(refused()); } match tx { _ => Ok(()) } }";
+    let bad = "pub fn execute_app_binding_tx(ctx: C, tx: T) -> R { // app_binding_enabled_for_chain_id(ctx.chain_id) return Err(..);\n match tx { _ => Ok(()) } }";
     let inverted = good.replace(
         "if !app_binding_enabled_for_chain_id",
         "if app_binding_enabled_for_chain_id",
@@ -372,23 +366,14 @@ mod tests {
     #[test]
     fn launch_evidence_requires_direct_binding_preflight_not_comment_or_profile_helper() {
         use super::*;
-        let good = concat!(
-            "pub fn execute_gr",
-            "aft_tx(ctx: C, tx: T) -> R { if !app_binding_enabled_for_chain_id(ctx.chain_id) { return Err(refused()); } match tx { _ => Ok(()) } }"
-        );
+        let good = "pub fn execute_app_binding_tx(ctx: C, tx: T) -> R { if !app_binding_enabled_for_chain_id(ctx.chain_id) { return Err(refused()); } match tx { _ => Ok(()) } }";
         assert!(binding_direct_guard(
             &super::super::capability_modules_are_wired::code_only(good)
         ));
-        let comment = concat!(
-            "pub fn execute_gr",
-            "aft_tx(ctx: C, tx: T) -> R { // app_binding_enabled_for_chain_id(ctx.chain_id) return Err(...);\n match tx { _ => Ok(()) } }"
-        );
+        let comment = "pub fn execute_app_binding_tx(ctx: C, tx: T) -> R { // app_binding_enabled_for_chain_id(ctx.chain_id) return Err(...);\n match tx { _ => Ok(()) } }";
         assert!(!binding_direct_guard(
             &super::super::capability_modules_are_wired::code_only(comment)
         ));
-        assert!(!binding_direct_guard(concat!(
-            "pub fn app_binding_enabled_for_chain_id() {} pub fn execute_gr",
-            "aft_tx(ctx: C, tx: T) -> R { match tx { _ => Ok(()) } }"
-        )));
+        assert!(!binding_direct_guard("pub fn app_binding_enabled_for_chain_id() {} pub fn execute_app_binding_tx(ctx: C, tx: T) -> R { match tx { _ => Ok(()) } }"));
     }
 }

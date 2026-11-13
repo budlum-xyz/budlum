@@ -177,9 +177,9 @@ pub enum ChainCommand {
     ),
     GetDomainCommitments(oneshot::Sender<Vec<crate::domain::DomainCommitment>>),
     GetConsensusDomains(oneshot::Sender<Vec<crate::domain::ConsensusDomain>>),
-    GetGraftApplication(
+    GetAppBindingApplication(
         [u8; 32],
-        oneshot::Sender<Option<crate::settlement::graft::GraftApp>>,
+        oneshot::Sender<Option<crate::settlement::app_binding::AppBindingApp>>,
     ),
     GetRestakedValidators(
         oneshot::Sender<(
@@ -187,9 +187,9 @@ pub enum ChainCommand {
             std::collections::BTreeMap<crate::core::address::Address, u64>,
         )>,
     ),
-    GetGraftPaymentProof(
+    GetAppBindingPaymentProof(
         [u8; 32],
-        oneshot::Sender<Option<crate::settlement::graft::GraftPaymentProof>>,
+        oneshot::Sender<Option<crate::settlement::app_binding::AppBindingPaymentProof>>,
     ),
     GetCrossDomainMessage(
         [u8; 32],
@@ -598,9 +598,9 @@ pub enum ChainCommand {
     HubGetApps {
         response: oneshot::Sender<Vec<crate::budlumxyz::types::AppRecord>>,
     },
-    /// The Graft applications, listed beside the native apps.
-    HubGetGraftApps {
-        response: oneshot::Sender<Vec<crate::settlement::graft::GraftApp>>,
+    /// The AppBinding applications, listed beside the native apps.
+    HubGetAppBindingApps {
+        response: oneshot::Sender<Vec<crate::settlement::app_binding::AppBindingApp>>,
     },
 }
 
@@ -1632,26 +1632,26 @@ impl ChainHandle {
         rx.await.unwrap_or_default()
     }
 
-    pub async fn get_graft_payment_proof(
+    pub async fn get_app_binding_payment_proof(
         &self,
         payment_id: [u8; 32],
-    ) -> Option<crate::settlement::graft::GraftPaymentProof> {
+    ) -> Option<crate::settlement::app_binding::AppBindingPaymentProof> {
         let (tx, rx) = oneshot::channel();
         let _ = self
             .tx
-            .send(ChainCommand::GetGraftPaymentProof(payment_id, tx))
+            .send(ChainCommand::GetAppBindingPaymentProof(payment_id, tx))
             .await;
         rx.await.unwrap_or(None)
     }
 
-    pub async fn get_graft_application(
+    pub async fn get_app_binding_application(
         &self,
-        graft_id: [u8; 32],
-    ) -> Option<crate::settlement::graft::GraftApp> {
+        app_binding_id: [u8; 32],
+    ) -> Option<crate::settlement::app_binding::AppBindingApp> {
         let (tx, rx) = oneshot::channel();
         let _ = self
             .tx
-            .send(ChainCommand::GetGraftApplication(graft_id, tx))
+            .send(ChainCommand::GetAppBindingApplication(app_binding_id, tx))
             .await;
         rx.await.unwrap_or(None)
     }
@@ -2632,11 +2632,13 @@ impl ChainHandle {
         rx.await.unwrap_or_default()
     }
 
-    pub async fn budlumxyz_get_graft_apps(&self) -> Vec<crate::settlement::graft::GraftApp> {
+    pub async fn budlumxyz_get_app_binding_apps(
+        &self,
+    ) -> Vec<crate::settlement::app_binding::AppBindingApp> {
         let (tx, rx) = oneshot::channel();
         let _ = self
             .tx
-            .send(ChainCommand::HubGetGraftApps { response: tx })
+            .send(ChainCommand::HubGetAppBindingApps { response: tx })
             .await;
         rx.await.unwrap_or_default()
     }
@@ -3187,14 +3189,14 @@ impl ChainActor {
                         "proofMarketActiveTasks": self.blockchain.state.proof_market.active_tasks.len(),
                         "proofMarketPendingReceipts": self.blockchain.state.proof_market.pending_receipts.len(),
                         "proofMarketEscrowedCreators": self.blockchain.state.proof_market.escrowed.len(),
-                        "graftRoot": format!(
+                        "appBindingRoot": format!(
                             "0x{}",
-                            hex::encode(self.blockchain.state.settlement.graft.root())
+                            hex::encode(self.blockchain.state.settlement.app_binding.root())
                         ),
-                        "graftApplications": self.blockchain.state.settlement.graft.apps.len(),
-                        "graftPayments": self.blockchain.state.settlement.graft.payments.len(),
-                        "graftIntents": self.blockchain.state.settlement.graft.intents.len(),
-                        "graftClaims": self.blockchain.state.settlement.graft.used_messages.len(),
+                        "appBindingApplications": self.blockchain.state.settlement.app_binding.apps.len(),
+                        "appBindingPayments": self.blockchain.state.settlement.app_binding.payments.len(),
+                        "appBindingIntents": self.blockchain.state.settlement.app_binding.intents.len(),
+                        "appBindingClaims": self.blockchain.state.settlement.app_binding.used_messages.len(),
                     });
                     let _ = tx.send(info);
                 }
@@ -3214,8 +3216,8 @@ impl ChainActor {
                 ChainCommand::GetConsensusDomains(tx) => {
                     let _ = tx.send(self.blockchain.state.settlement.domains.domains());
                 }
-                ChainCommand::GetGraftPaymentProof(payment_id, tx) => {
-                    let _ = tx.send(self.blockchain.graft_payment_proof(&payment_id));
+                ChainCommand::GetAppBindingPaymentProof(payment_id, tx) => {
+                    let _ = tx.send(self.blockchain.app_binding_payment_proof(&payment_id));
                 }
                 ChainCommand::GetRestakedValidators(tx) => {
                     let state = &self.blockchain.state;
@@ -3234,13 +3236,13 @@ impl ChainActor {
                         .collect();
                     let _ = tx.send((rows, weights));
                 }
-                ChainCommand::GetGraftApplication(graft_id, tx) => {
+                ChainCommand::GetAppBindingApplication(app_binding_id, tx) => {
                     let _ = tx.send(
                         self.blockchain
                             .state
                             .settlement
-                            .graft
-                            .get(&graft_id)
+                            .app_binding
+                            .get(&app_binding_id)
                             .cloned(),
                     );
                 }
@@ -4253,12 +4255,12 @@ impl ChainActor {
                         .collect();
                     let _ = response.send(receipts);
                 }
-                ChainCommand::HubGetGraftApps { response } => {
+                ChainCommand::HubGetAppBindingApps { response } => {
                     let apps = self
                         .blockchain
                         .state
                         .settlement
-                        .graft
+                        .app_binding
                         .apps
                         .values()
                         .cloned()
