@@ -26,6 +26,7 @@ fn registry() -> Vec<(&'static str, &'static [&'static str])> {
         ("bud-e2e", super::bud_e2e::TESTS),
         ("economy-invariants", super::economy_invariants::TESTS),
         ("fork-choice", super::fork_choice_gate::TESTS),
+        ("gateway", super::gateway_gate::TESTS),
         ("governance-invariants", super::governance_invariants::TESTS),
         ("network-hardening", super::network_hardening_gate::TESTS),
         (
