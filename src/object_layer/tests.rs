@@ -1212,9 +1212,7 @@ fn settlement_charter_requires_domain_operator_and_refresh_requires_state_proof(
             class,
             updates.clone(),
             Phase::Final,
-            None,
-            Some([0x11; 32]),
-            true,
+            (None, Some([0x11; 32]), true),
         ),
         Err(Refusal::UnprovenEvent)
     );
@@ -1248,9 +1246,7 @@ fn settlement_charter_requires_domain_operator_and_refresh_requires_state_proof(
             class,
             updates,
             Phase::Final,
-            Some(&sp),
-            Some(root),
-            true,
+            (Some(&sp), Some(root), true),
         ),
         Ok(ClassStatus::Frozen(FreezeReason::UpgradeAuthorityChanged))
     );

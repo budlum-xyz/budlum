@@ -1999,35 +1999,35 @@ mod tests {
     }
 
     #[test]
-    fn ipv6_slash48_and_ipv4_mapped_share_eclipse_ceiling() {
+    fn ipv6_slash64_and_ipv4_mapped_share_eclipse_ceiling() {
         let mut pm = PeerManager::new();
         pm.set_max_peers_per_subnet(2);
         let v6_a: libp2p::Multiaddr = "/ip6/2001:db8:cafe:1::1/tcp/30333".parse().unwrap();
-        let v6_b: libp2p::Multiaddr = "/ip6/2001:db8:cafe:2::9/tcp/30333".parse().unwrap();
+        let v6_b: libp2p::Multiaddr = "/ip6/2001:db8:cafe:1:ffff::9/tcp/30333".parse().unwrap();
         let v6_other: libp2p::Multiaddr = "/ip6/2001:db8:beef:1::1/tcp/30333".parse().unwrap();
-        let key_a = peer_subnet_key(&v6_a);
-        let key_b = peer_subnet_key(&v6_b);
-        assert_eq!(key_a, key_b, "two /64s inside the same /48 share one key");
+        let key_a = crate::network::node::subnet_bucket(&v6_a);
+        let key_b = crate::network::node::subnet_bucket(&v6_b);
+        assert_eq!(key_a, key_b, "two hosts inside the same /64 share one key");
         assert!(pm.note_connected(test_peer_id(), key_a));
         assert!(pm.note_connected(test_peer_id(), key_b));
         assert!(
             !pm.can_admit_subnet(key_a),
-            "third IPv6 peer from the same /48 must be rejected"
+            "third IPv6 peer from the same /64 must be rejected"
         );
         assert!(
-            pm.can_admit_subnet(peer_subnet_key(&v6_other)),
-            "distinct IPv6 /48 remains admissible"
+            pm.can_admit_subnet(crate::network::node::subnet_bucket(&v6_other)),
+            "distinct IPv6 /64 remains admissible"
         );
 
         let v4: libp2p::Multiaddr = "/ip4/203.0.113.7/tcp/30333".parse().unwrap();
         let v4_mapped: libp2p::Multiaddr = "/ip6/::ffff:203.0.113.99/tcp/30333".parse().unwrap();
         assert_eq!(
-            peer_subnet_key(&v4),
-            peer_subnet_key(&v4_mapped),
+            crate::network::node::subnet_bucket(&v4),
+            crate::network::node::subnet_bucket(&v4_mapped),
             "IPv4-mapped IPv6 must share the IPv4 /24 bucket"
         );
         let v6_lo: libp2p::Multiaddr = "/ip6/::1/tcp/30333".parse().unwrap();
-        assert_eq!(peer_subnet_key(&v6_lo), None);
+        assert_eq!(crate::network::node::subnet_bucket(&v6_lo), None);
     }
 
     #[test]
