@@ -169,7 +169,7 @@ STARK proving on every call.
  `move_pointer_holds_no_balance`, `pointer_allowance_lives_at_home`).
 - `KR-UEL-REENTRANCY` (`IP-52` item 3): cross-environment reentrancy prohibition
  (`Section 8.7.3` item 6) remains enforced (`ReentrancyForbidden`,
- `uel_reentrancy_across_ees_refused`).
+ `uel_reentrancy_forbidden`).
 
 ## 14. Deterministic Access-Set Parallel Block Execution (`the implementation track`)
 

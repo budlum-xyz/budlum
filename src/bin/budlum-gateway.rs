@@ -52,8 +52,8 @@ use budlum_core::web_gateway::policy::{
     IMMUTABLE_CACHE, RESOLUTION_CACHE,
 };
 use budlum_core::web_gateway::resolve::{
-    agreed_proof, cache_key, content_ref_of, route_of, ContentCache, ContentSource, GatewayError,
-    NameProof, NameProver, StateRoots,
+    agreed_proof, content_ref_of, route_of, ContentCache, ContentSource, GatewayError, NameProof,
+    NameProver, StateRoots,
 };
 use hyper::body::Bytes;
 use hyper::header::{HeaderName, HeaderValue};
@@ -138,12 +138,12 @@ struct CachedResolution {
 /// One RPC endpoint.
 struct RpcProver {
     url: String,
-    client: reqwest::blocking::Client,
+    client: reqwest::Client,
 }
 
 impl RpcProver {
     fn new(url: String) -> Result<Self, String> {
-        let client = reqwest::blocking::Client::builder()
+        let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(10))
             .build()
             .map_err(|e| format!("rpc client for {url}: {e}"))?;
@@ -159,15 +159,22 @@ impl NameProver for RpcProver {
             "method": "bud_bnsGetProof",
             "params": [name],
         });
-        let response = self
-            .client
-            .post(&self.url)
-            .json(&body)
-            .send()
-            .map_err(|e| format!("{}: {e}", self.url))?
-            .error_for_status()
-            .map_err(|e| format!("{}: {e}", self.url))?;
-        let json: serde_json::Value = response.json().map_err(|e| format!("{}: {e}", self.url))?;
+        // The verifier is synchronous and the client is not. The request is
+        // driven to completion here, and `block_in_place` tells the runtime
+        // this worker is busy so the other connections move to another one.
+        let request = async {
+            self.client
+                .post(&self.url)
+                .json(&body)
+                .send()
+                .await?
+                .error_for_status()?
+                .json::<serde_json::Value>()
+                .await
+        };
+        let json =
+            tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(request))
+                .map_err(|e| format!("{}: {e}", self.url))?;
         if let Some(error) = json.get("error") {
             return Err(format!("{}: rpc error {error}", self.url));
         }
@@ -206,7 +213,7 @@ fn decode_proof_result(result: &serde_json::Value) -> Result<NameProof, String> 
                 .and_then(serde_json::Value::as_array)
                 .ok_or("branch.siblings")?
                 .iter()
-                .map(|v| v.as_str().ok_or("branch.siblings[]").and_then(hex32))
+                .map(|v| hex32(v.as_str().ok_or("branch.siblings[]")?))
                 .collect::<Result<Vec<_>, _>>()?,
             directions: value
                 .get("directions")
@@ -337,7 +344,7 @@ fn hex32_field(value: &serde_json::Value, field: &str) -> Result<[u8; 32], Strin
 
 fn optional_hex32(value: &serde_json::Value, field: &str) -> Result<Option<[u8; 32]>, String> {
     match value.get(field) {
-        Some(v) if !v.is_null() => v.as_str().ok_or(field).and_then(hex32).map(Some),
+        Some(v) if !v.is_null() => hex32(v.as_str().ok_or(field)?).map(Some),
         _ => Ok(None),
     }
 }
@@ -634,6 +641,11 @@ fn resolve_name(
         content,
         height: answer.height,
     };
+    tracing::debug!(
+        name,
+        height = resolved.height,
+        "name resolved against a verified root"
+    );
     {
         let mut cache = match state.resolved.lock() {
             Ok(guard) => guard,
@@ -675,7 +687,7 @@ fn build_state(config: GatewayConfig) -> Result<GatewayState, String> {
         }
         None => BlockList::default(),
     };
-    let Some(content_dir) = &config.content_dir else {
+    let Some(content_dir) = config.content_dir.clone() else {
         return Err(
             "config names no content_dir; the B.U.D. 3.0 content source is not wired yet, so the \
              process refuses to start rather than answer every request with a 502"
@@ -701,9 +713,7 @@ fn build_state(config: GatewayConfig) -> Result<GatewayState, String> {
         roots: Arc::new(PinnedHeaderRoots {
             pinned: std::collections::BTreeMap::new(),
         }),
-        content: Arc::new(DirectorySource {
-            root: content_dir.clone(),
-        }),
+        content: Arc::new(DirectorySource { root: content_dir }),
         blocklist,
         limiter: std::sync::Mutex::new(RateLimiter::new(rate, 60)),
         cache: std::sync::Mutex::new(ContentCache::new(cache_max)),
@@ -728,6 +738,10 @@ async fn main() -> Result<(), String> {
         .await
         .map_err(|e| format!("bind {listen}: {e}"))?;
     tracing::info!(%listen, suffix = %state.suffix, "budlum gateway listening on plain HTTP; a terminator puts TLS in front");
+    tracing::info!(
+        cache_dir = %state.config.cache_dir.display(),
+        "the content cache is held in memory; nothing is written under cache_dir yet"
+    );
     loop {
         let (stream, _peer) = match listener.accept().await {
             Ok(pair) => pair,
@@ -851,7 +865,9 @@ mod tests {
             content_dir: None,
             resolve_ttl_secs: 10,
         };
-        let error = build_state(config).unwrap_err();
+        let error = build_state(config)
+            .err()
+            .expect("the state must be refused");
         assert!(error.contains("content_dir"), "got {error}");
     }
 
@@ -868,7 +884,9 @@ mod tests {
             content_dir: Some(std::env::temp_dir()),
             resolve_ttl_secs: 10,
         };
-        let error = build_state(config).unwrap_err();
+        let error = build_state(config)
+            .err()
+            .expect("the state must be refused");
         assert!(error.contains("rpc"), "got {error}");
     }
 
