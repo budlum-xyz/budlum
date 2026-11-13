@@ -608,6 +608,12 @@ pub struct Wallet {
     /// and can make the second one unspendable, so a counter may only be used
     /// once even though the caller picks it.
     next_blinding_counter: u64,
+    /// Note commitments this wallet actually prepared to receive (or produced as
+    /// change) and has not yet spent. Checking `derive_spend_secret` alone is
+    /// circular whenever the caller also builds the witness via
+    /// `note_input_from_receive`, so `build_private_transfer` only signs for a
+    /// commitment recorded here.
+    received_note_commitments: std::sync::Mutex<std::collections::BTreeSet<u64>>,
 }
 
 // Zeroize sensitive material on drop.
@@ -1106,6 +1112,9 @@ impl Wallet {
         self.mnemonic.zeroize();
         self.seed.zeroize();
         self.privacy.view_key.zeroize();
+        if let Ok(mut notes) = self.received_note_commitments.lock() {
+            notes.clear();
+        }
     }
     /// Create a new wallet (random entropy -> mnemonic -> seed -> keypair).
     ///
@@ -1187,6 +1196,7 @@ impl Wallet {
             privacy: WalletPrivacyConfig::default(),
             trusted_tee_measurement: None,
             next_blinding_counter: 0,
+            received_note_commitments: std::sync::Mutex::new(std::collections::BTreeSet::new()),
         })
     }
 
@@ -1220,6 +1230,7 @@ impl Wallet {
             privacy: WalletPrivacyConfig::default(),
             trusted_tee_measurement: None,
             next_blinding_counter: 0,
+            received_note_commitments: std::sync::Mutex::new(std::collections::BTreeSet::new()),
         })
     }
 
@@ -1543,8 +1554,9 @@ impl Wallet {
                 "input note recipient tag does not match this wallet's address".into(),
             ));
         }
+        let input_commitment = req.input.commitment();
         let expected_secret_bytes =
-            derive_spend_secret(&self.seed, req.input.commitment()).to_le_bytes();
+            derive_spend_secret(&self.seed, input_commitment).to_le_bytes();
         let caller_secret_bytes = req.input.spend_secret.to_le_bytes();
         let mut secret_diff = 0u8;
         for (&lhs, &rhs) in caller_secret_bytes.iter().zip(expected_secret_bytes.iter()) {
@@ -1553,6 +1565,18 @@ impl Wallet {
         if secret_diff != 0 {
             return Err(WalletError::InvalidPrivateTransfer(
                 "input note spend_secret does not match wallet seed derivation".into(),
+            ));
+        }
+        let known_note = self
+            .received_note_commitments
+            .lock()
+            .map_err(|_| {
+                WalletError::InvalidPrivateTransfer("wallet note tracker lock poisoned".into())
+            })?
+            .contains(&input_commitment);
+        if !known_note {
+            return Err(WalletError::InvalidPrivateTransfer(
+                "input note commitment was never prepared or received by this wallet".into(),
             ));
         }
         let change = req.input.amount - req.send_amount;
@@ -1610,6 +1634,14 @@ impl Wallet {
         };
         let auth_msg = privacy_transfer::intent_authorization_message(&intent);
         intent.authorization_sig = self.sign_for(PRIVATE_TRANSFER_CTX, &auth_msg);
+        if let Ok(mut notes) = self.received_note_commitments.lock() {
+            notes.remove(&input_commitment);
+            if change > 0 {
+                if let Some(change_output) = intent.outputs.get(1) {
+                    notes.insert(change_output.commitment());
+                }
+            }
+        }
 
         Ok(intent)
     }
@@ -1678,6 +1710,12 @@ impl Wallet {
         let tag = address_to_recipient_tag(&self.address());
         // privacy_commit(amount, blinding, recipient_tag)
         let commitment = privacy_commit(amount, blinding, tag);
+        self.received_note_commitments
+            .lock()
+            .map_err(|_| {
+                WalletError::InvalidPrivateTransfer("wallet note tracker lock poisoned".into())
+            })?
+            .insert(commitment);
         Ok((blinding, commitment, hash_from_field(commitment)))
     }
 
@@ -1694,6 +1732,18 @@ impl Wallet {
         let tag = address_to_recipient_tag(&self.address());
         // privacy_commit(amount, blinding, recipient_tag)
         let commitment = privacy_commit(amount, blinding, tag);
+        let known_note = self
+            .received_note_commitments
+            .lock()
+            .map_err(|_| {
+                WalletError::InvalidPrivateTransfer("wallet note tracker lock poisoned".into())
+            })?
+            .contains(&commitment);
+        if !known_note {
+            return Err(WalletError::InvalidPrivateTransfer(
+                "note commitment was never prepared or received by this wallet".into(),
+            ));
+        }
         let spend_secret = derive_spend_secret(&self.seed, commitment);
         Ok(PrivateNoteInput {
             amount,
@@ -2848,6 +2898,36 @@ mod tests {
         assert!(matches!(err, WalletError::InvalidPrivateTransfer(_)));
 
         let input = w.note_input_from_receive(100, blinding).unwrap();
+        let unreceived_witness_err = w.note_input_from_receive(100, 777).unwrap_err();
+        assert!(matches!(
+            unreceived_witness_err,
+            WalletError::InvalidPrivateTransfer(_)
+        ));
+        let forged_unreceived = PrivateNoteInput {
+            amount: 100,
+            recipient_tag: input.recipient_tag,
+            blinding: 777,
+            spend_secret: derive_spend_secret(
+                &w.seed,
+                privacy_commit(100, 777, input.recipient_tag),
+            ),
+        };
+        let forged_err = w
+            .build_private_transfer(
+                PrivateTransferRequest {
+                    input: forged_unreceived,
+                    to: [0x11u8; 32],
+                    send_amount: 100,
+                    output_blinding: 9,
+                    change_recipient_tag: None,
+                    change_blinding: None,
+                },
+                &w.default_tee_runtime(),
+                45262,
+                0,
+            )
+            .unwrap_err();
+        assert!(matches!(forged_err, WalletError::InvalidPrivateTransfer(_)));
         for bad_out in [0u64, budlum_note_packing::GOLDILOCKS_P, blinding] {
             let err = w
                 .build_private_transfer(

@@ -1482,9 +1482,9 @@ pub fn prove_storage_challenge_proof(
 
     let initial_state_root = bud_proof::initial_state_root_of(
         bud_proof::memory_image_commitment_of_reads(&bud_proof::initial_memory_reads(&vm.trace)),
-        bud_proof::register_image_commitment_of_reads(
-            &bud_proof::initial_register_reads(&vm.trace),
-        ),
+        bud_proof::register_image_commitment_of_reads(&bud_proof::initial_register_reads(
+            &vm.trace,
+        )),
     );
     let mut sender_bytes = [0u8; 8];
     sender_bytes.copy_from_slice(&context.responder.as_bytes()[..8]);
@@ -2013,6 +2013,84 @@ impl StorageRegistry {
         })
     }
 
+    /// True when `claimant` has funded an operator-consented storage custody
+    /// deal on `content_id`. Opening a deal requires storage-operator shard
+    /// consent signatures (`DealConsent`) and locked escrow, whereas a bare
+    /// `RegisterManifest` on a content-addressed `manifest_id` excludes `owner`
+    /// and can be copied from the mempool by anyone.
+    #[must_use]
+    pub(crate) fn has_custody_deal(&self, content_id: &ContentId, claimant: &Address) -> bool {
+        *claimant != Address::zero()
+            && self.deals.values().any(|d| {
+                d.manifest_id == *content_id
+                    && matches!(d.status, DealStatus::Active | DealStatus::Expired)
+                    && d.payer == Some(*claimant)
+            })
+    }
+
+    /// True when `claimant` holds uncontested, custody-backed ownership of
+    /// `content_id`: `owner_of(content_id) == Some(*claimant)` (so any competing
+    /// claim leaves the id contested with no canonical owner) AND `claimant`
+    /// holds a funded custody deal rather than a lone manifest claim.
+    #[must_use]
+    pub(crate) fn has_proven_ownership(&self, content_id: &ContentId, claimant: &Address) -> bool {
+        *claimant != Address::zero()
+            && self.owner_of(content_id) == Some(*claimant)
+            && self.has_custody_deal(content_id, claimant)
+            && !self.has_active_deal_for_other_payer(content_id, claimant)
+    }
+
+    /// Canonical custody-proven owner of `content_id`, or `None` if unregistered,
+    /// contested across multiple claimants, or backed only by a lone manifest claim.
+    #[must_use]
+    pub(crate) fn proven_owner_of(&self, content_id: &ContentId) -> Option<Address> {
+        let owner = self.owner_of(content_id)?;
+        self.has_proven_ownership(content_id, &owner)
+            .then_some(owner)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn record_test_custody_for_manifest(
+        &mut self,
+        manifest: &ContentManifest,
+        payer: Address,
+    ) {
+        let envelope = bud_proof::ProofEnvelope {
+            proof_format_version: 1,
+            backend: "test-backend".to_string(),
+            p3_version: "0.6".to_string(),
+            fri_params_id: "test-fri".to_string(),
+            public_inputs_hash: [0x42u8; 32],
+            proof_bytes: vec![0xABu8; 96],
+            degree_bits: 8,
+        };
+        let proof = bincode::serialize(&envelope).expect("envelope");
+        let deal_id = self
+            .open_deal(
+                42,
+                manifest,
+                manifest.shards[0].shard_id,
+                Address::from([0xFE; 32]),
+                0,
+                1,
+                200,
+                StorageEconomicsParams {
+                    operator_bond: 5_000_000,
+                    fee_per_byte_epoch: 100,
+                },
+                &crate::domain::storage_params::StorageDomainParams {
+                    chunk_size: 256,
+                    max_committed_chunks: 1000,
+                    challenge_interval: 10,
+                    min_operator_bond: 1_000_000,
+                },
+                Some(proof),
+                Some([0x42u8; 32]),
+            )
+            .expect("test custody deal opens");
+        self.set_deal_payer(deal_id, payer);
+    }
+
     /// Scoped retraction of `caller`'s own un-paid `Plaintext` manifest when
     /// `caller` lists the content as a paid marketplace asset and no active
     /// storage deal references `manifest_id`.
@@ -2350,16 +2428,17 @@ impl StorageRegistry {
         content_id: &ContentId,
         issuer: Address,
     ) -> Result<(), crate::storage::ViewGrantError> {
-        if !self.has_claim(content_id, &issuer) {
-            return match self.owner_of(content_id) {
+        if !self.has_proven_ownership(content_id, &issuer) {
+            return match self.proven_owner_of(content_id) {
                 Some(owner) => Err(crate::storage::ViewGrantError::NotOwner { issuer, owner }),
                 None => {
-                    if self.manifests.contains_key(content_id)
-                        || self.confidential_commits.contains_key(content_id)
-                    {
+                    if self.is_registered(content_id) {
                         Err(crate::storage::ViewGrantError::NotOwner {
                             issuer,
-                            owner: Address::zero(),
+                            owner: self
+                                .owner_of(content_id)
+                                .filter(|o| *o != issuer)
+                                .unwrap_or_default(),
                         })
                     } else {
                         Err(crate::storage::ViewGrantError::UnknownContent)
@@ -2628,7 +2707,7 @@ impl StorageRegistry {
     /// stored data or grants.
     #[must_use]
     pub fn can_prune_on_nft_burn(&self, content_id: &ContentId, burner: &Address) -> bool {
-        if *burner == Address::zero() || self.owner_of(content_id) != Some(*burner) {
+        if *burner == Address::zero() || !self.has_proven_ownership(content_id, burner) {
             return false;
         }
         if self.has_active_deal_for_other_payer(content_id, burner) {
@@ -2901,10 +2980,13 @@ impl StorageRegistry {
         let caller = auth
             .derived_owner()
             .map_err(crate::storage::ViewGrantError::Authorization)?;
-        if !self.has_claim(&content_id, &caller) {
+        if !self.has_proven_ownership(&content_id, &caller) {
             return Err(crate::storage::ViewGrantError::NotOwner {
                 issuer: caller,
-                owner: self.owner_of(&content_id).unwrap_or_default(),
+                owner: self
+                    .owner_of(&content_id)
+                    .filter(|o| *o != caller)
+                    .unwrap_or_default(),
             });
         }
         let digest = crate::storage::social_delete_digest(
@@ -2925,7 +3007,7 @@ impl StorageRegistry {
     /// # Errors
     ///
     /// [`crate::storage::ViewGrantError`] for unknown content or a caller who
-    /// holds no claim on the content.
+    /// holds no custody-proven ownership on the content.
     pub fn social_delete_as(
         &mut self,
         caller: Address,
@@ -2935,10 +3017,13 @@ impl StorageRegistry {
         if !self.is_registered(&content_id) {
             return Err(crate::storage::ViewGrantError::UnknownContent);
         }
-        if !self.has_claim(&content_id, &caller) {
+        if !self.has_proven_ownership(&content_id, &caller) {
             return Err(crate::storage::ViewGrantError::NotOwner {
                 issuer: caller,
-                owner: self.owner_of(&content_id).unwrap_or_default(),
+                owner: self
+                    .owner_of(&content_id)
+                    .filter(|o| *o != caller)
+                    .unwrap_or_default(),
             });
         }
         let mut hook = crate::storage::three_hooks::NopThreeHook;
@@ -4072,12 +4157,12 @@ impl StorageRegistry {
         }
 
         let initial_state_root = bud_proof::initial_state_root_of(
-            bud_proof::memory_image_commitment_of_reads(
-                &bud_proof::initial_memory_reads(&vm.trace),
-            ),
-            bud_proof::register_image_commitment_of_reads(
-                &bud_proof::initial_register_reads(&vm.trace),
-            ),
+            bud_proof::memory_image_commitment_of_reads(&bud_proof::initial_memory_reads(
+                &vm.trace,
+            )),
+            bud_proof::register_image_commitment_of_reads(&bud_proof::initial_register_reads(
+                &vm.trace,
+            )),
         );
         let mut sender_bytes = [0u8; 8];
         sender_bytes.copy_from_slice(&context.responder.as_bytes()[..8]);
@@ -5596,11 +5681,13 @@ mod tests {
         let mut m = good_manifest();
         m.owner = owner;
         reg.register_manifest(&m);
+        reg.record_test_custody_for_manifest(&m, owner);
         let content = m.manifest_id;
         let mut other = ContentManifest::from_bytes_sliced(b"another private body bytes...", 8)
             .expect("second manifest");
         other.owner = owner;
         reg.register_manifest(&other);
+        reg.record_test_custody_for_manifest(&other, owner);
         let other = other.manifest_id;
         assert_ne!(content, other, "the two objects must be distinct");
 
@@ -5700,6 +5787,7 @@ mod tests {
         let mut m = good_manifest();
         m.owner = owner;
         reg.register_manifest(&m);
+        reg.record_test_custody_for_manifest(&m, owner);
         let key = [5u8; 32];
         let digest = crate::storage::grant_issue_digest(
             1,
@@ -5746,6 +5834,7 @@ mod tests {
         let mut m = good_manifest();
         m.owner = owner;
         reg.register_manifest(&m);
+        reg.record_test_custody_for_manifest(&m, owner);
         let key = [6u8; 32];
         let policy = crate::storage::ViewPolicy::PublicKeyId;
         let sign = |chain: u64, nonce: u64| {
@@ -5828,6 +5917,7 @@ mod tests {
         let mut m = good_manifest();
         m.owner = owner;
         reg.register_manifest(&m);
+        reg.record_test_custody_for_manifest(&m, owner);
         let key = [6u8; 32];
         let issue_digest = crate::storage::grant_issue_digest(
             1,
@@ -9603,9 +9693,8 @@ mod tests {
             operator(),
             111,
         );
-        let self_real_proof =
-            prove_storage_challenge_proof(&self_ctx, &[0x42u8; 32], &range_hash)
-                .expect("real self-challenge STARK proof");
+        let self_real_proof = prove_storage_challenge_proof(&self_ctx, &[0x42u8; 32], &range_hash)
+            .expect("real self-challenge STARK proof");
         let self_res = reg
             .answer_challenge_with_chain_id(
                 crate::core::chain_config::Network::Testnet
@@ -9659,6 +9748,11 @@ mod tests {
         alice_manifest.owner = alice;
         reg.register_manifest(&alice_manifest);
         assert_eq!(reg.owner_of(&alice_manifest.manifest_id), Some(alice));
+        assert!(
+            !reg.can_prune_on_nft_burn(&alice_manifest.manifest_id, &alice),
+            "lone manifest claim without custody deal must not authorize hard prune"
+        );
+        reg.record_test_custody_for_manifest(&alice_manifest, alice);
         assert!(reg.can_prune_on_nft_burn(&alice_manifest.manifest_id, &alice));
 
         let mut mallory_manifest = alice_manifest.clone();

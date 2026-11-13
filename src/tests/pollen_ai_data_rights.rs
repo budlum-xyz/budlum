@@ -226,6 +226,9 @@ fn registered_plaintext_content(state: &mut AccountState, owner: Address, seed: 
     manifest.owner = owner;
     let content_id = manifest.manifest_id;
     state.storage_registry.register_manifest(&manifest);
+    state
+        .storage_registry
+        .record_test_custody_for_manifest(&manifest, owner);
     content_id
 }
 

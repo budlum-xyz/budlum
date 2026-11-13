@@ -653,13 +653,21 @@ impl ConsensusEngine for PoAEngine {
                     block.index, expected.address, producer
                 )));
             }
-            if let Some(pq) = block.composite_pq_key() {
-                if expected.pq_public_key.is_empty() || expected.pq_public_key != pq {
-                    return Err(ConsensusError(
-                        "PoA block signature's ML-DSA-65 key is not the authority's registered key"
-                            .into(),
-                    ));
+            if !expected.pq_public_key.is_empty() {
+                match block.composite_pq_key() {
+                    Some(pq) if pq == expected.pq_public_key.as_slice() => {}
+                    _ => {
+                        return Err(ConsensusError(
+                            "PoA block signature's ML-DSA-65 key is not the authority's registered key"
+                                .into(),
+                        ));
+                    }
                 }
+            } else if block.composite_pq_key().is_some() {
+                return Err(ConsensusError(
+                    "PoA block signature's ML-DSA-65 key is not the authority's registered key"
+                        .into(),
+                ));
             }
 
             info!(
@@ -1111,6 +1119,20 @@ mod tests {
 
         state.validators.get_mut(&pubkey).unwrap().pq_public_key = pq_bytes;
         engine.validate_block(&block, &[], &state).unwrap();
+
+        let mut classical_only = Block::new(1, "prev".into(), vec![]);
+        classical_only.producer = Some(pubkey);
+        classical_only.sign(&keys.sig_key);
+        assert!(classical_only.composite_pq_key().is_none());
+        let skip_err = engine
+            .validate_block(&classical_only, &[], &state)
+            .expect_err("Ed25519-only PoA block must not bypass registered ML-DSA-65 key");
+        assert!(
+            skip_err
+                .to_string()
+                .contains("ML-DSA-65 key is not the authority's registered key"),
+            "missing composite PQ signature must be rejected: {skip_err}"
+        );
     }
 
     #[test]

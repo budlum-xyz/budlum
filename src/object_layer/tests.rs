@@ -1133,7 +1133,14 @@ fn default_min_class_bond_and_charter_home_proof_enforced() {
     };
 
     assert_eq!(
-        reg.charter_verified(DOMAIN, ch.clone(), &good_proof(), true, Some(state_root), true),
+        reg.charter_verified(
+            DOMAIN,
+            ch.clone(),
+            &good_proof(),
+            true,
+            Some(state_root),
+            true
+        ),
         Err(Refusal::Charter(CharterRefusal::ProofDisagrees))
     );
     assert_eq!(
@@ -1183,13 +1190,12 @@ fn settlement_charter_requires_domain_operator_and_refresh_requires_state_proof(
         fee: 0,
         bls: || Box::new(crate::cross_domain::external::intake::PairingBls),
     };
-    let tx = crate::settlement::domains::SettlementTx::ObjectLayer(Box::new(
-        ObjectLayerTx::Charter {
+    let tx =
+        crate::settlement::domains::SettlementTx::ObjectLayer(Box::new(ObjectLayerTx::Charter {
             domain: DOMAIN,
             charter: ch.clone(),
             proof: good_proof(),
-        },
-    ));
+        }));
     let err = crate::settlement::domains::execute_settlement_tx(&mut state, &ctx_attacker, &tx)
         .unwrap_err();
     assert!(format!("{err:?}").contains("operator"));
@@ -1289,7 +1295,12 @@ fn uol_k2_guest_placement_preserves_custody_and_returns_on_proof() {
     );
     assert_eq!(w.reg.recorded_custody(&class), 1);
 
-    let ret_raw = guest_fx.call(&guest_fx.address(0xe0), &guest_fx.address(0x22), 1, b"return");
+    let ret_raw = guest_fx.call(
+        &guest_fx.address(0xe0),
+        &guest_fx.address(0x22),
+        1,
+        b"return",
+    );
     let ret_proof = HomeEventProof {
         domain: guest_domain,
         home_height: 55,
@@ -1302,7 +1313,10 @@ fn uol_k2_guest_placement_preserves_custody_and_returns_on_proof() {
     w.reg
         .guest_return(class, &native, alice(), &ret_proof, &YES)
         .unwrap();
-    assert_eq!(w.reg.unique.get(&asset).unwrap().location, Location::ObjectLayer);
+    assert_eq!(
+        w.reg.unique.get(&asset).unwrap().location,
+        Location::ObjectLayer
+    );
     assert_eq!(w.reg.unique.get(&asset).unwrap().holder, Some(alice()));
     assert_eq!(w.reg.recorded_custody(&class), 1);
 }
@@ -1341,8 +1355,7 @@ fn home_stipend_call_requires_verifier_and_enforces_nonce_and_cap() {
 
     // Without a verifier (`None`), `HomeStipendCall` must fail closed.
     assert_eq!(
-        w.reg
-            .home_stipend_call(DOMAIN, &auth, &action, 1, None),
+        w.reg.home_stipend_call(DOMAIN, &auth, &action, 1, None),
         Err(Refusal::NotAuthorized)
     );
 
@@ -1378,13 +1391,19 @@ fn home_stipend_call_requires_verifier_and_enforces_nonce_and_cap() {
     // Nested `HomeStipendCall` and admin variants (`Challenge`) are refused.
     let nested = ObjectLayerTx::HomeStipendCall {
         domain: DOMAIN,
-        auth: HomeKeyStipendAuth { nonce: 1, ..auth.clone() },
+        auth: HomeKeyStipendAuth {
+            nonce: 1,
+            ..auth.clone()
+        },
         action: Box::new(action.clone()),
     };
     assert_eq!(
         w.reg.home_stipend_call(
             DOMAIN,
-            &HomeKeyStipendAuth { nonce: 1, ..auth.clone() },
+            &HomeKeyStipendAuth {
+                nonce: 1,
+                ..auth.clone()
+            },
             &nested,
             2,
             Some(&AllowAllVerifier),
@@ -1394,7 +1413,10 @@ fn home_stipend_call_requires_verifier_and_enforces_nonce_and_cap() {
     assert_eq!(
         w.reg.home_stipend_call(
             DOMAIN,
-            &HomeKeyStipendAuth { nonce: 1, ..auth.clone() },
+            &HomeKeyStipendAuth {
+                nonce: 1,
+                ..auth.clone()
+            },
             &ObjectLayerTx::Challenge { class },
             2,
             Some(&AllowAllVerifier),
@@ -1405,9 +1427,18 @@ fn home_stipend_call_requires_verifier_and_enforces_nonce_and_cap() {
     // Exceeding cumulative lifetime stipend cap is refused.
     let rounds = u64::try_from(MAX_HOME_STIPEND_TOTAL_ATTOS / MAX_HOME_STIPEND_ATTOS).unwrap();
     for nonce in 1..rounds {
-        let next_auth = HomeKeyStipendAuth { nonce, ..auth.clone() };
+        let next_auth = HomeKeyStipendAuth {
+            nonce,
+            ..auth.clone()
+        };
         w.reg
-            .home_stipend_call(DOMAIN, &next_auth, &action, 2 + nonce, Some(&AllowAllVerifier))
+            .home_stipend_call(
+                DOMAIN,
+                &next_auth,
+                &action,
+                2 + nonce,
+                Some(&AllowAllVerifier),
+            )
             .unwrap();
     }
     let over_cap = HomeKeyStipendAuth {
