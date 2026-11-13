@@ -1498,7 +1498,7 @@ pub fn prove_storage_challenge_proof(
         gas_limit: vm.gas_limit,
         gas_used: vm.gas_used,
         exit_code: receipt.exit_code,
-        trace_len: vm.trace.len() as u64,
+        trace_len: u64::try_from(vm.trace.len()).unwrap_or(u64::MAX),
         event_digest: bud_proof::event_digest_from_events(&receipt.events),
         state_writes_digest: receipt.state_writes_digest,
     };
@@ -4091,7 +4091,7 @@ impl StorageRegistry {
             gas_limit: vm.gas_limit,
             gas_used: vm.gas_used,
             exit_code: receipt.exit_code,
-            trace_len: vm.trace.len() as u64,
+            trace_len: u64::try_from(vm.trace.len()).unwrap_or(u64::MAX),
             event_digest: bud_proof::event_digest_from_events(&receipt.events),
             state_writes_digest: receipt.state_writes_digest,
         };

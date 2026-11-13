@@ -74,7 +74,7 @@ pub fn decode_uol_precompile_calldata(calldata: &[u8]) -> Result<DecodedUolPreco
         .get(..4)
         .and_then(|s| s.try_into().ok())
         .ok_or_else(|| String::from("UOL calldata shorter than 4-byte selector"))?;
-    let args = &calldata[4..];
+    let args = calldata.get(4..).unwrap_or_default();
     if sel == uol_selector("balanceOf(bytes32,bytes)") {
         let w = read_word(args, 0)?;
         let mut class_id = [0u8; 32];
@@ -98,8 +98,10 @@ pub fn decode_uol_precompile_calldata(calldata: &[u8]) -> Result<DecodedUolPreco
         if amt_word.get(..16).is_some_and(|hi| hi.iter().any(|b| *b != 0)) {
             return Err(String::from("ABI uint128 overflows 128 bits"));
         }
-        let mut lo = [0u8; 16];
-        lo.copy_from_slice(&amt_word[16..32]);
+        let lo: [u8; 16] = amt_word
+            .get(16..32)
+            .and_then(|s| s.try_into().ok())
+            .ok_or_else(|| String::from("ABI uint128 truncated"))?;
         let amount = u128::from_be_bytes(lo);
         return Ok(DecodedUolPrecompileCall::Transfer {
             class_id,
@@ -119,8 +121,10 @@ pub fn decode_uol_precompile_calldata(calldata: &[u8]) -> Result<DecodedUolPreco
         if amt_word.get(..16).is_some_and(|hi| hi.iter().any(|b| *b != 0)) {
             return Err(String::from("ABI uint128 overflows 128 bits"));
         }
-        let mut lo = [0u8; 16];
-        lo.copy_from_slice(&amt_word[16..32]);
+        let lo: [u8; 16] = amt_word
+            .get(16..32)
+            .and_then(|s| s.try_into().ok())
+            .ok_or_else(|| String::from("ABI uint128 truncated"))?;
         let amount = u128::from_be_bytes(lo);
         let expiry = read_u64_word(args, 160)?;
         return Ok(DecodedUolPrecompileCall::Offer {

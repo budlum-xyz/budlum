@@ -101,8 +101,9 @@ fn verify_inference_is_closed_on_testnet() {
     ]);
     decode_budzero_for_testnet(&bytecode)
         .expect("VerifyInference is enabled at BudZero EE deploy validation on testnet");
-    ZkVmExecutor::execute_bytecode_mainnet(&bytecode, DEFAULT_CONTRACT_GAS_LIMIT)
-        .expect("VerifyInference executes and proves on testnet under MainnetActivation::default()");
+    ZkVmExecutor::execute_bytecode_mainnet(&bytecode, DEFAULT_CONTRACT_GAS_LIMIT).expect(
+        "VerifyInference executes and proves on testnet under MainnetActivation::default()",
+    );
 }
 
 #[test]
