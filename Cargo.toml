@@ -237,6 +237,10 @@ required-features = ["wallet-ml-dsa"]
 # needs no feature. It is registered by name so a build or a package listing
 # shows it; Cargo would otherwise only discover it by directory.
 [[bin]]
+name = "budlum-gateway"
+path = "src/bin/budlum-gateway.rs"
+
+[[bin]]
 name = "budlum-indexer"
 path = "src/bin/budlum-indexer.rs"
 
