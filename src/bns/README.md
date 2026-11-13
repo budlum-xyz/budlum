@@ -31,6 +31,20 @@
     `bud_bnsListOffers`, `bud_bnsPrepareCreateOffer`, `bud_bnsPrepareBuyName`,
     and `bud_bnsPrepareCancelOffer`; CLI `bud bns sell` batch-publishes
     `Primary` offers from a file.
+  - **B3 (anti-squatting limits and reserved labels):** protocol constants in
+    `src/registry/params.rs` (`RESERVED_LABELS`, `MIN_DURATION = 10`,
+    `MAX_DURATION = 365_000`, `MAX_NAMES_PER_OWNER = 64`) guard all BNS write
+    paths. `RESERVED_LABELS` covers core service labels (`bud`, `www`, `app`,
+    `api`, `rpc`, `docs`, `mail`, `explorer`, `faucet`, `status`, `testnet`,
+    `mainnet`, `devnet`, `seed`, `seed-1`, `root`, `admin`, `bns`, `budlum`,
+    `validator`, `node`, `gateway`), is seeded from
+    `GenesisConfig::bns_reserved_labels` and committed into `BnsRegistry::root()`,
+    and may only be registered when an authorized `BNS_PRIMARY_SELLERS` address
+    settles a `Primary` marketplace offer. Registration and renewal durations
+    outside `MIN_DURATION..=MAX_DURATION` (including post-renewal remaining
+    duration above `MAX_DURATION`) return `BnsError::InvalidDuration`, and
+    holding `MAX_NAMES_PER_OWNER` live/grace names blocks further purchases or
+    incoming transfers with `BnsError::OwnerNameLimitExceeded`.
 
 ## Current behaviour (locked by tests)
 

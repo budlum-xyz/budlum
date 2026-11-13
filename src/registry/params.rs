@@ -29,6 +29,46 @@ use serde::{Deserialize, Serialize};
 /// consensus-critical layout.
 pub const LIVENESS_JAIL_EPOCHS: u64 = 7;
 
+/// Reserved `.bud` labels and `budlum.xyz` infrastructure subdomains.
+///
+/// Shared between BNS consensus validation and the HTTP gateway: none of these
+/// labels may be registered directly or resolved through BNS on the gateway,
+/// and only authorized `BNS_PRIMARY_SELLERS` may list them as `Primary` offers.
+pub const RESERVED_LABELS: &[&str] = &[
+    "bud",
+    "www",
+    "app",
+    "api",
+    "rpc",
+    "docs",
+    "mail",
+    "explorer",
+    "faucet",
+    "status",
+    "testnet",
+    "mainnet",
+    "devnet",
+    "seed",
+    "seed-1",
+    "root",
+    "admin",
+    "bns",
+    "budlum",
+    "validator",
+    "node",
+    "gateway",
+];
+
+/// Minimum `.bud` registration or renewal duration in epochs (rejects 1-epoch squatting).
+pub const MIN_DURATION: u64 = 10;
+
+/// Maximum `.bud` registration or post-renewal remaining duration in epochs
+/// (10 years at ~100 epochs/day).
+pub const MAX_DURATION: u64 = 365_000;
+
+/// Maximum live or grace-period `.bud` names a single address may hold at once.
+pub const MAX_NAMES_PER_OWNER: usize = 64;
+
 /// Economic / timing parameters that gate participation and slashing.
 ///
 /// `*_slash_ratio_fixed` values are `FIXED_POINT_SCALE`-scaled fractions in
