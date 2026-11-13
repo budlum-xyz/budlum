@@ -210,11 +210,16 @@ impl ThresholdEscrow {
         recipient: &Address,
     ) -> Result<PredicateProof, ThresholdEscrowError> {
         let msg = Self::signing_message(&self.committee, recipient, &self.amount_commitment);
-        let aux = u64::from_le_bytes(msg[..8].try_into().unwrap_or([1u8; 8])).max(1);
+        let aux = u64::from_le_bytes(
+            msg.get(..8)
+                .and_then(|s| s.try_into().ok())
+                .unwrap_or([1u8; 8]),
+        )
+        .max(1);
         let stmt = PredicateStatement {
             kind: PredicateKind::Yk6ThresholdQuorum,
-            lhs: verified_signers as u64,
-            rhs: THRESHOLD_ESCROW_T as u64,
+            lhs: u64::try_from(verified_signers).unwrap_or(u64::MAX),
+            rhs: u64::try_from(THRESHOLD_ESCROW_T).unwrap_or(u64::MAX),
             aux,
             chain_id: self.committee.chain_id,
         };
@@ -249,11 +254,17 @@ impl ThresholdEscrow {
             });
         }
         let msg = Self::signing_message(&self.committee, recipient, &self.amount_commitment);
-        let expected_aux = u64::from_le_bytes(msg[..8].try_into().unwrap_or([1u8; 8])).max(1);
+        let expected_aux = u64::from_le_bytes(
+            msg.get(..8)
+                .and_then(|s| s.try_into().ok())
+                .unwrap_or([1u8; 8]),
+        )
+        .max(1);
+        let threshold_u64 = u64::try_from(THRESHOLD_ESCROW_T).unwrap_or(u64::MAX);
         if quorum_proof.statement.kind != PredicateKind::Yk6ThresholdQuorum
-            || quorum_proof.statement.rhs != THRESHOLD_ESCROW_T as u64
+            || quorum_proof.statement.rhs != threshold_u64
             || quorum_proof.statement.aux != expected_aux
-            || quorum_proof.statement.lhs < THRESHOLD_ESCROW_T as u64
+            || quorum_proof.statement.lhs < threshold_u64
         {
             return Err(ThresholdEscrowError::InvalidQuorumStatement);
         }

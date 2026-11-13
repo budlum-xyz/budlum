@@ -953,7 +953,8 @@ fn non_evm_migration_kit_8_12_3_wasm_svm_and_move() {
     let store_val = br#"{"admin":"ok"}"#.to_vec();
 
     // Build a 2-leaf ICS-23 tree where `info_leaf` pairs with `store_leaf` under `app_hash`.
-    let info_leaf = compute_ics23_leaf_hash(&[0x00], contract_bech32.as_bytes(), &contract_info_bytes);
+    let info_leaf =
+        compute_ics23_leaf_hash(&[0x00], contract_bech32.as_bytes(), &contract_info_bytes);
     let store_leaf = compute_ics23_leaf_hash(&[0x00], &store_key, &store_val);
     let mut root_pre = vec![0x01u8];
     root_pre.extend_from_slice(&info_leaf);

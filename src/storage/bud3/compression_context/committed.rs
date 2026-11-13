@@ -2,7 +2,7 @@
 //! exposed for expansion-tier A0 context codecs (12 and 13), context rotation, and Context Maintenance Pool accounting.
 //!
 //! Binding invariants (`K15`..`K19`):
-//! 1. Closed by default at testnet launch (`TESTNET_CONTEXT_ENABLED_BY_DEFAULT == false`).
+//! 1. Enabled by default from genesis on testnet `45261` (`TESTNET_CONTEXT_ENABLED_BY_DEFAULT == true`).
 //! 2. A shared context is the network's shared dictionary for a public content class,
 //!    defined on-chain solely by [`ContextManifest`]; materialized dictionary bytes live
 //!    only in each node's local cache ([`LocalContextCache`]).

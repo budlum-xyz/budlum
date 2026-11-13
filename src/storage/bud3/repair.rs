@@ -321,7 +321,9 @@ where
     let witness = if live_vec.first().is_some_and(|s| s.esi == 0)
         && witness_need <= MAX_REPAIR_WITNESS_SYMBOLS
     {
-        let subset = &live_vec[..live_vec.len().min(witness_need)];
+        let subset = live_vec
+            .get(..live_vec.len().min(witness_need))
+            .unwrap_or(&live_vec);
         build_repair_proven_witness(0, &live_vec, subset).unwrap_or_default()
     } else {
         Vec::new()

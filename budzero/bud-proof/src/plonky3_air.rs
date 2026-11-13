@@ -2767,7 +2767,7 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
                 + is_pop * cur[COL_RD_VAL_NEW].into()
                 + is_call * (cur[COL_PC].into() + one.clone())
                 + is_ret * cur[COL_NEXT_PC].into()
-                + is_sread * cur[COL_RD_VAL_NEW].into()
+                + is_sread.clone() * cur[COL_RD_VAL_NEW].into()
                 + is_swrite.clone() * cur[COL_RS1_VAL].into()
                 + is_merkle_expand_mem * cur[COL_VM_MERKLE_SIBLING].into()
                 + is_merkle_key_read * cur[COL_VM_MERKLE_KEY].into();
