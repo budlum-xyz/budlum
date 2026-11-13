@@ -551,6 +551,8 @@ pub enum TransactionType {
     BnsCreateOffer,
     BnsCancelOffer,
     BnsBuyName,
+    BnsSetAddress,
+    BnsSetPrimaryName,
     BnsSetContent,
     BnsRegisterSubdomain,
     BnsSetStorage,
@@ -2525,6 +2527,8 @@ impl Transaction {
             TransactionType::BnsCreateOffer
             | TransactionType::BnsCancelOffer
             | TransactionType::BnsBuyName
+            | TransactionType::BnsSetAddress
+            | TransactionType::BnsSetPrimaryName
             | TransactionType::BnsSetContent
             | TransactionType::BnsRegisterSubdomain
             | TransactionType::BnsSetStorage
@@ -3098,6 +3102,8 @@ fn transaction_type_tag(tx_type: &TransactionType) -> u8 {
         TransactionType::BnsCreateOffer => 71,
         TransactionType::BnsCancelOffer => 72,
         TransactionType::BnsBuyName => 73,
+        TransactionType::BnsSetAddress => 74,
+        TransactionType::BnsSetPrimaryName => 75,
     }
 }
 fn encode_chain(chain: ExternalChain, out: &mut Vec<u8>) {
@@ -3797,6 +3803,8 @@ fn encode_transaction_type_payload(tx_type: &TransactionType, out: &mut Vec<u8>)
         | TransactionType::BnsCreateOffer
         | TransactionType::BnsCancelOffer
         | TransactionType::BnsBuyName
+        | TransactionType::BnsSetAddress
+        | TransactionType::BnsSetPrimaryName
         | TransactionType::BnsSetContent
         | TransactionType::BnsRegisterSubdomain
         | TransactionType::BnsSetStorage
