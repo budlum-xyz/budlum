@@ -525,11 +525,11 @@ pub enum ChainCommand {
     },
     BnsGetOffer {
         offer_id: u64,
-        response: oneshot::Sender<(Option<crate::pollen::NameOffer>, u64)>,
+        response: oneshot::Sender<(Option<crate::bns::NameOffer>, u64)>,
     },
     BnsListOffers {
-        kind: Option<crate::pollen::OfferKind>,
-        response: oneshot::Sender<Vec<crate::pollen::NameOffer>>,
+        kind: Option<crate::bns::OfferKind>,
+        response: oneshot::Sender<Vec<crate::bns::NameOffer>>,
     },
     NftGet {
         id: u64,
@@ -2400,7 +2400,7 @@ impl ChainHandle {
         rx.await.unwrap_or(0)
     }
 
-    pub async fn bns_get_offer(&self, offer_id: u64) -> (Option<crate::pollen::NameOffer>, u64) {
+    pub async fn bns_get_offer(&self, offer_id: u64) -> (Option<crate::bns::NameOffer>, u64) {
         let (tx, rx) = oneshot::channel();
         let _ = self
             .tx
@@ -2414,8 +2414,8 @@ impl ChainHandle {
 
     pub async fn bns_list_offers(
         &self,
-        kind: Option<crate::pollen::OfferKind>,
-    ) -> Vec<crate::pollen::NameOffer> {
+        kind: Option<crate::bns::OfferKind>,
+    ) -> Vec<crate::bns::NameOffer> {
         let (tx, rx) = oneshot::channel();
         let _ = self
             .tx

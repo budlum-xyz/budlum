@@ -290,11 +290,11 @@ fn test_bns_register_fee_enforced_regression_m4() {
         .marketplace
         .create_name_offer(
             seller,
-            crate::pollen::CreateNameOffer {
+            crate::bns::CreateNameOffer {
                 name: name.clone(),
                 price_atoms,
                 duration: 100,
-                kind: crate::pollen::OfferKind::Primary,
+                kind: crate::bns::OfferKind::Primary,
                 expires_at_epoch: 50,
             },
             0,
