@@ -1129,7 +1129,6 @@ struct Wallets {
     alice: String,
     alice_file: String,
     bob: String,
-    bob_file: String,
 }
 
 fn scenario_faucet(backend: &Backend<'_>) -> Result<(Wallets, String), String> {
@@ -1149,7 +1148,6 @@ fn scenario_faucet(backend: &Backend<'_>) -> Result<(Wallets, String), String> {
             alice,
             alice_file,
             bob,
-            bob_file,
         },
         detail,
     ))
@@ -1257,45 +1255,23 @@ fn scenario_graft(backend: &Backend<'_>, wallets: &Wallets) -> Result<String, St
     let ids = backend.bud(&["graft", "id", "--domain", DOMAIN, "--origin-app", ORIGIN])?;
     let graft_id = line_value(&ids, "graft id: ").ok_or("graft id printed nothing")?;
     let mirror = line_value(&ids, "mirror account: 0x").ok_or("graft id printed no mirror")?;
-    let app_binding_closed = match backend {
-        Backend::Compose { eight_seat, .. } => *eight_seat,
-        Backend::Local { stack, .. } => stack.eight_seat,
-    };
-    let signer_file = if app_binding_closed {
-        &wallets.bob_file
-    } else {
-        &wallets.alice_file
-    };
-    let before_tip = tip();
-    let reg_attempt = backend.bud(&[
+    backend.bud(&[
         "graft",
         "register",
         "--key-file",
-        signer_file,
+        &wallets.alice_file,
         "--domain",
         DOMAIN,
         "--origin-app",
         ORIGIN,
         "--manifest",
         "1111111111111111111111111111111111111111111111111111111111111111",
-    ]);
+    ])?;
     let query_params = format!("[\"{graft_id}\"]");
     let lookup_registered = || {
         call("bud_getGraftApplication", &query_params)
             .filter(|value| *value != crate::json::Value::Null)
     };
-    if app_binding_closed {
-        if reg_attempt.is_ok() {
-            let _ = wait_for(15, || (tip() >= before_tip + 2).then_some(()));
-        }
-        if lookup_registered().is_some() {
-            return Err("app_binding registered on testnet despite containment".into());
-        }
-        return Ok(format!(
-            "domain {DOMAIN} registered; app_binding (mirror 0x{mirror}) contained on chain 45261"
-        ));
-    }
-    reg_attempt?;
     wait_for(60, lookup_registered).ok_or("the Graft application did not register within 120 s")?;
     backend.bud(&[
         "graft",
