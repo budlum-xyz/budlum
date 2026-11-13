@@ -22,6 +22,8 @@ pub struct NameRecord {
 
     pub content_id: Option<ContentId>,
     pub subdomains: std::collections::BTreeMap<String, Address>,
+    #[serde(default)]
+    pub records: std::collections::BTreeMap<String, String>,
 }
 
 impl NameRecord {
@@ -60,6 +62,7 @@ impl NameRecord {
             storage_root_height: None,
             content_id: None,
             subdomains: std::collections::BTreeMap::new(),
+            records: std::collections::BTreeMap::new(),
         }
     }
 
@@ -90,6 +93,8 @@ pub struct BnsResolved {
     pub storage_root: Option<[u8; 32]>,
     pub storage_domain_id: Option<u32>,
     pub content_id: Option<ContentId>,
+    #[serde(default)]
+    pub records: std::collections::BTreeMap<String, String>,
     pub is_expired: bool,
 }
 
@@ -98,6 +103,7 @@ pub enum BnsError {
     InvalidName,
     ReservedName,
     InvalidDuration,
+    InvalidRecord,
     OwnerNameLimitExceeded,
     NameTaken,
     NotOwner,
@@ -110,6 +116,7 @@ impl fmt::Display for BnsError {
             BnsError::InvalidName => write!(f, "Name too short or long"),
             BnsError::ReservedName => write!(f, "Name label is reserved"),
             BnsError::InvalidDuration => write!(f, "Registration duration out of bounds"),
+            BnsError::InvalidRecord => write!(f, "Invalid BNS record key, value, or count"),
             BnsError::OwnerNameLimitExceeded => write!(f, "Owner name limit exceeded"),
             BnsError::NameTaken => write!(f, "Name already taken"),
             BnsError::NotOwner => write!(f, "Not the owner"),

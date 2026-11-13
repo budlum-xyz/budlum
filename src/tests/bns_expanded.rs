@@ -990,3 +990,83 @@ fn bns_forward_target_address_and_bidirectional_reverse_resolution() {
     assert_eq!(state.bns_registry.resolve("ayaz.bud", 2), Some(bob));
     assert_eq!(state.bns_registry.reverse_resolve(&vault, 2), None);
 }
+
+#[test]
+fn bns_v3_text_and_multichain_records_commit_to_root_and_reject_unsafe_schemes() {
+    use crate::core::account::AccountState;
+    use crate::crypto::primitives::KeyPair;
+    use crate::execution::executor::Executor;
+    use std::collections::BTreeMap;
+
+    let alice_kp = KeyPair::generate().unwrap();
+    let alice = Address::from(alice_kp.public_key_bytes());
+    let bob = addr(9);
+
+    let mut state = AccountState::new();
+    state.epoch_index = 1;
+    state.add_balance(&alice, 1_000_000);
+    state
+        .bns_registry
+        .register("profile.bud".to_string(), alice, 1, 100)
+        .unwrap();
+
+    let root_before = state.bns_registry.root();
+    let mut updates = BTreeMap::new();
+    updates.insert(
+        "avatar".to_string(),
+        Some("https://budlum.xyz/avatar.png".to_string()),
+    );
+    updates.insert("com.github".to_string(), Some("budlum-xyz".to_string()));
+    updates.insert(
+        "addr.eth".to_string(),
+        Some("0x1111111111111111111111111111111111111111".to_string()),
+    );
+    let mut set_tx = lifecycle_tx(
+        alice,
+        0,
+        1,
+        0,
+        TransactionType::BnsSetRecords,
+        bincode::serialize(&("profile.bud".to_string(), updates)).unwrap(),
+    );
+    set_tx.sign(&alice_kp);
+    Executor::apply_transaction_checked(&mut state, &set_tx).unwrap();
+
+    assert_ne!(state.bns_registry.root(), root_before);
+    let records = state.bns_registry.get_records("profile.bud", 2).unwrap();
+    assert_eq!(records["com.github"], "budlum-xyz");
+    assert_eq!(
+        records["addr.eth"],
+        "0x1111111111111111111111111111111111111111"
+    );
+
+    // Unsafe `javascript:` URI rejected without mutating existing records.
+    let mut bad_updates = BTreeMap::new();
+    bad_updates.insert("url".to_string(), Some("javascript:alert(1)".to_string()));
+    let mut bad_tx = lifecycle_tx(
+        alice,
+        0,
+        1,
+        1,
+        TransactionType::BnsSetRecords,
+        bincode::serialize(&("profile.bud".to_string(), bad_updates)).unwrap(),
+    );
+    bad_tx.sign(&alice_kp);
+    assert_eq!(
+        Executor::apply_transaction_checked(&mut state, &bad_tx)
+            .unwrap_err()
+            .code(),
+        "bns_set_records_failed"
+    );
+
+    // Transfer clears all text/multi-chain records.
+    state
+        .bns_registry
+        .transfer("profile.bud", &alice, bob, 2)
+        .unwrap();
+    assert!(state
+        .bns_registry
+        .get_records("profile.bud", 2)
+        .unwrap()
+        .is_empty());
+}
