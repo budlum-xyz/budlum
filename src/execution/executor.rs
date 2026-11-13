@@ -4732,7 +4732,6 @@ mod tests {
 
     /// The legacy privacy path is available only on the development network.
     #[test]
-    #[test]
     fn privacy_transfers_are_enabled_on_testnet_and_devnet() {
         let mainnet = crate::core::chain_config::Network::Mainnet
             .chain_id()

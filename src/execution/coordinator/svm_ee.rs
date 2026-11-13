@@ -1149,8 +1149,7 @@ impl ExecutionEnvironment for SvmEe {
                         owner,
                         delegate,
                     } => {
-                        let Ok(alw_pda) = derive_spl_allowance_pda(&mint, &owner, &delegate)
-                        else {
+                        let Ok(alw_pda) = derive_spl_allowance_pda(&mint, &owner, &delegate) else {
                             return Ok(EeOutcome {
                                 status: OutcomeStatus::Revert,
                                 output: Vec::new(),

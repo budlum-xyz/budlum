@@ -299,7 +299,7 @@ mod tests {
             Err(CodecError::Unknown(registry::RESERVED_ID))
         );
         assert!(!is_open(registry::RESERVED_ID));
-        assert!(is_open(codecs::LZMA2));
+        assert!(is_open(2));
     }
 
     #[test]
@@ -379,23 +379,14 @@ mod tests {
                 rec
             })
             .collect();
-        let ts_enc = codecs::encode_codec(codecs::TIME_SERIES, &ts_raw).unwrap();
-        assert_eq!(
-            decode(codecs::TIME_SERIES, &ts_enc, ts_raw.len() as u64).unwrap(),
-            ts_raw
-        );
+        let ts_enc = codecs::encode_codec(15, &ts_raw).unwrap();
+        assert_eq!(decode(15, &ts_enc, ts_raw.len() as u64).unwrap(), ts_raw);
         let fp_raw: Vec<u8> = (0..64u32).flat_map(|i| (i as f32).to_le_bytes()).collect();
-        let fp_enc = codecs::encode_codec(codecs::FLOAT_SPLIT, &fp_raw).unwrap();
-        assert_eq!(
-            decode(codecs::FLOAT_SPLIT, &fp_enc, fp_raw.len() as u64).unwrap(),
-            fp_raw
-        );
+        let fp_enc = codecs::encode_codec(19, &fp_raw).unwrap();
+        assert_eq!(decode(19, &fp_enc, fp_raw.len() as u64).unwrap(), fp_raw);
         let dna = b">seq1\nACGTACGTACGTACGTNNACGTACGT\n";
-        let dna_enc = codecs::encode_codec(codecs::GENOMIC, dna).unwrap();
-        assert_eq!(
-            decode(codecs::GENOMIC, &dna_enc, dna.len() as u64).unwrap(),
-            dna
-        );
+        let dna_enc = codecs::encode_codec(23, dna).unwrap();
+        assert_eq!(decode(23, &dna_enc, dna.len() as u64).unwrap(), dna);
     }
 
     #[test]

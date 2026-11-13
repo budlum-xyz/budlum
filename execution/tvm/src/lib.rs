@@ -272,7 +272,9 @@ fn run_tvm_body(
             }
         }
     }
-    Ok(stack.pop().map_or_else(Vec::new, |v| v.to_le_bytes().to_vec()))
+    Ok(stack
+        .pop()
+        .map_or_else(Vec::new, |v| v.to_le_bytes().to_vec()))
 }
 
 /// Deterministic TVM execution environment worker (`EeId::TVM = 0x09`).
