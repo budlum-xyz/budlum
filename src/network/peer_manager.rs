@@ -10,6 +10,7 @@ pub const RATE_LIMIT_PENALTY: i32 = -3;
 /// design: the ask was this node's own choice, so an unanswerable one costs
 /// the peer its place in the sync order, not an hour of silence.
 const UNANSWERED_REQUEST_PENALTY: i32 = -5;
+const MAX_UNANSWERED_SYNC_STRIKES: u32 = 4;
 /// A batch that does not join this chain: a fork signal, priced like an
 /// unanswered request and, like it, floored above the ban threshold.
 const UNJOINED_BLOCK_PENALTY: i32 = -5;
@@ -52,6 +53,7 @@ pub struct PeerScore {
     pub vote_tokens: f64,
     pub blob_tokens: f64,
     pub handshaked: bool,
+    pub unanswered_sync_strikes: u32,
 }
 impl Default for PeerScore {
     fn default() -> Self {
@@ -69,6 +71,7 @@ impl Default for PeerScore {
             vote_tokens: 10.0,
             blob_tokens: 5.0,
             handshaked: false,
+            unanswered_sync_strikes: 0,
         }
     }
 }
@@ -513,6 +516,19 @@ impl PeerManager {
     }
 
     pub fn check_vote_rate_limit(&mut self, peer_id: &PeerId) -> bool {
+        self.check_vote_rate_limit_from(peer_id, true)
+    }
+
+    /// Check per-peer vote rate budget. When `authored_by_peer` is `false`
+    /// (for example a gossipsub relayer forwarding another validator's vote),
+    /// exhaustion still drops the excess traffic and demotes the peer in
+    /// selection order, but floors above `BAN_THRESHOLD` so a flooding third
+    /// party cannot get honest mesh relayers banned.
+    pub(crate) fn check_vote_rate_limit_from(
+        &mut self,
+        peer_id: &PeerId,
+        authored_by_peer: bool,
+    ) -> bool {
         let Some(score) = self.get_or_create(peer_id) else {
             return false;
         };
@@ -521,14 +537,14 @@ impl PeerManager {
             score.vote_tokens -= 1.0;
             true
         } else {
-            score.score = (score.score - 1).max(MIN_SCORE);
+            let floor = if authored_by_peer {
+                MIN_SCORE
+            } else {
+                MIN_SCORE.saturating_add(1)
+            };
+            score.score = (score.score - 1).max(floor);
             score.last_seen = Some(Instant::now());
-            // A penalty that only walks the score down to the threshold never
-            // removes the peer: `MIN_SCORE` is the floor, so a vote flood
-            // costs it tokens and nothing else. The ban is the whole point of
-            // the penalty, so it fires here as it does for every other
-            // bad-behaviour report.
-            let spent = score.score <= BAN_THRESHOLD;
+            let spent = authored_by_peer && score.score <= BAN_THRESHOLD;
             if spent {
                 self.ban_peer(peer_id);
             }
@@ -537,6 +553,17 @@ impl PeerManager {
     }
 
     pub fn check_blob_rate_limit(&mut self, peer_id: &PeerId) -> bool {
+        self.check_blob_rate_limit_from(peer_id, true)
+    }
+
+    /// Check per-peer QC/fault-proof blob rate budget. Relayed frames and
+    /// `/sync` pull saturation (`authored_by_peer == false`) enforce the token
+    /// bucket and demote score without auto-banning honest relayers/fetchers.
+    pub(crate) fn check_blob_rate_limit_from(
+        &mut self,
+        peer_id: &PeerId,
+        authored_by_peer: bool,
+    ) -> bool {
         let Some(score) = self.get_or_create(peer_id) else {
             return false;
         };
@@ -545,9 +572,14 @@ impl PeerManager {
             score.blob_tokens -= 1.0;
             true
         } else {
-            score.score = (score.score - 5).max(MIN_SCORE);
+            let floor = if authored_by_peer {
+                MIN_SCORE
+            } else {
+                MIN_SCORE.saturating_add(1)
+            };
+            score.score = (score.score - 5).max(floor);
             score.last_seen = Some(Instant::now());
-            let spent = score.score <= BAN_THRESHOLD;
+            let spent = authored_by_peer && score.score <= BAN_THRESHOLD;
             if spent {
                 self.ban_peer(peer_id);
             }
@@ -601,6 +633,7 @@ impl PeerManager {
             return;
         };
         score.valid_contributions += 1;
+        score.unanswered_sync_strikes = 0;
         score.score = (score.score + GOOD_BEHAVIOR_REWARD).min(MAX_SCORE);
         score.last_seen = Some(Instant::now());
     }
@@ -660,6 +693,7 @@ impl PeerManager {
         if let Some(score) = self.peers.get_mut(peer_id) {
             score.banned_until = None;
             score.ban_expires_unix = None;
+            score.unanswered_sync_strikes = 0;
             score.score = 0;
         }
     }
@@ -672,6 +706,7 @@ impl PeerManager {
             if expired_instant || expired_unix {
                 score.banned_until = None;
                 score.ban_expires_unix = None;
+                score.unanswered_sync_strikes = 0;
                 score.score = 0;
             }
         }
@@ -709,11 +744,17 @@ impl PeerManager {
         let Some(score) = self.get_or_create(peer_id) else {
             return;
         };
-        score.score = score
-            .score
-            .saturating_add(UNANSWERED_REQUEST_PENALTY)
-            .max(MIN_SCORE.saturating_add(1));
+        score.unanswered_sync_strikes = score.unanswered_sync_strikes.saturating_add(1);
         score.last_seen = Some(Instant::now());
+        if score.unanswered_sync_strikes >= MAX_UNANSWERED_SYNC_STRIKES {
+            score.score = BAN_THRESHOLD;
+            self.ban_peer(peer_id);
+        } else {
+            score.score = score
+                .score
+                .saturating_add(UNANSWERED_REQUEST_PENALTY)
+                .max(MIN_SCORE.saturating_add(1));
+        }
     }
     /// A block or a sync batch that does not continue this chain.
     ///
@@ -1842,5 +1883,59 @@ mod tests {
         );
         let v6_lo: libp2p::Multiaddr = "/ip6/::1/tcp/30333".parse().unwrap();
         assert_eq!(peer_subnet_key(&v6_lo), None);
+    }
+
+    #[test]
+    fn relayed_vote_and_blob_rate_exhaustion_demotes_without_banning_relayer() {
+        let mut pm = PeerManager::new();
+        let relay = test_peer_id();
+        let flooder = test_peer_id();
+
+        for _ in 0..300 {
+            let _ = pm.check_vote_rate_limit_from(&relay, false);
+            let _ = pm.check_blob_rate_limit_from(&relay, false);
+        }
+        assert!(
+            !pm.is_banned(&relay),
+            "honest relayer must not be auto-banned when forwarding flooded votes/blobs"
+        );
+        assert_eq!(pm.get_score(&relay), MIN_SCORE + 1);
+
+        for _ in 0..300 {
+            let _ = pm.check_vote_rate_limit_from(&flooder, true);
+        }
+        assert!(
+            pm.is_banned(&flooder),
+            "direct author flooding vote bucket must still be banned"
+        );
+    }
+
+    #[test]
+    fn repeated_unanswered_sync_strikes_ban_after_grace_window() {
+        let mut pm = PeerManager::new();
+        let flaky = test_peer_id();
+        let staller = test_peer_id();
+
+        pm.report_unanswered_request(&flaky);
+        pm.report_unanswered_request(&flaky);
+        assert!(
+            !pm.is_banned(&flaky),
+            "isolated unanswered sync requests must only demote, not ban"
+        );
+        pm.report_good_behavior(&flaky);
+        pm.report_unanswered_request(&flaky);
+        pm.report_unanswered_request(&flaky);
+        assert!(
+            !pm.is_banned(&flaky),
+            "valid contributions must reset consecutive unanswered sync strikes"
+        );
+
+        for _ in 0..MAX_UNANSWERED_SYNC_STRIKES {
+            pm.report_unanswered_request(&staller);
+        }
+        assert!(
+            pm.is_banned(&staller),
+            "peer that persistently leaves sync requests unanswered must be banned"
+        );
     }
 }

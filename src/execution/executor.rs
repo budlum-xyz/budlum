@@ -2174,7 +2174,7 @@ impl Executor {
                 // again (`register_manifest` refuses content bound to another
                 // owner) and the gateway refused to serve it, so the seizure
                 // was permanent and permissionless.
-                match state.storage_registry.owner_of(&asset.manifest_id) {
+                match state.storage_registry.proven_owner_of(&asset.manifest_id) {
                     Some(recorded_owner) if recorded_owner == tx.from => {}
                     Some(_) => {
                         return Err(BudlumError::validation(
@@ -2183,9 +2183,19 @@ impl Executor {
                         ));
                     }
                     None => {
+                        if state
+                            .storage_registry
+                            .owner_of(&asset.manifest_id)
+                            .is_some_and(|recorded_owner| recorded_owner != tx.from)
+                        {
+                            return Err(BudlumError::validation(
+                                "pollen_asset_manifest_not_owned",
+                                "DataAsset content is owned by another account",
+                            ));
+                        }
                         return Err(BudlumError::validation(
                             "pollen_asset_manifest_unregistered",
-                            "DataAsset content id has no unambiguous registered owner; register the manifest first",
+                            "DataAsset content id has no unambiguous custody-proven owner; register the manifest and custody deal first",
                         ));
                     }
                 }
