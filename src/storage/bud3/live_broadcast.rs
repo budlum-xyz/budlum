@@ -90,7 +90,7 @@ impl LiveGateway {
         }
     }
 
-    /// The testnet launch gateway: bit1 objects are refused.
+    /// The testnet gateway: bit1 objects are active from genesis (`height = 0`).
     #[must_use]
     pub fn testnet() -> Self {
         Self::for_chain(Network::Testnet.chain_id(), ACTIVATION)

@@ -964,19 +964,19 @@ mod tests {
             let receipt = vm.run_receipt(&program_words);
             assert!(receipt.success, "VerifyInference must execute in mainnet mode");
             let m = if model < 0 {
-                bud_vm::GOLDILOCKS_P.wrapping_sub(model.unsigned_abs() as u64)
+                bud_vm::GOLDILOCKS_P.wrapping_sub(u64::from(model.unsigned_abs()))
             } else {
-                model as u64
+                u64::from(model.cast_unsigned())
             };
             let x = if input < 0 {
-                bud_vm::GOLDILOCKS_P.wrapping_sub(input.unsigned_abs() as u64)
+                bud_vm::GOLDILOCKS_P.wrapping_sub(u64::from(input.unsigned_abs()))
             } else {
-                input as u64
+                u64::from(input.cast_unsigned())
             };
             let aux = if proof_type < 0 {
-                bud_vm::GOLDILOCKS_P.wrapping_sub(proof_type.unsigned_abs() as u64)
+                bud_vm::GOLDILOCKS_P.wrapping_sub(u64::from(proof_type.unsigned_abs()))
             } else {
-                proof_type as u64
+                u64::from(proof_type.cast_unsigned())
             };
             assert_eq!(vm.registers[4], bud_vm::verify_inference_digest(m, x, aux));
         }

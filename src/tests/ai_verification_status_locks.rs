@@ -141,7 +141,8 @@ fn verify_inference_opcode_is_reserved_and_answers_zero() {
     let at = src.find(head).expect("VerifyInference arm must exist");
     let arm = squash(block_after(&src[at + head.len()..]));
     assert!(
-        arm.contains("verify_inference_digest") && arm.contains("self.activation.verify_inference_enabled"),
+        arm.contains("verify_inference_digest")
+            && arm.contains("self.activation.verify_inference_enabled"),
         "VerifyInference must check the activation gate and evaluate verify_inference_digest; \
          keep docs/AI_VERIFICATION_STATUS.md synchronized with any change"
     );

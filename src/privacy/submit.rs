@@ -147,14 +147,25 @@ impl PrivateTransferSubmit {
         &self,
         chain_id: u64,
         blinding_salt: &[u8; 32],
-    ) -> Result<(Vec<u64>, bud_proof::ExecutionPublicInputs, bud_proof::hiding::HidingProofPackage), String> {
+    ) -> Result<
+        (
+            Vec<u64>,
+            bud_proof::ExecutionPublicInputs,
+            bud_proof::hiding::HidingProofPackage,
+        ),
+        String,
+    > {
         use bud_isa::{Instruction, Opcode};
         use bud_vm::Vm;
         use sha3::{Digest, Keccak256};
 
         let digest_fe = i32::try_from(
-            u64::from_le_bytes(self.public_digest[..8].try_into().unwrap_or([0u8; 8]))
-                & 0x7FFF_FFFF,
+            u64::from_le_bytes(
+                self.public_digest
+                    .get(..8)
+                    .and_then(|s| s.try_into().ok())
+                    .unwrap_or([0u8; 8]),
+            ) & 0x7FFF_FFFF,
         )
         .unwrap_or(0);
         let inputs_fe = i32::try_from(self.spent_commitments.len() & 0x7FFF_FFFF).unwrap_or(1);
@@ -204,7 +215,7 @@ impl PrivateTransferSubmit {
             gas_limit: vm.gas_limit,
             gas_used: vm.gas_used,
             exit_code: 0,
-            trace_len: vm.trace.len() as u64,
+            trace_len: u64::try_from(vm.trace.len()).unwrap_or(u64::MAX),
             event_digest: bud_proof::event_digest_from_events(&receipt.events),
             state_writes_digest: receipt.state_writes_digest,
         };
@@ -266,15 +277,26 @@ impl PrivateTransferSubmit {
         let (hiding_program, hiding_inputs, hiding_package) =
             self.prove_hiding_transfer(chain_id, blinding_salt)?;
 
-        let digest_fe =
-            u64::from_le_bytes(self.public_digest[..8].try_into().unwrap_or([1u8; 8]))
-                % budlum_note_packing::GOLDILOCKS_P;
+        let digest_fe = u64::from_le_bytes(
+            self.public_digest
+                .get(..8)
+                .and_then(|s| s.try_into().ok())
+                .unwrap_or([1u8; 8]),
+        ) % budlum_note_packing::GOLDILOCKS_P;
         let commitment_fe = (u64::from_le_bytes(
-            self.spent_commitments[0][..8].try_into().unwrap_or([1u8; 8]),
+            self.spent_commitments
+                .first()
+                .and_then(|c| c.get(..8))
+                .and_then(|s| s.try_into().ok())
+                .unwrap_or([1u8; 8]),
         ) % budlum_note_packing::GOLDILOCKS_P)
             .max(1);
         let note_secret_fe = u64::from_le_bytes(
-            self.nullifier_proofs[0][..8].try_into().unwrap_or([1u8; 8]),
+            self.nullifier_proofs
+                .first()
+                .and_then(|p| p.get(..8))
+                .and_then(|s| s.try_into().ok())
+                .unwrap_or([1u8; 8]),
         ) % budlum_note_packing::GOLDILOCKS_P;
         let derived_nf =
             bud_vm::poseidon4_hash4(note_secret_fe, bud_vm::DOMAIN_NULLIFIER, 0, 0);
@@ -283,7 +305,9 @@ impl PrivateTransferSubmit {
             kind: PredicateKind::Yk1Ownership,
             lhs: digest_fe,
             rhs: digest_fe,
-            aux: (self.spent_commitments.len() as u64).max(1),
+            aux: u64::try_from(self.spent_commitments.len())
+                .unwrap_or(u64::MAX)
+                .max(1),
             chain_id,
         })
         .map_err(|e| format!("YK1 ownership proof failed: {e:?}"))?;
@@ -292,7 +316,9 @@ impl PrivateTransferSubmit {
             kind: PredicateKind::Yk2BalanceConservation,
             lhs: input_sum,
             rhs: output_sum,
-            aux: (self.output_commitments.len() as u64).max(1),
+            aux: u64::try_from(self.output_commitments.len())
+                .unwrap_or(u64::MAX)
+                .max(1),
             chain_id,
         })
         .map_err(|e| format!("YK2 value-conservation proof failed: {e:?}"))?;
@@ -344,7 +370,8 @@ impl PrivateTransferSubmit {
         use bud_proof::predicates::{verify_predicate, PredicateKind};
 
         self.validate_shape()?;
-        if bundle.chain_id != expected_chain_id || bundle.hiding_inputs.chain_id != expected_chain_id
+        if bundle.chain_id != expected_chain_id
+            || bundle.hiding_inputs.chain_id != expected_chain_id
         {
             return Err("private transfer bundle: chain_id mismatch".into());
         }
@@ -354,15 +381,26 @@ impl PrivateTransferSubmit {
             &bundle.hiding_program,
         )?;
 
-        let expected_digest_fe =
-            u64::from_le_bytes(self.public_digest[..8].try_into().unwrap_or([1u8; 8]))
-                % budlum_note_packing::GOLDILOCKS_P;
+        let expected_digest_fe = u64::from_le_bytes(
+            self.public_digest
+                .get(..8)
+                .and_then(|s| s.try_into().ok())
+                .unwrap_or([1u8; 8]),
+        ) % budlum_note_packing::GOLDILOCKS_P;
         let expected_commitment_fe = (u64::from_le_bytes(
-            self.spent_commitments[0][..8].try_into().unwrap_or([1u8; 8]),
+            self.spent_commitments
+                .first()
+                .and_then(|c| c.get(..8))
+                .and_then(|s| s.try_into().ok())
+                .unwrap_or([1u8; 8]),
         ) % budlum_note_packing::GOLDILOCKS_P)
             .max(1);
         let expected_secret_fe = u64::from_le_bytes(
-            self.nullifier_proofs[0][..8].try_into().unwrap_or([1u8; 8]),
+            self.nullifier_proofs
+                .first()
+                .and_then(|p| p.get(..8))
+                .and_then(|s| s.try_into().ok())
+                .unwrap_or([1u8; 8]),
         ) % budlum_note_packing::GOLDILOCKS_P;
 
         if bundle.ownership_proof.statement.kind != PredicateKind::Yk1Ownership
