@@ -405,8 +405,8 @@ pub fn ipv4_slash24(addr: &Multiaddr) -> Option<[u8; 3]> {
             if ip.is_loopback() {
                 return None;
             }
-            let o = ip.octets();
-            return Some([o[0], o[1], o[2]]);
+            let [a, b, c, _] = ip.octets();
+            return Some([a, b, c]);
         }
     }
     None
@@ -3794,7 +3794,8 @@ impl Node {
                         }
                         SwarmEvent::ConnectionEstablished { peer_id, endpoint, .. } => {
                             let remote = endpoint.get_remote_address();
-                            let subnet = ipv4_slash24(remote);
+                            let subnet: Option<crate::network::peer_manager::SubnetKey> =
+                                crate::network::peer_manager::peer_subnet_key(remote);
                             // Security review (HIGH): a banned peer
                             // could reconnect and carry on issuing
                             // /sync requests, because the handshaked
@@ -5632,6 +5633,7 @@ impl Node {
                                                             continue;
                                                         }
                                                         let mut fork_retry = false;
+                                                        let mut non_fork_refusal = false;
                                                         let mut joined = 0u32;
                                                         let mut fork_suffix_ready: Option<Vec<crate::core::block::Block>> = None;
                                                         let cursor_opt = self.sync_range_cursor.take();
@@ -5748,13 +5750,24 @@ impl Node {
                                                                                     }
                                                                                 }
                                                                                 Err(e) => {
-                                                                                    fork_retry |= e.contains("Previous hash mismatch");
+                                                                                    if e.contains("Previous hash mismatch") {
+                                                                                        fork_retry = true;
+                                                                                    } else {
+                                                                                        non_fork_refusal = true;
+                                                                                        {
+                                                                                            let mut pm = self.peer_manager_lock();
+                                                                                            pm.report_invalid_block(&peer);
+                                                                                        }
+                                                                                    }
                                                                                     warn!(
                                                                                         peer = %peer,
                                                                                         index,
                                                                                         error = %e,
                                                                                         "sync block refused"
                                                                                     );
+                                                                                    if non_fork_refusal {
+                                                                                        break;
+                                                                                    }
                                                                                 }
                                                                             }
                                                                         }
@@ -5835,13 +5848,24 @@ impl Node {
                                                                                 }
                                                                             }
                                                                             Err(e) => {
-                                                                                fork_retry |= e.contains("Previous hash mismatch");
+                                                                                if e.contains("Previous hash mismatch") {
+                                                                                    fork_retry = true;
+                                                                                } else {
+                                                                                    non_fork_refusal = true;
+                                                                                    {
+                                                                                        let mut pm = self.peer_manager_lock();
+                                                                                        pm.report_invalid_block(&peer);
+                                                                                    }
+                                                                                }
                                                                                 warn!(
                                                                                     peer = %peer,
                                                                                     index,
                                                                                     error = %e,
                                                                                     "sync block refused"
                                                                                 );
+                                                                                if non_fork_refusal {
+                                                                                    break;
+                                                                                }
                                                                             }
                                                                         }
                                                                     }
@@ -5916,9 +5940,12 @@ impl Node {
                                                                     peer,
                                                                 )
                                                                 .await;
+                                                                if !non_fork_refusal {
+                                                                    let mut pm =
+                                                                        self.peer_manager_lock();
+                                                                    pm.report_good_behavior(&peer);
+                                                                }
                                                             }
-                                                            let mut pm = self.peer_manager_lock();
-                                                            pm.report_good_behavior(&peer);
                                                         }
                                                     }
                                                     _ => {

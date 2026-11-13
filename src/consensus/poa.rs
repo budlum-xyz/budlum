@@ -633,6 +633,14 @@ impl ConsensusEngine for PoAEngine {
                     block.index, expected.address, producer
                 )));
             }
+            if let Some(pq) = block.composite_pq_key() {
+                if expected.pq_public_key.is_empty() || expected.pq_public_key != pq {
+                    return Err(ConsensusError(
+                        "PoA block signature's ML-DSA-65 key is not the authority's registered key"
+                            .into(),
+                    ));
+                }
+            }
 
             info!(
                 "PoA: Block {} signature verified (producer: {})",
@@ -1035,7 +1043,8 @@ mod tests {
     }
 
     /// an authority whose key set holds its ML-DSA-65 key signs the
-    /// composite block form, and the block verifies.
+    /// composite block form, and the block verifies only against the
+    /// authority's registered `pq_public_key`.
     #[test]
     fn a_poa_authority_with_a_pq_key_signs_composite_blocks() {
         let keys = crate::crypto::primitives::ValidatorKeys::generate().unwrap();
@@ -1051,6 +1060,37 @@ mod tests {
         assert_eq!(block.producer, Some(pubkey));
         assert!(block.composite_pq_key().is_some());
         assert!(block.verify_signature());
+
+        let pq_bytes = block.composite_pq_key().unwrap().to_vec();
+        let unregistered_err = engine.validate_block(&block, &[], &state).unwrap_err();
+        assert!(
+            unregistered_err
+                .to_string()
+                .contains("ML-DSA-65 key is not the authority's registered key"),
+            "composite PoA block with unregistered PQ key must be rejected: {unregistered_err}"
+        );
+
+        let wrong_keys = crate::crypto::primitives::ValidatorKeys::generate().unwrap();
+        let mut wrong_block = Block::new(1, "prev".into(), vec![]);
+        PoAEngine::new(PoAConfig::default(), Some(wrong_keys.sig_key.clone()))
+            .with_composite_key(wrong_keys.composite_keypair().unwrap())
+            .sign_prepared(
+                &mut wrong_block,
+                Some(Address::from(wrong_keys.sig_key.public_key_bytes())),
+            )
+            .unwrap();
+        state.validators.get_mut(&pubkey).unwrap().pq_public_key =
+            wrong_block.composite_pq_key().unwrap().to_vec();
+        let mismatch_err = engine.validate_block(&block, &[], &state).unwrap_err();
+        assert!(
+            mismatch_err
+                .to_string()
+                .contains("ML-DSA-65 key is not the authority's registered key"),
+            "composite PoA block with mismatched PQ key must be rejected: {mismatch_err}"
+        );
+
+        state.validators.get_mut(&pubkey).unwrap().pq_public_key = pq_bytes;
+        engine.validate_block(&block, &[], &state).unwrap();
     }
 
     #[test]
