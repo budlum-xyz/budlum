@@ -5,12 +5,22 @@ use bud_proof::{DefaultAdapter as Prover, ExecutionPublicInputs, ProofEnvelope, 
 use bud_vm::Vm;
 use sha3::{Digest, Keccak256};
 
-/// Contract gas one call may burn, bounded by what the prover can materialise.
+/// Contract gas one call may burn.
 ///
-/// Witness size is `next_pow2(3 * steps + 1) * TRACE_WIDTH` field elements, so
-/// `2^14` steps keep one call's base matrix near half a gigabyte and couple
-/// `MAX_BLOCK_CONTRACT_GAS` directly to the per-call trace cap.
-pub const DEFAULT_CONTRACT_GAS_LIMIT: u64 = 1 << 14;
+/// This is a gas budget, not a trace bound. What the prover can materialise is
+/// bounded independently by `bud_vm::MAX_CONTRACT_TRACE_STEPS` (`2^14`), which
+/// every execution entry point applies through `with_step_limit`, and by
+/// `MAX_PROVER_WITNESS_ROWS` (`2^17`) inside the prover. Witness rows are
+/// `next_pow2(3 * steps + 1)`, so the step cap holds one call at `2^16` rows,
+/// inside the prover ceiling, whatever the gas budget is. Setting this constant
+/// to the step count does not make proving safer; it only misprices a call.
+///
+/// The value is locked to `MAX_BLOCK_CONTRACT_GAS / 60` by
+/// `src/tests/conformance_locks.rs` and by the `BudZero per-block soft contract
+/// gas` row of `docs/EXECUTION_LIMITS.md`: a block carries exactly sixty full
+/// calls and refuses the sixty-first before execution. At `2^14` the ratio
+/// becomes 3662, both locks fail, and a block may carry 3,662 contract calls.
+pub const DEFAULT_CONTRACT_GAS_LIMIT: u64 = 1_000_000;
 
 /// Memory size in bytes of the VM that runs and proves contract bytecode.
 const CONTRACT_VM_MEMORY_BYTES: usize = 8192;
@@ -155,13 +165,11 @@ impl ZkVmExecutor {
     /// the public inputs that repeat them describe this transaction rather
     /// than a zeroed one.
     ///
-    /// Execution-only gated VM run for consensus `ContractCall` (§8.8:
-    /// deterministic execution without inline per-validator STARK proof
-    /// generation). WIRING: the block path. The executor's `ContractCall`
-    /// path is the only caller, and it must not allocate a prover on the
-    /// validator critical path; `execute_for_block` is the same execution
-    /// door without the proof, `execute_bytecode` keeps the inline STARK
-    /// proof for settlement and tooling callers.
+    /// Deprecated alias for `execute_for_block`.
+    ///
+    /// Kept so an out-of-tree caller does not break. The block path and this
+    /// name now share one implementation: two copies of the gated VM run can
+    /// drift, and only one of them would be the consensus door.
     ///
     /// # Errors
     ///
@@ -171,33 +179,7 @@ impl ZkVmExecutor {
         gas_limit: u64,
         ctx: TxContext,
     ) -> Result<ZkVmReceipt, String> {
-        if bytecode.is_empty() {
-            return Err("Empty BudZKVM bytecode".into());
-        }
-        if !bytecode.len().is_multiple_of(8) {
-            return Err("BudZKVM bytecode length must be a multiple of 8 bytes".into());
-        }
-        let program = decode_program(bytecode)?;
-        let mut vm = Vm::with_mainnet_mode(CONTRACT_VM_MEMORY_BYTES, gas_limit, true)
-            .with_step_limit(bud_vm::MAX_CONTRACT_TRACE_STEPS);
-        vm.context.sender = ctx.sender;
-        vm.context.nonce = ctx.nonce;
-        vm.context.block_height = ctx.block_height;
-        let receipt =
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| vm.run_receipt(&program)))
-                .map_err(|_| "BudZKVM execution failed".to_string())?;
-        if !receipt.success {
-            return Err(match receipt.error {
-                Some(e) => format!("BudZKVM execution failed: {e:?}"),
-                None => "BudZKVM execution failed".to_string(),
-            });
-        }
-        Ok(ZkVmReceipt {
-            gas_used: receipt.gas_used,
-            steps: receipt.trace_len as usize,
-            events: receipt.events,
-            proof_bytes: 0,
-        })
+        Self::execute_for_block(bytecode, gas_limit, ctx)
     }
 
     /// Performs the requested operation.

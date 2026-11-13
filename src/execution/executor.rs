@@ -1056,7 +1056,10 @@ impl Executor {
                 // block height go into the context the syscalls read and the
                 // public inputs repeat, instead of the zeros a fresh VM holds.
                 let ctx = crate::execution::zkvm::TxContext::of(tx, state.current_block_height);
-                let receipt = ZkVmExecutor::execute_bytecode_vm_only(
+                // The block path runs the gated VM without the inline prover.
+                // Proofs belong to the `SubmitZkProof` settlement path; a
+                // validator must not allocate a STARK witness per contract call.
+                let receipt = ZkVmExecutor::execute_for_block(
                     &tx.data,
                     DEFAULT_CONTRACT_GAS_LIMIT,
                     ctx,
