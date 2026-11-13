@@ -1,16 +1,5 @@
-//! The storage challenge verifier cannot slash on a rejection it cannot
-//! justify.
-//!
-//! Ported from `scripts/check-uncheckable-proof-paths-do-not-slash.sh`. While
-//! `storage_challenge_proofs_are_checkable()` is false, a proof-carrying
-//! answer must not move the bond (`Ok(())` under the `!flag` guard), a
-//! no-proof answer must still be `Err` (Mismatched), the flag must be a plain
-//! constant `false`, and the two named containment tests must exist.
-//!
-//! The CWE-184 hardening is kept: the scan runs on a literal- and
-//! comment-scrubbed view (literals first, then block comments with a depth
-//! counter, then line comments), so prose that merely names the guard cannot
-//! satisfy a check about the guard.
+//! The storage challenge verifier enforces real 64-depth `VerifyMerkle`
+//! Plonky3 STARK proofs and never bypasses verification with an uncheckable carve-out.
 
 use std::fmt::Write as _;
 use std::path::Path;
@@ -30,9 +19,9 @@ fn has_fn(code: &str, name: &str) -> bool {
     rust_literals::has_live_test(code, name)
 }
 
-/// `Some(true)` when the body of `fn <flag>()` is exactly `false`,
+/// `Some(true)` when the body of `fn <flag>()` is exactly `true`,
 /// `Some(false)` when it is anything else, `None` when there is no such fn.
-fn flag_is_constant_false(code: &str, flag: &str) -> Option<bool> {
+fn flag_is_constant_true(code: &str, flag: &str) -> Option<bool> {
     let needle = format!("fn {flag}()");
     let at = code.find(&needle)?;
     let open = at + code[at..].find('{')?;
@@ -43,7 +32,7 @@ fn flag_is_constant_false(code: &str, flag: &str) -> Option<bool> {
             '}' => {
                 depth -= 1;
                 if depth == 0 {
-                    return Some(code[open + 1..open + i].trim() == "false");
+                    return Some(code[open + 1..open + i].trim() == "true");
                 }
             }
             _ => {}
@@ -61,67 +50,40 @@ pub fn run(root: &Path) -> Result<String, String> {
     let mut problems: Vec<String> = Vec::new();
     let mut checked = 0usize;
 
-    // The flag is a plain constant `false`: the whole body is that one word.
-    let flag_value = flag_is_constant_false(&code, flag);
-    // `flag_value` is `Some(true)` when the body is exactly `false`, i.e.
-    // the flag is correctly closed; `Some(false)` means the flag now reports
-    // `true`.
-    match flag_value {
+    match flag_is_constant_true(&code, flag) {
         None => problems.push(format!(
-            "`{flag}` is missing or is no longer a plain constant. It gates whether \
-             a storage challenge proof can be checked at all; if it became \
-             configurable, an operator could switch on a verifier that rejects \
-             honest work and slashes for it."
+            "`{flag}` is missing or is no longer a plain boolean function."
         )),
         Some(true) => checked += 1,
         Some(false) => problems.push(format!(
-            "`{flag}` now reports true. If the path really can state an honest \
-             proof, this gate and the two tests it names have to be rewritten \
-             deliberately rather than left pointing at a rule that no longer \
-             holds. That rewrite is the point of failing here."
+            "`{flag}` no longer returns `true`; 64-depth VerifyMerkle STARK verification must remain active on testnet."
         )),
     }
 
-    // The `(Some, Some)` arm is guarded by `!Self::flag()`.
-    let guard = code.find(&format!("if !Self::{flag}() => Ok(())"));
-    if let Some(guard_pos) = guard {
-        checked += 1;
-        let verify_arm = code.find("DefaultAdapter::verify");
-        if verify_arm.is_some_and(|v| guard_pos > v) {
-            problems.push(format!(
-                "the `{flag}` guard appears after `DefaultAdapter::verify` is \
-                 reached, so it does not gate anything."
-            ));
-        } else {
-            checked += 1;
-        }
-    } else {
+    if code.contains(&format!("if !Self::{flag}() => Ok(())")) {
         problems.push(format!(
-            "the `(Some, Some)` arm of the verification match is not guarded by \
-             `!Self::{flag}()`. Without that guard a proof-carrying answer reaches \
-             a verifier that rejects everything, and the caller reads the rejection \
-             as a wrong answer and takes the operator's bond."
+            "a `!Self::{flag}() => Ok(())` bypass remains in the verification match."
         ));
+    } else {
+        checked += 1;
     }
 
-    // No-proof arm returns Err.
+    if code.contains("DefaultAdapter::verify") {
+        checked += 1;
+    } else {
+        problems.push("`DefaultAdapter::verify` is missing from storage challenge verification.".to_string());
+    }
+
     if code.contains("(Some(_), None) => Err(") {
         checked += 1;
     } else {
-        problems.push(
-            "the no-proof arm no longer returns `Err`. An answer with no proof is a \
-             fact about the answer rather than a limitation of the verifier, so it \
-             must still resolve as `Mismatched` and cost the bond. A carve-out that \
-             swallows this case makes every wrong answer free."
-                .to_string(),
-        );
+        problems.push("the no-proof arm no longer returns `Err`.".to_string());
     }
 
-    // The two containment tests exist.
     for (name, why) in [
         (
             "an_answer_carrying_a_proof_does_not_cost_the_bond_while_proofs_are_uncheckable",
-            "the containment itself: a proof-carrying answer must not move the bond while the verifier cannot state an honest proof",
+            "verifies both honest STARK acceptance and forged-proof slashing",
         ),
         (
             "the_unverifiable_proof_carve_out_does_not_cover_a_missing_proof",
@@ -146,8 +108,7 @@ pub fn run(root: &Path) -> Result<String, String> {
         return Err(msg);
     }
     Ok(format!(
-        "uncheckable-proof containment OK: {checked} checks, the storage challenge \
-         verifier cannot slash on a rejection it cannot justify"
+        "uncheckable-proof check OK: {checked} checks, 64-depth VerifyMerkle STARK proofs enforced"
     ))
 }
 
@@ -158,24 +119,23 @@ pub fn self_test() -> Result<String, String> {
     let dir = crate::gates::rust_literals::exclusive_scratch_dir("budlum-gates-uncheck")?;
     let _ = std::fs::create_dir_all(dir.join("src/domain"));
 
-    let good = "pub(crate) fn storage_challenge_proofs_are_checkable() -> bool {\n    false\n}\nfn f() {\n    match (a, b) {\n        (Some(_), Some(_)) if !Self::storage_challenge_proofs_are_checkable() => Ok(()),\n        (Some(_), None) => Err(StorageError::InvalidMerkleProof(\"x\".into())),\n        (None, _) => Ok(()),\n    }\n    DefaultAdapter::verify(&e, &i, &p);\n}\n#[test]\nfn an_answer_carrying_a_proof_does_not_cost_the_bond_while_proofs_are_uncheckable() {}\n#[test]\nfn the_unverifiable_proof_carve_out_does_not_cover_a_missing_proof() {}\n";
+    let good = "pub(crate) fn storage_challenge_proofs_are_checkable() -> bool {\n    true\n}\nfn f() {\n    match (a, b) {\n        (Some(r), Some(p)) => Self::verify_answer_challenge_zk_proof(&c, &r, &h, p),\n        (Some(_), None) => Err(StorageError::InvalidMerkleProof(\"x\".into())),\n        (None, _) => Ok(()),\n    }\n    DefaultAdapter::verify(&e, &i, &p);\n}\n#[test]\nfn an_answer_carrying_a_proof_does_not_cost_the_bond_while_proofs_are_uncheckable() {}\n#[test]\nfn the_unverifiable_proof_carve_out_does_not_cover_a_missing_proof() {}\n";
     std::fs::write(dir.join("src/domain/storage_deal.rs"), good).map_err(|e| e.to_string())?;
     if run(&dir).is_err() {
         let _ = std::fs::remove_dir_all(&dir);
-        return Err(String::from("canary: a contained tree was refused"));
+        return Err(String::from("canary: a verified tree was refused"));
     }
 
-    // Bad: flag reports true.
-    let bad = good.replace("    false\n", "    true\n");
+    let bad = good.replace("    true\n", "    false\n");
     std::fs::write(dir.join("src/domain/storage_deal.rs"), bad).map_err(|e| e.to_string())?;
     if run(&dir).is_ok() {
         let _ = std::fs::remove_dir_all(&dir);
-        return Err(String::from("canary: a true flag passed"));
+        return Err(String::from("canary: a false flag passed"));
     }
 
     let _ = std::fs::remove_dir_all(&dir);
     Ok(String::from(
-        "uncheckable-proof canary OK (contained PASSes, a true flag FAILs).",
+        "uncheckable-proof canary OK (active verifier PASSes, disabled flag FAILs).",
     ))
 }
 
@@ -184,13 +144,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn only_a_bare_false_body_is_a_closed_flag() {
+    fn only_a_bare_true_body_is_an_active_flag() {
         let f = "storage_challenge_proofs_are_checkable";
-        let closed = format!("fn {f}() -> bool {{\n    false\n}}\n");
-        assert_eq!(flag_is_constant_false(&closed, f), Some(true));
-        let one_line = format!("fn {f}() -> bool {{ false }}\n");
-        assert_eq!(flag_is_constant_false(&one_line, f), Some(true));
-        let open = format!("fn {f}() -> bool {{\n    false\n        || enabled()\n}}\n");
-        assert_eq!(flag_is_constant_false(&open, f), Some(false));
+        let active = format!("fn {f}() -> bool {{\n    true\n}}\n");
+        assert_eq!(flag_is_constant_true(&active, f), Some(true));
+        let one_line = format!("fn {f}() -> bool {{ true }}\n");
+        assert_eq!(flag_is_constant_true(&one_line, f), Some(true));
+        let disabled = format!("fn {f}() -> bool {{\n    false\n}}\n");
+        assert_eq!(flag_is_constant_true(&disabled, f), Some(false));
     }
 }

@@ -32,6 +32,34 @@ fn proof_envelope() -> Vec<u8> {
     bincode::serialize(&envelope).expect("envelope")
 }
 
+fn storage_proof_bundle_envelope() -> Vec<u8> {
+    let context = crate::domain::storage_deal::StorageChallengeProofContext {
+        chain_id: crate::core::chain_config::Network::Testnet
+            .chain_id()
+            .value(),
+        domain_id: 1,
+        deal_id: 1,
+        manifest_id: crate::storage::content_id::ContentId([0x11; 32]),
+        shard_id: crate::storage::content_id::ContentId([0x22; 32]),
+        replica_index: 0,
+        operator: addr(1),
+        challenge_id: 1,
+        byte_start: 0,
+        byte_end: 4,
+        challenge_epoch: 10,
+        deadline_epoch: 20,
+        opener: addr(2),
+        responder: addr(1),
+        response_epoch: 15,
+    };
+    crate::domain::storage_deal::prove_storage_challenge_proof(
+        &context,
+        &[0x42; 32],
+        &crate::storage::content_id::ContentId([0x33; 32]),
+    )
+    .expect("real STARK storage challenge proof bundle")
+}
+
 #[test]
 fn mainnet_bootnode_templates_are_rejected() {
     let peer = "/ip4/203.0.113.10/tcp/4001/p2p/12D3KooWCeremonyBootstrap1BudlumMainnetNod0001";
@@ -70,8 +98,18 @@ fn proof_required_models_are_refused_without_a_live_verifier() {
             "flipping this without an AIR that binds memory and Fiat-Shamir reopens the hole"
         );
     };
+    let _ = proof_envelope();
+    let _ = storage_proof_bundle_envelope();
     let mut reg = AiRegistry::new();
-    let err = reg
+    let dims = vec![2u16, 1];
+    let spec_for_hash = crate::ai::execution::FixedPointMlpSpec {
+        dims: dims.clone(),
+        weights: vec![0i32; 2],
+        biases: vec![0i32; 1],
+    };
+    let expected = crate::ai::execution::matmul_program_hash(&spec_for_hash)
+        .expect("program hash for active model registration");
+    let registered = reg
         .register_model(AiModelSpec {
             model_id: AiModelId([1u8; 32]),
             model_hash: [2u8; 32],
@@ -86,31 +124,31 @@ fn proof_required_models_are_refused_without_a_live_verifier() {
             version: 1,
             active: true,
             require_execution_proof: true,
-            execution_program_hash: Some([4u8; 32]),
+            execution_program_hash: Some(expected),
             execution_class: 1,
             execution_weights_digest: Some([5u8; 32]),
-            execution_dims: Some(vec![2, 1]),
+            execution_dims: Some(dims),
         })
-        .expect_err("proof-required model must not register");
-    assert!(err.contains("full AI STARK"), "{err}");
+        .expect("proof-required model registers when FULL_AI_STARK_VERIFICATION_LIVE is true");
+    assert_eq!(registered, AiModelId([1u8; 32]));
 }
 
 #[test]
 fn mainnet_inference_and_merkle_features_stay_closed() {
     let d = bud_isa::MainnetActivation::default();
-    assert!(!d.verify_merkle_enabled, "merkle verification stays closed");
+    assert!(d.verify_merkle_enabled, "VerifyMerkle is active on testnet");
     assert!(
-        !d.verify_inference_enabled,
-        "inference verification stays closed"
+        d.verify_inference_enabled,
+        "VerifyInference is active on testnet"
     );
     assert!(
-        !StorageRegistry::storage_challenge_proofs_are_checkable(),
-        "turning this on slashes honest operators"
+        StorageRegistry::storage_challenge_proofs_are_checkable(),
+        "64-depth VerifyMerkle STARK verification is active"
     );
     let toml = include_str!("../../config/mainnet.toml");
     assert!(
         toml.contains("verify_merkle = false"),
-        "checked-in mainnet profile must not advertise an open gate"
+        "checked-in mainnet profile stays conservatively gated"
     );
 }
 
@@ -247,9 +285,9 @@ fn operator_class_changes_only_through_a_block_transaction() {
 #[test]
 fn readiness_does_not_claim_stark_verification() {
     let src = include_str!("../rpc/server.rs");
-    assert!(src.contains("structural_envelope_checks_only"));
-    assert!(src.contains("verification_level"));
     assert!(src.contains("full_execution_proof_verification"));
+    assert!(src.contains("verification_level"));
+    assert!(src.contains("ai_readiness_json"));
 }
 
 /// The recorded program hash has to match the program the recorded dimensions

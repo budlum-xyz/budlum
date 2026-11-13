@@ -131,7 +131,7 @@ impl MoveEe {
     }
 }
 
-fn state_key_module(addr: &[u8; 32], mod_name: &str) -> Vec<u8> {
+pub(crate) fn state_key_module(addr: &[u8; 32], mod_name: &str) -> Vec<u8> {
     let mut k = Vec::with_capacity(40 + mod_name.len());
     k.extend_from_slice(b"mod:");
     k.extend_from_slice(addr);
@@ -140,7 +140,7 @@ fn state_key_module(addr: &[u8; 32], mod_name: &str) -> Vec<u8> {
     k
 }
 
-fn state_key_resource(addr: &[u8; 32], resource_tag: &str) -> Vec<u8> {
+pub(crate) fn state_key_resource(addr: &[u8; 32], resource_tag: &str) -> Vec<u8> {
     let mut k = Vec::with_capacity(40 + resource_tag.len());
     k.extend_from_slice(b"res:");
     k.extend_from_slice(addr);

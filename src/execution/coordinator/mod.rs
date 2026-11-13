@@ -31,7 +31,7 @@ use crate::core::hash::hash_fields_bytes;
 use crate::execution::coordinator::alias::{derive_contract_account, ALIAS_NAMESPACE};
 use crate::execution::coordinator::evm_ee::EvmEe;
 use crate::execution::coordinator::expansion_ee::{
-    CairoEe, MoveSuiEe, NearWasmEe, PlutusEe, PolkaVmEe, TvmEe, UtxoEe,
+    CairoEe, MoveSuiEe, NearWasmEe, PlutusEe, PolkaVmEe, Rv32Ee, TvmEe, UtxoEe,
 };
 use crate::execution::coordinator::foreign::{
     ForeignAdmissionError, ForeignTx, VerifiedForeignOutcome,
@@ -143,6 +143,13 @@ impl StatefulBudZeroEe {
     }
 }
 
+fn budzero_owner_key(id: &[u8]) -> Vec<u8> {
+    let mut k = Vec::with_capacity(6 + id.len());
+    k.extend_from_slice(b"owner:");
+    k.extend_from_slice(id);
+    k
+}
+
 impl ExecutionEnvironment for StatefulBudZeroEe {
     fn id(&self) -> EeId {
         EeId::BUDZERO
@@ -216,6 +223,13 @@ impl ExecutionEnvironment for StatefulBudZeroEe {
                 if host
                     .write(&prog_ns, &call.target.id, Some(&call.input))
                     .is_err()
+                    || host
+                        .write(
+                            &prog_ns,
+                            &budzero_owner_key(&call.target.id),
+                            Some(&call.caller.id),
+                        )
+                        .is_err()
                 {
                     return Ok(EeOutcome {
                         status: OutcomeStatus::Revert,
@@ -278,7 +292,19 @@ impl ExecutionEnvironment for StatefulBudZeroEe {
                         gas_used: call.gas_limit,
                     });
                 }
+                let is_owner_or_self = call.caller.id == call.target.id
+                    || matches!(
+                        host.read(&prog_ns, &budzero_owner_key(&call.target.id)),
+                        Ok(Some(ref owner)) if owner.as_slice() == call.caller.id.as_slice()
+                    );
                 if call.input.first().copied() == Some(BUDZERO_SYSCALL_UNIVERSAL_CALL) {
+                    if !is_owner_or_self {
+                        return Ok(EeOutcome {
+                            status: OutcomeStatus::Revert,
+                            output: b"unauthorized 0x40 universal_call".to_vec(),
+                            gas_used: spent,
+                        });
+                    }
                     let Some(&to_ee_b) = call.input.get(1) else {
                         return Ok(EeOutcome {
                             status: OutcomeStatus::Revert,
@@ -337,6 +363,13 @@ impl ExecutionEnvironment for StatefulBudZeroEe {
                     };
                 }
                 if let (Some(slot), Some(val)) = (call.input.get(..32), call.input.get(32..)) {
+                    if !is_owner_or_self {
+                        return Ok(EeOutcome {
+                            status: OutcomeStatus::Revert,
+                            output: b"unauthorized budzero storage write".to_vec(),
+                            gas_used: spent,
+                        });
+                    }
                     let mut storage_key = Vec::with_capacity(call.target.id.len() + 32);
                     storage_key.extend_from_slice(&call.target.id);
                     storage_key.extend_from_slice(slot);
@@ -416,6 +449,7 @@ impl ExecutionCoordinator {
         supervisor.register(WorkerEndpoint::in_process(|| Box::new(TvmEe::new())));
         supervisor.register(WorkerEndpoint::in_process(|| Box::new(UtxoEe::new())));
         supervisor.register(WorkerEndpoint::in_process(|| Box::new(PlutusEe::new())));
+        supervisor.register(WorkerEndpoint::in_process(|| Box::new(Rv32Ee::new())));
         Self { supervisor }
     }
 
@@ -432,6 +466,27 @@ impl ExecutionCoordinator {
     #[must_use]
     pub const fn supervisor(&self) -> &WorkerSupervisor {
         &self.supervisor
+    }
+
+    /// Applies a verified contract or account migration transaction (`8.12.2` EVM & `8.12.3` WASM/SVM/Move).
+    ///
+    /// exposed for: Migration Kit consensus block execution across all VMs.
+    pub fn apply_migration(
+        &mut self,
+        state: &mut AccountState,
+        migrator: &Address,
+        tx: crate::execution::coordinator::migration::MigrationTx,
+        fee_schedule: &crate::execution::coordinator::migration::MigrationFeeSchedule,
+    ) -> Result<
+        crate::execution::coordinator::migration::MigrationTxOutcome,
+        crate::execution::coordinator::migration::ImportError,
+    > {
+        crate::execution::coordinator::migration::apply_migration_tx(
+            state,
+            migrator,
+            tx,
+            fee_schedule,
+        )
     }
 
     /// Applies a verified EVM contract migration transaction ( 2/3 door).
@@ -469,6 +524,45 @@ impl ExecutionCoordinator {
         let outcome = lane.process_foreign_tx(tx, &exec_snapshot, state, now_timestamp_secs)?;
         state.execution_state.foreign_lane = lane;
         Ok(outcome)
+    }
+
+    /// Executes a block of native Budlum transactions through the deterministic
+    /// cross-tx wave scheduler (`scheduler::execute_block_with_policy`) using
+    /// the testnet Block-STM launch policy.
+    ///
+    /// exposed for: block execution and scheduler callers.
+    #[must_use]
+    pub fn execute_account_block(
+        &self,
+        state: &mut AccountState,
+        txs: &[crate::core::transaction::Transaction],
+        policy: crate::execution::coordinator::scheduler::ParallelSchedulerPolicy,
+    ) -> crate::execution::coordinator::scheduler::BlockExecutionReport {
+        crate::execution::coordinator::scheduler::execute_block_with_policy(state, txs, policy)
+    }
+
+    /// Executes a block of native Budlum transactions using scoped parallel
+    /// wave execution with deterministic conflict fallback (`execute_block_checked`).
+    ///
+    /// exposed for: checked parallel block execution callers.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::error::BudlumError`] if any transaction validation fails
+    /// (leaving `state` unchanged).
+    pub fn execute_account_block_checked(
+        &self,
+        state: &mut AccountState,
+        txs: &[crate::core::transaction::Transaction],
+        block_producer: Option<&Address>,
+        config: &crate::execution::coordinator::scheduler::ParallelExecutionConfig,
+    ) -> crate::error::BudlumResult<crate::execution::coordinator::scheduler::ScheduleReport> {
+        crate::execution::coordinator::scheduler::execute_block_checked(
+            state,
+            txs,
+            block_producer,
+            config,
+        )
     }
 
     /// Executes `txs` sequentially inside `ctx`, retrying the whole block up to
@@ -625,14 +719,25 @@ impl ExecutionCoordinator {
                             .execution_state
                             .check_evm_alias_collision(&evm_cand)
                             .map_err(AttemptError::Deterministic)?;
+                        let c_addr = derive_contract_account(tx.ee, &evm_cand);
+                        let id = EeIdentity::new(tx.ee, evm_cand.to_vec())
+                            .map_err(|e| AttemptError::Deterministic(e.to_string()))?;
+                        (EeCallKind::Deploy, id, Some(c_addr), code.clone())
+                    } else {
+                        let c_addr = derive_contract_account(tx.ee, &local_seed);
+                        let id = EeIdentity::new(tx.ee, c_addr.0.to_vec())
+                            .map_err(|e| AttemptError::Deterministic(e.to_string()))?;
+                        (EeCallKind::Deploy, id, Some(c_addr), code.clone())
                     }
-                    let c_addr = derive_contract_account(tx.ee, &local_seed);
-                    let id = EeIdentity::new(tx.ee, c_addr.0.to_vec())
-                        .map_err(|e| AttemptError::Deterministic(e.to_string()))?;
-                    (EeCallKind::Deploy, id, Some(c_addr), code.clone())
                 }
                 UelAction::Call { target, input } => {
-                    let c_addr = resolve_identity_address(tx.ee, target);
+                    if tx.ee == EeId::EVM && tx.value_attos > 0 && target.len() != 20 {
+                        return Err(AttemptError::Deterministic(String::from(
+                            "EVM value-bearing call target must be a 20-byte address",
+                        )));
+                    }
+                    let c_addr =
+                        resolve_identity_address_in_state(&state.execution_state, tx.ee, target);
                     let id = EeIdentity::new(tx.ee, target.clone())
                         .map_err(|e| AttemptError::Deterministic(e.to_string()))?;
                     (EeCallKind::Call, id, Some(c_addr), input.clone())
@@ -795,14 +900,20 @@ enum AttemptError {
     Transport(WorkerError),
 }
 
-fn resolve_identity_address(ee: EeId, id: &[u8]) -> Address {
+fn resolve_identity_address_in_state(
+    exec_state: &crate::execution::coordinator::state::ExecutionState,
+    ee: EeId,
+    id: &[u8],
+) -> Address {
     if id.len() == 32 {
         let mut raw = [0u8; 32];
         raw.copy_from_slice(id);
-        Address::from(raw)
-    } else {
-        derive_contract_account(ee, id)
+        return Address::from(raw);
     }
+    if let Some(owner) = exec_state.resolve_alias_owner(ee, id) {
+        return owner;
+    }
+    derive_contract_account(ee, id)
 }
 
 fn is_system_universal_gateway(ee: EeId, target_id: &[u8]) -> bool {
@@ -881,13 +992,34 @@ impl HostRead for HostBridge<'_> {
                     return Ok(hit.then(|| vec![1u8]));
                 }
             }
+            return self
+                .overlay
+                .read(&self.state.execution_state, self.cache, ns.as_str(), key);
+        }
+        let caller_group =
+            crate::execution::coordinator::state::RootGroup::for_ee(self.frame_actor.ee)
+                .ok_or_else(|| HostError::Denied(String::from("unknown execution environment")))?;
+        let target_group =
+            crate::execution::coordinator::state::RootGroup::for_namespace(ns.as_str())
+                .ok_or_else(|| {
+                    HostError::Denied(format!("unknown UEL namespace `{}`", ns.as_str()))
+                })?;
+        let uol_allowed = ns.as_str() == crate::execution::coordinator::state::NS_UEL_ASSETS
+            && self.frame_actor.ee == EeId::EVM
+            && key.starts_with(b"uol:");
+        if target_group != caller_group && !uol_allowed {
+            return Err(HostError::Denied(format!(
+                "EE {:?} cannot read foreign namespace `{}`",
+                self.frame_actor.ee,
+                ns.as_str()
+            )));
         }
         self.overlay
             .read(&self.state.execution_state, self.cache, ns.as_str(), key)
     }
 
     fn bud_balance(&self, who: &EeIdentity) -> Result<BudAmount, HostError> {
-        let addr = resolve_identity_address(who.ee, &who.id);
+        let addr = resolve_identity_address_in_state(&self.state.execution_state, who.ee, &who.id);
         Ok(BudAmount(self.state.get_attos_balance(&addr)))
     }
 }
@@ -902,7 +1034,10 @@ impl HostApi for HostBridge<'_> {
                 .ok_or_else(|| {
                     HostError::Denied(format!("unknown UEL namespace `{}`", ns.as_str()))
                 })?;
-        if target_group != caller_group {
+        let uol_allowed = ns.as_str() == crate::execution::coordinator::state::NS_UEL_ASSETS
+            && self.frame_actor.ee == EeId::EVM
+            && key.starts_with(b"uol:");
+        if target_group != caller_group && !uol_allowed {
             return Err(HostError::Denied(format!(
                 "EE {:?} cannot write foreign namespace `{}`",
                 self.frame_actor.ee,
@@ -926,6 +1061,7 @@ impl HostApi for HostBridge<'_> {
             )));
         }
         let budget = call.gas_limit.min(self.overlay.remaining_bgu());
+        let parent_depth = self.overlay.universal_depth();
         self.overlay.push_universal_frame_with_budget(
             self.state,
             call.to_ee,
@@ -935,15 +1071,29 @@ impl HostApi for HostBridge<'_> {
         if call.value.0 > 0 {
             let unit = BudEnvUnit::for_ee(call.to_ee)
                 .ok_or_else(|| HostError::Invalid(String::from("unsupported target EE")))?;
-            let src = resolve_identity_address(call.from.ee, &call.from.id);
-            let frame_src = resolve_identity_address(self.frame_actor.ee, &self.frame_actor.id);
+            let src = resolve_identity_address_in_state(
+                &self.state.execution_state,
+                call.from.ee,
+                &call.from.id,
+            );
+            let frame_src = resolve_identity_address_in_state(
+                &self.state.execution_state,
+                self.frame_actor.ee,
+                &self.frame_actor.id,
+            );
             let gateway_caller_ok =
                 is_system_universal_gateway(self.frame_actor.ee, &self.frame_actor.id)
-                    && src == resolve_identity_address(self.frame_caller.ee, &self.frame_caller.id);
-            if src != frame_src && src != self.root_actor && !gateway_caller_ok {
+                    && src
+                        == resolve_identity_address_in_state(
+                            &self.state.execution_state,
+                            self.frame_caller.ee,
+                            &self.frame_caller.id,
+                        );
+            let root_ok = parent_depth == 0 && src == self.root_actor;
+            if src != frame_src && !root_ok && !gateway_caller_ok {
                 self.overlay.rollback_universal_frame(self.state);
                 return Err(HostError::Denied(String::from(
-                    "universal call may only debit the executing contract or the transaction sender",
+                    "universal call may only debit the executing contract or the root transaction sender",
                 )));
             }
             if let Err(e) = self
@@ -955,7 +1105,11 @@ impl HostApi for HostBridge<'_> {
                 self.overlay.rollback_universal_frame(self.state);
                 return Err(HostError::Denied(e.to_string()));
             }
-            let dst = resolve_identity_address(call.target.ee, &call.target.id);
+            let dst = resolve_identity_address_in_state(
+                &self.state.execution_state,
+                call.target.ee,
+                &call.target.id,
+            );
             if let Err(e) = self
                 .overlay
                 .transfer_attos(self.state, &src, &dst, call.value.0, unit)
@@ -1070,13 +1224,23 @@ impl HostApi for HostBridge<'_> {
     ) -> Result<(), HostError> {
         let unit = BudEnvUnit::for_ee(self.overlay.current_ee())
             .ok_or_else(|| HostError::Invalid(String::from("unsupported EE unit")))?;
-        let src = resolve_identity_address(from.ee, &from.id);
-        let dst = resolve_identity_address(to.ee, &to.id);
-        let frame_src = resolve_identity_address(self.frame_actor.ee, &self.frame_actor.id);
-        let frame_caller = resolve_identity_address(self.frame_caller.ee, &self.frame_caller.id);
-        if src != frame_src && src != frame_caller && src != self.root_actor {
+        let src = resolve_identity_address_in_state(&self.state.execution_state, from.ee, &from.id);
+        let dst = resolve_identity_address_in_state(&self.state.execution_state, to.ee, &to.id);
+        let frame_src = resolve_identity_address_in_state(
+            &self.state.execution_state,
+            self.frame_actor.ee,
+            &self.frame_actor.id,
+        );
+        let frame_caller = resolve_identity_address_in_state(
+            &self.state.execution_state,
+            self.frame_caller.ee,
+            &self.frame_caller.id,
+        );
+        let root_caller_ok =
+            self.overlay.universal_depth() == 0 && (src == frame_caller || src == self.root_actor);
+        if src != frame_src && !root_caller_ok {
             return Err(HostError::Denied(String::from(
-                "bud transfer may only debit the executing frame or the transaction sender",
+                "bud transfer may only debit the executing contract or root caller",
             )));
         }
         self.state
@@ -1086,6 +1250,18 @@ impl HostApi for HostBridge<'_> {
             .map_err(|e| HostError::Denied(e.to_string()))?;
         self.overlay
             .transfer_attos(self.state, &src, &dst, attos, unit)
+    }
+
+    fn checkpoint_begin(&mut self) -> Result<u64, HostError> {
+        self.overlay.begin_checkpoint(self.state)
+    }
+
+    fn checkpoint_commit(&mut self, id: u64) -> Result<(), HostError> {
+        self.overlay.commit_checkpoint(id)
+    }
+
+    fn checkpoint_rollback(&mut self, id: u64) -> Result<(), HostError> {
+        self.overlay.rollback_checkpoint(self.state, id)
     }
 }
 

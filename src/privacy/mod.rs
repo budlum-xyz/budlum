@@ -6,6 +6,11 @@
 
 mod note_registry;
 mod submit;
+pub mod threshold_escrow;
 
 pub use note_registry::{is_note_hash, L1NoteRegistry};
-pub use submit::{PrivateTransferSubmit, MAX_PRIVATE_IO};
+pub use submit::{ConfidentialTransferProofBundle, PrivateTransferSubmit, MAX_PRIVATE_IO};
+pub use threshold_escrow::{
+    EscrowCommittee, EscrowMember, EscrowUnlockShare, ThresholdEscrow, ThresholdEscrowError,
+    THRESHOLD_ESCROW_N, THRESHOLD_ESCROW_T,
+};

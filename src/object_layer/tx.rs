@@ -12,14 +12,68 @@
 //! closed on every network.
 
 use crate::core::address::Address;
+use crate::core::hash::hash_fields_bytes;
 use crate::domain::types::{DomainId, Hash32};
 use crate::object_layer::charter::{CodeProof, DomainCharter};
 use crate::object_layer::ids::{AssetClassId, DependencyId};
 use crate::object_layer::registry::{
-    Call, ClassRegistration, HomeEventProof, HomeFinality, ObjectLayerRegistry, Phase, Refusal,
+    Call, ClassRegistration, HomeEventProof, HomeFinality, HomeSliceProof, ObjectLayerRegistry,
+    Phase, Refusal,
 };
 use crate::object_layer::rule::{ClassSlice, Condition, Holder};
 use serde::{Deserialize, Serialize};
+
+/// Supported home-chain classical key schemes for `UOL-K1` gasless stipends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum HomeKeyScheme {
+    EthereumSecp256k1 = 0,
+    SolanaEd25519 = 1,
+    AptosEd25519 = 2,
+    CosmosSecp256k1 = 3,
+}
+
+/// Classical-signed gasless home-key stipend authorization (`UOL-K1`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HomeKeyStipendAuth {
+    pub scheme: HomeKeyScheme,
+    pub home_address: Vec<u8>,
+    pub signer_pubkey: Vec<u8>,
+    pub signature: Vec<u8>,
+    pub nonce: u64,
+    pub requested_stipend_attos: u128,
+}
+
+/// Classical home-key signature & PQ-ceiling verifier supplied by the
+/// execution coordinator (`UOL-K1`). Keeping verification behind this trait
+/// ensures `object_layer` enforces replay/cap bounds without embedding
+/// classical primitives outside `execution/coordinator/foreign`.
+pub trait HomeStipendVerifier {
+    /// Verifies the classical signature, address binding, PQ holding cap, and
+    /// Quantum Alert status for `HomeStipendCall`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Refusal`] when verification fails or the alert gate blocks it.
+    fn verify_stipend(
+        &self,
+        domain: DomainId,
+        auth: &HomeKeyStipendAuth,
+        action_digest: &Hash32,
+    ) -> Result<(), Refusal>;
+}
+
+/// Domain-separated hash commitment of the inner action inside `HomeStipendCall`.
+///
+/// # Errors
+///
+/// Returns [`Refusal::Overflow`] if postcard serialization fails.
+pub fn home_stipend_action_digest(action: &ObjectLayerTx) -> Result<Hash32, Refusal> {
+    let encoded = postcard::to_allocvec(action).map_err(|_| Refusal::Overflow)?;
+    Ok(hash_fields_bytes(&[
+        b"BDLM_UOL_HOME_STIPEND_ACTION_V1",
+        &encoded,
+    ]))
+}
 
 /// When the object layer opens. `None`: closed on this chain.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -32,10 +86,17 @@ impl ObjectLayerActivation {
     pub fn is_open_at(&self, height: u64) -> bool {
         self.height.is_some_and(|h| height >= h)
     }
+
+    #[must_use]
+    pub fn is_open_for_chain_at(&self, chain_id: u64, height: u64) -> bool {
+        chain_id != crate::core::chain_config::Network::Mainnet.chain_id().value()
+            && self.is_open_at(height)
+    }
 }
 
-/// TESTNET-DEFAULT: closed. The activation height is set after launch (M7).
-pub const ACTIVATION: ObjectLayerActivation = ObjectLayerActivation { height: None };
+/// Active on testnet (`45261`) and devnet (`45262`) from genesis (height 0);
+/// mainnet (`45260`) stays gated by chain-id check until launch sign-off.
+pub const ACTIVATION: ObjectLayerActivation = ObjectLayerActivation { height: Some(0) };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ObjectLayerTx {
@@ -49,6 +110,8 @@ pub enum ObjectLayerTx {
         class: AssetClassId,
         updates: ClassSlice,
         phase: Phase,
+        #[serde(default)]
+        state_proof: Option<HomeSliceProof>,
     },
     AuditCode {
         class: AssetClassId,
@@ -96,6 +159,25 @@ pub enum ObjectLayerTx {
     Rebut {
         class: AssetClassId,
     },
+    GuestPlace {
+        class: AssetClassId,
+        native_id: Vec<u8>,
+        guest_domain: DomainId,
+        guest_holder: Holder,
+    },
+    GuestReturn {
+        class: AssetClassId,
+        native_id: Vec<u8>,
+        recipient: Holder,
+        proof: HomeEventProof,
+    },
+    /// `UOL-K1`: gasless home-key action signed by the home chain's key within
+    /// a bounded stipend and PQ holding ceiling (closed at Quantum Alert >= 2).
+    HomeStipendCall {
+        domain: DomainId,
+        auth: HomeKeyStipendAuth,
+        action: Box<ObjectLayerTx>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -121,6 +203,13 @@ pub struct TxContext<'a> {
     pub finality: &'a dyn HomeFinality,
     /// Whether the charter's domain is active in the external intake.
     pub domain_active: &'a dyn Fn(DomainId) -> bool,
+    /// Optional finalized home-chain state root lookup for state-proof doors.
+    pub home_state_root: Option<&'a dyn Fn(DomainId) -> Option<Hash32>>,
+    /// Whether `Charter`, `RegisterClass`, and `RefreshClass` require
+    /// proven home-chain state inclusion (always `true` on consensus).
+    pub require_home_state_proofs: bool,
+    /// Verifier for `UOL-K1` (`HomeStipendCall`). `None` fails closed.
+    pub home_stipend_verifier: Option<&'a dyn HomeStipendVerifier>,
 }
 
 impl ObjectLayerTx {
@@ -138,28 +227,52 @@ impl ObjectLayerTx {
             return Err(TxRefusal::Closed);
         }
         let me = Holder::Account(ctx.signer);
+        let state_root_for = |id: DomainId| -> Option<Hash32> {
+            ctx.home_state_root.and_then(|lookup| lookup(id))
+        };
         match self {
             Self::Charter {
                 domain,
                 charter,
                 proof,
             } => {
-                registry.charter(
+                registry.charter_verified(
                     *domain,
                     charter.clone(),
                     proof,
                     (ctx.domain_active)(*domain),
+                    state_root_for(*domain),
+                    ctx.require_home_state_proofs,
                 )?;
             }
             Self::RegisterClass(reg) => {
-                registry.register_class(ctx.signer, reg.clone())?;
+                registry.register_class_verified(
+                    ctx.signer,
+                    reg.clone(),
+                    state_root_for(reg.home_domain),
+                    ctx.require_home_state_proofs,
+                )?;
             }
             Self::RefreshClass {
                 class,
                 updates,
                 phase,
+                state_proof,
             } => {
-                registry.refresh_class(ctx.signer, *class, updates.clone(), *phase)?;
+                let domain = registry
+                    .classes
+                    .get(class)
+                    .map(|c| c.home_domain)
+                    .ok_or(TxRefusal::Refused(Refusal::UnknownClass))?;
+                registry.refresh_class_verified(
+                    ctx.signer,
+                    *class,
+                    updates.clone(),
+                    *phase,
+                    state_proof.as_ref(),
+                    state_root_for(domain),
+                    ctx.require_home_state_proofs,
+                )?;
             }
             Self::AuditCustody {
                 class,
@@ -205,20 +318,47 @@ impl ObjectLayerTx {
             Self::SetTentativeConsent { consent } => {
                 registry.set_tentative_consent(ctx.signer, *consent);
             }
-            Self::Adopt { .. } => {
-                // `escape_addresses` is recorded from a plain transaction, so it
-                // proves nothing about who controls the home identity: any
-                // account can register any home address and then adopt the
-                // balances held for it. Adoption stays closed until a proven
-                // home event binds the raw home address to the adopting
-                // account; a proven `HomeCall` already moves these balances.
-                return Err(TxRefusal::StepNotOpen);
+            Self::Adopt { home } => {
+                if let Ok(proof) = postcard::from_bytes::<HomeEventProof>(home) {
+                    registry.adopt_with_proof(ctx.signer, &proof, ctx.finality)?;
+                } else {
+                    registry.adopt(ctx.signer, home)?;
+                }
             }
             Self::Challenge { class } => {
                 registry.challenge(ctx.signer, *class, ctx.height)?;
             }
             Self::Rebut { class } => {
                 registry.rebut(ctx.signer, *class, ctx.height)?;
+            }
+            Self::GuestPlace {
+                class,
+                native_id,
+                guest_domain,
+                guest_holder,
+            } => {
+                registry.guest_place(me, *class, native_id, *guest_domain, *guest_holder)?;
+            }
+            Self::GuestReturn {
+                class,
+                native_id,
+                recipient,
+                proof,
+            } => {
+                registry.guest_return(*class, native_id, *recipient, proof, ctx.finality)?;
+            }
+            Self::HomeStipendCall {
+                domain,
+                auth,
+                action,
+            } => {
+                registry.home_stipend_call(
+                    *domain,
+                    auth,
+                    action,
+                    ctx.height,
+                    ctx.home_stipend_verifier,
+                )?;
             }
         }
         Ok(())

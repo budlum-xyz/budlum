@@ -56,7 +56,8 @@ pub const fn soft_limit_for_ee(ee: EeId) -> Option<u64> {
         | EeId::POLKAVM
         | EeId::TVM
         | EeId::UTXO
-        | EeId::PLUTUS => Some(WASM_SOFT_BGU_LIMIT),
+        | EeId::PLUTUS
+        | EeId::RV32 => Some(WASM_SOFT_BGU_LIMIT),
         EeId::SVM => Some(SVM_SOFT_BGU_LIMIT),
         EeId::MOVE => Some(MOVE_SOFT_BGU_LIMIT),
         EeId::BUDZERO => Some(MAX_BLOCK_CONTRACT_GAS),
@@ -83,7 +84,8 @@ pub fn native_gas_to_bgu(ee: EeId, native_units: u64) -> Result<u64, String> {
         | EeId::POLKAVM
         | EeId::TVM
         | EeId::UTXO
-        | EeId::PLUTUS => Ok(native_units),
+        | EeId::PLUTUS
+        | EeId::RV32 => Ok(native_units),
         EeId::MOVE => native_units
             .checked_mul(MOVE_GAS_TO_BGU)
             .ok_or_else(|| String::from("Move gas to BGU conversion overflow")),

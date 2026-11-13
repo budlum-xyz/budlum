@@ -401,6 +401,10 @@ mod tests {
             }
             Ok(())
         }
+
+        fn sync_committee_closed(&self) -> bool {
+            false
+        }
     }
 
     fn test_bls() -> Box<dyn BlsVerifier> {
@@ -432,16 +436,20 @@ mod tests {
     }
 
     fn evidence(submitter: Address, height: u64, root: [u8; 32]) -> RawConsensusEvidence {
-        let mut payload = vec![0u8; layout::LEN];
-        payload[layout::FINALIZED_ROOT].copy_from_slice(&[0xaa; 32]);
-        payload[layout::FINALIZED_SLOT].copy_from_slice(&height.to_le_bytes());
-        payload[layout::ATTESTED_SLOT].copy_from_slice(&(height * 2).to_le_bytes());
-        payload[layout::PERIOD].copy_from_slice(&0u64.to_le_bytes());
-        payload[layout::NEXT_COMMITTEE_ROOT].copy_from_slice(&[0xbb; 32]);
-        payload[layout::AGGREGATE_PUBKEY].copy_from_slice(&[0x11; 96]);
-        payload[layout::SIGNATURE].copy_from_slice(&[0x22; 96]);
-        payload[layout::PARTICIPATION_BITS].copy_from_slice(&[0xff; 64]);
-        payload[layout::STATE_ROOT].copy_from_slice(&root);
+        let committee = PinnedCommittee {
+            period: 0,
+            aggregate_pubkey: vec![0x11; 96],
+            next_committee_root: [0xbb; 32],
+        };
+        let payload = crate::cross_domain::external::ethereum::build_deneb_update_payload(
+            height,
+            height * 2,
+            0,
+            &committee,
+            &[0x22; 96],
+            &[0xff; 64],
+            root,
+        );
         let adapter = spec().build(Some(test_bls()), None);
         RawConsensusEvidence {
             adapter: adapter.descriptor().id,

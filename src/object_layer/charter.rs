@@ -12,6 +12,9 @@
 //! the state is held by `SettlementRegistries::object_layer` and closed on
 //! the testnet by `ACTIVATION`.
 
+use crate::core::hash::hash_fields_bytes;
+use crate::cross_domain::event_tree::MerkleProof;
+use crate::cross_domain::evm::account_proof;
 use crate::domain::types::Hash32;
 use crate::object_layer::family::{profile_for, FamilyContext, HomeVmFamily};
 use serde::{Deserialize, Serialize};
@@ -83,11 +86,22 @@ pub struct CanonicalCodeHashes {
     pub verifier: Hash32,
 }
 
-/// The code hashes the account proofs showed for the charter's addresses.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// Home-chain state-inclusion proof anchoring `endpoint_code_hash` and
+/// `verifier_code_hash` to a finalized home `state_root`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HomeCodeStateProof {
+    pub state_root: Hash32,
+    pub endpoint_proof: Vec<Vec<u8>>,
+    pub verifier_proof: Vec<Vec<u8>>,
+}
+
+/// The code hashes and optional home-chain inclusion proofs for the charter's addresses.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CodeProof {
     pub endpoint_code_hash: Hash32,
     pub verifier_code_hash: Hash32,
+    #[serde(default)]
+    pub home_proof: Option<HomeCodeStateProof>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -102,6 +116,49 @@ pub enum CharterRefusal {
     AlreadyChartered,
 }
 
+fn verify_home_code_entry(
+    vm_family: HomeVmFamily,
+    chain_reference: &str,
+    address: &[u8],
+    expected_code_hash: Hash32,
+    state_root: Hash32,
+    proof_nodes: &[Vec<u8>],
+) -> Result<(), CharterRefusal> {
+    if proof_nodes.is_empty() {
+        return Err(CharterRefusal::ProofDisagrees);
+    }
+    match vm_family {
+        HomeVmFamily::Evm => {
+            let addr20: [u8; 20] = address
+                .try_into()
+                .map_err(|_| CharterRefusal::BadAddress)?;
+            let acct = account_proof::verify_account(proof_nodes, &state_root, &addr20)
+                .map_err(|_| CharterRefusal::ProofDisagrees)?;
+            if acct.code_hash != expected_code_hash {
+                return Err(CharterRefusal::ProofDisagrees);
+            }
+            Ok(())
+        }
+        HomeVmFamily::CosmWasm | HomeVmFamily::Svm | HomeVmFamily::Move => {
+            let [raw] = proof_nodes else {
+                return Err(CharterRefusal::ProofDisagrees);
+            };
+            let merkle: MerkleProof =
+                bincode::deserialize(raw).map_err(|_| CharterRefusal::ProofDisagrees)?;
+            let expected_leaf = hash_fields_bytes(&[
+                b"BDLM_UOL_HOME_CODE_V1",
+                chain_reference.as_bytes(),
+                address,
+                &expected_code_hash,
+            ]);
+            if merkle.leaf != expected_leaf || !merkle.verify(state_root) {
+                return Err(CharterRefusal::ProofDisagrees);
+            }
+            Ok(())
+        }
+    }
+}
+
 /// Check one charter against the proofs and the canonical hashes.
 ///
 /// # Errors
@@ -112,6 +169,24 @@ pub fn check_charter(
     proof: &CodeProof,
     canonical: Option<&CanonicalCodeHashes>,
     domain_active: bool,
+) -> Result<(), CharterRefusal> {
+    check_charter_at_state_root(charter, proof, canonical, domain_active, None)
+}
+
+/// Check one charter against its proofs, canonical hashes, and (when present)
+/// the finalized home-chain `state_root`.
+///
+/// # Errors
+///
+/// Returns [`CharterRefusal`] if the domain is inactive, addresses are invalid,
+/// the home-chain code proof disagrees with `expected_home_state_root` or fails
+/// verification, or hashes do not match canonical genesis hashes.
+pub fn check_charter_at_state_root(
+    charter: &DomainCharter,
+    proof: &CodeProof,
+    canonical: Option<&CanonicalCodeHashes>,
+    domain_active: bool,
+    expected_home_state_root: Option<Hash32>,
 ) -> Result<(), CharterRefusal> {
     if !domain_active {
         return Err(CharterRefusal::DomainNotActive);
@@ -130,6 +205,32 @@ pub fn check_charter(
         || proof.verifier_code_hash != charter.verifier_code_hash
     {
         return Err(CharterRefusal::ProofDisagrees);
+    }
+    if let Some(expected_root) = expected_home_state_root {
+        let Some(hp) = proof.home_proof.as_ref() else {
+            return Err(CharterRefusal::ProofDisagrees);
+        };
+        if hp.state_root != expected_root {
+            return Err(CharterRefusal::ProofDisagrees);
+        }
+    }
+    if let Some(hp) = proof.home_proof.as_ref() {
+        verify_home_code_entry(
+            charter.vm_family,
+            &charter.chain_reference,
+            &charter.endpoint,
+            charter.endpoint_code_hash,
+            hp.state_root,
+            &hp.endpoint_proof,
+        )?;
+        verify_home_code_entry(
+            charter.vm_family,
+            &charter.chain_reference,
+            &charter.verifier,
+            charter.verifier_code_hash,
+            hp.state_root,
+            &hp.verifier_proof,
+        )?;
     }
     let canonical = canonical.ok_or(CharterRefusal::NoCanonicalHashes)?;
     if charter.endpoint_code_hash != canonical.endpoint {

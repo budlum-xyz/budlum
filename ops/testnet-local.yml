@@ -232,9 +232,8 @@ services:
       - testnet-local
 
   grafana:
-    # Tag pin; move it to a reviewed digest before this file serves anything
-    # beyond a local rehearsal (the Prometheus pin above is the model).
-    image: grafana/grafana:11.2.0
+    # Pinned to the manifest-list digest of grafana/grafana:11.2.0.
+    image: grafana/grafana:11.2.0@sha256:408afb9726de5122b00a2576763a8a57a3c86d5b0eff5305bc994ceb3eb96c3f
     container_name: testnet-grafana
     ports:
       - "127.0.0.1:23000:3000"

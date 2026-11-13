@@ -885,7 +885,11 @@ impl ForeignLaneState {
                 got: adopt.chain_id,
             });
         }
-        if self.quantum_class_of(&adopt.native_pq_target) != AccountQuantumClass::PostQuantum {
+        if self
+            .accounts
+            .get(&adopt.native_pq_target)
+            .is_some_and(|rec| rec.quantum_class == AccountQuantumClass::Classical)
+        {
             return Err(ForeignAdmissionError::InvalidAdoptProof(String::from(
                 "Adopt target must be a post-quantum native account",
             )));
@@ -1062,4 +1066,231 @@ fn verify_classical_adopt_proof(
             "scheme / proof variant mismatch",
         ))),
     }
+}
+
+/// Maximum PQ balance ceiling (1 BUD = 10^18 attoBUD) allowed on a classical foreign
+/// account for `UOL-K1` gasless home-key stipend eligibility.
+pub const MAX_HOME_KEY_STIPEND_PQ_CEILING_ATTOS: u128 = 1_000_000_000_000_000_000;
+
+/// Domain-separated signing digest for a `UOL-K1` home-key stipend call.
+///
+/// exposed for: `UOL-K1` classical-key stipend authorization (`K-3` gated).
+#[must_use]
+pub fn home_key_stipend_digest(
+    chain_id: u64,
+    domain: u32,
+    home_address: &[u8],
+    nonce: u64,
+    requested_stipend_attos: u128,
+    action_digest: &[u8; 32],
+) -> [u8; 32] {
+    hash_fields_bytes(&[
+        b"BDLM_UOL_HOME_STIPEND_V1",
+        &chain_id.to_le_bytes(),
+        &domain.to_le_bytes(),
+        home_address,
+        &nonce.to_le_bytes(),
+        &requested_stipend_attos.to_le_bytes(),
+        action_digest,
+    ])
+}
+
+/// Verifies a `UOL-K1` home-key stipend authorization against the active
+/// Quantum Alert level and returns the derived Budlum foreign account + scheme.
+///
+/// Refuses at Quantum Alert Level 2 (`Level2Restricted`) and Level 3 (`Level3Isolated`).
+///
+/// # Errors
+///
+/// Returns [`ForeignAdmissionError`] when blocked by Quantum Alert, stipend limits,
+/// or invalid cryptographic proof.
+///
+/// exposed for: `UOL-K1` (`execute_object_layer_tx`) gasless stipend door.
+pub fn verify_home_key_stipend_auth(
+    auth: &crate::object_layer::tx::HomeKeyStipendAuth,
+    chain_id: u64,
+    domain: u32,
+    action_digest: &[u8; 32],
+    alert_level: QuantumAlertLevel,
+) -> Result<(Address, ForeignScheme), ForeignAdmissionError> {
+    use crate::object_layer::tx::HomeKeyScheme;
+
+    if alert_level >= QuantumAlertLevel::Level2Restricted {
+        return Err(ForeignAdmissionError::ClosedByQuantumAlert(alert_level));
+    }
+    if auth.requested_stipend_attos == 0
+        || auth.requested_stipend_attos > crate::object_layer::registry::MAX_HOME_STIPEND_ATTOS
+    {
+        return Err(ForeignAdmissionError::InvalidAdoptProof(String::from(
+            "UOL-K1 requested stipend exceeds cap or is zero",
+        )));
+    }
+    let digest = home_key_stipend_digest(
+        chain_id,
+        domain,
+        &auth.home_address,
+        auth.nonce,
+        auth.requested_stipend_attos,
+        action_digest,
+    );
+    let foreign_scheme = match auth.scheme {
+        HomeKeyScheme::EthereumSecp256k1 => {
+            let expected: [u8; 20] = auth.home_address.as_slice().try_into().map_err(|_| {
+                ForeignAdmissionError::InvalidAdoptProof(String::from(
+                    "Ethereum home_address != 20 bytes",
+                ))
+            })?;
+            let recovered = recover_address(&digest, &auth.signature)
+                .map_err(|e| ForeignAdmissionError::InvalidAdoptProof(e.to_string()))?;
+            if recovered != expected {
+                return Err(ForeignAdmissionError::InvalidAdoptProof(String::from(
+                    "Ethereum stipend signer does not match home_address",
+                )));
+            }
+            ForeignScheme::EthereumSecp256k1
+        }
+        HomeKeyScheme::SolanaEd25519 => {
+            let pk32: [u8; 32] = auth.home_address.as_slice().try_into().map_err(|_| {
+                ForeignAdmissionError::InvalidAdoptProof(String::from(
+                    "Solana home_address != 32 bytes",
+                ))
+            })?;
+            if !auth.signer_pubkey.is_empty() && auth.signer_pubkey.as_slice() != pk32 {
+                return Err(ForeignAdmissionError::InvalidAdoptProof(String::from(
+                    "Solana signer_pubkey mismatch",
+                )));
+            }
+            let sig64: [u8; 64] = auth.signature.as_slice().try_into().map_err(|_| {
+                ForeignAdmissionError::InvalidAdoptProof(String::from("Solana sig != 64 bytes"))
+            })?;
+            let vk = EdVerifyingKey::from_bytes(&pk32)
+                .map_err(|e| ForeignAdmissionError::InvalidAdoptProof(e.to_string()))?;
+            vk.verify_strict(&digest, &EdSignature::from_bytes(&sig64))
+                .map_err(|e| ForeignAdmissionError::InvalidAdoptProof(e.to_string()))?;
+            ForeignScheme::SolanaEd25519
+        }
+        HomeKeyScheme::AptosEd25519 => {
+            let expected: [u8; 32] = auth.home_address.as_slice().try_into().map_err(|_| {
+                ForeignAdmissionError::InvalidAdoptProof(String::from(
+                    "Aptos home_address != 32 bytes",
+                ))
+            })?;
+            let pk32: [u8; 32] = auth.signer_pubkey.as_slice().try_into().map_err(|_| {
+                ForeignAdmissionError::InvalidAdoptProof(String::from("Aptos pubkey != 32 bytes"))
+            })?;
+            if aptos_ed25519_address(&pk32) != expected {
+                return Err(ForeignAdmissionError::InvalidAdoptProof(String::from(
+                    "Aptos pubkey does not derive home_address",
+                )));
+            }
+            let sig64: [u8; 64] = auth.signature.as_slice().try_into().map_err(|_| {
+                ForeignAdmissionError::InvalidAdoptProof(String::from("Aptos sig != 64 bytes"))
+            })?;
+            let vk = EdVerifyingKey::from_bytes(&pk32)
+                .map_err(|e| ForeignAdmissionError::InvalidAdoptProof(e.to_string()))?;
+            vk.verify_strict(&digest, &EdSignature::from_bytes(&sig64))
+                .map_err(|e| ForeignAdmissionError::InvalidAdoptProof(e.to_string()))?;
+            ForeignScheme::Aptos
+        }
+        HomeKeyScheme::CosmosSecp256k1 => {
+            let expected: [u8; 20] = auth.home_address.as_slice().try_into().map_err(|_| {
+                ForeignAdmissionError::InvalidAdoptProof(String::from(
+                    "Cosmos home_address != 20 bytes",
+                ))
+            })?;
+            let pk33: [u8; 33] = auth.signer_pubkey.as_slice().try_into().map_err(|_| {
+                ForeignAdmissionError::InvalidAdoptProof(String::from("Cosmos pubkey != 33 bytes"))
+            })?;
+            if cosmos_addr20_from_compressed_pubkey(&pk33) != expected {
+                return Err(ForeignAdmissionError::InvalidAdoptProof(String::from(
+                    "Cosmos pubkey does not derive home_address",
+                )));
+            }
+            let vk = SecpVerifyingKey::from_sec1_bytes(&pk33)
+                .map_err(|e| ForeignAdmissionError::InvalidAdoptProof(e.to_string()))?;
+            let sig = SecpSig::from_slice(&auth.signature)
+                .map_err(|e| ForeignAdmissionError::InvalidAdoptProof(e.to_string()))?;
+            if sig.normalize_s() != sig {
+                return Err(ForeignAdmissionError::InvalidAdoptProof(String::from(
+                    "high-s Cosmos stipend signature refused",
+                )));
+            }
+            use k256::ecdsa::signature::Verifier as _;
+            vk.verify(&digest, &sig)
+                .map_err(|e| ForeignAdmissionError::InvalidAdoptProof(e.to_string()))?;
+            ForeignScheme::CosmosSecp256k1
+        }
+    };
+    let derived = derive_foreign_account(foreign_scheme, &auth.home_address);
+    Ok((derived, foreign_scheme))
+}
+
+/// Verifies a Cosmos secp256k1 deployment/admin signature for `8.12.3` WASM migration.
+///
+/// # Errors
+///
+/// Returns a reason string on invalid key, address mismatch, high-`s`, or invalid signature.
+///
+/// exposed for: `execution::coordinator::migration` (`WASM` migration).
+pub fn verify_cosmos_secp256k1_migration_sig(
+    digest: &[u8; 32],
+    compressed_pubkey33: &[u8],
+    signature64: &[u8],
+    expected_addr20: &[u8; 20],
+) -> Result<(), String> {
+    let pk33: [u8; 33] = compressed_pubkey33
+        .try_into()
+        .map_err(|_| String::from("Cosmos migration pubkey != 33 bytes"))?;
+    if cosmos_addr20_from_compressed_pubkey(&pk33) != *expected_addr20 {
+        return Err(String::from(
+            "Cosmos migration pubkey does not derive expected address",
+        ));
+    }
+    let vk = SecpVerifyingKey::from_sec1_bytes(&pk33).map_err(|e| e.to_string())?;
+    let sig = SecpSig::from_slice(signature64).map_err(|e| e.to_string())?;
+    if sig.normalize_s() != sig {
+        return Err(String::from("high-s Cosmos migration signature refused"));
+    }
+    use k256::ecdsa::signature::Verifier as _;
+    vk.verify(digest, &sig).map_err(|e| e.to_string())
+}
+
+/// Verifies a Solana Ed25519 upgrade/owner authority signature for `8.12.3` SVM migration.
+///
+/// # Errors
+///
+/// Returns a reason string on malformed key or failed strict Ed25519 verification.
+///
+/// exposed for: `execution::coordinator::migration` (`SVM` migration).
+pub fn verify_solana_ed25519_migration_sig(
+    digest: &[u8; 32],
+    pubkey32: &[u8; 32],
+    signature64: &[u8; 64],
+) -> Result<(), String> {
+    let vk = EdVerifyingKey::from_bytes(pubkey32).map_err(|e| e.to_string())?;
+    vk.verify_strict(digest, &EdSignature::from_bytes(signature64))
+        .map_err(|e| e.to_string())
+}
+
+/// Verifies an Aptos Ed25519 account signature for `8.12.3` Move migration.
+///
+/// # Errors
+///
+/// Returns a reason string when `pubkey32` does not derive `expected_addr32` or signature fails.
+///
+/// exposed for: `execution::coordinator::migration` (`Move` migration).
+pub fn verify_aptos_migration_sig(
+    digest: &[u8; 32],
+    pubkey32: &[u8; 32],
+    signature64: &[u8; 64],
+    expected_addr32: &[u8; 32],
+) -> Result<(), String> {
+    if aptos_ed25519_address(pubkey32) != *expected_addr32 {
+        return Err(String::from(
+            "Aptos migration pubkey does not derive account address",
+        ));
+    }
+    let vk = EdVerifyingKey::from_bytes(pubkey32).map_err(|e| e.to_string())?;
+    vk.verify_strict(digest, &EdSignature::from_bytes(signature64))
+        .map_err(|e| e.to_string())
 }

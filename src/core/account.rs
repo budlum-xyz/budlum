@@ -108,7 +108,8 @@ impl BudEnvUnit {
             | budlum_uel_abi::EeId::NEAR_WASM
             | budlum_uel_abi::EeId::POLKAVM
             | budlum_uel_abi::EeId::TVM
-            | budlum_uel_abi::EeId::PLUTUS => Some(Self::EvmWei),
+            | budlum_uel_abi::EeId::PLUTUS
+            | budlum_uel_abi::EeId::RV32 => Some(Self::EvmWei),
             budlum_uel_abi::EeId::WASM => Some(Self::WasmUbud),
             budlum_uel_abi::EeId::SVM | budlum_uel_abi::EeId::MOVE_SUI => Some(Self::SvmLamport),
             budlum_uel_abi::EeId::MOVE | budlum_uel_abi::EeId::UTXO => Some(Self::MoveOcta),
