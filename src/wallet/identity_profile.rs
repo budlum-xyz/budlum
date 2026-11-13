@@ -675,17 +675,53 @@ fn evaluate_bns_evidence(
             Some("Missing per-name BNS Merkle state proof for expected bns_root".into()),
         );
     };
-    let verified_owner = BnsRegistry::verify_state_proof(proof, &expected_root, ctx.current_epoch)
-        .ok()
-        .flatten()
-        .filter(|leaf| leaf.name == resolved.name && leaf.owner == resolved.owner);
-    if verified_owner.is_some() {
+    let Ok(Some(leaf)) = BnsRegistry::verify_state_proof(proof, &expected_root, ctx.current_epoch)
+    else {
+        return (
+            EvidenceStatus::Unverified,
+            root_hex,
+            Some("Per-name BNS Merkle state proof failed verification against bns_root".into()),
+        );
+    };
+    if leaf.name != resolved.name || leaf.owner != resolved.owner {
+        return (
+            EvidenceStatus::Unverified,
+            root_hex,
+            Some("Per-name BNS Merkle state proof answers a different name or owner".into()),
+        );
+    }
+    // The proof binds `address`, the records, the subdomains and the B.U.D.
+    // 3.0 reference through its extras pre-image. Without that pre-image the
+    // leaf only fixes the name, owner, expiry, content id and storage root,
+    // and the profile would print "Verified" over an address the answering
+    // node picked. A proof that cannot show the fields this profile publishes
+    // is not evidence for them, and a proof whose pre-image disagrees with the
+    // disclosed values is refused outright.
+    let Some(extras) = leaf.extras.as_ref() else {
+        return (
+            EvidenceStatus::Unverified,
+            root_hex,
+            Some(
+                "Per-name BNS Merkle proof ships no extras pre-image, so the disclosed address and records are unbound"
+                    .into(),
+            ),
+        );
+    };
+    let disclosed_matches = extras.address == resolved.address
+        && extras.records == resolved.records
+        && extras.subdomains.len() == resolved.subdomains.len()
+        && extras.bud3_content == resolved.bud3_content
+        && extras.storage_domain_id == resolved.storage_domain_id;
+    if disclosed_matches {
         (EvidenceStatus::Verified, root_hex, None)
     } else {
         (
             EvidenceStatus::Unverified,
             root_hex,
-            Some("Per-name BNS Merkle state proof failed verification against bns_root".into()),
+            Some(
+                "Disclosed profile fields do not match the extras digest the bns_root commits to"
+                    .into(),
+            ),
         )
     }
 }
@@ -1046,5 +1082,97 @@ mod tests {
         assert!(validate_passport_name("alice.eth").is_err());
         assert!(validate_passport_name("ab.bud").is_err());
         assert!(validate_passport_name("Alice.bud").is_err());
+    }
+    /// A profile may only print what the root commits to.
+    ///
+    /// The leaf digest binds `address`, the records, the subdomains and the
+    /// B.U.D. 3.0 reference through one opaque `extras_digest`, and the branch
+    /// discloses those values next to it. Before the extras pre-image was
+    /// shipped and checked, the disclosure was whatever the answering node
+    /// chose: a relayer could keep a valid proof for a name and swap the
+    /// forwarding address, so a user who trusted the Verified badge paid the
+    /// relayer instead of the name's owner.
+    #[test]
+    fn a_swapped_address_under_a_valid_proof_is_not_verified() {
+        let owner = addr(0x31);
+        let attacker = addr(0x32);
+        let mut reg = BnsRegistry::new();
+        reg.register("ayaz.bud".to_string(), owner, 10, 100)
+            .unwrap();
+        reg.set_address("ayaz.bud", &owner, Some(attacker), None, 11)
+            .unwrap();
+        let resolved = reg.resolve_full("ayaz.bud", 20).unwrap();
+        assert_eq!(resolved.address, Some(attacker));
+
+        let honest = reg.prove_name("ayaz.bud", 20);
+        let bns_root = reg.root();
+
+        // The proof verifies and its extras carry the committed address.
+        let leaf = BnsRegistry::verify_state_proof(&honest, &bns_root, 20)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            leaf.extras.as_ref().and_then(|extras| extras.address),
+            Some(attacker)
+        );
+
+        // The attack: keep the honest proof and swap the address the profile
+        // prints. The extras still fold to the committed digest, so the
+        // mismatch is between the disclosure and the root.
+        let mut lied = resolved.clone();
+        lied.address = Some(addr(0x44));
+        let ctx = IdentityProofContext {
+            bns_proof: Some(honest.clone()),
+            expected_bns_root: Some(bns_root),
+            current_epoch: 20,
+            reverse_primary_name: Some("ayaz.bud".into()),
+        };
+        let profile = build_identity_profile_verified(
+            "ayaz.bud".into(),
+            Some(lied),
+            None,
+            &[],
+            &[],
+            &[],
+            Some(&ctx),
+        );
+        assert_eq!(
+            profile
+                .evidence
+                .iter()
+                .find(|c| c.subject == "bns")
+                .unwrap()
+                .status,
+            EvidenceStatus::Unverified,
+            "a disclosed address the root does not commit to is not evidence"
+        );
+
+        // A proof with no extras pre-image cannot vouch for the disclosure at
+        // all, and the profile says so rather than defaulting to Verified.
+        let mut stripped = honest;
+        stripped.entry.as_mut().unwrap().extras = None;
+        let ctx = IdentityProofContext {
+            bns_proof: Some(stripped),
+            expected_bns_root: Some(bns_root),
+            current_epoch: 20,
+            reverse_primary_name: Some("ayaz.bud".into()),
+        };
+        let bare = build_identity_profile_verified(
+            "ayaz.bud".into(),
+            Some(resolved),
+            None,
+            &[],
+            &[],
+            &[],
+            Some(&ctx),
+        );
+        assert_eq!(
+            bare.evidence
+                .iter()
+                .find(|c| c.subject == "bns")
+                .unwrap()
+                .status,
+            EvidenceStatus::Unverified
+        );
     }
 }

@@ -1202,45 +1202,71 @@ impl BnsRegistry {
     /// carried directly in the top-level browser `ResolvedName` tuple.
     #[must_use]
     fn record_extras_digest(record: &NameRecord) -> [u8; 32] {
+        Self::extras_digest(&Self::extras_from_record(record))
+    }
+
+    /// The extras a name record discloses, in the shape a proof carries.
+    #[must_use]
+    pub(crate) fn extras_from_record(record: &NameRecord) -> crate::bns::types::BnsBranchExtras {
+        crate::bns::types::BnsBranchExtras {
+            resolver: record.resolver,
+            address: record.address,
+            consensus_domain_id: record.consensus_domain_id,
+            storage_domain_id: record.storage_domain_id,
+            storage_root_height: record.storage_root_height,
+            bud3_content: record.bud3_content.clone(),
+            subdomains: record.subdomains.clone(),
+            records: record.records.clone(),
+        }
+    }
+
+    /// The commitment over a disclosed extras pre-image (`BDLM_BNS_EXTRAS_V1`).
+    ///
+    /// The encoding is the one the leaf digest already used, so the digest of
+    /// [`Self::extras_from_record`] equals [`Self::record_extras_digest`] field
+    /// for field. A proof that ships its extras can therefore be checked
+    /// against the header root instead of being believed.
+    #[must_use]
+    pub(crate) fn extras_digest(extras: &crate::bns::types::BnsBranchExtras) -> [u8; 32] {
         use sha2::{Digest, Sha256};
         let mut hasher = Sha256::new();
         hasher.update(b"BDLM_BNS_EXTRAS_V1");
-        match record.resolver {
+        match extras.resolver {
             Some(resolver) => {
                 hasher.update([1u8]);
                 hasher.update(resolver.0);
             }
             None => hasher.update([0u8]),
         }
-        match record.address {
+        match extras.address {
             Some(address) => {
                 hasher.update([1u8]);
                 hasher.update(address.0);
             }
             None => hasher.update([0u8]),
         }
-        match record.consensus_domain_id {
+        match extras.consensus_domain_id {
             Some(domain_id) => {
                 hasher.update([1u8]);
                 hasher.update(domain_id.to_le_bytes());
             }
             None => hasher.update([0u8]),
         }
-        match record.storage_domain_id {
+        match extras.storage_domain_id {
             Some(domain_id) => {
                 hasher.update([1u8]);
                 hasher.update(domain_id.to_le_bytes());
             }
             None => hasher.update([0u8]),
         }
-        match record.storage_root_height {
+        match extras.storage_root_height {
             Some(height) => {
                 hasher.update([1u8]);
                 hasher.update(height.to_le_bytes());
             }
             None => hasher.update([0u8]),
         }
-        match record.bud3_content {
+        match extras.bud3_content {
             Some(cref) => {
                 hasher.update([1u8]);
                 let kind_byte = match cref.content_id.kind {
@@ -1261,14 +1287,14 @@ impl BnsRegistry {
             }
             None => hasher.update([0u8]),
         }
-        hasher.update((record.subdomains.len() as u64).to_le_bytes());
-        for (sub_label, sub_owner) in &record.subdomains {
+        hasher.update((extras.subdomains.len() as u64).to_le_bytes());
+        for (sub_label, sub_owner) in &extras.subdomains {
             hasher.update((sub_label.len() as u64).to_le_bytes());
             hasher.update(sub_label.as_bytes());
             hasher.update(sub_owner.0);
         }
-        hasher.update((record.records.len() as u64).to_le_bytes());
-        for (rec_key, rec_val) in &record.records {
+        hasher.update((extras.records.len() as u64).to_le_bytes());
+        for (rec_key, rec_val) in &extras.records {
             hasher.update((rec_key.len() as u64).to_le_bytes());
             hasher.update(rec_key.as_bytes());
             hasher.update((rec_val.len() as u64).to_le_bytes());
@@ -1471,7 +1497,102 @@ impl BnsRegistry {
             leaf,
             siblings,
             directions,
+            leaf_index: Some(u64::try_from(target_idx).unwrap_or(u64::MAX)),
+            tree_size: Some(u64::try_from(records.len()).unwrap_or(u64::MAX)),
+            extras: Some(Self::extras_from_record(rec)),
         }
+    }
+
+    /// The absence rule: `pred` and `succ` are the two leaves flanking the
+    /// target, and no name sorts between them.
+    ///
+    /// Lexicographic order alone is not a proof of absence. Every branch in the
+    /// tree sorts next to some target, and `names_count` is a claimed field the
+    /// leaf never commits to, so an honest inclusion branch of a live name could
+    /// be relabelled and served as proof that the name is unregistered. Two
+    /// things make the claim checkable:
+    ///
+    /// - Both boundary branches carry the size of the list they were built
+    ///   from, and the two must agree. A predecessor from one tree and a
+    ///   successor from another cannot be spliced together.
+    /// - Both carry their leaf position, and the positions must be adjacent.
+    ///   Adjacent positions in the ordered name list are exactly what "nothing
+    ///   sorts between these two names" means, so a prover that skips a live
+    ///   name in the middle has to forge a position it cannot open.
+    ///
+    /// The first and last positions are the two open ends: the first leaf has
+    /// no predecessor and the last has no successor, which is why one boundary
+    /// is allowed when it is that end.
+    fn check_boundary_pair(
+        proof: &BnsStateProof,
+        pred: Option<&BnsMerkleBranch>,
+        succ: Option<&BnsMerkleBranch>,
+    ) -> Result<(), String> {
+        let target = proof.name.as_str();
+        for branch in [pred, succ].into_iter().flatten() {
+            let (Some(index), Some(size)) = (branch.leaf_index, branch.tree_size) else {
+                return Err(
+                    "absence proof branch carries no leaf position; a branch without one cannot show adjacency"
+                        .into(),
+                );
+            };
+            if size != proof.names_count {
+                return Err("absence proof branch was built from a different list size".into());
+            }
+            if index >= size {
+                return Err("absence proof branch leaf position is outside the tree".into());
+            }
+        }
+        match (pred, succ) {
+            (Some(pred), Some(succ)) => {
+                let (Some(pred_index), Some(succ_index)) = (pred.leaf_index, succ.leaf_index)
+                else {
+                    return Err("absence proof boundary branch carries no leaf position".into());
+                };
+                if succ_index != pred_index.saturating_add(1) {
+                    return Err(
+                        "absence proof boundaries are not adjacent, so a name may sort between them"
+                            .into(),
+                    );
+                }
+            }
+            (Some(pred), None) => {
+                let Some(pred_index) = pred.leaf_index else {
+                    return Err("absence proof boundary branch carries no leaf position".into());
+                };
+                if pred_index.saturating_add(1) != proof.names_count {
+                    return Err(
+                        "a predecessor-only absence proof must name the last leaf of the tree"
+                            .into(),
+                    );
+                }
+            }
+            (None, Some(succ)) => {
+                let Some(succ_index) = succ.leaf_index else {
+                    return Err("absence proof boundary branch carries no leaf position".into());
+                };
+                if succ_index != 0 {
+                    return Err(
+                        "a successor-only absence proof must name the first leaf of the tree"
+                            .into(),
+                    );
+                }
+            }
+            (None, None) => {
+                return Err("non-empty registry absence proof requires a boundary branch".into());
+            }
+        }
+        if let Some(pred) = pred {
+            if pred.name.as_str() >= target {
+                return Err("predecessor name is not strictly less than target".into());
+            }
+        }
+        if let Some(succ) = succ {
+            if succ.name.as_str() <= target {
+                return Err("successor name is not strictly greater than target".into());
+            }
+        }
+        Ok(())
     }
 
     /// Produce an $O(\log N)$ per-name Merkle state proof (inclusion when `name`
@@ -1558,6 +1679,22 @@ impl BnsRegistry {
             return Err("proof bns_root does not match expected header bns_root".into());
         }
         let check_branch = |branch: &BnsMerkleBranch| -> Result<[u8; 32], String> {
+            // The extras digest is a commitment; `address`, the records, the
+            // subdomains and the B.U.D. 3.0 reference only mean something if
+            // the pre-image behind it is the one the header root commits to.
+            // A branch that discloses its extras is checked here, so every
+            // field it shows is bound to the root. A branch that withholds them
+            // still proves the fields outside the digest; callers that need a
+            // disclosed field must read it from `branch.extras`, never from the
+            // top-level copy, which is where the prover chooses freely.
+            if let Some(extras) = &branch.extras {
+                if Self::extras_digest(extras) != branch.extras_digest {
+                    return Err("branch extras do not match the extras digest".into());
+                }
+                if extras.address != branch.address {
+                    return Err("branch top-level address contradicts the extras digest".into());
+                }
+            }
             let recomputed_leaf = Self::compute_leaf_digest(
                 &branch.name,
                 &branch.owner,
@@ -1605,24 +1742,23 @@ impl BnsRegistry {
             if proof.predecessor.is_none() && proof.successor.is_none() {
                 return Err("non-empty registry absence proof requires a boundary branch".into());
             }
+            // Each boundary branch must open to the header root before its
+            // position means anything.
             if let Some(pred) = &proof.predecessor {
-                if pred.name.as_str() >= proof.name.as_str() {
-                    return Err("predecessor name is not strictly less than target".into());
-                }
                 let root = check_branch(pred)?;
                 if Self::root_from_parts(proof.meta_digest, root) != *expected_bns_root {
                     return Err("predecessor branch did not reproduce expected bns_root".into());
                 }
             }
             if let Some(succ) = &proof.successor {
-                if succ.name.as_str() <= proof.name.as_str() {
-                    return Err("successor name is not strictly greater than target".into());
-                }
                 let root = check_branch(succ)?;
                 if Self::root_from_parts(proof.meta_digest, root) != *expected_bns_root {
                     return Err("successor branch did not reproduce expected bns_root".into());
                 }
             }
+            // Order alone proves nothing: a live name can hide between two
+            // honest branches. Only the positions can rule that out.
+            Self::check_boundary_pair(proof, proof.predecessor.as_ref(), proof.successor.as_ref())?;
             Ok(None)
         }
     }
