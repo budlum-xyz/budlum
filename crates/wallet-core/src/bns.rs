@@ -259,6 +259,9 @@ fn parse_address_from_extras_preimage(
 ///
 /// Refuses invalid names, expired leaves (`expires_at <= current_epoch`), root
 /// mismatches, zero addresses, or unauthenticated target substitution.
+#[deprecated(
+    note = "the root and epoch come from the caller, so the proof is only as good as whoever supplied them; call `verify_bns_recipient_proof_from_header` with a `HeaderSource` the wallet trusts"
+)]
 pub fn verify_bns_recipient_proof(
     requested_name: &str,
     claimed_target: &[u8; 32],
@@ -353,6 +356,7 @@ pub fn verify_bns_recipient_proof_from_header<S: HeaderSource + ?Sized>(
     let (root, epoch) = headers
         .bns_root_at(proof.header_height)
         .ok_or_else(|| HeaderUnknown(proof.header_height).to_string())?;
+    #[allow(deprecated)] // the header path is the sanctioned wrapper around it
     verify_bns_recipient_proof(requested_name, claimed_target, proof, &root, epoch)
 }
 
