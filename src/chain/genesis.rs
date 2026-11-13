@@ -255,10 +255,22 @@ pub struct GenesisConfig {
     /// Defaults to [`crate::bns::BNS_PRIMARY_SELLERS`].
     #[serde(default = "default_bns_primary_sellers")]
     pub bns_primary_sellers: Vec<Address>,
+
+    /// Reserved `.bud` labels and `budlum.xyz` infrastructure subdomains.
+    /// Defaults to [`crate::bns::RESERVED_LABELS`].
+    #[serde(default = "default_bns_reserved_labels")]
+    pub bns_reserved_labels: Vec<String>,
 }
 
 fn default_bns_primary_sellers() -> Vec<Address> {
     crate::bns::BNS_PRIMARY_SELLERS.to_vec()
+}
+
+fn default_bns_reserved_labels() -> Vec<String> {
+    crate::bns::RESERVED_LABELS
+        .iter()
+        .map(|s| (*s).to_string())
+        .collect()
 }
 
 impl Default for GenesisConfig {
@@ -280,6 +292,7 @@ impl Default for GenesisConfig {
             anchor_ledger: None,
             reward_pool: None,
             bns_primary_sellers: default_bns_primary_sellers(),
+            bns_reserved_labels: default_bns_reserved_labels(),
         }
     }
 }
@@ -657,6 +670,7 @@ impl GenesisConfig {
         {
             let mut probe = crate::bns::BnsRegistry::new();
             probe.set_primary_sellers(self.bns_primary_sellers.iter().copied())?;
+            probe.set_reserved_labels(self.bns_reserved_labels.iter().cloned())?;
         }
         let validator_set = self
             .validators
@@ -870,6 +884,9 @@ impl GenesisConfig {
         let _ = state
             .bns_registry
             .set_primary_sellers(self.bns_primary_sellers.iter().copied());
+        let _ = state
+            .bns_registry
+            .set_reserved_labels(self.bns_reserved_labels.iter().cloned());
 
         let validator_stake = self.validator_stake();
         for validator in &self.validators {
@@ -1221,6 +1238,7 @@ fn mainnet_genesis_with(tokenomics: crate::tokenomics::TokenomicsParams) -> Gene
         // `validate_reward_pool_flag` instead of quietly minting nothing.
         reward_pool: Some(GenesisRewardPool::disabled()),
         bns_primary_sellers: default_bns_primary_sellers(),
+        bns_reserved_labels: default_bns_reserved_labels(),
     }
 }
 
@@ -1254,6 +1272,7 @@ pub fn testnet_genesis() -> GenesisConfig {
         // testnet: the reward pool is on, and genesis says so.
         reward_pool: Some(GenesisRewardPool::enabled()),
         bns_primary_sellers: default_bns_primary_sellers(),
+        bns_reserved_labels: default_bns_reserved_labels(),
     }
 }
 
@@ -1296,6 +1315,7 @@ pub fn devnet_genesis() -> GenesisConfig {
         // devnet: no distribution to fund a pool from.
         reward_pool: Some(GenesisRewardPool::disabled()),
         bns_primary_sellers: default_bns_primary_sellers(),
+        bns_reserved_labels: default_bns_reserved_labels(),
     }
 }
 

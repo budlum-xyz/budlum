@@ -182,7 +182,7 @@ fn bns_lifecycle_doors_reject_zero_duration_and_zero_owner() {
 
     assert_eq!(
         reg.renew("term.bud", &alice, 10, 0),
-        Err(BnsError::InvalidName),
+        Err(BnsError::InvalidDuration),
         "a renewal must extend the registration"
     );
     assert_eq!(
@@ -343,12 +343,12 @@ fn bns_renew_and_transfer_execute_through_consensus_doors() {
 
 #[test]
 fn bns_marketplace_primary_resale_cancel_expiry_and_governance() {
+    use crate::bns::{CreateNameOffer, OfferKind};
     use crate::core::account::AccountState;
     use crate::core::governance::{GovernanceAction, ProposalStatus, ProposalType};
     use crate::core::transaction::TransactionType;
     use crate::crypto::primitives::KeyPair;
     use crate::execution::executor::Executor;
-    use crate::pollen::{CreateNameOffer, OfferKind};
 
     let primary_kp = KeyPair::generate().unwrap();
     let primary_seller = Address::from(primary_kp.public_key_bytes());
@@ -656,4 +656,248 @@ fn bns_marketplace_primary_resale_cancel_expiry_and_governance() {
             .code(),
         "bns_offer_inactive_or_expired"
     );
+}
+
+#[test]
+fn bns_reserved_labels_rejected_unless_primary_seller_settles() {
+    use crate::bns::{CreateNameOffer, OfferKind, RESERVED_LABELS};
+    use crate::core::account::AccountState;
+    use crate::crypto::primitives::KeyPair;
+    use crate::execution::executor::Executor;
+
+    let mut reg = BnsRegistry::new();
+    let alice = addr(1);
+    for label in [
+        "bud",
+        "www",
+        "app",
+        "api",
+        "rpc",
+        "docs",
+        "mail",
+        "explorer",
+        "faucet",
+        "status",
+        "testnet",
+        "mainnet",
+        "devnet",
+        "seed",
+        "seed-1",
+        "root",
+        "admin",
+        "bns",
+        "budlum",
+        "validator",
+        "node",
+        "gateway",
+    ] {
+        assert!(
+            RESERVED_LABELS.contains(&label),
+            "RESERVED_LABELS must contain `{label}`"
+        );
+        assert_eq!(
+            reg.register(format!("{label}.bud"), alice, 1, 100),
+            Err(BnsError::ReservedName),
+            "normal register must reject reserved `{label}.bud`"
+        );
+    }
+
+    // Primary seller can list and settle a reserved label (`rpc.bud`) via marketplace,
+    // whereas a non-primary seller is rejected on CreateOffer.
+    let primary_kp = KeyPair::generate().unwrap();
+    let primary_seller = Address::from(primary_kp.public_key_bytes());
+    let outsider_kp = KeyPair::generate().unwrap();
+    let outsider = Address::from(outsider_kp.public_key_bytes());
+    let buyer_kp = KeyPair::generate().unwrap();
+    let buyer = Address::from(buyer_kp.public_key_bytes());
+
+    let mut state = AccountState::new();
+    state.epoch_index = 1;
+    state
+        .bns_registry
+        .set_primary_sellers([primary_seller])
+        .unwrap();
+    state.add_balance(&primary_seller, 1_000_000);
+    state.add_balance(&outsider, 1_000_000);
+    state.add_balance(&buyer, 1_000_000);
+
+    let mut bad_offer = lifecycle_tx(
+        outsider,
+        0,
+        1,
+        0,
+        TransactionType::BnsCreateOffer,
+        bincode::serialize(&CreateNameOffer {
+            name: "rpc.bud".to_string(),
+            price_atoms: 50_000,
+            duration: 100,
+            kind: OfferKind::Primary,
+            expires_at_epoch: 50,
+        })
+        .unwrap(),
+    );
+    bad_offer.sign(&outsider_kp);
+    assert_eq!(
+        Executor::apply_transaction_checked(&mut state, &bad_offer)
+            .unwrap_err()
+            .code(),
+        "bns_reserved_name"
+    );
+
+    let mut ok_offer = lifecycle_tx(
+        primary_seller,
+        0,
+        1,
+        0,
+        TransactionType::BnsCreateOffer,
+        bincode::serialize(&CreateNameOffer {
+            name: "rpc.bud".to_string(),
+            price_atoms: 50_000,
+            duration: 100,
+            kind: OfferKind::Primary,
+            expires_at_epoch: 50,
+        })
+        .unwrap(),
+    );
+    ok_offer.sign(&primary_kp);
+    Executor::apply_transaction_checked(&mut state, &ok_offer).unwrap();
+
+    let mut buy_reserved = lifecycle_tx(
+        buyer,
+        50_000,
+        1,
+        0,
+        TransactionType::BnsBuyName,
+        bincode::serialize(&0u64).unwrap(),
+    );
+    buy_reserved.sign(&buyer_kp);
+    Executor::apply_transaction_checked(&mut state, &buy_reserved).unwrap();
+    assert_eq!(state.bns_registry.names["rpc.bud"].owner, buyer);
+}
+
+#[test]
+fn bns_duration_and_owner_name_limits_enforced() {
+    use crate::bns::{CreateNameOffer, OfferKind, MAX_DURATION, MAX_NAMES_PER_OWNER, MIN_DURATION};
+    use crate::core::account::AccountState;
+    use crate::crypto::primitives::KeyPair;
+    use crate::execution::executor::Executor;
+
+    let mut reg = BnsRegistry::new();
+    let alice = addr(1);
+    let bob = addr(2);
+
+    // 1-epoch registration rejected (`MIN_DURATION = 10`).
+    assert_eq!(
+        reg.register("shortdur.bud".to_string(), alice, 1, 1),
+        Err(BnsError::InvalidDuration)
+    );
+    assert_eq!(
+        reg.register("shortdur.bud".to_string(), alice, 1, MIN_DURATION - 1),
+        Err(BnsError::InvalidDuration)
+    );
+    // >10-year (`MAX_DURATION + 1`) registration rejected.
+    assert_eq!(
+        reg.register("longdur.bud".to_string(), alice, 1, MAX_DURATION + 1),
+        Err(BnsError::InvalidDuration)
+    );
+
+    // Register at MAX_DURATION, advance 5 epochs, then renew by MIN_DURATION (10) ->
+    // post-renewal remaining duration would be MAX_DURATION - 5 + 10 > MAX_DURATION -> rejected!
+    reg.register("maxcap.bud".to_string(), alice, 1, MAX_DURATION)
+        .unwrap();
+    assert_eq!(
+        reg.renew("maxcap.bud", &alice, 6, MIN_DURATION),
+        Err(BnsError::InvalidDuration),
+        "post-renewal remaining duration exceeding MAX_DURATION must be rejected"
+    );
+    // Advance 20 epochs so remaining is MAX_DURATION - 20 -> renewing by MIN_DURATION (10) succeeds!
+    reg.renew("maxcap.bud", &alice, 21, MIN_DURATION).unwrap();
+
+    // MAX_NAMES_PER_OWNER enforced on registration, marketplace purchase, and transfer!
+    let primary_kp = KeyPair::generate().unwrap();
+    let primary_seller = Address::from(primary_kp.public_key_bytes());
+    let full_kp = KeyPair::generate().unwrap();
+    let full_owner = Address::from(full_kp.public_key_bytes());
+    let sender_kp = KeyPair::generate().unwrap();
+    let sender = Address::from(sender_kp.public_key_bytes());
+
+    let mut state = AccountState::new();
+    state.epoch_index = 1;
+    state
+        .bns_registry
+        .set_primary_sellers([primary_seller])
+        .unwrap();
+    state.add_balance(&primary_seller, 10_000_000);
+    state.add_balance(&full_owner, 10_000_000);
+    state.add_balance(&sender, 10_000_000);
+
+    for idx in 0..MAX_NAMES_PER_OWNER {
+        state
+            .bns_registry
+            .register(format!("slot{idx:03}.bud"), full_owner, 1, 100)
+            .unwrap();
+    }
+    assert_eq!(
+        state
+            .bns_registry
+            .register("extra01.bud".to_string(), full_owner, 1, 100),
+        Err(BnsError::OwnerNameLimitExceeded)
+    );
+
+    // Marketplace purchase by `full_owner` (already holding MAX_NAMES_PER_OWNER) is rejected.
+    let mut offer_tx = lifecycle_tx(
+        primary_seller,
+        0,
+        1,
+        0,
+        TransactionType::BnsCreateOffer,
+        bincode::serialize(&CreateNameOffer {
+            name: "market65.bud".to_string(),
+            price_atoms: 1_000,
+            duration: 100,
+            kind: OfferKind::Primary,
+            expires_at_epoch: 50,
+        })
+        .unwrap(),
+    );
+    offer_tx.sign(&primary_kp);
+    Executor::apply_transaction_checked(&mut state, &offer_tx).unwrap();
+
+    let mut buy_over_cap = lifecycle_tx(
+        full_owner,
+        1_000,
+        1,
+        0,
+        TransactionType::BnsBuyName,
+        bincode::serialize(&0u64).unwrap(),
+    );
+    buy_over_cap.sign(&full_kp);
+    assert_eq!(
+        Executor::apply_transaction_checked(&mut state, &buy_over_cap)
+            .unwrap_err()
+            .code(),
+        "bns_registration_failed"
+    );
+
+    // Direct transfer from `sender` to `full_owner` is also rejected!
+    state
+        .bns_registry
+        .register("giftname.bud".to_string(), sender, 1, 100)
+        .unwrap();
+    let mut transfer_over_cap = lifecycle_tx(
+        sender,
+        0,
+        1,
+        0,
+        TransactionType::BnsTransfer,
+        bincode::serialize(&("giftname.bud".to_string(), full_owner)).unwrap(),
+    );
+    transfer_over_cap.sign(&sender_kp);
+    assert_eq!(
+        Executor::apply_transaction_checked(&mut state, &transfer_over_cap)
+            .unwrap_err()
+            .code(),
+        "bns_transfer_failed"
+    );
+    let _ = bob;
 }

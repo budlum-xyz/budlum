@@ -160,11 +160,11 @@ async fn a_bns_name_registered_by_transaction_survives_a_restart() {
         );
         bc.mempool.set_min_fee(0);
 
-        let offer_data = bincode::serialize(&crate::pollen::CreateNameOffer {
+        let offer_data = bincode::serialize(&crate::bns::CreateNameOffer {
             name: bns_name.clone(),
             price_atoms,
             duration: 1000,
-            kind: crate::pollen::OfferKind::Primary,
+            kind: crate::bns::OfferKind::Primary,
             expires_at_epoch: 500,
         })
         .expect("ser");
