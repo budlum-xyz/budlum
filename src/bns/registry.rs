@@ -107,20 +107,6 @@ impl BnsRegistry {
     /// Required top-level suffix for every registrable BNS name.
     const SUFFIX: &'static str = ".bud";
 
-    /// One label: lowercase ASCII letters, digits and hyphens, not empty, no
-    /// hyphen at either edge. The same table the browser name rule applies, so
-    /// the registry cannot sell a name the rest of the stack refuses or one
-    /// that differs from another only by case or by a look-alike letter.
-    #[must_use]
-    fn is_valid_label(label: &str) -> bool {
-        !label.is_empty()
-            && !label.starts_with('-')
-            && !label.ends_with('-')
-            && label
-                .bytes()
-                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
-    }
-
     /// Extracts `<label>` from `<label>.bud` when `<label>` is a single valid
     /// label of 3..=32 characters (counted excluding `.bud`).
     fn bud_label(name: &str) -> Option<&str> {
@@ -137,6 +123,23 @@ impl BnsRegistry {
     #[must_use]
     pub fn is_valid_name(name: &str) -> bool {
         Self::bud_label(name).is_some()
+    }
+
+    /// The label rule on its own: one label, lowercase ASCII letters, digits
+    /// and inner hyphens.
+    ///
+    /// Exposed so the network gateway applies exactly the table the registry
+    /// sells from. A gateway with its own copy of the rule is a second opinion
+    /// about what a name is, and the two drift.
+    #[must_use]
+    pub fn is_valid_label(label: &str) -> bool {
+        label.len() <= 63
+            && !label.is_empty()
+            && !label.starts_with('-')
+            && !label.ends_with('-')
+            && label
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
     }
 
     pub fn new() -> Self {
