@@ -2045,14 +2045,32 @@ pub(crate) fn execute_relayer_intent_tx(
                     .get(&bid.relayer, crate::registry::role::roles::RELAYER)
                     .is_some_and(|registration| registration.is_slashable());
                 if should_slash {
-                    state
-                        .slash_role_destroying(
-                            bid.relayer,
-                            crate::registry::role::roles::RELAYER,
-                            crate::registry::permissionless::SlashingCondition::LivenessFault,
-                            slash_ratio,
-                        )
-                        .map_err(|e| SettlementTxError::Refused(e.to_string()))?;
+                    // The refund and the liveness penalty are not one
+                    // decision. `is_slashable()` accepts `SlashedUnbonding`
+                    // with a positive bond, but `slash_role_only` answers that
+                    // same status with `AlreadySlashed`; propagating that error
+                    // aborted the whole `Expire`, so the owner's escrow stayed
+                    // locked while `Settle` refused the expired intent and
+                    // `prune_expired` skipped the escrowed row. One already
+                    // punished bidder turned a recoverable job into a
+                    // permanently frozen escrow, and the bidder escaped the
+                    // second penalty on top.
+                    //
+                    // A refusal here means the penalty is already on the
+                    // account (or the role row is gone), which is exactly the
+                    // case in which there is nothing left to take. Anything
+                    // else is a real halt and still stops the block.
+                    match state.slash_role_destroying(
+                        bid.relayer,
+                        crate::registry::role::roles::RELAYER,
+                        crate::registry::permissionless::SlashingCondition::LivenessFault,
+                        slash_ratio,
+                    ) {
+                        Ok(_) => {}
+                        Err(crate::registry::RegistryError::AlreadySlashed { .. })
+                        | Err(crate::registry::RegistryError::NotRegistered { .. }) => {}
+                        Err(e) => return Err(SettlementTxError::Refused(e.to_string())),
+                    }
                 }
             }
             state
@@ -2077,14 +2095,21 @@ fn slash_failed_prover(
         .is_some_and(crate::registry::permissionless::Registration::is_slashable);
     if slashable {
         let ratio = state.registry.params().malicious_slash_ratio_fixed;
-        state
-            .slash_role_destroying(
-                *prover,
-                role,
-                crate::registry::permissionless::SlashingCondition::MaliciousBehaviour,
-                ratio,
-            )
-            .map_err(|e| SettlementTxError::Refused(e.to_string()))?;
+        // Same split as `Expire`: a prover already in `SlashedUnbonding` has
+        // paid, and `slash_role_only` refuses the second attempt. The reward
+        // has already gone back to the task's creator by the time this runs, so
+        // aborting here would fail a settlement that has nothing left to undo.
+        match state.slash_role_destroying(
+            *prover,
+            role,
+            crate::registry::permissionless::SlashingCondition::MaliciousBehaviour,
+            ratio,
+        ) {
+            Ok(_) => {}
+            Err(crate::registry::RegistryError::AlreadySlashed { .. })
+            | Err(crate::registry::RegistryError::NotRegistered { .. }) => {}
+            Err(e) => return Err(SettlementTxError::Refused(e.to_string())),
+        }
     }
     Ok(())
 }
@@ -3284,6 +3309,152 @@ mod tests {
                 < relayer_stake,
             "the unhonoured bid costs RELAYER bond at the liveness rate"
         );
+        assert!(matches!(
+            state
+                .settlement
+                .relayer_policy
+                .settlements
+                .get(&intent.intent_id)
+                .unwrap()
+                .status,
+            crate::relayer::IntentSettlementStatus::Expired
+        ));
+    }
+
+    /// The refund is not welded to the penalty.
+    ///
+    /// `is_slashable()` accepts a `SlashedUnbonding` bidder (the bond is still
+    /// positive), and `slash_role_only` answers that same status with
+    /// `AlreadySlashed`. Propagating that error aborted the whole `Expire`, so
+    /// the owner's escrow stayed locked while `Settle` refused the expired
+    /// intent and `prune_expired` skipped the escrowed row: one already
+    /// punished bidder froze a recoverable job forever.
+    #[test]
+    fn relayer_intent_expiry_refunds_an_owner_whose_bidder_is_already_slashed() {
+        let owner = Address::from([0x61; 32]);
+        let relayer = Address::from([0x62; 32]);
+        let mut state = AccountState::new();
+        state.current_block_height = 10;
+        state.add_balance(&owner, 50 + FEE);
+        let relayer_stake = state.registry.params().min_stake;
+        state
+            .registry
+            .register(
+                relayer,
+                crate::registry::role::roles::RELAYER,
+                relayer_stake,
+                0,
+            )
+            .unwrap();
+        let policy = crate::relayer::PolicyEnvelope {
+            owner,
+            session_key: None,
+            spending_cap: 50,
+            allowed_domains: vec![1, 2],
+            requires_multisig: false,
+            requires_hsm: false,
+            expires_at_block: 100,
+        };
+        let intent = crate::relayer::UserIntent::new(
+            owner,
+            1,
+            2,
+            crate::relayer::RelayerActionKind::ExternalTransaction {
+                chain: crate::core::transaction::ExternalChain::Ethereum,
+                target_address: "0x00000000000000000000000000000000000000B2".into(),
+                payload_hash: [0x51; 32],
+            },
+            50,
+            20,
+            1,
+            policy.policy_hash(),
+            relayer,
+        );
+        execute_settlement_tx(
+            &mut state,
+            &ctx(owner),
+            &SettlementTx::RelayerIntent(Box::new(crate::relayer::RelayerIntentTx::Open {
+                intent: Box::new(intent.clone()),
+                policy: Box::new(policy),
+            })),
+        )
+        .unwrap();
+        execute_settlement_tx(
+            &mut state,
+            &ctx(relayer),
+            &SettlementTx::RelayerIntent(Box::new(crate::relayer::RelayerIntentTx::Bid(Box::new(
+                crate::relayer::SolverBid {
+                    intent_id: intent.intent_id,
+                    relayer,
+                    quoted_fee: 40,
+                    proof_commitment: [0x43; 32],
+                    bond: 10,
+                    expires_at_block: 21,
+                },
+            )))),
+        )
+        .unwrap();
+        execute_settlement_tx(
+            &mut state,
+            &ctx(owner),
+            &SettlementTx::RelayerIntent(Box::new(crate::relayer::RelayerIntentTx::Award {
+                intent_id: intent.intent_id,
+            })),
+        )
+        .unwrap();
+
+        // The bidder has already paid a liveness fault elsewhere, and its bond
+        // is still positive, so `is_slashable()` stays true while
+        // `slash_role_only` refuses a second cut.
+        state
+            .registry
+            .slash_role_only(
+                relayer,
+                crate::registry::role::roles::RELAYER,
+                crate::registry::permissionless::SlashingCondition::LivenessFault,
+                state.registry.params().liveness_slash_ratio_fixed / 2,
+            )
+            .unwrap();
+        let registration = state
+            .registry
+            .get(&relayer, crate::registry::role::roles::RELAYER)
+            .unwrap()
+            .clone();
+        assert!(
+            registration.is_slashable(),
+            "the fixture needs a slashable bidder"
+        );
+        let stake_after_first_slash = registration.stake;
+
+        state.current_block_height = 20;
+        execute_settlement_tx(
+            &mut state,
+            &ctx(relayer),
+            &SettlementTx::RelayerIntent(Box::new(crate::relayer::RelayerIntentTx::Expire {
+                intent_id: intent.intent_id,
+            })),
+        )
+        .expect("an already slashed bidder must not freeze the owner's escrow");
+
+        assert_eq!(
+            state.get_balance(&owner),
+            50 + FEE,
+            "the owner is made whole"
+        );
+        assert_eq!(
+            state
+                .registry
+                .get(&relayer, crate::registry::role::roles::RELAYER)
+                .unwrap()
+                .stake,
+            stake_after_first_slash,
+            "the second slash is refused, and the refusal is not an abort"
+        );
+        assert!(!state
+            .settlement
+            .relayer_policy
+            .intents
+            .contains_key(&intent.intent_id));
         assert!(matches!(
             state
                 .settlement

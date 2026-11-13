@@ -3013,6 +3013,11 @@ fn parse_merkle_branch_json(
     for d in dirs_arr {
         directions.push(d.as_bool().ok_or("non-bool entry in branch.directions")?);
     }
+    // Position fields are optional on the wire: a missing one leaves the
+    // branch usable for inclusion and unusable for non-inclusion, which is the
+    // safe reading. A missing field is not an error here.
+    let leaf_index = val.get("leaf_index").and_then(serde_json::Value::as_u64);
+    let tree_size = val.get("tree_size").and_then(serde_json::Value::as_u64);
     Ok(budlum_core::bns::types::BnsMerkleBranch {
         name,
         owner,
@@ -3024,6 +3029,8 @@ fn parse_merkle_branch_json(
         leaf,
         siblings,
         directions,
+        leaf_index,
+        tree_size,
     })
 }
 

@@ -1419,6 +1419,86 @@ fn bns_per_name_merkle_proofs_verify_inclusion_absence_tampering_and_expiry() {
         .is_none());
 }
 
+/// An absence proof must place its boundaries, not merely spell them.
+///
+/// Order alone proves nothing: every branch in the tree sorts next to some
+/// target, and `names_count` is a claimed field that no leaf commits to. Before
+/// the boundary rule, the honest inclusion branch of a live owned name could be
+/// relabelled as the predecessor of a nearby target and served as proof that
+/// the target is free, so a lying node could talk a wallet into treating a
+/// taken name as unclaimed. The positions are the part a prover cannot invent
+/// without opening a branch that says otherwise.
+#[test]
+fn bns_absence_proof_boundaries_must_be_adjacent_positions() {
+    let mut reg = BnsRegistry::new();
+    let alice = Address::from([0xA1; 32]);
+    let bob = Address::from([0xB1; 32]);
+    let t0 = 100u64;
+    reg.register("alpha.bud".to_string(), alice, 10, t0)
+        .unwrap();
+    reg.register("gamma.bud".to_string(), bob, 10, t0).unwrap();
+    reg.register("omega.bud".to_string(), bob, 10, t0 + 1)
+        .unwrap();
+    let root = reg.root();
+
+    // The honest proof verifies, and it carries the positions it depends on.
+    let honest = reg.prove_name("beta.bud", 5);
+    assert!(!honest.included);
+    assert!(BnsRegistry::verify_state_proof(&honest, &root, 5).is_ok());
+    let pred = honest.predecessor.clone().unwrap();
+    assert_eq!(pred.leaf_index, Some(0));
+    assert_eq!(pred.tree_size, Some(3));
+
+    // The attack: hide `gamma.bud` by dropping the successor and relabelling
+    // the live `alpha.bud` branch as a lone predecessor. It still opens to the
+    // header root, so only the position can refuse it.
+    let mut spliced = honest.clone();
+    spliced.successor = None;
+    assert!(
+        BnsRegistry::verify_state_proof(&spliced, &root, 5).is_err(),
+        "a predecessor-only absence proof must be the end of the tree"
+    );
+
+    // A prover that reaches for the right names but the wrong positions: an
+    // adjacent-looking pair taken from different indices of the same tree.
+    let mut misplaced = honest.clone();
+    misplaced.successor.as_mut().unwrap().leaf_index = Some(2);
+    assert!(
+        BnsRegistry::verify_state_proof(&misplaced, &root, 5).is_err(),
+        "non-adjacent boundaries leave room for a live name in between"
+    );
+
+    // A branch from a different-sized tree cannot be spliced onto this one.
+    let mut stitched = honest.clone();
+    stitched.successor.as_mut().unwrap().tree_size = Some(4);
+    assert!(
+        BnsRegistry::verify_state_proof(&stitched, &root, 5).is_err(),
+        "both boundaries must come from the list the root commits to"
+    );
+
+    // A branch that carries no position at all is usable for inclusion only.
+    let mut unpositioned = honest.clone();
+    unpositioned.predecessor.as_mut().unwrap().leaf_index = None;
+    assert!(BnsRegistry::verify_state_proof(&unpositioned, &root, 5).is_err());
+
+    // The two open ends of the tree remain provable with one boundary.
+    let first = reg.prove_name("aardvark.bud", 5);
+    assert!(first.predecessor.is_none());
+    assert_eq!(first.successor.as_ref().unwrap().leaf_index, Some(0));
+    assert!(BnsRegistry::verify_state_proof(&first, &root, 5).is_ok());
+
+    let last = reg.prove_name("zeta.bud", 5);
+    assert!(last.successor.is_none());
+    assert_eq!(last.predecessor.as_ref().unwrap().leaf_index, Some(2));
+    assert!(BnsRegistry::verify_state_proof(&last, &root, 5).is_ok());
+
+    // And the boundary count is not a free variable: a proof that claims a
+    // smaller list than the branch was built from is refused.
+    let mut shrunk = honest.clone();
+    shrunk.names_count = 2;
+    assert!(BnsRegistry::verify_state_proof(&shrunk, &root, 5).is_err());
+}
+
 // ---------------------------------------------------------------------------
 // B12: governance price door
 // ---------------------------------------------------------------------------

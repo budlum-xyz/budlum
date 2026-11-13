@@ -141,6 +141,36 @@
     test (`bns_root_is_independent_of_insertion_order`) runs under `proptest`,
     and the gates keep their positive and negative canaries.
 
+### Proof hardening (review findings)
+
+The `bns-gate` list also names the two tests below. Both close a hole where a
+proof was well formed, opened to the header root, and still said something the
+root does not say.
+
+- **Absence proofs carry positions.** `BnsMerkleBranch::leaf_index` and
+  `tree_size` are the leaf's position in the ordered name list and the size of
+  that list. `check_boundary_pair` requires both boundary branches to agree on
+  the size and to be adjacent positions, so "no name sorts between these two"
+  is checked instead of assumed. Order alone was not a proof: every branch in
+  the tree sorts next to some target, so an honest inclusion branch of a live
+  name could be relabelled and served as proof that the target is free. A
+  branch without a position still verifies for inclusion and is refused for
+  non-inclusion.
+- **Extras ship their pre-image.** `BnsMerkleBranch::extras` is the
+  `BnsBranchExtras` the `extras_digest` commits to: resolver, address, both
+  domain ids, storage root height, the B.U.D. 3.0 reference, subdomains and
+  records. `verify_state_proof` recomputes the digest from it and refuses the
+  branch on any mismatch, and refuses a top-level `address` that contradicts
+  it. `evaluate_bns_evidence` marks a profile Verified only when a verified
+  proof discloses an extras pre-image that matches every field the profile
+  prints. Before this, the digest was opaque and the disclosed values were
+  whatever the answering node chose.
+
+Known open finding, not fixed here: the digest is over the registry's name
+ordering, so a non-inclusion proof still relies on the prover having read the
+header. Separating "the header root at this epoch" from "the root the prover
+names" is the wallet-side change tracked in PR #126.
+
 ## Current behaviour (locked by tests)
 
 Marketplace primary and resale settlement for `<label>.bud` names (3..=32 label
@@ -154,7 +184,7 @@ subdomains, full resolve through storage, B.U.D. 3.0 content binding, and RPC
 
 - Covered in `src/bns/registry.rs`, `src/bns/types.rs`, `src/bns/bud3.rs`,
   `src/rpc/tests.rs`, `src/bin/bud.rs`, `src/tests/bns.rs` (2), and
-  `src/tests/bns_expanded.rs` (20).
+  `src/tests/bns_expanded.rs` (21).
 - Runs inside the core lib suite (`cargo test --lib`). The CI gates are
   **`bns-gate`** and **`bns-names`** in `xtask/gates`, both protected against a
   vacuous pass with positive and negative canaries.
