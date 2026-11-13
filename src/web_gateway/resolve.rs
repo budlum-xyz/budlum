@@ -235,7 +235,7 @@ pub fn content_ref_of(branch: &BnsMerkleBranch) -> Option<ContentRef> {
     branch
         .extras
         .as_ref()
-        .and_then(|extras| extras.bud3_content.clone())
+        .and_then(|extras| extras.bud3_content)
         .filter(|_content| branch.content_id.is_some() && branch.storage_root.is_some())
 }
 

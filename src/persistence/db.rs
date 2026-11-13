@@ -2509,10 +2509,6 @@ mod tests {
     use crate::core::block::Block;
     use tempfile::tempdir;
 
-    /// Two rules, and the difference between them is what keeps an upgraded
-    /// node booting: a row with NO tag is the legacy row this build still
-    /// writes and must load; a row with a FOREIGN tag is refused.
-    #[test]
     /// The loop a restarting node runs. Certificates and validator snapshots
     /// are written at the epoch boundary, the process goes away, and the chain
     /// is rebuilt from disk without trusting a byte of it.
@@ -2618,6 +2614,10 @@ mod tests {
         );
     }
 
+    /// Two rules, and the difference between them is what keeps an upgraded
+    /// node booting: a row with NO tag is the legacy row this build still
+    /// writes and must load; a row with a FOREIGN tag is refused.
+    #[test]
     fn qc_blob_binary_storage_and_legacy_bincode_are_readable() {
         use crate::consensus::qc::{PqSignatureEntry, QcBlob};
         let dir = tempdir().unwrap();

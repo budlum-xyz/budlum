@@ -19,7 +19,7 @@ mod tests {
 
     #[test]
     fn zk_qc_fault_proof_is_closed_on_testnet() {
-        assert!(ZK_QC_FAULT_PROOF_CLOSED_ON_TESTNET);
+        const { assert!(ZK_QC_FAULT_PROOF_CLOSED_ON_TESTNET) };
         let result = verify_zk_qc_fault_proof(&[1, 2, 3], "root");
         assert!(result.is_err());
         assert!(result

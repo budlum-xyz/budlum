@@ -1220,7 +1220,7 @@ impl BnsRegistry {
             consensus_domain_id: record.consensus_domain_id,
             storage_domain_id: record.storage_domain_id,
             storage_root_height: record.storage_root_height,
-            bud3_content: record.bud3_content.clone(),
+            bud3_content: record.bud3_content,
             subdomains: record.subdomains.clone(),
             records: record.records.clone(),
         }
