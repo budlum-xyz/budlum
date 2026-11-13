@@ -2547,11 +2547,16 @@ impl StorageRegistry {
         {
             return false;
         }
-        if self
-            .scoped_confidential_commits
-            .keys()
-            .any(|(owner, cid)| cid == content_id && owner != burner)
-        {
+        // A scoped commit on its own is not custody of the body: the commit
+        // door accepts one for any content id, so only an owner that also
+        // holds a manifest claim or a funded deal has stored data the burn
+        // could destroy.
+        if self.scoped_confidential_commits.keys().any(|(owner, cid)| {
+            cid == content_id
+                && owner != burner
+                && (self.has_manifest_claim(content_id, owner)
+                    || self.has_custody_deal(content_id, owner))
+        }) {
             return false;
         }
         if self
@@ -9516,6 +9521,36 @@ mod tests {
         );
         assert!(!reg.can_prune_on_nft_burn(&alice_manifest.manifest_id, &mallory));
         assert!(!reg.can_prune_on_nft_burn(&alice_manifest.manifest_id, &alice));
+    }
+
+    #[test]
+    fn stranger_bare_scoped_confidential_commit_does_not_block_owner_prune() {
+        let mut reg = StorageRegistry::new();
+        let alice = Address::from([0xA1; 32]);
+        let stranger = Address::from([0xB2; 32]);
+        let mut alice_manifest = good_manifest();
+        alice_manifest.owner = alice;
+        let cid = alice_manifest.manifest_id;
+        reg.register_manifest(&alice_manifest);
+        reg.record_test_custody_for_manifest(&alice_manifest, alice);
+        assert!(reg.can_prune_on_nft_burn(&cid, &alice));
+
+        reg.register_confidential_commit_as(
+            stranger,
+            crate::storage::ConfidentialBodyCommit {
+                content_id: cid,
+                encryption: crate::storage::ContentEncryption::ClientSide(
+                    crate::storage::ContentCipher::Aes256Gcm,
+                ),
+                ciphertext_root: [0x77; 32],
+                proof_kind: crate::storage::ConfidentialProofKind::RetrievalChallenge,
+            },
+        )
+        .unwrap();
+        assert!(
+            reg.can_prune_on_nft_burn(&cid, &alice),
+            "inert third-party scoped commit without claim or custody deal must not block owner prune"
+        );
     }
 }
 

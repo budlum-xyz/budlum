@@ -2406,6 +2406,18 @@ mod tests {
         )
         .expect("custody-proven owner keeps social delete authority after rival manifest");
 
+        assert_eq!(
+            execute_storage_tx(
+                &mut state,
+                &ctx(squatter),
+                &StorageTx::RegisterManifest {
+                    manifest: squatter_manifest.clone(),
+                },
+            )
+            .unwrap_err(),
+            StorageTxError::AlreadyRegistered
+        );
+
         state.add_balance(&victim, 1_000);
         let asset = crate::pollen::DataAsset::new(victim, mid, [0x77; 32], true);
         let tx = crate::core::transaction::Transaction::new_with_chain_id(
@@ -2430,7 +2442,10 @@ mod tests {
                 },
             )
             .unwrap_err(),
-            StorageTxError::AlreadyRegistered
+            StorageTxError::OwnerIsNotSender {
+                owner: victim,
+                sender: squatter,
+            }
         );
     }
 
@@ -2440,7 +2455,10 @@ mod tests {
         let (_op, opener, deal_id) = challengeable(&mut state);
         let epoch = state.epoch_index;
         let root = state.storage_registry.root();
-        for too_short in [epoch + 1, epoch + StorageRegistry::MIN_CHALLENGE_WINDOW_EPOCHS - 1] {
+        for too_short in [
+            epoch + 1,
+            epoch + StorageRegistry::MIN_CHALLENGE_WINDOW_EPOCHS - 1,
+        ] {
             let err = execute_storage_tx(
                 &mut state,
                 &ctx(opener),

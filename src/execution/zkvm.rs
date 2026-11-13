@@ -3,7 +3,12 @@ use bud_proof::{DefaultAdapter as Prover, ExecutionPublicInputs, ProofEnvelope, 
 use bud_vm::Vm;
 use sha3::{Digest, Keccak256};
 
-pub const DEFAULT_CONTRACT_GAS_LIMIT: u64 = 1_000_000;
+/// Contract gas one call may burn, bounded by what the prover can materialise.
+///
+/// Witness size is `next_pow2(3 * steps + 1) * TRACE_WIDTH` field elements, so
+/// `2^14` steps keep one call's base matrix near half a gigabyte and couple
+/// `MAX_BLOCK_CONTRACT_GAS` directly to the per-call trace cap.
+pub const DEFAULT_CONTRACT_GAS_LIMIT: u64 = 1 << 14;
 
 /// Memory size in bytes of the VM that runs and proves contract bytecode.
 const CONTRACT_VM_MEMORY_BYTES: usize = 8192;
@@ -11,6 +16,12 @@ const CONTRACT_VM_MEMORY_BYTES: usize = 8192;
 const _: () = assert!(
     CONTRACT_VM_MEMORY_BYTES as u64 <= bud_vm::MAX_MEMORY_BYTES,
     "CONTRACT_VM_MEMORY_BYTES must not exceed bud_vm::MAX_MEMORY_BYTES"
+);
+
+const _: () = assert!(
+    (3 * bud_vm::MAX_CONTRACT_TRACE_STEPS + 1).next_power_of_two()
+        <= bud_proof::plonky3_prover::MAX_PROVER_WITNESS_ROWS,
+    "MAX_CONTRACT_TRACE_STEPS must stay within MAX_PROVER_WITNESS_ROWS"
 );
 
 /// Contract gas one block may carry, summed over its `ContractCall`
