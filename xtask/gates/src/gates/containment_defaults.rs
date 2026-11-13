@@ -126,7 +126,9 @@ pub fn self_test() -> Result<String, String> {
 
     let full_vm = "fn decode() { MainnetActivation::full(); }\n";
     if check(good_isa, full_vm, good_zkvm).is_ok() {
-        return Err(String::from("canary: MainnetActivation::full() call passed"));
+        return Err(String::from(
+            "canary: MainnetActivation::full() call passed",
+        ));
     }
 
     Ok(String::from(
