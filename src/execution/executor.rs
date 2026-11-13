@@ -2441,7 +2441,7 @@ impl Executor {
                 // again (`register_manifest` refuses content bound to another
                 // owner) and the gateway refused to serve it, so the seizure
                 // was permanent and permissionless.
-                match state.storage_registry.owner_of(&asset.manifest_id) {
+                match state.storage_registry.proven_owner_of(&asset.manifest_id) {
                     Some(recorded_owner) if recorded_owner == tx.from => {}
                     Some(_) => {
                         return Err(BudlumError::validation(
@@ -2450,9 +2450,19 @@ impl Executor {
                         ));
                     }
                     None => {
+                        if state
+                            .storage_registry
+                            .owner_of(&asset.manifest_id)
+                            .is_some_and(|recorded_owner| recorded_owner != tx.from)
+                        {
+                            return Err(BudlumError::validation(
+                                "pollen_asset_manifest_not_owned",
+                                "DataAsset content is owned by another account",
+                            ));
+                        }
                         return Err(BudlumError::validation(
                             "pollen_asset_manifest_unregistered",
-                            "DataAsset content id has no unambiguous registered owner; register the manifest first",
+                            "DataAsset content id has no unambiguous custody-proven owner; register the manifest and custody deal first",
                         ));
                     }
                 }
@@ -5472,9 +5482,17 @@ mod tests {
         let role_bond = state.required_ai_bond(chain_id);
         let bond = crate::ai_inference::MIN_OPERATOR_BOND;
         state.add_balance(&owner, 10_000_000);
-        state.add_balance(&verifier, role_bond.saturating_add(bond).saturating_add(10_000));
-        state.bond_ai_operator(&verifier, role_bond, chain_id).unwrap();
-        state.ai_registry.lock_verifier_stake(&verifier, bond).unwrap();
+        state.add_balance(
+            &verifier,
+            role_bond.saturating_add(bond).saturating_add(10_000),
+        );
+        state
+            .bond_ai_operator(&verifier, role_bond, chain_id)
+            .unwrap();
+        state
+            .ai_registry
+            .lock_verifier_stake(&verifier, bond)
+            .unwrap();
 
         let spec = FixedPointMlpSpec {
             dims: vec![2, 1],
@@ -5553,7 +5571,10 @@ mod tests {
         let digest = result.calculate_signing_hash();
         result.signature = verifier_kp.sign(&digest).to_vec();
         let outcome = state.ai_registry.submit_result(result, 0).unwrap();
-        assert!(outcome.is_none(), "proof-required model waits for STARK attach");
+        assert!(
+            outcome.is_none(),
+            "proof-required model waits for STARK attach"
+        );
 
         // Replay with wrong nonce must fail closed before STARK verification.
         let mut wrong_nonce_tx = Transaction::new_with_chain_id(
@@ -5592,7 +5613,9 @@ mod tests {
         valid_tx.sign(&verifier_kp);
         Executor::apply_transaction_checked(&mut state, &valid_tx)
             .expect("honest STARK execution proof attaches and finalizes request");
-        assert!(state.ai_registry.has_verified_execution_proof(&req_id, &verifier));
+        assert!(state
+            .ai_registry
+            .has_verified_execution_proof(&req_id, &verifier));
         assert!(state.ai_registry.outcomes.contains_key(&req_id));
     }
 }

@@ -596,18 +596,14 @@ fn uol_k1_home_key_stipend_all_four_chains_alert_and_pq_ceiling() {
     use crate::object_layer::charter::{CharterStatus, DataPolicy, DomainCharter};
     use crate::object_layer::family::{AssetKind, HomeVmFamily};
     use crate::object_layer::ids::{AssetClassId, HomeIdentity};
-    use crate::object_layer::registry::{
-        AssetClass, Call, ClassStatus, MAX_HOME_STIPEND_ATTOS,
-    };
+    use crate::object_layer::registry::{AssetClass, Call, ClassStatus, MAX_HOME_STIPEND_ATTOS};
     use crate::object_layer::rule::{
         ClassRule, ClassSlice, Holder, TemplateId, TemplateParams, Verb,
     };
     use crate::object_layer::tx::{
         home_stipend_action_digest, HomeKeyScheme, HomeKeyStipendAuth, ObjectLayerTx,
     };
-    use crate::settlement::domains::{
-        execute_settlement_tx, SettlementTx, SettlementTxContext,
-    };
+    use crate::settlement::domains::{execute_settlement_tx, SettlementTx, SettlementTxContext};
     use ed25519_dalek::{Signer as _, SigningKey as EdSigningKey};
     use k256::ecdsa::Signature as SecpSig;
 
@@ -708,7 +704,10 @@ fn uol_k1_home_key_stipend_all_four_chains_alert_and_pq_ceiling() {
         action: Box::new(eth_action.clone()),
     }));
     execute_settlement_tx(&mut state, &ctx, &eth_tx).expect("Ethereum UOL-K1 call succeeds");
-    assert_eq!(state.settlement.object_layer.balance(&class_id, &recipient), 25);
+    assert_eq!(
+        state.settlement.object_layer.balance(&class_id, &recipient),
+        25
+    );
 
     // 2. Solana Ed25519 home key stipend call (fee = 0).
     let sol_sk = EdSigningKey::from_bytes(&[0x27u8; 32]);
@@ -753,7 +752,10 @@ fn uol_k1_home_key_stipend_all_four_chains_alert_and_pq_ceiling() {
         action: Box::new(sol_action),
     }));
     execute_settlement_tx(&mut state, &ctx, &sol_tx).expect("Solana UOL-K1 call succeeds");
-    assert_eq!(state.settlement.object_layer.balance(&class_id, &recipient), 40);
+    assert_eq!(
+        state.settlement.object_layer.balance(&class_id, &recipient),
+        40
+    );
 
     // 3. Aptos Ed25519 home key stipend call (fee = 0).
     let apt_sk = EdSigningKey::from_bytes(&[0x37u8; 32]);
@@ -799,7 +801,10 @@ fn uol_k1_home_key_stipend_all_four_chains_alert_and_pq_ceiling() {
         action: Box::new(apt_action),
     }));
     execute_settlement_tx(&mut state, &ctx, &apt_tx).expect("Aptos UOL-K1 call succeeds");
-    assert_eq!(state.settlement.object_layer.balance(&class_id, &recipient), 50);
+    assert_eq!(
+        state.settlement.object_layer.balance(&class_id, &recipient),
+        50
+    );
 
     // 4. Cosmos secp256k1 home key stipend call (fee = 0).
     let cos_key = SecpSigningKey::from_bytes((&[0x47u8; 32]).into()).expect("cos key");
@@ -849,7 +854,10 @@ fn uol_k1_home_key_stipend_all_four_chains_alert_and_pq_ceiling() {
         action: Box::new(cos_action),
     }));
     execute_settlement_tx(&mut state, &ctx, &cos_tx).expect("Cosmos UOL-K1 call succeeds");
-    assert_eq!(state.settlement.object_layer.balance(&class_id, &recipient), 55);
+    assert_eq!(
+        state.settlement.object_layer.balance(&class_id, &recipient),
+        55
+    );
 
     // 5. PQ holding ceiling enforcement (> 1 BUD refused).
     let eth_next_digest = home_key_stipend_digest(
@@ -906,19 +914,15 @@ fn non_evm_migration_kit_8_12_3_wasm_svm_and_move() {
     use crate::execution::coordinator::migration::{
         compute_ics23_leaf_hash, fold_sha256_merkle, fold_sha3_merkle, move_migration_digest,
         move_state_leaf, svm_account_leaf, svm_migration_digest, wasm_migration_digest,
-        Ics23ExistenceProof, Ics23InnerOp, ImportError, MigrationFeeSchedule,
-        MoveMigrationEntryKind, MoveMigrationRequest, MoveStateProofEntry, MigrationTx,
-        MigrationTxOutcome, SvmMigrationRequest, WasmMigrationRequest,
+        Ics23ExistenceProof, Ics23InnerOp, ImportError, MigrationFeeSchedule, MigrationTx,
+        MigrationTxOutcome, MoveMigrationEntryKind, MoveMigrationRequest, MoveStateProofEntry,
+        SvmMigrationRequest, WasmMigrationRequest,
     };
-    use crate::execution::coordinator::move_ee::{
-        FORBIDDEN_MOVE_MODULES, MOVE_BINARY_MAGIC,
-    };
+    use crate::execution::coordinator::move_ee::{FORBIDDEN_MOVE_MODULES, MOVE_BINARY_MAGIC};
     use crate::execution::coordinator::state::{
         NS_MOVE_STATE, NS_SVM_ACCOUNT, NS_WASM_CODE, NS_WASM_CONTRACT, NS_WASM_STORE,
     };
-    use crate::execution::coordinator::svm_ee::{
-        SvmAccountData, FORBIDDEN_SVM_STAKE_PROGRAM_ID,
-    };
+    use crate::execution::coordinator::svm_ee::{SvmAccountData, FORBIDDEN_SVM_STAKE_PROGRAM_ID};
     use crate::execution::coordinator::wasm_ee::build_valid_cosmwasm_module;
     use crate::object_layer::family::encoding::bech32_encode;
     use ed25519_dalek::{Signer as _, SigningKey as EdSigningKey};
@@ -934,7 +938,11 @@ fn non_evm_migration_kit_8_12_3_wasm_svm_and_move() {
 
     // 1. WASM (Cosmos) ICS-23 verified migration.
     let cos_sk = SecpSigningKey::from_bytes((&[0x61u8; 32]).into()).expect("secp key");
-    let cos_pk = cos_sk.verifying_key().to_sec1_point(true).as_bytes().to_vec();
+    let cos_pk = cos_sk
+        .verifying_key()
+        .to_sec1_point(true)
+        .as_bytes()
+        .to_vec();
     let creator_addr20 = super::cosmos::cosmos_addr20_from_compressed_pubkey(
         cos_pk.as_slice().try_into().expect("33B"),
     );
@@ -977,14 +985,8 @@ fn non_evm_migration_kit_8_12_3_wasm_svm_and_move() {
             suffix: Vec::new(),
         }],
     };
-    let wasm_digest = wasm_migration_digest(
-        chain_id,
-        11,
-        500,
-        &contract_bech32,
-        &code_hash,
-        &wasm_root,
-    );
+    let wasm_digest =
+        wasm_migration_digest(chain_id, 11, 500, &contract_bech32, &code_hash, &wasm_root);
     let wasm_sig: SecpSig = cos_sk.sign(&wasm_digest);
     let wasm_req = WasmMigrationRequest {
         chain_id,
@@ -1009,18 +1011,22 @@ fn non_evm_migration_kit_8_12_3_wasm_svm_and_move() {
             &schedule,
         )
         .expect("WASM ICS-23 migration succeeds");
-    assert!(matches!(wasm_out, MigrationTxOutcome::WasmImported { keys: 1, .. }));
+    assert!(matches!(
+        wasm_out,
+        MigrationTxOutcome::WasmImported { keys: 1, .. }
+    ));
     assert_eq!(
-        state.execution_state.read(NS_WASM_CODE, &code_hash).expect("read"),
-        Some(wasm_code)
-    );
-    assert!(
         state
             .execution_state
-            .read(NS_WASM_CONTRACT, contract_bech32.as_bytes())
-            .expect("read")
-            .is_some()
+            .read(NS_WASM_CODE, &code_hash)
+            .expect("read"),
+        Some(wasm_code)
     );
+    assert!(state
+        .execution_state
+        .read(NS_WASM_CONTRACT, contract_bech32.as_bytes())
+        .expect("read")
+        .is_some());
     let expected_store_key = [contract_bech32.as_bytes(), b":", &store_key].concat();
     assert_eq!(
         state
@@ -1075,14 +1081,20 @@ fn non_evm_migration_kit_8_12_3_wasm_svm_and_move() {
             &schedule,
         )
         .expect("SVM migration succeeds");
-    assert!(matches!(svm_out, MigrationTxOutcome::SvmImported { data_len: 64, .. }));
+    assert!(matches!(
+        svm_out,
+        MigrationTxOutcome::SvmImported { data_len: 64, .. }
+    ));
     let raw_svm = state
         .execution_state
         .read(NS_SVM_ACCOUNT, &svm_pk)
         .expect("read")
         .expect("installed");
     let decoded_svm: SvmAccountData = serde_json::from_slice(&raw_svm).expect("svm json");
-    assert_eq!(decoded_svm.lamports, 0, "native SOL must never mint on Budlum");
+    assert_eq!(
+        decoded_svm.lamports, 0,
+        "native SOL must never mint on Budlum"
+    );
     assert_eq!(decoded_svm.data, svm_data);
     assert_eq!(decoded_svm.owner, svm_owner);
     assert!(matches!(
@@ -1152,13 +1164,22 @@ fn non_evm_migration_kit_8_12_3_wasm_svm_and_move() {
             &schedule,
         )
         .expect("Move migration succeeds");
-    assert!(matches!(move_out, MigrationTxOutcome::MoveImported { entries: 2, .. }));
+    assert!(matches!(
+        move_out,
+        MigrationTxOutcome::MoveImported { entries: 2, .. }
+    ));
     assert_eq!(
-        state.execution_state.read(NS_MOVE_STATE, &mod_key).expect("read"),
+        state
+            .execution_state
+            .read(NS_MOVE_STATE, &mod_key)
+            .expect("read"),
         Some(move_mod)
     );
     assert_eq!(
-        state.execution_state.read(NS_MOVE_STATE, &res_key).expect("read"),
+        state
+            .execution_state
+            .read(NS_MOVE_STATE, &res_key)
+            .expect("read"),
         Some(res_val)
     );
     let mut bad_move = move_req;
