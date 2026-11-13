@@ -4706,6 +4706,8 @@ impl Blockchain {
         // the commit.
         crate::chain::storage_maintenance::apply(&mut next_state, block)?;
         Self::apply_ai_registry_maintenance(&mut next_state, block.index);
+        crate::settlement::graft::sweep_expired_intents(&mut next_state, block.index)
+            .map_err(|e| e.to_string())?;
         // The settlement registries' clocks advance at block end, inside the
         // `(state, block) -> state` transition: the external intake now lives
         // in the account state, so a clock driven from the commit path alone

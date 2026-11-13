@@ -163,6 +163,7 @@ pub(crate) fn issue_challenges(
     let active: Vec<(
         u64,
         u64,
+        u64,
         crate::storage::content_id::ContentId,
         crate::storage::content_id::ContentId,
     )> = state
@@ -170,7 +171,15 @@ pub(crate) fn issue_challenges(
         .all_deals()
         .iter()
         .filter(|d| d.is_active())
-        .map(|d| (d.deal_id, d.deal_start_epoch, d.manifest_id, d.shard_id))
+        .map(|d| {
+            (
+                d.deal_id,
+                d.deal_start_epoch,
+                d.deal_end_epoch,
+                d.manifest_id,
+                d.shard_id,
+            )
+        })
         .collect();
 
     // Sample the full small shard, then one sixty-fourth of a larger one,
@@ -178,9 +187,21 @@ pub(crate) fn issue_challenges(
     const MIN_CHALLENGE_RANGE_BYTES: u64 = 4 * 1024;
     const MAX_CHALLENGE_RANGE_BYTES: u64 = 64 * 1024;
     let mut issued = 0u32;
-    for (deal_id, start_epoch, manifest_id, shard_id) in active {
+    for (deal_id, start_epoch, end_epoch, manifest_id, shard_id) in active {
         let elapsed = epoch.saturating_sub(start_epoch);
         if elapsed == 0 || elapsed % DEFAULT_CHALLENGE_INTERVAL != 0 {
+            continue;
+        }
+        // The cadence asks for a ten-epoch answer window, and a challenge may
+        // not outlive the deal's term: `expire_deal` holds a deal with an
+        // unresolved challenge `Active`, so a window reaching past the term
+        // would defer the bond return, the expiry reallocation and the repair
+        // ticket. Skip the deal rather than raise and refuse one every interval.
+        if end_epoch
+            < epoch.saturating_add(
+                crate::domain::storage_deal::StorageRegistry::MIN_CHALLENGE_WINDOW_EPOCHS,
+            )
+        {
             continue;
         }
         let Some(shard_size) = state

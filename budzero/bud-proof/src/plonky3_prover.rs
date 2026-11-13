@@ -2025,6 +2025,21 @@ impl Plonky3Adapter {
             return Err(VerifyError::PublicInputsMismatch);
         }
 
+        let num_rows = usize::try_from(expected_inputs.trace_len)
+            .ok()
+            .and_then(|n| n.checked_mul(3))
+            .and_then(|n| n.checked_add(1))
+            .and_then(usize::checked_next_power_of_two)
+            .map(|n| n.max(16))
+            .ok_or_else(|| {
+                VerifyError::InvalidEnvelope("trace length exceeds verifier limit".to_string())
+            })?;
+        if num_rows > MAX_PROVER_WITNESS_ROWS {
+            return Err(VerifyError::InvalidEnvelope(format!(
+                "trace matrix rows {num_rows} exceed verifier limit {MAX_PROVER_WITNESS_ROWS}"
+            )));
+        }
+
         // The AIR proves that a program ran; it does not decide whether the
         // chain allows the program to run. An opcode that is not activated
         // is refused here, on the program the proof is bound to, so that a
@@ -10497,7 +10512,7 @@ mod tests {
         let huge_trace = vec![step; 50_000];
         let pi = ExecutionPublicInputs {
             chain_id: 45261,
-            program_hash: [0u8; 32],
+            program_hash: crate::canonical_set::program_hash_of(&[halt]),
             initial_state_root: [0u8; 32],
             final_state_root: [0u8; 32],
             sender: 0,
@@ -10512,5 +10527,26 @@ mod tests {
         };
         let err = Plonky3Adapter::prove(&huge_trace, &pi, &[halt]).unwrap_err();
         assert!(matches!(err, ProverError::TraceGenerationError(_)));
+
+        // The verifier derives its preprocessed-trace degree from the
+        // submitter's `trace_len` and commits to it before it reads a proof
+        // byte, so the same bound the prover applies has to be refused here
+        // rather than allocated: one cheap `SubmitZkProof` would otherwise make
+        // every validator build a gigabyte-scale preprocessed trace.
+        let env = ProofEnvelope {
+            proof_format_version: PROOF_FORMAT_VERSION,
+            backend: "Plonky3-Keccak-Goldilocks".to_string(),
+            p3_version: "0.5.2".to_string(),
+            fri_params_id: "test_fri_params".to_string(),
+            public_inputs_hash: pi.hash(),
+            proof_bytes: vec![0u8; 32],
+            degree_bits: 18,
+        };
+        let verify_err = Plonky3Adapter::verify(&env, &pi, &[halt]).unwrap_err();
+        assert!(
+            matches!(verify_err, VerifyError::InvalidEnvelope(_)),
+            "an oversized claimed trace must be refused before the preprocessed \
+             trace is built, got {verify_err:?}"
+        );
     }
 }
