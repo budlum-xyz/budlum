@@ -1164,9 +1164,7 @@ fn settlement_charter_requires_domain_operator_and_refresh_requires_state_proof(
     use crate::cross_domain::event_tree::MerkleProof;
     use crate::domain::plugin::default_domain;
     use crate::domain::types::ConsensusKind;
-    use crate::settlement::commitment_tree::{
-        merkle_node_hash, merkle_odd_promote_hash, merkle_root,
-    };
+    use crate::settlement::commitment_tree::merkle_root;
 
     let mut state = crate::core::account::AccountState::new();
     let dom = default_domain(DOMAIN, ConsensusKind::PoS, 45262, "pos-committee-v1", 1);

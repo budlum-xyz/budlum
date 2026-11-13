@@ -1655,7 +1655,11 @@ impl AiRegistry {
     /// verification. `require_proof` escrow release gates on this, not on
     /// the structural-only `has_execution_proof`: a payer that asked for a
     /// verified proof must not be settled against envelope-shaped bytes.
-    fn has_verified_execution_proof(&self, request_id: &AiRequestId, verifier: &Address) -> bool {
+    pub fn has_verified_execution_proof(
+        &self,
+        request_id: &AiRequestId,
+        verifier: &Address,
+    ) -> bool {
         self.execution_proofs
             .contains_key(&(*request_id, verifier.0))
             && self

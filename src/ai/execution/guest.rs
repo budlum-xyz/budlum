@@ -188,6 +188,14 @@ pub fn input_commitment(limbs: &[i32]) -> [u8; 32] {
     commit_i32_limbs(b"BDLM_AI_INPUT_V1", limbs)
 }
 
+/// Encodes `i32` output limbs in canonical little-endian order so
+/// `AiInferenceResult::output_ref` and `canonical_output_commitment` match
+/// the proven STARK inference output commitment end-to-end.
+#[must_use]
+pub fn encode_output_limbs(limbs: &[i32]) -> Vec<u8> {
+    limbs.iter().flat_map(|x| x.to_le_bytes()).collect()
+}
+
 pub fn output_commitment(limbs: &[i32]) -> [u8; 32] {
     commit_i32_limbs(b"BDLM_AI_OUTPUT_V1", limbs)
 }
@@ -370,7 +378,7 @@ pub fn prove_mlp_inference_with_context(
     }
 
     let in_c = input_commitment(input);
-    let out_c = output_commitment(&host_output);
+    let out_c = crate::ai::types::canonical_output_commitment(&encode_output_limbs(&host_output));
     let words = build_matmul_guest_program(spec)?;
     let program_hash = stark_program_hash_from_words(&words);
     let bytecode = words_to_bytecode(&words);
@@ -431,7 +439,7 @@ pub fn prove_mlp_inference(
     }
 
     let in_c = input_commitment(input);
-    let out_c = output_commitment(&host_output);
+    let out_c = crate::ai::types::canonical_output_commitment(&encode_output_limbs(&host_output));
     let words = build_matmul_guest_program(spec)?;
     // The proof carries the hash the STARK binds, not the registry
     // identifier: `verify_execution_proof_stark` compares this field against

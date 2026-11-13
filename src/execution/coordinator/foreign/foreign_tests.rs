@@ -609,7 +609,6 @@ fn uol_k1_home_key_stipend_all_four_chains_alert_and_pq_ceiling() {
         execute_settlement_tx, SettlementTx, SettlementTxContext,
     };
     use ed25519_dalek::{Signer as _, SigningKey as EdSigningKey};
-    use k256::ecdsa::signature::Signer as _;
     use k256::ecdsa::Signature as SecpSig;
 
     let chain_id = Network::Testnet.chain_id().value();
@@ -804,7 +803,7 @@ fn uol_k1_home_key_stipend_all_four_chains_alert_and_pq_ceiling() {
 
     // 4. Cosmos secp256k1 home key stipend call (fee = 0).
     let cos_key = SecpSigningKey::from_bytes((&[0x47u8; 32]).into()).expect("cos key");
-    let cos_pk = cos_key.verifying_key().to_encoded_point(true);
+    let cos_pk = cos_key.verifying_key().to_sec1_point(true);
     let cos_pk_bytes = cos_pk.as_bytes().to_vec();
     let cos_addr = super::cosmos::cosmos_addr20_from_compressed_pubkey(
         cos_pk_bytes.as_slice().try_into().expect("33 bytes"),
@@ -923,7 +922,6 @@ fn non_evm_migration_kit_8_12_3_wasm_svm_and_move() {
     use crate::execution::coordinator::wasm_ee::build_valid_cosmwasm_module;
     use crate::object_layer::family::encoding::bech32_encode;
     use ed25519_dalek::{Signer as _, SigningKey as EdSigningKey};
-    use k256::ecdsa::signature::Signer as _;
     use k256::ecdsa::Signature as SecpSig;
     use sha2::{Digest as _, Sha256};
 
@@ -936,7 +934,7 @@ fn non_evm_migration_kit_8_12_3_wasm_svm_and_move() {
 
     // 1. WASM (Cosmos) ICS-23 verified migration.
     let cos_sk = SecpSigningKey::from_bytes((&[0x61u8; 32]).into()).expect("secp key");
-    let cos_pk = cos_sk.verifying_key().to_encoded_point(true).as_bytes().to_vec();
+    let cos_pk = cos_sk.verifying_key().to_sec1_point(true).as_bytes().to_vec();
     let creator_addr20 = super::cosmos::cosmos_addr20_from_compressed_pubkey(
         cos_pk.as_slice().try_into().expect("33B"),
     );
