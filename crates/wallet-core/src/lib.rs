@@ -48,6 +48,8 @@
 //!   Linked SGX/Nitro runtime (no silent plaintext fallback).
 
 mod bip39_wordlist;
+/// `.bud` recipient validation and Merkle state-proof verification.
+pub mod bns;
 /// Wallet-side blinded consent confirmation screen, Padme buckets, and Shamir escrow.
 pub mod consent_screen;
 /// The cryptographic core shared with the node: scheme registry, FIPS 204 and
@@ -1555,8 +1557,7 @@ impl Wallet {
             ));
         }
         let input_commitment = req.input.commitment();
-        let expected_secret_bytes =
-            derive_spend_secret(&self.seed, input_commitment).to_le_bytes();
+        let expected_secret_bytes = derive_spend_secret(&self.seed, input_commitment).to_le_bytes();
         let caller_secret_bytes = req.input.spend_secret.to_le_bytes();
         let mut secret_diff = 0u8;
         for (&lhs, &rhs) in caller_secret_bytes.iter().zip(expected_secret_bytes.iter()) {
