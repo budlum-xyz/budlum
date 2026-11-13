@@ -1070,3 +1070,89 @@ fn bns_v3_text_and_multichain_records_commit_to_root_and_reject_unsafe_schemes()
         .unwrap()
         .is_empty());
 }
+
+#[test]
+fn bns_subdomains_resolve_fqdn_remove_cleanly_and_expire_with_parent() {
+    use crate::core::account::AccountState;
+    use crate::crypto::primitives::KeyPair;
+    use crate::execution::executor::Executor;
+
+    let alice_kp = KeyPair::generate().unwrap();
+    let alice = Address::from(alice_kp.public_key_bytes());
+    let vault = addr(11);
+    let api = addr(12);
+
+    let mut state = AccountState::new();
+    state.epoch_index = 1;
+    state.add_balance(&alice, 1_000_000);
+    state
+        .bns_registry
+        .register("studio.bud".to_string(), alice, 1, 20)
+        .unwrap();
+
+    // Register `pay.studio.bud` (3-char sub-label) and `v1.studio.bud` (2-char sub-label).
+    let mut reg_pay = lifecycle_tx(
+        alice,
+        0,
+        1,
+        0,
+        TransactionType::BnsRegisterSubdomain,
+        bincode::serialize(&("studio.bud".to_string(), "pay".to_string(), vault)).unwrap(),
+    );
+    reg_pay.sign(&alice_kp);
+    Executor::apply_transaction_checked(&mut state, &reg_pay).unwrap();
+
+    let mut reg_v1 = lifecycle_tx(
+        alice,
+        0,
+        1,
+        1,
+        TransactionType::BnsRegisterSubdomain,
+        bincode::serialize(&("studio.bud".to_string(), "v1".to_string(), api)).unwrap(),
+    );
+    reg_v1.sign(&alice_kp);
+    Executor::apply_transaction_checked(&mut state, &reg_v1).unwrap();
+
+    // Direct FQDN resolution works for `<sub_label>.<label>.bud`, refuses 3+ levels.
+    assert_eq!(state.bns_registry.resolve("pay.studio.bud", 5), Some(vault));
+    assert_eq!(state.bns_registry.resolve("v1.studio.bud", 5), Some(api));
+    assert_eq!(state.bns_registry.resolve("a.pay.studio.bud", 5), None);
+
+    // Non-zero header amount is rejected on consensus subdomain doors.
+    let mut bad_amt = lifecycle_tx(
+        alice,
+        50,
+        1,
+        2,
+        TransactionType::BnsRemoveSubdomain,
+        bincode::serialize(&("studio.bud".to_string(), "v1".to_string())).unwrap(),
+    );
+    bad_amt.sign(&alice_kp);
+    assert_eq!(
+        Executor::apply_transaction_checked(&mut state, &bad_amt)
+            .unwrap_err()
+            .code(),
+        "bns_invalid_remove_subdomain"
+    );
+
+    // Removing `v1` clears `v1.studio.bud` while keeping `pay.studio.bud`.
+    let mut rm_v1 = lifecycle_tx(
+        alice,
+        0,
+        1,
+        2,
+        TransactionType::BnsRemoveSubdomain,
+        bincode::serialize(&("studio.bud".to_string(), "v1".to_string())).unwrap(),
+    );
+    rm_v1.sign(&alice_kp);
+    Executor::apply_transaction_checked(&mut state, &rm_v1).unwrap();
+    assert_eq!(state.bns_registry.resolve("v1.studio.bud", 5), None);
+    assert_eq!(state.bns_registry.resolve("pay.studio.bud", 5), Some(vault));
+
+    // When `studio.bud` expires at epoch 21, `pay.studio.bud` fails closed automatically.
+    assert_eq!(state.bns_registry.resolve("pay.studio.bud", 21), None);
+    assert!(state
+        .bns_registry
+        .list_subdomains("studio.bud", 21)
+        .is_none());
+}

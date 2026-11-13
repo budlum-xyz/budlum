@@ -2453,6 +2453,85 @@ impl AccountState {
                     return Err("BNS set records requires a live name owned by the signer".into());
                 }
             }
+            TransactionType::BnsSetContent => {
+                if tx.amount != 0 || tx.to != Address::zero() {
+                    return Err("BNS set content requires zero amount and recipient".into());
+                }
+                let (name, _cid): (String, crate::storage::content_id::ContentId) =
+                    bincode::deserialize(&tx.data)
+                        .map_err(|e| format!("Invalid BNS set content data: {e}"))?;
+                if !crate::bns::BnsRegistry::is_valid_name(&name) {
+                    return Err("Invalid BNS name".into());
+                }
+                if !self
+                    .bns_registry
+                    .is_live_owned_by(&name, &tx.from, self.epoch_index)
+                {
+                    return Err("BNS set content requires a live name owned by the signer".into());
+                }
+            }
+            TransactionType::BnsRegisterSubdomain => {
+                if tx.amount != 0 || tx.to != Address::zero() {
+                    return Err("BNS register subdomain requires zero amount and recipient".into());
+                }
+                let (parent, sub_label, sub_owner): (String, String, Address) =
+                    bincode::deserialize(&tx.data)
+                        .map_err(|e| format!("Invalid BNS subdomain data: {e}"))?;
+                if !crate::bns::BnsRegistry::is_valid_name(&parent)
+                    || !crate::bns::BnsRegistry::is_valid_sub_label(&sub_label)
+                    || sub_owner == Address::zero()
+                {
+                    return Err("Invalid BNS parent name, subdomain label, or target".into());
+                }
+                if !self
+                    .bns_registry
+                    .is_live_owned_by(&parent, &tx.from, self.epoch_index)
+                {
+                    return Err("BNS subdomain requires a live parent owned by the signer".into());
+                }
+            }
+            TransactionType::BnsRemoveSubdomain => {
+                if tx.amount != 0 || tx.to != Address::zero() {
+                    return Err("BNS remove subdomain requires zero amount and recipient".into());
+                }
+                let (parent, sub_label): (String, String) = bincode::deserialize(&tx.data)
+                    .map_err(|e| format!("Invalid BNS remove subdomain data: {e}"))?;
+                if !crate::bns::BnsRegistry::is_valid_name(&parent)
+                    || !crate::bns::BnsRegistry::is_valid_sub_label(&sub_label)
+                {
+                    return Err("Invalid BNS parent name or subdomain label".into());
+                }
+                let subs = self
+                    .bns_registry
+                    .list_subdomains(&parent, self.epoch_index)
+                    .ok_or_else(|| "BNS parent name is unknown or expired".to_string())?;
+                if !self
+                    .bns_registry
+                    .is_live_owned_by(&parent, &tx.from, self.epoch_index)
+                {
+                    return Err("BNS remove subdomain requires parent owner".into());
+                }
+                if !subs.contains_key(&sub_label) {
+                    return Err("BNS subdomain does not exist".into());
+                }
+            }
+            TransactionType::BnsSetStorage => {
+                if tx.amount != 0 || tx.to != Address::zero() {
+                    return Err("BNS set storage requires zero amount and recipient".into());
+                }
+                let (name, _root, _dom_id): (String, [u8; 32], u32) =
+                    bincode::deserialize(&tx.data)
+                        .map_err(|e| format!("Invalid BNS set storage data: {e}"))?;
+                if !crate::bns::BnsRegistry::is_valid_name(&name) {
+                    return Err("Invalid BNS name".into());
+                }
+                if !self
+                    .bns_registry
+                    .is_live_owned_by(&name, &tx.from, self.epoch_index)
+                {
+                    return Err("BNS set storage requires a live name owned by the signer".into());
+                }
+            }
             TransactionType::Validator(ref validator_tx) => {
                 self.check_validator_tx(tx, validator_tx)
                     .map_err(|error| error.to_string())?;

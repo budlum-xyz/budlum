@@ -61,6 +61,14 @@
     (registered in `src/crypto/domain_tags.rs`), adds `BnsSetRecords` (wire tag
     `76`), clears `records` on `transfer`, and exposes `bud_bnsGetRecords`,
     `bud_bnsPrepareSetRecords`, and `bud bns {set-record,get-records}`.
+  - **B6 (two-level `.bud` subdomains and consensus door hardening):** resolves
+    `<sub_label>.<label>.bud` directly through `BnsRegistry::resolve` (failing
+    closed on parent expiry or 3+ label hierarchies), adds `remove_subdomain` /
+    `list_subdomains` and `BnsRemoveSubdomain` (wire tag `77`), hardens
+    `BnsSetContent`, `BnsRegisterSubdomain`, and `BnsSetStorage` to require zero
+    header amount/recipient and unlocked spendable fee balance, and exposes
+    `bud_bnsListSubdomains`, `bud_bnsPrepareRemoveSubdomain`, and
+    `bud bns {set-subdomain,remove-subdomain,list-subdomains}`.
 
 ## Current behaviour (locked by tests)
 
