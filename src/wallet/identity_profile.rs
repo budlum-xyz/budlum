@@ -546,6 +546,9 @@ mod tests {
             bud3_content: None,
             subdomains: Default::default(),
             records: Default::default(),
+            status: crate::bns::types::NameStatus::Active,
+            expires_at: 100,
+            grace_expires_at: 3100,
             is_expired: false,
         };
         let asset = DataAsset::new(owner, manifest_id, [7u8; 32], true);
@@ -654,6 +657,9 @@ mod tests {
             bud3_content: None,
             subdomains: Default::default(),
             records: Default::default(),
+            status: crate::bns::types::NameStatus::Active,
+            expires_at: 100,
+            grace_expires_at: 3100,
             is_expired: false,
         };
         let mut revoked_asset = DataAsset::new(owner, cid, [9u8; 32], true);
@@ -694,6 +700,9 @@ mod tests {
             bud3_content: None,
             subdomains: Default::default(),
             records: Default::default(),
+            status: crate::bns::types::NameStatus::Active,
+            expires_at: 100,
+            grace_expires_at: 3100,
             is_expired: false,
         };
         let revoked: DataAsset = serde_json::from_value(serde_json::json!({

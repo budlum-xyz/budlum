@@ -4275,6 +4275,9 @@ impl BudlumApiServer for RpcServer {
                 })),
                 "subdomains": resolved.subdomains.iter().map(|(k, v)| (k.clone(), Self::to_0x_hash(v.to_hex()))).collect::<std::collections::BTreeMap<_, _>>(),
                 "records": resolved.records,
+                "status": resolved.status,
+                "expires_at": resolved.expires_at,
+                "grace_expires_at": resolved.grace_expires_at,
                 "is_expired": resolved.is_expired,
             }))
         } else {
@@ -4545,6 +4548,37 @@ impl BudlumApiServer for RpcServer {
             ErrorObjectOwned::owned(-32602, format!("Invalid address: {e}"), None::<()>)
         })?;
         Ok(self.chain.bns_reverse_resolve(addr).await)
+    }
+
+    async fn bns_list_names_by_owner(
+        &self,
+        owner: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let clean = owner.strip_prefix("0x").unwrap_or(&owner);
+        let owner_addr = Address::from_hex(clean).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Invalid owner address: {e}"), None::<()>)
+        })?;
+        let items: Vec<serde_json::Value> = self
+            .chain
+            .bns_list_names_by_owner(owner_addr)
+            .await
+            .into_iter()
+            .map(|resolved| {
+                serde_json::json!({
+                    "name": resolved.name,
+                    "owner": Self::to_0x_hash(resolved.owner.to_hex()),
+                    "address": resolved.address.map(|a| Self::to_0x_hash(a.to_hex())),
+                    "status": resolved.status,
+                    "expires_at": resolved.expires_at,
+                    "grace_expires_at": resolved.grace_expires_at,
+                    "is_expired": resolved.is_expired,
+                })
+            })
+            .collect();
+        Ok(serde_json::json!({
+            "owner": Self::to_0x_hash(owner_addr.to_hex()),
+            "names": items,
+        }))
     }
 
     async fn bns_prepare_set_address(

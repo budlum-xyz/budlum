@@ -66,6 +66,11 @@ pub const MIN_DURATION: u64 = 10;
 /// (10 years at ~100 epochs/day).
 pub const MAX_DURATION: u64 = 365_000;
 
+/// Renewal grace period in epochs (~30 days at ~100 epochs/day) during which
+/// resolution and mutations fail closed, third-party registration is blocked,
+/// and only the existing owner may rescue the `.bud` name via `BnsRenew`.
+pub const GRACE_PERIOD: u64 = 3_000;
+
 /// Maximum live or grace-period `.bud` names a single address may hold at once.
 pub const MAX_NAMES_PER_OWNER: usize = 64;
 
