@@ -5639,12 +5639,14 @@ impl BudlumApiServer for RpcServer {
 
     async fn social_get_post(&self, id: u64) -> Result<serde_json::Value, ErrorObjectOwned> {
         if let Some(nft) = self.chain.nft_get(id).await {
+            let author_bud_name = self.chain.bns_reverse_resolve(nft.owner).await;
             Ok(serde_json::json!({
                 "id": nft.id,
                 "owner": Self::to_0x_hash(nft.owner.to_hex()),
                 "content_id": format!("0x{}", hex::encode(nft.content_id.0)),
                 "minted_at": nft.minted_at_epoch,
                 "author": nft.author_name,
+                "author_bud_name": author_bud_name,
             }))
         } else {
             Ok(serde_json::json!(null))
@@ -5659,6 +5661,7 @@ impl BudlumApiServer for RpcServer {
         let addr = Address::from_hex(clean_addr).map_err(|e| {
             ErrorObjectOwned::owned(-32602, format!("Invalid address: {e}"), None::<()>)
         })?;
+        let author_bud_name = self.chain.bns_reverse_resolve(addr).await;
         let nfts = self.chain.nft_get_by_owner(addr).await;
         let list: Vec<_> = nfts
             .into_iter()
@@ -5668,6 +5671,7 @@ impl BudlumApiServer for RpcServer {
                     "content_id": format!("0x{}", hex::encode(nft.content_id.0)),
                     "minted_at": nft.minted_at_epoch,
                     "author": nft.author_name,
+                    "author_bud_name": author_bud_name,
                 })
             })
             .collect();
@@ -5676,15 +5680,25 @@ impl BudlumApiServer for RpcServer {
 
     async fn social_get_feed(&self, limit: usize) -> Result<serde_json::Value, ErrorObjectOwned> {
         let nfts = self.chain.nft_get_feed(clamp_feed_limit(limit)).await;
+        let mut resolved_handles = std::collections::BTreeMap::new();
+        for nft in &nfts {
+            if let std::collections::btree_map::Entry::Vacant(e) = resolved_handles.entry(nft.owner)
+            {
+                let handle = self.chain.bns_reverse_resolve(nft.owner).await;
+                e.insert(handle);
+            }
+        }
         let list: Vec<_> = nfts
             .into_iter()
             .map(|nft| {
+                let author_bud_name = resolved_handles.get(&nft.owner).cloned().flatten();
                 serde_json::json!({
                     "id": nft.id,
                     "owner": Self::to_0x_hash(nft.owner.to_hex()),
                     "content_id": format!("0x{}", hex::encode(nft.content_id.0)),
                     "minted_at": nft.minted_at_epoch,
                     "author": nft.author_name,
+                    "author_bud_name": author_bud_name,
                 })
             })
             .collect();
@@ -6379,9 +6393,21 @@ impl BudlumApiServer for RpcServer {
         #[cfg(feature = "wallet-ml-dsa")]
         {
             crate::wallet::identity_profile::validate_passport_name(&name).map_err(|e| {
-                ErrorObjectOwned::owned(-32602, format!("Invalid passport name: {e}"), None::<()>)
+                ErrorObjectOwned::owned(-32602, format!("Invalid identity name: {e}"), None::<()>)
             })?;
             let resolved = self.chain.bns_resolve_full(name.clone()).await;
+            let bns_proof = self.chain.bns_prove_name(name.clone()).await;
+            let current_epoch = bns_proof.as_ref().map_or(0, |p| p.epoch);
+            let reverse_primary_name = match resolved.as_ref() {
+                Some(r) => self.chain.bns_reverse_resolve(r.owner).await,
+                None => None,
+            };
+            let proof_ctx = crate::wallet::identity_profile::IdentityProofContext {
+                expected_bns_root: bns_proof.as_ref().map(|p| p.bns_root),
+                bns_proof,
+                current_epoch,
+                reverse_primary_name,
+            };
             let manifest_id = resolved.as_ref().and_then(|r| {
                 r.content_id
                     .or(r.storage_root.map(crate::storage::ContentId))
@@ -6394,18 +6420,19 @@ impl BudlumApiServer for RpcServer {
             let data_assets = self.chain.pollen_get_data_assets().await;
             let access_grants = self.chain.pollen_get_access_grants().await;
             let sale_authorizations = self.chain.pollen_get_sale_authorizations().await;
-            let profile = crate::wallet::identity_profile::build_passport_profile(
+            let profile = crate::wallet::identity_profile::build_identity_profile_verified(
                 name,
                 resolved,
                 manifest,
                 &data_assets,
                 &access_grants,
                 &sale_authorizations,
+                Some(&proof_ctx),
             );
             serde_json::to_value(profile).map_err(|e| {
                 ErrorObjectOwned::owned(
                     -32603,
-                    format!("failed to serialize passport profile: {e}"),
+                    format!("failed to serialize identity profile: {e}"),
                     None::<()>,
                 )
             })
@@ -6428,9 +6455,21 @@ impl BudlumApiServer for RpcServer {
         #[cfg(feature = "wallet-ml-dsa")]
         {
             crate::wallet::identity_profile::validate_passport_name(&name).map_err(|e| {
-                ErrorObjectOwned::owned(-32602, format!("Invalid passport name: {e}"), None::<()>)
+                ErrorObjectOwned::owned(-32602, format!("Invalid identity name: {e}"), None::<()>)
             })?;
             let resolved = self.chain.bns_resolve_full(name.clone()).await;
+            let bns_proof = self.chain.bns_prove_name(name.clone()).await;
+            let current_epoch = bns_proof.as_ref().map_or(0, |p| p.epoch);
+            let reverse_primary_name = match resolved.as_ref() {
+                Some(r) => self.chain.bns_reverse_resolve(r.owner).await,
+                None => None,
+            };
+            let proof_ctx = crate::wallet::identity_profile::IdentityProofContext {
+                expected_bns_root: bns_proof.as_ref().map(|p| p.bns_root),
+                bns_proof,
+                current_epoch,
+                reverse_primary_name,
+            };
             let manifest_id = resolved.as_ref().and_then(|r| {
                 r.content_id
                     .or(r.storage_root.map(crate::storage::ContentId))
@@ -6443,13 +6482,14 @@ impl BudlumApiServer for RpcServer {
             let data_assets = self.chain.pollen_get_data_assets().await;
             let access_grants = self.chain.pollen_get_access_grants().await;
             let sale_authorizations = self.chain.pollen_get_sale_authorizations().await;
-            let profile = crate::wallet::identity_profile::build_passport_profile(
+            let profile = crate::wallet::identity_profile::build_identity_profile_verified(
                 name,
                 resolved,
                 manifest,
                 &data_assets,
                 &access_grants,
                 &sale_authorizations,
+                Some(&proof_ctx),
             );
             let height = self.chain.get_height().await;
             let bundle =
@@ -6457,14 +6497,14 @@ impl BudlumApiServer for RpcServer {
                     .map_err(|e| {
                         ErrorObjectOwned::owned(
                             -32603,
-                            format!("failed to build passport proof bundle: {e}"),
+                            format!("failed to build identity proof bundle: {e}"),
                             None::<()>,
                         )
                     })?;
             serde_json::to_value(bundle).map_err(|e| {
                 ErrorObjectOwned::owned(
                     -32603,
-                    format!("failed to serialize passport proof bundle: {e}"),
+                    format!("failed to serialize identity proof bundle: {e}"),
                     None::<()>,
                 )
             })

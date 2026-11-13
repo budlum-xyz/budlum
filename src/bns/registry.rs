@@ -72,7 +72,7 @@ impl BnsRegistry {
     /// the registry cannot sell a name the rest of the stack refuses or one
     /// that differs from another only by case or by a look-alike letter.
     #[must_use]
-    pub fn is_valid_label(label: &str) -> bool {
+    fn is_valid_label(label: &str) -> bool {
         !label.is_empty()
             && !label.starts_with('-')
             && !label.ends_with('-')
@@ -216,7 +216,7 @@ impl BnsRegistry {
 
     /// Lifecycle status (`Active`, `Grace`, or `Expired`) of `name` at `current_epoch`.
     #[must_use]
-    pub fn name_status(&self, name: &str, current_epoch: u64) -> Option<NameStatus> {
+    fn name_status(&self, name: &str, current_epoch: u64) -> Option<NameStatus> {
         let rec = self.names.get(name)?;
         if current_epoch < rec.expires_at {
             Some(NameStatus::Active)
@@ -456,7 +456,7 @@ impl BnsRegistry {
     /// Split a two-level `.bud` FQDN `<sub_label>.<label>.bud` into
     /// `(sub_label, "<label>.bud")`. Rejects 3+ label hierarchies.
     #[must_use]
-    pub fn split_subdomain_fqdn(fqdn: &str) -> Option<(&str, String)> {
+    fn split_subdomain_fqdn(fqdn: &str) -> Option<(&str, String)> {
         let stem = fqdn.strip_suffix(Self::SUFFIX)?;
         let (sub_label, parent_label) = stem.split_once('.')?;
         if parent_label.contains('.') {
@@ -911,16 +911,10 @@ impl BnsRegistry {
     }
 
     pub fn resolve_full(&self, name: &str, current_epoch: u64) -> Option<BnsResolved> {
+        let status = self.name_status(name, current_epoch)?;
         self.names.get(name).map(|record| {
             let expired = record.expires_at <= current_epoch;
             let grace_expires_at = record.expires_at.saturating_add(Self::GRACE_PERIOD);
-            let status = if !expired {
-                NameStatus::Active
-            } else if current_epoch < grace_expires_at {
-                NameStatus::Grace
-            } else {
-                NameStatus::Expired
-            };
             BnsResolved {
                 name: record.name.clone(),
                 owner: record.owner,
@@ -1007,7 +1001,7 @@ impl BnsRegistry {
     /// Canonical SHA-256 commitment over the auxiliary fields of `record` not
     /// carried directly in the top-level browser `ResolvedName` tuple.
     #[must_use]
-    pub fn record_extras_digest(record: &NameRecord) -> [u8; 32] {
+    fn record_extras_digest(record: &NameRecord) -> [u8; 32] {
         use sha2::{Digest, Sha256};
         let mut hasher = Sha256::new();
         hasher.update(b"BDLM_BNS_EXTRAS_V1");
@@ -1085,7 +1079,7 @@ impl BnsRegistry {
 
     /// Canonical per-name Merkle leaf digest (`BDLM_BNS_LEAF_V1`).
     #[must_use]
-    pub fn compute_leaf_digest(
+    fn compute_leaf_digest(
         name: &str,
         owner: &Address,
         expires_at: u64,
@@ -1120,7 +1114,7 @@ impl BnsRegistry {
 
     /// Canonical leaf digest for an existing [`NameRecord`].
     #[must_use]
-    pub fn record_leaf_digest(record: &NameRecord) -> [u8; 32] {
+    fn record_leaf_digest(record: &NameRecord) -> [u8; 32] {
         let extras = Self::record_extras_digest(record);
         Self::compute_leaf_digest(
             &record.name,
@@ -1143,7 +1137,7 @@ impl BnsRegistry {
 
     /// Fold a Merkle branch `(siblings, directions)` from `leaf` up to `names_merkle_root`.
     #[must_use]
-    pub fn fold_merkle_branch(
+    fn fold_merkle_branch(
         leaf: [u8; 32],
         siblings: &[[u8; 32]],
         directions: &[bool],
@@ -1199,7 +1193,7 @@ impl BnsRegistry {
 
     /// Combine `(meta_digest, names_merkle_root)` into `BDLM_BNS_REGISTRY_V3`.
     #[must_use]
-    pub fn root_from_parts(meta_digest: [u8; 32], names_merkle_root: [u8; 32]) -> [u8; 32] {
+    fn root_from_parts(meta_digest: [u8; 32], names_merkle_root: [u8; 32]) -> [u8; 32] {
         use sha2::{Digest, Sha256};
         let mut hasher = Sha256::new();
         hasher.update(b"BDLM_BNS_REGISTRY_V3");
