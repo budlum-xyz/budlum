@@ -3018,6 +3018,15 @@ fn parse_merkle_branch_json(
     // safe reading. A missing field is not an error here.
     let leaf_index = val.get("leaf_index").and_then(serde_json::Value::as_u64);
     let tree_size = val.get("tree_size").and_then(serde_json::Value::as_u64);
+    // The extras pre-image is what binds `address`, the records, the
+    // subdomains and the B.U.D. 3.0 reference to `extras_digest`. Dropping it
+    // here would make the client's own verification refuse a branch the
+    // registry correctly produced, so it is read when present and left `None`
+    // when the node does not disclose it.
+    let extras = match val.get("extras") {
+        Some(v) if !v.is_null() => Some(parse_branch_extras_json(v)?),
+        _ => None,
+    };
     Ok(budlum_core::bns::types::BnsMerkleBranch {
         name,
         owner,
@@ -3031,7 +3040,101 @@ fn parse_merkle_branch_json(
         directions,
         leaf_index,
         tree_size,
+        extras,
     })
+}
+
+fn parse_branch_extras_json(
+    val: &serde_json::Value,
+) -> Result<budlum_core::bns::types::BnsBranchExtras, String> {
+    let address = match val.get("address") {
+        Some(v) if !v.is_null() => Some(Address::from(decode_hex32_field(v, "extras.address")?)),
+        _ => None,
+    };
+    let resolver = match val.get("resolver") {
+        Some(v) if !v.is_null() => Some(Address::from(decode_hex32_field(v, "extras.resolver")?)),
+        _ => None,
+    };
+    let mut subdomains = std::collections::BTreeMap::new();
+    if let Some(map) = val.get("subdomains").and_then(serde_json::Value::as_object) {
+        for (label, owner) in map {
+            subdomains.insert(
+                label.clone(),
+                Address::from(decode_hex32_field(owner, "extras.subdomains[]")?),
+            );
+        }
+    }
+    let mut records = std::collections::BTreeMap::new();
+    if let Some(map) = val.get("records").and_then(serde_json::Value::as_object) {
+        for (key, value) in map {
+            let text = value
+                .as_str()
+                .ok_or_else(|| format!("non-string value for extras.records.{key}"))?;
+            records.insert(key.clone(), text.to_string());
+        }
+    }
+    Ok(budlum_core::bns::types::BnsBranchExtras {
+        resolver,
+        address,
+        consensus_domain_id: val
+            .get("consensus_domain_id")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|v| u32::try_from(v).ok()),
+        storage_domain_id: val
+            .get("storage_domain_id")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|v| u32::try_from(v).ok()),
+        storage_root_height: val
+            .get("storage_root_height")
+            .and_then(serde_json::Value::as_u64),
+        // The B.U.D. 3.0 reference carries a kind byte, a digest, a length, an
+        // object commitment and an optional NFT id; a partial reference would
+        // fold to a different digest, so it is either read whole or not at all.
+        bud3_content: match val.get("bud3_content") {
+            Some(v) if !v.is_null() => Some(parse_bud3_ref_json(v)?),
+            _ => None,
+        },
+        subdomains,
+        records,
+    })
+}
+
+fn parse_bud3_ref_json(
+    val: &serde_json::Value,
+) -> Result<budlum_core::storage::bud3::content_ref::ContentRef, String> {
+    use budlum_core::storage::bud3::content_id::{ContentId, ContentIdKind};
+    let kind = match val
+        .get("kind")
+        .and_then(serde_json::Value::as_str)
+        .ok_or("missing extras.bud3_content.kind")?
+    {
+        "public" => ContentIdKind::Public,
+        "sealed" => ContentIdKind::Sealed,
+        other => return Err(format!("unknown extras.bud3_content.kind `{other}`")),
+    };
+    let content_id = ContentId {
+        kind,
+        digest: decode_hex32_field(
+            val.get("digest")
+                .ok_or("missing extras.bud3_content.digest")?,
+            "extras.bud3_content.digest",
+        )?,
+        len: val
+            .get("len")
+            .and_then(serde_json::Value::as_u64)
+            .ok_or("missing extras.bud3_content.len")?,
+    };
+    let object_commitment = decode_hex32_field(
+        val.get("object_commitment")
+            .ok_or("missing extras.bud3_content.object_commitment")?,
+        "extras.bud3_content.object_commitment",
+    )?;
+    let nft_id = match val.get("nft_id") {
+        Some(v) if !v.is_null() => Some(decode_hex32_field(v, "extras.bud3_content.nft_id")?),
+        _ => None,
+    };
+    budlum_core::storage::bud3::content_ref::ContentRef::new(content_id, object_commitment, nft_id)
+        .map_err(|e| format!("invalid extras.bud3_content: {e}"))
 }
 
 fn is_valid_resolvable_bud_fqdn(name: &str) -> bool {
