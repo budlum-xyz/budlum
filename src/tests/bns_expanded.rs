@@ -7,6 +7,7 @@ use crate::core::address::Address;
 use crate::core::transaction::{Transaction, TransactionType, DEFAULT_CHAIN_ID};
 use crate::crypto::primitives::KeyPair;
 use crate::execution::executor::Executor;
+use proptest::proptest;
 
 fn addr(b: u8) -> Address {
     Address::from([b; 32])
@@ -1416,4 +1417,321 @@ fn bns_per_name_merkle_proofs_verify_inclusion_absence_tampering_and_expiry() {
     assert!(BnsRegistry::verify_state_proof(&abs, &expected_root, 5)
         .unwrap()
         .is_none());
+}
+
+// ---------------------------------------------------------------------------
+// B12: governance price door
+// ---------------------------------------------------------------------------
+
+/// B12: the absolute bounds are a property of the value, and the step bound is
+/// a property of the move. Both are enforced, and neither clamps.
+#[test]
+fn bns_base_cost_bounds_and_tenfold_step_are_enforced() {
+    use crate::bns::{MAX_BNS_BASE_COST, MIN_BNS_BASE_COST};
+    use crate::registry::params::BNS_BASE_COST_MAX_STEP_FACTOR;
+
+    let mut reg = BnsRegistry::new();
+    let genesis_cost = reg.base_cost;
+    assert_eq!(genesis_cost, 100, "the genesis price this test moves from");
+
+    // Absolute floor and ceiling: rejected on their own, with no state change.
+    assert!(BnsRegistry::check_base_cost_bounds(0).is_err());
+    assert!(BnsRegistry::check_base_cost_bounds(MIN_BNS_BASE_COST - 1).is_err());
+    assert!(BnsRegistry::check_base_cost_bounds(MAX_BNS_BASE_COST + 1).is_err());
+    assert!(BnsRegistry::check_base_cost_bounds(u64::MAX).is_err());
+    assert!(BnsRegistry::check_base_cost_bounds(MIN_BNS_BASE_COST).is_ok());
+    assert!(BnsRegistry::check_base_cost_bounds(MAX_BNS_BASE_COST).is_ok());
+
+    // The step bound is exactly tenfold in each direction: 10x passes, 11x fails.
+    assert!(reg
+        .set_base_cost(genesis_cost * BNS_BASE_COST_MAX_STEP_FACTOR)
+        .is_ok());
+    assert_eq!(reg.base_cost, genesis_cost * BNS_BASE_COST_MAX_STEP_FACTOR);
+
+    let raised = reg.base_cost;
+    assert!(
+        reg.set_base_cost(genesis_cost).is_ok(),
+        "10x down is allowed"
+    );
+    assert_eq!(reg.base_cost, genesis_cost);
+
+    // 11x up is refused and leaves the price alone.
+    assert!(reg
+        .set_base_cost(genesis_cost * (BNS_BASE_COST_MAX_STEP_FACTOR + 1))
+        .is_err());
+    assert_eq!(
+        reg.base_cost, genesis_cost,
+        "a refused step does not move the price"
+    );
+    // 11x down is refused too: the bound is symmetric.
+    assert!(reg
+        .set_base_cost(genesis_cost / (BNS_BASE_COST_MAX_STEP_FACTOR + 1))
+        .is_err());
+    assert_eq!(reg.base_cost, genesis_cost);
+    assert!(raised > genesis_cost);
+}
+
+/// B12: the price moves and nothing else does. A registered name keeps the term
+/// it paid for, and the next renewal is charged at the new base.
+#[test]
+fn bns_base_cost_change_does_not_touch_existing_registrations() {
+    use crate::bns::{CreateNameOffer, OfferKind};
+
+    let mut state = AccountState::new();
+    let owner = addr(0x51);
+    let seller = addr(0x52);
+    state
+        .bns_registry
+        .set_primary_sellers(vec![seller])
+        .unwrap();
+
+    let duration = crate::bns::MIN_DURATION;
+    state.add_balance(&seller, 1_000_000);
+    state.add_balance(&owner, 1_000_000);
+
+    let offer_id = state
+        .marketplace
+        .create_name_offer(
+            seller,
+            CreateNameOffer {
+                name: "priced.bud".to_string(),
+                price_atoms: 1_000,
+                duration,
+                kind: OfferKind::Primary,
+                expires_at_epoch: state.epoch_index + 100,
+            },
+            state.epoch_index,
+        )
+        .expect("the authorized seller lists an unregistered name");
+
+    // The Primary sale path is the only registration door (B2).
+    state
+        .bns_registry
+        .register_primary_sale(
+            &seller,
+            "priced.bud".to_string(),
+            owner,
+            state.epoch_index,
+            duration,
+        )
+        .expect("the primary sale registers the name for the buyer");
+
+    let before = state.bns_registry.names.get("priced.bud").cloned().unwrap();
+    let root_before = state.bns_registry.root();
+    let old_cost = state.bns_registry.calculate_cost("priced.bud", duration);
+
+    state
+        .bns_registry
+        .set_base_cost(1_000)
+        .expect("10x up from the genesis 100");
+
+    let after = state.bns_registry.names.get("priced.bud").cloned().unwrap();
+    assert_eq!(
+        before, after,
+        "no field of a registration moves with the price"
+    );
+    assert_ne!(
+        root_before,
+        state.bns_registry.root(),
+        "the price is committed"
+    );
+    assert_eq!(
+        state.bns_registry.calculate_cost("priced.bud", duration),
+        old_cost * crate::registry::params::BNS_BASE_COST_MAX_STEP_FACTOR,
+        "the new base is charged on the next renewal"
+    );
+    assert!(
+        state.marketplace.get_name_offer(offer_id).is_some(),
+        "the offer table is untouched by a price change"
+    );
+    assert_eq!(after.owner, owner);
+}
+
+// ---------------------------------------------------------------------------
+// B13: capacity parameter and the expiry index
+// ---------------------------------------------------------------------------
+
+/// B13: the ceiling is a stored parameter, and the reclaim path reads the index
+/// instead of scanning the registry.
+#[test]
+fn bns_expiry_index_reclaims_the_earliest_expired_name_without_a_scan() {
+    use crate::bns::{BnsRegistry, MAX_DURATION};
+
+    let mut reg = BnsRegistry::new();
+    let seller = addr(0x61);
+    let buyer = |i: u8| addr(0x60 + i);
+    reg.set_primary_sellers(vec![seller]).unwrap();
+
+    // A small ceiling makes the reclaim path reachable in a test.
+    reg.max_names = 2;
+    assert_eq!(reg.max_names, 2, "the ceiling is a field, not the constant");
+
+    let duration = crate::bns::MIN_DURATION;
+    reg.register_primary_sale(&seller, "aaa.bud".into(), buyer(1), 0, duration)
+        .unwrap();
+    reg.register_primary_sale(&seller, "bbb.bud".into(), buyer(2), 0, duration + 100)
+        .unwrap();
+    assert_eq!(reg.names.len(), 2);
+    assert_eq!(
+        reg.expired_by_grace_end.len(),
+        2,
+        "every live record is indexed"
+    );
+
+    // At the ceiling with nothing expired: refused, fail-closed.
+    assert_eq!(
+        reg.register_primary_sale(&seller, "ccc.bud".into(), buyer(3), 0, duration),
+        Err(crate::bns::BnsError::NameTaken)
+    );
+
+    // Both names are expired but `aaa.bud` has the earlier grace end. The
+    // reclaim must take that one, and only that one.
+    let later = duration + 100 + crate::bns::GRACE_PERIOD;
+    reg.register_primary_sale(&seller, "ccc.bud".into(), buyer(3), later, duration)
+        .unwrap();
+    assert!(
+        !reg.names.contains_key("aaa.bud"),
+        "the earliest grace end is reclaimed"
+    );
+    assert!(
+        reg.names.contains_key("bbb.bud"),
+        "a later grace end is not"
+    );
+    assert!(reg.names.contains_key("ccc.bud"));
+    assert_eq!(reg.names.len(), 2);
+    assert_eq!(
+        reg.expired_by_grace_end.len(),
+        2,
+        "the reclaimed name left no index row behind"
+    );
+    assert!(MAX_DURATION > duration);
+}
+
+/// B13: renewal, transfer and prune all keep the index in step with `names`.
+#[test]
+fn bns_expiry_index_tracks_renewal_prune_and_rebuild() {
+    use crate::bns::{BnsRegistry, MAX_DURATION};
+
+    let mut reg = BnsRegistry::new();
+    let seller = addr(0x71);
+    let owner = addr(0x72);
+    reg.set_primary_sellers(vec![seller]).unwrap();
+    let duration = crate::bns::MIN_DURATION;
+    reg.register_primary_sale(&seller, "keep.bud".into(), owner, 0, duration)
+        .unwrap();
+
+    let grace_end_before = reg.names["keep.bud"].expires_at + crate::bns::GRACE_PERIOD;
+    assert!(reg
+        .expired_by_grace_end
+        .contains(&(grace_end_before, "keep.bud".to_string())));
+
+    // Renewal moves the row.
+    reg.renew("keep.bud", &owner, 0, duration).unwrap();
+    let grace_end_after = reg.names["keep.bud"].expires_at + crate::bns::GRACE_PERIOD;
+    assert!(grace_end_after > grace_end_before);
+    assert!(
+        !reg.expired_by_grace_end
+            .contains(&(grace_end_before, "keep.bud".to_string())),
+        "the stale row is gone"
+    );
+    assert_eq!(reg.expired_by_grace_end.len(), 1, "one name, one row");
+
+    // Prune at an epoch inside grace deletes nothing.
+    assert_eq!(reg.prune_expired(grace_end_after - 1), 0);
+    assert!(reg.names.contains_key("keep.bud"));
+
+    // Prune at the grace end deletes the name and its row together.
+    assert_eq!(reg.prune_expired(grace_end_after), 1);
+    assert!(!reg.names.contains_key("keep.bud"));
+    assert!(reg.expired_by_grace_end.is_empty());
+
+    // A registry restored from a snapshot has an empty index until rebuilt,
+    // and the derived rebuild is idempotent.
+    reg.register_primary_sale(&seller, "again.bud".into(), owner, 0, duration)
+        .unwrap();
+    reg.expired_by_grace_end.clear();
+    assert!(reg.expired_by_grace_end.is_empty());
+    reg.rebuild_expiry_index();
+    assert_eq!(reg.expired_by_grace_end.len(), 1);
+    reg.rebuild_expiry_index();
+    assert_eq!(reg.expired_by_grace_end.len(), 1);
+    assert!(MAX_DURATION > duration);
+}
+
+/// B13: the index is derived state, so it does not move the state root.
+#[test]
+fn bns_expiry_index_is_not_committed_to_the_root() {
+    use crate::bns::BnsRegistry;
+
+    let mut reg = BnsRegistry::new();
+    let seller = addr(0x81);
+    let owner = addr(0x82);
+    reg.set_primary_sellers(vec![seller]).unwrap();
+    reg.register_primary_sale(
+        &seller,
+        "rooted.bud".into(),
+        owner,
+        0,
+        crate::bns::MIN_DURATION,
+    )
+    .unwrap();
+
+    let root_with_index = reg.root();
+    reg.expired_by_grace_end.clear();
+    assert_eq!(
+        reg.root(),
+        root_with_index,
+        "the index is a view; a snapshot without it must produce the same root"
+    );
+    reg.rebuild_expiry_index();
+    assert_eq!(reg.root(), root_with_index);
+}
+
+// ---------------------------------------------------------------------------
+// B16: the root is order-independent (property test)
+// ---------------------------------------------------------------------------
+
+/// B16: the same set of records produces the same root in every insertion
+/// order, for randomly generated label sets.
+///
+/// The root is a Merkle tree over an ordered map, so this is the property the
+/// tree shape depends on: if insertion order could reach the root, two nodes
+/// that applied the same block in the same order would still agree, but a
+/// snapshot restore that re-inserted rows would not. Proptest searches for a
+/// counterexample instead of trusting three hand-written permutations.
+proptest! {
+    #![proptest_config(proptest::prelude::ProptestConfig::with_cases(64))]
+
+    #[test]
+    fn bns_root_is_independent_of_insertion_order(
+        order in proptest::collection::vec(0u8..12, 1..12)
+    ) {
+        fn registry_over(order: &[u8]) -> BnsRegistry {
+            let mut reg = BnsRegistry::new();
+            let seller = addr(0x95);
+            reg.set_primary_sellers(vec![seller]).unwrap();
+            for &i in order {
+                let name = format!("order{i:02}.bud");
+                reg.names.insert(
+                    name.clone(),
+                    crate::bns::NameRecord::try_new(
+                        name,
+                        addr(0xA0 ^ i),
+                        0,
+                        crate::bns::MIN_DURATION,
+                    )
+                    .unwrap(),
+                );
+            }
+            reg.rebuild_expiry_index();
+            reg
+        }
+
+        let mut reversed = order.clone();
+        reversed.reverse();
+        let mut sorted = order.clone();
+        sorted.sort_unstable();
+        prop_assert_eq!(registry_over(&order).root(), registry_over(&reversed).root());
+        prop_assert_eq!(registry_over(&order).root(), registry_over(&sorted).root());
+    }
 }

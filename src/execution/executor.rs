@@ -4756,6 +4756,12 @@ impl Executor {
                         .set_primary_sellers(sellers)
                         .map_err(|e| BudlumError::validation("bns_primary_sellers", e))?;
                 }
+                crate::core::governance::GovernanceAction::BnsSetBaseCost { base_cost } => {
+                    state
+                        .bns_registry
+                        .set_base_cost(base_cost)
+                        .map_err(|e| BudlumError::validation("bns_base_cost", e))?;
+                }
                 crate::core::governance::GovernanceAction::PoaAddAdmin { .. }
                 | crate::core::governance::GovernanceAction::PoaRemoveAdmin { .. }
                 | crate::core::governance::GovernanceAction::FreezePoaAccount { .. }

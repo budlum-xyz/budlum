@@ -218,6 +218,42 @@ pub struct Metrics {
     pub bns_names_registered: IntCounter,
     /// BNS name rows retained in account state.
     pub bns_name_rows: IntGauge,
+    /// B15: names currently inside their grace window.
+    ///
+    /// The gauge the directive asks for beside the name count: a registry can
+    /// look healthy by row count while a large share of it is only waiting to
+    /// be reclaimed, and an owner in grace can still rescue the name.
+    pub bns_names_in_grace: IntGauge,
+    /// B15: open `.bud` marketplace offers, primary and resale together.
+    pub bns_open_offers: IntGauge,
+    /// B15: marketplace sales settled through `BnsBuyName`.
+    pub bns_sales_total: IntCounter,
+    /// B15: atoms paid to sellers by `BnsBuyName`, excluding fees.
+    pub bns_sales_amount_total: IntCounter,
+    /// B15: Renewal transactions applied.
+    pub bns_renewals_total: IntCounter,
+    /// B15: Transfer transactions applied.
+    pub bns_transfers_total: IntCounter,
+    /// B15: Marketplace offers created.
+    pub bns_offers_created_total: IntCounter,
+    /// B15: Marketplace offers cancelled.
+    pub bns_offers_cancelled_total: IntCounter,
+    /// B15: Forward-address writes applied.
+    pub bns_set_address_total: IntCounter,
+    /// B15: Reverse-resolution primary-name writes applied.
+    pub bns_set_primary_name_total: IntCounter,
+    /// B15: Text and profile record writes applied.
+    pub bns_set_records_total: IntCounter,
+    /// B15: Legacy content-pointer writes applied.
+    pub bns_set_content_total: IntCounter,
+    /// B15: B.U.D. 3.0 content bindings applied.
+    pub bns_set_bud3_content_total: IntCounter,
+    /// B15: Subdomains registered.
+    pub bns_register_subdomain_total: IntCounter,
+    /// B15: Subdomains removed.
+    pub bns_remove_subdomain_total: IntCounter,
+    /// B15: Storage-pointer writes applied.
+    pub bns_set_storage_total: IntCounter,
     /// Minted SocialFi NFTs retained in account state.
     pub nft_rows: IntGauge,
     /// Vault folders retained in account state.
@@ -728,6 +764,68 @@ impl Metrics {
             "budlum_bns_name_rows",
             "BNS name rows retained in account state",
         )?;
+        let bns_names_in_grace = IntGauge::new(
+            "budlum_bns_names_in_grace",
+            "BNS names inside their grace window",
+        )?;
+        let bns_open_offers =
+            IntGauge::new("budlum_bns_open_offers", "Open .bud marketplace offers")?;
+        let bns_sales_total = IntCounter::new(
+            "budlum_bns_sales_total",
+            "BNS marketplace sales settled through BnsBuyName",
+        )?;
+        let bns_sales_amount_total = IntCounter::new(
+            "budlum_bns_sales_amount_total",
+            "Atoms paid to sellers by BnsBuyName, excluding fees",
+        )?;
+        let bns_renewals_total = IntCounter::new(
+            "budlum_bns_renewals_total",
+            "BNS renewal transactions applied",
+        )?;
+        let bns_transfers_total = IntCounter::new(
+            "budlum_bns_transfers_total",
+            "BNS transfer transactions applied",
+        )?;
+        let bns_offers_created_total = IntCounter::new(
+            "budlum_bns_offers_created_total",
+            "BNS marketplace offers created",
+        )?;
+        let bns_offers_cancelled_total = IntCounter::new(
+            "budlum_bns_offers_cancelled_total",
+            "BNS marketplace offers cancelled",
+        )?;
+        let bns_set_address_total = IntCounter::new(
+            "budlum_bns_set_address_total",
+            "BNS forward-address writes applied",
+        )?;
+        let bns_set_primary_name_total = IntCounter::new(
+            "budlum_bns_set_primary_name_total",
+            "BNS reverse-resolution primary-name writes applied",
+        )?;
+        let bns_set_records_total = IntCounter::new(
+            "budlum_bns_set_records_total",
+            "BNS text and profile record writes applied",
+        )?;
+        let bns_set_content_total = IntCounter::new(
+            "budlum_bns_set_content_total",
+            "BNS legacy content-pointer writes applied",
+        )?;
+        let bns_set_bud3_content_total = IntCounter::new(
+            "budlum_bns_set_bud3_content_total",
+            "BNS b.u.d. 3.0 content bindings applied",
+        )?;
+        let bns_register_subdomain_total = IntCounter::new(
+            "budlum_bns_register_subdomain_total",
+            "BNS subdomains registered",
+        )?;
+        let bns_remove_subdomain_total = IntCounter::new(
+            "budlum_bns_remove_subdomain_total",
+            "BNS subdomains removed",
+        )?;
+        let bns_set_storage_total = IntCounter::new(
+            "budlum_bns_set_storage_total",
+            "BNS storage-pointer writes applied",
+        )?;
         let nft_rows = IntGauge::new(
             "budlum_nft_rows",
             "Minted SocialFi NFTs retained in account state",
@@ -944,6 +1042,22 @@ impl Metrics {
         registry.register(Box::new(tokenomics_team_locked.clone()))?;
         registry.register(Box::new(bns_names_registered.clone()))?;
         registry.register(Box::new(bns_name_rows.clone()))?;
+        registry.register(Box::new(bns_names_in_grace.clone()))?;
+        registry.register(Box::new(bns_open_offers.clone()))?;
+        registry.register(Box::new(bns_sales_total.clone()))?;
+        registry.register(Box::new(bns_sales_amount_total.clone()))?;
+        registry.register(Box::new(bns_renewals_total.clone()))?;
+        registry.register(Box::new(bns_transfers_total.clone()))?;
+        registry.register(Box::new(bns_offers_created_total.clone()))?;
+        registry.register(Box::new(bns_offers_cancelled_total.clone()))?;
+        registry.register(Box::new(bns_set_address_total.clone()))?;
+        registry.register(Box::new(bns_set_primary_name_total.clone()))?;
+        registry.register(Box::new(bns_set_records_total.clone()))?;
+        registry.register(Box::new(bns_set_content_total.clone()))?;
+        registry.register(Box::new(bns_set_bud3_content_total.clone()))?;
+        registry.register(Box::new(bns_register_subdomain_total.clone()))?;
+        registry.register(Box::new(bns_remove_subdomain_total.clone()))?;
+        registry.register(Box::new(bns_set_storage_total.clone()))?;
         registry.register(Box::new(nft_rows.clone()))?;
         registry.register(Box::new(vault_folder_rows.clone()))?;
         registry.register(Box::new(vault_membership_rows.clone()))?;
@@ -1080,6 +1194,22 @@ impl Metrics {
             tokenomics_team_locked,
             bns_names_registered,
             bns_name_rows,
+            bns_names_in_grace,
+            bns_open_offers,
+            bns_sales_total,
+            bns_sales_amount_total,
+            bns_renewals_total,
+            bns_transfers_total,
+            bns_offers_created_total,
+            bns_offers_cancelled_total,
+            bns_set_address_total,
+            bns_set_primary_name_total,
+            bns_set_records_total,
+            bns_set_content_total,
+            bns_set_bud3_content_total,
+            bns_register_subdomain_total,
+            bns_remove_subdomain_total,
+            bns_set_storage_total,
             nft_rows,
             vault_folder_rows,
             vault_membership_rows,
@@ -1214,6 +1344,22 @@ mod tests {
             "budlum_peer_connection_quality",
             "budlum_bns_names_registered",
             "budlum_bns_name_rows",
+            "budlum_bns_names_in_grace",
+            "budlum_bns_open_offers",
+            "budlum_bns_sales_total",
+            "budlum_bns_sales_amount_total",
+            "budlum_bns_renewals_total",
+            "budlum_bns_transfers_total",
+            "budlum_bns_offers_created_total",
+            "budlum_bns_offers_cancelled_total",
+            "budlum_bns_set_address_total",
+            "budlum_bns_set_primary_name_total",
+            "budlum_bns_set_records_total",
+            "budlum_bns_set_content_total",
+            "budlum_bns_set_bud3_content_total",
+            "budlum_bns_register_subdomain_total",
+            "budlum_bns_remove_subdomain_total",
+            "budlum_bns_set_storage_total",
             "budlum_nft_rows",
             "budlum_vault_folder_rows",
             "budlum_vault_membership_rows",

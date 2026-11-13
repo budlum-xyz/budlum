@@ -960,7 +960,15 @@ impl AccountState {
             current_block_unix_secs: 0,
             current_block_entropy: [0u8; 32],
             last_epoch_time: snapshot.last_epoch_time,
-            bns_registry: snapshot.bns_registry.clone().unwrap_or_default(),
+            bns_registry: {
+                // B13: the expiry index is derived state and serde skips it, so
+                // a registry restored from a snapshot arrives with an empty
+                // index. Rebuilding here is what keeps the reclaim path from
+                // refusing registrations at the ceiling forever.
+                let mut registry = snapshot.bns_registry.clone().unwrap_or_default();
+                registry.rebuild_expiry_index();
+                registry
+            },
             nft_registry: snapshot.nft_registry.clone().unwrap_or_default(),
             identity: snapshot.identity.clone().unwrap_or_default(),
             vault: snapshot.vault.clone().unwrap_or_default(),
@@ -3541,6 +3549,20 @@ impl AccountState {
         self.activate_validator_changes(chain_id);
         self.advance_bud3_epoch();
 
+        // B13: drop the names whose grace window closed at or before this
+        // epoch, before anything below reads the registry. The epoch boundary
+        // is the one point every node reaches with the same epoch value, so the
+        // deletion is as deterministic as the index it walks; doing it lazily
+        // when the registry happened to be full would make the state root
+        // depend on which unrelated registration arrived first.
+        let pruned = self.bns_registry.prune_expired(self.epoch_index);
+        if pruned > 0 {
+            tracing::info!(
+                "BNS expiry index pruned {pruned} names at epoch {}",
+                self.epoch_index
+            );
+        }
+
         // ResumeValidator requests whose epoch has come lift the suspension
         // (section 7.8.7); the validator re-enters the active set. Absence
         // itself never slashed (V-4).
@@ -3956,6 +3978,14 @@ impl AccountState {
                         sellers.len()
                     ),
                     Err(e) => tracing::warn!("Rejecting BnsSetPrimarySellers: {e}"),
+                }
+            }
+            ProposalType::BnsSetBaseCost { base_cost } => {
+                match self.bns_registry.set_base_cost(*base_cost) {
+                    Ok(()) => {
+                        tracing::info!("Executing Governance: BNS base cost updated to {base_cost}")
+                    }
+                    Err(e) => tracing::warn!("Rejecting BnsSetBaseCost: {e}"),
                 }
             }
         }

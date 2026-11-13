@@ -19,6 +19,15 @@ pub(crate) const TESTS: &[&str] = &[
     "tests::bns_expanded::test_bns_full_resolve_with_storage",
     "tests::bns_expanded::bns_lifecycle_doors_reject_zero_duration_and_zero_owner",
     "tests::bns_expanded::bns_renew_and_transfer_execute_through_consensus_doors",
+    // B12-B16: the governance price door, the expiry index, the metrics that
+    // observe them, and the root property the Merkle tree rests on.
+    "tests::bns_expanded::bns_base_cost_bounds_and_tenfold_step_are_enforced",
+    "tests::bns_expanded::bns_base_cost_change_does_not_touch_existing_registrations",
+    "tests::bns_expanded::bns_expiry_index_reclaims_the_earliest_expired_name_without_a_scan",
+    "tests::bns_expanded::bns_expiry_index_tracks_renewal_prune_and_rebuild",
+    "tests::bns_expanded::bns_expiry_index_is_not_committed_to_the_root",
+    "tests::bns_expanded::bns_metrics_export_one_counter_per_type_and_the_named_gauges",
+    "tests::bns_expanded::bns_root_is_independent_of_insertion_order",
 ];
 
 pub fn run(_root: &Path, log: &Path) -> Result<String, String> {

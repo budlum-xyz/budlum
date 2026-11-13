@@ -113,6 +113,34 @@
     `BnsSetBud3Content` + `BnsSetRecords`), and upgrades `bud tx send --to` to
     verify `.bud` recipient Merkle proofs client-side.
 
+  - **B12b (governance price door):** `ProposalType::BnsSetBaseCost` and
+    `GovernanceAction::BnsSetBaseCost` replace `BnsRegistry::base_cost` and
+    nothing else. `BnsRegistry::check_base_cost_bounds` enforces
+    `MIN_BNS_BASE_COST..=MAX_BNS_BASE_COST` at proposal submission;
+    `BnsRegistry::set_base_cost` enforces the same bounds plus
+    `BNS_BASE_COST_MAX_STEP_FACTOR` (10x in one step, symmetric, never clamps)
+    at execution. A registered name keeps its owner and term, and the next
+    renewal is charged at the new base. All three constants live in
+    `src/registry/params.rs`.
+  - **B13 (capacity parameter and the expiry index):** `DEFAULT_MAX_NAMES`
+    (`1_000_000`) is the genesis value of `BnsRegistry::max_names`, a stored
+    field rather than a constant, so a snapshot restores the ceiling it was
+    written with. `BnsRegistry::expired_by_grace_end` is a `BTreeSet` keyed by
+    `(expires_at + GRACE_PERIOD, name)`; `register` reclaims the head of the
+    set instead of scanning every record, `renew` re-indexes the new expiry,
+    `prune_expired` deletes the expired prefix at the epoch boundary, and
+    `rebuild_expiry_index` restores the view after a snapshot load. The index
+    is skipped by serde and is not part of `BnsRegistry::root()`.
+  - **B15 (metrics):** `budlum_bns_names_in_grace`, `budlum_bns_open_offers`,
+    `budlum_bns_sales_total` and `budlum_bns_sales_amount_total` join the
+    existing name counters, and every BNS write type has its own
+    `budlum_bns_<type>_total` counter incremented at the applied-transaction
+    site, so a refused transaction moves none of them.
+  - **B16 (tests and gates):** `bns-gate` names the seven B12/B13/B15/B16
+    tests, so a green relay requires them to exist and pass. The root property
+    test (`bns_root_is_independent_of_insertion_order`) runs under `proptest`,
+    and the gates keep their positive and negative canaries.
+
 ## Current behaviour (locked by tests)
 
 Marketplace primary and resale settlement for `<label>.bud` names (3..=32 label
@@ -126,7 +154,7 @@ subdomains, full resolve through storage, B.U.D. 3.0 content binding, and RPC
 
 - Covered in `src/bns/registry.rs`, `src/bns/types.rs`, `src/bns/bud3.rs`,
   `src/rpc/tests.rs`, `src/bin/bud.rs`, `src/tests/bns.rs` (2), and
-  `src/tests/bns_expanded.rs` (13).
+  `src/tests/bns_expanded.rs` (20).
 - Runs inside the core lib suite (`cargo test --lib`). The CI gates are
   **`bns-gate`** and **`bns-names`** in `xtask/gates`, both protected against a
   vacuous pass with positive and negative canaries.
