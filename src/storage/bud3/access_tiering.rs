@@ -221,7 +221,10 @@ mod tests {
         let sealed_obj = [0x22u8; 32];
         tracker.track_object(pub_obj, false);
         tracker.track_object(sealed_obj, true);
-        assert_eq!(tracker.evaluate_tier(pub_obj, 100 * 86_400), AccessTier::Cold);
+        assert_eq!(
+            tracker.evaluate_tier(pub_obj, 100 * 86_400),
+            AccessTier::Cold
+        );
         assert_eq!(
             tracker.evaluate_tier(sealed_obj, 100 * 86_400),
             AccessTier::Cold

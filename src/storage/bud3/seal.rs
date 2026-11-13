@@ -47,7 +47,7 @@ const FIELD_MAC_TAG: &[u8] = b"BDLM_BUD3_FIELD_MAC_V1";
 const FIELD_NONCE_TAG: &[u8] = b"BDLM_BUD3_FIELD_NONCE_V1";
 
 /// Domain tag for sealed manifest ciphertext roots.
-const FIELD_CIPH_ROOT_TAG: &[u8] = b"BDLM_BUD3_FIELD_CIPH_ROOT_V1";
+const FIELD_CIPHER_ROOT_TAG: &[u8] = b"BDLM_BUD3_FIELD_CIPHER_ROOT_V1";
 
 /// Domain tag for sealed manifest key commitments.
 const FIELD_KEY_COMMIT_TAG: &[u8] = b"BDLM_BUD3_FIELD_KEY_COMMIT_V1";
@@ -113,7 +113,7 @@ pub struct SealedObjectManifest {
 
 /// Verifiable consent proof granting scoped computation/view rights over a
 /// sealed object without exposing the plaintext or unrevoked identity keys.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ConsentProof {
     /// Unlinkable consent grant tag checked against `DeletionSet`.
     pub grant_tag: [u8; 32],
@@ -394,10 +394,9 @@ fn ct_eq_32(a: &[u8; 32], b: &[u8; 32]) -> bool {
 }
 
 fn le_u64_from_chunk(chunk: &[u8]) -> u64 {
-    chunk
-        .iter()
-        .enumerate()
-        .fold(0u64, |acc, (idx, &byte)| acc | (u64::from(byte) << (idx * 8)))
+    chunk.iter().enumerate().fold(0u64, |acc, (idx, &byte)| {
+        acc | (u64::from(byte) << (idx * 8))
+    })
 }
 
 fn field_limbs_from_digest(digest: &[u8; 32]) -> (u64, u64) {
@@ -709,7 +708,7 @@ pub fn seal_object_with_profile(
         cipher_profile,
         chunk_size: 64 * 1024,
         padded_len: object.header.payload_len,
-        ciphertext_root: hash_fields_bytes(&[FIELD_CIPH_ROOT_TAG, &object.payload]),
+        ciphertext_root: hash_fields_bytes(&[FIELD_CIPHER_ROOT_TAG, &object.payload]),
         plaintext_root: sealed_plaintext_root(content),
         key_commitment: sealed_key_commitment(content_key),
         object_commitment: object.header.content_digest,
@@ -739,12 +738,15 @@ pub fn open_sealed_object_with_profile(
         || manifest.hash_suite != expected_suite
         || manifest.padded_len != object.header.payload_len
         || !ct_eq_32(&manifest.object_commitment, &object.header.content_digest)
-        || !ct_eq_32(&manifest.key_commitment, &sealed_key_commitment(content_key))
+        || !ct_eq_32(
+            &manifest.key_commitment,
+            &sealed_key_commitment(content_key),
+        )
     {
         return Err(SealBud3Error::ManifestMismatch);
     }
-    let observed_ciph_root = hash_fields_bytes(&[FIELD_CIPH_ROOT_TAG, &object.payload]);
-    if !ct_eq_32(&manifest.ciphertext_root, &observed_ciph_root) {
+    let observed_cipher_root = hash_fields_bytes(&[FIELD_CIPHER_ROOT_TAG, &object.payload]);
+    if !ct_eq_32(&manifest.ciphertext_root, &observed_cipher_root) {
         return Err(SealBud3Error::ManifestMismatch);
     }
     let plaintext = match manifest.cipher_profile {
@@ -935,7 +937,8 @@ mod tests {
 
     #[test]
     fn cipher_profile_field_native_and_aead_round_trip_and_reject_tamper() {
-        let payload = b"confidential field-native genomic sequence payload for zero-knowledge inference";
+        let payload =
+            b"confidential field-native genomic sequence payload for zero-knowledge inference";
         let key = ContentKey([0x55u8; 32]);
         let wrong_key = ContentKey([0x56u8; 32]);
         let owner_secret = [0xAAu8; 32];

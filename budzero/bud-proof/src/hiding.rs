@@ -99,8 +99,11 @@ pub fn prove_hiding(
         bytes_to_field(&salt_commit),
         HIDING_COMMIT_DOMAIN,
     );
-    let transcript_seal =
-        compute_transcript_seal(&envelope.public_inputs_hash, &salt_commit, witness_commitment);
+    let transcript_seal = compute_transcript_seal(
+        &envelope.public_inputs_hash,
+        &salt_commit,
+        witness_commitment,
+    );
     Ok(HidingProofPackage {
         class: ProofClass::Hiding,
         envelope,

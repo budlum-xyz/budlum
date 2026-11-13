@@ -352,7 +352,8 @@ fn ai_require_execution_proof_blocks_finalize_without_proof() {
     })
     .expect("proof-required model registers cleanly when FULL_AI_STARK_VERIFICATION_LIVE is true");
 
-    reg.lock_verifier_stake(&verifier, MIN_VERIFIER_STAKE).unwrap();
+    reg.lock_verifier_stake(&verifier, MIN_VERIFIER_STAKE)
+        .unwrap();
     let mut req = AiInferenceRequest {
         request_id: AiRequestId::default(),
         requester: owner,
@@ -672,7 +673,11 @@ fn private_transfer_is_open_on_testnet() {
         authorization_sig: kp.sign(&auth_msg).to_vec(),
         public_digest: digest,
     };
-    let tx_testnet = signed_tx(&kp, testnet, TransactionType::PrivateTransferSubmit(sub.clone()));
+    let tx_testnet = signed_tx(
+        &kp,
+        testnet,
+        TransactionType::PrivateTransferSubmit(sub.clone()),
+    );
     crate::execution::executor::Executor::apply_transaction_checked(&mut state, &tx_testnet)
         .expect("testnet 45261 executes private transfers");
     assert!(!state.note_registry.contains_commitment(&c_in));

@@ -279,8 +279,7 @@ impl ZkVmExecutor {
     /// fails validation or STARK verification.
     pub fn prove_and_verify_predicate(
         statement: &bud_proof::predicates::PredicateStatement,
-    ) -> Result<bud_proof::predicates::PredicateProof, bud_proof::predicates::PredicateError>
-    {
+    ) -> Result<bud_proof::predicates::PredicateProof, bud_proof::predicates::PredicateError> {
         let proof = bud_proof::predicates::prove_predicate(statement)?;
         bud_proof::predicates::verify_predicate(&proof)?;
         Ok(proof)
@@ -652,9 +651,11 @@ mod tests {
                 imm: 0,
             }
             .encode();
-            let err =
-                bud_isa::Instruction::decode_for_mainnet(word, bud_isa::MainnetActivation::closed())
-                    .expect_err("explicit closed activation must still refuse gated opcodes");
+            let err = bud_isa::Instruction::decode_for_mainnet(
+                word,
+                bud_isa::MainnetActivation::closed(),
+            )
+            .expect_err("explicit closed activation must still refuse gated opcodes");
             assert!(
                 matches!(err, bud_isa::DecodeError::MainnetActivationRequired(_)),
                 "unexpected error for closed activation: {err}"
@@ -962,7 +963,10 @@ mod tests {
 
             let mut vm = bud_vm::Vm::with_mainnet_mode(8192, DEFAULT_CONTRACT_GAS_LIMIT, true);
             let receipt = vm.run_receipt(&program_words);
-            assert!(receipt.success, "VerifyInference must execute in mainnet mode");
+            assert!(
+                receipt.success,
+                "VerifyInference must execute in mainnet mode"
+            );
             let m = if model < 0 {
                 bud_vm::GOLDILOCKS_P.wrapping_sub(u64::from(model.unsigned_abs()))
             } else {

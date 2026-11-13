@@ -1495,16 +1495,10 @@ mod tests {
         let spec = eth_spec();
         let a = quorum_evidence(&spec, addr(2));
         let mut b = quorum_evidence(&spec, addr(3));
-        crate::cross_domain::external::ethereum::set_deneb_state_root(
-            &mut b.payload,
-            [0xdd; 32],
-        );
+        crate::cross_domain::external::ethereum::set_deneb_state_root(&mut b.payload, [0xdd; 32]);
         b.declared_root = [0xdd; 32];
         let mut c = quorum_evidence(&spec, addr(4));
-        crate::cross_domain::external::ethereum::set_deneb_state_root(
-            &mut c.payload,
-            [0xee; 32],
-        );
+        crate::cross_domain::external::ethereum::set_deneb_state_root(&mut c.payload, [0xee; 32]);
         c.declared_root = [0xee; 32];
         let _ = state.submit_evidence(&a, Some(Box::new(StrictTestBls)));
         let _ = state.submit_evidence(&b, Some(Box::new(StrictTestBls)));
