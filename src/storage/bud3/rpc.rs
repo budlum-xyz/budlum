@@ -445,6 +445,14 @@ impl Bud3RpcService {
             other => Err(format!("unknown B.U.D. 3.0 RPC method `{other}`")),
         }
     }
+
+    /// Return public cold objects eligible for testnet `SlowY` / Codec 13 archival
+    /// conversion via [`AccessTierTracker::expansion_archival_candidates`].
+    #[must_use]
+    pub fn archival_candidates(&self, now_sec: u64) -> Vec<ObjectKey> {
+        self.tiers
+            .expansion_archival_candidates(now_sec, AccessTierTracker::testnet_converts_objects())
+    }
 }
 
 #[cfg(test)]

@@ -831,6 +831,131 @@ impl LightClient {
     }
 }
 
+/// One sibling link in a [`RemoteStateView`] Merkle inclusion path.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RemoteMerkleStep {
+    /// 32-byte sibling digest at this tree height.
+    pub sibling: [u8; 32],
+    /// True if `sibling` sits on the right (`H(node || sibling)`), false if on the left.
+    pub sibling_is_right: bool,
+}
+
+/// Verified cross-domain remote state view (`RemoteStateView`, section 1.2 / IP-60).
+///
+/// Binds an external domain's finalized `remote_state_root` to a checkpointed
+/// [`crate::settlement::GlobalBlockHeader`], verifies Merkle inclusion of
+/// `(state_key, state_value)`, and optionally validates a zero-knowledge
+/// [`bud_proof::predicates::PredicateProof`] for private ownership claims.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RemoteStateView {
+    /// Source external domain identifier.
+    pub remote_domain_id: u64,
+    /// Committed state root of the remote domain at `header.checkpoint_height`.
+    pub remote_state_root: [u8; 32],
+    /// Global block header anchored at the trusted checkpoint.
+    pub header: crate::settlement::GlobalBlockHeader,
+    /// Key inside the remote domain state tree.
+    pub state_key: Vec<u8>,
+    /// Claimed state value bytes stored under `state_key`.
+    pub state_value: Vec<u8>,
+    /// Merkle path from leaf digest up to `remote_state_root`.
+    pub inclusion_path: Vec<RemoteMerkleStep>,
+    /// Optional hidden-ownership or capability predicate STARK proof.
+    pub predicate_proof: Option<bud_proof::predicates::PredicateProof>,
+}
+
+impl RemoteStateView {
+    /// Canonical commitment binding `remote_domain_id` and `remote_state_root`
+    /// into `GlobalBlockHeader::domain_commitment_root`.
+    #[must_use]
+    pub fn expected_domain_commitment(
+        remote_domain_id: u64,
+        remote_state_root: &[u8; 32],
+    ) -> [u8; 32] {
+        crate::core::hash::hash_fields_bytes(&[
+            b"BDLM_REMOTE_STATE_VIEW_V1",
+            &remote_domain_id.to_le_bytes(),
+            remote_state_root,
+        ])
+    }
+
+    /// Canonical leaf digest for `(state_key, state_value)`.
+    #[must_use]
+    pub fn leaf_digest(state_key: &[u8], state_value: &[u8]) -> [u8; 32] {
+        crate::core::hash::hash_fields_bytes(&[b"BDLM_REMOTE_STATE_LEAF_V1", state_key, state_value])
+    }
+
+    /// Reconstruct the Merkle root for `(state_key, state_value)` across `inclusion_path`.
+    #[must_use]
+    pub fn compute_merkle_root(
+        state_key: &[u8],
+        state_value: &[u8],
+        inclusion_path: &[RemoteMerkleStep],
+    ) -> [u8; 32] {
+        let mut current = Self::leaf_digest(state_key, state_value);
+        for step in inclusion_path {
+            current = if step.sibling_is_right {
+                crate::core::hash::hash_fields_bytes(&[
+                    b"BDLM_REMOTE_STATE_NODE_V1",
+                    &current,
+                    &step.sibling,
+                ])
+            } else {
+                crate::core::hash::hash_fields_bytes(&[
+                    b"BDLM_REMOTE_STATE_NODE_V1",
+                    &step.sibling,
+                    &current,
+                ])
+            };
+        }
+        current
+    }
+
+    /// Verify checkpoint binding, remote domain root commitment, state inclusion
+    /// path, and optional zero-knowledge predicate proof.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LightClientError`] if app binding is disabled on `chain_id`,
+    /// global header binding fails, domain commitment mismatches, Merkle inclusion
+    /// fails, or the attached `PredicateProof` is invalid.
+    pub fn verify_for_chain(
+        &self,
+        checkpoint: &VerifiedCheckpoint,
+        state_root_body: &crate::domain::types::Hash32,
+        chain_id: u64,
+    ) -> Result<(), LightClientError> {
+        if !crate::core::chain_config::app_binding_enabled_for_chain_id(chain_id) {
+            return Err(LightClientError::VerificationFailed(format!(
+                "RemoteStateView app binding disabled for chain_id {chain_id}"
+            )));
+        }
+        LightClient::verify_global_header(checkpoint, state_root_body, &self.header)?;
+        let expected_domain_root =
+            Self::expected_domain_commitment(self.remote_domain_id, &self.remote_state_root);
+        if self.header.domain_commitment_root != expected_domain_root {
+            return Err(LightClientError::GlobalHeaderBinding(
+                "remote_state_root does not match header.domain_commitment_root".to_string(),
+            ));
+        }
+        let recomputed_root =
+            Self::compute_merkle_root(&self.state_key, &self.state_value, &self.inclusion_path);
+        if recomputed_root != self.remote_state_root {
+            return Err(LightClientError::VerificationFailed(
+                "RemoteStateView Merkle inclusion proof failed".to_string(),
+            ));
+        }
+        if let Some(predicate) = &self.predicate_proof {
+            bud_proof::predicates::verify_predicate(predicate).map_err(|err| {
+                LightClientError::VerificationFailed(format!(
+                    "RemoteStateView predicate proof failed: {err:?}"
+                ))
+            })?;
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1518,6 +1643,108 @@ mod tests {
         assert!(matches!(
             LightClient::verify_global_header(&checkpoint, &[7u8; 32], &header),
             Err(LightClientError::GlobalHeaderBinding(_))
+        ));
+    }
+
+    #[test]
+    fn remote_state_view_verifies_inclusion_and_predicate_and_rejects_tampering() {
+        use crate::core::account::AccountState;
+        use crate::settlement::GlobalBlockHeader;
+        use bud_proof::predicates::{prove_predicate, PredicateKind, PredicateStatement};
+
+        let key = b"domain:eth:vault:alice".to_vec();
+        let value = b"balance:1000000".to_vec();
+        let sibling_a = [0x11u8; 32];
+        let sibling_b = [0x22u8; 32];
+        let path = vec![
+            RemoteMerkleStep {
+                sibling: sibling_a,
+                sibling_is_right: true,
+            },
+            RemoteMerkleStep {
+                sibling: sibling_b,
+                sibling_is_right: false,
+            },
+        ];
+        let remote_root = RemoteStateView::compute_merkle_root(&key, &value, &path);
+        let remote_domain_id = 42u64;
+        let domain_commitment_root =
+            RemoteStateView::expected_domain_commitment(remote_domain_id, &remote_root);
+
+        let pred_proof = prove_predicate(&PredicateStatement {
+            kind: PredicateKind::Yk1Ownership,
+            lhs: 777,
+            rhs: 777,
+            aux: 1,
+            chain_id: TEST_CHAIN_ID,
+        })
+        .expect("predicate proof generation succeeds");
+
+        let mut state = AccountState::new();
+        let header = GlobalBlockHeader {
+            version: 2,
+            global_height: 0,
+            previous_global_hash: [0u8; 32],
+            chain_id: TEST_CHAIN_ID,
+            timestamp_ms: 1,
+            domain_registry_root: [1u8; 32],
+            domain_commitment_root,
+            message_root: [3u8; 32],
+            bridge_state_root: [4u8; 32],
+            replay_nonce_root: [5u8; 32],
+            proposer: None,
+            settlement_finality_root: [6u8; 32],
+            storage_root: None,
+            ai_root: None,
+            identity_root: None,
+            checkpoint_height: 10,
+            external_intake_root: None,
+            graft_root: None,
+            delegation_root: None,
+            object_layer_root: None,
+            proof_root: Some([7u8; 32]),
+            proven_height: 10,
+        };
+        state.global_header_summary = header.calculate_hash_bytes();
+        let body = state.state_root_body();
+        let checkpoint = VerifiedCheckpoint {
+            height: 10,
+            block_hash: "aa".repeat(32),
+            set_hash: "bb".repeat(32),
+            epoch: 1,
+            state_root: state.calculate_state_root(),
+        };
+
+        let view = RemoteStateView {
+            remote_domain_id,
+            remote_state_root: remote_root,
+            header,
+            state_key: key,
+            state_value: value,
+            inclusion_path: path,
+            predicate_proof: Some(pred_proof),
+        };
+        let testnet_chain = crate::core::chain_config::Network::Testnet
+            .chain_id()
+            .value();
+        assert!(view
+            .verify_for_chain(&checkpoint, &body, testnet_chain)
+            .is_ok());
+
+        let mut tampered_val = view.clone();
+        tampered_val.state_value = b"balance:9999999".to_vec();
+        assert!(matches!(
+            tampered_val.verify_for_chain(&checkpoint, &body, testnet_chain),
+            Err(LightClientError::VerificationFailed(_))
+        ));
+
+        let mut tampered_pred = view;
+        if let Some(p) = tampered_pred.predicate_proof.as_mut() {
+            p.statement.lhs ^= 1;
+        }
+        assert!(matches!(
+            tampered_pred.verify_for_chain(&checkpoint, &body, testnet_chain),
+            Err(LightClientError::VerificationFailed(_))
         ));
     }
 }

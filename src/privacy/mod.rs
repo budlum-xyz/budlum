@@ -14,3 +14,6 @@ pub use threshold_escrow::{
     EscrowCommittee, EscrowMember, EscrowUnlockShare, ThresholdEscrow, ThresholdEscrowError,
     THRESHOLD_ESCROW_N, THRESHOLD_ESCROW_T,
 };
+
+/// Canonical alias matching [`ThresholdEscrow`] (`EscrowedDisclosure`).
+pub type EscrowedDisclosure = ThresholdEscrow;
