@@ -1785,6 +1785,36 @@ mod rpc_tests {
             .unwrap_err()
             .message()
             .contains("Unsafe or oversized"));
+        assert!(server
+            .bns_list_subdomains("bids.bud".to_string())
+            .await
+            .unwrap()
+            .is_null());
+        assert!(server
+            .bns_list_subdomains("bids".to_string())
+            .await
+            .unwrap_err()
+            .message()
+            .contains("Invalid BNS name"));
+        let prepared_rm = server
+            .bns_prepare_remove_subdomain(
+                "bids.bud".to_string(),
+                "pay".to_string(),
+                seller.to_hex(),
+            )
+            .await
+            .unwrap();
+        assert!(prepared_rm["tx_template"].is_object());
+        assert!(server
+            .bns_prepare_remove_subdomain(
+                "bids.bud".to_string(),
+                "-bad-".to_string(),
+                seller.to_hex(),
+            )
+            .await
+            .unwrap_err()
+            .message()
+            .contains("Invalid subdomain label"));
     }
 
     #[tokio::test]

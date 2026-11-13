@@ -556,6 +556,7 @@ pub enum TransactionType {
     BnsSetRecords,
     BnsSetContent,
     BnsRegisterSubdomain,
+    BnsRemoveSubdomain,
     BnsSetStorage,
     NftMint,
     NftTransfer,
@@ -2533,6 +2534,7 @@ impl Transaction {
             | TransactionType::BnsSetRecords
             | TransactionType::BnsSetContent
             | TransactionType::BnsRegisterSubdomain
+            | TransactionType::BnsRemoveSubdomain
             | TransactionType::BnsSetStorage
             | TransactionType::BnsRenew
             | TransactionType::BnsTransfer => schedule.contract_call_gas,
@@ -3107,6 +3109,7 @@ fn transaction_type_tag(tx_type: &TransactionType) -> u8 {
         TransactionType::BnsSetAddress => 74,
         TransactionType::BnsSetPrimaryName => 75,
         TransactionType::BnsSetRecords => 76,
+        TransactionType::BnsRemoveSubdomain => 77,
     }
 }
 fn encode_chain(chain: ExternalChain, out: &mut Vec<u8>) {
@@ -3811,6 +3814,7 @@ fn encode_transaction_type_payload(tx_type: &TransactionType, out: &mut Vec<u8>)
         | TransactionType::BnsSetRecords
         | TransactionType::BnsSetContent
         | TransactionType::BnsRegisterSubdomain
+        | TransactionType::BnsRemoveSubdomain
         | TransactionType::BnsSetStorage
         | TransactionType::BnsRenew
         | TransactionType::BnsTransfer
