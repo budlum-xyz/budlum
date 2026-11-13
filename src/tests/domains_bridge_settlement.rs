@@ -280,9 +280,7 @@ fn ethereum_sync_committee_is_open_on_testnet() {
     }
     let update = crate::cross_domain::external::ethereum::parse_update(&payload).expect("update");
     let root = crate::cross_domain::external::ethereum::signing_root_v2(&update);
-    let sig = G2Affine::from(
-        G2Projective::from(crate::chain::finality::hash_to_g2(&root)) * sk,
-    );
+    let sig = G2Affine::from(G2Projective::from(crate::chain::finality::hash_to_g2(&root)) * sk);
     if let Some(s) = payload.get_mut(layout::SIGNATURE) {
         s.copy_from_slice(&sig.to_compressed());
     }
@@ -442,7 +440,7 @@ fn app_binding_is_open_on_testnet() {
             manifest_hash: [0x56; 32],
         })),
     )
-    .expect_err("SettlementTx::Graft must remain closed on mainnet");
+    .expect_err("settlement app registration must remain closed on mainnet");
     assert!(outer_err.to_string().contains("not enabled"), "{outer_err}");
 }
 

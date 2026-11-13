@@ -880,9 +880,7 @@ fn execute_wasm_pointer_to_svm_or_move(
         let owner = parse_wasm_party32(
             host,
             home_ee,
-            tf.get("owner")
-                .and_then(|v| v.as_str())
-                .unwrap_or_default(),
+            tf.get("owner").and_then(|v| v.as_str()).unwrap_or_default(),
         );
         let to = parse_wasm_party32(
             host,
