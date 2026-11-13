@@ -727,6 +727,11 @@ enum BnsAction {
         #[arg(long, required = true)]
         owner: String,
     },
+    /// Fetch a compact per-name Merkle state proof against `BnsRegistry::root()`.
+    Proof {
+        #[arg(long, required = true)]
+        name: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -2882,6 +2887,15 @@ fn run_bns_list_by_owner(rpc_url: &str, owner: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn run_bns_proof(rpc_url: &str, name: &str) -> Result<(), String> {
+    let ans = rpc_call(rpc_url, "bud_bnsGetProof", serde_json::json!([name]))?;
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&ans).map_err(|e| e.to_string())?
+    );
+    Ok(())
+}
+
 /// The multiaddr peers dial: `/ip4/...` for an address, `/dns4/...` for a
 /// name.
 fn bootnode_multiaddr(host: &str, port: u16, peer_id: &str) -> String {
@@ -3228,6 +3242,7 @@ fn main() {
             ),
             BnsAction::GetBud3 { name } => run_bns_get_bud3(&cli.rpc_url, name),
             BnsAction::List { owner } => run_bns_list_by_owner(&cli.rpc_url, owner),
+            BnsAction::Proof { name } => run_bns_proof(&cli.rpc_url, name),
         },
         Command::Node { action } => match action {
             NodeAction::Identity {

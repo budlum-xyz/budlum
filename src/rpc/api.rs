@@ -758,6 +758,11 @@ pub trait BudlumApi {
         owner: String,
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
+    /// Generate a compact $O(\log N)$ per-name Merkle inclusion or non-existence proof
+    /// against `BnsRegistry::root()` (`BDLM_BNS_REGISTRY_V3`).
+    #[method(name = "bud_bnsGetProof")]
+    async fn bns_get_proof(&self, name: String) -> Result<serde_json::Value, ErrorObjectOwned>;
+
     /// Prepare a signed `BnsSetAddress` forwarding/target update transaction.
     #[method(name = "bud_bnsPrepareSetAddress")]
     async fn bns_prepare_set_address(

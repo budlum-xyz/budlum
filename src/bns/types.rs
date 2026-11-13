@@ -127,6 +127,35 @@ pub struct BnsResolved {
     pub is_expired: bool,
 }
 
+/// Authenticated Merkle branch for a single leaf in `BnsRegistry`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BnsMerkleBranch {
+    pub name: String,
+    pub owner: Address,
+    pub address: Option<Address>,
+    pub expires_at: u64,
+    pub content_id: Option<ContentId>,
+    pub storage_root: Option<[u8; 32]>,
+    pub extras_digest: [u8; 32],
+    pub leaf: [u8; 32],
+    pub siblings: Vec<[u8; 32]>,
+    pub directions: Vec<bool>,
+}
+
+/// Compact per-name inclusion or lexicographic non-existence proof against `BnsRegistry::root()`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BnsStateProof {
+    pub name: String,
+    pub included: bool,
+    pub bns_root: [u8; 32],
+    pub meta_digest: [u8; 32],
+    pub names_count: u64,
+    pub epoch: u64,
+    pub entry: Option<BnsMerkleBranch>,
+    pub predecessor: Option<BnsMerkleBranch>,
+    pub successor: Option<BnsMerkleBranch>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BnsError {
     InvalidName,
