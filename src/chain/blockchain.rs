@@ -402,6 +402,36 @@ impl Blockchain {
                 .set(i64::try_from(self.state.storage_registry.result_count()).unwrap_or(i64::MAX));
             m.bns_name_rows
                 .set(i64::try_from(self.state.bns_registry.names.len()).unwrap_or(i64::MAX));
+            // B15: the two gauges the directive names beside the row count.
+            let epoch = self.state.epoch_index;
+            m.bns_names_in_grace.set(
+                i64::try_from(
+                    self.state
+                        .bns_registry
+                        .names
+                        .values()
+                        .filter(|rec| {
+                            epoch >= rec.expires_at
+                                && epoch
+                                    < rec
+                                        .expires_at
+                                        .saturating_add(crate::bns::BnsRegistry::GRACE_PERIOD)
+                        })
+                        .count(),
+                )
+                .unwrap_or(i64::MAX),
+            );
+            m.bns_open_offers.set(
+                i64::try_from(
+                    self.state
+                        .marketplace
+                        .name_offers
+                        .values()
+                        .filter(|offer| offer.active && epoch < offer.expires_at_epoch)
+                        .count(),
+                )
+                .unwrap_or(i64::MAX),
+            );
             m.nft_rows
                 .set(i64::try_from(self.state.nft_registry.nfts.len()).unwrap_or(i64::MAX));
             m.vault_folder_rows
@@ -525,6 +555,54 @@ impl Blockchain {
             match &tx.tx_type {
                 TransactionType::BnsBuyName => {
                     m.bns_names_registered.inc();
+                    // B15: the sales counter and the atoms that actually
+                    // reached a seller. The header amount is the offer price
+                    // the buyer paid; the fee is charged separately, so this is
+                    // the payment and not the transaction cost. It is counted
+                    // at the applied-transaction site, so a reverted buy (the
+                    // executor refused it) does not increment either counter.
+                    m.bns_sales_total.inc();
+                    m.bns_sales_amount_total.inc_by(tx.amount);
+                }
+                // B15: one counter per BNS write type. Counting the type rather
+                // than the outcome keeps this cheap and makes a missing door
+                // visible: a type with a zero counter over a long window is a
+                // transaction nobody reaches, or one that never applies.
+                TransactionType::BnsRenew => {
+                    m.bns_renewals_total.inc();
+                }
+                TransactionType::BnsTransfer => {
+                    m.bns_transfers_total.inc();
+                }
+                TransactionType::BnsCreateOffer => {
+                    m.bns_offers_created_total.inc();
+                }
+                TransactionType::BnsCancelOffer => {
+                    m.bns_offers_cancelled_total.inc();
+                }
+                TransactionType::BnsSetAddress => {
+                    m.bns_set_address_total.inc();
+                }
+                TransactionType::BnsSetPrimaryName => {
+                    m.bns_set_primary_name_total.inc();
+                }
+                TransactionType::BnsSetRecords => {
+                    m.bns_set_records_total.inc();
+                }
+                TransactionType::BnsSetContent => {
+                    m.bns_set_content_total.inc();
+                }
+                TransactionType::BnsSetBud3Content => {
+                    m.bns_set_bud3_content_total.inc();
+                }
+                TransactionType::BnsRegisterSubdomain => {
+                    m.bns_register_subdomain_total.inc();
+                }
+                TransactionType::BnsRemoveSubdomain => {
+                    m.bns_remove_subdomain_total.inc();
+                }
+                TransactionType::BnsSetStorage => {
+                    m.bns_set_storage_total.inc();
                 }
                 TransactionType::AiInferenceRequest(_) => {
                     m.ai_requests_total.inc();
