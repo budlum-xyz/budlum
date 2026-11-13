@@ -113,12 +113,12 @@ pub trait BudlumApi {
     #[method(name = "bud_getConsensusDomains")]
     async fn get_consensus_domains(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
 
-    /// Read one state-rooted Graft application by its canonical id. Writes
-    /// still travel as signed `SettlementTx::Graft` transactions.
-    #[method(name = "bud_getGraftApplication")]
-    async fn get_graft_application(
+    /// Read one state-rooted AppBinding application by its canonical id. Writes
+    /// still travel as signed `SettlementTx::AppBinding` transactions.
+    #[method(name = "bud_getAppBindingApplication")]
+    async fn get_app_binding_application(
         &self,
-        graft_id_hex: String,
+        app_binding_id_hex: String,
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
     /// The Mikoriza restaked validators: the bound Ethereum operator,
@@ -127,12 +127,12 @@ pub trait BudlumApi {
     #[method(name = "bud_getRestakedValidators")]
     async fn get_restaked_validators(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
 
-    /// Prove a Graft payment against the latest checkpoint header whose
+    /// Prove an AppBinding payment against the latest checkpoint header whose
     /// payment window holds it. An application checks the
-    /// result with `settlement::graft::verify_graft_payment` and a finalized
+    /// result with `settlement::app_binding::verify_app_binding_payment` and a finalized
     /// checkpoint it trusts. `null` when no recent header covers the payment.
-    #[method(name = "bud_graftPaymentProof")]
-    async fn graft_payment_proof(
+    #[method(name = "bud_appBindingPaymentProof")]
+    async fn app_binding_payment_proof(
         &self,
         payment_id_hex: String,
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
@@ -1072,9 +1072,9 @@ pub trait BudlumApi {
     #[method(name = "bud_hubGetApps")]
     async fn budlumxyz_get_apps(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
 
-    /// List the Graft applications (apps on other chains usable with BUD).
-    #[method(name = "bud_hubGetGraftApps")]
-    async fn budlumxyz_get_graft_apps(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
+    /// List the AppBinding applications (apps on other chains usable with BUD).
+    #[method(name = "bud_hubGetAppBindingApps")]
+    async fn budlumxyz_get_app_binding_apps(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
 
     /// Prepare a dApp registration transaction.
     #[method(name = "bud_hubPrepareRegister")]

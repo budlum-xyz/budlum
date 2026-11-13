@@ -1078,7 +1078,7 @@ impl RpcServer {
                    "identityRoot": h.identity_root.map(Self::bytes32_to_0x),
                    "checkpointHeight": Self::to_hex(h.checkpoint_height),
                    "externalIntakeRoot": h.external_intake_root.map(Self::bytes32_to_0x),
-                   "graftRoot": h.graft_root.map(Self::bytes32_to_0x),
+                   "appBindingRoot": h.app_binding_root.map(Self::bytes32_to_0x),
                    "delegationRoot": h.delegation_root.map(Self::bytes32_to_0x),
                    "objectLayerRoot": h.object_layer_root.map(Self::bytes32_to_0x),
                    "proofRoot": h.proof_root.map(Self::bytes32_to_0x),
@@ -1102,7 +1102,7 @@ impl RpcServer {
             "aiRoot" => h.ai_root,
             "identityRoot" => h.identity_root,
             "externalIntakeRoot" => h.external_intake_root,
-            "graftRoot" => h.graft_root,
+            "appBindingRoot" => h.app_binding_root,
             "delegationRoot" => h.delegation_root,
             "objectLayerRoot" => h.object_layer_root,
             "proofRoot" => h.proof_root,
@@ -2223,7 +2223,7 @@ impl BudlumApiServer for RpcServer {
         ))
     }
 
-    async fn graft_payment_proof(
+    async fn app_binding_payment_proof(
         &self,
         payment_id_hex: String,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
@@ -2232,14 +2232,18 @@ impl BudlumApiServer for RpcServer {
             .ok()
             .and_then(|bytes| bytes.try_into().ok())
             .ok_or_else(|| {
-                ErrorObjectOwned::owned(-32602, "a Graft payment id is 32 bytes of hex", None::<()>)
+                ErrorObjectOwned::owned(
+                    -32602,
+                    "an AppBinding payment id is 32 bytes of hex",
+                    None::<()>,
+                )
             })?;
-        match self.chain.get_graft_payment_proof(payment_id).await {
+        match self.chain.get_app_binding_payment_proof(payment_id).await {
             None => Ok(serde_json::Value::Null),
             Some(proof) => serde_json::to_value(proof).map_err(|e| {
                 ErrorObjectOwned::owned(
                     -32603,
-                    format!("cannot encode the Graft payment proof: {e}"),
+                    format!("cannot encode the AppBinding payment proof: {e}"),
                     None::<()>,
                 )
             }),
@@ -2265,22 +2269,24 @@ impl BudlumApiServer for RpcServer {
         Ok(serde_json::json!({ "validators": rows }))
     }
 
-    async fn get_graft_application(
+    async fn get_app_binding_application(
         &self,
-        graft_id_hex: String,
+        app_binding_id_hex: String,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        let clean = graft_id_hex.strip_prefix("0x").unwrap_or(&graft_id_hex);
+        let clean = app_binding_id_hex
+            .strip_prefix("0x")
+            .unwrap_or(&app_binding_id_hex);
         let bytes = hex::decode(clean).map_err(|e| {
-            ErrorObjectOwned::owned(-32602, format!("invalid Graft id: {e}"), None::<()>)
+            ErrorObjectOwned::owned(-32602, format!("invalid AppBinding id: {e}"), None::<()>)
         })?;
-        let graft_id: [u8; 32] = bytes.try_into().map_err(|_| {
-            ErrorObjectOwned::owned(-32602, "Graft id must be 32 bytes", None::<()>)
+        let app_binding_id: [u8; 32] = bytes.try_into().map_err(|_| {
+            ErrorObjectOwned::owned(-32602, "AppBinding id must be 32 bytes", None::<()>)
         })?;
-        let Some(app) = self.chain.get_graft_application(graft_id).await else {
+        let Some(app) = self.chain.get_app_binding_application(app_binding_id).await else {
             return Ok(serde_json::Value::Null);
         };
         Ok(serde_json::json!({
-            "graftId": format!("0x{}", hex::encode(app.graft_id)),
+            "appBindingId": format!("0x{}", hex::encode(app.app_binding_id)),
             "owner": format!("0x{}", app.owner.to_hex()),
             "domainKey": app.domain_key,
             "originApp": format!("0x{}", hex::encode(app.origin_app)),
@@ -6212,8 +6218,8 @@ impl BudlumApiServer for RpcServer {
         Ok(serde_json::json!(apps))
     }
 
-    async fn budlumxyz_get_graft_apps(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
-        let apps = self.chain.budlumxyz_get_graft_apps().await;
+    async fn budlumxyz_get_app_binding_apps(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let apps = self.chain.budlumxyz_get_app_binding_apps().await;
         Ok(serde_json::json!(apps))
     }
 

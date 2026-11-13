@@ -22,7 +22,7 @@
 //!   the sender maps each frame to its symbol through `SegmentEncoder`.
 //! * The gate: live segments are enabled from genesis on testnet
 //!   (`ACTIVATION` holds `height: Some(0)`). `LiveContext::closed()`
-//!   exercises the pre-activation refusal (`bud3_live_is_closed_on_testnet`),
+//!   exercises the pre-activation refusal (`bud3_live_is_open_on_testnet`),
 //!   while `LiveContext::testnet(h)` admits bit1 objects at all heights `h`.
 //!
 //! WIRING: unwired - the block executor reaches live segments through the
