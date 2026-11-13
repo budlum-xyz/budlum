@@ -2035,17 +2035,26 @@ impl StorageRegistry {
         })
     }
 
-    /// True when `claimant` has funded an operator-consented storage custody
+    /// True when `claimant` holds a live, operator-consented storage custody
     /// deal on `content_id`. Opening a deal requires storage-operator shard
     /// consent signatures (`DealConsent`) and locked escrow, whereas a bare
     /// `RegisterManifest` on a content-addressed `manifest_id` excludes `owner`
     /// and can be copied from the mempool by anyone.
+    ///
+    /// A lapsed (`Expired`) deal is deliberately excluded. Its escrow is
+    /// settled, its bond is returned, and no challenge can be opened against it
+    /// any more, so it no longer proves that the claimant holds the bytes.
+    /// Deal rows are never deleted (`expire_deal` only flips the status and
+    /// `prune_content` only flips live rows), so counting history here let one
+    /// finished deal by a stranger contest the id for the life of the chain:
+    /// `owner_of` returned `None` and every door behind `has_proven_ownership`
+    /// closed for the real owner.
     #[must_use]
     pub(crate) fn has_custody_deal(&self, content_id: &ContentId, claimant: &Address) -> bool {
         *claimant != Address::zero()
             && self.deals.values().any(|d| {
                 d.manifest_id == *content_id
-                    && matches!(d.status, DealStatus::Active | DealStatus::Expired)
+                    && matches!(d.status, DealStatus::Active)
                     && d.payer == Some(*claimant)
             })
     }
@@ -10021,6 +10030,63 @@ mod tests {
         );
         assert!(!reg.can_prune_on_nft_burn(&alice_manifest.manifest_id, &mallory));
         assert!(!reg.can_prune_on_nft_burn(&alice_manifest.manifest_id, &alice));
+    }
+
+    /// A lapsed deal proves nothing, and nothing ever deletes a deal row.
+    ///
+    /// `has_custody_deal` used to count `DealStatus::Expired`, and `expire_deal`
+    /// only flips the status while `prune_content` only flips live rows. One
+    /// finished deal by a stranger therefore made `owner_of` answer `None` for
+    /// the life of the chain, and every door behind `has_proven_ownership`
+    /// (view grants, key rotation, burn-driven deletion, asset listing) closed
+    /// for the real owner. The competing deal cannot even be challenged: a
+    /// non-`Active` deal is refused by `open_challenge`.
+    #[test]
+    fn a_lapsed_custody_deal_stops_contesting_the_owner() {
+        let mut reg = StorageRegistry::new();
+        let alice = Address::from([0xA1; 32]);
+        let mallory = Address::from([0xB2; 32]);
+        let alice_manifest = good_manifest();
+        let manifest_id = alice_manifest.manifest_id;
+        reg.register_manifest(&alice_manifest);
+        reg.record_test_custody_for_manifest(&alice_manifest, alice);
+        assert_eq!(reg.owner_of(&manifest_id), Some(alice));
+
+        // Mallory registers a competing claim and backs it with a deal that
+        // then lapses: the contest must end with the deal.
+        let mut mallory_manifest = alice_manifest.clone();
+        mallory_manifest.owner = mallory;
+        reg.register_manifest(&mallory_manifest);
+        let mallory_deal = reg
+            .open_deal(
+                4242,
+                &mallory_manifest,
+                alice_manifest.shards[0].shard_id,
+                Address::from([0xFE; 32]),
+                0,
+                10,
+                20,
+                good_econ(),
+                &params(),
+                Some(valid_merkle_proof()),
+                Some([0x42u8; 32]),
+            )
+            .unwrap();
+        reg.set_deal_payer(mallory_deal, mallory);
+        assert_eq!(
+            reg.owner_of(&manifest_id),
+            None,
+            "a live competing custody deal still contests the id"
+        );
+        assert!(!reg.can_prune_on_nft_burn(&manifest_id, &alice));
+
+        reg.expire_deal(mallory_deal, 21).unwrap();
+        assert_eq!(
+            reg.owner_of(&manifest_id),
+            Some(alice),
+            "a lapsed deal must not contest the id after its escrow has settled"
+        );
+        assert!(reg.can_prune_on_nft_burn(&manifest_id, &alice));
     }
 
     #[test]
