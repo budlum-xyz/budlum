@@ -206,6 +206,12 @@ fn inst_key(contract: &[u8; 32]) -> Vec<u8> {
     k
 }
 
+fn owner_key(contract: &[u8; 32]) -> Vec<u8> {
+    let mut k = b"owner:".to_vec();
+    k.extend_from_slice(contract);
+    k
+}
+
 fn nonce_key(account: &[u8; 32]) -> Vec<u8> {
     let mut k = b"nonce:".to_vec();
     k.extend_from_slice(account);
@@ -548,9 +554,19 @@ impl ExecutionEnvironment for CairoWorker {
                     return Ok(ee_reverted(b"CLASS_NOT_DECLARED".to_vec(), gas_used));
                 };
                 let addr = derive_starknet_contract_address(&caller_felt, &salt, &class_hash);
+                match host.read(&ns, &inst_key(&addr)) {
+                    Ok(Some(_)) => {
+                        return Ok(ee_reverted(b"CONTRACT_ALREADY_DEPLOYED".to_vec(), gas_used));
+                    }
+                    Ok(None) => {}
+                    Err(_) => return Ok(ee_reverted(b"deploy read err".to_vec(), gas_used)),
+                }
                 if host
                     .write(&ns, &inst_key(&addr), Some(&class_hash))
                     .is_err()
+                    || host
+                        .write(&ns, &owner_key(&addr), Some(&caller_felt))
+                        .is_err()
                 {
                     return Ok(ee_reverted(b"deploy write err".to_vec(), gas_used));
                 }
@@ -568,6 +584,26 @@ impl ExecutionEnvironment for CairoWorker {
                 }
             }
             CairoAction::InvokeAccount { calls, nonce } => {
+                // This compact Cairo model has no contract-side caller or
+                // signature syscall. Until it does, bind each deployed
+                // instance to its recorded deployer and reject all other
+                // callers before consuming nonce or running caller-supplied
+                // entrypoint calldata.
+                for c in &calls {
+                    match host.read(&ns, &owner_key(&c.contract_address)) {
+                        Ok(Some(owner)) if owner.as_slice() == caller_felt.as_slice() => {}
+                        Ok(Some(_)) => {
+                            return Ok(ee_reverted(
+                                b"CALLER_NOT_CONTRACT_OWNER".to_vec(),
+                                gas_used,
+                            ));
+                        }
+                        Ok(None) => {
+                            return Ok(ee_reverted(b"CONTRACT_NOT_FOUND".to_vec(), gas_used));
+                        }
+                        Err(_) => return Ok(ee_reverted(b"owner read err".to_vec(), gas_used)),
+                    }
+                }
                 // `__validate__`: bound directly to caller's post-quantum Budlum alias + nonce.
                 if let Err(reason) = bump_account_nonce(host, &caller_felt, nonce) {
                     return Ok(ee_reverted(reason.to_vec(), gas_used));
@@ -880,6 +916,40 @@ mod tests {
         let Ok(contract_address) = <[u8; 32]>::try_from(dep_out.output.as_slice()) else {
             panic!("contract_address");
         };
+
+        // A different authenticated alias cannot replay an entrypoint against
+        // this deployed instance; rejection happens before entrypoint writes.
+        let Ok(attacker) = EeIdentity::new(EeId::CAIRO, vec![0xEF; 32]) else {
+            panic!("attacker");
+        };
+        let Ok(attack_input) = serde_json::to_vec(&CairoAction::InvokeAccount {
+            calls: vec![StarknetCall {
+                contract_address,
+                entrypoint: "increase_balance".to_string(),
+                calldata: Vec::new(),
+            }],
+            nonce: 0,
+        }) else {
+            panic!("attack_input");
+        };
+        let Ok(attack_out) = worker.execute(
+            &active_ctx(),
+            &EeCall {
+                kind: EeCallKind::Call,
+                caller: attacker.clone(),
+                target: attacker,
+                value: BudAmount(0),
+                input: attack_input,
+                gas_limit: 1_000_000,
+                depth: 0,
+                tx_hash: [0x24; 32],
+            },
+            &mut host,
+        ) else {
+            panic!("attack execution");
+        };
+        assert_eq!(attack_out.status, OutcomeStatus::Revert);
+        assert_eq!(attack_out.output, b"CALLER_NOT_CONTRACT_OWNER");
 
         // 3. `sncast invoke` (`nonce = 2`): `increase_balance` (+7 -> 42) + `get_balance`.
         let Ok(inv_in) = serde_json::to_vec(&CairoAction::InvokeAccount {

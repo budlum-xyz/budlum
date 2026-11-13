@@ -12,6 +12,7 @@ use budlum_uel_abi::{
     EeQuery, EeRefusal, ExecutionEnvironment, HostApi, HostRead, Namespace, OutcomeStatus,
     RefusalCode,
 };
+use k256::ecdsa::{signature::hazmat::PrehashVerifier, Signature, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
@@ -144,6 +145,26 @@ fn derive_utxo_id(caller: &[u8], tx_hash: &[u8; 32]) -> [u8; 32] {
     h.finalize().into()
 }
 
+/// Digest signed by UTXO multisig witnesses. It binds the signature to the
+/// authenticated transaction hash, consumed outpoint, caller identity, and
+/// selected payout recipient so proofs cannot be replayed across spends.
+#[must_use]
+pub fn utxo_multisig_sighash(
+    tx_hash: &[u8; 32],
+    utxo_id: &[u8; 32],
+    spender: &[u8],
+    recipient: &[u8; 32],
+) -> [u8; 32] {
+    let mut h = Sha256::new();
+    h.update(b"BDLM_UTXO_MULTISIG_SIGHASH_V1");
+    h.update(tx_hash);
+    h.update(utxo_id);
+    h.update((spender.len() as u64).to_le_bytes());
+    h.update(spender);
+    h.update(recipient);
+    h.finalize().into()
+}
+
 fn ee_wire_fault(err: impl std::fmt::Display) -> EeFault {
     let msg = err.to_string();
     EeFault {
@@ -170,7 +191,7 @@ fn eval_script(
     ctx: &BlockContext,
     unlock_ops: &[ScriptOp],
     lock_ops: &[ScriptOp],
-    tx_hash: &[u8; 32],
+    sighash: &[u8; 32],
     gas_used: &mut u64,
     gas_limit: u64,
     host: &mut dyn HostApi,
@@ -255,17 +276,33 @@ fn eval_script(
                     return Err(b"invalid multisig threshold".to_vec());
                 }
                 let mut verified = 0usize;
-                for pk in pubkeys {
-                    let Some(sig) = stack.pop() else {
+                let mut next_pubkey = 0usize;
+                for _ in 0..*threshold {
+                    let Some(sig_bytes) = stack.pop() else {
                         break;
                     };
-                    let mut h = Sha256::new();
-                    h.update(b"BDLM_UTXO_SIG_COMMIT_V1");
-                    h.update(pk);
-                    h.update(tx_hash);
-                    let expected: [u8; 32] = h.finalize().into();
-                    if sig == expected {
-                        verified += 1;
+                    let Ok(signature) = Signature::from_slice(&sig_bytes) else {
+                        continue;
+                    };
+                    // Reject malleable high-S signatures so each signer has a
+                    // single canonical witness representation.
+                    if signature.normalize_s().is_some() {
+                        continue;
+                    }
+                    let mut matched = false;
+                    while let Some(pk_bytes) = pubkeys.get(next_pubkey) {
+                        next_pubkey += 1;
+                        let Ok(key) = VerifyingKey::from_sec1_bytes(pk_bytes) else {
+                            continue;
+                        };
+                        if key.verify_prehash(sighash, &signature).is_ok() {
+                            verified += 1;
+                            matched = true;
+                            break;
+                        }
+                    }
+                    if !matched {
+                        break;
                     }
                 }
                 stack.push(if verified >= *threshold {
@@ -433,11 +470,13 @@ impl ExecutionEnvironment for UtxoScriptWorker {
             });
         };
 
+        let sighash =
+            utxo_multisig_sighash(&call.tx_hash, &utxo_id, &call.caller.id, &witness.recipient);
         if let Err(err) = eval_script(
             ctx,
             &witness.unlock_ops,
             &lock.lock_ops,
-            &call.tx_hash,
+            &sighash,
             &mut gas_used,
             call.gas_limit,
             host,
@@ -681,5 +720,115 @@ mod tests {
             panic!("query");
         };
         assert_eq!(q_bytes, vec![1]);
+    }
+
+    #[test]
+    fn multisig_requires_a_real_signature_bound_to_outpoint_spender_and_recipient() {
+        use k256::ecdsa::{signature::hazmat::PrehashSigner, SigningKey};
+
+        let Ok(signing_key) = SigningKey::from_bytes((&[7u8; 32]).into()) else {
+            panic!("signing key");
+        };
+        let pubkey = signing_key
+            .verifying_key()
+            .to_encoded_point(true)
+            .as_bytes()
+            .to_vec();
+        let lock = UtxoLockScript {
+            witness_ops: Vec::new(),
+            lock_ops: vec![ScriptOp::OpCheckMultiSigHash {
+                threshold: 1,
+                pubkeys: vec![pubkey],
+            }],
+            value_atoms: 100,
+        };
+        let Ok(blob) = encode_utxo_script(&lock) else {
+            panic!("encode");
+        };
+        let mut worker = UtxoScriptWorker::new();
+        let mut host = MemoryHost::new(1_000_000);
+        let Ok(caller) = EeIdentity::new(EeId::UTXO, vec![0x41; 32]) else {
+            panic!("caller");
+        };
+        let Ok(deploy) = worker.execute(
+            &ctx(1),
+            &EeCall {
+                kind: EeCallKind::Deploy,
+                caller: caller.clone(),
+                target: caller.clone(),
+                value: budlum_uel_abi::BudAmount(0),
+                input: blob,
+                gas_limit: 100_000,
+                depth: 0,
+                tx_hash: [0x11; 32],
+            },
+            &mut host,
+        ) else {
+            panic!("deploy");
+        };
+        assert_eq!(deploy.status, OutcomeStatus::Success);
+        let Ok(utxo_id) = <[u8; 32]>::try_from(deploy.output.as_slice()) else {
+            panic!("utxo id");
+        };
+        let spend_tx = [0x22; 32];
+        let recipient = [0x52; 32];
+        let sighash = utxo_multisig_sighash(&spend_tx, &utxo_id, &caller.id, &recipient);
+        let Ok(signature): Result<Signature, _> = signing_key.sign_prehash(&sighash) else {
+            panic!("sign");
+        };
+        let Ok(target) = EeIdentity::new(EeId::UTXO, utxo_id.to_vec()) else {
+            panic!("target");
+        };
+
+        // The formerly public hash commitment is not an ECDSA signature.
+        let fake_sig = Sha256::digest(b"attacker chosen").to_vec();
+        let Ok(fake_witness) = serde_json::to_vec(&UtxoSpendWitness {
+            unlock_ops: vec![ScriptOp::PushBytes(fake_sig)],
+            recipient,
+        }) else {
+            panic!("fake witness");
+        };
+        let Ok(fake_spend) = worker.execute(
+            &ctx(2),
+            &EeCall {
+                kind: EeCallKind::Call,
+                caller: caller.clone(),
+                target: target.clone(),
+                value: budlum_uel_abi::BudAmount(0),
+                input: fake_witness,
+                gas_limit: 100_000,
+                depth: 0,
+                tx_hash: spend_tx,
+            },
+            &mut host,
+        ) else {
+            panic!("fake spend");
+        };
+        assert_eq!(fake_spend.status, OutcomeStatus::Revert);
+
+        let Ok(valid_witness) = serde_json::to_vec(&UtxoSpendWitness {
+            unlock_ops: vec![ScriptOp::PushBytes(signature.to_bytes().to_vec())],
+            recipient,
+        }) else {
+            panic!("valid witness");
+        };
+        let Ok(valid_spend) = worker.execute(
+            &ctx(2),
+            &EeCall {
+                kind: EeCallKind::Call,
+                caller,
+                target,
+                value: budlum_uel_abi::BudAmount(0),
+                input: valid_witness,
+                gas_limit: 100_000,
+                depth: 0,
+                tx_hash: spend_tx,
+            },
+            &mut host,
+        ) else {
+            panic!("valid spend");
+        };
+        assert_eq!(valid_spend.status, OutcomeStatus::Success);
+        assert_eq!(valid_spend.output, recipient.to_vec());
     }
 }
