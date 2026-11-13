@@ -2192,6 +2192,124 @@ impl AccountState {
                     return Err("Validator is not active".into());
                 }
             }
+            TransactionType::BnsCreateOffer => {
+                if tx.amount != 0 || tx.to != Address::zero() {
+                    return Err("BNS create offer requires zero amount and recipient".into());
+                }
+                let req: crate::pollen::CreateNameOffer = bincode::deserialize(&tx.data)
+                    .map_err(|e| format!("Invalid BNS create offer data: {e}"))?;
+                if !crate::bns::BnsRegistry::is_valid_name(&req.name) {
+                    return Err(
+                        "Invalid BNS name: expected <label>.bud with 3..=32 characters".into(),
+                    );
+                }
+                if req.price_atoms == 0 {
+                    return Err("BNS offer price_atoms must be greater than zero".into());
+                }
+                if req.expires_at_epoch <= self.epoch_index {
+                    return Err("BNS offer expires_at_epoch must be in the future".into());
+                }
+                match req.kind {
+                    crate::pollen::OfferKind::Primary => {
+                        if req.duration == 0 || self.epoch_index.checked_add(req.duration).is_none()
+                        {
+                            return Err(
+                                "Primary BNS offer duration must be positive and non-overflowing"
+                                    .into(),
+                            );
+                        }
+                        if !self.bns_registry.is_primary_seller(&tx.from) {
+                            return Err(
+                                "Only authorized BNS primary sellers can open Primary offers"
+                                    .into(),
+                            );
+                        }
+                        if !self
+                            .bns_registry
+                            .is_available_for_primary(&req.name, self.epoch_index)
+                        {
+                            return Err(
+                                "Name is already live or in grace and cannot be listed as Primary"
+                                    .into(),
+                            );
+                        }
+                    }
+                    crate::pollen::OfferKind::Resale => {
+                        if !self.bns_registry.is_live_owned_by(
+                            &req.name,
+                            &tx.from,
+                            self.epoch_index,
+                        ) {
+                            return Err(
+                                "Resale BNS offer requires a live name owned by the seller".into(),
+                            );
+                        }
+                    }
+                }
+            }
+            TransactionType::BnsCancelOffer => {
+                if tx.amount != 0 || tx.to != Address::zero() {
+                    return Err("BNS cancel offer requires zero amount and recipient".into());
+                }
+                let offer_id: u64 = bincode::deserialize(&tx.data)
+                    .map_err(|e| format!("Invalid BNS cancel offer data: {e}"))?;
+                let offer = self
+                    .marketplace
+                    .get_name_offer(offer_id)
+                    .ok_or_else(|| "BNS offer not found".to_string())?;
+                if !offer.active {
+                    return Err("BNS offer is already closed".into());
+                }
+                if offer.seller != tx.from {
+                    return Err("Only the offer seller can cancel this BNS offer".into());
+                }
+            }
+            TransactionType::BnsBuyName => {
+                if tx.amount == 0 || tx.to != Address::zero() {
+                    return Err(
+                        "BNS buy name requires a positive payment and zero header recipient".into(),
+                    );
+                }
+                let offer_id: u64 = bincode::deserialize(&tx.data)
+                    .map_err(|e| format!("Invalid BNS buy name data: {e}"))?;
+                let offer = self
+                    .marketplace
+                    .get_name_offer(offer_id)
+                    .ok_or_else(|| "BNS offer not found".to_string())?;
+                if !offer.active || self.epoch_index >= offer.expires_at_epoch {
+                    return Err("BNS offer is inactive or expired".into());
+                }
+                if tx.amount != offer.price_atoms {
+                    return Err(format!(
+                        "BNS buy name requires exact offer payment: {} != {}",
+                        tx.amount, offer.price_atoms
+                    ));
+                }
+                match offer.kind {
+                    crate::pollen::OfferKind::Primary => {
+                        if !self
+                            .bns_registry
+                            .is_available_for_primary(&offer.name, self.epoch_index)
+                        {
+                            return Err(
+                                "Primary BNS offer target name is no longer available".into()
+                            );
+                        }
+                    }
+                    crate::pollen::OfferKind::Resale => {
+                        if !self.bns_registry.is_live_owned_by(
+                            &offer.name,
+                            &offer.seller,
+                            self.epoch_index,
+                        ) {
+                            return Err(
+                                "Resale BNS offer target name is no longer live or owned by seller"
+                                    .into(),
+                            );
+                        }
+                    }
+                }
+            }
             TransactionType::BnsRenew => {
                 if tx.amount == 0 || tx.to != Address::zero() {
                     return Err("BNS renewal requires a positive payment and zero recipient".into());
@@ -3576,6 +3694,18 @@ impl AccountState {
                 tracing::info!(
                     "Executing Governance: ResetConsensusDomainTip {domain_id} queued for Blockchain registry"
                 );
+            }
+            ProposalType::BnsSetPrimarySellers { sellers } => {
+                match self
+                    .bns_registry
+                    .set_primary_sellers(sellers.iter().copied())
+                {
+                    Ok(()) => tracing::info!(
+                        "Executing Governance: BNS primary sellers updated ({} entries)",
+                        sellers.len()
+                    ),
+                    Err(e) => tracing::warn!("Rejecting BnsSetPrimarySellers: {e}"),
+                }
             }
         }
     }

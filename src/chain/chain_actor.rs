@@ -523,6 +523,14 @@ pub enum ChainCommand {
         duration: u64,
         response: oneshot::Sender<u64>,
     },
+    BnsGetOffer {
+        offer_id: u64,
+        response: oneshot::Sender<(Option<crate::pollen::NameOffer>, u64)>,
+    },
+    BnsListOffers {
+        kind: Option<crate::pollen::OfferKind>,
+        response: oneshot::Sender<Vec<crate::pollen::NameOffer>>,
+    },
     NftGet {
         id: u64,
         response: oneshot::Sender<Option<crate::socialfi::types::Nft>>,
@@ -2392,6 +2400,30 @@ impl ChainHandle {
         rx.await.unwrap_or(0)
     }
 
+    pub async fn bns_get_offer(&self, offer_id: u64) -> (Option<crate::pollen::NameOffer>, u64) {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::BnsGetOffer {
+                offer_id,
+                response: tx,
+            })
+            .await;
+        rx.await.unwrap_or((None, 0))
+    }
+
+    pub async fn bns_list_offers(
+        &self,
+        kind: Option<crate::pollen::OfferKind>,
+    ) -> Vec<crate::pollen::NameOffer> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::BnsListOffers { kind, response: tx })
+            .await;
+        rx.await.unwrap_or_default()
+    }
+
     pub async fn nft_get(&self, id: u64) -> Option<crate::socialfi::types::Nft> {
         let (tx, rx) = oneshot::channel();
         let _ = self
@@ -3931,6 +3963,24 @@ impl ChainActor {
                             .bns_registry
                             .calculate_cost(&name, duration),
                     );
+                }
+                ChainCommand::BnsGetOffer { offer_id, response } => {
+                    let offer = self
+                        .blockchain
+                        .state
+                        .marketplace
+                        .get_name_offer(offer_id)
+                        .cloned();
+                    let _ = response.send((offer, self.blockchain.state.epoch_index));
+                }
+                ChainCommand::BnsListOffers { kind, response } => {
+                    let epoch = self.blockchain.state.epoch_index;
+                    let offers = self
+                        .blockchain
+                        .state
+                        .marketplace
+                        .list_active_name_offers(epoch, kind);
+                    let _ = response.send(offers);
                 }
                 ChainCommand::NftGet { id, response } => {
                     let _ = response.send(self.blockchain.state.nft_registry.get_nft(id).cloned());
