@@ -63,6 +63,56 @@ pub fn send_raw_transaction(signed_json: &str) -> String {
     request("bud_sendRawTransaction", &format!("[{signed_json}]"), 1)
 }
 
+/// `bud_bnsResolve` of a validated `<label>.bud` or `<sub_label>.<label>.bud` name.
+///
+/// # Errors
+///
+/// Refuses malformed or non-`.bud` names before constructing the RPC body.
+pub fn bns_resolve(name: &str) -> Result<String, String> {
+    if !crate::bns::is_valid_resolvable_bud_name(name) {
+        return Err(format!("invalid .bud name '{name}'"));
+    }
+    let escaped = json_escape_str(name);
+    Ok(request("bud_bnsResolve", &format!("[\"{escaped}\"]"), 1))
+}
+
+/// `bud_bnsResolveFull` of a validated `<label>.bud` name.
+///
+/// # Errors
+///
+/// Refuses malformed or non-`.bud` names before constructing the RPC body.
+pub fn bns_resolve_full(name: &str) -> Result<String, String> {
+    if !crate::bns::is_valid_bud_name(name) {
+        return Err(format!("invalid .bud name '{name}'"));
+    }
+    let escaped = json_escape_str(name);
+    Ok(request(
+        "bud_bnsResolveFull",
+        &format!("[\"{escaped}\"]"),
+        1,
+    ))
+}
+
+/// `bud_bnsGetProof` of a validated `<label>.bud` name.
+///
+/// # Errors
+///
+/// Refuses malformed or non-`.bud` names before constructing the RPC body.
+pub fn bns_get_proof(name: &str) -> Result<String, String> {
+    if !crate::bns::is_valid_bud_name(name) {
+        return Err(format!("invalid .bud name '{name}'"));
+    }
+    let escaped = json_escape_str(name);
+    Ok(request("bud_bnsGetProof", &format!("[\"{escaped}\"]"), 1))
+}
+
+/// `bud_bnsReverseResolve` of a hex address.
+#[must_use]
+pub fn bns_reverse_resolve(address_hex: &str) -> String {
+    let address = json_escape_str(strip_hex_prefix(address_hex));
+    request("bud_bnsReverseResolve", &format!("[\"{address}\"]"), 1)
+}
+
 /// Locate a top-level JSON object key outside nested objects, arrays, and
 /// string literals, returning the trimmed slice starting at its value.
 fn top_level_value<'a>(answer: &'a str, key: &str) -> Option<&'a str> {
@@ -118,7 +168,7 @@ fn top_level_value<'a>(answer: &'a str, key: &str) -> Option<&'a str> {
 }
 
 /// Read a string or scalar token from the start of a JSON value slice.
-fn read_scalar_or_string<'a>(rest: &'a str) -> Option<&'a str> {
+fn read_scalar_or_string(rest: &str) -> Option<&str> {
     if let Some(quoted) = rest.strip_prefix('"') {
         let bytes = quoted.as_bytes();
         let mut i = 0usize;
@@ -189,6 +239,47 @@ pub fn quantity_result(answer: &str) -> Result<u64, String> {
     .map_err(|e| format!("the result '{text}' is not a number: {e}"))
 }
 
+/// Parse a `bud_bnsResolve` JSON-RPC answer into `Ok(None)` (`"result": null`)
+/// or a non-zero 32-byte recipient address (`"result": "0x<64hex>"`).
+///
+/// # Errors
+///
+/// Refuses RPC error responses, malformed hex, or the zero address.
+pub fn optional_address_result(answer: &str) -> Result<Option<[u8; 32]>, String> {
+    let text = string_result(answer)?;
+    if text == "null" {
+        return Ok(None);
+    }
+    let clean = strip_hex_prefix(&text);
+    if clean.len() != 64 {
+        return Err(format!("resolved address '{text}' is not 32 bytes"));
+    }
+    let bytes = hex::decode(clean).map_err(|e| format!("invalid resolved address hex: {e}"))?;
+    let mut addr = [0u8; 32];
+    addr.copy_from_slice(&bytes);
+    if addr == [0u8; 32] {
+        return Err("resolved BNS target cannot be the zero address".into());
+    }
+    Ok(Some(addr))
+}
+
+/// Parse a `bud_bnsReverseResolve` JSON-RPC answer into `Ok(None)` (`"result": null`)
+/// or a syntax-validated `<label>.bud` primary name.
+///
+/// # Errors
+///
+/// Refuses RPC error responses or any returned string that violates `.bud` label rules.
+pub fn optional_bud_name_result(answer: &str) -> Result<Option<String>, String> {
+    let text = string_result(answer)?;
+    if text == "null" {
+        return Ok(None);
+    }
+    if !crate::bns::is_valid_bud_name(&text) {
+        return Err(format!("RPC returned invalid reverse .bud name '{text}'"));
+    }
+    Ok(Some(text))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -239,5 +330,45 @@ mod tests {
             !body.contains("\"method\":\"bud_admin\""),
             "escaped address parameter must never break out of the params string literal"
         );
+    }
+
+    #[test]
+    fn bns_rpc_builders_and_readers_validate_bud_rules_and_reject_zero_or_spoofed_answers() {
+        assert_eq!(
+            bns_resolve("ayaz.bud").unwrap(),
+            "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"bud_bnsResolve\",\"params\":[\"ayaz.bud\"]}"
+        );
+        assert!(bns_resolve("pay.ayaz.bud").is_ok());
+        assert!(bns_resolve("ab.bud").is_err());
+        assert!(bns_get_proof("ayaz.bud").is_ok());
+        assert!(bns_get_proof("pay.ayaz.bud").is_err());
+
+        let addr_ans = format!(
+            "{{\"jsonrpc\":\"2.0\",\"result\":\"0x{}\",\"id\":1}}",
+            "55".repeat(32)
+        );
+        assert_eq!(
+            optional_address_result(&addr_ans).unwrap(),
+            Some([0x55; 32])
+        );
+        assert_eq!(
+            optional_address_result("{\"jsonrpc\":\"2.0\",\"result\":null,\"id\":1}").unwrap(),
+            None
+        );
+        let zero_ans = format!(
+            "{{\"jsonrpc\":\"2.0\",\"result\":\"0x{}\",\"id\":1}}",
+            "00".repeat(32)
+        );
+        assert!(optional_address_result(&zero_ans).is_err());
+
+        assert_eq!(
+            optional_bud_name_result("{\"jsonrpc\":\"2.0\",\"result\":\"ayaz.bud\",\"id\":1}")
+                .unwrap(),
+            Some("ayaz.bud".to_string())
+        );
+        assert!(optional_bud_name_result(
+            "{\"jsonrpc\":\"2.0\",\"result\":\"Spoof.bud\",\"id\":1}"
+        )
+        .is_err());
     }
 }
