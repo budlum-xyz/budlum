@@ -93,6 +93,13 @@
     `BnsInclusionProof::PerName` to produce `Strength::Verified` against
     `bns_v1` while refusing expired or forged proofs, and exposes
     `bud_bnsGetProof` and `bud bns proof --name`.
+  - **B10 (`wallet-core` `.bud` recipient validation and proof-verified transfers):**
+    adds `crates/wallet-core/src/bns.rs` (`parse_recipient_input`,
+    `WalletBnsProof`, `verify_bns_recipient_proof` authenticating custom
+    `record.address` via `BDLM_BNS_EXTRAS_V1` + `BDLM_BNS_LEAF_V1` +
+    `BDLM_BNS_REGISTRY_V3`), `UnsignedTransfer::to_verified_bud_recipient`, and
+    transport-free `bud_bns{Resolve,ResolveFull,GetProof,ReverseResolve}` JSON-RPC
+    builders/readers in `crates/wallet-core/src/rpc.rs`.
 
 ## Current behaviour (locked by tests)
 
