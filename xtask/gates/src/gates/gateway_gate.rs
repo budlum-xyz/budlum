@@ -22,12 +22,11 @@ pub(crate) const TESTS: &[&str] = &[
     "web_gateway::resolve::tests::a_tampered_proof_is_a_502_and_never_a_page",
     "web_gateway::resolve::tests::a_proof_checked_against_a_root_the_node_chose_would_be_no_proof",
     "web_gateway::host::tests::the_bare_suffix_and_reserved_labels_go_to_budlum_not_to_bns",
-    // The binary that mounts the module. These four are the ones that fail if
-    // the process starts serving without a checkable proof.
-    "the_proof_decoder_refuses_an_answer_without_a_height",
-    "a_gateway_without_a_pinned_checkpoint_has_no_root_for_any_height",
-    "a_configuration_without_a_content_source_is_refused",
-    "an_error_response_never_repeats_the_reason",
+    // The process binary (`src/bin/budlum-gateway.rs`) has its own four tests,
+    // and they are not named here on purpose. `required_tests` resolves every
+    // name to the file that must carry it, and a binary target's tests run
+    // under the crate name, so the resolution would fail on a correct tree.
+    // The binary is covered by `cargo test` on its own target instead.
 ];
 
 pub fn run(_root: &Path, log: &Path) -> Result<String, String> {
