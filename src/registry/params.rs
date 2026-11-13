@@ -69,6 +69,15 @@ pub const MAX_DURATION: u64 = 365_000;
 /// Maximum live or grace-period `.bud` names a single address may hold at once.
 pub const MAX_NAMES_PER_OWNER: usize = 64;
 
+/// Maximum key-value text/profile/multi-chain records stored on one `.bud` name.
+pub const MAX_RECORDS_PER_NAME: usize = 32;
+
+/// Maximum ASCII byte length of a `.bud` record key (e.g. `avatar`, `com.github`, `addr.eth`).
+pub const MAX_RECORD_KEY_LEN: usize = 64;
+
+/// Maximum UTF-8 byte length of a `.bud` record value.
+pub const MAX_RECORD_VALUE_BYTES: usize = 512;
+
 /// Economic / timing parameters that gate participation and slashing.
 ///
 /// `*_slash_ratio_fixed` values are `FIXED_POINT_SCALE`-scaled fractions in
