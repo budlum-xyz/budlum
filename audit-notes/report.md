@@ -68,6 +68,7 @@ Tam kayit: `audit-notes/findings/`.
 | B-0002 | `src/bns/registry.rs` | orta | `is_valid_label` ozeldi, ag gecidi ayni tabloyu kopyalamak zorundaydi | cozuldu, `f0ee157e` |
 | B-0003 | `src/gateway/mod.rs` | orta | yeni modul public yuzey sunuyor ama calisan hicbir ikili onu cagirmiyor | kayitli, `WIRING: unwired` |
 | B-0004 | `src/rpc/server.rs` | yuksek | RPC kanit yaniti `leaf_index`, `tree_size` ve `extras` alanlarini yazmiyordu; duzeltme telde etkisizdi | cozuldu, `bd1e6a79` |
+| B-0005 | `crates/wallet-core/src/bns.rs` | yuksek | cuzdan kaniti kok ve epoch'u cagirandan aliyor; crate icinde baslik dogrulamasi yok | acik, tasarim `ip-11` icinde |
 
 B-0003 bir hata degil, bir durumdur. Direktifin kurali: bir yetenek modulu ya
 bir yerden cagrilir ya da cagrilmadigini yazar. Modul yazdi.
