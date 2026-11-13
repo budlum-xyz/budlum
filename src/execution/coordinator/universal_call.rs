@@ -18,6 +18,128 @@ pub const EVM_UNIVERSAL_PRECOMPILE: [u8; 20] = [
     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xB0, 0x01,
 ];
 
+/// Canonical 20-byte EVM Universal Object Layer (UOL) precompile address (`0x...B002`).
+pub const EVM_UOL_PRECOMPILE: [u8; 20] = [
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xB0, 0x02,
+];
+
+/// Decoded ABI selector for `0x...B002` UOL calls (`Section 9.4`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DecodedUolPrecompileCall {
+    BalanceOf {
+        class_id: [u8; 32],
+        holder: Vec<u8>,
+    },
+    HolderOf {
+        asset_id: [u8; 32],
+    },
+    Transfer {
+        class_id: [u8; 32],
+        asset_id: [u8; 32],
+        to: Vec<u8>,
+        amount: u128,
+    },
+    Offer {
+        class_id: [u8; 32],
+        asset_id: [u8; 32],
+        taker: Vec<u8>,
+        payment: Vec<u8>,
+        amount: u128,
+        expiry: u64,
+    },
+    Accept {
+        offer_id: [u8; 32],
+    },
+}
+
+/// Derive a canonical 4-byte ABI selector for a UOL precompile signature.
+///
+/// Convenience: exposed for external ABI encoders calling `0x...B002`.
+#[must_use]
+pub fn uol_selector(sig: &str) -> [u8; 4] {
+    let digest: [u8; 32] = Keccak256::digest(sig.as_bytes()).into();
+    [digest[0], digest[1], digest[2], digest[3]]
+}
+
+/// Decodes `0x...B002` Universal Object Layer precompile calldata (`balanceOf`,
+/// `holderOf`, `transfer`, `offer`, `accept`).
+///
+/// Convenience: exposed for EVM UOL precompile dispatch and inspection callers.
+///
+/// # Errors
+///
+/// Returns an error string if the selector is unknown or ABI words are malformed.
+pub fn decode_uol_precompile_calldata(calldata: &[u8]) -> Result<DecodedUolPrecompileCall, String> {
+    let sel: [u8; 4] = calldata
+        .get(..4)
+        .and_then(|s| s.try_into().ok())
+        .ok_or_else(|| String::from("UOL calldata shorter than 4-byte selector"))?;
+    let args = &calldata[4..];
+    if sel == uol_selector("balanceOf(bytes32,bytes)") {
+        let w = read_word(args, 0)?;
+        let mut class_id = [0u8; 32];
+        class_id.copy_from_slice(w);
+        let holder = read_dyn_bytes(args, 32)?;
+        return Ok(DecodedUolPrecompileCall::BalanceOf { class_id, holder });
+    }
+    if sel == uol_selector("holderOf(bytes32)") {
+        let w = read_word(args, 0)?;
+        let mut asset_id = [0u8; 32];
+        asset_id.copy_from_slice(w);
+        return Ok(DecodedUolPrecompileCall::HolderOf { asset_id });
+    }
+    if sel == uol_selector("transfer(bytes32,bytes32,bytes,uint128)") {
+        let mut class_id = [0u8; 32];
+        class_id.copy_from_slice(read_word(args, 0)?);
+        let mut asset_id = [0u8; 32];
+        asset_id.copy_from_slice(read_word(args, 32)?);
+        let to = read_dyn_bytes(args, 64)?;
+        let amt_word = read_word(args, 96)?;
+        if amt_word.get(..16).is_some_and(|hi| hi.iter().any(|b| *b != 0)) {
+            return Err(String::from("ABI uint128 overflows 128 bits"));
+        }
+        let mut lo = [0u8; 16];
+        lo.copy_from_slice(&amt_word[16..32]);
+        let amount = u128::from_be_bytes(lo);
+        return Ok(DecodedUolPrecompileCall::Transfer {
+            class_id,
+            asset_id,
+            to,
+            amount,
+        });
+    }
+    if sel == uol_selector("offer(bytes32,bytes32,bytes,bytes,uint128,uint64)") {
+        let mut class_id = [0u8; 32];
+        class_id.copy_from_slice(read_word(args, 0)?);
+        let mut asset_id = [0u8; 32];
+        asset_id.copy_from_slice(read_word(args, 32)?);
+        let taker = read_dyn_bytes(args, 64)?;
+        let payment = read_dyn_bytes(args, 96)?;
+        let amt_word = read_word(args, 128)?;
+        if amt_word.get(..16).is_some_and(|hi| hi.iter().any(|b| *b != 0)) {
+            return Err(String::from("ABI uint128 overflows 128 bits"));
+        }
+        let mut lo = [0u8; 16];
+        lo.copy_from_slice(&amt_word[16..32]);
+        let amount = u128::from_be_bytes(lo);
+        let expiry = read_u64_word(args, 160)?;
+        return Ok(DecodedUolPrecompileCall::Offer {
+            class_id,
+            asset_id,
+            taker,
+            payment,
+            amount,
+            expiry,
+        });
+    }
+    if sel == uol_selector("accept(bytes32)") {
+        let mut offer_id = [0u8; 32];
+        offer_id.copy_from_slice(read_word(args, 0)?);
+        return Ok(DecodedUolPrecompileCall::Accept { offer_id });
+    }
+    Err(String::from("unknown 0x...B002 UOL precompile selector"))
+}
+
 /// BudZero `UNIVERSAL_CALL` syscall code (section 8.7.2).
 pub const BUDZERO_SYSCALL_UNIVERSAL_CALL: u8 = 0x40;
 

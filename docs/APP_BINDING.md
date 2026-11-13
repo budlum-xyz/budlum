@@ -8,9 +8,9 @@ on another network from inside Budlum and pay for it in BUD. The application
 does not move. Budlum holds a binding row for it, and every write is a signed
 in-block settlement transaction.
 
-Status: **closed on testnet** (`45261`, proven by `app_binding_is_closed_on_testnet`)
-pending Universal Object Layer activation; enabled on devnet (`45262`) for
-end-to-end verification. Values marked TESTNET-DEFAULT are genesis parameters.
+Status: **active on testnet** (`45261`) and **devnet** (`45262`) from genesis
+with Universal Object Layer activation; values marked TESTNET-DEFAULT are
+genesis parameters.
 
 ## 1. The application binding row
 

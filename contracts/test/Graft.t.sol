@@ -253,7 +253,7 @@ contract GraftTest is Harness {
         proof.path = new bytes32[](0);
         proof.paymentsRoot = receiver.paymentLeaf(proof.payment);
         proof.restHash = keccak256("rest");
-        proof.header.version = 7;
+        proof.header.version = 8;
         proof.header.timestampMs = uint128(block.timestamp) * 1000;
         proof.header.checkpointHeight = 20;
         proof.header.hasGraftRoot = true;
@@ -266,11 +266,11 @@ contract GraftTest is Harness {
         return bytes32(uint256(value) * (type(uint256).max / 255));
     }
 
-    /// Independent SHA-256/LE-length vectors for the payment leaf, V7 header,
+    /// Independent SHA-256/LE-length vectors for the payment leaf, V9 header,
     /// and state-root opening. Prior tests created their trusted state root
     /// with the same Solidity functions under test and could miss a shared
     /// Rust/Solidity encoding mismatch.
-    function test_payment_and_v7_header_match_independent_vectors() public {
+    function test_payment_and_v8_header_match_independent_vectors() public {
         Receiver receiver = new Receiver(new FinalityStub(), _word(1));
         GraftPayment memory payment = GraftPayment(
             _word(0x11),
@@ -291,7 +291,7 @@ contract GraftTest is Harness {
         );
 
         GlobalHeader memory header;
-        header.version = 7;
+        header.version = 8;
         header.globalHeight = 17;
         header.previousGlobalHash = _word(1);
         header.chainId = 45_261;
@@ -311,10 +311,10 @@ contract GraftTest is Harness {
         header.hasGraftRoot = true;
         header.graftRoot = _word(11);
         bytes32 headerHash = receiver.headerHash(header);
-        assertEq(headerHash, hex"8eeb903d12a692364ee51fb93faba8d120b121e4cb90430e2984b7dc874eb6e2", "V7 header fixture");
+        assertEq(headerHash, hex"570f166c9fc7b73b4fd2934964752678d7789ce7ece8da2552f7f184becd8151", "V9 header fixture");
         assertEq(
             receiver.stateRootFromOpening(_word(12), headerHash),
-            hex"ac3fa7a621e0b5186e35ec8ff0849f91825c3e88db79de9ddde1b110713bcbf6",
+            hex"7215039be4c3172fb04d6e331d2c77f62772e0223ed0ed6e53ee642cc426ce84",
             "state root opening fixture"
         );
     }

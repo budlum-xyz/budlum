@@ -691,14 +691,14 @@ mod tests {
                 s.esi
             );
         }
-        let far = enc.repair_symbols(20_000, 4).unwrap();
+        let far = enc.repair_symbols(65_000, 4).unwrap();
         assert!(far.iter().all(|s| s.esi > 255));
         assert!(far.iter().all(|s| s.esi > u32::from(u16::MAX)));
         // Independence, measured rather than asserted: the 4096 source symbols
         // and one repair symbol from the far end of the ESI space still build
         // the segment, so the far symbol carried new information and not a
         // repeat of a source symbol.
-        let far_one = enc.repair_symbols(20_000, 1).unwrap().remove(0);
+        let far_one = enc.repair_symbols(65_000, 1).unwrap().remove(0);
         let mut symbols = enc.source_symbols();
         let same_as_source = symbols.iter().any(|s| s.data == far_one.data);
         assert!(

@@ -1702,6 +1702,21 @@ fn execute_object_layer_tx(
         }
     }
     let height = state.current_block_height;
+    if let crate::object_layer::ObjectLayerTx::Charter { domain, .. } = tx {
+        let dom = state.settlement.domains.get(*domain).ok_or_else(|| {
+            SettlementTxError::Refused("object_layer_charter_domain_missing".into())
+        })?;
+        if !dom.is_active() {
+            return Err(SettlementTxError::Refused(
+                "object_layer_charter_domain_inactive".into(),
+            ));
+        }
+        if dom.operator != Some(ctx.sender) {
+            return Err(SettlementTxError::Refused(
+                "object_layer_charter_requires_domain_operator".into(),
+            ));
+        }
+    }
     let domain_registry = state.settlement.domains.clone();
     let commitment_registry = state.settlement.commitments.clone();
     let finality = IntakeFinality(&commitment_registry);
@@ -1710,12 +1725,100 @@ fn execute_object_layer_tx(
             .get(id)
             .is_some_and(|d| d.status == DomainStatus::Active)
     };
+    let home_state_root = |id: DomainId| -> Option<Hash32> {
+        let from_commitment = commitment_registry
+            .commitments_for_global_block()
+            .into_iter()
+            .filter(|c| c.domain_id == id && c.state_root != [0u8; 32])
+            .max_by_key(|c| (c.domain_height, c.sequence))
+            .map(|c| c.state_root);
+        from_commitment.or_else(|| {
+            domain_registry
+                .get(id)
+                .map(|d| {
+                    if d.last_committed_hash != [0u8; 32] {
+                        d.last_committed_hash
+                    } else {
+                        d.genesis_state_root
+                    }
+                })
+                .filter(|h| *h != [0u8; 32])
+        })
+    };
+    let mut prechecked_stipend_ok = false;
+    if let crate::object_layer::ObjectLayerTx::HomeStipendCall {
+        domain,
+        auth,
+        action,
+    } = tx
+    {
+        if u128::from(ctx.fee) > auth.requested_stipend_attos {
+            return Err(SettlementTxError::Refused(
+                "home_stipend_fee_exceeds_stipend".into(),
+            ));
+        }
+        let action_digest = crate::object_layer::tx::home_stipend_action_digest(action)
+            .map_err(|r| SettlementTxError::Refused(format!("object_layer_refused: {r:?}")))?;
+        let (actor_addr, _) = crate::execution::coordinator::foreign::verify_home_key_stipend_auth(
+            auth,
+            ctx.chain_id,
+            *domain,
+            &action_digest,
+            state.execution_state.foreign_lane.quantum_alert_level,
+        )
+        .map_err(|e| SettlementTxError::Refused(format!("home_stipend_auth_refused: {e}")))?;
+        if state
+            .execution_state
+            .foreign_lane
+            .quantum_class_of(&actor_addr)
+            != crate::execution::coordinator::alias::AccountQuantumClass::Classical
+        {
+            return Err(SettlementTxError::Refused(
+                "home_stipend_pq_account_refused".into(),
+            ));
+        }
+        if state.get_attos_balance(&actor_addr)
+            > crate::execution::coordinator::foreign::MAX_HOME_KEY_STIPEND_PQ_CEILING_ATTOS
+        {
+            return Err(SettlementTxError::Refused(
+                "home_stipend_pq_ceiling_exceeded".into(),
+            ));
+        }
+        prechecked_stipend_ok = true;
+    }
+    struct PrecheckedStipendVerifier(bool);
+    impl crate::object_layer::tx::HomeStipendVerifier for PrecheckedStipendVerifier {
+        fn verify_stipend(
+            &self,
+            _domain: DomainId,
+            _auth: &crate::object_layer::tx::HomeKeyStipendAuth,
+            _action_digest: &Hash32,
+        ) -> Result<(), crate::object_layer::Refusal> {
+            if self.0 {
+                Ok(())
+            } else {
+                Err(crate::object_layer::Refusal::NotAuthorized)
+            }
+        }
+    }
+    let stipend_verifier = PrecheckedStipendVerifier(prechecked_stipend_ok);
     let uol_ctx = crate::object_layer::tx::TxContext {
         height,
         signer: ctx.sender,
-        activation: crate::object_layer::ACTIVATION,
+        activation: if ctx.chain_id
+            == crate::core::chain_config::Network::Mainnet
+                .chain_id()
+                .value()
+        {
+            crate::object_layer::ObjectLayerActivation { height: None }
+        } else {
+            crate::object_layer::ACTIVATION
+        },
         finality: &finality,
         domain_active: &domain_active,
+        home_state_root: Some(&home_state_root),
+        require_home_state_proofs: true,
+        home_stipend_verifier: prechecked_stipend_ok.then_some(&stipend_verifier),
     };
     tx.apply(&mut state.settlement.object_layer, &uol_ctx)
         .map_err(|err| match err {
@@ -3611,35 +3714,38 @@ mod tests {
                 }
                 Ok(())
             }
+
+            fn sync_committee_closed(&self) -> bool {
+                false
+            }
         }
         fn test_bls() -> Box<dyn crate::cross_domain::external::BlsVerifier> {
             Box::new(AcceptTestBls)
         }
 
         let mut state = AccountState::new();
+        let committee = crate::cross_domain::external::ethereum::PinnedCommittee {
+            period: 0,
+            aggregate_pubkey: vec![0x11; 96],
+            next_committee_root: [0xbb; 32],
+        };
         let spec = crate::cross_domain::external::AdapterSpec::EthereumSync {
             network: "testnet".to_string(),
-            committee: Some(crate::cross_domain::external::ethereum::PinnedCommittee {
-                period: 0,
-                aggregate_pubkey: vec![0x11; 96],
-                next_committee_root: [0xbb; 32],
-            }),
+            committee: Some(committee.clone()),
         };
         let adapter = spec.build(Some(test_bls()), None);
         let adapter_id = adapter.descriptor().id;
 
         let build_eth_evidence = |height: u64, root: [u8; 32]| {
-            use crate::cross_domain::external::ethereum::layout;
-            let mut payload = vec![0u8; layout::LEN];
-            payload[layout::FINALIZED_ROOT].copy_from_slice(&[0xaa; 32]);
-            payload[layout::FINALIZED_SLOT].copy_from_slice(&height.to_le_bytes());
-            payload[layout::ATTESTED_SLOT].copy_from_slice(&(height + 64).to_le_bytes());
-            payload[layout::PERIOD].copy_from_slice(&0u64.to_le_bytes());
-            payload[layout::NEXT_COMMITTEE_ROOT].copy_from_slice(&[0xbb; 32]);
-            payload[layout::AGGREGATE_PUBKEY].copy_from_slice(&[0x11; 96]);
-            payload[layout::SIGNATURE].copy_from_slice(&[0x22; 96]);
-            payload[layout::PARTICIPATION_BITS].copy_from_slice(&[0xff; 64]);
-            payload[layout::STATE_ROOT].copy_from_slice(&root);
+            let payload = crate::cross_domain::external::ethereum::build_deneb_update_payload(
+                height,
+                height + 64,
+                0,
+                &committee,
+                &[0x22; 96],
+                &[0xff; 64],
+                root,
+            );
             crate::cross_domain::external::RawConsensusEvidence {
                 adapter: adapter_id,
                 evidence_version: 2,
@@ -3738,35 +3844,38 @@ mod tests {
                 }
                 Ok(())
             }
+
+            fn sync_committee_closed(&self) -> bool {
+                false
+            }
         }
         fn test_bls() -> Box<dyn crate::cross_domain::external::BlsVerifier> {
             Box::new(AcceptTestBls)
         }
 
         let mut state = AccountState::new();
+        let committee = crate::cross_domain::external::ethereum::PinnedCommittee {
+            period: 0,
+            aggregate_pubkey: vec![0x11; 96],
+            next_committee_root: [0xbb; 32],
+        };
         let spec = crate::cross_domain::external::AdapterSpec::EthereumSync {
             network: "testnet".to_string(),
-            committee: Some(crate::cross_domain::external::ethereum::PinnedCommittee {
-                period: 0,
-                aggregate_pubkey: vec![0x11; 96],
-                next_committee_root: [0xbb; 32],
-            }),
+            committee: Some(committee.clone()),
         };
         let adapter = spec.build(Some(test_bls()), None);
         let adapter_id = adapter.descriptor().id;
         let prover = Address::from([0x41; 32]);
         let build_eth_evidence = |height: u64, root: [u8; 32]| {
-            use crate::cross_domain::external::ethereum::layout;
-            let mut payload = vec![0u8; layout::LEN];
-            payload[layout::FINALIZED_ROOT].copy_from_slice(&[0xaa; 32]);
-            payload[layout::FINALIZED_SLOT].copy_from_slice(&height.to_le_bytes());
-            payload[layout::ATTESTED_SLOT].copy_from_slice(&(height + 64).to_le_bytes());
-            payload[layout::PERIOD].copy_from_slice(&0u64.to_le_bytes());
-            payload[layout::NEXT_COMMITTEE_ROOT].copy_from_slice(&[0xbb; 32]);
-            payload[layout::AGGREGATE_PUBKEY].copy_from_slice(&[0x11; 96]);
-            payload[layout::SIGNATURE].copy_from_slice(&[0x22; 96]);
-            payload[layout::PARTICIPATION_BITS].copy_from_slice(&[0xff; 64]);
-            payload[layout::STATE_ROOT].copy_from_slice(&root);
+            let payload = crate::cross_domain::external::ethereum::build_deneb_update_payload(
+                height,
+                height + 64,
+                0,
+                &committee,
+                &[0x22; 96],
+                &[0xff; 64],
+                root,
+            );
             crate::cross_domain::external::RawConsensusEvidence {
                 adapter: adapter_id,
                 evidence_version: 2,
@@ -3860,36 +3969,39 @@ mod tests {
                 }
                 Ok(())
             }
+
+            fn sync_committee_closed(&self) -> bool {
+                false
+            }
         }
         fn test_bls() -> Box<dyn crate::cross_domain::external::BlsVerifier> {
             Box::new(AcceptTestBls)
         }
 
         let mut state = AccountState::new();
+        let committee = crate::cross_domain::external::ethereum::PinnedCommittee {
+            period: 0,
+            aggregate_pubkey: vec![0x11; 96],
+            next_committee_root: [0xbb; 32],
+        };
         let spec = crate::cross_domain::external::AdapterSpec::EthereumSync {
             network: "testnet".to_string(),
-            committee: Some(crate::cross_domain::external::ethereum::PinnedCommittee {
-                period: 0,
-                aggregate_pubkey: vec![0x11; 96],
-                next_committee_root: [0xbb; 32],
-            }),
+            committee: Some(committee.clone()),
         };
         let adapter = spec.build(Some(test_bls()), None);
         let adapter_id = adapter.descriptor().id;
         let p1 = Address::from([0x51; 32]);
         let p2 = Address::from([0x52; 32]);
         let build_eth_evidence = |height: u64, root: [u8; 32], submitter: Address| {
-            use crate::cross_domain::external::ethereum::layout;
-            let mut payload = vec![0u8; layout::LEN];
-            payload[layout::FINALIZED_ROOT].copy_from_slice(&[0xaa; 32]);
-            payload[layout::FINALIZED_SLOT].copy_from_slice(&height.to_le_bytes());
-            payload[layout::ATTESTED_SLOT].copy_from_slice(&(height + 64).to_le_bytes());
-            payload[layout::PERIOD].copy_from_slice(&0u64.to_le_bytes());
-            payload[layout::NEXT_COMMITTEE_ROOT].copy_from_slice(&[0xbb; 32]);
-            payload[layout::AGGREGATE_PUBKEY].copy_from_slice(&[0x11; 96]);
-            payload[layout::SIGNATURE].copy_from_slice(&[0x22; 96]);
-            payload[layout::PARTICIPATION_BITS].copy_from_slice(&[0xff; 64]);
-            payload[layout::STATE_ROOT].copy_from_slice(&root);
+            let payload = crate::cross_domain::external::ethereum::build_deneb_update_payload(
+                height,
+                height + 64,
+                0,
+                &committee,
+                &[0x22; 96],
+                &[0xff; 64],
+                root,
+            );
             crate::cross_domain::external::RawConsensusEvidence {
                 adapter: adapter_id,
                 evidence_version: 2,

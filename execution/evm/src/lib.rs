@@ -42,12 +42,15 @@ pub const BUDLUM_EVM_CHAIN_ID: u64 = 45_261;
 /// Read-only `query` gas ceiling (`16 Mi` gas, matching Osaka EIP-7825 per-tx cap).
 pub const QUERY_GAS_LIMIT: u64 = 16_777_216;
 
-/// Inspector enforcing `CREATE`/`CREATE2` alias-collision refusal and dispatching
-/// `0x000000000000000000000000000000000000B001` Universal Calls (`Section 8.7.2`).
+/// Inspector enforcing `CREATE`/`CREATE2` alias-collision refusal, dispatching
+/// `0x000000000000000000000000000000000000B001` / `0x...B002`, and rolling back
+/// host-side checkpoints when an EVM `CALL`/`CREATE` sub-frame reverts.
 #[derive(Debug, Default)]
 pub struct BudlumEvmInspector {
     /// Set if an alias collision refused contract creation during execution.
     pub alias_collision_refused: bool,
+    call_checkpoints: Vec<Option<u64>>,
+    create_checkpoints: Vec<Option<u64>>,
 }
 
 type EvmHostCtx<'a> = Context<BlockEnv, TxEnv, CfgEnv, HostDb<'a>, Journal<HostDb<'a>>, ()>;
@@ -72,13 +75,44 @@ impl<'a> Inspector<EvmHostCtx<'a>, EthInterpreter> for BudlumEvmInspector {
             .unwrap_or(true);
         if collided {
             self.alias_collision_refused = true;
+            self.create_checkpoints.push(None);
             let gas = Gas::new_spent_with_reservoir(inputs.gas_limit(), inputs.reservoir());
             return Some(CreateOutcome::new(
                 InterpreterResult::new(InstructionResult::CreateCollision, Bytes::new(), gas),
                 None,
             ));
         }
+        let cp = context
+            .journaled_state
+            .db_mut()
+            .host
+            .checkpoint_begin()
+            .ok();
+        self.create_checkpoints.push(cp);
         None
+    }
+
+    fn create_end(
+        &mut self,
+        context: &mut EvmHostCtx<'a>,
+        _inputs: &CreateInputs,
+        outcome: &mut CreateOutcome,
+    ) {
+        if let Some(Some(cp_id)) = self.create_checkpoints.pop() {
+            if outcome.result.result.is_ok() {
+                let _ = context
+                    .journaled_state
+                    .db_mut()
+                    .host
+                    .checkpoint_commit(cp_id);
+            } else {
+                let _ = context
+                    .journaled_state
+                    .db_mut()
+                    .host
+                    .checkpoint_rollback(cp_id);
+            }
+        }
     }
 
     fn call(
@@ -86,7 +120,45 @@ impl<'a> Inspector<EvmHostCtx<'a>, EthInterpreter> for BudlumEvmInspector {
         context: &mut EvmHostCtx<'a>,
         inputs: &mut CallInputs,
     ) -> Option<CallOutcome> {
-        handle_universal_precompile_call(context, inputs)
+        if let Some(outcome) = handle_universal_precompile_call(context, inputs) {
+            self.call_checkpoints.push(None);
+            return Some(outcome);
+        }
+        let cp = if inputs.is_static {
+            None
+        } else {
+            context
+                .journaled_state
+                .db_mut()
+                .host
+                .checkpoint_begin()
+                .ok()
+        };
+        self.call_checkpoints.push(cp);
+        None
+    }
+
+    fn call_end(
+        &mut self,
+        context: &mut EvmHostCtx<'a>,
+        _inputs: &CallInputs,
+        outcome: &mut CallOutcome,
+    ) {
+        if let Some(Some(cp_id)) = self.call_checkpoints.pop() {
+            if outcome.result.result.is_ok() {
+                let _ = context
+                    .journaled_state
+                    .db_mut()
+                    .host
+                    .checkpoint_commit(cp_id);
+            } else {
+                let _ = context
+                    .journaled_state
+                    .db_mut()
+                    .host
+                    .checkpoint_rollback(cp_id);
+            }
+        }
     }
 }
 
@@ -244,6 +316,7 @@ impl EvmWorker {
             ..TxEnv::default()
         };
 
+        let top_cp = host.checkpoint_begin().ok();
         let child_gas_charged = Rc::new(Cell::new(0u64));
         let exec_out = {
             let host_db = HostDb::with_child_gas_tracker(host, chain_id, child_gas_charged.clone());
@@ -255,6 +328,9 @@ impl EvmWorker {
         };
 
         let Ok(result_and_state) = exec_out else {
+            if let Some(cp) = top_cp {
+                let _ = host.checkpoint_rollback(cp);
+            }
             let _ = host.charge(call.gas_limit);
             return EeOutcome {
                 status: OutcomeStatus::Revert,
@@ -275,6 +351,9 @@ impl EvmWorker {
             .charge(gas_used.saturating_sub(child_gas_charged.get()))
             .is_err()
         {
+            if let Some(cp) = top_cp {
+                let _ = host.checkpoint_rollback(cp);
+            }
             return EeOutcome {
                 status: OutcomeStatus::OutOfGas,
                 output: Vec::new(),
@@ -285,11 +364,17 @@ impl EvmWorker {
         match result_and_state.result {
             ExecutionResult::Success { logs, output, .. } => {
                 if commit_evm_state(host, &result_and_state.state, &logs).is_err() {
+                    if let Some(cp) = top_cp {
+                        let _ = host.checkpoint_rollback(cp);
+                    }
                     return EeOutcome {
                         status: OutcomeStatus::Revert,
                         output: Vec::new(),
                         gas_used,
                     };
+                }
+                if let Some(cp) = top_cp {
+                    let _ = host.checkpoint_commit(cp);
                 }
                 let out_bytes = match (call.kind, output.address()) {
                     (EeCallKind::Deploy, Some(created)) => created.as_slice().to_vec(),
@@ -301,16 +386,26 @@ impl EvmWorker {
                     gas_used,
                 }
             }
-            ExecutionResult::Revert { output, .. } => EeOutcome {
-                status: OutcomeStatus::Revert,
-                output: output.to_vec(),
-                gas_used,
-            },
-            ExecutionResult::Halt { reason, .. } => EeOutcome {
-                status: map_halt_to_status(&reason),
-                output: Vec::new(),
-                gas_used,
-            },
+            ExecutionResult::Revert { output, .. } => {
+                if let Some(cp) = top_cp {
+                    let _ = host.checkpoint_rollback(cp);
+                }
+                EeOutcome {
+                    status: OutcomeStatus::Revert,
+                    output: output.to_vec(),
+                    gas_used,
+                }
+            }
+            ExecutionResult::Halt { reason, .. } => {
+                if let Some(cp) = top_cp {
+                    let _ = host.checkpoint_rollback(cp);
+                }
+                EeOutcome {
+                    status: map_halt_to_status(&reason),
+                    output: Vec::new(),
+                    gas_used,
+                }
+            }
         }
     }
 }
@@ -947,6 +1042,18 @@ mod tests {
         ) -> Result<(), HostError> {
             self.0.bud_transfer(from, to, attos)
         }
+
+        fn checkpoint_begin(&mut self) -> Result<u64, HostError> {
+            self.0.checkpoint_begin()
+        }
+
+        fn checkpoint_commit(&mut self, id: u64) -> Result<(), HostError> {
+            self.0.checkpoint_commit(id)
+        }
+
+        fn checkpoint_rollback(&mut self, id: u64) -> Result<(), HostError> {
+            self.0.checkpoint_rollback(id)
+        }
     }
 
     #[test]
@@ -1083,5 +1190,231 @@ mod tests {
         drop(client);
         let _ = srv.join();
         let _ = std::fs::remove_file(&sock_path);
+    }
+
+    #[test]
+    fn uol_precompile_b002_payment_expiry_and_revert_checkpoint_rollback() {
+        let mut host = MemoryHost::new(10_000_000);
+        let caller_raw = [0x11u8; 20];
+        let taker_raw = [0x22u8; 20];
+        let caller = EeIdentity {
+            ee: EeId::EVM,
+            id: caller_raw.to_vec(),
+        };
+        let taker = EeIdentity {
+            ee: EeId::EVM,
+            id: taker_raw.to_vec(),
+        };
+        host.balances.insert(caller.clone(), 10_000_000);
+        host.balances.insert(taker.clone(), 5_000);
+
+        let class_id = [0xAAu8; 32];
+        let asset_id = [0xBBu8; 32];
+        let Ok(ns_assets) = Namespace::new(crate::abi::NS_UEL_ASSETS) else {
+            panic!("bad ns");
+        };
+        let mut hk = b"uol:holder:".to_vec();
+        hk.extend_from_slice(&asset_id);
+        let _ = host.write(&ns_assets, &hk, Some(&caller_raw));
+
+        // Deploy a contract that calls 0x...B002 transfer() and then REVERTs.
+        let mut rt = Asm::default();
+        rt.op(opcode::CALLDATASIZE)
+            .push1(0x00)
+            .push1(0x00)
+            .op(opcode::CALLDATACOPY)
+            .push1(0x00)
+            .push1(0x00)
+            .op(opcode::CALLDATASIZE)
+            .push1(0x00)
+            .push1(0x00)
+            .push20(crate::abi::UOL_PRECOMPILE.into_array())
+            .op(opcode::GAS)
+            .op(opcode::CALL)
+            .op(opcode::POP)
+            .push1(0x00)
+            .push1(0x00)
+            .op(opcode::REVERT);
+        let initcode = wrap_initcode(&[], &rt.finish());
+
+        let ctx = BlockContext {
+            chain_id: BUDLUM_EVM_CHAIN_ID,
+            height: 20,
+            timestamp_ms: 1_762_000_000_000,
+        };
+        let mut worker = EvmWorker;
+        let Ok(dep) = worker.execute(
+            &ctx,
+            &EeCall {
+                kind: EeCallKind::Deploy,
+                caller: caller.clone(),
+                target: EeIdentity {
+                    ee: EeId::EVM,
+                    id: vec![0u8; 20],
+                },
+                value: BudAmount(0),
+                input: initcode,
+                gas_limit: 500_000,
+                depth: 0,
+                tx_hash: [0x61; 32],
+            },
+            &mut host,
+        ) else {
+            panic!("deploy faulted");
+        };
+        assert_eq!(dep.status, OutcomeStatus::Success);
+        let contract20 = dep.output;
+        let mut contract_hk = b"uol:holder:".to_vec();
+        let contract_asset = [0xCCu8; 32];
+        contract_hk.extend_from_slice(&contract_asset);
+        let _ = host.write(&ns_assets, &contract_hk, Some(&contract20));
+
+        // Call contract with 0x...B002 transfer(class_id, contract_asset, taker_raw, 0).
+        let mut xfer_cd = Vec::from(crate::abi::uol_selector(
+            "transfer(bytes32,bytes32,bytes,uint128)",
+        ));
+        xfer_cd.extend_from_slice(&class_id);
+        xfer_cd.extend_from_slice(&contract_asset);
+        let mut off = [0u8; 32];
+        off[31] = 128;
+        xfer_cd.extend_from_slice(&off);
+        xfer_cd.extend_from_slice(&[0u8; 32]);
+        let mut tlen = [0u8; 32];
+        tlen[31] = 20;
+        xfer_cd.extend_from_slice(&tlen);
+        let mut tpad = [0u8; 32];
+        tpad[..20].copy_from_slice(&taker_raw);
+        xfer_cd.extend_from_slice(&tpad);
+
+        let Ok(rev_res) = worker.execute(
+            &ctx,
+            &EeCall {
+                kind: EeCallKind::Call,
+                caller: caller.clone(),
+                target: EeIdentity {
+                    ee: EeId::EVM,
+                    id: contract20.clone(),
+                },
+                value: BudAmount(0),
+                input: xfer_cd,
+                gas_limit: 500_000,
+                depth: 0,
+                tx_hash: [0x62; 32],
+            },
+            &mut host,
+        ) else {
+            panic!("call faulted");
+        };
+        assert_eq!(rev_res.status, OutcomeStatus::Revert);
+        assert_eq!(
+            host.read(&ns_assets, &contract_hk).ok().flatten(),
+            Some(contract20),
+            "reverted EVM call must roll back 0x...B002 asset transfer via checkpoint"
+        );
+
+        // Create native-payment offer: 1_000 attoBUD, expiry height 50.
+        let mut offer_cd = Vec::from(crate::abi::uol_selector(
+            "offer(bytes32,bytes32,bytes,bytes,uint128,uint64)",
+        ));
+        offer_cd.extend_from_slice(&class_id);
+        offer_cd.extend_from_slice(&asset_id);
+        let mut w_off1 = [0u8; 32];
+        w_off1[24..32].copy_from_slice(&192u64.to_be_bytes());
+        offer_cd.extend_from_slice(&w_off1);
+        let mut w_off2 = [0u8; 32];
+        w_off2[24..32].copy_from_slice(&256u64.to_be_bytes());
+        offer_cd.extend_from_slice(&w_off2);
+        offer_cd.extend_from_slice(&[0u8; 32]);
+        let mut w_exp = [0u8; 32];
+        w_exp[24..32].copy_from_slice(&50u64.to_be_bytes());
+        offer_cd.extend_from_slice(&w_exp);
+        offer_cd.extend_from_slice(&tlen);
+        offer_cd.extend_from_slice(&tpad);
+        let mut plen = [0u8; 32];
+        plen[31] = 16;
+        offer_cd.extend_from_slice(&plen);
+        let mut ppad = [0u8; 32];
+        ppad[..16].copy_from_slice(&1_000u128.to_le_bytes());
+        offer_cd.extend_from_slice(&ppad);
+
+        let Ok(offer_res) = worker.execute(
+            &ctx,
+            &EeCall {
+                kind: EeCallKind::Call,
+                caller: caller.clone(),
+                target: EeIdentity {
+                    ee: EeId::EVM,
+                    id: crate::abi::UOL_PRECOMPILE.as_slice().to_vec(),
+                },
+                value: BudAmount(0),
+                input: offer_cd,
+                gas_limit: 500_000,
+                depth: 0,
+                tx_hash: [0x63; 32],
+            },
+            &mut host,
+        ) else {
+            panic!("offer faulted");
+        };
+        assert_eq!(offer_res.status, OutcomeStatus::Success);
+        assert_eq!(offer_res.output.len(), 32);
+
+        let mut accept_cd = Vec::from(crate::abi::uol_selector("accept(bytes32)"));
+        accept_cd.extend_from_slice(&offer_res.output);
+
+        // Expired offer reverts cleanly.
+        let expired_ctx = BlockContext {
+            chain_id: BUDLUM_EVM_CHAIN_ID,
+            height: 51,
+            timestamp_ms: 1_762_000_000_000,
+        };
+        let Ok(exp_res) = worker.execute(
+            &expired_ctx,
+            &EeCall {
+                kind: EeCallKind::Call,
+                caller: taker.clone(),
+                target: EeIdentity {
+                    ee: EeId::EVM,
+                    id: crate::abi::UOL_PRECOMPILE.as_slice().to_vec(),
+                },
+                value: BudAmount(0),
+                input: accept_cd.clone(),
+                gas_limit: 500_000,
+                depth: 0,
+                tx_hash: [0x64; 32],
+            },
+            &mut host,
+        ) else {
+            panic!("expired accept faulted");
+        };
+        assert_eq!(exp_res.status, OutcomeStatus::Revert);
+
+        // Live accept settles 1_000 attoBUD payment and transfers the asset.
+        let Ok(acc_res) = worker.execute(
+            &ctx,
+            &EeCall {
+                kind: EeCallKind::Call,
+                caller: taker.clone(),
+                target: EeIdentity {
+                    ee: EeId::EVM,
+                    id: crate::abi::UOL_PRECOMPILE.as_slice().to_vec(),
+                },
+                value: BudAmount(0),
+                input: accept_cd,
+                gas_limit: 500_000,
+                depth: 0,
+                tx_hash: [0x65; 32],
+            },
+            &mut host,
+        ) else {
+            panic!("accept faulted");
+        };
+        assert_eq!(acc_res.status, OutcomeStatus::Success);
+        assert_eq!(host.balances.get(&taker).copied(), Some(4_000));
+        assert_eq!(host.balances.get(&caller).copied(), Some(10_001_000));
+        assert_eq!(
+            host.read(&ns_assets, &hk).ok().flatten(),
+            Some(taker_raw.to_vec())
+        );
     }
 }

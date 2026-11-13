@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 /// Tamper-evident at the global settlement layer.
 ///
 /// **Backward compatibility:** the domain-separation tag is
-/// `BDLM_GLOBAL_BLOCK_V7`. V2 separated pre- and post-storage-root headers,
+/// `BDLM_GLOBAL_BLOCK_V9`. V2 separated pre- and post-storage-root headers,
 /// V3 added `ai_root`, V4 encodes each optional root behind a presence byte
 /// so `None` and `Some([0; 32])` hash differently, and V5 added
 /// `identity_root`. Old serialized headers (without the fields) still
@@ -115,6 +115,18 @@ pub struct GlobalBlockHeader {
     /// exists: [`crate::registry::PermissionlessRegistry::delegation_root`].
     #[serde(default)]
     pub delegation_root: Option<Hash32>,
+
+    /// Object Layer commitment root (V8), presence-tagged.
+    #[serde(default)]
+    pub object_layer_root: Option<Hash32>,
+
+    /// Proof-claim registry root (V8), presence-tagged.
+    #[serde(default)]
+    pub proof_root: Option<Hash32>,
+
+    /// Highest checkpoint height with a recorded settlement proof claim (V8).
+    #[serde(default)]
+    pub proven_height: u64,
 }
 
 /// How many checkpoint headers the account state keeps. Older headers stay
@@ -203,9 +215,11 @@ impl GlobalBlockHeader {
         let external_intake_root_bytes = presence_tagged(self.external_intake_root);
         let graft_root_bytes = presence_tagged(self.graft_root);
         let delegation_root_bytes = presence_tagged(self.delegation_root);
+        let object_layer_root_bytes = presence_tagged(self.object_layer_root);
+        let proof_root_bytes = presence_tagged(self.proof_root);
 
         hash_fields_bytes(&[
-            b"BDLM_GLOBAL_BLOCK_V7",
+            b"BDLM_GLOBAL_BLOCK_V9",
             &self.version.to_le_bytes(),
             &self.global_height.to_le_bytes(),
             &self.previous_global_hash,
@@ -225,11 +239,26 @@ impl GlobalBlockHeader {
             &external_intake_root_bytes,
             &graft_root_bytes,
             &delegation_root_bytes,
+            &object_layer_root_bytes,
+            &proof_root_bytes,
+            &self.proven_height.to_le_bytes(),
         ])
     }
 
     pub fn calculate_hash(&self) -> String {
         hex::encode(self.calculate_hash_bytes())
+    }
+
+    /// Classify the Phase-A proof status (`Proven`, `PendingProof`, or
+    /// `DelayExceeded` beyond `D = 8` blocks) of this global block header.
+    ///
+    /// Convenience: exposed for header proof-lag inspection callers.
+    #[must_use]
+    pub fn proof_status(&self) -> crate::cross_domain::external::phase_a_dual::RootProofStatus {
+        crate::cross_domain::external::phase_a_dual::classify_root_proof_status(
+            self.global_height,
+            self.proven_height,
+        )
     }
 }
 
@@ -258,6 +287,9 @@ mod tests {
             external_intake_root: None,
             graft_root: None,
             delegation_root: None,
+            object_layer_root: None,
+            proof_root: None,
+            proven_height: 0,
         }
     }
 

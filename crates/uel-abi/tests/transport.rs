@@ -600,3 +600,108 @@ fn uel_abi_partial_request_write_is_not_retried() {
     worker.join().expect("worker");
     std::fs::remove_file(path).expect("remove socket");
 }
+
+#[test]
+fn uel_abi_rejects_cross_ee_namespace_access() {
+    let path = socket_path();
+    let _ = std::fs::remove_file(&path);
+    let listener = UnixListener::bind(&path).expect("bind");
+    let (tx, rx) = std::sync::mpsc::channel();
+    thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept");
+        let hello = read_frame(&mut stream).expect("hello");
+        write_frame(
+            &mut stream,
+            &pb::Envelope {
+                abi_version: ABI_VERSION,
+                request_id: hello.request_id,
+                body: Some(pb::envelope::Body::Hello(pb::Hello { ee: 1 })),
+            },
+        )
+        .expect("hello reply");
+        let request = read_frame(&mut stream).expect("execute");
+        let id = request.request_id;
+        for op in [
+            pb::host_request::Op::Read(pb::HostRead {
+                namespace: "ee/wasm/store".into(),
+                key: vec![1],
+            }),
+            pb::host_request::Op::Write(pb::HostWrite {
+                namespace: "ee/wasm/store".into(),
+                key: vec![1],
+                has_value: true,
+                value: vec![2],
+            }),
+            pb::host_request::Op::Read(pb::HostRead {
+                namespace: "ee/evm/storage".into(),
+                key: vec![3],
+            }),
+        ] {
+            write_frame(
+                &mut stream,
+                &pb::Envelope {
+                    abi_version: ABI_VERSION,
+                    request_id: id,
+                    body: Some(pb::envelope::Body::HostRequest(pb::HostRequest {
+                        op: Some(op),
+                    })),
+                },
+            )
+            .expect("host request");
+            let answer = read_frame(&mut stream).expect("host response");
+            tx.send(answer).expect("send");
+        }
+        write_frame(
+            &mut stream,
+            &pb::Envelope {
+                abi_version: ABI_VERSION,
+                request_id: id,
+                body: Some(pb::envelope::Body::ExecuteResponse(pb::ExecuteResponse {
+                    result: Some(pb::execute_response::Result::Outcome(
+                        (&EeOutcome {
+                            status: OutcomeStatus::Success,
+                            output: vec![],
+                            gas_used: 100,
+                            logs: vec![],
+                        })
+                            .into(),
+                    )),
+                })),
+            },
+        )
+        .expect("execute response");
+    });
+
+    let mut client = EeClient::new(&path, EeId::EVM);
+    let mut host = MemoryHost::new(0);
+    host.state
+        .insert(("ee/wasm/store".into(), vec![1]), vec![0xAA]);
+    host.state
+        .insert(("ee/evm/storage".into(), vec![3]), vec![0xBB]);
+    let outcome = client
+        .execute(&ctx(), &call(vec![]), &mut host)
+        .expect("transport")
+        .expect("outcome");
+    assert_eq!(outcome.status, OutcomeStatus::Success);
+
+    for label in ["cross-EE read", "cross-EE write"] {
+        let pb::envelope::Body::HostResponse(resp) = rx.recv().expect(label).body.unwrap() else {
+            panic!("not a host response");
+        };
+        let Some(pb::host_response::Result::Error(err)) = resp.result else {
+            panic!("{label} was not denied");
+        };
+        assert_eq!(err.code, pb::HostErrorCode::Denied as i32);
+    }
+
+    let pb::envelope::Body::HostResponse(own_resp) = rx.recv().expect("own read").body.unwrap()
+    else {
+        panic!("not a host response");
+    };
+    let Some(pb::host_response::Result::Read(read)) = own_resp.result else {
+        panic!("own-EE read was denied");
+    };
+    assert_eq!(read.value, vec![0xBB]);
+    drop(client);
+    std::fs::remove_file(path).expect("remove socket");
+}

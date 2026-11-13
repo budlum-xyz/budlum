@@ -1,10 +1,9 @@
 //! Deterministic parallel scheduling of a block's transactions.
 //!
-//! WIRING: the coordinator calls [`execute_block_with_policy`] under the
-//! activation policy, which is closed at launch. [`execute_block_checked`] is
-//! a separate opt-in checked scoped-thread executor; the coordinator does not
-//! select that path yet, so its equality and rollback tests are not production
-//! activation evidence.
+//! WIRING: the coordinator exposes [`ExecutionCoordinator::execute_account_block`]
+//! and [`ExecutionCoordinator::execute_account_block_checked`], reaching both
+//! [`execute_block_with_policy`] (under [`ParallelSchedulerPolicy::testnet_launch`])
+//! and [`execute_block_checked`].
 //!
 //! # Rule
 //!

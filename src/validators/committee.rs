@@ -961,9 +961,10 @@ mod tests {
 
     #[test]
     fn allocate_seats_water_fills_proportionally_without_inflating_dust_validators() {
-        // 1 whale (1_000_000_000) hits cap = 8, 7 real validators (1_000 each),
-        // and 1 dust Sybil (weight 1). Remaining 24 seats must water-fill
-        // proportionally to the 7 real validators rather than handing seats to dust.
+        // 9 members => 36 seats, cap = 9: 1 whale (1_000_000_000) hits cap = 9,
+        // 7 real validators (1_000 each), and 1 dust Sybil (weight 1). Remaining
+        // 27 seats must water-fill proportionally to the 7 real validators rather
+        // than handing seats to dust.
         let mut members = Vec::new();
         members.push((addr(1), 1));
         for i in 2..=8u8 {
@@ -971,14 +972,14 @@ mod tests {
         }
         members.push((addr(9), 1_000_000_000));
         let table = table_of(&members);
-        assert_eq!(table.seat_count(), 32);
-        assert_eq!(table.seats_of(&addr(9)).len(), 8);
+        assert_eq!(table.seat_count(), 36);
+        assert_eq!(table.seats_of(&addr(9)).len(), 9);
         assert_eq!(
             table.seats_of(&addr(1)).len(),
             0,
             "dust Sybil must receive zero seats when real uncapped stake exists"
         );
         let real_total: usize = (2..=8u8).map(|i| table.seats_of(&addr(i)).len()).sum();
-        assert_eq!(real_total, 24);
+        assert_eq!(real_total, 27);
     }
 }

@@ -108,6 +108,10 @@ impl BlsVerifier for AcceptTestBls {
         }
         Ok(())
     }
+
+    fn sync_committee_closed(&self) -> bool {
+        false
+    }
 }
 
 fn test_bls() -> Box<dyn BlsVerifier> {
@@ -244,43 +248,33 @@ fn ethereum_sync_committee_is_open_on_testnet() {
     let mut agg_pk = vec![0u8; 96];
     agg_pk[..48].copy_from_slice(&pk_compressed);
 
+    let committee = PinnedCommittee {
+        period: 0,
+        aggregate_pubkey: agg_pk.clone(),
+        next_committee_root: [0xbb; 32],
+    };
     let spec = AdapterSpec::EthereumSync {
         network: "testnet".to_string(),
-        committee: Some(PinnedCommittee {
-            period: 0,
-            aggregate_pubkey: agg_pk.clone(),
-            next_committee_root: [0xbb; 32],
-        }),
+        committee: Some(committee.clone()),
     };
     let adapter = spec.build(Some(IntakeState::production_bls()), None);
     let economics = IntakeState::conservative_economics(1_000_000);
     let bond = u64::try_from(economics.required_bond_atoms()).expect("bond fits u64");
 
-    let mut payload = vec![0u8; layout::LEN];
-    if let Some(s) = payload.get_mut(layout::FINALIZED_ROOT) {
-        s.copy_from_slice(&[0xaa; 32]);
-    }
-    if let Some(s) = payload.get_mut(layout::FINALIZED_SLOT) {
-        s.copy_from_slice(&64u64.to_le_bytes());
-    }
-    if let Some(s) = payload.get_mut(layout::ATTESTED_SLOT) {
-        s.copy_from_slice(&128u64.to_le_bytes());
-    }
-    if let Some(s) = payload.get_mut(layout::NEXT_COMMITTEE_ROOT) {
-        s.copy_from_slice(&[0xbb; 32]);
-    }
-    if let Some(s) = payload.get_mut(layout::AGGREGATE_PUBKEY) {
-        s.copy_from_slice(&agg_pk);
-    }
-    if let Some(s) = payload.get_mut(layout::PARTICIPATION_BITS) {
-        s.copy_from_slice(&[0xff; 64]);
-    }
-    if let Some(s) = payload.get_mut(layout::STATE_ROOT) {
-        s.copy_from_slice(&[0xcc; 32]);
-    }
+    let mut payload = crate::cross_domain::external::ethereum::build_deneb_update_payload(
+        64,
+        128,
+        0,
+        &committee,
+        &[0u8; 96],
+        &[0xff; 64],
+        [0xcc; 32],
+    );
     let update = crate::cross_domain::external::ethereum::parse_update(&payload).expect("update");
     let root = crate::cross_domain::external::ethereum::signing_root_v2(&update);
-    let sig = G2Affine::from(G2Projective::from(crate::chain::finality::hash_to_g2(&root)) * sk);
+    let sig = G2Affine::from(
+        G2Projective::from(crate::chain::finality::hash_to_g2(&root)) * sk,
+    );
     if let Some(s) = payload.get_mut(layout::SIGNATURE) {
         s.copy_from_slice(&sig.to_compressed());
     }
@@ -936,42 +930,27 @@ fn proof_market_paid_receipt_cannot_be_revoked() {
 #[test]
 fn external_registry_readmit_requires_probes_and_height_is_monotonic() {
     let poster = addr(0x81);
+    let committee = PinnedCommittee {
+        period: 0,
+        aggregate_pubkey: vec![0x11; 96],
+        next_committee_root: [0xbb; 32],
+    };
     let spec = AdapterSpec::EthereumSync {
         network: "devnet".to_string(),
-        committee: Some(PinnedCommittee {
-            period: 0,
-            aggregate_pubkey: vec![0x11; 96],
-            next_committee_root: [0xbb; 32],
-        }),
+        committee: Some(committee.clone()),
     };
     let adapter = spec.build(Some(test_bls()), None);
     let economics = IntakeState::conservative_economics(1_000_000);
     let make_ev = |height: u64, root_byte: u8| -> RawConsensusEvidence {
-        let mut payload = vec![0u8; layout::LEN];
-        if let Some(s) = payload.get_mut(layout::FINALIZED_ROOT) {
-            s.copy_from_slice(&[0xaa; 32]);
-        }
-        if let Some(s) = payload.get_mut(layout::FINALIZED_SLOT) {
-            s.copy_from_slice(&height.to_le_bytes());
-        }
-        if let Some(s) = payload.get_mut(layout::ATTESTED_SLOT) {
-            s.copy_from_slice(&(height.saturating_mul(2)).to_le_bytes());
-        }
-        if let Some(s) = payload.get_mut(layout::NEXT_COMMITTEE_ROOT) {
-            s.copy_from_slice(&[0xbb; 32]);
-        }
-        if let Some(s) = payload.get_mut(layout::AGGREGATE_PUBKEY) {
-            s.copy_from_slice(&[0x11; 96]);
-        }
-        if let Some(s) = payload.get_mut(layout::SIGNATURE) {
-            s.copy_from_slice(&[0x22; 96]);
-        }
-        if let Some(s) = payload.get_mut(layout::PARTICIPATION_BITS) {
-            s.copy_from_slice(&[0xff; 64]);
-        }
-        if let Some(s) = payload.get_mut(layout::STATE_ROOT) {
-            s.copy_from_slice(&[root_byte; 32]);
-        }
+        let payload = crate::cross_domain::external::ethereum::build_deneb_update_payload(
+            height,
+            height.saturating_mul(2),
+            0,
+            &committee,
+            &[0x22; 96],
+            &[0xff; 64],
+            [root_byte; 32],
+        );
         RawConsensusEvidence {
             adapter: adapter.descriptor().id,
             evidence_version: 2,

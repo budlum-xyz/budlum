@@ -12,7 +12,10 @@ use super::fountain::Symbol;
 use super::grants::GrantRow;
 use super::pipeline::ObjectRecord;
 use super::placement::Share;
-use super::registry::{Address, Bud3Registry, NftId, ObjectKey, Registered, RegistryError};
+use super::registry::{
+    Address, Bud3Registry, NftId, ObjectKey, Registered, RegistryError, SegmentRepair,
+};
+use super::repair::RepairWitness;
 
 /// The `StorageTx` v3 transactions.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -48,6 +51,8 @@ pub enum StorageTxV3 {
         new_symbols: Vec<Symbol>,
         /// Symbol root over the new symbols.
         new_root: [u8; 32],
+        /// Cryptographic witness binding `new_symbols`/`new_root` to the segment.
+        witness: RepairWitness,
     },
     /// Bind an NFT to an object. Signed by the NFT holder.
     BindNft {
@@ -214,6 +219,7 @@ pub fn apply_with_validators(
             new_shares,
             new_symbols,
             new_root,
+            witness,
         } => {
             // The repairer must not hold one of the new shares itself: a
             // repair moves symbols to new holders.
@@ -223,7 +229,19 @@ pub fn apply_with_validators(
                 ));
             }
             registry
-                .record_repair(&object, segment, new_shares, new_symbols, new_root, epoch)
+                .record_repair_with_validators(
+                    &object,
+                    SegmentRepair {
+                        segment,
+                        new_shares,
+                        new_symbols,
+                        new_root,
+                        witness: &witness,
+                    },
+                    Some(&signer),
+                    validator_keys,
+                    epoch,
+                )
                 .map(|()| Applied::Repaired)
         }
         StorageTxV3::BindNft { nft, object } => registry
@@ -454,10 +472,62 @@ mod tests {
             }],
             new_symbols: Vec::new(),
             new_root: [0; 32],
+            witness: RepairWitness::ProvenSymbols(Vec::new()),
         };
         assert!(matches!(
             apply(&mut r, [5; 32], tx, 0),
             Err(RegistryError::BadRepair(_))
         ));
+    }
+
+    #[test]
+    fn record_repair_tx_repairs_segment_on_chain() {
+        use super::super::custody::{symbol_leaf, symbol_root};
+        use super::super::fountain::SegmentEncoder;
+        use super::super::repair::build_repair_proven_witness;
+
+        let mut r = Bud3Registry::default();
+        let content: Vec<u8> = (0..1500u32).map(|i| (i % 249) as u8).collect();
+        let (up, shares) = prepare_public_upload(&content, &P, &Bud3Limits::default(), 8).unwrap();
+        let key = up.record.commitment;
+        let uploader = [1u8; 32];
+        r.register_object(uploader, up.record.clone(), shares.clone(), 0, 1000)
+            .unwrap();
+        for (_, s) in &shares {
+            r.ack(&key, &s.validator).unwrap();
+        }
+        let lost = shares.last().unwrap().1;
+        assert_eq!(r.mark_unseen(&lost.validator), 1);
+        assert_eq!(r.repairs_due(&key), vec![0]);
+
+        let next_esi = u32::try_from(up.segments[0].len()).unwrap();
+        let obj_bytes = super::super::bof1::Object::raw_public(&content).encode();
+        let enc = SegmentEncoder::new(0, &obj_bytes, &P).unwrap();
+        let fresh = enc.repair_symbols(next_esi - enc.k(), lost.symbols).unwrap();
+        let leaves: Vec<(u32, [u8; 32])> = fresh
+            .iter()
+            .map(|x| (x.esi, symbol_leaf(&x.data)))
+            .collect();
+        let new_root = symbol_root(&leaves);
+        let new_share = Share {
+            validator: [20u8; 32],
+            class: Class::Full,
+            first_esi: next_esi,
+            symbols: lost.symbols,
+        };
+        let witness = RepairWitness::ProvenSymbols(
+            build_repair_proven_witness(0, &up.segments[0], &up.segments[0]).unwrap(),
+        );
+        let tx = StorageTxV3::RecordRepair {
+            object: key,
+            segment: 0,
+            new_shares: vec![new_share],
+            new_symbols: fresh,
+            new_root,
+            witness,
+        };
+        assert_eq!(apply(&mut r, uploader, tx, 100), Ok(Applied::Repaired));
+        r.ack(&key, &[20u8; 32]).unwrap();
+        assert!(r.repairs_due(&key).is_empty());
     }
 }

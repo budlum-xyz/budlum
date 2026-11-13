@@ -187,6 +187,7 @@ impl NetworkMessage {
     /// # Errors
     ///
     /// Returns an error if the operation fails.
+    #[cfg(test)]
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, String> {
         use prost::Message;
         let proto_msg = crate::network::proto_conversions::pb::ProtoNetworkMessage::decode(bytes)

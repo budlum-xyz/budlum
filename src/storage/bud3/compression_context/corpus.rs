@@ -5,9 +5,8 @@
 //! bound to the original plaintext. Sealed content never enters a shared
 //! context. Burned corpus objects leave on the next context rotation.
 //!
-//! WIRING: unwired - post-launch T-Expansion shared compression context and
-//! access tiering; closed on testnet 45261 until activation height is
-//! set by governance.
+//! WIRING: shared compression context and access tiering, active on testnet
+//! `45261` from genesis (`ACTIVATION` height `Some(0)`).
 
 use std::collections::BTreeMap;
 
@@ -356,14 +355,22 @@ pub struct AccessObservation {
 }
 
 /// Policy engine for Section 6.14 item 8 access-tier transitions.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AccessTierPolicy {
     /// Whether cold objects past [`COLD_DWELL_SECS`] trigger slow-codec
-    /// re-encoding. Closed (`false`) on testnet launch; opened by governance upon
-    /// activation.
+    /// re-encoding (`true` by default on active testnet).
     pub conversion_enabled: bool,
     #[serde(with = "crate::core::map_keys")]
     observations: BTreeMap<ContentId, AccessObservation>,
+}
+
+impl Default for AccessTierPolicy {
+    fn default() -> Self {
+        Self {
+            conversion_enabled: true,
+            observations: BTreeMap::new(),
+        }
+    }
 }
 
 impl AccessTierPolicy {
@@ -811,11 +818,12 @@ mod tests {
 
         assert_eq!(policy.evaluate_tier(cid, t0), AccessTier::Cold);
         let due = t0 + COLD_DWELL_SECS + 10;
-        // Closed on testnet launch: even after 31 days cold, conversion stays off.
-        assert!(!policy.should_convert_to_cold_representation(cid, due));
-
-        policy.conversion_enabled = true;
+        // Active by default on testnet: after 31 days cold, public objects convert.
         assert!(policy.should_convert_to_cold_representation(cid, due));
+
+        policy.conversion_enabled = false;
+        assert!(!policy.should_convert_to_cold_representation(cid, due));
+        policy.conversion_enabled = true;
 
         // Five reads inside 7 days promote the object to Hot and clear cold dwell.
         let t_hot = t0 + COLD_DWELL_SECS + 100;

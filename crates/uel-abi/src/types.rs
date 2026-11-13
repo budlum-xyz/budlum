@@ -47,6 +47,8 @@ impl EeId {
     pub const UTXO: Self = Self(0x0A);
     /// Plutus UPLC.
     pub const PLUTUS: Self = Self(0x0B);
+    /// General RISC-V 32-bit guest execution (ELF RV32IMAC/RV32I).
+    pub const RV32: Self = Self(0x0C);
 }
 
 /// A state namespace the coordinator keeps for a worker, such as `uel/alias`.

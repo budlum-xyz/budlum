@@ -1,9 +1,9 @@
 //! Access tiering and temperature observation log (Section 6.14 items 8-9).
 //! exposed for RPC access telemetry and archival tier monitoring.
 //!
-//! At testnet launch, `SlowY` archival codecs are closed, so [`AccessTierTracker`]
-//! records access observations and [`TierTransition`] events without performing
-//! autonomous object re-encoding (`testnet_converts_objects() == false`).
+//! On testnet (`45261`), `SlowY` archival codecs are open and [`AccessTierTracker`]
+//! records access observations, [`TierTransition`] events, and archival
+//! candidates (`testnet_converts_objects() == true`).
 //! Sealed objects (`is_sealed == true`) are never converted by validators.
 
 use serde::{Deserialize, Serialize};
