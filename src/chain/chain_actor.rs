@@ -491,6 +491,10 @@ pub enum ChainCommand {
         label: String,
         response: oneshot::Sender<Option<Address>>,
     },
+    BnsReverseResolve {
+        address: Address,
+        response: oneshot::Sender<Option<String>>,
+    },
     IdentityResolve {
         subject: Address,
         response: oneshot::Sender<Option<(crate::registry::IdentityRecord, u64)>>,
@@ -2289,6 +2293,18 @@ impl ChainHandle {
         rx.await.unwrap_or(None)
     }
 
+    pub async fn bns_reverse_resolve(&self, address: Address) -> Option<String> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::BnsReverseResolve {
+                address,
+                response: tx,
+            })
+            .await;
+        rx.await.unwrap_or(None)
+    }
+
     pub async fn identity_resolve(
         &self,
         subject: Address,
@@ -3864,6 +3880,14 @@ impl ChainActor {
                         &label,
                         self.blockchain.state.epoch_index,
                     ));
+                }
+                ChainCommand::BnsReverseResolve { address, response } => {
+                    let _ = response.send(
+                        self.blockchain
+                            .state
+                            .bns_registry
+                            .reverse_resolve(&address, self.blockchain.state.epoch_index),
+                    );
                 }
                 ChainCommand::IdentityResolve { subject, response } => {
                     // The epoch travels with the record so liveness is

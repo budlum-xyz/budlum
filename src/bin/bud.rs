@@ -625,6 +625,36 @@ enum BnsAction {
         #[arg(long, required = true)]
         new_owner: String,
     },
+    /// Set or clear (`--clear`) the target address of a live `.bud` name.
+    SetAddress {
+        #[command(flatten)]
+        signer: V5Signer,
+        #[arg(long, required = true)]
+        name: String,
+        /// Target address (omit when passing `--clear`).
+        #[arg(long)]
+        address: Option<String>,
+        /// Clear the forwarding target instead of setting one.
+        #[arg(long, default_value_t = false)]
+        clear: bool,
+        /// Optional consensus domain ID associated with `--address`.
+        #[arg(long)]
+        domain_id: Option<u32>,
+    },
+    /// Set or clear (`--clear`) the wallet's reverse primary `.bud` name.
+    SetPrimary {
+        #[command(flatten)]
+        signer: V5Signer,
+        #[arg(long)]
+        name: Option<String>,
+        #[arg(long, default_value_t = false)]
+        clear: bool,
+    },
+    /// Reverse-resolve an address to its verified primary `.bud` name.
+    Reverse {
+        #[arg(long, required = true)]
+        address: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -2479,6 +2509,97 @@ fn run_bns_transfer(
     send_bns(rpc_url, signer, &key, TransactionType::BnsTransfer, 0, data)
 }
 
+fn run_bns_set_address(
+    rpc_url: &str,
+    signer: &V5Signer,
+    name: &str,
+    address: Option<&str>,
+    clear: bool,
+    domain_id: Option<u32>,
+) -> Result<(), String> {
+    if clear && address.is_some() {
+        return Err("pass either --address or --clear, not both".into());
+    }
+    if !clear && address.is_none() {
+        return Err("either --address <hex> or --clear is required".into());
+    }
+    let key = open_wallet(signer)?;
+    let target = match address {
+        Some(raw) => {
+            let parsed = parse_address(raw.strip_prefix("0x").unwrap_or(raw))?;
+            if parsed == Address::zero() {
+                return Err("target address cannot be the zero address".into());
+            }
+            Some(parsed)
+        }
+        None => None,
+    };
+    let effective_domain = if target.is_some() { domain_id } else { None };
+    let _prepared = rpc_call(
+        rpc_url,
+        "bud_bnsPrepareSetAddress",
+        serde_json::json!([
+            name,
+            key.address().to_hex(),
+            target.map(|a| a.to_hex()),
+            effective_domain,
+        ]),
+    )?;
+    let data = bincode::serialize(&(name.to_string(), target, effective_domain))
+        .map_err(|e| e.to_string())?;
+    send_bns(
+        rpc_url,
+        signer,
+        &key,
+        TransactionType::BnsSetAddress,
+        0,
+        data,
+    )
+}
+
+fn run_bns_set_primary(
+    rpc_url: &str,
+    signer: &V5Signer,
+    name: Option<&str>,
+    clear: bool,
+) -> Result<(), String> {
+    if clear && name.is_some() {
+        return Err("pass either --name or --clear, not both".into());
+    }
+    if !clear && name.is_none() {
+        return Err("either --name <label.bud> or --clear is required".into());
+    }
+    let key = open_wallet(signer)?;
+    let primary = name.map(str::to_string);
+    let _prepared = rpc_call(
+        rpc_url,
+        "bud_bnsPrepareSetPrimaryName",
+        serde_json::json!([key.address().to_hex(), primary]),
+    )?;
+    let data = bincode::serialize(&primary).map_err(|e| e.to_string())?;
+    send_bns(
+        rpc_url,
+        signer,
+        &key,
+        TransactionType::BnsSetPrimaryName,
+        0,
+        data,
+    )
+}
+
+fn run_bns_reverse(rpc_url: &str, address: &str) -> Result<(), String> {
+    let ans = rpc_call(
+        rpc_url,
+        "bud_bnsReverseResolve",
+        serde_json::json!([address]),
+    )?;
+    match ans.as_str() {
+        Some(name) => println!("{name}"),
+        None => println!("null"),
+    }
+    Ok(())
+}
+
 /// The multiaddr peers dial: `/ip4/...` for an address, `/dns4/...` for a
 /// name.
 fn bootnode_multiaddr(host: &str, port: u16, peer_id: &str) -> String {
@@ -2763,6 +2884,26 @@ fn main() {
                 name,
                 new_owner,
             } => run_bns_transfer(&cli.rpc_url, signer, name, new_owner),
+            BnsAction::SetAddress {
+                signer,
+                name,
+                address,
+                clear,
+                domain_id,
+            } => run_bns_set_address(
+                &cli.rpc_url,
+                signer,
+                name,
+                address.as_deref(),
+                *clear,
+                *domain_id,
+            ),
+            BnsAction::SetPrimary {
+                signer,
+                name,
+                clear,
+            } => run_bns_set_primary(&cli.rpc_url, signer, name.as_deref(), *clear),
+            BnsAction::Reverse { address } => run_bns_reverse(&cli.rpc_url, address),
         },
         Command::Node { action } => match action {
             NodeAction::Identity {

@@ -35,6 +35,8 @@ pub struct BnsRegistry {
     pub primary_sellers: BTreeSet<Address>,
     #[serde(default = "default_reserved_labels")]
     pub reserved_labels: BTreeSet<String>,
+    #[serde(default)]
+    pub primary_names: BTreeMap<Address, String>,
 }
 
 impl Default for BnsRegistry {
@@ -98,6 +100,7 @@ impl BnsRegistry {
             base_cost: 100,
             primary_sellers: default_primary_sellers(),
             reserved_labels: default_reserved_labels(),
+            primary_names: BTreeMap::new(),
         }
     }
 
@@ -373,6 +376,7 @@ impl BnsRegistry {
         {
             return Err(BnsError::OwnerNameLimitExceeded);
         }
+        let prev_address = self.names[name].address;
         let record = self.names.get_mut(name).ok_or(BnsError::InvalidName)?;
         record.owner = new_owner;
         record.resolver = None;
@@ -383,6 +387,24 @@ impl BnsRegistry {
         record.storage_root_height = None;
         record.content_id = None;
         record.subdomains.clear();
+        if current_owner != new_owner
+            && self
+                .primary_names
+                .get(&current_owner)
+                .is_some_and(|n| n == name)
+        {
+            self.primary_names.remove(&current_owner);
+        }
+        if let Some(prev_addr) = prev_address {
+            if prev_addr != new_owner
+                && self
+                    .primary_names
+                    .get(&prev_addr)
+                    .is_some_and(|n| n == name)
+            {
+                self.primary_names.remove(&prev_addr);
+            }
+        }
         Ok(())
     }
 
@@ -467,10 +489,130 @@ impl BnsRegistry {
         })
     }
 
-    pub fn resolve(&self, name: &str, current_epoch: u64) -> Option<Address> {
+    /// Update the forwarding/payment target address (and optional consensus
+    /// domain ID) of a live `.bud` name. Passing `target = None` clears the
+    /// custom target; `Some(Address::zero())` is refused.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BnsError`] if the name does not exist, is expired, `caller` is
+    /// not the owner, or `target` is the zero address.
+    pub fn set_address(
+        &mut self,
+        name: &str,
+        caller: &Address,
+        target: Option<Address>,
+        consensus_domain_id: Option<u32>,
+        current_epoch: u64,
+    ) -> Result<(), BnsError> {
+        if target == Some(Address::zero()) {
+            return Err(BnsError::InvalidName);
+        }
+        let (owner, prev_target) = {
+            let record = self.names.get(name).ok_or(BnsError::InvalidName)?;
+            if &record.owner != caller {
+                return Err(BnsError::NotOwner);
+            }
+            if record.expires_at <= current_epoch {
+                return Err(BnsError::Expired);
+            }
+            (record.owner, record.address)
+        };
+        let record = self.names.get_mut(name).ok_or(BnsError::InvalidName)?;
+        record.address = target;
+        record.consensus_domain_id = if target.is_some() {
+            consensus_domain_id
+        } else {
+            None
+        };
+        if let Some(prev) = prev_target {
+            if prev != owner
+                && Some(prev) != target
+                && self.primary_names.get(&prev).is_some_and(|n| n == name)
+            {
+                self.primary_names.remove(&prev);
+            }
+        }
+        Ok(())
+    }
+
+    /// Set or clear the signer's reverse primary `.bud` name.
+    ///
+    /// To set `Some(name)`, `name` must be live at `current_epoch` and either
+    /// owned by `caller` or explicitly routed to `caller` via `record.address`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BnsError`] if `caller` is zero, `name` is invalid/unknown,
+    /// expired, or neither owned by nor routed to `caller`.
+    pub fn set_primary_name(
+        &mut self,
+        caller: &Address,
+        name: Option<String>,
+        current_epoch: u64,
+    ) -> Result<(), BnsError> {
+        if *caller == Address::zero() {
+            return Err(BnsError::InvalidName);
+        }
+        match name {
+            Some(name) => {
+                if !Self::is_valid_name(&name) {
+                    return Err(BnsError::InvalidName);
+                }
+                let record = self.names.get(&name).ok_or(BnsError::InvalidName)?;
+                if record.expires_at <= current_epoch {
+                    return Err(BnsError::Expired);
+                }
+                if &record.owner != caller && record.address.as_ref() != Some(caller) {
+                    return Err(BnsError::NotOwner);
+                }
+                self.primary_names.insert(*caller, name);
+                Ok(())
+            }
+            None => {
+                self.primary_names.remove(caller);
+                Ok(())
+            }
+        }
+    }
+
+    /// Bidirectionally verified reverse `.bud` resolution for `address`.
+    ///
+    /// Returns `Some(name)` iff `primary_names[address] == name` AND `name` is
+    /// currently live AND (`record.owner == *address` or
+    /// `record.address == Some(*address)`).
+    #[must_use]
+    pub fn reverse_resolve(&self, address: &Address, current_epoch: u64) -> Option<String> {
+        let name = self.primary_names.get(address)?;
+        let record = self.names.get(name)?;
+        if record.expires_at <= current_epoch {
+            return None;
+        }
+        if &record.owner == address || record.address.as_ref() == Some(address) {
+            Some(name.clone())
+        } else {
+            None
+        }
+    }
+
+    /// Resolve a live `.bud` name to its owner address (used for authorization).
+    #[must_use]
+    pub fn resolve_owner(&self, name: &str, current_epoch: u64) -> Option<Address> {
         self.names.get(name).and_then(|record| {
             if record.expires_at > current_epoch {
                 Some(record.owner)
+            } else {
+                None
+            }
+        })
+    }
+
+    /// Resolve a live `.bud` name to its target address (`record.address` when
+    /// set, otherwise `None` if explicitly cleared).
+    pub fn resolve(&self, name: &str, current_epoch: u64) -> Option<Address> {
+        self.names.get(name).and_then(|record| {
+            if record.expires_at > current_epoch {
+                record.address
             } else {
                 None
             }
@@ -527,6 +669,7 @@ impl BnsRegistry {
             && self.base_cost == 100
             && self.primary_sellers == default_primary_sellers()
             && self.reserved_labels == default_reserved_labels()
+            && self.primary_names.is_empty()
     }
 
     pub fn root(&self) -> [u8; 32] {
@@ -545,6 +688,15 @@ impl BnsRegistry {
             hasher.update((self.primary_sellers.len() as u64).to_le_bytes());
             for seller in &self.primary_sellers {
                 hasher.update(seller.0);
+            }
+        }
+        if !self.primary_names.is_empty() {
+            hasher.update(b"primary_names");
+            hasher.update((self.primary_names.len() as u64).to_le_bytes());
+            for (addr, name) in &self.primary_names {
+                hasher.update(addr.0);
+                hasher.update((name.len() as u64).to_le_bytes());
+                hasher.update(name.as_bytes());
             }
         }
         hasher.update((self.names.len() as u64).to_le_bytes());
