@@ -405,6 +405,7 @@ impl Vm {
         let mut inference_model_commitment = None;
         let mut inference_input_commitment = None;
         let mut inference_output_commitment = None;
+        let mut pending_merkle_walk: Option<MerkleWalk> = None;
 
         let (dst_val, next_pc) = match inst.opcode {
             Opcode::Halt => {
@@ -706,6 +707,7 @@ impl Vm {
                     }
                     None => 0,
                 };
+                pending_merkle_walk = walk;
                 self.registers[dst_idx as usize] = result;
                 self.pc += 1;
                 (result, cur_pc + 1)
@@ -835,8 +837,7 @@ impl Vm {
         // last one, which hands off to the next instruction (the AIR enforces
         // `nxt_pc == next_pc` on every cpu row).
         if matches!(inst.opcode, Opcode::VerifyMerkle) {
-            let path_addr = inst.imm as usize;
-            if let Some(walk) = self.merkle_walk(path_addr) {
+            if let Some(walk) = pending_merkle_walk {
                 if let Some(last) = self.trace.last_mut() {
                     last.merkle_key = Some(walk.key);
                     last.next_pc = cur_pc;
@@ -1028,11 +1029,14 @@ impl Vm {
             Opcode::SRead => 8,
             Opcode::SWrite => 12,
             Opcode::Poseidon
-            | Opcode::VerifyMerkle
             | Opcode::VerifyInference
             | Opcode::PrivacyCommit
             | Opcode::NullifierCheck
             | Opcode::SumConservation => 10,
+            // VerifyMerkle performs a 64-level Poseidon2 Merkle walk and emits
+            // MERKLE_ROUNDS (264) expansion rows in the AIR; price proportionally
+            // to prevent tight loops from exhausting CPU/trace budgets.
+            Opcode::VerifyMerkle => 700,
             Opcode::Call | Opcode::Ret | Opcode::Push | Opcode::Pop => 2,
             Opcode::Syscall => 5,
             // `Div` is a binary long division: the AIR expands one row per bit
@@ -2140,5 +2144,22 @@ mod poseidon_parameter_tests {
                 0xDDDD_EEEE_FFFF_0001,
             ]
         );
+    }
+
+    #[test]
+    fn verify_merkle_loop_hits_out_of_gas_within_bounded_iterations() {
+        assert!(Vm::gas_cost(Opcode::VerifyMerkle) >= 700);
+        let program = vec![
+            inst(Opcode::VerifyMerkle, 1, 0, 0, 0),
+            inst(Opcode::Jmp, 0, 0, 0, 0),
+        ];
+        let mut vm = Vm::with_gas_limit(8192, 50_000);
+        let receipt = vm.run_receipt(&program);
+        assert!(!receipt.success);
+        assert_eq!(receipt.error, Some(VmError::OutOfGas));
+        // Each iteration charges at least 700 + 1 gas and produces at most
+        // 1 + MERKLE_ROUNDS expansion rows, bounding trace growth under 50k gas.
+        assert!(receipt.gas_used <= 50_000);
+        assert!(vm.trace.len() <= 80 * (1 + MERKLE_ROUNDS) + 1);
     }
 }
