@@ -221,14 +221,14 @@ pub struct RegistryParams {
     /// change it as the application fee policy evolves.
     pub app_fee_share_ppm: u64,
     /// Fixed fee charged in addition to the base transaction fee when an
-    /// account registers a Graft application. A non-zero fee keeps application
+    /// account registers an AppBinding application. A non-zero fee keeps application
     /// identity rows from being a free state-growth vector; the testnet
     /// profile uses one base unit.
-    pub graft_registration_fee: u64,
-    /// Number of blocks used when a Graft intent leaves its deadline at zero.
+    pub app_binding_registration_fee: u64,
+    /// Number of blocks used when an AppBinding intent leaves its deadline at zero.
     /// The testnet profile fixes this default at 600 blocks; an explicit
     /// deadline can still be chosen by the intent owner within policy.
-    pub graft_default_intent_deadline_blocks: u64,
+    pub app_binding_default_intent_deadline_blocks: u64,
     /// Highest commission a validator may take from its delegators' rewards,
     /// in parts-per-million. TESTNET-DEFAULT: 200,000 (20 percent).
     pub max_validator_commission_ppm: u64,
@@ -387,8 +387,8 @@ impl RegistryParams {
         if self.ai_model_register_fee > MAX_PARAM_AMOUNT {
             return Err("ai_model_register_fee exceeds the maximum parameter amount".into());
         }
-        if self.graft_registration_fee > MAX_PARAM_AMOUNT {
-            return Err("graft_registration_fee exceeds the maximum parameter amount".into());
+        if self.app_binding_registration_fee > MAX_PARAM_AMOUNT {
+            return Err("app_binding_registration_fee exceeds the maximum parameter amount".into());
         }
         if self.slashing_report_fee > MAX_PARAM_AMOUNT {
             return Err("slashing_report_fee exceeds the maximum parameter amount".into());
@@ -402,11 +402,11 @@ impl RegistryParams {
         if self.liveness_max_missed_epochs == 0 || self.liveness_max_missed_epochs > 100_000 {
             return Err("liveness_max_missed_epochs must be between 1 and 100,000".into());
         }
-        if self.graft_default_intent_deadline_blocks == 0
-            || self.graft_default_intent_deadline_blocks > 100_000
+        if self.app_binding_default_intent_deadline_blocks == 0
+            || self.app_binding_default_intent_deadline_blocks > 100_000
         {
             return Err(
-                "graft_default_intent_deadline_blocks must be between 1 and 100,000".into(),
+                "app_binding_default_intent_deadline_blocks must be between 1 and 100,000".into(),
             );
         }
         if self.delegation_unbonding_epochs == 0 || self.delegation_unbonding_epochs > 100_000 {
@@ -555,11 +555,11 @@ impl Default for RegistryParams {
             // generic default at zero avoids silently repricing non-testnet
             // chains; testnet genesis opts into explicitly.
             app_fee_share_ppm: 0,
-            // One base unit makes Graft registration cheap for real apps while
+            // One base unit makes AppBinding registration cheap for real apps while
             // ensuring an unbounded registration flood is not free.
-            graft_registration_fee: 1,
-            // Ten-minute-at-testnet-slot-scale default from the Graft profile.
-            graft_default_intent_deadline_blocks: 600,
+            app_binding_registration_fee: 1,
+            // Ten-minute-at-testnet-slot-scale default from the AppBinding profile.
+            app_binding_default_intent_deadline_blocks: 600,
             // TESTNET-DEFAULT. The self-bond floor is `min_stake`.
             max_validator_commission_ppm: 200_000,
             max_commission_change_ppm_per_epoch: 10_000,
@@ -823,8 +823,8 @@ mod tests {
         assert_eq!(p.swap_fee_ppm, 400);
         assert_eq!(p.bridge_fee_ppm, 800);
         assert_eq!(p.app_fee_share_ppm, 400_000);
-        assert_eq!(p.graft_registration_fee, 1);
-        assert_eq!(p.graft_default_intent_deadline_blocks, 600);
+        assert_eq!(p.app_binding_registration_fee, 1);
+        assert_eq!(p.app_binding_default_intent_deadline_blocks, 600);
         assert!(p.validate().is_ok());
     }
 

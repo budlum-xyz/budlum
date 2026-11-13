@@ -75,7 +75,7 @@ const CALLS: &[(&str, Class)] = &[
     ("get_state_root", Read),
     ("get_state_snapshot", Read),
     ("get_transaction_by_hash", Read),
-    ("graft_payment_proof", Read),
+    ("app_binding_payment_proof", Read),
     ("import_pruned_segment", Sync),
     ("pq_sealed_heights", Read),
     ("pq_stage_observation", NodeLocal),

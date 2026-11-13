@@ -38,10 +38,10 @@ use crate::domain::plugin::default_domain;
 use crate::domain::{ConsensusKind, DomainCommitment, Hash32, POW_HEADER_CHAIN_ADAPTER};
 use crate::execution::zkvm::{prove_bytecode, DEFAULT_CONTRACT_GAS_LIMIT};
 use crate::prover::ZkProofSubmission;
+use crate::settlement::app_binding::{execute_app_binding_tx, AppBindingTx};
 use crate::settlement::domains::{
     execute_settlement_tx, submit_zk_proof, SettlementTx, SettlementTxContext,
 };
-use crate::settlement::graft::{execute_graft_tx, GraftTx};
 use crate::settlement::proof_market::{ProofReceipt, ReceiptStatus};
 use crate::settlement::shared_security::{execute_shared_security_tx, SharedSecurityTx};
 use crate::tokenomics::VestingSchedule;
@@ -408,14 +408,14 @@ fn app_binding_is_open_on_testnet() {
         fee: 5,
         bls: IntakeState::production_bls,
     };
-    let tx = GraftTx::Register {
+    let tx = AppBindingTx::Register {
         domain_key: 9,
         origin_app: vec![0x44; 20],
         manifest_hash: [0x55; 32],
     };
-    execute_graft_tx(&mut state, &testnet_ctx, &tx)
+    execute_app_binding_tx(&mut state, &testnet_ctx, &tx)
         .expect("app_binding must execute on testnet 45261");
-    assert_eq!(state.settlement.graft.apps.len(), 1);
+    assert_eq!(state.settlement.app_binding.apps.len(), 1);
 
     let mainnet_ctx = SettlementTxContext {
         sender: registrant,
@@ -426,7 +426,7 @@ fn app_binding_is_open_on_testnet() {
     let outer_err = execute_settlement_tx(
         &mut state,
         &mainnet_ctx,
-        &SettlementTx::Graft(Box::new(GraftTx::Register {
+        &SettlementTx::AppBinding(Box::new(AppBindingTx::Register {
             domain_key: 9,
             origin_app: vec![0x45; 20],
             manifest_hash: [0x56; 32],

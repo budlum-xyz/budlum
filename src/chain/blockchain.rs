@@ -139,15 +139,15 @@ pub struct Blockchain {
     /// header, by global height: node-local proof material for
     /// `bud_getGlobalHeaderProof`.
     pub global_header_openings: BTreeMap<u64, crate::domain::Hash32>,
-    /// The Graft payment window and the rest of the registry opening as
+    /// The AppBinding payment window and the rest of the registry opening as
     /// they stood at each recent checkpoint, by global height:
-    /// node-local proof material for `bud_graftPaymentProof`, so a payment
+    /// node-local proof material for `bud_appBindingPaymentProof`, so a payment
     /// can be proven against a header after later payments moved the window.
     /// Rebuilt from the next checkpoint after a restart.
-    pub graft_payment_windows: BTreeMap<
+    pub app_binding_payment_windows: BTreeMap<
         u64,
         (
-            Vec<crate::settlement::graft::GraftPayment>,
+            Vec<crate::settlement::app_binding::AppBindingPayment>,
             crate::domain::Hash32,
         ),
     >,
@@ -1238,7 +1238,7 @@ impl Blockchain {
             max_pending_certs: 100, // Keep last 100 pending cert batches
             global_headers,
             global_header_openings,
-            graft_payment_windows: BTreeMap::new(),
+            app_binding_payment_windows: BTreeMap::new(),
             plugin_registry: DomainPluginRegistry::new(),
             quarantine_ledger,
             quarantine_dirty: false,
@@ -1994,10 +1994,10 @@ impl Blockchain {
             } else {
                 None
             },
-            graft_root: if state.settlement.graft.is_empty() {
+            app_binding_root: if state.settlement.app_binding.is_empty() {
                 None
             } else {
-                Some(state.settlement.graft.root())
+                Some(state.settlement.app_binding.root())
             },
             delegation_root: state.registry.delegation_root(),
             object_layer_root: if state.settlement.object_layer.is_empty() {
@@ -2093,24 +2093,25 @@ impl Blockchain {
         })
     }
 
-    /// A Graft payment proven against the most recent checkpoint header whose
+    /// An AppBinding payment proven against the most recent checkpoint header whose
     /// payment window still holds it: the payment, its Merkle
     /// path to the window root, the rest of the registry opening, and the
     /// header with its own proof material.
     #[must_use]
-    pub fn graft_payment_proof(
+    pub fn app_binding_payment_proof(
         &self,
         payment_id: &[u8; 32],
-    ) -> Option<crate::settlement::graft::GraftPaymentProof> {
-        self.graft_payment_windows.iter().rev().find_map(
+    ) -> Option<crate::settlement::app_binding::AppBindingPaymentProof> {
+        self.app_binding_payment_windows.iter().rev().find_map(
             |(global_height, (payments, rest_hash))| {
-                let (payment, path) = crate::settlement::graft::window_proof(payments, payment_id)?;
+                let (payment, path) =
+                    crate::settlement::app_binding::window_proof(payments, payment_id)?;
                 let header = self.global_header_proof(*global_height)?;
-                Some(crate::settlement::graft::GraftPaymentProof {
+                Some(crate::settlement::app_binding::AppBindingPaymentProof {
                     payment,
                     path,
-                    opening: crate::settlement::graft::GraftRootOpening {
-                        payments_root: crate::settlement::graft::window_root(payments),
+                    opening: crate::settlement::app_binding::AppBindingRootOpening {
+                        payments_root: crate::settlement::app_binding::window_root(payments),
                         rest_hash: *rest_hash,
                     },
                     header: header.header,
@@ -2135,16 +2136,21 @@ impl Blockchain {
             if header.checkpoint_height == block.index {
                 let body = self.state.state_root_body();
                 let summary = header.calculate_hash_bytes();
-                let graft = &self.state.settlement.graft;
-                if header.graft_root.is_some() && header.graft_root == Some(graft.root()) {
-                    self.graft_payment_windows.insert(
+                let app_binding = &self.state.settlement.app_binding;
+                if header.app_binding_root.is_some()
+                    && header.app_binding_root == Some(app_binding.root())
+                {
+                    self.app_binding_payment_windows.insert(
                         header.global_height,
-                        (graft.payments.clone(), graft.opening().rest_hash),
+                        (
+                            app_binding.payments.clone(),
+                            app_binding.opening().rest_hash,
+                        ),
                     );
-                    while self.graft_payment_windows.len()
+                    while self.app_binding_payment_windows.len()
                         > crate::settlement::global_block::GLOBAL_HEADER_WINDOW
                     {
-                        self.graft_payment_windows.pop_first();
+                        self.app_binding_payment_windows.pop_first();
                     }
                 }
                 if hex::encode(AccountState::root_from_opening(&body, &summary)) == block.state_root
@@ -2499,10 +2505,10 @@ impl Blockchain {
             } else {
                 None
             },
-            graft_root: if self.state.settlement.graft.is_empty() {
+            app_binding_root: if self.state.settlement.app_binding.is_empty() {
                 None
             } else {
-                Some(self.state.settlement.graft.root())
+                Some(self.state.settlement.app_binding.root())
             },
             delegation_root: self.state.registry.delegation_root(),
             object_layer_root: if self.state.settlement.object_layer.is_empty() {
@@ -5098,7 +5104,7 @@ impl Blockchain {
         // the commit.
         crate::chain::storage_maintenance::apply(&mut next_state, block)?;
         Self::apply_ai_registry_maintenance(&mut next_state, block.index);
-        crate::settlement::graft::sweep_expired_intents(&mut next_state, block.index)
+        crate::settlement::app_binding::sweep_expired_intents(&mut next_state, block.index)
             .map_err(|e| e.to_string())?;
         // The settlement registries' clocks advance at block end, inside the
         // `(state, block) -> state` transition: the external intake now lives
@@ -9277,20 +9283,20 @@ impl Blockchain {
             m.settlement_sovereign_template_rows.set(
                 i64::try_from(self.state.settlement.sovereign.templates.len()).unwrap_or(i64::MAX),
             );
-            let graft_transactions = block
+            let app_binding_transactions = block
                 .transactions
                 .iter()
                 .filter(|tx| {
                     matches!(
                         &tx.tx_type,
                         crate::core::transaction::TransactionType::Settlement(
-                            crate::settlement::domains::SettlementTx::Graft(_)
+                            crate::settlement::domains::SettlementTx::AppBinding(_)
                         )
                     )
                 })
                 .count();
-            m.graft_transactions_total
-                .inc_by(u64::try_from(graft_transactions).unwrap_or(u64::MAX));
+            m.app_binding_transactions_total
+                .inc_by(u64::try_from(app_binding_transactions).unwrap_or(u64::MAX));
             let contract_calls = block
                 .transactions
                 .iter()
@@ -9512,7 +9518,7 @@ impl Clone for Blockchain {
             max_pending_certs: self.max_pending_certs,
             global_headers: self.global_headers.clone(),
             global_header_openings: self.global_header_openings.clone(),
-            graft_payment_windows: self.graft_payment_windows.clone(),
+            app_binding_payment_windows: self.app_binding_payment_windows.clone(),
             plugin_registry: DomainPluginRegistry::new(),
             quarantine_ledger: self.quarantine_ledger.clone(),
             quarantine_dirty: self.quarantine_dirty,

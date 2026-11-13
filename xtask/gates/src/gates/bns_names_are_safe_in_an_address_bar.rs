@@ -283,6 +283,68 @@ pub fn run(root: &Path) -> Result<String, String> {
     ))
 }
 
+/// The `.bud` registration rule canaries, a positive and a negative set.
+fn bud_registration_canaries(problems: &mut Vec<String>) {
+    // B1 `.bud` registration rule canaries (non-vacuous positive + negative).
+    let max_bud = format!("{}.bud", "a".repeat(32));
+    let over_bud = format!("{}.bud", "a".repeat(33));
+    for ok_bud in ["bids.bud", "abc.bud", max_bud.as_str()] {
+        if let Err(e) = check_bud_registration(ok_bud) {
+            problems.push(format!("BROKEN: valid `.bud` name {ok_bud:?} refused: {e}"));
+        }
+    }
+    for bad_bud in [
+        "bids",
+        "ab.bud",
+        over_bud.as_str(),
+        "sub.bids.bud",
+        "-abc.bud",
+        "abc-.bud",
+        "UPPER.bud",
+        "bids.eth",
+    ] {
+        if check_bud_registration(bad_bud).is_ok() {
+            problems.push(format!("VACUOUS: invalid `.bud` name {bad_bud:?} accepted"));
+        }
+    }
+}
+
+/// Source-inspection canaries: each missing rule must fail on its own.
+fn source_inspection_canaries(problems: &mut Vec<String>) {
+    // Source-inspection anti-vacuous mutation canaries.
+    let valid_reg = "const SUFFIX: &'static str = \".bud\";\n\
+                     name.strip_suffix(Self::SUFFIX);\n\
+                     (3..=32).contains(&char_count);\n\
+                     Self::is_valid_label(label);\n\
+                     Self::is_valid_name(&name);\n\
+                     name.strip_suffix(Self::SUFFIX);\n";
+    let valid_types = "BnsRegistry::is_valid_name(&name)";
+    let valid_rpc = "BnsRegistry::is_valid_name(&name)";
+    if let Err(e) = inspect_bns_sources(valid_reg, valid_types, valid_rpc) {
+        problems.push(format!("BROKEN: valid source fixture rejected: {e}"));
+    }
+    if inspect_bns_sources("let x = 1;", valid_types, valid_rpc).is_ok() {
+        problems.push(String::from(
+            "VACUOUS: missing `.bud` suffix rule in registry.rs passed",
+        ));
+    }
+    if inspect_bns_sources(valid_reg, "let x = 1;", valid_rpc).is_ok() {
+        problems.push(String::from(
+            "VACUOUS: missing `is_valid_name` check in types.rs passed",
+        ));
+    }
+    if inspect_bns_sources(valid_reg, valid_types, "let x = 1;").is_ok() {
+        problems.push(String::from(
+            "VACUOUS: missing `is_valid_name` check in rpc/server.rs passed",
+        ));
+    }
+    if run(Path::new("/nonexistent-bns-names-canary")).is_ok() {
+        problems.push(String::from(
+            "VACUOUS: `run` passed on an unreadable root directory",
+        ));
+    }
+}
+
 /// # Errors
 ///
 /// The canaries that did not behave.
@@ -358,61 +420,8 @@ pub fn self_test() -> Result<String, String> {
         }
     }
 
-    // B1 `.bud` registration rule canaries (non-vacuous positive + negative).
-    let max_bud = format!("{}.bud", "a".repeat(32));
-    let over_bud = format!("{}.bud", "a".repeat(33));
-    for ok_bud in ["bids.bud", "abc.bud", max_bud.as_str()] {
-        if let Err(e) = check_bud_registration(ok_bud) {
-            problems.push(format!("BROKEN: valid `.bud` name {ok_bud:?} refused: {e}"));
-        }
-    }
-    for bad_bud in [
-        "bids",
-        "ab.bud",
-        over_bud.as_str(),
-        "sub.bids.bud",
-        "-abc.bud",
-        "abc-.bud",
-        "UPPER.bud",
-        "bids.eth",
-    ] {
-        if check_bud_registration(bad_bud).is_ok() {
-            problems.push(format!("VACUOUS: invalid `.bud` name {bad_bud:?} accepted"));
-        }
-    }
-
-    // Source-inspection anti-vacuous mutation canaries.
-    let valid_reg = "const SUFFIX: &'static str = \".bud\";\n\
-                     name.strip_suffix(Self::SUFFIX);\n\
-                     (3..=32).contains(&char_count);\n\
-                     Self::is_valid_label(label);\n\
-                     Self::is_valid_name(&name);\n\
-                     name.strip_suffix(Self::SUFFIX);\n";
-    let valid_types = "BnsRegistry::is_valid_name(&name)";
-    let valid_rpc = "BnsRegistry::is_valid_name(&name)";
-    if let Err(e) = inspect_bns_sources(valid_reg, valid_types, valid_rpc) {
-        problems.push(format!("BROKEN: valid source fixture rejected: {e}"));
-    }
-    if inspect_bns_sources("let x = 1;", valid_types, valid_rpc).is_ok() {
-        problems.push(String::from(
-            "VACUOUS: missing `.bud` suffix rule in registry.rs passed",
-        ));
-    }
-    if inspect_bns_sources(valid_reg, "let x = 1;", valid_rpc).is_ok() {
-        problems.push(String::from(
-            "VACUOUS: missing `is_valid_name` check in types.rs passed",
-        ));
-    }
-    if inspect_bns_sources(valid_reg, valid_types, "let x = 1;").is_ok() {
-        problems.push(String::from(
-            "VACUOUS: missing `is_valid_name` check in rpc/server.rs passed",
-        ));
-    }
-    if run(Path::new("/nonexistent-bns-names-canary")).is_ok() {
-        problems.push(String::from(
-            "VACUOUS: `run` passed on an unreadable root directory",
-        ));
-    }
+    bud_registration_canaries(&mut problems);
+    source_inspection_canaries(&mut problems);
 
     if !problems.is_empty() {
         let mut msg = String::new();

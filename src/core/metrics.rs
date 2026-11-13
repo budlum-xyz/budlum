@@ -95,8 +95,8 @@ pub struct Metrics {
     pub settlement_frozen_domains: IntGauge,
     pub settlement_global_headers_sealed: IntCounter,
     pub settlement_equivocations_detected: IntCounter,
-    /// Graft settlement-door writes accepted in committed blocks.
-    pub graft_transactions_total: IntCounter,
+    /// AppBinding settlement-door writes accepted in committed blocks.
+    pub app_binding_transactions_total: IntCounter,
     /// BudZKVM contract calls in committed blocks.
     pub contract_calls_total: IntCounter,
     /// Mikoriza restaked validator rows in account state.
@@ -515,9 +515,9 @@ impl Metrics {
             "budlum_settlement_equivocations_detected",
             "Total settlement equivocations detected",
         )?;
-        let graft_transactions_total = IntCounter::new(
-            "budlum_graft_transactions_total",
-            "Total Graft settlement-door transactions processed",
+        let app_binding_transactions_total = IntCounter::new(
+            "budlum_app_binding_transactions_total",
+            "Total AppBinding settlement-door transactions processed",
         )?;
         let contract_calls_total = IntCounter::new(
             "budlum_contract_calls_total",
@@ -978,7 +978,7 @@ impl Metrics {
         registry.register(Box::new(settlement_frozen_domains.clone()))?;
         registry.register(Box::new(settlement_global_headers_sealed.clone()))?;
         registry.register(Box::new(settlement_equivocations_detected.clone()))?;
-        registry.register(Box::new(graft_transactions_total.clone()))?;
+        registry.register(Box::new(app_binding_transactions_total.clone()))?;
         registry.register(Box::new(contract_calls_total.clone()))?;
         registry.register(Box::new(restaked_validator_rows.clone()))?;
         registry.register(Box::new(proof_market_active_tasks.clone()))?;
@@ -1129,7 +1129,7 @@ impl Metrics {
             settlement_frozen_domains,
             settlement_global_headers_sealed,
             settlement_equivocations_detected,
-            graft_transactions_total,
+            app_binding_transactions_total,
             contract_calls_total,
             restaked_validator_rows,
             proof_market_active_tasks,
