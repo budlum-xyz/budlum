@@ -5,7 +5,12 @@ use bud_proof::{DefaultAdapter as Prover, ExecutionPublicInputs, ProofEnvelope, 
 use bud_vm::Vm;
 use sha3::{Digest, Keccak256};
 
-pub const DEFAULT_CONTRACT_GAS_LIMIT: u64 = 1_000_000;
+/// Contract gas one call may burn, bounded by what the prover can materialise.
+///
+/// Witness size is `next_pow2(3 * steps + 1) * TRACE_WIDTH` field elements, so
+/// `2^14` steps keep one call's base matrix near half a gigabyte and couple
+/// `MAX_BLOCK_CONTRACT_GAS` directly to the per-call trace cap.
+pub const DEFAULT_CONTRACT_GAS_LIMIT: u64 = 1 << 14;
 
 /// Memory size in bytes of the VM that runs and proves contract bytecode.
 const CONTRACT_VM_MEMORY_BYTES: usize = 8192;
@@ -15,6 +20,12 @@ const _: () = assert!(
     "CONTRACT_VM_MEMORY_BYTES must not exceed bud_vm::MAX_MEMORY_BYTES"
 );
 
+const _: () = assert!(
+    (3 * bud_vm::MAX_CONTRACT_TRACE_STEPS + 1).next_power_of_two()
+        <= bud_proof::plonky3_prover::MAX_PROVER_WITNESS_ROWS,
+    "MAX_CONTRACT_TRACE_STEPS must stay within MAX_PROVER_WITNESS_ROWS"
+);
+
 /// Contract gas one block may carry, summed over its `ContractCall`
 /// transactions at [`DEFAULT_CONTRACT_GAS_LIMIT`] each.
 ///
@@ -22,7 +33,7 @@ const _: () = assert!(
 /// many such executions a block could ask a validator to run and prove, so a
 /// block of near-limit calls repeated the heaviest work
 /// `MAX_TRANSACTIONS_PER_BLOCK` times. The budget is counted at the limit,
-/// not at `gas_used`: proving cost is committed when the call starts, and a
+/// not at `gas_used`: execution cost is committed when the call starts, and a
 /// call that runs out of gas at the limit costs the same trace as one that
 /// halts just under it. Sixty full calls per block.
 ///
@@ -41,6 +52,17 @@ const BLOCK_GAS_LIMIT_BGU: u64 = 60_000_000;
 const _: () = assert!(
     DEFAULT_CONTRACT_GAS_LIMIT <= BLOCK_GAS_LIMIT_BGU,
     "a contract call limit may not exceed the block gas limit (Section 8.9 item 3)"
+);
+
+/// The witness matrix rows one call can materialise must fit the prover cap.
+///
+/// `next_pow2(3 * steps + 1)` is the shape `trace_matrix` produces, so a step
+/// cap above `MAX_PROVER_WITNESS_ROWS` would let a single `ContractCall` ask
+/// the prover for a matrix it refuses to build (prover OOM).
+const _: () = assert!(
+    (3 * bud_vm::MAX_CONTRACT_TRACE_STEPS + 1).next_power_of_two()
+        <= bud_proof::plonky3_prover::MAX_PROVER_WITNESS_ROWS,
+    "MAX_CONTRACT_TRACE_STEPS must stay within MAX_PROVER_WITNESS_ROWS"
 );
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -131,9 +153,15 @@ impl ZkVmExecutor {
     /// `ctx` is the transaction the bytecode runs for: the VM context carries
     /// its sender, nonce and block height, so the syscalls that read them and
     /// the public inputs that repeat them describe this transaction rather
-    /// than a zeroed one. The executor's `ContractCall` path is the caller.
-    /// Execution-only gated VM run for consensus `ContractCall` (§8.8: deterministic
-    /// execution without inline per-validator STARK proof generation).
+    /// than a zeroed one.
+    ///
+    /// Execution-only gated VM run for consensus `ContractCall` (§8.8:
+    /// deterministic execution without inline per-validator STARK proof
+    /// generation). WIRING: the block path. The executor's `ContractCall`
+    /// path is the only caller, and it must not allocate a prover on the
+    /// validator critical path; `execute_for_block` is the same execution
+    /// door without the proof, `execute_bytecode` keeps the inline STARK
+    /// proof for settlement and tooling callers.
     ///
     /// # Errors
     ///
@@ -150,7 +178,8 @@ impl ZkVmExecutor {
             return Err("BudZKVM bytecode length must be a multiple of 8 bytes".into());
         }
         let program = decode_program(bytecode)?;
-        let mut vm = Vm::with_mainnet_mode(CONTRACT_VM_MEMORY_BYTES, gas_limit, true);
+        let mut vm = Vm::with_mainnet_mode(CONTRACT_VM_MEMORY_BYTES, gas_limit, true)
+            .with_step_limit(bud_vm::MAX_CONTRACT_TRACE_STEPS);
         vm.context.sender = ctx.sender;
         vm.context.nonce = ctx.nonce;
         vm.context.block_height = ctx.block_height;
@@ -210,11 +239,36 @@ impl ZkVmExecutor {
         Self::execute_bytecode_inner(bytecode, gas_limit, false, TxContext::default())
     }
 
+    /// Execute contract bytecode inside the deterministic block state
+    /// transition without running the inline Plonky3 STARK prover.
+    ///
+    /// Every validator re-executes the same deterministic VM bytecode under the
+    /// staged-rollout activation gates and `MAX_CONTRACT_TRACE_STEPS`; proofs
+    /// belong on the dedicated `SubmitZkProof` settlement path rather than on
+    /// the per-block validator critical path.
+    pub fn execute_for_block(
+        bytecode: &[u8],
+        gas_limit: u64,
+        ctx: TxContext,
+    ) -> Result<ZkVmReceipt, String> {
+        Self::execute_bytecode_mode(bytecode, gas_limit, true, ctx, false)
+    }
+
     fn execute_bytecode_inner(
         bytecode: &[u8],
         gas_limit: u64,
         mainnet: bool,
         ctx: TxContext,
+    ) -> Result<ZkVmReceipt, String> {
+        Self::execute_bytecode_mode(bytecode, gas_limit, mainnet, ctx, true)
+    }
+
+    fn execute_bytecode_mode(
+        bytecode: &[u8],
+        gas_limit: u64,
+        mainnet: bool,
+        ctx: TxContext,
+        prove_execution: bool,
     ) -> Result<ZkVmReceipt, String> {
         if bytecode.is_empty() {
             return Err("Empty BudZKVM bytecode".into());
@@ -224,7 +278,8 @@ impl ZkVmExecutor {
         }
 
         let program = decode_program(bytecode)?;
-        let mut vm = Vm::with_mainnet_mode(CONTRACT_VM_MEMORY_BYTES, gas_limit, mainnet);
+        let mut vm = Vm::with_mainnet_mode(CONTRACT_VM_MEMORY_BYTES, gas_limit, mainnet)
+            .with_step_limit(bud_vm::MAX_CONTRACT_TRACE_STEPS);
         vm.context.sender = ctx.sender;
         vm.context.nonce = ctx.nonce;
         vm.context.block_height = ctx.block_height;
@@ -255,17 +310,22 @@ impl ZkVmExecutor {
             });
         }
 
-        let public_inputs = build_public_inputs(&program, &vm, &receipt);
-        let proof = Prover::prove(&vm.trace, &public_inputs, &program)
-            .map_err(|err| format!("BudZKVM proof generation failed: {err:?}"))?;
-        Prover::verify(&proof, &public_inputs, &program)
-            .map_err(|err| format!("BudZKVM proof verification failed: {err:?}"))?;
+        let proof_bytes = if prove_execution {
+            let public_inputs = build_public_inputs(&program, &vm, &receipt);
+            let proof = Prover::prove(&vm.trace, &public_inputs, &program)
+                .map_err(|err| format!("BudZKVM proof generation failed: {err:?}"))?;
+            Prover::verify(&proof, &public_inputs, &program)
+                .map_err(|err| format!("BudZKVM proof verification failed: {err:?}"))?;
+            proof.proof_bytes.len()
+        } else {
+            0
+        };
 
         Ok(ZkVmReceipt {
             gas_used: receipt.gas_used,
             steps: receipt.trace_len as usize,
             events: receipt.events.clone(),
-            proof_bytes: proof.proof_bytes.len(),
+            proof_bytes,
         })
     }
 
@@ -401,7 +461,16 @@ fn prove_bytecode_inner_with_memory(
         return Err("BudZKVM bytecode length must be a multiple of 8 bytes".into());
     }
     let program = decode_program(bytecode)?;
-    let mut vm = Vm::with_mainnet_mode(CONTRACT_VM_MEMORY_BYTES, gas_limit, mainnet);
+    // A pre-state setup (the stateful-contract door stages memory before the
+    // run) appends its own rows, so it gets twice the step budget. Both caps
+    // sit under `MAX_PROVER_WITNESS_ROWS` through the const assertion above.
+    let max_steps = if setup.is_some() {
+        bud_vm::MAX_CONTRACT_TRACE_STEPS.saturating_mul(2)
+    } else {
+        bud_vm::MAX_CONTRACT_TRACE_STEPS
+    };
+    let mut vm = Vm::with_mainnet_mode(CONTRACT_VM_MEMORY_BYTES, gas_limit, mainnet)
+        .with_step_limit(max_steps);
     vm.context.sender = ctx.sender;
     vm.context.nonce = ctx.nonce;
     vm.context.block_height = ctx.block_height;
@@ -1036,5 +1105,76 @@ mod tests {
             .is_err(),
             "explicitly closed activation must still refuse VerifyInference"
         );
+    }
+
+    #[test]
+    fn contract_infinite_loop_stops_within_step_limit_without_prover_oom() {
+        let jump = Instruction {
+            opcode: Opcode::Jmp,
+            rd: 0,
+            rs1: 0,
+            rs2: 0,
+            imm: 0,
+        };
+        let bytecode: Vec<u8> = jump.encode().to_le_bytes().to_vec();
+        let err = ZkVmExecutor::execute_bytecode(
+            &bytecode,
+            DEFAULT_CONTRACT_GAS_LIMIT,
+            TxContext::default(),
+        )
+        .expect_err("infinite loop must terminate via OutOfGas within step limit");
+        assert!(err.contains("OutOfGas"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn execute_for_block_runs_gated_vm_without_prover_allocation() {
+        let halt = Instruction {
+            opcode: Opcode::Halt,
+            rd: 0,
+            rs1: 0,
+            rs2: 0,
+            imm: 0,
+        };
+        let bytecode = halt.encode().to_le_bytes().to_vec();
+        let receipt = ZkVmExecutor::execute_for_block(
+            &bytecode,
+            DEFAULT_CONTRACT_GAS_LIMIT,
+            TxContext::default(),
+        )
+        .expect("halt must succeed");
+        assert_eq!(receipt.proof_bytes, 0);
+        assert!(receipt.steps >= 1);
+    }
+
+    #[test]
+    fn execute_bytecode_still_proves_what_execute_for_block_deliberately_skips() {
+        let halt = Instruction {
+            opcode: Opcode::Halt,
+            rd: 0,
+            rs1: 0,
+            rs2: 0,
+            imm: 0,
+        };
+        let bytecode = halt.encode().to_le_bytes().to_vec();
+        let receipt = ZkVmExecutor::execute_bytecode(
+            &bytecode,
+            DEFAULT_CONTRACT_GAS_LIMIT,
+            TxContext::default(),
+        )
+        .expect("halt must succeed");
+        assert!(receipt.steps >= 1);
+        // The block path moved to `execute_for_block` (no prover allocation on
+        // the validator critical path); this call pins that the proving entry
+        // point still runs the inline prover, so a future refactor cannot
+        // silently turn every receipt into an unproved one.
+        assert!(!receipt.proof_bytes.is_empty());
+        // The same program under the block path proves nothing.
+        let unproved = ZkVmExecutor::execute_for_block(
+            &bytecode,
+            DEFAULT_CONTRACT_GAS_LIMIT,
+            TxContext::default(),
+        )
+        .expect("halt must succeed");
+        assert_eq!(unproved.proof_bytes, 0);
     }
 }

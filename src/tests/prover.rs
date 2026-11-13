@@ -195,6 +195,48 @@ fn invalid_proof_burns_fee_and_leaves_state_unchanged() {
     assert_eq!(bc.state.message_registry.len(), 0);
 }
 
+/// One cheap submission must not make every validator size and commit a
+/// gigabyte-scale preprocessed trace.
+///
+/// The verifier derives its preprocessed-trace degree from the submitter's
+/// `trace_len` and commits to it before it parses a proof byte, so the claimed
+/// shape is bounded by what an honest prover can produce
+/// (`(3 * trace_len + 1).next_power_of_two() <= MAX_PROVER_WITNESS_ROWS`) before
+/// the verifier is handed anything. `MAX_TRACE_LEN` alone is sixteen times that.
+#[test]
+fn an_oversized_claimed_trace_is_rejected_before_the_verifier_allocates() {
+    let mut bc = fresh_chain();
+    let (proof, mut pi, program) = real_proof();
+    register_domain_allowing(&mut bc, 1, &program);
+    let sender = addr(0x0b);
+    let fee = bc.state.registry.params().proof_submission_fee;
+    bc.state.add_balance(&sender, fee);
+
+    // The largest trace the shape cap allows, and eight times past the rows an
+    // honest prover will build.
+    pi.trace_len = u64::try_from(bud_proof::adapter::MAX_TRACE_LEN).unwrap_or(u64::MAX);
+    assert!(
+        pi.trace_len * 3 + 1
+            > u64::try_from(bud_proof::plonky3_prover::MAX_PROVER_WITNESS_ROWS).unwrap_or(u64::MAX),
+        "the claimed trace must exceed the prover's own witness limit"
+    );
+
+    let submission = submission(sender, 1, 10, &proof, &pi, &program);
+    let before = bc.state.get_balance(&sender);
+    let outcome = crate::settlement::domains::submit_zk_proof(
+        &mut bc.state,
+        &submission,
+        bc.chain_id,
+        bc.chain.len() as u64,
+        0,
+    )
+    .expect("an oversized claim is refused, not an error against the chain");
+    assert_eq!(outcome, ProofAcceptance::Rejected);
+    // The fee is burned whatever the verdict, and nothing is recorded.
+    assert_eq!(bc.state.get_balance(&sender), before - fee);
+    assert_eq!(bc.state.settlement.proof_claims.len(), 0);
+}
+
 #[test]
 fn insufficient_fee_rejected_without_verification() {
     let mut bc = fresh_chain();
