@@ -989,14 +989,11 @@ impl Vm {
             Opcode::SRead => 8,
             Opcode::SWrite => 12,
             Opcode::Poseidon
+            | Opcode::VerifyMerkle
             | Opcode::VerifyInference
             | Opcode::PrivacyCommit
             | Opcode::NullifierCheck
             | Opcode::SumConservation => 10,
-            // VerifyMerkle performs a 64-level Poseidon2 Merkle walk and emits
-            // MERKLE_ROUNDS (264) expansion rows in the AIR; price proportionally
-            // to prevent tight loops from exhausting CPU/trace budgets.
-            Opcode::VerifyMerkle => 700,
             Opcode::Call | Opcode::Ret | Opcode::Push | Opcode::Pop => 2,
             Opcode::Syscall => 5,
             // `Div` is a binary long division: the AIR expands one row per bit
@@ -2031,16 +2028,29 @@ mod poseidon_parameter_tests {
 
     #[test]
     fn verify_merkle_loop_hits_out_of_gas_within_bounded_iterations() {
-        assert!(Vm::gas_cost(Opcode::VerifyMerkle) >= 700);
-        let program = vec![
-            inst(Opcode::VerifyMerkle, 1, 0, 0, 0),
-            inst(Opcode::Jmp, 0, 0, 0, 0),
-        ];
-        let mut vm = Vm::with_gas_limit(8192, 50_000);
+        assert_eq!(Vm::gas_cost(Opcode::VerifyMerkle), 10);
+        let verify = Instruction {
+            opcode: Opcode::VerifyMerkle,
+            rd: 1,
+            rs1: 0,
+            rs2: 0,
+            imm: 0,
+        }
+        .encode();
+        let jump = Instruction {
+            opcode: Opcode::Jmp,
+            rd: 0,
+            rs1: 0,
+            rs2: 0,
+            imm: 0,
+        }
+        .encode();
+        let program = vec![verify, jump];
+        let mut vm = Vm::with_gas_limit(8192, 4_096);
         let receipt = vm.run_receipt(&program);
         assert!(!receipt.success);
         assert_eq!(receipt.error, Some(VmError::OutOfGas));
-        assert!(receipt.gas_used <= 50_000);
-        assert!(vm.trace.len() <= 80 * (1 + MERKLE_ROUNDS) + 1);
+        assert!(receipt.gas_used <= 4_096);
+        assert!(vm.trace.len() <= 410 * (1 + MERKLE_ROUNDS) + 1);
     }
 }
