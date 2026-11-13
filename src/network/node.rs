@@ -5842,6 +5842,7 @@ impl Node {
                                                             continue;
                                                         }
                                                         let mut fork_retry = false;
+                                                        let mut non_fork_refusal = false;
                                                         let mut joined = 0u32;
                                                         let mut fork_suffix_ready: Option<Vec<crate::core::block::Block>> = None;
                                                         let cursor_opt = self.sync_range_cursor.take();
@@ -5958,13 +5959,24 @@ impl Node {
                                                                                     }
                                                                                 }
                                                                                 Err(e) => {
-                                                                                    fork_retry |= e.contains("Previous hash mismatch");
+                                                                                    if e.contains("Previous hash mismatch") {
+                                                                                        fork_retry = true;
+                                                                                    } else {
+                                                                                        non_fork_refusal = true;
+                                                                                        {
+                                                                                            let mut pm = self.peer_manager_lock();
+                                                                                            pm.report_invalid_block(&peer);
+                                                                                        }
+                                                                                    }
                                                                                     warn!(
                                                                                         peer = %peer,
                                                                                         index,
                                                                                         error = %e,
                                                                                         "sync block refused"
                                                                                     );
+                                                                                    if non_fork_refusal {
+                                                                                        break;
+                                                                                    }
                                                                                 }
                                                                             }
                                                                         }
@@ -6045,13 +6057,24 @@ impl Node {
                                                                                 }
                                                                             }
                                                                             Err(e) => {
-                                                                                fork_retry |= e.contains("Previous hash mismatch");
+                                                                                if e.contains("Previous hash mismatch") {
+                                                                                    fork_retry = true;
+                                                                                } else {
+                                                                                    non_fork_refusal = true;
+                                                                                    {
+                                                                                        let mut pm = self.peer_manager_lock();
+                                                                                        pm.report_invalid_block(&peer);
+                                                                                    }
+                                                                                }
                                                                                 warn!(
                                                                                     peer = %peer,
                                                                                     index,
                                                                                     error = %e,
                                                                                     "sync block refused"
                                                                                 );
+                                                                                if non_fork_refusal {
+                                                                                    break;
+                                                                                }
                                                                             }
                                                                         }
                                                                     }
@@ -6126,9 +6149,12 @@ impl Node {
                                                                     peer,
                                                                 )
                                                                 .await;
+                                                                if !non_fork_refusal {
+                                                                    let mut pm =
+                                                                        self.peer_manager_lock();
+                                                                    pm.report_good_behavior(&peer);
+                                                                }
                                                             }
-                                                            let mut pm = self.peer_manager_lock();
-                                                            pm.report_good_behavior(&peer);
                                                         }
                                                     }
                                                     _ => {

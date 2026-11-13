@@ -2143,18 +2143,7 @@ mod tests {
             },
         )
         .expect("squatter commits under its own namespace");
-        let mut blocking_policy = policy_for(squatter, victim_manifest.shards[0].shard_id);
-        blocking_policy.self_host_allowed = false;
-        execute_storage_tx(
-            &mut state,
-            &ctx(squatter),
-            &StorageTx::DeclareSelfHostPolicy {
-                manifest_id: mid,
-                policy: blocking_policy,
-                profile: profile_for(squatter),
-            },
-        )
-        .expect("squatter policy scoped to squatter");
+        assert!(state.storage_registry.is_registered(&mid));
 
         // 2. Real owner is NOT locked out: RegisterManifest, CommitConfidentialBody,
         //    IssueViewGrant, SocialDelete, and self-host check all succeed for victim.
@@ -2162,6 +2151,18 @@ mod tests {
         // Ambiguous while neither holds a third-party deal: squatter cannot claim sole owner_of.
         assert_eq!(state.storage_registry.owner_of(&mid), None);
         assert!(state.storage_registry.has_claim(&mid, &victim));
+        assert_eq!(
+            execute_storage_tx(
+                &mut state,
+                &ctx(squatter),
+                &StorageTx::RegisterManifest {
+                    manifest: squatter_manifest,
+                },
+            )
+            .unwrap_err(),
+            StorageTxError::AlreadyRegistered
+        );
+        assert_eq!(state.storage_registry.owner_of(&mid), Some(victim));
 
         let victim_commit = ConfidentialBodyCommit::new(
             mid,

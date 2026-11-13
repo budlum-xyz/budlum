@@ -1307,11 +1307,22 @@ pub fn execute_graft_tx(
             // Bidding alone is not a promise to execute: only the solver
             // actually awarded the work held it open.
             if let Some(solver) = intent.awarded_solver {
+                // `Fulfill` refuses an application whose domain is not Active,
+                // so a solver awarded that work could not deliver it. A
+                // liveness fault belongs to the solver only while the domain
+                // still lets it act; the refund must not burn the bond of a
+                // solver that was never able to fulfil.
+                let domain_active = state
+                    .settlement
+                    .graft
+                    .get(&intent.graft_id)
+                    .and_then(|app| state.settlement.domains.get(app.domain_key))
+                    .is_some_and(crate::domain::types::ConsensusDomain::is_active);
                 let slashable = state
                     .registry
                     .get(&solver, crate::registry::role::roles::RELAYER)
                     .is_some_and(crate::registry::permissionless::Registration::is_slashable);
-                if slashable {
+                if domain_active && slashable {
                     let ratio = state.registry.params().liveness_slash_ratio_fixed;
                     state
                         .slash_role_destroying(
@@ -2328,6 +2339,42 @@ mod tests {
                 },
             )
             .is_err());
+            let pay_err = run_binding_tx(
+                &mut state,
+                &ctx(user),
+                &BindingTx::Pay {
+                    graft_id: id,
+                    amount: 10,
+                    memo_hash: [0x11; 32],
+                    origin_recipient: vec![0x22; 20],
+                    target_chain_id: 0,
+                    target_receiver: Vec::new(),
+                },
+            )
+            .unwrap_err();
+            assert!(
+                pay_err.to_string().contains("not active"),
+                "Pay must refuse inactive domain: {pay_err}"
+            );
+            let open_err = run_binding_tx(
+                &mut state,
+                &ctx(user),
+                &BindingTx::OpenIntent {
+                    graft_id: id,
+                    call_hash: [0x92; 32],
+                    value: 0,
+                    max_payment: 500,
+                    solver_fee_cap: 50,
+                    service_price: 50,
+                    origin_beneficiary: vec![0x33; 20],
+                    deadline_block: 120,
+                },
+            )
+            .unwrap_err();
+            assert!(
+                open_err.to_string().contains("not active"),
+                "OpenIntent must refuse inactive domain: {open_err}"
+            );
             assert!(run_binding_tx(
                 &mut state,
                 &ctx(solver),
@@ -2338,5 +2385,21 @@ mod tests {
             )
             .is_err());
         }
+
+        // When an intent expires while the domain is Frozen/Retired, Refund
+        // returns the user's escrow without slashing the awarded solver that
+        // was forbidden from calling Fulfill.
+        state.current_block_height = 101;
+        let user_before = state.get_balance(&user);
+        run_binding_tx(&mut state, &ctx(user), &BindingTx::Refund { intent_id }).unwrap();
+        assert_eq!(state.get_balance(&user), user_before + 1_000);
+        let reg = state
+            .registry
+            .get(&solver, relayer_role)
+            .expect("solver registration remains");
+        assert_eq!(
+            reg.stake, stake,
+            "solver bond must not be burned when domain was inactive"
+        );
     }
 }
