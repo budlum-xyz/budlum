@@ -499,6 +499,10 @@ pub enum ChainCommand {
         name: String,
         response: oneshot::Sender<Option<std::collections::BTreeMap<String, String>>>,
     },
+    BnsListSubdomains {
+        parent_name: String,
+        response: oneshot::Sender<Option<std::collections::BTreeMap<String, Address>>>,
+    },
     IdentityResolve {
         subject: Address,
         response: oneshot::Sender<Option<(crate::registry::IdentityRecord, u64)>>,
@@ -2321,6 +2325,21 @@ impl ChainHandle {
         rx.await.unwrap_or(None)
     }
 
+    pub async fn bns_list_subdomains(
+        &self,
+        parent_name: String,
+    ) -> Option<std::collections::BTreeMap<String, Address>> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::BnsListSubdomains {
+                parent_name,
+                response: tx,
+            })
+            .await;
+        rx.await.unwrap_or(None)
+    }
+
     pub async fn identity_resolve(
         &self,
         subject: Address,
@@ -3911,6 +3930,17 @@ impl ChainActor {
                             .state
                             .bns_registry
                             .get_records(&name, self.blockchain.state.epoch_index),
+                    );
+                }
+                ChainCommand::BnsListSubdomains {
+                    parent_name,
+                    response,
+                } => {
+                    let _ = response.send(
+                        self.blockchain
+                            .state
+                            .bns_registry
+                            .list_subdomains(&parent_name, self.blockchain.state.epoch_index),
                     );
                 }
                 ChainCommand::IdentityResolve { subject, response } => {
