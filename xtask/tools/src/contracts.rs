@@ -125,8 +125,8 @@ struct Plan {
 
 fn plans(config: &Config, verifier: Option<&str>) -> Vec<Plan> {
     let mut plans = vec![Plan {
-        key: "graft_executor",
-        contract: "graft/GraftExecutor.sol:GraftExecutor",
+        key: "app_binding_executor",
+        contract: "app_binding/AppBindingExecutor.sol:AppBindingExecutor",
         args: Vec::new(),
     }];
     let budlum_chain = config.get("network.budlum_chain_id").unwrap_or("45261");
@@ -149,7 +149,7 @@ fn plans(config: &Config, verifier: Option<&str>) -> Vec<Plan> {
     if let Some(verifier) = verifier {
         plans.push(Plan {
             key: "budlum_remote_account_factory",
-            contract: "graft/BudlumRemoteAccountFactory.sol:BudlumRemoteAccountFactory",
+            contract: "app_binding/BudlumRemoteAccountFactory.sol:BudlumRemoteAccountFactory",
             args: vec![verifier.to_string()],
         });
     }
@@ -280,18 +280,19 @@ fn deploy(root: &Path) -> Result<String, String> {
 ///
 /// The first disagreement.
 pub fn self_test() -> Result<String, String> {
-    let sample = "[verifier]\nfraud_proof_verifier = \"\"\n[addresses]\ngraft_executor = \"\"\n";
+    let sample =
+        "[verifier]\nfraud_proof_verifier = \"\"\n[addresses]\napp_binding_executor = \"\"\n";
     let config = Config::parse(sample);
     if config.get("verifier.fraud_proof_verifier").is_some() {
         return Err("an empty value read as set".into());
     }
     let mut written = BTreeMap::new();
     written.insert(
-        "graft_executor",
+        "app_binding_executor",
         "0x00000000000000000000000000000000000000aa".to_string(),
     );
     let rewritten = write_addresses(sample, &written);
-    if Config::parse(&rewritten).get("addresses.graft_executor")
+    if Config::parse(&rewritten).get("addresses.app_binding_executor")
         != Some("0x00000000000000000000000000000000000000aa")
     {
         return Err("the address writer lost the address".into());
@@ -304,7 +305,7 @@ pub fn self_test() -> Result<String, String> {
     }
     if !plans(&config, None)
         .iter()
-        .any(|p| p.key == "graft_executor")
+        .any(|p| p.key == "app_binding_executor")
     {
         return Err("the executor needs no parameter and is always planned".into());
     }

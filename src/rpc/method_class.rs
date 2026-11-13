@@ -97,9 +97,9 @@ pub(crate) const METHOD_CLASSES: &[MethodClass] = &[
     row("bud_getGlobalHeaderProof", Public, Read),
     row("bud_getDomainCommitments", Public, Read),
     row("bud_getConsensusDomains", Public, Read),
-    row("bud_getGraftApplication", Public, Read),
+    row("bud_getAppBindingApplication", Public, Read),
     row("bud_getRestakedValidators", Public, Read),
-    row("bud_graftPaymentProof", Public, Read),
+    row("bud_appBindingPaymentProof", Public, Read),
     // /: refused; the door is `ExternalDomainTx::Register`.
     row("bud_registerExternalDomain", Operator, Refused),
     // refused; the door is `ExternalDomainTx::SubmitEvidence`.
@@ -232,7 +232,7 @@ pub(crate) const METHOD_CLASSES: &[MethodClass] = &[
     row("bud_dataMarketPrepareSaleAuthorization", Public, TxSubmit),
     row("bud_dataMarketPreparePurchase", Public, TxSubmit),
     row("bud_hubGetApps", Public, Read),
-    row("bud_hubGetGraftApps", Public, Read),
+    row("bud_hubGetAppBindingApps", Public, Read),
     row("bud_hubPrepareRegister", Public, TxSubmit),
     row("bud_relayerPrepareExternalTx", Public, TxSubmit),
     row("bud_pruneStatus", Public, Read),

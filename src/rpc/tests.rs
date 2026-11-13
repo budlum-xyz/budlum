@@ -2150,8 +2150,8 @@ mod rpc_tests {
             "bud_hubGetApps"
         );
         assert!(
-            record_answered(&server.budlumxyz_get_graft_apps().await.unwrap()),
-            "bud_hubGetGraftApps"
+            record_answered(&server.budlumxyz_get_app_binding_apps().await.unwrap()),
+            "bud_hubGetAppBindingApps"
         );
     }
 

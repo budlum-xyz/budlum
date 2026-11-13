@@ -13,7 +13,7 @@
 //! `budlum-indexer` processes on loopback using pre-built binaries in
 //! `target/release` (or `--bin-dir`), assembles a fresh testnet ceremony on
 //! chain `45261` wired as a 3-regular chordal ring, and runs the same live
-//! Graft, domain, delegation, BNS, faucet, and finality scenarios plus
+//! AppBinding, domain, delegation, BNS, faucet, and finality scenarios plus
 //! public/operator RPC split and multi-VM/storage checks.
 //!
 //! Each scenario's verdict and measurements go to the report file (default
@@ -1231,7 +1231,7 @@ fn scenario_bns(backend: &Backend<'_>, wallets: &Wallets) -> Result<String, Stri
     Ok(format!("{name} -> {owner}"))
 }
 
-fn scenario_graft(backend: &Backend<'_>, wallets: &Wallets) -> Result<String, String> {
+fn scenario_app_binding(backend: &Backend<'_>, wallets: &Wallets) -> Result<String, String> {
     const DOMAIN: &str = "4242";
     const ORIGIN: &str = "00000000000000000000000000000000000000aa";
     backend.bud(&[
@@ -1252,11 +1252,20 @@ fn scenario_graft(backend: &Backend<'_>, wallets: &Wallets) -> Result<String, St
             .map(|_| ())
     })
     .ok_or("the PoW domain did not register within 120 s")?;
-    let ids = backend.bud(&["graft", "id", "--domain", DOMAIN, "--origin-app", ORIGIN])?;
-    let graft_id = line_value(&ids, "graft id: ").ok_or("graft id printed nothing")?;
-    let mirror = line_value(&ids, "mirror account: 0x").ok_or("graft id printed no mirror")?;
+    let ids = backend.bud(&[
+        "app-binding",
+        "id",
+        "--domain",
+        DOMAIN,
+        "--origin-app",
+        ORIGIN,
+    ])?;
+    let app_binding_id =
+        line_value(&ids, "app_binding id: ").ok_or("app_binding id printed nothing")?;
+    let mirror =
+        line_value(&ids, "mirror account: 0x").ok_or("app_binding id printed no mirror")?;
     backend.bud(&[
-        "graft",
+        "app-binding",
         "register",
         "--key-file",
         &wallets.alice_file,
@@ -1267,19 +1276,20 @@ fn scenario_graft(backend: &Backend<'_>, wallets: &Wallets) -> Result<String, St
         "--manifest",
         "1111111111111111111111111111111111111111111111111111111111111111",
     ])?;
-    let query_params = format!("[\"{graft_id}\"]");
+    let query_params = format!("[\"{app_binding_id}\"]");
     let lookup_registered = || {
-        call("bud_getGraftApplication", &query_params)
+        call("bud_getAppBindingApplication", &query_params)
             .filter(|value| *value != crate::json::Value::Null)
     };
-    wait_for(60, lookup_registered).ok_or("the Graft application did not register within 120 s")?;
+    wait_for(60, lookup_registered)
+        .ok_or("the AppBinding application did not register within 120 s")?;
     backend.bud(&[
-        "graft",
+        "app-binding",
         "pay",
         "--key-file",
         &wallets.alice_file,
-        "--graft-id",
-        &graft_id,
+        "--app-binding-id",
+        &app_binding_id,
         "--amount",
         "5000",
         "--origin-recipient",
@@ -1289,9 +1299,9 @@ fn scenario_graft(backend: &Backend<'_>, wallets: &Wallets) -> Result<String, St
         let amount = balance(&mirror);
         (amount >= 5000).then_some(amount)
     })
-    .ok_or("the Graft payment did not reach the mirror within 120 s")?;
+    .ok_or("the AppBinding payment did not reach the mirror within 120 s")?;
     Ok(format!(
-        "application {graft_id}: mirror 0x{mirror} holds {held}"
+        "application {app_binding_id}: mirror 0x{mirror} holds {held}"
     ))
 }
 
@@ -1593,8 +1603,8 @@ fn run_scenarios(backend: &mut Backend<'_>) -> Vec<Verdict> {
     ) && push("7. delegation", scenario_delegation(backend, &wallets))
         && push("8. BNS name", scenario_bns(backend, &wallets))
         && push(
-            "9. Graft register and pay",
-            scenario_graft(backend, &wallets),
+            "9. AppBinding register and pay",
+            scenario_app_binding(backend, &wallets),
         )
         && push("10. load", scenario_load(backend, &wallets))
         && push("11. validator loss and rejoin", scenario_chaos(backend));

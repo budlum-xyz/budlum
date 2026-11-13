@@ -13,7 +13,7 @@
 //! Budlum validator address and BLS key to it on Ethereum. The registrar
 //! contract emits one allocation event per change. Budlum reads that event
 //! only through an anchored external result, the same verified-evidence path
-//! the bridge, the relayer intents and Graft use: no trusted party reports
+//! the bridge, the relayer intents and AppBinding use: no trusted party reports
 //! Ethereum state.
 //!
 //! Two separate `PoS` systems keep running: Gasper on Ethereum and Budlum `PoS`
@@ -395,7 +395,7 @@ fn observe(
         .map_err(SettlementTxError::Refused)?;
     let adapter = source.adapter();
     if message.kind != MessageKind::Custom(adapter.allocation_kind().to_vec())
-        || message.sender != crate::settlement::graft::origin_emitter(&registrar)
+        || message.sender != crate::settlement::app_binding::origin_emitter(&registrar)
         || message.recipient != allocation.budlum_validator
         || message.correlation_id != Some(operator_correlation(&allocation.eth_operator))
         || message.payload_hash != adapter.allocation_payload_hash(allocation)
@@ -607,7 +607,7 @@ mod tests {
                 source_height: 3,
                 event_index: 0,
                 nonce,
-                sender: crate::settlement::graft::origin_emitter(&REGISTRAR),
+                sender: crate::settlement::app_binding::origin_emitter(&REGISTRAR),
                 recipient: allocation.budlum_validator,
                 payload_hash: allocation_payload_hash(RestakeSource::EigenLayer, allocation),
                 kind: MessageKind::Custom(ALLOCATION_KIND.to_vec()),

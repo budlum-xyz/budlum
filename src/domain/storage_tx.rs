@@ -2168,7 +2168,7 @@ mod tests {
                 &mut state,
                 &ctx(squatter),
                 &StorageTx::RegisterManifest {
-                    manifest: squatter_manifest,
+                    manifest: squatter_manifest.clone(),
                 },
             )
             .unwrap_err(),

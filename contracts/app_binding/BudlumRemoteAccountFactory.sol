@@ -3,10 +3,10 @@
 // aderyn-fp-next-line(push-zero-opcode)
 pragma solidity 0.8.26;
 
-import {BudlumPaymentReceiver, GraftPayment, IBudlumFinality, PaymentProof} from "./BudlumPaymentReceiver.sol";
+import {BudlumPaymentReceiver, AppBindingPayment, IBudlumFinality, PaymentProof} from "./BudlumPaymentReceiver.sol";
 
 /// @title BudlumRemoteAccount
-/// @notice A Graft level 3 account (8.3): an account on this chain that a
+/// @notice An AppBinding level 3 account (8.3): an account on this chain that a
 ///         Budlum user controls with Budlum proofs alone.
 contract BudlumRemoteAccount is BudlumPaymentReceiver {
     uint256 private constant POST_CALL_GAS_RESERVE = 5_000;
@@ -22,8 +22,8 @@ contract BudlumRemoteAccount is BudlumPaymentReceiver {
     error InsufficientRelayGas();
     error CallFailed(bytes reason);
 
-    constructor(IBudlumFinality finality_, bytes32 graftId_, bytes32 budlumOwner_)
-        BudlumPaymentReceiver(finality_, graftId_)
+    constructor(IBudlumFinality finality_, bytes32 appBindingId_, bytes32 budlumOwner_)
+        BudlumPaymentReceiver(finality_, appBindingId_)
     {
         budlumOwner = budlumOwner_;
     }
@@ -47,7 +47,7 @@ contract BudlumRemoteAccount is BudlumPaymentReceiver {
         if (msg.sender == address(0) || target == address(0)) {
             revert InvalidCallTarget();
         }
-        GraftPayment calldata payment = _consumePayment(proof);
+        AppBindingPayment calldata payment = _consumePayment(proof);
         if (payment.payer != budlumOwner) {
             revert NotOwner(payment.payer);
         }
@@ -76,29 +76,29 @@ contract BudlumRemoteAccount is BudlumPaymentReceiver {
 contract BudlumRemoteAccountFactory {
     IBudlumFinality public immutable finality;
 
-    event AccountDeployed(bytes32 indexed budlumOwner, bytes32 graftId, address account);
+    event AccountDeployed(bytes32 indexed budlumOwner, bytes32 appBindingId, address account);
 
     constructor(IBudlumFinality finality_) {
         finality = finality_;
     }
 
-    function _bytecode(bytes32 graftId, bytes32 budlumOwner) internal view returns (bytes memory) {
+    function _bytecode(bytes32 appBindingId, bytes32 budlumOwner) internal view returns (bytes memory) {
         return bytes.concat(
-            type(BudlumRemoteAccount).creationCode, abi.encode(finality, graftId, budlumOwner)
+            type(BudlumRemoteAccount).creationCode, abi.encode(finality, appBindingId, budlumOwner)
         );
     }
 
-    function accountAddress(bytes32 graftId, bytes32 budlumOwner) external view returns (address) {
-        bytes32 salt = keccak256(abi.encode(graftId, budlumOwner));
+    function accountAddress(bytes32 appBindingId, bytes32 budlumOwner) external view returns (address) {
+        bytes32 salt = keccak256(abi.encode(appBindingId, budlumOwner));
         bytes32 digest = keccak256(
-            bytes.concat(bytes1(0xff), bytes20(address(this)), salt, keccak256(_bytecode(graftId, budlumOwner)))
+            bytes.concat(bytes1(0xff), bytes20(address(this)), salt, keccak256(_bytecode(appBindingId, budlumOwner)))
         );
         return address(uint160(uint256(digest)));
     }
 
-    function deploy(bytes32 graftId, bytes32 budlumOwner) external returns (address account) {
-        bytes32 salt = keccak256(abi.encode(graftId, budlumOwner));
-        account = address(new BudlumRemoteAccount{salt: salt}(finality, graftId, budlumOwner));
-        emit AccountDeployed(budlumOwner, graftId, account);
+    function deploy(bytes32 appBindingId, bytes32 budlumOwner) external returns (address account) {
+        bytes32 salt = keccak256(abi.encode(appBindingId, budlumOwner));
+        account = address(new BudlumRemoteAccount{salt: salt}(finality, appBindingId, budlumOwner));
+        emit AccountDeployed(budlumOwner, appBindingId, account);
     }
 }

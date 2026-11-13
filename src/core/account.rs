@@ -4488,7 +4488,7 @@ impl AccountState {
     /// Validator unbonding entries, and independently debited role bonds such as
     /// AI_OPERATOR. Excluding role bonds would make a bond look like a supply
     /// Burn and reopen false minting headroom. Delegation exits, proof-market
-    /// escrow, relayer-intent escrow and Graft intent escrow are counted for the
+    /// escrow, relayer-intent escrow and AppBinding intent escrow are counted for the
     /// same reason.
     fn non_liquid_committed_atoms(&self) -> u128 {
         let total = self
@@ -4499,7 +4499,7 @@ impl AccountState {
             .and_then(|v| v.checked_add(self.total_external_bonded_supply()))
             .and_then(|v| v.checked_add(self.proof_market.total_locked_supply()))
             .and_then(|v| v.checked_add(self.settlement.relayer_policy.total_escrowed_supply()))
-            .and_then(|v| v.checked_add(self.settlement.graft.total_escrowed_supply()))
+            .and_then(|v| v.checked_add(self.settlement.app_binding.total_escrowed_supply()))
             .and_then(|v| v.checked_add(self.total_storage_escrowed_supply()));
         match total {
             Some(total) => total,

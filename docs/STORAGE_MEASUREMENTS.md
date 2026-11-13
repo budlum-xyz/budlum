@@ -104,14 +104,14 @@ codec on chain `45261`).
 ## 4. Verification Locks
 
 - `cargo test --lib storage::bud3::compression_context::tests`
- - `compression_context_is_closed_on_testnet`
+ - `compression_context_is_open_on_testnet`
  - `bud3_context_codec_vectors`
  - `bud3_context_rotation_keeps_content_id`
  - `bud3_context_burned_corpus_leaves`
  - `bud3_context_fee_goes_to_pool`
  - `access_tiering_tracks_hot_and_cold_transitions`
 - `cargo test --lib storage::bud3::private_dedup::tests`
- - `private_dedup_is_closed_on_testnet`
+ - `private_dedup_is_open_on_testnet`
  - `bud3_private_dedup_rate_limited`
  - `bud3_private_dedup_needs_ownership_proof`
  - `bud3_private_dedup_hides_match_from_public`

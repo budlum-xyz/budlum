@@ -7,7 +7,7 @@ use crate::core::address::Address;
 use crate::core::transaction::{Transaction, TransactionType, DEFAULT_CHAIN_ID};
 use crate::crypto::primitives::KeyPair;
 use crate::execution::executor::Executor;
-use proptest::proptest;
+use proptest::{prop_assert_eq, proptest};
 
 fn addr(b: u8) -> Address {
     Address::from([b; 32])
@@ -1196,7 +1196,7 @@ fn bns_consensus_bud3_content_ref_validates_against_bud3_registry_and_serves_vie
     state.add_balance(&alice, 1_000_000);
     state
         .bns_registry
-        .register("dweb.bud".to_string(), alice, 1, 50)
+        .register("site.bud".to_string(), alice, 1, 50)
         .unwrap();
 
     let html = b"<html><body>On-chain B.U.D. 3.0 site</body></html>".repeat(6);
@@ -1218,7 +1218,7 @@ fn bns_consensus_bud3_content_ref_validates_against_bud3_registry_and_serves_vie
         1,
         0,
         TransactionType::BnsSetBud3Content,
-        bincode::serialize(&("dweb.bud".to_string(), Some(cref))).unwrap(),
+        bincode::serialize(&("site.bud".to_string(), Some(cref))).unwrap(),
     );
     premature_tx.sign(&alice_kp);
     assert_eq!(
@@ -1252,7 +1252,7 @@ fn bns_consensus_bud3_content_ref_validates_against_bud3_registry_and_serves_vie
     Executor::apply_transaction_checked(&mut state, &premature_tx).unwrap();
     assert_ne!(state.bns_registry.root(), root_before);
     assert_eq!(
-        state.bns_registry.resolve_bud3_content("dweb.bud", 2),
+        state.bns_registry.resolve_bud3_content("site.bud", 2),
         Some(cref)
     );
 
@@ -1263,7 +1263,7 @@ fn bns_consensus_bud3_content_ref_validates_against_bud3_registry_and_serves_vie
             &state.bns_registry,
             &state.bud3_registry,
             &net,
-            "dweb.bud",
+            "site.bud",
             2,
             &BnsViewAccess::default(),
         )
@@ -1273,9 +1273,9 @@ fn bns_consensus_bud3_content_ref_validates_against_bud3_registry_and_serves_vie
     // Ownership transfer clears `bud3_content`.
     state
         .bns_registry
-        .transfer("dweb.bud", &alice, bob, 3)
+        .transfer("site.bud", &alice, bob, 3)
         .unwrap();
-    assert_eq!(state.bns_registry.resolve_bud3_content("dweb.bud", 3), None);
+    assert_eq!(state.bns_registry.resolve_bud3_content("site.bud", 3), None);
 }
 
 #[test]
@@ -1771,14 +1771,14 @@ fn bns_expiry_index_is_not_committed_to_the_root() {
 // B16: the root is order-independent (property test)
 // ---------------------------------------------------------------------------
 
-/// B16: the same set of records produces the same root in every insertion
-/// order, for randomly generated label sets.
-///
-/// The root is a Merkle tree over an ordered map, so this is the property the
-/// tree shape depends on: if insertion order could reach the root, two nodes
-/// that applied the same block in the same order would still agree, but a
-/// snapshot restore that re-inserted rows would not. Proptest searches for a
-/// counterexample instead of trusting three hand-written permutations.
+// B16: the same set of records produces the same root in every insertion
+// order, for randomly generated label sets.
+//
+// The root is a Merkle tree over an ordered map, so this is the property the
+// tree shape depends on: if insertion order could reach the root, two nodes
+// that applied the same block in the same order would still agree, but a
+// snapshot restore that re-inserted rows would not. Proptest searches for a
+// counterexample instead of trusting three hand-written permutations.
 proptest! {
     #![proptest_config(proptest::prelude::ProptestConfig::with_cases(64))]
 

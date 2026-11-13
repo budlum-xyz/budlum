@@ -431,7 +431,7 @@ impl AiRegistry {
         // which is the check request admission already makes on
         // `input_commitment`. Without it a verifier can group on the honest
         // commitment and ship different bytes: the outcome serves
-        // `output_ref`, the output NFT and Pollen `DataAsset` are minted from
+        // `output_ref`, the output NFT and Data Market `DataAsset` are minted from
         // it, and no dispute path covers the mismatch.
         let canonical = crate::ai::types::canonical_output_commitment(result.output_ref.as_slice());
         if result.output_commitment != canonical {
