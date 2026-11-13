@@ -10090,6 +10090,53 @@ mod tests {
     }
 
     #[test]
+    fn expired_competing_custody_deal_does_not_keep_owner_contested() {
+        let mut reg = StorageRegistry::new();
+        let victim = Address::from([0x41; 32]);
+        let stranger = Address::from([0x42; 32]);
+        let operator = Address::from([0x43; 32]);
+
+        let mut victim_manifest = good_manifest();
+        victim_manifest.owner = victim;
+        let content_id = victim_manifest.manifest_id;
+        reg.register_manifest(&victim_manifest);
+        reg.record_test_custody_for_manifest(&victim_manifest, victim);
+
+        let mut stranger_manifest = victim_manifest.clone();
+        stranger_manifest.owner = stranger;
+        reg.register_manifest(&stranger_manifest);
+        let deal_id = reg
+            .open_deal(
+                42,
+                &stranger_manifest,
+                stranger_manifest.shards[0].shard_id,
+                operator,
+                1,
+                10,
+                20,
+                good_econ(),
+                &params(),
+                Some(valid_merkle_proof()),
+                Some([0x42u8; 32]),
+            )
+            .unwrap();
+        reg.set_deal_payer(deal_id, stranger);
+
+        assert_eq!(reg.owner_of(&content_id), None);
+        assert!(reg.has_custody_deal(&content_id, &stranger));
+
+        reg.deals.get_mut(&deal_id).unwrap().status = DealStatus::Expired;
+
+        assert!(!reg.has_custody_deal(&content_id, &stranger));
+        assert_eq!(
+            reg.owner_of(&content_id),
+            Some(victim),
+            "expired custody is history, not continuing authority over the content id"
+        );
+        assert!(reg.has_proven_ownership(&content_id, &victim));
+    }
+
+    #[test]
     fn stranger_bare_scoped_confidential_commit_does_not_block_owner_prune() {
         let mut reg = StorageRegistry::new();
         let alice = Address::from([0xA1; 32]);
