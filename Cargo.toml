@@ -50,30 +50,11 @@ sled = "0.34"
 
 # P2P Networking
 tokio = { version = "1", features = ["full"] }
-# libp2p is taken from the rust-libp2p tree rather than crates.io.
-#
-# 0.57.0 is tagged upstream but unpublished, and it is the only build that
-# closes three advisories:
-#
-#   GHSA-vxx9-2994-q338  yamux < 0.13.10            (libp2p-yamux 0.47 linked
-#                                                    0.12.1 *and* 0.13.10)
-#   GHSA-3v94-mw7p-v465  hickory-proto <= 0.25.2    (no patched 0.25.x exists)
-#   GHSA-q2qq-hmj6-3wpp  hickory-proto <= 0.26.0    (fixed in 0.26.1)
-#
-# Neither dependency is optional: `dns` is what makes /dns4 bootstrap
-# multiaddrs dialable, and yamux is the muxer. libp2p-yamux 0.48.0 drops the
-# 0.12 path for yamux 0.14; libp2p-dns 0.45.0 moves to hickory 0.26.
-#
-# This is a direct git dependency rather than [patch.crates-io] on purpose:
-# tools that re-resolve the manifest in a scratch directory (cargo-semver-checks
-# among them) do not carry the patch table across, and then fail to select a
-# version for a requirement crates.io cannot satisfy.
-#
-# Pinned by full revision so the source cannot move. cargo-deny keeps
-# `unknown-git = "deny"` and allow-lists only this host.
-#
-# Revisit when 0.57.0 is published: swap back to a plain version requirement.
-# `advisory_reachability` pins the reason so the pin cannot be forgotten.
+# libp2p 0.57.1 is published on crates.io. Cargo.lock fixes the resolved
+# registry versions and checksums; cargo-vet audits them without git-fork
+# audit-as-crates-io overrides. This release removes the vulnerable yamux
+# 0.12 and hickory-proto 0.25 paths while keeping DNS and yamux available.
+# `advisory_reachability` checks that the vulnerable paths do not return.
 libp2p = { version = "0.57.1", features = [
     "tokio",
     "tcp",
