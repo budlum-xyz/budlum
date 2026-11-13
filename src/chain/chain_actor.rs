@@ -511,6 +511,10 @@ pub enum ChainCommand {
         owner: Address,
         response: oneshot::Sender<Vec<crate::bns::types::BnsResolved>>,
     },
+    BnsProveName {
+        name: String,
+        response: oneshot::Sender<crate::bns::types::BnsStateProof>,
+    },
     IdentityResolve {
         subject: Address,
         response: oneshot::Sender<Option<(crate::registry::IdentityRecord, u64)>>,
@@ -2375,6 +2379,15 @@ impl ChainHandle {
         rx.await.unwrap_or_default()
     }
 
+    pub async fn bns_prove_name(&self, name: String) -> Option<crate::bns::types::BnsStateProof> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::BnsProveName { name, response: tx })
+            .await;
+        rx.await.ok()
+    }
+
     pub async fn identity_resolve(
         &self,
         subject: Address,
@@ -3992,6 +4005,14 @@ impl ChainActor {
                             .state
                             .bns_registry
                             .list_names_by_owner(&owner, self.blockchain.state.epoch_index),
+                    );
+                }
+                ChainCommand::BnsProveName { name, response } => {
+                    let _ = response.send(
+                        self.blockchain
+                            .state
+                            .bns_registry
+                            .prove_name(&name, self.blockchain.state.epoch_index),
                     );
                 }
                 ChainCommand::IdentityResolve { subject, response } => {

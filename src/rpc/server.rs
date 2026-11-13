@@ -4581,6 +4581,44 @@ impl BudlumApiServer for RpcServer {
         }))
     }
 
+    async fn bns_get_proof(&self, name: String) -> Result<serde_json::Value, ErrorObjectOwned> {
+        if !crate::bns::BnsRegistry::is_valid_name(&name) {
+            return Err(ErrorObjectOwned::owned(
+                -32602,
+                "Invalid BNS name: expected <label>.bud with 3..=32 lowercase label characters",
+                None::<()>,
+            ));
+        }
+        let proof = self.chain.bns_prove_name(name).await.ok_or_else(|| {
+            ErrorObjectOwned::owned(-32000, "Failed to query BNS state proof", None::<()>)
+        })?;
+        let branch_json = |b: &crate::bns::types::BnsMerkleBranch| -> serde_json::Value {
+            serde_json::json!({
+                "name": b.name,
+                "owner": Self::to_0x_hash(b.owner.to_hex()),
+                "address": b.address.map(|a| Self::to_0x_hash(a.to_hex())),
+                "expires_at": b.expires_at,
+                "content_id": b.content_id.map(|c| format!("0x{}", hex::encode(c.0))),
+                "storage_root": b.storage_root.map(|r| format!("0x{}", hex::encode(r))),
+                "extras_digest": format!("0x{}", hex::encode(b.extras_digest)),
+                "leaf": format!("0x{}", hex::encode(b.leaf)),
+                "siblings": b.siblings.iter().map(|s| format!("0x{}", hex::encode(s))).collect::<Vec<_>>(),
+                "directions": b.directions,
+            })
+        };
+        Ok(serde_json::json!({
+            "name": proof.name,
+            "included": proof.included,
+            "bns_root": format!("0x{}", hex::encode(proof.bns_root)),
+            "meta_digest": format!("0x{}", hex::encode(proof.meta_digest)),
+            "names_count": proof.names_count,
+            "epoch": proof.epoch,
+            "entry": proof.entry.as_ref().map(branch_json),
+            "predecessor": proof.predecessor.as_ref().map(branch_json),
+            "successor": proof.successor.as_ref().map(branch_json),
+        }))
+    }
+
     async fn bns_prepare_set_address(
         &self,
         name: String,
