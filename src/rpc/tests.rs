@@ -1865,6 +1865,14 @@ mod rpc_tests {
             .unwrap_err()
             .message()
             .contains("Invalid owner address"));
+        let proof_val = server.bns_get_proof("bids.bud".to_string()).await.unwrap();
+        assert_eq!(proof_val["included"], false);
+        assert!(server
+            .bns_get_proof("bids".to_string())
+            .await
+            .unwrap_err()
+            .message()
+            .contains("Invalid BNS name"));
     }
 
     #[tokio::test]
