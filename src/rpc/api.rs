@@ -855,6 +855,27 @@ pub trait BudlumApi {
         cid: String,
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
+    /// Resolve the live B.U.D. 3.0 `ContentRef` bound to a `.bud` name (`null` if unbound/expired).
+    #[method(name = "bud_bnsGetBud3Content")]
+    async fn bns_get_bud3_content(
+        &self,
+        name: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Prepare a signed `BnsSetBud3Content` transaction binding or clearing (`object_commitment = null`)
+    /// a B.U.D. 3.0 `ContentRef` on a live `.bud` name.
+    #[method(name = "bud_bnsPrepareSetBud3Content")]
+    async fn bns_prepare_set_bud3_content(
+        &self,
+        name: String,
+        owner: String,
+        object_commitment: Option<String>,
+        content_digest: Option<String>,
+        content_len: Option<u64>,
+        sealed: Option<bool>,
+        nft_id: Option<String>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
     /// Prepare a signed renewal transaction. The caller must be the current
     /// owner; the executor rechecks ownership and liveness in the block.
     #[method(name = "bud_bnsPrepareRenew")]
