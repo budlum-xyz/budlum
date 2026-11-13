@@ -389,6 +389,7 @@ impl BnsRegistry {
         record.storage_domain_id = None;
         record.storage_root_height = None;
         record.content_id = None;
+        record.bud3_content = None;
         record.subdomains.clear();
         record.records.clear();
         if current_owner != new_owner
@@ -567,6 +568,83 @@ impl BnsRegistry {
         self.names.get(name).and_then(|record| {
             if record.expires_at > current_epoch {
                 record.content_id
+            } else {
+                None
+            }
+        })
+    }
+
+    /// Bind or clear (`None`) a verified B.U.D. 3.0 [`ContentRef`] on a live `.bud`
+    /// name owned by `caller`, checking object existence and `ContentId` parity in
+    /// `bud3_registry`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::bns::bud3::BnsBud3Error`] if `name` is invalid, expired,
+    /// not owned by `caller`, or `content_ref` fails `Bud3Registry` verification.
+    pub fn set_bud3_content(
+        &mut self,
+        name: &str,
+        caller: &Address,
+        bud3: &crate::storage::bud3::registry::Bud3Registry,
+        content_ref: Option<crate::storage::bud3::content_ref::ContentRef>,
+        current_epoch: u64,
+    ) -> Result<(), crate::bns::bud3::BnsBud3Error> {
+        use crate::bns::bud3::BnsBud3Error;
+        use crate::storage::bud3::content_id::ContentIdKind;
+        use crate::storage::bud3::content_ref::ContentRef;
+
+        if !Self::is_valid_name(name) {
+            return Err(BnsBud3Error::Bns(BnsError::InvalidName));
+        }
+        {
+            let record = self
+                .names
+                .get(name)
+                .ok_or(BnsBud3Error::Bns(BnsError::InvalidName))?;
+            if &record.owner != caller {
+                return Err(BnsBud3Error::Bns(BnsError::NotOwner));
+            }
+            if record.expires_at <= current_epoch {
+                return Err(BnsBud3Error::Bns(BnsError::Expired));
+            }
+        }
+        let validated = match content_ref {
+            None => None,
+            Some(cref) => {
+                let checked = ContentRef::new(cref.content_id, cref.object_commitment, cref.nft_id)
+                    .map_err(BnsBud3Error::InvalidContentRef)?;
+                let obj = bud3
+                    .object(&checked.object_commitment)
+                    .ok_or(BnsBud3Error::UnknownObject)?;
+                if obj.record.content_id != checked.content_id {
+                    return Err(BnsBud3Error::ContentIdMismatch);
+                }
+                if checked.content_id.kind == ContentIdKind::Sealed && checked.nft_id.is_none() {
+                    return Err(BnsBud3Error::SealedRequiresNftGrant);
+                }
+                Some(checked)
+            }
+        };
+        let record = self
+            .names
+            .get_mut(name)
+            .ok_or(BnsBud3Error::Bns(BnsError::InvalidName))?;
+        record.bud3_content = validated;
+        Ok(())
+    }
+
+    /// Resolve the live B.U.D. 3.0 [`ContentRef`] bound to `name` (`None` if
+    /// unbound, unknown, or expired).
+    #[must_use]
+    pub fn resolve_bud3_content(
+        &self,
+        name: &str,
+        current_epoch: u64,
+    ) -> Option<crate::storage::bud3::content_ref::ContentRef> {
+        self.names.get(name).and_then(|record| {
+            if record.expires_at > current_epoch {
+                record.bud3_content
             } else {
                 None
             }
@@ -819,6 +897,7 @@ impl BnsRegistry {
                     record.storage_domain_id
                 },
                 content_id: if expired { None } else { record.content_id },
+                bud3_content: if expired { None } else { record.bud3_content },
                 subdomains: if expired {
                     BTreeMap::new()
                 } else {
@@ -947,6 +1026,27 @@ impl BnsRegistry {
                 Some(content_id) => {
                     hasher.update([1u8]);
                     hasher.update(content_id.0);
+                }
+                None => hasher.update([0u8]),
+            }
+            match record.bud3_content {
+                Some(cref) => {
+                    hasher.update([1u8]);
+                    let kind_byte = match cref.content_id.kind {
+                        crate::storage::bud3::content_id::ContentIdKind::Public => 0u8,
+                        crate::storage::bud3::content_id::ContentIdKind::Sealed => 1u8,
+                    };
+                    hasher.update([kind_byte]);
+                    hasher.update(cref.content_id.digest);
+                    hasher.update(cref.content_id.len.to_le_bytes());
+                    hasher.update(cref.object_commitment);
+                    match cref.nft_id {
+                        Some(nft) => {
+                            hasher.update([1u8]);
+                            hasher.update(nft);
+                        }
+                        None => hasher.update([0u8]),
+                    }
                 }
                 None => hasher.update([0u8]),
             }

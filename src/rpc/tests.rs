@@ -1815,6 +1815,45 @@ mod rpc_tests {
             .unwrap_err()
             .message()
             .contains("Invalid subdomain label"));
+        assert!(server
+            .bns_get_bud3_content("bids.bud".to_string())
+            .await
+            .unwrap()
+            .is_null());
+        assert!(server
+            .bns_get_bud3_content("bids".to_string())
+            .await
+            .unwrap_err()
+            .message()
+            .contains("Invalid BNS name"));
+        let hex32 = format!("0x{}", "11".repeat(32));
+        let prepared_bud3 = server
+            .bns_prepare_set_bud3_content(
+                "bids.bud".to_string(),
+                seller.to_hex(),
+                Some(hex32.clone()),
+                Some(hex32.clone()),
+                Some(1024),
+                Some(false),
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(prepared_bud3["tx_template"].is_object());
+        assert!(server
+            .bns_prepare_set_bud3_content(
+                "bids.bud".to_string(),
+                seller.to_hex(),
+                Some(hex32.clone()),
+                Some(hex32),
+                Some(1024),
+                Some(true),
+                None,
+            )
+            .await
+            .unwrap_err()
+            .message()
+            .contains("requires nft_id"));
     }
 
     #[tokio::test]

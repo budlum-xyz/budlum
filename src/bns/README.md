@@ -69,6 +69,14 @@
     header amount/recipient and unlocked spendable fee balance, and exposes
     `bud_bnsListSubdomains`, `bud_bnsPrepareRemoveSubdomain`, and
     `bud bns {set-subdomain,remove-subdomain,list-subdomains}`.
+  - **B7 (native B.U.D. 3.0 `ContentRef` binding in consensus):** adds
+    `NameRecord::bud3_content` (`Option<ContentRef>`) committed into
+    `BnsRegistry::root()`, validates object existence, `ContentId` parity, and
+    sealed NFT requirements against `AccountState::bud3_registry` via
+    `BnsSetBud3Content` (wire tag `78`), clears `bud3_content` on `transfer`,
+    resolves on-chain bindings directly in `Bud3BnsResolver::resolve_via_bud3_view`,
+    and exposes `bud_bnsGetBud3Content`, `bud_bnsPrepareSetBud3Content`, and
+    `bud bns {set-bud3,get-bud3}`.
 
 ## Current behaviour (locked by tests)
 

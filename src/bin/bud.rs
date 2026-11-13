@@ -698,6 +698,30 @@ enum BnsAction {
         #[arg(long, required = true)]
         parent: String,
     },
+    /// Bind or clear (`--clear`) a B.U.D. 3.0 `ContentRef` on a live `.bud` name.
+    SetBud3 {
+        #[command(flatten)]
+        signer: V5Signer,
+        #[arg(long, required = true)]
+        name: String,
+        #[arg(long)]
+        object: Option<String>,
+        #[arg(long)]
+        digest: Option<String>,
+        #[arg(long)]
+        len: Option<u64>,
+        #[arg(long, default_value_t = false)]
+        sealed: bool,
+        #[arg(long)]
+        nft: Option<String>,
+        #[arg(long, default_value_t = false)]
+        clear: bool,
+    },
+    /// Inspect the live B.U.D. 3.0 `ContentRef` bound to a `.bud` name.
+    GetBud3 {
+        #[arg(long, required = true)]
+        name: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -2751,6 +2775,95 @@ fn run_bns_list_subdomains(rpc_url: &str, parent: &str) -> Result<(), String> {
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
+fn run_bns_set_bud3(
+    rpc_url: &str,
+    signer: &V5Signer,
+    name: &str,
+    object: Option<&str>,
+    digest: Option<&str>,
+    len: Option<u64>,
+    sealed: bool,
+    nft: Option<&str>,
+    clear: bool,
+) -> Result<(), String> {
+    if clear && object.is_some() {
+        return Err("pass either --object/--digest/--len or --clear, not both".into());
+    }
+    if !clear && (object.is_none() || digest.is_none() || len.is_none()) {
+        return Err(
+            "--object <hex>, --digest <hex>, and --len <u64> are required unless --clear is set"
+                .into(),
+        );
+    }
+    let key = open_wallet(signer)?;
+    let parse_32 = |raw: &str, label: &str| -> Result<[u8; 32], String> {
+        let clean = raw.strip_prefix("0x").unwrap_or(raw);
+        let bytes = hex::decode(clean).map_err(|e| format!("invalid {label} hex: {e}"))?;
+        if bytes.len() != 32 {
+            return Err(format!("{label} must be 32 bytes"));
+        }
+        let mut arr = [0u8; 32];
+        arr.copy_from_slice(&bytes);
+        Ok(arr)
+    };
+    let cref = if clear {
+        None
+    } else {
+        let obj_key = parse_32(object.unwrap_or_default(), "object")?;
+        let dig = parse_32(digest.unwrap_or_default(), "digest")?;
+        let nft_id = match nft {
+            Some(raw) => Some(parse_32(raw, "nft")?),
+            None => None,
+        };
+        let kind = if sealed {
+            budlum_core::storage::bud3::content_id::ContentIdKind::Sealed
+        } else {
+            budlum_core::storage::bud3::content_id::ContentIdKind::Public
+        };
+        let cid = budlum_core::storage::bud3::content_id::ContentId {
+            kind,
+            digest: dig,
+            len: len.unwrap_or_default(),
+        };
+        Some(
+            budlum_core::storage::bud3::content_ref::ContentRef::new(cid, obj_key, nft_id)
+                .map_err(|e| format!("invalid ContentRef: {e:?}"))?,
+        )
+    };
+    let _prepared = rpc_call(
+        rpc_url,
+        "bud_bnsPrepareSetBud3Content",
+        serde_json::json!([
+            name,
+            key.address().to_hex(),
+            object,
+            digest,
+            len,
+            sealed,
+            nft
+        ]),
+    )?;
+    let data = bincode::serialize(&(name.to_string(), cref)).map_err(|e| e.to_string())?;
+    send_bns(
+        rpc_url,
+        signer,
+        &key,
+        TransactionType::BnsSetBud3Content,
+        0,
+        data,
+    )
+}
+
+fn run_bns_get_bud3(rpc_url: &str, name: &str) -> Result<(), String> {
+    let ans = rpc_call(rpc_url, "bud_bnsGetBud3Content", serde_json::json!([name]))?;
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&ans).map_err(|e| e.to_string())?
+    );
+    Ok(())
+}
+
 /// The multiaddr peers dial: `/ip4/...` for an address, `/dns4/...` for a
 /// name.
 fn bootnode_multiaddr(host: &str, port: u16, peer_id: &str) -> String {
@@ -3075,6 +3188,27 @@ fn main() {
                 sub,
             } => run_bns_remove_subdomain(&cli.rpc_url, signer, parent, sub),
             BnsAction::ListSubdomains { parent } => run_bns_list_subdomains(&cli.rpc_url, parent),
+            BnsAction::SetBud3 {
+                signer,
+                name,
+                object,
+                digest,
+                len,
+                sealed,
+                nft,
+                clear,
+            } => run_bns_set_bud3(
+                &cli.rpc_url,
+                signer,
+                name,
+                object.as_deref(),
+                digest.as_deref(),
+                *len,
+                *sealed,
+                nft.as_deref(),
+                *clear,
+            ),
+            BnsAction::GetBud3 { name } => run_bns_get_bud3(&cli.rpc_url, name),
         },
         Command::Node { action } => match action {
             NodeAction::Identity {
