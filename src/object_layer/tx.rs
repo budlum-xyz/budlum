@@ -271,9 +271,11 @@ impl ObjectLayerTx {
                     *class,
                     updates.clone(),
                     *phase,
-                    state_proof.as_ref(),
-                    state_root_for(domain),
-                    ctx.require_home_state_proofs,
+                    (
+                        state_proof.as_ref(),
+                        state_root_for(domain),
+                        ctx.require_home_state_proofs,
+                    ),
                 )?;
             }
             Self::AuditCustody {
