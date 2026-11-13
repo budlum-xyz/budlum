@@ -193,6 +193,7 @@ pub(crate) const METHOD_CLASSES: &[MethodClass] = &[
     row("bud_bnsResolveSubdomain", Public, Read),
     row("bud_bnsListSubdomains", Public, Read),
     row("bud_bnsReverseResolve", Public, Read),
+    row("bud_bnsListNamesByOwner", Public, Read),
     row("bud_bnsGetRecords", Public, Read),
     row("bud_bnsGetOffer", Public, Read),
     row("bud_bnsListOffers", Public, Read),
