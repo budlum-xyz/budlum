@@ -250,6 +250,15 @@ pub struct GenesisConfig {
     /// share at genesis and the epoch transition pays only its balance.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reward_pool: Option<GenesisRewardPool>,
+
+    /// Authorized primary sellers for `.bud` marketplace `Primary` listings.
+    /// Defaults to [`crate::bns::BNS_PRIMARY_SELLERS`].
+    #[serde(default = "default_bns_primary_sellers")]
+    pub bns_primary_sellers: Vec<Address>,
+}
+
+fn default_bns_primary_sellers() -> Vec<Address> {
+    crate::bns::BNS_PRIMARY_SELLERS.to_vec()
 }
 
 impl Default for GenesisConfig {
@@ -270,6 +279,7 @@ impl Default for GenesisConfig {
             poa_authorities: Vec::new(),
             anchor_ledger: None,
             reward_pool: None,
+            bns_primary_sellers: default_bns_primary_sellers(),
         }
     }
 }
@@ -644,6 +654,10 @@ impl GenesisConfig {
         }
         self.validate_tokenomics_supply()?;
         self.validate_total_issuance()?;
+        {
+            let mut probe = crate::bns::BnsRegistry::new();
+            probe.set_primary_sellers(self.bns_primary_sellers.iter().copied())?;
+        }
         let validator_set = self
             .validators
             .iter()
@@ -853,6 +867,9 @@ impl GenesisConfig {
         for (address, amount) in &self.allocations {
             state.add_balance(address, *amount);
         }
+        let _ = state
+            .bns_registry
+            .set_primary_sellers(self.bns_primary_sellers.iter().copied());
 
         let validator_stake = self.validator_stake();
         for validator in &self.validators {
@@ -1203,6 +1220,7 @@ fn mainnet_genesis_with(tokenomics: crate::tokenomics::TokenomicsParams) -> Gene
         // decision, and a mainnet genesis asking for the pool is refused by
         // `validate_reward_pool_flag` instead of quietly minting nothing.
         reward_pool: Some(GenesisRewardPool::disabled()),
+        bns_primary_sellers: default_bns_primary_sellers(),
     }
 }
 
@@ -1235,6 +1253,7 @@ pub fn testnet_genesis() -> GenesisConfig {
         anchor_ledger: None,
         // testnet: the reward pool is on, and genesis says so.
         reward_pool: Some(GenesisRewardPool::enabled()),
+        bns_primary_sellers: default_bns_primary_sellers(),
     }
 }
 
@@ -1276,6 +1295,7 @@ pub fn devnet_genesis() -> GenesisConfig {
         anchor_ledger: None,
         // devnet: no distribution to fund a pool from.
         reward_pool: Some(GenesisRewardPool::disabled()),
+        bns_primary_sellers: default_bns_primary_sellers(),
     }
 }
 

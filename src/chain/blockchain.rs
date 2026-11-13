@@ -523,7 +523,7 @@ impl Blockchain {
         use crate::core::transaction::TransactionType;
         for tx in txs {
             match &tx.tx_type {
-                TransactionType::BnsRegister => {
+                TransactionType::BnsBuyName => {
                     m.bns_names_registered.inc();
                 }
                 TransactionType::AiInferenceRequest(_) => {
@@ -4002,6 +4002,90 @@ impl Blockchain {
                         > self.state.registry.params().max_validator_commission_ppm
                 {
                     reasons.push("invalid_validator_commission".to_string());
+                }
+            }
+            crate::core::transaction::TransactionType::BnsCreateOffer => {
+                if tx.amount != 0 || tx.to != Address::zero() {
+                    reasons.push("invalid_bns_create_offer_shape".to_string());
+                }
+                match bincode::deserialize::<crate::pollen::CreateNameOffer>(&tx.data) {
+                    Ok(req) => {
+                        if !crate::bns::BnsRegistry::is_valid_name(&req.name) {
+                            reasons.push("invalid_bns_offer_name".to_string());
+                        }
+                        if req.price_atoms == 0 {
+                            reasons.push("invalid_bns_offer_price".to_string());
+                        }
+                        if req.expires_at_epoch <= self.state.epoch_index {
+                            reasons.push("invalid_bns_offer_expiry".to_string());
+                        }
+                        match req.kind {
+                            crate::pollen::OfferKind::Primary => {
+                                if req.duration == 0
+                                    || self.state.epoch_index.checked_add(req.duration).is_none()
+                                {
+                                    reasons.push("invalid_bns_offer_duration".to_string());
+                                }
+                                if !self.state.bns_registry.is_primary_seller(&tx.from) {
+                                    reasons.push("bns_unauthorized_primary_seller".to_string());
+                                }
+                                if !self
+                                    .state
+                                    .bns_registry
+                                    .is_available_for_primary(&req.name, self.state.epoch_index)
+                                {
+                                    reasons.push("bns_offer_name_unavailable".to_string());
+                                }
+                            }
+                            crate::pollen::OfferKind::Resale => {
+                                if !self.state.bns_registry.is_live_owned_by(
+                                    &req.name,
+                                    &tx.from,
+                                    self.state.epoch_index,
+                                ) {
+                                    reasons.push("bns_resale_not_live_owner".to_string());
+                                }
+                            }
+                        }
+                    }
+                    Err(_) => reasons.push("invalid_bns_create_offer_data".to_string()),
+                }
+            }
+            crate::core::transaction::TransactionType::BnsCancelOffer => {
+                if tx.amount != 0 || tx.to != Address::zero() {
+                    reasons.push("invalid_bns_cancel_offer_shape".to_string());
+                }
+                match bincode::deserialize::<u64>(&tx.data) {
+                    Ok(offer_id) => match self.state.marketplace.get_name_offer(offer_id) {
+                        None => reasons.push("bns_offer_not_found".to_string()),
+                        Some(offer) if !offer.active => {
+                            reasons.push("bns_offer_inactive".to_string());
+                        }
+                        Some(offer) if offer.seller != tx.from => {
+                            reasons.push("bns_offer_not_seller".to_string());
+                        }
+                        Some(_) => {}
+                    },
+                    Err(_) => reasons.push("invalid_bns_cancel_offer_data".to_string()),
+                }
+            }
+            crate::core::transaction::TransactionType::BnsBuyName => {
+                if tx.amount == 0 || tx.to != Address::zero() {
+                    reasons.push("invalid_bns_buy_name_shape".to_string());
+                }
+                match bincode::deserialize::<u64>(&tx.data) {
+                    Ok(offer_id) => match self.state.marketplace.get_name_offer(offer_id) {
+                        None => reasons.push("bns_offer_not_found".to_string()),
+                        Some(offer) => {
+                            if !offer.active || self.state.epoch_index >= offer.expires_at_epoch {
+                                reasons.push("bns_offer_inactive_or_expired".to_string());
+                            }
+                            if tx.amount != offer.price_atoms {
+                                reasons.push("invalid_bns_buy_name_payment".to_string());
+                            }
+                        }
+                    },
+                    Err(_) => reasons.push("invalid_bns_buy_name_data".to_string()),
                 }
             }
             crate::core::transaction::TransactionType::BnsRenew => {
