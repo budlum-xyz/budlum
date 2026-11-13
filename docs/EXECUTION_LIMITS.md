@@ -20,7 +20,7 @@ locks it.
 | Move (`0x04`) | Aptos staking and governance framework modules (`0x1::stake`, `0x1::aptos_governance`, `0x1::voting`, `0x1::delegation_pool`) | Staking and governance belong to Budlum native protocol | `src/execution/coordinator/move_ee.rs` | `uel_conformance_move` |
 | Move (`0x04`) | Aptos OIDC keyless accounts | Classical/OIDC witness complexity excluded at T-Launch | `src/execution/coordinator/foreign/aptos.rs` | `uel_foreign_tx_replay_refused` |
 | BudZero (`0x00`) | Explicit `MainnetActivation::closed()` mode | Optional differential opt-out toggle; default profile enables `VerifyMerkle` and `VerifyInference` on testnet `45261` | `src/execution/budzero_ee/mod.rs` | `verify_merkle_is_closed_on_testnet`, `verify_inference_is_closed_on_testnet` |
-| All EEs | Cross-environment re-entrancy (`A -> B -> A`) and call depth `> 8` | Each stateless worker holds one execution stack at T-Launch (`ReentrancyForbidden`) | `src/execution/coordinator/overlay.rs` | `uel_reentrancy_across_ees_refused`, `uel_call_depth_cap_enforced` |
+| All EEs | Cross-environment re-entrancy (`A -> B -> A`) and call depth `> 8` | Each stateless worker holds one execution stack at T-Launch (`ReentrancyForbidden`) | `src/execution/coordinator/overlay.rs` | `uel_reentrancy_forbidden`, `uel_depth_limit` |
 | Foreign Lane | Classical foreign account touching post-quantum holdings (K-3) | Prevents quantum key compromise of classical ECDSA/Ed25519 accounts from draining PQ holdings | `src/execution/coordinator/foreign/mod.rs` | `foreign_account_cannot_touch_pq_holding` | <!-- claim:L-WALLET-01 -->
 
 ---

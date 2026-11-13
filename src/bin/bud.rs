@@ -3134,7 +3134,7 @@ fn parse_bud3_ref_json(
         _ => None,
     };
     budlum_core::storage::bud3::content_ref::ContentRef::new(content_id, object_commitment, nft_id)
-        .map_err(|e| format!("invalid extras.bud3_content: {e}"))
+        .map_err(|e| format!("invalid extras.bud3_content: {e:?}"))
 }
 
 fn is_valid_resolvable_bud_fqdn(name: &str) -> bool {
