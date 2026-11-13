@@ -139,6 +139,10 @@ enum ProtoTransactionType {
     BNS_CANCEL_OFFER = 72;
     // Atomic purchase and settlement of an active .bud domain listing.
     BNS_BUY_NAME = 73;
+    // Owner-only update of the forwarding/payment target address of a live .bud name.
+    BNS_SET_ADDRESS = 74;
+    // Set or clear the signer's reverse primary .bud name.
+    BNS_SET_PRIMARY_NAME = 75;
 }
 
 message ProtoTransaction {
