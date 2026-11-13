@@ -51,6 +51,8 @@ pub mod consensus_round_boundaries;
 #[cfg(test)]
 pub mod consensus_rounds;
 #[cfg(test)]
+pub mod consensus_safety;
+#[cfg(test)]
 pub mod constitution_engine;
 #[cfg(test)]
 pub mod deed;
