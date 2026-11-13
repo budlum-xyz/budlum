@@ -4524,6 +4524,157 @@ impl BudlumApiServer for RpcServer {
         Ok(addr.map(|a| Self::to_0x_hash(a.to_hex())))
     }
 
+    async fn bns_reverse_resolve(
+        &self,
+        address: String,
+    ) -> Result<Option<String>, ErrorObjectOwned> {
+        let clean = address.strip_prefix("0x").unwrap_or(&address);
+        let addr = Address::from_hex(clean).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Invalid address: {e}"), None::<()>)
+        })?;
+        Ok(self.chain.bns_reverse_resolve(addr).await)
+    }
+
+    async fn bns_prepare_set_address(
+        &self,
+        name: String,
+        owner: String,
+        target: Option<String>,
+        consensus_domain_id: Option<u32>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        if !crate::bns::BnsRegistry::is_valid_name(&name) {
+            return Err(ErrorObjectOwned::owned(
+                -32602,
+                "Invalid BNS name: expected <label>.bud with 3..=32 lowercase label characters",
+                None::<()>,
+            ));
+        }
+        let clean_owner = owner.strip_prefix("0x").unwrap_or(&owner);
+        let owner_addr = Address::from_hex(clean_owner).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Invalid owner address: {e}"), None::<()>)
+        })?;
+        if owner_addr == Address::zero() {
+            return Err(ErrorObjectOwned::owned(
+                -32602,
+                "Owner address cannot be the zero address",
+                None::<()>,
+            ));
+        }
+        let target_addr = match target.as_deref() {
+            None => None,
+            Some(raw) => {
+                let clean = raw.strip_prefix("0x").unwrap_or(raw);
+                let parsed = Address::from_hex(clean).map_err(|e| {
+                    ErrorObjectOwned::owned(
+                        -32602,
+                        format!("Invalid target address: {e}"),
+                        None::<()>,
+                    )
+                })?;
+                if parsed == Address::zero() {
+                    return Err(ErrorObjectOwned::owned(
+                        -32602,
+                        "Target address cannot be the zero address",
+                        None::<()>,
+                    ));
+                }
+                Some(parsed)
+            }
+        };
+        let domain_id = if target_addr.is_some() {
+            consensus_domain_id
+        } else {
+            None
+        };
+        let data = bincode::serialize(&(name.clone(), target_addr, domain_id))
+            .map_err(|e| ErrorObjectOwned::owned(-32000, e.to_string(), None::<()>))?;
+        let tx = crate::core::transaction::Transaction {
+            from: owner_addr,
+            to: Address::zero(),
+            amount: 0,
+            fee: 1000,
+            max_fee: 1000,
+            priority_fee: 0,
+            nonce: self.chain.get_nonce(&owner_addr).await,
+            data,
+            timestamp: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis(),
+            hash: String::new(),
+            signature: None,
+            signer_public_key: Vec::new(),
+            authorization: None,
+            chain_id: self.chain.get_chain_id().await,
+            signature_version: crate::core::transaction::SIGNATURE_VERSION_V5,
+            tx_type: crate::core::transaction::TransactionType::BnsSetAddress,
+        };
+        let tx = self.finish_template(tx).await?;
+        Ok(serde_json::json!({
+            "name": name,
+            "owner": owner,
+            "target": target_addr.map(|a| Self::to_0x_hash(a.to_hex())),
+            "consensus_domain_id": domain_id,
+            "tx_template": tx,
+        }))
+    }
+
+    async fn bns_prepare_set_primary_name(
+        &self,
+        caller: String,
+        name: Option<String>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let clean_caller = caller.strip_prefix("0x").unwrap_or(&caller);
+        let caller_addr = Address::from_hex(clean_caller).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Invalid caller address: {e}"), None::<()>)
+        })?;
+        if caller_addr == Address::zero() {
+            return Err(ErrorObjectOwned::owned(
+                -32602,
+                "Caller address cannot be the zero address",
+                None::<()>,
+            ));
+        }
+        if let Some(ref n) = name {
+            if !crate::bns::BnsRegistry::is_valid_name(n) {
+                return Err(ErrorObjectOwned::owned(
+                    -32602,
+                    "Invalid BNS name: expected <label>.bud with 3..=32 lowercase label characters",
+                    None::<()>,
+                ));
+            }
+        }
+        let data = bincode::serialize(&name)
+            .map_err(|e| ErrorObjectOwned::owned(-32000, e.to_string(), None::<()>))?;
+        let tx = crate::core::transaction::Transaction {
+            from: caller_addr,
+            to: Address::zero(),
+            amount: 0,
+            fee: 1000,
+            max_fee: 1000,
+            priority_fee: 0,
+            nonce: self.chain.get_nonce(&caller_addr).await,
+            data,
+            timestamp: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis(),
+            hash: String::new(),
+            signature: None,
+            signer_public_key: Vec::new(),
+            authorization: None,
+            chain_id: self.chain.get_chain_id().await,
+            signature_version: crate::core::transaction::SIGNATURE_VERSION_V5,
+            tx_type: crate::core::transaction::TransactionType::BnsSetPrimaryName,
+        };
+        let tx = self.finish_template(tx).await?;
+        Ok(serde_json::json!({
+            "caller": caller,
+            "name": name,
+            "tx_template": tx,
+        }))
+    }
+
     async fn bns_get_offer(&self, offer_id: u64) -> Result<serde_json::Value, ErrorObjectOwned> {
         let (offer, _epoch) = self.chain.bns_get_offer(offer_id).await;
         match offer {
