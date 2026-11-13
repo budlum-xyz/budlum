@@ -2071,7 +2071,13 @@ mod poseidon_parameter_tests {
         let receipt = vm.run_receipt(&program);
         assert!(!receipt.success);
         assert_eq!(receipt.error, Some(VmError::OutOfGas));
-        assert!(receipt.gas_used <= 4_096);
+        // `consume_gas` adds the cost of the refused instruction to the counter
+        // before it compares against the limit, and the receipt keeps that
+        // addition: the loop always stops past the limit, but never further
+        // past it than one `VerifyMerkle` costs. That one-instruction overshoot
+        // is the DoS bound this calibration promises.
+        assert!(receipt.gas_used > 4_096);
+        assert!(receipt.gas_used <= 4_096 + Vm::gas_cost(Opcode::VerifyMerkle));
         assert!(vm.trace.len() <= 410 * (1 + MERKLE_ROUNDS) + 1);
     }
 
