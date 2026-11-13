@@ -39,6 +39,7 @@ impl UnsignedTransfer {
     ///
     /// Refuses malformed names, expired registrations, Merkle root mismatches,
     /// or unauthenticated target substitution.
+    /// exposed for: the wallet crate's SDK surface - browser and mobile hosts call these directly.
     #[allow(clippy::too_many_arguments)]
     pub fn to_verified_bud_recipient(
         from: [u8; 32],
