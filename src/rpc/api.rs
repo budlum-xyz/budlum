@@ -769,6 +769,19 @@ pub trait BudlumApi {
         name: Option<String>,
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
+    /// Read all text/profile/multi-chain records of a live `.bud` name (`null` if unknown/expired).
+    #[method(name = "bud_bnsGetRecords")]
+    async fn bns_get_records(&self, name: String) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Prepare a signed `BnsSetRecords` text/profile/multi-chain record update transaction.
+    #[method(name = "bud_bnsPrepareSetRecords")]
+    async fn bns_prepare_set_records(
+        &self,
+        name: String,
+        owner: String,
+        updates: std::collections::BTreeMap<String, Option<String>>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
     /// Fetch a single `.bud` domain offer by id (`null` if unknown).
     #[method(name = "bud_bnsGetOffer")]
     async fn bns_get_offer(&self, offer_id: u64) -> Result<serde_json::Value, ErrorObjectOwned>;

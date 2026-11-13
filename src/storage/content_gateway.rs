@@ -432,6 +432,7 @@ mod tests {
             storage_root: root,
             storage_domain_id: None,
             content_id,
+            records: Default::default(),
             is_expired: false,
         }
     }
@@ -703,6 +704,7 @@ mod tests {
             storage_root: Some([1u8; 32]),
             storage_domain_id: None,
             content_id: Some(ContentId([2u8; 32])),
+            records: Default::default(),
             is_expired: false,
         };
         let ids = pollen_guard_ids(&resolved);

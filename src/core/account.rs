@@ -2423,6 +2423,36 @@ impl AccountState {
                     }
                 }
             }
+            TransactionType::BnsSetRecords => {
+                if tx.amount != 0 || tx.to != Address::zero() {
+                    return Err("BNS set records requires zero amount and recipient".into());
+                }
+                let (name, updates): (String, std::collections::BTreeMap<String, Option<String>>) =
+                    bincode::deserialize(&tx.data)
+                        .map_err(|e| format!("Invalid BNS set records data: {e}"))?;
+                if !crate::bns::BnsRegistry::is_valid_name(&name) {
+                    return Err("Invalid BNS name".into());
+                }
+                if updates.is_empty() || updates.len() > crate::bns::MAX_RECORDS_PER_NAME {
+                    return Err("BNS record updates must contain 1..=32 entries".into());
+                }
+                for (k, v) in &updates {
+                    if !crate::bns::BnsRegistry::is_valid_record_key(k) {
+                        return Err(format!("Invalid BNS record key `{k}`"));
+                    }
+                    if let Some(val) = v {
+                        if !crate::bns::BnsRegistry::is_safe_record_value(val) {
+                            return Err(format!("Unsafe or oversized BNS record value for `{k}`"));
+                        }
+                    }
+                }
+                if !self
+                    .bns_registry
+                    .is_live_owned_by(&name, &tx.from, self.epoch_index)
+                {
+                    return Err("BNS set records requires a live name owned by the signer".into());
+                }
+            }
             TransactionType::Validator(ref validator_tx) => {
                 self.check_validator_tx(tx, validator_tx)
                     .map_err(|error| error.to_string())?;
