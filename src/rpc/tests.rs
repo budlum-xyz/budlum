@@ -1559,8 +1559,26 @@ mod rpc_tests {
     /// owner address would be signed and broadcast as is.
     #[tokio::test]
     async fn rpc_bns_reads_answer_null_and_the_prepare_refuses_a_malformed_owner() {
-        let (server, _chain) = setup().await;
-        let owner = Address([9u8; 32]);
+        let consensus = Arc::new(PoWEngine::new(0));
+        let mut blockchain = Blockchain::new(consensus, None, 45262, None);
+        let seller = crate::bns::BNS_PRIMARY_SELLERS[0];
+        let buyer = Address([9u8; 32]);
+        let seeded_offer_id = blockchain
+            .state
+            .marketplace
+            .create_name_offer(
+                seller,
+                crate::pollen::CreateNameOffer {
+                    name: "bids.bud".to_string(),
+                    price_atoms: 25_000,
+                    duration: 365,
+                    kind: crate::pollen::OfferKind::Primary,
+                    expires_at_epoch: 100,
+                },
+                0,
+            )
+            .expect("seed offer");
+        let (server, _chain) = setup_with_blockchain(blockchain).await;
 
         assert!(
             server
@@ -1595,8 +1613,35 @@ mod rpc_tests {
             "a subdomain of an absent parent is absent too"
         );
         assert!(
+            server.bns_get_offer(999_999).await.unwrap().is_null(),
+            "an unknown offer id answers null"
+        );
+        let got_offer = server.bns_get_offer(seeded_offer_id).await.unwrap();
+        assert_eq!(got_offer["name"], "bids.bud");
+        let listed = server
+            .bns_list_offers(Some("Primary".to_string()))
+            .await
+            .unwrap();
+        assert_eq!(listed.as_array().unwrap().len(), 1);
+        assert!(
             server
-                .bns_prepare_register("bids".to_string(), owner.to_hex(), 365)
+                .bns_list_offers(Some("InvalidKind".to_string()))
+                .await
+                .unwrap_err()
+                .message()
+                .contains("Invalid BNS offer kind"),
+            "unknown offer kind filter must be refused"
+        );
+        assert!(
+            server
+                .bns_prepare_create_offer(
+                    seller.to_hex(),
+                    "bids".to_string(),
+                    25_000,
+                    365,
+                    "Primary".to_string(),
+                    100,
+                )
                 .await
                 .unwrap_err()
                 .message()
@@ -1605,30 +1650,70 @@ mod rpc_tests {
         );
         assert!(
             server
-                .bns_prepare_register("ab.bud".to_string(), owner.to_hex(), 365)
+                .bns_prepare_create_offer(
+                    seller.to_hex(),
+                    "ab.bud".to_string(),
+                    25_000,
+                    365,
+                    "Primary".to_string(),
+                    100,
+                )
                 .await
                 .unwrap_err()
                 .message()
                 .contains("Invalid BNS name"),
             "label shorter than 3 chars must be refused at RPC prepare"
         );
-        let prepared = server
-            .bns_prepare_register("bids.bud".to_string(), owner.to_hex(), 365)
+        let prepared_offer = server
+            .bns_prepare_create_offer(
+                seller.to_hex(),
+                "fresh.bud".to_string(),
+                25_000,
+                365,
+                "Primary".to_string(),
+                100,
+            )
             .await
             .unwrap();
-        assert!(
-            prepared["tx_template"].is_object() && prepared["cost"].is_number(),
-            "a prepare answer carries the template and its cost: {prepared}"
-        );
+        assert!(prepared_offer["tx_template"].is_object());
         assert!(
             server
-                .bns_prepare_register("bids.bud".to_string(), "0xzz".to_string(), 365)
+                .bns_prepare_create_offer(
+                    "0xzz".to_string(),
+                    "fresh.bud".to_string(),
+                    25_000,
+                    365,
+                    "Primary".to_string(),
+                    100,
+                )
                 .await
                 .unwrap_err()
                 .message()
-                .contains("Invalid owner address"),
-            "the template door names the owner field it could not parse"
+                .contains("Invalid seller address"),
+            "the template door names the seller field it could not parse"
         );
+        let prepared_buy = server
+            .bns_prepare_buy_name(buyer.to_hex(), seeded_offer_id)
+            .await
+            .unwrap();
+        assert_eq!(prepared_buy["price_atoms"], 25_000);
+        assert!(server
+            .bns_prepare_buy_name(buyer.to_hex(), 999_999)
+            .await
+            .unwrap_err()
+            .message()
+            .contains("not found"));
+        let prepared_cancel = server
+            .bns_prepare_cancel_offer(seller.to_hex(), seeded_offer_id)
+            .await
+            .unwrap();
+        assert!(prepared_cancel["tx_template"].is_object());
+        assert!(server
+            .bns_prepare_cancel_offer(buyer.to_hex(), seeded_offer_id)
+            .await
+            .unwrap_err()
+            .message()
+            .contains("Only the offer seller"));
     }
 
     #[tokio::test]

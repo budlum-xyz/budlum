@@ -2,12 +2,29 @@ use crate::bns::types::{BnsError, BnsResolved, NameRecord};
 use crate::core::address::Address;
 use crate::storage::content_id::ContentId;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+
+/// Genesis-seeded set of primary `.bud` name sellers.
+///
+/// Only addresses in `BnsRegistry::primary_sellers` (loaded at genesis from
+/// `GenesisConfig::bns_primary_sellers`, which defaults to this slice, and
+/// updated exclusively via `GovernanceAction::BnsSetPrimarySellers`) may open
+/// `OfferKind::Primary` listings on the marketplace.
+pub const BNS_PRIMARY_SELLERS: &[Address] = &[Address([0xB2; 32])];
+
+/// Maximum number of primary seller addresses governance or genesis may configure.
+const MAX_PRIMARY_SELLERS: usize = 64;
+
+fn default_primary_sellers() -> BTreeSet<Address> {
+    BNS_PRIMARY_SELLERS.iter().copied().collect()
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BnsRegistry {
     pub names: BTreeMap<String, NameRecord>,
     pub base_cost: u64,
+    #[serde(default = "default_primary_sellers")]
+    pub primary_sellers: BTreeSet<Address>,
 }
 
 impl Default for BnsRegistry {
@@ -69,7 +86,63 @@ impl BnsRegistry {
         Self {
             names: BTreeMap::new(),
             base_cost: 100,
+            primary_sellers: default_primary_sellers(),
         }
+    }
+
+    /// Whether `seller` is authorized to open `OfferKind::Primary` listings.
+    #[must_use]
+    pub fn is_primary_seller(&self, seller: &Address) -> bool {
+        self.primary_sellers.contains(seller)
+    }
+
+    /// Replace the primary-seller set. Called at genesis construction and from
+    /// `GovernanceAction::BnsSetPrimarySellers`.
+    ///
+    /// # Errors
+    ///
+    /// Refuses the zero address or sets exceeding `MAX_PRIMARY_SELLERS`.
+    pub fn set_primary_sellers(
+        &mut self,
+        sellers: impl IntoIterator<Item = Address>,
+    ) -> Result<(), String> {
+        let mut next = BTreeSet::new();
+        for addr in sellers {
+            if addr == Address::zero() {
+                return Err("BNS primary seller cannot be the zero address".into());
+            }
+            next.insert(addr);
+            if next.len() > MAX_PRIMARY_SELLERS {
+                return Err(format!(
+                    "BNS primary sellers exceed maximum count ({MAX_PRIMARY_SELLERS})"
+                ));
+            }
+        }
+        self.primary_sellers = next;
+        Ok(())
+    }
+
+    /// Whether `name` is eligible for a `Primary` marketplace listing at
+    /// `current_epoch`: valid `<label>.bud` and either unregistered or past its
+    /// post-expiry grace window.
+    #[must_use]
+    pub fn is_available_for_primary(&self, name: &str, current_epoch: u64) -> bool {
+        if !Self::is_valid_name(name) {
+            return false;
+        }
+        match self.names.get(name) {
+            None => true,
+            Some(record) => current_epoch >= record.expires_at.saturating_add(Self::GRACE_PERIOD),
+        }
+    }
+
+    /// Whether `name` is currently live (not expired) and owned by `owner`.
+    #[must_use]
+    pub fn is_live_owned_by(&self, name: &str, owner: &Address, current_epoch: u64) -> bool {
+        matches!(
+            self.names.get(name),
+            Some(record) if current_epoch < record.expires_at && &record.owner == owner
+        )
     }
 
     pub fn calculate_cost(&self, name: &str, duration: u64) -> u64 {
@@ -90,10 +163,13 @@ impl BnsRegistry {
     /// nothing was evicted: no expired name existed, so the registry is at
     /// capacity and nothing was taken out. The two are exclusive.
     ///
+    /// Called exclusively from the consensus executor (`BnsBuyName` primary
+    /// settlement) and crate-internal tests.
+    ///
     /// # Errors
     ///
     /// Returns an error if the operation fails.
-    pub fn register(
+    pub(crate) fn register(
         &mut self,
         name: String,
         owner: Address,
@@ -355,7 +431,9 @@ impl BnsRegistry {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.names.is_empty() && self.base_cost == 100
+        self.names.is_empty()
+            && self.base_cost == 100
+            && self.primary_sellers == default_primary_sellers()
     }
 
     pub fn root(&self) -> [u8; 32] {
@@ -379,6 +457,13 @@ impl BnsRegistry {
         // same commit as the bump.
         hasher.update(b"BDLM_BNS_REGISTRY_V2");
         hasher.update(self.base_cost.to_le_bytes());
+        if self.primary_sellers != default_primary_sellers() {
+            hasher.update(b"primary_sellers");
+            hasher.update((self.primary_sellers.len() as u64).to_le_bytes());
+            for seller in &self.primary_sellers {
+                hasher.update(seller.0);
+            }
+        }
         hasher.update((self.names.len() as u64).to_le_bytes());
         for (name, record) in &self.names {
             hasher.update((name.len() as u64).to_le_bytes());
