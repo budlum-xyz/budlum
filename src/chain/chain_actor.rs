@@ -495,6 +495,10 @@ pub enum ChainCommand {
         address: Address,
         response: oneshot::Sender<Option<String>>,
     },
+    BnsGetRecords {
+        name: String,
+        response: oneshot::Sender<Option<std::collections::BTreeMap<String, String>>>,
+    },
     IdentityResolve {
         subject: Address,
         response: oneshot::Sender<Option<(crate::registry::IdentityRecord, u64)>>,
@@ -2305,6 +2309,18 @@ impl ChainHandle {
         rx.await.unwrap_or(None)
     }
 
+    pub async fn bns_get_records(
+        &self,
+        name: String,
+    ) -> Option<std::collections::BTreeMap<String, String>> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::BnsGetRecords { name, response: tx })
+            .await;
+        rx.await.unwrap_or(None)
+    }
+
     pub async fn identity_resolve(
         &self,
         subject: Address,
@@ -3887,6 +3903,14 @@ impl ChainActor {
                             .state
                             .bns_registry
                             .reverse_resolve(&address, self.blockchain.state.epoch_index),
+                    );
+                }
+                ChainCommand::BnsGetRecords { name, response } => {
+                    let _ = response.send(
+                        self.blockchain
+                            .state
+                            .bns_registry
+                            .get_records(&name, self.blockchain.state.epoch_index),
                     );
                 }
                 ChainCommand::IdentityResolve { subject, response } => {
