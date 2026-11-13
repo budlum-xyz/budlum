@@ -77,9 +77,12 @@ pub enum BnsInclusionProof {
         /// a shortfall, not as a success.
         entries: Vec<RegistryEntry>,
     },
-    /// A Merkle proof per name. The chain does not produce this today.
+    /// An $O(\log N)$ per-name Merkle proof against `BnsRegistry::root()`
+    /// (`BDLM_BNS_LEAF_V1` + `BDLM_BNS_NODE_V1` + `BDLM_BNS_REGISTRY_V3`).
     PerName {
-        leaf: [u8; 32],
+        expires_at: u64,
+        extras_digest: [u8; 32],
+        meta_digest: [u8; 32],
         siblings: Vec<[u8; 32]>,
         directions: Vec<bool>,
     },
@@ -134,13 +137,19 @@ pub fn evaluate(
                  belong to the name that was asked for",
             ));
         }
-        BnsInclusionProof::PerName { .. } => {
-            evidence.push(Claim::new(
-                "bns-resolution",
-                Strength::RpcClaimOnly,
-                "a per-name proof was presented, but the chain does not produce one today: \
-                 BnsRegistry::root() writes the whole registry into a single SHA-256 \
-                 stream, not a Merkle tree. There is no root to verify it against",
+        BnsInclusionProof::PerName {
+            expires_at,
+            extras_digest,
+            meta_digest,
+            siblings,
+            directions,
+        } => {
+            evidence.push(evaluate_per_name_claim(
+                resolved,
+                (*expires_at, *extras_digest, *meta_digest),
+                (siblings, directions),
+                expected_bns_root,
+                current_epoch,
             ));
         }
         BnsInclusionProof::Registry { base_cost, entries } => {
@@ -203,7 +212,137 @@ pub fn evaluate(
     evidence
 }
 
-/// A **partial** reproduction of `BnsRegistry::root()`.
+fn evaluate_per_name_claim(
+    resolved: &ResolvedName,
+    digests: (u64, [u8; 32], [u8; 32]),
+    branch: (&[[u8; 32]], &[bool]),
+    expected_bns_root: Option<[u8; 32]>,
+    current_epoch: u64,
+) -> Claim {
+    let (expires_at, extras_digest, meta_digest) = digests;
+    let (siblings, directions) = branch;
+    let leaf = bns_leaf_digest(
+        &resolved.name,
+        resolved.owner,
+        expires_at,
+        resolved.content_id,
+        resolved.storage_root,
+        extras_digest,
+    );
+    let Some(names_root_candidate) = fold_bns_merkle_branch(leaf, siblings, directions) else {
+        return Claim::new(
+            "bns-resolution",
+            Strength::Refused,
+            "malformed per-name Merkle proof: sibling and direction vectors disagree or exceed depth",
+        );
+    };
+    let Some(expected) = expected_bns_root else {
+        return Claim::new(
+            "bns-resolution",
+            Strength::RpcClaimOnly,
+            "a per-name Merkle proof was presented, but no bns_v1 root was given to compare it against",
+        );
+    };
+    if expires_at <= current_epoch {
+        return Claim::new(
+            "bns-resolution",
+            Strength::Refused,
+            "the proven entry has expired at the current epoch, whatever the resolver \
+             reported, and an expired name binds to no content",
+        );
+    }
+    let computed = bns_registry_root_from_parts(meta_digest, names_root_candidate);
+    if computed == expected {
+        Claim::new(
+            "bns-resolution",
+            Strength::Verified,
+            "the per-name Merkle proof reproduced the bns_v1 root, and the record is live",
+        )
+    } else {
+        Claim::new(
+            "bns-resolution",
+            Strength::Refused,
+            "the per-name Merkle proof did not reproduce the bns_v1 root; the resolved record contradicts state",
+        )
+    }
+}
+
+/// Canonical per-name Merkle leaf digest (`BDLM_BNS_LEAF_V1`), matching
+/// `BnsRegistry::compute_leaf_digest` in `src/bns/registry.rs`.
+#[must_use]
+pub fn bns_leaf_digest(
+    name: &str,
+    owner: [u8; 32],
+    expires_at: u64,
+    content_id: Option<ContentId>,
+    storage_root: Option<[u8; 32]>,
+    extras_digest: [u8; 32],
+) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(b"BDLM_BNS_LEAF_V1");
+    hasher.update((name.len() as u64).to_le_bytes());
+    hasher.update(name.as_bytes());
+    hasher.update(owner);
+    hasher.update(expires_at.to_le_bytes());
+    match content_id {
+        Some(cid) => {
+            hasher.update([1u8]);
+            hasher.update(cid.0);
+        }
+        None => hasher.update([0u8]),
+    }
+    match storage_root {
+        Some(sr) => {
+            hasher.update([1u8]);
+            hasher.update(sr);
+        }
+        None => hasher.update([0u8]),
+    }
+    hasher.update(extras_digest);
+    hasher.finalize().into()
+}
+
+/// Fold a binary Merkle branch (`BDLM_BNS_NODE_V1`) from `leaf` up to `names_merkle_root`.
+#[must_use]
+pub fn fold_bns_merkle_branch(
+    leaf: [u8; 32],
+    siblings: &[[u8; 32]],
+    directions: &[bool],
+) -> Option<[u8; 32]> {
+    if siblings.len() != directions.len() || siblings.len() > 32 {
+        return None;
+    }
+    let mut acc = leaf;
+    for (sib, is_right_child) in siblings.iter().zip(directions.iter()) {
+        let mut hasher = Sha256::new();
+        hasher.update(b"BDLM_BNS_NODE_V1");
+        if *is_right_child {
+            hasher.update(sib);
+            hasher.update(acc);
+        } else {
+            hasher.update(acc);
+            hasher.update(sib);
+        }
+        acc = hasher.finalize().into();
+    }
+    Some(acc)
+}
+
+/// Combine `(meta_digest, names_merkle_root)` under `BDLM_BNS_REGISTRY_V3`,
+/// matching `BnsRegistry::root_from_parts` in `src/bns/registry.rs`.
+#[must_use]
+pub fn bns_registry_root_from_parts(
+    meta_digest: [u8; 32],
+    names_merkle_root: [u8; 32],
+) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(b"BDLM_BNS_REGISTRY_V3");
+    hasher.update(meta_digest);
+    hasher.update(names_merkle_root);
+    hasher.finalize().into()
+}
+
+/// A **partial** reproduction of legacy stream roots (`BnsInclusionProof::Registry`).
 ///
 /// Deliberately incomplete, and its name says so. The full root also covers
 /// six fields the browser never reads, plus subdomain names; carrying those
@@ -271,19 +410,41 @@ mod tests {
     }
 
     #[test]
-    fn a_per_name_proof_says_the_chain_does_not_produce_one() {
-        let e = evaluate(
-            &resolved(),
-            &BnsInclusionProof::PerName {
-                leaf: [0u8; 32],
-                siblings: vec![],
-                directions: vec![],
-            },
-            Some([0u8; 32]),
-            0,
-        );
-        assert_eq!(e.weakest(), Strength::RpcClaimOnly);
-        assert!(e.badge().contains("not a Merkle tree"));
+    fn a_valid_per_name_merkle_proof_is_verified_and_forgery_or_expiry_is_refused() {
+        let r = resolved();
+        let extras = [0x42u8; 32];
+        let meta = [0x24u8; 32];
+        let sibling = [0x77u8; 32];
+        let leaf = bns_leaf_digest(&r.name, r.owner, 25, r.content_id, r.storage_root, extras);
+        let names_root = fold_bns_merkle_branch(leaf, &[sibling], &[false]).unwrap();
+        let expected_root = bns_registry_root_from_parts(meta, names_root);
+
+        let proof = BnsInclusionProof::PerName {
+            expires_at: 25,
+            extras_digest: extras,
+            meta_digest: meta,
+            siblings: vec![sibling],
+            directions: vec![false],
+        };
+
+        // Without expected_bns_root -> RpcClaimOnly.
+        let unanchored = evaluate(&r, &proof, None, 10);
+        assert_eq!(unanchored.weakest(), Strength::RpcClaimOnly);
+
+        // Live & matching expected_bns_root -> Verified!
+        let ok = evaluate(&r, &proof, Some(expected_root), 10);
+        assert_eq!(ok.weakest(), Strength::Verified);
+
+        // Expired at header epoch 25 (even though r.is_expired == false) -> Refused!
+        let lapsed = evaluate(&r, &proof, Some(expected_root), 25);
+        assert_eq!(lapsed.weakest(), Strength::Refused);
+        assert!(lapsed.badge().contains("has expired"));
+
+        // Forged owner in resolver response -> Refused!
+        let mut forged = r;
+        forged.owner = [0xEE; 32];
+        let bad = evaluate(&forged, &proof, Some(expected_root), 10);
+        assert_eq!(bad.weakest(), Strength::Refused);
     }
 
     #[test]
