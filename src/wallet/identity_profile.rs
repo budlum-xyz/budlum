@@ -17,12 +17,16 @@
 //! search for the literal text, so prose describing a marker reads as one,
 //! and this file tripped its own removal.
 
-use crate::bns::types::BnsResolved;
+use crate::bns::registry::BnsRegistry;
+use crate::bns::types::{BnsResolved, BnsStateProof, NameStatus};
 use crate::core::address::Address;
 use crate::pollen::{AccessGrant, AccessGrantStatus, DataAsset, SaleAuthorization};
+use crate::registry::params::{MAX_RECORDS_PER_NAME, MAX_RECORD_KEY_LEN, MAX_RECORD_VALUE_BYTES};
+use crate::storage::bud3::content_ref::ContentRef;
 use crate::storage::{ContentId, ContentManifest};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
 
 pub const MAX_PASSPORT_EVIDENCE_ITEMS: usize = 64;
 
@@ -32,15 +36,10 @@ pub const MAX_PASSPORT_EVIDENCE_ITEMS: usize = 64;
 ///
 /// Returns an error if the operation fails.
 pub fn validate_passport_name(name: &str) -> Result<(), String> {
-    let valid = !name.is_empty()
-        && name.len() <= 253
-        && !name.contains("..")
-        && !name.contains('/')
-        && !name.bytes().any(|b| b == 0 || b.is_ascii_control());
-    if valid {
+    if BnsRegistry::is_valid_name(name) {
         Ok(())
     } else {
-        Err("D-Web Passport name invalid".into())
+        Err("identity profile requires a canonical <label>.bud name".into())
     }
 }
 
@@ -106,6 +105,47 @@ pub struct PollenLineageSummary {
     pub sale_authorizations: usize,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IdentitySocialSummary {
+    pub avatar: Option<String>,
+    pub bio: Option<String>,
+    pub url: Option<String>,
+    pub twitter: Option<String>,
+    pub github: Option<String>,
+    pub discord: Option<String>,
+    pub telegram: Option<String>,
+    pub eth_address: Option<String>,
+    pub btc_address: Option<String>,
+    pub sol_address: Option<String>,
+}
+
+impl IdentitySocialSummary {
+    #[must_use]
+    pub fn from_records(records: &BTreeMap<String, String>) -> Self {
+        Self {
+            avatar: records.get("avatar").cloned(),
+            bio: records.get("bio").cloned(),
+            url: records.get("url").cloned(),
+            twitter: records.get("com.twitter").cloned(),
+            github: records.get("com.github").cloned(),
+            discord: records.get("com.discord").cloned(),
+            telegram: records.get("org.telegram").cloned(),
+            eth_address: records.get("addr.eth").cloned(),
+            btc_address: records.get("addr.btc").cloned(),
+            sol_address: records.get("addr.sol").cloned(),
+        }
+    }
+}
+
+/// Optional Merkle state-proof and reverse-resolution context for identity verification.
+#[derive(Debug, Clone, Default)]
+pub struct IdentityProofContext {
+    pub bns_proof: Option<BnsStateProof>,
+    pub expected_bns_root: Option<[u8; 32]>,
+    pub current_epoch: u64,
+    pub reverse_primary_name: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DwebPassportProfile {
     pub name: String,
@@ -119,6 +159,20 @@ pub struct DwebPassportProfile {
     pub manifest: Option<PassportManifestSummary>,
     pub pollen: PollenLineageSummary,
     pub evidence: Vec<EvidenceCard>,
+    #[serde(default)]
+    pub primary_name: Option<String>,
+    #[serde(default)]
+    pub status: Option<NameStatus>,
+    #[serde(default)]
+    pub bud3_content: Option<ContentRef>,
+    #[serde(default)]
+    pub records: BTreeMap<String, String>,
+    #[serde(default)]
+    pub subdomains_count: usize,
+    #[serde(default)]
+    pub bns_state_root: Option<String>,
+    #[serde(default)]
+    pub social: IdentitySocialSummary,
 }
 
 impl DwebPassportProfile {
@@ -129,6 +183,19 @@ impl DwebPassportProfile {
     /// Returns an error if the operation fails.
     pub fn validate_public(&self) -> Result<(), String> {
         validate_passport_name(&self.name)?;
+        if let Some(primary) = &self.primary_name {
+            if !BnsRegistry::is_valid_name(primary) {
+                return Err("identity profile primary_name invalid".into());
+            }
+        }
+        if self.records.len() > MAX_RECORDS_PER_NAME {
+            return Err("identity profile records limit exceeded".into());
+        }
+        for (k, v) in &self.records {
+            if k.is_empty() || k.len() > MAX_RECORD_KEY_LEN || v.len() > MAX_RECORD_VALUE_BYTES {
+                return Err("identity profile record key/value out of bounds".into());
+            }
+        }
         if self.exists && self.owner.is_none() {
             return Err("DwebPassportProfile existing profile requires owner".into());
         }
@@ -377,6 +444,28 @@ pub fn build_passport_profile(
     access_grants: &[AccessGrant],
     sale_authorizations: &[SaleAuthorization],
 ) -> DwebPassportProfile {
+    build_identity_profile_verified(
+        name,
+        resolved,
+        manifest,
+        data_assets,
+        access_grants,
+        sale_authorizations,
+        None,
+    )
+}
+
+/// Build an evidence-labelled `.bud` identity profile with optional per-name
+/// Merkle state-proof verification and bidirectional primary-name binding.
+pub fn build_identity_profile_verified(
+    name: String,
+    resolved: Option<BnsResolved>,
+    manifest: Option<ContentManifest>,
+    data_assets: &[DataAsset],
+    access_grants: &[AccessGrant],
+    sale_authorizations: &[SaleAuthorization],
+    proof_ctx: Option<&IdentityProofContext>,
+) -> DwebPassportProfile {
     let Some(resolved) = resolved else {
         return DwebPassportProfile {
             name,
@@ -398,9 +487,20 @@ pub fn build_passport_profile(
                 subject: "bns".into(),
                 status: EvidenceStatus::Unavailable,
                 source: "BNS registry".into(),
-                root: None,
+                root: proof_ctx
+                    .and_then(|ctx| ctx.expected_bns_root.as_ref())
+                    .map(hex32),
                 warning: Some("Name not found".into()),
             }],
+            primary_name: None,
+            status: None,
+            bud3_content: None,
+            records: BTreeMap::new(),
+            subdomains_count: 0,
+            bns_state_root: proof_ctx
+                .and_then(|ctx| ctx.expected_bns_root.as_ref())
+                .map(hex32),
+            social: IdentitySocialSummary::default(),
         };
     };
 
@@ -454,20 +554,33 @@ pub fn build_passport_profile(
         }
     });
 
+    let (bns_status, bns_root_hex, bns_warning) = evaluate_bns_evidence(&resolved, proof_ctx);
+
     let mut evidence = Vec::new();
     evidence.push(EvidenceCard {
         subject: "bns".into(),
-        status: if resolved.is_expired {
-            EvidenceStatus::Unverified
-        } else {
-            EvidenceStatus::Verified
-        },
+        status: bns_status.clone(),
         source: "BNS registry".into(),
-        root: storage_root.as_ref().map(hex32),
-        warning: resolved
-            .is_expired
-            .then(|| "BNS record is expired; do not treat profile as active".into()),
+        root: bns_root_hex
+            .clone()
+            .or_else(|| storage_root.as_ref().map(hex32)),
+        warning: bns_warning,
     });
+    if let Some(ref bud3) = resolved.bud3_content {
+        evidence.push(EvidenceCard {
+            subject: "bud3".into(),
+            status: if resolved.is_expired || bns_status != EvidenceStatus::Verified {
+                EvidenceStatus::Unverified
+            } else {
+                EvidenceStatus::Verified
+            },
+            source: "BNS B.U.D. 3.0 ContentRef".into(),
+            root: Some(hex32(&bud3.object_commitment)),
+            warning: resolved
+                .is_expired
+                .then(|| "B.U.D. 3.0 reference belongs to an expired .bud record".into()),
+        });
+    }
     evidence.push(EvidenceCard {
         subject: "manifest".into(),
         status: match (&manifest_summary, &manifest) {
@@ -497,6 +610,15 @@ pub fn build_passport_profile(
         ),
     });
 
+    let primary_name = proof_ctx.and_then(|ctx| {
+        ctx.reverse_primary_name
+            .as_ref()
+            .filter(|primary| !resolved.is_expired && BnsRegistry::is_valid_name(primary))
+            .cloned()
+    });
+    let social = IdentitySocialSummary::from_records(&resolved.records);
+    let subdomains_count = resolved.subdomains.len();
+
     DwebPassportProfile {
         name: resolved.name,
         exists: true,
@@ -514,6 +636,57 @@ pub fn build_passport_profile(
             sale_authorizations,
         },
         evidence,
+        primary_name,
+        status: Some(resolved.status),
+        bud3_content: resolved.bud3_content,
+        records: resolved.records,
+        subdomains_count,
+        bns_state_root: bns_root_hex,
+        social,
+    }
+}
+
+fn evaluate_bns_evidence(
+    resolved: &BnsResolved,
+    proof_ctx: Option<&IdentityProofContext>,
+) -> (EvidenceStatus, Option<String>, Option<String>) {
+    if resolved.is_expired {
+        let root = proof_ctx
+            .and_then(|ctx| ctx.expected_bns_root.as_ref())
+            .map(hex32);
+        let msg = if resolved.status == NameStatus::Grace {
+            "BNS record is in owner rescue grace period; active resolution is suspended"
+        } else {
+            "BNS record is expired; do not treat profile as active"
+        };
+        return (EvidenceStatus::Unverified, root, Some(msg.into()));
+    }
+    let Some(ctx) = proof_ctx else {
+        return (EvidenceStatus::Verified, None, None);
+    };
+    let Some(expected_root) = ctx.expected_bns_root else {
+        return (EvidenceStatus::Verified, None, None);
+    };
+    let root_hex = Some(hex32(&expected_root));
+    let Some(ref proof) = ctx.bns_proof else {
+        return (
+            EvidenceStatus::Unverified,
+            root_hex,
+            Some("Missing per-name BNS Merkle state proof for expected bns_root".into()),
+        );
+    };
+    let verified_owner = BnsRegistry::verify_state_proof(proof, &expected_root, ctx.current_epoch)
+        .ok()
+        .flatten()
+        .filter(|leaf| leaf.name == resolved.name && leaf.owner == resolved.owner);
+    if verified_owner.is_some() {
+        (EvidenceStatus::Verified, root_hex, None)
+    } else {
+        (
+            EvidenceStatus::Unverified,
+            root_hex,
+            Some("Per-name BNS Merkle state proof failed verification against bns_root".into()),
+        )
     }
 }
 
@@ -733,5 +906,145 @@ mod tests {
         let mut spoofed_addr = profile;
         spoofed_addr.address = Some(addr(10));
         assert!(bundle.validate_against_profile(&spoofed_addr).is_err());
+    }
+
+    #[test]
+    fn verified_identity_profile_binds_merkle_proof_v3_social_records_primary_name_and_bud3_ref() {
+        use crate::storage::bud3::limits::{Bud3Limits, Profile};
+        use crate::storage::bud3::pipeline::prepare_public_upload;
+        use crate::storage::bud3::placement::{Class, Share};
+        use crate::storage::bud3::registry::Bud3Registry;
+
+        const PROFILE: Profile = Profile {
+            id: 0,
+            qr_version: 40,
+            symbol_size: 128,
+            fps: 10,
+            k_max: 16,
+        };
+
+        let owner = addr(0x21);
+        let mut reg = BnsRegistry::new();
+        reg.register("ayaz.bud".to_string(), owner, 10, 100)
+            .unwrap();
+        reg.set_primary_name(&owner, Some("ayaz.bud".into()), 12)
+            .unwrap();
+        let mut recs = BTreeMap::new();
+        recs.insert("bio".into(), Some("Budlum core builder".into()));
+        recs.insert("com.github".into(), Some("ayaz".into()));
+        recs.insert(
+            "addr.eth".into(),
+            Some("0x1111111111111111111111111111111111111111".into()),
+        );
+        reg.set_records("ayaz.bud", &owner, &recs, 15).unwrap();
+
+        let html = b"<html><body>Ayaz profile site</body></html>".repeat(4);
+        let up = prepare_public_upload(&html, &PROFILE, &Bud3Limits::default(), 8).unwrap();
+        let bud3_ref = ContentRef::new(up.record.content_id, up.record.commitment, None).unwrap();
+        let mut bud3 = Bud3Registry::default();
+        bud3.register_object(
+            owner.0,
+            up.record,
+            vec![(
+                0,
+                Share {
+                    validator: [7u8; 32],
+                    class: Class::Full,
+                    first_esi: 0,
+                    symbols: 8,
+                },
+            )],
+            15,
+            100,
+        )
+        .unwrap();
+        reg.set_bud3_content("ayaz.bud", &owner, &bud3, Some(bud3_ref), 16)
+            .unwrap();
+
+        let resolved = reg.resolve_full("ayaz.bud", 20).unwrap();
+        let proof = reg.prove_name("ayaz.bud", 20);
+        let bns_root = reg.root();
+        let reverse = reg.reverse_resolve(&owner, 20);
+
+        let ctx = IdentityProofContext {
+            bns_proof: Some(proof.clone()),
+            expected_bns_root: Some(bns_root),
+            current_epoch: 20,
+            reverse_primary_name: reverse,
+        };
+        let profile = build_identity_profile_verified(
+            "ayaz.bud".into(),
+            Some(resolved.clone()),
+            None,
+            &[],
+            &[],
+            &[],
+            Some(&ctx),
+        );
+        assert_eq!(profile.primary_name.as_deref(), Some("ayaz.bud"));
+        assert_eq!(profile.status, Some(NameStatus::Active));
+        assert_eq!(profile.bud3_content, Some(bud3_ref));
+        assert_eq!(profile.social.bio.as_deref(), Some("Budlum core builder"));
+        assert_eq!(profile.social.github.as_deref(), Some("ayaz"));
+        assert_eq!(
+            profile
+                .evidence
+                .iter()
+                .find(|c| c.subject == "bns")
+                .unwrap()
+                .status,
+            EvidenceStatus::Verified
+        );
+        assert_eq!(
+            profile
+                .evidence
+                .iter()
+                .find(|c| c.subject == "bud3")
+                .unwrap()
+                .status,
+            EvidenceStatus::Verified
+        );
+        let bundle = try_build_passport_proof_bundle(&profile, 88).unwrap();
+        assert!(bundle.validate_against_profile(&profile).is_ok());
+
+        // Tampered bns_root downgrades BNS + BUD3 evidence to Unverified!
+        let bad_ctx = IdentityProofContext {
+            bns_proof: Some(proof),
+            expected_bns_root: Some([0xEE; 32]),
+            current_epoch: 20,
+            reverse_primary_name: Some("ayaz.bud".into()),
+        };
+        let bad_profile = build_identity_profile_verified(
+            "ayaz.bud".into(),
+            Some(resolved),
+            None,
+            &[],
+            &[],
+            &[],
+            Some(&bad_ctx),
+        );
+        assert_eq!(
+            bad_profile
+                .evidence
+                .iter()
+                .find(|c| c.subject == "bns")
+                .unwrap()
+                .status,
+            EvidenceStatus::Unverified
+        );
+        assert_eq!(
+            bad_profile
+                .evidence
+                .iter()
+                .find(|c| c.subject == "bud3")
+                .unwrap()
+                .status,
+            EvidenceStatus::Unverified
+        );
+
+        // Non-.bud names are rejected by validate_passport_name!
+        assert!(validate_passport_name("alice.eth").is_err());
+        assert!(validate_passport_name("ab.bud").is_err());
+        assert!(validate_passport_name("Alice.bud").is_err());
     }
 }

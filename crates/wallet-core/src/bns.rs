@@ -1,5 +1,7 @@
 //! `.bud` recipient classification and Merkle state-proof verification for wallets.
 //!
+//! exposed for: the wallet crate's SDK surface - browser and mobile hosts call these directly.
+//!
 //! A wallet sending funds to `ayaz.bud` must never trust an unauthenticated RPC
 //! answer: a lying node could substitute an attacker's address and collect the
 //! user's signature over it. This module validates `.bud` / `<sub_label>.<label>.bud`
