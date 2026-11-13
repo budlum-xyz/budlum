@@ -145,6 +145,8 @@ enum ProtoTransactionType {
     BNS_SET_PRIMARY_NAME = 75;
     // Atomically set or delete bounded text/profile/multi-chain records on a live .bud name.
     BNS_SET_RECORDS = 76;
+    // Remove an existing subdomain under a live .bud parent name owned by the signer.
+    BNS_REMOVE_SUBDOMAIN = 77;
 }
 
 message ProtoTransaction {

@@ -830,6 +830,22 @@ pub trait BudlumApi {
         sub_owner: String,
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
+    /// List all subdomains of a live `.bud` parent name (`null` if unknown/expired).
+    #[method(name = "bud_bnsListSubdomains")]
+    async fn bns_list_subdomains(
+        &self,
+        parent_name: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Prepare a signed `BnsRemoveSubdomain` transaction for a live `.bud` parent name.
+    #[method(name = "bud_bnsPrepareRemoveSubdomain")]
+    async fn bns_prepare_remove_subdomain(
+        &self,
+        parent_name: String,
+        sub_label: String,
+        caller: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
     /// Prepare a transaction to link content (CID) to a name.
     #[method(name = "bud_bnsPrepareSetContent")]
     async fn bns_prepare_set_content(
