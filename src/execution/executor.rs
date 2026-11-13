@@ -1388,6 +1388,9 @@ impl Executor {
                     .marketplace
                     .close_name_offer(offer_id)
                     .map_err(|e| BudlumError::validation("bns_close_offer_failed", e))?;
+                state
+                    .marketplace
+                    .invalidate_resale_offers_for_name(&offer.name);
 
                 // Pay the seller from buyer's spendable balance (not burned).
                 let buyer = state.get_or_create(&tx.from);
@@ -1489,6 +1492,7 @@ impl Executor {
                     .bns_registry
                     .transfer(&name, &tx.from, new_owner, state.epoch_index)
                     .map_err(|e| BudlumError::validation("bns_transfer_failed", e.to_string()))?;
+                state.marketplace.invalidate_resale_offers_for_name(&name);
 
                 let sender = state.get_or_create(&tx.from);
                 sender.balance = sender.balance.checked_sub(tx.fee).ok_or_else(|| {

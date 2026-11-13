@@ -2361,6 +2361,15 @@ impl AccountState {
                         tx.amount, cost
                     ));
                 }
+                if !self
+                    .bns_registry
+                    .is_renewable_by(&name, &tx.from, self.epoch_index)
+                {
+                    return Err(
+                        "BNS renewal requires an active or grace-period name owned by the signer"
+                            .into(),
+                    );
+                }
             }
             TransactionType::BnsTransfer => {
                 if tx.amount != 0 || tx.to != Address::zero() {

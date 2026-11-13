@@ -52,21 +52,30 @@ fn test_bns_renewal() {
     assert_eq!(reg.resolve("test.bud", 250), Some(alice));
     assert_eq!(reg.resolve("test.bud", 350), None);
 
-    // Expired names cannot be renewed; they become re-registerable.
+    // F14 + B8: inside GRACE_PERIOD (epoch 400 <= 300 + 3000), resolution fails closed
+    // and third parties (`bob`) are refused on both `renew` and `register`, while the
+    // owner (`alice`) may rescue the name (`new_expires_at = max(300, 400) + 100 = 500`).
     assert!(matches!(
-        reg.renew("test.bud", &alice, 400, 100),
-        Err(BnsError::Expired)
+        reg.renew("test.bud", &bob, 400, 100),
+        Err(BnsError::NotOwner)
     ));
-    // F14: grace-period - expire (350) + GRACE_PERIOD (3000)
-    // no third party can squat inside it. epoch 400 < 3350, so bob is REFUSED.
     assert!(matches!(
         reg.register("test.bud".to_string(), bob, 400, 100),
         Err(BnsError::NameTaken)
     ));
-    // After the grace period (epoch 3360 > 3350) bob may register.
-    reg.register("test.bud".to_string(), bob, 3360, 100)
+    reg.renew("test.bud", &alice, 400, 100).unwrap();
+    assert_eq!(reg.resolve("test.bud", 450), Some(alice));
+    assert_eq!(reg.resolve("test.bud", 550), None);
+
+    // Past GRACE_PERIOD (epoch 3600 > 500 + 3000), owner renewal is refused (`Expired`)
+    // and `bob` may register the released name.
+    assert!(matches!(
+        reg.renew("test.bud", &alice, 3600, 100),
+        Err(BnsError::Expired)
+    ));
+    reg.register("test.bud".to_string(), bob, 3600, 100)
         .unwrap();
-    assert_eq!(reg.resolve("test.bud", 3370), Some(bob));
+    assert_eq!(reg.resolve("test.bud", 3610), Some(bob));
 }
 
 #[test]
@@ -618,7 +627,7 @@ fn bns_marketplace_primary_resale_cancel_expiry_and_governance() {
         Executor::apply_transaction_checked(&mut state, &buy_stale)
             .unwrap_err()
             .code(),
-        "bns_resale_stale"
+        "bns_offer_inactive_or_expired"
     );
 
     // Expired offer: primary_seller opens offer #4 expiring at epoch 10, advance epoch to 10 -> rejected!
@@ -1266,4 +1275,99 @@ fn bns_consensus_bud3_content_ref_validates_against_bud3_registry_and_serves_vie
         .transfer("dweb.bud", &alice, bob, 3)
         .unwrap();
     assert_eq!(state.bns_registry.resolve_bud3_content("dweb.bud", 3), None);
+}
+
+#[test]
+fn bns_grace_period_owner_rescue_resale_invalidation_and_owner_listing() {
+    use crate::bns::{CreateNameOffer, NameStatus, OfferKind};
+    use crate::core::account::AccountState;
+    use crate::crypto::primitives::KeyPair;
+    use crate::execution::executor::Executor;
+
+    let alice_kp = KeyPair::generate().unwrap();
+    let alice = Address::from(alice_kp.public_key_bytes());
+    let bob_kp = KeyPair::generate().unwrap();
+    let bob = Address::from(bob_kp.public_key_bytes());
+
+    let mut state = AccountState::new();
+    state.epoch_index = 1;
+    state.add_balance(&alice, 5_000_000);
+    state.add_balance(&bob, 5_000_000);
+
+    state
+        .bns_registry
+        .register("rescue.bud".to_string(), alice, 1, 20)
+        .unwrap();
+    state
+        .bns_registry
+        .register("listed.bud".to_string(), alice, 1, 200)
+        .unwrap();
+
+    // Alice opens a Resale offer on `listed.bud`, then transfers `listed.bud` directly to Bob:
+    // the stale Resale offer is automatically invalidated!
+    let mut offer_tx = lifecycle_tx(
+        alice,
+        0,
+        1,
+        0,
+        TransactionType::BnsCreateOffer,
+        bincode::serialize(&CreateNameOffer {
+            name: "listed.bud".to_string(),
+            price_atoms: 10_000,
+            duration: 0,
+            kind: OfferKind::Resale,
+            expires_at_epoch: 100,
+        })
+        .unwrap(),
+    );
+    offer_tx.sign(&alice_kp);
+    Executor::apply_transaction_checked(&mut state, &offer_tx).unwrap();
+    assert_eq!(
+        state
+            .marketplace
+            .list_active_name_offers(1, Some(OfferKind::Resale))
+            .len(),
+        1
+    );
+
+    let mut xfer_tx = lifecycle_tx(
+        alice,
+        0,
+        1,
+        1,
+        TransactionType::BnsTransfer,
+        bincode::serialize(&("listed.bud".to_string(), bob)).unwrap(),
+    );
+    xfer_tx.sign(&alice_kp);
+    Executor::apply_transaction_checked(&mut state, &xfer_tx).unwrap();
+    assert!(state
+        .marketplace
+        .list_active_name_offers(1, Some(OfferKind::Resale))
+        .is_empty());
+
+    // Advance into grace for `rescue.bud` (`expires_at == 21`, `epoch_index = 50 <= 3021`).
+    state.epoch_index = 50;
+    assert_eq!(state.bns_registry.resolve("rescue.bud", 50), None);
+    let alice_names = state.bns_registry.list_names_by_owner(&alice, 50);
+    assert_eq!(alice_names.len(), 1);
+    assert_eq!(alice_names[0].name, "rescue.bud");
+    assert_eq!(alice_names[0].status, NameStatus::Grace);
+
+    // Alice rescues `rescue.bud` via `BnsRenew` in grace (`new_expires_at = 50 + 30 = 80`).
+    let cost = state.bns_registry.calculate_cost("rescue.bud", 30);
+    let mut renew_tx = lifecycle_tx(
+        alice,
+        cost,
+        1,
+        2,
+        TransactionType::BnsRenew,
+        bincode::serialize(&("rescue.bud".to_string(), 30u64)).unwrap(),
+    );
+    renew_tx.sign(&alice_kp);
+    Executor::apply_transaction_checked(&mut state, &renew_tx).unwrap();
+
+    assert_eq!(state.bns_registry.resolve("rescue.bud", 50), Some(alice));
+    let alice_names_after = state.bns_registry.list_names_by_owner(&alice, 50);
+    assert_eq!(alice_names_after[0].status, NameStatus::Active);
+    assert_eq!(alice_names_after[0].expires_at, 80);
 }
