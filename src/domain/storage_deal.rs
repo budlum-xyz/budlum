@@ -2505,18 +2505,27 @@ impl StorageRegistry {
     /// over another registrant's data.
     #[must_use]
     pub fn owner_of(&self, content_id: &ContentId) -> Option<crate::core::address::Address> {
-        let mut iter = self
-            .manifest_claims
-            .range((*content_id, Address::zero())..=(*content_id, Address::from([u8::MAX; 32])))
-            .map(|(_, claimant)| *claimant);
-        if let Some(first) = iter.next() {
-            return if iter.next().is_some() {
-                None
-            } else {
-                Some(first)
-            };
+        let claimants = || {
+            self.manifest_claims
+                .range((*content_id, Address::zero())..=(*content_id, Address::from([u8::MAX; 32])))
+                .map(|(_, claimant)| *claimant)
+        };
+        // A manifest claim costs one transaction: `manifest_id` is content-addressed
+        // and excludes `owner`, so anyone can record a bare claim on public content.
+        // Only custody-backed claims (`has_custody_deal`) can establish or contest
+        // canonical ownership once at least one custody-backed claimant exists.
+        let mut backed = claimants().filter(|c| self.has_custody_deal(content_id, c));
+        match (backed.next(), backed.next()) {
+            (Some(only), None) => return Some(only),
+            (Some(_), Some(_)) => return None,
+            (None, _) => {}
         }
-        self.confidential_owners.get(content_id).copied()
+        let mut any = claimants();
+        match (any.next(), any.next()) {
+            (Some(only), None) => Some(only),
+            (Some(_), Some(_)) => None,
+            (None, _) => self.confidential_owners.get(content_id).copied(),
+        }
     }
 
     /// True iff `burner` is the sole, uncontested owner of `content_id` across
@@ -2897,12 +2906,16 @@ impl StorageRegistry {
     /// Canonical epochs, including challenges opened through distinct deals.
     pub(crate) const MIN_OPERATOR_MANIFEST_CHALLENGE_EPOCHS: u64 = 4;
 
+    /// Shortest challenge answer window a caller may ask for, in epochs.
+    pub const MIN_CHALLENGE_WINDOW_EPOCHS: u64 = 10;
+
     /// Longest answer window a caller may ask for, in epochs.
     pub const MAX_CHALLENGE_WINDOW_EPOCHS: u64 = 1024;
 
     /// A challenge opened over RPC must start at the current epoch or
     /// earlier (a far-future `challenge_epoch` would push the per operator
-    /// rate limit minimum out for good) and must close within
+    /// rate limit minimum out for good), must allow at least
+    /// `MIN_CHALLENGE_WINDOW_EPOCHS` epochs to answer, and must close within
     /// `MAX_CHALLENGE_WINDOW_EPOCHS` (a huge `deadline_epoch` would never
     /// finalize as missed).
     pub fn validate_challenge_window(
@@ -2912,6 +2925,7 @@ impl StorageRegistry {
     ) -> Result<(), StorageError> {
         if challenge_epoch > current_epoch
             || deadline_epoch <= current_epoch
+            || deadline_epoch < challenge_epoch.saturating_add(Self::MIN_CHALLENGE_WINDOW_EPOCHS)
             || deadline_epoch > challenge_epoch.saturating_add(Self::MAX_CHALLENGE_WINDOW_EPOCHS)
         {
             return Err(StorageError::InvalidEpochRange {
