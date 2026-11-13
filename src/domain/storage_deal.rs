@@ -468,7 +468,8 @@ pub struct StorageChallengeRangeInput<'a> {
 }
 
 impl StorageChallengeProofContext {
-    fn from_registry(
+    /// Builds a challenge proof context from registry state.
+    pub fn from_registry(
         chain_id: u64,
         challenge: &RetrievalChallenge,
         deal: &StorageDeal,

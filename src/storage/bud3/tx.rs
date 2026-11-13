@@ -488,7 +488,29 @@ mod tests {
 
         let mut r = Bud3Registry::default();
         let content: Vec<u8> = (0..1500u32).map(|i| (i % 249) as u8).collect();
-        let (up, shares) = prepare_public_upload(&content, &P, &Bud3Limits::default(), 8).unwrap();
+        let up = prepare_public_upload(&content, &P, &Bud3Limits::default(), 8).unwrap();
+        let total = u32::try_from(up.segments[0].len()).unwrap();
+        let half = total / 2;
+        let shares = vec![
+            (
+                0,
+                Share {
+                    validator: [10u8; 32],
+                    class: Class::Full,
+                    first_esi: 0,
+                    symbols: half,
+                },
+            ),
+            (
+                0,
+                Share {
+                    validator: [11u8; 32],
+                    class: Class::Full,
+                    first_esi: half,
+                    symbols: total - half,
+                },
+            ),
+        ];
         let key = up.record.commitment;
         let uploader = [1u8; 32];
         r.register_object(uploader, up.record.clone(), shares.clone(), 0, 1000)
@@ -500,8 +522,12 @@ mod tests {
         assert_eq!(r.mark_unseen(&lost.validator), 1);
         assert_eq!(r.repairs_due(&key), vec![0]);
 
-        let next_esi = u32::try_from(up.segments[0].len()).unwrap();
-        let obj_bytes = super::super::bof1::Object::raw_public(&content).encode();
+        let next_esi = total;
+        let selected = bud_codec::select(&content);
+        let obj_bytes =
+            super::super::bof1::Object::public_coded(selected.codec, selected.payload, &content)
+                .unwrap()
+                .encode();
         let enc = SegmentEncoder::new(0, &obj_bytes, &P).unwrap();
         let fresh = enc.repair_symbols(next_esi - enc.k(), lost.symbols).unwrap();
         let leaves: Vec<(u32, [u8; 32])> = fresh

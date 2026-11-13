@@ -749,19 +749,25 @@ mod tests {
         let code = minimal_budzero_program();
         assert!(worker.validate_deploy(&code).is_ok());
 
-        // Testnet-closed opcodes must be refused at deploy validation (Section 10.1).
-        for closed in [Opcode::VerifyMerkle, Opcode::VerifyInference] {
-            let raw = Instruction {
-                opcode: closed,
+        // Testnet/mainnet active opcodes decode cleanly; unactivated or invalid words still fail.
+        for active in [Opcode::VerifyMerkle, Opcode::VerifyInference] {
+            let raw_u64 = Instruction {
+                opcode: active,
                 rd: 1,
                 rs1: 0,
                 rs2: 0,
                 imm: 0,
             }
-            .encode()
-            .to_le_bytes();
-            assert!(worker.validate_deploy(&raw).is_err());
+            .encode();
+            let raw = raw_u64.to_le_bytes();
+            assert!(worker.validate_deploy(&raw).is_ok());
+            assert!(bud_isa::Instruction::decode_for_mainnet(
+                raw_u64,
+                bud_isa::MainnetActivation::closed(),
+            )
+            .is_err());
         }
+        assert!(worker.validate_deploy(&[0xFF; 8]).is_err());
 
         let mut host = MemoryHost::new(2_000_000);
         let Ok(caller) = EeIdentity::new(EeId::BUDZERO, vec![0x5A; 32]) else {
