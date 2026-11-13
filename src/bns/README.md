@@ -173,7 +173,7 @@ names" is the wallet-side change tracked in PR #126.
 
 ### B14: the network gateway (`budlum.xyz`)
 
-A `.bud` name is reachable as `ad.budlum.xyz` through `src/gateway`, and the
+A `.bud` name is reachable as `ad.budlum.xyz` through `src/web_gateway`, and the
 gateway's answer is derived, never asserted. `budlum.xyz` belongs to Budlum, so
 the wildcard certificate and the wildcard DNS record are both within one
 operator's control.
@@ -212,7 +212,9 @@ operator's control.
   `ContentCache` re-checks every byte against the `ContentId` digest on insert
   and again on read, so a bad write cannot become a bad page.
 
-The gate `gateway-gate` names six of these tests, including the cookie
+The module is `web_gateway`, not `gateway`: `src/gateway` already holds the
+wallet gateway (atlas, passport, service), which is a different thing. The gate
+`gateway-gate` names six of these tests, including the cookie
 prohibition, the CSP floor, the traversal rule and the 502-on-tampered-proof
 rule, so none of them can be deleted without failing the relay.
 
