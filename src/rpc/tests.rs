@@ -1568,11 +1568,11 @@ mod rpc_tests {
             .marketplace
             .create_name_offer(
                 seller,
-                crate::pollen::CreateNameOffer {
+                crate::bns::CreateNameOffer {
                     name: "bids.bud".to_string(),
                     price_atoms: 25_000,
                     duration: 365,
-                    kind: crate::pollen::OfferKind::Primary,
+                    kind: crate::bns::OfferKind::Primary,
                     expires_at_epoch: 100,
                 },
                 0,
