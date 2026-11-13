@@ -48,10 +48,10 @@ pub struct SettlementRegistries {
     /// Written only by `SettlementTx::RelayerIntent`.
     #[serde(default)]
     pub relayer_policy: crate::relayer::RelayerPolicyRegistry,
-    /// Graft applications, mirror payments, externally proven claims, and
-    /// solver-intent bindings. Every write enters through `SettlementTx::Graft`.
+    /// AppBinding applications, mirror payments, externally proven claims, and
+    /// solver-intent bindings. Every write enters through `SettlementTx::AppBinding`.
     #[serde(default)]
-    pub graft: crate::settlement::graft::GraftRegistry,
+    pub app_binding: crate::settlement::app_binding::AppBindingRegistry,
     /// The finality checkpoint headers: built by the transition of
     /// every checkpoint block from the state at its end.
     pub global_headers: GlobalHeaderWindow,
@@ -94,7 +94,7 @@ impl SettlementRegistries {
             && self.proof_claims.is_empty()
             && self.relayer.is_empty()
             && self.relayer_policy.is_empty()
-            && self.graft.is_empty()
+            && self.app_binding.is_empty()
             && self.global_headers.is_empty()
             && self.shared_security.is_empty()
             && self.quantum.is_empty()
@@ -145,7 +145,7 @@ impl SettlementRegistries {
         let proof_claims = self.proof_claims.root();
         let relayer = self.relayer.state_root();
         let relayer_policy = self.relayer_policy.root();
-        let graft = self.graft.root();
+        let app_binding = self.app_binding.root();
         let headers = self.global_headers.root();
         let mut fields: Vec<&[u8]> = vec![
             b"BDLM_SETTLEMENT_REGISTRIES_V1",
@@ -157,7 +157,7 @@ impl SettlementRegistries {
             &proof_claims,
             &relayer,
             &relayer_policy,
-            &graft,
+            &app_binding,
             &headers,
         ];
         // Mikoriza joins only once it holds something, like the canary book.
@@ -236,13 +236,13 @@ mod tests {
     }
 
     #[test]
-    fn a_graft_registration_changes_the_settlement_root() {
+    fn a_app_binding_registration_changes_the_settlement_root() {
         let mut registries = SettlementRegistries::new();
         let before = registries.root();
         registries
-            .graft
+            .app_binding
             .register(7, b"app".to_vec(), [2u8; 32], 1)
-            .expect("the test Graft row is valid");
+            .expect("the test AppBinding row is valid");
         assert_ne!(before, registries.root());
     }
 }

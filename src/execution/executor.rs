@@ -4593,7 +4593,7 @@ impl Executor {
             // Economic policy (2026-07-25): validators earn the protocol
             // portion of the flat transaction fee, less the configured
             // metabolic burn. A transaction that uses a registered, active
-            // Graft application (a payment, an intent, or a contract call
+            // AppBinding application (a payment, an intent, or a contract call
             // addressed to its mirror account) carries the configured
             // application share of the same post-burn amount to that
             // application. The recipient is read from state, never from the
@@ -4610,7 +4610,7 @@ impl Executor {
                 // headroom under the cap.
                 state.record_destroyed(u128::from(burn));
                 let application_recipient =
-                    crate::settlement::graft::application_fee_recipient(state, tx);
+                    crate::settlement::app_binding::application_fee_recipient(state, tx);
                 let split = application_recipient.map_or(
                     crate::registry::ApplicationFeeSplit {
                         application: 0,

@@ -3727,7 +3727,7 @@ mod tests {
             identity_root: None,
             checkpoint_height: 70,
             external_intake_root: Some([8u8; 32]),
-            graft_root: Some([9u8; 32]),
+            app_binding_root: Some([9u8; 32]),
             delegation_root: Some([10u8; 32]),
             object_layer_root: Some([11u8; 32]),
             proof_root: Some([12u8; 32]),

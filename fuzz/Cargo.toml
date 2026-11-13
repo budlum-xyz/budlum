@@ -62,6 +62,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "light_client_header_chain"
+path = "fuzz_targets/light_client_header_chain.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "snapshot_deserialize"
 path = "fuzz_targets/snapshot_deserialize.rs"
 test = false

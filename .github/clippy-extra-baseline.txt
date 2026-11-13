@@ -51,6 +51,6 @@
 # 2026-10-29: 8056 -> 8513 (measured 8108 on the CI run for a27a913, "Budlum
 #   Core quality": `clippy-extra: 8108 | baseline: 8056`; base = 8108 + 5%
 #   concurrency margin, the same formula as the 2026-10-20 and 2026-09-13
-#   entries). The testnet branch carries the quantum canary, the graft and
+#   entries). The testnet branch carries the quantum canary, the app_binding and
 #   domain modules, the settlement doors and the testnet daemons the consensus
 #   branch does not, and their doc/`must_use` surface is what the +52 is.
