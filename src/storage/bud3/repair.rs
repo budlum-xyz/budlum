@@ -109,8 +109,7 @@ pub fn sign_repair_attestation(
     ml_dsa_seed: &[u8; 32],
     object: &ObjectKey,
     segment: u64,
-    first_esi: u32,
-    count: u32,
+    (first_esi, count): (u32, u32),
     new_root: &[u8; 32],
     original_segment_root: &[u8; 32],
 ) -> Result<RepairAttestation, PqError> {
