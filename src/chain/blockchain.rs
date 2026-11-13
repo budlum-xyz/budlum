@@ -4185,6 +4185,21 @@ impl Blockchain {
                     Err(_) => reasons.push("invalid_bns_set_records_data".to_string()),
                 }
             }
+            crate::core::transaction::TransactionType::BnsRemoveSubdomain => {
+                if tx.amount != 0 || tx.to != Address::zero() {
+                    reasons.push("invalid_bns_remove_subdomain_shape".to_string());
+                }
+                match bincode::deserialize::<(String, String)>(&tx.data) {
+                    Ok((parent, sub_label)) => {
+                        if !crate::bns::BnsRegistry::is_valid_name(&parent)
+                            || !crate::bns::BnsRegistry::is_valid_sub_label(&sub_label)
+                        {
+                            reasons.push("invalid_bns_subdomain".to_string());
+                        }
+                    }
+                    Err(_) => reasons.push("invalid_bns_remove_subdomain_data".to_string()),
+                }
+            }
             crate::core::transaction::TransactionType::RegisterConsensusKeys(ref registration) => {
                 if tx.amount != 0 || tx.to != Address::zero() || !tx.data.is_empty() {
                     reasons.push("invalid_consensus_key_registration_shape".to_string());

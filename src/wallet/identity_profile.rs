@@ -543,6 +543,7 @@ mod tests {
             storage_root: Some(*manifest_id.as_bytes()),
             storage_domain_id: Some(5),
             content_id: Some(manifest_id),
+            subdomains: Default::default(),
             records: Default::default(),
             is_expired: false,
         };
@@ -649,6 +650,7 @@ mod tests {
             storage_root: Some(*cid.as_bytes()),
             storage_domain_id: Some(5),
             content_id: Some(cid),
+            subdomains: Default::default(),
             records: Default::default(),
             is_expired: false,
         };
@@ -687,6 +689,7 @@ mod tests {
             storage_root: Some(*cid.as_bytes()),
             storage_domain_id: Some(3),
             content_id: Some(cid),
+            subdomains: Default::default(),
             records: Default::default(),
             is_expired: false,
         };
