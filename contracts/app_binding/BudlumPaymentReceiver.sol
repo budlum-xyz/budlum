@@ -6,10 +6,10 @@ pragma solidity 0.8.26;
 import {IBudlumFinality} from "../external-domain/BudlumFinalityVerifier.sol";
 import {BudlumHash} from "../lib/BudlumHash.sol";
 
-/// @notice A Budlum Graft payment as `GraftPayment` (src/settlement/graft.rs).
-struct GraftPayment {
+/// @notice A Budlum AppBinding payment as `AppBindingPayment` (src/settlement/app_binding.rs).
+struct AppBindingPayment {
     bytes32 paymentId;
-    bytes32 graftId;
+    bytes32 appBindingId;
     bytes32 payer;
     bytes32 recipient;
     uint64 amount;
@@ -43,8 +43,8 @@ struct GlobalHeader {
     uint64 checkpointHeight;
     bool hasExternalIntakeRoot;
     bytes32 externalIntakeRoot;
-    bool hasGraftRoot;
-    bytes32 graftRoot;
+    bool hasAppBindingRoot;
+    bytes32 appBindingRoot;
     bool hasDelegationRoot;
     bytes32 delegationRoot;
     bool hasObjectLayerRoot;
@@ -54,9 +54,9 @@ struct GlobalHeader {
     uint64 provenHeight;
 }
 
-/// @notice Everything `bud_graftPaymentProof` returns, in EVM form.
+/// @notice Everything `bud_appBindingPaymentProof` returns, in EVM form.
 struct PaymentProof {
-    GraftPayment payment;
+    AppBindingPayment payment;
     uint256 index;
     bytes32[] path;
     bytes32 paymentsRoot;
@@ -66,7 +66,7 @@ struct PaymentProof {
 }
 
 /// @title BudlumPaymentReceiver
-/// @notice On-chain check of a Budlum Graft payment (8.5, level 1 in a contract).
+/// @notice On-chain check of a Budlum AppBinding payment (8.5, level 1 in a contract).
 abstract contract BudlumPaymentReceiver {
     uint256 private constant PAYMENT_LEAF_FIELDS = 13;
     uint256 private constant OPENING_TRIPLE_FIELDS = 3;
@@ -80,24 +80,24 @@ abstract contract BudlumPaymentReceiver {
     uint8 private constant TAG_PRESENT = 1;
 
     IBudlumFinality public immutable finality;
-    bytes32 public immutable graftId;
+    bytes32 public immutable appBindingId;
 
     mapping(bytes32 => bool) public consumed;
 
     event PaymentConsumed(bytes32 indexed paymentId, bytes32 payer, uint64 amount, bytes32 memoHash);
 
-    error WrongGraft(bytes32 expected, bytes32 got);
+    error WrongAppBinding(bytes32 expected, bytes32 got);
     error AlreadyConsumed(bytes32 paymentId);
     error ProofInvalid(string link);
 
-    constructor(IBudlumFinality finality_, bytes32 graftId_) {
+    constructor(IBudlumFinality finality_, bytes32 appBindingId_) {
         finality = finality_;
-        graftId = graftId_;
+        appBindingId = appBindingId_;
     }
 
-    function _consumePayment(PaymentProof calldata proof) internal returns (GraftPayment calldata) {
-        if (proof.payment.graftId != graftId) {
-            revert WrongGraft(graftId, proof.payment.graftId);
+    function _consumePayment(PaymentProof calldata proof) internal returns (AppBindingPayment calldata) {
+        if (proof.payment.appBindingId != appBindingId) {
+            revert WrongAppBinding(appBindingId, proof.payment.appBindingId);
         }
         if (consumed[proof.payment.paymentId]) {
             revert AlreadyConsumed(proof.payment.paymentId);
@@ -114,20 +114,20 @@ abstract contract BudlumPaymentReceiver {
     }
 
     function checkPayment(PaymentProof calldata proof) public view returns (string memory) {
-        if (proof.payment.graftId != graftId) {
-            return "wrong graft";
+        if (proof.payment.appBindingId != appBindingId) {
+            return "wrong app_binding";
         }
         (bool fits, bytes32 window) =
             BudlumHash.rootFromProof(paymentLeaf(proof.payment), proof.index, proof.path);
         if (!fits || window != proof.paymentsRoot) {
             return "payment path";
         }
-        if (!proof.header.hasGraftRoot
-            || proof.header.graftRoot != graftRegistryRoot(proof.paymentsRoot, proof.restHash)) {
-            return "graft root opening";
+        if (!proof.header.hasAppBindingRoot
+            || proof.header.appBindingRoot != appBindingRegistryRoot(proof.paymentsRoot, proof.restHash)) {
+            return "app_binding root opening";
         }
         // Consensus-committed deployment binding: targetChainId and
-        // targetReceiver live in GraftTx::Pay and BDLM_GRAFT_PAYMENT_LEAF_V1.
+        // targetReceiver live in AppBindingTx::Pay and BDLM_APP_BINDING_PAYMENT_LEAF_V1.
         if (uint256(proof.payment.targetChainId) != block.chainid
             || proof.payment.targetReceiver.length != EVM_ADDRESS_BYTE_LEN
             || address(bytes20(proof.payment.targetReceiver)) != address(this))
@@ -160,11 +160,11 @@ abstract contract BudlumPaymentReceiver {
         return "";
     }
 
-    function paymentLeaf(GraftPayment calldata p) public pure returns (bytes32) {
+    function paymentLeaf(AppBindingPayment calldata p) public pure returns (bytes32) {
         bytes[] memory fields = new bytes[](PAYMENT_LEAF_FIELDS);
-        fields[0] = "BDLM_GRAFT_PAYMENT_LEAF_V1";
+        fields[0] = "BDLM_APP_BINDING_PAYMENT_LEAF_V1";
         fields[1] = bytes.concat(p.paymentId);
-        fields[2] = bytes.concat(p.graftId);
+        fields[2] = bytes.concat(p.appBindingId);
         fields[3] = bytes.concat(p.payer);
         fields[4] = bytes.concat(p.recipient);
         fields[5] = BudlumHash.le64(p.amount);
@@ -178,9 +178,9 @@ abstract contract BudlumPaymentReceiver {
         return BudlumHash.hashFields(fields);
     }
 
-    function graftRegistryRoot(bytes32 paymentsRoot, bytes32 restHash) public pure returns (bytes32) {
+    function appBindingRegistryRoot(bytes32 paymentsRoot, bytes32 restHash) public pure returns (bytes32) {
         bytes[] memory fields = new bytes[](OPENING_TRIPLE_FIELDS);
-        fields[0] = "BDLM_GRAFT_REGISTRY_V2";
+        fields[0] = "BDLM_APP_BINDING_REGISTRY_V2";
         fields[1] = bytes.concat(paymentsRoot);
         fields[2] = bytes.concat(restHash);
         return BudlumHash.hashFields(fields);
@@ -217,7 +217,7 @@ abstract contract BudlumPaymentReceiver {
         fields[15] = _tagged(h.hasIdentityRoot, h.identityRoot);
         fields[16] = BudlumHash.le64(h.checkpointHeight);
         fields[17] = _tagged(h.hasExternalIntakeRoot, h.externalIntakeRoot);
-        fields[18] = _tagged(h.hasGraftRoot, h.graftRoot);
+        fields[18] = _tagged(h.hasAppBindingRoot, h.appBindingRoot);
         fields[19] = _tagged(h.hasDelegationRoot, h.delegationRoot);
         fields[20] = _tagged(h.hasObjectLayerRoot, h.objectLayerRoot);
         fields[21] = _tagged(h.hasProofRoot, h.proofRoot);

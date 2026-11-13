@@ -667,4 +667,75 @@ mod tests {
             assert_eq!(handover_spec(*duty), *spec);
         }
     }
+
+    fn full(seed: u8) -> (Address, ValidatorClass) {
+        ([seed; 32], ValidatorClass::Full)
+    }
+
+    #[test]
+    fn an_empty_seat_set_rotates_nothing_and_has_no_quorum() {
+        let mut tracker = SeatHandoverTracker::from_epoch_candidates(0, &[full(1), full(2)]);
+        assert!(tracker.active_seats().is_empty());
+        assert_eq!(tracker.standby_len(), 2);
+        assert_eq!(tracker.quorum_threshold(), 0);
+        for _ in 0..4 {
+            assert!(tracker
+                .record_checkpoint_participation(&BTreeSet::new())
+                .is_empty());
+        }
+        assert!(tracker.active_seats().is_empty());
+        assert_eq!(tracker.standby_len(), 2);
+    }
+
+    #[test]
+    fn a_single_seat_hands_over_after_two_misses_and_not_before() {
+        let mut tracker = SeatHandoverTracker::from_epoch_candidates(1, &[full(1), full(2)]);
+        assert_eq!(tracker.active_seats(), &[[1u8; 32]]);
+        assert_eq!(tracker.quorum_threshold(), 1);
+        let nobody = BTreeSet::new();
+        assert!(tracker.record_checkpoint_participation(&nobody).is_empty());
+        assert_eq!(
+            tracker.record_checkpoint_participation(&nobody),
+            vec![([1u8; 32], [2u8; 32])]
+        );
+        assert_eq!(tracker.active_seats(), &[[2u8; 32]]);
+        assert_eq!(tracker.standby_len(), 0);
+    }
+
+    #[test]
+    fn a_seat_with_no_standby_keeps_its_holder() {
+        let mut tracker = SeatHandoverTracker::from_epoch_candidates(1, &[full(1)]);
+        let nobody = BTreeSet::new();
+        for _ in 0..5 {
+            assert!(tracker.record_checkpoint_participation(&nobody).is_empty());
+        }
+        assert_eq!(tracker.active_seats(), &[[1u8; 32]]);
+    }
+
+    #[test]
+    fn handovers_per_checkpoint_stay_under_the_cap_at_every_seat_count() {
+        for seats in 1..=31u8 {
+            let candidates: Vec<_> = (1..=seats.saturating_mul(2)).map(full).collect();
+            let mut tracker =
+                SeatHandoverTracker::from_epoch_candidates(usize::from(seats), &candidates);
+            let cap = usize::from(seats).div_ceil(SEAT_MAX_HANDOVER_DIVISOR);
+            let nobody = BTreeSet::new();
+            assert!(tracker.record_checkpoint_participation(&nobody).is_empty());
+            let rotated = tracker.record_checkpoint_participation(&nobody);
+            assert_eq!(rotated.len(), cap, "seat count {seats}");
+            assert_eq!(tracker.active_seats().len(), usize::from(seats));
+        }
+    }
+
+    #[test]
+    fn a_vacated_holder_does_not_return_in_the_same_epoch() {
+        let mut tracker = SeatHandoverTracker::from_epoch_candidates(1, &[full(1), full(2)]);
+        let nobody = BTreeSet::new();
+        let _ = tracker.record_checkpoint_participation(&nobody);
+        assert_eq!(tracker.record_checkpoint_participation(&nobody).len(), 1);
+        for _ in 0..4 {
+            assert!(tracker.record_checkpoint_participation(&nobody).is_empty());
+        }
+        assert_eq!(tracker.active_seats(), &[[2u8; 32]]);
+    }
 }

@@ -292,8 +292,8 @@ impl AiDatasetMetadata {
 
 // SocialFi hardening: social content as an AI inference layer data source
 
-/// An AI inference layer data reference from `SocialFi` NFT content (expects a Pollen grant).
-/// Closed loop: AI inference layer reads social content only with a Pollen grant.
+/// An AI inference layer data reference from `SocialFi` NFT content (expects a Data Market grant).
+/// Closed loop: AI inference layer reads social content only with a Data Market grant.
 #[derive(Clone, Debug)]
 pub struct SocialDataRef {
     pub nft_id: u64,
@@ -315,7 +315,7 @@ impl SocialDataRef {
 
 // Pollen grant runtime construction (the closed loop complete)
 
-/// Build a closed-loop Pollen `AccessGrant` for an AI inference layer inference.
+/// Build a closed-loop Data Market `AccessGrant` for an AI inference layer inference.
 ///
 /// The production AI read path (`validate_ai_read_ref`) is
 /// requester-bound. `grantee` must be the inference requester, not the

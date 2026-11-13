@@ -205,10 +205,10 @@ enum Command {
         #[command(subcommand)]
         action: DevAction,
     },
-    /// Graft: use an application of another network from Budlum, in BUD.
-    Graft {
+    /// AppBinding: use an application of another network from Budlum, in BUD.
+    AppBinding {
         #[command(subcommand)]
-        action: GraftAction,
+        action: AppBindingAction,
     },
     /// `.bud` names.
     Bns {
@@ -419,8 +419,8 @@ enum FaucetAction {
 }
 
 #[derive(Subcommand)]
-enum GraftAction {
-    /// Print the Graft id and the mirror account of an application.
+enum AppBindingAction {
+    /// Print the AppBinding id and the mirror account of an application.
     Id {
         #[arg(long, required = true)]
         domain: u32,
@@ -447,7 +447,7 @@ enum GraftAction {
         #[command(flatten)]
         signer: V5Signer,
         #[arg(long, required = true)]
-        graft_id: String,
+        app_binding_id: String,
         /// Amount in base units.
         #[arg(long, required = true)]
         amount: u64,
@@ -470,7 +470,7 @@ enum GraftAction {
         #[command(flatten)]
         signer: V5Signer,
         #[arg(long, required = true)]
-        graft_id: String,
+        app_binding_id: String,
         /// Hash of the call data (hex).
         #[arg(long, required = true)]
         call_hash: String,
@@ -525,7 +525,7 @@ enum GraftAction {
         #[command(flatten)]
         signer: V5Signer,
         #[arg(long, required = true)]
-        graft_id: String,
+        app_binding_id: String,
         #[arg(long, required = true)]
         payout: String,
         #[arg(long, required = true)]
@@ -537,7 +537,7 @@ enum GraftAction {
         #[command(flatten)]
         signer: V5Signer,
         #[arg(long, required = true)]
-        graft_id: String,
+        app_binding_id: String,
         #[arg(long, required = true)]
         payout: String,
         /// Last block the signature is valid at.
@@ -1930,37 +1930,37 @@ fn run_faucet(action: &FaucetAction) -> Result<(), String> {
     }
 }
 
-/// `bud graft ...`: build the Graft settlement transaction here and sign it
+/// `bud app-binding ...`: build the AppBinding settlement transaction here and sign it
 /// with the V5 wallet.
-fn run_graft(rpc_url: &str, action: &GraftAction) -> Result<(), String> {
-    use budlum_core::settlement::graft::GraftTx;
-    let (signer, graft_tx) = match action {
-        GraftAction::Id { domain, origin_app } => {
+fn run_app_binding(rpc_url: &str, action: &AppBindingAction) -> Result<(), String> {
+    use budlum_core::settlement::app_binding::AppBindingTx;
+    let (signer, app_binding_tx) = match action {
+        AppBindingAction::Id { domain, origin_app } => {
             let origin = hex_bytes(origin_app, "--origin-app")?;
-            let id = budlum_core::settlement::graft::graft_id(*domain, &origin);
-            println!("graft id: 0x{}", hex::encode(id));
+            let id = budlum_core::settlement::app_binding::app_binding_id(*domain, &origin);
+            println!("app_binding id: 0x{}", hex::encode(id));
             println!(
                 "mirror account: 0x{}",
-                budlum_core::settlement::graft::mirror_account(id).to_hex()
+                budlum_core::settlement::app_binding::mirror_account(id).to_hex()
             );
             return Ok(());
         }
-        GraftAction::Register {
+        AppBindingAction::Register {
             signer,
             domain,
             origin_app,
             manifest,
         } => (
             signer,
-            GraftTx::Register {
+            AppBindingTx::Register {
                 domain_key: *domain,
                 origin_app: hex_bytes(origin_app, "--origin-app")?,
                 manifest_hash: hex32(manifest, "--manifest")?,
             },
         ),
-        GraftAction::Pay {
+        AppBindingAction::Pay {
             signer,
-            graft_id,
+            app_binding_id,
             amount,
             origin_recipient,
             memo_hash,
@@ -1968,8 +1968,8 @@ fn run_graft(rpc_url: &str, action: &GraftAction) -> Result<(), String> {
             target_receiver,
         } => (
             signer,
-            GraftTx::Pay {
-                graft_id: hex32(graft_id, "--graft-id")?,
+            AppBindingTx::Pay {
+                app_binding_id: hex32(app_binding_id, "--app-binding-id")?,
                 amount: *amount,
                 memo_hash: memo_hash
                     .as_deref()
@@ -1981,9 +1981,9 @@ fn run_graft(rpc_url: &str, action: &GraftAction) -> Result<(), String> {
                     .map_or(Ok(Vec::new()), |recv| hex_bytes(recv, "--target-receiver"))?,
             },
         ),
-        GraftAction::Intent {
+        AppBindingAction::Intent {
             signer,
-            graft_id,
+            app_binding_id,
             call_hash,
             value,
             max_payment,
@@ -1993,8 +1993,8 @@ fn run_graft(rpc_url: &str, action: &GraftAction) -> Result<(), String> {
             deadline_block,
         } => (
             signer,
-            GraftTx::OpenIntent {
-                graft_id: hex32(graft_id, "--graft-id")?,
+            AppBindingTx::OpenIntent {
+                app_binding_id: hex32(app_binding_id, "--app-binding-id")?,
                 call_hash: hex32(call_hash, "--call-hash")?,
                 value: *value,
                 max_payment: *max_payment,
@@ -2004,71 +2004,71 @@ fn run_graft(rpc_url: &str, action: &GraftAction) -> Result<(), String> {
                 deadline_block: *deadline_block,
             },
         ),
-        GraftAction::Refund { signer, intent_id } => (
+        AppBindingAction::Refund { signer, intent_id } => (
             signer,
-            GraftTx::Refund {
+            AppBindingTx::Refund {
                 intent_id: hex32(intent_id, "--intent-id")?,
             },
         ),
-        GraftAction::Bid {
+        AppBindingAction::Bid {
             signer,
             intent_id,
             cost,
             fee,
         } => (
             signer,
-            GraftTx::Bid {
+            AppBindingTx::Bid {
                 intent_id: hex32(intent_id, "--intent-id")?,
                 cost: *cost,
                 fee: *fee,
             },
         ),
-        GraftAction::Award {
+        AppBindingAction::Award {
             signer,
             intent_id,
             solver,
         } => (
             signer,
-            GraftTx::Award {
+            AppBindingTx::Award {
                 intent_id: hex32(intent_id, "--intent-id")?,
                 solver: parse_address(solver.strip_prefix("0x").unwrap_or(solver))?,
             },
         ),
-        GraftAction::Claim {
+        AppBindingAction::Claim {
             signer,
-            graft_id,
+            app_binding_id,
             payout,
             evidence,
         } => (
             signer,
-            GraftTx::Claim {
-                graft_id: hex32(graft_id, "--graft-id")?,
+            AppBindingTx::Claim {
+                app_binding_id: hex32(app_binding_id, "--app-binding-id")?,
                 payout: parse_address(payout.strip_prefix("0x").unwrap_or(payout))?,
                 evidence: evidence_file(evidence)?,
             },
         ),
-        GraftAction::ClaimSigned {
+        AppBindingAction::ClaimSigned {
             signer,
-            graft_id,
+            app_binding_id,
             payout,
             valid_until_block,
             signature,
         } => (
             signer,
-            GraftTx::ClaimBySignature {
-                graft_id: hex32(graft_id, "--graft-id")?,
+            AppBindingTx::ClaimBySignature {
+                app_binding_id: hex32(app_binding_id, "--app-binding-id")?,
                 payout: parse_address(payout.strip_prefix("0x").unwrap_or(payout))?,
                 valid_until_block: *valid_until_block,
                 signature: hex_bytes(signature, "--signature")?,
             },
         ),
-        GraftAction::Fulfill {
+        AppBindingAction::Fulfill {
             signer,
             intent_id,
             evidence,
         } => (
             signer,
-            GraftTx::Fulfill {
+            AppBindingTx::Fulfill {
                 intent_id: hex32(intent_id, "--intent-id")?,
                 evidence: evidence_file(evidence)?,
             },
@@ -2076,7 +2076,7 @@ fn run_graft(rpc_url: &str, action: &GraftAction) -> Result<(), String> {
     };
     let key = open_wallet(signer)?;
     let tx_type = TransactionType::Settlement(
-        budlum_core::settlement::domains::SettlementTx::Graft(Box::new(graft_tx)),
+        budlum_core::settlement::domains::SettlementTx::AppBinding(Box::new(app_binding_tx)),
     );
     send_v5(rpc_url, &key, v5_template(tx_type, 0, signer.fee), None)
 }
@@ -3792,7 +3792,7 @@ fn main() {
             ),
         },
         Command::Dev { action } => run_dev(&cli.rpc_url, action),
-        Command::Graft { action } => run_graft(&cli.rpc_url, action),
+        Command::AppBinding { action } => run_app_binding(&cli.rpc_url, action),
         Command::Bns { action } => match action {
             BnsAction::Sell {
                 signer,

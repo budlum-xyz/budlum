@@ -53,7 +53,6 @@ mod gates {
     pub mod binding_claims;
     pub mod bit_decompositions;
     pub mod bns_gate;
-    pub mod gateway_gate;
     pub mod bns_names_are_safe_in_an_address_bar;
     pub mod bridge_dual_tree;
     pub mod bud3_codec_and_replace;
@@ -106,6 +105,7 @@ mod gates {
     pub mod gas_calibration;
     pub mod gates_are_wired;
     pub mod gates_do_not_panic;
+    pub mod gateway_gate;
     pub mod gating_flags;
     pub mod geiger;
     pub mod generated_content;
@@ -119,6 +119,7 @@ mod gates {
     pub mod indexing_is_not_new;
     pub mod kani;
     pub mod launch_evidence;
+    pub mod launch_matrix_tests_exist;
     pub mod license_consistency;
     pub mod lock_failures;
     pub mod logup_multipliers;
@@ -1662,6 +1663,14 @@ const GATES: &[Gate] = &[
         run_log: None,
         run_args: None,
         self_test: gates::testnet_runtime_hardening::self_test,
+    },
+    Gate {
+        name: "launch-matrix-tests-exist",
+        replaces: None,
+        run: gates::launch_matrix_tests_exist::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::launch_matrix_tests_exist::self_test,
     },
 ];
 

@@ -6,10 +6,10 @@ pragma solidity 0.8.26;
 import {BudlumHash} from "../lib/BudlumHash.sol";
 import {BudlumOutboundEmitter} from "../lib/BudlumOutbound.sol";
 
-/// @title GraftExecutor
+/// @title AppBindingExecutor
 /// @notice Executes an intent on this chain and emits the fulfilment log.
-contract GraftExecutor is BudlumOutboundEmitter {
-    bytes internal constant FULFILLED_KIND = "budlum/graft/fulfilled/v1";
+contract AppBindingExecutor is BudlumOutboundEmitter {
+    bytes internal constant FULFILLED_KIND = "budlum/app_binding/fulfilled/v1";
     uint64 private constant EVM_ADDRESS_BYTE_LEN = 20;
     uint256 private constant FULFILLED_PAYLOAD_FIELDS = 9;
     uint256 private constant POST_CALL_GAS_RESERVE = 8_000;
@@ -17,7 +17,7 @@ contract GraftExecutor is BudlumOutboundEmitter {
     mapping(bytes32 => mapping(address => bool)) public fulfilled;
     mapping(address => bytes32) public solverKey;
 
-    event BudlumGraftFulfilled(
+    event BudlumAppBindingFulfilled(
         bytes32 indexed intentId,
         address indexed target,
         bytes32 calldataHash,
@@ -90,7 +90,7 @@ contract GraftExecutor is BudlumOutboundEmitter {
         bytes32 callHash,
         bytes calldata beneficiary
     ) private {
-        emit BudlumGraftFulfilled(intentId, target, callHash, msg.value, beneficiary, true);
+        emit BudlumAppBindingFulfilled(intentId, target, callHash, msg.value, beneficiary, true);
         _emitOutbound(
             FULFILLED_KIND,
             bytes32(0),
@@ -110,7 +110,7 @@ contract GraftExecutor is BudlumOutboundEmitter {
         bytes32 budlumSolver
     ) public pure returns (bytes32) {
         bytes[] memory fields = new bytes[](FULFILLED_PAYLOAD_FIELDS);
-        fields[0] = "BDLM_GRAFT_FULFILLED_EVENT_V1";
+        fields[0] = "BDLM_APP_BINDING_FULFILLED_EVENT_V1";
         fields[1] = bytes.concat(intentId);
         fields[2] = BudlumHash.le64(EVM_ADDRESS_BYTE_LEN);
         fields[3] = bytes.concat(bytes20(target));
@@ -123,39 +123,39 @@ contract GraftExecutor is BudlumOutboundEmitter {
     }
 }
 
-/// @title BudlumGraftClaimer
-/// @notice What an origin application inherits to name its Budlum payout (`GraftTx::Claim`).
-abstract contract BudlumGraftClaimer is BudlumOutboundEmitter {
-    bytes internal constant CLAIM_KIND = "budlum/graft/claim/v1";
-    uint256 private constant GRAFT_APP_FIELDS = 4;
+/// @title BudlumAppBindingClaimer
+/// @notice What an origin application inherits to name its Budlum payout (`AppBindingTx::Claim`).
+abstract contract BudlumAppBindingClaimer is BudlumOutboundEmitter {
+    bytes internal constant CLAIM_KIND = "budlum/app_binding/claim/v1";
+    uint256 private constant APP_BINDING_APP_FIELDS = 4;
     uint256 private constant CLAIM_PAYLOAD_FIELDS = 3;
     uint256 private constant U32_BYTE_LEN = 4;
     uint256 private constant BITS_PER_BYTE = 8;
 
-    event BudlumGraftClaim(bytes32 indexed graftId, bytes32 payout);
+    event BudlumAppBindingClaim(bytes32 indexed appBindingId, bytes32 payout);
 
-    function budlumGraftId(uint32 domainKey) public view returns (bytes32) {
+    function budlumAppBindingId(uint32 domainKey) public view returns (bytes32) {
         bytes memory origin = bytes.concat(bytes20(address(this)));
-        bytes[] memory fields = new bytes[](GRAFT_APP_FIELDS);
-        fields[0] = "BDLM_GRAFT_APP_V1";
+        bytes[] memory fields = new bytes[](APP_BINDING_APP_FIELDS);
+        fields[0] = "BDLM_APP_BINDING_APP_V1";
         fields[1] = _le32(domainKey);
         fields[2] = BudlumHash.le64(uint64(origin.length));
         fields[3] = origin;
         return BudlumHash.hashFields(fields);
     }
 
-    function claimPayloadHash(bytes32 graftId, bytes32 payout) public pure returns (bytes32) {
+    function claimPayloadHash(bytes32 appBindingId, bytes32 payout) public pure returns (bytes32) {
         bytes[] memory fields = new bytes[](CLAIM_PAYLOAD_FIELDS);
-        fields[0] = "BDLM_GRAFT_CLAIM_EVENT_V1";
-        fields[1] = bytes.concat(graftId);
+        fields[0] = "BDLM_APP_BINDING_CLAIM_EVENT_V1";
+        fields[1] = bytes.concat(appBindingId);
         fields[2] = bytes.concat(payout);
         return BudlumHash.hashFields(fields);
     }
 
     function _claimBudlumPayout(uint32 domainKey, bytes32 payout) internal {
-        bytes32 graftId = budlumGraftId(domainKey);
-        emit BudlumGraftClaim(graftId, payout);
-        _emitOutbound(CLAIM_KIND, payout, graftId, claimPayloadHash(graftId, payout));
+        bytes32 appBindingId = budlumAppBindingId(domainKey);
+        emit BudlumAppBindingClaim(appBindingId, payout);
+        _emitOutbound(CLAIM_KIND, payout, appBindingId, claimPayloadHash(appBindingId, payout));
     }
 
     function _le32(uint32 value) private pure returns (bytes memory out) {

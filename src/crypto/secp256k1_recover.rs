@@ -1,4 +1,4 @@
-//! Ethereum signature recovery for Graft claims by an externally owned
+//! Ethereum signature recovery for AppBinding claims by an externally owned
 //! account (8.2 (b), option (b)): secp256k1 ECDSA
 //! public key recovery written on the `k256` curve arithmetic already in the
 //! tree, so no new dependency enters.

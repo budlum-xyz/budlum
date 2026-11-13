@@ -30,7 +30,7 @@ use serde::{Deserialize, Serialize};
 /// finality certificate of the checkpoint covers the block that commits the
 /// state root. V6 adds the checkpoint height and the external intake root.
 ///
-/// V7: the Graft registry root
+/// V7: the AppBinding registry root
 /// and the delegation root join the header, each presence-tagged. The
 /// testnet starts from a new genesis, so the bump is the activation; the
 /// mainnet activation-height scheme is 's.
@@ -105,11 +105,11 @@ pub struct GlobalBlockHeader {
     #[serde(default)]
     pub external_intake_root: Option<Hash32>,
 
-    /// The Graft registry root (V7), when the registry holds any row:
+    /// The AppBinding registry root (V7), when the registry holds any row:
     /// applications, the payment window, open intents. A payment proof opens
-    /// it ([`crate::settlement::graft::GraftRootOpening`]).
+    /// it ([`crate::settlement::app_binding::AppBindingRootOpening`]).
     #[serde(default)]
-    pub graft_root: Option<Hash32>,
+    pub app_binding_root: Option<Hash32>,
 
     /// The delegation root (V7), when any delegation, exit or commission
     /// exists: [`crate::registry::PermissionlessRegistry::delegation_root`].
@@ -213,7 +213,7 @@ impl GlobalBlockHeader {
         let ai_root_bytes = presence_tagged(self.ai_root);
         let identity_root_bytes = presence_tagged(self.identity_root);
         let external_intake_root_bytes = presence_tagged(self.external_intake_root);
-        let graft_root_bytes = presence_tagged(self.graft_root);
+        let app_binding_root_bytes = presence_tagged(self.app_binding_root);
         let delegation_root_bytes = presence_tagged(self.delegation_root);
         let object_layer_root_bytes = presence_tagged(self.object_layer_root);
         let proof_root_bytes = presence_tagged(self.proof_root);
@@ -237,7 +237,7 @@ impl GlobalBlockHeader {
             &identity_root_bytes,
             &self.checkpoint_height.to_le_bytes(),
             &external_intake_root_bytes,
-            &graft_root_bytes,
+            &app_binding_root_bytes,
             &delegation_root_bytes,
             &object_layer_root_bytes,
             &proof_root_bytes,
@@ -285,7 +285,7 @@ mod tests {
             identity_root: None,
             checkpoint_height: 0,
             external_intake_root: None,
-            graft_root: None,
+            app_binding_root: None,
             delegation_root: None,
             object_layer_root: None,
             proof_root: None,

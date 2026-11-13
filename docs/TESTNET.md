@@ -193,7 +193,7 @@ ceremony. See `contracts/README.md`.
 | Contract | Address |
 |---|---|
 | `BudlumFinalityVerifier` | not deployed |
-| `GraftExecutor` | not deployed |
+| `AppBindingExecutor` | not deployed |
 | `BudlumRemoteAccountFactory` | not deployed |
 | `BudlumRegistrar` (Mikoriza AVS) | not deployed |
 | `BudlumSlasher` (deployed by the registrar) | not deployed |

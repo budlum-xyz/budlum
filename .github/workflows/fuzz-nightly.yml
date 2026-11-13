@@ -58,6 +58,9 @@ jobs:
           # one a camera feeds: a declared drop length, a digest and a nested
           # decoder, all over untrusted bytes.
           - bud3_qr_frame_decode
+          # The header segment check decides which headers a finality
+          # certificate may name, and a peer supplies the segment.
+          - light_client_header_chain
           # BPQS WOTS chain-walk refusal safety (crates/bpqs). Runs the
           # quick gate too; here it gets the deep budget.
           - bpqs_wots_reject
