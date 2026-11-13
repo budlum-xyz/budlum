@@ -310,4 +310,6 @@ pub use content_gate::{ContentGateError, ProtectedContent};
 pub use data_market::{
     DataMarketError, DataMarketListing, DataMarketRegistry, DATA_MARKET_RPC_METHODS,
 };
-pub use offers::{DataOffer, MarketplaceRegistry, PollenPurchaseReceipt};
+pub use offers::{
+    CreateNameOffer, DataOffer, MarketplaceRegistry, NameOffer, OfferKind, PollenPurchaseReceipt,
+};
