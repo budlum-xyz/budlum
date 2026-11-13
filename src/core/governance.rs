@@ -54,6 +54,7 @@ pub const fn activation_delay_epochs(p_type: &ProposalType) -> u64 {
         // Tunable numbers and parameter strings.
         ProposalType::ChangeBaseFee(_)
         | ProposalType::ChangeBlockReward(_)
+        | ProposalType::BnsSetBaseCost { .. }
         | ProposalType::ParameterUpdate(_, _) => GOVERNANCE_PARAMETER_ACTIVATION_DELAY_EPOCHS,
 
         // Rules the rest of the system is written against.
@@ -301,6 +302,15 @@ pub enum ProposalType {
     /// `Primary` listings.
     BnsSetPrimarySellers {
         sellers: Vec<Address>,
+    },
+    /// Replace the `.bud` renewal base cost (`BnsRegistry::base_cost`).
+    ///
+    /// B12: there is no other door to this number. A sale price that only the
+    /// genesis file can set is a price nobody can correct, and one that any
+    /// account can set is no price at all. The action changes one field and
+    /// touches no record: an existing registration keeps the term it paid for.
+    BnsSetBaseCost {
+        base_cost: u64,
     },
 }
 
@@ -662,6 +672,11 @@ impl GovernanceState {
                 let mut reg = crate::bns::BnsRegistry::new();
                 reg.set_primary_sellers(sellers.iter().copied())?;
             }
+            ProposalType::BnsSetBaseCost { base_cost } => {
+                // The absolute bounds only: the tenfold step is relative to the
+                // live price, which the proposal cannot know at submission.
+                crate::bns::BnsRegistry::check_base_cost_bounds(*base_cost)?;
+            }
             _ => {}
         }
 
@@ -866,6 +881,11 @@ impl GovernanceState {
                         sellers: sellers.clone(),
                     })
                 }
+                ProposalType::BnsSetBaseCost { base_cost } => {
+                    Some(GovernanceAction::BnsSetBaseCost {
+                        base_cost: *base_cost,
+                    })
+                }
                 // Applied (and marked Executed) by the account state at the
                 // epoch boundary, see the doc comment.
                 ProposalType::ChangeBaseFee(_)
@@ -943,6 +963,10 @@ pub enum GovernanceAction {
     },
     BnsSetPrimarySellers {
         sellers: Vec<Address>,
+    },
+    /// Replace the `.bud` renewal base cost. Only the price moves.
+    BnsSetBaseCost {
+        base_cost: u64,
     },
 }
 

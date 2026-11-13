@@ -3,8 +3,9 @@ use crate::bns::types::{
 };
 use crate::core::address::Address;
 use crate::registry::params::{
-    GRACE_PERIOD, MAX_DURATION, MAX_NAMES_PER_OWNER, MAX_RECORDS_PER_NAME, MAX_RECORD_KEY_LEN,
-    MAX_RECORD_VALUE_BYTES, MIN_DURATION, RESERVED_LABELS,
+    BNS_BASE_COST_MAX_STEP_FACTOR, GRACE_PERIOD, MAX_BNS_BASE_COST, MAX_DURATION,
+    MAX_NAMES_PER_OWNER, MAX_RECORDS_PER_NAME, MAX_RECORD_KEY_LEN, MAX_RECORD_VALUE_BYTES,
+    MIN_BNS_BASE_COST, MIN_DURATION, RESERVED_LABELS,
 };
 use crate::storage::content_id::ContentId;
 use serde::{Deserialize, Serialize};
@@ -17,6 +18,21 @@ use std::collections::{BTreeMap, BTreeSet};
 /// updated exclusively via `GovernanceAction::BnsSetPrimarySellers`) may open
 /// `OfferKind::Primary` listings on the marketplace.
 pub const BNS_PRIMARY_SELLERS: &[Address] = &[Address([0xB2; 32])];
+
+/// B13: the first epoch at which a record leaves the registry.
+///
+/// Expiry is `expires_at`, and the grace window that follows it still belongs
+/// to the previous owner, so a record is reclaimable only from
+/// `expires_at + GRACE_PERIOD` onward. Spelling it once keeps the index key and
+/// the reclaim predicate from drifting apart.
+#[must_use]
+fn grace_end_of(record: &NameRecord) -> u64 {
+    record.expires_at.saturating_add(GRACE_PERIOD)
+}
+
+fn default_max_names() -> usize {
+    crate::registry::params::DEFAULT_MAX_NAMES
+}
 
 /// Maximum number of primary seller addresses governance or genesis may configure.
 const MAX_PRIMARY_SELLERS: usize = 64;
@@ -35,6 +51,30 @@ fn default_reserved_labels() -> BTreeSet<String> {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BnsRegistry {
     pub names: BTreeMap<String, NameRecord>,
+    /// B13: the ceiling this registry enforces. Seeded from
+    /// [`crate::registry::params::DEFAULT_MAX_NAMES`] and stored, not read from
+    /// the constant, so a snapshot written under a different ceiling still
+    /// deserializes to the capacity it was written with.
+    ///
+    /// Appended after every pre-B13 field in the struct declaration on purpose.
+    /// `AccountState::from_snapshot` reads this table through bincode, which is
+    /// positional and not self-describing, so a field inserted in the middle
+    /// would shift every field after it. Putting the new field last means a
+    /// snapshot written before B13 has exactly two fields, and
+    /// `#[serde(default)]` covers the absent tail.
+    #[serde(default = "default_max_names")]
+    pub max_names: usize,
+    /// B13: `(expires_at + GRACE_PERIOD, name)` for every live record, ordered
+    /// by the epoch its grace window closes.
+    ///
+    /// This is a derived view: it is rebuilt from `names` and deliberately
+    /// **not** part of the state root ([`Self::root`] hashes `names` through the
+    /// Merkle root and the metadata digest, and this field appears in neither).
+    /// Keeping it out of the root means a snapshot restore, a replay and a live
+    /// application all agree on consensus state even though only the live one
+    /// carries the index in memory, and the rebuild on load costs one pass.
+    #[serde(skip)]
+    pub expired_by_grace_end: BTreeSet<(u64, String)>,
     pub base_cost: u64,
     #[serde(default = "default_primary_sellers")]
     pub primary_sellers: BTreeSet<Address>,
@@ -102,11 +142,97 @@ impl BnsRegistry {
     pub fn new() -> Self {
         Self {
             names: BTreeMap::new(),
+            max_names: default_max_names(),
+            expired_by_grace_end: BTreeSet::new(),
             base_cost: 100,
             primary_sellers: default_primary_sellers(),
             reserved_labels: default_reserved_labels(),
             primary_names: BTreeMap::new(),
         }
+    }
+
+    /// B13: record `name` and keep the expiry index in step.
+    ///
+    /// Every insert goes through here so the index cannot drift from `names`.
+    /// The previous expiry row for the name is removed first: a renewal or a
+    /// transfer rewrites `expires_at`, and two rows for one name would let the
+    /// reclaim path delete a name that is still live.
+    fn insert_record(&mut self, name: String, record: NameRecord) {
+        self.expired_by_grace_end
+            .remove(&(grace_end_of(&record), name.clone()));
+        self.expired_by_grace_end
+            .insert(grace_end_of(&record), name.clone());
+        self.names.insert(name, record);
+    }
+
+    /// B13: delete `name` and its index row together.
+    fn remove_record(&mut self, name: &str) -> Option<NameRecord> {
+        let removed = self.names.remove(name)?;
+        self.expired_by_grace_end
+            .remove(&(grace_end_of(&removed), name.to_string()));
+        Some(removed)
+    }
+
+    /// B13: reclaim one name whose grace window has closed, dropping its index
+    /// row with it. Refuses a name that is still live or still in grace, so the
+    /// reclaim path cannot be turned into a deletion door.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BnsError::NameTaken`] when the record is still within
+    /// `current_epoch < expires_at + GRACE_PERIOD`.
+    pub fn reclaim_expired(&mut self, name: &str, current_epoch: u64) -> Result<(), BnsError> {
+        let Some(record) = self.names.get(name) else {
+            return Ok(());
+        };
+        if current_epoch < grace_end_of(record) {
+            return Err(BnsError::NameTaken);
+        }
+        self.remove_record(name);
+        Ok(())
+    }
+
+    /// B13: delete every name whose grace window closed at or before
+    /// `current_epoch`, and return how many were deleted.
+    ///
+    /// The index makes this a walk of the expired prefix instead of a walk of
+    /// the whole registry, so an epoch boundary costs time proportional to the
+    /// names that actually ended. Deterministic: the index is ordered, so every
+    /// node deletes the same names in the same order.
+    pub fn prune_expired(&mut self, current_epoch: u64) -> usize {
+        let due: Vec<(u64, String)> = self
+            .expired_by_grace_end
+            .iter()
+            .take_while(|(grace_end, _)| *grace_end <= current_epoch)
+            .cloned()
+            .collect();
+        let mut removed = 0;
+        for (grace_end, name) in due {
+            if self
+                .names
+                .get(&name)
+                .is_some_and(|record| grace_end_of(record) == grace_end)
+            {
+                self.names.remove(&name);
+                removed += 1;
+            }
+            self.expired_by_grace_end.remove(&(grace_end, name));
+        }
+        removed
+    }
+
+    /// B13: rebuild the expiry index from `names`.
+    ///
+    /// The index is skipped by serde because it is derived state. A registry
+    /// that arrives from a snapshot, a clone of a snapshot, or a fresh genesis
+    /// load therefore has an empty index until this runs; the load path calls
+    /// it, and so does any test that builds a registry by hand.
+    pub fn rebuild_expiry_index(&mut self) {
+        self.expired_by_grace_end = self
+            .names
+            .iter()
+            .map(|(name, record)| (grace_end_of(record), name.clone()))
+            .collect();
     }
 
     /// Replace the reserved-label set (seeded at genesis).
@@ -188,6 +314,62 @@ impl BnsRegistry {
             }
         }
         self.primary_sellers = next;
+        Ok(())
+    }
+
+    /// B12: the bounds every `BnsSetBaseCost` value must satisfy, on its own.
+    ///
+    /// Separated from [`Self::set_base_cost`] because the two checks answer
+    /// different questions. The absolute bounds are a property of the value and
+    /// can be checked when a proposal is submitted; the step bound is a
+    /// property of the move and can only be checked against the price the chain
+    /// holds when the proposal executes. A submission-time check that used
+    /// [`Self::new`] would compare against the genesis price instead of the live
+    /// one.
+    ///
+    /// # Errors
+    ///
+    /// Returns a message when `base_cost` is outside
+    /// `MIN_BNS_BASE_COST..=MAX_BNS_BASE_COST`.
+    pub fn check_base_cost_bounds(base_cost: u64) -> Result<(), String> {
+        if !(MIN_BNS_BASE_COST..=MAX_BNS_BASE_COST).contains(&base_cost) {
+            return Err(format!(
+                "BNS base cost {base_cost} is outside the allowed range \
+                 {MIN_BNS_BASE_COST}..={MAX_BNS_BASE_COST}"
+            ));
+        }
+        Ok(())
+    }
+
+    /// B12: replace the renewal base cost under the directive's two bounds.
+    ///
+    /// The price moves and nothing else does. No record is re-priced, no term
+    /// is shortened and no offer is rewritten: a registration keeps the
+    /// duration it already paid for, and the next renewal of any name is
+    /// charged at the new base. That is the whole reason the action exists, so
+    /// the function refuses every input the bounds do not allow and does not
+    /// clamp a bad one into a good one: a clamped price is a price governance
+    /// did not vote for.
+    ///
+    /// # Errors
+    ///
+    /// Returns a message when `base_cost` is outside
+    /// `MIN_BNS_BASE_COST..=MAX_BNS_BASE_COST`, or when it moves the current
+    /// price by more than `BNS_BASE_COST_MAX_STEP_FACTOR` in one step.
+    pub fn set_base_cost(&mut self, base_cost: u64) -> Result<(), String> {
+        Self::check_base_cost_bounds(base_cost)?;
+        let current = self.base_cost;
+        // Integer form of `new <= current * FACTOR && new * FACTOR >= current`,
+        // without the multiplication that could overflow for a large current.
+        let within_step = base_cost <= current.saturating_mul(BNS_BASE_COST_MAX_STEP_FACTOR)
+            && base_cost.saturating_mul(BNS_BASE_COST_MAX_STEP_FACTOR) >= current;
+        if !within_step {
+            return Err(format!(
+                "BNS base cost may not move by more than {BNS_BASE_COST_MAX_STEP_FACTOR}x in one \
+                 step: {current} -> {base_cost}"
+            ));
+        }
+        self.base_cost = base_cost;
         Ok(())
     }
 
@@ -318,19 +500,26 @@ impl BnsRegistry {
             .ok_or(BnsError::InvalidDuration)?;
         let record = NameRecord::try_new(name.clone(), owner, current_epoch, expires_at)?;
         // Cap total name count - fail-closed.
-        // Reuse slots from expired names first; only reject if truly at capacity.
-        if self.names.len() >= Self::MAX_NAMES && !self.names.contains_key(&name) {
-            let expired_key = self
-                .names
+        //
+        // B13: slots are reclaimed through the expiry index, not through a
+        // scan of every record. The scan was O(registry size) on a path any
+        // buyer can reach, so once the registry filled, each registration paid
+        // for a walk of the whole map, and the walk returned the first
+        // *iteration-order* expired name rather than the one that expired
+        // first. The index answers the same question - which name's grace
+        // window closed earliest - in the time it takes to look at the head.
+        if self.names.len() >= self.max_names && !self.names.contains_key(&name) {
+            let Some((_, expired_key)) = self
+                .expired_by_grace_end
                 .iter()
-                .find(|(_, r)| r.expires_at.saturating_add(Self::GRACE_PERIOD) < current_epoch)
-                .map(|(k, _)| k.clone());
-            let Some(key) = expired_key else {
+                .find(|(grace_end, _)| *grace_end < current_epoch)
+            else {
                 return Err(BnsError::NameTaken);
             };
-            self.names.remove(&key);
+            let key = expired_key.clone();
+            self.reclaim_expired(&key, current_epoch);
         }
-        self.names.insert(name, record);
+        self.insert_record(name, record);
         Ok(())
     }
 
@@ -371,7 +560,18 @@ impl BnsRegistry {
         if new_expires_at.saturating_sub(current_epoch) > MAX_DURATION {
             return Err(BnsError::InvalidDuration);
         }
+        // B13: the index carries the grace end, so a renewal must move both the
+        // record and its row. Writing `record.expires_at` here directly was how
+        // a renewed name kept an index entry pointing at the old epoch.
+        let old_grace_end = grace_end_of(record);
         record.expires_at = new_expires_at;
+        let new_grace_end = grace_end_of(record);
+        if old_grace_end != new_grace_end {
+            let key = name.to_string();
+            self.expired_by_grace_end
+                .remove(&(old_grace_end, key.clone()));
+            self.expired_by_grace_end.insert((new_grace_end, key));
+        }
         Ok(())
     }
 
