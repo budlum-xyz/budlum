@@ -18,12 +18,16 @@ Bu turda yigina uc commit eklendi:
 | `c3c6ed92` | dort inceleme bulgusu: BNS yokluk kaniti konumu, BNS extras on-imaji, slashta kilitli emanet, suresi dolmus custody anlasmasi | `testnet` |
 | `f0ee157e` | B14 ag gecidi kurallari ve alti adli gate | `testnet` |
 | `8b5592af` | `src/gateway` ad cakismasi: modul `web_gateway` oldu | `testnet` |
+| `bd1e6a79` | B-0004: RPC kanit yaniti eksik alanlari tasiyordu | `testnet` |
+| `c6bdcccf` | B14 sunucu ikilisi, `ops/gateway/` birimi, imaji ve yapilandirmasi | `testnet` |
+| `6c25fa32` | `gateway-gate` ikili testlerini adlandirdi | `testnet` |
+| `f424cba2` | Gate yalnizca modul testlerini adlandiriyor; ikili testleri kendi hedefinde | `testnet` |
 
 `30c5ab48` B12b, B13, B15 ve B16 maddelerini tasir.
 
 ### CI durumu
 
-Depoda 196 bekleyen calistirma var. `testnet` dalina atilan her yeni commit
+Depoda 229 bekleyen calistirma var. `testnet` dalina atilan her yeni commit
 onceki kosulari iptal eder (`cancelled`), cunku is akislari ayni concurrency
 grubunu paylasir. Bu turda yesil bir kosu gorulmedi. Bu yuzden hicbir madde
 "dogrulandi" sayilmaz. Kanit yok.
@@ -77,7 +81,8 @@ bir yerden cagrilir ya da cagrilmadigini yazar. Modul yazdi.
 
 | Konu | Neden simdi kodlanmadi | Onerilen sonraki adim |
 |------|------------------------|----------------------|
-| B14 sunucu ikilisi, TLS, `ops/gateway/` | Canli sertifika, DNS saglayici ve ana makine gerekir | `src/bin/budlum-gateway.rs`, sonra `budlum.xyz` PSL basvurusu |
+| B14 TLS sonlandirici ve `budlum.xyz` PSL basvurusu | Canli sertifika, DNS saglayici ve alan adi gerekir | Terminator yapilandirmasi, sonra PSL basvurusu |
+| B14 B.U.D. 3.0 icerik kaynagi | Dugum ve ag gecidinin kendi odedigi ucretli goruntuleme makbuzu gerekir | `ContentSource` icin B.U.D. 3.0 uygulamasi |
 | 50 acik Strix bulgusu | Her biri ayri kod yolu ve test ister | Asama 3 sirasina gore, onem sirasiyla |
 | 64 is paketi | Cogu `main` dalinda, bu dalda degil | Asama 10 |
 | Cok isletim sisteminde calistirma | Imaj indirme ve derleme gerekir; bu ortamda derleme OOM ile oluyor | Asama 9 |
