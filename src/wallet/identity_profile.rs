@@ -543,6 +543,7 @@ mod tests {
             storage_root: Some(*manifest_id.as_bytes()),
             storage_domain_id: Some(5),
             content_id: Some(manifest_id),
+            records: Default::default(),
             is_expired: false,
         };
         let asset = DataAsset::new(owner, manifest_id, [7u8; 32], true);
@@ -648,6 +649,7 @@ mod tests {
             storage_root: Some(*cid.as_bytes()),
             storage_domain_id: Some(5),
             content_id: Some(cid),
+            records: Default::default(),
             is_expired: false,
         };
         let mut revoked_asset = DataAsset::new(owner, cid, [9u8; 32], true);
@@ -685,6 +687,7 @@ mod tests {
             storage_root: Some(*cid.as_bytes()),
             storage_domain_id: Some(3),
             content_id: Some(cid),
+            records: Default::default(),
             is_expired: false,
         };
         let revoked: DataAsset = serde_json::from_value(serde_json::json!({
