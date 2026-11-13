@@ -140,8 +140,9 @@ pub fn select_codec_with_fast_probe(
 
     let skipped_medium = if !has_format_specific && raw_len > 0 {
         let saved = raw_len.saturating_sub(fast_probe_encoded_len);
-        let savings_bps =
-            u128::from(saved as u64).saturating_mul(10_000) / u128::from(raw_len as u64);
+        let saved_u64 = u64::try_from(saved).unwrap_or(u64::MAX);
+        let raw_u64 = u64::try_from(raw_len).unwrap_or(u64::MAX);
+        let savings_bps = u128::from(saved_u64).saturating_mul(10_000) / u128::from(raw_u64);
         savings_bps <= u128::from(FAST_PROBE_MIN_SAVINGS_BPS)
     } else {
         false

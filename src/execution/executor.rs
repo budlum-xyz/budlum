@@ -3548,24 +3548,24 @@ impl Executor {
                             }
                         }
                     }
-                    StorageTxV3::RecordRepair {
-                        witness: crate::storage::bud3::repair::RepairWitness::ValidatorAttestations(atts),
-                        ..
-                    } => {
-                        for att in atts {
-                            let v_addr = Address::from(att.validator);
-                            if let Some(pk) = state
-                                .get_validator(&v_addr)
-                                .filter(|v| {
-                                    v.active
-                                        && !v.slashed
-                                        && !v.jailed
-                                        && v.class == crate::validators::ValidatorClass::Full
-                                        && !v.pq_public_key.is_empty()
-                                })
-                                .map(|v| v.pq_public_key.clone())
-                            {
-                                validator_keys.insert(att.validator, pk);
+                    StorageTxV3::RecordRepair { witness, .. } => {
+                        use crate::storage::bud3::repair::RepairWitness;
+                        if let RepairWitness::ValidatorAttestations(atts) = witness {
+                            for att in atts {
+                                let v_addr = Address::from(att.validator);
+                                if let Some(pk) = state
+                                    .get_validator(&v_addr)
+                                    .filter(|v| {
+                                        v.active
+                                            && !v.slashed
+                                            && !v.jailed
+                                            && v.class == crate::validators::ValidatorClass::Full
+                                            && !v.pq_public_key.is_empty()
+                                    })
+                                    .map(|v| v.pq_public_key.clone())
+                                {
+                                    validator_keys.insert(att.validator, pk);
+                                }
                             }
                         }
                     }

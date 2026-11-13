@@ -283,7 +283,8 @@ fn check_testnet_activation(
     chain_id: u64,
     activation: bud_isa::MainnetActivation,
 ) -> Result<(), String> {
-    if chain_id == 45_261 && (!activation.verify_merkle_enabled || !activation.verify_inference_enabled)
+    if chain_id == 45_261
+        && (!activation.verify_merkle_enabled || !activation.verify_inference_enabled)
     {
         return Err(
             "testnet requires active VerifyMerkle and VerifyInference under canonical default activation"

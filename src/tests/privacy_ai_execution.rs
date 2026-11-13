@@ -1008,7 +1008,8 @@ fn privacy_confidential_bundle_hiding_stark_and_predicates_on_testnet() {
     let nf = L1NoteRegistry::derive_nullifier(&spent, &proof_note);
     let out = hash_from_field(606);
     let digest = PrivateTransferSubmit::compute_public_digest(&[nf], &[out]);
-    let auth_msg = PrivateTransferSubmit::authorization_message(testnet, sender.as_bytes(), 0, &digest);
+    let auth_msg =
+        PrivateTransferSubmit::authorization_message(testnet, sender.as_bytes(), 0, &digest);
     let sub = PrivateTransferSubmit {
         spent_commitments: vec![spent],
         nullifiers: vec![nf],
