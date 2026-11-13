@@ -964,7 +964,6 @@ crates/wallet-core/src/lib.rs	fn	is_privacy_active
 crates/wallet-core/src/lib.rs	fn	is_timelock_satisfied
 crates/wallet-core/src/lib.rs	fn	note_input_from_receive
 crates/wallet-core/src/lib.rs	fn	note_privacy_only
-crates/wallet-core/src/lib.rs	fn	owner_count
 crates/wallet-core/src/lib.rs	fn	prepare_receive_note
 crates/wallet-core/src/lib.rs	fn	privacy_config
 crates/wallet-core/src/lib.rs	fn	remove_guardian
