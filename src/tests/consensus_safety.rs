@@ -9,23 +9,25 @@ use crate::consensus::{
 
 #[test]
 fn block_size_is_bounded() {
-    assert!(
-        MAX_BLOCK_SIZE >= 100_000,
-        "block size too small for useful txs"
-    );
-    assert!(MAX_BLOCK_SIZE <= 10_000_000, "block size exceeds 10MB");
+    const {
+        assert!(
+            MAX_BLOCK_SIZE >= 100_000,
+            "block size too small for useful txs"
+        )
+    };
+    const { assert!(MAX_BLOCK_SIZE <= 10_000_000, "block size exceeds 10MB") };
 }
 
 #[test]
 fn max_transactions_per_block_is_bounded() {
-    assert!(MAX_TRANSACTIONS_PER_BLOCK >= 100);
-    assert!(MAX_TRANSACTIONS_PER_BLOCK <= 50_000);
+    const { assert!(MAX_TRANSACTIONS_PER_BLOCK >= 100) };
+    const { assert!(MAX_TRANSACTIONS_PER_BLOCK <= 50_000) };
 }
 
 #[test]
 fn reorg_depth_is_bounded() {
-    assert!(MAX_REORG_DEPTH >= 10, "reorg depth too shallow");
-    assert!(MAX_REORG_DEPTH <= 1_000, "reorg depth dangerously deep");
+    const { assert!(MAX_REORG_DEPTH >= 10, "reorg depth too shallow") };
+    const { assert!(MAX_REORG_DEPTH <= 1_000, "reorg depth dangerously deep") };
 }
 
 #[test]
@@ -55,22 +57,26 @@ fn max_leader_rounds_is_sixteen() {
 
 #[test]
 fn slashing_evidence_is_bounded() {
-    assert!(MAX_SLASHING_EVIDENCE_BYTES >= 1_024);
-    assert!(MAX_SLASHING_EVIDENCE_BYTES <= 1_000_000);
+    const { assert!(MAX_SLASHING_EVIDENCE_BYTES >= 1_024) };
+    const { assert!(MAX_SLASHING_EVIDENCE_BYTES <= 1_000_000) };
 }
 
 #[test]
 fn block_interval_less_than_round_timeout() {
-    assert!(
-        MIN_BLOCK_INTERVAL_MS < ROUND_TIMEOUT_MS,
-        "block interval must be less than round timeout"
-    );
+    const {
+        assert!(
+            MIN_BLOCK_INTERVAL_MS < ROUND_TIMEOUT_MS,
+            "block interval must be less than round timeout"
+        )
+    };
 }
 
 #[test]
 fn round_timeout_less_than_future_block_time() {
-    assert!(
-        ROUND_TIMEOUT_MS < MAX_FUTURE_BLOCK_TIME_MS,
-        "round timeout must be less than future block time tolerance"
-    );
+    const {
+        assert!(
+            ROUND_TIMEOUT_MS < MAX_FUTURE_BLOCK_TIME_MS,
+            "round timeout must be less than future block time tolerance"
+        )
+    };
 }
