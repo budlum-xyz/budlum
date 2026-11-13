@@ -243,8 +243,45 @@ fn handle_system_program(
             if space > 1024 * 1024 {
                 return Err((OutcomeStatus::Revert, String::from("space > 1 MiB")));
             }
-            let to_pk = ix.accounts.get(1).map(|m| m.pubkey).unwrap_or([0u8; 32]);
-            if lamports > 0 {
+            let payer = ix.accounts.first().ok_or_else(|| {
+                (
+                    OutcomeStatus::Revert,
+                    String::from("missing CreateAccount payer"),
+                )
+            })?;
+            let new_account = ix.accounts.get(1).ok_or_else(|| {
+                (
+                    OutcomeStatus::Revert,
+                    String::from("missing CreateAccount target"),
+                )
+            })?;
+            if payer.pubkey != *caller || !payer.is_signer || !payer.is_writable {
+                return Err((
+                    OutcomeStatus::Revert,
+                    String::from("CreateAccount payer must be the authenticated writable signer"),
+                ));
+            }
+            // The worker receives only the authenticated outer caller, not a
+            // transaction-level signer set. AccountMeta.is_signer is caller
+            // supplied and cannot authorize another key; restrict creation to
+            // the caller's own absent account until co-signers are authenticated
+            // by the coordinator.
+            if new_account.pubkey != *caller || !new_account.is_signer || !new_account.is_writable {
+                return Err((
+                    OutcomeStatus::Revert,
+                    String::from("CreateAccount target is not an authenticated signer"),
+                ));
+            }
+            let to_pk = new_account.pubkey;
+            if svm_account_exists(host, &to_pk)
+                .map_err(|e| (OutcomeStatus::Revert, e.to_string()))?
+            {
+                return Err((
+                    OutcomeStatus::Revert,
+                    String::from("CreateAccount target already exists"),
+                ));
+            }
+            if lamports > 0 && to_pk != *caller {
                 let attos = u128::from(lamports).saturating_mul(ATTOS_PER_LAMPORT);
                 host.bud_transfer(
                     &EeIdentity {
@@ -989,6 +1026,41 @@ mod tests {
             height: 10,
             timestamp_ms: 1_762_000_000_000,
         }
+    }
+
+    #[test]
+    fn system_create_account_cannot_overwrite_another_accounts_record() {
+        let caller = [0x11; 32];
+        let victim = [0x55; 32];
+        let mut host = MemoryHost::new(1_000_000);
+        let existing = SvmAccountRecord {
+            owner: [0x33; 32],
+            executable: true,
+            rent_epoch: 17,
+            data: b"victim program bytes".to_vec(),
+        };
+        write_svm_account(&mut host, &victim, &existing).expect("fixture write");
+        let mut data = 0u32.to_le_bytes().to_vec();
+        data.extend_from_slice(&10u64.to_le_bytes());
+        data.extend_from_slice(&128u64.to_le_bytes());
+        data.extend_from_slice(&[0x99; 32]);
+        let ix = SvmInstructionEnvelope {
+            accounts: vec![
+                SvmAccountMeta {
+                    pubkey: caller,
+                    is_signer: true,
+                    is_writable: true,
+                },
+                SvmAccountMeta {
+                    pubkey: victim,
+                    is_signer: true,
+                    is_writable: true,
+                },
+            ],
+            data,
+        };
+        assert!(handle_system_program(&caller, &ix, &mut host).is_err());
+        assert_eq!(read_svm_account(&host, &victim), existing);
     }
 
     #[test]
