@@ -1944,10 +1944,8 @@ impl Bud3Registry {
                 let mut seen_esis = BTreeSet::new();
                 let mut dec = SegmentDecoder::new(segment, seg_len, &obj.record.profile)
                     .map_err(|_| RegistryError::BadRepair("repair decoder init failed"))?;
-                let mut meter = Meter::new(
-                    seg_len.saturating_mul(4).saturating_add(1 << 20),
-                    1 << 20,
-                );
+                let mut meter =
+                    Meter::new(seg_len.saturating_mul(4).saturating_add(1 << 20), 1 << 20);
                 for p in proofs {
                     let root_entry = obj
                         .roots
@@ -1972,9 +1970,7 @@ impl Bud3Registry {
                         ));
                     }
                     if !seen_esis.insert(p.symbol.esi) {
-                        return Err(RegistryError::BadRepair(
-                            "duplicate ESI in repair witness",
-                        ));
+                        return Err(RegistryError::BadRepair("duplicate ESI in repair witness"));
                     }
                     if !verify_symbol_root_path(
                         root_entry.root,
@@ -1992,9 +1988,9 @@ impl Bud3Registry {
                         .push(p.symbol.clone(), &mut meter)
                         .map_err(|_| RegistryError::BadRepair("bad repair witness symbol"))?;
                 }
-                let seg_bytes = dec
-                    .into_bytes()
-                    .ok_or(RegistryError::BadRepair("repair witness did not decode segment"))?;
+                let seg_bytes = dec.into_bytes().ok_or(RegistryError::BadRepair(
+                    "repair witness did not decode segment",
+                ))?;
                 let enc = SegmentEncoder::new(segment, &seg_bytes, &obj.record.profile)
                     .map_err(|_| RegistryError::BadRepair("repair witness re-encode failed"))?;
                 let expected_syms = enc
@@ -2017,14 +2013,8 @@ impl Bud3Registry {
                     .symbol_roots
                     .get(seg_idx)
                     .ok_or(RegistryError::BadRepair("missing original segment root"))?;
-                let digest = repair_attestation_digest(
-                    key,
-                    segment,
-                    first,
-                    count,
-                    &new_root,
-                    &orig_root,
-                );
+                let digest =
+                    repair_attestation_digest(key, segment, first, count, &new_root, &orig_root);
                 let new_holders: BTreeSet<Address> = sorted.iter().map(|s| s.validator).collect();
                 let lost_holders: BTreeSet<Address> = obj
                     .shares
@@ -2057,7 +2047,9 @@ impl Bud3Registry {
                         crate::crypto::ctx::STORAGE_V2,
                         &att.signature,
                     )
-                    .map_err(|_| RegistryError::BadRepair("invalid repair attestation signature"))?;
+                    .map_err(|_| {
+                        RegistryError::BadRepair("invalid repair attestation signature")
+                    })?;
                 }
             }
         }

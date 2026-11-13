@@ -160,9 +160,7 @@ pub fn verify_home_slice_proof(
     }
     match family {
         HomeVmFamily::Evm => {
-            let addr20: [u8; 20] = contract
-                .try_into()
-                .map_err(|_| Refusal::UnprovenEvent)?;
+            let addr20: [u8; 20] = contract.try_into().map_err(|_| Refusal::UnprovenEvent)?;
             let acct = account_proof::verify_account(
                 &proof.contract_account_proof,
                 &proof.state_root,
@@ -497,8 +495,7 @@ impl ObjectLayerRegistry {
         expected_home_state_root: Option<Hash32>,
         require_home_proof: bool,
     ) -> Result<bool, Refusal> {
-        if require_home_proof
-            && (proof.home_proof.is_none() || expected_home_state_root.is_none())
+        if require_home_proof && (proof.home_proof.is_none() || expected_home_state_root.is_none())
         {
             return Err(Refusal::Charter(CharterRefusal::ProofDisagrees));
         }
@@ -617,9 +614,7 @@ impl ObjectLayerRegistry {
         if reg.bond < self.params.min_class_bond {
             return Err(Refusal::BondTooSmall);
         }
-        if require_home_proof
-            && (reg.state_proof.is_none() || expected_home_state_root.is_none())
-        {
+        if require_home_proof && (reg.state_proof.is_none() || expected_home_state_root.is_none()) {
             return Err(Refusal::UnprovenEvent);
         }
         if let Some(sp) = reg.state_proof.as_ref() {

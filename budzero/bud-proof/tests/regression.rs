@@ -128,12 +128,7 @@ fn verify_inference_is_refused_in_any_trace() {
         "VerifyInference default verify",
     );
     must_ok(
-        Plonky3Adapter::verify_with_activation(
-            &envelope,
-            &pi,
-            &program,
-            MainnetActivation::full(),
-        ),
+        Plonky3Adapter::verify_with_activation(&envelope, &pi, &program, MainnetActivation::full()),
         "VerifyInference full verify",
     );
     assert!(
