@@ -284,7 +284,7 @@ fn test_bns_register_fee_enforced_regression_m4() {
     // as a regression: a four-letter name with duration 1 gives cost > amount.
     let mut state = AccountState::new();
     state.add_balance(&relayer_addr(), 10_000);
-    let name = "abcd".to_string();
+    let name = "abcd.bud".to_string();
     let cost = state.bns_registry.calculate_cost(&name, 1);
     assert!(cost > 0);
     let data = bincode::serialize(&(name.clone(), 1u64)).expect("ser");
