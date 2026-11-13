@@ -65,10 +65,10 @@ Kimlik bicimi `S-<PR>-<yorum>`. Durum degerleri: cozuldu, acik, gecersiz, ertele
 - **Konum:** `src/validators/committee.rs`:141
 - **Onem:** high
 - **Ozet:** Checkpoint proposer can move committee seats by forging the unverified `seat_participation` record
-- **Durum:** acik
-- **Commit:** yok
+- **Durum:** gecersiz
+- **Commit:** `bd1e6a79` (dal ucu, dogrulama)
 - **CI run:** yok
-- **Not:** Henuz cozulmedi.
+- **Not:** Kod okundu, bulgu artik gecerli degil. `derive_seat_table_for_checkpoint` (`src/chain/blockchain.rs:8798`) icindeki `record_at` kapanisi, QC blob'u varsa imzalayanlari `verify_against_snapshot_in` ile dogruluyor ve `SeatParticipation::collect` ile kaydi kendisi yeniden uretiyor. Proposer'in yazdigi `seat_participation` yalnizca `snapshot_has_keys` yanlissa (BLS ve PQ anahtari olmayan snapshot) kullaniliyor; o durumda da dogrulanacak bir imza yok. Ayrica her blob `blob.checkpoint_hash != cp_block.hash` kontrolunden geciyor, yani imzalar baska bir checkpoint'e baglanamaz. `qc.rs` icindeki `pq_signing_message` epoch, checkpoint_height, checkpoint_hash ve validator_index'i imzaliyor. Bulgu, bu duzeltmeden onceki koda yazilmis.
 
 ### S-126-4510483736
 
