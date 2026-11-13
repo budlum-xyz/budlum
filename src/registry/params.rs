@@ -576,6 +576,40 @@ impl Default for RegistryParams {
     }
 }
 
+/// B12: the floor a governance `BnsSetBaseCost` action may set.
+///
+/// A base cost of zero sells every `.bud` name for nothing, and the renewal
+/// fee is the only BNS revenue that is burned, so a zero is a subsidy with no
+/// way back (each governance step is bounded).
+pub const MIN_BNS_BASE_COST: u64 = 1;
+
+/// B12: the ceiling a governance `BnsSetBaseCost` action may set.
+///
+/// The 3-character tier pays 100x this value per epoch, so the ceiling keeps
+/// the most expensive name inside what a `MAX_DURATION` registration can pay
+/// without saturating: `MIN_BNS_BASE_COST` through this value is the whole
+/// range, and both ends are checked before any state is written.
+pub const MAX_BNS_BASE_COST: u64 = 1_000_000;
+
+/// B12: the largest factor one `BnsSetBaseCost` action may move the price by.
+///
+/// Governance is not a rubber stamp: a single vote may not multiply the price
+/// by more than this (or divide it by more than this), so a compromised or
+/// mistaken proposal cannot reprice the whole namespace in one step. Ten is the
+/// directive's bound; a larger move needs a second proposal, which is a second
+/// chance to see it.
+pub const BNS_BASE_COST_MAX_STEP_FACTOR: u64 = 10;
+
+/// B13: the default ceiling on how many `.bud` names the registry holds.
+///
+/// A parameter rather than a constant inside [`crate::bns::BnsRegistry`] because
+/// the number is a capacity decision, not a rule: 100K names with subdomains
+/// bounded state growth to roughly 50MB, and the ceiling that appears in a
+/// snapshot must be readable by operators who tune it. The registry keeps the
+/// genesis value in its own field so an old snapshot still deserializes to the
+/// ceiling it was written with.
+pub const DEFAULT_MAX_NAMES: usize = 1_000_000;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1062,37 +1096,3 @@ mod tests {
         }
     }
 }
-
-/// B12: the floor a governance `BnsSetBaseCost` action may set.
-///
-/// A base cost of zero sells every `.bud` name for nothing, and the renewal
-/// fee is the only BNS revenue that is burned, so a zero is a subsidy with no
-/// way back (each governance step is bounded).
-pub const MIN_BNS_BASE_COST: u64 = 1;
-
-/// B12: the ceiling a governance `BnsSetBaseCost` action may set.
-///
-/// The 3-character tier pays 100x this value per epoch, so the ceiling keeps
-/// the most expensive name inside what a `MAX_DURATION` registration can pay
-/// without saturating: `MIN_BNS_BASE_COST` through this value is the whole
-/// range, and both ends are checked before any state is written.
-pub const MAX_BNS_BASE_COST: u64 = 1_000_000;
-
-/// B12: the largest factor one `BnsSetBaseCost` action may move the price by.
-///
-/// Governance is not a rubber stamp: a single vote may not multiply the price
-/// by more than this (or divide it by more than this), so a compromised or
-/// mistaken proposal cannot reprice the whole namespace in one step. Ten is the
-/// directive's bound; a larger move needs a second proposal, which is a second
-/// chance to see it.
-pub const BNS_BASE_COST_MAX_STEP_FACTOR: u64 = 10;
-
-/// B13: the default ceiling on how many `.bud` names the registry holds.
-///
-/// A parameter rather than a constant inside [`crate::bns::BnsRegistry`] because
-/// the number is a capacity decision, not a rule: 100K names with subdomains
-/// bounded state growth to roughly 50MB, and the ceiling that appears in a
-/// snapshot must be readable by operators who tune it. The registry keeps the
-/// genesis value in its own field so an old snapshot still deserializes to the
-/// ceiling it was written with.
-pub const DEFAULT_MAX_NAMES: usize = 1_000_000;
