@@ -88,6 +88,22 @@ impl NameRecord {
     }
 }
 
+/// Lifecycle state of a registered `.bud` name at a given epoch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NameStatus {
+    /// Live (`current_epoch < expires_at`): resolves and accepts owner mutations.
+    #[default]
+    Active,
+    /// Grace (`expires_at <= current_epoch <= expires_at + GRACE_PERIOD`):
+    /// resolution and mutations fail closed, third parties cannot register, and
+    /// only the owner may rescue via `renew`.
+    Grace,
+    /// Expired past grace (`current_epoch > expires_at + GRACE_PERIOD`):
+    /// eligible for eviction and primary marketplace registration.
+    Expired,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BnsResolved {
     pub name: String,
@@ -102,6 +118,12 @@ pub struct BnsResolved {
     pub subdomains: std::collections::BTreeMap<String, Address>,
     #[serde(default)]
     pub records: std::collections::BTreeMap<String, String>,
+    #[serde(default)]
+    pub status: NameStatus,
+    #[serde(default)]
+    pub expires_at: u64,
+    #[serde(default)]
+    pub grace_expires_at: u64,
     pub is_expired: bool,
 }
 

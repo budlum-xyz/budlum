@@ -1210,6 +1210,16 @@ impl MarketplaceRegistry {
         Ok(())
     }
 
+    /// Close any open `Resale` listings for `name` (e.g. when `name` is
+    /// transferred directly or purchased via another listing).
+    pub fn invalidate_resale_offers_for_name(&mut self, name: &str) {
+        for offer in self.name_offers.values_mut() {
+            if offer.active && offer.kind == OfferKind::Resale && offer.name == name {
+                offer.active = false;
+            }
+        }
+    }
+
     #[must_use]
     pub fn get_name_offer(&self, offer_id: u64) -> Option<&NameOffer> {
         self.name_offers.get(&offer_id)

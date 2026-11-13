@@ -751,6 +751,13 @@ pub trait BudlumApi {
         address: String,
     ) -> Result<Option<String>, ErrorObjectOwned>;
 
+    /// List all `active` and `grace` `.bud` names held by `owner`.
+    #[method(name = "bud_bnsListNamesByOwner")]
+    async fn bns_list_names_by_owner(
+        &self,
+        owner: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
     /// Prepare a signed `BnsSetAddress` forwarding/target update transaction.
     #[method(name = "bud_bnsPrepareSetAddress")]
     async fn bns_prepare_set_address(
