@@ -4008,7 +4008,7 @@ impl Blockchain {
                 if tx.amount != 0 || tx.to != Address::zero() {
                     reasons.push("invalid_bns_create_offer_shape".to_string());
                 }
-                match bincode::deserialize::<crate::pollen::CreateNameOffer>(&tx.data) {
+                match bincode::deserialize::<crate::bns::CreateNameOffer>(&tx.data) {
                     Ok(req) => {
                         if !crate::bns::BnsRegistry::is_valid_name(&req.name) {
                             reasons.push("invalid_bns_offer_name".to_string());
@@ -4020,13 +4020,16 @@ impl Blockchain {
                             reasons.push("invalid_bns_offer_expiry".to_string());
                         }
                         match req.kind {
-                            crate::pollen::OfferKind::Primary => {
-                                if req.duration == 0
+                            crate::bns::OfferKind::Primary => {
+                                if !crate::bns::BnsRegistry::is_valid_duration(req.duration)
                                     || self.state.epoch_index.checked_add(req.duration).is_none()
                                 {
                                     reasons.push("invalid_bns_offer_duration".to_string());
                                 }
                                 if !self.state.bns_registry.is_primary_seller(&tx.from) {
+                                    if self.state.bns_registry.is_reserved_name(&req.name) {
+                                        reasons.push("bns_reserved_name".to_string());
+                                    }
                                     reasons.push("bns_unauthorized_primary_seller".to_string());
                                 }
                                 if !self
@@ -4037,7 +4040,7 @@ impl Blockchain {
                                     reasons.push("bns_offer_name_unavailable".to_string());
                                 }
                             }
-                            crate::pollen::OfferKind::Resale => {
+                            crate::bns::OfferKind::Resale => {
                                 if !self.state.bns_registry.is_live_owned_by(
                                     &req.name,
                                     &tx.from,
@@ -4094,7 +4097,7 @@ impl Blockchain {
                         if tx.amount != self.state.bns_registry.calculate_cost(&name, duration) {
                             reasons.push("invalid_bns_renewal_payment".to_string());
                         }
-                        if duration == 0 {
+                        if !crate::bns::BnsRegistry::is_valid_duration(duration) {
                             reasons.push("invalid_bns_renewal_duration".to_string());
                         }
                     }
@@ -4106,7 +4109,17 @@ impl Blockchain {
             }
             crate::core::transaction::TransactionType::BnsTransfer => {
                 match bincode::deserialize::<(String, Address)>(&tx.data) {
-                    Ok((_name, new_owner)) if new_owner != Address::zero() => {}
+                    Ok((_name, new_owner)) if new_owner != Address::zero() => {
+                        if new_owner != tx.from
+                            && self
+                                .state
+                                .bns_registry
+                                .active_name_count_for_owner(&new_owner, self.state.epoch_index)
+                                >= crate::bns::MAX_NAMES_PER_OWNER
+                        {
+                            reasons.push("bns_owner_name_limit_exceeded".to_string());
+                        }
+                    }
                     Ok(_) => reasons.push("invalid_bns_transfer_owner".to_string()),
                     Err(_) => reasons.push("invalid_bns_transfer_data".to_string()),
                 }
