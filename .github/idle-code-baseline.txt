@@ -1538,7 +1538,6 @@ src/network/peer_manager.rs	fn	get_score
 src/network/peer_manager.rs	fn	max_tracked_peers
 src/network/peer_manager.rs	fn	msg_refill_rate
 src/network/peer_manager.rs	fn	refill_tokens
-src/network/peer_manager.rs	fn	report_slow_sync
 src/network/peer_manager.rs	fn	set_max_peers_per_subnet
 src/network/peer_manager.rs	fn	subnet_connection_count
 src/network/peer_manager.rs	fn	tracked_peer_count

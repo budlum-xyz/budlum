@@ -204,9 +204,9 @@ impl PrivateTransferSubmit {
                 bud_proof::memory_image_commitment_of_reads(&bud_proof::initial_memory_reads(
                     &vm.trace,
                 )),
-                bud_proof::register_image_commitment_of_reads(
-                    &bud_proof::initial_register_reads(&vm.trace),
-                ),
+                bud_proof::register_image_commitment_of_reads(&bud_proof::initial_register_reads(
+                    &vm.trace,
+                )),
             ),
             final_state_root: receipt.state_writes_digest,
             sender: 0,
@@ -298,8 +298,7 @@ impl PrivateTransferSubmit {
                 .and_then(|s| s.try_into().ok())
                 .unwrap_or([1u8; 8]),
         ) % budlum_note_packing::GOLDILOCKS_P;
-        let derived_nf =
-            bud_vm::poseidon4_hash4(note_secret_fe, bud_vm::DOMAIN_NULLIFIER, 0, 0);
+        let derived_nf = bud_vm::poseidon4_hash4(note_secret_fe, bud_vm::DOMAIN_NULLIFIER, 0, 0);
 
         let ownership_proof = prove_predicate(&PredicateStatement {
             kind: PredicateKind::Yk1Ownership,

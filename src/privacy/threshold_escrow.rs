@@ -187,9 +187,14 @@ impl ThresholdEscrow {
         recipient: &Address,
     ) -> Result<EscrowUnlockShare, ThresholdEscrowError> {
         let msg = Self::signing_message(&self.committee, recipient, &self.amount_commitment);
-        let signature =
-            ml_dsa_sign(SchemeId::ML_DSA_65, seed, &msg, PRIVATE_TRANSFER_V1, &[0u8; 32])
-                .map_err(|_| ThresholdEscrowError::SigningFailed)?;
+        let signature = ml_dsa_sign(
+            SchemeId::ML_DSA_65,
+            seed,
+            &msg,
+            PRIVATE_TRANSFER_V1,
+            &[0u8; 32],
+        )
+        .map_err(|_| ThresholdEscrowError::SigningFailed)?;
         Ok(EscrowUnlockShare {
             member_index,
             signature,

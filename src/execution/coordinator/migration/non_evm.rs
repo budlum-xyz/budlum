@@ -196,9 +196,10 @@ pub fn verify_ics23_existence(
             computed: current,
         });
     }
-    let nodes = 1u64.saturating_add(u64::try_from(proof.path.len()).map_err(|_| {
-        ImportError::StateError(String::from("ICS-23 node count overflow"))
-    })?);
+    let nodes = 1u64.saturating_add(
+        u64::try_from(proof.path.len())
+            .map_err(|_| ImportError::StateError(String::from("ICS-23 node count overflow")))?,
+    );
     Ok(nodes)
 }
 
@@ -430,7 +431,8 @@ pub(crate) fn apply_wasm_migration(
     }
     let proven_info: serde_json::Value = serde_json::from_slice(&req.contract_info_proof.value)
         .map_err(|e| ImportError::StateError(format!("invalid CosmWasm contract info: {e}")))?;
-    if proven_info.get("code_hash").and_then(|v| v.as_str()) != Some(hex::encode(code_hash).as_str())
+    if proven_info.get("code_hash").and_then(|v| v.as_str())
+        != Some(hex::encode(code_hash).as_str())
         || proven_info.get("creator").and_then(|v| v.as_str()) != Some(req.creator.as_str())
     {
         return Err(ImportError::CodeHashMismatch);
@@ -522,10 +524,7 @@ pub(crate) fn apply_svm_migration(
             "SVM account data exceeds 512 KiB bound",
         )));
     }
-    if req.executable
-        && req.owner == SVM_BPF_LOADER_ID
-        && req.data.get(..4) != Some(&ELF_MAGIC)
-    {
+    if req.executable && req.owner == SVM_BPF_LOADER_ID && req.data.get(..4) != Some(&ELF_MAGIC) {
         return Err(ImportError::StateError(String::from(
             "executable BPF loader account must carry ELF magic",
         )));
@@ -544,7 +543,9 @@ pub(crate) fn apply_svm_migration(
         .authority_signature64
         .as_slice()
         .try_into()
-        .map_err(|_| ImportError::StateError(String::from("SVM authority signature != 64 bytes")))?;
+        .map_err(|_| {
+            ImportError::StateError(String::from("SVM authority signature != 64 bytes"))
+        })?;
     let digest = svm_migration_digest(
         req.budlum_chain_id,
         req.source_domain_id,
@@ -581,9 +582,10 @@ pub(crate) fn apply_svm_migration(
     )?;
 
     let data_len = req.data.len();
-    let nodes = 1u64.saturating_add(u64::try_from(req.proof_siblings.len()).map_err(|_| {
-        ImportError::StateError(String::from("SVM proof node count overflow"))
-    })?);
+    let nodes = 1u64.saturating_add(
+        u64::try_from(req.proof_siblings.len())
+            .map_err(|_| ImportError::StateError(String::from("SVM proof node count overflow")))?,
+    );
     let usage = MigrationUsage {
         proof_nodes: nodes,
         code_bytes: u64::try_from(data_len).map_err(|_| super::MigrationFeeOverflow)?,
@@ -621,9 +623,9 @@ fn is_forbidden_move_entry(account: &[u8; 32], kind: &MoveMigrationEntryKind) ->
             let full = format!("0x1::{name}");
             FORBIDDEN_MOVE_MODULES.contains(&full.as_str())
         }
-        MoveMigrationEntryKind::Resource(tag) => FORBIDDEN_MOVE_MODULES
-            .iter()
-            .any(|m| tag.starts_with(m)),
+        MoveMigrationEntryKind::Resource(tag) => {
+            FORBIDDEN_MOVE_MODULES.iter().any(|m| tag.starts_with(m))
+        }
     }
 }
 
@@ -732,8 +734,8 @@ pub(crate) fn apply_move_migration(
         total_nodes = total_nodes
             .saturating_add(1)
             .saturating_add(u64::try_from(entry.siblings.len()).unwrap_or(u64::MAX));
-        total_bytes = total_bytes
-            .saturating_add(u64::try_from(entry.bytes.len()).unwrap_or(u64::MAX));
+        total_bytes =
+            total_bytes.saturating_add(u64::try_from(entry.bytes.len()).unwrap_or(u64::MAX));
         writes.push((state_key, entry.bytes.clone()));
     }
 

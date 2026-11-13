@@ -1565,7 +1565,9 @@ fn testnet_sealed_field_native_remote_view_and_blind_compute_work_end_to_end() {
         prove_mlp_inference, verify_compute_without_seeing, weights_digest,
         ComputeWithoutSeeingBundle, ComputeWithoutSeeingPermit, FixedPointMlpSpec,
     };
-    use crate::ai::types::{AiModelId, AiModelSpec, AiRequestId, BoundedBytes};
+    use crate::ai::types::{
+        AiInferenceRequest, AiInferenceResult, AiModelId, AiModelSpec, AiRequestId, BoundedBytes,
+    };
     use crate::light_client::{RemoteMerkleStep, RemoteStateView, VerifiedCheckpoint};
     use crate::privacy::{EscrowCommittee, EscrowedDisclosure, THRESHOLD_ESCROW_N};
     use crate::settlement::GlobalBlockHeader;
@@ -1751,11 +1753,7 @@ fn testnet_sealed_field_native_remote_view_and_blind_compute_work_end_to_end() {
         proof: proof.clone(),
     };
     let program = guest_program_for_model(&model).unwrap();
-    let pi = proof
-        .public_inputs
-        .as_ref()
-        .unwrap()
-        .to_execution_inputs();
+    let pi = proof.public_inputs.as_ref().unwrap().to_execution_inputs();
     let mut deletion_set = DeletionSet::default();
     let rep =
         verify_compute_without_seeing(&bundle, &deletion_set, &model, Some((&program, &pi)), 100)
