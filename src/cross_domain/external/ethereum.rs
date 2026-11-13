@@ -444,39 +444,46 @@ pub fn build_deneb_update_payload(
 /// Recompute `STATE_ROOT`, `FINALIZED_ROOT`, and `ATTESTED_STATE_ROOT` inside
 /// a Deneb payload so its SSZ finality branch stays consistent after mutating
 /// the committed state root.
+fn read_deneb_u64(payload: &[u8], range: std::ops::Range<usize>) -> u64 {
+    payload
+        .get(range)
+        .and_then(|s| <[u8; 8]>::try_from(s).ok())
+        .map(u64::from_le_bytes)
+        .unwrap_or(0)
+}
+
+fn read_deneb_32(payload: &[u8], range: std::ops::Range<usize>) -> [u8; 32] {
+    payload
+        .get(range)
+        .and_then(|s| <[u8; 32]>::try_from(s).ok())
+        .unwrap_or([0u8; 32])
+}
+
 pub fn set_deneb_state_root(payload: &mut [u8], state_root: [u8; 32]) {
-    let read_u64 = |range: std::ops::Range<usize>| -> u64 {
-        payload
-            .get(range)
-            .and_then(|s| <[u8; 8]>::try_from(s).ok())
-            .map(u64::from_le_bytes)
-            .unwrap_or(0)
-    };
-    let read_32 = |range: std::ops::Range<usize>| -> [u8; 32] {
-        payload
-            .get(range)
-            .and_then(|s| <[u8; 32]>::try_from(s).ok())
-            .unwrap_or([0u8; 32])
-    };
+    let finalized_slot = read_deneb_u64(payload, layout::FINALIZED_SLOT);
+    let finalized_proposer_index = read_deneb_u64(payload, layout::FINALIZED_PROPOSER_INDEX);
+    let finalized_parent_root = read_deneb_32(payload, layout::FINALIZED_PARENT_ROOT);
+    let finalized_body_root = read_deneb_32(payload, layout::FINALIZED_BODY_ROOT);
+    let mut branch = Vec::with_capacity(6);
+    for i in 0..6 {
+        let start = layout::FINALITY_BRANCH_OFFSET + i * 32;
+        branch.push(read_deneb_32(payload, start..start + 32));
+    }
+    let gindex = read_deneb_u64(payload, layout::FINALIZED_ROOT_GINDEX);
+
     if let Some(dst) = payload.get_mut(layout::STATE_ROOT) {
         dst.copy_from_slice(&state_root);
     }
     let finalized_root = crate::cross_domain::evm::sync_committee::beacon_header_hash_tree_root(
-        read_u64(layout::FINALIZED_SLOT),
-        read_u64(layout::FINALIZED_PROPOSER_INDEX),
-        read_32(layout::FINALIZED_PARENT_ROOT),
+        finalized_slot,
+        finalized_proposer_index,
+        finalized_parent_root,
         state_root,
-        read_32(layout::FINALIZED_BODY_ROOT),
+        finalized_body_root,
     );
     if let Some(dst) = payload.get_mut(layout::FINALIZED_ROOT) {
         dst.copy_from_slice(&finalized_root);
     }
-    let mut branch = Vec::with_capacity(6);
-    for i in 0..6 {
-        let start = layout::FINALITY_BRANCH_OFFSET + i * 32;
-        branch.push(read_32(start..start + 32));
-    }
-    let gindex = read_u64(layout::FINALIZED_ROOT_GINDEX);
     if let Some(attested_state_root) =
         crate::cross_domain::evm::sync_committee::walk_branch(finalized_root, &branch, gindex)
     {

@@ -1017,7 +1017,7 @@ mod tests {
             },
         ];
         let bytecode: Vec<u8> = program
-            .into_iter()
+            .iter()
             .flat_map(|instruction| instruction.encode().to_le_bytes())
             .collect();
 

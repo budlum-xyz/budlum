@@ -3553,13 +3553,21 @@ impl Executor {
                         if let RepairWitness::ValidatorAttestations(atts) = witness {
                             for att in atts {
                                 let v_addr = Address::from(att.validator);
+                                if state
+                                    .validator_directory
+                                    .get(&v_addr)
+                                    .is_some_and(|r| {
+                                        r.class != crate::validators::ValidatorClass::Full
+                                    })
+                                {
+                                    continue;
+                                }
                                 if let Some(pk) = state
                                     .get_validator(&v_addr)
                                     .filter(|v| {
                                         v.active
                                             && !v.slashed
                                             && !v.jailed
-                                            && v.class == crate::validators::ValidatorClass::Full
                                             && !v.pq_public_key.is_empty()
                                     })
                                     .map(|v| v.pq_public_key.clone())
@@ -5461,9 +5469,11 @@ mod tests {
         let verifier = Address::from(verifier_kp.public_key_bytes());
 
         let mut state = AccountState::new();
-        state.add_balance(&owner, 10_000_000);
-        state.add_balance(&verifier, 10_000_000);
+        let role_bond = state.required_ai_bond(chain_id);
         let bond = crate::ai_inference::MIN_OPERATOR_BOND;
+        state.add_balance(&owner, 10_000_000);
+        state.add_balance(&verifier, role_bond.saturating_add(bond).saturating_add(10_000));
+        state.bond_ai_operator(&verifier, role_bond, chain_id).unwrap();
         state.ai_registry.lock_verifier_stake(&verifier, bond).unwrap();
 
         let spec = FixedPointMlpSpec {
@@ -5505,7 +5515,7 @@ mod tests {
             submitted_at_block: 0,
             deadline_block: 100,
             perception: Some(crate::ai_inference::perception::PerceptionRequest {
-                asset_id: crate::ai_inference::perception::DataAssetId([0xAA; 32]),
+                asset_id: crate::pollen::AssetId([0xAA; 32]),
                 content_id: crate::storage::content_id::ContentId([0xBB; 32]),
                 kind: crate::ai_inference::perception::PerceptionKind::Text,
                 declared_units: 4,
@@ -5530,16 +5540,17 @@ mod tests {
         .expect("context-bound STARK proof");
         assert_eq!(host_out, vec![23]);
 
+        let output_bytes = crate::ai::execution::encode_output_limbs(&host_out);
         let mut result = AiInferenceResult {
             request_id: req_id,
             verifier,
             output_commitment: proof.output_commitment,
-            output_ref: BoundedBytes::try_new(vec![23]).unwrap(),
-            result_nonce: 0,
+            output_ref: BoundedBytes::try_new(output_bytes).unwrap(),
+            result_nonce: 1,
             signature: Vec::new(),
             submitted_at_block: 0,
         };
-        let digest = result.signing_digest();
+        let digest = result.calculate_signing_hash();
         result.signature = verifier_kp.sign(&digest).to_vec();
         let outcome = state.ai_registry.submit_result(result, 0).unwrap();
         assert!(outcome.is_none(), "proof-required model waits for STARK attach");
@@ -5581,7 +5592,7 @@ mod tests {
         valid_tx.sign(&verifier_kp);
         Executor::apply_transaction_checked(&mut state, &valid_tx)
             .expect("honest STARK execution proof attaches and finalizes request");
-        assert!(state.ai_registry.has_fully_verified_execution_proof(&req_id, &verifier));
+        assert!(state.ai_registry.has_verified_execution_proof(&req_id, &verifier));
         assert!(state.ai_registry.outcomes.contains_key(&req_id));
     }
 }

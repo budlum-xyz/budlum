@@ -1941,6 +1941,7 @@ mod tests {
         assert!(pm.is_connected(&admitted[0]) || pm.can_admit_subnet(Some(subnet)));
         assert!(!pm.note_connected(admitted[0], Some(subnet)));
         assert_eq!(pm.subnet_connection_count(subnet), 4);
+    }
 
     #[test]
     fn simultaneous_dial_to_same_peer_is_recognized_as_already_connected() {
@@ -1954,7 +1955,6 @@ mod tests {
         assert!(manager.is_connected(&peer));
         assert!(manager.note_disconnected(&peer));
         assert!(!manager.is_connected(&peer));
-    }
     }
 
 }

@@ -1,16 +1,16 @@
-//! In-process adapters for the seven T-Expansion execution environments
+//! In-process adapters for the eight T-Expansion execution environments
 //! (`MOVE_SUI = 0x05`, `CAIRO = 0x06`, `NEAR_WASM = 0x07`, `POLKAVM = 0x08`,
-//! `TVM = 0x09`, `UTXO = 0x0A`, `PLUTUS = 0x0B`), wired directly into
-//! [`crate::execution::coordinator::ExecutionCoordinator::new`] so testnet
-//! blocks execute all twelve environments seamlessly alongside out-of-process
-//! `budlum-ee-*` sockets.
+//! `TVM = 0x09`, `UTXO = 0x0A`, `PLUTUS = 0x0B`, `RV32 = 0x0C`), wired
+//! directly into [`crate::execution::coordinator::ExecutionCoordinator::new`]
+//! so testnet blocks execute all thirteen environments seamlessly alongside
+//! out-of-process `budlum-ee-*` sockets.
 //!
 //! Convenience: exposed for UEL coordinator supervision and runtime wiring.
 
 use crate::core::chain_config::Network;
 use crate::execution::coordinator::state::{
-    NS_CAIRO_STATE, NS_NEAR_STATE, NS_PLUTUS_STATE, NS_POLKAVM_STATE, NS_SUI_OBJECT, NS_TVM_STATE,
-    NS_UTXO_STATE,
+    NS_CAIRO_STATE, NS_NEAR_STATE, NS_PLUTUS_STATE, NS_POLKAVM_STATE, NS_RV32_STATE, NS_SUI_OBJECT,
+    NS_TVM_STATE, NS_UTXO_STATE,
 };
 use budlum_uel_abi::{
     BlockContext, CodeInfo, EeCall, EeCallKind, EeFault, EeId, EeOutcome, EeQuery, EeRefusal,
@@ -313,5 +313,14 @@ define_expansion_ee!(
     65_536,
     "Plutus UPLC",
     "plutus-uplc-v1",
+    false
+);
+define_expansion_ee!(
+    Rv32Ee,
+    EeId::RV32,
+    NS_RV32_STATE,
+    524_288,
+    "RISC-V 32",
+    "rv32-elf-v1",
     false
 );
