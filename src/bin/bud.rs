@@ -673,6 +673,31 @@ enum BnsAction {
         #[arg(long, required = true)]
         name: String,
     },
+    /// Register or update a subdomain `<sub_label>.<parent>` under a live `.bud` name.
+    SetSubdomain {
+        #[command(flatten)]
+        signer: V5Signer,
+        #[arg(long, required = true)]
+        parent: String,
+        #[arg(long, required = true)]
+        sub: String,
+        #[arg(long, required = true)]
+        target: String,
+    },
+    /// Remove an existing subdomain `<sub_label>` under a live `.bud` parent name.
+    RemoveSubdomain {
+        #[command(flatten)]
+        signer: V5Signer,
+        #[arg(long, required = true)]
+        parent: String,
+        #[arg(long, required = true)]
+        sub: String,
+    },
+    /// List all subdomains under a live `.bud` parent name.
+    ListSubdomains {
+        #[arg(long, required = true)]
+        parent: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -2660,6 +2685,72 @@ fn run_bns_get_records(rpc_url: &str, name: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn run_bns_set_subdomain(
+    rpc_url: &str,
+    signer: &V5Signer,
+    parent: &str,
+    sub: &str,
+    target: &str,
+) -> Result<(), String> {
+    let key = open_wallet(signer)?;
+    let target_addr = Address::from_hex(target.strip_prefix("0x").unwrap_or(target))?;
+    if target_addr == Address::zero() {
+        return Err("subdomain target cannot be the zero address".into());
+    }
+    let _prepared = rpc_call(
+        rpc_url,
+        "bud_bnsPrepareRegisterSubdomain",
+        serde_json::json!([parent, sub, target_addr.to_hex()]),
+    )?;
+    let data = bincode::serialize(&(parent.to_string(), sub.to_string(), target_addr))
+        .map_err(|e| e.to_string())?;
+    send_bns(
+        rpc_url,
+        signer,
+        &key,
+        TransactionType::BnsRegisterSubdomain,
+        0,
+        data,
+    )
+}
+
+fn run_bns_remove_subdomain(
+    rpc_url: &str,
+    signer: &V5Signer,
+    parent: &str,
+    sub: &str,
+) -> Result<(), String> {
+    let key = open_wallet(signer)?;
+    let _prepared = rpc_call(
+        rpc_url,
+        "bud_bnsPrepareRemoveSubdomain",
+        serde_json::json!([parent, sub, key.address().to_hex()]),
+    )?;
+    let data =
+        bincode::serialize(&(parent.to_string(), sub.to_string())).map_err(|e| e.to_string())?;
+    send_bns(
+        rpc_url,
+        signer,
+        &key,
+        TransactionType::BnsRemoveSubdomain,
+        0,
+        data,
+    )
+}
+
+fn run_bns_list_subdomains(rpc_url: &str, parent: &str) -> Result<(), String> {
+    let ans = rpc_call(
+        rpc_url,
+        "bud_bnsListSubdomains",
+        serde_json::json!([parent]),
+    )?;
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&ans).map_err(|e| e.to_string())?
+    );
+    Ok(())
+}
+
 /// The multiaddr peers dial: `/ip4/...` for an address, `/dns4/...` for a
 /// name.
 fn bootnode_multiaddr(host: &str, port: u16, peer_id: &str) -> String {
@@ -2972,6 +3063,18 @@ fn main() {
                 delete,
             } => run_bns_set_record(&cli.rpc_url, signer, name, key, value.as_deref(), *delete),
             BnsAction::GetRecords { name } => run_bns_get_records(&cli.rpc_url, name),
+            BnsAction::SetSubdomain {
+                signer,
+                parent,
+                sub,
+                target,
+            } => run_bns_set_subdomain(&cli.rpc_url, signer, parent, sub, target),
+            BnsAction::RemoveSubdomain {
+                signer,
+                parent,
+                sub,
+            } => run_bns_remove_subdomain(&cli.rpc_url, signer, parent, sub),
+            BnsAction::ListSubdomains { parent } => run_bns_list_subdomains(&cli.rpc_url, parent),
         },
         Command::Node { action } => match action {
             NodeAction::Identity {

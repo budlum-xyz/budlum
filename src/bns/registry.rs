@@ -412,11 +412,41 @@ impl BnsRegistry {
         Ok(())
     }
 
-    /// Performs the requested operation.
+    /// Whether `label` is a valid subdomain label (`1..=32` lowercase ASCII
+    /// `[a-z0-9-]`, no leading or trailing `-`).
+    #[must_use]
+    pub fn is_valid_sub_label(label: &str) -> bool {
+        let len = label.len();
+        (1..=32).contains(&len)
+            && !label.starts_with('-')
+            && !label.ends_with('-')
+            && label
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+    }
+
+    /// Split a two-level `.bud` FQDN `<sub_label>.<label>.bud` into
+    /// `(sub_label, "<label>.bud")`. Rejects 3+ label hierarchies.
+    #[must_use]
+    pub fn split_subdomain_fqdn(fqdn: &str) -> Option<(&str, String)> {
+        let stem = fqdn.strip_suffix(Self::SUFFIX)?;
+        let (sub_label, parent_label) = stem.split_once('.')?;
+        if parent_label.contains('.') {
+            return None;
+        }
+        if !Self::is_valid_sub_label(sub_label) || !Self::is_valid_label(parent_label) {
+            return None;
+        }
+        Some((sub_label, format!("{parent_label}{}", Self::SUFFIX)))
+    }
+
+    /// Register or update a subdomain `<sub_label>.<parent_name>` owned by `caller`.
     ///
     /// # Errors
     ///
-    /// Returns an error if the operation fails.
+    /// Returns [`BnsError`] if `sub_label` or `parent_name` is invalid, `owner`
+    /// is zero, `caller` is not the parent owner, the parent is expired, or the
+    /// subdomain count cap (`MAX_SUBDOMAINS_PER_NAME`) would be exceeded.
     pub fn register_subdomain(
         &mut self,
         parent_name: &str,
@@ -425,7 +455,7 @@ impl BnsRegistry {
         caller: &Address,
         current_epoch: u64,
     ) -> Result<(), BnsError> {
-        if !Self::is_valid_label(&sub_label) {
+        if owner == Address::zero() || !Self::is_valid_sub_label(&sub_label) {
             return Err(BnsError::InvalidName);
         }
         let parent = self
@@ -438,12 +468,62 @@ impl BnsRegistry {
         if parent.expires_at <= current_epoch {
             return Err(BnsError::Expired);
         }
-        // Cap subdomains per name - fail-closed.
-        if parent.subdomains.len() >= Self::MAX_SUBDOMAINS_PER_NAME {
+        if !parent.subdomains.contains_key(&sub_label)
+            && parent.subdomains.len() >= Self::MAX_SUBDOMAINS_PER_NAME
+        {
             return Err(BnsError::InvalidName);
         }
         parent.subdomains.insert(sub_label, owner);
         Ok(())
+    }
+
+    /// Remove an existing subdomain `<sub_label>` from a live `parent_name`
+    /// owned by `caller`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BnsError`] if `sub_label` or `parent_name` is invalid, `caller`
+    /// is not the parent owner, the parent is expired, or `sub_label` does not exist.
+    pub fn remove_subdomain(
+        &mut self,
+        parent_name: &str,
+        sub_label: &str,
+        caller: &Address,
+        current_epoch: u64,
+    ) -> Result<(), BnsError> {
+        if !Self::is_valid_sub_label(sub_label) {
+            return Err(BnsError::InvalidName);
+        }
+        {
+            let parent = self.names.get(parent_name).ok_or(BnsError::InvalidName)?;
+            if &parent.owner != caller {
+                return Err(BnsError::NotOwner);
+            }
+            if parent.expires_at <= current_epoch {
+                return Err(BnsError::Expired);
+            }
+            if !parent.subdomains.contains_key(sub_label) {
+                return Err(BnsError::InvalidName);
+            }
+        }
+        if let Some(parent) = self.names.get_mut(parent_name) {
+            parent.subdomains.remove(sub_label);
+        }
+        Ok(())
+    }
+
+    /// List all subdomains of a live `parent_name` (`None` if unknown or expired).
+    #[must_use]
+    pub fn list_subdomains(
+        &self,
+        parent_name: &str,
+        current_epoch: u64,
+    ) -> Option<BTreeMap<String, Address>> {
+        let parent = self.names.get(parent_name)?;
+        if parent.expires_at <= current_epoch {
+            return None;
+        }
+        Some(parent.subdomains.clone())
     }
 
     pub fn resolve_subdomain(
@@ -611,16 +691,19 @@ impl BnsRegistry {
         })
     }
 
-    /// Resolve a live `.bud` name to its target address (`record.address` when
-    /// set, otherwise `None` if explicitly cleared).
+    /// Resolve a live `<label>.bud` name (to `record.address`) or a live
+    /// two-level `<sub_label>.<label>.bud` subdomain (failing closed if the
+    /// parent `.bud` name is unknown or expired).
     pub fn resolve(&self, name: &str, current_epoch: u64) -> Option<Address> {
-        self.names.get(name).and_then(|record| {
-            if record.expires_at > current_epoch {
+        if let Some(record) = self.names.get(name) {
+            return if record.expires_at > current_epoch {
                 record.address
             } else {
                 None
-            }
-        })
+            };
+        }
+        let (sub_label, parent_name) = Self::split_subdomain_fqdn(name)?;
+        self.resolve_subdomain(&parent_name, sub_label, current_epoch)
     }
 
     /// Whether `key` is a valid BNS text/profile/multi-chain record key
@@ -736,6 +819,11 @@ impl BnsRegistry {
                     record.storage_domain_id
                 },
                 content_id: if expired { None } else { record.content_id },
+                subdomains: if expired {
+                    BTreeMap::new()
+                } else {
+                    record.subdomains.clone()
+                },
                 records: if expired {
                     BTreeMap::new()
                 } else {
