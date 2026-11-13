@@ -83,7 +83,8 @@ pub use content_id::{ContentId, ContentKey};
 pub use content_ref::{ContentRef, ContentRefError};
 pub use custody::{prove_symbol_root_path, verify_symbol_root_path};
 pub use delete::{
-    check_same_owner_dependency, requires_rehydration_before_transfer, GrantShredAuth, ShredOutcome,
+    check_same_owner_dependency, requires_rehydration_before_transfer, DeletionSet, GrantShredAuth,
+    ShredOutcome,
 };
 pub use fees::{
     custody_endowment_account, distribute_object_endowment_epoch, renewal_fee_epochs,
@@ -145,7 +146,9 @@ pub use replace::{
 };
 pub use rpc::{Bud3RpcService, BUD3_RPC_METHODS};
 pub use seal::{
-    open_sealed_object, padme_padded_len, seal_object, SealBud3Error, MIN_SEALED_BUCKET_BYTES,
+    open_sealed_object, open_sealed_object_with_profile, padme_padded_len, seal_object,
+    seal_object_with_profile, sealed_key_commitment, sealed_plaintext_root, CipherProfile,
+    ConsentProof, ObjectVisibility, SealBud3Error, SealedObjectManifest, MIN_SEALED_BUCKET_BYTES,
     SEAL_AUTH_TAG_LEN, SEAL_SALT_LEN,
 };
 pub use segment::{object_commitment, segment_digest, ObjectCommitment, Segmentation};

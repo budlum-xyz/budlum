@@ -1557,3 +1557,217 @@ fn bud3_e2e_replace_object_preserves_nft_binding_and_slashes_mismatch() {
         1
     );
 }
+
+#[test]
+fn testnet_sealed_field_native_remote_view_and_blind_compute_work_end_to_end() {
+    use crate::ai::execution::{
+        blind_compute_scope_tag, guest_program_for_model, input_commitment, matmul_program_hash,
+        prove_mlp_inference, verify_compute_without_seeing, weights_digest,
+        ComputeWithoutSeeingBundle, ComputeWithoutSeeingPermit, FixedPointMlpSpec,
+    };
+    use crate::ai::types::{AiModelId, AiModelSpec, AiRequestId, BoundedBytes};
+    use crate::light_client::{RemoteMerkleStep, RemoteStateView, VerifiedCheckpoint};
+    use crate::privacy::{EscrowCommittee, EscrowedDisclosure, THRESHOLD_ESCROW_N};
+    use crate::settlement::GlobalBlockHeader;
+    use crate::storage::bud3::{
+        open_sealed_object_with_profile, seal_object_with_profile, sealed_key_commitment,
+        sealed_plaintext_root, Bud3RpcService, CipherProfile, ConsentProof, ContentKey,
+        DeletionSet, Meter, ObjectVisibility, SEAL_SALT_LEN,
+    };
+
+    // 1. Sealed object manifest + FieldNative cipher round-trip + archival candidates wiring.
+    let key = ContentKey([0x61u8; 32]);
+    let owner_secret = [0x62u8; 32];
+    let raw = b"end-to-end testnet sealed record for blind AI and archival tracking";
+    let (obj, manifest) = seal_object_with_profile(
+        raw,
+        &key,
+        &owner_secret,
+        ObjectVisibility::Consented,
+        CipherProfile::FieldNative,
+        [0x63u8; SEAL_SALT_LEN],
+    )
+    .expect("field-native seal succeeds");
+    assert_eq!(manifest.key_commitment, sealed_key_commitment(&key));
+    assert_eq!(manifest.plaintext_root, sealed_plaintext_root(raw));
+    let mut meter = Meter::for_object(1 << 20);
+    assert_eq!(
+        open_sealed_object_with_profile(&obj, &manifest, &key, &mut meter).unwrap(),
+        raw
+    );
+    let rpc = Bud3RpcService::default();
+    assert!(rpc.archival_candidates(100).is_empty());
+
+    // 2. EscrowedDisclosure (ThresholdEscrow) open on testnet committee.
+    let testnet_chain = crate::core::chain_config::Network::Testnet
+        .chain_id()
+        .value();
+    let members: Vec<_> = (0..THRESHOLD_ESCROW_N)
+        .map(|i| {
+            let mut seed = [0u8; 32];
+            seed[0] = (i as u8) + 1;
+            seed[31] = 0x5A;
+            EscrowCommittee::member_from_seed(i as u8, &seed).expect("escrow member")
+        })
+        .collect();
+    let committee = EscrowCommittee {
+        escrow_id: [0x19u8; 32],
+        chain_id: testnet_chain,
+        epoch: 1,
+        nonce: 0,
+        members,
+    };
+    let escrow = EscrowedDisclosure::open(committee, manifest.object_commitment)
+        .expect("escrow committee opens cleanly");
+    assert_eq!(escrow.amount_commitment, manifest.object_commitment);
+
+    // 3. RemoteStateView against verified GlobalBlockHeader on chain 45261.
+    let state_key = b"bud3:manifest".to_vec();
+    let state_val = manifest.object_commitment.to_vec();
+    let path = vec![RemoteMerkleStep {
+        sibling: [0x64u8; 32],
+        sibling_is_right: true,
+    }];
+    let remote_root = RemoteStateView::compute_merkle_root(&state_key, &state_val, &path);
+    let mut acct_state = crate::core::account::AccountState::new();
+    let header = GlobalBlockHeader {
+        version: 2,
+        global_height: 0,
+        previous_global_hash: [0u8; 32],
+        chain_id: testnet_chain,
+        timestamp_ms: 1,
+        domain_registry_root: [1u8; 32],
+        domain_commitment_root: RemoteStateView::expected_domain_commitment(7, &remote_root),
+        message_root: [3u8; 32],
+        bridge_state_root: [4u8; 32],
+        replay_nonce_root: [5u8; 32],
+        proposer: None,
+        settlement_finality_root: [6u8; 32],
+        storage_root: None,
+        ai_root: None,
+        identity_root: None,
+        checkpoint_height: 10,
+        external_intake_root: None,
+        graft_root: None,
+        delegation_root: None,
+        object_layer_root: None,
+        proof_root: Some([7u8; 32]),
+        proven_height: 10,
+    };
+    acct_state.global_header_summary = header.calculate_hash_bytes();
+    let checkpoint = VerifiedCheckpoint {
+        height: 10,
+        block_hash: "aa".repeat(32),
+        set_hash: "bb".repeat(32),
+        epoch: 1,
+        state_root: acct_state.calculate_state_root(),
+    };
+    let remote_view = RemoteStateView {
+        remote_domain_id: 7,
+        remote_state_root: remote_root,
+        header,
+        state_key,
+        state_value: state_val,
+        inclusion_path: path,
+        predicate_proof: None,
+    };
+    remote_view
+        .verify_for_chain(&checkpoint, &acct_state.state_root_body(), testnet_chain)
+        .expect("remote state view verifies cleanly");
+
+    // 4. ComputeWithoutSeeing STARK + ConsentProof + DeletionSet revocation.
+    let mlp = FixedPointMlpSpec {
+        dims: vec![2, 2, 1],
+        weights: vec![1, -1, -1, 1, 1, 1],
+        biases: vec![0, 0, 0],
+    };
+    let inputs = vec![5i32, 10i32];
+    let requester = Address::from([0x65u8; 32]);
+    let model_id = AiModelId::of(&requester, &[0x66u8; 32], 1);
+    let (proof, _) = prove_mlp_inference(&mlp, model_id, &inputs, 5_000_000).unwrap();
+    let model = AiModelSpec {
+        model_id,
+        model_hash: [0x66u8; 32],
+        owner: requester,
+        min_verifier_count: 1,
+        agreement_threshold: 1,
+        max_input_ref_bytes: 1024,
+        max_output_ref_bytes: 1024,
+        request_deadline_blocks: 10,
+        result_deadline_blocks: 10,
+        version: 1,
+        active: true,
+        require_execution_proof: true,
+        execution_program_hash: Some(matmul_program_hash(&mlp).unwrap()),
+        execution_class: 1,
+        execution_weights_digest: Some(weights_digest(&mlp)),
+        execution_dims: Some(mlp.dims.clone()),
+        modalities: crate::ai_inference::perception::ModalitySet::text_only(),
+    };
+    let req = AiInferenceRequest {
+        request_id: AiRequestId([0x67u8; 32]),
+        requester,
+        model_id,
+        input_commitment: input_commitment(&inputs),
+        input_ref: BoundedBytes::empty(),
+        max_fee: 0,
+        callback: None,
+        submitted_at_block: 0,
+        deadline_block: 10,
+        effort: crate::ai_inference::effort::EffortTier::default(),
+        perception: None,
+    };
+    let res = AiInferenceResult {
+        request_id: req.request_id,
+        verifier: requester,
+        output_commitment: proof.output_commitment,
+        output_ref: BoundedBytes::empty(),
+        result_nonce: 1,
+        signature: vec![],
+        submitted_at_block: 1,
+    };
+    let grant_tag = [0x68u8; 32];
+    let scope = blind_compute_scope_tag(&model_id, &req.input_commitment);
+    let consent = ConsentProof::issue(
+        &manifest,
+        grant_tag,
+        *requester.as_bytes(),
+        scope,
+        testnet_chain,
+        500,
+    )
+    .unwrap();
+    let bundle = ComputeWithoutSeeingBundle {
+        manifest: manifest.clone(),
+        permit: ComputeWithoutSeeingPermit {
+            sealed_object: manifest.object_commitment,
+            plaintext_root: manifest.plaintext_root,
+            key_commitment: manifest.key_commitment,
+            model_id,
+            consent_proof: consent,
+        },
+        request: req,
+        result: res,
+        proof: proof.clone(),
+    };
+    let program = guest_program_for_model(&model).unwrap();
+    let pi = proof
+        .public_inputs
+        .as_ref()
+        .unwrap()
+        .to_execution_inputs();
+    let mut deletion_set = DeletionSet::default();
+    let rep =
+        verify_compute_without_seeing(&bundle, &deletion_set, &model, Some((&program, &pi)), 100)
+            .expect("blind compute verifies");
+    assert!(rep.is_fully_valid());
+    deletion_set.tombstone_object(manifest.object_commitment);
+    assert!(verify_compute_without_seeing(
+        &bundle,
+        &deletion_set,
+        &model,
+        Some((&program, &pi)),
+        100,
+    )
+    .is_err());
+}
