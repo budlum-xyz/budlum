@@ -796,7 +796,7 @@ impl Executor {
                 // public inputs repeat, instead of the zeros a fresh VM holds.
                 let ctx = crate::execution::zkvm::TxContext::of(tx, state.current_block_height);
                 let receipt =
-                    ZkVmExecutor::execute_bytecode(&tx.data, DEFAULT_CONTRACT_GAS_LIMIT, ctx)
+                    ZkVmExecutor::execute_for_block(&tx.data, DEFAULT_CONTRACT_GAS_LIMIT, ctx)
                         .map_err(|e| BudlumError::validation("contract_execution_failed", e))?;
 
                 if !receipt.events.is_empty()

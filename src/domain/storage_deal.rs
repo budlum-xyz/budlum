@@ -1012,6 +1012,19 @@ pub enum StorageError {
         deal_id: u64,
         open_challenges: u32,
     },
+    /// A retrieval challenge named an answer deadline past the deal's own term.
+    ///
+    /// `expire_deal` holds a deal with an unresolved challenge `Active`, because
+    /// the missed-answer slash settles only an active row. The deadline the
+    /// opener chose therefore decided how long the deal outlived its term: the
+    /// bond was not returned, no expiry reallocation opened, and the departed
+    /// shard still counted live so repair skipped it. A question about these
+    /// bytes has to be answerable inside the term it is asked about.
+    ChallengeDeadlinePastDealTerm {
+        deal_id: u64,
+        deadline_epoch: u64,
+        deal_end_epoch: u64,
+    },
     /// Caller referenced a challenge that does not exist.
     UnknownChallenge(u64),
     /// Caller referenced a deal that is not `Active` (e.g. tried to
@@ -1215,6 +1228,15 @@ impl std::fmt::Display for StorageError {
                  {range_len}-byte challenge range"
             ),
             Self::UnknownDeal(id) => write!(f, "unknown deal {id}"),
+            Self::ChallengeDeadlinePastDealTerm {
+                deal_id,
+                deadline_epoch,
+                deal_end_epoch,
+            } => write!(
+                f,
+                "challenge deadline epoch {deadline_epoch} on deal {deal_id} runs past its term \
+                 {deal_end_epoch}: the deal would be held Active for the whole window"
+            ),
             Self::UnknownChallenge(id) => write!(f, "unknown challenge {id}"),
             Self::DealNotActive(id) => write!(f, "deal {id} is not Active"),
             Self::OpenChallengeBlocksExpiry {
@@ -2548,14 +2570,15 @@ impl StorageRegistry {
             return false;
         }
         // A scoped commit on its own is not custody of the body: the commit
-        // door accepts one for any content id, so only an owner that also
-        // holds a manifest claim or a funded deal has stored data the burn
-        // could destroy.
+        // door accepts one for any content id. Neither is a manifest claim -
+        // `manifest_id` is content-addressed and excludes `owner`, so any
+        // principal can copy a manifest and record a competing claim for the
+        // price of one transaction, and pairing that free claim with a scoped
+        // commit vetoed the real owner's burn prune permanently. Only a funded,
+        // operator-consented custody deal proves the stranger actually holds
+        // bytes this burn could destroy.
         if self.scoped_confidential_commits.keys().any(|(owner, cid)| {
-            cid == content_id
-                && owner != burner
-                && (self.has_manifest_claim(content_id, owner)
-                    || self.has_custody_deal(content_id, owner))
+            cid == content_id && owner != burner && self.has_custody_deal(content_id, owner)
         }) {
             return false;
         }
@@ -3611,6 +3634,18 @@ impl StorageRegistry {
             .ok_or(StorageError::UnknownDeal(deal_id))?;
         if !deal.is_active() {
             return Err(StorageError::DealNotActive(deal_id));
+        }
+        // Enforced here, at the registry door, so the transaction path and the
+        // automatic block-maintenance cadence inherit it instead of each having
+        // to remember: `expire_deal` holds a deal with an unresolved challenge
+        // `Active`, so a deadline past the term is what defers the bond return,
+        // the expiry reallocation and the shard repair ticket.
+        if deadline_epoch > deal.deal_end_epoch {
+            return Err(StorageError::ChallengeDeadlinePastDealTerm {
+                deal_id,
+                deadline_epoch,
+                deal_end_epoch: deal.deal_end_epoch,
+            });
         }
         let operator = deal.operator;
         let manifest_id = deal.manifest_id;
@@ -4874,8 +4909,12 @@ impl StorageRegistry {
     /// Drop settled retrieval challenges (and their results) once their
     /// answer deadline is `MAX_CHALLENGE_WINDOW_EPOCHS` or more epochs old.
     ///
-    /// Unresolved challenges (`!self.results.contains_key(&id)`) are never
-    /// dropped here. Both `challenges` and `results` are included in the
+    /// An unresolved row is kept while its deal is still `Active`, because the
+    /// missed-answer slash needs it. Once the deal has left `Active` the row can
+    /// never resolve - both the answer and the missed paths refuse
+    /// `DealNotActive` - and it also stops counting against the per-deal and
+    /// per-operator caps, so keeping it would let a funded account grow the
+    /// registry root without bound. Both `challenges` and `results` are in the
     /// deterministic registry root and rescanned each block, so bounded
     /// retention keeps per-block cost and state size bounded.
     pub fn prune_settled_challenges(&mut self, now_epoch: u64) -> usize {
@@ -4886,7 +4925,14 @@ impl StorageRegistry {
             .challenges
             .iter()
             .filter_map(|(&id, challenge)| {
-                (self.results.contains_key(&id) && challenge.deadline_epoch <= cutoff).then_some(id)
+                if challenge.deadline_epoch > cutoff {
+                    return None;
+                }
+                let resolvable = self
+                    .deals
+                    .get(&challenge.deal_id)
+                    .is_some_and(|deal| deal.is_active());
+                (self.results.contains_key(&id) || !resolvable).then_some(id)
             })
             .collect();
         let mut dropped = 0;
@@ -6971,17 +7017,17 @@ mod tests {
     #[test]
     fn a_deal_does_not_expire_under_an_open_challenge() {
         // The missed-challenge slash settles only an `Active` deal (open_one
-        // opens 100..200). A challenge may outlive the term - the deadline is
-        // its own - but the term may not pass while the question is open: the
-        // row would leave `Active`, `finalize_missed_challenge` would refuse
-        // with DealNotActive, and the opener's bond would be stranded with no
-        // slash. Held until the challenge closes.
+        // opens 100..200). A challenge closes on the block after its deadline,
+        // so a deadline on the term itself still leaves one epoch in which the
+        // term passes while the question is open: the row would leave `Active`,
+        // `finalize_missed_challenge` would refuse with DealNotActive, and the
+        // opener's bond would be stranded with no slash. Held until it closes.
         let m = good_manifest();
         let mut reg = StorageRegistry::new();
         let (deal_id, _) = open_one(&mut reg, &m);
         let challenge = reg
-            .open_challenge(deal_id, 0, 4, 110, 201, opener(), 50)
-            .expect("a challenge may run past the term");
+            .open_challenge(deal_id, 0, 4, 110, 200, opener(), 50)
+            .expect("a challenge may close on the deal's last epoch");
         assert!(matches!(
             reg.expire_deal(deal_id, 201),
             Err(StorageError::OpenChallengeBlocksExpiry {
@@ -6994,6 +7040,71 @@ mod tests {
         reg.finalize_missed_challenge(challenge, 202)
             .expect("silence is slashed");
         assert_eq!(reg.expire_deal(deal_id, 202).expect("nothing held"), 0);
+    }
+
+    /// The opener does not get to choose how long a deal outlives its term.
+    ///
+    /// `expire_deal` holds a deal with an unresolved challenge `Active`, so a
+    /// caller-chosen deadline was a caller-chosen delay of the bond return, the
+    /// expiry reallocation and the shard repair ticket - bought with the minimum
+    /// opener bond. Enforced at the registry door, so the automatic cadence
+    /// inherits it as well as the transaction path.
+    #[test]
+    fn a_challenge_deadline_past_the_deal_term_is_refused() {
+        let m = good_manifest();
+        let mut reg = StorageRegistry::new();
+        let (deal_id, _) = open_one(&mut reg, &m);
+        let root = reg.root();
+        assert!(matches!(
+            reg.open_challenge(deal_id, 0, 4, 110, 201, opener(), 50),
+            Err(StorageError::ChallengeDeadlinePastDealTerm {
+                deal_end_epoch: 200,
+                ..
+            })
+        ));
+        // Refused before anything is written: no row, no root change.
+        assert!(reg.all_challenges().is_empty());
+        assert_eq!(reg.root(), root);
+        // The last epoch of the term is still answerable inside the term.
+        reg.open_challenge(deal_id, 0, 4, 110, 200, opener(), 50)
+            .expect("a deadline on the term itself must be accepted");
+    }
+
+    /// An unresolved challenge whose deal can never be active again is not
+    /// evidence of anything: both resolution paths refuse `DealNotActive`, and
+    /// the row stops counting against the per-deal and per-operator caps, so
+    /// without the sweep it stays in the registry root for the life of the chain.
+    #[test]
+    fn an_unresolvable_challenge_leaves_the_log_with_the_settled_ones() {
+        let m = good_manifest();
+        let mut reg = StorageRegistry::new();
+        let (deal_id, _) = open_one(&mut reg, &m);
+        let challenge = reg
+            .open_challenge(deal_id, 0, 4, 110, 120, opener(), 50)
+            .expect("the challenge opens");
+        // The deal leaves `Active` without this challenge resolving - a slash
+        // settled on a sibling challenge, or an operator killed in the chaos
+        // paths. From here neither the answer nor the missed path can ever close
+        // the row (both refuse `DealNotActive`), and it no longer counts against
+        // the per-deal or per-operator caps.
+        reg.deals.get_mut(&deal_id).expect("the deal exists").status = DealStatus::Slashed;
+        assert!(matches!(
+            reg.open_challenge(deal_id, 0, 4, 131, 140, opener(), 50),
+            Err(StorageError::DealNotActive(_))
+        ));
+
+        let window = StorageRegistry::MAX_CHALLENGE_WINDOW_EPOCHS;
+        assert_eq!(reg.prune_settled_challenges(120 + window - 1), 0);
+        assert!(
+            reg.get_challenge(challenge).is_some(),
+            "inside the retention window the row is still evidence"
+        );
+        assert_eq!(reg.prune_settled_challenges(120 + window), 1);
+        assert!(
+            reg.get_challenge(challenge).is_none(),
+            "a row that can never resolve must not outlive the retention window"
+        );
+        assert!(reg.get_result(challenge).is_none());
     }
 
     #[test]
@@ -8390,11 +8501,14 @@ mod tests {
         let (deal_id, _) = open_one(&mut reg, &m);
         for i in 0..10 {
             let epoch = 110 + i as u64 * StorageRegistry::MIN_OPERATOR_MANIFEST_CHALLENGE_EPOCHS;
-            reg.open_challenge(deal_id, 0, 4, epoch, epoch + 90, opener(), 50)
+            // Inside the deal's own term (open_one opens 100..200): a deadline
+            // past the term is refused, because it would hold the deal `Active`
+            // past its expiry.
+            reg.open_challenge(deal_id, 0, 4, epoch, epoch + 40, opener(), 50)
                 .unwrap_or_else(|e| panic!("challenge {i} should open: {e:?}"));
         }
         let err = reg
-            .open_challenge(deal_id, 0, 4, 500, 600, opener(), 50)
+            .open_challenge(deal_id, 0, 4, 195, 200, opener(), 50)
             .unwrap_err();
         assert!(
             matches!(err, StorageError::TooManyOpenChallenges { .. }),
@@ -9654,6 +9768,24 @@ mod tests {
         assert!(
             reg.can_prune_on_nft_burn(&cid, &alice),
             "inert third-party scoped commit without claim or custody deal must not block owner prune"
+        );
+
+        // A competing manifest claim costs one transaction: `manifest_id` is
+        // content-addressed and excludes `owner`, so the stranger can copy the
+        // manifest and record its own claim, which the registry keeps rather
+        // than refuses. Paired with the scoped commit above, that used to be
+        // enough to veto the owner's burn prune for good at no capital cost.
+        let mut stranger_manifest = good_manifest();
+        stranger_manifest.owner = stranger;
+        assert_eq!(stranger_manifest.manifest_id, cid);
+        reg.register_manifest(&stranger_manifest);
+        assert!(
+            reg.has_manifest_claim(&cid, &stranger),
+            "the free duplicate claim is recorded"
+        );
+        assert!(
+            reg.can_prune_on_nft_burn(&cid, &alice),
+            "a free duplicate manifest claim plus a scoped commit must not veto the owner's prune"
         );
     }
 }
