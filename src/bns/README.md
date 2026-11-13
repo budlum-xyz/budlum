@@ -171,6 +171,51 @@ ordering, so a non-inclusion proof still relies on the prover having read the
 header. Separating "the header root at this epoch" from "the root the prover
 names" is the wallet-side change tracked in PR #126.
 
+### B14: the network gateway (`budlum.xyz`)
+
+A `.bud` name is reachable as `ad.budlum.xyz` through `src/gateway`, and the
+gateway's answer is derived, never asserted. `budlum.xyz` belongs to Budlum, so
+the wildcard certificate and the wildcard DNS record are both within one
+operator's control.
+
+- **`host`** parses a `Host` header into a registry name and an optional
+  subdomain label. `ayaz.budlum.xyz` is `ayaz.bud`; `shop.ayaz.budlum.xyz` is
+  `ayaz.bud` with subdomain `shop`; more than one subdomain, a look-alike
+  suffix, a bare apex, a bad label or any of `RESERVED_LABELS` returns `None`.
+  Case is folded before the check, so `AYAZ.budlum.xyz` is the same name; the
+  suffix is configuration (`DEFAULT_GATEWAY_SUFFIX` is `budlum.xyz`) and the
+  label table is `BnsRegistry::is_valid_label`, now public for exactly this
+  reason. A reserved label goes to a Budlum service, never to BNS, and an
+  explicit DNS record backs each one.
+- **`manifest`** maps a request path to a `ContentRef` and a mime type. The
+  traversal rule lives here and nowhere else: a `..` or `.` segment, a doubled
+  slash, a backslash or a NUL is refused before any lookup, and a path the
+  manifest does not carry is a 404 rather than a fallback, because a fallback
+  is where one site's bytes answer another site's URL. The mime allow list is
+  enforced when a route is resolved.
+- **`policy`** holds the response headers, the per-key fixed-window rate
+  limiter and the block list. A response never carries `set-cookie`: a cookie
+  set here belongs to the suffix, not to the name, and would follow the reader
+  to every other name. A site may narrow the `Content-Security-Policy` and may
+  never widen it; the comparison is conservative, so an unparseable policy is
+  refused rather than trusted. Content addressed by `ContentId` is immutable
+  for a year; a name resolution is cached for ten seconds, because a record can
+  move. A block list affects this gateway only and never touches a chain
+  record, which is the only statement a host can honestly make.
+- **`resolve`** is the trust boundary. `resolve_verified` asks every configured
+  prover, requires them to agree (a disagreement is a refusal, not a vote),
+  takes the state root of the proof's height from a light client that already
+  verified the header, requires the proof to fold to that root, and reads every
+  served field from the folded branch. A record supplied next to the proof is
+  never read: that would be a second source for the same fact, and the second
+  source is the one an attacker writes. A failed proof is a 502 and no content;
+  `ContentCache` re-checks every byte against the `ContentId` digest on insert
+  and again on read, so a bad write cannot become a bad page.
+
+The gate `gateway-gate` names six of these tests, including the cookie
+prohibition, the CSP floor, the traversal rule and the 502-on-tampered-proof
+rule, so none of them can be deleted without failing the relay.
+
 ## Current behaviour (locked by tests)
 
 Marketplace primary and resale settlement for `<label>.bud` names (3..=32 label
