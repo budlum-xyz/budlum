@@ -161,7 +161,8 @@ impl AccessTierTracker {
     /// Return public objects eligible for archival `SlowY` / Codec `13` conversion
     /// when expansion-tier conversion is enabled (`Section 6.14 item 8`,  item 5`).
     ///
-    /// Returns an empty list on testnet launch (`expansion_enabled == false`) and never
+    /// Active on testnet (`AccessTierTracker::testnet_converts_objects() == true`);
+    /// returns an empty list when `expansion_enabled == false` and never
     /// selects sealed objects (`is_sealed == true`).
     /// Convenience: exposed for expansion-tier archival re-encoding sweeps.
     #[must_use]
@@ -211,5 +212,29 @@ mod tests {
         }
         assert_eq!(tracker.evaluate_tier(obj, base + 600), AccessTier::Hot);
         assert_eq!(tracker.transitions().last().unwrap().to, AccessTier::Hot);
+    }
+
+    #[test]
+    fn expansion_archival_candidates_work_when_testnet_converts_enabled() {
+        let mut tracker = AccessTierTracker::default();
+        let pub_obj = [0x11u8; 32];
+        let sealed_obj = [0x22u8; 32];
+        tracker.track_object(pub_obj, false);
+        tracker.track_object(sealed_obj, true);
+        assert_eq!(tracker.evaluate_tier(pub_obj, 100 * 86_400), AccessTier::Cold);
+        assert_eq!(
+            tracker.evaluate_tier(sealed_obj, 100 * 86_400),
+            AccessTier::Cold
+        );
+
+        let after_dwell = 100 * 86_400 + COLD_DWELL_FOR_ARCHIVE_SECS;
+        assert!(tracker
+            .expansion_archival_candidates(after_dwell, false)
+            .is_empty());
+        let cands = tracker.expansion_archival_candidates(
+            after_dwell,
+            AccessTierTracker::testnet_converts_objects(),
+        );
+        assert_eq!(cands, vec![pub_obj]);
     }
 }

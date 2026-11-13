@@ -145,8 +145,10 @@ fn ownership_predicate_statement(
         oprf_tag,
         &padme_bucket_bytes.to_le_bytes(),
     ]);
-    let mut w = [0u8; 8];
-    w.copy_from_slice(&binding_hash[..8]);
+    let w: [u8; 8] = binding_hash
+        .get(..8)
+        .and_then(|s| s.try_into().ok())
+        .unwrap_or_default();
     let fe = u64::from_le_bytes(w) % GOLDILOCKS_P;
     PredicateStatement {
         kind: PredicateKind::Yk1Ownership,

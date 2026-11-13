@@ -20,10 +20,10 @@
 //! * The optical transfer: the frames are the RFC 6330 symbols of the
 //!   segment object. [`RatiolessPlan`] yields the order they are sent in;
 //!   the sender maps each frame to its symbol through `SegmentEncoder`.
-//! * The gate: live segments are T-Expansion work. `ACTIVATION` holds no
-//!   height, so every step is refused at testnet launch
-//!   (`bud3_live_is_closed_on_testnet`). The activation height is set after
-//!   launch (M7), and bit1 objects are accepted only at and above it.
+//! * The gate: live segments are enabled from genesis on testnet
+//!   (`ACTIVATION` holds `height: Some(0)`). `LiveContext::closed()`
+//!   exercises the pre-activation refusal (`bud3_live_is_closed_on_testnet`),
+//!   while `LiveContext::testnet(h)` admits bit1 objects at all heights `h`.
 //!
 //! WIRING: unwired - the block executor reaches live segments through the
 //! live `StorageTx` variants once the activation height is set, and the final

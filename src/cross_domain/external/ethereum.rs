@@ -302,7 +302,11 @@ pub fn parse_update(payload: &[u8]) -> Result<SyncCommitteeUpdate, AdapterError>
         });
     }
 
-    let finalized_root_gindex = u64_at(payload, layout::FINALIZED_ROOT_GINDEX, "finalized_root_gindex")?;
+    let finalized_root_gindex = u64_at(
+        payload,
+        layout::FINALIZED_ROOT_GINDEX,
+        "finalized_root_gindex",
+    )?;
     let expected_depth = match finalized_root_gindex {
         FINALIZED_ROOT_GINDEX_DENEB => 6usize,
         FINALIZED_ROOT_GINDEX_ELECTRA => 7usize,

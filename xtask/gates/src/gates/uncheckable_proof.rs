@@ -71,7 +71,9 @@ pub fn run(root: &Path) -> Result<String, String> {
     if code.contains("DefaultAdapter::verify") {
         checked += 1;
     } else {
-        problems.push("`DefaultAdapter::verify` is missing from storage challenge verification.".to_string());
+        problems.push(
+            "`DefaultAdapter::verify` is missing from storage challenge verification.".to_string(),
+        );
     }
 
     if code.contains("(Some(_), None) => Err(") {

@@ -984,7 +984,9 @@ fn execute_evm_pointer_to_expansion(
 ) -> Result<(OutcomeStatus, Vec<u8>), String> {
     let home_ee = EeId(ptr.home_ee);
     if home_ee == EeId::MOVE_SUI {
-        return execute_evm_pointer_to_svm_or_move(ptr, caller20, input, is_static, gas_budget, host);
+        return execute_evm_pointer_to_svm_or_move(
+            ptr, caller20, input, is_static, gas_budget, host,
+        );
     }
     let payload = serde_json::to_vec(&serde_json::json!({
         "op": "pointer_call",
@@ -1064,9 +1066,17 @@ fn encode_uol_offer_bytes(offer: &PrecompileUolOffer) -> Vec<u8> {
     out.extend_from_slice(&offer.asset_id);
     out.extend_from_slice(&offer.amount.to_le_bytes());
     out.extend_from_slice(&offer.expiry.to_le_bytes());
-    out.extend_from_slice(&(offer.taker.len() as u32).to_le_bytes());
+    out.extend_from_slice(
+        &u32::try_from(offer.taker.len())
+            .unwrap_or(u32::MAX)
+            .to_le_bytes(),
+    );
     out.extend_from_slice(&offer.taker);
-    out.extend_from_slice(&(offer.payment.len() as u32).to_le_bytes());
+    out.extend_from_slice(
+        &u32::try_from(offer.payment.len())
+            .unwrap_or(u32::MAX)
+            .to_le_bytes(),
+    );
     out.extend_from_slice(&offer.payment);
     out
 }
@@ -1076,43 +1086,64 @@ fn decode_uol_offer_bytes(raw: &[u8]) -> Result<PrecompileUolOffer, String> {
         return Err(String::from("corrupt UOL offer record"));
     }
     let mut maker = [0u8; 20];
-    maker.copy_from_slice(&raw[..20]);
+    let maker_slice = raw
+        .get(..20)
+        .ok_or_else(|| String::from("corrupt UOL offer maker"))?;
+    maker.copy_from_slice(maker_slice);
     let mut class_id = [0u8; 32];
-    class_id.copy_from_slice(&raw[20..52]);
+    let class_slice = raw
+        .get(20..52)
+        .ok_or_else(|| String::from("corrupt UOL offer class_id"))?;
+    class_id.copy_from_slice(class_slice);
     let mut asset_id = [0u8; 32];
-    asset_id.copy_from_slice(&raw[52..84]);
+    let asset_slice = raw
+        .get(52..84)
+        .ok_or_else(|| String::from("corrupt UOL offer asset_id"))?;
+    asset_id.copy_from_slice(asset_slice);
     let amount = u128::from_le_bytes(
-        raw[84..100]
-            .try_into()
-            .map_err(|_| String::from("corrupt UOL offer amount"))?,
+        raw.get(84..100)
+            .and_then(|s| s.try_into().ok())
+            .ok_or_else(|| String::from("corrupt UOL offer amount"))?,
     );
     let expiry = u64::from_le_bytes(
-        raw[100..108]
-            .try_into()
-            .map_err(|_| String::from("corrupt UOL offer expiry"))?,
+        raw.get(100..108)
+            .and_then(|s| s.try_into().ok())
+            .ok_or_else(|| String::from("corrupt UOL offer expiry"))?,
     );
-    let taker_len = u32::from_le_bytes(
-        raw[108..112]
-            .try_into()
-            .map_err(|_| String::from("corrupt UOL offer taker_len"))?,
-    ) as usize;
+    let taker_len_u32 = u32::from_le_bytes(
+        raw.get(108..112)
+            .and_then(|s| s.try_into().ok())
+            .ok_or_else(|| String::from("corrupt UOL offer taker_len"))?,
+    );
+    let taker_len =
+        usize::try_from(taker_len_u32).map_err(|_| String::from("UOL offer taker overflow"))?;
     let taker_end = 112usize
         .checked_add(taker_len)
         .ok_or_else(|| String::from("UOL offer taker overflow"))?;
-    if raw.len() < taker_end + 4 {
-        return Err(String::from("truncated UOL offer taker"));
-    }
-    let taker = raw[112..taker_end].to_vec();
-    let pay_len = u32::from_le_bytes(
-        raw[taker_end..taker_end + 4]
-            .try_into()
-            .map_err(|_| String::from("corrupt UOL offer pay_len"))?,
-    ) as usize;
-    let pay_end = taker_end + 4 + pay_len;
+    let pay_hdr_end = taker_end
+        .checked_add(4)
+        .ok_or_else(|| String::from("UOL offer taker overflow"))?;
+    let taker = raw
+        .get(112..taker_end)
+        .ok_or_else(|| String::from("truncated UOL offer taker"))?
+        .to_vec();
+    let pay_len_u32 = u32::from_le_bytes(
+        raw.get(taker_end..pay_hdr_end)
+            .and_then(|s| s.try_into().ok())
+            .ok_or_else(|| String::from("corrupt UOL offer pay_len"))?,
+    );
+    let pay_len =
+        usize::try_from(pay_len_u32).map_err(|_| String::from("UOL offer payment overflow"))?;
+    let pay_end = pay_hdr_end
+        .checked_add(pay_len)
+        .ok_or_else(|| String::from("UOL offer payment overflow"))?;
     if raw.len() != pay_end {
         return Err(String::from("corrupt UOL offer trailing bytes"));
     }
-    let payment = raw[taker_end + 4..pay_end].to_vec();
+    let payment = raw
+        .get(pay_hdr_end..pay_end)
+        .ok_or_else(|| String::from("truncated UOL offer payment"))?
+        .to_vec();
     Ok(PrecompileUolOffer {
         maker,
         class_id,
@@ -1124,7 +1155,12 @@ fn decode_uol_offer_bytes(raw: &[u8]) -> Result<PrecompileUolOffer, String> {
     })
 }
 
-fn uol_read_balance(host: &dyn HostRead, ns: &Namespace, class_id: &[u8; 32], holder: &[u8]) -> Result<u128, String> {
+fn uol_read_balance(
+    host: &dyn HostRead,
+    ns: &Namespace,
+    class_id: &[u8; 32],
+    holder: &[u8],
+) -> Result<u128, String> {
     let key = uol_bal_key(class_id, holder);
     let Some(bytes) = host.read(ns, &key).map_err(|e| e.to_string())? else {
         return Ok(0);
@@ -1173,10 +1209,17 @@ fn invoke_uol_precompile(
                 .map_err(|e| e.to_string())?
                 .unwrap_or_default();
             let mut out = vec![0u8; 64 + holder.len().div_ceil(32) * 32];
-            out[31] = 32;
-            out[56..64].copy_from_slice(&(holder.len() as u64).to_be_bytes());
+            if let Some(s) = out.get_mut(31) {
+                *s = 32;
+            }
+            if let Some(dst) = out.get_mut(56..64) {
+                let len_be = u64::try_from(holder.len()).unwrap_or(u64::MAX).to_be_bytes();
+                dst.copy_from_slice(&len_be);
+            }
             if !holder.is_empty() {
-                out[64..64 + holder.len()].copy_from_slice(&holder);
+                if let Some(dst) = out.get_mut(64..64 + holder.len()) {
+                    dst.copy_from_slice(&holder);
+                }
             }
             Ok((OutcomeStatus::Success, out))
         }
@@ -1239,7 +1282,11 @@ fn invoke_uol_precompile(
                 address: EVM_UOL_PRECOMPILE.to_vec(),
                 topics: vec![{
                     let mut t = [0u8; 32];
-                    t[..4].copy_from_slice(&uol_selector("transfer(bytes32,bytes32,bytes,uint128)"));
+                    if let Some(dst) = t.get_mut(..4) {
+                        dst.copy_from_slice(&uol_selector(
+                            "transfer(bytes32,bytes32,bytes,uint128)",
+                        ));
+                    }
                     t
                 }],
                 data: asset_id.to_vec(),
@@ -1351,16 +1398,33 @@ fn invoke_uol_precompile(
                     return Ok((OutcomeStatus::Revert, b"UOL native payment failed".to_vec()));
                 }
             } else if offer.payment.len() == 48 {
+                let Some(pay_class_slice) = offer.payment.get(..32) else {
+                    let _ = host.checkpoint_rollback(cp);
+                    return Ok((
+                        OutcomeStatus::Revert,
+                        b"unsupported UOL offer payment encoding".to_vec(),
+                    ));
+                };
+                let Some(pay_amt_slice) = offer.payment.get(32..48) else {
+                    let _ = host.checkpoint_rollback(cp);
+                    return Ok((
+                        OutcomeStatus::Revert,
+                        b"unsupported UOL offer payment encoding".to_vec(),
+                    ));
+                };
                 let mut pay_class = [0u8; 32];
-                pay_class.copy_from_slice(&offer.payment[..32]);
+                pay_class.copy_from_slice(pay_class_slice);
                 let mut pay_arr = [0u8; 16];
-                pay_arr.copy_from_slice(&offer.payment[32..48]);
+                pay_arr.copy_from_slice(pay_amt_slice);
                 let pay_amt = u128::from_le_bytes(pay_arr);
                 if pay_amt > 0 {
                     let payer_bal = uol_read_balance(host, &ns, &pay_class, caller20)?;
                     let Some(rem_pay) = payer_bal.checked_sub(pay_amt) else {
                         let _ = host.checkpoint_rollback(cp);
-                        return Ok((OutcomeStatus::Revert, b"UOL taker payment balance exhausted".to_vec()));
+                        return Ok((
+                            OutcomeStatus::Revert,
+                            b"UOL taker payment balance exhausted".to_vec(),
+                        ));
                     };
                     if let Err(e) = uol_write_balance(host, &ns, &pay_class, caller20, rem_pay) {
                         let _ = host.checkpoint_rollback(cp);
@@ -1432,7 +1496,9 @@ fn invoke_uol_precompile(
                 address: EVM_UOL_PRECOMPILE.to_vec(),
                 topics: vec![{
                     let mut t = [0u8; 32];
-                    t[..4].copy_from_slice(&uol_selector("accept(bytes32)"));
+                    if let Some(dst) = t.get_mut(..4) {
+                        dst.copy_from_slice(&uol_selector("accept(bytes32)"));
+                    }
                     t
                 }],
                 data: offer_id.to_vec(),
@@ -3431,7 +3497,8 @@ mod tests {
 
         let mut accept_cd = Vec::from(uol_selector("accept(bytes32)"));
         accept_cd.extend_from_slice(&offer_out);
-        let (st_static, _) = invoke_uol_precompile(10, &taker, &accept_cd, true, &mut host).unwrap();
+        let (st_static, _) =
+            invoke_uol_precompile(10, &taker, &accept_cd, true, &mut host).unwrap();
         assert_eq!(st_static, OutcomeStatus::Revert);
 
         let (st2, _) = invoke_uol_precompile(10, &taker, &accept_cd, false, &mut host).unwrap();
