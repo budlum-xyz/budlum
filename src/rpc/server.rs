@@ -940,6 +940,11 @@ impl RpcServer {
     fn ai_readiness_json(chain_id: u64, active_bonded_operators: usize) -> serde_json::Value {
         const REQUIRED_OPERATORS: usize = 3;
         let stark_live = crate::ai::FULL_AI_STARK_VERIFICATION_LIVE;
+        let verification_level = if stark_live {
+            "full_plonky3_stark_verified"
+        } else {
+            "structural_envelope_checks_only"
+        };
         serde_json::json!({
             "module": "ai_inference",
             "status": if stark_live { "stark_verification_live" } else { "not_ready" },
@@ -955,7 +960,7 @@ impl RpcServer {
                 "process_level_byzantine_e2e": true,
             },
             "verification": {
-                "live": if stark_live { "full_plonky3_stark_verified" } else { "structural_envelope_checks_only" },
+                "live": verification_level,
                 "target": "full Plonky3 STARK verification bound to request/model/result/sender/nonce",
                 "layer": crate::ai::verification_layer_capabilities(),
             },
@@ -970,7 +975,7 @@ impl RpcServer {
                 },
             },
             "data_layer": "requester-bound Pollen AccessGrant checks live; the grant builder issues to the requester",
-            "verification_level": if stark_live { "full_plonky3_stark_verified" } else { "structural_envelope_checks_only" },
+            "verification_level": verification_level,
             "verification_level_note": "proof-required models enforce full Plonky3 STARK verification bound to model, input, output, chain_id, sender, and nonce",
         })
     }

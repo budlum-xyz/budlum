@@ -19,10 +19,9 @@
 //!
 //! # Testnet
 //!
-//! T-Expansion work: closed on the testnet chain id and opened by an
-//! activation height. [`ACTIVATION`] holds no height, so
-//! every `ObjectLayerTx` is refused (`object_layer_is_closed_on_testnet`).
-//! The settlement root does not change while the registry is empty.
+//! Open from genesis on testnet `45261` and devnet `45262` (`ACTIVATION` has
+//! `min_height: Some(0)`). The settlement root does not change while the
+//! registry is empty.
 //!
 //! # Delivered here (core, four family profiles, settlement door, RPC reads)
 //!

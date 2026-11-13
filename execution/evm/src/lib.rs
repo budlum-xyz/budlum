@@ -1090,9 +1090,9 @@ mod tests {
                 timestamp_ms: 1_762_000_000_000,
             };
             let mut worker = EvmWorker;
-            let outcome = worker
-                .execute(&ctx, &call, &mut host)
-                .expect("EVM must not fault");
+            let Ok(outcome) = worker.execute(&ctx, &call, &mut host) else {
+                panic!("EVM must not fault");
+            };
             assert_eq!(outcome.status, OutcomeStatus::Success);
             assert_eq!(outcome.output.get(31) == Some(&1), child_success);
             assert_eq!(host.0.universal_calls.len(), 1);
@@ -1217,7 +1217,7 @@ mod tests {
         hk.extend_from_slice(&asset_id);
         let _ = host.write(&ns_assets, &hk, Some(&caller_raw));
 
-        // Deploy a contract that calls 0x...B002 transfer() and then REVERTs.
+        // Deploy a contract that calls 0x...B002 transfer() and then reverts.
         let mut rt = Asm::default();
         rt.op(opcode::CALLDATASIZE)
             .push1(0x00)

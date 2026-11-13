@@ -255,7 +255,8 @@ pub fn apply_rule(
         ClassRule::Native => return Err(RuleRefusal::ClosedRule),
     };
     if is_set(class_slice, &pause_field)
-        || (matches!(rule, ClassRule::Program) && is_set(class_slice, &Some(String::from("frozen"))))
+        || (matches!(rule, ClassRule::Program)
+            && is_set(class_slice, &Some(String::from("frozen"))))
     {
         return Err(RuleRefusal::Paused);
     }

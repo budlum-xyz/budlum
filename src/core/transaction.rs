@@ -4620,11 +4620,11 @@ fn encode_storage_v3_tx(tx: &crate::storage::bud3::tx::StorageTxV3, out: &mut Ve
             match witness {
                 crate::storage::bud3::repair::RepairWitness::ProvenSymbols(proofs) => {
                     put_u8(out, 0);
-                    put_u64(out, proofs.len() as u64);
+                    put_u64(out, u64::try_from(proofs.len()).unwrap_or(u64::MAX));
                     for p in proofs {
                         put_u32(out, p.root_index);
                         put_u64(out, p.position);
-                        put_u64(out, p.root_path.len() as u64);
+                        put_u64(out, u64::try_from(p.root_path.len()).unwrap_or(u64::MAX));
                         for step in &p.root_path {
                             match step {
                                 None => put_u8(out, 0),
@@ -4641,7 +4641,7 @@ fn encode_storage_v3_tx(tx: &crate::storage::bud3::tx::StorageTxV3, out: &mut Ve
                 }
                 crate::storage::bud3::repair::RepairWitness::ValidatorAttestations(atts) => {
                     put_u8(out, 1);
-                    put_u64(out, atts.len() as u64);
+                    put_u64(out, u64::try_from(atts.len()).unwrap_or(u64::MAX));
                     for att in atts {
                         put_fixed(out, &att.validator);
                         put_bytes(out, &att.signature);

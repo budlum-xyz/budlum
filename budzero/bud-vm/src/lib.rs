@@ -1107,7 +1107,7 @@ pub const fn canonical_imm(imm: i32) -> u64 {
     if imm < 0 {
         GOLDILOCKS_P.wrapping_sub(imm.unsigned_abs() as u64)
     } else {
-        imm as u64
+        imm.cast_unsigned() as u64
     }
 }
 

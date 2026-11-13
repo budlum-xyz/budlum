@@ -163,7 +163,11 @@ fn handle_uol_precompile_call(
                 dst.copy_from_slice(&bal.to_be_bytes());
             }
             Some(CallOutcome::new(
-                InterpreterResult::new(InstructionResult::Return, Bytes::copy_from_slice(&word), gas),
+                InterpreterResult::new(
+                    InstructionResult::Return,
+                    Bytes::copy_from_slice(&word),
+                    gas,
+                ),
                 mem_offset,
             ))
         }
@@ -181,7 +185,8 @@ fn handle_uol_precompile_call(
                 *s = 32;
             }
             if let Some(dst) = out.get_mut(56..64) {
-                dst.copy_from_slice(&(holder.len() as u64).to_be_bytes());
+                let len_be = u64::try_from(holder.len()).unwrap_or(u64::MAX).to_be_bytes();
+                dst.copy_from_slice(&len_be);
             }
             if !holder.is_empty() {
                 if let Some(dst) = out.get_mut(64..64 + holder.len()) {
@@ -212,7 +217,7 @@ fn handle_uol_precompile_call(
                     mem_offset,
                 );
             }
-            let host = context.journaled_state.db_mut().host;
+            let host = &mut *context.journaled_state.db_mut().host;
             let Ok(cp) = host.checkpoint_begin() else {
                 return uol_revert(b"UOL checkpoint begin failed", gas, mem_offset);
             };
@@ -261,12 +266,19 @@ fn handle_uol_precompile_call(
             }
             context.journaled_state.log(Log {
                 address: UOL_PRECOMPILE,
-                data: LogData::new_unchecked(vec![B256::from(topic)], Bytes::copy_from_slice(&asset_id)),
+                data: LogData::new_unchecked(
+                    vec![B256::from(topic)],
+                    Bytes::copy_from_slice(&asset_id),
+                ),
             });
             let mut ok_word = [0u8; 32];
             ok_word[31] = 1;
             Some(CallOutcome::new(
-                InterpreterResult::new(InstructionResult::Return, Bytes::copy_from_slice(&ok_word), gas),
+                InterpreterResult::new(
+                    InstructionResult::Return,
+                    Bytes::copy_from_slice(&ok_word),
+                    gas,
+                ),
                 mem_offset,
             ))
         }
@@ -294,7 +306,7 @@ fn handle_uol_precompile_call(
             if !payment.is_empty() && payment.len() != 16 && payment.len() != 48 {
                 return uol_revert(b"unsupported UOL offer payment encoding", gas, mem_offset);
             }
-            let host = context.journaled_state.db_mut().host;
+            let host = &mut *context.journaled_state.db_mut().host;
             if asset_id != [0u8; 32] {
                 let Some(cur) = host.read(&ns, &uol_holder_key(&asset_id)).ok().flatten() else {
                     return uol_revert(b"UOL unknown asset", gas, mem_offset);
@@ -333,7 +345,11 @@ fn handle_uol_precompile_call(
                 return uol_revert(b"UOL offer write failed", gas, mem_offset);
             }
             Some(CallOutcome::new(
-                InterpreterResult::new(InstructionResult::Return, Bytes::copy_from_slice(&offer_id), gas),
+                InterpreterResult::new(
+                    InstructionResult::Return,
+                    Bytes::copy_from_slice(&offer_id),
+                    gas,
+                ),
                 mem_offset,
             ))
         }
@@ -343,7 +359,7 @@ fn handle_uol_precompile_call(
             }
             let ok = uol_offer_key(&offer_id);
             let caller_id = evm_identity(inputs.caller);
-            let host = context.journaled_state.db_mut().host;
+            let host = &mut *context.journaled_state.db_mut().host;
             let Ok(Some(raw)) = host.read(&ns, &ok) else {
                 return uol_revert(b"UOL unknown offerId", gas, mem_offset);
             };
@@ -432,7 +448,8 @@ fn handle_uol_precompile_call(
                 }
             }
             if offer.amount > 0 {
-                let maker_bal = uol_read_balance(host, &ns, &offer.class_id, &offer.maker).unwrap_or(0);
+                let maker_bal =
+                    uol_read_balance(host, &ns, &offer.class_id, &offer.maker).unwrap_or(0);
                 let Some(rem) = maker_bal.checked_sub(offer.amount) else {
                     let _ = host.checkpoint_rollback(cp);
                     return uol_revert(b"UOL maker balance exhausted", gas, mem_offset);
@@ -441,7 +458,8 @@ fn handle_uol_precompile_call(
                     let _ = host.checkpoint_rollback(cp);
                     return uol_revert(b"UOL maker write failed", gas, mem_offset);
                 }
-                let taker_bal = uol_read_balance(host, &ns, &offer.class_id, &caller20).unwrap_or(0);
+                let taker_bal =
+                    uol_read_balance(host, &ns, &offer.class_id, &caller20).unwrap_or(0);
                 let Some(next_taker) = taker_bal.checked_add(offer.amount) else {
                     let _ = host.checkpoint_rollback(cp);
                     return uol_revert(b"UOL balance overflow", gas, mem_offset);
@@ -465,12 +483,19 @@ fn handle_uol_precompile_call(
             }
             context.journaled_state.log(Log {
                 address: UOL_PRECOMPILE,
-                data: LogData::new_unchecked(vec![B256::from(topic)], Bytes::copy_from_slice(&offer_id)),
+                data: LogData::new_unchecked(
+                    vec![B256::from(topic)],
+                    Bytes::copy_from_slice(&offer_id),
+                ),
             });
             let mut ok_word = [0u8; 32];
             ok_word[31] = 1;
             Some(CallOutcome::new(
-                InterpreterResult::new(InstructionResult::Return, Bytes::copy_from_slice(&ok_word), gas),
+                InterpreterResult::new(
+                    InstructionResult::Return,
+                    Bytes::copy_from_slice(&ok_word),
+                    gas,
+                ),
                 mem_offset,
             ))
         }

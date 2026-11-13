@@ -1951,7 +1951,7 @@ impl Bud3Registry {
                 for p in proofs {
                     let root_entry = obj
                         .roots
-                        .get(p.root_index as usize)
+                        .get(usize::try_from(p.root_index).unwrap_or(usize::MAX))
                         .ok_or(RegistryError::BadRepair("unknown repair witness root"))?;
                     if root_entry.segment != segment {
                         return Err(RegistryError::BadRepair(
