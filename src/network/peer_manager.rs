@@ -1504,7 +1504,7 @@ mod tests {
     fn outbound_subnet_diversity_rejects_excess() {
         let mut pm = PeerManager::new();
         pm.max_outbound_per_subnet = 2;
-        let subnet = [10u8, 0, 1];
+        let subnet: [u8; 3] = [10u8, 0, 1];
         // First 2 outbound from same subnet: OK.
         let p1 = libp2p::identity::Keypair::generate_ed25519()
             .public()
@@ -1941,5 +1941,20 @@ mod tests {
         assert!(pm.is_connected(&admitted[0]) || pm.can_admit_subnet(Some(subnet)));
         assert!(!pm.note_connected(admitted[0], Some(subnet)));
         assert_eq!(pm.subnet_connection_count(subnet), 4);
+
+    #[test]
+    fn simultaneous_dial_to_same_peer_is_recognized_as_already_connected() {
+        let mut manager = PeerManager::new();
+        let peer = test_peer_id();
+        let lo: [u8; 3] = [127, 0, 0];
+        assert!(!manager.is_connected(&peer));
+        assert!(manager.note_connected(peer, Some(lo)));
+        assert!(manager.is_connected(&peer));
+        assert!(!manager.note_connected(peer, Some(lo)));
+        assert!(manager.is_connected(&peer));
+        assert!(manager.note_disconnected(&peer));
+        assert!(!manager.is_connected(&peer));
     }
+    }
+
 }
