@@ -9,6 +9,7 @@ pub mod pow;
 pub mod qc;
 pub mod registration;
 pub mod split_resolver;
+pub mod zk_verifier;
 use crate::core::block::Block;
 pub use poa::PoAEngine;
 pub use pos::PoSEngine;
