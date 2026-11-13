@@ -9,7 +9,9 @@
 use budlum_uel_abi::{BudAmount, EeId, EeIdentity, Namespace, UniversalCall};
 use revm::context::{BlockEnv, CfgEnv, Context, Journal, TxEnv};
 use revm::context_interface::JournalTr;
-use revm::interpreter::{CallInputs, CallOutcome, Gas, InstructionResult, InterpreterResult};
+use revm::interpreter::{
+    CallInputs, CallOutcome, CallScheme, Gas, InstructionResult, InterpreterResult,
+};
 use revm::primitives::{keccak256, Bytes, Log, LogData, B256};
 
 use crate::abi::{
@@ -26,6 +28,24 @@ pub const UNIVERSAL_CALL_EXECUTED_TOPIC0: [u8; 32] = [
 ];
 
 type EvmHostCtx<'a> = Context<BlockEnv, TxEnv, CfgEnv, HostDb<'a>, Journal<HostDb<'a>>, ()>;
+
+fn precompile_scheme_allowed(scheme: CallScheme) -> bool {
+    matches!(scheme, CallScheme::Call | CallScheme::StaticCall)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::precompile_scheme_allowed;
+    use revm::interpreter::CallScheme;
+
+    #[test]
+    fn host_precompiles_reject_delegate_and_callcode_schemes() {
+        assert!(precompile_scheme_allowed(CallScheme::Call));
+        assert!(precompile_scheme_allowed(CallScheme::StaticCall));
+        assert!(!precompile_scheme_allowed(CallScheme::DelegateCall));
+        assert!(!precompile_scheme_allowed(CallScheme::CallCode));
+    }
+}
 
 /// ABI-encode event data `(uint8 ee, bytes target, bool ok)` for `UniversalCallExecuted`.
 #[must_use]
@@ -91,11 +111,7 @@ fn uol_read_balance(
     Some(u128::from_le_bytes(arr))
 }
 
-fn uol_revert(
-    msg: &[u8],
-    gas: Gas,
-    mem_offset: std::ops::Range<usize>,
-) -> Option<CallOutcome> {
+fn uol_revert(msg: &[u8], gas: Gas, mem_offset: std::ops::Range<usize>) -> Option<CallOutcome> {
     Some(CallOutcome::new(
         InterpreterResult::new(InstructionResult::Revert, Bytes::copy_from_slice(msg), gas),
         mem_offset,
@@ -129,6 +145,23 @@ fn handle_uol_precompile_call(
 ) -> Option<CallOutcome> {
     if inputs.bytecode_address != UOL_PRECOMPILE && inputs.target_address != UOL_PRECOMPILE {
         return None;
+    }
+    // These host-backed operations must execute in the precompile's own
+    // address context. DELEGATECALL/CALLCODE change the storage/caller context
+    // while still executing code at the precompile address; never dispatch
+    // those schemes into mutable host operations.
+    if !precompile_scheme_allowed(inputs.scheme) {
+        let mut gas = Gas::new_with_regular_gas_and_reservoir(inputs.gas_limit, inputs.reservoir);
+        if !gas.record_regular_cost(UOL_PRECOMPILE_GAS) {
+            return Some(CallOutcome::new(
+                InterpreterResult::new_oog(inputs.gas_limit, inputs.reservoir),
+                inputs.return_memory_offset.clone(),
+            ));
+        }
+        return Some(CallOutcome::new(
+            InterpreterResult::new(InstructionResult::Revert, Bytes::new(), gas),
+            inputs.return_memory_offset.clone(),
+        ));
     }
     let calldata: Vec<u8> = inputs.input.as_bytes(context).to_vec();
     let mem_offset = inputs.return_memory_offset.clone();
@@ -185,7 +218,9 @@ fn handle_uol_precompile_call(
                 *s = 32;
             }
             if let Some(dst) = out.get_mut(56..64) {
-                let len_be = u64::try_from(holder.len()).unwrap_or(u64::MAX).to_be_bytes();
+                let len_be = u64::try_from(holder.len())
+                    .unwrap_or(u64::MAX)
+                    .to_be_bytes();
                 dst.copy_from_slice(&len_be);
             }
             if !holder.is_empty() {
@@ -515,6 +550,21 @@ pub(crate) fn handle_universal_precompile_call(
         && inputs.target_address != UNIVERSAL_CALL_PRECOMPILE
     {
         return None;
+    }
+    // Cross-VM calls are host effects and must not inherit a delegate's
+    // address/storage context. Match the UOL precompile's scheme policy.
+    if !precompile_scheme_allowed(inputs.scheme) {
+        let mut gas = Gas::new_with_regular_gas_and_reservoir(inputs.gas_limit, inputs.reservoir);
+        if !gas.record_regular_cost(PRECOMPILE_BASE_GAS) {
+            return Some(CallOutcome::new(
+                InterpreterResult::new_oog(inputs.gas_limit, inputs.reservoir),
+                inputs.return_memory_offset.clone(),
+            ));
+        }
+        return Some(CallOutcome::new(
+            InterpreterResult::new(InstructionResult::Revert, Bytes::new(), gas),
+            inputs.return_memory_offset.clone(),
+        ));
     }
 
     let calldata: Vec<u8> = inputs.input.as_bytes(context).to_vec();
