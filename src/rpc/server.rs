@@ -4524,11 +4524,46 @@ impl BudlumApiServer for RpcServer {
         Ok(addr.map(|a| Self::to_0x_hash(a.to_hex())))
     }
 
-    async fn bns_prepare_register(
+    async fn bns_get_offer(&self, offer_id: u64) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let (offer, _epoch) = self.chain.bns_get_offer(offer_id).await;
+        match offer {
+            Some(o) => serde_json::to_value(o).map_err(|e| {
+                ErrorObjectOwned::owned(-32603, format!("Serialization error: {e}"), None::<()>)
+            }),
+            None => Ok(serde_json::Value::Null),
+        }
+    }
+
+    async fn bns_list_offers(
         &self,
+        kind: Option<String>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let parsed_kind = match kind.as_deref() {
+            None => None,
+            Some("Primary" | "primary") => Some(crate::pollen::OfferKind::Primary),
+            Some("Resale" | "resale") => Some(crate::pollen::OfferKind::Resale),
+            Some(other) => {
+                return Err(ErrorObjectOwned::owned(
+                    -32602,
+                    format!("Invalid BNS offer kind '{other}': expected Primary or Resale"),
+                    None::<()>,
+                ));
+            }
+        };
+        let offers = cap_list_response(self.chain.bns_list_offers(parsed_kind).await);
+        serde_json::to_value(offers).map_err(|e| {
+            ErrorObjectOwned::owned(-32603, format!("Serialization error: {e}"), None::<()>)
+        })
+    }
+
+    async fn bns_prepare_create_offer(
+        &self,
+        seller: String,
         name: String,
-        owner: String,
+        price_atoms: u64,
         duration: u64,
+        kind: String,
+        expires_at_epoch: u64,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
         if !crate::bns::BnsRegistry::is_valid_name(&name) {
             return Err(ErrorObjectOwned::owned(
@@ -4537,31 +4572,61 @@ impl BudlumApiServer for RpcServer {
                 None::<()>,
             ));
         }
-        if duration == 0 {
+        if price_atoms == 0 {
             return Err(ErrorObjectOwned::owned(
                 -32602,
-                "Registration duration must be greater than zero",
+                "Offer price_atoms must be greater than zero",
                 None::<()>,
             ));
         }
-        let clean_owner = owner.strip_prefix("0x").unwrap_or(&owner);
-        let owner_addr = Address::from_hex(clean_owner).map_err(|e| {
-            ErrorObjectOwned::owned(-32602, format!("Invalid owner address: {e}"), None::<()>)
+        let offer_kind = match kind.as_str() {
+            "Primary" | "primary" => crate::pollen::OfferKind::Primary,
+            "Resale" | "resale" => crate::pollen::OfferKind::Resale,
+            other => {
+                return Err(ErrorObjectOwned::owned(
+                    -32602,
+                    format!("Invalid BNS offer kind '{other}': expected Primary or Resale"),
+                    None::<()>,
+                ));
+            }
+        };
+        if offer_kind == crate::pollen::OfferKind::Primary && duration == 0 {
+            return Err(ErrorObjectOwned::owned(
+                -32602,
+                "Primary offer duration must be greater than zero",
+                None::<()>,
+            ));
+        }
+        let clean_seller = seller.strip_prefix("0x").unwrap_or(&seller);
+        let seller_addr = Address::from_hex(clean_seller).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Invalid seller address: {e}"), None::<()>)
         })?;
+        if seller_addr == Address::zero() {
+            return Err(ErrorObjectOwned::owned(
+                -32602,
+                "Seller address cannot be the zero address",
+                None::<()>,
+            ));
+        }
 
-        let data = bincode::serialize(&(name.clone(), duration))
+        let req = crate::pollen::CreateNameOffer {
+            name: name.clone(),
+            price_atoms,
+            duration,
+            kind: offer_kind,
+            expires_at_epoch,
+        };
+        let data = bincode::serialize(&req)
             .map_err(|e| ErrorObjectOwned::owned(-32000, e.to_string(), None::<()>))?;
 
-        let cost = self.chain.bns_calculate_cost(name.clone(), duration).await;
-
         let tx = crate::core::transaction::Transaction {
-            from: owner_addr,
+            from: seller_addr,
             to: Address::zero(),
-            amount: cost,
+            amount: 0,
             fee: 1000,
             max_fee: 1000,
             priority_fee: 0,
-            nonce: self.chain.get_nonce(&owner_addr).await,
+            nonce: self.chain.get_nonce(&seller_addr).await,
             data,
             timestamp: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -4573,15 +4638,152 @@ impl BudlumApiServer for RpcServer {
             authorization: None,
             chain_id: self.chain.get_chain_id().await,
             signature_version: crate::core::transaction::SIGNATURE_VERSION_V5,
-            tx_type: crate::core::transaction::TransactionType::BnsRegister,
+            tx_type: crate::core::transaction::TransactionType::BnsCreateOffer,
         };
         let tx = self.finish_template(tx).await?;
 
         Ok(serde_json::json!({
+            "seller": seller,
             "name": name,
-            "owner": owner,
+            "price_atoms": price_atoms,
             "duration": duration,
-            "cost": cost,
+            "kind": offer_kind,
+            "expires_at_epoch": expires_at_epoch,
+            "tx_template": tx,
+        }))
+    }
+
+    async fn bns_prepare_buy_name(
+        &self,
+        buyer: String,
+        offer_id: u64,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let clean_buyer = buyer.strip_prefix("0x").unwrap_or(&buyer);
+        let buyer_addr = Address::from_hex(clean_buyer).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Invalid buyer address: {e}"), None::<()>)
+        })?;
+        if buyer_addr == Address::zero() {
+            return Err(ErrorObjectOwned::owned(
+                -32602,
+                "Buyer address cannot be the zero address",
+                None::<()>,
+            ));
+        }
+
+        let (offer, current_epoch) = self.chain.bns_get_offer(offer_id).await;
+        let offer = offer.ok_or_else(|| {
+            ErrorObjectOwned::owned(
+                -32602,
+                format!("BNS offer {offer_id} not found"),
+                None::<()>,
+            )
+        })?;
+        if !offer.active || current_epoch >= offer.expires_at_epoch {
+            return Err(ErrorObjectOwned::owned(
+                -32602,
+                format!("BNS offer {offer_id} is closed or expired"),
+                None::<()>,
+            ));
+        }
+
+        let data = bincode::serialize(&offer_id)
+            .map_err(|e| ErrorObjectOwned::owned(-32000, e.to_string(), None::<()>))?;
+
+        let tx = crate::core::transaction::Transaction {
+            from: buyer_addr,
+            to: Address::zero(),
+            amount: offer.price_atoms,
+            fee: 1000,
+            max_fee: 1000,
+            priority_fee: 0,
+            nonce: self.chain.get_nonce(&buyer_addr).await,
+            data,
+            timestamp: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis(),
+            hash: String::new(),
+            signature: None,
+            signer_public_key: Vec::new(),
+            authorization: None,
+            chain_id: self.chain.get_chain_id().await,
+            signature_version: crate::core::transaction::SIGNATURE_VERSION_V5,
+            tx_type: crate::core::transaction::TransactionType::BnsBuyName,
+        };
+        let tx = self.finish_template(tx).await?;
+
+        Ok(serde_json::json!({
+            "buyer": buyer,
+            "offer_id": offer_id,
+            "name": offer.name,
+            "price_atoms": offer.price_atoms,
+            "seller": offer.seller.to_hex(),
+            "kind": offer.kind,
+            "tx_template": tx,
+        }))
+    }
+
+    async fn bns_prepare_cancel_offer(
+        &self,
+        seller: String,
+        offer_id: u64,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let clean_seller = seller.strip_prefix("0x").unwrap_or(&seller);
+        let seller_addr = Address::from_hex(clean_seller).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Invalid seller address: {e}"), None::<()>)
+        })?;
+        let (offer, _epoch) = self.chain.bns_get_offer(offer_id).await;
+        let offer = offer.ok_or_else(|| {
+            ErrorObjectOwned::owned(
+                -32602,
+                format!("BNS offer {offer_id} not found"),
+                None::<()>,
+            )
+        })?;
+        if !offer.active {
+            return Err(ErrorObjectOwned::owned(
+                -32602,
+                format!("BNS offer {offer_id} is already closed"),
+                None::<()>,
+            ));
+        }
+        if offer.seller != seller_addr {
+            return Err(ErrorObjectOwned::owned(
+                -32602,
+                "Only the offer seller can cancel this BNS offer",
+                None::<()>,
+            ));
+        }
+
+        let data = bincode::serialize(&offer_id)
+            .map_err(|e| ErrorObjectOwned::owned(-32000, e.to_string(), None::<()>))?;
+
+        let tx = crate::core::transaction::Transaction {
+            from: seller_addr,
+            to: Address::zero(),
+            amount: 0,
+            fee: 1000,
+            max_fee: 1000,
+            priority_fee: 0,
+            nonce: self.chain.get_nonce(&seller_addr).await,
+            data,
+            timestamp: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis(),
+            hash: String::new(),
+            signature: None,
+            signer_public_key: Vec::new(),
+            authorization: None,
+            chain_id: self.chain.get_chain_id().await,
+            signature_version: crate::core::transaction::SIGNATURE_VERSION_V5,
+            tx_type: crate::core::transaction::TransactionType::BnsCancelOffer,
+        };
+        let tx = self.finish_template(tx).await?;
+
+        Ok(serde_json::json!({
+            "seller": seller,
+            "offer_id": offer_id,
             "tx_template": tx,
         }))
     }

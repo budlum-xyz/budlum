@@ -26,6 +26,39 @@ pub struct DataOffer {
     pub active: bool,
 }
 
+/// Listing kind for a `.bud` domain offer on the marketplace.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum OfferKind {
+    /// First sale of an unregistered or post-grace expired `.bud` name by an
+    /// authorized primary seller (`BNS_PRIMARY_SELLERS`).
+    Primary,
+    /// Secondary resale of a currently live `.bud` name by its owner.
+    Resale,
+}
+
+/// Marketplace listing for a `.bud` domain name.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NameOffer {
+    pub id: u64,
+    pub seller: Address,
+    pub name: String,
+    pub price_atoms: u64,
+    pub duration: u64,
+    pub kind: OfferKind,
+    pub expires_at_epoch: u64,
+    pub active: bool,
+}
+
+/// Signed transaction payload for `TransactionType::BnsCreateOffer`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CreateNameOffer {
+    pub name: String,
+    pub price_atoms: u64,
+    pub duration: u64,
+    pub kind: OfferKind,
+    pub expires_at_epoch: u64,
+}
+
 /// Receipt for an authorization-backed pollen purchase. This is not a LUM/DeFi
 /// Settlement: `payment_commitment` binds the buyer-side payment proof for a
 /// Future adapter while the DataAsset ownership remains with `seller`.
@@ -242,6 +275,10 @@ pub struct MarketplaceRegistry {
     pub offers: BTreeMap<u64, DataOffer>,
     #[serde(default)]
     pub next_offer_id: u64,
+    #[serde(default)]
+    pub name_offers: BTreeMap<u64, NameOffer>,
+    #[serde(default)]
+    pub next_name_offer_id: u64,
     /// Pollen: registered data buds. The asset is not sold; its
     /// Access pollen is sold via `AccessGrant`.
     #[serde(default)]
@@ -1078,7 +1115,148 @@ impl MarketplaceRegistry {
         // it would accept different blocks.
         hasher.update(b"protected_content");
         hasher.update(self.protected_content.root());
+        if self.next_name_offer_id != 0 || !self.name_offers.is_empty() {
+            hasher.update(b"name_offers_v1");
+            hasher.update(self.next_name_offer_id.to_le_bytes());
+            hasher.update((self.name_offers.len() as u64).to_le_bytes());
+            for (id, offer) in &self.name_offers {
+                hasher.update(b"name_offer");
+                hasher.update(id.to_le_bytes());
+                hasher.update(offer.seller.0);
+                hasher.update((offer.name.len() as u64).to_le_bytes());
+                hasher.update(offer.name.as_bytes());
+                hasher.update(offer.price_atoms.to_le_bytes());
+                hasher.update(offer.duration.to_le_bytes());
+                let kind_tag = match offer.kind {
+                    OfferKind::Primary => 0u8,
+                    OfferKind::Resale => 1u8,
+                };
+                hasher.update([kind_tag]);
+                hasher.update(offer.expires_at_epoch.to_le_bytes());
+                hasher.update([u8::from(offer.active)]);
+            }
+        }
         hasher.finalize().into()
+    }
+
+    /// Open a `.bud` domain listing on the marketplace.
+    ///
+    /// # Errors
+    ///
+    /// Refuses zero seller, invalid BNS name, zero price, already-expired
+    /// listing window, zero/overflowing primary duration, or full offer table.
+    pub fn create_name_offer(
+        &mut self,
+        seller: Address,
+        request: CreateNameOffer,
+        current_epoch: u64,
+    ) -> Result<u64, String> {
+        if seller == Address::zero() {
+            return Err("Name offer seller cannot be the zero address".into());
+        }
+        if !crate::bns::BnsRegistry::is_valid_name(&request.name) {
+            return Err("Invalid BNS name: expected <label>.bud with 3..=32 characters".into());
+        }
+        if request.price_atoms == 0 {
+            return Err("Name offer price_atoms must be greater than zero".into());
+        }
+        if request.expires_at_epoch <= current_epoch {
+            return Err("Name offer expires_at_epoch must be in the future".into());
+        }
+        if request.kind == OfferKind::Primary {
+            if request.duration == 0 {
+                return Err("Primary name offer duration must be greater than zero".into());
+            }
+            if current_epoch.checked_add(request.duration).is_none() {
+                return Err("Primary name offer duration overflows epoch counter".into());
+            }
+        }
+
+        if self.name_offers.len() >= MAX_OFFERS {
+            self.name_offers
+                .retain(|_, o| o.active && current_epoch < o.expires_at_epoch);
+            if self.name_offers.len() >= MAX_OFFERS {
+                return Err(format!("Name offer table full (max {MAX_OFFERS})"));
+            }
+        }
+
+        let id = self.next_name_offer_id;
+        self.next_name_offer_id = id
+            .checked_add(1)
+            .ok_or_else(|| "Name offer id overflow".to_string())?;
+        self.name_offers.insert(
+            id,
+            NameOffer {
+                id,
+                seller,
+                name: request.name,
+                price_atoms: request.price_atoms,
+                duration: request.duration,
+                kind: request.kind,
+                expires_at_epoch: request.expires_at_epoch,
+                active: true,
+            },
+        );
+        Ok(id)
+    }
+
+    /// Seller-only cancellation of an active `.bud` domain listing.
+    ///
+    /// # Errors
+    ///
+    /// Refuses unknown, inactive, or foreign listings.
+    pub fn cancel_name_offer(&mut self, offer_id: u64, caller: &Address) -> Result<(), String> {
+        let offer = self
+            .name_offers
+            .get_mut(&offer_id)
+            .ok_or_else(|| "Name offer not found".to_string())?;
+        if !offer.active {
+            return Err("Name offer is already closed".into());
+        }
+        if &offer.seller != caller {
+            return Err("Only the seller can cancel this name offer".into());
+        }
+        offer.active = false;
+        Ok(())
+    }
+
+    /// Mark a `.bud` domain listing closed upon settlement.
+    ///
+    /// # Errors
+    ///
+    /// Refuses unknown or already-closed listings.
+    pub fn close_name_offer(&mut self, offer_id: u64) -> Result<(), String> {
+        let offer = self
+            .name_offers
+            .get_mut(&offer_id)
+            .ok_or_else(|| "Name offer not found".to_string())?;
+        if !offer.active {
+            return Err("Name offer is already closed".into());
+        }
+        offer.active = false;
+        Ok(())
+    }
+
+    #[must_use]
+    pub fn get_name_offer(&self, offer_id: u64) -> Option<&NameOffer> {
+        self.name_offers.get(&offer_id)
+    }
+
+    #[must_use]
+    pub fn list_active_name_offers(
+        &self,
+        current_epoch: u64,
+        kind: Option<OfferKind>,
+    ) -> Vec<NameOffer> {
+        self.name_offers
+            .values()
+            .filter(|o| {
+                o.active
+                    && current_epoch < o.expires_at_epoch
+                    && kind.is_none_or(|wanted| o.kind == wanted)
+            })
+            .cloned()
+            .collect()
     }
 }
 
