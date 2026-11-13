@@ -734,6 +734,45 @@ enum BnsAction {
         #[arg(long, required = true)]
         name: String,
     },
+    /// Forward-resolve `<label>.bud` or `<sub_label>.<label>.bud` to its target address.
+    Resolve {
+        #[arg(long, required = true)]
+        name: String,
+        /// Require and locally verify a per-name Merkle state proof (`<label>.bud`).
+        #[arg(long, default_value_t = false)]
+        verify_proof: bool,
+    },
+    /// Inspect full `.bud` record metadata and locally verify its Merkle state proof.
+    Info {
+        #[arg(long, required = true)]
+        name: String,
+    },
+    /// List active `.bud` marketplace offers (`Primary`, `Resale`, or all).
+    Offers {
+        #[arg(long)]
+        kind: Option<String>,
+    },
+    /// Inspect a single `.bud` marketplace offer by numeric id.
+    GetOffer {
+        #[arg(long, required = true)]
+        offer_id: u64,
+    },
+    /// Package a file or static directory into B.U.D. 3.0 and bind its `ContentRef` to `<label>.bud`.
+    PublishSite {
+        #[command(flatten)]
+        signer: V5Signer,
+        #[arg(long, required = true)]
+        name: String,
+        /// File (e.g. `index.html`) or static site directory to publish.
+        #[arg(long, required = true)]
+        path: std::path::PathBuf,
+        /// Paid B.U.D. 3.0 object lifetime in epochs.
+        #[arg(long, default_value_t = 100_000)]
+        lifetime_epochs: u64,
+        /// Optional 32-byte custody validator hex (defaults to wallet address).
+        #[arg(long)]
+        validator: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1200,7 +1239,11 @@ fn run_tx_send(
     let seed = parse_seed(&load_priv_key(priv_key_file)?)?;
     let keypair = KeyPair::from_seed(&seed).map_err(|e| format!("key derivation: {e}"))?;
     let from = Address::from(keypair.public_key_bytes());
-    let to_addr = parse_address(to)?;
+    let to_addr = if to.ends_with(".bud") || to.contains('.') {
+        resolve_bud_recipient_verified(rpc_url, to)?
+    } else {
+        parse_address(to)?
+    };
 
     // Nonce: fetch it from the node when not given.
     let nonce = match nonce {
@@ -2903,6 +2946,496 @@ fn run_bns_proof(rpc_url: &str, name: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn decode_hex32_field(val: &serde_json::Value, field: &str) -> Result<[u8; 32], String> {
+    let raw = val
+        .as_str()
+        .ok_or_else(|| format!("missing or non-string `{field}` in BNS proof JSON"))?;
+    let clean = raw.strip_prefix("0x").unwrap_or(raw);
+    let bytes = hex::decode(clean).map_err(|e| format!("invalid `{field}` hex: {e}"))?;
+    if bytes.len() != 32 {
+        return Err(format!("`{field}` must be 32 bytes, got {}", bytes.len()));
+    }
+    let mut arr = [0u8; 32];
+    arr.copy_from_slice(&bytes);
+    Ok(arr)
+}
+
+fn parse_merkle_branch_json(
+    val: &serde_json::Value,
+) -> Result<budlum_core::bns::types::BnsMerkleBranch, String> {
+    let name = val
+        .get("name")
+        .and_then(serde_json::Value::as_str)
+        .ok_or("missing branch.name")?
+        .to_string();
+    let owner = Address::from(decode_hex32_field(
+        val.get("owner").ok_or("missing branch.owner")?,
+        "branch.owner",
+    )?);
+    let address = match val.get("address") {
+        Some(v) if !v.is_null() => Some(Address::from(decode_hex32_field(v, "branch.address")?)),
+        _ => None,
+    };
+    let expires_at = val
+        .get("expires_at")
+        .and_then(serde_json::Value::as_u64)
+        .ok_or("missing branch.expires_at")?;
+    let content_id = match val.get("content_id") {
+        Some(v) if !v.is_null() => Some(budlum_core::storage::ContentId(decode_hex32_field(
+            v,
+            "branch.content_id",
+        )?)),
+        _ => None,
+    };
+    let storage_root = match val.get("storage_root") {
+        Some(v) if !v.is_null() => Some(decode_hex32_field(v, "branch.storage_root")?),
+        _ => None,
+    };
+    let extras_digest = decode_hex32_field(
+        val.get("extras_digest")
+            .ok_or("missing branch.extras_digest")?,
+        "branch.extras_digest",
+    )?;
+    let leaf = decode_hex32_field(val.get("leaf").ok_or("missing branch.leaf")?, "branch.leaf")?;
+    let siblings_arr = val
+        .get("siblings")
+        .and_then(serde_json::Value::as_array)
+        .ok_or("missing branch.siblings")?;
+    let mut siblings = Vec::with_capacity(siblings_arr.len());
+    for s in siblings_arr {
+        siblings.push(decode_hex32_field(s, "branch.siblings[]")?);
+    }
+    let dirs_arr = val
+        .get("directions")
+        .and_then(serde_json::Value::as_array)
+        .ok_or("missing branch.directions")?;
+    let mut directions = Vec::with_capacity(dirs_arr.len());
+    for d in dirs_arr {
+        directions.push(d.as_bool().ok_or("non-bool entry in branch.directions")?);
+    }
+    Ok(budlum_core::bns::types::BnsMerkleBranch {
+        name,
+        owner,
+        address,
+        expires_at,
+        content_id,
+        storage_root,
+        extras_digest,
+        leaf,
+        siblings,
+        directions,
+    })
+}
+
+fn is_valid_resolvable_bud_fqdn(name: &str) -> bool {
+    if budlum_core::bns::BnsRegistry::is_valid_name(name) {
+        return true;
+    }
+    let Some(stem) = name.strip_suffix(".bud") else {
+        return false;
+    };
+    let Some((sub, parent_label)) = stem.split_once('.') else {
+        return false;
+    };
+    !parent_label.contains('.')
+        && budlum_core::bns::BnsRegistry::is_valid_sub_label(sub)
+        && budlum_core::bns::BnsRegistry::is_valid_name(&format!("{parent_label}.bud"))
+}
+
+fn parse_and_verify_bns_proof_json(
+    proof_json: &serde_json::Value,
+    expected_name: &str,
+) -> Result<(budlum_core::bns::types::BnsStateProof, Option<Address>), String> {
+    let name = proof_json
+        .get("name")
+        .and_then(serde_json::Value::as_str)
+        .ok_or("missing proof.name")?
+        .to_string();
+    if name != expected_name {
+        return Err(format!(
+            "BNS proof name mismatch: expected `{expected_name}`, got `{name}`"
+        ));
+    }
+    let included = proof_json
+        .get("included")
+        .and_then(serde_json::Value::as_bool)
+        .ok_or("missing proof.included")?;
+    let epoch = proof_json
+        .get("epoch")
+        .and_then(serde_json::Value::as_u64)
+        .ok_or("missing proof.epoch")?;
+    let names_count = proof_json
+        .get("names_count")
+        .and_then(serde_json::Value::as_u64)
+        .ok_or("missing proof.names_count")?;
+    let bns_root = decode_hex32_field(
+        proof_json.get("bns_root").ok_or("missing proof.bns_root")?,
+        "proof.bns_root",
+    )?;
+    let meta_digest = decode_hex32_field(
+        proof_json
+            .get("meta_digest")
+            .ok_or("missing proof.meta_digest")?,
+        "proof.meta_digest",
+    )?;
+    let parse_opt_branch =
+        |key: &str| -> Result<Option<budlum_core::bns::types::BnsMerkleBranch>, String> {
+            match proof_json.get(key) {
+                Some(v) if !v.is_null() => Ok(Some(parse_merkle_branch_json(v)?)),
+                _ => Ok(None),
+            }
+        };
+    let proof = budlum_core::bns::types::BnsStateProof {
+        name,
+        included,
+        bns_root,
+        meta_digest,
+        names_count,
+        epoch,
+        entry: parse_opt_branch("entry")?,
+        predecessor: parse_opt_branch("predecessor")?,
+        successor: parse_opt_branch("successor")?,
+    };
+    let verified_leaf =
+        budlum_core::bns::BnsRegistry::verify_state_proof(&proof, &bns_root, epoch)?;
+    let owner = verified_leaf.map(|b| b.owner);
+    Ok((proof, owner))
+}
+
+fn resolve_bud_recipient_verified(rpc_url: &str, name: &str) -> Result<Address, String> {
+    if !is_valid_resolvable_bud_fqdn(name) {
+        return Err(format!(
+            "invalid .bud recipient `{name}`: expected <label>.bud or <sub>.<label>.bud"
+        ));
+    }
+    let parent = if budlum_core::bns::BnsRegistry::is_valid_name(name) {
+        name.to_string()
+    } else {
+        let (_, p) = name
+            .rsplit_once('.')
+            .and_then(|(stem, _)| {
+                stem.split_once('.')
+                    .map(|(_, label)| ("", format!("{label}.bud")))
+            })
+            .ok_or_else(|| format!("invalid subdomain recipient `{name}`"))?;
+        p
+    };
+    let proof_json = rpc_call(rpc_url, "bud_bnsGetProof", serde_json::json!([parent]))?;
+    let (_, verified_owner) = parse_and_verify_bns_proof_json(&proof_json, &parent)?;
+    if verified_owner.is_none() {
+        return Err(format!(
+            "`{parent}` is not registered in verified BNS state"
+        ));
+    }
+    let resolved = rpc_call(rpc_url, "bud_bnsResolve", serde_json::json!([name]))?;
+    let raw = resolved
+        .as_str()
+        .ok_or_else(|| format!("`{name}` has no active forwarding target address"))?;
+    let addr = parse_address(raw.strip_prefix("0x").unwrap_or(raw))?;
+    if addr == Address::zero() {
+        return Err("resolved BNS recipient cannot be the zero address".into());
+    }
+    Ok(addr)
+}
+
+fn run_bns_resolve(rpc_url: &str, name: &str, verify_proof: bool) -> Result<(), String> {
+    if !is_valid_resolvable_bud_fqdn(name) {
+        return Err(format!(
+            "invalid BNS name `{name}`: expected <label>.bud or <sub>.<label>.bud"
+        ));
+    }
+    if verify_proof {
+        let addr = resolve_bud_recipient_verified(rpc_url, name)?;
+        println!("0x{}", addr.to_hex());
+        return Ok(());
+    }
+    let ans = rpc_call(rpc_url, "bud_bnsResolve", serde_json::json!([name]))?;
+    match ans.as_str() {
+        Some(addr) => println!("{addr}"),
+        None => println!("null"),
+    }
+    Ok(())
+}
+
+fn run_bns_info(rpc_url: &str, name: &str) -> Result<(), String> {
+    if !budlum_core::bns::BnsRegistry::is_valid_name(name) {
+        return Err(format!(
+            "invalid BNS name `{name}`: expected <label>.bud with 3..=32 chars"
+        ));
+    }
+    let full = rpc_call(rpc_url, "bud_bnsResolveFull", serde_json::json!([name]))?;
+    let proof_json = rpc_call(rpc_url, "bud_bnsGetProof", serde_json::json!([name]))?;
+    let (proof, verified_owner) = parse_and_verify_bns_proof_json(&proof_json, name)?;
+    let summary = serde_json::json!({
+        "name": name,
+        "resolved": full,
+        "bns_root": format!("0x{}", hex::encode(proof.bns_root)),
+        "epoch": proof.epoch,
+        "proof_verified": true,
+        "verified_live_owner": verified_owner.map(|o| format!("0x{}", o.to_hex())),
+    });
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&summary).map_err(|e| e.to_string())?
+    );
+    Ok(())
+}
+
+fn run_bns_offers(rpc_url: &str, kind: Option<&str>) -> Result<(), String> {
+    let ans = rpc_call(rpc_url, "bud_bnsListOffers", serde_json::json!([kind]))?;
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&ans).map_err(|e| e.to_string())?
+    );
+    Ok(())
+}
+
+fn run_bns_get_offer(rpc_url: &str, offer_id: u64) -> Result<(), String> {
+    let ans = rpc_call(rpc_url, "bud_bnsGetOffer", serde_json::json!([offer_id]))?;
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&ans).map_err(|e| e.to_string())?
+    );
+    Ok(())
+}
+
+fn infer_site_mime(path: &std::path::Path) -> &'static str {
+    match path
+        .extension()
+        .and_then(std::ffi::OsStr::to_str)
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("html" | "htm") => "text/html; charset=utf-8",
+        Some("css") => "text/css; charset=utf-8",
+        Some("js" | "mjs") => "text/javascript; charset=utf-8",
+        Some("json") => "application/json",
+        Some("svg") => "image/svg+xml",
+        Some("png") => "image/png",
+        Some("jpg" | "jpeg") => "image/jpeg",
+        Some("webp") => "image/webp",
+        Some("wasm") => "application/wasm",
+        Some("txt" | "md") => "text/plain; charset=utf-8",
+        _ => "application/octet-stream",
+    }
+}
+
+fn collect_site_dir_files(
+    root: &std::path::Path,
+    dir: &std::path::Path,
+    out: &mut std::collections::BTreeMap<String, (String, Vec<u8>)>,
+) -> Result<(), String> {
+    let entries =
+        std::fs::read_dir(dir).map_err(|e| format!("cannot read {}: {e}", dir.display()))?;
+    for entry in entries {
+        let entry = entry.map_err(|e| format!("dir entry error: {e}"))?;
+        let ft = entry
+            .file_type()
+            .map_err(|e| format!("file_type error: {e}"))?;
+        if ft.is_symlink() {
+            return Err(format!(
+                "refusing symlink inside static site directory: {}",
+                entry.path().display()
+            ));
+        }
+        let path = entry.path();
+        if ft.is_dir() {
+            collect_site_dir_files(root, &path, out)?;
+        } else if ft.is_file() {
+            let rel = path
+                .strip_prefix(root)
+                .map_err(|e| e.to_string())?
+                .components()
+                .map(|c| {
+                    c.as_os_str()
+                        .to_str()
+                        .ok_or_else(|| "non-UTF-8 path in site directory".to_string())
+                })
+                .collect::<Result<Vec<_>, _>>()?
+                .join("/");
+            if rel.is_empty() || rel.contains("..") {
+                return Err(format!("invalid relative site path `{rel}`"));
+            }
+            let bytes =
+                std::fs::read(&path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+            out.insert(rel, (infer_site_mime(&path).to_string(), bytes));
+        }
+    }
+    Ok(())
+}
+
+/// Read a single site file or deterministically package a static site directory
+/// into `(payload_bytes, mime_type)`.
+fn bundle_site_payload(path: &std::path::Path) -> Result<(Vec<u8>, String), String> {
+    let meta = std::fs::symlink_metadata(path)
+        .map_err(|e| format!("cannot stat {}: {e}", path.display()))?;
+    if meta.file_type().is_symlink() {
+        return Err(format!("refusing symlink site path: {}", path.display()));
+    }
+    if meta.is_file() {
+        let bytes =
+            std::fs::read(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+        if bytes.is_empty() {
+            return Err("site file cannot be empty".into());
+        }
+        return Ok((bytes, infer_site_mime(path).to_string()));
+    }
+    if meta.is_dir() {
+        let mut files = std::collections::BTreeMap::new();
+        collect_site_dir_files(path, path, &mut files)?;
+        if files.is_empty() {
+            return Err("static site directory contains no files".into());
+        }
+        if !files.contains_key("index.html") {
+            return Err("static site directory must contain an `index.html` entrypoint".into());
+        }
+        let mut manifest_files = serde_json::Map::new();
+        for (rel, (mime, raw)) in files {
+            manifest_files.insert(
+                rel,
+                serde_json::json!({
+                    "mime": mime,
+                    "hex": hex::encode(raw),
+                }),
+            );
+        }
+        let bundle = serde_json::json!({
+            "format": "bud-site-v1",
+            "entrypoint": "index.html",
+            "files": manifest_files,
+        });
+        let encoded = serde_json::to_vec(&bundle).map_err(|e| e.to_string())?;
+        return Ok((encoded, "application/vnd.budlum.site+json".to_string()));
+    }
+    Err(format!(
+        "{} is neither a regular file nor a directory",
+        path.display()
+    ))
+}
+
+fn prepare_publish_site_payloads(
+    name: &str,
+    payload: &[u8],
+    mime: &str,
+    lifetime_epochs: u64,
+    custody_validator: [u8; 32],
+) -> Result<
+    (
+        budlum_core::storage::bud3::tx::StorageTxV3,
+        budlum_core::storage::bud3::content_ref::ContentRef,
+        Vec<u8>,
+        Vec<u8>,
+    ),
+    String,
+> {
+    use budlum_core::storage::bud3::content_ref::ContentRef;
+    use budlum_core::storage::bud3::limits::{Bud3Limits, Profile};
+    use budlum_core::storage::bud3::pipeline::prepare_public_upload;
+    use budlum_core::storage::bud3::placement::{Class, Share};
+    use budlum_core::storage::bud3::tx::StorageTxV3;
+
+    if !budlum_core::bns::BnsRegistry::is_valid_name(name) {
+        return Err(format!(
+            "invalid BNS name `{name}`: expected <label>.bud with 3..=32 chars"
+        ));
+    }
+    if lifetime_epochs == 0 {
+        return Err("--lifetime-epochs must be greater than zero".into());
+    }
+    const SITE_PROFILE: Profile = Profile {
+        id: 0,
+        qr_version: 40,
+        symbol_size: 128,
+        fps: 10,
+        k_max: 16,
+    };
+    let prepared = prepare_public_upload(payload, &SITE_PROFILE, &Bud3Limits::default(), 8)
+        .map_err(|e| format!("B.U.D. 3.0 site encoding failed: {e:?}"))?;
+    let mut shares = Vec::with_capacity(prepared.segments.len());
+    for (seg_idx, syms) in prepared.segments.iter().enumerate() {
+        shares.push((
+            seg_idx as u64,
+            Share {
+                validator: custody_validator,
+                class: Class::Full,
+                first_esi: 0,
+                symbols: syms.len() as u32,
+            },
+        ));
+    }
+    let cref = ContentRef::new(prepared.record.content_id, prepared.record.commitment, None)
+        .map_err(|e| format!("invalid ContentRef: {e:?}"))?;
+    let storage_tx = StorageTxV3::RegisterObject {
+        record: prepared.record,
+        shares,
+        lifetime_epochs,
+    };
+    let set_bud3_data =
+        bincode::serialize(&(name.to_string(), Some(cref))).map_err(|e| e.to_string())?;
+    let mut rec_updates: std::collections::BTreeMap<String, Option<String>> =
+        std::collections::BTreeMap::new();
+    rec_updates.insert("content.mime".to_string(), Some(mime.to_string()));
+    let set_records_data =
+        bincode::serialize(&(name.to_string(), rec_updates)).map_err(|e| e.to_string())?;
+    Ok((storage_tx, cref, set_bud3_data, set_records_data))
+}
+
+fn run_bns_publish_site(
+    rpc_url: &str,
+    signer: &V5Signer,
+    name: &str,
+    path: &std::path::Path,
+    lifetime_epochs: u64,
+    validator: Option<&str>,
+) -> Result<(), String> {
+    let key = open_wallet(signer)?;
+    let (payload, mime) = bundle_site_payload(path)?;
+    let custody_validator = match validator {
+        Some(raw) => parse_address(raw.strip_prefix("0x").unwrap_or(raw))?.0,
+        None => key.address().0,
+    };
+    let (storage_tx, cref, set_bud3_data, set_records_data) =
+        prepare_publish_site_payloads(name, &payload, &mime, lifetime_epochs, custody_validator)?;
+    let nonce_val = rpc_call(
+        rpc_url,
+        "bud_getNonce",
+        serde_json::json!([key.address().to_hex()]),
+    )?;
+    let start_nonce = parse_rpc_u64(&nonce_val, "bud_getNonce")?;
+
+    // 1. Register B.U.D. 3.0 object on-chain (`nonce`).
+    let tx1 = v5_template(
+        TransactionType::StorageV3(Box::new(storage_tx)),
+        0,
+        signer.fee,
+    );
+    send_v5(rpc_url, &key, tx1, Some(start_nonce))?;
+
+    // 2. Bind `ContentRef` to `<label>.bud` (`nonce + 1`).
+    let mut tx2 = v5_template(TransactionType::BnsSetBud3Content, 0, signer.fee);
+    tx2.data = set_bud3_data;
+    send_v5(rpc_url, &key, tx2, Some(start_nonce + 1))?;
+
+    // 3. Record canonical `content.mime` in V3 records (`nonce + 2`).
+    let mut tx3 = v5_template(TransactionType::BnsSetRecords, 0, signer.fee);
+    tx3.data = set_records_data;
+    send_v5(rpc_url, &key, tx3, Some(start_nonce + 2))?;
+
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&serde_json::json!({
+            "name": name,
+            "byte_len": payload.len(),
+            "mime": mime,
+            "object_commitment": format!("0x{}", hex::encode(cref.object_commitment)),
+            "content_digest": format!("0x{}", hex::encode(cref.content_id.digest)),
+            "lifetime_epochs": lifetime_epochs,
+        }))
+        .map_err(|e| e.to_string())?
+    );
+    Ok(())
+}
+
 /// The multiaddr peers dial: `/ip4/...` for an address, `/dns4/...` for a
 /// name.
 fn bootnode_multiaddr(host: &str, port: u16, peer_id: &str) -> String {
@@ -3250,6 +3783,26 @@ fn main() {
             BnsAction::GetBud3 { name } => run_bns_get_bud3(&cli.rpc_url, name),
             BnsAction::List { owner } => run_bns_list_by_owner(&cli.rpc_url, owner),
             BnsAction::Proof { name } => run_bns_proof(&cli.rpc_url, name),
+            BnsAction::Resolve { name, verify_proof } => {
+                run_bns_resolve(&cli.rpc_url, name, *verify_proof)
+            }
+            BnsAction::Info { name } => run_bns_info(&cli.rpc_url, name),
+            BnsAction::Offers { kind } => run_bns_offers(&cli.rpc_url, kind.as_deref()),
+            BnsAction::GetOffer { offer_id } => run_bns_get_offer(&cli.rpc_url, *offer_id),
+            BnsAction::PublishSite {
+                signer,
+                name,
+                path,
+                lifetime_epochs,
+                validator,
+            } => run_bns_publish_site(
+                &cli.rpc_url,
+                signer,
+                name,
+                path,
+                *lifetime_epochs,
+                validator.as_deref(),
+            ),
         },
         Command::Node { action } => match action {
             NodeAction::Identity {
@@ -3905,5 +4458,180 @@ mod rpc_auth_tests {
         assert!(parse_bns_sell_list("ab.bud 50000\n", 10_000).is_err());
         assert!(parse_bns_sell_list("ayaz.bud 0\n", 10_000).is_err());
         assert!(parse_bns_sell_list("ayaz.bud 100\nayaz.bud 200\n", 10_000).is_err());
+    }
+
+    #[test]
+    fn site_bundle_and_publish_site_payloads_execute_cleanly_in_consensus_and_verify_proof_json() {
+        use budlum_core::core::account::AccountState;
+        use budlum_core::execution::executor::Executor;
+
+        let dir = tempfile::tempdir().unwrap();
+        let index_path = dir.path().join("index.html");
+        std::fs::write(
+            &index_path,
+            b"<!doctype html><html><body><h1>Hello ayaz.bud</h1></body></html>",
+        )
+        .unwrap();
+        let assets_dir = dir.path().join("assets");
+        std::fs::create_dir(&assets_dir).unwrap();
+        std::fs::write(assets_dir.join("style.css"), b"body{background:#111;}").unwrap();
+
+        // Single-file mode
+        let (file_bytes, file_mime) = bundle_site_payload(&index_path).unwrap();
+        assert_eq!(file_mime, "text/html; charset=utf-8");
+        assert!(file_bytes.starts_with(b"<!doctype html>"));
+
+        // Directory-bundle mode
+        let (dir_bytes, dir_mime) = bundle_site_payload(dir.path()).unwrap();
+        assert_eq!(dir_mime, "application/vnd.budlum.site+json");
+        let parsed: serde_json::Value = serde_json::from_slice(&dir_bytes).unwrap();
+        assert_eq!(parsed["format"], "bud-site-v1");
+        assert!(parsed["files"]["index.html"].is_object());
+        assert!(parsed["files"]["assets/style.css"].is_object());
+
+        // Missing index.html in directory is refused
+        let bad_dir = tempfile::tempdir().unwrap();
+        std::fs::write(bad_dir.path().join("only.txt"), b"hi").unwrap();
+        assert!(bundle_site_payload(bad_dir.path()).is_err());
+
+        // Acquire `ayaz.bud` via real Primary marketplace (`BnsCreateOffer` + `BnsBuyName`),
+        // then execute the 3 prepared site-publish transactions (`StorageV3::RegisterObject`,
+        // `BnsSetBud3Content`, `BnsSetRecords`) through `Executor::apply_transaction_checked`!
+        let seller_kp = KeyPair::generate().unwrap();
+        let seller = Address::from(seller_kp.public_key_bytes());
+        let kp = KeyPair::generate().unwrap();
+        let alice = Address::from(kp.public_key_bytes());
+        let mut state = AccountState::new();
+        state.epoch_index = 5;
+        state.add_balance(&seller, 50_000_000_000);
+        state.add_balance(&alice, 50_000_000_000);
+        state.bns_registry.set_primary_sellers([seller]).unwrap();
+
+        let offer_req = budlum_core::bns::CreateNameOffer {
+            name: "ayaz.bud".to_string(),
+            price_atoms: 10_000,
+            duration: 100,
+            kind: budlum_core::bns::OfferKind::Primary,
+            expires_at_epoch: 50,
+        };
+        let mut offer_tx = Transaction::new_with_chain_id(
+            seller,
+            Address::zero(),
+            0,
+            1_000,
+            0,
+            bincode::serialize(&offer_req).unwrap(),
+            45261,
+            TransactionType::BnsCreateOffer,
+        );
+        offer_tx.max_fee = 1_000;
+        offer_tx.sign(&seller_kp);
+        Executor::apply_transaction_checked(&mut state, &offer_tx).unwrap();
+
+        let mut buy_tx = Transaction::new_with_chain_id(
+            alice,
+            Address::zero(),
+            10_000,
+            1_000,
+            0,
+            bincode::serialize(&0u64).unwrap(),
+            45261,
+            TransactionType::BnsBuyName,
+        );
+        buy_tx.max_fee = 1_000;
+        buy_tx.sign(&kp);
+        Executor::apply_transaction_checked(&mut state, &buy_tx).unwrap();
+
+        let (storage_tx, cref, set_bud3_data, set_records_data) =
+            prepare_publish_site_payloads("ayaz.bud", &file_bytes, &file_mime, 100, alice.0)
+                .unwrap();
+
+        let mut tx1 = Transaction::new_with_chain_id(
+            alice,
+            Address::zero(),
+            0,
+            1_000,
+            1,
+            Vec::new(),
+            45261,
+            TransactionType::StorageV3(Box::new(storage_tx)),
+        );
+        tx1.max_fee = 1_000;
+        tx1.sign(&kp);
+        Executor::apply_transaction_checked(&mut state, &tx1).unwrap();
+
+        let mut tx2 = Transaction::new_with_chain_id(
+            alice,
+            Address::zero(),
+            0,
+            1_000,
+            2,
+            set_bud3_data,
+            45261,
+            TransactionType::BnsSetBud3Content,
+        );
+        tx2.max_fee = 1_000;
+        tx2.sign(&kp);
+        Executor::apply_transaction_checked(&mut state, &tx2).unwrap();
+
+        let mut tx3 = Transaction::new_with_chain_id(
+            alice,
+            Address::zero(),
+            0,
+            1_000,
+            3,
+            set_records_data,
+            45261,
+            TransactionType::BnsSetRecords,
+        );
+        tx3.max_fee = 1_000;
+        tx3.sign(&kp);
+        Executor::apply_transaction_checked(&mut state, &tx3).unwrap();
+
+        assert_eq!(
+            state.bns_registry.resolve_bud3_content("ayaz.bud", 6),
+            Some(cref)
+        );
+        assert_eq!(
+            state
+                .bns_registry
+                .get_records("ayaz.bud", 6)
+                .unwrap()
+                .get("content.mime")
+                .map(String::as_str),
+            Some("text/html; charset=utf-8")
+        );
+
+        // Verify JSON proof roundtrip through `parse_and_verify_bns_proof_json`!
+        let proof = state.bns_registry.prove_name("ayaz.bud", 6);
+        let t = proof.entry.as_ref().unwrap();
+        let proof_json = serde_json::json!({
+            "name": proof.name,
+            "included": proof.included,
+            "epoch": proof.epoch,
+            "names_count": proof.names_count,
+            "bns_root": format!("0x{}", hex::encode(proof.bns_root)),
+            "meta_digest": format!("0x{}", hex::encode(proof.meta_digest)),
+            "entry": {
+                "name": t.name,
+                "owner": format!("0x{}", t.owner.to_hex()),
+                "address": t.address.map(|a| format!("0x{}", a.to_hex())),
+                "expires_at": t.expires_at,
+                "content_id": t.content_id.map(|c| format!("0x{}", hex::encode(c.0))),
+                "storage_root": t.storage_root.map(|s| format!("0x{}", hex::encode(s))),
+                "extras_digest": format!("0x{}", hex::encode(t.extras_digest)),
+                "leaf": format!("0x{}", hex::encode(t.leaf)),
+                "siblings": t.siblings.iter().map(|s| format!("0x{}", hex::encode(s))).collect::<Vec<_>>(),
+                "directions": t.directions,
+            },
+            "predecessor": serde_json::Value::Null,
+            "successor": serde_json::Value::Null,
+        });
+        let (_, verified_owner) = parse_and_verify_bns_proof_json(&proof_json, "ayaz.bud").unwrap();
+        assert_eq!(verified_owner, Some(alice));
+
+        let mut forged_json = proof_json;
+        forged_json["bns_root"] = serde_json::json!(format!("0x{}", "ee".repeat(32)));
+        assert!(parse_and_verify_bns_proof_json(&forged_json, "ayaz.bud").is_err());
     }
 }
