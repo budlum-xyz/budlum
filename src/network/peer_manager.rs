@@ -123,6 +123,52 @@ impl PeerScore {
         })
     }
 }
+/// Canonical network prefix key for eclipse and outbound-diversity bounds.
+///
+/// IPv4 addresses are grouped by `/24` (`3` octets), IPv6 addresses by `/48`
+/// (`6` octets, the standard regional operator allocation), and IPv4-mapped
+/// IPv6 addresses (`::ffff:a.b.c.d`) collapse into the corresponding IPv4 `/24`
+/// bucket so dual-stack endpoints cannot double their budget.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SubnetKey {
+    Ipv4([u8; 3]),
+    Ipv6([u8; 6]),
+}
+
+impl From<[u8; 3]> for SubnetKey {
+    fn from(prefix: [u8; 3]) -> Self {
+        Self::Ipv4(prefix)
+    }
+}
+
+/// Extract canonical subnet key (`/24` for IPv4 and IPv4-mapped IPv6, `/48` for
+/// IPv6) from a multiaddr for eclipse and outbound-diversity admission.
+///
+/// Loopback addresses (`127.0.0.0/8`, `::1`, `::ffff:127.0.0.0/104`) return
+/// `None` so single-host rehearsals do not trip public subnet ceilings.
+pub(crate) fn peer_subnet_key(addr: &libp2p::Multiaddr) -> Option<SubnetKey> {
+    if let Some(v4) = crate::network::node::ipv4_slash24(addr) {
+        return Some(SubnetKey::Ipv4(v4));
+    }
+    for proto in addr.iter() {
+        if let libp2p::multiaddr::Protocol::Ip6(ip) = proto {
+            if ip.is_loopback() {
+                return None;
+            }
+            if let Some(v4) = ip.to_ipv4_mapped() {
+                if v4.is_loopback() {
+                    return None;
+                }
+                let [a, b, c, _] = v4.octets();
+                return Some(SubnetKey::Ipv4([a, b, c]));
+            }
+            let [b0, b1, b2, b3, b4, b5, ..] = ip.octets();
+            return Some(SubnetKey::Ipv6([b0, b1, b2, b3, b4, b5]));
+        }
+    }
+    None
+}
+
 pub struct PeerManager {
     peers: HashMap<PeerId, PeerScore>,
     /// Tokens refilled per second for general P2P messages.
@@ -130,21 +176,21 @@ pub struct PeerManager {
     pub(crate) msg_refill_rate: f64,
     /// Soft ceiling on tracked peer score entries (memory DoS guard).
     pub(crate) max_tracked_peers: usize,
-    /// H5.1 eclipse protection: max concurrent connections per IPv4 /24.
+    /// H5.1 eclipse protection: max concurrent connections per subnet (`/24` IPv4, `/48` IPv6).
     pub(crate) max_peers_per_subnet: usize,
-    /// Live connection count per IPv4 /24 key (first 3 octets).
-    subnet_counts: HashMap<[u8; 3], usize>,
+    /// Live connection count per subnet key (`/24` IPv4 or `/48` IPv6).
+    subnet_counts: HashMap<SubnetKey, usize>,
     /// Peer → subnet mapping for disconnect accounting.
-    peer_subnets: HashMap<PeerId, [u8; 3]>,
+    peer_subnets: HashMap<PeerId, SubnetKey>,
     /// Live peer set. Libp2p can emit multiple connection events for one peer;
     /// This set makes peer_count and /24 accounting idempotent.
     connected_peers: HashSet<PeerId>,
-    /// H5.2 outbound diversity: max outbound connections per IPv4 /24.
+    /// H5.2 outbound diversity: max outbound connections per subnet.
     pub(crate) max_outbound_per_subnet: usize,
-    /// Outbound connection count per IPv4 /24.
-    outbound_subnet_counts: HashMap<[u8; 3], usize>,
+    /// Outbound connection count per subnet.
+    outbound_subnet_counts: HashMap<SubnetKey, usize>,
     /// Outbound peer → subnet mapping.
-    outbound_peer_subnets: HashMap<PeerId, [u8; 3]>,
+    outbound_peer_subnets: HashMap<PeerId, SubnetKey>,
     /// When the last full-table prune found nothing to reclaim. While the
     /// table stays full of unprunable records, scanning it again on every
     /// message from an unknown peer is a CPU amplifier.
@@ -217,7 +263,7 @@ impl PeerManager {
 
     /// Returns false if an outbound connection to `subnet` would
     /// Exceed the diversity bound. 0 = unlimited.
-    pub fn can_admit_outbound_subnet(&self, subnet: Option<[u8; 3]>) -> bool {
+    pub fn can_admit_outbound_subnet(&self, subnet: Option<SubnetKey>) -> bool {
         if self.max_outbound_per_subnet == 0 {
             return true;
         }
@@ -229,7 +275,7 @@ impl PeerManager {
 
     /// Record an outbound connection. Returns false if the peer is
     /// Already tracked as outbound or the subnet bound is exceeded.
-    pub fn note_outbound_connected(&mut self, peer_id: PeerId, subnet: Option<[u8; 3]>) -> bool {
+    pub fn note_outbound_connected(&mut self, peer_id: PeerId, subnet: Option<SubnetKey>) -> bool {
         if !self.can_admit_outbound_subnet(subnet) {
             return false;
         }
@@ -259,19 +305,19 @@ impl PeerManager {
     }
 
     /// Returns false if admitting `subnet` would exceed the eclipse bound.
-    pub fn can_admit_subnet(&self, subnet: Option<[u8; 3]>) -> bool {
+    pub fn can_admit_subnet(&self, subnet: Option<SubnetKey>) -> bool {
         let Some(key) = subnet else {
-            return true; // non-IPv4 (relay/circuit) - bound by max_peers only
+            return true; // loopback / relay / circuit - bound by max_peers only
         };
         self.subnet_counts.get(&key).copied().unwrap_or(0) < self.max_peers_per_subnet
     }
 
-    /// Record a live connection under an optional /24 key.
+    /// Record a live connection under an optional subnet key (`/24` IPv4, `/48` IPv6).
     ///
     /// Returns `true` only for the first live connection for `peer_id`.
     /// Libp2p may emit duplicate connection events for the same peer/address;
-    /// Counting those duplicates was causing peer_count drift and /24 overcount.
-    pub fn note_connected(&mut self, peer_id: PeerId, subnet: Option<[u8; 3]>) -> bool {
+    /// Counting those duplicates was causing peer_count drift and subnet overcount.
+    pub fn note_connected(&mut self, peer_id: PeerId, subnet: Option<SubnetKey>) -> bool {
         if !self.connected_peers.insert(peer_id) {
             return false;
         }
@@ -314,7 +360,7 @@ impl PeerManager {
         true
     }
 
-    pub fn subnet_connection_count(&self, subnet: [u8; 3]) -> usize {
+    pub fn subnet_connection_count(&self, subnet: SubnetKey) -> usize {
         self.subnet_counts.get(&subnet).copied().unwrap_or(0)
     }
     /// Score entry for a peer, creating one if the map has room.
@@ -1109,7 +1155,7 @@ mod tests {
     fn eclipse_subnet_bound_rejects_fifth_peer() {
         let mut pm = PeerManager::new();
         pm.set_max_peers_per_subnet(4);
-        let subnet = [10, 0, 0];
+        let subnet = SubnetKey::Ipv4([10, 0, 0]);
         for _ in 0..4 {
             assert!(pm.can_admit_subnet(Some(subnet)));
             let peer = libp2p::identity::Keypair::generate_ed25519()
@@ -1123,14 +1169,14 @@ mod tests {
             "5th peer on same /24 must be rejected"
         );
         // Different subnet still ok
-        assert!(pm.can_admit_subnet(Some([10, 0, 1])));
+        assert!(pm.can_admit_subnet(Some(SubnetKey::Ipv4([10, 0, 1]))));
     }
 
     #[test]
     fn eclipse_disconnect_frees_subnet_slot() {
         let mut pm = PeerManager::new();
         pm.set_max_peers_per_subnet(1);
-        let subnet = [192, 168, 1];
+        let subnet = SubnetKey::Ipv4([192, 168, 1]);
         let peer = libp2p::identity::Keypair::generate_ed25519()
             .public()
             .to_peer_id();
@@ -1146,7 +1192,7 @@ mod tests {
     #[test]
     fn eclipse_peer_accounting_is_idempotent() {
         let mut pm = PeerManager::new();
-        let subnet = [172, 18, 0];
+        let subnet = SubnetKey::Ipv4([172, 18, 0]);
         let peer = libp2p::identity::Keypair::generate_ed25519()
             .public()
             .to_peer_id();
@@ -1168,8 +1214,8 @@ mod tests {
         let mut pm = PeerManager::new();
         pm.set_max_peers_per_subnet(4);
 
-        let subnet_a = [10, 0, 0];
-        let subnet_b = [10, 0, 1];
+        let subnet_a = SubnetKey::Ipv4([10, 0, 0]);
+        let subnet_b = SubnetKey::Ipv4([10, 0, 1]);
 
         // Fill subnet A
         for _ in 0..4 {
@@ -1212,7 +1258,7 @@ mod tests {
         let mut pm = PeerManager::new();
         pm.set_max_peers_per_subnet(4);
 
-        let subnet = [192, 168, 1];
+        let subnet = SubnetKey::Ipv4([192, 168, 1]);
         // Fill the subnet completely
         for _ in 0..4 {
             let peer = libp2p::identity::Keypair::generate_ed25519()
@@ -1223,7 +1269,7 @@ mod tests {
         // New peer on same subnet is rejected - eclipse isolation
         assert!(!pm.can_admit_subnet(Some(subnet)));
         // New peer on different subnet is accepted
-        assert!(pm.can_admit_subnet(Some([192, 168, 2])));
+        assert!(pm.can_admit_subnet(Some(SubnetKey::Ipv4([192, 168, 2]))));
     }
 
     /// Chaos: sybil attack from same /24 subnet is rejected.
@@ -1232,7 +1278,7 @@ mod tests {
         let mut pm = PeerManager::new();
         pm.set_max_peers_per_subnet(4);
 
-        let subnet = [172, 16, 0];
+        let subnet = SubnetKey::Ipv4([172, 16, 0]);
         // Sybil: 4 peers from same subnet
         for _ in 0..4 {
             let peer = libp2p::identity::Keypair::generate_ed25519()
@@ -1335,7 +1381,7 @@ mod tests {
     fn outbound_subnet_diversity_rejects_excess() {
         let mut pm = PeerManager::new();
         pm.max_outbound_per_subnet = 2;
-        let subnet = [10u8, 0, 1];
+        let subnet = SubnetKey::Ipv4([10u8, 0, 1]);
         // First 2 outbound from same subnet: OK.
         let p1 = libp2p::identity::Keypair::generate_ed25519()
             .public()
@@ -1756,12 +1802,45 @@ mod tests {
     fn simultaneous_dial_to_same_peer_is_recognized_as_already_connected() {
         let mut manager = PeerManager::new();
         let peer = test_peer_id();
+        let lo = SubnetKey::Ipv4([127, 0, 0]);
         assert!(!manager.is_connected(&peer));
-        assert!(manager.note_connected(peer, Some([127, 0, 0])));
+        assert!(manager.note_connected(peer, Some(lo)));
         assert!(manager.is_connected(&peer));
-        assert!(!manager.note_connected(peer, Some([127, 0, 0])));
+        assert!(!manager.note_connected(peer, Some(lo)));
         assert!(manager.is_connected(&peer));
         assert!(manager.note_disconnected(&peer));
         assert!(!manager.is_connected(&peer));
+    }
+
+    #[test]
+    fn ipv6_slash48_and_ipv4_mapped_share_eclipse_ceiling() {
+        let mut pm = PeerManager::new();
+        pm.set_max_peers_per_subnet(2);
+        let v6_a: libp2p::Multiaddr = "/ip6/2001:db8:cafe:1::1/tcp/30333".parse().unwrap();
+        let v6_b: libp2p::Multiaddr = "/ip6/2001:db8:cafe:2::9/tcp/30333".parse().unwrap();
+        let v6_other: libp2p::Multiaddr = "/ip6/2001:db8:beef:1::1/tcp/30333".parse().unwrap();
+        let key_a = peer_subnet_key(&v6_a);
+        let key_b = peer_subnet_key(&v6_b);
+        assert_eq!(key_a, key_b, "two /64s inside the same /48 share one key");
+        assert!(pm.note_connected(test_peer_id(), key_a));
+        assert!(pm.note_connected(test_peer_id(), key_b));
+        assert!(
+            !pm.can_admit_subnet(key_a),
+            "third IPv6 peer from the same /48 must be rejected"
+        );
+        assert!(
+            pm.can_admit_subnet(peer_subnet_key(&v6_other)),
+            "distinct IPv6 /48 remains admissible"
+        );
+
+        let v4: libp2p::Multiaddr = "/ip4/203.0.113.7/tcp/30333".parse().unwrap();
+        let v4_mapped: libp2p::Multiaddr = "/ip6/::ffff:203.0.113.99/tcp/30333".parse().unwrap();
+        assert_eq!(
+            peer_subnet_key(&v4),
+            peer_subnet_key(&v4_mapped),
+            "IPv4-mapped IPv6 must share the IPv4 /24 bucket"
+        );
+        let v6_lo: libp2p::Multiaddr = "/ip6/::1/tcp/30333".parse().unwrap();
+        assert_eq!(peer_subnet_key(&v6_lo), None);
     }
 }

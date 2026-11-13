@@ -961,10 +961,20 @@ fn register_manifest(
             });
         }
     }
+    // Manifest registration is first-writer-wins: once a manifest is registered
+    // for `manifest_id`, a second principal cannot append a competing
+    // `manifest_claims` entry that would render `owner_of` ambiguous (`None`)
+    // and lock the canonical owner out of marketplace listing and plaintext
+    // retraction. A front-run confidential commit without a manifest does not
+    // populate `manifests`, so the canonical owner can still register first.
     if state.storage_registry.is_registered(&manifest.manifest_id)
-        && state
+        && (state
             .storage_registry
-            .has_manifest_claim(&manifest.manifest_id, sender)
+            .get_manifest(&manifest.manifest_id)
+            .is_some()
+            || state
+                .storage_registry
+                .has_manifest_claim(&manifest.manifest_id, sender))
     {
         return Err(StorageTxError::AlreadyRegistered);
     }
@@ -1082,6 +1092,28 @@ mod tests {
         assert_eq!(
             execute_storage_tx(&mut state, &ctx(owner()), &tx).unwrap_err(),
             StorageTxError::AlreadyRegistered
+        );
+        assert_eq!(state.storage_registry.root(), root);
+
+        // A second principal forging a manifest for the same `manifest_id` must
+        // also be refused with `AlreadyRegistered` so `owner_of` stays unique.
+        let rival = Address::from([0x77; 32]);
+        let mut rival_manifest = m.clone();
+        rival_manifest.owner = rival;
+        assert_eq!(
+            execute_storage_tx(
+                &mut state,
+                &ctx(rival),
+                &StorageTx::RegisterManifest {
+                    manifest: rival_manifest,
+                },
+            )
+            .unwrap_err(),
+            StorageTxError::AlreadyRegistered
+        );
+        assert_eq!(
+            state.storage_registry.owner_of(&m.manifest_id),
+            Some(owner())
         );
         assert_eq!(state.storage_registry.root(), root);
     }
@@ -2233,15 +2265,7 @@ mod tests {
         assert_eq!(squatter_manifest.manifest_id, victim_manifest.manifest_id);
         let mid = victim_manifest.manifest_id;
 
-        // 1. Squatter front-runs manifest registration and commits its own body/grant/policy.
-        execute_storage_tx(
-            &mut state,
-            &ctx(squatter),
-            &StorageTx::RegisterManifest {
-                manifest: squatter_manifest,
-            },
-        )
-        .expect("squatter registers first");
+        // 1. Squatter front-runs confidential body commit before any manifest is registered.
         let squatter_commit = ConfidentialBodyCommit::new(
             mid,
             ContentEncryption::ClientSide(ContentCipher::Aes256Gcm),
@@ -2257,21 +2281,11 @@ mod tests {
             },
         )
         .expect("squatter commits under its own namespace");
-        let mut blocking_policy = policy_for(squatter, victim_manifest.shards[0].shard_id);
-        blocking_policy.self_host_allowed = false;
-        execute_storage_tx(
-            &mut state,
-            &ctx(squatter),
-            &StorageTx::DeclareSelfHostPolicy {
-                manifest_id: mid,
-                policy: blocking_policy,
-                profile: profile_for(squatter),
-            },
-        )
-        .expect("squatter policy scoped to squatter");
+        assert!(state.storage_registry.is_registered(&mid));
 
         // 2. Real owner is NOT locked out: RegisterManifest, CommitConfidentialBody,
-        //    IssueViewGrant, SocialDelete, and self-host check all succeed for victim.
+        //    IssueViewGrant, SocialDelete, and self-host check all succeed for victim,
+        //    and a copycat rival RegisterManifest cannot orphan `owner_of(&mid)`.
         execute_storage_tx(
             &mut state,
             &ctx(victim),
@@ -2279,10 +2293,21 @@ mod tests {
                 manifest: victim_manifest.clone(),
             },
         )
-        .expect("real owner registers despite squatter");
-        // Ambiguous while neither holds a third-party deal: squatter cannot claim sole owner_of.
-        assert_eq!(state.storage_registry.owner_of(&mid), None);
+        .expect("real owner registers despite squatter confidential commit");
+        assert_eq!(state.storage_registry.owner_of(&mid), Some(victim));
         assert!(state.storage_registry.has_claim(&mid, &victim));
+        assert_eq!(
+            execute_storage_tx(
+                &mut state,
+                &ctx(squatter),
+                &StorageTx::RegisterManifest {
+                    manifest: squatter_manifest,
+                },
+            )
+            .unwrap_err(),
+            StorageTxError::AlreadyRegistered
+        );
+        assert_eq!(state.storage_registry.owner_of(&mid), Some(victim));
 
         let victim_commit = ConfidentialBodyCommit::new(
             mid,

@@ -1416,11 +1416,14 @@ impl Wallet {
             // Bind the exact sealed bytes to a quote: an untrusted runtime
             // cannot predict SHA-256(sealed) in advance, so replacing the
             // sealed payload breaks the report data the quote is bound to.
-            let seal_digest: [u8; 32] = {
+            let (msg_digest, seal_digest): ([u8; 32], [u8; 32]) = {
                 use sha3::{Digest, Sha3_256};
+                let msg_digest: [u8; 32] = Sha3_256::digest(message).into();
                 let mut h = Sha3_256::new();
+                h.update(b"BUDLUM_TEE_SEAL_BIND_V1");
+                h.update(msg_digest);
                 h.update(&sealed);
-                h.finalize().into()
+                (msg_digest, h.finalize().into())
             };
             let quote = runtime.quote(seal_digest)?;
             // The wallet's root of trust is the verifier it owns, which
@@ -1451,9 +1454,12 @@ impl Wallet {
                     "TEE attestation does not bind the sealed intent digest".into(),
                 ));
             }
-            // Sign the sealed bytes plus the attestation measurement so the
-            // signature commits to the enclave that sealed them.
-            let mut to_sign = Vec::with_capacity(sealed.len() + 32);
+            // Bind the caller's plaintext digest, sealed envelope, and enclave
+            // measurement into the signed payload so a faulty `seal_private_intent`
+            // implementation cannot substitute another intent's ciphertext.
+            let mut to_sign = Vec::with_capacity(25 + 32 + sealed.len() + 32);
+            to_sign.extend_from_slice(b"BUDLUM_TEE_INTENT_BIND_V1");
+            to_sign.extend_from_slice(&msg_digest);
             to_sign.extend_from_slice(&sealed);
             to_sign.extend_from_slice(&attestation.measurement);
             Ok(self.sign(&to_sign))
@@ -1508,6 +1514,18 @@ impl Wallet {
         if req.input.recipient_tag != wallet_tag {
             return Err(WalletError::InvalidPrivateTransfer(
                 "input note recipient tag does not match this wallet's address".into(),
+            ));
+        }
+        let expected_secret_bytes =
+            derive_spend_secret(&self.seed, req.input.commitment()).to_le_bytes();
+        let caller_secret_bytes = req.input.spend_secret.to_le_bytes();
+        let mut secret_diff = 0u8;
+        for (&lhs, &rhs) in caller_secret_bytes.iter().zip(expected_secret_bytes.iter()) {
+            secret_diff |= lhs ^ rhs;
+        }
+        if secret_diff != 0 {
+            return Err(WalletError::InvalidPrivateTransfer(
+                "input note spend_secret does not match wallet seed derivation".into(),
             ));
         }
         let change = req.input.amount - req.send_amount;
@@ -2733,6 +2751,7 @@ mod tests {
 
     #[test]
     fn d2_wallet_tee_ready_mock_allows_sign() {
+        use sha3::{Digest, Sha3_256};
         let rt = crate::tee::mock::MockTeeRuntime::new(TeeBackendKind::ClientSgx);
         let verifier = crate::tee::mock::MockQuoteVerifier::default();
         let mut w = Wallet::from_entropy(&[0x66u8; 16]).unwrap();
@@ -2741,12 +2760,71 @@ mod tests {
         // wallet would refuse any attestation, self-attested or not.
         w.set_trusted_tee_measurement(crate::tee::mock::MOCK_MEASUREMENT);
         let sig = w.sign_with_privacy(b"hello", &rt, &verifier).unwrap();
-        // Signature is over sealed bytes + measurement, not raw message.
+        // Signature binds caller message digest + sealed bytes + measurement.
         assert!(!Wallet::verify(&w.public_key(), b"hello", &sig));
         let sealed = rt.seal_private_intent(b"hello").unwrap();
-        let mut to_sign = sealed.clone();
+        let msg_digest: [u8; 32] = Sha3_256::digest(b"hello").into();
+        let mut to_sign = Vec::new();
+        to_sign.extend_from_slice(b"BUDLUM_TEE_INTENT_BIND_V1");
+        to_sign.extend_from_slice(&msg_digest);
+        to_sign.extend_from_slice(&sealed);
         to_sign.extend_from_slice(&crate::tee::mock::MOCK_MEASUREMENT);
         assert!(Wallet::verify(&w.public_key(), &to_sign, &sig));
+
+        // A signature produced for `"hello"` never verifies under `"other"` even
+        // if an untrusted runtime replayed the same sealed ciphertext.
+        let mut substituted = Vec::new();
+        let other_digest: [u8; 32] = Sha3_256::digest(b"other").into();
+        substituted.extend_from_slice(b"BUDLUM_TEE_INTENT_BIND_V1");
+        substituted.extend_from_slice(&other_digest);
+        substituted.extend_from_slice(&sealed);
+        substituted.extend_from_slice(&crate::tee::mock::MOCK_MEASUREMENT);
+        assert!(!Wallet::verify(&w.public_key(), &substituted, &sig));
+    }
+
+    #[test]
+    fn d2_wallet_rejects_forged_spend_secret_and_bad_blindings() {
+        let mut w = Wallet::from_entropy(&[0x67u8; 16]).unwrap();
+        w.set_note_privacy_enabled(true);
+        let (blinding, _, _) = w.prepare_receive_note(100, 0).unwrap();
+        let mut bad_secret_input = w.note_input_from_receive(100, blinding).unwrap();
+        bad_secret_input.spend_secret ^= 1;
+        let err = w
+            .build_private_transfer(
+                PrivateTransferRequest {
+                    input: bad_secret_input,
+                    to: [0x11u8; 32],
+                    send_amount: 100,
+                    output_blinding: 7,
+                    change_recipient_tag: None,
+                    change_blinding: None,
+                },
+                &w.default_tee_runtime(),
+                45262,
+                0,
+            )
+            .unwrap_err();
+        assert!(matches!(err, WalletError::InvalidPrivateTransfer(_)));
+
+        let input = w.note_input_from_receive(100, blinding).unwrap();
+        for bad_out in [0u64, budlum_note_packing::GOLDILOCKS_P, blinding] {
+            let err = w
+                .build_private_transfer(
+                    PrivateTransferRequest {
+                        input: input.clone(),
+                        to: [0x11u8; 32],
+                        send_amount: 100,
+                        output_blinding: bad_out,
+                        change_recipient_tag: None,
+                        change_blinding: None,
+                    },
+                    &w.default_tee_runtime(),
+                    45262,
+                    0,
+                )
+                .unwrap_err();
+            assert!(matches!(err, WalletError::InvalidPrivateTransfer(_)));
+        }
     }
 
     #[test]
