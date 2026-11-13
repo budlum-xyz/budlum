@@ -62,7 +62,8 @@ pub const fn activation_delay_epochs(p_type: &ProposalType) -> u64 {
         | ProposalType::SetConstitutionParameter(_)
         | ProposalType::UnfreezeConsensusDomain { .. }
         | ProposalType::ResetConsensusDomainTip { .. }
-        | ProposalType::PoaAddAdmin { .. } => GOVERNANCE_POLICY_ACTIVATION_DELAY_EPOCHS,
+        | ProposalType::PoaAddAdmin { .. }
+        | ProposalType::BnsSetPrimarySellers { .. } => GOVERNANCE_POLICY_ACTIVATION_DELAY_EPOCHS,
 
         // Actions aimed at one account.
         ProposalType::SlashValidator { .. }
@@ -295,6 +296,11 @@ pub enum ProposalType {
         target_height: u64,
         target_hash: [u8; 32],
         justification_hash: [u8; 32],
+    },
+    /// Replace the authorized primary-seller address set for `.bud` marketplace
+    /// `Primary` listings.
+    BnsSetPrimarySellers {
+        sellers: Vec<Address>,
     },
 }
 
@@ -652,6 +658,10 @@ impl GovernanceState {
                     );
                 }
             }
+            ProposalType::BnsSetPrimarySellers { sellers } => {
+                let mut reg = crate::bns::BnsRegistry::new();
+                reg.set_primary_sellers(sellers.iter().copied())?;
+            }
             _ => {}
         }
 
@@ -851,6 +861,11 @@ impl GovernanceState {
                     target_hash: *target_hash,
                     justification_hash: *justification_hash,
                 }),
+                ProposalType::BnsSetPrimarySellers { sellers } => {
+                    Some(GovernanceAction::BnsSetPrimarySellers {
+                        sellers: sellers.clone(),
+                    })
+                }
                 // Applied (and marked Executed) by the account state at the
                 // epoch boundary, see the doc comment.
                 ProposalType::ChangeBaseFee(_)
@@ -925,6 +940,9 @@ pub enum GovernanceAction {
         target_height: u64,
         target_hash: [u8; 32],
         justification_hash: [u8; 32],
+    },
+    BnsSetPrimarySellers {
+        sellers: Vec<Address>,
     },
 }
 

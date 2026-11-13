@@ -8,7 +8,8 @@ enum ProtoTransactionType {
     UNSTAKE = 2;
     VOTE = 3;
     CONTRACT_CALL = 4;
-    BNS_REGISTER = 5;
+    reserved 5;
+    reserved "BNS_REGISTER";
     BNS_SET_CONTENT = 6;
     BNS_REGISTER_SUBDOMAIN = 7;
     BNS_SET_STORAGE = 8;
@@ -132,6 +133,12 @@ enum ProtoTransactionType {
     VALIDATOR = 69;
     // The B.U.D. 3.0 storage door (StorageTx v3).
     STORAGE_V3 = 70;
+    // Open a Primary or Resale .bud domain listing on the marketplace.
+    BNS_CREATE_OFFER = 71;
+    // Seller-only cancellation of an active .bud domain listing.
+    BNS_CANCEL_OFFER = 72;
+    // Atomic purchase and settlement of an active .bud domain listing.
+    BNS_BUY_NAME = 73;
 }
 
 message ProtoTransaction {

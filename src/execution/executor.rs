@@ -1176,67 +1176,233 @@ impl Executor {
                 })?;
                 sender.nonce = Self::checked_next_nonce(sender.nonce)?;
             }
-            TransactionType::BnsRegister => {
-                let (name, duration): (String, u64) = bincode::deserialize(&tx.data)
+            TransactionType::BnsCreateOffer => {
+                if tx.amount != 0 || tx.to != Address::zero() {
+                    return Err(BudlumError::validation(
+                        "bns_invalid_create_offer",
+                        "BNS create offer carries no header amount or recipient",
+                    ));
+                }
+                if state.spendable_balance(&tx.from) < tx.fee {
+                    return Err(BudlumError::validation(
+                        "bns_vesting_locked",
+                        format!(
+                            "BNS create offer fee exceeds spendable balance: need {}, spendable {}",
+                            tx.fee,
+                            state.spendable_balance(&tx.from)
+                        ),
+                    ));
+                }
+                let req: crate::pollen::CreateNameOffer = bincode::deserialize(&tx.data)
                     .map_err(|e| BudlumError::validation("bns_invalid_data", e.to_string()))?;
 
-                let cost = state.bns_registry.calculate_cost(&name, duration);
-                if tx.amount < cost {
+                match req.kind {
+                    crate::pollen::OfferKind::Primary => {
+                        if !state.bns_registry.is_primary_seller(&tx.from) {
+                            return Err(BudlumError::validation(
+                                "bns_unauthorized_primary_seller",
+                                "Only authorized BNS primary sellers can open Primary offers",
+                            ));
+                        }
+                        if !state
+                            .bns_registry
+                            .is_available_for_primary(&req.name, state.epoch_index)
+                        {
+                            return Err(BudlumError::validation(
+                                "bns_offer_name_unavailable",
+                                "Name is already live or in grace and cannot be listed as Primary",
+                            ));
+                        }
+                    }
+                    crate::pollen::OfferKind::Resale => {
+                        if !state.bns_registry.is_live_owned_by(
+                            &req.name,
+                            &tx.from,
+                            state.epoch_index,
+                        ) {
+                            return Err(BudlumError::validation(
+                                "bns_resale_not_live_owner",
+                                "Resale offer requires a live name owned by the seller",
+                            ));
+                        }
+                    }
+                }
+
+                state
+                    .marketplace
+                    .create_name_offer(tx.from, req, state.epoch_index)
+                    .map_err(|e| BudlumError::validation("bns_create_offer_failed", e))?;
+
+                let sender = state.get_or_create(&tx.from);
+                sender.balance = sender.balance.checked_sub(tx.fee).ok_or_else(|| {
+                    BudlumError::validation("balance_underflow", "balance underflow")
+                })?;
+                sender.nonce = Self::checked_next_nonce(sender.nonce)?;
+            }
+            TransactionType::BnsCancelOffer => {
+                if tx.amount != 0 || tx.to != Address::zero() {
+                    return Err(BudlumError::validation(
+                        "bns_invalid_cancel_offer",
+                        "BNS cancel offer carries no header amount or recipient",
+                    ));
+                }
+                if state.spendable_balance(&tx.from) < tx.fee {
+                    return Err(BudlumError::validation(
+                        "bns_vesting_locked",
+                        format!(
+                            "BNS cancel offer fee exceeds spendable balance: need {}, spendable {}",
+                            tx.fee,
+                            state.spendable_balance(&tx.from)
+                        ),
+                    ));
+                }
+                let offer_id: u64 = bincode::deserialize(&tx.data)
+                    .map_err(|e| BudlumError::validation("bns_invalid_data", e.to_string()))?;
+
+                state
+                    .marketplace
+                    .cancel_name_offer(offer_id, &tx.from)
+                    .map_err(|e| BudlumError::validation("bns_cancel_offer_failed", e))?;
+
+                let sender = state.get_or_create(&tx.from);
+                sender.balance = sender.balance.checked_sub(tx.fee).ok_or_else(|| {
+                    BudlumError::validation("balance_underflow", "balance underflow")
+                })?;
+                sender.nonce = Self::checked_next_nonce(sender.nonce)?;
+            }
+            TransactionType::BnsBuyName => {
+                if tx.amount == 0 || tx.to != Address::zero() {
+                    return Err(BudlumError::validation(
+                        "bns_invalid_buy_name",
+                        "BNS buy name requires a positive payment and zero header recipient",
+                    ));
+                }
+                let offer_id: u64 = bincode::deserialize(&tx.data)
+                    .map_err(|e| BudlumError::validation("bns_invalid_data", e.to_string()))?;
+
+                let offer = state
+                    .marketplace
+                    .get_name_offer(offer_id)
+                    .cloned()
+                    .ok_or_else(|| {
+                        BudlumError::validation("bns_offer_not_found", "BNS offer not found")
+                    })?;
+
+                if !offer.active || state.epoch_index >= offer.expires_at_epoch {
+                    return Err(BudlumError::validation(
+                        "bns_offer_inactive_or_expired",
+                        "BNS offer is closed or expired",
+                    ));
+                }
+
+                if tx.amount != offer.price_atoms {
                     return Err(BudlumError::validation(
                         "bns_insufficient_payment",
                         format!(
                             "Required: {cost}, provided: {amount}",
-                            cost = cost,
+                            cost = offer.price_atoms,
                             amount = tx.amount
                         ),
                     ));
                 }
 
-                // Vesting gate: the registration cost
-                // is a spend; the locked team-vesting portion cannot pay it.
-                // Read before the registry mutation and the mutable borrow.
-                let bns_total = tx
+                let total_need = tx
                     .fee
-                    .checked_add(cost)
+                    .checked_add(offer.price_atoms)
                     .ok_or_else(|| BudlumError::validation("bns_cost_overflow", "cost overflow"))?;
-                let bns_spendable = state.spendable_balance(&tx.from);
-                if bns_spendable < bns_total {
+                let spendable = state.spendable_balance(&tx.from);
+                if spendable < total_need {
                     return Err(BudlumError::validation(
                         "bns_vesting_locked",
                         format!(
-                            "BNS registration exceeds spendable balance: need {bns_total}, spendable {bns_spendable}"
+                            "BNS purchase exceeds spendable balance: need {total_need}, spendable {spendable}"
                         ),
                     ));
                 }
 
-                state
-                    .bns_registry
-                    .register(name, tx.from, state.epoch_index, duration)
-                    .map_err(|e| {
-                        BudlumError::validation("bns_registration_failed", e.to_string())
-                    })?;
+                if tx.from != offer.seller {
+                    state
+                        .get_balance(&offer.seller)
+                        .checked_add(offer.price_atoms)
+                        .ok_or_else(|| {
+                            BudlumError::validation(
+                                "balance_overflow",
+                                "Seller balance overflow on BNS purchase",
+                            )
+                        })?;
+                }
 
-                let sender = state.get_or_create(&tx.from);
-                // SECURITY H1 FIX: Only subtract exact cost
-                sender.balance = sender
+                // Settle name ownership atomically before touching offer state or balances:
+                // if the name was sold or expired in the meantime, fail closed here.
+                match offer.kind {
+                    crate::pollen::OfferKind::Primary => {
+                        if !state
+                            .bns_registry
+                            .is_available_for_primary(&offer.name, state.epoch_index)
+                        {
+                            return Err(BudlumError::validation(
+                                "bns_name_unavailable",
+                                "Primary offer target name was already registered or is in grace",
+                            ));
+                        }
+                        state
+                            .bns_registry
+                            .register(
+                                offer.name.clone(),
+                                tx.from,
+                                state.epoch_index,
+                                offer.duration,
+                            )
+                            .map_err(|e| {
+                                BudlumError::validation("bns_registration_failed", e.to_string())
+                            })?;
+                    }
+                    crate::pollen::OfferKind::Resale => {
+                        if !state.bns_registry.is_live_owned_by(
+                            &offer.name,
+                            &offer.seller,
+                            state.epoch_index,
+                        ) {
+                            return Err(BudlumError::validation(
+                                "bns_resale_stale",
+                                "Resale offer target name was already transferred or has expired",
+                            ));
+                        }
+                        state
+                            .bns_registry
+                            .transfer(&offer.name, &offer.seller, tx.from, state.epoch_index)
+                            .map_err(|e| {
+                                BudlumError::validation("bns_transfer_failed", e.to_string())
+                            })?;
+                    }
+                }
+
+                state
+                    .marketplace
+                    .close_name_offer(offer_id)
+                    .map_err(|e| BudlumError::validation("bns_close_offer_failed", e))?;
+
+                // Pay the seller from buyer's spendable balance (not burned).
+                let buyer = state.get_or_create(&tx.from);
+                buyer.balance = buyer
                     .balance
                     .checked_sub(tx.fee)
+                    .and_then(|b| b.checked_sub(offer.price_atoms))
                     .ok_or_else(|| {
                         BudlumError::validation(
                             "balance_underflow",
-                            "balance underflow on fee deduction",
-                        )
-                    })?
-                    .checked_sub(cost)
-                    .ok_or_else(|| {
-                        BudlumError::validation(
-                            "balance_underflow",
-                            "balance underflow on cost deduction",
+                            "balance underflow on BNS purchase",
                         )
                     })?;
-                sender.nonce = Self::checked_next_nonce(sender.nonce)?;
-                // The registration cost is paid to no one.
-                state.record_destroyed(u128::from(cost));
+                buyer.nonce = Self::checked_next_nonce(buyer.nonce)?;
+
+                let seller = state.get_or_create(&offer.seller);
+                seller.balance = seller.balance.checked_add(offer.price_atoms).ok_or_else(|| {
+                    BudlumError::validation(
+                        "balance_overflow",
+                        "Seller balance overflow on BNS purchase",
+                    )
+                })?;
             }
             TransactionType::BnsRenew => {
                 let (name, duration): (String, u64) = bincode::deserialize(&tx.data)
@@ -4346,6 +4512,12 @@ impl Executor {
                         hex::encode(target_hash),
                         hex::encode(justification_hash)
                     );
+                }
+                crate::core::governance::GovernanceAction::BnsSetPrimarySellers { sellers } => {
+                    state
+                        .bns_registry
+                        .set_primary_sellers(sellers)
+                        .map_err(|e| BudlumError::validation("bns_primary_sellers", e))?;
                 }
                 crate::core::governance::GovernanceAction::PoaAddAdmin { .. }
                 | crate::core::governance::GovernanceAction::PoaRemoveAdmin { .. }

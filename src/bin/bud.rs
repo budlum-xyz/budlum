@@ -558,16 +558,52 @@ enum GraftAction {
 
 #[derive(Subcommand)]
 enum BnsAction {
-    /// Register a `.bud` name to the wallet's address.
-    Register {
+    /// Batch-publish `Primary` `.bud` marketplace offers from a text file.
+    ///
+    /// Each non-empty, non-`#` line carries `<name> <price_atoms> [duration]`
+    /// (space- or comma-separated).
+    Sell {
         #[command(flatten)]
         signer: V5Signer,
-        /// The name, e.g. `alice.bud`.
+        /// Path to the listing file (`<name> <price_atoms> [duration]`).
+        #[arg(long, required = true)]
+        file: std::path::PathBuf,
+        /// Default registration length in epochs when a line omits `duration`.
+        #[arg(long, default_value_t = 100_000)]
+        duration: u64,
+        /// Epoch at which the opened offers expire.
+        #[arg(long, required = true)]
+        expires_at_epoch: u64,
+    },
+    /// Open a single `Primary` or `Resale` `.bud` marketplace offer.
+    CreateOffer {
+        #[command(flatten)]
+        signer: V5Signer,
         #[arg(long, required = true)]
         name: String,
-        /// Registration length in blocks.
         #[arg(long, required = true)]
+        price_atoms: u64,
+        #[arg(long, default_value_t = 0)]
         duration: u64,
+        /// Offer kind: `Primary` or `Resale`.
+        #[arg(long, default_value = "Resale")]
+        kind: String,
+        #[arg(long, required = true)]
+        expires_at_epoch: u64,
+    },
+    /// Buy an active `.bud` marketplace offer by id.
+    Buy {
+        #[command(flatten)]
+        signer: V5Signer,
+        #[arg(long, required = true)]
+        offer_id: u64,
+    },
+    /// Cancel an active `.bud` marketplace offer owned by the wallet.
+    CancelOffer {
+        #[command(flatten)]
+        signer: V5Signer,
+        #[arg(long, required = true)]
+        offer_id: u64,
     },
     /// Extend a live `.bud` name from its existing expiry.
     Renew {
@@ -2224,26 +2260,189 @@ fn send_bns(
     send_v5(rpc_url, key, tx, None)
 }
 
-fn run_bns_register(
+/// Parse a batch `bud bns sell` file into `(name, price_atoms, duration)` rows.
+fn parse_bns_sell_list(
+    contents: &str,
+    default_duration: u64,
+) -> Result<Vec<(String, u64, u64)>, String> {
+    let mut rows = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
+    for (idx, raw_line) in contents.lines().enumerate() {
+        let line_no = idx + 1;
+        let trimmed = raw_line.split('#').next().unwrap_or("").trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let fields: Vec<&str> = trimmed
+            .split(|c: char| c.is_ascii_whitespace() || c == ',')
+            .filter(|part| !part.is_empty())
+            .collect();
+        if !(2..=3).contains(&fields.len()) {
+            return Err(format!(
+                "line {line_no}: expected `<name> <price_atoms> [duration]`, got `{trimmed}`"
+            ));
+        }
+        let name = fields[0].to_string();
+        if !budlum_core::bns::BnsRegistry::is_valid_name(&name) {
+            return Err(format!(
+                "line {line_no}: invalid BNS name `{name}` (expected <label>.bud with 3..=32 chars)"
+            ));
+        }
+        if !seen.insert(name.clone()) {
+            return Err(format!(
+                "line {line_no}: duplicate name `{name}` in sell file"
+            ));
+        }
+        let price_atoms = fields[1]
+            .parse::<u64>()
+            .map_err(|e| format!("line {line_no}: invalid price_atoms `{}`: {e}", fields[1]))?;
+        if price_atoms == 0 {
+            return Err(format!(
+                "line {line_no}: price_atoms must be greater than zero"
+            ));
+        }
+        let duration = match fields.get(2) {
+            Some(raw_dur) => raw_dur
+                .parse::<u64>()
+                .map_err(|e| format!("line {line_no}: invalid duration `{raw_dur}`: {e}"))?,
+            None => default_duration,
+        };
+        if duration == 0 {
+            return Err(format!(
+                "line {line_no}: duration must be greater than zero"
+            ));
+        }
+        rows.push((name, price_atoms, duration));
+    }
+    if rows.is_empty() {
+        return Err("sell file contains no offers".into());
+    }
+    Ok(rows)
+}
+
+fn run_bns_sell(
+    rpc_url: &str,
+    signer: &V5Signer,
+    file: &std::path::Path,
+    default_duration: u64,
+    expires_at_epoch: u64,
+) -> Result<(), String> {
+    let contents = std::fs::read_to_string(file)
+        .map_err(|e| format!("could not read {}: {e}", file.display()))?;
+    let rows = parse_bns_sell_list(&contents, default_duration)?;
+    let key = open_wallet(signer)?;
+    let nonce_value = rpc_call(
+        rpc_url,
+        "bud_getNonce",
+        serde_json::json!([key.address().to_hex()]),
+    )?;
+    let base_nonce = parse_rpc_u64(&nonce_value, "bud_getNonce")?;
+
+    for (idx, (name, price_atoms, duration)) in rows.into_iter().enumerate() {
+        let nonce = base_nonce
+            .checked_add(u64::try_from(idx).map_err(|_| "batch size overflow".to_string())?)
+            .ok_or_else(|| "nonce overflow in batch sell".to_string())?;
+        let req = budlum_core::bns::CreateNameOffer {
+            name: name.clone(),
+            price_atoms,
+            duration,
+            kind: budlum_core::bns::OfferKind::Primary,
+            expires_at_epoch,
+        };
+        let data = bincode::serialize(&req).map_err(|e| e.to_string())?;
+        let mut tx = v5_template(TransactionType::BnsCreateOffer, 0, signer.fee);
+        tx.data = data;
+        send_v5(rpc_url, &key, tx, Some(nonce))?;
+        println!("submitted Primary offer for {name} at {price_atoms} atoms (duration {duration})");
+    }
+    Ok(())
+}
+
+fn run_bns_create_offer(
     rpc_url: &str,
     signer: &V5Signer,
     name: &str,
+    price_atoms: u64,
     duration: u64,
+    kind: &str,
+    expires_at_epoch: u64,
 ) -> Result<(), String> {
     let key = open_wallet(signer)?;
-    let prepared = rpc_call(
+    let offer_kind = match kind {
+        "Primary" | "primary" => budlum_core::bns::OfferKind::Primary,
+        "Resale" | "resale" => budlum_core::bns::OfferKind::Resale,
+        other => {
+            return Err(format!(
+                "invalid offer kind `{other}`: expected Primary or Resale"
+            ))
+        }
+    };
+    let _prepared = rpc_call(
         rpc_url,
-        "bud_bnsPrepareRegister",
-        serde_json::json!([name, key.address().to_hex(), duration]),
+        "bud_bnsPrepareCreateOffer",
+        serde_json::json!([
+            key.address().to_hex(),
+            name,
+            price_atoms,
+            duration,
+            kind,
+            expires_at_epoch
+        ]),
     )?;
-    let cost = quoted_cost(&prepared, "bud_bnsPrepareRegister")?;
-    let data = bincode::serialize(&(name.to_string(), duration)).map_err(|e| e.to_string())?;
+    let req = budlum_core::bns::CreateNameOffer {
+        name: name.to_string(),
+        price_atoms,
+        duration,
+        kind: offer_kind,
+        expires_at_epoch,
+    };
+    let data = bincode::serialize(&req).map_err(|e| e.to_string())?;
     send_bns(
         rpc_url,
         signer,
         &key,
-        TransactionType::BnsRegister,
-        cost,
+        TransactionType::BnsCreateOffer,
+        0,
+        data,
+    )
+}
+
+fn run_bns_buy(rpc_url: &str, signer: &V5Signer, offer_id: u64) -> Result<(), String> {
+    let key = open_wallet(signer)?;
+    let prepared = rpc_call(
+        rpc_url,
+        "bud_bnsPrepareBuyName",
+        serde_json::json!([key.address().to_hex(), offer_id]),
+    )?;
+    let price_atoms = prepared
+        .get("price_atoms")
+        .and_then(serde_json::Value::as_u64)
+        .ok_or_else(|| "bud_bnsPrepareBuyName returned no price_atoms".to_string())?;
+    let data = bincode::serialize(&offer_id).map_err(|e| e.to_string())?;
+    send_bns(
+        rpc_url,
+        signer,
+        &key,
+        TransactionType::BnsBuyName,
+        price_atoms,
+        data,
+    )
+}
+
+fn run_bns_cancel_offer(rpc_url: &str, signer: &V5Signer, offer_id: u64) -> Result<(), String> {
+    let key = open_wallet(signer)?;
+    let _prepared = rpc_call(
+        rpc_url,
+        "bud_bnsPrepareCancelOffer",
+        serde_json::json!([key.address().to_hex(), offer_id]),
+    )?;
+    let data = bincode::serialize(&offer_id).map_err(|e| e.to_string())?;
+    send_bns(
+        rpc_url,
+        signer,
+        &key,
+        TransactionType::BnsCancelOffer,
+        0,
         data,
     )
 }
@@ -2528,11 +2727,32 @@ fn main() {
         Command::Dev { action } => run_dev(&cli.rpc_url, action),
         Command::Graft { action } => run_graft(&cli.rpc_url, action),
         Command::Bns { action } => match action {
-            BnsAction::Register {
+            BnsAction::Sell {
+                signer,
+                file,
+                duration,
+                expires_at_epoch,
+            } => run_bns_sell(&cli.rpc_url, signer, file, *duration, *expires_at_epoch),
+            BnsAction::CreateOffer {
                 signer,
                 name,
+                price_atoms,
                 duration,
-            } => run_bns_register(&cli.rpc_url, signer, name, *duration),
+                kind,
+                expires_at_epoch,
+            } => run_bns_create_offer(
+                &cli.rpc_url,
+                signer,
+                name,
+                *price_atoms,
+                *duration,
+                kind,
+                *expires_at_epoch,
+            ),
+            BnsAction::Buy { signer, offer_id } => run_bns_buy(&cli.rpc_url, signer, *offer_id),
+            BnsAction::CancelOffer { signer, offer_id } => {
+                run_bns_cancel_offer(&cli.rpc_url, signer, *offer_id)
+            }
             BnsAction::Renew {
                 signer,
                 name,
@@ -3176,5 +3396,27 @@ mod rpc_auth_tests {
             error.contains("requires the operator key"),
             "the refusal must name the cause, got: {error}"
         );
+    }
+
+    #[test]
+    fn bns_sell_list_parser_enforces_bud_names_and_prices() {
+        let ok = parse_bns_sell_list(
+            "# comment\n\
+             ayaz.bud 50000\n\
+             bids.bud, 125000, 36500\n",
+            10_000,
+        )
+        .expect("valid batch file parses");
+        assert_eq!(
+            ok,
+            vec![
+                ("ayaz.bud".to_string(), 50_000, 10_000),
+                ("bids.bud".to_string(), 125_000, 36_500),
+            ]
+        );
+        assert!(parse_bns_sell_list("bids 50000\n", 10_000).is_err());
+        assert!(parse_bns_sell_list("ab.bud 50000\n", 10_000).is_err());
+        assert!(parse_bns_sell_list("ayaz.bud 0\n", 10_000).is_err());
+        assert!(parse_bns_sell_list("ayaz.bud 100\nayaz.bud 200\n", 10_000).is_err());
     }
 }
