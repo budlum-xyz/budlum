@@ -37,8 +37,9 @@ Tam kayit: `audit-notes/strix-ledger.md`, 56 bulgu.
 
 | Durum | Yuksek | Orta | Dusuk | Toplam |
 |-------|--------|------|-------|--------|
-| cozuldu | 3 | 3 | 0 | 6 |
-| acik | 15 | 13 | 22 | 50 |
+| cozuldu | 4 | 3 | 0 | 7 |
+| gecersiz | 1 | 0 | 0 | 1 |
+| acik | 13 | 13 | 22 | 48 |
 | **Toplam** | **18** | **16** | **22** | **56** |
 
 ### Bu turda cozulenler
@@ -52,6 +53,7 @@ Tam kayit: `audit-notes/strix-ledger.md`, 56 bulgu.
 | S-110-4568539249 | `has_custody_deal` yalnizca canli anlasma sayar | `c3c6ed92` |
 | S-126-4568600961 | BNS yokluk kaniti konum tasir | `c3c6ed92` |
 | S-126-4568600860 | BNS extras on-imaj tasir | `c3c6ed92` |
+| S-126-4506127017 | Koltuk katilimi kaydi proposer'dan alinmiyor, QC blob'undan yeniden uretiliyor | kod okumasi, `bd1e6a79` |
 
 Uc bulgu kod okumasiyla "onceden cozulmustu" cikti. Bu bir kacis degil: ucunun
 de kapanis gerekcesi canli kod ve test ile desteklendi, defterde yazili.
@@ -65,6 +67,7 @@ Tam kayit: `audit-notes/findings/`.
 | B-0001 | `src/gateway` | yuksek | B14 modulu `main` dalindaki `src/gateway` ile ayni yolu paylasir; birlestiginde `pub mod gateway` iki kez tanimlanir | cozuldu, `8b5592af` |
 | B-0002 | `src/bns/registry.rs` | orta | `is_valid_label` ozeldi, ag gecidi ayni tabloyu kopyalamak zorundaydi | cozuldu, `f0ee157e` |
 | B-0003 | `src/gateway/mod.rs` | orta | yeni modul public yuzey sunuyor ama calisan hicbir ikili onu cagirmiyor | kayitli, `WIRING: unwired` |
+| B-0004 | `src/rpc/server.rs` | yuksek | RPC kanit yaniti `leaf_index`, `tree_size` ve `extras` alanlarini yazmiyordu; duzeltme telde etkisizdi | cozuldu, `bd1e6a79` |
 
 B-0003 bir hata degil, bir durumdur. Direktifin kurali: bir yetenek modulu ya
 bir yerden cagrilir ya da cagrilmadigini yazar. Modul yazdi.
