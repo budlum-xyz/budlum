@@ -393,8 +393,8 @@ mod tests {
         reg.register("ayaz.bud".to_string(), owner, 10, 100)
             .unwrap();
         if let Some((content_id, storage_root)) = content {
-            reg.set_content("ayaz.bud", &owner, content_id, 101)
-                .unwrap();
+            let legacy_id = crate::storage::content_id::ContentId(content_id.digest);
+            reg.set_content("ayaz.bud", &owner, legacy_id, 101).unwrap();
             reg.set_storage("ayaz.bud", owner, storage_root, 0, 101)
                 .unwrap();
             let bud3_content =
@@ -490,9 +490,6 @@ mod tests {
         };
         let differing = FakeProver {
             answer: Ok(proof_from(&reg, "ayaz.bud", 8, 100)),
-        };
-        let silent = FakeProver {
-            answer: Err("connection refused".into()),
         };
 
         assert!(resolve_verified(&[one], &roots, &target(None)).is_ok());
@@ -633,7 +630,7 @@ mod tests {
 
         // An object larger than the budget is refused rather than evicting
         // everything else for one page.
-        let small = ContentCache::new(4);
+        let mut small = ContentCache::new(4);
         assert_eq!(small.insert(&content, bytes), Err(CacheMiss::TooLarge));
     }
 
