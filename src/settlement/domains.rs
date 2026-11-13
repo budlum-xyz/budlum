@@ -1858,14 +1858,22 @@ fn slash_failed_prover(
         .is_some_and(crate::registry::permissionless::Registration::is_slashable);
     if slashable {
         let ratio = state.registry.params().malicious_slash_ratio_fixed;
-        state
-            .slash_role_destroying(
-                *prover,
-                role,
-                crate::registry::permissionless::SlashingCondition::MaliciousBehaviour,
-                ratio,
-            )
-            .map_err(|e| SettlementTxError::Refused(e.to_string()))?;
+        // Same class as the Graft and relayer-intent expiry paths:
+        // `is_slashable()` accepts `SlashedUnbonding` but
+        // `slash_role_only` refuses it, so a failed-proof refund must
+        // not abort when the prover was already slashed. The creator
+        // refund is independent of the penalty.
+        match state.slash_role_destroying(
+            *prover,
+            role,
+            crate::registry::permissionless::SlashingCondition::MaliciousBehaviour,
+            ratio,
+        ) {
+            Ok(_) => {}
+            Err(crate::registry::RegistryError::AlreadySlashed { .. })
+            | Err(crate::registry::RegistryError::NotRegistered { .. }) => {}
+            Err(e) => return Err(SettlementTxError::Refused(e.to_string())),
+        }
     }
     Ok(())
 }

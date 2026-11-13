@@ -973,7 +973,7 @@ mod tests {
         // the validator critical path); this call pins that the proving entry
         // point still runs the inline prover, so a future refactor cannot
         // silently turn every receipt into an unproved one.
-        assert!(!receipt.proof_bytes.is_empty());
+        assert!(receipt.proof_bytes > 0);
         // The same program under the block path proves nothing.
         let unproved = ZkVmExecutor::execute_for_block(
             &bytecode,
