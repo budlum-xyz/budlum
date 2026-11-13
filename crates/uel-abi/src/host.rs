@@ -96,6 +96,34 @@ pub trait HostApi: HostRead {
         to: &EeIdentity,
         attos: u128,
     ) -> Result<(), HostError>;
+
+    /// Opens a rollback checkpoint inside the current execution frame.
+    ///
+    /// # Errors
+    ///
+    /// A [`HostError`] if checkpoint state cannot be allocated.
+    fn checkpoint_begin(&mut self) -> Result<u64, HostError> {
+        Ok(0)
+    }
+
+    /// Commits checkpoint `id`, folding its mutations into the enclosing frame.
+    ///
+    /// # Errors
+    ///
+    /// A [`HostError`] if `id` is unknown or already closed.
+    fn checkpoint_commit(&mut self, _id: u64) -> Result<(), HostError> {
+        Ok(())
+    }
+
+    /// Rolls back checkpoint `id`, discarding writes, balance transfers, and
+    /// logs recorded since the matching [`HostApi::checkpoint_begin`].
+    ///
+    /// # Errors
+    ///
+    /// A [`HostError`] if `id` is unknown or already closed.
+    fn checkpoint_rollback(&mut self, _id: u64) -> Result<(), HostError> {
+        Ok(())
+    }
 }
 
 /// An execution environment, served by a worker process.

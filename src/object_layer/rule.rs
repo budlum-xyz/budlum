@@ -6,14 +6,15 @@
 //!
 //! WIRING: the block executor reaches this module through the
 //! `SettlementTx::ObjectLayer(Box<ObjectLayerTx>)` door, and RPC reads it
-//! through `bud_getCharter`, `bud_getAssetClass`, `bud_getAsset` and the
-//! other object-layer read methods. Both land in a later step; until then
-//! the state is held by `SettlementRegistries::object_layer` and closed on
-//! the testnet by `ACTIVATION`.
+//! through `bud_getCharter`, `bud_getAssetClass`, `bud_getAsset`, and the
+//! other object-layer read methods (all open from genesis on testnet `45261`
+//! and devnet `45262`).
 
 use crate::core::address::Address;
 use crate::object_layer::ids::{AssetClassId, HomeIdentity};
+use bud_proof::{DefaultAdapter, ExecutionPublicInputs, ProofEnvelope, ProverAdapter};
 use serde::{Deserialize, Serialize};
+use sha3::{Digest, Sha3_256};
 use std::collections::BTreeMap;
 
 /// The audited template list. Closed: a new template is a
@@ -58,8 +59,9 @@ pub enum ClassRule {
 }
 
 impl ClassRule {
-    /// Whether the rule may be registered today. `Program` and `Replica`
-    /// are closed gates; `FungibleV1`, `UniqueV1`, and `RecordV1` are open.
+    /// Whether the rule may be registered on testnet. `Program`, `Replica`,
+    /// and the three audited templates (`FungibleV1`, `UniqueV1`, `RecordV1`)
+    /// are open; `Native` stays reserved for chain-native modules.
     #[must_use]
     pub fn is_open(&self) -> bool {
         matches!(
@@ -67,7 +69,8 @@ impl ClassRule {
             Self::Template {
                 id: TemplateId::FungibleV1 | TemplateId::UniqueV1 | TemplateId::RecordV1,
                 ..
-            }
+            } | Self::Program
+                | Self::Replica
         )
     }
 }
@@ -170,6 +173,69 @@ fn is_set(slice: &ClassSlice, field: &Option<String>) -> bool {
         .is_some_and(|v| v.iter().any(|b| *b != 0))
 }
 
+fn verify_program_rule(class_slice: &ClassSlice) -> Result<(), RuleRefusal> {
+    let Some(raw_code) = class_slice.get("program_bytecode") else {
+        return Ok(());
+    };
+    if raw_code.is_empty() || !raw_code.len().is_multiple_of(8) || raw_code.len() > 8_192 {
+        return Err(RuleRefusal::WrongShape);
+    }
+    let mut words = Vec::with_capacity(raw_code.len() / 8);
+    for chunk in raw_code.chunks_exact(8) {
+        let mut arr = [0u8; 8];
+        arr.copy_from_slice(chunk);
+        words.push(u64::from_le_bytes(arr));
+    }
+    let mut vm = bud_vm::Vm::with_mainnet_mode(1024, 100_000, true);
+    let receipt = vm.run_receipt(&words);
+    if !receipt.success || receipt.error.is_some() || receipt.exit_code != 0 {
+        return Err(RuleRefusal::Paused);
+    }
+    if let Some(raw_proof) = class_slice.get("program_proof") {
+        let (envelope, inputs): (ProofEnvelope, ExecutionPublicInputs) =
+            postcard::from_bytes(raw_proof).map_err(|_| RuleRefusal::WrongShape)?;
+        DefaultAdapter::verify(&envelope, &inputs, &words).map_err(|_| RuleRefusal::Paused)?;
+    }
+    Ok(())
+}
+
+fn verify_replica_rule(class_slice: &ClassSlice) -> Result<(), RuleRefusal> {
+    let Some(root) = class_slice.get("replica_state_root") else {
+        return Ok(());
+    };
+    if root.len() != 32 {
+        return Err(RuleRefusal::WrongShape);
+    }
+    let quorum_bytes: [u8; 4] = class_slice
+        .get("replica_quorum")
+        .and_then(|v| v.as_slice().try_into().ok())
+        .ok_or(RuleRefusal::WrongShape)?;
+    let quorum = u32::from_le_bytes(quorum_bytes);
+    if quorum == 0 {
+        return Err(RuleRefusal::WrongShape);
+    }
+    let weight_bytes: [u8; 4] = class_slice
+        .get("replica_weight")
+        .and_then(|v| v.as_slice().try_into().ok())
+        .ok_or(RuleRefusal::WrongShape)?;
+    let weight = u32::from_le_bytes(weight_bytes);
+    if weight < quorum {
+        return Err(RuleRefusal::Paused);
+    }
+    let digest = class_slice
+        .get("replica_digest")
+        .ok_or(RuleRefusal::WrongShape)?;
+    let mut h = Sha3_256::new();
+    h.update(b"BDLM_UOL_REPLICA_V1");
+    h.update(root);
+    h.update(quorum_bytes);
+    let expected: [u8; 32] = h.finalize().into();
+    if digest.as_slice() != expected {
+        return Err(RuleRefusal::Paused);
+    }
+    Ok(())
+}
+
 /// Run one verb under a class rule. Pure: the same inputs always give the
 /// same output, on every node.
 ///
@@ -182,15 +248,33 @@ pub fn apply_rule(
     before: &AssetSlice,
     verb: &Verb,
 ) -> Result<Transition, RuleRefusal> {
-    let ClassRule::Template { id, params } = rule else {
-        return Err(RuleRefusal::ClosedRule);
+    let pause_field = match rule {
+        ClassRule::Template { params, .. } => params.pause_field.clone(),
+        ClassRule::Program => Some(String::from("paused")),
+        ClassRule::Replica => Some(String::from("replica_paused")),
+        ClassRule::Native => return Err(RuleRefusal::ClosedRule),
     };
-    if is_set(class_slice, &params.pause_field) {
+    if is_set(class_slice, &pause_field)
+        || (matches!(rule, ClassRule::Program) && is_set(class_slice, &Some(String::from("frozen"))))
+    {
         return Err(RuleRefusal::Paused);
     }
+    match rule {
+        ClassRule::Program => verify_program_rule(class_slice)?,
+        ClassRule::Replica => verify_replica_rule(class_slice)?,
+        _ => {}
+    }
     let Verb::Transfer { from, to, amount } = verb;
-    match (id, before) {
-        (TemplateId::FungibleV1, AssetSlice::Fungible { balances }) => {
+    match (rule, before) {
+        (
+            ClassRule::Template {
+                id: TemplateId::FungibleV1,
+                ..
+            }
+            | ClassRule::Program
+            | ClassRule::Replica,
+            AssetSlice::Fungible { balances },
+        ) => {
             if *amount == 0 {
                 return Err(RuleRefusal::ZeroAmount);
             }
@@ -211,7 +295,15 @@ pub fn apply_rule(
                 requirements: vec![Condition::SignedBy { signer: *from }],
             })
         }
-        (TemplateId::UniqueV1 | TemplateId::RecordV1, AssetSlice::Unique { holder }) => {
+        (
+            ClassRule::Template {
+                id: TemplateId::UniqueV1 | TemplateId::RecordV1,
+                ..
+            }
+            | ClassRule::Program
+            | ClassRule::Replica,
+            AssetSlice::Unique { holder },
+        ) => {
             if *amount != 1 {
                 return Err(RuleRefusal::WrongShape);
             }
@@ -411,15 +503,30 @@ mod tests {
             amount: 1,
         };
         let before = AssetSlice::Unique { holder: acct(1) };
-        for rule in [ClassRule::Program, ClassRule::Replica, ClassRule::Native] {
-            assert!(!matches!(rule, ClassRule::Native) || !rule.is_open());
-            assert_eq!(
-                apply_rule(&rule, &ClassSlice::new(), &before, &verb),
-                Err(RuleRefusal::ClosedRule)
-            );
+        assert!(!ClassRule::Native.is_open());
+        assert_eq!(
+            apply_rule(&ClassRule::Native, &ClassSlice::new(), &before, &verb),
+            Err(RuleRefusal::ClosedRule)
+        );
+        assert!(ClassRule::Program.is_open());
+        assert!(ClassRule::Replica.is_open());
+        for rule in [ClassRule::Program, ClassRule::Replica] {
+            let tr = apply_rule(&rule, &ClassSlice::new(), &before, &verb)
+                .expect("Program and Replica rules are active on testnet");
+            assert_eq!(tr.asset_slice, AssetSlice::Unique { holder: acct(2) });
         }
-        assert!(!ClassRule::Program.is_open());
-        assert!(!ClassRule::Replica.is_open());
+        let mut paused_prog = ClassSlice::new();
+        paused_prog.insert(String::from("paused"), vec![1]);
+        assert_eq!(
+            apply_rule(&ClassRule::Program, &paused_prog, &before, &verb),
+            Err(RuleRefusal::Paused)
+        );
+        let mut paused_rep = ClassSlice::new();
+        paused_rep.insert(String::from("replica_paused"), vec![1]);
+        assert_eq!(
+            apply_rule(&ClassRule::Replica, &paused_rep, &before, &verb),
+            Err(RuleRefusal::Paused)
+        );
     }
 
     #[test]
@@ -443,6 +550,78 @@ mod tests {
         assert_eq!(
             sample_commitment(std::slice::from_ref(&a)),
             sample_commitment(&[a])
+        );
+    }
+
+    #[test]
+    fn program_rule_executes_budzero_bytecode_and_rejects_failure() {
+        use bud_isa::{Instruction, Opcode};
+
+        let before = AssetSlice::Unique { holder: acct(1) };
+        let verb = Verb::Transfer {
+            from: acct(1),
+            to: acct(2),
+            amount: 1,
+        };
+        let ok_prog = Instruction {
+            opcode: Opcode::Halt,
+            rd: 0,
+            rs1: 0,
+            rs2: 0,
+            imm: 0,
+        }
+        .encode()
+        .to_le_bytes()
+        .to_vec();
+        let mut ok_slice = ClassSlice::new();
+        ok_slice.insert(String::from("program_bytecode"), ok_prog);
+        assert!(apply_rule(&ClassRule::Program, &ok_slice, &before, &verb).is_ok());
+
+        let fail_prog = Instruction {
+            opcode: Opcode::Assert,
+            rd: 0,
+            rs1: 1,
+            rs2: 0,
+            imm: 0,
+        }
+        .encode()
+        .to_le_bytes()
+        .to_vec();
+        let mut fail_slice = ClassSlice::new();
+        fail_slice.insert(String::from("program_bytecode"), fail_prog);
+        assert_eq!(
+            apply_rule(&ClassRule::Program, &fail_slice, &before, &verb),
+            Err(RuleRefusal::Paused)
+        );
+    }
+
+    #[test]
+    fn replica_rule_verifies_state_root_digest_and_quorum() {
+        let before = AssetSlice::Unique { holder: acct(1) };
+        let verb = Verb::Transfer {
+            from: acct(1),
+            to: acct(2),
+            amount: 1,
+        };
+        let root = [0x44u8; 32];
+        let quorum = 3u32.to_le_bytes();
+        let mut h = Sha3_256::new();
+        h.update(b"BDLM_UOL_REPLICA_V1");
+        h.update(root);
+        h.update(quorum);
+        let digest: [u8; 32] = h.finalize().into();
+
+        let mut slice = ClassSlice::new();
+        slice.insert(String::from("replica_state_root"), root.to_vec());
+        slice.insert(String::from("replica_quorum"), quorum.to_vec());
+        slice.insert(String::from("replica_weight"), 4u32.to_le_bytes().to_vec());
+        slice.insert(String::from("replica_digest"), digest.to_vec());
+        assert!(apply_rule(&ClassRule::Replica, &slice, &before, &verb).is_ok());
+
+        slice.insert(String::from("replica_weight"), 2u32.to_le_bytes().to_vec());
+        assert_eq!(
+            apply_rule(&ClassRule::Replica, &slice, &before, &verb),
+            Err(RuleRefusal::Paused)
         );
     }
 }

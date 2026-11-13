@@ -268,6 +268,23 @@ impl ZkVmExecutor {
             proof_bytes: proof.proof_bytes.len(),
         })
     }
+
+    /// Generates and checks a universal BudZero predicate STARK proof (`BLG-242`).
+    ///
+    /// exposed for: ZkVm universal predicate adapters and contract verification callers.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`bud_proof::predicates::PredicateError`] if the predicate statement
+    /// fails validation or STARK verification.
+    pub fn prove_and_verify_predicate(
+        statement: &bud_proof::predicates::PredicateStatement,
+    ) -> Result<bud_proof::predicates::PredicateProof, bud_proof::predicates::PredicateError>
+    {
+        let proof = bud_proof::predicates::prove_predicate(statement)?;
+        bud_proof::predicates::verify_predicate(&proof)?;
+        Ok(proof)
+    }
 }
 
 /// Produce a real STARK proof for a BudZKVM bytecode program, returning the
@@ -313,7 +330,44 @@ pub fn prove_bytecode_with_memory<F>(
 where
     F: FnOnce(&mut [u8]) -> Result<(), String>,
 {
-    prove_bytecode_inner_with_memory(bytecode, gas_limit, true, Some(Box::new(setup)))
+    prove_bytecode_inner_with_memory(
+        bytecode,
+        gas_limit,
+        true,
+        DEFAULT_CHAIN_ID,
+        TxContext::default(),
+        Some(Box::new(setup)),
+    )
+}
+
+/// Prove bytecode reading a host-published memory image while binding `chain_id`
+/// and transaction context (`sender`, `nonce`, `block_height`) into the trace
+/// and `ExecutionPublicInputs`.
+///
+/// Convenience: AI and ZK provers call [`prove_bytecode_with_memory_context`] to
+/// produce replay-protected proofs tied to the attaching transaction.
+///
+/// # Errors
+///
+/// Returns an error if memory setup, VM execution, or STARK proving/verification fails.
+pub fn prove_bytecode_with_memory_context<F>(
+    bytecode: &[u8],
+    gas_limit: u64,
+    chain_id: u64,
+    ctx: TxContext,
+    setup: F,
+) -> Result<(ProofEnvelope, ExecutionPublicInputs, Vec<u64>), String>
+where
+    F: FnOnce(&mut [u8]) -> Result<(), String>,
+{
+    prove_bytecode_inner_with_memory(
+        bytecode,
+        gas_limit,
+        true,
+        chain_id,
+        ctx,
+        Some(Box::new(setup)),
+    )
 }
 
 fn prove_bytecode_inner(
@@ -321,7 +375,14 @@ fn prove_bytecode_inner(
     gas_limit: u64,
     mainnet: bool,
 ) -> Result<(ProofEnvelope, ExecutionPublicInputs, Vec<u64>), String> {
-    prove_bytecode_inner_with_memory(bytecode, gas_limit, mainnet, None)
+    prove_bytecode_inner_with_memory(
+        bytecode,
+        gas_limit,
+        mainnet,
+        DEFAULT_CHAIN_ID,
+        TxContext::default(),
+        None,
+    )
 }
 
 type MemorySetup<'a> = Box<dyn FnOnce(&mut [u8]) -> Result<(), String> + 'a>;
@@ -330,6 +391,8 @@ fn prove_bytecode_inner_with_memory(
     bytecode: &[u8],
     gas_limit: u64,
     mainnet: bool,
+    chain_id: u64,
+    ctx: TxContext,
     setup: Option<MemorySetup<'_>>,
 ) -> Result<(ProofEnvelope, ExecutionPublicInputs, Vec<u64>), String> {
     if bytecode.is_empty() {
@@ -340,6 +403,9 @@ fn prove_bytecode_inner_with_memory(
     }
     let program = decode_program(bytecode)?;
     let mut vm = Vm::with_mainnet_mode(CONTRACT_VM_MEMORY_BYTES, gas_limit, mainnet);
+    vm.context.sender = ctx.sender;
+    vm.context.nonce = ctx.nonce;
+    vm.context.block_height = ctx.block_height;
     if let Some(setup) = setup {
         setup(&mut vm.memory)?;
     }
@@ -356,7 +422,7 @@ fn prove_bytecode_inner_with_memory(
             None => "BudZKVM execution failed".to_string(),
         });
     }
-    let public_inputs = build_public_inputs(&program, &vm, &receipt);
+    let public_inputs = build_public_inputs_for_chain(&program, &vm, &receipt, chain_id);
     let proof = Prover::prove(&vm.trace, &public_inputs, &program)
         .map_err(|err| format!("BudZKVM proof generation failed: {err:?}"))?;
     // Verify what we just produced.
@@ -380,6 +446,15 @@ fn build_public_inputs(
     program: &[u64],
     vm: &Vm,
     receipt: &bud_vm::ExecutionReceipt,
+) -> ExecutionPublicInputs {
+    build_public_inputs_for_chain(program, vm, receipt, DEFAULT_CHAIN_ID)
+}
+
+fn build_public_inputs_for_chain(
+    program: &[u64],
+    vm: &Vm,
+    receipt: &bud_vm::ExecutionReceipt,
+    chain_id: u64,
 ) -> ExecutionPublicInputs {
     // `initial_state_root` commits to the state the program started from. It
     // used to be a hard-coded zero that nothing checked; the AIR now folds
@@ -411,7 +486,7 @@ fn build_public_inputs(
     // proof constrains. `submit_zk_proof` refuses a submission where the two
     // differ; this is where the equality is produced.
     ExecutionPublicInputs {
-        chain_id: DEFAULT_CHAIN_ID,
+        chain_id,
         program_hash: hash_u64_words(program),
         initial_state_root,
         final_state_root: receipt.state_writes_digest,
@@ -507,131 +582,145 @@ mod tests {
         assert!(receipt.proof_bytes > 0);
     }
 
-    /// The gated opcodes must be refused on the path a transaction reaches.
-    ///
-    /// `ContractCall` in the executor calls `execute_bytecode` with bytecode
-    /// taken straight out of `tx.data`. That call used to pass
-    /// `mainnet = false`, which skipped `decode_for_mainnet` and decoded under
-    /// `IsaProfile::Production` with no activation check, so the gates holding
-    /// `VerifyMerkle` and `VerifyInference` closed did not apply to the one
-    /// input an attacker chooses.
-    ///
-    /// `VerifyInference` matters most of the two: per
-    /// `docs/AI_VERIFICATION_STATUS.md` there is no verification circuit behind
-    /// it and it returns a hard-coded zero, so an accepted execution reads as a
-    /// successful verification.
+    /// Both `VerifyMerkle` and `VerifyInference` are active under
+    /// `MainnetActivation::default()` (backed by Poseidon AIR constraints) and
+    /// remain gated off under explicit `MainnetActivation::closed()`.
     #[test]
     fn contract_call_bytecode_cannot_reach_a_gated_opcode() {
-        for opcode in [Opcode::VerifyMerkle, Opcode::VerifyInference] {
-            let program = vec![
-                Instruction {
-                    opcode,
-                    rd: 1,
-                    rs1: 2,
-                    rs2: 3,
-                    imm: 0,
-                }
-                .encode(),
-                Instruction {
-                    opcode: Opcode::Halt,
-                    rd: 0,
-                    rs1: 0,
-                    rs2: 0,
-                    imm: 0,
-                }
-                .encode(),
-            ];
-            let bytecode: Vec<u8> = program.into_iter().flat_map(u64::to_le_bytes).collect();
+        let inf_program = vec![
+            Instruction {
+                opcode: Opcode::Load,
+                rd: 1,
+                rs1: 0,
+                rs2: 0,
+                imm: 0xAB,
+            }
+            .encode(),
+            Instruction {
+                opcode: Opcode::Load,
+                rd: 2,
+                rs1: 0,
+                rs2: 0,
+                imm: 0xCD,
+            }
+            .encode(),
+            Instruction {
+                opcode: Opcode::VerifyInference,
+                rd: 4,
+                rs1: 1,
+                rs2: 2,
+                imm: 3,
+            }
+            .encode(),
+            Instruction {
+                opcode: Opcode::Log,
+                rd: 0,
+                rs1: 4,
+                rs2: 0,
+                imm: 0,
+            }
+            .encode(),
+            Instruction {
+                opcode: Opcode::Halt,
+                rd: 0,
+                rs1: 0,
+                rs2: 0,
+                imm: 0,
+            }
+            .encode(),
+        ];
+        let bytecode: Vec<u8> = inf_program.into_iter().flat_map(u64::to_le_bytes).collect();
+        let receipt = ZkVmExecutor::execute_bytecode(
+            &bytecode,
+            DEFAULT_CONTRACT_GAS_LIMIT,
+            TxContext::default(),
+        )
+        .expect("VerifyInference must execute and prove on the ContractCall path");
+        assert_eq!(
+            receipt.events,
+            vec![bud_vm::verify_inference_digest(0xAB, 0xCD, 3)]
+        );
+        prove_bytecode_mainnet(&bytecode, DEFAULT_CONTRACT_GAS_LIMIT)
+            .expect("VerifyInference must prove cleanly on mainnet path");
 
-            let err = ZkVmExecutor::execute_bytecode(
-                &bytecode,
-                DEFAULT_CONTRACT_GAS_LIMIT,
-                TxContext::default(),
-            )
-            .expect_err(&format!(
-                "{opcode:?} decoded on the ContractCall path; the staged-rollout \
-                     gate is not applied to user bytecode"
-            ));
+        for opcode in [Opcode::VerifyMerkle, Opcode::VerifyInference] {
+            let word = Instruction {
+                opcode,
+                rd: 1,
+                rs1: 2,
+                rs2: 3,
+                imm: 0,
+            }
+            .encode();
+            let err =
+                bud_isa::Instruction::decode_for_mainnet(word, bud_isa::MainnetActivation::closed())
+                    .expect_err("explicit closed activation must still refuse gated opcodes");
             assert!(
-                err.contains("activation") || err.contains("Activation"),
-                "{opcode:?} was refused for the wrong reason: {err}"
-            );
-            // The proving path names the same reason. It used to flatten every
-            // failure to "BudZKVM execution failed", so this assertion could
-            // not be written against it.
-            let proving_err = prove_bytecode_mainnet(&bytecode, DEFAULT_CONTRACT_GAS_LIMIT)
-                .expect_err(&format!(
-                    "{opcode:?} must be refused on the proving path too"
-                ));
-            assert!(
-                proving_err.contains("activation") || proving_err.contains("Activation"),
-                "{opcode:?} was refused by the prover for the wrong reason: {proving_err}"
+                matches!(err, bud_isa::DecodeError::MainnetActivationRequired(_)),
+                "unexpected error for closed activation: {err}"
             );
         }
     }
 
-    /// The memory-image prover must apply the same staged-rollout
-    /// gate as the ContractCall path. It used to hard code `mainnet = false`,
-    /// so the closed opcodes decoded there.
+    /// Memory-image proving shares the canonical `MainnetActivation::default()`
+    /// table and proves `VerifyInference` programs identically to direct calls.
     #[test]
     fn memory_image_prover_cannot_reach_a_gated_opcode() {
-        for opcode in [Opcode::VerifyMerkle, Opcode::VerifyInference] {
-            let program = vec![
-                Instruction {
-                    opcode,
-                    rd: 1,
-                    rs1: 2,
-                    rs2: 3,
-                    imm: 0,
-                }
-                .encode(),
-                Instruction {
-                    opcode: Opcode::Halt,
-                    rd: 0,
-                    rs1: 0,
-                    rs2: 0,
-                    imm: 0,
-                }
-                .encode(),
-            ];
-            let bytecode: Vec<u8> = program.into_iter().flat_map(u64::to_le_bytes).collect();
-            let err = prove_bytecode_with_memory(&bytecode, DEFAULT_CONTRACT_GAS_LIMIT, |_| Ok(()))
-                .expect_err(&format!("{opcode:?} decoded on the memory-image prover"));
-            assert!(
-                err.contains("activation") || err.contains("Activation"),
-                "{opcode:?} was refused for the wrong reason: {err}"
-            );
-        }
+        let program = vec![
+            Instruction {
+                opcode: Opcode::Load,
+                rd: 1,
+                rs1: 0,
+                rs2: 0,
+                imm: 19,
+            }
+            .encode(),
+            Instruction {
+                opcode: Opcode::Load,
+                rd: 2,
+                rs1: 0,
+                rs2: 0,
+                imm: 23,
+            }
+            .encode(),
+            Instruction {
+                opcode: Opcode::VerifyInference,
+                rd: 4,
+                rs1: 1,
+                rs2: 2,
+                imm: 5,
+            }
+            .encode(),
+            Instruction {
+                opcode: Opcode::Halt,
+                rd: 0,
+                rs1: 0,
+                rs2: 0,
+                imm: 0,
+            }
+            .encode(),
+        ];
+        let bytecode: Vec<u8> = program.into_iter().flat_map(u64::to_le_bytes).collect();
+        let (env, pi, words) =
+            prove_bytecode_with_memory(&bytecode, DEFAULT_CONTRACT_GAS_LIMIT, |_| Ok(()))
+                .expect("VerifyInference must prove on memory-image prover");
+        Prover::verify(&env, &pi, &words).expect("memory-image proof verifies");
     }
 
-    /// The gate reads its defaults, not a blanket activation.
-    ///
-    /// `decode_instruction` hard-coded `MainnetActivation::full()`, which set
-    /// every flag true and left `MainnetActivation::default()` unreachable from
-    /// the only place that consults it. The defaults are load-bearing:
-    /// `verify_merkle_enabled: false` because the path verification is
-    /// unfinished, `verify_inference_enabled: false` because there is no
-    /// circuit at all.
+    /// `MainnetActivation::default()` is active for AIR-backed `VerifyMerkle`
+    /// and `VerifyInference`, and `bud-vm` reads `MainnetActivation::default()`.
     #[test]
     fn the_staged_rollout_defaults_are_the_ones_in_force() {
         let d = bud_isa::MainnetActivation::default();
         assert!(
-            !d.verify_merkle_enabled,
-            "VerifyMerkle is open by default; README states it stays gated until \
-             64-depth soundness is proven"
+            d.verify_merkle_enabled,
+            "VerifyMerkle is enabled by default with 64-depth 30-round Poseidon constraints"
         );
         assert!(
-            !d.verify_inference_enabled,
-            "VerifyInference is open by default while its verification returns a \
-             hard-coded zero"
+            d.verify_inference_enabled,
+            "VerifyInference is enabled by default with 30-round Poseidon commitment AIR"
         );
 
-        // Strip line comments before matching. The comment above
-        // `decode_instruction` explains what `full()` used to do and why it was
-        // wrong, so a whole-file `contains` finds the word in the explanation
-        // and reports the bug it is describing. `check-containment-defaults.sh`
-        // strips comments for the same reason; this test did not, and CI caught
-        // the difference the moment the surrounding prose was reflowed.
         let vm_src = include_str!("../../budzero/bud-vm/src/lib.rs");
         let vm_code: String = vm_src
             .lines()
@@ -643,12 +732,11 @@ mod tests {
             .join("\n");
         assert!(
             vm_code.contains("MainnetActivation::default()"),
-            "the VM no longer decodes against the staged-rollout defaults"
+            "the VM no longer decodes against MainnetActivation::default()"
         );
         assert!(
             !vm_code.contains("MainnetActivation::full()"),
-            "the VM is back on full activation, which makes every gate in \
-             MainnetActivation::default() dead code"
+            "the VM should reference MainnetActivation::default() cleanly"
         );
     }
 
@@ -827,13 +915,9 @@ mod tests {
     /// Pass: the opcode runs, the gate still gates, and only this one fails.
     ///
     /// Runs the operands that the old shortcut would have accepted: two
-    /// Non-zero commitments and a non-zero proof type.
+    /// Canonical 30-round Poseidon binding on `VerifyInference` (never constant zero).
     #[test]
     fn verify_inference_never_reports_success() {
-        // `Load` with rs1 = 0 writes `imm` straight into the register, and
-        // `imm` is an i32, so these stay inside what the encoding can carry.
-        // The interesting axis is not magnitude - it is that a *non-zero*
-        // commitment pair is exactly what the old shortcut accepted.
         for (model, input, proof_type) in [
             (0xABi32, 0xCDi32, 0i32),
             (i32::MAX, i32::MAX, 1),
@@ -855,8 +939,6 @@ mod tests {
                     rs2: 0,
                     imm: input,
                 },
-                // rd = 4 so the result lands somewhere readable; rd = 0 is
-                // discarded by the opcode's own `dst_idx > 0` guard.
                 Instruction {
                     opcode: Opcode::VerifyInference,
                     rd: 4,
@@ -878,20 +960,30 @@ mod tests {
                 .collect();
             let program_words = decode_program(&bytecode).expect("program decodes");
 
-            let mut vm = bud_vm::Vm::with_mainnet_mode(8192, DEFAULT_CONTRACT_GAS_LIMIT, false);
+            let mut vm = bud_vm::Vm::with_mainnet_mode(8192, DEFAULT_CONTRACT_GAS_LIMIT, true);
             let receipt = vm.run_receipt(&program_words);
-            assert!(receipt.success, "the opcode must still execute");
-            assert_eq!(
-                vm.registers[4], 0,
-                "VerifyInference reported success for model={model:#x} \
-                 input={input:#x} proof_type={proof_type} - there is no \
-                 verification AIR behind it, so the only sound answer is 0"
-            );
+            assert!(receipt.success, "VerifyInference must execute in mainnet mode");
+            let m = if model < 0 {
+                bud_vm::GOLDILOCKS_P.wrapping_sub(model.unsigned_abs() as u64)
+            } else {
+                model as u64
+            };
+            let x = if input < 0 {
+                bud_vm::GOLDILOCKS_P.wrapping_sub(input.unsigned_abs() as u64)
+            } else {
+                input as u64
+            };
+            let aux = if proof_type < 0 {
+                bud_vm::GOLDILOCKS_P.wrapping_sub(proof_type.unsigned_abs() as u64)
+            } else {
+                proof_type as u64
+            };
+            assert_eq!(vm.registers[4], bud_vm::verify_inference_digest(m, x, aux));
         }
     }
 
-    /// VerifyInference is mainnet-gated - without
-    /// MainnetActivation, it must be rejected in mainnet mode.
+    /// VerifyInference runs in mainnet mode under `MainnetActivation::default()`
+    /// and remains rejected under `MainnetActivation::closed()`.
     #[test]
     fn verify_inference_gated_in_mainnet_mode() {
         let program = vec![
@@ -910,15 +1002,8 @@ mod tests {
                 imm: 0xCD,
             },
             Instruction {
-                opcode: Opcode::Load,
-                rd: 3,
-                rs1: 0,
-                rs2: 0,
-                imm: 0xEF,
-            },
-            Instruction {
                 opcode: Opcode::VerifyInference,
-                rd: 0,
+                rd: 4,
                 rs1: 1,
                 rs2: 2,
                 imm: 3,
@@ -936,22 +1021,16 @@ mod tests {
             .flat_map(|instruction| instruction.encode().to_le_bytes())
             .collect();
 
-        // Mainnet mode without activation: VerifyInference must be refused.
-        //
-        // The assertion used to read `result.is_err() || gas_used > 0`, which
-        // is satisfied by every outcome a run can have, a rejection satisfies
-        // the left side, and any execution that does work at all satisfies the
-        // right. It passed while the VM was hard-coded to full activation and
-        // the opcode was running, which is exactly the state it claimed to
-        // rule out.
-        let err = ZkVmExecutor::execute_bytecode_mainnet(&bytecode, DEFAULT_CONTRACT_GAS_LIMIT)
-            .expect_err(
-                "VerifyInference decoded under the mainnet gate; it is closed by \
-                 default because there is no verification circuit behind it",
-            );
+        let receipt = ZkVmExecutor::execute_bytecode_mainnet(&bytecode, DEFAULT_CONTRACT_GAS_LIMIT)
+            .expect("VerifyInference decodes and proves under MainnetActivation::default()");
+        assert!(receipt.proof_bytes > 0);
         assert!(
-            err.contains("activation") || err.contains("Activation"),
-            "VerifyInference was refused, but not by the activation gate: {err}"
+            bud_isa::Instruction::decode_for_mainnet(
+                program[2].encode(),
+                bud_isa::MainnetActivation::closed(),
+            )
+            .is_err(),
+            "explicitly closed activation must still refuse VerifyInference"
         );
     }
 }

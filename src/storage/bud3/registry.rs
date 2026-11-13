@@ -22,8 +22,8 @@
 
 use super::content_id::{ContentId, ContentIdKind};
 use super::custody::{
-    audit_for, sub_block_count, symbol_leaf, symbol_root, Audit, CustodyProof, ProofContext,
-    ShareRef, FULL_AUDIT_PPM, MOBILE_AUDIT_PPM,
+    audit_for, sub_block_count, symbol_leaf, symbol_root, verify_symbol_root_path, Audit,
+    CustodyProof, ProofContext, ShareRef, FULL_AUDIT_PPM, MOBILE_AUDIT_PPM,
 };
 use super::dedup_index::DedupIndex;
 use super::delete::{check_same_owner_dependency, GrantShredAuth, ShredOutcome};
@@ -32,10 +32,14 @@ use super::fees::{
     storage_fee_for_epochs, FeeParams, FeeRecord, ObjectEndowment, ShareRewardInput,
     PRESENCE_PPM_SCALE,
 };
-use super::fountain::Symbol;
+use super::fountain::{SegmentDecoder, SegmentEncoder, Symbol};
 use super::grants::{GrantBud3Error, GrantRow};
+use super::meter::Meter;
 use super::pipeline::ObjectRecord;
 use super::placement::{Class, Share};
+use super::repair::{
+    repair_attestation_digest, RepairWitness, MAX_REPAIR_WITNESS_SYMBOLS, MIN_REPAIR_ATTESTATIONS,
+};
 use super::segment::Segmentation;
 use super::view::{PaidViewReceipt, MIN_PAID_VIEW_FEE_ATOMS};
 use crate::core::hash::hash_fields_bytes;
@@ -270,6 +274,15 @@ pub enum Registered {
     New(ObjectKey),
     /// The public content is already held; nothing new was stored.
     Deduplicated(ObjectKey),
+}
+
+/// Bundled segment repair payload passed to [`Bud3Registry::record_repair_with_validators`].
+pub struct SegmentRepair<'a> {
+    pub segment: u64,
+    pub new_shares: Vec<Share>,
+    pub new_symbols: Vec<Symbol>,
+    pub new_root: [u8; 32],
+    pub witness: &'a RepairWitness,
 }
 
 /// The registry. It serializes as flat lists, so a JSON snapshot (which
@@ -1797,8 +1810,9 @@ impl Bud3Registry {
     /// # Errors
     ///
     /// [`RegistryError::BadRepair`] when the segment needs no repair, the new
-    /// ESIs reuse an old one or overlap, or the new symbols do not replace
-    /// the lost ones; [`RegistryError::UnknownObject`].
+    /// ESIs reuse an old one or overlap, the new symbols do not replace the
+    /// lost ones, or the cryptographic repair witness fails;
+    /// [`RegistryError::UnknownObject`].
     pub fn record_repair(
         &mut self,
         key: &ObjectKey,
@@ -1806,8 +1820,48 @@ impl Bud3Registry {
         new_shares: Vec<Share>,
         new_symbols: Vec<Symbol>,
         new_root: [u8; 32],
+        witness: &RepairWitness,
         epoch: u64,
     ) -> Result<(), RegistryError> {
+        self.record_repair_with_validators(
+            key,
+            SegmentRepair {
+                segment,
+                new_shares,
+                new_symbols,
+                new_root,
+                witness,
+            },
+            None,
+            &BTreeMap::new(),
+            epoch,
+        )
+    }
+
+    /// Verify and record a segment repair using either Merkle-proven live symbols
+    /// or `MIN_REPAIR_ATTESTATIONS` independent active Full validator signatures.
+    ///
+    /// Convenience: called by [`super::tx::apply_with_validators`] with the
+    /// consensus active Full validator key directory and by direct registry callers.
+    ///
+    /// # Errors
+    ///
+    /// [`RegistryError::BadRepair`] or [`RegistryError::UnknownObject`].
+    pub fn record_repair_with_validators(
+        &mut self,
+        key: &ObjectKey,
+        repair: SegmentRepair<'_>,
+        repairer: Option<&Address>,
+        validator_keys: &BTreeMap<Address, Vec<u8>>,
+        epoch: u64,
+    ) -> Result<(), RegistryError> {
+        let SegmentRepair {
+            segment,
+            new_shares,
+            new_symbols,
+            new_root,
+            witness,
+        } = repair;
         if !self.repairs_due(key).contains(&segment) {
             return Err(RegistryError::BadRepair("segment needs no repair"));
         }
@@ -1816,10 +1870,22 @@ impl Bud3Registry {
             .get_mut(key)
             .ok_or(RegistryError::UnknownObject)?;
         let seg_idx = usize::try_from(segment).map_err(|_| RegistryError::BadRepair("segment"))?;
+        let seg_layout = Segmentation::new(obj.record.object_len, &obj.record.profile)
+            .ok_or(RegistryError::BadRepair("invalid object profile"))?;
+        let seg_len = seg_layout
+            .len(segment)
+            .ok_or(RegistryError::BadRepair("segment out of bounds"))?;
+        let k_u64 = seg_layout
+            .source_symbols(segment)
+            .ok_or(RegistryError::BadRepair("segment out of bounds"))?;
+        let k_u32 = u32::try_from(k_u64).map_err(|_| RegistryError::BadRepair("ESI range"))?;
         let first = *obj
             .next_esi
             .get(seg_idx)
             .ok_or(RegistryError::BadRepair("segment"))?;
+        if first < k_u32 {
+            return Err(RegistryError::BadRepair("repair ESIs must exceed k"));
+        }
         let mut sorted = new_shares.clone();
         sorted.sort_by_key(|s| s.first_esi);
         let mut next = u64::from(first);
@@ -1867,6 +1933,132 @@ impl Bud3Registry {
             return Err(RegistryError::BadRepair(
                 "repair symbol root does not match supplied symbols",
             ));
+        }
+        match witness {
+            RepairWitness::ProvenSymbols(proofs) => {
+                if proofs.is_empty() || proofs.len() > MAX_REPAIR_WITNESS_SYMBOLS {
+                    return Err(RegistryError::BadRepair(
+                        "invalid inline repair symbol witness count",
+                    ));
+                }
+                let mut seen_esis = BTreeSet::new();
+                let mut dec = SegmentDecoder::new(segment, seg_len, &obj.record.profile)
+                    .map_err(|_| RegistryError::BadRepair("repair decoder init failed"))?;
+                let mut meter = Meter::new(
+                    seg_len.saturating_mul(4).saturating_add(1 << 20),
+                    1 << 20,
+                );
+                for p in proofs {
+                    let root_entry = obj
+                        .roots
+                        .get(p.root_index as usize)
+                        .ok_or(RegistryError::BadRepair("unknown repair witness root"))?;
+                    if root_entry.segment != segment {
+                        return Err(RegistryError::BadRepair(
+                            "repair witness root belongs to another segment",
+                        ));
+                    }
+                    if p.symbol.segment != segment || p.symbol.data.len() != symbol_bytes {
+                        return Err(RegistryError::BadRepair(
+                            "repair witness symbol segment or length mismatch",
+                        ));
+                    }
+                    let expected_esi = u64::from(root_entry.first_esi)
+                        .checked_add(p.position)
+                        .ok_or(RegistryError::BadRepair("repair witness position overflow"))?;
+                    if u64::from(p.symbol.esi) != expected_esi {
+                        return Err(RegistryError::BadRepair(
+                            "repair witness ESI does not match root position",
+                        ));
+                    }
+                    if !seen_esis.insert(p.symbol.esi) {
+                        return Err(RegistryError::BadRepair(
+                            "duplicate ESI in repair witness",
+                        ));
+                    }
+                    if !verify_symbol_root_path(
+                        root_entry.root,
+                        u64::from(root_entry.count),
+                        p.position,
+                        p.symbol.esi,
+                        symbol_leaf(&p.symbol.data),
+                        &p.root_path,
+                    ) {
+                        return Err(RegistryError::BadRepair(
+                            "repair witness symbol Merkle proof failed",
+                        ));
+                    }
+                    let _ = dec
+                        .push(p.symbol.clone(), &mut meter)
+                        .map_err(|_| RegistryError::BadRepair("bad repair witness symbol"))?;
+                }
+                let seg_bytes = dec
+                    .into_bytes()
+                    .ok_or(RegistryError::BadRepair("repair witness did not decode segment"))?;
+                let enc = SegmentEncoder::new(segment, &seg_bytes, &obj.record.profile)
+                    .map_err(|_| RegistryError::BadRepair("repair witness re-encode failed"))?;
+                let expected_syms = enc
+                    .repair_symbols(first - k_u32, count)
+                    .map_err(|_| RegistryError::BadRepair("repair symbol derivation failed"))?;
+                if expected_syms != sorted_syms {
+                    return Err(RegistryError::BadRepair(
+                        "repair symbols do not match reconstructed segment",
+                    ));
+                }
+            }
+            RepairWitness::ValidatorAttestations(atts) => {
+                if atts.len() < MIN_REPAIR_ATTESTATIONS {
+                    return Err(RegistryError::BadRepair(
+                        "insufficient Full validator repair attestations",
+                    ));
+                }
+                let orig_root = *obj
+                    .record
+                    .symbol_roots
+                    .get(seg_idx)
+                    .ok_or(RegistryError::BadRepair("missing original segment root"))?;
+                let digest = repair_attestation_digest(
+                    key,
+                    segment,
+                    first,
+                    count,
+                    &new_root,
+                    &orig_root,
+                );
+                let new_holders: BTreeSet<Address> = sorted.iter().map(|s| s.validator).collect();
+                let lost_holders: BTreeSet<Address> = obj
+                    .shares
+                    .iter()
+                    .filter(|s| s.segment == segment && s.lost)
+                    .map(|s| s.share.validator)
+                    .collect();
+                let mut distinct = BTreeSet::new();
+                for att in atts {
+                    if repairer == Some(&att.validator)
+                        || new_holders.contains(&att.validator)
+                        || lost_holders.contains(&att.validator)
+                    {
+                        return Err(RegistryError::BadRepair(
+                            "conflicted repair attester refused",
+                        ));
+                    }
+                    if !distinct.insert(att.validator) {
+                        return Err(RegistryError::BadRepair("duplicate repair attester"));
+                    }
+                    let pk = validator_keys
+                        .get(&att.validator)
+                        .ok_or(RegistryError::BadRepair(
+                            "repair attester has no active consensus Full key",
+                        ))?;
+                    crate::crypto::pq::verify(
+                        pk,
+                        &digest,
+                        crate::crypto::ctx::STORAGE_V2,
+                        &att.signature,
+                    )
+                    .map_err(|_| RegistryError::BadRepair("invalid repair attestation signature"))?;
+                }
+            }
         }
         obj.roots.push(SymbolRoot {
             segment,
@@ -2697,12 +2889,24 @@ mod tests {
         };
 
         // Reusing a lost ESI is refused.
+        let valid_witness = super::super::repair::RepairWitness::ProvenSymbols(
+            super::super::repair::build_repair_proven_witness(0, &up.segments[0], &up.segments[0])
+                .unwrap(),
+        );
         let reuse = Share {
             first_esi: 15,
             ..new_share
         };
         assert!(matches!(
-            r.record_repair(&key, 0, vec![reuse], fresh.clone(), new_root, 100),
+            r.record_repair(
+                &key,
+                0,
+                vec![reuse],
+                fresh.clone(),
+                new_root,
+                &valid_witness,
+                100
+            ),
             Err(RegistryError::BadRepair(_))
         ));
         let short = Share {
@@ -2710,12 +2914,73 @@ mod tests {
             ..new_share
         };
         assert!(matches!(
-            r.record_repair(&key, 0, vec![short], fresh.clone(), new_root, 100),
+            r.record_repair(
+                &key,
+                0,
+                vec![short],
+                fresh.clone(),
+                new_root,
+                &valid_witness,
+                100
+            ),
             Err(RegistryError::BadRepair("fewer new symbols than lost"))
         ));
         // Forged or mismatched symbol root is refused.
         assert!(matches!(
-            r.record_repair(&key, 0, vec![new_share], fresh.clone(), [0xFF; 32], 100),
+            r.record_repair(
+                &key,
+                0,
+                vec![new_share],
+                fresh.clone(),
+                [0xFF; 32],
+                &valid_witness,
+                100
+            ),
+            Err(RegistryError::BadRepair(_))
+        ));
+        // Fabricated symbols paired with their own matching root are ALSO refused!
+        let mut forged = fresh.clone();
+        forged[0].data.fill(0x5A);
+        let forged_leaves: Vec<(u32, [u8; 32])> = forged
+            .iter()
+            .map(|x| (x.esi, symbol_leaf(&x.data)))
+            .collect();
+        let forged_root = symbol_root(&forged_leaves);
+        assert!(matches!(
+            r.record_repair(
+                &key,
+                0,
+                vec![new_share],
+                forged,
+                forged_root,
+                &valid_witness,
+                100
+            ),
+            Err(RegistryError::BadRepair(_))
+        ));
+        // Empty witness and < 3 validator attestations are refused.
+        assert!(matches!(
+            r.record_repair(
+                &key,
+                0,
+                vec![new_share],
+                fresh.clone(),
+                new_root,
+                &super::super::repair::RepairWitness::ProvenSymbols(Vec::new()),
+                100
+            ),
+            Err(RegistryError::BadRepair(_))
+        ));
+        assert!(matches!(
+            r.record_repair(
+                &key,
+                0,
+                vec![new_share],
+                fresh.clone(),
+                new_root,
+                &super::super::repair::RepairWitness::ValidatorAttestations(Vec::new()),
+                100
+            ),
             Err(RegistryError::BadRepair(_))
         ));
         assert_eq!(
@@ -2728,6 +2993,7 @@ mod tests {
                     new_shares: vec![new_share],
                     new_symbols: fresh.clone(),
                     new_root,
+                    witness: valid_witness,
                 },
                 100,
             ),

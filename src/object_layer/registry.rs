@@ -17,9 +17,12 @@
 
 use crate::core::address::Address;
 use crate::core::hash::hash_fields_bytes;
+use crate::cross_domain::event_tree::MerkleProof;
+use crate::cross_domain::evm::account_proof;
 use crate::domain::types::{DomainId, Hash32};
 use crate::object_layer::charter::{
-    check_charter, CanonicalCodeHashes, CharterRefusal, CharterStatus, CodeProof, DomainCharter,
+    check_charter_at_state_root, CanonicalCodeHashes, CharterRefusal, CharterStatus, CodeProof,
+    DomainCharter,
 };
 use crate::object_layer::family::{
     class_ref_bytes, profile_for, AssetKind, EndpointEvent, FamilyError, HomeVmFamily,
@@ -32,10 +35,18 @@ use crate::object_layer::rule::{
     apply_rule, sample_commitment, verify_samples, AssetSlice, ClassRule, ClassSlice, Condition,
     Holder, ReferenceSample, RuleRefusal, TemplateId, Verb,
 };
+use crate::object_layer::tx::{
+    home_stipend_action_digest, HomeKeyStipendAuth, HomeStipendVerifier, ObjectLayerTx,
+};
 use crate::object_layer::{
     DEFAULT_CHALLENGE_WINDOW_BLOCKS, DEFAULT_MIN_REFERENCE_SAMPLES, MAX_COMPOSITE_CALLS,
     MAX_ESCAPE_ADDRESS_BYTES,
 };
+
+/// Maximum single-call gasless stipend authorized via `UOL-K1` (`0.01 BUD`).
+pub const MAX_HOME_STIPEND_ATTOS: u128 = 10_000_000_000_000_000;
+/// Maximum cumulative gasless stipend per home identity via `UOL-K1` (`0.1 BUD`).
+pub const MAX_HOME_STIPEND_TOTAL_ATTOS: u128 = 100_000_000_000_000_000;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -103,12 +114,114 @@ pub struct AssetClass {
     pub sample_commitment: Hash32,
 }
 
+/// Default minimum class bond required by [`ObjectLayerParams::default`].
+pub const DEFAULT_MIN_CLASS_BOND: u64 = 1_000_000;
+
 /// Where an asset is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Location {
     Home,
     ObjectLayer,
     Departing(DepartureId),
+    /// Placed as a guest asset on another chartered domain (`UOL-K2`).
+    Guest {
+        domain: DomainId,
+        holder: Holder,
+    },
+}
+
+/// Home-chain state-inclusion proof anchoring a contract's state slice to
+/// a finalized home `state_root`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HomeSliceProof {
+    pub state_root: Hash32,
+    pub contract_account_proof: Vec<Vec<u8>>,
+    pub storage_proofs: Vec<([u8; 32], [u8; 32], Vec<Vec<u8>>)>,
+}
+
+/// Verify that `proof` proves `slice` at `contract` against `state_root`.
+///
+/// # Errors
+///
+/// Returns [`Refusal::UnprovenEvent`] when the state proof fails verification
+/// or disagrees with `expected_root` / `slice`.
+pub fn verify_home_slice_proof(
+    family: HomeVmFamily,
+    chain_reference: &str,
+    contract: &[u8],
+    slice: &ClassSlice,
+    proof: &HomeSliceProof,
+    expected_root: Option<Hash32>,
+) -> Result<(), Refusal> {
+    if let Some(root) = expected_root {
+        if proof.state_root != root {
+            return Err(Refusal::UnprovenEvent);
+        }
+    }
+    match family {
+        HomeVmFamily::Evm => {
+            let addr20: [u8; 20] = contract
+                .try_into()
+                .map_err(|_| Refusal::UnprovenEvent)?;
+            let acct = account_proof::verify_account(
+                &proof.contract_account_proof,
+                &proof.state_root,
+                &addr20,
+            )
+            .map_err(|_| Refusal::UnprovenEvent)?;
+            if !slice.is_empty() && proof.storage_proofs.is_empty() {
+                return Err(Refusal::UnprovenEvent);
+            }
+            for (slot, expected_val, nodes) in &proof.storage_proofs {
+                let proven = account_proof::verify_storage(nodes, &acct.storage_root, slot)
+                    .map_err(|_| Refusal::UnprovenEvent)?
+                    .unwrap_or([0u8; 32]);
+                if proven != *expected_val {
+                    return Err(Refusal::UnprovenEvent);
+                }
+            }
+            let auth_field = profile_for(family).upgrade_authority_field();
+            if let Some(auth) = slice.get(auth_field) {
+                let bound = proof.storage_proofs.iter().any(|(_, val, _)| {
+                    val.as_slice() == auth.as_slice()
+                        || (auth.len() <= 32
+                            && !auth.is_empty()
+                            && val.get(32 - auth.len()..) == Some(auth.as_slice()))
+                });
+                if !bound {
+                    return Err(Refusal::UnprovenEvent);
+                }
+            }
+            Ok(())
+        }
+        HomeVmFamily::CosmWasm | HomeVmFamily::Svm | HomeVmFamily::Move => {
+            let [raw] = proof.contract_account_proof.as_slice() else {
+                return Err(Refusal::UnprovenEvent);
+            };
+            let merkle: MerkleProof =
+                bincode::deserialize(raw).map_err(|_| Refusal::UnprovenEvent)?;
+            let mut slice_bytes = Vec::new();
+            for (k, v) in slice {
+                let k_bytes = k.as_bytes();
+                let k_len = u32::try_from(k_bytes.len()).map_err(|_| Refusal::Overflow)?;
+                let v_len = u32::try_from(v.len()).map_err(|_| Refusal::Overflow)?;
+                slice_bytes.extend_from_slice(&k_len.to_le_bytes());
+                slice_bytes.extend_from_slice(k_bytes);
+                slice_bytes.extend_from_slice(&v_len.to_le_bytes());
+                slice_bytes.extend_from_slice(v);
+            }
+            let expected_leaf = hash_fields_bytes(&[
+                b"BDLM_UOL_SLICE_PROOF_V1",
+                chain_reference.as_bytes(),
+                contract,
+                &slice_bytes,
+            ]);
+            if merkle.leaf != expected_leaf || !merkle.verify(proof.state_root) {
+                return Err(Refusal::UnprovenEvent);
+            }
+            Ok(())
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -160,6 +273,8 @@ pub struct ClassRegistration {
     pub slice_source: SliceSource,
     pub samples: Vec<ReferenceSample>,
     pub bond: u64,
+    #[serde(default)]
+    pub state_proof: Option<HomeSliceProof>,
 }
 
 /// Registry parameters, written by genesis.
@@ -177,7 +292,7 @@ impl Default for ObjectLayerParams {
         Self {
             canonical: BTreeMap::new(),
             min_reference_samples: DEFAULT_MIN_REFERENCE_SAMPLES,
-            min_class_bond: 0,
+            min_class_bond: DEFAULT_MIN_CLASS_BOND,
             max_composite_calls: MAX_COMPOSITE_CALLS,
         }
     }
@@ -292,6 +407,10 @@ pub struct ObjectLayerRegistry {
     pub dependencies: BTreeMap<DependencyId, TentativeDependency>,
     #[serde(with = "crate::object_layer::pairs", default)]
     pub challenges: BTreeMap<AssetClassId, ChallengeRecord>,
+    #[serde(with = "crate::object_layer::pairs", default)]
+    pub home_stipend_nonces: BTreeMap<HomeIdentity, u64>,
+    #[serde(with = "crate::object_layer::pairs", default)]
+    pub home_stipend_spent: BTreeMap<HomeIdentity, u128>,
 }
 
 impl ObjectLayerRegistry {
@@ -319,6 +438,8 @@ impl ObjectLayerRegistry {
             && self.tentative_consent.is_empty()
             && self.dependencies.is_empty()
             && self.challenges.is_empty()
+            && self.home_stipend_nonces.is_empty()
+            && self.home_stipend_spent.is_empty()
     }
 
     /// The registry root. Folded into the settlement root only when the
@@ -357,11 +478,36 @@ impl ObjectLayerRegistry {
         proof: &CodeProof,
         domain_active: bool,
     ) -> Result<bool, Refusal> {
-        check_charter(
+        self.charter_verified(domain, charter, proof, domain_active, None, false)
+    }
+
+    /// `ObjectLayerTx::Charter` verifying the home-chain code proof against
+    /// `expected_home_state_root` (required when `require_home_proof` is true).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Refusal::Charter`] if charter validation or home-chain state
+    /// proof verification fails.
+    pub fn charter_verified(
+        &mut self,
+        domain: DomainId,
+        charter: DomainCharter,
+        proof: &CodeProof,
+        domain_active: bool,
+        expected_home_state_root: Option<Hash32>,
+        require_home_proof: bool,
+    ) -> Result<bool, Refusal> {
+        if require_home_proof
+            && (proof.home_proof.is_none() || expected_home_state_root.is_none())
+        {
+            return Err(Refusal::Charter(CharterRefusal::ProofDisagrees));
+        }
+        check_charter_at_state_root(
             &charter,
             proof,
             self.params.canonical.get(&charter.vm_family),
             domain_active,
+            expected_home_state_root,
         )
         .map_err(Refusal::Charter)?;
         if let Some(existing) = self.charters.get(&domain) {
@@ -429,18 +575,37 @@ impl ObjectLayerRegistry {
         registrant: Address,
         reg: ClassRegistration,
     ) -> Result<AssetClassId, Refusal> {
+        self.register_class_verified(registrant, reg, None, false)
+    }
+
+    /// `ObjectLayerTx::RegisterClass` verifying `reg.state_proof` against
+    /// `expected_home_state_root` (required when `require_home_proof` is true).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Refusal`] if validation, bond floor, or home-state proof fails.
+    pub fn register_class_verified(
+        &mut self,
+        registrant: Address,
+        reg: ClassRegistration,
+        expected_home_state_root: Option<Hash32>,
+        require_home_proof: bool,
+    ) -> Result<AssetClassId, Refusal> {
         let charter = self.active_charter(reg.home_domain)?;
         let family = profile_for(charter.vm_family);
         family.validate_address(&reg.contract)?;
         if !reg.rule.is_open() {
             return Err(Refusal::ClassClosedRule);
         }
-        let ClassRule::Template { id, .. } = &reg.rule else {
-            return Err(Refusal::ClassClosedRule);
-        };
-        let record_ok = reg.kind == AssetKind::Unique && *id == TemplateId::RecordV1;
-        if *id != family.template_for(reg.kind) && !record_ok {
-            return Err(Refusal::TemplateNotForFamily);
+        match &reg.rule {
+            ClassRule::Template { id, .. } => {
+                let record_ok = reg.kind == AssetKind::Unique && *id == TemplateId::RecordV1;
+                if *id != family.template_for(reg.kind) && !record_ok {
+                    return Err(Refusal::TemplateNotForFamily);
+                }
+            }
+            ClassRule::Program | ClassRule::Replica => {}
+            ClassRule::Native => return Err(Refusal::ClassClosedRule),
         }
         if !family.slice_read_rule().admits(reg.slice_source) {
             return Err(Refusal::SliceSourceNotAdmitted);
@@ -451,6 +616,21 @@ impl ObjectLayerRegistry {
         verify_samples(&reg.rule, &reg.samples).map_err(Refusal::SampleMismatch)?;
         if reg.bond < self.params.min_class_bond {
             return Err(Refusal::BondTooSmall);
+        }
+        if require_home_proof
+            && (reg.state_proof.is_none() || expected_home_state_root.is_none())
+        {
+            return Err(Refusal::UnprovenEvent);
+        }
+        if let Some(sp) = reg.state_proof.as_ref() {
+            verify_home_slice_proof(
+                charter.vm_family,
+                &charter.chain_reference,
+                &reg.contract,
+                &reg.slice,
+                sp,
+                expected_home_state_root,
+            )?;
         }
         let id = AssetClassId::derive(reg.home_domain, &class_ref_bytes(reg.kind, &reg.contract));
         if self.classes.contains_key(&id) {
@@ -490,6 +670,26 @@ impl ObjectLayerRegistry {
         updates: ClassSlice,
         phase: Phase,
     ) -> Result<ClassStatus, Refusal> {
+        self.refresh_class_verified(caller, class, updates, phase, None, None, false)
+    }
+
+    /// `ObjectLayerTx::RefreshClass` verifying `proof` against
+    /// `expected_home_state_root` (required when `require_home_proof` is true)
+    /// before accepting any slice update or upgrade-authority freeze.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Refusal`] if caller is unauthorized or home-state proof fails.
+    pub fn refresh_class_verified(
+        &mut self,
+        caller: Address,
+        class: AssetClassId,
+        updates: ClassSlice,
+        phase: Phase,
+        proof: Option<&HomeSliceProof>,
+        expected_home_state_root: Option<Hash32>,
+        require_home_proof: bool,
+    ) -> Result<ClassStatus, Refusal> {
         if phase == Phase::Tentative {
             return Err(Refusal::TentativeClosed);
         }
@@ -498,16 +698,34 @@ impl ObjectLayerRegistry {
         if self.class(&class)?.registrant != caller {
             return Err(Refusal::NotAuthorized);
         }
+        if require_home_proof && (proof.is_none() || expected_home_state_root.is_none()) {
+            return Err(Refusal::UnprovenEvent);
+        }
         self.atomic(|r| {
-            let domain = r
-                .classes
-                .get(&class)
-                .ok_or(Refusal::UnknownClass)?
-                .home_domain;
-            let family = profile_for(r.active_charter(domain)?.vm_family);
+            let (domain, contract, mut merged_slice) = {
+                let entry = r.classes.get(&class).ok_or(Refusal::UnknownClass)?;
+                (
+                    entry.home_domain,
+                    entry.contract.clone(),
+                    entry.slice.clone(),
+                )
+            };
+            merged_slice.extend(updates.clone());
+            let charter = r.active_charter(domain)?.clone();
+            if let Some(sp) = proof {
+                verify_home_slice_proof(
+                    charter.vm_family,
+                    &charter.chain_reference,
+                    &contract,
+                    &merged_slice,
+                    sp,
+                    expected_home_state_root,
+                )?;
+            }
+            let family = profile_for(charter.vm_family);
             let field = family.upgrade_authority_field();
             let entry = r.classes.get_mut(&class).ok_or(Refusal::UnknownClass)?;
-            entry.slice.extend(updates);
+            entry.slice = merged_slice;
             let authority = entry.slice.get(field).cloned();
             if authority != entry.upgrade_authority {
                 entry.upgrade_authority = authority;
@@ -1033,7 +1251,10 @@ impl ObjectLayerRegistry {
             Some(AssetKind::Unique) => self
                 .unique
                 .values()
-                .filter(|a| a.class == *class && a.location == Location::ObjectLayer)
+                .filter(|a| {
+                    a.class == *class
+                        && matches!(a.location, Location::ObjectLayer | Location::Guest { .. })
+                })
                 .count() as u128,
             Some(AssetKind::Fungible) => self
                 .balances
@@ -1323,6 +1544,179 @@ impl ObjectLayerRegistry {
                 return Err(Refusal::NoChallengeOpen);
             }
             Ok(())
+        })
+    }
+
+    /// `ObjectLayerTx::GuestPlace` (`UOL-K2`): place an active unique asset in
+    /// guest custody on another chartered domain.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Refusal`] when the class is frozen, the caller does not hold
+    /// the asset, the asset is not at [`Location::ObjectLayer`], or
+    /// `guest_domain` has no active charter.
+    pub fn guest_place(
+        &mut self,
+        caller: Holder,
+        class: AssetClassId,
+        native_id: &[u8],
+        guest_domain: DomainId,
+        guest_holder: Holder,
+    ) -> Result<AssetId, Refusal> {
+        self.atomic(|r| {
+            let class_entry = r.class(&class)?.clone();
+            if class_entry.status != ClassStatus::Active {
+                return Err(Refusal::ClassFrozen);
+            }
+            if class_entry.kind != AssetKind::Unique {
+                return Err(Refusal::KindMismatch);
+            }
+            if guest_domain == class_entry.home_domain {
+                return Err(Refusal::CharterNotActive);
+            }
+            let _ = r.active_charter(guest_domain)?;
+            let asset = AssetId::derive(&class, native_id);
+            let entry = r.unique.get_mut(&asset).ok_or(Refusal::UnknownAsset)?;
+            if entry.location != Location::ObjectLayer {
+                return Err(Refusal::AssetNotHere);
+            }
+            if entry.holder != Some(caller) {
+                return Err(Refusal::NotAuthorized);
+            }
+            entry.location = Location::Guest {
+                domain: guest_domain,
+                holder: guest_holder,
+            };
+            entry.holder = Some(guest_holder);
+            Ok(asset)
+        })
+    }
+
+    /// `ObjectLayerTx::GuestReturn` (`UOL-K2`): return a unique asset from
+    /// [`Location::Guest`] back to [`Location::ObjectLayer`] upon a finalized
+    /// endpoint event emitted by the guest domain.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Refusal`] when finality is unproven, `proof.domain` does not
+    /// match the recorded guest domain, or the asset is not in guest placement.
+    pub fn guest_return(
+        &mut self,
+        class: AssetClassId,
+        native_id: &[u8],
+        recipient: Holder,
+        proof: &HomeEventProof,
+        finality: &dyn HomeFinality,
+    ) -> Result<AssetId, Refusal> {
+        let (_, _event) = self.read_event(proof, finality, false)?;
+        self.atomic(|r| {
+            r.use_arrival(proof)?;
+            let asset = AssetId::derive(&class, native_id);
+            let entry = r.unique.get_mut(&asset).ok_or(Refusal::UnknownAsset)?;
+            let Location::Guest { domain, .. } = entry.location else {
+                return Err(Refusal::AssetNotHere);
+            };
+            if domain != proof.domain {
+                return Err(Refusal::WrongEmitter);
+            }
+            entry.location = Location::ObjectLayer;
+            entry.holder = Some(recipient);
+            Ok(asset)
+        })
+    }
+
+    /// `ObjectLayerTx::HomeStipendCall` (`UOL-K1`): execute a home-identity UOL
+    /// action authorized directly by the home chain's classical key under a
+    /// strict replay nonce, per-call and cumulative stipend cap, PQ holding
+    /// ceiling, and automatic Quantum Alert Level 2/3 closure.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Refusal`] when the verifier is absent or rejects the signature,
+    /// the charter is inactive, the nonce mismatches, the stipend cap is
+    /// exceeded, or the wrapped action is not an eligible home-identity call.
+    pub fn home_stipend_call(
+        &mut self,
+        domain: DomainId,
+        auth: &HomeKeyStipendAuth,
+        action: &ObjectLayerTx,
+        height: u64,
+        verifier: Option<&dyn HomeStipendVerifier>,
+    ) -> Result<HomeIdentity, Refusal> {
+        if matches!(action, ObjectLayerTx::HomeStipendCall { .. }) {
+            return Err(Refusal::NotAuthorized);
+        }
+        if auth.home_address.is_empty() || auth.home_address.len() > MAX_ESCAPE_ADDRESS_BYTES {
+            return Err(Refusal::NotAuthorized);
+        }
+        if auth.requested_stipend_attos == 0
+            || auth.requested_stipend_attos > MAX_HOME_STIPEND_ATTOS
+        {
+            return Err(Refusal::NotAuthorized);
+        }
+        let _ = self.active_charter(domain)?;
+        let action_digest = home_stipend_action_digest(action)?;
+        verifier
+            .ok_or(Refusal::NotAuthorized)?
+            .verify_stipend(domain, auth, &action_digest)?;
+        let home = HomeIdentity::derive(domain, &auth.home_address);
+        self.atomic(|r| {
+            let expected = *r.home_stipend_nonces.get(&home).unwrap_or(&0);
+            if auth.nonce != expected {
+                return Err(Refusal::HomeNonce {
+                    expected,
+                    got: auth.nonce,
+                });
+            }
+            let next = expected.checked_add(1).ok_or(Refusal::Overflow)?;
+            r.home_stipend_nonces.insert(home, next);
+
+            let spent = *r.home_stipend_spent.get(&home).unwrap_or(&0);
+            let new_spent = spent
+                .checked_add(auth.requested_stipend_attos)
+                .ok_or(Refusal::Overflow)?;
+            if new_spent > MAX_HOME_STIPEND_TOTAL_ATTOS {
+                return Err(Refusal::NotAuthorized);
+            }
+            r.home_stipend_spent.insert(home, new_spent);
+
+            let actor = Holder::Home(home);
+            match action {
+                ObjectLayerTx::Call { calls } => {
+                    r.check_composite(calls)?;
+                    for call in calls {
+                        r.run_call(&actor, call)?;
+                    }
+                }
+                ObjectLayerTx::Offer {
+                    calls,
+                    wants,
+                    expiry,
+                } => {
+                    r.offer(actor, calls.clone(), wants.clone(), *expiry)?;
+                }
+                ObjectLayerTx::Accept { offer, calls } => {
+                    r.accept(actor, *offer, calls, height)?;
+                }
+                ObjectLayerTx::Depart {
+                    class,
+                    native_id,
+                    amount,
+                    home_to,
+                } => {
+                    r.depart(actor, *class, native_id, *amount, home_to.clone(), height)?;
+                }
+                ObjectLayerTx::GuestPlace {
+                    class,
+                    native_id,
+                    guest_domain,
+                    guest_holder,
+                } => {
+                    r.guest_place(actor, *class, native_id, *guest_domain, *guest_holder)?;
+                }
+                _ => return Err(Refusal::NotAuthorized),
+            }
+            Ok(home)
         })
     }
 }

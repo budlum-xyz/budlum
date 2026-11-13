@@ -344,7 +344,7 @@ impl EthereumCompatGateway {
             return JsonRpcResponse::err(
                 req.id.clone(),
                 JSONRPC_METHOD_NOT_FOUND,
-                "eth_getProof is not supported on Budlum; use bud_getExecutionProof",
+                "eth_getProof is not supported on Budlum; use bud_getAccountProof",
             );
         }
         if class.listener == CompatListener::Operator && listener != CompatListener::Operator {

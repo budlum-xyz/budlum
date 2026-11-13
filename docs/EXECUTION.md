@@ -201,11 +201,10 @@ STARK proving on every call.
 - Starknet Account Abstraction (`__validate__`, `__validate_declare__`, `__execute__`)
  bound to the caller's post-quantum Budlum local alias under `ee/cairo/state`, plus <!-- claim:L-WALLET-01 -->
  read-only Starknet JSON-RPC v0.7 subset (`src/rpc/compat/starknet/`).
-- Closed at launch on testnet `45261` (`cairo_is_closed_on_testnet`) with proposed
- activation height `55_000`.
+- Active from genesis on testnet `45261` (`PROPOSED_CAIRO_ACTIVATION_HEIGHT = 0`; explicit `activation_height: None` test coverage in `cairo_is_closed_on_testnet`).
 
 ## 17. Expansion Catalog Workers (`the implementation track`, `0x07`..`0x0B`)
 
 - `0x08` PolkaVM (`execution/polkavm/`, `budlum-ee-polkavm`, RV32EM interpreter with
- JIT disabled, `ee/polkavm/state`, closed on testnet `45261` until height `60_000`,
+ JIT disabled, `ee/polkavm/state`, active on testnet `45261` from genesis,
  `polkavm_is_closed_on_testnet`, `uel_conformance_polkavm`).

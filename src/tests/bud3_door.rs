@@ -1066,6 +1066,7 @@ fn bud3_decline_content_reassigns_and_release_shares_lowers_quota_without_penalt
                 new_shares: prep.new_shares,
                 new_symbols: prep.new_symbols,
                 new_root: prep.new_root,
+                witness: crate::storage::bud3::repair::RepairWitness::ProvenSymbols(prep.witness),
             },
         ),
     )
@@ -1254,6 +1255,7 @@ fn bud3_e2e_upload_register_view() {
     let payer = Address::from([112u8; 32]);
     let mut state = AccountState::new();
     state.add_balance(&uploader, 100_000);
+    state.add_balance(&payer, 100_000);
 
     let candidates: Vec<Candidate> = (0..4u8)
         .map(|i| Candidate {

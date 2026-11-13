@@ -208,7 +208,55 @@ fn identity_arg(value: Option<pb::Identity>) -> Result<EeIdentity, HostError> {
         .map_err(|e: WireError| HostError::Invalid(e.to_string()))
 }
 
-fn answer_host_request(access: &mut HostAccess<'_>, request: pb::HostRequest) -> pb::HostResponse {
+fn ee_namespace_allowed(ee: EeId, ns: &Namespace, key: &[u8], is_write: bool) -> bool {
+    let s = ns.as_str();
+    if s == "mock/state" {
+        return true;
+    }
+    if !is_write && s == "ee/alias" {
+        return matches!(
+            ee,
+            EeId::BUDZERO
+                | EeId::EVM
+                | EeId::WASM
+                | EeId::SVM
+                | EeId::MOVE
+                | EeId::MOVE_SUI
+                | EeId::CAIRO
+                | EeId::NEAR_WASM
+                | EeId::POLKAVM
+                | EeId::TVM
+                | EeId::UTXO
+                | EeId::PLUTUS
+                | EeId::RV32
+        );
+    }
+    if s == "uel/assets" {
+        return ee == EeId::EVM && key.starts_with(b"uol:");
+    }
+    match ee {
+        EeId::BUDZERO => s.starts_with("ee/budzero/"),
+        EeId::EVM => s.starts_with("ee/evm/"),
+        EeId::WASM => s.starts_with("ee/wasm/"),
+        EeId::SVM => s.starts_with("ee/svm/"),
+        EeId::MOVE => s.starts_with("ee/move/"),
+        EeId::MOVE_SUI => s.starts_with("ee/sui/"),
+        EeId::CAIRO => s.starts_with("ee/cairo/"),
+        EeId::NEAR_WASM => s.starts_with("ee/near/"),
+        EeId::POLKAVM => s.starts_with("ee/polkavm/"),
+        EeId::TVM => s.starts_with("ee/tvm/"),
+        EeId::UTXO => s.starts_with("ee/utxo/"),
+        EeId::PLUTUS => s.starts_with("ee/plutus/"),
+        EeId::RV32 => s.starts_with("ee/rv32/"),
+        _ => false,
+    }
+}
+
+fn answer_host_request(
+    caller_ee: EeId,
+    access: &mut HostAccess<'_>,
+    request: pb::HostRequest,
+) -> pb::HostResponse {
     use pb::host_request::Op;
     let Some(op) = request.op else {
         return host_error(&HostError::Invalid("empty host request".into()));
@@ -218,6 +266,13 @@ fn answer_host_request(access: &mut HostAccess<'_>, request: pb::HostRequest) ->
         Op::Read(read) => Namespace::new(&read.namespace)
             .map_err(|e| HostError::Invalid(e.to_string()))
             .and_then(|ns| {
+                if !ee_namespace_allowed(caller_ee, &ns, &read.key, false) {
+                    return Err(HostError::Denied(format!(
+                        "EE 0x{:02x} may not read namespace {}",
+                        caller_ee.0,
+                        ns.as_str()
+                    )));
+                }
                 let reader: &dyn HostRead = match access {
                     HostAccess::Full(host) => &**host,
                     HostAccess::ReadOnly(host) => *host,
@@ -247,6 +302,13 @@ fn answer_host_request(access: &mut HostAccess<'_>, request: pb::HostRequest) ->
                 Op::Write(write) => Namespace::new(&write.namespace)
                     .map_err(|e| HostError::Invalid(e.to_string()))
                     .and_then(|ns| {
+                        if !ee_namespace_allowed(caller_ee, &ns, &write.key, true) {
+                            return Err(HostError::Denied(format!(
+                                "EE 0x{:02x} may not write namespace {}",
+                                caller_ee.0,
+                                ns.as_str()
+                            )));
+                        }
                         let value = write.has_value.then_some(write.value.as_slice());
                         host.write(&ns, &write.key, value)
                     })
@@ -277,6 +339,22 @@ fn answer_host_request(access: &mut HostAccess<'_>, request: pb::HostRequest) ->
                         (_, None) => Err(HostError::Invalid("missing amount".into())),
                     }
                 }
+                Op::Checkpoint(cp) => match pb::CheckpointOp::try_from(cp.op) {
+                    Ok(pb::CheckpointOp::Begin) => {
+                        host.checkpoint_begin().map(|id| pb::HostResponse {
+                            result: Some(pb::host_response::Result::CheckpointId(id)),
+                        })
+                    }
+                    Ok(pb::CheckpointOp::Commit) => {
+                        host.checkpoint_commit(cp.id).map(|()| host_ok())
+                    }
+                    Ok(pb::CheckpointOp::Rollback) => {
+                        host.checkpoint_rollback(cp.id).map(|()| host_ok())
+                    }
+                    Ok(pb::CheckpointOp::Unspecified) | Err(_) => {
+                        Err(HostError::Invalid("invalid checkpoint op".into()))
+                    }
+                },
                 Op::Read(_) | Op::BudBalance(_) => Err(HostError::Invalid("unreachable".into())),
             }
         }
@@ -431,6 +509,7 @@ impl EeClient {
         mut access: Option<HostAccess<'_>>,
         deadline: Instant,
     ) -> Result<pb::envelope::Body, TransportError> {
+        let expected_ee = self.expected;
         let result = (|| {
             let stream = self
                 .stream
@@ -454,7 +533,7 @@ impl EeClient {
                 match frame.body {
                     Some(pb::envelope::Body::HostRequest(request)) => {
                         let response = match access.as_mut() {
-                            Some(access) => answer_host_request(access, request),
+                            Some(access) => answer_host_request(expected_ee, access, request),
                             None => {
                                 host_error(&HostError::Denied("this request has no host".into()))
                             }
@@ -623,10 +702,16 @@ impl RemoteHost<'_> {
             pb::host_request::Op::BudBalance(_) => {
                 pb::host_response::Result::Balance(pb::Amount::default())
             }
+            pb::host_request::Op::Checkpoint(cp)
+                if pb::CheckpointOp::try_from(cp.op) == Ok(pb::CheckpointOp::Begin) =>
+            {
+                pb::host_response::Result::CheckpointId(0)
+            }
             pb::host_request::Op::Write(_)
             | pb::host_request::Op::EmitLog(_)
             | pb::host_request::Op::Charge(_)
-            | pb::host_request::Op::BudTransfer(_) => {
+            | pb::host_request::Op::BudTransfer(_)
+            | pb::host_request::Op::Checkpoint(_) => {
                 pb::host_response::Result::Ok(pb::HostEmpty::default())
             }
         };
@@ -759,6 +844,34 @@ impl HostApi for RemoteHost<'_> {
             from: Some(from.into()),
             to: Some(to.into()),
             attos: Some(BudAmount(attos).into()),
+        }))
+    }
+
+    fn checkpoint_begin(&mut self) -> Result<u64, HostError> {
+        let response = self.call(pb::host_request::Op::Checkpoint(pb::HostCheckpoint {
+            op: pb::CheckpointOp::Begin as i32,
+            id: 0,
+        }))?;
+        match response.result {
+            Some(pb::host_response::Result::CheckpointId(id)) => Ok(id),
+            Some(pb::host_response::Result::Error(e)) => Err(e
+                .try_into()
+                .unwrap_or_else(|e: WireError| HostError::Invalid(e.to_string()))),
+            _ => Err(HostError::Invalid("unexpected host response".into())),
+        }
+    }
+
+    fn checkpoint_commit(&mut self, id: u64) -> Result<(), HostError> {
+        self.expect_ok(pb::host_request::Op::Checkpoint(pb::HostCheckpoint {
+            op: pb::CheckpointOp::Commit as i32,
+            id,
+        }))
+    }
+
+    fn checkpoint_rollback(&mut self, id: u64) -> Result<(), HostError> {
+        self.expect_ok(pb::host_request::Op::Checkpoint(pb::HostCheckpoint {
+            op: pb::CheckpointOp::Rollback as i32,
+            id,
         }))
     }
 }

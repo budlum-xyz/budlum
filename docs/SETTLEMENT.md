@@ -29,7 +29,7 @@ unrelated anchored event settles nothing.
 ## Remote App Binding (`app_binding`)
 
 In-block settlement transactions implement remote app binding (`docs/APP_BINDING.md`
-is the integrator guide; closed on testnet `45261`, open on devnet `45262`). In short:
+is the integrator guide; active on testnet `45261` and devnet `45262` from genesis). In short:
 
 - `Register` is permissionless and idempotent and names no owner.
 - `Claim` sets the owner from an anchored claim event of the application.

@@ -133,9 +133,11 @@ pub trait BlsVerifier: Send + Sync {
     ) -> Result<(), String>;
 
     /// Whether Ethereum sync-committee finality is closed on this verifier's
-    /// network boundary until finality-branch Merkle verification lands.
+    /// network boundary. Defaults to fail-closed (`true`); real verifiers
+    /// that pair with [`EthereumSyncAdapter`]'s SSZ finality-branch check
+    /// override this to `false`.
     fn sync_committee_closed(&self) -> bool {
-        false
+        true
     }
 }
 
@@ -164,8 +166,29 @@ pub mod layout {
     /// to. Distinct from the header root above: a consumer that wanted the
     /// header root is reading the wrong field.
     pub const STATE_ROOT: std::ops::Range<usize> = 344..376;
-    /// Total payload length.
-    pub const LEN: usize = 376;
+    /// 8 bytes, little endian: finalized BeaconBlockHeader.proposer_index.
+    pub const FINALIZED_PROPOSER_INDEX: std::ops::Range<usize> = 376..384;
+    /// 32 bytes: finalized BeaconBlockHeader.parent_root.
+    pub const FINALIZED_PARENT_ROOT: std::ops::Range<usize> = 384..416;
+    /// 32 bytes: finalized BeaconBlockHeader.body_root.
+    pub const FINALIZED_BODY_ROOT: std::ops::Range<usize> = 416..448;
+    /// 8 bytes, little endian: attested BeaconBlockHeader.proposer_index.
+    pub const ATTESTED_PROPOSER_INDEX: std::ops::Range<usize> = 448..456;
+    /// 32 bytes: attested BeaconBlockHeader.parent_root.
+    pub const ATTESTED_PARENT_ROOT: std::ops::Range<usize> = 456..488;
+    /// 32 bytes: attested BeaconBlockHeader.state_root.
+    pub const ATTESTED_STATE_ROOT: std::ops::Range<usize> = 488..520;
+    /// 32 bytes: attested BeaconBlockHeader.body_root.
+    pub const ATTESTED_BODY_ROOT: std::ops::Range<usize> = 520..552;
+    /// 8 bytes, little endian: generalized index of `finalized_checkpoint.root`
+    /// (`105` Deneb / `169` Electra).
+    pub const FINALIZED_ROOT_GINDEX: std::ops::Range<usize> = 552..560;
+    /// Byte offset where `finality_branch` siblings begin.
+    pub const FINALITY_BRANCH_OFFSET: usize = 560;
+    /// Total payload length for Deneb (6-sibling finality branch).
+    pub const LEN: usize = 752;
+    /// Total payload length for Electra (7-sibling finality branch).
+    pub const LEN_ELECTRA: usize = 784;
 }
 
 /// The parsed update.
@@ -180,6 +203,15 @@ pub struct SyncCommitteeUpdate {
     pub signature: Vec<u8>,
     pub participation_bits: Vec<u8>,
     pub state_root: [u8; 32],
+    pub finalized_proposer_index: u64,
+    pub finalized_parent_root: [u8; 32],
+    pub finalized_body_root: [u8; 32],
+    pub attested_proposer_index: u64,
+    pub attested_parent_root: [u8; 32],
+    pub attested_state_root: [u8; 32],
+    pub attested_body_root: [u8; 32],
+    pub finalized_root_gindex: u64,
+    pub finality_branch: Vec<[u8; 32]>,
 }
 
 impl SyncCommitteeUpdate {
@@ -187,6 +219,30 @@ impl SyncCommitteeUpdate {
     #[must_use]
     pub fn signers(&self) -> u64 {
         participation(&self.participation_bits)
+    }
+
+    /// Reconstruct `hash_tree_root(finalized BeaconBlockHeader)`.
+    #[must_use]
+    pub fn finalized_header_root(&self) -> [u8; 32] {
+        crate::cross_domain::evm::sync_committee::beacon_header_hash_tree_root(
+            self.finalized_slot,
+            self.finalized_proposer_index,
+            self.finalized_parent_root,
+            self.state_root,
+            self.finalized_body_root,
+        )
+    }
+
+    /// Reconstruct `hash_tree_root(attested BeaconBlockHeader)`.
+    #[must_use]
+    pub fn attested_header_root(&self) -> [u8; 32] {
+        crate::cross_domain::evm::sync_committee::beacon_header_hash_tree_root(
+            self.attested_slot,
+            self.attested_proposer_index,
+            self.attested_parent_root,
+            self.attested_state_root,
+            self.attested_body_root,
+        )
     }
 }
 
@@ -197,6 +253,9 @@ impl SyncCommitteeUpdate {
 /// [`AdapterError::Malformed`] naming the offset, so a truncated or
 /// misaligned payload points at where it went wrong.
 pub fn parse_update(payload: &[u8]) -> Result<SyncCommitteeUpdate, AdapterError> {
+    use crate::cross_domain::evm::sync_committee::{
+        FINALIZED_ROOT_GINDEX_DENEB, FINALIZED_ROOT_GINDEX_ELECTRA,
+    };
     fn slice<'a>(
         payload: &'a [u8],
         range: std::ops::Range<usize>,
@@ -231,15 +290,51 @@ pub fn parse_update(payload: &[u8]) -> Result<SyncCommitteeUpdate, AdapterError>
         Ok(u64::from_le_bytes(arr))
     }
 
-    if payload.len() != layout::LEN {
+    if payload.len() != layout::LEN && payload.len() != layout::LEN_ELECTRA {
         return Err(AdapterError::Malformed {
             offset: payload.len(),
             reason: format!(
-                "payload is {} bytes, expected {}",
+                "payload is {} bytes, expected {} (Deneb) or {} (Electra)",
                 payload.len(),
-                layout::LEN
+                layout::LEN,
+                layout::LEN_ELECTRA
             ),
         });
+    }
+
+    let finalized_root_gindex = u64_at(payload, layout::FINALIZED_ROOT_GINDEX, "finalized_root_gindex")?;
+    let expected_depth = match finalized_root_gindex {
+        FINALIZED_ROOT_GINDEX_DENEB => 6usize,
+        FINALIZED_ROOT_GINDEX_ELECTRA => 7usize,
+        other => {
+            return Err(AdapterError::Malformed {
+                offset: layout::FINALIZED_ROOT_GINDEX.start,
+                reason: format!("unsupported finalized_root_gindex {other}"),
+            });
+        }
+    };
+    let branch_bytes = payload
+        .get(layout::FINALITY_BRANCH_OFFSET..)
+        .ok_or(AdapterError::Malformed {
+            offset: layout::FINALITY_BRANCH_OFFSET,
+            reason: "finality_branch missing".to_string(),
+        })?;
+    if branch_bytes.len() != expected_depth * 32 {
+        return Err(AdapterError::Malformed {
+            offset: layout::FINALITY_BRANCH_OFFSET,
+            reason: format!(
+                "finality_branch is {} bytes, expected {} for gindex {}",
+                branch_bytes.len(),
+                expected_depth * 32,
+                finalized_root_gindex
+            ),
+        });
+    }
+    let mut finality_branch = Vec::with_capacity(expected_depth);
+    for chunk in branch_bytes.chunks_exact(32) {
+        let mut node = [0u8; 32];
+        node.copy_from_slice(chunk);
+        finality_branch.push(node);
     }
 
     Ok(SyncCommitteeUpdate {
@@ -253,7 +348,138 @@ pub fn parse_update(payload: &[u8]) -> Result<SyncCommitteeUpdate, AdapterError>
         participation_bits: slice(payload, layout::PARTICIPATION_BITS, "participation_bits")?
             .to_vec(),
         state_root: fixed(payload, layout::STATE_ROOT, "state_root")?,
+        finalized_proposer_index: u64_at(
+            payload,
+            layout::FINALIZED_PROPOSER_INDEX,
+            "finalized_proposer_index",
+        )?,
+        finalized_parent_root: fixed(
+            payload,
+            layout::FINALIZED_PARENT_ROOT,
+            "finalized_parent_root",
+        )?,
+        finalized_body_root: fixed(payload, layout::FINALIZED_BODY_ROOT, "finalized_body_root")?,
+        attested_proposer_index: u64_at(
+            payload,
+            layout::ATTESTED_PROPOSER_INDEX,
+            "attested_proposer_index",
+        )?,
+        attested_parent_root: fixed(
+            payload,
+            layout::ATTESTED_PARENT_ROOT,
+            "attested_parent_root",
+        )?,
+        attested_state_root: fixed(payload, layout::ATTESTED_STATE_ROOT, "attested_state_root")?,
+        attested_body_root: fixed(payload, layout::ATTESTED_BODY_ROOT, "attested_body_root")?,
+        finalized_root_gindex,
+        finality_branch,
     })
+}
+
+/// Build a canonical Deneb `752`-byte update payload whose `finalized_root`,
+/// SSZ `finality_branch`, and `attested_state_root` are mutually consistent.
+///
+/// Intended for canonical test fixtures and tooling generating deterministic
+/// Deneb light-client updates.
+#[must_use]
+pub fn build_deneb_update_payload(
+    finalized_slot: u64,
+    attested_slot: u64,
+    period: u64,
+    committee: &PinnedCommittee,
+    signature: &[u8],
+    participation_bits: &[u8],
+    state_root: [u8; 32],
+) -> Vec<u8> {
+    let mut payload = vec![0u8; layout::LEN];
+    if let Some(s) = payload.get_mut(layout::FINALIZED_SLOT) {
+        s.copy_from_slice(&finalized_slot.to_le_bytes());
+    }
+    if let Some(s) = payload.get_mut(layout::ATTESTED_SLOT) {
+        s.copy_from_slice(&attested_slot.to_le_bytes());
+    }
+    if let Some(s) = payload.get_mut(layout::PERIOD) {
+        s.copy_from_slice(&period.to_le_bytes());
+    }
+    if let Some(s) = payload.get_mut(layout::NEXT_COMMITTEE_ROOT) {
+        s.copy_from_slice(&committee.next_committee_root);
+    }
+    if let (Some(dst), true) = (
+        payload.get_mut(layout::AGGREGATE_PUBKEY),
+        committee.aggregate_pubkey.len() == 96,
+    ) {
+        dst.copy_from_slice(&committee.aggregate_pubkey);
+    }
+    if let (Some(dst), true) = (payload.get_mut(layout::SIGNATURE), signature.len() == 96) {
+        dst.copy_from_slice(signature);
+    }
+    if let (Some(dst), true) = (
+        payload.get_mut(layout::PARTICIPATION_BITS),
+        participation_bits.len() == BITVECTOR_BYTES,
+    ) {
+        dst.copy_from_slice(participation_bits);
+    }
+    if let Some(dst) = payload.get_mut(layout::FINALIZED_ROOT_GINDEX) {
+        dst.copy_from_slice(
+            &crate::cross_domain::evm::sync_committee::FINALIZED_ROOT_GINDEX_DENEB.to_le_bytes(),
+        );
+    }
+    let branch = [
+        [0x11; 32], [0x22; 32], [0x33; 32], [0x44; 32], [0x55; 32], [0x66; 32],
+    ];
+    for (i, sib) in branch.iter().enumerate() {
+        let start = layout::FINALITY_BRANCH_OFFSET + i * 32;
+        if let Some(dst) = payload.get_mut(start..start + 32) {
+            dst.copy_from_slice(sib);
+        }
+    }
+    set_deneb_state_root(&mut payload, state_root);
+    payload
+}
+
+/// Recompute `STATE_ROOT`, `FINALIZED_ROOT`, and `ATTESTED_STATE_ROOT` inside
+/// a Deneb payload so its SSZ finality branch stays consistent after mutating
+/// the committed state root.
+pub fn set_deneb_state_root(payload: &mut [u8], state_root: [u8; 32]) {
+    let read_u64 = |range: std::ops::Range<usize>| -> u64 {
+        payload
+            .get(range)
+            .and_then(|s| <[u8; 8]>::try_from(s).ok())
+            .map(u64::from_le_bytes)
+            .unwrap_or(0)
+    };
+    let read_32 = |range: std::ops::Range<usize>| -> [u8; 32] {
+        payload
+            .get(range)
+            .and_then(|s| <[u8; 32]>::try_from(s).ok())
+            .unwrap_or([0u8; 32])
+    };
+    if let Some(dst) = payload.get_mut(layout::STATE_ROOT) {
+        dst.copy_from_slice(&state_root);
+    }
+    let finalized_root = crate::cross_domain::evm::sync_committee::beacon_header_hash_tree_root(
+        read_u64(layout::FINALIZED_SLOT),
+        read_u64(layout::FINALIZED_PROPOSER_INDEX),
+        read_32(layout::FINALIZED_PARENT_ROOT),
+        state_root,
+        read_32(layout::FINALIZED_BODY_ROOT),
+    );
+    if let Some(dst) = payload.get_mut(layout::FINALIZED_ROOT) {
+        dst.copy_from_slice(&finalized_root);
+    }
+    let mut branch = Vec::with_capacity(6);
+    for i in 0..6 {
+        let start = layout::FINALITY_BRANCH_OFFSET + i * 32;
+        branch.push(read_32(start..start + 32));
+    }
+    let gindex = read_u64(layout::FINALIZED_ROOT_GINDEX);
+    if let Some(attested_state_root) =
+        crate::cross_domain::evm::sync_committee::walk_branch(finalized_root, &branch, gindex)
+    {
+        if let Some(dst) = payload.get_mut(layout::ATTESTED_STATE_ROOT) {
+            dst.copy_from_slice(&attested_state_root);
+        }
+    }
 }
 
 /// The sync committee the adapter is pinned to.
@@ -291,8 +517,11 @@ pub fn committee_root(aggregate_pubkey: &[u8]) -> [u8; 32] {
 /// the claimed state root all go under the signature.
 #[must_use]
 pub fn signing_root_v2(update: &SyncCommitteeUpdate) -> [u8; 32] {
+    let attested_header_root = update.attested_header_root();
     crate::core::hash::hash_fields_bytes(&[
         b"BDLM_ETHSYNC_SIGNING_ROOT_V2",
+        &attested_header_root,
+        &update.attested_state_root,
         &update.finalized_root,
         &update.finalized_slot.to_le_bytes(),
         &update.attested_slot.to_le_bytes(),
@@ -442,9 +671,16 @@ impl crate::cross_domain::external::spec::ExternalFinalityAdapter for EthereumSy
             .accepted_evidence_versions
             .contains(&evidence.evidence_version)
         {
+            let accepted = self
+                .descriptor
+                .accepted_evidence_versions
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(", ");
             return Err(AdapterError::UnsupportedEvidenceVersion {
                 version: evidence.evidence_version,
-                accepted: "1".to_string(),
+                accepted,
             });
         }
 
@@ -485,12 +721,31 @@ impl crate::cross_domain::external::spec::ExternalFinalityAdapter for EthereumSy
             });
         }
 
-        // The declared period must be the one the slot belongs to. A period
-        // taken from the envelope rather than derived would let one committee's
-        // signature be presented for another period.
-        if update.period != period_of_slot(update.finalized_slot) {
+        // The declared period must match the attested slot that the committee
+        // actually signed. A period taken from the envelope rather than derived
+        // would let one committee's signature be presented for another period.
+        if update.period != period_of_slot(update.attested_slot) {
             return Err(AdapterError::ConsensusRule {
-                rule: "declared period does not match the finalized slot's period".to_string(),
+                rule: "declared period does not match the attested slot's period".to_string(),
+            });
+        }
+
+        // Verify the finalized BeaconBlockHeader fields reconstruct finalized_root
+        // and that the SSZ finality_branch proves finalized_root under attested_state_root.
+        if update.finalized_header_root() != update.finalized_root {
+            return Err(AdapterError::ConsensusRule {
+                rule: "finalized header fields do not match finalized_root".to_string(),
+            });
+        }
+        let proven_state_root = crate::cross_domain::evm::sync_committee::walk_branch(
+            update.finalized_root,
+            &update.finality_branch,
+            update.finalized_root_gindex,
+        );
+        if proven_state_root != Some(update.attested_state_root) {
+            return Err(AdapterError::ConsensusRule {
+                rule: "finality_branch does not prove finalized_root against attested_state_root"
+                    .to_string(),
             });
         }
 
@@ -536,6 +791,12 @@ impl crate::cross_domain::external::spec::ExternalFinalityAdapter for EthereumSy
                     .to_string(),
             });
         };
+        if verifier.sync_committee_closed() {
+            return Err(AdapterError::Unavailable {
+                reason: "Ethereum sync-committee verification is closed on this verifier"
+                    .to_string(),
+            });
+        }
         // The signed root is DERIVED from the update -
         // the signature binds the claimed state root and cannot be replayed
         // under another one.
@@ -670,6 +931,14 @@ impl crate::cross_domain::external::spec::ExternalFinalityAdapter for EthereumSy
                 expect: ExpectedRefusal::Any,
             },
             FaultProbe {
+                name: "corrupting attested_state_root breaks finality_branch proof".to_string(),
+                patch: BytePatch::InPayload {
+                    offset: layout::ATTESTED_STATE_ROOT.start,
+                    bytes: vec![0xff; 32],
+                },
+                expect: ExpectedRefusal::Kind(RefusalKind::ConsensusRule),
+            },
+            FaultProbe {
                 name: "pointing the adapter at a different network is refused".to_string(),
                 patch: BytePatch::Network {
                     value: "not-this-network".to_string(),
@@ -719,6 +988,10 @@ impl BlsVerifier for AcceptAllBls {
     ) -> Result<(), String> {
         Ok(())
     }
+
+    fn sync_committee_closed(&self) -> bool {
+        false
+    }
 }
 
 /// A [`BlsVerifier`] that refuses everything, for the probe that must not pass
@@ -736,6 +1009,10 @@ impl BlsVerifier for RefuseAllBls {
         _participants: u64,
     ) -> Result<(), String> {
         Err("refused by the test verifier".to_string())
+    }
+
+    fn sync_committee_closed(&self) -> bool {
+        false
     }
 }
 
@@ -761,13 +1038,15 @@ mod slashable_policy_tests {
     }
 
     fn evidence(adapter: &EthereumSyncAdapter) -> RawConsensusEvidence {
-        let mut payload = vec![0u8; layout::LEN];
-        payload[layout::FINALIZED_SLOT].copy_from_slice(&64u64.to_le_bytes());
-        payload[layout::ATTESTED_SLOT].copy_from_slice(&128u64.to_le_bytes());
-        payload[layout::AGGREGATE_PUBKEY].copy_from_slice(&[0x11; 96]);
-        payload[layout::SIGNATURE].copy_from_slice(&[0x22; 96]);
-        payload[layout::PARTICIPATION_BITS].copy_from_slice(&[0xff; 64]);
-        payload[layout::STATE_ROOT].copy_from_slice(&[0xcc; 32]);
+        let payload = build_deneb_update_payload(
+            64,
+            128,
+            0,
+            &test_committee(),
+            &[0x22; 96],
+            &[0xff; 64],
+            [0xcc; 32],
+        );
         RawConsensusEvidence {
             adapter: adapter.descriptor().id,
             evidence_version: 2,
@@ -873,7 +1152,7 @@ mod slashable_policy_tests {
             Some(Box::new(AcceptAllBls)),
         ));
         let mut b = a.clone();
-        b.payload[layout::STATE_ROOT].copy_from_slice(&[0xAB; 32]);
+        set_deneb_state_root(&mut b.payload, [0xAB; 32]);
         b.declared_root = [0xAB; 32];
         let update_a = parse_update(&a.payload).unwrap();
         let update_b = parse_update(&b.payload).unwrap();
@@ -882,6 +1161,53 @@ mod slashable_policy_tests {
             signing_root_v2(&update_b),
             "a different state root must be a different signing root"
         );
+    }
+
+    #[test]
+    fn forged_finality_branch_and_default_closed_verifier_are_refused() {
+        struct DefaultClosedBls;
+        impl BlsVerifier for DefaultClosedBls {
+            fn verify_aggregate(
+                &self,
+                _signing_root: &[u8; 32],
+                _aggregate_pubkey: &[u8],
+                _signature: &[u8],
+                _participants: u64,
+            ) -> Result<(), String> {
+                Ok(())
+            }
+        }
+        let closed_adapter = EthereumSyncAdapter::new(
+            "testnet",
+            Some(test_committee()),
+            Some(Box::new(DefaultClosedBls)),
+        );
+        let ev = evidence(&closed_adapter);
+        assert!(matches!(
+            closed_adapter.verify(&ev, &VerificationPolicy::strict(1_000)),
+            Err(AdapterError::Unavailable { .. })
+        ));
+
+        let adapter = EthereumSyncAdapter::new(
+            "testnet",
+            Some(test_committee()),
+            Some(Box::new(AcceptAllBls)),
+        );
+        let mut bad_branch = evidence(&adapter);
+        bad_branch.payload[layout::FINALITY_BRANCH_OFFSET] ^= 0xff;
+        assert!(matches!(
+            adapter.verify(&bad_branch, &VerificationPolicy::strict(1_000)),
+            Err(AdapterError::ConsensusRule { .. })
+        ));
+
+        let mut bad_version = evidence(&adapter);
+        bad_version.evidence_version = 99;
+        match adapter.verify(&bad_version, &VerificationPolicy::strict(1_000)) {
+            Err(AdapterError::UnsupportedEvidenceVersion { accepted, .. }) => {
+                assert_eq!(accepted, "2");
+            }
+            other => panic!("expected UnsupportedEvidenceVersion, got {other:?}"),
+        }
     }
 
     /// With no pinned committee the
