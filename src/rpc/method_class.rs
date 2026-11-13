@@ -190,7 +190,11 @@ pub(crate) const METHOD_CLASSES: &[MethodClass] = &[
     row("bud_bnsResolveFull", Public, Read),
     row("bud_bnsResolveContent", Public, Read),
     row("bud_bnsResolveSubdomain", Public, Read),
-    row("bud_bnsPrepareRegister", Public, TxSubmit),
+    row("bud_bnsGetOffer", Public, Read),
+    row("bud_bnsListOffers", Public, Read),
+    row("bud_bnsPrepareCreateOffer", Public, TxSubmit),
+    row("bud_bnsPrepareBuyName", Public, TxSubmit),
+    row("bud_bnsPrepareCancelOffer", Public, TxSubmit),
     row("bud_bnsPrepareRegisterSubdomain", Public, TxSubmit),
     row("bud_bnsPrepareSetContent", Public, TxSubmit),
     row("bud_bnsPrepareRenew", Public, TxSubmit),
@@ -651,10 +655,11 @@ mod tests {
     /// trait does not declare (a subscription, a method that arrives through an
     /// alias) is asked for both, because the rule cannot see its shape.
     fn wants_refusal(method: &str) -> bool {
-        // `get_charter` is total over its `u32` domain id: every value is a
-        // well-formed lookup and an absent charter answers `null`. There is
-        // no invalid call at this layer to invent a refusal test for.
-        if method == "bud_getCharter" {
+        // `get_charter` and `bns_get_offer` are total over their integer ids:
+        // every value is a well-formed lookup and an absent record answers
+        // `null`. There is no invalid call at this layer to invent a refusal
+        // test for.
+        if method == "bud_getCharter" || method == "bud_bnsGetOffer" {
             return false;
         }
         match declared_arguments(method) {

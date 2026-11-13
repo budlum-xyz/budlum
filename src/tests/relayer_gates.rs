@@ -280,23 +280,36 @@ fn test_hub_register_app_exact_min_fee_deducted_and_registered() {
 
 #[test]
 fn test_bns_register_fee_enforced_regression_m4() {
-    // The M4 record was already closed by the executor H1 fix; it is sealed here
-    // as a regression: a four-letter name with duration 1 gives cost > amount.
+    // Regression: BnsBuyName must enforce exact offer price_atoms payment.
     let mut state = AccountState::new();
-    state.add_balance(&relayer_addr(), 10_000);
+    let seller = crate::bns::BNS_PRIMARY_SELLERS[0];
+    state.add_balance(&relayer_addr(), 100_000);
     let name = "abcd.bud".to_string();
-    let cost = state.bns_registry.calculate_cost(&name, 1);
-    assert!(cost > 0);
-    let data = bincode::serialize(&(name.clone(), 1u64)).expect("ser");
+    let price_atoms = 5_000u64;
+    let offer_id = state
+        .marketplace
+        .create_name_offer(
+            seller,
+            crate::pollen::CreateNameOffer {
+                name: name.clone(),
+                price_atoms,
+                duration: 100,
+                kind: crate::pollen::OfferKind::Primary,
+                expires_at_epoch: 50,
+            },
+            0,
+        )
+        .expect("offer opens");
+    let data = bincode::serialize(&offer_id).expect("ser");
     let tx = Transaction::new_with_chain_id(
         relayer_addr(),
         Address::zero(),
-        cost - 1, // one short of the payment
+        price_atoms - 1, // one short of offer.price_atoms
         1,
         0,
         data,
         CHAIN_ID,
-        TransactionType::BnsRegister,
+        TransactionType::BnsBuyName,
     );
     let err = Executor::apply_transaction(&mut state, &tx).expect_err("must reject");
     assert!(err.contains("Required:") && err.contains("provided:"));

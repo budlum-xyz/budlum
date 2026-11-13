@@ -424,6 +424,7 @@ async fn main() {
             // the template, so what the chain pays is readable in the file it
             // was launched from (testnet item 8).
             reward_pool: network_defaults.reward_pool,
+            bns_primary_sellers: network_defaults.bns_primary_sellers,
         };
 
         let data = match serde_json::to_string_pretty(&genesis_config) {
