@@ -78,3 +78,39 @@ maddesi icinde:
 2. `verify_bns_recipient_proof_from_header(source, ...)` fonksiyonu. Eski
    fonksiyon `#[deprecated]` olur, silinmez.
 3. Bir test: dugum kendi urettigi koku verir, cuzdan reddeder.
+
+
+## Tur 2: kod indi
+
+`crates/wallet-core/src/bns.rs`:
+
+- `HeaderSource` trait: `bns_root_at(height) -> Option<([u8; 32], u64)>`.
+  Cuzdan guvendigi bir kaynak verir; kok ve epoch oradan okunur.
+- `verify_bns_recipient_proof_from_header`: kok ve epoch'u `headers`ten alip
+  `verify_bns_recipient_proof`'a veriyor. Cozum yolu bu.
+- `HeaderUnknown(u64)`: basligi olmayan yukseklik icin ayri tip, cagiran
+  "dugum yalan soyledi" ile "ben gerideyim"i ayirt edebilsin.
+- `WalletBnsProof.header_height`: capanin ihtiyac duydugu alan.
+
+Uc test:
+
+- `a_proof_verifies_against_the_root_of_the_header_the_wallet_holds`
+- `a_root_chosen_by_the_node_cannot_substitute_a_recipient` - dugumun kendi
+  urettigi kayit, dugumun kendi kokuyle dogrulanir; cuzdanin basligindaki
+  kokle reddedilir. Ayni sahtelik `expected_bns_root` cagirandan gelince
+  gecer; kapatilan kusur tam olarak bu.
+- `a_proof_for_a_height_the_wallet_has_no_header_for_is_refused`
+
+Eski `verify_bns_recipient_proof` silinmedi. Uc test ve tek cagiran hala onu
+kullaniyor; yeni giris noktasi yaninda duruyor. Cagiranlari tasiyip eski
+fonksiyonu `#[deprecated]` yapmak sirada.
+
+## Yerel kanit
+
+`wallet-core` bu makinede derleniyor (1.9 GB'in altinda kaliyor):
+
+- `cargo fmt --all --check` temiz
+- `cargo clippy --lib --all-features -- -D warnings` temiz
+- `cargo test --lib` 163 gecti, 0 basarisiz
+
+Commit `026711ba`. CI kosusu yok; kuyruk PR #163'te bekliyor.

@@ -2876,7 +2876,10 @@ mod tests {
 
     #[test]
     fn d2_wallet_rejects_forged_spend_secret_and_bad_blindings() {
-        let mut w = Wallet::from_entropy(&[0x67u8; 16]).unwrap();
+        // 32 bytes: this test is about the private-transfer refusals below,
+        // not about entropy size, and a 16-byte seed is refused by design
+        // (`generate_12_word_wallet_is_refused`).
+        let mut w = Wallet::from_entropy(&[0x67u8; 32]).unwrap();
         w.set_note_privacy_enabled(true);
         let (blinding, _, _) = w.prepare_receive_note(100, 0).unwrap();
         let mut bad_secret_input = w.note_input_from_receive(100, blinding).unwrap();
