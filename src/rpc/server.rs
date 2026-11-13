@@ -4592,6 +4592,29 @@ impl BudlumApiServer for RpcServer {
         let proof = self.chain.bns_prove_name(name).await.ok_or_else(|| {
             ErrorObjectOwned::owned(-32000, "Failed to query BNS state proof", None::<()>)
         })?;
+        let extras_json = |e: &crate::bns::types::BnsBranchExtras| -> serde_json::Value {
+            serde_json::json!({
+                "resolver": e.resolver.map(|a| Self::to_0x_hash(a.to_hex())),
+                "address": e.address.map(|a| Self::to_0x_hash(a.to_hex())),
+                "consensus_domain_id": e.consensus_domain_id,
+                "storage_domain_id": e.storage_domain_id,
+                "storage_root_height": e.storage_root_height,
+                "bud3_content": e.bud3_content.as_ref().map(|c| serde_json::json!({
+                    "kind": match c.content_id.kind {
+                        crate::storage::bud3::content_id::ContentIdKind::Public => "public",
+                        crate::storage::bud3::content_id::ContentIdKind::Sealed => "sealed",
+                    },
+                    "digest": format!("0x{}", hex::encode(c.content_id.digest)),
+                    "len": c.content_id.len,
+                    "object_commitment": format!("0x{}", hex::encode(c.object_commitment)),
+                    "nft_id": c.nft_id.map(|n| format!("0x{}", hex::encode(n))),
+                })),
+                "subdomains": e.subdomains.iter()
+                    .map(|(label, owner)| (label.clone(), Self::to_0x_hash(owner.to_hex())))
+                    .collect::<serde_json::Map<_, _>>(),
+                "records": e.records,
+            })
+        };
         let branch_json = |b: &crate::bns::types::BnsMerkleBranch| -> serde_json::Value {
             serde_json::json!({
                 "name": b.name,
@@ -4604,6 +4627,16 @@ impl BudlumApiServer for RpcServer {
                 "leaf": format!("0x{}", hex::encode(b.leaf)),
                 "siblings": b.siblings.iter().map(|s| format!("0x{}", hex::encode(s))).collect::<Vec<_>>(),
                 "directions": b.directions,
+                // The three fields below are what turns a branch into a
+                // checkable claim. Without `leaf_index` and `tree_size` an
+                // absence proof cannot show its boundaries are adjacent, and
+                // without `extras` the disclosed address and records are not
+                // bound to `extras_digest`. Omitting them here would not be a
+                // smaller answer: it would be the old answer, and the old
+                // answer is what the two proof findings were about.
+                "leaf_index": b.leaf_index,
+                "tree_size": b.tree_size,
+                "extras": b.extras.as_ref().map(extras_json),
             })
         };
         Ok(serde_json::json!({
