@@ -1714,6 +1714,48 @@ mod rpc_tests {
             .unwrap_err()
             .message()
             .contains("Only the offer seller"));
+        assert_eq!(
+            server.bns_reverse_resolve(buyer.to_hex()).await.unwrap(),
+            None
+        );
+        assert!(server
+            .bns_reverse_resolve("0xnot-hex".to_string())
+            .await
+            .unwrap_err()
+            .message()
+            .contains("Invalid address"));
+        let prepared_addr = server
+            .bns_prepare_set_address(
+                "bids.bud".to_string(),
+                seller.to_hex(),
+                Some(buyer.to_hex()),
+                Some(2),
+            )
+            .await
+            .unwrap();
+        assert!(prepared_addr["tx_template"].is_object());
+        assert!(server
+            .bns_prepare_set_address(
+                "bids".to_string(),
+                seller.to_hex(),
+                Some(buyer.to_hex()),
+                None,
+            )
+            .await
+            .unwrap_err()
+            .message()
+            .contains("Invalid BNS name"));
+        let prepared_primary = server
+            .bns_prepare_set_primary_name(seller.to_hex(), Some("bids.bud".to_string()))
+            .await
+            .unwrap();
+        assert!(prepared_primary["tx_template"].is_object());
+        assert!(server
+            .bns_prepare_set_primary_name(seller.to_hex(), Some("ab.bud".to_string()))
+            .await
+            .unwrap_err()
+            .message()
+            .contains("Invalid BNS name"));
     }
 
     #[tokio::test]
