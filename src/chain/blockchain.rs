@@ -2904,11 +2904,18 @@ impl Blockchain {
     /// after `self.state` becomes the committed state, and from the bridge
     /// suite that asserts the drain moves nothing twice.
     pub fn drain_pending_bridge_burns(&mut self) -> usize {
-        let pending = std::mem::take(&mut self.state.pending_bridge_burns);
+        let height = self.harness_height();
+        Self::drain_pending_bridge_burns_in_state(&mut self.state, height)
+    }
+
+    fn drain_pending_bridge_burns_in_state(state: &mut AccountState, height: u64) -> usize {
+        let pending = std::mem::take(&mut state.pending_bridge_burns);
         let count = pending.len();
         for event in pending {
             if let Some(message) = event.message.clone() {
-                self.enqueue_bridge_relay(event, &message);
+                crate::cross_domain::bridge_tx::enqueue_bridge_relay(
+                    state, &event, &message, height,
+                );
             }
         }
         count
@@ -4790,6 +4797,11 @@ impl Blockchain {
         // in the account state, so a clock driven from the commit path alone
         // would leave replay one tick behind live operation.
         next_state.settlement.on_block_end(block.index);
+        // Enqueue bridge-burn relay requests inside the `(state, block) -> state`
+        // transition before `calculate_state_root` runs: `enqueue_bridge_relay`
+        // writes `state.bridge_relayer`, which is folded into the state root, so
+        // draining after the commit diverged live and replayed state roots.
+        Self::drain_pending_bridge_burns_in_state(&mut next_state, block.index);
 
         // Fee settlement has a single authority: Executor::apply_block_checked
         // Credits the producer exactly once with flat fee, metabolic burn.
