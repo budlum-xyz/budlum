@@ -195,12 +195,17 @@ fn application_contract_fee_is_split_between_recipient_and_producer() {
     state.settlement.domains.register(origin_domain).unwrap();
     state
         .settlement
-        .graft
+        .app_binding
         .register(7, b"origin-app".to_vec(), [0x44u8; 32], 0)
         .unwrap();
-    let graft_id = crate::settlement::graft::graft_id(7, b"origin-app");
+    let app_binding_id = crate::settlement::app_binding::app_binding_id(7, b"origin-app");
     // An unclaimed application: its share accrues in the keyless mirror.
-    let app = state.settlement.graft.get(&graft_id).unwrap().clone();
+    let app = state
+        .settlement
+        .app_binding
+        .get(&app_binding_id)
+        .unwrap()
+        .clone();
     let application = app.fee_recipient();
     assert_eq!(application, app.mirror_account);
 
@@ -236,7 +241,7 @@ fn application_contract_fee_is_split_between_recipient_and_producer() {
     );
 }
 
-/// A contract call that names an address no Graft application owns pays the
+/// A contract call that names an address no AppBinding application owns pays the
 /// whole post-burn fee to the producer: the sender cannot route a share of
 /// its own fee back to itself by naming an arbitrary recipient.
 #[test]

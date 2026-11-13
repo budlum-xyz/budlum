@@ -1424,6 +1424,11 @@ jobs:
           set -euo pipefail
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- testnet-runtime-hardening --self-test
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- testnet-runtime-hardening
+      - name: Launch-matrix tests exist gate
+        run: |
+          set -euo pipefail
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- launch-matrix-tests-exist --self-test
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- launch-matrix-tests-exist
       - name: Network hardening gate canary
         run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- network-hardening --self-test
       - name:  network hardening tests
@@ -2406,6 +2411,9 @@ jobs:
             # harness): two chain-set builds per iteration, far inside the
             # 60 second budget; long coverage in fuzz-nightly.
             bpqs_wots_reject
+            # Light-client header segment linking: one hash per header and at
+            # most 32 headers per input.
+            light_client_header_chain
           )
           # evm_rlp_decode and evm_mpt_verify run in fuzz-nightly.yml. This
           # comment used to say "nightly/manual" while the nightly matrix did

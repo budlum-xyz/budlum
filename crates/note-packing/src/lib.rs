@@ -38,7 +38,7 @@
 //!
 //! Zero padding means the hash space of packed notes is a sparse subset of
 //! the full 32-byte space, which is a virtue here: the note subtree is
-//! isolated from the account, NFT, B.U.D. and Pollen state, so a packed note
+//! isolated from the account, NFT, B.U.D. and Data Market state, so a packed note
 //! hash cannot be confused with a hash from another subtree by construction
 //! rather than by convention. A domain tag in the high bytes would add
 //! nothing this isolation does not already provide, and would silently

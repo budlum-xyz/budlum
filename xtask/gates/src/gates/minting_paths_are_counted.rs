@@ -96,7 +96,7 @@ const TRANSFER_JUSTIFICATIONS: &[(&str, usize, &str)] = &[
          Every line moves recorded value back to the party that paid it in.",
     ),
     (
-        "src/settlement/graft.rs",
+        "src/settlement/app_binding.rs",
         1,
         "one in `credit`: the intent payment moves the user's own escrowed \
          funds to the solver on fulfilment - the amount the intent locked, \

@@ -18,10 +18,10 @@ No contract has an owner, a pause switch or an upgrade path.
 | Contract | Purpose | Budlum side |
 |---|---|---|
 | `external-domain/BudlumFinalityVerifier.sol` | Verifies Budlum finality (BLS12-381 aggregate and ML-DSA) with the EIP-2537 and EIP-8051 precompiles, optimistic window when one is missing | `src/cross_domain/external/evm_hybrid.rs` (signing root and digest encoder) |
-| `graft/GraftExecutor.sol` | A solver makes a Graft intent's call through it; it emits the fulfilment message | `GraftTx::Fulfill`, `fulfilled_payload_hash` |
-| `graft/GraftExecutor.sol` (`BudlumGraftClaimer`) | What an origin application inherits to name its Budlum payout | `GraftTx::Claim`, `claim_payload_hash` |
-| `graft/BudlumPaymentReceiver.sol` | On-chain check of a Graft payment: finalized state root, global header, Graft root, payment window | `verify_graft_payment` |
-| `graft/BudlumRemoteAccountFactory.sol` | Graft level 3: CREATE2 accounts a Budlum user controls with Budlum payments | Graft payments with a call authorization as memo |
+| `app_binding/AppBindingExecutor.sol` | A solver makes an AppBinding intent's call through it; it emits the fulfilment message | `AppBindingTx::Fulfill`, `fulfilled_payload_hash` |
+| `app_binding/AppBindingExecutor.sol` (`BudlumAppBindingClaimer`) | What an origin application inherits to name its Budlum payout | `AppBindingTx::Claim`, `claim_payload_hash` |
+| `app_binding/BudlumPaymentReceiver.sol` | On-chain check of an AppBinding payment: finalized state root, global header, AppBinding root, payment window | `verify_app_binding_payment` |
+| `app_binding/BudlumRemoteAccountFactory.sol` | AppBinding level 3: CREATE2 accounts a Budlum user controls with Budlum payments | AppBinding payments with a call authorization as memo |
 | `mikoriza/BudlumRegistrar.sol` | The Mikoriza AVS: binds a Budlum validator and BLS key to an EigenLayer operator, reports allocations | `SharedSecurityTx::Observe`, `allocation_payload_hash` |
 | `mikoriza/BudlumSlasher.sol` | Slashes an operator for a Budlum finality double vote, verified with EIP-2537 | `checkpoint_signing_message` |
 
@@ -39,7 +39,7 @@ event BudlumOutbound(bytes kind, bytes32 indexed recipient,
 cross-domain message whose sender is the emitting contract. Payload hashes use
 the Budlum field hash (`lib/BudlumHash.sol`, `hash_fields_bytes` in Rust):
 SHA-256 over every field, each preceded by its little-endian u64 length. The
-known-answer tests on both sides (`test/Graft.t.sol`, `test/Mikoriza.t.sol`,
+known-answer tests on both sides (`test/AppBinding.t.sol`, `test/Mikoriza.t.sol`,
 and the matching Rust tests) pin the same values.
 
 ## Deployment
