@@ -169,26 +169,84 @@ pub fn check_name(name: &str) -> Result<(), NameRejection> {
     Ok(())
 }
 
-/// The registry still applies only a length rule, and this records that.
+/// Validates a registrable `.bud` BNS name: exactly `<label>.bud` where
+/// `<label>` is 3..=32 lowercase ASCII letters, digits or interior hyphens.
+pub fn check_bud_registration(name: &str) -> Result<&str, &'static str> {
+    let label = name.strip_suffix(".bud").ok_or("missing .bud suffix")?;
+    let char_count = label.chars().count();
+    if !(3..=32).contains(&char_count) {
+        return Err("label length outside 3..=32");
+    }
+    if label.is_empty() || label.starts_with('-') || label.ends_with('-') {
+        return Err("empty or edge-hyphen label");
+    }
+    if !label
+        .bytes()
+        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+    {
+        return Err("disallowed label byte");
+    }
+    Ok(label)
+}
+
+fn inspect_bns_sources(registry_src: &str, types_src: &str, rpc_src: &str) -> Result<(), String> {
+    for required in [
+        "const SUFFIX: &'static str = \".bud\";",
+        "name.strip_suffix(Self::SUFFIX)",
+        "(3..=32).contains(&char_count)",
+        "Self::is_valid_label(label)",
+        "Self::is_valid_name(&name)",
+    ] {
+        if !registry_src.contains(required) {
+            return Err(format!(
+                "src/bns/registry.rs is missing `{required}` required by the `.bud` suffix and 3..=32 label rule"
+            ));
+        }
+    }
+
+    // Both `bud_label` and `calculate_cost` must strip `Self::SUFFIX` so `.bud`
+    // is excluded from both length validation and cost-tier calculation.
+    if registry_src.matches("strip_suffix(Self::SUFFIX)").count() < 2 {
+        return Err(String::from(
+            "src/bns/registry.rs must strip `Self::SUFFIX` in both `bud_label` and `calculate_cost`",
+        ));
+    }
+
+    if !types_src.contains("BnsRegistry::is_valid_name(&name)") {
+        return Err(String::from(
+            "src/bns/types.rs (`NameRecord::try_new`) no longer enforces `BnsRegistry::is_valid_name(&name)`",
+        ));
+    }
+
+    if !rpc_src.contains("BnsRegistry::is_valid_name(") {
+        return Err(String::from(
+            "src/rpc/server.rs `bns_prepare_*` doors no longer enforce `BnsRegistry::is_valid_name`",
+        ));
+    }
+
+    Ok(())
+}
+
+/// Checks that registry, `NameRecord::try_new`, RPC prepare doors and browser
+/// address-bar checks agree on `.bud` suffix and 3..=32 label rules.
 ///
 /// # Errors
 ///
-/// When `src/bns/registry.rs` has grown a second character-set rule that this
-/// module does not know about, so the two can disagree without anyone looking.
+/// When `src/bns/registry.rs`, `src/bns/types.rs` or `src/rpc/server.rs` drops
+/// the `.bud` suffix / 3..=32 label rule or diverges from the browser check.
 pub fn run(root: &Path) -> Result<String, String> {
-    let path = root.join("src/bns/registry.rs");
-    let display = path.display().to_string();
-    let src = std::fs::read_to_string(&path).map_err(|e| format!("cannot read {display}: {e}"))?;
+    let reg_path = root.join("src/bns/registry.rs");
+    let types_path = root.join("src/bns/types.rs");
+    let rpc_path = root.join("src/rpc/server.rs");
 
-    if !src.contains("(3..=32).contains(&char_count)") {
-        return Err(format!(
-            "{display} no longer applies the 3..=32 length rule this module was measured \
-             against. Either the bound moved or a character-set rule landed. If a rule \
-             landed, this module's check_name must be reconciled with it in the same \
-             commit: two places deciding what a name may contain, disagreeing, is worse \
-             than one place deciding badly."
-        ));
-    }
+    let reg_src = std::fs::read_to_string(&reg_path)
+        .map_err(|e| format!("cannot read {}: {e}", reg_path.display()))?;
+    let types_src = std::fs::read_to_string(&types_path)
+        .map_err(|e| format!("cannot read {}: {e}", types_path.display()))?;
+    let rpc_src = std::fs::read_to_string(&rpc_path)
+        .map_err(|e| format!("cannot read {}: {e}", rpc_path.display()))?;
+
+    inspect_bns_sources(&reg_src, &types_src, &rpc_src)?;
 
     // A name reaching a browser must fail this module's rule if it would fail
     // in an address bar. Pinned here so the table cannot quietly lose an entry.
@@ -200,25 +258,28 @@ pub fn run(root: &Path) -> Result<String, String> {
         "UPPER.bud",
     ];
     for name in dangerous {
-        if check_name(name).is_ok() {
+        if check_name(name).is_ok() || check_bud_registration(name).is_ok() {
             return Err(format!(
-                "check_name accepts {name:?}, which the registry also accepts. This module \
-                 exists because the registry's rule is a length and nothing else; if the \
-                 browser's rule stops catching these, nothing does."
+                "name rule accepts dangerous input {name:?}; both browser and registry rules must refuse it"
             ));
         }
     }
-    if check_name("ayaz.bud").is_err() {
+    for bad_reg in ["bids", "ab.bud", "sub.bids.bud", "bids.eth"] {
+        if check_bud_registration(bad_reg).is_ok() {
+            return Err(format!(
+                "check_bud_registration accepted invalid registrable name {bad_reg:?}"
+            ));
+        }
+    }
+    if check_name("ayaz.bud").is_err() || check_bud_registration("bids.bud").is_err() {
         return Err(String::from(
-            "check_name refuses an ordinary name, so it is a ban on names rather than a \
-             rule about them.",
+            "name rule refuses an ordinary `.bud` name, so it is a ban on names rather than a rule about them.",
         ));
     }
 
     Ok(String::from(
-        "BNS name gate OK: the registry still applies a length rule and nothing else, and \
-         the browser-side rule refuses scheme injection, path traversal, whitespace, \
-         uppercase and mixed scripts while accepting an ordinary name.",
+        "BNS name gate OK: `.bud` suffix and 3..=32 label bounds are enforced across registry, \
+         NameRecord::try_new, cost calculation, RPC prepare doors and browser-side rules.",
     ))
 }
 
@@ -295,6 +356,62 @@ pub fn self_test() -> Result<String, String> {
         if let Err(e) = check_name(name) {
             problems.push(format!("BROKEN: ordinary name {name:?} refused: {e:?}"));
         }
+    }
+
+    // B1 `.bud` registration rule canaries (non-vacuous positive + negative).
+    let max_bud = format!("{}.bud", "a".repeat(32));
+    let over_bud = format!("{}.bud", "a".repeat(33));
+    for ok_bud in ["bids.bud", "abc.bud", max_bud.as_str()] {
+        if let Err(e) = check_bud_registration(ok_bud) {
+            problems.push(format!("BROKEN: valid `.bud` name {ok_bud:?} refused: {e}"));
+        }
+    }
+    for bad_bud in [
+        "bids",
+        "ab.bud",
+        over_bud.as_str(),
+        "sub.bids.bud",
+        "-abc.bud",
+        "abc-.bud",
+        "UPPER.bud",
+        "bids.eth",
+    ] {
+        if check_bud_registration(bad_bud).is_ok() {
+            problems.push(format!("VACUOUS: invalid `.bud` name {bad_bud:?} accepted"));
+        }
+    }
+
+    // Source-inspection anti-vacuous mutation canaries.
+    let valid_reg = "const SUFFIX: &'static str = \".bud\";\n\
+                     name.strip_suffix(Self::SUFFIX);\n\
+                     (3..=32).contains(&char_count);\n\
+                     Self::is_valid_label(label);\n\
+                     Self::is_valid_name(&name);\n\
+                     name.strip_suffix(Self::SUFFIX);\n";
+    let valid_types = "BnsRegistry::is_valid_name(&name)";
+    let valid_rpc = "BnsRegistry::is_valid_name(&name)";
+    if let Err(e) = inspect_bns_sources(valid_reg, valid_types, valid_rpc) {
+        problems.push(format!("BROKEN: valid source fixture rejected: {e}"));
+    }
+    if inspect_bns_sources("let x = 1;", valid_types, valid_rpc).is_ok() {
+        problems.push(String::from(
+            "VACUOUS: missing `.bud` suffix rule in registry.rs passed",
+        ));
+    }
+    if inspect_bns_sources(valid_reg, "let x = 1;", valid_rpc).is_ok() {
+        problems.push(String::from(
+            "VACUOUS: missing `is_valid_name` check in types.rs passed",
+        ));
+    }
+    if inspect_bns_sources(valid_reg, valid_types, "let x = 1;").is_ok() {
+        problems.push(String::from(
+            "VACUOUS: missing `is_valid_name` check in rpc/server.rs passed",
+        ));
+    }
+    if run(Path::new("/nonexistent-bns-names-canary")).is_ok() {
+        problems.push(String::from(
+            "VACUOUS: `run` passed on an unreadable root directory",
+        ));
     }
 
     if !problems.is_empty() {

@@ -4530,6 +4530,20 @@ impl BudlumApiServer for RpcServer {
         owner: String,
         duration: u64,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        if !crate::bns::BnsRegistry::is_valid_name(&name) {
+            return Err(ErrorObjectOwned::owned(
+                -32602,
+                "Invalid BNS name: expected <label>.bud with 3..=32 lowercase label characters",
+                None::<()>,
+            ));
+        }
+        if duration == 0 {
+            return Err(ErrorObjectOwned::owned(
+                -32602,
+                "Registration duration must be greater than zero",
+                None::<()>,
+            ));
+        }
         let clean_owner = owner.strip_prefix("0x").unwrap_or(&owner);
         let owner_addr = Address::from_hex(clean_owner).map_err(|e| {
             ErrorObjectOwned::owned(-32602, format!("Invalid owner address: {e}"), None::<()>)
@@ -4578,6 +4592,20 @@ impl BudlumApiServer for RpcServer {
         sub_label: String,
         sub_owner: String,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        if !crate::bns::BnsRegistry::is_valid_name(&parent_name) {
+            return Err(ErrorObjectOwned::owned(
+                -32602,
+                "Invalid BNS name: expected <label>.bud with 3..=32 lowercase label characters",
+                None::<()>,
+            ));
+        }
+        if !crate::bns::BnsRegistry::is_valid_label(&sub_label) {
+            return Err(ErrorObjectOwned::owned(
+                -32602,
+                "Invalid subdomain label",
+                None::<()>,
+            ));
+        }
         let clean_owner = sub_owner.strip_prefix("0x").unwrap_or(&sub_owner);
         let owner_addr = Address::from_hex(clean_owner).map_err(|e| {
             ErrorObjectOwned::owned(-32602, format!("Invalid owner address: {e}"), None::<()>)
@@ -4632,6 +4660,13 @@ impl BudlumApiServer for RpcServer {
         owner: String,
         cid: String,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        if !crate::bns::BnsRegistry::is_valid_name(&name) {
+            return Err(ErrorObjectOwned::owned(
+                -32602,
+                "Invalid BNS name: expected <label>.bud with 3..=32 lowercase label characters",
+                None::<()>,
+            ));
+        }
         let clean_owner = owner.strip_prefix("0x").unwrap_or(&owner);
         let owner_addr = Address::from_hex(clean_owner).map_err(|e| {
             ErrorObjectOwned::owned(-32602, format!("Invalid owner address: {e}"), None::<()>)
@@ -4691,6 +4726,13 @@ impl BudlumApiServer for RpcServer {
         owner: String,
         duration: u64,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        if !crate::bns::BnsRegistry::is_valid_name(&name) {
+            return Err(ErrorObjectOwned::owned(
+                -32602,
+                "Invalid BNS name: expected <label>.bud with 3..=32 lowercase label characters",
+                None::<()>,
+            ));
+        }
         if duration == 0 {
             return Err(ErrorObjectOwned::owned(
                 -32602,
@@ -4742,6 +4784,13 @@ impl BudlumApiServer for RpcServer {
         owner: String,
         new_owner: String,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        if !crate::bns::BnsRegistry::is_valid_name(&name) {
+            return Err(ErrorObjectOwned::owned(
+                -32602,
+                "Invalid BNS name: expected <label>.bud with 3..=32 lowercase label characters",
+                None::<()>,
+            ));
+        }
         let clean_owner = owner.strip_prefix("0x").unwrap_or(&owner);
         let owner_addr = Address::from_hex(clean_owner).map_err(|e| {
             ErrorObjectOwned::owned(-32602, format!("Invalid owner address: {e}"), None::<()>)

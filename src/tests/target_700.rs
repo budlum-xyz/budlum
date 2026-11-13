@@ -57,7 +57,7 @@ fn nft_mint_table_distinct_ids() {
 fn bns_register_table_resolves_owners() {
     let mut r = BnsRegistry::new();
     for i in 1..=10u8 {
-        let name = format!("{i}.bud");
+        let name = format!("user{i}.bud");
         r.register(name.clone(), addr(i), 0, 1000).unwrap();
         assert_eq!(r.resolve(&name, 0), Some(addr(i)), "{name} owner mismatch");
     }
