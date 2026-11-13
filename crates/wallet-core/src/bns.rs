@@ -124,6 +124,10 @@ pub struct WalletBnsProof {
     pub meta_digest: [u8; 32],
     pub siblings: Vec<[u8; 32]>,
     pub directions: Vec<bool>,
+    /// The height of the header this proof folds to. Together with a
+    /// [`HeaderSource`] the wallet trusts, this is what anchors the proof:
+    /// the root and epoch are read from that header, not from the answer.
+    pub header_height: u64,
 }
 
 /// Compute `BDLM_BNS_LEAF_V1` over the leaf fields, matching `BnsRegistry::compute_leaf_digest`.
@@ -309,9 +313,210 @@ pub fn verify_bns_recipient_proof(
     }
 }
 
+/// Where the wallet gets the header root a `.bud` proof must fold to.
+///
+/// A proof is only worth what its anchor is worth. [`verify_bns_recipient_proof`]
+/// takes `expected_bns_root` and `current_epoch` as bare arguments, so a caller
+/// that believes a node's JSON sells the user's signature for a root the node
+/// chose. This trait is the missing half: a wallet hands a source it trusts
+/// (a header it synced, a checkpoint it was compiled with, a light-client
+/// follow chain) and reads both values out of it, so the root and the epoch the
+/// proof is checked against come from the header, not from the answer.
+///
+/// A source that has no header at `height` returns `None`; the verifying
+/// entry point refuses a proof rather than guessing.
+pub trait HeaderSource {
+    /// The committed `.bud` registry root (`bns_v1`) at `height`, and the
+    /// epoch that header belongs to.
+    fn bns_root_at(&self, height: u64) -> Option<([u8; 32], u64)>;
+}
+
+/// Verify a `.bud` recipient proof against the root and epoch of the header it
+/// claims to belong to, read from `headers`.
+///
+/// This is the entry point a wallet should call. The root and the epoch come
+/// from `headers`, never from the proof's carrier, so a lying node cannot
+/// change what the signature is checked against: the only thing it can still
+/// change is which header height it names, and then the answer no longer
+/// matches the header the wallet holds.
+///
+/// # Errors
+///
+/// Everything [`verify_bns_recipient_proof`] refuses, plus
+/// [`HeaderUnknown`] when `headers` has no header at `proof.header_height`.
+pub fn verify_bns_recipient_proof_from_header<S: HeaderSource + ?Sized>(
+    requested_name: &str,
+    claimed_target: &[u8; 32],
+    proof: &WalletBnsProof,
+    headers: &S,
+) -> Result<[u8; 32], String> {
+    let (root, epoch) = headers
+        .bns_root_at(proof.header_height)
+        .ok_or_else(|| HeaderUnknown(proof.header_height).to_string())?;
+    verify_bns_recipient_proof(requested_name, claimed_target, proof, &root, epoch)
+}
+
+/// No header at the named height in the source the wallet trusts.
+///
+/// A distinct type so a caller can tell "the node lied" from "I am behind".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HeaderUnknown(pub u64);
+
+impl std::fmt::Display for HeaderUnknown {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "no verified header at height {}; the proof cannot be anchored",
+            self.0
+        )
+    }
+}
+
+impl std::error::Error for HeaderUnknown {}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A header source holding one header. This is what a wallet hands the
+    /// verifying entry point: a header it synced and believes, never a root
+    /// it read out of the same node answer that carried the proof.
+    struct OneHeader {
+        height: u64,
+        root: [u8; 32],
+        epoch: u64,
+    }
+
+    impl HeaderSource for OneHeader {
+        fn bns_root_at(&self, height: u64) -> Option<([u8; 32], u64)> {
+            (height == self.height).then_some((self.root, self.epoch))
+        }
+    }
+
+    /// The proof a node would send for `ayaz.bud` at header height 7.
+    fn header_anchored_fixture() -> (WalletBnsProof, [u8; 32], [u8; 32]) {
+        let owner = [0x11u8; 32];
+        let vault = [0x22u8; 32];
+        let meta = [0x33u8; 32];
+        let sib = [0x44u8; 32];
+        let (preimage, extras_digest) = sample_extras_preimage(Some(vault));
+        let leaf = compute_bns_leaf_digest("ayaz.bud", &owner, 50, None, None, &extras_digest);
+        let names_root = fold_bns_merkle_branch(leaf, &[sib], &[true]).unwrap();
+        let root = compute_bns_registry_root(&meta, &names_root);
+        let proof = WalletBnsProof {
+            name: "ayaz.bud".to_string(),
+            owner,
+            expires_at: 50,
+            content_id: None,
+            storage_root: None,
+            extras_digest,
+            extras_preimage: Some(preimage),
+            meta_digest: meta,
+            siblings: vec![sib],
+            directions: vec![true],
+            header_height: 7,
+        };
+        (proof, root, vault)
+    }
+
+    #[test]
+    fn a_proof_verifies_against_the_root_of_the_header_the_wallet_holds() {
+        let (proof, root, vault) = header_anchored_fixture();
+        let headers = OneHeader {
+            height: 7,
+            root,
+            epoch: 10,
+        };
+        assert_eq!(
+            verify_bns_recipient_proof_from_header("ayaz.bud", &vault, &proof, &headers).unwrap(),
+            vault
+        );
+    }
+
+    /// The attack this trait exists for. The node answers with a proof and, in
+    /// the same breath, tells the wallet which root to check it against. A
+    /// wallet that took the node's root would accept a forged record. A wallet
+    /// that reads the root from its own header does not, even when the node
+    /// presents a proof that folds to the root it chose.
+    #[test]
+    fn a_root_chosen_by_the_node_cannot_substitute_a_recipient() {
+        let (genuine, real_root, real_vault) = header_anchored_fixture();
+
+        // The node builds a record for the attacker address and gets its own
+        // root for it. The proof is internally consistent: it folds to a root.
+        let attacker = [0x99u8; 32];
+        let meta = [0x33u8; 32];
+        let sib = [0x44u8; 32];
+        let (forged_preimage, forged_extras) = sample_extras_preimage(Some(attacker));
+        let forged_leaf = compute_bns_leaf_digest(
+            "ayaz.bud",
+            &genuine.owner,
+            50,
+            None,
+            None,
+            &forged_extras,
+        );
+        let forged_names = fold_bns_merkle_branch(forged_leaf, &[sib], &[true]).unwrap();
+        let forged_root = compute_bns_registry_root(&meta, &forged_names);
+        let forged = WalletBnsProof {
+            name: "ayaz.bud".to_string(),
+            owner: genuine.owner,
+            expires_at: 50,
+            content_id: None,
+            storage_root: None,
+            extras_digest: forged_extras,
+            extras_preimage: Some(forged_preimage),
+            meta_digest: meta,
+            siblings: vec![sib],
+            directions: vec![true],
+            header_height: 7,
+        };
+        assert_ne!(forged_root, real_root, "the forgery needs its own root");
+
+        // Refused: the wallet's header carries the real root, not the forged one.
+        let headers = OneHeader {
+            height: 7,
+            root: real_root,
+            epoch: 10,
+        };
+        let refused =
+            verify_bns_recipient_proof_from_header("ayaz.bud", &attacker, &forged, &headers);
+        assert!(
+            refused.is_err(),
+            "a proof folding to the nodes own root must not verify against the headers root"
+        );
+
+        // The same forgery verifies the moment the root is taken from the
+        // answer instead of the header. That is the defect this closes.
+        assert_eq!(
+            verify_bns_recipient_proof("ayaz.bud", &attacker, &forged, &forged_root, 10).unwrap(),
+            attacker,
+            "taken from the answer, the forgery passes - which is the whole point"
+        );
+
+        // And the genuine proof still passes against the real root.
+        assert_eq!(
+            verify_bns_recipient_proof_from_header("ayaz.bud", &real_vault, &genuine, &headers)
+                .unwrap(),
+            real_vault
+        );
+    }
+
+    #[test]
+    fn a_proof_for_a_height_the_wallet_has_no_header_for_is_refused() {
+        let (proof, root, vault) = header_anchored_fixture();
+        let behind = OneHeader {
+            height: 6,
+            root,
+            epoch: 10,
+        };
+        let err = verify_bns_recipient_proof_from_header("ayaz.bud", &vault, &proof, &behind)
+            .unwrap_err();
+        assert!(
+            err.contains("no verified header at height 7"),
+            "the refusal names the missing height, got: {err}"
+        );
+    }
 
     fn sample_extras_preimage(address: Option<[u8; 32]>) -> (Vec<u8>, [u8; 32]) {
         let mut buf = Vec::new();
@@ -393,6 +598,7 @@ mod tests {
             meta_digest: meta,
             siblings: vec![sib],
             directions: vec![true],
+            header_height: 7,
         };
 
         // Authentic vault target verifies!

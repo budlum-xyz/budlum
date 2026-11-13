@@ -85,10 +85,11 @@ Tam kayit: `audit-notes/findings/`.
 | B-0002 | `src/bns/registry.rs` | orta | `is_valid_label` ozeldi, ag gecidi ayni tabloyu kopyalamak zorundaydi | cozuldu, `f0ee157e` |
 | B-0003 | `src/gateway/mod.rs` | orta | yeni modul public yuzey sunuyor ama calisan hicbir ikili onu cagirmiyor | kayitli, `WIRING: unwired` |
 | B-0004 | `src/rpc/server.rs` | yuksek | RPC kanit yaniti `leaf_index`, `tree_size` ve `extras` alanlarini yazmiyordu; duzeltme telde etkisizdi | cozuldu, `bd1e6a79` |
-| B-0005 | `crates/wallet-core/src/bns.rs` | yuksek | cuzdan kaniti kok ve epoch'u cagirandan aliyor; crate icinde baslik dogrulamasi yok | acik, tasarim `ip-11` icinde |
+| B-0005 | `crates/wallet-core/src/bns.rs` | yuksek | cuzdan kaniti kok ve epoch'u cagirandan aliyor; crate icinde baslik dogrulamasi yok | cozuldu `026711ba`: `HeaderSource` + `verify_bns_recipient_proof_from_header`, 3 test; eski fonksiyon `#[deprecated]` sirasinda |
 | B-0006 | `src/core/account.rs` | dusuk | `state_root_body` dokuman yorumu yanlis islevin ustunde duruyordu | cozuldu, `work/a8-audit` |
 | B-0007 | `src/persistence/db.rs`, `src/consensus/handoff.rs` | yuksek | Handoff Sertifikasi dogrulaniyor ama hic uretilmiyor; depo kapilari cagiransiz | kismen cozuldu: `restore_handoff_chain` ve 2 test indi, uretim kancasi acik |
 | B-0008 | dal yapisi | yuksek | `audit/master-plan` `main`den dallanmis, `testnet`ten degil; 1092 commit ve 229 dosya geride | cozuldu: notlar `testnet` tabanina tasindi |
+| B-0009 | `crates/wallet-core/src/lib.rs` | orta | `d2_wallet_rejects_forged_spend_secret_and_bad_blindings` 16 bayt entropiyle cuzdan kurup `unwrap()` ediyordu; `from_entropy` 32 istiyor ve uc test 16'yi bilerek reddediyor | cozuldu `026711ba` |
 
 B-0003 bir hata degil, bir durumdur. Direktifin kurali: bir yetenek modulu ya
 bir yerden cagrilir ya da cagrilmadigini yazar. Modul yazdi.
