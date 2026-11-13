@@ -8,10 +8,16 @@
 //! - structural verify + optional STARK verify (postcard `ProofEnvelope`)
 //! - `prove_mlp_inference` packages `AiExecutionProof` for the chain attach
 
+mod blind_compute;
 mod guest;
 mod model_class;
 mod stark;
 mod verify;
+
+pub use blind_compute::{
+    blind_compute_scope_tag, verify_compute_without_seeing, ComputeWithoutSeeingBundle,
+    ComputeWithoutSeeingPermit,
+};
 
 pub use guest::{
     build_fixed_point_mlp_guest, build_matmul_guest_program, encode_output_limbs,
