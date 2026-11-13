@@ -1,7 +1,7 @@
-use crate::bns::types::{BnsError, BnsResolved, NameRecord};
+use crate::bns::types::{BnsError, BnsResolved, NameRecord, NameStatus};
 use crate::core::address::Address;
 use crate::registry::params::{
-    MAX_DURATION, MAX_NAMES_PER_OWNER, MAX_RECORDS_PER_NAME, MAX_RECORD_KEY_LEN,
+    GRACE_PERIOD, MAX_DURATION, MAX_NAMES_PER_OWNER, MAX_RECORDS_PER_NAME, MAX_RECORD_KEY_LEN,
     MAX_RECORD_VALUE_BYTES, MIN_DURATION, RESERVED_LABELS,
 };
 use crate::storage::content_id::ContentId;
@@ -53,7 +53,7 @@ impl BnsRegistry {
     /// a name expires. During that window no third party can register the name,
     /// which protects against squatting and front-running. It is roughly a
     /// 30-day window, at about 100 epochs per day.
-    pub const GRACE_PERIOD: u64 = 3000;
+    pub const GRACE_PERIOD: u64 = GRACE_PERIOD;
 
     /// Maximum number of BNS names in the registry.
     /// At 100K names with subdomains, this bounds state growth to ~50MB.
@@ -212,6 +212,27 @@ impl BnsRegistry {
         )
     }
 
+    /// Lifecycle status (`Active`, `Grace`, or `Expired`) of `name` at `current_epoch`.
+    #[must_use]
+    pub fn name_status(&self, name: &str, current_epoch: u64) -> Option<NameStatus> {
+        let rec = self.names.get(name)?;
+        if current_epoch < rec.expires_at {
+            Some(NameStatus::Active)
+        } else if current_epoch < rec.expires_at.saturating_add(Self::GRACE_PERIOD) {
+            Some(NameStatus::Grace)
+        } else {
+            Some(NameStatus::Expired)
+        }
+    }
+
+    /// Whether `owner` may renew `name` at `current_epoch` (either `Active` or inside `Grace`).
+    #[must_use]
+    pub fn is_renewable_by(&self, name: &str, owner: &Address, current_epoch: u64) -> bool {
+        self.names.get(name).is_some_and(|rec| {
+            &rec.owner == owner && current_epoch < rec.expires_at.saturating_add(Self::GRACE_PERIOD)
+        })
+    }
+
     pub fn calculate_cost(&self, name: &str, duration: u64) -> u64 {
         let label = name.strip_suffix(Self::SUFFIX).unwrap_or(name);
         let char_count = label.chars().count();
@@ -311,15 +332,18 @@ impl BnsRegistry {
         Ok(())
     }
 
-    /// Renew an existing name registration. Only the current owner may renew
-    /// while the record is still live (not expired). The new expiry extends
-    /// from the current expiry - never from `current_epoch` - so renewing early
-    /// never shortens the registration, and total remaining duration from
-    /// `current_epoch` cannot exceed `MAX_DURATION`.
+    /// Renew an existing name registration while `Active` or inside `GRACE_PERIOD`.
+    ///
+    /// Only the current owner may renew. When `Active`, the new expiry extends
+    /// from `record.expires_at` so renewing early never shortens registration;
+    /// when in `Grace`, the new expiry extends from `current_epoch` (`max(expires_at, current_epoch) + duration`),
+    /// restoring the name to `Active` with all existing pointers intact. Total
+    /// remaining duration from `current_epoch` cannot exceed `MAX_DURATION`.
     ///
     /// # Errors
     ///
-    /// Returns an error if the operation fails.
+    /// Returns [`BnsError`] if `duration` is out of bounds, the name is unknown,
+    /// `caller` is not the owner, or the grace period has already elapsed.
     pub fn renew(
         &mut self,
         name: &str,
@@ -334,11 +358,12 @@ impl BnsRegistry {
         if &record.owner != caller {
             return Err(BnsError::NotOwner);
         }
-        if record.expires_at <= current_epoch {
+        let grace_expires_at = record.expires_at.saturating_add(Self::GRACE_PERIOD);
+        if current_epoch >= grace_expires_at {
             return Err(BnsError::Expired);
         }
-        let new_expires_at = record
-            .expires_at
+        let base_epoch = record.expires_at.max(current_epoch);
+        let new_expires_at = base_epoch
             .checked_add(duration)
             .ok_or(BnsError::InvalidDuration)?;
         if new_expires_at.saturating_sub(current_epoch) > MAX_DURATION {
@@ -886,6 +911,14 @@ impl BnsRegistry {
     pub fn resolve_full(&self, name: &str, current_epoch: u64) -> Option<BnsResolved> {
         self.names.get(name).map(|record| {
             let expired = record.expires_at <= current_epoch;
+            let grace_expires_at = record.expires_at.saturating_add(Self::GRACE_PERIOD);
+            let status = if !expired {
+                NameStatus::Active
+            } else if current_epoch < grace_expires_at {
+                NameStatus::Grace
+            } else {
+                NameStatus::Expired
+            };
             BnsResolved {
                 name: record.name.clone(),
                 owner: record.owner,
@@ -908,9 +941,31 @@ impl BnsRegistry {
                 } else {
                     record.records.clone()
                 },
+                status,
+                expires_at: record.expires_at,
+                grace_expires_at,
                 is_expired: expired,
             }
         })
+    }
+
+    /// Enumerate all `Active` and `Grace` `.bud` names held by `owner` at
+    /// `current_epoch`, ordered lexicographically by name (excluding fully
+    /// expired post-grace tombstones).
+    #[must_use]
+    pub fn list_names_by_owner(&self, owner: &Address, current_epoch: u64) -> Vec<BnsResolved> {
+        self.names
+            .keys()
+            .filter_map(|name| {
+                let rec = self.names.get(name)?;
+                if &rec.owner != owner
+                    || current_epoch >= rec.expires_at.saturating_add(Self::GRACE_PERIOD)
+                {
+                    return None;
+                }
+                self.resolve_full(name, current_epoch)
+            })
+            .collect()
     }
 
     /// Performs the requested operation.

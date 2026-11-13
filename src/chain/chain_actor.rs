@@ -507,6 +507,10 @@ pub enum ChainCommand {
         name: String,
         response: oneshot::Sender<Option<crate::storage::bud3::content_ref::ContentRef>>,
     },
+    BnsListNamesByOwner {
+        owner: Address,
+        response: oneshot::Sender<Vec<crate::bns::types::BnsResolved>>,
+    },
     IdentityResolve {
         subject: Address,
         response: oneshot::Sender<Option<(crate::registry::IdentityRecord, u64)>>,
@@ -2356,6 +2360,21 @@ impl ChainHandle {
         rx.await.unwrap_or(None)
     }
 
+    pub async fn bns_list_names_by_owner(
+        &self,
+        owner: Address,
+    ) -> Vec<crate::bns::types::BnsResolved> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::BnsListNamesByOwner {
+                owner,
+                response: tx,
+            })
+            .await;
+        rx.await.unwrap_or_default()
+    }
+
     pub async fn identity_resolve(
         &self,
         subject: Address,
@@ -3967,6 +3986,14 @@ impl ChainActor {
                             .resolve_bud3_content(&name, self.blockchain.state.epoch_index),
                     );
                 }
+                ChainCommand::BnsListNamesByOwner { owner, response } => {
+                    let _ = response.send(
+                        self.blockchain
+                            .state
+                            .bns_registry
+                            .list_names_by_owner(&owner, self.blockchain.state.epoch_index),
+                    );
+                }
                 ChainCommand::IdentityResolve { subject, response } => {
                     // The epoch travels with the record so liveness is
                     // answered at the height the read happened on, not at
@@ -4077,11 +4104,22 @@ impl ChainActor {
                 }
                 ChainCommand::BnsListOffers { kind, response } => {
                     let epoch = self.blockchain.state.epoch_index;
+                    let bns = &self.blockchain.state.bns_registry;
                     let offers = self
                         .blockchain
                         .state
                         .marketplace
-                        .list_active_name_offers(epoch, kind);
+                        .list_active_name_offers(epoch, kind)
+                        .into_iter()
+                        .filter(|o| match o.kind {
+                            crate::bns::OfferKind::Primary => {
+                                bns.is_available_for_primary(&o.name, epoch)
+                            }
+                            crate::bns::OfferKind::Resale => {
+                                bns.is_live_owned_by(&o.name, &o.seller, epoch)
+                            }
+                        })
+                        .collect();
                     let _ = response.send(offers);
                 }
                 ChainCommand::NftGet { id, response } => {
