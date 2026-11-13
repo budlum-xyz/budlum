@@ -188,7 +188,11 @@ pub fn derive_alias_bytes(addr: &Address, ee: EeId) -> Result<Vec<u8>, String> {
             h.update(b"BDLM_NEAR_ALIAS_V1");
             h.update(addr.0);
             let digest: [u8; 32] = h.finalize().into();
-            Ok(format!("{}.budlum", hex::encode(&digest[..16])).into_bytes())
+            Ok(format!(
+                "{}.budlum",
+                hex::encode(digest.get(..16).unwrap_or(&digest))
+            )
+            .into_bytes())
         }
         other => Err(format!(
             "unsupported execution environment 0x{:02x}",
