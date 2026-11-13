@@ -53,6 +53,7 @@ mod gates {
     pub mod binding_claims;
     pub mod bit_decompositions;
     pub mod bns_gate;
+    pub mod gateway_gate;
     pub mod bns_names_are_safe_in_an_address_bar;
     pub mod bridge_dual_tree;
     pub mod bud3_codec_and_replace;
@@ -967,6 +968,18 @@ const GATES: &[Gate] = &[
         run_log: Some(gates::bns_gate::run),
         run_args: None,
         self_test: gates::bns_gate::self_test,
+    },
+    Gate {
+        name: "gateway-gate",
+        replaces: Some("check-gateway-gate.sh"),
+        run: |_| {
+            Err(String::from(
+                "gateway-gate reads a cargo test log; pass its path as an argument",
+            ))
+        },
+        run_log: Some(gates::gateway_gate::run),
+        run_args: None,
+        self_test: gates::gateway_gate::self_test,
     },
     Gate {
         name: "bud-e2e",
