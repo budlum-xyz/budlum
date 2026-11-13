@@ -2109,6 +2109,9 @@ impl TryFrom<pb::ProtoBlockHeader> for BlockHeader {
                     .map_err(|e| format!("Invalid producer address: {e}"))?,
             )
         };
+        if proto.slashing_evidence.len() > 64 {
+            return Err("Too many slashing evidence entries in block header".into());
+        }
         let mut evidence = Vec::new();
         for ev in proto.slashing_evidence {
             evidence.push(SlashingEvidence::try_from(ev)?);
@@ -2233,6 +2236,9 @@ impl TryFrom<pb::ProtoBlock> for Block {
             Some(proto.signature)
         };
 
+        if proto.slashing_evidence.len() > 64 {
+            return Err("Too many slashing evidence entries in block".into());
+        }
         let mut evidence = Vec::new();
         for ev in proto.slashing_evidence {
             evidence.push(SlashingEvidence::try_from(ev)?);

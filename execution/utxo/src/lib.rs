@@ -47,7 +47,10 @@ pub enum ScriptOp {
     OpAdd,
     OpGreaterThanOrEqual,
     OpCheckLockTimeVerify,
-    OpCheckMultiSigHash { threshold: usize, pubkeys: Vec<Vec<u8>> },
+    OpCheckMultiSigHash {
+        threshold: usize,
+        pubkeys: Vec<Vec<u8>>,
+    },
     OpReturn,
 }
 
@@ -396,7 +399,12 @@ impl ExecutionEnvironment for UtxoScriptWorker {
                 gas_used,
             });
         };
-        if host.read(&ns, &spent_key(&utxo_id)).ok().flatten().is_some() {
+        if host
+            .read(&ns, &spent_key(&utxo_id))
+            .ok()
+            .flatten()
+            .is_some()
+        {
             return Ok(EeOutcome {
                 status: OutcomeStatus::Revert,
                 output: b"UTXO already spent".to_vec(),
@@ -448,7 +456,10 @@ impl ExecutionEnvironment for UtxoScriptWorker {
             });
         }
 
-        if host.write(&ns, &spent_key(&utxo_id), Some(&witness.recipient)).is_err() {
+        if host
+            .write(&ns, &spent_key(&utxo_id), Some(&witness.recipient))
+            .is_err()
+        {
             return Ok(EeOutcome {
                 status: OutcomeStatus::Revert,
                 output: b"failed to record UTXO spend".to_vec(),

@@ -892,7 +892,7 @@ fn svm_pointer_holds_no_balance() {
     let erc20_code = encode_std_evm_token_code(&StdEvmTokenSpec {
         standard: AssetStandard::Fungible,
         name: String::from("HomeSvmAsset"),
-        symbol: String::from("HSA"),
+        symbol: String::from("HSVM"),
         decimals: 6,
         initial_holder: alice_evm20,
         initial_supply_or_token_id: 1_000,
@@ -929,7 +929,7 @@ fn svm_pointer_holds_no_balance() {
         &home_erc20,
         AssetStandard::Fungible,
         6,
-        String::from("HSA"),
+        String::from("HSVM"),
         String::from("HomeSvmAsset"),
     )
     .expect("reg");
@@ -1073,7 +1073,10 @@ fn svm_pointer_holds_no_balance() {
             }],
         )
         .expect("evm bal");
-    assert_eq!(evm_q[0].output.get(16..32), Some(&250u128.to_be_bytes()[..]));
+    assert_eq!(
+        evm_q[0].output.get(16..32),
+        Some(&250u128.to_be_bytes()[..])
+    );
 }
 
 #[test]
@@ -1319,7 +1322,10 @@ fn home_svm_and_move_pointers_work_cross_ee_and_refuse_unauthorized_mint() {
     let mint_ok = serde_json::to_vec(&MoveCallEnvelope::EntryFunction {
         module_id: String::from("0x1::fungible_asset"),
         function_name: String::from("mint"),
-        args: vec![format!("0x{}", hex::encode(alice_move)), String::from("1500")],
+        args: vec![
+            format!("0x{}", hex::encode(alice_move)),
+            String::from("1500"),
+        ],
     })
     .expect("json");
     let mint_bad = serde_json::to_vec(&MoveCallEnvelope::EntryFunction {
@@ -1434,7 +1440,10 @@ fn home_svm_and_move_pointers_work_cross_ee_and_refuse_unauthorized_mint() {
         serde_json::from_slice::<serde_json::Value>(&wasm_res[1].output).expect("bal")["balance"],
         "400"
     );
-    assert_eq!(state.execution_state.namespace_bytes(NS_WASM_STORE), wasm_before);
+    assert_eq!(
+        state.execution_state.namespace_bytes(NS_WASM_STORE),
+        wasm_before
+    );
 
     // 3. Initialize & mint SVM SPL home asset, then operate via stateless EVM pointer.
     let mint_pk = [0xD1u8; 32];
@@ -1554,6 +1563,12 @@ fn home_svm_and_move_pointers_work_cross_ee_and_refuse_unauthorized_mint() {
         .expect("evm ptr over svm home");
     assert_eq!(evm_res[0].status, UelReceiptStatus::Success);
     assert_eq!(evm_res[1].status, UelReceiptStatus::Success);
-    assert_eq!(evm_res[1].output.get(16..32), Some(&200u128.to_be_bytes()[..]));
-    assert_eq!(state.execution_state.namespace_bytes(NS_EVM_STORAGE), evm_before);
+    assert_eq!(
+        evm_res[1].output.get(16..32),
+        Some(&200u128.to_be_bytes()[..])
+    );
+    assert_eq!(
+        state.execution_state.namespace_bytes(NS_EVM_STORAGE),
+        evm_before
+    );
 }

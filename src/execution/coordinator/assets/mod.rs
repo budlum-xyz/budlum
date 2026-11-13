@@ -18,8 +18,8 @@ use crate::execution::coordinator::alias::{
     bech32_contract_addr, derive_evm_alias, derive_wasm_alias, is_ed25519_on_curve, ALIAS_NAMESPACE,
 };
 use crate::execution::coordinator::state::{
-    derive_uel_asset_id, NS_EVM_ACCOUNT, NS_EVM_CODE, NS_MOVE_STATE, NS_SVM_ACCOUNT,
-    NS_UEL_ASSETS, NS_WASM_CODE, NS_WASM_CONTRACT,
+    derive_uel_asset_id, NS_EVM_ACCOUNT, NS_EVM_CODE, NS_MOVE_STATE, NS_SVM_ACCOUNT, NS_UEL_ASSETS,
+    NS_WASM_CODE, NS_WASM_CONTRACT,
 };
 use budlum_uel_abi::{EeId, HostRead, Namespace};
 use serde::{Deserialize, Serialize};
@@ -399,10 +399,7 @@ pub fn deploy_asset_pointer(
                 .write(NS_MOVE_STATE, &mod_key, Some(&code))?;
         }
         other => {
-            return Err(format!(
-                "unsupported pointer target EE 0x{:02x}",
-                other.0
-            ));
+            return Err(format!("unsupported pointer target EE 0x{:02x}", other.0));
         }
     }
 
