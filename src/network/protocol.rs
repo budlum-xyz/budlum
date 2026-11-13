@@ -362,6 +362,31 @@ const MAX_HANDSHAKE_SCHEMES: usize = 64;
 const MAX_MULTISIG_ITEMS_WIRE: usize = 64;
 const MAX_PRIVATE_TRANSFER_ITEMS_WIRE: usize = 256;
 const MAX_EXECUTION_DIMS_WIRE: usize = 64;
+const MAX_FRAME_REPEATED_ITEMS: usize = 131_072;
+
+fn mark_unique_tag(
+    seen_tags: &mut u128,
+    tag: u32,
+    err_msg: &'static str,
+) -> Result<(), MessageError> {
+    if let Some(bit) = 1u128.checked_shl(tag) {
+        if (*seen_tags & bit) != 0 {
+            return Err(MessageError::ParseError(err_msg.into()));
+        }
+        *seen_tags |= bit;
+    }
+    Ok(())
+}
+
+fn bump_frame_items(frame_item_budget: &mut usize) -> Result<(), MessageError> {
+    *frame_item_budget = frame_item_budget.saturating_add(1);
+    if *frame_item_budget > MAX_FRAME_REPEATED_ITEMS {
+        return Err(MessageError::ParseError(
+            "Frame repeated item count exceeds limit".into(),
+        ));
+    }
+    Ok(())
+}
 
 fn skip_wire_field(
     buf: &mut &[u8],
@@ -436,9 +461,13 @@ fn scan_proto_slashing_evidence(
             "Frame slashing evidence count exceeds limit".into(),
         ));
     }
+    let mut seen_tags = 0u128;
     while !slice.is_empty() {
         let (tag, wire_type) = prost::encoding::decode_key(&mut slice)
             .map_err(|e| MessageError::ParseError(format!("Protobuf key error: {e}")))?;
+        if (1..=4).contains(&tag) {
+            mark_unique_tag(&mut seen_tags, tag, "Duplicate slashing evidence field")?;
+        }
         match tag {
             1 | 2 => {
                 let header_bytes = take_len_delimited(&mut slice, wire_type)?;
@@ -460,9 +489,17 @@ fn scan_proto_block_header(
 ) -> Result<(), MessageError> {
     let mut evidence_count = 0usize;
     let mut report_count = 0usize;
+    let mut seen_singular = 0u128;
     while !slice.is_empty() {
         let (tag, wire_type) = prost::encoding::decode_key(&mut slice)
             .map_err(|e| MessageError::ParseError(format!("Protobuf key error: {e}")))?;
+        if (1..=32).contains(&tag) && !matches!(tag, 9 | 18) {
+            mark_unique_tag(
+                &mut seen_singular,
+                tag,
+                "Duplicate singular block header field",
+            )?;
+        }
         match tag {
             9 => {
                 evidence_count = evidence_count.saturating_add(1);
@@ -502,9 +539,11 @@ fn scan_bounded_repeated_fields(
     mut slice: &[u8],
     watched_tag: u32,
     cap: usize,
+    frame_item_budget: &mut usize,
     err_msg: &'static str,
 ) -> Result<(), MessageError> {
     let mut count = 0usize;
+    let mut seen_singular = 0u128;
     while !slice.is_empty() {
         let (tag, wire_type) = prost::encoding::decode_key(&mut slice)
             .map_err(|e| MessageError::ParseError(format!("Protobuf key error: {e}")))?;
@@ -519,6 +558,7 @@ fn scan_bounded_repeated_fields(
                     if count > cap {
                         return Err(MessageError::ParseError(err_msg.into()));
                     }
+                    bump_frame_items(frame_item_budget)?;
                 }
                 continue;
             }
@@ -526,19 +566,124 @@ fn scan_bounded_repeated_fields(
             if count > cap {
                 return Err(MessageError::ParseError(err_msg.into()));
             }
+            bump_frame_items(frame_item_budget)?;
+        } else if (1..=32).contains(&tag) {
+            mark_unique_tag(&mut seen_singular, tag, "Duplicate singular payload field")?;
         }
         skip_wire_field(&mut slice, wire_type)?;
     }
     Ok(())
 }
 
-fn scan_proto_transaction(mut slice: &[u8]) -> Result<(), MessageError> {
+fn scan_private_transfer_payload(
+    mut sub: &[u8],
+    frame_item_budget: &mut usize,
+) -> Result<(), MessageError> {
+    let mut spent_count = 0usize;
+    let mut nullifier_count = 0usize;
+    let mut output_count = 0usize;
+    let mut proof_count = 0usize;
+    let mut seen_inner = 0u128;
+    while !sub.is_empty() {
+        let (inner_tag, inner_wire) = prost::encoding::decode_key(&mut sub)
+            .map_err(|e| MessageError::ParseError(format!("Protobuf key error: {e}")))?;
+        let bucket = match inner_tag {
+            1 => Some(&mut spent_count),
+            2 => Some(&mut nullifier_count),
+            3 => Some(&mut output_count),
+            6 => Some(&mut proof_count),
+            _ => None,
+        };
+        if let Some(counter) = bucket {
+            *counter = counter.saturating_add(1);
+            if *counter > MAX_PRIVATE_TRANSFER_ITEMS_WIRE {
+                return Err(MessageError::ParseError(
+                    "Too many entries in private transfer payload".into(),
+                ));
+            }
+            bump_frame_items(frame_item_budget)?;
+        } else if (1..=16).contains(&inner_tag) {
+            mark_unique_tag(
+                &mut seen_inner,
+                inner_tag,
+                "Duplicate singular private transfer field",
+            )?;
+        }
+        skip_wire_field(&mut sub, inner_wire)?;
+    }
+    Ok(())
+}
+
+fn scan_multisig_authorization(
+    mut sub: &[u8],
+    frame_item_budget: &mut usize,
+) -> Result<(), MessageError> {
+    let mut owner_count = 0usize;
+    let mut sig_count = 0usize;
+    let mut seen_inner = 0u128;
+    while !sub.is_empty() {
+        let (inner_tag, inner_wire) = prost::encoding::decode_key(&mut sub)
+            .map_err(|e| MessageError::ParseError(format!("Protobuf key error: {e}")))?;
+        match inner_tag {
+            1 => {
+                owner_count = owner_count.saturating_add(1);
+                if owner_count > MAX_MULTISIG_ITEMS_WIRE {
+                    return Err(MessageError::ParseError(
+                        "Too many multisig owners in authorization".into(),
+                    ));
+                }
+                bump_frame_items(frame_item_budget)?;
+            }
+            3 => {
+                sig_count = sig_count.saturating_add(1);
+                if sig_count > MAX_MULTISIG_ITEMS_WIRE {
+                    return Err(MessageError::ParseError(
+                        "Too many multisig signatures in authorization".into(),
+                    ));
+                }
+                bump_frame_items(frame_item_budget)?;
+            }
+            2 | 4 => {
+                mark_unique_tag(
+                    &mut seen_inner,
+                    inner_tag,
+                    "Duplicate singular multisig field",
+                )?;
+            }
+            _ => {}
+        }
+        skip_wire_field(&mut sub, inner_wire)?;
+    }
+    Ok(())
+}
+
+fn scan_proto_transaction(
+    mut slice: &[u8],
+    frame_item_budget: &mut usize,
+) -> Result<(), MessageError> {
     if slice.len() > MAX_TX_SIZE {
         return Err(MessageError::TooLarge(slice.len()));
     }
+    // prost merges duplicate occurrences of singular message or oneof fields
+    // into one value, which would otherwise multiply per-submessage caps across
+    // repeated tags. Canonical encoders emit each transaction field at most
+    // once and at most one `type_payload` oneof variant.
+    let mut seen_tags = 0u128;
+    let mut seen_oneof = false;
     while !slice.is_empty() {
         let (tag, wire_type) = prost::encoding::decode_key(&mut slice)
             .map_err(|e| MessageError::ParseError(format!("Protobuf key error: {e}")))?;
+        if (1..=95).contains(&tag) {
+            mark_unique_tag(&mut seen_tags, tag, "Duplicate transaction field")?;
+        }
+        if matches!(tag, 20..=48 | 51..=95) {
+            if seen_oneof {
+                return Err(MessageError::ParseError(
+                    "Multiple transaction type_payload fields".into(),
+                ));
+            }
+            seen_oneof = true;
+        }
         match tag {
             28 => {
                 let sub = take_len_delimited(&mut slice, wire_type)?;
@@ -546,68 +691,17 @@ fn scan_proto_transaction(mut slice: &[u8]) -> Result<(), MessageError> {
                     sub,
                     13,
                     MAX_EXECUTION_DIMS_WIRE,
+                    frame_item_budget,
                     "Too many execution_dims in model registration",
                 )?;
             }
             44 => {
-                let mut sub = take_len_delimited(&mut slice, wire_type)?;
-                let mut spent_count = 0usize;
-                let mut nullifier_count = 0usize;
-                let mut output_count = 0usize;
-                let mut proof_count = 0usize;
-                while !sub.is_empty() {
-                    let (inner_tag, inner_wire) =
-                        prost::encoding::decode_key(&mut sub).map_err(|e| {
-                            MessageError::ParseError(format!("Protobuf key error: {e}"))
-                        })?;
-                    let bucket = match inner_tag {
-                        1 => Some(&mut spent_count),
-                        2 => Some(&mut nullifier_count),
-                        3 => Some(&mut output_count),
-                        6 => Some(&mut proof_count),
-                        _ => None,
-                    };
-                    if let Some(counter) = bucket {
-                        *counter = counter.saturating_add(1);
-                        if *counter > MAX_PRIVATE_TRANSFER_ITEMS_WIRE {
-                            return Err(MessageError::ParseError(
-                                "Too many entries in private transfer payload".into(),
-                            ));
-                        }
-                    }
-                    skip_wire_field(&mut sub, inner_wire)?;
-                }
+                let sub = take_len_delimited(&mut slice, wire_type)?;
+                scan_private_transfer_payload(sub, frame_item_budget)?;
             }
             50 => {
-                let mut sub = take_len_delimited(&mut slice, wire_type)?;
-                let mut owner_count = 0usize;
-                let mut sig_count = 0usize;
-                while !sub.is_empty() {
-                    let (inner_tag, inner_wire) =
-                        prost::encoding::decode_key(&mut sub).map_err(|e| {
-                            MessageError::ParseError(format!("Protobuf key error: {e}"))
-                        })?;
-                    match inner_tag {
-                        1 => {
-                            owner_count = owner_count.saturating_add(1);
-                            if owner_count > MAX_MULTISIG_ITEMS_WIRE {
-                                return Err(MessageError::ParseError(
-                                    "Too many multisig owners in authorization".into(),
-                                ));
-                            }
-                        }
-                        3 => {
-                            sig_count = sig_count.saturating_add(1);
-                            if sig_count > MAX_MULTISIG_ITEMS_WIRE {
-                                return Err(MessageError::ParseError(
-                                    "Too many multisig signatures in authorization".into(),
-                                ));
-                            }
-                        }
-                        _ => {}
-                    }
-                    skip_wire_field(&mut sub, inner_wire)?;
-                }
+                let sub = take_len_delimited(&mut slice, wire_type)?;
+                scan_multisig_authorization(sub, frame_item_budget)?;
             }
             51 => {
                 let sub = take_len_delimited(&mut slice, wire_type)?;
@@ -615,6 +709,7 @@ fn scan_proto_transaction(mut slice: &[u8]) -> Result<(), MessageError> {
                     sub,
                     3,
                     crate::consensus::MAX_TRANSACTIONS_PER_BLOCK,
+                    frame_item_budget,
                     "Too many state_updates in settlement transaction",
                 )?;
             }
@@ -627,6 +722,7 @@ fn scan_proto_transaction(mut slice: &[u8]) -> Result<(), MessageError> {
 fn scan_proto_block(
     mut slice: &[u8],
     frame_evidence_total: &mut usize,
+    frame_item_budget: &mut usize,
 ) -> Result<(), MessageError> {
     if slice.len() > MAX_BLOCK_SIZE {
         return Err(MessageError::TooLarge(slice.len()));
@@ -634,9 +730,13 @@ fn scan_proto_block(
     let mut evidence_count = 0usize;
     let mut report_count = 0usize;
     let mut tx_count = 0usize;
+    let mut seen_singular = 0u128;
     while !slice.is_empty() {
         let (tag, wire_type) = prost::encoding::decode_key(&mut slice)
             .map_err(|e| MessageError::ParseError(format!("Protobuf key error: {e}")))?;
+        if (1..=32).contains(&tag) && !matches!(tag, 5 | 11 | 22) {
+            mark_unique_tag(&mut seen_singular, tag, "Duplicate singular block field")?;
+        }
         match tag {
             5 => {
                 tx_count = tx_count.saturating_add(1);
@@ -645,8 +745,9 @@ fn scan_proto_block(
                         "Too many transactions in block".into(),
                     ));
                 }
+                bump_frame_items(frame_item_budget)?;
                 let tx_bytes = take_len_delimited(&mut slice, wire_type)?;
-                scan_proto_transaction(tx_bytes)?;
+                scan_proto_transaction(tx_bytes, frame_item_budget)?;
             }
             11 => {
                 evidence_count = evidence_count.saturating_add(1);
@@ -678,11 +779,76 @@ fn scan_proto_block(
     Ok(())
 }
 
+fn scan_header_batch(
+    mut batch_payload: &[u8],
+    frame_evidence_total: &mut usize,
+    frame_item_budget: &mut usize,
+) -> Result<(), MessageError> {
+    let mut header_count = 0usize;
+    while !batch_payload.is_empty() {
+        let (inner_tag, inner_wire) = prost::encoding::decode_key(&mut batch_payload)
+            .map_err(|e| MessageError::ParseError(format!("Protobuf key error: {e}")))?;
+        if inner_tag == 1 {
+            header_count = header_count.saturating_add(1);
+            if header_count > MAX_HEADERS_PER_REQUEST as usize {
+                return Err(MessageError::ParseError(format!(
+                    "header batch exceeds {MAX_HEADERS_PER_REQUEST}"
+                )));
+            }
+            bump_frame_items(frame_item_budget)?;
+            let header_bytes = take_len_delimited(&mut batch_payload, inner_wire)?;
+            if header_bytes.len() > MAX_BLOCK_SIZE {
+                return Err(MessageError::TooLarge(header_bytes.len()));
+            }
+            scan_proto_block_header(header_bytes, 0, frame_evidence_total)?;
+        } else {
+            skip_wire_field(&mut batch_payload, inner_wire)?;
+        }
+    }
+    Ok(())
+}
+
+fn scan_block_batch(
+    mut batch_payload: &[u8],
+    frame_evidence_total: &mut usize,
+    frame_item_budget: &mut usize,
+) -> Result<(), MessageError> {
+    let mut block_count = 0usize;
+    while !batch_payload.is_empty() {
+        let (inner_tag, inner_wire) = prost::encoding::decode_key(&mut batch_payload)
+            .map_err(|e| MessageError::ParseError(format!("Protobuf key error: {e}")))?;
+        if inner_tag == 1 {
+            block_count = block_count.saturating_add(1);
+            if block_count > MAX_CHAIN_SYNC_BLOCKS {
+                return Err(MessageError::ParseError(format!(
+                    "block batch exceeds {MAX_CHAIN_SYNC_BLOCKS}"
+                )));
+            }
+            bump_frame_items(frame_item_budget)?;
+            let block_bytes = take_len_delimited(&mut batch_payload, inner_wire)?;
+            scan_proto_block(block_bytes, frame_evidence_total, frame_item_budget)?;
+        } else {
+            skip_wire_field(&mut batch_payload, inner_wire)?;
+        }
+    }
+    Ok(())
+}
+
 fn validate_wire_frame_caps(mut slice: &[u8]) -> Result<(), MessageError> {
     let mut frame_evidence_total = 0usize;
+    let mut frame_item_budget = 0usize;
+    let mut seen_payload = false;
     while !slice.is_empty() {
         let (tag, wire_type) = prost::encoding::decode_key(&mut slice)
             .map_err(|e| MessageError::ParseError(format!("Protobuf key error: {e}")))?;
+        if (1..=63).contains(&tag) {
+            if seen_payload {
+                return Err(MessageError::ParseError(
+                    "Duplicate network message payload field".into(),
+                ));
+            }
+            seen_payload = true;
+        }
         match tag {
             1 | 2 => {
                 let hs_bytes = take_len_delimited(&mut slice, wire_type)?;
@@ -690,16 +856,21 @@ fn validate_wire_frame_caps(mut slice: &[u8]) -> Result<(), MessageError> {
                     hs_bytes,
                     6,
                     MAX_HANDSHAKE_SCHEMES,
+                    &mut frame_item_budget,
                     "Handshake supported_schemes exceeds limit",
                 )?;
             }
             3 => {
                 let block_bytes = take_len_delimited(&mut slice, wire_type)?;
-                scan_proto_block(block_bytes, &mut frame_evidence_total)?;
+                scan_proto_block(
+                    block_bytes,
+                    &mut frame_evidence_total,
+                    &mut frame_item_budget,
+                )?;
             }
             4 => {
                 let tx_bytes = take_len_delimited(&mut slice, wire_type)?;
-                scan_proto_transaction(tx_bytes)?;
+                scan_proto_transaction(tx_bytes, &mut frame_item_budget)?;
             }
             5 => {
                 let req_bytes = take_len_delimited(&mut slice, wire_type)?;
@@ -707,55 +878,25 @@ fn validate_wire_frame_caps(mut slice: &[u8]) -> Result<(), MessageError> {
                     req_bytes,
                     1,
                     MAX_HEADER_LOCATOR_HASHES,
+                    &mut frame_item_budget,
                     "GetHeaders locator exceeds the limit",
                 )?;
             }
             6 => {
-                let mut batch_payload = take_len_delimited(&mut slice, wire_type)?;
-                let mut header_count = 0usize;
-                while !batch_payload.is_empty() {
-                    let (inner_tag, inner_wire) = prost::encoding::decode_key(&mut batch_payload)
-                        .map_err(|e| {
-                        MessageError::ParseError(format!("Protobuf key error: {e}"))
-                    })?;
-                    if inner_tag == 1 {
-                        header_count = header_count.saturating_add(1);
-                        if header_count > MAX_HEADERS_PER_REQUEST as usize {
-                            return Err(MessageError::ParseError(format!(
-                                "header batch exceeds {MAX_HEADERS_PER_REQUEST}"
-                            )));
-                        }
-                        let header_bytes = take_len_delimited(&mut batch_payload, inner_wire)?;
-                        if header_bytes.len() > MAX_BLOCK_SIZE {
-                            return Err(MessageError::TooLarge(header_bytes.len()));
-                        }
-                        scan_proto_block_header(header_bytes, 0, &mut frame_evidence_total)?;
-                    } else {
-                        skip_wire_field(&mut batch_payload, inner_wire)?;
-                    }
-                }
+                let batch_payload = take_len_delimited(&mut slice, wire_type)?;
+                scan_header_batch(
+                    batch_payload,
+                    &mut frame_evidence_total,
+                    &mut frame_item_budget,
+                )?;
             }
             8 | 10 => {
-                let mut batch_payload = take_len_delimited(&mut slice, wire_type)?;
-                let mut block_count = 0usize;
-                while !batch_payload.is_empty() {
-                    let (inner_tag, inner_wire) = prost::encoding::decode_key(&mut batch_payload)
-                        .map_err(|e| {
-                        MessageError::ParseError(format!("Protobuf key error: {e}"))
-                    })?;
-                    if inner_tag == 1 {
-                        block_count = block_count.saturating_add(1);
-                        if block_count > MAX_CHAIN_SYNC_BLOCKS {
-                            return Err(MessageError::ParseError(format!(
-                                "block batch exceeds {MAX_CHAIN_SYNC_BLOCKS}"
-                            )));
-                        }
-                        let block_bytes = take_len_delimited(&mut batch_payload, inner_wire)?;
-                        scan_proto_block(block_bytes, &mut frame_evidence_total)?;
-                    } else {
-                        skip_wire_field(&mut batch_payload, inner_wire)?;
-                    }
-                }
+                let batch_payload = take_len_delimited(&mut slice, wire_type)?;
+                scan_block_batch(
+                    batch_payload,
+                    &mut frame_evidence_total,
+                    &mut frame_item_budget,
+                )?;
             }
             25 => {
                 let evidence_bytes = take_len_delimited(&mut slice, wire_type)?;
@@ -1030,6 +1171,64 @@ mod tests {
         assert!(matches!(
             NetworkMessage::from_bytes_validated(&batch_frame),
             Err(MessageError::ParseError(msg)) if msg.contains("block batch exceeds")
+        ));
+    }
+
+    #[test]
+    fn duplicate_merged_wire_fields_are_refused_before_decode() {
+        // Two copies of tag 51 (state_update) inside one ProtoTransaction (outer tag 4)
+        // would merge into a single ProtoStateUpdate in prost; pre-decode scanning refuses it.
+        let mut tx_payload = Vec::new();
+        for _ in 0..2 {
+            // tag 51 (51 << 3 | 2): one empty ProtoStateUpdateEntry (tag 3 = 0x1a, len 0)
+            prost::encoding::encode_key(
+                51,
+                prost::encoding::WireType::LengthDelimited,
+                &mut tx_payload,
+            );
+            prost::encoding::encode_varint(2, &mut tx_payload);
+            tx_payload.extend_from_slice(&[0x1a, 0x00]);
+        }
+        let mut tx_frame = Vec::new();
+        prost::encoding::encode_key(4, prost::encoding::WireType::LengthDelimited, &mut tx_frame);
+        prost::encoding::encode_varint(tx_payload.len() as u64, &mut tx_frame);
+        tx_frame.extend_from_slice(&tx_payload);
+        assert!(matches!(
+            NetworkMessage::from_bytes_validated(&tx_frame),
+            Err(MessageError::ParseError(msg)) if msg.contains("Duplicate transaction field")
+        ));
+
+        // Two distinct type_payload oneof tags (tag 28 + tag 51) in one ProtoTransaction are refused.
+        let mut mixed_tx = Vec::new();
+        for tag in [28u32, 51u32] {
+            prost::encoding::encode_key(
+                tag,
+                prost::encoding::WireType::LengthDelimited,
+                &mut mixed_tx,
+            );
+            prost::encoding::encode_varint(0, &mut mixed_tx);
+        }
+        let mut mixed_frame = Vec::new();
+        prost::encoding::encode_key(
+            4,
+            prost::encoding::WireType::LengthDelimited,
+            &mut mixed_frame,
+        );
+        prost::encoding::encode_varint(mixed_tx.len() as u64, &mut mixed_frame);
+        mixed_frame.extend_from_slice(&mixed_tx);
+        assert!(matches!(
+            NetworkMessage::from_bytes_validated(&mixed_frame),
+            Err(MessageError::ParseError(msg)) if msg.contains("Multiple transaction type_payload")
+        ));
+
+        // Duplicate envelope payload tags (two ProtoBlocks entries at outer tag 8) are refused.
+        let mut dup_envelope = Vec::new();
+        for _ in 0..2 {
+            dup_envelope.extend_from_slice(&[0x42, 0x00]);
+        }
+        assert!(matches!(
+            NetworkMessage::from_bytes_validated(&dup_envelope),
+            Err(MessageError::ParseError(msg)) if msg.contains("Duplicate network message payload")
         ));
     }
 }
