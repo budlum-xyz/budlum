@@ -228,14 +228,48 @@ impl PrivateTransferRequest {
                 self.send_amount, self.input.amount
             )));
         }
-        let change = self.input.amount - self.send_amount;
-        if change > 0 && (self.change_recipient_tag.is_none() || self.change_blinding.is_none()) {
+        validate_canonical_blinding("input.blinding", self.input.blinding)?;
+        validate_canonical_blinding("output_blinding", self.output_blinding)?;
+        if self.output_blinding == self.input.blinding {
             return Err(WalletError::InvalidPrivateTransfer(
-                "change output requires change_recipient_tag and change_blinding".into(),
+                "output_blinding must differ from input.blinding".into(),
             ));
+        }
+        let change = self.input.amount - self.send_amount;
+        if change > 0 {
+            let Some(cb) = self.change_blinding else {
+                return Err(WalletError::InvalidPrivateTransfer(
+                    "change output requires change_recipient_tag and change_blinding".into(),
+                ));
+            };
+            if self.change_recipient_tag.is_none() {
+                return Err(WalletError::InvalidPrivateTransfer(
+                    "change output requires change_recipient_tag and change_blinding".into(),
+                ));
+            }
+            validate_canonical_blinding("change_blinding", cb)?;
+            if cb == self.output_blinding || cb == self.input.blinding {
+                return Err(WalletError::InvalidPrivateTransfer(
+                    "change_blinding must differ from input.blinding and output_blinding".into(),
+                ));
+            }
         }
         Ok(())
     }
+}
+
+fn validate_canonical_blinding(label: &str, blinding: u64) -> Result<(), WalletError> {
+    if blinding == 0 || blinding >= budlum_note_packing::GOLDILOCKS_P {
+        return Err(WalletError::InvalidPrivateTransfer(format!(
+            "{label} must be a non-zero canonical Goldilocks field element"
+        )));
+    }
+    Ok(())
+}
+
+fn reduce_nonzero_goldilocks(raw: u64) -> u64 {
+    let reduced = raw % budlum_note_packing::GOLDILOCKS_P;
+    if reduced == 0 { 1 } else { reduced }
 }
 
 /// Derive a field-element spend secret from wallet seed + note commitment.
@@ -248,7 +282,7 @@ pub fn derive_spend_secret(wallet_seed: &[u8; 32], note_commitment: u64) -> u64 
     h.update(note_commitment.to_le_bytes());
     let out: [u8; 32] = h.finalize().into();
     let [b0, b1, b2, b3, b4, b5, b6, b7, ..] = out;
-    u64::from_le_bytes([b0, b1, b2, b3, b4, b5, b6, b7])
+    reduce_nonzero_goldilocks(u64::from_le_bytes([b0, b1, b2, b3, b4, b5, b6, b7]))
 }
 
 /// Derive blinding from wallet seed + counter (deterministic UX helper).
@@ -261,7 +295,7 @@ pub fn derive_blinding(wallet_seed: &[u8; 32], counter: u64) -> u64 {
     h.update(counter.to_le_bytes());
     let out: [u8; 32] = h.finalize().into();
     let [b0, b1, b2, b3, b4, b5, b6, b7, ..] = out;
-    u64::from_le_bytes([b0, b1, b2, b3, b4, b5, b6, b7])
+    reduce_nonzero_goldilocks(u64::from_le_bytes([b0, b1, b2, b3, b4, b5, b6, b7]))
 }
 
 pub(crate) fn build_outputs(
