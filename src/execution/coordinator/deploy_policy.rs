@@ -32,6 +32,8 @@ impl Default for DeployPolicy {
 
 impl DeployPolicy {
     /// Phase-1 mainnet default: `EVM` and `BudZero` open; expansion environments frozen.
+    ///
+    /// Convenience: exposed for mainnet policy baselines and coordinator integration tests.
     #[must_use]
     pub const fn phase1_default() -> Self {
         Self {
@@ -186,10 +188,9 @@ mod tests {
             RefusalCode::Denied
         );
 
-        let opened = DeployPolicy::from_cli_csv(
-            "wasm,svm,move,move-sui,cairo,near,polkavm,tvm,utxo,plutus",
-        )
-        .unwrap();
+        let opened =
+            DeployPolicy::from_cli_csv("wasm,svm,move,move-sui,cairo,near,polkavm,tvm,utxo,plutus")
+                .unwrap();
         assert!(opened.check_deploy_allowed(EeId::WASM).is_ok());
         assert!(opened.check_deploy_allowed(EeId::SVM).is_ok());
         assert!(opened.check_deploy_allowed(EeId::MOVE).is_ok());

@@ -42,6 +42,15 @@ interface IExternalFraudProofVerifier {
         external
         view
         returns (bool);
+
+    /// @notice Whether `proof` shows the `(height, stateRoot)` pair itself is
+    ///         wrong, rather than one envelope's post-quantum half. A verifier
+    ///         that cannot answer must revert or return false; the contract
+    ///         then keeps the envelope-scoped verdict only.
+    function verifyFraudSubstance(uint64 height, bytes32 stateRoot, bytes calldata proof)
+        external
+        view
+        returns (bool);
 }
 
 contract BudlumFinalityVerifier is IBudlumFinality {
@@ -90,6 +99,10 @@ contract BudlumFinalityVerifier is IBudlumFinality {
     uint64 public override latestFinalHeight;
     mapping(bytes32 => Challenge) public challenges;
     mapping(bytes32 => bool) public fraudulent;
+    /// @dev Verdicts that condemn the `(height, stateRoot)` substance rather
+    ///      than one envelope. Terminal: a re-presented envelope carrying a
+    ///      mutated post-quantum blob must not settle a disproved root.
+    mapping(uint64 => mapping(bytes32 => bool)) public fraudulentRoot;
     mapping(bytes32 => uint256) public pendingEnvelopeCount;
     uint256 private _reentrancyLock;
 
@@ -215,7 +228,7 @@ contract BudlumFinalityVerifier is IBudlumFinality {
         if (accepted[digest]) {
             revert AlreadyAccepted(digest);
         }
-        if (fraudulent[digest]) {
+        if (fraudulent[digest] || fraudulentRoot[a.height][a.stateRoot]) {
             revert AlreadyFraudulent(digest);
         }
         if (challenges[digest].openedAt != 0) {
@@ -323,7 +336,8 @@ contract BudlumFinalityVerifier is IBudlumFinality {
             revert ChallengeWindowClosed(digest);
         }
         uint64 challengeHeight = c.height;
-        bytes32 challengeIdentity = pendingIdentity(challengeHeight, c.stateRoot);
+        bytes32 challengeStateRoot = c.stateRoot;
+        bytes32 challengeIdentity = pendingIdentity(challengeHeight, challengeStateRoot);
         bool fraud;
         try IExternalFraudProofVerifier(fraudProofVerifier).verifyFraud(digest, fraudProof) returns (bool proven) {
             fraud = proven;
@@ -333,15 +347,25 @@ contract BudlumFinalityVerifier is IBudlumFinality {
         if (!fraud) {
             revert FraudProofRejected(digest);
         }
+        bool substance = false;
+        try IExternalFraudProofVerifier(fraudProofVerifier).verifyFraudSubstance(
+            challengeHeight, challengeStateRoot, fraudProof
+        ) returns (bool substanceProven) {
+            substance = substanceProven;
+        } catch {}
         // aderyn-fp-next-line(reentrancy-state-change)
         c.challenger = msg.sender;
         c.resolved = true;
-        // The fraud proof speaks only to this envelope (`digest`), not to the
-        // `(height, stateRoot)` substance: on the optimistic BLS path the ML-DSA
-        // blob is outside the BLS signing root and unverified at submission, so
-        // a verdict on a mutated envelope must neither condemn `(height, stateRoot)`
-        // nor drop another live envelope's pending claim.
+        // A verdict that only shows one envelope's post-quantum blob is invalid
+        // kills that envelope, so mutating the blob cannot condemn an honest
+        // `(height, stateRoot)`. A verdict that the root itself is wrong is keyed
+        // to the substance and is terminal: otherwise the same disproved
+        // `(height, stateRoot)` is re-presented with a fresh blob and settled in
+        // a later window (CWE-294).
         fraudulent[digest] = true;
+        if (substance) {
+            fraudulentRoot[challengeHeight][challengeStateRoot] = true;
+        }
         accepted[digest] = false;
         if (pendingEnvelopeCount[challengeIdentity] > 0) {
             pendingEnvelopeCount[challengeIdentity] -= 1;
@@ -365,7 +389,7 @@ contract BudlumFinalityVerifier is IBudlumFinality {
         if (c.resolved) {
             revert ChallengeResolved(digest);
         }
-        if (fraudulent[digest]) {
+        if (fraudulent[digest] || fraudulentRoot[c.height][c.stateRoot]) {
             revert AlreadyFraudulent(digest);
         }
         uint256 elapsed = block.number - uint256(c.openedAt);

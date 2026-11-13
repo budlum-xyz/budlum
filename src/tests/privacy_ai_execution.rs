@@ -634,7 +634,11 @@ fn private_transfer_is_open_on_testnet() {
         authorization_sig: kp.sign(&auth_msg).to_vec(),
         public_digest: digest,
     };
-    let tx_testnet = signed_tx(&kp, testnet, TransactionType::PrivateTransferSubmit(sub.clone()));
+    let tx_testnet = signed_tx(
+        &kp,
+        testnet,
+        TransactionType::PrivateTransferSubmit(sub.clone()),
+    );
     crate::execution::executor::Executor::apply_transaction_checked(&mut state, &tx_testnet)
         .expect("testnet 45261 executes private transfers");
     assert!(!state.note_registry.contains_commitment(&c_in));

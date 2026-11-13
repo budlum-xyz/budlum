@@ -1756,9 +1756,8 @@ mod tests {
         payload[layout::STATE_ROOT].copy_from_slice(&[0xcc; 32]);
         let update = crate::cross_domain::external::ethereum::parse_update(&payload).unwrap();
         let root = signing_root_v2(&update);
-        let sig = G2Affine::from(
-            G2Projective::from(crate::chain::finality::hash_to_g2(&root)) * sk,
-        );
+        let sig =
+            G2Affine::from(G2Projective::from(crate::chain::finality::hash_to_g2(&root)) * sk);
         payload[layout::SIGNATURE].copy_from_slice(&sig.to_compressed());
 
         let adapter = spec.build(Some(IntakeState::production_bls()), None);

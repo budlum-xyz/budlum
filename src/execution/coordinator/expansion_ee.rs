@@ -13,7 +13,7 @@ use crate::execution::coordinator::state::{
     NS_UTXO_STATE,
 };
 use budlum_uel_abi::{
-    BlockContext, CodeInfo, EeCall, EeCallKind, EeId, EeOutcome, EeQuery, EeRefusal,
+    BlockContext, CodeInfo, EeCall, EeCallKind, EeFault, EeId, EeOutcome, EeQuery, EeRefusal,
     ExecutionEnvironment, HostApi, HostRead, Namespace, OutcomeStatus, RefusalCode,
 };
 use sha2::{Digest, Sha256};
@@ -120,8 +120,8 @@ fn execute_expansion_call(
                     gas_used: call.gas_limit,
                 });
             }
-            let ckey = code_storage_key(spec.ee, &call.target.id);
-            host.write(&store_ns, &ckey, Some(&call.input))
+            let code_key = code_storage_key(spec.ee, &call.target.id);
+            host.write(&store_ns, &code_key, Some(&call.input))
                 .map_err(|e| map_host_err(&e))?;
             Ok(EeOutcome {
                 status: OutcomeStatus::Success,
@@ -145,8 +145,11 @@ fn execute_expansion_call(
                     gas_used: call.gas_limit,
                 });
             }
-            let ckey = code_storage_key(spec.ee, &call.target.id);
-            let Some(code) = host.read(&store_ns, &ckey).map_err(|e| map_host_err(&e))? else {
+            let code_key = code_storage_key(spec.ee, &call.target.id);
+            let Some(code) = host
+                .read(&store_ns, &code_key)
+                .map_err(|e| map_host_err(&e))?
+            else {
                 return Ok(EeOutcome {
                     status: OutcomeStatus::Revert,
                     output: Vec::new(),
@@ -166,8 +169,8 @@ fn execute_expansion_call(
             h.update(clean_input);
             let digest: [u8; 32] = h.finalize().into();
             if !is_static && !clean_input.is_empty() {
-                let skey = state_storage_key(&call.target.id, b"last");
-                host.write(&store_ns, &skey, Some(&digest))
+                let state_slot_key = state_storage_key(&call.target.id, b"last");
+                host.write(&store_ns, &state_slot_key, Some(&digest))
                     .map_err(|e| map_host_err(&e))?;
             }
             Ok(EeOutcome {
@@ -185,8 +188,8 @@ fn query_expansion_state(
     host: &dyn HostRead,
 ) -> Result<Vec<u8>, EeRefusal> {
     let store_ns = ns(namespace)?;
-    let skey = state_storage_key(&q.target.id, &q.input);
-    host.read(&store_ns, &skey)
+    let state_slot_key = state_storage_key(&q.target.id, &q.input);
+    host.read(&store_ns, &state_slot_key)
         .map(Option::unwrap_or_default)
         .map_err(|e| map_host_err(&e))
 }
@@ -226,8 +229,15 @@ macro_rules! define_expansion_ee {
                 ctx: &BlockContext,
                 call: &EeCall,
                 host: &mut dyn HostApi,
-            ) -> Result<EeOutcome, EeRefusal> {
-                execute_expansion_call(&Self::SPEC, ctx, call, host)
+            ) -> Result<EeOutcome, EeFault> {
+                match execute_expansion_call(&Self::SPEC, ctx, call, host) {
+                    Ok(outcome) => Ok(outcome),
+                    Err(refusal) => Ok(EeOutcome {
+                        status: OutcomeStatus::Revert,
+                        output: refusal.message.into_bytes(),
+                        gas_used: 0,
+                    }),
+                }
             }
 
             fn query(

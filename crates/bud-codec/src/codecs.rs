@@ -17,53 +17,53 @@ use crate::{
 };
 
 /// LZMA2-equivalent sliding-window LZ77 + entropy frame.
-pub const LZMA2: CodecId = 2;
+const LZMA2: CodecId = 2;
 /// Small-object dictionary zstd (`<= 16 KiB` optimized).
-pub const DICT_ZSTD: CodecId = 3;
+const DICT_ZSTD: CodecId = 3;
 /// Columnar JSON record transpose + zstd.
-pub const COLUMNAR_JSON: CodecId = 4;
+const COLUMNAR_JSON: CodecId = 4;
 /// JPEG scan/segment predictor + zstd.
-pub const LEPTON_JPEG: CodecId = 5;
+const LEPTON_JPEG: CodecId = 5;
 /// DEFLATE stream unpacker/predictor + entropy coder.
-pub const PREFLATE: CodecId = 6;
+const PREFLATE: CodecId = 6;
 /// PCM WAV / AIFF header + channel delta predictor + zstd.
-pub const LOSSLESS_AUDIO: CodecId = 7;
+const LOSSLESS_AUDIO: CodecId = 7;
 /// Pure-Rust adaptive Order-1 bit-level arithmetic range coder.
-pub const CONTEXT_MIX: CodecId = 8;
+const CONTEXT_MIX: CodecId = 8;
 /// Region derivation delta against repeated slices + zstd.
-pub const DERIVATION: CodecId = 10;
+const DERIVATION: CodecId = 10;
 /// Content-defined chunked version delta + zstd.
-pub const VERSION_DELTA: CodecId = 11;
+const VERSION_DELTA: CodecId = 11;
 /// Shared corpus dictionary fast LZ + zstd.
-pub const LZ_CONTEXT: CodecId = 12;
+const LZ_CONTEXT: CodecId = 12;
 /// Archival finite-state context machine + zstd.
-pub const CONTEXT_MACHINE: CodecId = 13;
+const CONTEXT_MACHINE: CodecId = 13;
 /// Log field (nginx/syslog) whitespace/token columnar split + zstd.
-pub const LOG_COLUMNAR: CodecId = 14;
+const LOG_COLUMNAR: CodecId = 14;
 /// Time series `(u64, u64)` delta + XOR + zstd.
-pub const TIME_SERIES: CodecId = 15;
+const TIME_SERIES: CodecId = 15;
 /// Append-only WAL record columnar split + zstd.
-pub const WAL_COLUMNAR: CodecId = 16;
+const WAL_COLUMNAR: CodecId = 16;
 /// Libpcap capture header/record split + zstd.
-pub const PCAP_COLUMNAR: CodecId = 17;
+const PCAP_COLUMNAR: CodecId = 17;
 /// Page-aligned XOR delta + zstd.
-pub const PAGE_XOR_DELTA: CodecId = 18;
+const PAGE_XOR_DELTA: CodecId = 18;
 /// FP32 / BF16 exponent + sign/mantissa split + zstd.
-pub const FLOAT_SPLIT: CodecId = 19;
+const FLOAT_SPLIT: CodecId = 19;
 /// Executable PE/ELF section & branch-target transform + zstd.
-pub const EXE_SPLIT: CodecId = 20;
+const EXE_SPLIT: CodecId = 20;
 /// PDF stream/object boundary split + zstd.
-pub const PDF_SPLIT: CodecId = 21;
+const PDF_SPLIT: CodecId = 21;
 /// Markdown ATX heading / body stream split + zstd.
-pub const MARKDOWN_SPLIT: CodecId = 22;
+const MARKDOWN_SPLIT: CodecId = 22;
 /// FASTA / FASTQ 2-bit DNA base packing + zstd.
-pub const GENOMIC: CodecId = 23;
+const GENOMIC: CodecId = 23;
 /// Office OPC ZIP local-header + payload split + zstd.
-pub const OFFICE_OPC: CodecId = 24;
+const OFFICE_OPC: CodecId = 24;
 /// Point cloud 24-byte coordinate transpose + residual + zstd.
-pub const POINT_CLOUD: CodecId = 25;
+const POINT_CLOUD: CodecId = 25;
 /// Lossless raw pixel BMP / TIFF stride predictor + zstd.
-pub const LOSSLESS_IMAGE: CodecId = 26;
+const LOSSLESS_IMAGE: CodecId = 26;
 
 const fn tag_byte(codec: CodecId) -> u8 {
     codec as u8
