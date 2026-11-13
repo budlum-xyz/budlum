@@ -913,33 +913,22 @@ impl QcFaultProof {
                         .into(),
                 )
             }
-            QcProofKind::ZkInvalidAttestationV1 { public_inputs, .. } => {
+            QcProofKind::ZkInvalidAttestationV1 {
+                proof_bytes,
+                public_inputs,
+            } => {
                 if public_inputs.merkle_root != blob.merkle_root {
                     return Err("ZK QC public input merkle root mismatch".into());
                 }
-                // ZK QC fault proof verifier
-                // Is not yet implemented. This is a deliberate fail-closed guard:
-                // ZK domain finality attestations CANNOT be invalidated via fault
-                // Proofs until a proper ZK verifier is integrated. That verifier
-                // is a BudZero STARK proof of the fault; no
-                // pairing-based SNARK (Groth16, KZG-based PLONK, anything over
-                // BN254) sits on a Budlum verification path, and the
-                // `no_pairing_snark_in_verification_path` gate holds the line.
-                // This prevents forged ZK attestations
-                // From being finalized without verification, at the cost of also
-                // Preventing legitimate fault challenges.
-                //
-                // Tracking: Implement ZK verifier in consensus::zk_verifier module,
-                // Then replace this stub with actual proof verification.
-                // Security impact: ZK domain QC blobs are accepted (BLS quorum
-                // Verified) but cannot be challenged. For mainnet, consider
-                // Disabling ZK domain QC import until verifier is ready.
-                Err(
-                    "ZK QC fault proof verifier not implemented - ZK domain attestations \
-                     cannot be challenged until ZK verifier integration. This is fail-closed: \
-                     no invalid ZK attestation can be finalized via this path."
-                        .into(),
-                )
+                // Fail-closed. ZK domain attestations cannot be invalidated
+                // via fault proofs until a BudZero STARK verifier is
+                // integrated. No pairing based SNARK sits on a Budlum
+                // verification path.
+                crate::consensus::zk_verifier::verify_zk_qc_fault_proof(
+                    proof_bytes,
+                    &public_inputs.merkle_root,
+                )?;
+                Err("ZK QC fault proof verifier not implemented".into())
             }
         }
     }
