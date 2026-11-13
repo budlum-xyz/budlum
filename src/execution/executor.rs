@@ -1193,12 +1193,18 @@ impl Executor {
                         ),
                     ));
                 }
-                let req: crate::pollen::CreateNameOffer = bincode::deserialize(&tx.data)
+                let req: crate::bns::CreateNameOffer = bincode::deserialize(&tx.data)
                     .map_err(|e| BudlumError::validation("bns_invalid_data", e.to_string()))?;
 
                 match req.kind {
-                    crate::pollen::OfferKind::Primary => {
+                    crate::bns::OfferKind::Primary => {
                         if !state.bns_registry.is_primary_seller(&tx.from) {
+                            if state.bns_registry.is_reserved_name(&req.name) {
+                                return Err(BudlumError::validation(
+                                    "bns_reserved_name",
+                                    "Reserved .bud label can only be listed by an authorized BNS primary seller",
+                                ));
+                            }
                             return Err(BudlumError::validation(
                                 "bns_unauthorized_primary_seller",
                                 "Only authorized BNS primary sellers can open Primary offers",
@@ -1214,7 +1220,7 @@ impl Executor {
                             ));
                         }
                     }
-                    crate::pollen::OfferKind::Resale => {
+                    crate::bns::OfferKind::Resale => {
                         if !state.bns_registry.is_live_owned_by(
                             &req.name,
                             &tx.from,
@@ -1335,7 +1341,7 @@ impl Executor {
                 // Settle name ownership atomically before touching offer state or balances:
                 // if the name was sold or expired in the meantime, fail closed here.
                 match offer.kind {
-                    crate::pollen::OfferKind::Primary => {
+                    crate::bns::OfferKind::Primary => {
                         if !state
                             .bns_registry
                             .is_available_for_primary(&offer.name, state.epoch_index)
@@ -1347,7 +1353,8 @@ impl Executor {
                         }
                         state
                             .bns_registry
-                            .register(
+                            .register_primary_sale(
+                                &offer.seller,
                                 offer.name.clone(),
                                 tx.from,
                                 state.epoch_index,
@@ -1357,7 +1364,7 @@ impl Executor {
                                 BudlumError::validation("bns_registration_failed", e.to_string())
                             })?;
                     }
-                    crate::pollen::OfferKind::Resale => {
+                    crate::bns::OfferKind::Resale => {
                         if !state.bns_registry.is_live_owned_by(
                             &offer.name,
                             &offer.seller,

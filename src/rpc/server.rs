@@ -4540,8 +4540,8 @@ impl BudlumApiServer for RpcServer {
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
         let parsed_kind = match kind.as_deref() {
             None => None,
-            Some("Primary" | "primary") => Some(crate::pollen::OfferKind::Primary),
-            Some("Resale" | "resale") => Some(crate::pollen::OfferKind::Resale),
+            Some("Primary" | "primary") => Some(crate::bns::OfferKind::Primary),
+            Some("Resale" | "resale") => Some(crate::bns::OfferKind::Resale),
             Some(other) => {
                 return Err(ErrorObjectOwned::owned(
                     -32602,
@@ -4580,8 +4580,8 @@ impl BudlumApiServer for RpcServer {
             ));
         }
         let offer_kind = match kind.as_str() {
-            "Primary" | "primary" => crate::pollen::OfferKind::Primary,
-            "Resale" | "resale" => crate::pollen::OfferKind::Resale,
+            "Primary" | "primary" => crate::bns::OfferKind::Primary,
+            "Resale" | "resale" => crate::bns::OfferKind::Resale,
             other => {
                 return Err(ErrorObjectOwned::owned(
                     -32602,
@@ -4590,10 +4590,16 @@ impl BudlumApiServer for RpcServer {
                 ));
             }
         };
-        if offer_kind == crate::pollen::OfferKind::Primary && duration == 0 {
+        if offer_kind == crate::bns::OfferKind::Primary
+            && !crate::bns::BnsRegistry::is_valid_duration(duration)
+        {
             return Err(ErrorObjectOwned::owned(
                 -32602,
-                "Primary offer duration must be greater than zero",
+                format!(
+                    "Primary offer duration must be in {}..={}",
+                    crate::bns::MIN_DURATION,
+                    crate::bns::MAX_DURATION
+                ),
                 None::<()>,
             ));
         }
@@ -4609,7 +4615,7 @@ impl BudlumApiServer for RpcServer {
             ));
         }
 
-        let req = crate::pollen::CreateNameOffer {
+        let req = crate::bns::CreateNameOffer {
             name: name.clone(),
             price_atoms,
             duration,
@@ -4935,10 +4941,14 @@ impl BudlumApiServer for RpcServer {
                 None::<()>,
             ));
         }
-        if duration == 0 {
+        if !crate::bns::BnsRegistry::is_valid_duration(duration) {
             return Err(ErrorObjectOwned::owned(
                 -32602,
-                "Renewal duration must be greater than zero",
+                format!(
+                    "Renewal duration must be in {}..={}",
+                    crate::bns::MIN_DURATION,
+                    crate::bns::MAX_DURATION
+                ),
                 None::<()>,
             ));
         }

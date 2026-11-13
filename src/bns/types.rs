@@ -96,6 +96,9 @@ pub struct BnsResolved {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BnsError {
     InvalidName,
+    ReservedName,
+    InvalidDuration,
+    OwnerNameLimitExceeded,
     NameTaken,
     NotOwner,
     Expired,
@@ -105,6 +108,9 @@ impl fmt::Display for BnsError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             BnsError::InvalidName => write!(f, "Name too short or long"),
+            BnsError::ReservedName => write!(f, "Name label is reserved"),
+            BnsError::InvalidDuration => write!(f, "Registration duration out of bounds"),
+            BnsError::OwnerNameLimitExceeded => write!(f, "Owner name limit exceeded"),
             BnsError::NameTaken => write!(f, "Name already taken"),
             BnsError::NotOwner => write!(f, "Not the owner"),
             BnsError::Expired => write!(f, "Name expired"),

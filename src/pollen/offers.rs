@@ -17,6 +17,8 @@ use super::{
 };
 
 /// AI Data Marketplace - Economic layer for user-to-AI data sales.
+use crate::bns::{CreateNameOffer, NameOffer, OfferKind};
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DataOffer {
     pub id: u64,
@@ -24,39 +26,6 @@ pub struct DataOffer {
     pub cid: ContentId,
     pub price: u64, // Price in $BUD
     pub active: bool,
-}
-
-/// Listing kind for a `.bud` domain offer on the marketplace.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-pub enum OfferKind {
-    /// First sale of an unregistered or post-grace expired `.bud` name by an
-    /// authorized primary seller (`BNS_PRIMARY_SELLERS`).
-    Primary,
-    /// Secondary resale of a currently live `.bud` name by its owner.
-    Resale,
-}
-
-/// Marketplace listing for a `.bud` domain name.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct NameOffer {
-    pub id: u64,
-    pub seller: Address,
-    pub name: String,
-    pub price_atoms: u64,
-    pub duration: u64,
-    pub kind: OfferKind,
-    pub expires_at_epoch: u64,
-    pub active: bool,
-}
-
-/// Signed transaction payload for `TransactionType::BnsCreateOffer`.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct CreateNameOffer {
-    pub name: String,
-    pub price_atoms: u64,
-    pub duration: u64,
-    pub kind: OfferKind,
-    pub expires_at_epoch: u64,
 }
 
 /// Receipt for an authorization-backed pollen purchase. This is not a LUM/DeFi
@@ -1164,8 +1133,12 @@ impl MarketplaceRegistry {
             return Err("Name offer expires_at_epoch must be in the future".into());
         }
         if request.kind == OfferKind::Primary {
-            if request.duration == 0 {
-                return Err("Primary name offer duration must be greater than zero".into());
+            if !crate::bns::BnsRegistry::is_valid_duration(request.duration) {
+                return Err(format!(
+                    "Primary name offer duration must be in {}..={}",
+                    crate::bns::MIN_DURATION,
+                    crate::bns::MAX_DURATION
+                ));
             }
             if current_epoch.checked_add(request.duration).is_none() {
                 return Err("Primary name offer duration overflows epoch counter".into());

@@ -1,5 +1,6 @@
 use crate::bns::types::{BnsError, BnsResolved, NameRecord};
 use crate::core::address::Address;
+use crate::registry::params::{MAX_DURATION, MAX_NAMES_PER_OWNER, MIN_DURATION, RESERVED_LABELS};
 use crate::storage::content_id::ContentId;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -15,8 +16,15 @@ pub const BNS_PRIMARY_SELLERS: &[Address] = &[Address([0xB2; 32])];
 /// Maximum number of primary seller addresses governance or genesis may configure.
 const MAX_PRIMARY_SELLERS: usize = 64;
 
+/// Maximum number of reserved labels genesis may configure.
+const MAX_RESERVED_LABELS: usize = 512;
+
 fn default_primary_sellers() -> BTreeSet<Address> {
     BNS_PRIMARY_SELLERS.iter().copied().collect()
+}
+
+fn default_reserved_labels() -> BTreeSet<String> {
+    RESERVED_LABELS.iter().map(|s| (*s).to_string()).collect()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -25,6 +33,8 @@ pub struct BnsRegistry {
     pub base_cost: u64,
     #[serde(default = "default_primary_sellers")]
     pub primary_sellers: BTreeSet<Address>,
+    #[serde(default = "default_reserved_labels")]
+    pub reserved_labels: BTreeSet<String>,
 }
 
 impl Default for BnsRegistry {
@@ -87,7 +97,58 @@ impl BnsRegistry {
             names: BTreeMap::new(),
             base_cost: 100,
             primary_sellers: default_primary_sellers(),
+            reserved_labels: default_reserved_labels(),
         }
+    }
+
+    /// Replace the reserved-label set (seeded at genesis).
+    ///
+    /// # Errors
+    ///
+    /// Refuses invalid labels or sets exceeding `MAX_RESERVED_LABELS`.
+    pub fn set_reserved_labels(
+        &mut self,
+        labels: impl IntoIterator<Item = String>,
+    ) -> Result<(), String> {
+        let mut next = BTreeSet::new();
+        for label in labels {
+            let count = label.chars().count();
+            if !(1..=32).contains(&count) || !Self::is_valid_label(&label) {
+                return Err(format!("Invalid BNS reserved label `{label}`"));
+            }
+            next.insert(label);
+            if next.len() > MAX_RESERVED_LABELS {
+                return Err(format!(
+                    "BNS reserved labels exceed maximum count ({MAX_RESERVED_LABELS})"
+                ));
+            }
+        }
+        self.reserved_labels = next;
+        Ok(())
+    }
+
+    /// Whether `<label>.bud` (or bare `<label>`) is in the reserved-label list.
+    #[must_use]
+    pub fn is_reserved_name(&self, name: &str) -> bool {
+        let label = name.strip_suffix(Self::SUFFIX).unwrap_or(name);
+        self.reserved_labels.contains(label)
+    }
+
+    /// Count of live or grace-period names currently held by `owner`.
+    #[must_use]
+    pub fn active_name_count_for_owner(&self, owner: &Address, current_epoch: u64) -> usize {
+        self.names
+            .values()
+            .filter(|r| {
+                &r.owner == owner && current_epoch < r.expires_at.saturating_add(Self::GRACE_PERIOD)
+            })
+            .count()
+    }
+
+    /// Whether `duration` satisfies `[MIN_DURATION, MAX_DURATION]`.
+    #[must_use]
+    pub const fn is_valid_duration(duration: u64) -> bool {
+        duration >= MIN_DURATION && duration <= MAX_DURATION
     }
 
     /// Whether `seller` is authorized to open `OfferKind::Primary` listings.
@@ -158,17 +219,10 @@ impl BnsRegistry {
             .saturating_mul(duration)
     }
 
-    /// PARTIAL: allowed - the removal is an eviction that has already
-    /// succeeded when the refusal below fires. The `Err` is the branch where
-    /// nothing was evicted: no expired name existed, so the registry is at
-    /// capacity and nothing was taken out. The two are exclusive.
-    ///
-    /// Called exclusively from the consensus executor (`BnsBuyName` primary
-    /// settlement) and crate-internal tests.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the operation fails.
+    /// Crate-internal test registration helper (rejects `RESERVED_LABELS`).
+    /// Production consensus registration flows exclusively through
+    /// [`Self::register_primary_sale`].
+    #[cfg(test)]
     pub(crate) fn register(
         &mut self,
         name: String,
@@ -176,48 +230,77 @@ impl BnsRegistry {
         current_epoch: u64,
         duration: u64,
     ) -> Result<(), BnsError> {
+        self.register_inner(name, owner, current_epoch, duration, false)
+    }
+
+    /// Primary marketplace settlement door: allows reserved labels iff `seller`
+    /// is an authorized `BNS_PRIMARY_SELLERS` member, while enforcing all B1/B3
+    /// bounds (`MIN_DURATION..=MAX_DURATION`, `MAX_NAMES_PER_OWNER`).
+    pub(crate) fn register_primary_sale(
+        &mut self,
+        seller: &Address,
+        name: String,
+        buyer: Address,
+        current_epoch: u64,
+        duration: u64,
+    ) -> Result<(), BnsError> {
+        if !self.is_primary_seller(seller) {
+            return Err(BnsError::NotOwner);
+        }
+        self.register_inner(name, buyer, current_epoch, duration, true)
+    }
+
+    fn register_inner(
+        &mut self,
+        name: String,
+        owner: Address,
+        current_epoch: u64,
+        duration: u64,
+        allow_reserved: bool,
+    ) -> Result<(), BnsError> {
         if !Self::is_valid_name(&name) {
             return Err(BnsError::InvalidName);
         }
-        // Duration must be > 0. Zero-duration registration
-        // Would expire immediately (current_epoch + 0), creating a useless
-        // Record that wastes state space and could be used for name squatting.
-        if duration == 0 {
-            return Err(BnsError::InvalidName);
+        if !allow_reserved && self.is_reserved_name(&name) {
+            return Err(BnsError::ReservedName);
         }
+        if !Self::is_valid_duration(duration) {
+            return Err(BnsError::InvalidDuration);
+        }
+        let replacing_same_owner_in_grace = self.names.get(&name).is_some_and(|r| {
+            r.owner == owner && current_epoch < r.expires_at.saturating_add(Self::GRACE_PERIOD)
+        });
         if let Some(record) = self.names.get(&name) {
             if record.expires_at > current_epoch {
                 return Err(BnsError::NameTaken);
             }
-            // F14: the grace period. An expired name still grants its previous
-            // owner a renewal window. While
-            // `current_epoch < expires_at + GRACE_PERIOD` holds, only the
-            // previous owner can register or renew, which blocks front-running
-            // squatters from seizing an expired name.
             let grace_until = record.expires_at.saturating_add(Self::GRACE_PERIOD);
             if current_epoch < grace_until && record.owner != owner {
                 return Err(BnsError::NameTaken);
             }
         }
+        if !replacing_same_owner_in_grace
+            && self.active_name_count_for_owner(&owner, current_epoch) >= MAX_NAMES_PER_OWNER
+        {
+            return Err(BnsError::OwnerNameLimitExceeded);
+        }
+        let expires_at = current_epoch
+            .checked_add(duration)
+            .ok_or(BnsError::InvalidDuration)?;
+        let record = NameRecord::try_new(name.clone(), owner, current_epoch, expires_at)?;
         // Cap total name count - fail-closed.
         // Reuse slots from expired names first; only reject if truly at capacity.
         if self.names.len() >= Self::MAX_NAMES && !self.names.contains_key(&name) {
-            // Try to evict the oldest expired name to make room
             let expired_key = self
                 .names
                 .iter()
                 .find(|(_, r)| r.expires_at.saturating_add(Self::GRACE_PERIOD) < current_epoch)
                 .map(|(k, _)| k.clone());
-            if let Some(key) = expired_key {
-                self.names.remove(&key);
-            } else {
-                return Err(BnsError::NameTaken); // at capacity, no evictable names
-            }
+            let Some(key) = expired_key else {
+                return Err(BnsError::NameTaken);
+            };
+            self.names.remove(&key);
         }
-        let expires_at = current_epoch
-            .checked_add(duration)
-            .ok_or(BnsError::InvalidName)?;
-        let record = NameRecord::try_new(name.clone(), owner, current_epoch, expires_at)?;
         self.names.insert(name, record);
         Ok(())
     }
@@ -225,9 +308,8 @@ impl BnsRegistry {
     /// Renew an existing name registration. Only the current owner may renew
     /// while the record is still live (not expired). The new expiry extends
     /// from the current expiry - never from `current_epoch` - so renewing early
-    /// never shortens the registration. The transaction door charges the same
-    /// duration-based cost as registration, while this method owns the
-    /// lifecycle rule itself.
+    /// never shortens the registration, and total remaining duration from
+    /// `current_epoch` cannot exceed `MAX_DURATION`.
     ///
     /// # Errors
     ///
@@ -239,8 +321,8 @@ impl BnsRegistry {
         current_epoch: u64,
         duration: u64,
     ) -> Result<(), BnsError> {
-        if duration == 0 {
-            return Err(BnsError::InvalidName);
+        if !Self::is_valid_duration(duration) {
+            return Err(BnsError::InvalidDuration);
         }
         let record = self.names.get_mut(name).ok_or(BnsError::InvalidName)?;
         if &record.owner != caller {
@@ -249,10 +331,14 @@ impl BnsRegistry {
         if record.expires_at <= current_epoch {
             return Err(BnsError::Expired);
         }
-        record.expires_at = record
+        let new_expires_at = record
             .expires_at
             .checked_add(duration)
-            .ok_or(BnsError::InvalidName)?;
+            .ok_or(BnsError::InvalidDuration)?;
+        if new_expires_at.saturating_sub(current_epoch) > MAX_DURATION {
+            return Err(BnsError::InvalidDuration);
+        }
+        record.expires_at = new_expires_at;
         Ok(())
     }
 
@@ -275,13 +361,19 @@ impl BnsRegistry {
         if new_owner == Address::zero() {
             return Err(BnsError::InvalidName);
         }
-        let record = self.names.get_mut(name).ok_or(BnsError::InvalidName)?;
-        if &record.owner != caller {
+        let current_owner = self.names.get(name).ok_or(BnsError::InvalidName)?.owner;
+        if &current_owner != caller {
             return Err(BnsError::NotOwner);
         }
-        if record.expires_at <= current_epoch {
+        if self.names[name].expires_at <= current_epoch {
             return Err(BnsError::Expired);
         }
+        if new_owner != current_owner
+            && self.active_name_count_for_owner(&new_owner, current_epoch) >= MAX_NAMES_PER_OWNER
+        {
+            return Err(BnsError::OwnerNameLimitExceeded);
+        }
+        let record = self.names.get_mut(name).ok_or(BnsError::InvalidName)?;
         record.owner = new_owner;
         record.resolver = None;
         record.address = Some(new_owner);
@@ -434,29 +526,20 @@ impl BnsRegistry {
         self.names.is_empty()
             && self.base_cost == 100
             && self.primary_sellers == default_primary_sellers()
+            && self.reserved_labels == default_reserved_labels()
     }
 
     pub fn root(&self) -> [u8; 32] {
         use sha2::{Digest, Sha256};
         let mut hasher = Sha256::new();
-        // V2: every variable-length part carries its length and every
-        // collection its count. V1 wrote names and subdomain labels back to
-        // back, so two registries with different name boundaries could
-        // share a root.
-        //
-        // Migration policy (shared by all four V-bumped registry roots,
-        // BNS V2 / liveness V3 / invalid-vote V2 / NFT V6): the new tags
-        // activate with the USL genesis. Mainnet has no committed state
-        // before that genesis (launch timestamp is still TBD), so there is
-        // no old-format root in existence to carry over, and no activation
-        // height or compatibility path is needed. Devnet and testnet state
-        // is disposable and resets with its genesis; a node that still
-        // holds pre-USL devnet data must resync from the new genesis
-        // instead of migrating. Any future tag bump after launch needs a
-        // recorded migration (activation height or state rewrite) in the
-        // same commit as the bump.
         hasher.update(b"BDLM_BNS_REGISTRY_V2");
         hasher.update(self.base_cost.to_le_bytes());
+        hasher.update(b"reserved_labels");
+        hasher.update((self.reserved_labels.len() as u64).to_le_bytes());
+        for label in &self.reserved_labels {
+            hasher.update((label.len() as u64).to_le_bytes());
+            hasher.update(label.as_bytes());
+        }
         if self.primary_sellers != default_primary_sellers() {
             hasher.update(b"primary_sellers");
             hasher.update((self.primary_sellers.len() as u64).to_le_bytes());

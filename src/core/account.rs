@@ -2196,7 +2196,7 @@ impl AccountState {
                 if tx.amount != 0 || tx.to != Address::zero() {
                     return Err("BNS create offer requires zero amount and recipient".into());
                 }
-                let req: crate::pollen::CreateNameOffer = bincode::deserialize(&tx.data)
+                let req: crate::bns::CreateNameOffer = bincode::deserialize(&tx.data)
                     .map_err(|e| format!("Invalid BNS create offer data: {e}"))?;
                 if !crate::bns::BnsRegistry::is_valid_name(&req.name) {
                     return Err(
@@ -2210,15 +2210,23 @@ impl AccountState {
                     return Err("BNS offer expires_at_epoch must be in the future".into());
                 }
                 match req.kind {
-                    crate::pollen::OfferKind::Primary => {
-                        if req.duration == 0 || self.epoch_index.checked_add(req.duration).is_none()
+                    crate::bns::OfferKind::Primary => {
+                        if !crate::bns::BnsRegistry::is_valid_duration(req.duration)
+                            || self.epoch_index.checked_add(req.duration).is_none()
                         {
-                            return Err(
-                                "Primary BNS offer duration must be positive and non-overflowing"
-                                    .into(),
-                            );
+                            return Err(format!(
+                                "Primary BNS offer duration must be in {}..={} and non-overflowing",
+                                crate::bns::MIN_DURATION,
+                                crate::bns::MAX_DURATION
+                            ));
                         }
                         if !self.bns_registry.is_primary_seller(&tx.from) {
+                            if self.bns_registry.is_reserved_name(&req.name) {
+                                return Err(
+                                    "Reserved .bud label can only be listed by a BNS primary seller"
+                                        .into(),
+                                );
+                            }
                             return Err(
                                 "Only authorized BNS primary sellers can open Primary offers"
                                     .into(),
@@ -2234,7 +2242,7 @@ impl AccountState {
                             );
                         }
                     }
-                    crate::pollen::OfferKind::Resale => {
+                    crate::bns::OfferKind::Resale => {
                         if !self.bns_registry.is_live_owned_by(
                             &req.name,
                             &tx.from,
@@ -2286,7 +2294,7 @@ impl AccountState {
                     ));
                 }
                 match offer.kind {
-                    crate::pollen::OfferKind::Primary => {
+                    crate::bns::OfferKind::Primary => {
                         if !self
                             .bns_registry
                             .is_available_for_primary(&offer.name, self.epoch_index)
@@ -2295,8 +2303,23 @@ impl AccountState {
                                 "Primary BNS offer target name is no longer available".into()
                             );
                         }
+                        let replacing_same_owner_in_grace =
+                            self.bns_registry.names.get(&offer.name).is_some_and(|r| {
+                                r.owner == tx.from
+                                    && self.epoch_index
+                                        < r.expires_at
+                                            .saturating_add(crate::bns::BnsRegistry::GRACE_PERIOD)
+                            });
+                        if !replacing_same_owner_in_grace
+                            && self
+                                .bns_registry
+                                .active_name_count_for_owner(&tx.from, self.epoch_index)
+                                >= crate::bns::MAX_NAMES_PER_OWNER
+                        {
+                            return Err("Owner name limit exceeded".into());
+                        }
                     }
-                    crate::pollen::OfferKind::Resale => {
+                    crate::bns::OfferKind::Resale => {
                         if !self.bns_registry.is_live_owned_by(
                             &offer.name,
                             &offer.seller,
@@ -2307,6 +2330,14 @@ impl AccountState {
                                     .into(),
                             );
                         }
+                        if tx.from != offer.seller
+                            && self
+                                .bns_registry
+                                .active_name_count_for_owner(&tx.from, self.epoch_index)
+                                >= crate::bns::MAX_NAMES_PER_OWNER
+                        {
+                            return Err("Owner name limit exceeded".into());
+                        }
                     }
                 }
             }
@@ -2316,8 +2347,12 @@ impl AccountState {
                 }
                 let (name, duration): (String, u64) = bincode::deserialize(&tx.data)
                     .map_err(|e| format!("Invalid BNS renewal data: {e}"))?;
-                if duration == 0 {
-                    return Err("BNS renewal duration must be greater than zero".into());
+                if !crate::bns::BnsRegistry::is_valid_duration(duration) {
+                    return Err(format!(
+                        "BNS renewal duration must be in {}..={}",
+                        crate::bns::MIN_DURATION,
+                        crate::bns::MAX_DURATION
+                    ));
                 }
                 let cost = self.bns_registry.calculate_cost(&name, duration);
                 if tx.amount != cost {
@@ -2335,6 +2370,14 @@ impl AccountState {
                     .map_err(|e| format!("Invalid BNS transfer data: {e}"))?;
                 if new_owner == Address::zero() {
                     return Err("BNS transfer new owner cannot be the zero address".into());
+                }
+                if new_owner != tx.from
+                    && self
+                        .bns_registry
+                        .active_name_count_for_owner(&new_owner, self.epoch_index)
+                        >= crate::bns::MAX_NAMES_PER_OWNER
+                {
+                    return Err("Owner name limit exceeded".into());
                 }
             }
             TransactionType::Validator(ref validator_tx) => {
