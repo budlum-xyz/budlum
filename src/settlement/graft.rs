@@ -970,6 +970,22 @@ pub fn execute_graft_tx(
             if !identifier_ok(executor) {
                 return Err(refused("Graft executor length is invalid"));
             }
+            // A live intent was opened against this domain's executor and its
+            // anchored fulfilment is authenticated by `origin_emitter(executor)`.
+            // Rotating the executor while intents remain open makes `Fulfill`
+            // impossible and turns an honest solver into a liveness fault.
+            let live_intent = state.settlement.graft.intents.values().any(|intent| {
+                state
+                    .settlement
+                    .graft
+                    .get(&intent.graft_id)
+                    .is_some_and(|app| app.domain_key == *domain_key)
+            });
+            if live_intent {
+                return Err(refused(
+                    "the Graft executor cannot rotate while the domain has open intents",
+                ));
+            }
             state
                 .settlement
                 .graft
@@ -1243,17 +1259,28 @@ pub fn execute_graft_tx(
                 // liveness fault belongs to the solver only while the domain
                 // still lets it act; the refund must not burn the bond of a
                 // solver that was never able to fulfil.
-                let domain_active = state
-                    .settlement
-                    .graft
-                    .get(&intent.graft_id)
-                    .and_then(|app| state.settlement.domains.get(app.domain_key))
-                    .is_some_and(crate::domain::types::ConsensusDomain::is_active);
+                let domain_deliverable =
+                    state
+                        .settlement
+                        .graft
+                        .get(&intent.graft_id)
+                        .is_some_and(|app| {
+                            state
+                                .settlement
+                                .domains
+                                .get(app.domain_key)
+                                .is_some_and(crate::domain::types::ConsensusDomain::is_active)
+                                && state
+                                    .settlement
+                                    .graft
+                                    .executors
+                                    .contains_key(&app.domain_key)
+                        });
                 let slashable = state
                     .registry
                     .get(&solver, crate::registry::role::roles::RELAYER)
                     .is_some_and(crate::registry::permissionless::Registration::is_slashable);
-                if domain_active && slashable {
+                if domain_deliverable && slashable {
                     let ratio = state.registry.params().liveness_slash_ratio_fixed;
                     state
                         .slash_role_destroying(
@@ -2177,6 +2204,37 @@ mod tests {
         assert_eq!(
             reg.stake, stake,
             "solver bond must not be burned when domain was inactive"
+        );
+
+        state.settlement.domains.get_mut(DOMAIN).unwrap().status =
+            crate::domain::DomainStatus::Active;
+        execute_graft_tx(
+            &mut state,
+            &ctx(user),
+            &GraftTx::OpenIntent {
+                graft_id: id,
+                call_hash: [0x93; 32],
+                value: 0,
+                max_payment: 500,
+                solver_fee_cap: 50,
+                service_price: 50,
+                origin_beneficiary: vec![0x33; 20],
+                deadline_block: 200,
+            },
+        )
+        .unwrap();
+        let rotate_err = execute_graft_tx(
+            &mut state,
+            &ctx(operator),
+            &GraftTx::SetExecutor {
+                domain_key: DOMAIN,
+                executor: vec![0x88; 20],
+            },
+        )
+        .unwrap_err();
+        assert!(
+            rotate_err.to_string().contains("open intents"),
+            "SetExecutor must refuse rotation while intents are live: {rotate_err}"
         );
     }
 }

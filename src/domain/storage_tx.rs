@@ -961,20 +961,17 @@ fn register_manifest(
             });
         }
     }
-    // Manifest registration is first-writer-wins: once a manifest is registered
-    // for `manifest_id`, a second principal cannot append a competing
-    // `manifest_claims` entry that would render `owner_of` ambiguous (`None`)
-    // and lock the canonical owner out of marketplace listing and plaintext
-    // retraction. A front-run confidential commit without a manifest does not
-    // populate `manifests`, so the canonical owner can still register first.
+    // A repeat from the same claimant writes nothing, so it is still refused.
+    // A *different* principal registering the same content id is not refused:
+    // `manifest_id` is content-addressed and excludes `owner`, so it proves
+    // what the object is, never who wrote it. Refusing the later claimant is
+    // what turns `owner_of` - and the asset binding, view-grant, social-delete
+    // and prune authority that read it - over to whoever won the mempool race.
+    // Recording both claims leaves a contested id with no canonical owner.
     if state.storage_registry.is_registered(&manifest.manifest_id)
-        && (state
+        && state
             .storage_registry
-            .get_manifest(&manifest.manifest_id)
-            .is_some()
-            || state
-                .storage_registry
-                .has_manifest_claim(&manifest.manifest_id, sender))
+            .has_manifest_claim(&manifest.manifest_id, sender)
     {
         return Err(StorageTxError::AlreadyRegistered);
     }
@@ -1095,27 +1092,22 @@ mod tests {
         );
         assert_eq!(state.storage_registry.root(), root);
 
-        // A second principal forging a manifest for the same `manifest_id` must
-        // also be refused with `AlreadyRegistered` so `owner_of` stays unique.
+        // A second principal registering the same content-addressed `manifest_id`
+        // records a competing claim rather than being locked out, leaving a
+        // contested id with no canonical `owner_of`.
         let rival = Address::from([0x77; 32]);
         let mut rival_manifest = m.clone();
         rival_manifest.owner = rival;
-        assert_eq!(
-            execute_storage_tx(
-                &mut state,
-                &ctx(rival),
-                &StorageTx::RegisterManifest {
-                    manifest: rival_manifest,
-                },
-            )
-            .unwrap_err(),
-            StorageTxError::AlreadyRegistered
-        );
-        assert_eq!(
-            state.storage_registry.owner_of(&m.manifest_id),
-            Some(owner())
-        );
-        assert_eq!(state.storage_registry.root(), root);
+        execute_storage_tx(
+            &mut state,
+            &ctx(rival),
+            &StorageTx::RegisterManifest {
+                manifest: rival_manifest,
+            },
+        )
+        .expect("competing claimant is recorded instead of locked out");
+        assert_eq!(state.storage_registry.owner_of(&m.manifest_id), None);
+        assert_ne!(state.storage_registry.root(), root);
     }
 
     fn registered(state: &mut AccountState) -> ContentManifest {
@@ -2040,6 +2032,16 @@ mod tests {
         let m = registered(&mut state);
         let viewer = Address::from([4u8; 32]);
         state.epoch_index = 3;
+        assert!(
+            matches!(
+                execute_storage_tx(&mut state, &ctx(owner()), &grant_tx(&m, viewer)),
+                Err(StorageTxError::ViewGrantRefused(_))
+            ),
+            "lone manifest claim without custody deal must not issue view grants"
+        );
+        state
+            .storage_registry
+            .record_test_custody_for_manifest(&m, owner());
         execute_storage_tx(&mut state, &ctx(owner()), &grant_tx(&m, viewer)).expect("issues");
         assert!(state
             .storage_registry
@@ -2060,6 +2062,9 @@ mod tests {
     fn a_stranger_cannot_issue_or_revoke_a_grant_over_someone_elses_content() {
         let mut state = AccountState::new();
         let m = registered(&mut state);
+        state
+            .storage_registry
+            .record_test_custody_for_manifest(&m, owner());
         let stranger = Address::from([9u8; 32]);
         let root = state.storage_registry.root();
         let err =
@@ -2084,6 +2089,9 @@ mod tests {
     fn only_the_owner_social_deletes_and_every_live_grant_goes() {
         let mut state = AccountState::new();
         let m = registered(&mut state);
+        state
+            .storage_registry
+            .record_test_custody_for_manifest(&m, owner());
         let viewer = Address::from([4u8; 32]);
         execute_storage_tx(&mut state, &ctx(owner()), &grant_tx(&m, viewer)).expect("issues");
         let delete = StorageTx::SocialDelete {
@@ -2284,8 +2292,10 @@ mod tests {
         assert!(state.storage_registry.is_registered(&mid));
 
         // 2. Real owner is NOT locked out: RegisterManifest, CommitConfidentialBody,
-        //    IssueViewGrant, SocialDelete, and self-host check all succeed for victim,
-        //    and a copycat rival RegisterManifest cannot orphan `owner_of(&mid)`.
+        //    custody-backed IssueViewGrant, SocialDelete, and self-host check all
+        //    succeed for victim, while a squatter's lone claim cannot exercise
+        //    view-grant, social-delete, or prune authority, and a competing
+        //    RegisterManifest leaves `owner_of(&mid)` contested (`None`).
         execute_storage_tx(
             &mut state,
             &ctx(victim),
@@ -2296,18 +2306,7 @@ mod tests {
         .expect("real owner registers despite squatter confidential commit");
         assert_eq!(state.storage_registry.owner_of(&mid), Some(victim));
         assert!(state.storage_registry.has_claim(&mid, &victim));
-        assert_eq!(
-            execute_storage_tx(
-                &mut state,
-                &ctx(squatter),
-                &StorageTx::RegisterManifest {
-                    manifest: squatter_manifest,
-                },
-            )
-            .unwrap_err(),
-            StorageTxError::AlreadyRegistered
-        );
-        assert_eq!(state.storage_registry.owner_of(&mid), Some(victim));
+        assert_eq!(state.storage_registry.proven_owner_of(&mid), None);
 
         let victim_commit = ConfidentialBodyCommit::new(
             mid,
@@ -2324,6 +2323,10 @@ mod tests {
             },
         )
         .expect("real owner commits confidential body in its own namespace");
+        state
+            .storage_registry
+            .record_test_custody_for_manifest(&victim_manifest, victim);
+        assert_eq!(state.storage_registry.proven_owner_of(&mid), Some(victim));
         execute_storage_tx(
             &mut state,
             &ctx(victim),
@@ -2335,13 +2338,15 @@ mod tests {
             },
         )
         .expect("real owner issues view grant");
-        // Squatter social delete cannot revoke victim's grant.
-        execute_storage_tx(
-            &mut state,
-            &ctx(squatter),
-            &StorageTx::SocialDelete { content_id: mid },
-        )
-        .expect("squatter social delete runs in squatter namespace");
+        // Squatter without custody cannot social-delete.
+        assert!(matches!(
+            execute_storage_tx(
+                &mut state,
+                &ctx(squatter),
+                &StorageTx::SocialDelete { content_id: mid },
+            ),
+            Err(StorageTxError::ViewGrantRefused(_))
+        ));
         assert_eq!(
             state
                 .storage_registry
@@ -2356,7 +2361,7 @@ mod tests {
             .storage_registry
             .check_self_host_allowed_for_owner(&mid, &victim_manifest.shards[0].shard_id, &victim)
             .is_ok());
-        // Victim's own social delete revokes victim's grant.
+        // Victim's own social delete revokes victim's grant while uncontested.
         execute_storage_tx(
             &mut state,
             &ctx(victim),
@@ -2368,6 +2373,19 @@ mod tests {
             .view_grants
             .live_for_content(&mid)
             .is_empty());
+
+        // Competing RegisterManifest is recorded rather than refused, leaving
+        // `owner_of(&mid)` and `proven_owner_of(&mid)` ambiguous (`None`).
+        execute_storage_tx(
+            &mut state,
+            &ctx(squatter),
+            &StorageTx::RegisterManifest {
+                manifest: squatter_manifest,
+            },
+        )
+        .expect("competing manifest claim is recorded");
+        assert_eq!(state.storage_registry.owner_of(&mid), None);
+        assert_eq!(state.storage_registry.proven_owner_of(&mid), None);
     }
 
     #[test]
