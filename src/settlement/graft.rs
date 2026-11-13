@@ -1404,10 +1404,27 @@ fn settle_expired_intent(
                             .executors
                             .contains_key(&app.domain_key))
             });
+        // `slash_role_only` refuses a registration that is already `Slashed`
+        // or `SlashedUnbonding`, so gating on `is_slashable()` (which accepts
+        // `SlashedUnbonding`) made the block-end sweep abort the whole block
+        // transition for that solver: the intent row was removed, the slash
+        // error propagated, the transition was discarded, and every later
+        // block retried the same sweep and failed the same way. Only the
+        // statuses the slash itself accepts count here, and an
+        // `AlreadySlashed` refusal is a no-op: the solver was already
+        // punished, and the owner's refund must not depend on a second
+        // penalty succeeding.
         let slashable = state
             .registry
             .get(&solver, crate::registry::role::roles::RELAYER)
-            .is_some_and(crate::registry::permissionless::Registration::is_slashable);
+            .is_some_and(|registration| {
+                registration.stake > 0
+                    && matches!(
+                        registration.status,
+                        crate::registry::permissionless::MemberStatus::Active
+                            | crate::registry::permissionless::MemberStatus::Unbonding { .. }
+                    )
+            });
         if domain_deliverable && slashable {
             let ratio = state.registry.params().liveness_slash_ratio_fixed;
             // Same rule as `RelayerIntentTx::Expire`: the escrow refund is not
@@ -2806,6 +2823,121 @@ mod tests {
         assert_eq!(
             state.settlement.graft.intents[&intent_id].awarded_solver,
             Some(solver)
+        );
+    }
+    #[test]
+    fn sweep_expired_intents_does_not_abort_when_awarded_solver_is_slashed_unbonding() {
+        // Strix HIGH (PR #110): the block-end sweep aborted the whole block
+        // transition when the awarded solver was already SlashedUnbonding,
+        // because `is_slashable()` accepts that status but
+        // `slash_role_only` refuses it. The intent row was removed, the
+        // slash error propagated, the transition was discarded, and every
+        // later block retried the same sweep and failed the same way.
+        let operator = Address::from([0x01; 32]);
+        let user = Address::from([0x03; 32]);
+        let solver = Address::from([0x05; 32]);
+        let origin = vec![0xEF; 20];
+        let mut state = state_with_domain(operator);
+        state.add_balance(&user, 10_000);
+        let bond = state.registry.params().min_stake;
+        let epoch = state.epoch_index;
+        state
+            .registry
+            .register(solver, crate::registry::role::roles::RELAYER, bond, epoch)
+            .unwrap();
+        state
+            .settlement
+            .graft
+            .register(DOMAIN, origin.clone(), [0x11; 32], 0)
+            .unwrap();
+        state
+            .settlement
+            .graft
+            .executors
+            .insert(DOMAIN, vec![0x77; 20]);
+        let id = graft_id(DOMAIN, &origin);
+        execute_graft_tx(
+            &mut state,
+            &ctx(user),
+            &GraftTx::OpenIntent {
+                graft_id: id,
+                call_hash: [0x22; 32],
+                value: 0,
+                max_payment: 1_000,
+                solver_fee_cap: 100,
+                service_price: 0,
+                origin_beneficiary: vec![0x33; 20],
+                deadline_block: 600,
+            },
+        )
+        .unwrap();
+        let intent_id = *state.settlement.graft.intents.keys().next().unwrap();
+        execute_graft_tx(
+            &mut state,
+            &ctx(solver),
+            &GraftTx::Bid {
+                intent_id,
+                cost: 100,
+                fee: 10,
+            },
+        )
+        .unwrap();
+        execute_graft_tx(
+            &mut state,
+            &ctx(user),
+            &GraftTx::Award { intent_id, solver },
+        )
+        .unwrap();
+        // Put the awarded solver into SlashedUnbonding: slash for a
+        // non-liveness condition, then begin unbonding.
+        let ratio = state.registry.params().malicious_slash_ratio_fixed;
+        state
+            .registry
+            .slash_role_only(
+                solver,
+                crate::registry::role::roles::RELAYER,
+                crate::registry::permissionless::SlashingCondition::MaliciousBehaviour,
+                ratio,
+            )
+            .unwrap();
+        state
+            .registry
+            .begin_unbonding(solver, crate::registry::role::roles::RELAYER, epoch)
+            .unwrap();
+        assert!(matches!(
+            state
+                .registry
+                .get(&solver, crate::registry::role::roles::RELAYER)
+                .unwrap()
+                .status,
+            crate::registry::permissionless::MemberStatus::SlashedUnbonding { .. }
+        ));
+        let stake_after_slash = state
+            .registry
+            .get(&solver, crate::registry::role::roles::RELAYER)
+            .unwrap()
+            .stake;
+        state.current_block_height = 601;
+        let before = state.get_balance(&user);
+        sweep_expired_intents(&mut state, 601)
+            .expect("sweep must not abort for an already-slashed solver");
+        assert!(
+            !state.settlement.graft.intents.contains_key(&intent_id),
+            "the expired intent must be retired"
+        );
+        assert_eq!(
+            state.get_balance(&user),
+            before + 1_000,
+            "the owner escrow is refunded even though the solver was already slashed"
+        );
+        assert_eq!(
+            state
+                .registry
+                .get(&solver, crate::registry::role::roles::RELAYER)
+                .unwrap()
+                .stake,
+            stake_after_slash,
+            "an already-slashed solver is not slashed a second time"
         );
     }
 }

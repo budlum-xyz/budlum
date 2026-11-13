@@ -220,7 +220,7 @@ pub fn resolve_verified<P: NameProver, R: StateRoots>(
         let _ = content;
     }
     Ok(Resolved {
-        branch,
+        branch: branch.clone(),
         height: answer.height,
     })
 }
@@ -232,9 +232,11 @@ pub fn resolve_verified<P: NameProver, R: StateRoots>(
 /// commitment. A record with only one of them is a name with no site.
 #[must_use]
 pub fn content_ref_of(branch: &BnsMerkleBranch) -> Option<ContentRef> {
-    let content_id = branch.content_id?;
-    let object_commitment = branch.storage_root?;
-    ContentRef::new(content_id, object_commitment, None).ok()
+    branch
+        .extras
+        .as_ref()
+        .and_then(|extras| extras.bud3_content.clone())
+        .filter(|_content| branch.content_id.is_some() && branch.storage_root.is_some())
 }
 
 /// Resolve a request path against a site.
@@ -242,7 +244,7 @@ pub fn content_ref_of(branch: &BnsMerkleBranch) -> Option<ContentRef> {
 /// # Errors
 ///
 /// [`GatewayError::Site`] carrying the manifest's own reason.
-pub fn route_of(manifest: &SiteManifest, path: &str) -> Result<&Route, GatewayError> {
+pub fn route_of<'a>(manifest: &'a SiteManifest, path: &str) -> Result<&'a Route, GatewayError> {
     manifest.resolve(path).map_err(GatewayError::Site)
 }
 
@@ -395,6 +397,12 @@ mod tests {
                 .unwrap();
             reg.set_storage("ayaz.bud", owner, storage_root, 0, 101)
                 .unwrap();
+            let bud3_content =
+                ContentRef::new(content_id, storage_root, None).expect("non-zero halves");
+            reg.names
+                .get_mut("ayaz.bud")
+                .expect("registered above")
+                .bud3_content = Some(bud3_content);
         }
         reg
     }

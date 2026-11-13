@@ -164,7 +164,7 @@ impl BnsRegistry {
         self.expired_by_grace_end
             .remove(&(grace_end_of(&record), name.clone()));
         self.expired_by_grace_end
-            .insert(grace_end_of(&record), name.clone());
+            .insert((grace_end_of(&record), name.clone()));
         self.names.insert(name, record);
     }
 
@@ -520,7 +520,10 @@ impl BnsRegistry {
                 return Err(BnsError::NameTaken);
             };
             let key = expired_key.clone();
-            self.reclaim_expired(&key, current_epoch);
+            // The index row was selected because its grace end is past, so
+            // `reclaim_expired` refuses only when the record changed under it;
+            // that cannot happen between the two reads in this function.
+            let _ = self.reclaim_expired(&key, current_epoch);
         }
         self.insert_record(name, record);
         Ok(())
