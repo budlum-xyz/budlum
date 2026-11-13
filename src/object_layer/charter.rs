@@ -129,9 +129,7 @@ fn verify_home_code_entry(
     }
     match vm_family {
         HomeVmFamily::Evm => {
-            let addr20: [u8; 20] = address
-                .try_into()
-                .map_err(|_| CharterRefusal::BadAddress)?;
+            let addr20: [u8; 20] = address.try_into().map_err(|_| CharterRefusal::BadAddress)?;
             let acct = account_proof::verify_account(proof_nodes, &state_root, &addr20)
                 .map_err(|_| CharterRefusal::ProofDisagrees)?;
             if acct.code_hash != expected_code_hash {

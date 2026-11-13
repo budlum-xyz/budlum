@@ -317,12 +317,13 @@ pub fn parse_update(payload: &[u8]) -> Result<SyncCommitteeUpdate, AdapterError>
             });
         }
     };
-    let branch_bytes = payload
-        .get(layout::FINALITY_BRANCH_OFFSET..)
-        .ok_or(AdapterError::Malformed {
-            offset: layout::FINALITY_BRANCH_OFFSET,
-            reason: "finality_branch missing".to_string(),
-        })?;
+    let branch_bytes =
+        payload
+            .get(layout::FINALITY_BRANCH_OFFSET..)
+            .ok_or(AdapterError::Malformed {
+                offset: layout::FINALITY_BRANCH_OFFSET,
+                reason: "finality_branch missing".to_string(),
+            })?;
     if branch_bytes.len() != expected_depth * 32 {
         return Err(AdapterError::Malformed {
             offset: layout::FINALITY_BRANCH_OFFSET,

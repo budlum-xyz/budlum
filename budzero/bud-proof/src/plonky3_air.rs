@@ -3319,9 +3319,10 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
             builder
                 .when(p_inf.clone())
                 .assert_eq(cur[COL_INFERENCE_INPUT_COMMIT].into(), rs2_val.clone());
-            builder
-                .when(p_inf.clone())
-                .assert_eq(cur[COL_INFERENCE_OUTPUT_COMMIT].into(), poseidon_out.clone());
+            builder.when(p_inf.clone()).assert_eq(
+                cur[COL_INFERENCE_OUTPUT_COMMIT].into(),
+                poseidon_out.clone(),
+            );
             builder
                 .when(one.clone() - p_inf.clone())
                 .assert_zero(cur[COL_INFERENCE_INPUT_COMMIT].into());

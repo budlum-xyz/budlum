@@ -6,7 +6,9 @@
 //! AI execution proof without ever exposing the sealed dataset plaintext.
 
 use crate::ai::execution::verify::{verify_execution_proof_full, ExecutionVerifyReport};
-use crate::ai::types::{AiExecutionProof, AiInferenceRequest, AiInferenceResult, AiModelId, AiModelSpec};
+use crate::ai::types::{
+    AiExecutionProof, AiInferenceRequest, AiInferenceResult, AiModelId, AiModelSpec,
+};
 use crate::core::hash::hash_fields_bytes;
 use crate::storage::bud3::delete::DeletionSet;
 use crate::storage::bud3::registry::ObjectKey;
@@ -32,7 +34,7 @@ pub fn blind_compute_scope_tag(
 
 /// Verifiable authorization granting one-time or epoch-bounded blind inference
 /// rights over a sealed B.U.D. 3.0 dataset (`ComputeWithoutSeeing`).
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ComputeWithoutSeeingPermit {
     /// Commitment of the sealed object holding the dataset (`object_commitment`).
     pub sealed_object: ObjectKey,

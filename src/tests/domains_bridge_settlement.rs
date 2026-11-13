@@ -272,9 +272,7 @@ fn ethereum_sync_committee_is_open_on_testnet() {
     );
     let update = crate::cross_domain::external::ethereum::parse_update(&payload).expect("update");
     let root = crate::cross_domain::external::ethereum::signing_root_v2(&update);
-    let sig = G2Affine::from(
-        G2Projective::from(crate::chain::finality::hash_to_g2(&root)) * sk,
-    );
+    let sig = G2Affine::from(G2Projective::from(crate::chain::finality::hash_to_g2(&root)) * sk);
     if let Some(s) = payload.get_mut(layout::SIGNATURE) {
         s.copy_from_slice(&sig.to_compressed());
     }

@@ -95,7 +95,10 @@ pub fn decode_uol_precompile_calldata(calldata: &[u8]) -> Result<DecodedUolPreco
         asset_id.copy_from_slice(read_word(args, 32)?);
         let to = read_dyn_bytes(args, 64)?;
         let amt_word = read_word(args, 96)?;
-        if amt_word.get(..16).is_some_and(|hi| hi.iter().any(|b| *b != 0)) {
+        if amt_word
+            .get(..16)
+            .is_some_and(|hi| hi.iter().any(|b| *b != 0))
+        {
             return Err(String::from("ABI uint128 overflows 128 bits"));
         }
         let lo: [u8; 16] = amt_word
@@ -118,7 +121,10 @@ pub fn decode_uol_precompile_calldata(calldata: &[u8]) -> Result<DecodedUolPreco
         let taker = read_dyn_bytes(args, 64)?;
         let payment = read_dyn_bytes(args, 96)?;
         let amt_word = read_word(args, 128)?;
-        if amt_word.get(..16).is_some_and(|hi| hi.iter().any(|b| *b != 0)) {
+        if amt_word
+            .get(..16)
+            .is_some_and(|hi| hi.iter().any(|b| *b != 0))
+        {
             return Err(String::from("ABI uint128 overflows 128 bits"));
         }
         let lo: [u8; 16] = amt_word

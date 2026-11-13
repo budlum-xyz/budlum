@@ -2238,7 +2238,11 @@ mod tests {
         execute_storage_tx(&mut state, &ctx(op), &open_challenge_tx(deal_id))
             .expect("permissionless challenge invariant allows self-challenge");
         let cid = state.storage_registry.all_challenges()[0].challenge_id;
-        let deal = state.storage_registry.get_deal(deal_id).expect("deal").clone();
+        let deal = state
+            .storage_registry
+            .get_deal(deal_id)
+            .expect("deal")
+            .clone();
         let ch = state
             .storage_registry
             .get_challenge(cid)

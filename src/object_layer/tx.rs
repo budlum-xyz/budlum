@@ -89,7 +89,10 @@ impl ObjectLayerActivation {
 
     #[must_use]
     pub fn is_open_for_chain_at(&self, chain_id: u64, height: u64) -> bool {
-        chain_id != crate::core::chain_config::Network::Mainnet.chain_id().value()
+        chain_id
+            != crate::core::chain_config::Network::Mainnet
+                .chain_id()
+                .value()
             && self.is_open_at(height)
     }
 }
@@ -227,9 +230,8 @@ impl ObjectLayerTx {
             return Err(TxRefusal::Closed);
         }
         let me = Holder::Account(ctx.signer);
-        let state_root_for = |id: DomainId| -> Option<Hash32> {
-            ctx.home_state_root.and_then(|lookup| lookup(id))
-        };
+        let state_root_for =
+            |id: DomainId| -> Option<Hash32> { ctx.home_state_root.and_then(|lookup| lookup(id)) };
         match self {
             Self::Charter {
                 domain,

@@ -1054,12 +1054,7 @@ fn batch3_bridge_auth_and_evm_value_deploy_and_checkpoint_isolation() {
     assert_eq!(r_bz[0].status, UelReceiptStatus::Success);
     let bz_target = r_bz[0].output.clone();
 
-    let mut bz_0x40 = vec![
-        super::BUDZERO_SYSCALL_UNIVERSAL_CALL,
-        EeId::EVM.0,
-        20,
-        0,
-    ];
+    let mut bz_0x40 = vec![super::BUDZERO_SYSCALL_UNIVERSAL_CALL, EeId::EVM.0, 20, 0];
     bz_0x40.extend_from_slice(&r_ev[0].output);
     let r_bz_att = state
         .execute_uel_block(
@@ -1129,10 +1124,9 @@ fn batch3_bridge_auth_and_evm_value_deploy_and_checkpoint_isolation() {
         },
         transport_failure: None,
     };
-    let wasm_ns = budlum_uel_abi::Namespace::new(
-        crate::execution::coordinator::state::NS_WASM_STORE,
-    )
-    .expect("wasm ns");
+    let wasm_ns =
+        budlum_uel_abi::Namespace::new(crate::execution::coordinator::state::NS_WASM_STORE)
+            .expect("wasm ns");
     assert!(bridge.read(&wasm_ns, b"secret").is_err());
 
     bridge

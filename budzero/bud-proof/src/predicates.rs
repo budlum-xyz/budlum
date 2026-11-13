@@ -121,7 +121,9 @@ impl PredicateStatement {
             }
             PredicateKind::Yk6ThresholdQuorum => self.lhs >= self.rhs && self.rhs > 0,
             PredicateKind::Yk7TimeWindow => self.lhs >= self.aux && self.lhs <= self.rhs,
-            PredicateKind::Yk8HashPreimage => bud_vm::poseidon4_hash(self.lhs, self.aux) == self.rhs,
+            PredicateKind::Yk8HashPreimage => {
+                bud_vm::poseidon4_hash(self.lhs, self.aux) == self.rhs
+            }
             PredicateKind::Yk9RangeBound => self.lhs >= self.aux && self.lhs <= self.rhs,
             PredicateKind::Yk10RoleCapability => (self.lhs & self.rhs) == self.rhs && self.rhs != 0,
             PredicateKind::Yk11ObjectBinding => {
@@ -267,9 +269,8 @@ pub fn verify_predicate(proof: &PredicateProof) -> Result<(), PredicateError> {
     {
         return Err(PredicateError::ProgramMismatch);
     }
-    crate::Plonky3Adapter::verify(&proof.envelope, &proof.public_inputs, &proof.program).map_err(
-        |e: VerifyError| PredicateError::ProofInvalid(format!("{e:?}")),
-    )
+    crate::Plonky3Adapter::verify(&proof.envelope, &proof.public_inputs, &proof.program)
+        .map_err(|e: VerifyError| PredicateError::ProofInvalid(format!("{e:?}")))
 }
 
 #[cfg(test)]

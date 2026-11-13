@@ -529,7 +529,9 @@ mod tests {
                 .unwrap()
                 .encode();
         let enc = SegmentEncoder::new(0, &obj_bytes, &P).unwrap();
-        let fresh = enc.repair_symbols(next_esi - enc.k(), lost.symbols).unwrap();
+        let fresh = enc
+            .repair_symbols(next_esi - enc.k(), lost.symbols)
+            .unwrap();
         let leaves: Vec<(u32, [u8; 32])> = fresh
             .iter()
             .map(|x| (x.esi, symbol_leaf(&x.data)))

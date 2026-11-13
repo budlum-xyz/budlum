@@ -846,7 +846,7 @@ pub struct RemoteMerkleStep {
 /// [`crate::settlement::GlobalBlockHeader`], verifies Merkle inclusion of
 /// `(state_key, state_value)`, and optionally validates a zero-knowledge
 /// [`bud_proof::predicates::PredicateProof`] for private ownership claims.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct RemoteStateView {
     /// Source external domain identifier.
     pub remote_domain_id: u64,
@@ -882,7 +882,11 @@ impl RemoteStateView {
     /// Canonical leaf digest for `(state_key, state_value)`.
     #[must_use]
     pub fn leaf_digest(state_key: &[u8], state_value: &[u8]) -> [u8; 32] {
-        crate::core::hash::hash_fields_bytes(&[b"BDLM_REMOTE_STATE_LEAF_V1", state_key, state_value])
+        crate::core::hash::hash_fields_bytes(&[
+            b"BDLM_REMOTE_STATE_LEAF_V1",
+            state_key,
+            state_value,
+        ])
     }
 
     /// Reconstruct the Merkle root for `(state_key, state_value)` across `inclusion_path`.

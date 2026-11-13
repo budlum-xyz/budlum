@@ -18,9 +18,9 @@ use crate::execution::coordinator::alias::{
     bech32_contract_addr, derive_evm_alias, derive_wasm_alias, is_ed25519_on_curve, ALIAS_NAMESPACE,
 };
 use crate::execution::coordinator::state::{
-    derive_uel_asset_id, NS_CAIRO_STATE, NS_EVM_ACCOUNT, NS_EVM_CODE, NS_MOVE_STATE,
-    NS_NEAR_STATE, NS_PLUTUS_STATE, NS_POLKAVM_STATE, NS_RV32_STATE, NS_SUI_OBJECT,
-    NS_SVM_ACCOUNT, NS_TVM_STATE, NS_UEL_ASSETS, NS_UTXO_STATE, NS_WASM_CODE, NS_WASM_CONTRACT,
+    derive_uel_asset_id, NS_CAIRO_STATE, NS_EVM_ACCOUNT, NS_EVM_CODE, NS_MOVE_STATE, NS_NEAR_STATE,
+    NS_PLUTUS_STATE, NS_POLKAVM_STATE, NS_RV32_STATE, NS_SUI_OBJECT, NS_SVM_ACCOUNT, NS_TVM_STATE,
+    NS_UEL_ASSETS, NS_UTXO_STATE, NS_WASM_CODE, NS_WASM_CONTRACT,
 };
 use budlum_uel_abi::{EeId, HostRead, Namespace};
 use serde::{Deserialize, Serialize};
@@ -491,7 +491,9 @@ mod tests {
                 .expect("expansion EE deploys asset pointer");
             assert_eq!(ptr.len(), 32);
         }
-        let reloaded = read_registered_asset(&state, &entry.asset_id).unwrap().unwrap();
+        let reloaded = read_registered_asset(&state, &entry.asset_id)
+            .unwrap()
+            .unwrap();
         assert_eq!(reloaded.pointers.len(), 7);
     }
 }
