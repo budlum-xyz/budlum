@@ -990,7 +990,7 @@ mod tests {
     /// and remains rejected under `MainnetActivation::closed()`.
     #[test]
     fn verify_inference_gated_in_mainnet_mode() {
-        let program = vec![
+        let program = [
             Instruction {
                 opcode: Opcode::Load,
                 rd: 1,
