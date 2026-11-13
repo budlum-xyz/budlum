@@ -49,7 +49,10 @@ pub enum NearOp {
     /// Increments a little-endian `u64` counter stored at `key` by `delta`.
     StorageAddU64 { key: String, delta: u64 },
     /// Copies `arg_key` from call JSON args into `storage_key`.
-    SetFromArg { storage_key: String, arg_key: String },
+    SetFromArg {
+        storage_key: String,
+        arg_key: String,
+    },
     /// Reads `key` from `ee/near/state` and sets it as the call return value.
     StorageReturn { key: String },
     /// Emits a NEAR `EVENT_JSON` receipt log.
@@ -220,34 +223,38 @@ fn charge_step(gas_used: &mut u64, limit: u64, cost: u64, host: &mut dyn HostApi
     true
 }
 
+struct NearExecScope<'a> {
+    ns: &'a Namespace,
+    contract_id: &'a str,
+    caller_id: &'a [u8],
+    gas_limit: u64,
+}
+
 fn run_near_ops(
-    ns: &Namespace,
-    contract_id: &str,
-    caller_id: &[u8],
+    scope: &NearExecScope<'_>,
     ops: &[NearOp],
     args: &BTreeMap<String, Vec<u8>>,
     gas_used: &mut u64,
-    gas_limit: u64,
     host: &mut dyn HostApi,
 ) -> Result<Vec<u8>, Vec<u8>> {
     let mut ret = Vec::new();
     for op in ops {
-        if !charge_step(gas_used, gas_limit, 400, host) {
+        if !charge_step(gas_used, scope.gas_limit, 400, host) {
             return Err(b"OUT_OF_GAS".to_vec());
         }
         match op {
             NearOp::StorageWrite { key, value } => {
                 if host
-                    .write(ns, &state_key(contract_id, key), Some(value))
+                    .write(scope.ns, &state_key(scope.contract_id, key), Some(value))
                     .is_err()
                 {
                     return Err(b"storage write refused".to_vec());
                 }
             }
             NearOp::StorageAddU64 { key, delta } => {
-                let sk = state_key(contract_id, key);
+                let sk = state_key(scope.contract_id, key);
                 let cur = host
-                    .read(ns, &sk)
+                    .read(scope.ns, &sk)
                     .ok()
                     .flatten()
                     .and_then(|b| <[u8; 8]>::try_from(b.as_slice()).ok())
@@ -255,7 +262,10 @@ fn run_near_ops(
                 let Some(next) = cur.checked_add(*delta) else {
                     return Err(b"u64 storage overflow".to_vec());
                 };
-                if host.write(ns, &sk, Some(&next.to_le_bytes())).is_err() {
+                if host
+                    .write(scope.ns, &sk, Some(&next.to_le_bytes()))
+                    .is_err()
+                {
                     return Err(b"storage write refused".to_vec());
                 }
                 ret = next.to_le_bytes().to_vec();
@@ -266,7 +276,11 @@ fn run_near_ops(
             } => {
                 let val = args.get(arg_key).cloned().unwrap_or_default();
                 if host
-                    .write(ns, &state_key(contract_id, storage_key), Some(&val))
+                    .write(
+                        scope.ns,
+                        &state_key(scope.contract_id, storage_key),
+                        Some(&val),
+                    )
                     .is_err()
                 {
                     return Err(b"storage write refused".to_vec());
@@ -274,7 +288,7 @@ fn run_near_ops(
             }
             NearOp::StorageReturn { key } => {
                 ret = host
-                    .read(ns, &state_key(contract_id, key))
+                    .read(scope.ns, &state_key(scope.contract_id, key))
                     .ok()
                     .flatten()
                     .unwrap_or_default();
@@ -286,7 +300,7 @@ fn run_near_ops(
                     .emit_log(EeLog {
                         emitter: EeIdentity {
                             ee: EeId::NEAR_WASM,
-                            id: contract_id.as_bytes().to_vec(),
+                            id: scope.contract_id.as_bytes().to_vec(),
                         },
                         topics: vec![topic.to_vec()],
                         data: payload.into_bytes(),
@@ -306,7 +320,7 @@ fn run_near_ops(
                 let call = UniversalCall {
                     from: EeIdentity {
                         ee: EeId::NEAR_WASM,
-                        id: caller_id.to_vec(),
+                        id: scope.caller_id.to_vec(),
                     },
                     to_ee: EeId(*to_ee),
                     target: EeIdentity {
@@ -404,7 +418,10 @@ impl ExecutionEnvironment for NearWasmWorker {
 
         if call.kind == EeCallKind::Deploy {
             let Ok(parsed) = decode_near_blob(&call.input) else {
-                return Ok(ee_reverted(b"invalid NEAR contract code".to_vec(), gas_used));
+                return Ok(ee_reverted(
+                    b"invalid NEAR contract code".to_vec(),
+                    gas_used,
+                ));
             };
             let mut h = Sha256::new();
             h.update(&call.caller.id);
@@ -422,16 +439,13 @@ impl ExecutionEnvironment for NearWasmWorker {
             }
             if let Some(prog) = parsed {
                 let empty_args = BTreeMap::new();
-                match run_near_ops(
-                    &ns,
-                    &contract_id,
-                    &call.caller.id,
-                    &prog.init_ops,
-                    &empty_args,
-                    &mut gas_used,
-                    call.gas_limit,
-                    host,
-                ) {
+                let scope = NearExecScope {
+                    ns: &ns,
+                    contract_id: &contract_id,
+                    caller_id: &call.caller.id,
+                    gas_limit: call.gas_limit,
+                };
+                match run_near_ops(&scope, &prog.init_ops, &empty_args, &mut gas_used, host) {
                     Ok(_) => return Ok(ee_success(contract_id.into_bytes(), gas_used)),
                     Err(e) if e == b"OUT_OF_GAS" => return Ok(ee_out_of_gas(call.gas_limit)),
                     Err(e) => return Ok(ee_reverted(e, gas_used)),
@@ -442,7 +456,12 @@ impl ExecutionEnvironment for NearWasmWorker {
 
         let contract_id = match std::str::from_utf8(&call.target.id) {
             Ok(s) if !s.is_empty() => s.to_string(),
-            _ => return Ok(ee_reverted(b"invalid NEAR target account".to_vec(), gas_used)),
+            _ => {
+                return Ok(ee_reverted(
+                    b"invalid NEAR target account".to_vec(),
+                    gas_used,
+                ))
+            }
         };
         let Ok(Some(blob)) = host.read(&ns, &code_key(&contract_id)) else {
             return Ok(ee_reverted(b"NEAR contract not found".to_vec(), gas_used));
@@ -451,7 +470,10 @@ impl ExecutionEnvironment for NearWasmWorker {
             return Ok(ee_reverted(b"corrupt NEAR contract".to_vec(), gas_used));
         };
         let Ok(fc) = serde_json::from_slice::<NearFunctionCall>(&call.input) else {
-            return Ok(ee_reverted(b"malformed NEAR function call".to_vec(), gas_used));
+            return Ok(ee_reverted(
+                b"malformed NEAR function call".to_vec(),
+                gas_used,
+            ));
         };
         let Some(prog) = parsed else {
             return Ok(ee_success(Vec::new(), gas_used));
@@ -459,16 +481,13 @@ impl ExecutionEnvironment for NearWasmWorker {
         let Some(method) = prog.methods.iter().find(|m| m.name == fc.method_name) else {
             return Ok(ee_reverted(b"NEAR method not found".to_vec(), gas_used));
         };
-        match run_near_ops(
-            &ns,
-            &contract_id,
-            &call.caller.id,
-            &method.ops,
-            &fc.args,
-            &mut gas_used,
-            call.gas_limit,
-            host,
-        ) {
+        let scope = NearExecScope {
+            ns: &ns,
+            contract_id: &contract_id,
+            caller_id: &call.caller.id,
+            gas_limit: call.gas_limit,
+        };
+        match run_near_ops(&scope, &method.ops, &fc.args, &mut gas_used, host) {
             Ok(out) => Ok(ee_success(out, gas_used)),
             Err(e) if e == b"OUT_OF_GAS" => Ok(ee_out_of_gas(call.gas_limit)),
             Err(e) => Ok(ee_reverted(e, gas_used)),

@@ -414,7 +414,11 @@ impl ExecutionEnvironment for PlutusWorker {
         }
         if let Some(next_datum) = spend.new_datum_int {
             if host
-                .write(&ns, &datum_key(&script_hash), Some(&next_datum.to_le_bytes()))
+                .write(
+                    &ns,
+                    &datum_key(&script_hash),
+                    Some(&next_datum.to_le_bytes()),
+                )
                 .is_err()
             {
                 return Ok(EeOutcome {
