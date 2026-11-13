@@ -744,13 +744,43 @@ pub trait BudlumApi {
         sub_label: String,
     ) -> Result<Option<String>, ErrorObjectOwned>;
 
-    /// Prepare a registration transaction (offline helper).
-    #[method(name = "bud_bnsPrepareRegister")]
-    async fn bns_prepare_register(
+    /// Fetch a single `.bud` domain offer by id (`null` if unknown).
+    #[method(name = "bud_bnsGetOffer")]
+    async fn bns_get_offer(&self, offer_id: u64) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// List active `.bud` domain offers, optionally filtered by kind (`"Primary"` or `"Resale"`).
+    #[method(name = "bud_bnsListOffers")]
+    async fn bns_list_offers(
         &self,
+        kind: Option<String>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Prepare a signed `BnsCreateOffer` marketplace listing transaction.
+    #[method(name = "bud_bnsPrepareCreateOffer")]
+    async fn bns_prepare_create_offer(
+        &self,
+        seller: String,
         name: String,
-        owner: String,
+        price_atoms: u64,
         duration: u64,
+        kind: String,
+        expires_at_epoch: u64,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Prepare a signed `BnsBuyName` marketplace purchase transaction.
+    #[method(name = "bud_bnsPrepareBuyName")]
+    async fn bns_prepare_buy_name(
+        &self,
+        buyer: String,
+        offer_id: u64,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Prepare a signed `BnsCancelOffer` seller cancellation transaction.
+    #[method(name = "bud_bnsPrepareCancelOffer")]
+    async fn bns_prepare_cancel_offer(
+        &self,
+        seller: String,
+        offer_id: u64,
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
     /// Prepare a subdomain registration transaction.

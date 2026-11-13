@@ -548,7 +548,9 @@ pub enum TransactionType {
     },
     Vote,
     ContractCall,
-    BnsRegister,
+    BnsCreateOffer,
+    BnsCancelOffer,
+    BnsBuyName,
     BnsSetContent,
     BnsRegisterSubdomain,
     BnsSetStorage,
@@ -2520,7 +2522,9 @@ impl Transaction {
             | TransactionType::RegisterFiliz { .. } => schedule.stake_gas,
             TransactionType::Vote => schedule.vote_gas,
             TransactionType::ContractCall => schedule.contract_call_gas,
-            TransactionType::BnsRegister
+            TransactionType::BnsCreateOffer
+            | TransactionType::BnsCancelOffer
+            | TransactionType::BnsBuyName
             | TransactionType::BnsSetContent
             | TransactionType::BnsRegisterSubdomain
             | TransactionType::BnsSetStorage
@@ -3022,7 +3026,7 @@ fn transaction_type_tag(tx_type: &TransactionType) -> u8 {
         TransactionType::Unstake => 2,
         TransactionType::Vote => 3,
         TransactionType::ContractCall => 4,
-        TransactionType::BnsRegister => 5,
+        // Tag 5 retired with BnsRegister removal; never reuse.
         TransactionType::BnsSetContent => 6,
         TransactionType::BnsRegisterSubdomain => 7,
         TransactionType::BnsSetStorage => 8,
@@ -3091,6 +3095,9 @@ fn transaction_type_tag(tx_type: &TransactionType) -> u8 {
         TransactionType::RoleWithdraw { .. } => 68,
         TransactionType::Validator(_) => 69,
         TransactionType::StorageV3(_) => 70,
+        TransactionType::BnsCreateOffer => 71,
+        TransactionType::BnsCancelOffer => 72,
+        TransactionType::BnsBuyName => 73,
     }
 }
 fn encode_chain(chain: ExternalChain, out: &mut Vec<u8>) {
@@ -3787,7 +3794,9 @@ fn encode_transaction_type_payload(tx_type: &TransactionType, out: &mut Vec<u8>)
         | TransactionType::Unstake
         | TransactionType::Vote
         | TransactionType::ContractCall
-        | TransactionType::BnsRegister
+        | TransactionType::BnsCreateOffer
+        | TransactionType::BnsCancelOffer
+        | TransactionType::BnsBuyName
         | TransactionType::BnsSetContent
         | TransactionType::BnsRegisterSubdomain
         | TransactionType::BnsSetStorage

@@ -340,3 +340,320 @@ fn bns_renew_and_transfer_execute_through_consensus_doors() {
         "refused transfers do not advance nonce"
     );
 }
+
+#[test]
+fn bns_marketplace_primary_resale_cancel_expiry_and_governance() {
+    use crate::core::account::AccountState;
+    use crate::core::governance::{GovernanceAction, ProposalStatus, ProposalType};
+    use crate::core::transaction::TransactionType;
+    use crate::crypto::primitives::KeyPair;
+    use crate::execution::executor::Executor;
+    use crate::pollen::{CreateNameOffer, OfferKind};
+
+    let primary_kp = KeyPair::generate().unwrap();
+    let primary_seller = Address::from(primary_kp.public_key_bytes());
+    let alice_kp = KeyPair::generate().unwrap();
+    let alice = Address::from(alice_kp.public_key_bytes());
+    let bob_kp = KeyPair::generate().unwrap();
+    let bob = Address::from(bob_kp.public_key_bytes());
+    let outsider_kp = KeyPair::generate().unwrap();
+    let outsider = Address::from(outsider_kp.public_key_bytes());
+
+    let mut state = AccountState::new();
+    state.base_fee = 1;
+    state.epoch_index = 5;
+    state.add_balance(&primary_seller, 100_000);
+    state.add_balance(&alice, 500_000);
+    state.add_balance(&bob, 500_000);
+    state.add_balance(&outsider, 100_000);
+
+    // 1. Non-primary seller cannot open a Primary offer.
+    let mut unauth_primary = lifecycle_tx(
+        outsider,
+        0,
+        1,
+        0,
+        TransactionType::BnsCreateOffer,
+        bincode::serialize(&CreateNameOffer {
+            name: "market.bud".to_string(),
+            price_atoms: 40_000,
+            duration: 500,
+            kind: OfferKind::Primary,
+            expires_at_epoch: 50,
+        })
+        .unwrap(),
+    );
+    unauth_primary.sign(&outsider_kp);
+    assert!(state.validate_transaction(&unauth_primary).is_err());
+    let err = Executor::apply_transaction_checked(&mut state, &unauth_primary).unwrap_err();
+    assert_eq!(err.code(), "bns_unauthorized_primary_seller");
+
+    // 2. Governance updates BNS_PRIMARY_SELLERS via GovernanceAction::BnsSetPrimarySellers.
+    let prop_id = state
+        .governance
+        .create_proposal(
+            primary_seller,
+            ProposalType::BnsSetPrimarySellers {
+                sellers: vec![primary_seller],
+            },
+            state.epoch_index,
+            10,
+        )
+        .unwrap();
+    state.governance.find_proposal_mut(prop_id).unwrap().status = ProposalStatus::Passed;
+    let actions = state.governance.execute_passed_proposals(u64::MAX);
+    assert_eq!(
+        actions,
+        vec![GovernanceAction::BnsSetPrimarySellers {
+            sellers: vec![primary_seller]
+        }]
+    );
+    state
+        .bns_registry
+        .set_primary_sellers(vec![primary_seller])
+        .unwrap();
+    assert!(state.bns_registry.is_primary_seller(&primary_seller));
+
+    // 3. Authorized primary seller opens Primary offer #0 and Alice buys it;
+    //    seller receives price_atoms and burned_total does NOT increase.
+    let burned_before = state.burned_total;
+    let seller_bal_before = state.get_balance(&primary_seller);
+    let root_before_offer = state.calculate_state_root();
+
+    let mut create_primary = lifecycle_tx(
+        primary_seller,
+        0,
+        1,
+        0,
+        TransactionType::BnsCreateOffer,
+        bincode::serialize(&CreateNameOffer {
+            name: "market.bud".to_string(),
+            price_atoms: 40_000,
+            duration: 500,
+            kind: OfferKind::Primary,
+            expires_at_epoch: 50,
+        })
+        .unwrap(),
+    );
+    create_primary.sign(&primary_kp);
+    state.validate_transaction(&create_primary).unwrap();
+    Executor::apply_transaction_checked(&mut state, &create_primary).unwrap();
+    assert_ne!(
+        root_before_offer,
+        state.calculate_state_root(),
+        "opening a NameOffer must change AccountState root"
+    );
+
+    let mut buy_primary = lifecycle_tx(
+        alice,
+        40_000,
+        1,
+        0,
+        TransactionType::BnsBuyName,
+        bincode::serialize(&0u64).unwrap(),
+    );
+    buy_primary.sign(&alice_kp);
+    state.validate_transaction(&buy_primary).unwrap();
+    Executor::apply_transaction_checked(&mut state, &buy_primary).unwrap();
+
+    assert_eq!(state.bns_registry.resolve("market.bud", 5), Some(alice));
+    assert_eq!(
+        state.get_balance(&primary_seller),
+        seller_bal_before - 1 + 40_000,
+        "Primary sale pays seller instead of burning"
+    );
+    assert_eq!(
+        state.burned_total, burned_before,
+        "Primary sale must not burn"
+    );
+    assert!(!state.marketplace.get_name_offer(0).unwrap().active);
+
+    // 4. Alice sets content + subdomain, then lists `market.bud` as Resale (#1);
+    //    Bob buys it -> ownership moves to Bob, Alice is paid, pointers are cleared!
+    state
+        .bns_registry
+        .set_content(
+            "market.bud",
+            &alice,
+            crate::storage::content_id::ContentId([0xAB; 32]),
+            5,
+        )
+        .unwrap();
+    state
+        .bns_registry
+        .register_subdomain("market.bud", "blog".into(), alice, &alice, 5)
+        .unwrap();
+
+    let mut create_resale = lifecycle_tx(
+        alice,
+        0,
+        1,
+        1,
+        TransactionType::BnsCreateOffer,
+        bincode::serialize(&CreateNameOffer {
+            name: "market.bud".to_string(),
+            price_atoms: 75_000,
+            duration: 0,
+            kind: OfferKind::Resale,
+            expires_at_epoch: 50,
+        })
+        .unwrap(),
+    );
+    create_resale.sign(&alice_kp);
+    state.validate_transaction(&create_resale).unwrap();
+    Executor::apply_transaction_checked(&mut state, &create_resale).unwrap();
+
+    let alice_before_resale = state.get_balance(&alice);
+    let mut buy_resale = lifecycle_tx(
+        bob,
+        75_000,
+        1,
+        0,
+        TransactionType::BnsBuyName,
+        bincode::serialize(&1u64).unwrap(),
+    );
+    buy_resale.sign(&bob_kp);
+    state.validate_transaction(&buy_resale).unwrap();
+    Executor::apply_transaction_checked(&mut state, &buy_resale).unwrap();
+
+    assert_eq!(state.bns_registry.resolve("market.bud", 5), Some(bob));
+    assert_eq!(state.bns_registry.resolve_content("market.bud", 5), None);
+    assert_eq!(
+        state
+            .bns_registry
+            .resolve_subdomain("market.bud", "blog", 5),
+        None
+    );
+    assert_eq!(state.get_balance(&alice), alice_before_resale + 75_000);
+    assert_eq!(state.burned_total, burned_before, "Resale must not burn");
+
+    // 5. Cancelled offer and expired offer and stale offer (sold/transferred away) all fail closed.
+    let mut offer_to_cancel = lifecycle_tx(
+        bob,
+        0,
+        1,
+        1,
+        TransactionType::BnsCreateOffer,
+        bincode::serialize(&CreateNameOffer {
+            name: "market.bud".to_string(),
+            price_atoms: 10_000,
+            duration: 0,
+            kind: OfferKind::Resale,
+            expires_at_epoch: 20,
+        })
+        .unwrap(),
+    );
+    offer_to_cancel.sign(&bob_kp);
+    Executor::apply_transaction_checked(&mut state, &offer_to_cancel).unwrap(); // id = 2
+
+    let mut cancel_tx = lifecycle_tx(
+        bob,
+        0,
+        1,
+        2,
+        TransactionType::BnsCancelOffer,
+        bincode::serialize(&2u64).unwrap(),
+    );
+    cancel_tx.sign(&bob_kp);
+    state.validate_transaction(&cancel_tx).unwrap();
+    Executor::apply_transaction_checked(&mut state, &cancel_tx).unwrap();
+
+    let mut buy_cancelled = lifecycle_tx(
+        alice,
+        10_000,
+        1,
+        2,
+        TransactionType::BnsBuyName,
+        bincode::serialize(&2u64).unwrap(),
+    );
+    buy_cancelled.sign(&alice_kp);
+    assert_eq!(
+        Executor::apply_transaction_checked(&mut state, &buy_cancelled)
+            .unwrap_err()
+            .code(),
+        "bns_offer_inactive_or_expired"
+    );
+
+    // Stale resale offer: Bob opens offer #3, transfers `market.bud` directly to outsider,
+    // and Alice tries to buy offer #3 -> fails with `bns_resale_stale`!
+    let mut offer_stale = lifecycle_tx(
+        bob,
+        0,
+        1,
+        3,
+        TransactionType::BnsCreateOffer,
+        bincode::serialize(&CreateNameOffer {
+            name: "market.bud".to_string(),
+            price_atoms: 10_000,
+            duration: 0,
+            kind: OfferKind::Resale,
+            expires_at_epoch: 80,
+        })
+        .unwrap(),
+    );
+    offer_stale.sign(&bob_kp);
+    Executor::apply_transaction_checked(&mut state, &offer_stale).unwrap(); // id = 3
+
+    let mut direct_transfer = lifecycle_tx(
+        bob,
+        0,
+        1,
+        4,
+        TransactionType::BnsTransfer,
+        bincode::serialize(&("market.bud".to_string(), outsider)).unwrap(),
+    );
+    direct_transfer.sign(&bob_kp);
+    Executor::apply_transaction_checked(&mut state, &direct_transfer).unwrap();
+
+    let mut buy_stale = lifecycle_tx(
+        alice,
+        10_000,
+        1,
+        2,
+        TransactionType::BnsBuyName,
+        bincode::serialize(&3u64).unwrap(),
+    );
+    buy_stale.sign(&alice_kp);
+    assert_eq!(
+        Executor::apply_transaction_checked(&mut state, &buy_stale)
+            .unwrap_err()
+            .code(),
+        "bns_resale_stale"
+    );
+
+    // Expired offer: primary_seller opens offer #4 expiring at epoch 10, advance epoch to 10 -> rejected!
+    let mut offer_expiring = lifecycle_tx(
+        primary_seller,
+        0,
+        1,
+        1,
+        TransactionType::BnsCreateOffer,
+        bincode::serialize(&CreateNameOffer {
+            name: "expiring.bud".to_string(),
+            price_atoms: 10_000,
+            duration: 100,
+            kind: OfferKind::Primary,
+            expires_at_epoch: 10,
+        })
+        .unwrap(),
+    );
+    offer_expiring.sign(&primary_kp);
+    Executor::apply_transaction_checked(&mut state, &offer_expiring).unwrap(); // id = 4
+    state.epoch_index = 10;
+
+    let mut buy_expired = lifecycle_tx(
+        alice,
+        10_000,
+        1,
+        2,
+        TransactionType::BnsBuyName,
+        bincode::serialize(&4u64).unwrap(),
+    );
+    buy_expired.sign(&alice_kp);
+    assert_eq!(
+        Executor::apply_transaction_checked(&mut state, &buy_expired)
+            .unwrap_err()
+            .code(),
+        "bns_offer_inactive_or_expired"
+    );
+}
