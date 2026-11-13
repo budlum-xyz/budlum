@@ -324,7 +324,7 @@ impl PoSEngine {
     }
 
     /// Derive epoch randomness from a canonical, already-established VRF
-    /// Transcript. Epoch `E` consumes epoch ` `, giving the source transcript
+    /// Transcript. Epoch `E` consumes epoch `E - 2`, giving the source transcript
     /// A full epoch to settle before it controls leader selection. Only verified
     /// VRF outputs and producer identities enter the transcript: block hashes,
     /// Timestamps and transaction ordering are deliberately excluded so a
