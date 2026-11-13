@@ -407,8 +407,6 @@ impl Vm {
         let mut inference_output_commitment = None;
         let mut pending_merkle_walk: Option<MerkleWalk> = None;
 
-        let mut pending_merkle_walk: Option<MerkleWalk> = None;
-
         let (dst_val, next_pc) = match inst.opcode {
             Opcode::Halt => {
                 self.halted = true;

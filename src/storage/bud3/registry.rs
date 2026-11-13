@@ -1816,26 +1816,10 @@ impl Bud3Registry {
     pub fn record_repair(
         &mut self,
         key: &ObjectKey,
-        segment: u64,
-        new_shares: Vec<Share>,
-        new_symbols: Vec<Symbol>,
-        new_root: [u8; 32],
-        witness: &RepairWitness,
+        repair: SegmentRepair<'_>,
         epoch: u64,
     ) -> Result<(), RegistryError> {
-        self.record_repair_with_validators(
-            key,
-            SegmentRepair {
-                segment,
-                new_shares,
-                new_symbols,
-                new_root,
-                witness,
-            },
-            None,
-            &BTreeMap::new(),
-            epoch,
-        )
+        self.record_repair_with_validators(key, repair, None, &BTreeMap::new(), epoch)
     }
 
     /// Verify and record a segment repair using either Merkle-proven live symbols
@@ -2893,11 +2877,13 @@ mod tests {
         assert!(matches!(
             r.record_repair(
                 &key,
-                0,
-                vec![reuse],
-                fresh.clone(),
-                new_root,
-                &valid_witness,
+                SegmentRepair {
+                    segment: 0,
+                    new_shares: vec![reuse],
+                    new_symbols: fresh.clone(),
+                    new_root,
+                    witness: &valid_witness,
+                },
                 100
             ),
             Err(RegistryError::BadRepair(_))
@@ -2909,11 +2895,13 @@ mod tests {
         assert!(matches!(
             r.record_repair(
                 &key,
-                0,
-                vec![short],
-                fresh.clone(),
-                new_root,
-                &valid_witness,
+                SegmentRepair {
+                    segment: 0,
+                    new_shares: vec![short],
+                    new_symbols: fresh.clone(),
+                    new_root,
+                    witness: &valid_witness,
+                },
                 100
             ),
             Err(RegistryError::BadRepair("fewer new symbols than lost"))
@@ -2922,11 +2910,13 @@ mod tests {
         assert!(matches!(
             r.record_repair(
                 &key,
-                0,
-                vec![new_share],
-                fresh.clone(),
-                [0xFF; 32],
-                &valid_witness,
+                SegmentRepair {
+                    segment: 0,
+                    new_shares: vec![new_share],
+                    new_symbols: fresh.clone(),
+                    new_root: [0xFF; 32],
+                    witness: &valid_witness,
+                },
                 100
             ),
             Err(RegistryError::BadRepair(_))
@@ -2942,11 +2932,13 @@ mod tests {
         assert!(matches!(
             r.record_repair(
                 &key,
-                0,
-                vec![new_share],
-                forged,
-                forged_root,
-                &valid_witness,
+                SegmentRepair {
+                    segment: 0,
+                    new_shares: vec![new_share],
+                    new_symbols: forged,
+                    new_root: forged_root,
+                    witness: &valid_witness,
+                },
                 100
             ),
             Err(RegistryError::BadRepair(_))
@@ -2955,27 +2947,33 @@ mod tests {
         assert!(matches!(
             r.record_repair(
                 &key,
-                0,
-                vec![new_share],
-                fresh.clone(),
-                new_root,
-                &super::super::repair::RepairWitness::ProvenSymbols(Vec::new()),
+                SegmentRepair {
+                    segment: 0,
+                    new_shares: vec![new_share],
+                    new_symbols: fresh.clone(),
+                    new_root,
+                    witness: &super::super::repair::RepairWitness::ProvenSymbols(Vec::new()),
+                },
                 100
             ),
             Err(RegistryError::BadRepair(_))
         ));
         assert!(matches!(
-            r.record_repair(
-                &key,
-                0,
-                vec![new_share],
-                fresh.clone(),
-                new_root,
-                &super::super::repair::RepairWitness::ValidatorAttestations(Vec::new()),
-                100
-            ),
-            Err(RegistryError::BadRepair(_))
-        ));
+                r.record_repair(
+                    &key,
+                    SegmentRepair {
+                        segment: 0,
+                        new_shares: vec![new_share],
+                        new_symbols: fresh.clone(),
+                        new_root,
+                        witness: &super::super::repair::RepairWitness::ValidatorAttestations(
+                            Vec::new()
+                        ),
+                    },
+                    100
+                ),
+                Err(RegistryError::BadRepair(_))
+            ));
         assert_eq!(
             super::super::tx::apply(
                 &mut r,
