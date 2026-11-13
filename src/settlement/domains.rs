@@ -1814,30 +1814,26 @@ pub(crate) fn execute_relayer_intent_tx(
                 if !settleable || bid.expires_at_block <= deadline {
                     continue;
                 }
-                // `slash_role_destroying` refuses a replayed slash for a
-                // `Slashed` or `SlashedUnbonding` registration. Do not let
-                // that ineligible penalty prevent the owner's independent
-                // escrow refund.
                 let should_slash = state
                     .registry
                     .get(&bid.relayer, crate::registry::role::roles::RELAYER)
-                    .is_some_and(|registration| {
-                        registration.stake > 0
-                            && matches!(
-                                registration.status,
-                                crate::registry::permissionless::MemberStatus::Active
-                                    | crate::registry::permissionless::MemberStatus::Unbonding { .. }
-                            )
-                    });
+                    .is_some_and(|registration| registration.is_slashable());
                 if should_slash {
-                    state
-                        .slash_role_destroying(
-                            bid.relayer,
-                            crate::registry::role::roles::RELAYER,
-                            crate::registry::permissionless::SlashingCondition::LivenessFault,
-                            slash_ratio,
-                        )
-                        .map_err(|e| SettlementTxError::Refused(e.to_string()))?;
+                    // The escrow refund is independent of the liveness
+                    // penalty. An already-slashed registration or a removed
+                    // role has no additional penalty to collect, but neither
+                    // condition can keep the owner's refund locked.
+                    match state.slash_role_destroying(
+                        bid.relayer,
+                        crate::registry::role::roles::RELAYER,
+                        crate::registry::permissionless::SlashingCondition::LivenessFault,
+                        slash_ratio,
+                    ) {
+                        Ok(_) => {}
+                        Err(crate::registry::RegistryError::AlreadySlashed { .. })
+                        | Err(crate::registry::RegistryError::NotRegistered { .. }) => {}
+                        Err(e) => return Err(SettlementTxError::Refused(e.to_string())),
+                    }
                 }
             }
             state
