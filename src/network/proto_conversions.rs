@@ -2266,7 +2266,10 @@ impl TryFrom<pb::ProtoBlock> for Block {
             Some(reports)
         };
 
-        let mut transactions = Vec::new();
+        if proto.transactions.len() > crate::consensus::MAX_TRANSACTIONS_PER_BLOCK {
+            return Err("Too many transactions in block".into());
+        }
+        let mut transactions = Vec::with_capacity(proto.transactions.len());
         for t in proto.transactions {
             transactions.push(Transaction::try_from(t)?);
         }
@@ -2572,15 +2575,23 @@ impl TryFrom<pb::ProtoNetworkMessage> for NetworkMessage {
             .payload
             .ok_or("Empty payload in ProtoNetworkMessage")?;
         match payload {
-            pb::proto_network_message::Payload::Handshake(h) => Ok(NetworkMessage::Handshake {
-                version_major: h.version_major,
-                version_minor: h.version_minor,
-                chain_id: h.chain_id,
-                best_height: h.best_height,
-                validator_set_hash: h.validator_set_hash,
-                supported_schemes: h.supported_schemes,
-            }),
+            pb::proto_network_message::Payload::Handshake(h) => {
+                if h.supported_schemes.len() > 64 {
+                    return Err("Handshake supported_schemes exceeds limit".into());
+                }
+                Ok(NetworkMessage::Handshake {
+                    version_major: h.version_major,
+                    version_minor: h.version_minor,
+                    chain_id: h.chain_id,
+                    best_height: h.best_height,
+                    validator_set_hash: h.validator_set_hash,
+                    supported_schemes: h.supported_schemes,
+                })
+            }
             pb::proto_network_message::Payload::HandshakeAck(h) => {
+                if h.supported_schemes.len() > 64 {
+                    return Err("HandshakeAck supported_schemes exceeds limit".into());
+                }
                 Ok(NetworkMessage::HandshakeAck {
                     version_major: h.version_major,
                     version_minor: h.version_minor,
