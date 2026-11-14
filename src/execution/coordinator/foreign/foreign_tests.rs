@@ -989,7 +989,6 @@ fn non_evm_migration_kit_8_12_3_wasm_svm_and_move() {
         wasm_migration_digest(chain_id, 11, 500, &contract_bech32, &code_hash, &wasm_root);
     let wasm_sig: SecpSig = cos_sk.sign(&wasm_digest);
     let wasm_req = WasmMigrationRequest {
-        chain_id,
         budlum_chain_id: chain_id,
         source_domain_id: 11,
         source_block: 500,
@@ -1003,12 +1002,42 @@ fn non_evm_migration_kit_8_12_3_wasm_svm_and_move() {
         contract_info_proof: info_proof,
         storage_entries: vec![store_proof],
     };
+    // A proof against the request's own root proves nothing. The chain must
+    // have anchored that root for the source domain.
+    let apply_wasm = |coord: &mut ExecutionCoordinator, state: &mut AccountState, chain: u64| {
+        coord.apply_migration(
+            state,
+            &migrator,
+            MigrationTx::ImportWasmContract(Box::new(wasm_req.clone())),
+            &schedule,
+            chain,
+        )
+    };
+    assert!(matches!(
+        apply_wasm(&mut coord, &mut state, chain_id),
+        Err(ImportError::SourceNotAttested { domain: 11 })
+    ));
+    assert!(state.anchor_external_root(11, [0x5Au8; 32]));
+    assert!(
+        matches!(
+            apply_wasm(&mut coord, &mut state, chain_id),
+            Err(ImportError::SourceNotAttested { domain: 11 })
+        ),
+        "another anchored root does not attest the request's root"
+    );
+    assert!(state.anchor_external_root(11, wasm_root));
+    // The chain id is the node's, not the request's.
+    assert!(matches!(
+        apply_wasm(&mut coord, &mut state, chain_id + 1),
+        Err(ImportError::ChainMismatch { .. })
+    ));
     let wasm_out = coord
         .apply_migration(
             &mut state,
             &migrator,
             MigrationTx::ImportWasmContract(Box::new(wasm_req.clone())),
             &schedule,
+            chain_id,
         )
         .expect("WASM ICS-23 migration succeeds");
     assert!(matches!(
@@ -1042,6 +1071,7 @@ fn non_evm_migration_kit_8_12_3_wasm_svm_and_move() {
             &migrator,
             MigrationTx::ImportWasmContract(Box::new(wasm_req)),
             &schedule,
+            chain_id,
         ),
         Err(ImportError::AddressOccupied)
     ));
@@ -1057,7 +1087,6 @@ fn non_evm_migration_kit_8_12_3_wasm_svm_and_move() {
     let svm_digest = svm_migration_digest(chain_id, 12, 900, &svm_pk, &svm_root);
     let svm_sig = svm_sk.sign(&svm_digest).to_bytes().to_vec();
     let svm_req = SvmMigrationRequest {
-        chain_id,
         budlum_chain_id: chain_id,
         source_domain_id: 12,
         source_slot: 900,
@@ -1073,12 +1102,39 @@ fn non_evm_migration_kit_8_12_3_wasm_svm_and_move() {
         authority_pubkey: svm_pk,
         authority_signature64: svm_sig,
     };
+    let apply_svm = |coord: &mut ExecutionCoordinator, state: &mut AccountState, chain: u64| {
+        coord.apply_migration(
+            state,
+            &migrator,
+            MigrationTx::ImportSvmAccount(Box::new(svm_req.clone())),
+            &schedule,
+            chain,
+        )
+    };
+    assert!(matches!(
+        apply_svm(&mut coord, &mut state, chain_id),
+        Err(ImportError::SourceNotAttested { domain: 12 })
+    ));
+    assert!(state.anchor_external_root(12, [0x5Bu8; 32]));
+    assert!(
+        matches!(
+            apply_svm(&mut coord, &mut state, chain_id),
+            Err(ImportError::SourceNotAttested { domain: 12 })
+        ),
+        "another anchored root does not attest the request's root"
+    );
+    assert!(state.anchor_external_root(12, svm_root));
+    assert!(matches!(
+        apply_svm(&mut coord, &mut state, chain_id + 1),
+        Err(ImportError::ChainMismatch { .. })
+    ));
     let svm_out = coord
         .apply_migration(
             &mut state,
             &migrator,
             MigrationTx::ImportSvmAccount(Box::new(svm_req.clone())),
             &schedule,
+            chain_id,
         )
         .expect("SVM migration succeeds");
     assert!(matches!(
@@ -1103,6 +1159,7 @@ fn non_evm_migration_kit_8_12_3_wasm_svm_and_move() {
             &migrator,
             MigrationTx::ImportSvmAccount(Box::new(svm_req.clone())),
             &schedule,
+            chain_id,
         ),
         Err(ImportError::AddressOccupied)
     ));
@@ -1114,6 +1171,7 @@ fn non_evm_migration_kit_8_12_3_wasm_svm_and_move() {
             &migrator,
             MigrationTx::ImportSvmAccount(Box::new(bad_svm)),
             &schedule,
+            chain_id,
         )
         .is_err());
 
@@ -1133,7 +1191,6 @@ fn non_evm_migration_kit_8_12_3_wasm_svm_and_move() {
     let move_digest = move_migration_digest(chain_id, 13, 42, &move_addr, &move_root);
     let move_sig = move_sk.sign(&move_digest).to_bytes().to_vec();
     let move_req = MoveMigrationRequest {
-        chain_id,
         budlum_chain_id: chain_id,
         source_domain_id: 13,
         source_version: 42,
@@ -1156,12 +1213,39 @@ fn non_evm_migration_kit_8_12_3_wasm_svm_and_move() {
             },
         ],
     };
+    let apply_move = |coord: &mut ExecutionCoordinator, state: &mut AccountState, chain: u64| {
+        coord.apply_migration(
+            state,
+            &migrator,
+            MigrationTx::ImportMoveResource(Box::new(move_req.clone())),
+            &schedule,
+            chain,
+        )
+    };
+    assert!(matches!(
+        apply_move(&mut coord, &mut state, chain_id),
+        Err(ImportError::SourceNotAttested { domain: 13 })
+    ));
+    assert!(state.anchor_external_root(13, [0x5Cu8; 32]));
+    assert!(
+        matches!(
+            apply_move(&mut coord, &mut state, chain_id),
+            Err(ImportError::SourceNotAttested { domain: 13 })
+        ),
+        "another anchored root does not attest the request's root"
+    );
+    assert!(state.anchor_external_root(13, move_root));
+    assert!(matches!(
+        apply_move(&mut coord, &mut state, chain_id + 1),
+        Err(ImportError::ChainMismatch { .. })
+    ));
     let move_out = coord
         .apply_migration(
             &mut state,
             &migrator,
             MigrationTx::ImportMoveResource(Box::new(move_req.clone())),
             &schedule,
+            chain_id,
         )
         .expect("Move migration succeeds");
     assert!(matches!(
@@ -1191,6 +1275,7 @@ fn non_evm_migration_kit_8_12_3_wasm_svm_and_move() {
             &migrator,
             MigrationTx::ImportMoveResource(Box::new(bad_move)),
             &schedule,
+            chain_id,
         )
         .is_err());
 }

@@ -470,6 +470,8 @@ impl ExecutionCoordinator {
 
     /// Applies a verified contract or account migration transaction (`8.12.2` EVM & `8.12.3` WASM/SVM/Move).
     ///
+    /// `chain_id` is the chain the node runs. A request never names it.
+    ///
     /// exposed for: Migration Kit consensus block execution across all VMs.
     pub fn apply_migration(
         &mut self,
@@ -477,6 +479,7 @@ impl ExecutionCoordinator {
         migrator: &Address,
         tx: crate::execution::coordinator::migration::MigrationTx,
         fee_schedule: &crate::execution::coordinator::migration::MigrationFeeSchedule,
+        chain_id: u64,
     ) -> Result<
         crate::execution::coordinator::migration::MigrationTxOutcome,
         crate::execution::coordinator::migration::ImportError,
@@ -486,10 +489,13 @@ impl ExecutionCoordinator {
             migrator,
             tx,
             fee_schedule,
+            chain_id,
         )
     }
 
     /// Applies a verified EVM contract migration transaction ( 2/3 door).
+    ///
+    /// `chain_id` is the chain the node runs. A request never names it.
     ///
     /// exposed for: EVM Migration Kit consensus block execution.
     pub fn apply_evm_migration(
@@ -498,6 +504,7 @@ impl ExecutionCoordinator {
         migrator: &Address,
         tx: crate::execution::coordinator::migration::MigrationTx,
         fee_schedule: &crate::execution::coordinator::migration::MigrationFeeSchedule,
+        chain_id: u64,
     ) -> Result<
         crate::execution::coordinator::migration::MigrationTxOutcome,
         crate::execution::coordinator::migration::ImportError,
@@ -507,6 +514,7 @@ impl ExecutionCoordinator {
             migrator,
             tx,
             fee_schedule,
+            chain_id,
         )
     }
 
