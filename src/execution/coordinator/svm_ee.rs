@@ -109,7 +109,9 @@ pub enum SvmInstructionEnvelope {
         lamports: u64,
     },
     SplInitializeMint {
-        mint: [u8; 32],
+        /// A seed, not an address. The mint lives at `derive_spl_mint_address(caller, mint_seed)`
+        /// and that address is the output.
+        mint_seed: [u8; 32],
         decimals: u8,
         mint_authority: [u8; 32],
         is_token_2022: bool,
@@ -163,6 +165,32 @@ pub enum SvmInstructionEnvelope {
         gas_limit_bgu: u64,
         is_static: bool,
     },
+}
+
+/// Domain tag of the address a mint lives at. The out-of-process SVM worker derives with the same one.
+pub const SVM_SPL_MINT_DOMAIN: &[u8] = b"BDLM_SVM_SPL_MINT_V1";
+
+/// The address of the mint that `caller` initializes with `seed`: the first off-curve candidate of
+/// `SHA-256(domain || caller || seed || bump)` for `bump` from 255 down to 0.
+///
+/// A mint address is a global identity. It is a function of the account that initializes the mint
+/// and of a seed that account picks, so no other account can take it first, and an instruction
+/// cannot name the address it wants. `None` only if all 256 candidates are on the curve, which
+/// does not happen in practice.
+#[must_use]
+pub fn derive_spl_mint_address(caller: &[u8; 32], seed: &[u8; 32]) -> Option<[u8; 32]> {
+    for bump in (0u8..=255u8).rev() {
+        let mut h = Sha256::new();
+        h.update(SVM_SPL_MINT_DOMAIN);
+        h.update(caller);
+        h.update(seed);
+        h.update([bump]);
+        let cand: [u8; 32] = h.finalize().into();
+        if !is_ed25519_on_curve(&cand) {
+            return Some(cand);
+        }
+    }
+    None
 }
 
 /// Derives an off-curve Associated Token Account address for `(wallet, mint)`.
@@ -751,11 +779,29 @@ impl ExecutionEnvironment for SvmEe {
                         })
                     }
                     SvmInstructionEnvelope::SplInitializeMint {
-                        mint,
+                        mint_seed,
                         decimals,
                         mint_authority,
                         is_token_2022,
                     } => {
+                        // The mint address is derived from the authenticated caller, never taken
+                        // as named, and the caller is the authority. Otherwise any account could
+                        // take a mint address before its issuer, block the issuer for good, and
+                        // record a third party as the issuer of a mint that party never asked for.
+                        if mint_authority != caller_pk {
+                            return Ok(EeOutcome {
+                                status: OutcomeStatus::Revert,
+                                output: b"the mint authority must be the caller".to_vec(),
+                                gas_used: 8_000,
+                            });
+                        }
+                        let Some(mint) = derive_spl_mint_address(&caller_pk, &mint_seed) else {
+                            return Ok(EeOutcome {
+                                status: OutcomeStatus::Revert,
+                                output: b"no mint address for this seed".to_vec(),
+                                gas_used: 8_000,
+                            });
+                        };
                         let existing = read_svm_account(host, &mint).unwrap_or_default();
                         if existing.lamports != 0 || existing.owner != SVM_SYSTEM_PROGRAM_ID {
                             return Ok(EeOutcome {

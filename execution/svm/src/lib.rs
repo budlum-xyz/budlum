@@ -33,11 +33,11 @@ use solana_sbpf::verifier::RequisiteVerifier;
 use solana_sbpf::vm::{Config, ContextObject, EbpfVm};
 
 use crate::programs::{
-    decode_borsh_universal_call, derive_associated_token_address, SplMintState,
-    SplTokenAccountState, SvmAccountRecord, SvmInstructionEnvelope, ASSOCIATED_TOKEN_PROGRAM_ID,
-    ATTOS_PER_LAMPORT, BPF_LOADER_UPGRADEABLE_ID, MEMO_PROGRAM_ID, NS_SVM_ACCOUNT,
-    SPL_TOKEN_2022_PROGRAM_ID, SPL_TOKEN_PROGRAM_ID, STAKE_PROGRAM_ID, SYSTEM_PROGRAM_ID,
-    UNIVERSAL_CALL_PROGRAM_ID, VOTE_PROGRAM_ID,
+    decode_borsh_universal_call, derive_associated_token_address, derive_spl_mint_address,
+    SplMintState, SplTokenAccountState, SvmAccountRecord, SvmInstructionEnvelope,
+    ASSOCIATED_TOKEN_PROGRAM_ID, ATTOS_PER_LAMPORT, BPF_LOADER_UPGRADEABLE_ID, MEMO_PROGRAM_ID,
+    NS_SVM_ACCOUNT, SPL_TOKEN_2022_PROGRAM_ID, SPL_TOKEN_PROGRAM_ID, STAKE_PROGRAM_ID,
+    SYSTEM_PROGRAM_ID, UNIVERSAL_CALL_PROGRAM_ID, VOTE_PROGRAM_ID,
 };
 
 /// Maximum deployed sBPF binary size (`2 MiB`).
@@ -352,12 +352,36 @@ fn handle_spl_token(
         return Err((OutcomeStatus::Revert, String::from("empty SPL Token ix")));
     };
     match op {
-        // 0 = InitializeMint { decimals: u8, mint_authority: [u8; 32] }
+        // 0 = InitializeMint { decimals: u8, mint_authority: [u8; 32] } (accounts: [mint_seed]).
+        // The seed is not the address: the mint lives at `derive_spl_mint_address(caller,
+        // seed)` and that address is the output.
         0 => {
-            let Some(mint_meta) = ix.accounts.first() else {
-                return Err((OutcomeStatus::Revert, String::from("missing mint account")));
+            let Some(seed_meta) = ix.accounts.first() else {
+                return Err((OutcomeStatus::Revert, String::from("missing mint seed")));
             };
-            if svm_account_exists(host, &mint_meta.pubkey)
+            let decimals = ix.data.get(1).copied().unwrap_or(9);
+            let auth: [u8; 32] = ix
+                .data
+                .get(2..34)
+                .and_then(|s| s.try_into().ok())
+                .unwrap_or(*caller);
+            // The worker receives only the authenticated outer caller, so the mint address
+            // is derived from it rather than taken as named, and the caller is the
+            // authority. Otherwise any account could take a mint address before its issuer
+            // and record a third party as the issuer of a mint that party never asked for.
+            if auth != *caller {
+                return Err((
+                    OutcomeStatus::Revert,
+                    String::from("the mint authority must be the caller"),
+                ));
+            }
+            let Some(mint_address) = derive_spl_mint_address(caller, &seed_meta.pubkey) else {
+                return Err((
+                    OutcomeStatus::Revert,
+                    String::from("no mint address for this seed"),
+                ));
+            };
+            if svm_account_exists(host, &mint_address)
                 .map_err(|e| (OutcomeStatus::Revert, e.to_string()))?
             {
                 return Err((
@@ -365,12 +389,6 @@ fn handle_spl_token(
                     String::from("mint already initialized"),
                 ));
             }
-            let decimals = ix.data.get(1).copied().unwrap_or(9);
-            let auth: [u8; 32] = ix
-                .data
-                .get(2..34)
-                .and_then(|s| s.try_into().ok())
-                .unwrap_or(*caller);
             let mint = SplMintState {
                 mint_authority: Some(auth),
                 supply: 0,
@@ -383,9 +401,9 @@ fn handle_spl_token(
                 rent_epoch: u64::MAX,
                 data: serde_json::to_vec(&mint).unwrap_or_default(),
             };
-            write_svm_account(host, &mint_meta.pubkey, &rec)
+            write_svm_account(host, &mint_address, &rec)
                 .map_err(|e| (OutcomeStatus::Revert, e.to_string()))?;
-            Ok((Vec::new(), 1_500))
+            Ok((mint_address.to_vec(), 1_500))
         }
         // 1 = InitializeAccount (accounts: [token_acc, mint, owner])
         1 => {
@@ -395,6 +413,22 @@ fn handle_spl_token(
             let acc_pk = ix.accounts.first().map(|m| m.pubkey).unwrap_or([0; 32]);
             let mint_pk = ix.accounts.get(1).map(|m| m.pubkey).unwrap_or([0; 32]);
             let own_pk = ix.accounts.get(2).map(|m| m.pubkey).unwrap_or([0; 32]);
+            // The worker receives only the authenticated outer caller, not a
+            // transaction-level signer set, so no account meta can authorize a key the
+            // caller does not own. Only the caller's own associated token account may be
+            // initialized here. Accepting any absent address with any owner lets a third
+            // party occupy another wallet's derived account and receive its payments. The
+            // associated token account program still opens an account for any wallet.
+            if own_pk != *caller
+                || acc_pk != derive_associated_token_address(&own_pk, program_id, &mint_pk)
+            {
+                return Err((
+                    OutcomeStatus::Revert,
+                    String::from(
+                        "InitializeAccount must target the caller's own associated token account",
+                    ),
+                ));
+            }
             if svm_account_exists(host, &acc_pk)
                 .map_err(|e| (OutcomeStatus::Revert, e.to_string()))?
             {
@@ -1328,6 +1362,184 @@ mod tests {
         }
     }
 
+    fn hex32(bytes: &[u8; 32]) -> String {
+        bytes.iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    fn meta(pubkey: [u8; 32]) -> SvmAccountMeta {
+        SvmAccountMeta {
+            pubkey,
+            is_signer: false,
+            is_writable: true,
+        }
+    }
+
+    fn initialize_mint_ix(
+        seed: [u8; 32],
+        decimals: u8,
+        authority: [u8; 32],
+    ) -> SvmInstructionEnvelope {
+        let mut data = vec![0, decimals];
+        data.extend_from_slice(&authority);
+        SvmInstructionEnvelope {
+            accounts: vec![meta(seed)],
+            data,
+        }
+    }
+
+    fn initialize_account_ix(
+        account: [u8; 32],
+        mint: [u8; 32],
+        owner: [u8; 32],
+    ) -> SvmInstructionEnvelope {
+        SvmInstructionEnvelope {
+            accounts: vec![meta(account), meta(mint), meta(owner)],
+            data: vec![1],
+        }
+    }
+
+    /// The same two vectors are pinned in the root crate: the SVM environment and this
+    /// worker must derive one mint address for one `(caller, seed)` pair.
+    #[test]
+    fn the_spl_mint_address_matches_the_known_answers() {
+        let caller = [0x11u8; 32];
+        assert_eq!(
+            derive_spl_mint_address(&caller, &[0x22; 32]).map(|a| hex32(&a)),
+            Some(String::from(
+                "1ae021a316289bcb841cd784d3ca1c8a7085beb18c93bca77ef7b3f79979d816"
+            ))
+        );
+        // The first candidate for this seed is a curve point, so the search takes its retry path.
+        assert_eq!(
+            derive_spl_mint_address(&caller, &[0x25; 32]).map(|a| hex32(&a)),
+            Some(String::from(
+                "d316db7a76988d0f340d9014b3d0c9448e2240b9dcb7446ffc231081f7029217"
+            ))
+        );
+        // The address belongs to the caller: the same seed names another mint for another caller.
+        assert_ne!(
+            derive_spl_mint_address(&[0x33; 32], &[0x22; 32]),
+            derive_spl_mint_address(&caller, &[0x22; 32])
+        );
+    }
+
+    /// A mint address is a global identity. An account used to be able to take any
+    /// unclaimed address first, block the real issuer for good and record a third party as
+    /// an issuer.
+    #[test]
+    fn a_mint_belongs_to_the_account_that_initializes_it() {
+        let alice = [0x11u8; 32];
+        let mallory = [0x66u8; 32];
+        let seed = [0x22u8; 32];
+        let mut host = MemoryHost::new(1_000_000);
+
+        // Mallory goes first, with the seed Alice is about to use.
+        let Ok((mallory_mint, _)) = handle_spl_token(
+            &SPL_TOKEN_PROGRAM_ID,
+            &mallory,
+            &initialize_mint_ix(seed, 6, mallory),
+            &mut host,
+        ) else {
+            panic!("mallory initializes her own mint");
+        };
+        // Alice is not blocked: her mint is a different address, derived from her.
+        let Ok((alice_mint, _)) = handle_spl_token(
+            &SPL_TOKEN_PROGRAM_ID,
+            &alice,
+            &initialize_mint_ix(seed, 6, alice),
+            &mut host,
+        ) else {
+            panic!("alice is not blocked by mallory");
+        };
+        assert_ne!(mallory_mint, alice_mint);
+        let Ok(alice_address): Result<[u8; 32], _> = alice_mint.as_slice().try_into() else {
+            panic!("mint address length");
+        };
+        assert_eq!(Some(alice_address), derive_spl_mint_address(&alice, &seed));
+        let Ok(on_record) =
+            serde_json::from_slice::<SplMintState>(&read_svm_account(&host, &alice_address).data)
+        else {
+            panic!("mint record");
+        };
+        assert_eq!(on_record.mint_authority, Some(alice));
+
+        // Mallory cannot record Alice as the issuer of a mint Alice never asked for.
+        let refused = handle_spl_token(
+            &SPL_TOKEN_PROGRAM_ID,
+            &mallory,
+            &initialize_mint_ix([0x23; 32], 6, alice),
+            &mut host,
+        );
+        assert!(matches!(refused, Err((OutcomeStatus::Revert, _))));
+
+        // The same caller and seed name the same mint, so a second initialization is refused.
+        let again = handle_spl_token(
+            &SPL_TOKEN_PROGRAM_ID,
+            &alice,
+            &initialize_mint_ix(seed, 6, alice),
+            &mut host,
+        );
+        assert!(matches!(again, Err((OutcomeStatus::Revert, _))));
+    }
+
+    /// The worker sees the outer caller and no signer set, so an account meta authorizes
+    /// nothing. Only the caller's own associated token account can be initialized here. Any
+    /// other absent address used to be open to anyone, with any owner.
+    #[test]
+    fn an_account_can_only_initialize_its_own_associated_token_account() {
+        let alice = [0x11u8; 32];
+        let bob = [0x22u8; 32];
+        let mallory = [0x66u8; 32];
+        let mut host = MemoryHost::new(1_000_000);
+        let Ok((mint_vec, _)) = handle_spl_token(
+            &SPL_TOKEN_PROGRAM_ID,
+            &alice,
+            &initialize_mint_ix([0x01; 32], 6, alice),
+            &mut host,
+        ) else {
+            panic!("mint");
+        };
+        let Ok(mint): Result<[u8; 32], _> = mint_vec.as_slice().try_into() else {
+            panic!("mint address length");
+        };
+        let bob_ata = derive_associated_token_address(&bob, &SPL_TOKEN_PROGRAM_ID, &mint);
+
+        // Mallory cannot occupy Bob's associated token account, as owner herself or as Bob.
+        for owner in [mallory, bob] {
+            let refused = handle_spl_token(
+                &SPL_TOKEN_PROGRAM_ID,
+                &mallory,
+                &initialize_account_ix(bob_ata, mint, owner),
+                &mut host,
+            );
+            assert!(
+                matches!(refused, Err((OutcomeStatus::Revert, _))),
+                "mallory initializing bob's account with owner {} must be refused",
+                hex32(&owner)
+            );
+        }
+        assert!(!svm_account_exists(&host, &bob_ata).unwrap());
+
+        // An arbitrary address is not an associated token account, not even for its owner.
+        let refused = handle_spl_token(
+            &SPL_TOKEN_PROGRAM_ID,
+            &bob,
+            &initialize_account_ix([0x99; 32], mint, bob),
+            &mut host,
+        );
+        assert!(matches!(refused, Err((OutcomeStatus::Revert, _))));
+
+        // Bob can initialize his own.
+        let own = handle_spl_token(
+            &SPL_TOKEN_PROGRAM_ID,
+            &bob,
+            &initialize_account_ix(bob_ata, mint, bob),
+            &mut host,
+        );
+        assert!(own.is_ok());
+        assert!(svm_account_exists(&host, &bob_ata).unwrap());
+    }
+
     #[test]
     fn spl_token_and_sbpf_deploy_and_vote_stake_refused() {
         let mut host = MemoryHost::new(10_000_000);
@@ -1339,7 +1551,7 @@ mod tests {
         };
         let alice = [0x11u8; 32];
         let bob = [0x22u8; 32];
-        let mint = [0x33u8; 32];
+        let mint_seed = [0x33u8; 32];
         let alice_id = EeIdentity {
             ee: EeId::SVM,
             id: alice.to_vec(),
@@ -1374,7 +1586,7 @@ mod tests {
         init_mint_data.extend_from_slice(&alice);
         let init_mint_env = SvmInstructionEnvelope {
             accounts: vec![SvmAccountMeta {
-                pubkey: mint,
+                pubkey: mint_seed,
                 is_signer: true,
                 is_writable: true,
             }],
@@ -1400,6 +1612,12 @@ mod tests {
             panic!("mint init fault");
         };
         assert_eq!(m_out.status, OutcomeStatus::Success);
+        // The seed is not the address. The mint lives where the worker derived it, and
+        // the output says where.
+        let Ok(mint): Result<[u8; 32], _> = m_out.output.as_slice().try_into() else {
+            panic!("bad mint address length");
+        };
+        assert_eq!(Some(mint), derive_spl_mint_address(&alice, &mint_seed));
 
         let create_ata = |w: [u8; 32], h: &mut MemoryHost, worker: &mut SvmWorker| -> [u8; 32] {
             let env = SvmInstructionEnvelope {
