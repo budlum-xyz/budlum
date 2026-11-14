@@ -30,11 +30,9 @@ pub struct ExecutionReceipt {
     pub state_writes_digest: [u8; 32],
 }
 
-// Mainnet decoding reads `MainnetActivation::default()`. The 64-depth
-// VerifyMerkle path AIR can be exercised under explicit `full()` in tests,
-// but production stays closed until the path is bound to challenged shard
-// contents. VerifyInference's independent 30-round Poseidon commitment AIR
-// remains enabled; `closed()` can still refuse both for differential tests.
+// Mainnet decoding reads `MainnetActivation::default()`: testnet keeps both
+// VerifyMerkle and VerifyInference closed until their opening gates pass.
+// `full()` enables isolated proof tests without changing production decoding.
 fn decode_instruction(raw: u64, mainnet_mode: bool) -> Result<bud_isa::Instruction, String> {
     if mainnet_mode {
         let activation = bud_isa::MainnetActivation::default();
@@ -2217,12 +2215,10 @@ mod poseidon_parameter_tests {
         let receipt = vm.run_receipt(&program);
         assert!(!receipt.success);
         assert_eq!(receipt.error, Some(VmError::OutOfGas));
-        // The failing instruction has no trace row and charges no gas: step()
-        // restores its prior gas counter before run_receipt adds the terminal
-        // Halt row. The last successful instruction stays within the limit;
-        // adding the next VerifyMerkle would exceed it.
-        assert!(receipt.gas_used <= 4_096);
-        assert!(receipt.gas_used + Vm::gas_cost(Opcode::VerifyMerkle) > 4_096);
+        // `consume_gas` includes the refused instruction in the receipt;
+        // charge at most one VerifyMerkle beyond the limit.
+        assert!(receipt.gas_used > 4_096);
+        assert!(receipt.gas_used <= 4_096 + Vm::gas_cost(Opcode::VerifyMerkle));
         assert!(vm.trace.len() <= 410 * (1 + MERKLE_ROUNDS) + 1);
     }
 

@@ -150,6 +150,13 @@ const READ_NAMES: &[&str] = &[
     // `bud_estimateGas`. `chain_actor` answers `get_required_fee` with it;
     // reading the quote never writes consensus state.
     "required_fee",
+    // The BNS lookups below take `&self` and store nothing. `chain_actor`
+    // answers the `bud_bns*` read methods with them.
+    "reverse_resolve",
+    "list_active_name_offers",
+    "prove_name",
+    "list_names_by_owner",
+    "list_subdomains",
 ];
 
 /// Read-only queries reached through an explicit sub-registry. The method

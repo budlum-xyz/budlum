@@ -317,82 +317,42 @@ fn ai_mlp_host_eval_and_commitments() {
 }
 
 #[test]
-fn ai_require_execution_proof_blocks_finalize_without_proof() {
+fn ai_require_execution_proof_models_stay_closed_without_live_verifier() {
     use crate::ai::execution::{matmul_program_hash, weights_digest, FixedPointMlpSpec};
-    use crate::ai::registry::{AiRegistry, MIN_VERIFIER_STAKE};
+    use crate::ai::registry::AiRegistry;
     use crate::ai::types::*;
 
+    const { assert!(!crate::ai::FULL_AI_STARK_VERIFICATION_LIVE) };
     let owner = test_addr_from_byte(1u8);
-    let verifier = test_addr_from_byte(2u8);
-    let mut reg = AiRegistry::new();
     let spec_mlp = FixedPointMlpSpec {
         dims: vec![2, 1],
         weights: vec![2, 3],
         biases: vec![1],
     };
     let mid = AiModelId::of(&owner, &[9u8; 32], 1);
-    reg.register_model(AiModelSpec {
-        model_id: mid,
-        model_hash: [9u8; 32],
-        owner,
-        min_verifier_count: 1,
-        agreement_threshold: 1,
-        max_input_ref_bytes: 1024,
-        max_output_ref_bytes: 1024,
-        request_deadline_blocks: 100,
-        result_deadline_blocks: 100,
-        version: 1,
-        active: true,
-        require_execution_proof: true,
-        execution_program_hash: Some(matmul_program_hash(&spec_mlp).unwrap()),
-        execution_class: 1,
-        execution_dims: Some(spec_mlp.dims.clone()),
-        execution_weights_digest: Some(weights_digest(&spec_mlp)),
-        modalities: crate::ai_inference::perception::ModalitySet::text_only(),
-    })
-    .expect("proof-required model registers cleanly when FULL_AI_STARK_VERIFICATION_LIVE is true");
-
-    reg.lock_verifier_stake(&verifier, MIN_VERIFIER_STAKE)
-        .unwrap();
-    let mut req = AiInferenceRequest {
-        request_id: AiRequestId::default(),
-        requester: owner,
-        model_id: mid,
-        // This test submits no proof. Its empty input ref still needs the
-        // canonical request commitment; the guest-only limb commitment is a
-        // different scheme and cannot authenticate a request's input_ref.
-        input_commitment: crate::ai::types::canonical_input_commitment(&[]),
-        input_ref: BoundedBytes::empty(),
-        max_fee: 10,
-        callback: None,
-        submitted_at_block: 0,
-        deadline_block: 100,
-        perception: Some(crate::ai_inference::perception::PerceptionRequest {
-            asset_id: crate::pollen::AssetId([0xAA; 32]),
-            content_id: crate::storage::content_id::ContentId([0xBB; 32]),
-            kind: crate::ai_inference::perception::PerceptionKind::Text,
-            declared_units: 4,
-        }),
-        effort: crate::ai_inference::effort::EffortTier::default(),
-    };
-    req.request_id = req.calculate_id();
-    let req_id = reg.submit_request(req, 0).unwrap();
-
-    let res = AiInferenceResult {
-        request_id: req_id,
-        verifier,
-        output_commitment: crate::ai::types::canonical_output_commitment(&[23]),
-        output_ref: BoundedBytes::try_new(vec![23]).unwrap(),
-        result_nonce: 1,
-        signature: Vec::new(),
-        submitted_at_block: 0,
-    };
-    let outcome = reg.submit_result(res, 0).unwrap();
-    assert!(
-        outcome.is_none(),
-        "proof-required model must block finalization before verified STARK proof attach"
-    );
-    assert!(reg.try_finalize_with_proofs(&req_id).is_none());
+    let mut registry = AiRegistry::new();
+    let err = registry
+        .register_model(AiModelSpec {
+            model_id: mid,
+            model_hash: [9u8; 32],
+            owner,
+            min_verifier_count: 1,
+            agreement_threshold: 1,
+            max_input_ref_bytes: 1024,
+            max_output_ref_bytes: 1024,
+            request_deadline_blocks: 100,
+            result_deadline_blocks: 100,
+            version: 1,
+            active: true,
+            require_execution_proof: true,
+            execution_program_hash: Some(matmul_program_hash(&spec_mlp).unwrap()),
+            execution_class: 1,
+            execution_dims: Some(spec_mlp.dims.clone()),
+            execution_weights_digest: Some(weights_digest(&spec_mlp)),
+            modalities: crate::ai_inference::perception::ModalitySet::text_only(),
+        })
+        .expect_err("proof-required AI remains closed until its opening gates pass");
+    assert!(err.contains("not accepted until full AI STARK verification is live"));
 }
 
 fn transfer_fixture(

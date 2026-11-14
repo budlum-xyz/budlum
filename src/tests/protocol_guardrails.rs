@@ -32,43 +32,6 @@ fn proof_envelope() -> Vec<u8> {
     bincode::serialize(&envelope).expect("envelope")
 }
 
-fn storage_proof_bundle_envelope() -> Vec<u8> {
-    let context = crate::domain::storage_deal::StorageChallengeProofContext {
-        chain_id: crate::core::chain_config::Network::Testnet
-            .chain_id()
-            .value(),
-        domain_id: 1,
-        deal_id: 1,
-        manifest_id: crate::storage::content_id::ContentId([0x11; 32]),
-        shard_id: crate::storage::content_id::ContentId([0x22; 32]),
-        replica_index: 0,
-        operator: addr(1),
-        challenge_id: 1,
-        byte_start: 0,
-        byte_end: 4,
-        challenge_epoch: 10,
-        deadline_epoch: 20,
-        opener: addr(2),
-        responder: addr(1),
-        response_epoch: 15,
-    };
-    assert!(
-        crate::domain::storage_deal::prove_storage_challenge_proof(
-            &context,
-            &[0x42; 32],
-            &crate::storage::content_id::ContentId([0x33; 32]),
-        )
-        .is_err(),
-        "the production builder must not bypass the closed VerifyMerkle gate"
-    );
-    crate::domain::storage_deal::prove_storage_challenge_proof_for_isolated_air_tests(
-        &context,
-        &[0x42; 32],
-        &crate::storage::content_id::ContentId([0x33; 32]),
-    )
-    .expect("isolated AIR witness; production VerifyMerkle remains closed")
-}
-
 #[test]
 fn mainnet_bootnode_templates_are_rejected() {
     let peer = "/ip4/203.0.113.10/tcp/4001/p2p/12D3KooWCeremonyBootstrap1BudlumMainnetNod0001";
@@ -101,14 +64,7 @@ fn mainnet_pkcs11_requires_a_module_path() {
 
 #[test]
 fn proof_required_models_are_refused_without_a_live_verifier() {
-    const {
-        assert!(
-            FULL_AI_STARK_VERIFICATION_LIVE,
-            "AI STARK verification must be live for proof-required models"
-        );
-    };
-    let _ = proof_envelope();
-    let _ = storage_proof_bundle_envelope();
+    const { assert!(!FULL_AI_STARK_VERIFICATION_LIVE) };
     let mut reg = AiRegistry::new();
     let dims = vec![2u16, 1];
     let spec_for_hash = crate::ai::execution::FixedPointMlpSpec {
@@ -117,8 +73,8 @@ fn proof_required_models_are_refused_without_a_live_verifier() {
         biases: vec![0i32; 1],
     };
     let expected = crate::ai::execution::matmul_program_hash(&spec_for_hash)
-        .expect("program hash for active model registration");
-    let registered = reg
+        .expect("program hash for model registration");
+    let err = reg
         .register_model(AiModelSpec {
             model_id: AiModelId([1u8; 32]),
             model_hash: [2u8; 32],
@@ -138,24 +94,38 @@ fn proof_required_models_are_refused_without_a_live_verifier() {
             execution_weights_digest: Some([5u8; 32]),
             execution_dims: Some(dims),
         })
-        .expect("proof-required model registers when FULL_AI_STARK_VERIFICATION_LIVE is true");
-    assert_eq!(registered, AiModelId([1u8; 32]));
+        .expect_err("proof-required models stay closed without a live verifier");
+    assert!(err.contains("not accepted until full AI STARK verification is live"));
 }
 
 #[test]
-fn production_merkle_and_storage_credit_stay_closed_until_shard_binding() {
+fn verify_merkle_is_closed_on_testnet() {
+    let activation = bud_isa::MainnetActivation::default();
+    assert!(!activation.verify_merkle_enabled);
+    assert!(!activation.allows(bud_isa::Opcode::VerifyMerkle));
+}
+
+#[test]
+fn verify_inference_is_closed_on_testnet() {
+    let activation = bud_isa::MainnetActivation::default();
+    assert!(!activation.verify_inference_enabled);
+    assert!(!activation.allows(bud_isa::Opcode::VerifyInference));
+}
+
+#[test]
+fn mainnet_inference_and_merkle_features_stay_closed() {
     let d = bud_isa::MainnetActivation::default();
     assert!(
         !d.verify_merkle_enabled,
-        "a 64-depth path proof alone cannot attest possession of the challenged shard"
+        "VerifyMerkle stays closed on testnet"
     );
     assert!(
-        d.verify_inference_enabled,
-        "inference has an independent 30-round AIR and must not be disabled to close storage"
+        !d.verify_inference_enabled,
+        "VerifyInference stays closed on testnet"
     );
     assert!(
         !StorageRegistry::storage_challenge_proofs_are_checkable(),
-        "an unbound storage witness must not earn proof credit or trigger slashing"
+        "storage challenge proofs stay closed until the witness binds stored shard bytes"
     );
     let toml = include_str!("../../config/mainnet.toml");
     assert!(

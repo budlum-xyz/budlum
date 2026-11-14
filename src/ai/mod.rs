@@ -19,11 +19,9 @@ pub use execution::{
 };
 pub use registry::AiRegistry;
 
-/// Full Plonky3 STARK verification is active on testnet for `require_execution_proof`
-/// models, bound to `chain_id`, `program_hash`, `weights_digest`,
-/// `initial_state_root`, `event_digest`, attaching `sender`, `nonce`, and
-/// `block_height`.
-pub const FULL_AI_STARK_VERIFICATION_LIVE: bool = true;
+/// Testnet keeps proof-required AI models closed until BLG-059 through BLG-062
+/// are resolved and the VL-1 opening gate is independently verified.
+pub const FULL_AI_STARK_VERIFICATION_LIVE: bool = false;
 
 /// Descriptor summarizing the active VL-0..VL-3 verification layer, DIP,
 /// `64 x 64` tile bisection, small-model bound proofs, and Answer Proof Bundle
@@ -4434,14 +4432,14 @@ mod tests {
         assert_ne!(root_before, registry.state_root());
     }
 
-    /// Verifies that `FULL_AI_STARK_VERIFICATION_LIVE` is enabled and that the
-    /// AI STARK verifier rejects zeroed initial-memory / output-log commitments.
+    /// Testnet keeps proof-required AI models closed while the opening gates
+    /// are incomplete. The verifier still rejects forged commitments.
     #[test]
     fn full_stark_verification_flag_is_locked_off_until_inputs_are_bound() {
         const {
             assert!(
-                FULL_AI_STARK_VERIFICATION_LIVE,
-                "full AI STARK verification must be live on testnet"
+                !FULL_AI_STARK_VERIFICATION_LIVE,
+                "proof-required AI models remain closed until their opening gates pass"
             );
         }
         let spec = crate::ai::execution::FixedPointMlpSpec {

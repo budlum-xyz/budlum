@@ -437,9 +437,8 @@ pub struct OptionalProofJobReceipt {
     pub alters_consensus_state: bool,
 }
 
-/// Decode BudZero bytecode under canonical production opcode rules. The
-/// Merkle path remains closed until a shard-bound witness is available;
-/// inference uses its independent active AIR-backed gate.
+/// Decode BudZero bytecode under canonical active testnet/mainnet opcode rules
+/// (`VerifyMerkle` and `VerifyInference` closed under `MainnetActivation::default()`).
 ///
 /// # Errors
 ///
@@ -528,29 +527,14 @@ mod tests {
                 imm: 0,
             },
         ]);
-        let refusal = ee
-            .validate_deploy(&active)
-            .expect_err("unbound VerifyMerkle must not deploy on testnet");
-        assert!(format!("{refusal:?}").contains("VerifyMerkle"));
         assert!(
-            bud_isa::Instruction::decode_for_mainnet(
-                Instruction {
-                    opcode: Opcode::VerifyMerkle,
-                    rd: 0,
-                    rs1: 1,
-                    rs2: 2,
-                    imm: 0,
-                }
-                .encode(),
-                bud_isa::MainnetActivation::full(),
-            )
-            .is_ok(),
-            "isolated full-activation tests still exercise the proven path"
+            ee.validate_deploy(&active).is_err(),
+            "testnet deployment must refuse VerifyMerkle until the opening gates pass"
         );
     }
 
     #[test]
-    fn verify_inference_is_active_on_testnet() {
+    fn verify_inference_is_closed_on_testnet() {
         let ee = BudZeroEe::new();
         let active = encode_instrs(&[
             Instruction {
@@ -568,22 +552,9 @@ mod tests {
                 imm: 0,
             },
         ]);
-        ee.validate_deploy(&active)
-            .expect("VerifyInference is active on testnet under MainnetActivation::default()");
         assert!(
-            bud_isa::Instruction::decode_for_mainnet(
-                Instruction {
-                    opcode: Opcode::VerifyInference,
-                    rd: 0,
-                    rs1: 1,
-                    rs2: 2,
-                    imm: 0,
-                }
-                .encode(),
-                bud_isa::MainnetActivation::closed(),
-            )
-            .is_err(),
-            "explicit MainnetActivation::closed() still refuses VerifyInference"
+            ee.validate_deploy(&active).is_err(),
+            "testnet deployment must refuse VerifyInference until the opening gates pass"
         );
     }
 

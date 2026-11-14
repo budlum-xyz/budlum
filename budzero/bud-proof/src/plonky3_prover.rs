@@ -1977,10 +1977,10 @@ impl Plonky3Adapter {
     /// explicit activation state.
     ///
     /// [`ProverAdapter::verify`] uses [`bud_isa::MainnetActivation::default`],
-    /// in which `VerifyMerkle` is off and `VerifyInference` is on: a proof whose
-    /// program contains `VerifyMerkle` is refused with
-    /// `VerifyError::InvalidEnvelope` before the STARK is looked at. A network
-    /// that has activated it passes its own state here.
+    /// in which both `VerifyMerkle` and `VerifyInference` are off: a proof
+    /// containing either is refused with `VerifyError::InvalidEnvelope`
+    /// before the STARK is looked at. An explicitly activated network passes
+    /// its own schedule here.
     pub fn verify_with_activation(
         envelope: &ProofEnvelope,
         expected_inputs: &ExecutionPublicInputs,
@@ -4598,12 +4598,11 @@ mod tests {
         );
     }
 
-    /// The default verifier refuses staged VerifyMerkle, even for an honest proof.
+    /// The default verifier refuses staged opcodes even for honest proofs.
     ///
     /// The AIR proves that a program ran, not that the chain allows it to run.
-    /// VerifyMerkle is off by default; VerifyInference is on by default. A
-    /// proof reaches the verifier without passing through the execution path,
-    /// so activation must be checked against the committed program there too.
+    /// A proof reaches the verifier without passing through execution, so
+    /// activation must also be checked against the committed program.
     #[test]
     fn verifier_refuses_verify_merkle_under_default_activation() {
         // VerifyMerkle: the honest one-sibling path.
@@ -4683,8 +4682,8 @@ mod tests {
             Err(VerifyError::InvalidEnvelope(_))
         ));
 
-        // VerifyInference: honest 30-round Poseidon proof verifies under default and full,
-        // and refuses under explicit `closed()`.
+        // VerifyInference: isolated full activation proves the Poseidon path;
+        // default and explicitly closed schedules refuse the proof.
         let program = vec![
             inst(Opcode::Load, 2, 0, 0, 0xABCD),
             inst(Opcode::Load, 3, 0, 0, 0x1234),
@@ -4714,10 +4713,10 @@ mod tests {
             state_writes_digest: [0u8; 32],
         };
         let envelope = Plonky3Adapter::prove(&vm.trace, &pi, &program).unwrap();
-        assert!(
-            Plonky3Adapter::verify(&envelope, &pi, &program).is_ok(),
-            "VerifyInference proof must verify under default activation"
-        );
+        assert!(matches!(
+            Plonky3Adapter::verify(&envelope, &pi, &program),
+            Err(VerifyError::InvalidEnvelope(msg)) if msg.contains("VerifyInference")
+        ));
         assert!(
             Plonky3Adapter::verify_with_activation(
                 &envelope,
@@ -10342,8 +10341,10 @@ mod tests {
             };
             let envelope = Plonky3Adapter::prove(&vm.trace, &pi, &program)
                 .expect("honest VerifyInference trace must prove");
-            Plonky3Adapter::verify(&envelope, &pi, &program)
-                .expect("honest VerifyInference proof must verify under default activation");
+            assert!(matches!(
+                Plonky3Adapter::verify(&envelope, &pi, &program),
+                Err(VerifyError::InvalidEnvelope(_))
+            ));
             Plonky3Adapter::verify_with_activation(
                 &envelope,
                 &pi,
