@@ -690,6 +690,19 @@ fn evaluate_bns_evidence(
             Some("Per-name BNS Merkle state proof answers a different name or owner".into()),
         );
     }
+    // The leaf digest binds the content id and the storage root itself, so what this profile
+    // prints for them has to be what the root commits to. Checking only the name and the owner
+    // let an answering node keep a valid proof and swap the content the profile points at.
+    if leaf.content_id != resolved.content_id || leaf.storage_root != resolved.storage_root {
+        return (
+            EvidenceStatus::Unverified,
+            root_hex,
+            Some(
+                "Per-name BNS Merkle state proof commits to a different content id or storage root than the profile discloses"
+                    .into(),
+            ),
+        );
+    }
     // The proof binds `address`, the records, the subdomains and the B.U.D.
     // 3.0 reference through its extras pre-image. Without that pre-image the
     // leaf only fixes the name, owner, expiry, content id and storage root,
@@ -709,7 +722,7 @@ fn evaluate_bns_evidence(
     };
     let disclosed_matches = extras.address == resolved.address
         && extras.records == resolved.records
-        && extras.subdomains.len() == resolved.subdomains.len()
+        && extras.subdomains == resolved.subdomains
         && extras.bud3_content == resolved.bud3_content
         && extras.storage_domain_id == resolved.storage_domain_id;
     if disclosed_matches {
@@ -1174,5 +1187,72 @@ mod tests {
                 .status,
             EvidenceStatus::Unverified
         );
+    }
+
+    /// The count of subdomains is not the subdomains. A profile used to compare only how many the
+    /// proof's extras held, so a node could keep a valid proof, point one subdomain at someone
+    /// else and swap the content id the profile shows, and still read Verified.
+    #[test]
+    fn a_swapped_content_id_or_subdomain_under_a_valid_bns_proof_is_not_verified() {
+        let owner = addr(0x33);
+        let sub_owner = addr(0x34);
+        let attacker = addr(0x35);
+        let mut reg = BnsRegistry::new();
+        reg.register("shop.bud".to_string(), owner, 10, 100)
+            .unwrap();
+        reg.set_content("shop.bud", &owner, ContentId([0xAB; 32]), 11)
+            .unwrap();
+        reg.register_subdomain("shop.bud", "pay".to_string(), sub_owner, &owner, 12)
+            .unwrap();
+        let resolved = reg.resolve_full("shop.bud", 20).unwrap();
+        assert_eq!(resolved.content_id, Some(ContentId([0xAB; 32])));
+        assert_eq!(resolved.subdomains.len(), 1);
+
+        let honest = reg.prove_name("shop.bud", 20);
+        let bns_root = reg.root();
+        let status = |resolved: BnsResolved| {
+            let ctx = IdentityProofContext {
+                bns_proof: Some(honest.clone()),
+                expected_bns_root: Some(bns_root),
+                current_epoch: 20,
+                reverse_primary_name: Some("shop.bud".into()),
+            };
+            let profile = build_identity_profile_verified(
+                "shop.bud".into(),
+                Some(resolved),
+                None,
+                &[],
+                &[],
+                &[],
+                Some(&ctx),
+            );
+            profile
+                .evidence
+                .iter()
+                .find(|c| c.subject == "bns")
+                .unwrap()
+                .status
+                .clone()
+        };
+
+        // Control: the disclosure the root commits to is Verified.
+        assert_eq!(status(resolved.clone()), EvidenceStatus::Verified);
+
+        // The content id is bound by the leaf itself.
+        let mut swapped_content = resolved.clone();
+        swapped_content.content_id = Some(ContentId([0xEE; 32]));
+        assert_eq!(status(swapped_content), EvidenceStatus::Unverified);
+
+        // The storage root is bound by the leaf too.
+        let mut swapped_root = resolved.clone();
+        swapped_root.storage_root = Some([0x77; 32]);
+        assert_eq!(status(swapped_root), EvidenceStatus::Unverified);
+
+        // One subdomain pointed at someone else, with the same number of subdomains.
+        let mut swapped_sub = resolved.clone();
+        let label = swapped_sub.subdomains.keys().next().cloned().unwrap();
+        swapped_sub.subdomains.insert(label, attacker);
+        assert_eq!(swapped_sub.subdomains.len(), resolved.subdomains.len());
+        assert_eq!(status(swapped_sub), EvidenceStatus::Unverified);
     }
 }
