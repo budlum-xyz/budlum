@@ -947,23 +947,11 @@ mod tests {
         );
     }
 
-    /// `VerifyInference` must answer "not verified" for every input.
-    ///
-    /// The opcode used to accept any non-zero commitment as proof of an AI
-    /// Inference - no cryptography, just a non-zero check. It was reduced to a
-    /// No-op that always writes 0 until a real STARK verification AIR exists.
-    ///
-    /// The mainnet gate is tested, and executing the opcode is tested, but
-    /// Nothing asserted the *result*. That is the assertion carrying the
-    /// Security property: a gate can be lifted by configuration, whereas "the
-    /// Answer is always 0" is what makes lifting it safe. If someone
-    /// Reintroduces the non-zero-commitment shortcut, the existing tests still
-    /// Pass: the opcode runs, the gate still gates, and only this one fails.
-    ///
-    /// Runs the operands that the old shortcut would have accepted: two
-    /// Canonical 30-round Poseidon binding on `VerifyInference` (never constant zero).
+    /// Default production decoding refuses VerifyInference. Isolated VM
+    /// execution still computes the constrained Poseidon digest, but a digest
+    /// is not proof that an AI model ran on the registered weights and input.
     #[test]
-    fn verify_inference_never_reports_success() {
+    fn verify_inference_isolated_digest_never_opens_production_gate() {
         for (model, input, proof_type) in [
             (0xABi32, 0xCDi32, 0i32),
             (i32::MAX, i32::MAX, 1),
@@ -1006,12 +994,22 @@ mod tests {
                 .collect();
             let program_words = decode_program(&bytecode).expect("program decodes");
 
-            let mut vm = bud_vm::Vm::with_mainnet_mode(8192, DEFAULT_CONTRACT_GAS_LIMIT, true);
+            let mut production =
+                bud_vm::Vm::with_mainnet_mode(8192, DEFAULT_CONTRACT_GAS_LIMIT, true);
+            let refused = production.run_receipt(&program_words);
+            assert!(!refused.success);
+            assert!(matches!(
+                refused.error,
+                Some(bud_vm::VmError::InvalidOpcode(_))
+            ));
+            assert!(production
+                .trace
+                .iter()
+                .all(|step| { step.instruction.opcode != Opcode::VerifyInference }));
+
+            let mut vm = bud_vm::Vm::with_mainnet_mode(8192, DEFAULT_CONTRACT_GAS_LIMIT, false);
             let receipt = vm.run_receipt(&program_words);
-            assert!(
-                receipt.success,
-                "VerifyInference must execute in mainnet mode"
-            );
+            assert!(receipt.success, "isolated AIR witness computes the digest");
             let m = if model < 0 {
                 bud_vm::GOLDILOCKS_P.wrapping_sub(u64::from(model.unsigned_abs()))
             } else {

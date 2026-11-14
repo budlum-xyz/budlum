@@ -68,14 +68,15 @@ pub struct ComputeWithoutSeeingBundle {
     pub proof: AiExecutionProof,
 }
 
-/// Verify consent, `DeletionSet` non-revocation, sealed-object manifest binding,
-/// model/input commitments, and the full Plonky3 STARK proof for blind inference.
+/// Reserved blind-inference verification boundary. It refuses while the
+/// proof-required AI gate is closed; even after opening, a caller must supply
+/// a STARK program/public-input pair and verify the full proof. Structural
+/// checks alone are never sufficient to authorize access to sealed data.
 ///
 /// # Errors
 ///
-/// Returns a descriptive failure string if the permit does not match the
-/// manifest, the `ConsentProof` is revoked/expired/invalid, the request does
-/// not match the permitted scope, or STARK verification fails.
+/// Returns a descriptive failure if proof verification is gated or missing,
+/// consent is revoked/invalid, the scope is wrong, or the STARK is invalid.
 pub fn verify_compute_without_seeing(
     bundle: &ComputeWithoutSeeingBundle,
     deletion_set: &DeletionSet,
@@ -83,6 +84,18 @@ pub fn verify_compute_without_seeing(
     program_and_pi: Option<(&[u64], &ExecutionPublicInputs)>,
     current_epoch: u64,
 ) -> Result<ExecutionVerifyReport, String> {
+    if !crate::ai::FULL_AI_STARK_VERIFICATION_LIVE {
+        return Err("ComputeWithoutSeeing is closed until the AI proof opening gates pass".into());
+    }
+    let program_and_pi = program_and_pi
+        .ok_or("ComputeWithoutSeeing requires a full STARK program and public inputs")?;
+    if bundle.request.input_commitment
+        != crate::ai::types::canonical_input_commitment(bundle.request.input_ref.as_slice())
+        || bundle.result.output_commitment
+            != crate::ai::types::canonical_output_commitment(bundle.result.output_ref.as_slice())
+    {
+        return Err("ComputeWithoutSeeing request/result payload commitment mismatch".into());
+    }
     if bundle.manifest.object_commitment != bundle.permit.sealed_object
         || bundle.manifest.plaintext_root != bundle.permit.plaintext_root
         || bundle.manifest.key_commitment != bundle.permit.key_commitment
@@ -115,16 +128,13 @@ pub fn verify_compute_without_seeing(
         &bundle.request,
         &bundle.result,
         Some(model),
-        program_and_pi,
+        Some(program_and_pi),
     );
-    if !report.is_structurally_valid() || report.stark_ok == Some(false) {
+    if !report.is_fully_valid() {
         return Err(format!(
-            "ComputeWithoutSeeing execution verification failed: {:?}",
+            "ComputeWithoutSeeing full execution STARK verification failed: {:?}",
             report.stark_error
         ));
-    }
-    if program_and_pi.is_some() && !report.is_fully_valid() {
-        return Err("ComputeWithoutSeeing STARK did not verify cleanly".into());
     }
     Ok(report)
 }
@@ -133,8 +143,9 @@ pub fn verify_compute_without_seeing(
 mod tests {
     use super::*;
     use crate::ai::execution::{
-        guest_program_for_model, input_commitment, matmul_program_hash, prove_mlp_inference,
-        weights_digest, FixedPointMlpSpec,
+        encode_input_limbs, encode_output_limbs, guest_program_for_model, matmul_program_hash,
+        prove_mlp_inference, verify_execution_proof_structural_with_model, weights_digest,
+        FixedPointMlpSpec,
     };
     use crate::ai::types::{
         canonical_output_commitment, AiModelId, AiModelSpec, AiRequestId, BoundedBytes,
@@ -143,11 +154,12 @@ mod tests {
     use crate::core::hash::hash_fields_bytes;
     use crate::storage::bud3::content_id::ContentKey;
     use crate::storage::bud3::seal::{
-        seal_object_with_profile, CipherProfile, ObjectVisibility, SEAL_SALT_LEN,
+        seal_object_with_profile, CipherProfile, ObjectVisibility, SealBud3Error, SEAL_SALT_LEN,
     };
+    use bud_proof::predicates::{prove_predicate, PredicateKind, PredicateStatement};
 
     #[test]
-    fn compute_without_seeing_verifies_field_native_consent_and_stark_and_blocks_revoked() {
+    fn compute_without_seeing_refuses_unbound_consent_even_with_valid_unrelated_stark() {
         let mlp = FixedPointMlpSpec {
             dims: vec![2, 2, 1],
             weights: vec![1, -1, -1, 1, 1, 1],
@@ -170,7 +182,7 @@ mod tests {
 
         let requester = Address::from([0x10u8; 32]);
         let model_id = AiModelId::of(&requester, &[0x77u8; 32], 1);
-        let (proof, _output) =
+        let (proof, output) =
             prove_mlp_inference(&mlp, model_id, &private_input, 5_000_000).expect("prove MLP");
 
         let model = AiModelSpec {
@@ -193,12 +205,13 @@ mod tests {
             modalities: crate::ai_inference::perception::ModalitySet::text_only(),
         };
 
+        let input_ref = encode_input_limbs(&private_input);
         let req = AiInferenceRequest {
             request_id: AiRequestId([0x31u8; 32]),
             requester,
             model_id,
-            input_commitment: input_commitment(&private_input),
-            input_ref: BoundedBytes::empty(),
+            input_commitment: crate::ai::types::canonical_input_commitment(&input_ref),
+            input_ref: BoundedBytes::try_new(input_ref).unwrap(),
             max_fee: 0,
             callback: None,
             submitted_at_block: 0,
@@ -210,7 +223,7 @@ mod tests {
             request_id: req.request_id,
             verifier: requester,
             output_commitment: proof.output_commitment,
-            output_ref: BoundedBytes::empty(),
+            output_ref: BoundedBytes::try_new(encode_output_limbs(&output)).unwrap(),
             result_nonce: 1,
             signature: vec![],
             submitted_at_block: 1,
@@ -221,15 +234,38 @@ mod tests {
         let testnet_chain = crate::core::chain_config::Network::Testnet
             .chain_id()
             .value();
-        let consent = ConsentProof::issue(
-            &manifest,
+        assert_eq!(
+            ConsentProof::issue(
+                &manifest,
+                grant_tag,
+                *requester.as_bytes(),
+                scope,
+                testnet_chain,
+                2_000,
+            )
+            .unwrap_err(),
+            SealBud3Error::ConsentDenied,
+            "an unsigned owner claim must not mint blind-compute consent"
+        );
+        let unrelated = prove_predicate(&PredicateStatement {
+            kind: PredicateKind::Yk6ThresholdQuorum,
+            lhs: 4,
+            rhs: 4,
+            aux: 1,
+            chain_id: testnet_chain,
+        })
+        .expect("independent quorum STARK");
+        let consent = ConsentProof {
             grant_tag,
-            *requester.as_bytes(),
-            scope,
-            testnet_chain,
-            2_000,
-        )
-        .expect("consent proof");
+            object_commitment: manifest.object_commitment,
+            plaintext_root: manifest.plaintext_root,
+            key_commitment: manifest.key_commitment,
+            grantee_commitment: *requester.as_bytes(),
+            scope_tag: scope,
+            chain_id: testnet_chain,
+            expires_at_epoch: 2_000,
+            predicate_proof: unrelated,
+        };
 
         let bundle = ComputeWithoutSeeingBundle {
             manifest: manifest.clone(),
@@ -252,31 +288,45 @@ mod tests {
             .expect("public inputs")
             .to_execution_inputs();
         let mut deletions = DeletionSet::default();
+        assert_eq!(bundle.request.input_commitment, proof.input_commitment);
+        assert_eq!(bundle.result.output_commitment, proof.output_commitment);
+        let structural = verify_execution_proof_structural_with_model(
+            &proof,
+            &bundle.request,
+            &bundle.result,
+            Some(&model),
+        );
+        assert!(structural.is_structurally_valid());
+        // Structural consistency does not prove the sealed input or owner
+        // authorization. An unrelated *valid* STARK cannot open this door.
+        assert_eq!(
+            bundle.permit.consent_proof.verify(
+                &deletions,
+                &manifest.object_commitment,
+                &manifest.plaintext_root,
+                1_000,
+            ),
+            Err(SealBud3Error::ConsentDenied)
+        );
+        for inputs in [Some((program.as_slice(), &pi)), None] {
+            let err = verify_compute_without_seeing(&bundle, &deletions, &model, inputs, 1_000)
+                .expect_err("gated blind compute must not authorize access");
+            assert!(err.contains("closed"), "{err}");
+        }
 
-        let report = verify_compute_without_seeing(
-            &bundle,
-            &deletions,
-            &model,
-            Some((&program, &pi)),
-            1_000,
-        )
-        .expect("valid ComputeWithoutSeeing bundle verifies end-to-end");
-        assert!(report.is_fully_valid());
-
-        // Tampering output commitment fails verification.
         let mut bad_output = bundle.clone();
         bad_output.result.output_commitment = canonical_output_commitment(&[99u8; 8]);
-        assert!(verify_compute_without_seeing(
-            &bad_output,
-            &deletions,
-            &model,
-            Some((&program, &pi)),
-            1_000,
-        )
-        .is_err());
-
-        // Revoking the grant in DeletionSet fails closed.
+        assert!(
+            !verify_execution_proof_structural_with_model(
+                &proof,
+                &bad_output.request,
+                &bad_output.result,
+                Some(&model),
+            )
+            .commitments_ok
+        );
         deletions.tombstone_grant(grant_tag);
+        assert!(deletions.is_revoked(&grant_tag, &manifest.object_commitment));
         assert!(verify_compute_without_seeing(
             &bundle,
             &deletions,

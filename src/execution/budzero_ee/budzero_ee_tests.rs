@@ -70,7 +70,7 @@ fn verify_merkle_is_closed_on_testnet() {
 }
 
 #[test]
-fn verify_inference_is_active_on_testnet() {
+fn verify_inference_stays_closed_at_budzero_ee_and_vm_doors() {
     let bytecode = encode_program(&[
         Instruction {
             opcode: Opcode::Load,
@@ -101,11 +101,12 @@ fn verify_inference_is_active_on_testnet() {
             imm: 0,
         },
     ]);
-    decode_budzero_for_testnet(&bytecode)
-        .expect("VerifyInference is enabled at BudZero EE deploy validation on testnet");
-    ZkVmExecutor::execute_bytecode_mainnet(&bytecode, DEFAULT_CONTRACT_GAS_LIMIT).expect(
-        "VerifyInference executes and proves on testnet under MainnetActivation::default()",
-    );
+    let deploy = decode_budzero_for_testnet(&bytecode)
+        .expect_err("testnet deployment must not bypass the staged inference gate");
+    assert!(deploy.contains("VerifyInference"), "{deploy}");
+    let runtime = ZkVmExecutor::execute_bytecode_mainnet(&bytecode, DEFAULT_CONTRACT_GAS_LIMIT)
+        .expect_err("the production VM must refuse staged inference");
+    assert!(format!("{runtime:?}").contains("VerifyInference"));
 }
 
 #[test]
