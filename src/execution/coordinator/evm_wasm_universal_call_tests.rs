@@ -16,7 +16,7 @@ use crate::execution::coordinator::move_ee::{MoveCallEnvelope, MOVE_BINARY_MAGIC
 use crate::execution::coordinator::state::{
     derive_uel_asset_id, NS_EVM_STORAGE, NS_MOVE_STATE, NS_SVM_ACCOUNT, NS_WASM_STORE,
 };
-use crate::execution::coordinator::svm_ee::SvmInstructionEnvelope;
+use crate::execution::coordinator::svm_ee::{derive_spl_mint_address, SvmInstructionEnvelope};
 use crate::execution::coordinator::universal_call::{
     encode_precompile_call, universal_call_executed_topic0, EVM_UNIVERSAL_PRECOMPILE,
 };
@@ -1448,9 +1448,10 @@ fn home_svm_and_move_pointers_work_cross_ee_and_refuse_unauthorized_mint() {
     );
 
     // 3. Initialize & mint SVM SPL home asset, then operate via stateless EVM pointer.
-    let mint_pk = [0xD1u8; 32];
+    let mint_seed = [0xD1u8; 32];
+    let mint_pk = derive_spl_mint_address(&alice_svm, &mint_seed).expect("mint address");
     let init_ix = serde_json::to_vec(&SvmInstructionEnvelope::SplInitializeMint {
-        mint: mint_pk,
+        mint_seed,
         decimals: 6,
         mint_authority: alice_svm,
         is_token_2022: false,

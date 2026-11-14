@@ -7,9 +7,9 @@ use crate::execution::coordinator::move_ee::{
 };
 use crate::execution::coordinator::state::NS_WASM_STORE;
 use crate::execution::coordinator::svm_ee::{
-    derive_associated_token_address, svm_universal_program_id, SvmEe, SvmInstructionEnvelope,
-    SvmRuntimeConfig, FORBIDDEN_SVM_STAKE_PROGRAM_ID, FORBIDDEN_SVM_VOTE_PROGRAM_ID,
-    SVM_SPL_TOKEN_PROGRAM_ID,
+    derive_associated_token_address, derive_spl_mint_address, svm_universal_program_id, SvmEe,
+    SvmInstructionEnvelope, SvmRuntimeConfig, FORBIDDEN_SVM_STAKE_PROGRAM_ID,
+    FORBIDDEN_SVM_VOTE_PROGRAM_ID, SVM_SPL_TOKEN_PROGRAM_ID,
 };
 use crate::execution::coordinator::wasm_ee::build_valid_cosmwasm_module;
 use crate::execution::coordinator::{ExecutionCoordinator, UelAction, UelReceiptStatus, UelTx};
@@ -60,13 +60,14 @@ fn svm_spl_token_and_vote_stake_refusal_and_universal_cpi() {
 
     let (alice_svm, _) = derive_svm_alias(&alice).expect("alice off-curve svm alias");
     let (bob_svm, _) = derive_svm_alias(&bob).expect("bob off-curve svm alias");
-    let mint = [0x99u8; 32];
+    let mint_seed = [0x99u8; 32];
+    let mint = derive_spl_mint_address(&alice_svm, &mint_seed).expect("mint address");
     let ata = derive_associated_token_address(&alice_svm, &mint).expect("ata");
     assert!(!is_ed25519_on_curve(&ata));
 
     // 1. Initialize SPL Mint, MintTo 500 to Alice, Transfer 200 to Bob.
     let init_ix = serde_json::to_vec(&SvmInstructionEnvelope::SplInitializeMint {
-        mint,
+        mint_seed,
         decimals: 6,
         mint_authority: alice_svm,
         is_token_2022: false,
@@ -440,4 +441,115 @@ fn move_sequential_randomness_staking_refusal_and_universal_call() {
             .expect("r"),
         Some(b"aptos_ok".to_vec())
     );
+}
+
+fn hex32(bytes: &[u8; 32]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// The same two vectors are pinned in the SVM worker: the home environment and the worker derive
+/// one mint address for one `(caller, seed)` pair.
+#[test]
+fn the_spl_mint_address_matches_the_known_answers() {
+    let caller = [0x11u8; 32];
+    assert_eq!(
+        derive_spl_mint_address(&caller, &[0x22; 32]).map(|a| hex32(&a)),
+        Some(String::from(
+            "1ae021a316289bcb841cd784d3ca1c8a7085beb18c93bca77ef7b3f79979d816"
+        ))
+    );
+    // The first candidate for this seed is a curve point, so the search takes its retry path.
+    assert_eq!(
+        derive_spl_mint_address(&caller, &[0x25; 32]).map(|a| hex32(&a)),
+        Some(String::from(
+            "d316db7a76988d0f340d9014b3d0c9448e2240b9dcb7446ffc231081f7029217"
+        ))
+    );
+    // The address belongs to the caller: the same seed names another mint for another caller.
+    assert_ne!(
+        derive_spl_mint_address(&[0x33; 32], &[0x22; 32]),
+        derive_spl_mint_address(&caller, &[0x22; 32])
+    );
+}
+
+/// A mint address is a global identity. An account used to be able to take any unclaimed address
+/// first, block the real issuer for good and record a third party as an issuer.
+#[test]
+fn an_svm_mint_belongs_to_the_account_that_initializes_it() {
+    let alice = Address::from([0x71; 32]);
+    let mallory = Address::from([0x74; 32]);
+    let proposer = Address::from([0x73; 32]);
+    let mut state = funded(&[alice, mallory, proposer]);
+    let mut coord = ExecutionCoordinator::new();
+    let (alice_svm, _) = derive_svm_alias(&alice).expect("alice svm alias");
+    let (mallory_svm, _) = derive_svm_alias(&mallory).expect("mallory svm alias");
+    let seed = [0x22u8; 32];
+    let init = |seed: [u8; 32], authority: [u8; 32]| {
+        serde_json::to_vec(&SvmInstructionEnvelope::SplInitializeMint {
+            mint_seed: seed,
+            decimals: 6,
+            mint_authority: authority,
+            is_token_2022: false,
+        })
+        .expect("json")
+    };
+    let tx = |hash: u8, sender: Address, nonce: u64, input: Vec<u8>| UelTx {
+        tx_hash: [hash; 32],
+        sender,
+        nonce,
+        ee: EeId::SVM,
+        action: UelAction::Call {
+            target: SVM_SPL_TOKEN_PROGRAM_ID.to_vec(),
+            input,
+        },
+        value_attos: 0,
+        gas_limit_bgu: 200_000,
+        max_fee_per_bgu_attos: MIN_UEL_BASE_FEE_ATTOS * 2,
+        max_priority_fee_per_bgu_attos: 100,
+    };
+
+    // Mallory goes first with the seed Alice is about to use, and names Alice as an issuer.
+    let recs = state
+        .execute_uel_block(
+            &mut coord,
+            sample_ctx(),
+            proposer,
+            &[
+                tx(0x81, mallory, 0, init(seed, mallory_svm)),
+                tx(0x82, mallory, 1, init([0x23; 32], alice_svm)),
+                tx(0x83, alice, 0, init(seed, alice_svm)),
+            ],
+        )
+        .expect("mint block");
+    assert_eq!(recs[0].status, UelReceiptStatus::Success, "her own mint");
+    assert_eq!(
+        recs[1].status,
+        UelReceiptStatus::Revert,
+        "she cannot record Alice as the issuer of a mint Alice never asked for"
+    );
+    assert_eq!(
+        recs[2].status,
+        UelReceiptStatus::Success,
+        "Alice is not blocked by Mallory taking the same seed"
+    );
+    assert_ne!(recs[0].output, recs[2].output);
+    assert_eq!(
+        Some(recs[2].output.clone()),
+        derive_spl_mint_address(&alice_svm, &seed).map(|a| a.to_vec())
+    );
+    assert_eq!(
+        Some(recs[0].output.clone()),
+        derive_spl_mint_address(&mallory_svm, &seed).map(|a| a.to_vec())
+    );
+
+    // The same caller and seed name the same mint, so a second initialization is refused.
+    let again = state
+        .execute_uel_block(
+            &mut coord,
+            sample_ctx(),
+            proposer,
+            &[tx(0x84, alice, 1, init(seed, alice_svm))],
+        )
+        .expect("second block");
+    assert_eq!(again[0].status, UelReceiptStatus::Revert);
 }
