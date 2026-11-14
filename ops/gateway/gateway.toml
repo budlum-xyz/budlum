@@ -28,6 +28,17 @@ cache_max_bytes = 10000000000
 # Requests per minute, per client address.
 rate_per_minute = 120
 
+# Who the clients are. The terminator in front of this process connects from
+# loopback and writes the client address into `X-Forwarded-For`; only that peer
+# is believed, and the client is the rightmost address in the header that is
+# not itself a trusted proxy. To serve clients that connect straight to this
+# port, set `allow_direct = true` and remove `trusted_proxies`: every forwarded
+# header is then ignored and the socket peer is the client. The process refuses
+# to start with neither of the two or with both, because a rate limit keyed on a
+# header the client wrote is no limit at all.
+trusted_proxies = ["127.0.0.1"]
+# allow_direct = true
+
 # A block list affects this gateway only. It never writes a chain record.
 # blocklist_file = "/etc/budlum-gateway/blocklist.txt"
 

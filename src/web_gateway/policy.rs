@@ -181,16 +181,33 @@ pub fn content_headers_with_csp(
     headers
 }
 
+/// Most clients the limiter remembers at once.
+///
+/// One entry is a short key and two integers, so the table stays within a few
+/// megabytes. A client past the bound is refused rather than remembered: the
+/// memory the limiter holds must not grow with the number of addresses an
+/// attacker can name.
+const MAX_TRACKED_CLIENTS: usize = 65_536;
+
 /// A fixed-window rate limiter, per client key.
 ///
 /// Per key, not global: one reader cannot spend another reader's budget. The
 /// window is chosen by the caller in seconds and carried with the state, so a
 /// test can advance a clock instead of sleeping.
+///
+/// The table is swept whenever the window changes, so a closed window is
+/// forgotten without a caller having to ask, and it holds at most
+/// `MAX_TRACKED_CLIENTS` keys. Both bounds hold whatever the keys are: a key is
+/// only as trustworthy as the caller that derived it, and the gateway derives
+/// it from the socket peer or from a configured proxy, never from a header the
+/// client chose.
 #[derive(Debug, Clone)]
 pub struct RateLimiter {
     per_window: u32,
     window_secs: u64,
     counts: BTreeMap<String, (u64, u32)>,
+    /// The window `counts` was last swept for.
+    swept_window: Option<u64>,
 }
 
 /// What the limiter decided.
@@ -212,33 +229,40 @@ impl RateLimiter {
             per_window,
             window_secs: window_secs.max(1),
             counts: BTreeMap::new(),
+            swept_window: None,
         }
     }
 
     /// Count one request from `key` at `now_secs`.
+    ///
+    /// A key the table does not hold is refused once the table is full. A key
+    /// it holds keeps its own budget whatever the table holds.
     pub fn check(&mut self, key: &str, now_secs: u64) -> LimitDecision {
         let window = now_secs / self.window_secs;
-        match self.counts.get_mut(key) {
-            Some((open_window, used)) if *open_window == window => {
-                if *used >= self.per_window {
-                    LimitDecision::Refused
-                } else {
-                    *used = used.saturating_add(1);
-                    LimitDecision::AllowedWithinWindow
-                }
-            }
-            _ => {
-                self.counts.insert(key.to_string(), (window, 1));
-                LimitDecision::Allowed
-            }
+        if self.swept_window != Some(window) {
+            self.sweep(window);
         }
+        if let Some((_, used)) = self.counts.get_mut(key) {
+            return if *used >= self.per_window {
+                LimitDecision::Refused
+            } else {
+                *used = used.saturating_add(1);
+                LimitDecision::AllowedWithinWindow
+            };
+        }
+        if self.counts.len() >= MAX_TRACKED_CLIENTS {
+            return LimitDecision::Refused;
+        }
+        self.counts.insert(key.to_string(), (window, 1));
+        LimitDecision::Allowed
     }
 
-    /// Drop keys whose window has closed, so the map does not grow with every
-    /// address that ever connected.
-    pub fn prune(&mut self, now_secs: u64) {
-        let window = now_secs / self.window_secs;
+    /// Drop the keys whose window has closed, so the table does not grow with
+    /// every address that ever connected. `check` runs it once whenever the
+    /// window changes.
+    fn sweep(&mut self, window: u64) {
         self.counts.retain(|_, (open, _)| *open == window);
+        self.swept_window = Some(window);
     }
 
     /// Test-only view of limiter key retention after a window is pruned.
@@ -427,12 +451,72 @@ mod tests {
         assert_eq!(limiter.check("a", 20), LimitDecision::Refused);
         // Another key is unaffected: one reader cannot spend another's budget.
         assert_eq!(limiter.check("b", 20), LimitDecision::Allowed);
-        // A new window resets the count.
+        // A new window resets the count and forgets the keys of the window
+        // that closed: `b` was last seen in window 0.
         assert_eq!(limiter.check("a", 60), LimitDecision::Allowed);
-        assert_eq!(limiter.tracked_keys(), 2);
-        // Pruning drops the keys whose window has closed.
-        limiter.prune(120);
-        assert_eq!(limiter.tracked_keys(), 0);
+        assert_eq!(limiter.tracked_keys(), 1);
+        // A later window forgets `a` too: the only key left is the new one.
+        assert_eq!(limiter.check("c", 120), LimitDecision::Allowed);
+        assert_eq!(limiter.tracked_keys(), 1);
+    }
+
+    /// The table must not hold one entry per address that ever connected.
+    ///
+    /// A client that names a different address on every request added an
+    /// entry per request, and nothing removed them. The table is bounded at
+    /// 65,536 clients, and a new client past the bound is refused rather than
+    /// remembered, so the memory the limiter holds does not grow with the
+    /// traffic an attacker chooses to send.
+    #[test]
+    fn the_rate_limiter_holds_at_most_a_fixed_number_of_clients() {
+        let mut limiter = RateLimiter::new(2, 60);
+        let mut refused = 0usize;
+        for i in 0..70_000u32 {
+            if limiter.check(&format!("client-{i}"), 0) == LimitDecision::Refused {
+                refused += 1;
+            }
+        }
+        assert!(
+            limiter.tracked_keys() <= 65_536,
+            "tracked {} clients, the bound is 65536",
+            limiter.tracked_keys()
+        );
+        assert_eq!(
+            refused,
+            70_000 - 65_536,
+            "every client past the bound is refused"
+        );
+        // A client already in the table keeps its own budget.
+        assert_eq!(
+            limiter.check("client-0", 1),
+            LimitDecision::AllowedWithinWindow
+        );
+    }
+
+    /// A closed window is forgotten without anyone calling `prune`.
+    #[test]
+    fn the_rate_limiter_forgets_closed_windows_by_itself() {
+        let mut limiter = RateLimiter::new(2, 60);
+        for i in 0..1_000u32 {
+            let _ = limiter.check(&format!("client-{i}"), 0);
+        }
+        assert_eq!(limiter.tracked_keys(), 1_000);
+        let _ = limiter.check("later", 60);
+        assert_eq!(
+            limiter.tracked_keys(),
+            1,
+            "the window of the first 1000 clients is closed"
+        );
+    }
+
+    /// Being full for one window must not lock the gateway for the next one.
+    #[test]
+    fn a_full_rate_limiter_admits_new_clients_once_the_window_rolls() {
+        let mut limiter = RateLimiter::new(2, 60);
+        for i in 0..70_000u32 {
+            let _ = limiter.check(&format!("client-{i}"), 0);
+        }
+        assert_eq!(limiter.check("fresh", 60), LimitDecision::Allowed);
     }
 
     #[test]
