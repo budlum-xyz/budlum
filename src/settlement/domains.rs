@@ -1995,10 +1995,10 @@ pub(crate) fn execute_relayer_intent_tx(
                 .try_add_balance(&owner, refund)
                 .map_err(SettlementTxError::Refused)
         }
-        RelayerIntentTx::Award { intent_id } => state
+        RelayerIntentTx::Award { intent_id, solver } => state
             .settlement
             .relayer_policy
-            .award_intent(*intent_id, ctx.sender, state.current_block_height)
+            .award_intent(*intent_id, ctx.sender, *solver, state.current_block_height)
             .map(|_| ())
             .map_err(SettlementTxError::Refused),
         RelayerIntentTx::Expire { intent_id } => {
@@ -3277,7 +3277,8 @@ mod tests {
             &mut state,
             &ctx(relayer),
             &SettlementTx::RelayerIntent(Box::new(crate::relayer::RelayerIntentTx::Award {
-                intent_id: intent.intent_id
+                intent_id: intent.intent_id,
+                solver: relayer,
             }))
         )
         .is_err());
@@ -3286,6 +3287,7 @@ mod tests {
             &ctx(owner),
             &SettlementTx::RelayerIntent(Box::new(crate::relayer::RelayerIntentTx::Award {
                 intent_id: intent.intent_id,
+                solver: relayer,
             })),
         )
         .unwrap();
@@ -3399,6 +3401,7 @@ mod tests {
             &ctx(owner),
             &SettlementTx::RelayerIntent(Box::new(crate::relayer::RelayerIntentTx::Award {
                 intent_id: intent.intent_id,
+                solver: relayer,
             })),
         )
         .unwrap();
@@ -3533,6 +3536,7 @@ mod tests {
             &ctx(owner),
             &SettlementTx::RelayerIntent(Box::new(crate::relayer::RelayerIntentTx::Award {
                 intent_id: intent.intent_id,
+                solver: relayer,
             })),
         )
         .unwrap();
@@ -3662,6 +3666,7 @@ mod tests {
             &ctx(owner),
             &SettlementTx::RelayerIntent(Box::new(crate::relayer::RelayerIntentTx::Award {
                 intent_id: intent.intent_id,
+                solver: relayer,
             })),
         )
         .unwrap();
