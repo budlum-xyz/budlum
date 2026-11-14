@@ -167,9 +167,9 @@ impl ZkVmExecutor {
     ///
     /// Deprecated alias for `execute_for_block`.
     ///
-    /// Kept so an out-of-tree caller does not break. The block path and this
-    /// name now share one implementation: two copies of the gated VM run can
-    /// drift, and only one of them would be the consensus door.
+    /// Convenience: kept as a compatibility entry point for out-of-tree
+    /// callers. The block path and this name share one implementation: two
+    /// copies of the gated VM run can drift, and only one would be consensus.
     ///
     /// # Errors
     ///
@@ -632,9 +632,8 @@ mod tests {
         assert!(receipt.proof_bytes > 0);
     }
 
-    /// Both `VerifyMerkle` and `VerifyInference` are active under
-    /// `MainnetActivation::default()` (backed by Poseidon AIR constraints) and
-    /// remain gated off under explicit `MainnetActivation::closed()`.
+    /// Testnet keeps `VerifyMerkle` and `VerifyInference` closed under the
+    /// default activation until their opening gates pass.
     #[test]
     fn contract_call_bytecode_cannot_reach_a_gated_opcode() {
         let inf_program = vec![
@@ -680,18 +679,19 @@ mod tests {
             .encode(),
         ];
         let bytecode: Vec<u8> = inf_program.into_iter().flat_map(u64::to_le_bytes).collect();
-        let receipt = ZkVmExecutor::execute_bytecode(
-            &bytecode,
-            DEFAULT_CONTRACT_GAS_LIMIT,
-            TxContext::default(),
-        )
-        .expect("VerifyInference must execute and prove on the ContractCall path");
-        assert_eq!(
-            receipt.events,
-            vec![bud_vm::verify_inference_digest(0xAB, 0xCD, 3)]
+        assert!(
+            ZkVmExecutor::execute_bytecode(
+                &bytecode,
+                DEFAULT_CONTRACT_GAS_LIMIT,
+                TxContext::default(),
+            )
+            .is_err(),
+            "testnet contract calls must refuse VerifyInference"
         );
-        prove_bytecode_mainnet(&bytecode, DEFAULT_CONTRACT_GAS_LIMIT)
-            .expect("VerifyInference must prove cleanly on mainnet path");
+        assert!(
+            prove_bytecode_mainnet(&bytecode, DEFAULT_CONTRACT_GAS_LIMIT).is_err(),
+            "the testnet proof path must refuse VerifyInference"
+        );
 
         for opcode in [Opcode::VerifyMerkle, Opcode::VerifyInference] {
             let word = Instruction {
@@ -753,25 +753,19 @@ mod tests {
             .encode(),
         ];
         let bytecode: Vec<u8> = program.into_iter().flat_map(u64::to_le_bytes).collect();
-        let (env, pi, words) =
-            prove_bytecode_with_memory(&bytecode, DEFAULT_CONTRACT_GAS_LIMIT, |_| Ok(()))
-                .expect("VerifyInference must prove on memory-image prover");
-        Prover::verify(&env, &pi, &words).expect("memory-image proof verifies");
+        assert!(
+            prove_bytecode_with_memory(&bytecode, DEFAULT_CONTRACT_GAS_LIMIT, |_| Ok(())).is_err(),
+            "the memory-image prover must enforce the default closed activation"
+        );
     }
 
-    /// `MainnetActivation::default()` is active for AIR-backed `VerifyMerkle`
-    /// and `VerifyInference`, and `bud-vm` reads `MainnetActivation::default()`.
+    /// The default activation keeps evidence-dependent opcodes closed, and
+    /// `bud-vm` decodes against that default schedule.
     #[test]
     fn the_staged_rollout_defaults_are_the_ones_in_force() {
         let d = bud_isa::MainnetActivation::default();
-        assert!(
-            d.verify_merkle_enabled,
-            "VerifyMerkle is enabled by default with 64-depth 30-round Poseidon constraints"
-        );
-        assert!(
-            d.verify_inference_enabled,
-            "VerifyInference is enabled by default with 30-round Poseidon commitment AIR"
-        );
+        assert!(!d.verify_merkle_enabled);
+        assert!(!d.verify_inference_enabled);
 
         let vm_src = include_str!("../../budzero/bud-vm/src/lib.rs");
         let vm_code: String = vm_src
@@ -1037,8 +1031,7 @@ mod tests {
         }
     }
 
-    /// VerifyInference runs in mainnet mode under `MainnetActivation::default()`
-    /// and remains rejected under `MainnetActivation::closed()`.
+    /// VerifyInference remains rejected in mainnet mode under the default schedule.
     #[test]
     fn verify_inference_gated_in_mainnet_mode() {
         let program = [
@@ -1076,16 +1069,9 @@ mod tests {
             .flat_map(|instruction| instruction.encode().to_le_bytes())
             .collect();
 
-        let receipt = ZkVmExecutor::execute_bytecode_mainnet(&bytecode, DEFAULT_CONTRACT_GAS_LIMIT)
-            .expect("VerifyInference decodes and proves under MainnetActivation::default()");
-        assert!(receipt.proof_bytes > 0);
         assert!(
-            bud_isa::Instruction::decode_for_mainnet(
-                program[2].encode(),
-                bud_isa::MainnetActivation::closed(),
-            )
-            .is_err(),
-            "explicitly closed activation must still refuse VerifyInference"
+            ZkVmExecutor::execute_bytecode_mainnet(&bytecode, DEFAULT_CONTRACT_GAS_LIMIT).is_err(),
+            "the default testnet activation must refuse VerifyInference"
         );
     }
 
