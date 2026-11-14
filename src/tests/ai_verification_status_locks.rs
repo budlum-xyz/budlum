@@ -132,24 +132,23 @@ fn stark_verification_helpers_have_no_production_callers() {
     );
 }
 
-/// `VerifyInference` checks the 30-round Poseidon inference commitment digest in
-/// the VM and AIR and is active under `MainnetActivation::default()`.
+/// `VerifyInference` stays closed under the default testnet activation.
 #[test]
-fn verify_inference_opcode_is_reserved_and_answers_zero() {
-    let src = read("budzero/bud-vm/src/lib.rs");
-    let head = "Opcode::VerifyInference => {";
-    let at = src.find(head).expect("VerifyInference arm must exist");
-    let arm = squash(block_after(&src[at + head.len()..]));
+fn verify_inference_stays_gated_by_default() {
+    let isa = read("budzero/bud-isa/src/lib.rs");
     assert!(
-        arm.contains("verify_inference_digest")
-            && arm.contains("self.activation.verify_inference_enabled"),
-        "VerifyInference must check the activation gate and evaluate verify_inference_digest; \
-         keep docs/AI_VERIFICATION_STATUS.md synchronized with any change"
+        isa.contains("verify_inference_enabled: false"),
+        "the default activation must keep VerifyInference closed"
+    );
+    let vm = read("budzero/bud-vm/src/lib.rs");
+    assert!(
+        vm.contains("Instruction::decode_for_mainnet(raw, activation)"),
+        "mainnet-mode decoding must enforce the activation schedule"
     );
     let air = read("budzero/bud-proof/src/plonky3_air.rs");
     assert!(
         air.contains("COL_IS_VERIFY_INFERENCE"),
-        "AIR must retain the VerifyInference constraint wiring"
+        "AIR must retain the VerifyInference constraints for explicit activation"
     );
 }
 

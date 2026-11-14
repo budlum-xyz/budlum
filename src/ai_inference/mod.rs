@@ -5,7 +5,7 @@
 //!
 //! **Scope boundary:** access grants, compute bonds, perception limits, and
 //! Plonky3 STARK verification for registered `require_execution_proof` MLP models
-//! are active on testnet (`FULL_AI_STARK_VERIFICATION_LIVE = true`). Details:
+//! stay closed on testnet until the AI opening gates pass. Details:
 //! `docs/AI_VERIFICATION_STATUS.md`.
 //!
 //! - **Operator compute bond** = `AiRegistry` verifier stake (the AI-layer-first decision).
