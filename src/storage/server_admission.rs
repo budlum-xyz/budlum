@@ -1,3 +1,5 @@
+//! WIRING: unwired - this legacy BUD 1.0 admission API is excluded pending its IP-07 removal.
+//!
 //! Server admission for the 1.0 mobile-self profile: the network-side
 //! measurement that a device really is the server of its own content.
 
