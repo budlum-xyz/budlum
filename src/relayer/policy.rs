@@ -645,9 +645,9 @@ impl RelayerPolicyRegistry {
         Ok(())
     }
 
-    /// Lowest eligible quote at this height: lapsed or imminently expiring
-    /// offers cannot block the other solvers. Ties use bond then address.
-    pub fn best_bid_at(&self, intent_id: &[u8; 32], current_block: u64) -> Option<&SolverBid> {
+    /// Test helper for comparing owner selection against the lowest eligible quote.
+    #[cfg(test)]
+    fn best_bid_at(&self, intent_id: &[u8; 32], current_block: u64) -> Option<&SolverBid> {
         self.bids.get(intent_id).and_then(|bids| {
             bids.iter()
                 .filter(|bid| {
