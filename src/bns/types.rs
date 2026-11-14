@@ -11,7 +11,6 @@ pub struct NameRecord {
     pub name: String,
     pub owner: Address,
     pub expires_at: u64,
-    pub resolver: Option<Address>,
 
     // Full_impl - storage/address binding
     pub address: Option<Address>,
@@ -56,7 +55,6 @@ impl NameRecord {
             name,
             owner,
             expires_at,
-            resolver: None,
             address: Some(owner),
             consensus_domain_id: None,
             storage_root: None,
@@ -183,7 +181,6 @@ pub struct BnsMerkleBranch {
 /// header root commits to, or they do not.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BnsBranchExtras {
-    pub resolver: Option<Address>,
     pub address: Option<Address>,
     pub consensus_domain_id: Option<u32>,
     pub storage_domain_id: Option<u32>,

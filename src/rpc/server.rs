@@ -4605,7 +4605,6 @@ impl BudlumApiServer for RpcServer {
         })?;
         let extras_json = |e: &crate::bns::types::BnsBranchExtras| -> serde_json::Value {
             serde_json::json!({
-                "resolver": e.resolver.map(|a| Self::to_0x_hash(a.to_hex())),
                 "address": e.address.map(|a| Self::to_0x_hash(a.to_hex())),
                 "consensus_domain_id": e.consensus_domain_id,
                 "storage_domain_id": e.storage_domain_id,
