@@ -1,8 +1,10 @@
 //! Private cross-owner deduplication experiments.
 //!
-//! `threshold` exposes the fail-closed transcript API (`TESTNET_PRIVATE_DEDUP_ENABLED`).
-//! `committee` provides the committee/epoch-batch threshold OPRF model, active
-//! on testnet `45261` from genesis (`ACTIVATION` height `Some(0)`).
+//! Both `threshold` and `committee` are experimental transcript APIs and
+//! closed on testnet `45261`. Their hash-derived shares are not a threshold
+//! OPRF; a plaintext challenge transcript is not a private ownership proof.
+//! `TESTNET_PRIVATE_DEDUP_ENABLED` and `ACTIVATION` stay closed until real
+//! cryptographic primitives and a production admission path exist.
 
 pub mod committee;
 pub mod threshold;

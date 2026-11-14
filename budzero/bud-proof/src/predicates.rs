@@ -1,7 +1,9 @@
 //! Universal ZKVM predicates `YK1..YK11` for BudZero verifiable state checks.
 //!
-//! Each predicate represents a canonical, domain-separated verifiable statement
-//! backed by 30-round Goldilocks Poseidon commitments and BudZKVM execution proofs.
+//! Only YK6 is presently provable/verifiable, as a public quorum counter
+//! checked against independently authenticated shares at its escrow boundary.
+//! The other predicates require private-witness or context binding not yet
+//! supplied by this generic public-statement API; their doors stay closed.
 //!
 //! Convenience: exposed for STARK predicate proving and verification across VM, privacy, and storage.
 
@@ -132,10 +134,21 @@ impl PredicateStatement {
         }
     }
 
-    /// Build a BudZKVM verification program that binds `(lhs, rhs, aux, kind)` inside
-    /// a STARK proof (`VerifyInference` / `Poseidon` + `Assert` + `Halt`).
+    /// Build a BudZKVM program for the public statement.
+    ///
+    /// The quorum predicate is backed by independently checked ML-DSA shares
+    /// at the threshold-escrow boundary; its digest uses ordinary Poseidon.
+    /// Other YK predicates retain the staged VerifyInference opcode and
+    /// remain closed under the default schedule. In particular this must not
+    /// turn a claimed Merkle root, a model digest, or an unsigned object grant
+    /// into a live proof by routing them around their opening gates.
     #[must_use]
     pub fn to_program(&self) -> Vec<u64> {
+        let commitment_opcode = if self.kind == PredicateKind::Yk6ThresholdQuorum {
+            Opcode::Poseidon
+        } else {
+            Opcode::VerifyInference
+        };
         let enc = |opcode: Opcode, rd: u8, rs1: u8, rs2: u8, imm: i32| {
             Instruction {
                 opcode,
@@ -166,7 +179,7 @@ impl PredicateStatement {
                 0,
                 i32::try_from(self.rhs & 0x7FFF_FFFF).unwrap_or(0),
             ),
-            enc(Opcode::VerifyInference, 5, 3, 4, aux_imm),
+            enc(commitment_opcode, 5, 3, 4, aux_imm),
             enc(Opcode::Load, 6, 0, 0, i32::try_from(ok).unwrap_or(0)),
             enc(Opcode::Assert, 0, 6, 0, 0),
             enc(Opcode::Log, 0, 5, 0, 0),
@@ -179,6 +192,9 @@ impl PredicateStatement {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PredicateError {
     ConditionUnsatisfied(PredicateKind),
+    /// This generic API does not bind the private witness or remote context
+    /// required by this predicate, independently of the VM opcode schedule.
+    ActivationClosed(PredicateKind),
     VmFailed(String),
     ProgramMismatch,
     ProofInvalid(String),
@@ -213,6 +229,12 @@ fn hash_program(program: &[u64]) -> [u8; 32] {
 pub fn prove_predicate(statement: &PredicateStatement) -> Result<PredicateProof, PredicateError> {
     if !statement.holds() {
         return Err(PredicateError::ConditionUnsatisfied(statement.kind));
+    }
+    // A VM accepting VerifyInference would still only prove an equality of
+    // caller-supplied public numbers, not ownership, Merkle membership, or an
+    // actual inference. Opening the opcode must not implicitly open YK1..YK11.
+    if statement.kind != PredicateKind::Yk6ThresholdQuorum {
+        return Err(PredicateError::ActivationClosed(statement.kind));
     }
     let program = statement.to_program();
     let mut vm = Vm::with_mainnet_mode(1024, 1_000_000, true);
@@ -258,6 +280,12 @@ pub fn verify_predicate(proof: &PredicateProof) -> Result<(), PredicateError> {
     if !proof.statement.holds() {
         return Err(PredicateError::ConditionUnsatisfied(proof.statement.kind));
     }
+    // Independently refuse externally produced STARKs for the unbound kinds:
+    // an isolated prover can run the opcode even while production decoding is
+    // closed. A valid execution trace is not a proof of a missing relation.
+    if proof.statement.kind != PredicateKind::Yk6ThresholdQuorum {
+        return Err(PredicateError::ActivationClosed(proof.statement.kind));
+    }
     if proof.statement_digest != proof.statement.digest() {
         return Err(PredicateError::ProgramMismatch);
     }
@@ -294,7 +322,7 @@ mod tests {
     }
 
     #[test]
-    fn yk2_balance_conservation_proves_and_verifies_end_to_end() {
+    fn yk2_balance_conservation_stays_closed_until_private_witness_is_bound() {
         let st = PredicateStatement {
             kind: PredicateKind::Yk2BalanceConservation,
             lhs: 500,
@@ -302,12 +330,93 @@ mod tests {
             aux: 7,
             chain_id: 45261,
         };
-        let proof = prove_predicate(&st).expect("honest YK2 proves");
-        verify_predicate(&proof).expect("honest YK2 verifies");
+        assert_eq!(
+            prove_predicate(&st).unwrap_err(),
+            PredicateError::ActivationClosed(PredicateKind::Yk2BalanceConservation)
+        );
+    }
 
-        let mut bad = proof.clone();
-        bad.statement.rhs = 501;
-        assert!(verify_predicate(&bad).is_err());
+    #[test]
+    fn isolated_valid_yk1_execution_proof_cannot_authorize_ownership() {
+        let statement = PredicateStatement {
+            kind: PredicateKind::Yk1Ownership,
+            lhs: 500,
+            rhs: 500,
+            aux: 1,
+            chain_id: 45261,
+        };
+        let program = statement.to_program();
+        assert!(program.iter().any(|word| {
+            Instruction::decode(*word).is_ok_and(|ins| ins.opcode == Opcode::VerifyInference)
+        }));
+        // An isolated VM can produce a real STARK for a public equality.
+        // That still provides no private ownership witness and must be refused
+        // at the *verifier* boundary, not just at production VM admission.
+        let mut vm = Vm::with_mainnet_mode(1024, 1_000_000, false);
+        let receipt = vm.run_receipt(&program);
+        assert!(receipt.success);
+        let pi = ExecutionPublicInputs {
+            chain_id: statement.chain_id,
+            program_hash: hash_program(&program),
+            initial_state_root: crate::initial_state_root_of(
+                crate::memory_image_commitment_of_reads(&crate::initial_memory_reads(&vm.trace)),
+                crate::register_image_commitment_of_reads(&crate::initial_register_reads(
+                    &vm.trace,
+                )),
+            ),
+            final_state_root: receipt.state_writes_digest,
+            sender: 0,
+            nonce: 0,
+            block_height: 0,
+            gas_limit: vm.gas_limit,
+            gas_used: vm.gas_used,
+            exit_code: 0,
+            trace_len: vm.trace.len() as u64,
+            event_digest: crate::event_digest_from_events(&receipt.events),
+            state_writes_digest: receipt.state_writes_digest,
+        };
+        let envelope = crate::Plonky3Adapter::prove(&vm.trace, &pi, &program)
+            .expect("the isolated STARK really proves VM execution");
+        crate::Plonky3Adapter::verify_with_activation(
+            &envelope,
+            &pi,
+            &program,
+            bud_isa::MainnetActivation::full(),
+        )
+        .expect("a hypothetically activated VM accepts this public execution trace");
+        let proof = PredicateProof {
+            statement: statement.clone(),
+            statement_digest: statement.digest(),
+            program,
+            public_inputs: pi,
+            envelope,
+        };
+        assert_eq!(
+            verify_predicate(&proof),
+            Err(PredicateError::ActivationClosed(
+                PredicateKind::Yk1Ownership
+            ))
+        );
+    }
+
+    #[test]
+    fn yk6_quorum_uses_poseidon_without_opening_inference_or_merkle() {
+        let st = PredicateStatement {
+            kind: PredicateKind::Yk6ThresholdQuorum,
+            lhs: 4,
+            rhs: 4,
+            aux: 7,
+            chain_id: 45261,
+        };
+        assert!(!bud_isa::MainnetActivation::default().verify_inference_enabled);
+        assert!(st.to_program().iter().any(|word| {
+            Instruction::decode(*word).is_ok_and(|inst| inst.opcode == Opcode::Poseidon)
+        }));
+        let proof = prove_predicate(&st).expect("quorum predicate proves with ordinary Poseidon");
+        verify_predicate(&proof).expect("quorum predicate verifies with ordinary Poseidon");
+        let mut bad = proof;
+        bad.statement.aux ^= 1;
+        assert_eq!(verify_predicate(&bad), Err(PredicateError::ProgramMismatch));
     }
 
     #[test]
@@ -320,8 +429,26 @@ mod tests {
             chain_id: 45261,
         };
         assert!(valid_inf.holds());
-        let proof = prove_predicate(&valid_inf).expect("honest YK5 proves");
-        verify_predicate(&proof).expect("honest YK5 verifies");
+        assert_eq!(
+            prove_predicate(&valid_inf).unwrap_err(),
+            PredicateError::ActivationClosed(PredicateKind::Yk5InferenceAttestation)
+        );
+        for kind in [
+            PredicateKind::Yk3MerkleMembership,
+            PredicateKind::Yk11ObjectBinding,
+        ] {
+            let gated = PredicateStatement {
+                kind,
+                lhs: 123,
+                rhs: 123,
+                aux: 1,
+                chain_id: 45261,
+            };
+            assert_eq!(
+                prove_predicate(&gated).unwrap_err(),
+                PredicateError::ActivationClosed(kind)
+            );
+        }
 
         let unsat_quorum = PredicateStatement {
             kind: PredicateKind::Yk6ThresholdQuorum,

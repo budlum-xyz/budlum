@@ -1,9 +1,10 @@
 //! Private cross-owner deduplication for sealed B.U.D. 3.0 objects (Section 6.20.2.6).
 //! exposed for expansion-tier sealed deduplication, threshold OPRF evaluation, and epoch-batched reference settlement.
 //!
-//! Ownership proofs are generated and verified as real Plonky3 STARK proofs
-//! via `bud_proof::predicates` (`PredicateKind::Yk1Ownership`) bound to the
-//! claimant, epoch, OPRF tag, and PADME-padded bucket length.
+//! YK1 ownership predicates require the gated VerifyInference opcode; no
+//! private-dedup proof is accepted by the default testnet schedule. The
+//! transcript-share helper is not a threshold OPRF. Keep the feature closed
+//! until a real OPRF and witness-bound proof are independently reviewed.
 
 use bud_proof::predicates::{
     prove_predicate, verify_predicate, PredicateKind, PredicateProof, PredicateStatement,
@@ -18,9 +19,11 @@ use crate::core::hash::hash_fields_bytes;
 
 use super::super::seal::padme_padded_len;
 
-/// Testnet posture: cross-owner private dedup is active (`Section 6.20.2.6`).
+/// Cross-owner private dedup stays closed on testnet. Its transcript shares
+/// are not a threshold OPRF, and YK1 cannot attest private ownership under
+/// the gated production proof schedule.
 /// Convenience: exposed for launch configuration gates.
-pub const TESTNET_PRIVATE_DEDUP_ENABLED: bool = true;
+pub const TESTNET_PRIVATE_DEDUP_ENABLED: bool = false;
 
 /// Maximum private deduplication OPRF queries per account per epoch (`Section 6.20.2.6`).
 /// Convenience: exposed for rate-limiter inspection and tests.
@@ -160,21 +163,21 @@ fn ownership_predicate_statement(
 }
 
 impl OwnershipProofBundle {
-    /// Construct a real `BudZero` STARK ownership proof bound to plaintext,
-    /// claimant, epoch, blinded OPRF tag, and PADME size bucket.
+    /// Attempt a BudZero ownership proof. Production refuses while YK1's
+    /// proof opening gate is closed; never return an invalid placeholder bundle
+    /// that a caller could mistake for a successfully produced proof.
     /// Convenience: exposed for client-side BudZero prover integration.
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// Never panics for valid field-sized inputs unless the in-tree Plonky3
-    /// prover fails internally.
-    #[must_use]
+    /// Returns [`PrivateDedupError::InvalidOwnershipProof`] if proving is
+    /// unavailable or the proof cannot be serialized within the size bound.
     pub fn prove_plaintext_ownership(
         claimant: Address,
         epoch: u64,
         oprf_tag: [u8; 32],
         plaintext: &[u8],
-    ) -> Self {
+    ) -> Result<Self, PrivateDedupError> {
         let len_u64 = u64::try_from(plaintext.len()).unwrap_or(u64::MAX);
         let padme_bucket_bytes = padme_padded_len(len_u64);
         let stark_witness_commitment = hash_fields_bytes(&[
@@ -192,48 +195,25 @@ impl OwnershipProofBundle {
             padme_bucket_bytes,
             &stark_witness_commitment,
         );
-        let proof = prove_predicate(&stmt).unwrap_or_else(|e| {
-            // Unreachable for valid Yk1Ownership statement; surface empty so verification fails closed.
-            tracing::warn!("private_dedup STARK prove failed: {e:?}");
-            PredicateProof {
-                statement: stmt.clone(),
-                statement_digest: 0,
-                program: Vec::new(),
-                public_inputs: bud_proof::ExecutionPublicInputs {
-                    chain_id: stmt.chain_id,
-                    program_hash: [0u8; 32],
-                    initial_state_root: [0u8; 32],
-                    final_state_root: [0u8; 32],
-                    sender: 0,
-                    nonce: 0,
-                    block_height: 0,
-                    gas_limit: 0,
-                    gas_used: 0,
-                    exit_code: 1,
-                    trace_len: 0,
-                    event_digest: [0u8; 32],
-                    state_writes_digest: [0u8; 32],
-                },
-                envelope: bud_proof::ProofEnvelope {
-                    proof_format_version: 0,
-                    backend: String::new(),
-                    p3_version: String::new(),
-                    fri_params_id: String::new(),
-                    public_inputs_hash: [0u8; 32],
-                    proof_bytes: Vec::new(),
-                    degree_bits: 0,
-                },
-            }
-        });
-        let stark_proof_bytes = bincode::serialize(&proof).unwrap_or_default();
-        Self {
+        let proof = prove_predicate(&stmt).map_err(|_| {
+            PrivateDedupError::InvalidOwnershipProof("YK1 proof unavailable under testnet gate")
+        })?;
+        let stark_proof_bytes = bincode::serialize(&proof).map_err(|_| {
+            PrivateDedupError::InvalidOwnershipProof("cannot encode ownership proof")
+        })?;
+        if stark_proof_bytes.len() > crate::execution::proof_verifier::MAX_PROOF_BYTES {
+            return Err(PrivateDedupError::InvalidOwnershipProof(
+                "ownership proof too large",
+            ));
+        }
+        Ok(Self {
             claimant,
             epoch,
             oprf_tag,
             padme_bucket_bytes,
             stark_witness_commitment,
             stark_proof_bytes,
-        }
+        })
     }
 
     fn verify_statement(
@@ -373,7 +353,10 @@ impl PrivateDedupEngine {
         &mut self,
         req: SealedDedupSubmission,
     ) -> Result<BlindedDedupRecord, PrivateDedupError> {
-        if !self.enabled {
+        // An API caller choosing `new(true)` is not a network activation.
+        // The transcript shares are not an OPRF and cannot authorize a
+        // cross-owner dedup record even if another opcode opens later.
+        if !TESTNET_PRIVATE_DEDUP_ENABLED || !self.enabled {
             return Err(PrivateDedupError::Disabled);
         }
 
@@ -449,48 +432,68 @@ mod tests {
         let claimant = Address([0x11; 32]);
         let tag = [0x22; 32];
         let plaintext = b"sensitive content";
-        let proof = OwnershipProofBundle::prove_plaintext_ownership(claimant, 7, tag, plaintext);
-        let mut disabled = PrivateDedupEngine::new(false, 5_000);
+        const { assert!(!TESTNET_PRIVATE_DEDUP_ENABLED) };
         assert_eq!(
-            disabled.submit_sealed_upload(SealedDedupSubmission {
-                caller: claimant,
-                epoch: 7,
-                oprf_tag: tag,
-                caller_blinding_nonce: [0x33; 32],
-                padme_bucket_bytes: proof.padme_bucket_bytes,
-                ownership_proof: Some(proof.clone()),
-            }),
-            Err(PrivateDedupError::Disabled)
+            OwnershipProofBundle::prove_plaintext_ownership(claimant, 7, tag, plaintext),
+            Err(PrivateDedupError::InvalidOwnershipProof(
+                "YK1 proof unavailable under testnet gate"
+            )),
+            "the prover must return an error, not a fake proof envelope"
         );
 
-        let mut engine = PrivateDedupEngine::new(TESTNET_PRIVATE_DEDUP_ENABLED, 5_000);
-        let record = engine
-            .submit_sealed_upload(SealedDedupSubmission {
-                caller: claimant,
-                epoch: 7,
-                oprf_tag: tag,
-                caller_blinding_nonce: [0x33; 32],
-                padme_bucket_bytes: proof.padme_bucket_bytes,
-                ownership_proof: Some(proof.clone()),
-            })
-            .expect("real STARK ownership proof is verified on active testnet");
-        assert_eq!(record.charged_fee_atoms, 5_000);
-        assert_eq!(engine.public_epoch_ref_total(), 0);
-        assert_eq!(engine.flush_epoch_batch(), 1);
-        assert_eq!(engine.public_epoch_ref_total(), 1);
+        // Even a valid STARK for a different, independently authorized YK6
+        // predicate must not become a YK1 ownership proof if someone creates
+        // an engine with an explicit `true` override.
+        let statement = PredicateStatement {
+            kind: PredicateKind::Yk6ThresholdQuorum,
+            lhs: 4,
+            rhs: 4,
+            aux: 1,
+            chain_id: Network::Testnet.chain_id().value(),
+        };
+        let other = prove_predicate(&statement).expect("independent YK6 proof");
+        let proof = OwnershipProofBundle {
+            claimant,
+            epoch: 7,
+            oprf_tag: tag,
+            padme_bucket_bytes: padme_padded_len(plaintext.len() as u64),
+            stark_witness_commitment: [0x44; 32],
+            stark_proof_bytes: bincode::serialize(&other).unwrap(),
+        };
+        let submission = SealedDedupSubmission {
+            caller: claimant,
+            epoch: 7,
+            oprf_tag: tag,
+            caller_blinding_nonce: [0x33; 32],
+            padme_bucket_bytes: proof.padme_bucket_bytes,
+            ownership_proof: Some(proof.clone()),
+        };
+        let mut disabled = PrivateDedupEngine::new(TESTNET_PRIVATE_DEDUP_ENABLED, 5_000);
+        assert_eq!(
+            disabled.submit_sealed_upload(submission.clone()),
+            Err(PrivateDedupError::Disabled)
+        );
+        assert_eq!(
+            proof.verify_statement(&claimant, 7, &tag, proof.padme_bucket_bytes),
+            Err(PrivateDedupError::InvalidOwnershipProof(
+                "STARK predicate statement mismatch"
+            ))
+        );
+        let mut forced = PrivateDedupEngine::new(true, 5_000);
+        assert_eq!(
+            forced.submit_sealed_upload(submission),
+            Err(PrivateDedupError::Disabled),
+            "an API-local flag cannot override the testnet security gate"
+        );
+        assert_eq!(forced.flush_epoch_batch(), 0);
+        assert_eq!(forced.public_epoch_ref_total(), 0);
 
         let mut forged = proof;
         forged.stark_proof_bytes[0] ^= 0xFF;
         assert!(matches!(
-            engine.submit_sealed_upload(SealedDedupSubmission {
-                caller: claimant,
-                epoch: 7,
-                oprf_tag: tag,
-                caller_blinding_nonce: [0x44; 32],
-                padme_bucket_bytes: forged.padme_bucket_bytes,
-                ownership_proof: Some(forged),
-            }),
+            forged.verify_statement(&claimant, 7, &tag, forged.padme_bucket_bytes),
             Err(PrivateDedupError::InvalidOwnershipProof(_))
         ));
+        assert_eq!(forced.flush_epoch_batch(), 0);
     }
 }

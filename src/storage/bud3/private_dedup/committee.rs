@@ -10,8 +10,11 @@
 //!    pricing, and epoch-batched submission counters so public state never
 //!    reveals whether two owners hold the same sealed bytes.
 //!
-//! WIRING: private cross-owner deduplication, active on testnet `45261` from
-//! genesis (`ACTIVATION` height `Some(0)`).
+//! WIRING: unwired - no production transaction consumes this experimental
+//! transcript model. Its hash-derived shares are not a threshold OPRF and the
+//! caller-supplied plaintext transcript is not a zero-knowledge ownership
+//! proof. The public request/upload methods stay closed on testnet until both
+//! primitives and the transaction admission path are implemented.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -40,13 +43,17 @@ pub struct PrivateDedupActivation {
     pub height: Option<u64>,
 }
 
-/// Testnet configuration: private cross-owner deduplication is active from genesis (height 0).
-pub const ACTIVATION: PrivateDedupActivation = PrivateDedupActivation { height: Some(0) };
+/// Testnet configuration: cross-owner private deduplication has no activation
+/// height while threshold OPRF and witness-bound ownership remain unavailable.
+pub const ACTIVATION: PrivateDedupActivation = PrivateDedupActivation { height: None };
 
 impl PrivateDedupActivation {
-    /// Whether private cross-owner deduplication is active at `block_height`.
+    /// A requested height alone cannot activate the unimplemented primitives.
     #[must_use]
     pub const fn is_active(&self, block_height: u64) -> bool {
+        if !super::threshold::TESTNET_PRIVATE_DEDUP_ENABLED {
+            return false;
+        }
         match self.height {
             Some(active_at) => block_height >= active_at,
             None => false,
@@ -94,7 +101,7 @@ pub const fn padme_bucket_bytes(raw_len: u64) -> u64 {
     }
 }
 
-/// One validator's partial evaluation in the threshold OPRF committee.
+/// Experimental hash transcript share (not a cryptographic OPRF share).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OprfPartialShare {
     /// Committee seat index.
@@ -103,11 +110,10 @@ pub struct OprfPartialShare {
     pub evaluation: [u8; 32],
 }
 
-/// Deterministic `t`-of-`n` threshold OPRF committee model.
-///
-/// In production deployment each validator holds only its secret scalar share;
-/// any `threshold` seats produce identical reconstructed tokens via canonical
-/// epoch key derivation, while fewer than `threshold` shares reveal nothing.
+/// Experimental deterministic transcript-share model, **not** a threshold
+/// OPRF. All shares are computed from one seed and a public digest; the final
+/// hash is neither blinded nor a threshold secret reconstruction. Never use
+/// this API as evidence of content ownership or privacy on a live network.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ThresholdOprfCommittee {
     epoch_secret_seed: [u8; 32],
@@ -184,12 +190,10 @@ impl ThresholdOprfCommittee {
     }
 }
 
-/// Proof of plaintext ownership bound to uploader, epoch, OPRF token and
-/// verifier challenge nonce.
-///
-/// Knowing only `SHA-256(plaintext)` or `oprf_token` is insufficient to construct
-/// [`OwnershipProof`] because `sampled_chunk_mac` absorbs challenge-selected
-/// windows of the raw plaintext bytes themselves.
+/// Plaintext challenge transcript, **not** a zero-knowledge ownership proof.
+/// The caller supplies the entire plaintext to [`OwnershipProof::is_authentic`];
+/// a verifier receives the secret bytes. This is suitable only for isolated
+/// algorithm tests, not for private sealed-object admission.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OwnershipProof {
     /// Plain SHA-256 digest of the plaintext proven by the uploader.
@@ -353,14 +357,33 @@ pub struct CommitteeUploadRequest<'a> {
 }
 
 impl PrivateDedupEngine {
-    /// Request a rate-limited threshold OPRF token for `(account, epoch)`.
+    /// Reserved token request, closed until a real threshold OPRF and an
+    /// activation-height-aware network context are implemented.
     ///
     /// # Errors
     ///
-    /// Returns [`PrivateDedupError::RateLimited`] once `account` reaches
-    /// `max_queries_per_epoch` in `epoch`.
+    /// Returns [`PrivateDedupError::ClosedOnNetwork`] under the testnet gate.
     /// Convenience: exposed for B.U.D. 3.0 threshold OPRF client request builder.
     pub fn request_oprf_token(
+        &mut self,
+        committee: &ThresholdOprfCommittee,
+        account: Address,
+        epoch: u64,
+        content_digest: &[u8; 32],
+        shares: &[OprfPartialShare],
+    ) -> Result<[u8; 32], PrivateDedupError> {
+        // This API has no block-height context. It cannot open at an arbitrary
+        // configured height; with the default closed gate it must not even
+        // consume a rate-limit slot or reveal a deterministic content token.
+        if !ACTIVATION.is_active(0) {
+            return Err(PrivateDedupError::ClosedOnNetwork);
+        }
+        self.request_oprf_token_inner(committee, account, epoch, content_digest, shares)
+    }
+
+    // Private simulation core. Test-only callers exercise bookkeeping without
+    // implying that the public, proof-bearing endpoint has been activated.
+    fn request_oprf_token_inner(
         &mut self,
         committee: &ThresholdOprfCommittee,
         account: Address,
@@ -380,16 +403,28 @@ impl PrivateDedupEngine {
         committee.finalize_token(content_digest, shares)
     }
 
-    /// Submit a sealed upload with mandatory plaintext ownership proof.
-    ///
-    /// Both cross-owner hits and brand-new sealed objects charge the exact same
-    /// Padme-bucketed sealed-pool average fee, emit a fresh unlinkable
-    /// `blinded_object_field`, and update only the epoch-batched public summary.
+    /// Reserved cross-owner sealed upload. Default testnet refuses before
+    /// touching balances, indices, or public epoch counters; the isolated
+    /// simulation below is not a private proof or an on-chain admission path.
     ///
     /// # Errors
     ///
-    /// Refuses invalid ownership proofs or insufficient fee balances.
+    /// Returns [`PrivateDedupError::ClosedOnNetwork`] under the testnet gate.
     pub fn submit_sealed_upload(
+        &mut self,
+        payer_balance: &mut u64,
+        req: &CommitteeUploadRequest<'_>,
+    ) -> Result<PublicSealedNftView, PrivateDedupError> {
+        // The caller supplies the plaintext and a self-declared transcript;
+        // neither that transcript nor a locally set flag is authorization to
+        // deduplicate another owner's sealed object on a real network.
+        if !ACTIVATION.is_active(0) {
+            return Err(PrivateDedupError::ClosedOnNetwork);
+        }
+        self.submit_sealed_upload_inner(payer_balance, req)
+    }
+
+    fn submit_sealed_upload_inner(
         &mut self,
         payer_balance: &mut u64,
         req: &CommitteeUploadRequest<'_>,
@@ -502,18 +537,61 @@ mod tests {
     }
 
     #[test]
-    fn private_dedup_is_open_on_testnet() {
-        assert!(ACTIVATION.is_active(0));
-        assert!(ACTIVATION.is_active(500_000));
-        let opened = PrivateDedupActivation {
+    fn private_dedup_request_and_upload_stay_closed_without_balance_or_index_changes() {
+        assert_eq!(ACTIVATION.height, None);
+        assert!(!ACTIVATION.is_active(0));
+        assert!(!ACTIVATION.is_active(u64::MAX));
+        // A local caller cannot open this incomplete primitive by setting
+        // the height independently of the proof/OPRF security gate.
+        let proposed = PrivateDedupActivation {
             height: Some(2_000),
         };
-        assert!(!opened.is_active(1_999));
-        assert!(opened.is_active(2_000));
+        assert!(!proposed.is_active(2_000));
+
+        let committee = test_committee();
+        let mut engine = PrivateDedupEngine::default();
+        let account = Address([0x11; 32]);
+        let plaintext = b"sealed, owner-controlled test object";
+        let digest: [u8; 32] = Sha256::digest(plaintext).into();
+        let shares = collect_shares(&committee, &digest);
+        assert_eq!(
+            engine.request_oprf_token(&committee, account, 7, &digest, &shares),
+            Err(PrivateDedupError::ClosedOnNetwork)
+        );
+        assert!(
+            engine.oprf_queries.is_empty(),
+            "closed requests spend no quota"
+        );
+
+        let token = committee.finalize_token(&digest, &shares).unwrap();
+        let challenge = [0x55; 32];
+        let proof = OwnershipProof::prove(plaintext, &account, 7, &token, challenge);
+        let mut payer = 10_000u64;
+        assert_eq!(
+            engine.submit_sealed_upload(
+                &mut payer,
+                &CommitteeUploadRequest {
+                    uploader: account,
+                    epoch: 7,
+                    nft_id: &[0x20; 32],
+                    nft_blinding_factor: &[0x30; 32],
+                    oprf_token: &token,
+                    expected_challenge: &challenge,
+                    plaintext,
+                    proof: &proof,
+                    candidate_object_commitment: [0x40; 32],
+                },
+            ),
+            Err(PrivateDedupError::ClosedOnNetwork)
+        );
+        assert_eq!(payer, 10_000);
+        assert_eq!(engine.sealed_endowment_pool, 0);
+        assert!(engine.sealed_index.is_empty());
+        assert_eq!(engine.public_epoch_summary(7).total_sealed_submissions, 0);
     }
 
     #[test]
-    fn bud3_private_dedup_rate_limited() {
+    fn simulated_private_dedup_rate_limited() {
         let committee = test_committee();
         let mut engine = PrivateDedupEngine {
             max_queries_per_epoch: 3,
@@ -526,14 +604,14 @@ mod tests {
             let digest = [idx; 32];
             let shares = collect_shares(&committee, &digest);
             assert!(engine
-                .request_oprf_token(&committee, alice, 7, &digest, &shares)
+                .request_oprf_token_inner(&committee, alice, 7, &digest, &shares)
                 .is_ok());
         }
 
         let fourth_digest = [9u8; 32];
         let fourth_shares = collect_shares(&committee, &fourth_digest);
         assert_eq!(
-            engine.request_oprf_token(&committee, alice, 7, &fourth_digest, &fourth_shares),
+            engine.request_oprf_token_inner(&committee, alice, 7, &fourth_digest, &fourth_shares),
             Err(PrivateDedupError::RateLimited {
                 account: alice,
                 epoch: 7,
@@ -544,15 +622,15 @@ mod tests {
         // Another account in the same epoch and the same account in the next
         // epoch each get a fresh quota.
         assert!(engine
-            .request_oprf_token(&committee, bob, 7, &fourth_digest, &fourth_shares)
+            .request_oprf_token_inner(&committee, bob, 7, &fourth_digest, &fourth_shares)
             .is_ok());
         assert!(engine
-            .request_oprf_token(&committee, alice, 8, &fourth_digest, &fourth_shares)
+            .request_oprf_token_inner(&committee, alice, 8, &fourth_digest, &fourth_shares)
             .is_ok());
     }
 
     #[test]
-    fn bud3_private_dedup_needs_ownership_proof() {
+    fn simulated_private_dedup_checks_ownership_transcript() {
         let committee = test_committee();
         let mut engine = PrivateDedupEngine::default();
         let owner_a = Address([0xA1; 32]);
@@ -562,13 +640,13 @@ mod tests {
         let shares = collect_shares(&committee, &digest);
 
         let token_a = engine
-            .request_oprf_token(&committee, owner_a, 10, &digest, &shares)
+            .request_oprf_token_inner(&committee, owner_a, 10, &digest, &shares)
             .unwrap();
         let challenge_a = [0x55; 32];
         let proof_a = OwnershipProof::prove(&secret_doc, &owner_a, 10, &token_a, challenge_a);
         let mut bal_a = 100_000u64;
         engine
-            .submit_sealed_upload(
+            .submit_sealed_upload_inner(
                 &mut bal_a,
                 &CommitteeUploadRequest {
                     uploader: owner_a,
@@ -590,7 +668,7 @@ mod tests {
         let challenge_b = [0x66; 32];
         let mut bal_attacker = 100_000u64;
         assert_eq!(
-            engine.submit_sealed_upload(
+            engine.submit_sealed_upload_inner(
                 &mut bal_attacker,
                 &CommitteeUploadRequest {
                     uploader: attacker,
@@ -610,7 +688,7 @@ mod tests {
     }
 
     #[test]
-    fn bud3_private_dedup_hides_match_from_public() {
+    fn simulated_private_dedup_hides_match_from_public() {
         let committee = test_committee();
         let mut hit_world = PrivateDedupEngine::default();
         let mut miss_world = PrivateDedupEngine::default();
@@ -627,13 +705,13 @@ mod tests {
             let d1: [u8; 32] = Sha256::digest(&shared_doc).into();
             let s1 = collect_shares(&committee, &d1);
             let tok1 = engine
-                .request_oprf_token(&committee, alice, 3, &d1, &s1)
+                .request_oprf_token_inner(&committee, alice, 3, &d1, &s1)
                 .unwrap();
             let ch1 = [0x10; 32];
             let p1 = OwnershipProof::prove(&shared_doc, &alice, 3, &tok1, ch1);
             let mut bal1 = 50_000u64;
             let view1 = engine
-                .submit_sealed_upload(
+                .submit_sealed_upload_inner(
                     &mut bal1,
                     &CommitteeUploadRequest {
                         uploader: alice,
@@ -652,13 +730,13 @@ mod tests {
             let d2: [u8; 32] = Sha256::digest(second_doc).into();
             let s2 = collect_shares(&committee, &d2);
             let tok2 = engine
-                .request_oprf_token(&committee, bob, 3, &d2, &s2)
+                .request_oprf_token_inner(&committee, bob, 3, &d2, &s2)
                 .unwrap();
             let ch2 = [0x20; 32];
             let p2 = OwnershipProof::prove(second_doc, &bob, 3, &tok2, ch2);
             let mut bal2 = 50_000u64;
             let view2 = engine
-                .submit_sealed_upload(
+                .submit_sealed_upload_inner(
                     &mut bal2,
                     &CommitteeUploadRequest {
                         uploader: bob,

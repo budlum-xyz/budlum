@@ -963,7 +963,7 @@ fn attacker_cannot_spend_victim_live_note_or_inflate_outputs() {
 }
 
 #[test]
-fn privacy_confidential_bundle_hiding_stark_and_predicates_on_testnet() {
+fn privacy_confidential_bundle_refuses_unbound_yk1_on_testnet() {
     use crate::core::chain_config::Network;
     use crate::crypto::primitives::KeyPair;
     use crate::privacy::{L1NoteRegistry, PrivateTransferSubmit};
@@ -988,33 +988,24 @@ fn privacy_confidential_bundle_hiding_stark_and_predicates_on_testnet() {
     };
 
     let salt = [0x42u8; 32];
-    let bundle = sub
-        .prove_confidential_bundle(testnet, &salt, 1_000, 1_000)
-        .expect("prove Hiding + YK1..YK4 bundle on testnet");
-    Executor::process_confidential_transfer_bundle(&sub, &bundle, testnet)
-        .expect("full confidential STARK + predicate bundle verifies on testnet 45261");
-
-    // Unrecognized / Mainnet chain_ids fail closed with privacy_mainnet_disabled.
-    let err = Executor::process_confidential_transfer_bundle(&sub, &bundle, testnet + 99)
-        .expect_err("wrong chain_id must be refused");
-    assert_eq!(err.code(), "privacy_mainnet_disabled");
-    let mainnet_err = Executor::process_confidential_transfer_bundle(
-        &sub,
-        &bundle,
-        Network::Mainnet.chain_id().value(),
-    )
-    .expect_err("mainnet must remain refused until launch sign-off");
-    assert_eq!(mainnet_err.code(), "privacy_mainnet_disabled");
-
-    // Unconserved input vs output value fails closed during proving.
-    assert!(sub
+    let invalid_value = sub
         .prove_confidential_bundle(testnet, &salt, 1_000, 999)
+        .expect_err("unconserved values must be rejected before proving");
+    assert!(
+        invalid_value.contains("input_sum != output_sum"),
+        "{invalid_value}"
+    );
+    let gated = sub
+        .prove_confidential_bundle(testnet, &salt, 1_000, 1_000)
+        .expect_err("YK1 owner proof is not open under testnet's staged opcode schedule");
+    assert!(gated.contains("YK1 ownership proof failed"), "{gated}");
+    assert!(gated.contains("ActivationClosed(Yk1Ownership)"), "{gated}");
+    assert!(sub
+        .prove_confidential_bundle(Network::Mainnet.chain_id().value(), &salt, 1_000, 1_000)
         .is_err());
-
-    // Tampered YK2 conservation proof fails verification.
-    let mut tampered = bundle.clone();
-    tampered.conservation_proof.statement.lhs ^= 1;
-    assert!(Executor::process_confidential_transfer_bundle(&sub, &tampered, testnet).is_err());
+    // Independent privacy authorization, conservation and mainnet-gate
+    // regression tests still check their own boundaries; this test pins the
+    // missing witness-backed predicate gate instead of declaring success.
 }
 
 #[test]
