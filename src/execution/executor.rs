@@ -3449,12 +3449,17 @@ impl Executor {
                         model.as_ref(),
                         Some((program, inputs)),
                     ),
-                    None => crate::ai::execution::verify_execution_proof_structural_with_model(
-                        proof,
-                        &req,
-                        &res,
-                        model.as_ref(),
-                    ),
+                    None => match model.as_ref() {
+                        Some(spec) => crate::ai::execution::verify_execution_proof_structural_with_model(
+                            proof,
+                            &req,
+                            &res,
+                            Some(spec),
+                        ),
+                        None => crate::ai::execution::verify_execution_proof_structural(
+                            proof, &req, &res,
+                        ),
+                    },
                 };
                 if !report.is_structurally_valid() {
                     return Err(BudlumError::validation(
@@ -5892,161 +5897,40 @@ mod tests {
     }
 
     #[test]
-    fn ai_attach_execution_proof_stark_e2e_and_replay_guards() {
-        use crate::ai::execution::{
-            matmul_program_hash, prove_mlp_inference_with_context, weights_digest,
-            FixedPointMlpSpec, ProveInferenceContext,
-        };
-        use crate::ai::types::{
-            AiInferenceRequest, AiInferenceResult, AiModelId, AiModelSpec, AiRequestId,
-            BoundedBytes,
-        };
-        use crate::core::chain_config::Network;
-
-        let chain_id = Network::Testnet.chain_id().value();
-        let owner_kp = crate::crypto::primitives::KeyPair::generate().unwrap();
-        let owner = Address::from(owner_kp.public_key_bytes());
-        let verifier_kp = crate::crypto::primitives::KeyPair::generate().unwrap();
-        let verifier = Address::from(verifier_kp.public_key_bytes());
-
-        let mut state = AccountState::new();
-        let role_bond = state.required_ai_bond(chain_id);
-        let bond = crate::ai_inference::MIN_OPERATOR_BOND;
-        state.add_balance(&owner, 10_000_000);
-        state.add_balance(
-            &verifier,
-            role_bond.saturating_add(bond).saturating_add(10_000),
-        );
-        state
-            .bond_ai_operator(&verifier, role_bond, chain_id)
-            .unwrap();
-        state
-            .ai_registry
-            .lock_verifier_stake(&verifier, bond)
-            .unwrap();
-
-        let spec = FixedPointMlpSpec {
+    fn ai_attach_execution_proof_is_gated_on_testnet() {
+        assert!(!crate::ai::FULL_AI_STARK_VERIFICATION_LIVE);
+        let owner = Address::from([0x31; 32]);
+        let spec = crate::ai::execution::FixedPointMlpSpec {
             dims: vec![2, 1],
             weights: vec![2, 3],
             biases: vec![1],
         };
-        let input = vec![4, 5];
-        let model_id = AiModelId::of(&owner, &[0x51; 32], 1);
-        let model_spec = AiModelSpec {
-            model_id,
-            model_hash: [0x51; 32],
-            owner,
-            min_verifier_count: 1,
-            agreement_threshold: 1,
-            max_input_ref_bytes: 1024,
-            max_output_ref_bytes: 1024,
-            request_deadline_blocks: 100,
-            result_deadline_blocks: 100,
-            version: 1,
-            active: true,
-            require_execution_proof: true,
-            execution_program_hash: Some(matmul_program_hash(&spec).unwrap()),
-            execution_class: 1,
-            execution_weights_digest: Some(weights_digest(&spec)),
-            execution_dims: Some(spec.dims.clone()),
-            modalities: crate::ai_inference::perception::ModalitySet::text_only(),
-        };
-        state.ai_registry.register_model(model_spec).unwrap();
-
-        let mut req = AiInferenceRequest {
-            request_id: AiRequestId::default(),
-            requester: owner,
-            model_id,
-            input_commitment: crate::ai::execution::input_commitment(&input),
-            input_ref: BoundedBytes::empty(),
-            max_fee: 100,
-            callback: None,
-            submitted_at_block: 0,
-            deadline_block: 100,
-            perception: Some(crate::ai_inference::perception::PerceptionRequest {
-                asset_id: crate::pollen::AssetId([0xAA; 32]),
-                content_id: crate::storage::content_id::ContentId([0xBB; 32]),
-                kind: crate::ai_inference::perception::PerceptionKind::Text,
-                declared_units: 4,
-            }),
-            effort: crate::ai_inference::effort::EffortTier::default(),
-        };
-        req.request_id = req.calculate_id();
-        let req_id = state.ai_registry.submit_request(req, 0).unwrap();
-
-        let (proof, host_out) = prove_mlp_inference_with_context(
-            &spec,
-            model_id,
-            &input,
-            5_000_000,
-            ProveInferenceContext {
-                chain_id,
-                sender: verifier,
-                nonce: 0,
-                block_height: 0,
-            },
-        )
-        .expect("context-bound STARK proof");
-        assert_eq!(host_out, vec![23]);
-
-        let output_bytes = crate::ai::execution::encode_output_limbs(&host_out);
-        let mut result = AiInferenceResult {
-            request_id: req_id,
-            verifier,
-            output_commitment: proof.output_commitment,
-            output_ref: BoundedBytes::try_new(output_bytes).unwrap(),
-            result_nonce: 1,
-            signature: Vec::new(),
-            submitted_at_block: 0,
-        };
-        let digest = result.calculate_signing_hash();
-        result.signature = verifier_kp.sign(&digest).to_vec();
-        let outcome = state.ai_registry.submit_result(result, 0).unwrap();
-        assert!(
-            outcome.is_none(),
-            "proof-required model waits for STARK attach"
-        );
-
-        // Replay with wrong nonce must fail closed before STARK verification.
-        let mut wrong_nonce_tx = Transaction::new_with_chain_id(
-            verifier,
-            Address::zero(),
-            0,
-            10,
-            1,
-            vec![],
-            chain_id,
-            TransactionType::AiAttachExecutionProof {
-                request_id: req_id,
-                proof: proof.clone(),
-            },
-        );
-        wrong_nonce_tx.sign(&verifier_kp);
-        let mut replay_state = state.clone();
-        replay_state.get_or_create(&verifier).nonce = 1;
-        let err = Executor::apply_transaction_checked(&mut replay_state, &wrong_nonce_tx)
-            .expect_err("replayed proof with wrong nonce must fail");
-        assert_eq!(err.code(), "ai_exec_nonce_mismatch");
-
-        let mut valid_tx = Transaction::new_with_chain_id(
-            verifier,
-            Address::zero(),
-            0,
-            10,
-            0,
-            vec![],
-            chain_id,
-            TransactionType::AiAttachExecutionProof {
-                request_id: req_id,
-                proof,
-            },
-        );
-        valid_tx.sign(&verifier_kp);
-        Executor::apply_transaction_checked(&mut state, &valid_tx)
-            .expect("honest STARK execution proof attaches and finalizes request");
-        assert!(state
-            .ai_registry
-            .has_verified_execution_proof(&req_id, &verifier));
-        assert!(state.ai_registry.outcomes.contains_key(&req_id));
+        let model_id = crate::ai::types::AiModelId::of(&owner, &[0x51; 32], 1);
+        let mut registry = crate::ai::registry::AiRegistry::new();
+        let err = registry
+            .register_model(crate::ai::types::AiModelSpec {
+                model_id,
+                model_hash: [0x51; 32],
+                owner,
+                min_verifier_count: 1,
+                agreement_threshold: 1,
+                max_input_ref_bytes: 1024,
+                max_output_ref_bytes: 1024,
+                request_deadline_blocks: 100,
+                result_deadline_blocks: 100,
+                version: 1,
+                active: true,
+                require_execution_proof: true,
+                execution_program_hash: Some(
+                    crate::ai::execution::matmul_program_hash(&spec)
+                        .expect("Mlp guest program hash"),
+                ),
+                execution_class: 1,
+                execution_weights_digest: Some(crate::ai::execution::weights_digest(&spec)),
+                execution_dims: Some(spec.dims),
+                modalities: crate::ai_inference::perception::ModalitySet::text_only(),
+            })
+            .expect_err("proof-required AI stays closed until the opening gates pass");
+        assert!(err.contains("not accepted until full AI STARK verification is live"));
     }
 }

@@ -600,11 +600,12 @@ impl BnsRegistry {
         if new_owner == Address::zero() {
             return Err(BnsError::InvalidName);
         }
-        let current_owner = self.names.get(name).ok_or(BnsError::InvalidName)?.owner;
+        let existing = self.names.get(name).ok_or(BnsError::InvalidName)?;
+        let current_owner = existing.owner;
         if &current_owner != caller {
             return Err(BnsError::NotOwner);
         }
-        if self.names[name].expires_at <= current_epoch {
+        if existing.expires_at <= current_epoch {
             return Err(BnsError::Expired);
         }
         if new_owner != current_owner
@@ -612,7 +613,7 @@ impl BnsRegistry {
         {
             return Err(BnsError::OwnerNameLimitExceeded);
         }
-        let prev_address = self.names[name].address;
+        let prev_address = existing.address;
         let record = self.names.get_mut(name).ok_or(BnsError::InvalidName)?;
         record.owner = new_owner;
         record.resolver = None;
@@ -1445,54 +1446,64 @@ impl BnsRegistry {
             let mut next = Vec::with_capacity(level.len().div_ceil(2));
             let mut i = 0;
             while i < level.len() {
-                if i + 1 < level.len() {
-                    next.push(Self::hash_merkle_pair(&level[i], &level[i + 1]));
+                let Some(left) = level.get(i) else {
+                    break;
+                };
+                if let Some(right) = level.get(i.saturating_add(1)) {
+                    next.push(Self::hash_merkle_pair(left, right));
                 } else {
-                    next.push(level[i]);
+                    next.push(*left);
                 }
                 i += 2;
             }
             level = next;
         }
-        level[0]
+        level.first().copied().unwrap_or([0u8; 32])
     }
 
     fn build_branch_at(
         records: &[&NameRecord],
         leaves: &[[u8; 32]],
         target_idx: usize,
-    ) -> BnsMerkleBranch {
-        let rec = records[target_idx];
+    ) -> Option<BnsMerkleBranch> {
+        let rec = records.get(target_idx).copied()?;
         let extras_digest = Self::record_extras_digest(rec);
-        let leaf = leaves[target_idx];
+        let leaf = *leaves.get(target_idx)?;
         let mut siblings = Vec::new();
         let mut directions = Vec::new();
         let mut idx = target_idx;
         let mut level = leaves.to_vec();
         while level.len() > 1 {
             if idx.is_multiple_of(2) {
-                if idx + 1 < level.len() {
-                    siblings.push(level[idx + 1]);
+                if let Some(sibling) = idx
+                    .checked_add(1)
+                    .and_then(|sibling_idx| level.get(sibling_idx))
+                {
+                    siblings.push(*sibling);
                     directions.push(false);
                 }
             } else {
-                siblings.push(level[idx - 1]);
+                let sibling = idx
+                    .checked_sub(1)
+                    .and_then(|sibling_idx| level.get(sibling_idx))?;
+                siblings.push(*sibling);
                 directions.push(true);
             }
             let mut next = Vec::with_capacity(level.len().div_ceil(2));
             let mut i = 0;
             while i < level.len() {
-                if i + 1 < level.len() {
-                    next.push(Self::hash_merkle_pair(&level[i], &level[i + 1]));
+                let left = level.get(i)?;
+                if let Some(right) = level.get(i.saturating_add(1)) {
+                    next.push(Self::hash_merkle_pair(left, right));
                 } else {
-                    next.push(level[i]);
+                    next.push(*left);
                 }
                 i += 2;
             }
             idx /= 2;
             level = next;
         }
-        BnsMerkleBranch {
+        Some(BnsMerkleBranch {
             name: rec.name.clone(),
             owner: rec.owner,
             address: rec.address,
@@ -1506,7 +1517,7 @@ impl BnsRegistry {
             leaf_index: Some(u64::try_from(target_idx).unwrap_or(u64::MAX)),
             tree_size: Some(u64::try_from(records.len()).unwrap_or(u64::MAX)),
             extras: Some(Self::extras_from_record(rec)),
-        }
+        })
     }
 
     /// The absence rule: `pred` and `succ` are the two leaves flanking the
@@ -1619,16 +1630,19 @@ impl BnsRegistry {
                 let mut next = Vec::with_capacity(lvl.len().div_ceil(2));
                 let mut i = 0;
                 while i < lvl.len() {
-                    if i + 1 < lvl.len() {
-                        next.push(Self::hash_merkle_pair(&lvl[i], &lvl[i + 1]));
+                    let Some(left) = lvl.get(i) else {
+                        break;
+                    };
+                    if let Some(right) = lvl.get(i.saturating_add(1)) {
+                        next.push(Self::hash_merkle_pair(left, right));
                     } else {
-                        next.push(lvl[i]);
+                        next.push(*left);
                     }
                     i += 2;
                 }
                 lvl = next;
             }
-            lvl[0]
+            lvl.first().copied().unwrap_or([0u8; 32])
         };
         let bns_root = Self::root_from_parts(meta_digest, names_root);
 
@@ -1640,16 +1654,16 @@ impl BnsRegistry {
                 meta_digest,
                 names_count: records.len() as u64,
                 epoch: current_epoch,
-                entry: Some(Self::build_branch_at(&records, &leaves, idx)),
+                entry: Self::build_branch_at(&records, &leaves, idx),
                 predecessor: None,
                 successor: None,
             },
             Err(insert_idx) => {
                 let predecessor = insert_idx
                     .checked_sub(1)
-                    .map(|p| Self::build_branch_at(&records, &leaves, p));
+                    .and_then(|p| Self::build_branch_at(&records, &leaves, p));
                 let successor = if insert_idx < records.len() {
-                    Some(Self::build_branch_at(&records, &leaves, insert_idx))
+                    Self::build_branch_at(&records, &leaves, insert_idx)
                 } else {
                     None
                 };

@@ -675,9 +675,8 @@ pub struct Pkcs11Section {
 #[serde(deny_unknown_fields)]
 pub struct FeaturesSection {
     pub pruning: Option<bool>,
-    /// F2 config-driven: `VerifyMerkle` staged rollout gate controlled via config
-    /// True = gate open (MainnetActivation::full), false = gate closed (default reject)
-    /// Default: true (gate opened, 4e2b920)
+    /// Legacy configuration field. Testnet keeps `VerifyMerkle` closed until
+    /// its opening gate passes; this value does not activate the opcode.
     pub verify_merkle: Option<bool>,
     /// Mobile mode (lightweight P2P/sharding)
     pub mobile_mode: Option<bool>,
