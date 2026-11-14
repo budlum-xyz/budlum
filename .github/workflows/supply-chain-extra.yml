@@ -9,11 +9,13 @@ on:
   # the same reason: a filtered-out run reports nothing rather than success,
   # which branch protection reads as still-waiting.
   # Heavy battery. It runs on pull requests to `main` (the PR that merges the
-  # stack), on the schedule below where one exists, and on demand. Stacked pull
-  # requests (`testnet-quantum`, `testnet`) run the PR gates in ci.yml,
-  # security-audit.yml, semgrep.yml and the other light workflows. This keeps
-  # one push from queueing more work than the shared runner pool can finish
-  # before the next push cancels it.
+  # stack), on the schedule and on demand. A stacked pull request (base
+  # `testnet-quantum` or `testnet`) runs the PR gates in ci.yml,
+  # security-audit.yml, semgrep.yml and the other light workflows, and skips the
+  # jobs of this file through the job-level condition: GitHub evaluates the
+  # `branches` filter of a stacked pull request against the root of the stack,
+  # so the filter alone does not keep it out. This keeps one push from queueing
+  # more work than the shared runner pool can finish before the next push cancels it.
   pull_request:
     branches: [main, consensus-of-consensuses]
   schedule:
@@ -31,6 +33,9 @@ permissions:
 
 jobs:
   udeps:
+    # Heavy battery: a pull request whose base is `testnet-quantum` or `testnet` does
+    # not start this job. See the note at the top of the file.
+    if: ${{ github.event_name != 'pull_request' || contains(fromJSON('["main","consensus-of-consensuses"]'), github.event.pull_request.base.ref) }}
     name: "Udeps: the unused dependency gate"
     runs-on: ubuntu-latest
     timeout-minutes: 25
@@ -107,6 +112,9 @@ jobs:
           cargo run --release --manifest-path ../xtask/gates/Cargo.toml -- udeps /tmp/udeps2.txt
 
   geiger:
+    # Heavy battery: a pull request whose base is `testnet-quantum` or `testnet` does
+    # not start this job. See the note at the top of the file.
+    if: ${{ github.event_name != 'pull_request' || contains(fromJSON('["main","consensus-of-consensuses"]'), github.event.pull_request.base.ref) }}
     name: "Geiger: unsafe visibility (the first-party 0 evidence layer)"
     runs-on: ubuntu-latest
     permissions:
