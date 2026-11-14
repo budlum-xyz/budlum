@@ -312,25 +312,6 @@ fn weights_digest_binding_stays_wired() {
     );
 }
 
-/// The text up to and including the `}` that closes the block whose opening
-/// brace was already consumed before the slice.
-fn block_after(rest: &str) -> &str {
-    let mut depth = 1usize;
-    for (i, b) in rest.bytes().enumerate() {
-        match b {
-            b'{' => depth += 1,
-            b'}' => {
-                depth -= 1;
-                if depth == 0 {
-                    return &rest[..=i];
-                }
-            }
-            _ => {}
-        }
-    }
-    rest
-}
-
 /// Collapse every run of whitespace to a single space so a doc-comment or a
 /// Markdown paragraph can be re-wrapped without silently disarming a lock.
 fn squash(body: &str) -> String {
