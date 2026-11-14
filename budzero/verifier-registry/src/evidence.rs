@@ -13,11 +13,14 @@ use crate::role::RoleId;
 use serde::{Deserialize, Serialize};
 
 /// Where a piece of evidence's verification came from.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// The default is the fail-closed one: a value that is not given is [`Self::Unverified`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum ProofProvenance {
     /// Verified by the local consensus engine.
     ConsensusVerified,
     /// Submitted externally and NOT yet verified. The registry must not slash.
+    #[default]
     Unverified,
 }
 
@@ -66,7 +69,12 @@ pub struct SlashingReport {
     pub offender: Address,
     pub role: RoleId,
     pub proof: SlashingProof,
-    pub provenance: ProofProvenance,
+    /// Provenance of the proof's verification. Private, and never read from the wire:
+    /// verification is local state that only the verifying side can set. A public field that
+    /// deserialized let any submitter stamp `ConsensusVerified` on its own claim, and the
+    /// registry slashed on it. A decoded report is always `Unverified`.
+    #[serde(skip_deserializing)]
+    provenance: ProofProvenance,
     pub reporter: Option<Address>,
 }
 
@@ -153,20 +161,44 @@ fn canonical_hash(hash: &str) -> String {
 }
 
 impl SlashingReport {
+    /// Builds an [`ProofProvenance::Unverified`] report: the only thing a public constructor may
+    /// certify. A verified report comes from the consensus-side constructors of this module,
+    /// never from a claim.
     pub fn new(
         offender: Address,
         role: RoleId,
         proof: SlashingProof,
-        provenance: ProofProvenance,
         reporter: Option<Address>,
     ) -> Self {
         Self {
             offender,
             role,
             proof,
-            provenance,
+            provenance: ProofProvenance::Unverified,
             reporter,
         }
+    }
+
+    /// The consensus side's constructor. Not `pub` on purpose.
+    pub(crate) fn new_verified(
+        offender: Address,
+        role: RoleId,
+        proof: SlashingProof,
+        reporter: Option<Address>,
+    ) -> Self {
+        Self {
+            offender,
+            role,
+            proof,
+            provenance: ProofProvenance::ConsensusVerified,
+            reporter,
+        }
+    }
+
+    /// The report's provenance (the field is private).
+    #[must_use]
+    pub fn provenance(&self) -> ProofProvenance {
+        self.provenance
     }
 
     pub fn condition(&self) -> SlashingCondition {
@@ -243,7 +275,7 @@ impl SlashingReport {
     /// Whether the registry is allowed to act on this report.
     pub fn is_actionable(&self) -> Result<(), EvidenceError> {
         self.validate_shape()?;
-        match self.provenance {
+        match self.provenance() {
             ProofProvenance::ConsensusVerified => Ok(()),
             ProofProvenance::Unverified => Err(EvidenceError::Unverified),
         }
@@ -255,14 +287,13 @@ impl SlashingReport {
         reason: String,
         reporter: Option<Address>,
     ) -> Self {
-        Self::new(
+        Self::new_verified(
             offender,
             crate::role::roles::RELAYER,
             SlashingProof::Other {
                 tag: "relayer_invalid_proof".into(),
                 data: reason.into_bytes(),
             },
-            ProofProvenance::ConsensusVerified,
             reporter,
         )
     }
@@ -273,14 +304,13 @@ impl SlashingReport {
         reason: String,
         reporter: Option<Address>,
     ) -> Self {
-        Self::new(
+        Self::new_verified(
             offender,
             crate::role::roles::ATTESTER,
             SlashingProof::Other {
                 tag: "attester_invalid_attestation".into(),
                 data: reason.into_bytes(),
             },
-            ProofProvenance::ConsensusVerified,
             reporter,
         )
     }
@@ -291,14 +321,13 @@ impl SlashingReport {
         reason: String,
         reporter: Option<Address>,
     ) -> Self {
-        Self::new(
+        Self::new_verified(
             offender,
             crate::role::roles::CONTENT_VALIDATOR,
             SlashingProof::Other {
                 tag: "content_validator_malicious".into(),
                 data: reason.into_bytes(),
             },
-            ProofProvenance::ConsensusVerified,
             reporter,
         )
     }
@@ -317,7 +346,7 @@ mod tests {
     #[test]
     fn spellings_of_one_hash_are_not_a_conflict() {
         for (a, b) in [("aa", "AA"), ("aa", "0xaa"), ("0XAA", "aa")] {
-            let r = SlashingReport::new(
+            let r = SlashingReport::new_verified(
                 addr(1),
                 roles::MASTER_VERIFIER,
                 SlashingProof::DoubleSign {
@@ -327,7 +356,6 @@ mod tests {
                     signature_1: vec![1],
                     signature_2: vec![2],
                 },
-                ProofProvenance::ConsensusVerified,
                 None,
             );
             assert_eq!(r.validate_shape(), Err(EvidenceError::NonConflictingHashes));
@@ -336,7 +364,7 @@ mod tests {
 
     #[test]
     fn double_sign_shape_ok() {
-        let r = SlashingReport::new(
+        let r = SlashingReport::new_verified(
             addr(1),
             roles::MASTER_VERIFIER,
             SlashingProof::DoubleSign {
@@ -346,7 +374,6 @@ mod tests {
                 signature_1: vec![1],
                 signature_2: vec![2],
             },
-            ProofProvenance::ConsensusVerified,
             None,
         );
         assert!(r.validate_shape().is_ok());
@@ -356,7 +383,7 @@ mod tests {
 
     #[test]
     fn identical_hashes_rejected() {
-        let r = SlashingReport::new(
+        let r = SlashingReport::new_verified(
             addr(1),
             roles::MASTER_VERIFIER,
             SlashingProof::DoubleSign {
@@ -366,7 +393,6 @@ mod tests {
                 signature_1: vec![1],
                 signature_2: vec![2],
             },
-            ProofProvenance::ConsensusVerified,
             None,
         );
         assert_eq!(r.validate_shape(), Err(EvidenceError::NonConflictingHashes));
@@ -383,7 +409,6 @@ mod tests {
                 missed: 5,
                 expected: 10,
             },
-            ProofProvenance::Unverified,
             Some(addr(2)),
         );
         assert!(r.validate_shape().is_ok());
@@ -392,7 +417,7 @@ mod tests {
 
     #[test]
     fn oversized_block_hash_rejected() {
-        let r = SlashingReport::new(
+        let r = SlashingReport::new_verified(
             addr(1),
             roles::MASTER_VERIFIER,
             SlashingProof::DoubleSign {
@@ -402,7 +427,6 @@ mod tests {
                 signature_1: vec![1],
                 signature_2: vec![2],
             },
-            ProofProvenance::ConsensusVerified,
             None,
         );
         assert_eq!(r.validate_shape(), Err(EvidenceError::BlockHashTooLong));
@@ -410,7 +434,7 @@ mod tests {
 
     #[test]
     fn oversized_signature_rejected() {
-        let r = SlashingReport::new(
+        let r = SlashingReport::new_verified(
             addr(1),
             roles::MASTER_VERIFIER,
             SlashingProof::DoubleSign {
@@ -420,7 +444,6 @@ mod tests {
                 signature_1: vec![1u8; MAX_SIGNATURE_LEN + 1],
                 signature_2: vec![2],
             },
-            ProofProvenance::ConsensusVerified,
             None,
         );
         assert_eq!(r.validate_shape(), Err(EvidenceError::SignatureTooLong));
@@ -428,26 +451,24 @@ mod tests {
 
     #[test]
     fn oversized_opaque_tag_and_data_rejected() {
-        let tag = SlashingReport::new(
+        let tag = SlashingReport::new_verified(
             addr(1),
             roles::RELAYER,
             SlashingProof::Other {
                 tag: "x".repeat(MAX_EVIDENCE_TAG_LEN + 1),
                 data: vec![0],
             },
-            ProofProvenance::ConsensusVerified,
             None,
         );
         assert_eq!(tag.validate_shape(), Err(EvidenceError::TagTooLong));
 
-        let data = SlashingReport::new(
+        let data = SlashingReport::new_verified(
             addr(1),
             roles::RELAYER,
             SlashingProof::Other {
                 tag: "relayer_invalid_proof".into(),
                 data: vec![0u8; MAX_EVIDENCE_DATA_LEN + 1],
             },
-            ProofProvenance::ConsensusVerified,
             None,
         );
         assert_eq!(data.validate_shape(), Err(EvidenceError::DataTooLong));
@@ -457,14 +478,13 @@ mod tests {
     fn evidence_at_the_byte_bound_is_accepted() {
         // A report whose free-form fields sit exactly at the ceilings is
         // valid: the bound refuses only what is beyond it.
-        let r = SlashingReport::new(
+        let r = SlashingReport::new_verified(
             addr(1),
             roles::RELAYER,
             SlashingProof::Other {
                 tag: "t".repeat(MAX_EVIDENCE_TAG_LEN),
                 data: vec![0u8; MAX_EVIDENCE_DATA_LEN],
             },
-            ProofProvenance::ConsensusVerified,
             None,
         );
         assert!(r.validate_shape().is_ok());
@@ -472,7 +492,7 @@ mod tests {
 
     #[test]
     fn zero_offender_rejected() {
-        let r = SlashingReport::new(
+        let r = SlashingReport::new_verified(
             Address::zero(),
             roles::RELAYER,
             SlashingProof::Liveness {
@@ -481,7 +501,6 @@ mod tests {
                 missed: 5,
                 expected: 10,
             },
-            ProofProvenance::ConsensusVerified,
             None,
         );
         assert_eq!(r.validate_shape(), Err(EvidenceError::ZeroOffender));
@@ -489,7 +508,7 @@ mod tests {
 
     #[test]
     fn inverted_liveness_window_is_rejected() {
-        let r = SlashingReport::new(
+        let r = SlashingReport::new_verified(
             addr(1),
             roles::RELAYER,
             SlashingProof::Liveness {
@@ -498,12 +517,41 @@ mod tests {
                 missed: 3,
                 expected: 10,
             },
-            ProofProvenance::ConsensusVerified,
             None,
         );
         assert_eq!(
             r.validate_shape(),
             Err(EvidenceError::ImpossibleLivenessWindow)
         );
+    }
+
+    /// A report decoded from the wire is `Unverified`, whatever its bytes say. The field used to
+    /// be public and to deserialize, so a submitter could certify its own report.
+    #[test]
+    fn a_decoded_report_cannot_certify_itself() {
+        let certified = SlashingReport::consensus_invalid_relay_proof(
+            Address::from([9u8; 32]),
+            "spam".into(),
+            None,
+        );
+        assert_eq!(certified.provenance(), ProofProvenance::ConsensusVerified);
+        let wire = serde_json::to_string(&certified).unwrap();
+        assert!(
+            wire.contains("ConsensusVerified"),
+            "the claim is on the wire: {wire}"
+        );
+
+        let decoded: SlashingReport = serde_json::from_str(&wire).unwrap();
+        assert_eq!(decoded.provenance(), ProofProvenance::Unverified);
+        assert_eq!(decoded.is_actionable(), Err(EvidenceError::Unverified));
+        // The rest of the report survives the round trip.
+        assert_eq!(decoded.offender, certified.offender);
+        assert_eq!(decoded.proof, certified.proof);
+
+        // A report with the field missing is `Unverified` too.
+        let mut value: serde_json::Value = serde_json::from_str(&wire).unwrap();
+        value.as_object_mut().unwrap().remove("provenance");
+        let without: SlashingReport = serde_json::from_value(value).unwrap();
+        assert_eq!(without.provenance(), ProofProvenance::Unverified);
     }
 }

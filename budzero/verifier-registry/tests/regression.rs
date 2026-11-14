@@ -1,7 +1,7 @@
 //! Regression tests for `verifier-registry`.
 
 use verifier_registry::address::Address;
-use verifier_registry::evidence::{EvidenceError, ProofProvenance, SlashingProof, SlashingReport};
+use verifier_registry::evidence::{EvidenceError, SlashingProof, SlashingReport};
 use verifier_registry::params::RegistryParams;
 use verifier_registry::role::roles;
 
@@ -15,7 +15,6 @@ fn liveness(missed: u64, expected: u64) -> SlashingReport {
             missed,
             expected,
         },
-        ProofProvenance::ConsensusVerified,
         Some(Address::from([2u8; 32])),
     )
 }
