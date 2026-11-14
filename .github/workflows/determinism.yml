@@ -3,8 +3,14 @@ name: Determinism
 on:
   push:
     branches: [main]
+  # Heavy battery. It runs on pull requests to `main` (the PR that merges the
+  # stack), on the schedule below where one exists, and on demand. Stacked pull
+  # requests (`testnet-quantum`, `testnet`) run the PR gates in ci.yml,
+  # security-audit.yml, semgrep.yml and the other light workflows. This keeps
+  # one push from queueing more work than the shared runner pool can finish
+  # before the next push cancels it.
   pull_request:
-    branches: [main, consensus-of-consensuses, testnet-quantum, testnet]
+    branches: [main, consensus-of-consensuses]
   # Section 16.2 puts this workflow on a pull request *and* on a nightly run.
   # The nightly half was missing: the file ran only on a push or a pull
   # request, so a drift that appears with no commit in front of it (a runner

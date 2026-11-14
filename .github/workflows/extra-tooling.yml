@@ -23,8 +23,14 @@ name: Extra Tooling (security + quality)
 on:
   push:
     branches: [main]
+  # Heavy battery. It runs on pull requests to `main` (the PR that merges the
+  # stack), on the schedule below where one exists, and on demand. Stacked pull
+  # requests (`testnet-quantum`, `testnet`) run the PR gates in ci.yml,
+  # security-audit.yml, semgrep.yml and the other light workflows. This keeps
+  # one push from queueing more work than the shared runner pool can finish
+  # before the next push cancels it.
   pull_request:
-    branches: [main, consensus-of-consensuses, testnet-quantum, testnet]
+    branches: [main, consensus-of-consensuses]
   schedule:
     - cron: "0 4 * * 1" # weekly, Monday 04:00 UTC
   workflow_dispatch:

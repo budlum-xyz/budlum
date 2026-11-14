@@ -8,8 +8,14 @@ on:
   # unmergeable, so this has to fire on PRs too. The path filter is gone for
   # the same reason: a filtered-out run reports nothing rather than success,
   # which branch protection reads as still-waiting.
+  # Heavy battery. It runs on pull requests to `main` (the PR that merges the
+  # stack), on the schedule below where one exists, and on demand. Stacked pull
+  # requests (`testnet-quantum`, `testnet`) run the PR gates in ci.yml,
+  # security-audit.yml, semgrep.yml and the other light workflows. This keeps
+  # one push from queueing more work than the shared runner pool can finish
+  # before the next push cancels it.
   pull_request:
-    branches: [main, consensus-of-consensuses, testnet-quantum, testnet]
+    branches: [main, consensus-of-consensuses]
   schedule:
     # Weekly hygiene scan (effects of cargo update + new deps)
     - cron: '17 4 * * 1'

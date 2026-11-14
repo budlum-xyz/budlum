@@ -2,9 +2,11 @@ name: CI
 
 on:
   push:
-    # Stacked PRs still need head checks when merge conflicts suppress the
-    # pull_request event. Keep the same validation jobs and permissions.
-    branches: [main, testnet-quantum, testnet]
+    # The stacked branches (testnet-quantum, testnet) are validated by the
+    # pull_request event below. A push trigger on them ran every job twice per
+    # commit under two concurrency groups (`refs/heads/<branch>` and
+    # `refs/pull/<n>/merge`), which doubled the queue and starved the runners.
+    branches: [main]
   pull_request:
     # Run on the normal protected bases and on stacked continuation bases.
     branches: [main, consensus-of-consensuses, testnet-quantum, testnet, 'arena/**']

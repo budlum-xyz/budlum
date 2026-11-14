@@ -26,6 +26,9 @@ jobs:
     timeout-minutes: 330
     strategy:
       fail-fast: false
+      # Twelve four-hour jobs at once took the whole shared runner pool and left
+      # pull request checks queued for hours. Same coverage, four at a time.
+      max-parallel: 4
       matrix:
         target:
           - block_deserialize
