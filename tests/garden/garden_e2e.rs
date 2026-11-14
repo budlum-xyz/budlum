@@ -804,3 +804,84 @@ fn garden_join_behind_nat() {
     relay.stop();
     let _ = std::fs::remove_dir_all(&root);
 }
+
+#[test]
+fn garden_security_hardening_rejects_traversal_tampered_genesis_ssrf_and_spam() {
+    if maybe_run_worker_process() {
+        return;
+    }
+
+    let root = temp_test_dir("hardening");
+    let mut svc = GardenService::new(Some(root.clone()));
+
+    // 1. Path traversal host / validator labels are rejected before Path::join.
+    assert!(svc
+        .create_garden(
+            "Valid".into(),
+            "../escape".into(),
+            "/ip4/127.0.0.1/tcp/9000".into(),
+            Vec::new(),
+            1,
+        )
+        .is_err());
+
+    let (invite, snap) = svc
+        .create_garden(
+            "Hardened Room".into(),
+            "host".into(),
+            "/ip4/127.0.0.1/tcp/9000".into(),
+            Vec::new(),
+            2,
+        )
+        .unwrap();
+    let link = invite.to_invite_link().unwrap();
+    for bad_name in ["../escape", "/tmp/abs", "..", "bad:name"] {
+        assert!(svc.join_by_invite(&link, bad_name.into()).is_err());
+    }
+    assert!(svc
+        .resolve_content(Some(snap.chain_id), "../../etc/passwd")
+        .is_err());
+
+    // 2. Non-routable / metadata probe targets are rejected.
+    for bad_addr in ["169.254.169.254:80", "0.0.0.0:1", "224.0.0.1:1"] {
+        assert!(svc.query_peer_status(bad_addr).is_err());
+    }
+
+    // 3. Peer-supplied genesis with tampered limits or hash fails verify().
+    let mut forged_node = GardenNode::new("forged".into(), None).unwrap();
+    let forged_inv = forged_node
+        .create_garden(
+            "Genuine".into(),
+            1_700_000_000_000,
+            5,
+            GardenLimits::default(),
+        )
+        .unwrap();
+    let mut tampered_gen = forged_node.state.as_ref().unwrap().genesis.clone();
+    tampered_gen.limits.max_object_bytes = usize::MAX;
+    let mut victim = GardenNode::new("victim".into(), None).unwrap();
+    assert!(victim.init_from_invite(&forged_inv, tampered_gen).is_err());
+
+    // 4. Node-wide Garden cap rejects excess active Gardens.
+    for idx in 1..16u64 {
+        svc.create_garden(
+            format!("Room {idx}"),
+            "host".into(),
+            "/ip4/127.0.0.1/tcp/9001".into(),
+            Vec::new(),
+            100 + idx,
+        )
+        .unwrap();
+    }
+    assert!(svc
+        .create_garden(
+            "Overflow Room".into(),
+            "host".into(),
+            "/ip4/127.0.0.1/tcp/9001".into(),
+            Vec::new(),
+            999,
+        )
+        .is_err());
+
+    let _ = std::fs::remove_dir_all(&root);
+}

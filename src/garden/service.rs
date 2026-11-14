@@ -8,8 +8,8 @@ use crate::garden::node::{
 };
 use crate::garden::storage::{GardenContentStore, GardenStoredObject};
 use crate::garden::types::{
-    verify_garden_execution_chain, GardenBlock, GardenContentKind, GardenGenesis, GardenLimits,
-    GardenTrace, GardenTxKind, SignedGardenTx,
+    is_safe_validator_label, verify_garden_execution_chain, GardenBlock, GardenContentKind,
+    GardenGenesis, GardenLimits, GardenTrace, GardenTxKind, SignedGardenTx,
 };
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
@@ -76,6 +76,35 @@ impl GardenService {
         relay_multiaddrs: Vec<String>,
         nonce: u64,
     ) -> Result<(GardenInvitePayload, GardenStatusSnapshot), String> {
+        const MAX_GARDENS_PER_NODE: usize = 16;
+        const MAX_ADDR_BYTES: usize = 256;
+        const MAX_RELAYS_PER_INVITE: usize = 16;
+        if !is_safe_validator_label(&host_name) {
+            return Err("host_name must be 1..=64 safe path-free bytes".into());
+        }
+        if host_multiaddr.trim().is_empty() || host_multiaddr.len() > MAX_ADDR_BYTES {
+            return Err("host_multiaddr must be 1..=256 bytes".into());
+        }
+        if relay_multiaddrs.len() > MAX_RELAYS_PER_INVITE
+            || relay_multiaddrs
+                .iter()
+                .any(|r| r.trim().is_empty() || r.len() > MAX_ADDR_BYTES)
+        {
+            return Err("relay_multiaddrs exceeds count or byte limit".into());
+        }
+        // Evict Retired gardens before enforcing the active/frozen capacity cap.
+        self.gardens.retain(|_, entry| {
+            entry
+                .host_node
+                .state
+                .as_ref()
+                .is_some_and(|s| s.status() != DomainStatus::Retired)
+        });
+        if self.gardens.len() >= MAX_GARDENS_PER_NODE {
+            return Err(format!(
+                "maximum active Gardens per node ({MAX_GARDENS_PER_NODE}) reached"
+            ));
+        }
         let host_storage = self.storage_root.as_ref().map(|r| r.join("host"));
         let mut host_node = GardenNode::new(host_name, host_storage)?;
         host_node.set_network_addrs(host_multiaddr, relay_multiaddrs);
@@ -116,6 +145,9 @@ impl GardenService {
         invite_or_qr: &str,
         validator_name: String,
     ) -> Result<serde_json::Value, String> {
+        if !is_safe_validator_label(&validator_name) {
+            return Err("validator_name must be 1..=64 safe path-free bytes".into());
+        }
         let payload = GardenInvitePayload::decode_any(invite_or_qr)?;
         let chain_key = payload.chain_id.to_string();
         let storage_root = self.storage_root.as_ref().map(|r| r.join(&validator_name));
@@ -260,9 +292,12 @@ impl GardenService {
                 .get_mut(validator_pubkey_hex)
                 .ok_or_else(|| format!("unknown Garden validator {}", validator_pubkey_hex))?;
             if let Some(mut refreshed) = host_state_snapshot {
-                let node_dir = storage_root
-                    .as_ref()
-                    .map(|r| r.join(&participant.display_name));
+                let node_dir = match storage_root.as_ref() {
+                    Some(root) if is_safe_validator_label(&participant.display_name) => {
+                        Some(root.join(&participant.display_name))
+                    }
+                    _ => None,
+                };
                 if let Some(dir_root) = node_dir.as_deref() {
                     if let Ok(rebuilt_store) = GardenContentStore::new(
                         chain_num,
@@ -388,6 +423,19 @@ impl GardenService {
         let addr: SocketAddr = peer_addr
             .parse()
             .map_err(|e| format!("invalid peer socket address '{peer_addr}': {e}"))?;
+        let unreachable = match addr.ip() {
+            std::net::IpAddr::V4(v4) => {
+                v4.is_unspecified() || v4.is_multicast() || v4.is_link_local() || v4.is_broadcast()
+            }
+            std::net::IpAddr::V6(v6) => {
+                v6.is_unspecified() || v6.is_multicast() || v6.is_unicast_link_local()
+            }
+        };
+        if unreachable {
+            return Err(format!(
+                "refusing to probe non-routable Garden peer address {addr}"
+            ));
+        }
         GardenNodeClient::call(addr, &GardenPeerRequest::GetStatus)
     }
 
