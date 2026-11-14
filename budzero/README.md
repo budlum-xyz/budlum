@@ -66,22 +66,22 @@ cargo test --workspace
 
 ## Soundness work (honest status)
 
-This crate set is the [`budzero/`](./) tree **inside this monorepo** (there is no separate `budlum-xyz/BudZero` checkout; this is the source). **Z-B:** `proves_verify_merkle_valid_64_depth` is green. Both `VerifyMerkle` and `VerifyInference` are backed by AIR constraints and enabled under `MainnetActivation::default()` (`MainnetActivation::closed()` retains an explicit opt-out toggle for differential testing).
+This crate set is the [`budzero/`](./) tree **inside this monorepo** (there is no separate `budlum-xyz/BudZero` checkout; this is the source). The AIR contains constraints for `VerifyMerkle` and `VerifyInference`; both remain closed under the default testnet activation. Explicit full activation is limited to tests until the opening gates pass.
 
 | Item | Status |
 | --- | --- |
 | Public inputs (Z-A) | Bound (incl. event_digest Log fix ) |
 | `VerifyMerkle` path AIR (Z-B) | Expansion + Poseidon round checks; pre-round currents, single-round path hash, original-only root check, expand gas |
 | Valid 64-depth prove | OK `proves_verify_merkle_valid_64_depth` green (matrix chain + full prove/verify) |
-| Production gate | `MainnetActivation::default()` **on** (`VerifyMerkle` and `VerifyInference` active); ISA `is_experimental()==false` |
-| `VerifyInference` | Opcode, gas, and 30-round Poseidon commitment AIR (`DOMAIN_VERIFY_INFERENCE`) active under `MainnetActivation::default()` |
+| Production gate | `MainnetActivation::default()` keeps `VerifyMerkle` and `VerifyInference` closed; ISA `is_experimental()==false` |
+| `VerifyInference` | Opcode and 30-round Poseidon commitment AIR (`DOMAIN_VERIFY_INFERENCE`) are present; default testnet activation stays closed |
 | Termination / halt (Z-C/D) | Landed .zk |
 | Storage gas (SRead/SWrite) | Higher than Load/Store; AIR aligned |
 | performance benches | Planned Tur **13.5** |
 | external audit | Checklist Tur **13.9** (not claimed done) |
 
-Z-B 64-depth soundness proof is green. Merkle membership and inference commitment
-checks inside STARK proofs are cryptographically constrained and enabled by default.
+Z-B 64-depth constraints exist. Merkle membership and inference commitment checks
+remain disabled on testnet until their opening gates and independent reviews pass.
 **B.U.D.** proof-of-storage productization remains a separate integration on top of
 this L1 primitive.
 
