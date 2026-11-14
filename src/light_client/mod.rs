@@ -844,8 +844,9 @@ pub struct RemoteMerkleStep {
 ///
 /// Binds an external domain's finalized `remote_state_root` to a checkpointed
 /// [`crate::settlement::GlobalBlockHeader`], verifies Merkle inclusion of
-/// `(state_key, state_value)`, and optionally validates a zero-knowledge
-/// [`bud_proof::predicates::PredicateProof`] for private ownership claims.
+/// `(state_key, state_value)`. Attached ownership/capability predicates stay
+/// closed until their public statement is bound to this exact leaf and domain;
+/// verifying an unrelated valid STARK is not ownership evidence.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct RemoteStateView {
     /// Source external domain identifier.
@@ -860,7 +861,8 @@ pub struct RemoteStateView {
     pub state_value: Vec<u8>,
     /// Merkle path from leaf digest up to `remote_state_root`.
     pub inclusion_path: Vec<RemoteMerkleStep>,
-    /// Optional hidden-ownership or capability predicate STARK proof.
+    /// Reserved for a future leaf-bound ownership/capability proof. Any
+    /// attached proof is refused until its relation to the leaf is specified.
     pub predicate_proof: Option<bud_proof::predicates::PredicateProof>,
 }
 
@@ -915,8 +917,8 @@ impl RemoteStateView {
         current
     }
 
-    /// Verify checkpoint binding, remote domain root commitment, state inclusion
-    /// path, and optional zero-knowledge predicate proof.
+    /// Verify checkpoint binding, remote domain root commitment, and state
+    /// inclusion path. Unbound optional predicates remain fail-closed.
     ///
     /// # Errors
     ///
@@ -949,12 +951,10 @@ impl RemoteStateView {
                 "RemoteStateView Merkle inclusion proof failed".to_string(),
             ));
         }
-        if let Some(predicate) = &self.predicate_proof {
-            bud_proof::predicates::verify_predicate(predicate).map_err(|err| {
-                LightClientError::VerificationFailed(format!(
-                    "RemoteStateView predicate proof failed: {err:?}"
-                ))
-            })?;
+        if self.predicate_proof.is_some() {
+            return Err(LightClientError::VerificationFailed(
+                "RemoteStateView predicate is not bound to the committed state leaf".to_string(),
+            ));
         }
         Ok(())
     }
@@ -1651,10 +1651,12 @@ mod tests {
     }
 
     #[test]
-    fn remote_state_view_verifies_inclusion_and_predicate_and_rejects_tampering() {
+    fn remote_state_view_verifies_inclusion_and_refuses_unbound_predicates() {
         use crate::core::account::AccountState;
         use crate::settlement::GlobalBlockHeader;
-        use bud_proof::predicates::{prove_predicate, PredicateKind, PredicateStatement};
+        use bud_proof::predicates::{
+            prove_predicate, verify_predicate, PredicateKind, PredicateStatement,
+        };
 
         let key = b"domain:eth:vault:alice".to_vec();
         let value = b"balance:1000000".to_vec();
@@ -1675,14 +1677,17 @@ mod tests {
         let domain_commitment_root =
             RemoteStateView::expected_domain_commitment(remote_domain_id, &remote_root);
 
+        // A valid, independent quorum proof must not confer ownership over
+        // this unrelated state leaf merely because its STARK verifies.
         let pred_proof = prove_predicate(&PredicateStatement {
-            kind: PredicateKind::Yk1Ownership,
-            lhs: 777,
-            rhs: 777,
+            kind: PredicateKind::Yk6ThresholdQuorum,
+            lhs: 4,
+            rhs: 4,
             aux: 1,
             chain_id: TEST_CHAIN_ID,
         })
-        .expect("predicate proof generation succeeds");
+        .expect("independent quorum predicate proves");
+        verify_predicate(&pred_proof).expect("unrelated predicate really does verify");
 
         let mut state = AccountState::new();
         let header = GlobalBlockHeader {
@@ -1726,7 +1731,7 @@ mod tests {
             state_key: key,
             state_value: value,
             inclusion_path: path,
-            predicate_proof: Some(pred_proof),
+            predicate_proof: None,
         };
         let testnet_chain = crate::core::chain_config::Network::Testnet
             .chain_id()
@@ -1742,13 +1747,12 @@ mod tests {
             Err(LightClientError::VerificationFailed(_))
         ));
 
-        let mut tampered_pred = view;
-        if let Some(p) = tampered_pred.predicate_proof.as_mut() {
-            p.statement.lhs ^= 1;
-        }
+        let mut unbound_pred = view;
+        unbound_pred.predicate_proof = Some(pred_proof);
         assert!(matches!(
-            tampered_pred.verify_for_chain(&checkpoint, &body, testnet_chain),
-            Err(LightClientError::VerificationFailed(_))
+            unbound_pred.verify_for_chain(&checkpoint, &body, testnet_chain),
+            Err(LightClientError::VerificationFailed(reason))
+                if reason.contains("not bound to the committed state leaf")
         ));
     }
 }

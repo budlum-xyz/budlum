@@ -945,6 +945,11 @@ impl RpcServer {
         } else {
             "structural_envelope_checks_only"
         };
+        let proof_note = if stark_live {
+            "proof-required models enforce full Plonky3 STARK verification bound to model, input, output, chain_id, sender, and nonce"
+        } else {
+            "proof-required models cannot register until the STARK input/output binding gates pass"
+        };
         serde_json::json!({
             "module": "ai_inference",
             "status": if stark_live { "stark_verification_live" } else { "not_ready" },
@@ -965,7 +970,7 @@ impl RpcServer {
                 "layer": crate::ai::verification_layer_capabilities(),
             },
             "economy": {
-                "status": "active_testnet_settlement",
+                "status": if stark_live { "active_testnet_settlement" } else { "partial_testnet_settlement" },
                 "pricing": "deterministic_compute_units",
                 "split": {
                     "operator_percent": 80,
@@ -976,7 +981,7 @@ impl RpcServer {
             },
             "data_layer": "requester-bound Pollen AccessGrant checks live; the grant builder issues to the requester",
             "verification_level": verification_level,
-            "verification_level_note": "proof-required models enforce full Plonky3 STARK verification bound to model, input, output, chain_id, sender, and nonce",
+            "verification_level_note": proof_note,
         })
     }
 
@@ -9124,7 +9129,7 @@ mod tests {
     #[test]
     fn ai_stats_fail_closed_until_runtime_wiring_is_complete() {
         let stats = RpcServer::ai_readiness_json(45261, 3);
-        assert_eq!(stats["status"], "stark_verification_live");
+        assert_eq!(stats["status"], "not_ready");
         assert_eq!(stats["active_bonded_operators"], 3);
         assert!(stats["operator_quorum_available"]
             .as_bool()
@@ -9135,11 +9140,17 @@ mod tests {
         assert!(stats["readiness"]["worker_daemon"]
             .as_bool()
             .unwrap_or(false));
-        assert!(stats["readiness"]["full_execution_proof_verification"]
+        assert!(!stats["readiness"]["full_execution_proof_verification"]
             .as_bool()
-            .unwrap_or(false));
-        assert_eq!(stats["verification_level"], "full_plonky3_stark_verified");
-        assert_eq!(stats["economy"]["status"], "active_testnet_settlement");
+            .unwrap_or(true));
+        assert_eq!(
+            stats["verification_level"],
+            "structural_envelope_checks_only"
+        );
+        assert_eq!(stats["economy"]["status"], "partial_testnet_settlement");
+        assert!(stats["verification_level_note"]
+            .as_str()
+            .is_some_and(|note| note.contains("cannot register")));
     }
 
     #[test]

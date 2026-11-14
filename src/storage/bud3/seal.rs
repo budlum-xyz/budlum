@@ -61,6 +61,12 @@ const OWNER_COMMIT_TAG: &[u8] = b"BDLM_BUD3_OWNER_COMMIT_V1";
 /// Domain tag binding privacy consent predicates to sealed objects.
 const CONSENT_PRED_TAG: &[u8] = b"BDLM_BUD3_CONSENT_PRED_V1";
 
+/// A public manifest alone cannot authorize its holder to issue owner consent.
+/// The YK11 statement commits to public metadata, not to a signature or a
+/// private witness for `owner_commitment`. Keep issuance and verification
+/// closed independently of the shared VerifyInference opcode schedule.
+pub const CONSENT_OWNER_AUTHORIZATION_LIVE: bool = false;
+
 /// Encryption profile for B.U.D. 3.0 sealed objects.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[repr(u8)]
@@ -111,8 +117,9 @@ pub struct SealedObjectManifest {
     pub owner_commitment: [u8; 32],
 }
 
-/// Verifiable consent proof granting scoped computation/view rights over a
-/// sealed object without exposing the plaintext or unrevoked identity keys.
+/// Reserved scoped consent proof format. Issuance is closed under the default
+/// testnet opcode gate until owner authorization and the private witness are
+/// cryptographically bound; no caller may treat manifest metadata as consent.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ConsentProof {
     /// Unlinkable consent grant tag checked against `DeletionSet`.
@@ -778,7 +785,8 @@ impl ConsentProof {
     ///
     /// # Errors
     ///
-    /// Returns [`SealBud3Error::ConsentDenied`] if the predicate proof cannot be built.
+    /// Returns [`SealBud3Error::ConsentDenied`] while owner authorization is
+    /// unbound, or if the predicate proof cannot be built.
     pub fn issue(
         manifest: &SealedObjectManifest,
         grant_tag: [u8; 32],
@@ -787,6 +795,9 @@ impl ConsentProof {
         chain_id: u64,
         expires_at_epoch: u64,
     ) -> Result<Self, SealBud3Error> {
+        if !CONSENT_OWNER_AUTHORIZATION_LIVE {
+            return Err(SealBud3Error::ConsentDenied);
+        }
         let binding = hash_fields_bytes(&[
             CONSENT_PRED_TAG,
             &grant_tag,
@@ -830,6 +841,9 @@ impl ConsentProof {
         expected_plaintext_root: &[u8; 32],
         current_epoch: u64,
     ) -> Result<(), SealBud3Error> {
+        if !CONSENT_OWNER_AUTHORIZATION_LIVE {
+            return Err(SealBud3Error::ConsentDenied);
+        }
         if deletion_set.is_revoked(&self.grant_tag, &self.object_commitment)
             || current_epoch > self.expires_at_epoch
             || !ct_eq_32(&self.object_commitment, expected_object)
@@ -980,7 +994,7 @@ mod tests {
     }
 
     #[test]
-    fn consent_proof_enforces_stark_binding_and_deletion_set_revocation() {
+    fn consent_refuses_unbound_owner_proofs_and_revoked_grants() {
         let payload = b"private telemetry batch for consented analytics";
         let key = ContentKey([0x71u8; 32]);
         let owner_secret = [0x81u8; 32];
@@ -997,34 +1011,47 @@ mod tests {
         let grant_tag = [0x44u8; 32];
         let grantee = [0x77u8; 32];
         let scope = [0x99u8; 32];
-        let consent =
-            ConsentProof::issue(&manifest, grant_tag, grantee, scope, 45261, 1_000).unwrap();
-
-        let mut deletions = DeletionSet::default();
-        assert!(consent
-            .verify(
-                &deletions,
-                &manifest.object_commitment,
-                &manifest.plaintext_root,
-                500
-            )
-            .is_ok());
-
-        // Expired consent is refused.
-        assert_eq!(
-            consent.verify(
-                &deletions,
-                &manifest.object_commitment,
-                &manifest.plaintext_root,
-                1_001
-            ),
+        assert!(matches!(
+            ConsentProof::issue(&manifest, grant_tag, grantee, scope, 45261, 1_000),
             Err(SealBud3Error::ConsentDenied)
-        );
+        ));
 
-        // Revocation in DeletionSet blocks further consent acceptance.
+        // A genuine STARK for an unrelated quorum statement must not become
+        // owner consent just because a caller fills in manifest fields.
+        let unrelated = prove_predicate(&PredicateStatement {
+            kind: PredicateKind::Yk6ThresholdQuorum,
+            lhs: 4,
+            rhs: 4,
+            aux: 1,
+            chain_id: 45261,
+        })
+        .expect("independent quorum predicate");
+        let impostor = ConsentProof {
+            grant_tag,
+            object_commitment: manifest.object_commitment,
+            plaintext_root: manifest.plaintext_root,
+            key_commitment: manifest.key_commitment,
+            grantee_commitment: grantee,
+            scope_tag: scope,
+            chain_id: 45261,
+            expires_at_epoch: 1_000,
+            predicate_proof: unrelated,
+        };
+        let mut deletions = DeletionSet::default();
+        for epoch in [500, 1_001] {
+            assert_eq!(
+                impostor.verify(
+                    &deletions,
+                    &manifest.object_commitment,
+                    &manifest.plaintext_root,
+                    epoch
+                ),
+                Err(SealBud3Error::ConsentDenied)
+            );
+        }
         deletions.tombstone_grant(grant_tag);
         assert_eq!(
-            consent.verify(
+            impostor.verify(
                 &deletions,
                 &manifest.object_commitment,
                 &manifest.plaintext_root,

@@ -1559,10 +1559,10 @@ fn bud3_e2e_replace_object_preserves_nft_binding_and_slashes_mismatch() {
 }
 
 #[test]
-fn testnet_sealed_field_native_remote_view_and_blind_compute_work_end_to_end() {
+fn testnet_sealed_field_native_remote_view_and_blind_compute_stays_closed() {
     use crate::ai::execution::{
-        blind_compute_scope_tag, guest_program_for_model, input_commitment, matmul_program_hash,
-        prove_mlp_inference, verify_compute_without_seeing, weights_digest,
+        blind_compute_scope_tag, encode_input_limbs, encode_output_limbs, guest_program_for_model,
+        matmul_program_hash, prove_mlp_inference, verify_compute_without_seeing, weights_digest,
         ComputeWithoutSeeingBundle, ComputeWithoutSeeingPermit, FixedPointMlpSpec,
     };
     use crate::ai::types::{
@@ -1574,8 +1574,9 @@ fn testnet_sealed_field_native_remote_view_and_blind_compute_work_end_to_end() {
     use crate::storage::bud3::{
         open_sealed_object_with_profile, seal_object_with_profile, sealed_key_commitment,
         sealed_plaintext_root, Bud3RpcService, CipherProfile, ConsentProof, ContentKey,
-        DeletionSet, Meter, ObjectVisibility, SEAL_SALT_LEN,
+        DeletionSet, Meter, ObjectVisibility, SealBud3Error, SEAL_SALT_LEN,
     };
+    use bud_proof::predicates::{prove_predicate, PredicateKind, PredicateStatement};
 
     // 1. Sealed object manifest + FieldNative cipher round-trip + archival candidates wiring.
     let key = ContentKey([0x61u8; 32]);
@@ -1677,7 +1678,8 @@ fn testnet_sealed_field_native_remote_view_and_blind_compute_work_end_to_end() {
         .verify_for_chain(&checkpoint, &acct_state.state_root_body(), testnet_chain)
         .expect("remote state view verifies cleanly");
 
-    // 4. ComputeWithoutSeeing STARK + ConsentProof + DeletionSet revocation.
+    // 4. The MLP guest still proves in isolation; the unsigned owner-consent
+    // and proof-required AI doors do not open on the production testnet.
     let mlp = FixedPointMlpSpec {
         dims: vec![2, 2, 1],
         weights: vec![1, -1, -1, 1, 1, 1],
@@ -1686,7 +1688,7 @@ fn testnet_sealed_field_native_remote_view_and_blind_compute_work_end_to_end() {
     let inputs = vec![5i32, 10i32];
     let requester = Address::from([0x65u8; 32]);
     let model_id = AiModelId::of(&requester, &[0x66u8; 32], 1);
-    let (proof, _) = prove_mlp_inference(&mlp, model_id, &inputs, 5_000_000).unwrap();
+    let (proof, output) = prove_mlp_inference(&mlp, model_id, &inputs, 5_000_000).unwrap();
     let model = AiModelSpec {
         model_id,
         model_hash: [0x66u8; 32],
@@ -1706,12 +1708,13 @@ fn testnet_sealed_field_native_remote_view_and_blind_compute_work_end_to_end() {
         execution_dims: Some(mlp.dims.clone()),
         modalities: crate::ai_inference::perception::ModalitySet::text_only(),
     };
+    let input_ref = encode_input_limbs(&inputs);
     let req = AiInferenceRequest {
         request_id: AiRequestId([0x67u8; 32]),
         requester,
         model_id,
-        input_commitment: input_commitment(&inputs),
-        input_ref: BoundedBytes::empty(),
+        input_commitment: crate::ai::types::canonical_input_commitment(&input_ref),
+        input_ref: BoundedBytes::try_new(input_ref).unwrap(),
         max_fee: 0,
         callback: None,
         submitted_at_block: 0,
@@ -1723,22 +1726,44 @@ fn testnet_sealed_field_native_remote_view_and_blind_compute_work_end_to_end() {
         request_id: req.request_id,
         verifier: requester,
         output_commitment: proof.output_commitment,
-        output_ref: BoundedBytes::empty(),
+        output_ref: BoundedBytes::try_new(encode_output_limbs(&output)).unwrap(),
         result_nonce: 1,
         signature: vec![],
         submitted_at_block: 1,
     };
     let grant_tag = [0x68u8; 32];
     let scope = blind_compute_scope_tag(&model_id, &req.input_commitment);
-    let consent = ConsentProof::issue(
-        &manifest,
+    assert_eq!(
+        ConsentProof::issue(
+            &manifest,
+            grant_tag,
+            *requester.as_bytes(),
+            scope,
+            testnet_chain,
+            500,
+        )
+        .unwrap_err(),
+        SealBud3Error::ConsentDenied
+    );
+    let unrelated = prove_predicate(&PredicateStatement {
+        kind: PredicateKind::Yk6ThresholdQuorum,
+        lhs: 4,
+        rhs: 4,
+        aux: 1,
+        chain_id: testnet_chain,
+    })
+    .expect("independent quorum STARK");
+    let consent = ConsentProof {
         grant_tag,
-        *requester.as_bytes(),
-        scope,
-        testnet_chain,
-        500,
-    )
-    .unwrap();
+        object_commitment: manifest.object_commitment,
+        plaintext_root: manifest.plaintext_root,
+        key_commitment: manifest.key_commitment,
+        grantee_commitment: *requester.as_bytes(),
+        scope_tag: scope,
+        chain_id: testnet_chain,
+        expires_at_epoch: 500,
+        predicate_proof: unrelated,
+    };
     let bundle = ComputeWithoutSeeingBundle {
         manifest: manifest.clone(),
         permit: ComputeWithoutSeeingPermit {
@@ -1755,11 +1780,14 @@ fn testnet_sealed_field_native_remote_view_and_blind_compute_work_end_to_end() {
     let program = guest_program_for_model(&model).unwrap();
     let pi = proof.public_inputs.as_ref().unwrap().to_execution_inputs();
     let mut deletion_set = DeletionSet::default();
-    let rep =
+    assert_eq!(bundle.request.input_commitment, proof.input_commitment);
+    assert_eq!(bundle.result.output_commitment, proof.output_commitment);
+    let err =
         verify_compute_without_seeing(&bundle, &deletion_set, &model, Some((&program, &pi)), 100)
-            .expect("blind compute verifies");
-    assert!(rep.is_fully_valid());
+            .expect_err("unsigned consent and unbound AI proof must remain closed");
+    assert!(err.contains("closed"), "{err}");
     deletion_set.tombstone_object(manifest.object_commitment);
+    assert!(deletion_set.is_revoked(&grant_tag, &manifest.object_commitment));
     assert!(verify_compute_without_seeing(
         &bundle,
         &deletion_set,

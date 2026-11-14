@@ -272,10 +272,10 @@ mod testnet_closures {
             .collect()
     }
 
-    /// A signed `ContractCall` on testnet uses the same ISA activation as the
-    /// proof verifier. Merkle must fail before it can claim storage credit;
-    /// inference retains its independent 30-round AIR proof path.
-    fn production_opcode_admission(opcode: Opcode, admitted: bool) {
+    /// A signed `ContractCall` on testnet uses the same staged ISA activation
+    /// as the proof verifier. Neither evidence-dependent opcode can be reached
+    /// by a transaction before its independent opening gate passes.
+    fn production_opcode_admission(opcode: Opcode) {
         let keypair = KeyPair::generate().expect("keypair");
         let from = Address::from(keypair.public_key_bytes());
         let mut state = AccountState::new();
@@ -292,29 +292,26 @@ mod testnet_closures {
             TransactionType::ContractCall,
         );
         tx.sign(&keypair);
-        let result = Executor::apply_transaction(&mut state, &tx);
-        if admitted {
-            result.expect("inference executes under the canonical testnet activation");
-            assert_eq!(state.get_nonce(&from), 1);
-        } else {
-            let err = result.expect_err("unbound VerifyMerkle is closed on testnet");
-            assert!(format!("{err:?}").contains("VerifyMerkle"), "{err:?}");
-            assert_eq!(
-                state.get_nonce(&from),
-                0,
-                "refusal must not consume a nonce"
-            );
-        }
+        let err = Executor::apply_transaction(&mut state, &tx)
+            .expect_err("staged opcode must be refused before state mutation");
+        assert!(err.contains(&format!("{opcode:?}")), "{err:?}");
+        assert_eq!(
+            state.get_nonce(&from),
+            0,
+            "refusal must not consume a nonce"
+        );
+        assert_eq!(state.get_balance(&from), 1_000, "no fee may be debited");
+        assert!(!bud_isa::MainnetActivation::default().allows(opcode));
         assert!(!bud_isa::MainnetActivation::closed().allows(opcode));
     }
 
     #[test]
     fn verify_merkle_is_closed_on_testnet() {
-        production_opcode_admission(Opcode::VerifyMerkle, false);
+        production_opcode_admission(Opcode::VerifyMerkle);
     }
 
     #[test]
-    fn verify_inference_is_active_on_testnet() {
-        production_opcode_admission(Opcode::VerifyInference, true);
+    fn verify_inference_is_closed_on_testnet() {
+        production_opcode_admission(Opcode::VerifyInference);
     }
 }
