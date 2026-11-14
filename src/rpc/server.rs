@@ -345,6 +345,7 @@ pub struct RpcServer {
     /// If `None`, metrics are silently skipped (e.g. in tests without a
     /// Global registry).
     metrics: Option<Arc<crate::core::metrics::Metrics>>,
+    garden: Arc<Mutex<crate::garden::GardenService>>,
 }
 
 impl RpcServer {
@@ -356,6 +357,7 @@ impl RpcServer {
             mode: RpcMode::Public,
             reveal_gateway: Arc::new(Mutex::new(crate::storage::RevealGateway::new())),
             metrics: None,
+            garden: Arc::new(Mutex::new(crate::garden::GardenService::default())),
         }
     }
 
@@ -371,6 +373,7 @@ impl RpcServer {
             mode: RpcMode::Public,
             reveal_gateway: Arc::new(Mutex::new(crate::storage::RevealGateway::new())),
             metrics: None,
+            garden: Arc::new(Mutex::new(crate::garden::GardenService::default())),
         }
     }
 
@@ -387,6 +390,7 @@ impl RpcServer {
             mode,
             reveal_gateway: Arc::new(Mutex::new(crate::storage::RevealGateway::new())),
             metrics: None,
+            garden: Arc::new(Mutex::new(crate::garden::GardenService::default())),
         }
     }
 
@@ -6598,6 +6602,229 @@ impl BudlumApiServer for RpcServer {
             .await;
         let chain_id = self.chain.get_chain_id().await;
         Ok(Self::ai_readiness_json(chain_id, active_operators.len()))
+    }
+
+    async fn garden_create(
+        &self,
+        title: String,
+        host_name: String,
+        host_multiaddr: String,
+        relay_multiaddrs: Vec<String>,
+        nonce: u64,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let mut guard = self
+            .garden
+            .lock()
+            .map_err(|_| ErrorObjectOwned::owned(-32603, "garden lock poisoned", None::<()>))?;
+        let (invite, status) = guard
+            .create_garden(title, host_name, host_multiaddr, relay_multiaddrs, nonce)
+            .map_err(|e| ErrorObjectOwned::owned(-32602, e, None::<()>))?;
+        let link = invite
+            .to_invite_link()
+            .map_err(|e| ErrorObjectOwned::owned(-32603, e, None::<()>))?;
+        let qr_payload = invite
+            .to_qr_payload()
+            .map_err(|e| ErrorObjectOwned::owned(-32603, e, None::<()>))?;
+        Ok(serde_json::json!({
+            "chain_id": status.chain_id,
+            "invite_link": link,
+            "qr_payload": qr_payload,
+            "status": status,
+        }))
+    }
+
+    async fn garden_invite(
+        &self,
+        chain_id: Option<u64>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let guard = self
+            .garden
+            .lock()
+            .map_err(|_| ErrorObjectOwned::owned(-32603, "garden lock poisoned", None::<()>))?;
+        guard
+            .get_invite(chain_id)
+            .map_err(|e| ErrorObjectOwned::owned(-32602, e, None::<()>))
+    }
+
+    async fn garden_join(
+        &self,
+        invite_or_qr: String,
+        validator_name: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let mut guard = self
+            .garden
+            .lock()
+            .map_err(|_| ErrorObjectOwned::owned(-32603, "garden lock poisoned", None::<()>))?;
+        guard
+            .join_by_invite(&invite_or_qr, validator_name)
+            .map_err(|e| ErrorObjectOwned::owned(-32602, e, None::<()>))
+    }
+
+    async fn garden_leave(
+        &self,
+        chain_id: Option<u64>,
+        validator_pubkey_hex: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let mut guard = self
+            .garden
+            .lock()
+            .map_err(|_| ErrorObjectOwned::owned(-32603, "garden lock poisoned", None::<()>))?;
+        let snap = guard
+            .leave_validator(chain_id, &validator_pubkey_hex)
+            .map_err(|e| ErrorObjectOwned::owned(-32602, e, None::<()>))?;
+        serde_json::to_value(snap)
+            .map_err(|e| ErrorObjectOwned::owned(-32603, e.to_string(), None::<()>))
+    }
+
+    async fn garden_return(
+        &self,
+        chain_id: Option<u64>,
+        validator_pubkey_hex: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let mut guard = self
+            .garden
+            .lock()
+            .map_err(|_| ErrorObjectOwned::owned(-32603, "garden lock poisoned", None::<()>))?;
+        let snap = guard
+            .return_validator(chain_id, &validator_pubkey_hex)
+            .map_err(|e| ErrorObjectOwned::owned(-32602, e, None::<()>))?;
+        serde_json::to_value(snap)
+            .map_err(|e| ErrorObjectOwned::owned(-32603, e.to_string(), None::<()>))
+    }
+
+    async fn garden_status(
+        &self,
+        chain_id: Option<u64>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let guard = self
+            .garden
+            .lock()
+            .map_err(|_| ErrorObjectOwned::owned(-32603, "garden lock poisoned", None::<()>))?;
+        let snap = guard
+            .status(chain_id)
+            .map_err(|e| ErrorObjectOwned::owned(-32602, e, None::<()>))?;
+        serde_json::to_value(snap)
+            .map_err(|e| ErrorObjectOwned::owned(-32603, e.to_string(), None::<()>))
+    }
+
+    async fn garden_publish(
+        &self,
+        chain_id: u64,
+        sender_pubkey_hex: String,
+        kind: String,
+        title_or_mime: String,
+        body_or_filename: String,
+        payload_hex: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let node_chain_id = self.chain.get_chain_id().await;
+        if crate::garden::is_primary_budlum_chain(chain_id) {
+            return Err(ErrorObjectOwned::owned(
+                -32602,
+                format!(
+                    "garden transactions are closed on primary Budlum chain {} (node chain {})",
+                    chain_id, node_chain_id
+                ),
+                None::<()>,
+            ));
+        }
+        let content_kind = match kind.as_str() {
+            "message" => crate::garden::GardenContentKind::Message,
+            "post" => crate::garden::GardenContentKind::Post,
+            "image" => crate::garden::GardenContentKind::Image,
+            other => {
+                return Err(ErrorObjectOwned::owned(
+                    -32602,
+                    format!("unknown garden content kind: {other}"),
+                    None::<()>,
+                ));
+            }
+        };
+        let clean_hex = payload_hex.strip_prefix("0x").unwrap_or(&payload_hex);
+        let payload_bytes = hex::decode(clean_hex).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("invalid payload_hex: {e}"), None::<()>)
+        })?;
+        let mut guard = self
+            .garden
+            .lock()
+            .map_err(|_| ErrorObjectOwned::owned(-32603, "garden lock poisoned", None::<()>))?;
+        guard
+            .publish_content(
+                chain_id,
+                &sender_pubkey_hex,
+                content_kind,
+                title_or_mime,
+                body_or_filename,
+                payload_bytes,
+            )
+            .map_err(|e| ErrorObjectOwned::owned(-32602, e, None::<()>))
+    }
+
+    async fn garden_resolve_content(
+        &self,
+        chain_id: Option<u64>,
+        content_id_hex: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let guard = self
+            .garden
+            .lock()
+            .map_err(|_| ErrorObjectOwned::owned(-32603, "garden lock poisoned", None::<()>))?;
+        let obj = guard
+            .resolve_content(chain_id, &content_id_hex)
+            .map_err(|e| ErrorObjectOwned::owned(-32602, e, None::<()>))?;
+        serde_json::to_value(obj)
+            .map_err(|e| ErrorObjectOwned::owned(-32603, e.to_string(), None::<()>))
+    }
+
+    async fn garden_trace(
+        &self,
+        chain_id: Option<u64>,
+        id_hex: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let guard = self
+            .garden
+            .lock()
+            .map_err(|_| ErrorObjectOwned::owned(-32603, "garden lock poisoned", None::<()>))?;
+        let trace = guard
+            .query_trace(chain_id, &id_hex)
+            .map_err(|e| ErrorObjectOwned::owned(-32602, e, None::<()>))?;
+        serde_json::to_value(trace)
+            .map_err(|e| ErrorObjectOwned::owned(-32603, e.to_string(), None::<()>))
+    }
+
+    async fn garden_advance_round(
+        &self,
+        chain_id: Option<u64>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let mut guard = self
+            .garden
+            .lock()
+            .map_err(|_| ErrorObjectOwned::owned(-32603, "garden lock poisoned", None::<()>))?;
+        guard
+            .advance_round(chain_id)
+            .map_err(|e| ErrorObjectOwned::owned(-32602, e, None::<()>))
+    }
+
+    async fn garden_peer_status(
+        &self,
+        chain_id: Option<u64>,
+        peer_addr: Option<String>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let guard = self
+            .garden
+            .lock()
+            .map_err(|_| ErrorObjectOwned::owned(-32603, "garden lock poisoned", None::<()>))?;
+        if let Some(addr) = peer_addr {
+            let resp = guard
+                .query_peer_status(&addr)
+                .map_err(|e| ErrorObjectOwned::owned(-32602, e, None::<()>))?;
+            serde_json::to_value(resp)
+                .map_err(|e| ErrorObjectOwned::owned(-32603, e.to_string(), None::<()>))
+        } else {
+            let probe = guard
+                .probe_local_node_listener(chain_id)
+                .map_err(|e| ErrorObjectOwned::owned(-32602, e, None::<()>))?;
+            Ok(serde_json::json!({ "local_probe": probe }))
+        }
     }
 }
 
