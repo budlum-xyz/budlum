@@ -40,39 +40,33 @@ pub const MAX_APP_NAME_BYTES: usize = 64;
 pub const MAX_APP_URL_BYTES: usize = 256;
 
 fn is_valid_app_url(url: &str) -> bool {
-    let trimmed = url.trim();
-    if trimmed.is_empty()
-        || url.len() > MAX_APP_URL_BYTES
-        || url.chars().any(char::is_control)
-        || trimmed.chars().any(char::is_whitespace)
-        || trimmed
-            .chars()
-            .any(|c| matches!(c, '<' | '>' | '"' | '\'' | '`' | '\\'))
-    {
+    // The whole string is judged, never a prefix, and the default is refusal. Looking for a
+    // scheme only before the first `/` and accepting everything else made acceptance the
+    // function's default branch: markup, an entity-encoded `javascript&colon;` and a
+    // protocol-relative `//host/path` were all stored and then served to every client by
+    // `bud_hubGetApps`.
+    if url.is_empty() || url.len() > MAX_APP_URL_BYTES || url != url.trim() {
         return false;
     }
-    // If a URI scheme is present before any path separator, allow only safe
-    // content/transport schemes (`https://`, `bud://`, `ipfs://`) with a
-    // non-empty target, refusing `javascript:`, `data:`, `vbscript:`, `file:`,
-    // `blob:`, `http:`, etc.
-    let head_end = trimmed.find('/').unwrap_or(trimmed.len());
-    if let Some(colon) = trimmed[..head_end].find(':') {
-        let scheme = &trimmed[..colon];
-        let rest = &trimmed[colon + 1..];
-        let Some(target) = rest.strip_prefix("//") else {
-            return false;
-        };
-        if target.trim().is_empty() || target.chars().any(char::is_whitespace) {
-            return false;
-        }
-        return scheme.eq_ignore_ascii_case("https")
-            || scheme.eq_ignore_ascii_case("bud")
-            || scheme.eq_ignore_ascii_case("ipfs");
+    // Characters that never belong in a stored URL: control and whitespace characters, and the
+    // ones that open or close markup and attribute values where a client prints the URL.
+    if url.chars().any(|c| {
+        c.is_control() || c.is_whitespace() || matches!(c, '<' | '>' | '"' | '\'' | '`' | '\\')
+    }) {
+        return false;
     }
-    // Without an explicit `scheme://`, refuse entity-encoded schemes (`&#58;`,
-    // `&colon;`), percent-encoded colons, and script-like punctuation while
-    // still permitting bare test labels/domains such as `example.bud`.
-    !trimmed.contains('&') && !trimmed.contains(';') && !trimmed.contains('%')
+    // Only an absolute URL on one of the three content and transport schemes (`https://`,
+    // `bud://`, `ipfs://`) with a target is accepted. `javascript:`, `data:`, `vbscript:`,
+    // `file:`, `blob:`, `http:`, a bare label and a relative path all fail here.
+    let Some((scheme, target)) = url.split_once("://") else {
+        return false;
+    };
+    if target.is_empty() || target.starts_with('/') {
+        return false;
+    }
+    scheme.eq_ignore_ascii_case("https")
+        || scheme.eq_ignore_ascii_case("bud")
+        || scheme.eq_ignore_ascii_case("ipfs")
 }
 
 impl BudlumxyzRegistry {
@@ -370,7 +364,7 @@ mod tests {
         ));
         assert!(!reg.apps[&id].verified);
         assert!(matches!(
-            reg.update_app(id, &other, Some("x".into()), None),
+            reg.update_app(id, &other, Some("https://x.bud".into()), None),
             Err(BudlumxyzError::NotDeveloper)
         ));
         assert_eq!(reg.list_apps().len(), 1);
@@ -452,7 +446,14 @@ mod tests {
         let dev = Address::from([1u8; 32]);
         let gov = Address::from([5u8; 32]);
         let id = reg
-            .register_app("G".into(), dev, AppCategory::Other, "u".into(), None, 1)
+            .register_app(
+                "G".into(),
+                dev,
+                AppCategory::Other,
+                "https://g.bud".into(),
+                None,
+                1,
+            )
             .expect("a fresh registry has no id to collide with");
         reg.authorized_governors.insert(gov);
         assert!(reg.mark_verified_by_governance(id, &gov).is_ok());
@@ -468,12 +469,24 @@ mod tests {
         let mut reg = BudlumxyzRegistry::new();
         let dev = Address::from([1u8; 32]);
         let id = reg
-            .register_app("U".into(), dev, AppCategory::DeFi, "u".into(), None, 1)
+            .register_app(
+                "U".into(),
+                dev,
+                AppCategory::DeFi,
+                "https://u.bud".into(),
+                None,
+                1,
+            )
             .expect("a fresh registry has no id to collide with");
         assert!(reg
-            .update_app(id, &dev, Some("new".into()), Some(ContentId([3u8; 32])))
+            .update_app(
+                id,
+                &dev,
+                Some("https://new.bud".into()),
+                Some(ContentId([3u8; 32]))
+            )
             .is_ok());
-        assert_eq!(reg.apps[&id].website_url, "new");
+        assert_eq!(reg.apps[&id].website_url, "https://new.bud");
         assert_eq!(reg.apps[&id].manifest_id, Some(ContentId([3u8; 32])));
     }
 
@@ -483,10 +496,10 @@ mod tests {
         let dev = Address::from([1u8; 32]);
         let long = "a".repeat(MAX_APP_NAME_BYTES + 1);
         for (name, url) in [
-            (String::new(), "u".to_string()),
-            (long, "u".to_string()),
+            (String::new(), "https://u.bud".to_string()),
+            (long, "https://u.bud".to_string()),
             ("ok".to_string(), String::new()),
-            ("bad\nname".to_string(), "u".to_string()),
+            ("bad\nname".to_string(), "https://u.bud".to_string()),
         ] {
             assert!(reg
                 .register_app(name, dev, AppCategory::DeFi, url, None, 1)
@@ -500,11 +513,19 @@ mod tests {
         let mut reg = BudlumxyzRegistry::new();
         let dev = Address::from([1u8; 32]);
         let id = reg
-            .register_app("B".into(), dev, AppCategory::DeFi, "u".into(), None, 1)
+            .register_app(
+                "B".into(),
+                dev,
+                AppCategory::DeFi,
+                "https://b.bud".into(),
+                None,
+                1,
+            )
             .expect("a fresh registry has no id to collide with");
         reg.attest_app_as_developer(id, &dev).unwrap();
         reg.apps.get_mut(&id).unwrap().verified = true;
-        reg.update_app(id, &dev, Some("new".into()), None).unwrap();
+        reg.update_app(id, &dev, Some("https://new.bud".into()), None)
+            .unwrap();
         assert!(!reg.apps[&id].verified);
         assert!(!reg.apps[&id].developer_attested);
     }
@@ -680,14 +701,33 @@ mod tests {
         let dev = Address::from([3u8; 32]);
 
         let a = reg
-            .register_app("A".into(), dev, AppCategory::Other, "a".into(), None, 1)
+            .register_app(
+                "A".into(),
+                dev,
+                AppCategory::Other,
+                "https://a.bud".into(),
+                None,
+                1,
+            )
             .expect("first registration");
         let b = reg
-            .register_app("B".into(), dev, AppCategory::Other, "b".into(), None, 1)
+            .register_app(
+                "B".into(),
+                dev,
+                AppCategory::Other,
+                "https://b.bud".into(),
+                None,
+                1,
+            )
             .expect("second registration");
         assert_ne!(a, b, "an incrementing counter must keep producing new ids");
     }
 
+    /// The default of the URL gate is refusal. The check used to look for a scheme only before the
+    /// first `/` and let every other string through, so markup, an entity-encoded scheme, a
+    /// protocol-relative URL and a bare label were stored and served to every client by
+    /// `bud_hubGetApps`. Only an absolute URL on `https://`, `bud://` or `ipfs://` with a target
+    /// is accepted, and the whole string is judged.
     #[test]
     fn app_registry_rejects_xss_schemes_and_overlong_updates() {
         let mut reg = BudlumxyzRegistry::new();
@@ -697,6 +737,7 @@ mod tests {
             "JAVASCRIPT:alert(1)",
             "  javascript:alert(1)",
             "javascript&#58;alert(1)",
+            "javascript&colon;alert(1)",
             "&#x6a;avascript:alert(1)",
             "data&#x3a;text/html,<script>alert(1)</script>",
             "<script>alert(1)</script>",
@@ -705,6 +746,24 @@ mod tests {
             "vbscript:msgbox(1)",
             "http://insecure.example",
             "https://",
+            "//evil.example/x",
+            "/relative/path",
+            "u",
+            "example.bud",
+            "javascript\u{ff1a}alert(1)",
+            "https:/one-slash.example",
+            "https:///no-host",
+            "bud://",
+            "ipfs://",
+            " https://padded.example",
+            "https://padded.example ",
+            "https://with space.example",
+            "https://a.example/\"onmouseover=\"x",
+            "https://a.example/<b>",
+            "https://a.example/`x`",
+            "https://a.example\\evil.example",
+            "ftp://files.example",
+            "mailto://someone@example.org",
         ] {
             assert!(
                 reg.register_app("App".into(), dev, AppCategory::Other, bad.into(), None, 1,)
@@ -728,5 +787,24 @@ mod tests {
         let overlong = format!("https://{}", "a".repeat(MAX_APP_URL_BYTES));
         assert!(reg.update_app(id, &dev, Some(overlong), None).is_err());
         assert_eq!(reg.apps[&id].website_url, "https://clean.bud");
+        assert!(
+            reg.apps.len() == 1,
+            "a refused registration leaves no record"
+        );
+
+        // The refusals are narrow: the three schemes, in any case, with a path, a query or a
+        // fragment, are accepted on update.
+        for good in [
+            "https://a.example",
+            "HTTPS://A.EXAMPLE/Path?x=1&y=2#frag",
+            "bud://name.bud",
+            "ipfs://bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi",
+        ] {
+            assert!(
+                reg.update_app(id, &dev, Some(good.into()), None).is_ok(),
+                "{good:?} must be accepted on update_app"
+            );
+            assert_eq!(reg.apps[&id].website_url, good);
+        }
     }
 }
