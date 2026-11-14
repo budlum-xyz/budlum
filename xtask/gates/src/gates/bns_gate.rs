@@ -29,7 +29,8 @@ pub(crate) const TESTS: &[&str] = &[
     "tests::bns_expanded::bns_metrics_export_one_counter_per_type_and_the_named_gauges",
     "tests::bns_expanded::bns_root_is_independent_of_insertion_order",
     "tests::bns_expanded::bns_absence_proof_boundaries_must_be_adjacent_positions",
-    "wallet::identity_profile::tests::a_swapped_address_under_a_valid_proof_is_not_verified",
+    "tests::bns_expanded::bns_set_content_refuses_unknown_content_and_binds_a_registered_manifest",
+    "wallet::identity_profile::tests::a_swapped_address_under_a_valid_bns_proof_is_not_verified",
 ];
 
 pub fn run(_root: &Path, log: &Path) -> Result<String, String> {

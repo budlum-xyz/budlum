@@ -1745,6 +1745,23 @@ mod rpc_tests {
             .unwrap_err()
             .message()
             .contains("Invalid BNS name"));
+        let prepared_storage = server
+            .bns_prepare_set_storage(
+                "bids.bud".to_string(),
+                seller.to_hex(),
+                hex::encode([0x33u8; 32]),
+                7,
+            )
+            .await
+            .unwrap();
+        assert!(prepared_storage["tx_template"].is_object());
+        assert_eq!(prepared_storage["storage_domain_id"], 7);
+        assert!(server
+            .bns_prepare_set_storage("bids.bud".to_string(), seller.to_hex(), "33".to_string(), 7)
+            .await
+            .unwrap_err()
+            .message()
+            .contains("Storage root must be 32 bytes"));
         let prepared_primary = server
             .bns_prepare_set_primary_name(seller.to_hex(), Some("bids.bud".to_string()))
             .await
