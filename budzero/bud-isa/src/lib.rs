@@ -82,19 +82,16 @@ pub enum IsaProfile {
     Testing,
 }
 
-/// Controls which opcodes
-/// Are active on mainnet. Default: VerifyMerkle and VerifyInference NOT
-/// Active on mainnet (staged rollout). After ceremony completion, flip
-/// The corresponding flags to true.
+/// Controls staged opcode activation. The default testnet schedule keeps
+/// `VerifyMerkle` and `VerifyInference` closed until their opening gates pass.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MainnetActivation {
-    /// False = OFF on mainnet (staged rollout) - the same as bool::default,
-    /// kept explicit for clarity alongside the privacy gates.
+    /// False keeps the opcode closed on testnet; it opens only through an
+    /// explicit activation schedule after the opening gates pass.
     pub verify_merkle_enabled: bool,
     /// AI inference verification opcode gate.
-    /// False means OFF on mainnet - it requires post-ceremony activation.
-    /// When true, the reserved VerifyInference (0x1F) opcode decodes on
-    /// mainnet. It still answers 0, and the AIR refuses any proof of it.
+    /// False keeps the opcode closed on testnet. When true, the
+    /// VerifyInference (0x1F) opcode decodes under the explicit schedule.
     pub verify_inference_enabled: bool,
     /// Privacy-layer opcode gates (staged rollout).
     pub privacy_commit_enabled: bool,
@@ -103,43 +100,19 @@ pub struct MainnetActivation {
 }
 
 impl Default for MainnetActivation {
-    /// Privacy opcodes are on; Merkle and inference verification are not.
+    /// Privacy opcodes are open; evidence-dependent opcodes stay closed.
     ///
-    /// The privacy three (`PrivacyCommit`, `NullifierCheck`,
-    /// `SumConservation`) were held closed because they hash through a
-    /// Poseidon permutation truncated to four rounds. At `alpha = 7` that
-    /// leaves algebraic degree 2401 - low enough to invert by interpolation
-    /// and cheap enough to collide by brute force, so the commitments
-    /// neither hid nor bound.
+    /// The privacy opcodes use the full Goldilocks width-12 Poseidon
+    /// permutation (`R_F = 8`, `R_P = 22`) and the AIR constrains every round.
+    /// Their previous four-round weakness is no longer present.
     ///
-    /// The permutation is now the full Goldilocks width-12 instance: `R_F = 8`,
-    /// `R_P = 22`, 30 rounds, and the AIR constrains every one of them. The
-    /// reason for the gate is gone, so the gate is gone.
-    ///
-    /// `VerifyMerkle` and `VerifyInference` stay closed for reasons that have
-    /// nothing to do with Poseidon. `VerifyInference` is a reserved opcode:
-    /// it returns zero and the AIR refuses any proof of it; see
-    /// `docs/AI_VERIFICATION_STATUS.md`.
-    ///
-    /// The rationale for `VerifyMerkle` has changed. For a long time it read
-    /// "unfinished path verification", and that was true: the 64 expansion rows
-    /// walked the Poseidon chain correctly row by row, but **the result they
-    /// reached was bound to nothing**. The root comparison looked at the
-    /// `merkle_current` cell of the original row, and no constraint forced the
-    /// output of round 64 to be written into that cell; a prover that writes the
-    /// claimed root there itself, without touching the expansion rows, produced
-    /// a proof that verified. That was measured, and it did.
-    ///
-    /// That gap is now closed (`plonky3_air.rs`, "The output of the last round
-    /// ..."; `rejects_verify_merkle_root_not_produced_by_the_path`). The gate
-    /// Activation schedule used when no override is configured: all five
-    /// staged opcodes (`VerifyMerkle`, `VerifyInference`, `PrivacyCommit`,
-    /// `NullifierCheck`, `SumConservation`) are backed by full 30-round
-    /// Poseidon AIR constraints and enabled on testnet/devnet/mainnet execution.
+    /// `VerifyMerkle` and `VerifyInference` remain closed on testnet until the
+    /// testnet opening gates and their independent security reviews pass.
+    /// Callers must use an explicit activation schedule to open them.
     fn default() -> Self {
         Self {
-            verify_merkle_enabled: true,
-            verify_inference_enabled: true,
+            verify_merkle_enabled: false,
+            verify_inference_enabled: false,
             privacy_commit_enabled: true,
             nullifier_check_enabled: true,
             sum_conservation_enabled: true,
@@ -352,16 +325,15 @@ impl Instruction {
 mod tests {
     use super::*;
 
-    /// `VerifyMerkle` is active under default activation once the full
-    /// 30-round Poseidon path check is enabled, while `closed()` continues to gate it.
+    /// `VerifyMerkle` stays closed under default testnet activation.
     #[test]
     fn verify_merkle_gate_stays_closed_until_full_poseidon() {
         let default = MainnetActivation::default();
-        assert!(default.verify_merkle_enabled);
-        assert!(default.allows(Opcode::VerifyMerkle));
-        let closed = MainnetActivation::closed();
-        assert!(!closed.verify_merkle_enabled);
-        assert!(!closed.allows(Opcode::VerifyMerkle));
+        assert!(!default.verify_merkle_enabled);
+        assert!(!default.allows(Opcode::VerifyMerkle));
+        let full = MainnetActivation::full();
+        assert!(full.verify_merkle_enabled);
+        assert!(full.allows(Opcode::VerifyMerkle));
     }
 
     #[test]
@@ -390,11 +362,8 @@ mod tests {
             imm: 0,
         }
         .encode();
-        let inst = Instruction::decode_for_mainnet(raw, MainnetActivation::default())
-            .expect("VerifyMerkle allowed by default activation");
-        assert_eq!(inst.opcode, Opcode::VerifyMerkle);
-        let err = Instruction::decode_for_mainnet(raw, MainnetActivation::closed())
-            .expect_err("VerifyMerkle blocked under closed activation");
+        let err = Instruction::decode_for_mainnet(raw, MainnetActivation::default())
+            .expect_err("VerifyMerkle stays closed under the default testnet activation");
         assert!(matches!(
             err,
             DecodeError::MainnetActivationRequired(Opcode::VerifyMerkle)
@@ -473,11 +442,8 @@ mod tests {
             imm: 0,
         }
         .encode();
-        let inst = Instruction::decode_for_mainnet(raw, MainnetActivation::default())
-            .expect("VerifyInference allowed by default activation");
-        assert_eq!(inst.opcode, Opcode::VerifyInference);
-        let err = Instruction::decode_for_mainnet(raw, MainnetActivation::closed())
-            .expect_err("VerifyInference blocked under closed activation");
+        let err = Instruction::decode_for_mainnet(raw, MainnetActivation::default())
+            .expect_err("VerifyInference stays closed under the default testnet activation");
         assert!(matches!(
             err,
             DecodeError::MainnetActivationRequired(Opcode::VerifyInference)
@@ -550,8 +516,8 @@ mod tests {
         }
     }
 
-    /// Under `MainnetActivation::default()` both opcodes are open backed by
-    /// the 30-round Poseidon AIR; `MainnetActivation::closed()` still refuses them.
+    /// The default testnet activation refuses evidence-dependent opcodes;
+    /// the explicit full schedule allows them for gated verification tests.
     #[test]
     fn d2_mainnet_activation_default_still_rejects_merkle_and_inference() {
         for op in [Opcode::VerifyMerkle, Opcode::VerifyInference] {
@@ -563,14 +529,17 @@ mod tests {
                 imm: 0,
             }
             .encode();
-            let inst = Instruction::decode_for_mainnet(raw, MainnetActivation::default())
-                .unwrap_or_else(|e| panic!("{op:?} must decode by default, got {e:?}"));
-            assert_eq!(inst.opcode, op);
-            let err = Instruction::decode_for_mainnet(raw, MainnetActivation::closed())
-                .expect_err("must stay blocked when explicitly closed");
+            let err = Instruction::decode_for_mainnet(raw, MainnetActivation::default())
+                .expect_err("default testnet activation keeps this opcode closed");
             assert!(
                 matches!(err, DecodeError::MainnetActivationRequired(_)),
-                "{op:?} must require activation when closed"
+                "{op:?} must require activation under the default schedule"
+            );
+            assert_eq!(
+                Instruction::decode_for_mainnet(raw, MainnetActivation::full())
+                    .expect("explicit full activation permits the opcode")
+                    .opcode,
+                op
             );
         }
     }
@@ -633,15 +602,14 @@ mod tests {
         }
     }
 
-    /// VerifyMerkle and VerifyInference are active under default() now that both
-    /// are backed by full 30-round Poseidon AIR constraints, and refused under closed().
+    /// Evidence-dependent opcodes stay closed under the default testnet activation.
     #[test]
     fn merkle_and_inference_stay_gated_by_default() {
         let default = MainnetActivation::default();
-        assert!(default.verify_merkle_enabled);
-        assert!(default.verify_inference_enabled);
-        assert!(default.allows(Opcode::VerifyMerkle));
-        assert!(default.allows(Opcode::VerifyInference));
+        assert!(!default.verify_merkle_enabled);
+        assert!(!default.verify_inference_enabled);
+        assert!(!default.allows(Opcode::VerifyMerkle));
+        assert!(!default.allows(Opcode::VerifyInference));
         let closed = MainnetActivation::closed();
         assert!(!closed.verify_merkle_enabled);
         assert!(!closed.verify_inference_enabled);

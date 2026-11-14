@@ -229,8 +229,8 @@ operator's control.
   limiter and the block list. A response never carries `set-cookie`: a cookie
   set here belongs to the suffix, not to the name, and would follow the reader
   to every other name. A site may narrow the `Content-Security-Policy` and may
-  never widen it; the comparison is conservative, so an unparsable policy is
-  refused rather than trusted. Content addressed by `ContentId` is immutable
+  never widen it; the comparison is conservative, so a policy the gateway cannot
+  parse is refused rather than trusted. Content addressed by `ContentId` is immutable
   for a year; a name resolution is cached for ten seconds, because a record can
   move. A block list affects this gateway only and never touches a chain
   record, which is the only statement a host can honestly make.

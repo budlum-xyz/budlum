@@ -603,6 +603,9 @@ pub fn rotate_period(state: &mut SyncCommitteeState) -> Result<(), SyncCommittee
     Err(SyncCommitteeError::RotationBranchRequired)
 }
 
+/// WIRING: exposed for external EVM light-client integrations that supply the
+/// finalized BeaconState branch and next committee.
+///
 /// Rotate the sync committee using a finalized BeaconState SSZ branch proving
 /// the incoming `next_sync_committee` against `finalized_state_root`.
 ///

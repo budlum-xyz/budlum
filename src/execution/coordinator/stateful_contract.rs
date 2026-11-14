@@ -37,6 +37,11 @@ pub const STATEFUL_CONTRACT_MAGIC: &[u8; 20] = b"BDLM_UEL_STATEFUL_V1";
 const STATEFUL_VM_MEMORY_BYTES: usize = 8192;
 const MAX_DECLARED_SLOTS: usize = 256;
 
+fn new_stateful_vm(gas_limit: u64) -> Vm {
+    Vm::with_mainnet_mode(STATEFUL_VM_MEMORY_BYTES, gas_limit, true)
+        .with_step_limit(bud_vm::MAX_CONTRACT_TRACE_STEPS)
+}
+
 /// Decoded stateful contract operation carried inside `Transaction::data`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StatefulContractEnvelope {
@@ -296,7 +301,7 @@ pub fn execute_stateful_contract_tx(
                 .ok_or_else(|| "deployed BudZero contract not found".to_string())?;
             let program = decode_checked_budzero(&code_bytes)?;
 
-            let mut vm = Vm::with_mainnet_mode(STATEFUL_VM_MEMORY_BYTES, capped_limit, true);
+            let mut vm = new_stateful_vm(capped_limit);
             vm.context.set_sender_bytes(&tx.from.0);
             vm.context.nonce = tx.nonce;
             vm.context.block_height = state.current_block_height;
@@ -416,6 +421,30 @@ mod tests {
             out.extend_from_slice(&ins.encode().to_le_bytes());
         }
         out
+    }
+
+    #[test]
+    fn stateful_vm_trace_is_capped_independently_of_the_gas_limit() {
+        let program = vec![Instruction {
+            opcode: Opcode::Jmp,
+            rd: 0,
+            rs1: 0,
+            rs2: 0,
+            imm: 0,
+        }
+        .encode()];
+        let mut vm = new_stateful_vm(1_000_000);
+
+        let receipt = vm.run_receipt(&program);
+
+        assert!(!receipt.success);
+        assert_eq!(receipt.error, Some(bud_vm::VmError::OutOfGas));
+        assert_eq!(
+            receipt.trace_len,
+            (bud_vm::MAX_CONTRACT_TRACE_STEPS + 1) as u64,
+            "only the synthetic terminal row may exceed the configured step cap"
+        );
+        assert!(vm.trace.len() <= bud_vm::MAX_CONTRACT_TRACE_STEPS + 1);
     }
 
     #[test]
