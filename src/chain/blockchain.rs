@@ -542,7 +542,7 @@ impl Blockchain {
     /// re-apply the same height will recount; prometheus counters already
     /// reset on process restart, and the alternative (remembering every
     /// hash ever applied) is a second consensus log.
-    fn emit_applied_tx_metrics(
+    pub(crate) fn emit_applied_tx_metrics(
         &self,
         txs: &[crate::core::transaction::Transaction],
         outcomes_before: usize,

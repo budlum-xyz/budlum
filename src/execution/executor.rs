@@ -1627,6 +1627,19 @@ impl Executor {
                     bincode::deserialize(&tx.data)
                         .map_err(|e| BudlumError::validation("bns_invalid_data", e.to_string()))?;
 
+                // The record may only point at content the chain knows: a
+                // registered plaintext manifest or a live public B.U.D. 3.0
+                // object. Sealed content has no public row and binds through
+                // `BnsSetBud3Content`, which checks the NFT grant.
+                if state.storage_registry.get_manifest(&cid).is_none()
+                    && state.bud3_registry.public_object(&cid.0).is_none()
+                {
+                    return Err(BudlumError::validation(
+                        "bns_content_unknown",
+                        "BNS set content names content that is not registered",
+                    ));
+                }
+
                 state
                     .bns_registry
                     .set_content(&name, &tx.from, cid, state.epoch_index)

@@ -867,6 +867,16 @@ pub trait BudlumApi {
         cid: String,
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
+    /// Prepare a transaction that binds a storage root and its domain to a name.
+    #[method(name = "bud_bnsPrepareSetStorage")]
+    async fn bns_prepare_set_storage(
+        &self,
+        name: String,
+        owner: String,
+        storage_root: String,
+        storage_domain_id: u32,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
     /// Resolve the live B.U.D. 3.0 `ContentRef` bound to a `.bud` name (`null` if unbound/expired).
     #[method(name = "bud_bnsGetBud3Content")]
     async fn bns_get_bud3_content(

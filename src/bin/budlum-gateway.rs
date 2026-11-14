@@ -617,16 +617,7 @@ fn resolve_name(
         .roots
         .verified_state_root(answer.height)
         .ok_or(GatewayError::UnknownHeight(answer.height))?;
-    let branch = budlum_core::bns::registry::BnsRegistry::verify_state_proof(
-        &answer.proof,
-        &root,
-        answer.epoch,
-    )
-    .map_err(GatewayError::ProofFailed)?
-    .ok_or(GatewayError::NotFound)?;
-    if branch.expires_at <= answer.epoch {
-        return Err(GatewayError::Expired);
-    }
+    let branch = budlum_core::web_gateway::resolve::verified_branch(&answer, &root)?;
     if let Some(sub) = &target.sub {
         let extras = branch
             .extras

@@ -141,6 +141,38 @@
     test (`bns_root_is_independent_of_insertion_order`) runs under `proptest`,
     and the gates keep their positive and negative canaries.
 
+  - **Content existence at the consensus door:** `BnsSetContent` is refused
+    with `bns_content_unknown` unless the id is a registered plaintext manifest
+    or a live public B.U.D. 3.0 object. Sealed content binds only through
+    `BnsSetBud3Content`, which checks the NFT grant.
+  - **`bud_bnsPrepareSetStorage`:** builds the `BnsSetStorage` template and
+    refuses a root that is not 32 bytes.
+  - **Gateway answers:** an expired record whose proof folds to the verified
+    root is a 404, a proof that does not fold is a 502, two nodes that answer
+    with different heights disagree, and a site policy of `'none'` narrows the
+    baseline.
+
+- **Open items (not implemented):**
+  - `BnsSetStorage` does not look the root up anywhere, because the chain
+    holds no per-domain storage root table. There is no `bns_storage_unknown`
+    refusal.
+  - A subdomain is an owner pointer (`BTreeMap<String, Address>`). There is
+    no `SubdomainRecord`, no `BnsSetSubdomainContent` and no subdomain content
+    RPC, so a subdomain serves the content of its parent name.
+  - `NameRecord` still carries the unused `resolver` field and two content
+    fields (`content_id` and `bud3_content`). They are not merged into one
+    `ContentRef`.
+  - The name tree is a binary Merkle tree over the sorted names with
+    adjacent-leaf absence proofs. It is not a sparse Merkle tree and is
+    recomputed from the rows, not updated incrementally.
+  - `wallet-core` verifies a recipient proof (`verify_bns_recipient_proof`).
+    It has no `resolve_bns` and no generated mobile or browser bindings for it.
+  - The gateway binary reads pinned header roots from its configuration and
+    takes the epoch from the node answer. It does not follow headers with the
+    light client. Its content source is a local directory and its content
+    cache is in memory. `serve` and `tls` live in the binary, not in
+    `src/web_gateway/`.
+
 ### Proof hardening (review findings)
 
 The `bns-gate` list also names the two tests below. Both close a hole where a
@@ -197,7 +229,7 @@ operator's control.
   limiter and the block list. A response never carries `set-cookie`: a cookie
   set here belongs to the suffix, not to the name, and would follow the reader
   to every other name. A site may narrow the `Content-Security-Policy` and may
-  never widen it; the comparison is conservative, so an unparseable policy is
+  never widen it; the comparison is conservative, so an unparsable policy is
   refused rather than trusted. Content addressed by `ContentId` is immutable
   for a year; a name resolution is cached for ten seconds, because a record can
   move. A block list affects this gateway only and never touches a chain
