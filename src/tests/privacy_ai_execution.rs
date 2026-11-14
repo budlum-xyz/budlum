@@ -607,13 +607,13 @@ fn private_transfer_replayed_under_another_nonce_or_bare_digest_is_refused() {
     assert!(state.note_registry.contains_commitment(&c_in));
 }
 
-/// Testnet (`45261`) executes private transfers with authorization and
+/// Devnet (`45262`) executes private transfers with authorization and
 /// ownership checks; Mainnet (`45260`) keeps the legacy boundary closed.
 #[test]
-fn private_transfer_is_open_on_testnet() {
+fn private_transfer_is_open_on_devnet() {
     use crate::core::chain_config::Network;
     let mainnet = Network::Mainnet.chain_id().value();
-    let testnet = Network::Testnet.chain_id().value();
+    let devnet = Network::Devnet.chain_id().value();
     let kp = KeyPair::generate().unwrap();
     let from = Address::from(kp.public_key_bytes());
     let mut state = funded_state(from, 1_000_000);
@@ -627,7 +627,7 @@ fn private_transfer_is_open_on_testnet() {
         .unwrap();
     let digest = PrivateTransferSubmit::compute_public_digest(&[n1], &[c_out]);
     let auth_msg =
-        PrivateTransferSubmit::authorization_message(testnet, from.as_bytes(), 0, &digest);
+        PrivateTransferSubmit::authorization_message(devnet, from.as_bytes(), 0, &digest);
     let sub = PrivateTransferSubmit {
         spent_commitments: vec![c_in],
         nullifiers: vec![n1],
@@ -636,13 +636,13 @@ fn private_transfer_is_open_on_testnet() {
         authorization_sig: kp.sign(&auth_msg).to_vec(),
         public_digest: digest,
     };
-    let tx_testnet = signed_tx(
+    let tx_devnet = signed_tx(
         &kp,
-        testnet,
+        devnet,
         TransactionType::PrivateTransferSubmit(sub.clone()),
     );
-    crate::execution::executor::Executor::apply_transaction_checked(&mut state, &tx_testnet)
-        .expect("testnet 45261 executes private transfers");
+    crate::execution::executor::Executor::apply_transaction_checked(&mut state, &tx_devnet)
+        .expect("devnet 45262 executes private transfers");
     assert!(!state.note_registry.contains_commitment(&c_in));
     assert!(state.note_registry.contains_commitment(&c_out));
 
@@ -658,19 +658,19 @@ fn private_transfer_is_open_on_testnet() {
     }
 }
 
-/// Note insertion executes on testnet (`45261`) and remains refused on mainnet (`45260`).
+/// Note insertion executes on devnet (`45262`) and remains refused on mainnet (`45260`).
 #[test]
-fn note_registry_is_open_on_testnet() {
+fn note_registry_is_open_on_devnet() {
     use crate::core::chain_config::Network;
     let mainnet = Network::Mainnet.chain_id().value();
-    let testnet = Network::Testnet.chain_id().value();
+    let devnet = Network::Devnet.chain_id().value();
     let kp = KeyPair::generate().unwrap();
     let from = Address::from(kp.public_key_bytes());
     let mut state = funded_state(from, 1_000_000);
     let c = hash_from_field(77);
-    let tx_testnet = signed_tx(&kp, testnet, TransactionType::PrivacyNoteInsert(c));
-    crate::execution::executor::Executor::apply_transaction_checked(&mut state, &tx_testnet)
-        .expect("testnet accepts note insertion");
+    let tx_devnet = signed_tx(&kp, devnet, TransactionType::PrivacyNoteInsert(c));
+    crate::execution::executor::Executor::apply_transaction_checked(&mut state, &tx_devnet)
+        .expect("devnet accepts note insertion");
     assert!(state.note_registry.contains_commitment(&c));
 
     let c_main = hash_from_field(78);
@@ -687,12 +687,12 @@ fn note_registry_is_open_on_testnet() {
     assert!(!state.note_registry.contains_commitment(&c_main));
 }
 
-/// AI execution proofs are open on testnet (`45261`) and gated on mainnet (`45260`).
+/// AI execution proofs are open on devnet (`45262`) and gated on mainnet (`45260`).
 #[test]
-fn ai_execution_proof_is_open_on_testnet() {
+fn ai_execution_proof_is_open_on_devnet() {
     use crate::core::chain_config::Network;
     let mainnet = Network::Mainnet.chain_id().value();
-    let testnet = Network::Testnet.chain_id().value();
+    let devnet = Network::Devnet.chain_id().value();
     let kp = KeyPair::generate().unwrap();
     let from = Address::from(kp.public_key_bytes());
     let mut state = funded_state(from, 1_000_000);
@@ -707,18 +707,18 @@ fn ai_execution_proof_is_open_on_testnet() {
         weights_digest: None,
         public_inputs: None,
     };
-    let tx_testnet = signed_tx(
+    let tx_devnet = signed_tx(
         &kp,
-        testnet,
+        devnet,
         TransactionType::AiAttachExecutionProof {
             request_id: crate::ai::types::AiRequestId::new([9u8; 32]),
             proof: proof.clone(),
         },
     );
-    let err_testnet =
-        crate::execution::executor::Executor::apply_transaction_checked(&mut state, &tx_testnet)
+    let err_devnet =
+        crate::execution::executor::Executor::apply_transaction_checked(&mut state, &tx_devnet)
             .expect_err("unknown request must fail request lookup, not layer gate");
-    if let crate::error::BudlumError::Validation { code, .. } = err_testnet {
+    if let crate::error::BudlumError::Validation { code, .. } = err_devnet {
         assert_ne!(code, "ai_layer_testnet_closed");
     }
 
@@ -741,13 +741,12 @@ fn ai_execution_proof_is_open_on_testnet() {
     }
 }
 
-/// Entry to the on-chain AI verification layer is open on testnet (`45261`)
-/// and devnet (`45262`); mainnet (`45260`) keeps the closure boundary.
+/// Entry to the AI verification layer is open on devnet and closed on mainnet.
 #[test]
-fn ai_layer_is_open_on_testnet() {
+fn ai_layer_is_open_on_devnet() {
     use crate::core::chain_config::Network;
     let mainnet = Network::Mainnet.chain_id().value();
-    let testnet = Network::Testnet.chain_id().value();
+    let devnet = Network::Devnet.chain_id().value();
     let kp = KeyPair::generate().unwrap();
     let from = Address::from(kp.public_key_bytes());
 
@@ -778,7 +777,7 @@ fn ai_layer_is_open_on_testnet() {
     }
 
     let mut state = funded_state(from, 1_000_000);
-    let tx = signed_tx(&kp, testnet, TransactionType::AiOperatorBond);
+    let tx = signed_tx(&kp, devnet, TransactionType::AiOperatorBond);
     if let Err(crate::error::BudlumError::Validation { code, .. }) =
         crate::execution::executor::Executor::apply_transaction_checked(&mut state, &tx)
     {
@@ -786,10 +785,10 @@ fn ai_layer_is_open_on_testnet() {
     }
 }
 
-/// A native contract can submit an AI inference marker on testnet (`45261`),
+/// A native contract can submit an AI inference marker on devnet (`45262`),
 /// while mainnet (`45260`) still enforces the layer closure before mutation.
 #[test]
-fn contract_inference_event_is_open_on_testnet() {
+fn contract_inference_event_is_open_on_devnet() {
     use bud_isa::{Instruction, Opcode};
     let mut program = Vec::new();
     for value in [0x00A1_00A1, 7, 1, 10] {
@@ -835,7 +834,7 @@ fn contract_inference_event_is_open_on_testnet() {
         100,
         0,
         bytecode.clone(),
-        crate::core::chain_config::Network::Testnet
+        crate::core::chain_config::Network::Devnet
             .chain_id()
             .value(),
         TransactionType::ContractCall,
@@ -1009,7 +1008,7 @@ fn privacy_confidential_bundle_refuses_unbound_yk1_on_testnet() {
 }
 
 #[test]
-fn privacy_threshold_escrow_7_of_4_unlocks_on_testnet() {
+fn privacy_threshold_escrow_7_of_4_unlocks_on_devnet() {
     use crate::core::chain_config::Network;
     use crate::privacy::{
         EscrowCommittee, ThresholdEscrow, ThresholdEscrowError, THRESHOLD_ESCROW_N,
@@ -1018,7 +1017,7 @@ fn privacy_threshold_escrow_7_of_4_unlocks_on_testnet() {
 
     assert_eq!(THRESHOLD_ESCROW_N, 7);
     assert_eq!(THRESHOLD_ESCROW_T, 4);
-    let testnet = Network::Testnet.chain_id().value();
+    let devnet = Network::Devnet.chain_id().value();
     let recipient = Address::from([0x77u8; 32]);
     let seeds: [[u8; 32]; 7] = std::array::from_fn(|i| {
         let mut s = [0u8; 32];
@@ -1031,7 +1030,7 @@ fn privacy_threshold_escrow_7_of_4_unlocks_on_testnet() {
         .collect();
     let committee = EscrowCommittee {
         escrow_id: [0x19u8; 32],
-        chain_id: testnet,
+        chain_id: devnet,
         epoch: 1,
         nonce: 0,
         members,
@@ -1060,10 +1059,18 @@ fn privacy_threshold_escrow_7_of_4_unlocks_on_testnet() {
         Err(ThresholdEscrowError::InsufficientShares { got: 3, need: 4 })
     );
 
+    let mut closed = escrow.clone();
+    closed.committee.chain_id = Network::Testnet.chain_id().value();
+    let refusal =
+        Executor::process_threshold_escrow_unlock(&mut closed, &recipient, &shares, &quorum_proof)
+            .expect_err("testnet escrow entry remains closed");
+    assert_eq!(refusal.code(), "privacy_testnet_closed");
+    assert!(!closed.unlocked);
+
     // 4 valid ML-DSA-65 committee shares + YK6 STARK unlock cleanly via Executor.
     let receipt =
         Executor::process_threshold_escrow_unlock(&mut escrow, &recipient, &shares, &quorum_proof)
-            .expect("7-of-4 threshold escrow unlocks on testnet 45261");
+            .expect("7-of-4 threshold escrow unlocks on devnet 45262");
     assert_ne!(receipt, [0u8; 32]);
     assert!(escrow.unlocked);
 
