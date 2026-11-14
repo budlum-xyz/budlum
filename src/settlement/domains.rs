@@ -4815,4 +4815,141 @@ mod tests {
         let err2 = err2.unwrap_err();
         assert!(err2.contains("not an active attester"), "got: {err2}");
     }
+
+    #[test]
+    fn awarded_relayer_intent_solver_cannot_withdraw_bond_before_expiry_and_gets_slashed() {
+        let owner = Address::from([0x91; 32]);
+        let relayer = Address::from([0x92; 32]);
+        let role = crate::registry::role::roles::RELAYER;
+        let mut state = AccountState::new();
+        state.current_block_height = 10;
+        state.add_balance(&owner, 50 + FEE);
+        let initial_stake = state.registry.params().min_stake;
+        state.add_balance(&relayer, initial_stake);
+        state.bond_relayer(&relayer, initial_stake).unwrap();
+
+        let policy = crate::relayer::PolicyEnvelope {
+            owner,
+            session_key: None,
+            spending_cap: 50,
+            allowed_domains: vec![1, 2],
+            requires_multisig: false,
+            requires_hsm: false,
+            expires_at_block: 10_000,
+        };
+        let intent = crate::relayer::UserIntent::new(
+            owner,
+            1,
+            2,
+            crate::relayer::RelayerActionKind::ExternalTransaction {
+                chain: crate::core::transaction::ExternalChain::Ethereum,
+                target_address: "0x0000000000000000000000000000000000000092".into(),
+                payload_hash: [0x91; 32],
+            },
+            50,
+            5_000,
+            1,
+            policy.policy_hash(),
+            relayer,
+        );
+        execute_settlement_tx(
+            &mut state,
+            &ctx(owner),
+            &SettlementTx::RelayerIntent(Box::new(crate::relayer::RelayerIntentTx::Open {
+                intent: Box::new(intent.clone()),
+                policy: Box::new(policy),
+            })),
+        )
+        .unwrap();
+        execute_settlement_tx(
+            &mut state,
+            &ctx(relayer),
+            &SettlementTx::RelayerIntent(Box::new(crate::relayer::RelayerIntentTx::Bid(Box::new(
+                crate::relayer::SolverBid {
+                    intent_id: intent.intent_id,
+                    relayer,
+                    quoted_fee: 40,
+                    proof_commitment: [0x93; 32],
+                    bond: 10,
+                    expires_at_block: 5_001,
+                },
+            )))),
+        )
+        .unwrap();
+        execute_settlement_tx(
+            &mut state,
+            &ctx(owner),
+            &SettlementTx::RelayerIntent(Box::new(crate::relayer::RelayerIntentTx::Award {
+                intent_id: intent.intent_id,
+                solver: relayer,
+            })),
+        )
+        .unwrap();
+
+        let release_epoch = state.begin_role_bond_unbonding(&relayer, role).unwrap();
+        state.epoch_index = release_epoch;
+        let err = state.withdraw_role_bond(&relayer, role).unwrap_err();
+        assert!(
+            err.contains("live awarded intent"),
+            "awarded relayer must not withdraw before intent expires: {err}"
+        );
+
+        state.current_block_height = 5_000;
+        execute_settlement_tx(
+            &mut state,
+            &ctx(owner),
+            &SettlementTx::RelayerIntent(Box::new(crate::relayer::RelayerIntentTx::Expire {
+                intent_id: intent.intent_id,
+            })),
+        )
+        .unwrap();
+        let stake_after = state.registry.get(&relayer, role).unwrap().stake;
+        assert!(
+            stake_after < initial_stake,
+            "liveness slash must land on the retained unbonding bond ({stake_after} vs {initial_stake})"
+        );
+    }
+
+    #[test]
+    fn assigned_prover_cannot_withdraw_prover_bond_while_task_is_live() {
+        let prover = Address::from([0x95; 32]);
+        let creator = Address::from([0x96; 32]);
+        let role = crate::registry::role::roles::PROVER;
+        let mut state = AccountState::new();
+        let bond = state.registry.params().min_stake;
+        state.add_balance(&prover, bond);
+        state.bond_prover(&prover, bond).unwrap();
+
+        let mut task = crate::settlement::proof_market::ProofTask::new(
+            crate::settlement::proof_market::ProofTaskKind::SyncCommitteeSig {
+                domain_id: 1,
+                epoch: 10,
+            },
+            creator,
+            0,
+            100,
+            100,
+            [0x11; 32],
+            bond,
+        );
+        task.status = crate::settlement::proof_market::ProofTaskStatus::Assigned {
+            prover,
+            assigned_at_epoch: 0,
+        };
+        state.proof_market.active_tasks.push(task);
+
+        let release_epoch = state.begin_role_bond_unbonding(&prover, role).unwrap();
+        state.epoch_index = release_epoch;
+        let err = state.withdraw_role_bond(&prover, role).unwrap_err();
+        assert!(
+            err.contains("live assigned task"),
+            "assigned prover must not withdraw bond while task is live: {err}"
+        );
+
+        state.proof_market.active_tasks.clear();
+        let returned = state
+            .withdraw_role_bond(&prover, role)
+            .expect("prover bond withdraws once no assigned task remains");
+        assert_eq!(returned, bond);
+    }
 }
