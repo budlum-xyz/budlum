@@ -13,11 +13,10 @@ pub enum Network {
     Devnet,
 }
 
-/// Privacy transfers and note insertion are enabled on Testnet (`45261`) and
-/// Devnet (`45262`); Mainnet (`45260`) stays gated until ceremony sign-off.
+/// Privacy transfers and note insertion remain closed on public networks
+/// until complete proof verification is wired. Devnet remains available for testing.
 pub(crate) fn privacy_transfers_enabled(chain_id: u64) -> bool {
-    chain_id == Network::Testnet.chain_id().value()
-        || chain_id == Network::Devnet.chain_id().value()
+    chain_id == Network::Devnet.chain_id().value()
 }
 
 impl Network {
