@@ -1,0 +1,1 @@
+# RPC method success and refusal test coverage ratchet (0 unrecorded gaps).

@@ -3,6 +3,7 @@
 //! The Data Rights and Pollen hardening adds the `DataAsset` and `AccessGrant`
 //! maps to this transitional registry. The rule: an AI cannot read a Pollen or
 //! B.U.D. data reference without a valid grant.
+//! Convenience: exposed for CLI, RPC, SDK, and multi-VM runtime callers.
 
 use crate::core::address::Address;
 use crate::storage::content_id::ContentId;
@@ -16,6 +17,8 @@ use super::{
 };
 
 /// AI Data Marketplace - Economic layer for user-to-AI data sales.
+use crate::bns::{CreateNameOffer, NameOffer, OfferKind};
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DataOffer {
     pub id: u64,
@@ -125,6 +128,11 @@ impl PollenPurchaseReceipt {
         AssetId(hasher.finalize().into())
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn validate_shape(&self) -> Result<(), String> {
         if self.receipt_id == GrantId::zero() {
             return Err("PollenPurchaseReceipt receipt_id cannot be zero".into());
@@ -209,6 +217,26 @@ pub const MAX_DATA_ASSETS: usize = 100_000;
 /// Convenience: pub so marketplace callers can refuse past the
 /// same bound the registry enforces in this module.
 pub const MAX_ACCESS_GRANTS: usize = 100_000;
+/// Most sale authorizations the registry holds.
+///
+/// Convenience: pub so marketplace callers can refuse past the
+/// same bound the registry enforces in this module.
+pub const MAX_SALE_AUTHORIZATIONS: usize = 100_000;
+/// Most purchase receipts the registry holds.
+///
+/// Convenience: pub so marketplace callers can refuse past the
+/// same bound the registry enforces in this module.
+pub const MAX_PURCHASE_RECEIPTS: usize = 100_000;
+/// Most encryption policy versions the registry holds.
+///
+/// Convenience: pub so marketplace callers can refuse past the
+/// same bound the registry enforces in this module.
+pub const MAX_ENCRYPTION_POLICIES: usize = 1_024;
+/// Most protected-content bindings the registry holds.
+///
+/// Convenience: pub so marketplace callers can refuse past the
+/// same bound the registry enforces in this module.
+pub const MAX_PROTECTED_CONTENT: usize = 100_000;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct MarketplaceRegistry {
@@ -216,15 +244,19 @@ pub struct MarketplaceRegistry {
     pub offers: BTreeMap<u64, DataOffer>,
     #[serde(default)]
     pub next_offer_id: u64,
+    #[serde(default)]
+    pub name_offers: BTreeMap<u64, NameOffer>,
+    #[serde(default)]
+    pub next_name_offer_id: u64,
     /// Pollen: registered data buds. The asset is not sold; its
-    /// Access pollen is sold via AccessGrant.
+    /// Access pollen is sold via `AccessGrant`.
     #[serde(default)]
     pub data_assets: BTreeMap<AssetId, DataAsset>,
     /// Pollen: owner-signed access grants. Strict AI gate consumes these.
     #[serde(default)]
     pub access_grants: BTreeMap<GrantId, AccessGrant>,
     /// Pollen: seller/owner signed sale authorizations. These define the
-    /// Bounded pollen sale terms without transferring DataAsset ownership.
+    /// Bounded pollen sale terms without transferring `DataAsset` ownership.
     #[serde(default)]
     pub sale_authorizations: BTreeMap<SaleAuthorizationId, SaleAuthorization>,
     /// Pollen: purchase receipts produced from authorization-backed grant issue.
@@ -259,6 +291,10 @@ impl MarketplaceRegistry {
     /// `payment_commitment`, expiry. That way the buyer has signed what they
     /// accepted, and an attacker cannot produce a grant in somebody else's name
     /// or on altered terms.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn purchase_signing_hash(
         authorization: &SaleAuthorization,
         buyer: Address,
@@ -289,6 +325,11 @@ impl MarketplaceRegistry {
         Ok(hasher.finalize().into())
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn create_offer(
         &mut self,
         seller: Address,
@@ -329,10 +370,15 @@ impl MarketplaceRegistry {
             active: true,
         };
         self.offers.insert(id, offer);
-        self.next_offer_id += 1;
+        self.next_offer_id = self.next_offer_id.saturating_add(1);
         Ok(id)
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn close_offer(&mut self, id: u64, caller: &Address) -> Result<(), String> {
         let offer = self.offers.get_mut(&id).ok_or("Offer not found")?;
         if &offer.seller != caller {
@@ -346,6 +392,11 @@ impl MarketplaceRegistry {
         self.offers.get(&id)
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn register_data_asset(&mut self, asset: DataAsset) -> Result<AssetId, String> {
         asset.validate()?;
         if self.data_assets.contains_key(&asset.asset_id) {
@@ -359,6 +410,11 @@ impl MarketplaceRegistry {
         Ok(id)
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn revoke_data_asset(
         &mut self,
         asset_id: &AssetId,
@@ -376,6 +432,10 @@ impl MarketplaceRegistry {
     }
 
     /// exposed for: pollen surface - offer/data-rights readers land with the pollen rollout.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn create_access_grant(&mut self, grant: AccessGrant) -> Result<GrantId, String> {
         self.create_access_grant_checked(grant, true)
     }
@@ -496,6 +556,11 @@ impl MarketplaceRegistry {
         Ok(())
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn revoke_access_grant(
         &mut self,
         grant_id: &GrantId,
@@ -512,8 +577,18 @@ impl MarketplaceRegistry {
         Ok(())
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn set_encryption_policy(&mut self, policy: EncryptionPolicy) -> Result<(), String> {
         policy.validate()?;
+        if !self.encryption_policies.contains_key(&policy.version)
+            && self.encryption_policies.len() >= MAX_ENCRYPTION_POLICIES
+        {
+            return Err("encryption policy registry is full".into());
+        }
         self.encryption_policies.insert(policy.version, policy);
         Ok(())
     }
@@ -529,6 +604,11 @@ impl MarketplaceRegistry {
             .collect()
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn create_sale_authorization(
         &mut self,
         authorization: SaleAuthorization,
@@ -585,11 +665,19 @@ impl MarketplaceRegistry {
         {
             return Err("SaleAuthorization already registered".into());
         }
+        if self.sale_authorizations.len() >= MAX_SALE_AUTHORIZATIONS {
+            return Err("sale authorization registry is full".into());
+        }
         let id = authorization.authorization_id;
         self.sale_authorizations.insert(id, authorization);
         Ok(id)
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     #[allow(clippy::too_many_arguments)]
     pub fn issue_grant_from_sale_authorization(
         &mut self,
@@ -678,7 +766,7 @@ impl MarketplaceRegistry {
             authorization.terms_hash,
         );
         // Authorization-backed grant: `create_sale_authorization` already
-        // verified the seller signature cryptographically (finding #358), so a
+        // verified the seller signature cryptographically, so a
         // grant issued from a *registered* authorization carries verified
         // owner consent. The owner_signature field is inherited from the
         // verified authorization rather than re-signed over the grant's own
@@ -715,6 +803,9 @@ impl MarketplaceRegistry {
         if self.purchase_receipts.contains_key(&receipt.receipt_id) {
             return Err("PollenPurchaseReceipt already registered".into());
         }
+        if self.purchase_receipts.len() >= MAX_PURCHASE_RECEIPTS {
+            return Err("purchase receipt registry is full".into());
+        }
 
         self.sale_authorizations
             .get_mut(&authorization_id)
@@ -737,6 +828,10 @@ impl MarketplaceRegistry {
     /// Strict AI gate. Returns `Ok(None)` for non-Pollen input_ref payloads
     /// (legacy prompt/opaque bytes). Returns `Err` for Pollen references that
     /// Lack a valid grant. There is no DAO/admin override.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn validate_ai_read_ref(
         &self,
         input_ref: &[u8],
@@ -799,6 +894,7 @@ impl MarketplaceRegistry {
 
     /// Owner of the paid `DataAsset` bound to `manifest_id`, if any.
     #[must_use]
+    /// Convenience: exposed for marketplace content ownership query.
     pub fn bound_asset_owner(&self, manifest_id: &ContentId) -> Option<Address> {
         let asset_id = self.protected_content.asset_for(manifest_id)?;
         self.data_assets.get(&asset_id).map(|a| a.owner)
@@ -836,6 +932,11 @@ impl MarketplaceRegistry {
             return Err(
                 "cannot bind content that does not match the asset's registered manifest".into(),
             );
+        }
+        if self.protected_content.asset_for(&manifest_id).is_none()
+            && self.protected_content.len() >= MAX_PROTECTED_CONTENT
+        {
+            return Err("protected content registry is full".into());
         }
         let owner = asset.owner;
         self.protected_content
@@ -920,6 +1021,11 @@ impl MarketplaceRegistry {
             .map_err(|e| e.to_string())
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn consume_ai_read_grant(
         &mut self,
         grant_id: &GrantId,
@@ -978,7 +1084,162 @@ impl MarketplaceRegistry {
         // it would accept different blocks.
         hasher.update(b"protected_content");
         hasher.update(self.protected_content.root());
+        if self.next_name_offer_id != 0 || !self.name_offers.is_empty() {
+            hasher.update(b"name_offers_v1");
+            hasher.update(self.next_name_offer_id.to_le_bytes());
+            hasher.update((self.name_offers.len() as u64).to_le_bytes());
+            for (id, offer) in &self.name_offers {
+                hasher.update(b"name_offer");
+                hasher.update(id.to_le_bytes());
+                hasher.update(offer.seller.0);
+                hasher.update((offer.name.len() as u64).to_le_bytes());
+                hasher.update(offer.name.as_bytes());
+                hasher.update(offer.price_atoms.to_le_bytes());
+                hasher.update(offer.duration.to_le_bytes());
+                let kind_tag = match offer.kind {
+                    OfferKind::Primary => 0u8,
+                    OfferKind::Resale => 1u8,
+                };
+                hasher.update([kind_tag]);
+                hasher.update(offer.expires_at_epoch.to_le_bytes());
+                hasher.update([u8::from(offer.active)]);
+            }
+        }
         hasher.finalize().into()
+    }
+
+    /// Open a `.bud` domain listing on the marketplace.
+    ///
+    /// # Errors
+    ///
+    /// Refuses zero seller, invalid BNS name, zero price, already-expired
+    /// listing window, zero/overflowing primary duration, or full offer table.
+    pub fn create_name_offer(
+        &mut self,
+        seller: Address,
+        request: CreateNameOffer,
+        current_epoch: u64,
+    ) -> Result<u64, String> {
+        if seller == Address::zero() {
+            return Err("Name offer seller cannot be the zero address".into());
+        }
+        if !crate::bns::BnsRegistry::is_valid_name(&request.name) {
+            return Err("Invalid BNS name: expected <label>.bud with 3..=32 characters".into());
+        }
+        if request.price_atoms == 0 {
+            return Err("Name offer price_atoms must be greater than zero".into());
+        }
+        if request.expires_at_epoch <= current_epoch {
+            return Err("Name offer expires_at_epoch must be in the future".into());
+        }
+        if request.kind == OfferKind::Primary {
+            if !crate::bns::BnsRegistry::is_valid_duration(request.duration) {
+                return Err(format!(
+                    "Primary name offer duration must be in {}..={}",
+                    crate::bns::MIN_DURATION,
+                    crate::bns::MAX_DURATION
+                ));
+            }
+            if current_epoch.checked_add(request.duration).is_none() {
+                return Err("Primary name offer duration overflows epoch counter".into());
+            }
+        }
+
+        if self.name_offers.len() >= MAX_OFFERS {
+            self.name_offers
+                .retain(|_, o| o.active && current_epoch < o.expires_at_epoch);
+            if self.name_offers.len() >= MAX_OFFERS {
+                return Err(format!("Name offer table full (max {MAX_OFFERS})"));
+            }
+        }
+
+        let id = self.next_name_offer_id;
+        self.next_name_offer_id = id
+            .checked_add(1)
+            .ok_or_else(|| "Name offer id overflow".to_string())?;
+        self.name_offers.insert(
+            id,
+            NameOffer {
+                id,
+                seller,
+                name: request.name,
+                price_atoms: request.price_atoms,
+                duration: request.duration,
+                kind: request.kind,
+                expires_at_epoch: request.expires_at_epoch,
+                active: true,
+            },
+        );
+        Ok(id)
+    }
+
+    /// Seller-only cancellation of an active `.bud` domain listing.
+    ///
+    /// # Errors
+    ///
+    /// Refuses unknown, inactive, or foreign listings.
+    pub fn cancel_name_offer(&mut self, offer_id: u64, caller: &Address) -> Result<(), String> {
+        let offer = self
+            .name_offers
+            .get_mut(&offer_id)
+            .ok_or_else(|| "Name offer not found".to_string())?;
+        if !offer.active {
+            return Err("Name offer is already closed".into());
+        }
+        if &offer.seller != caller {
+            return Err("Only the seller can cancel this name offer".into());
+        }
+        offer.active = false;
+        Ok(())
+    }
+
+    /// Mark a `.bud` domain listing closed upon settlement.
+    ///
+    /// # Errors
+    ///
+    /// Refuses unknown or already-closed listings.
+    pub fn close_name_offer(&mut self, offer_id: u64) -> Result<(), String> {
+        let offer = self
+            .name_offers
+            .get_mut(&offer_id)
+            .ok_or_else(|| "Name offer not found".to_string())?;
+        if !offer.active {
+            return Err("Name offer is already closed".into());
+        }
+        offer.active = false;
+        Ok(())
+    }
+
+    /// Close any open `Resale` listings for `name` (e.g. when `name` is
+    /// transferred directly or purchased via another listing).
+    pub fn invalidate_resale_offers_for_name(&mut self, name: &str) {
+        for offer in self.name_offers.values_mut() {
+            if offer.active && offer.kind == OfferKind::Resale && offer.name == name {
+                offer.active = false;
+            }
+        }
+    }
+
+    #[must_use]
+    pub fn get_name_offer(&self, offer_id: u64) -> Option<&NameOffer> {
+        self.name_offers.get(&offer_id)
+    }
+
+    #[must_use]
+    pub fn list_active_name_offers(
+        &self,
+        current_epoch: u64,
+        kind: Option<OfferKind>,
+    ) -> Vec<NameOffer> {
+        self.name_offers
+            .values()
+            .filter(|o| {
+                o.active
+                    && current_epoch < o.expires_at_epoch
+                    && kind.is_none_or(|wanted| o.kind == wanted)
+            })
+            .cloned()
+            .collect()
     }
 }
 
@@ -990,8 +1251,8 @@ mod tests {
     /// A deterministic test key pair: the address is the public key, and the
     /// signature comes from this pair.
     ///
-    /// Finding #358 (HIGH): signatures are now verified cryptographically, so tests
-    /// have to produce real ed25519 signatures.
+    /// Signatures are verified cryptographically, so tests have to produce
+    /// real ed25519 signatures.
     fn test_keypair(byte: u8) -> crate::crypto::primitives::KeyPair {
         crate::crypto::primitives::KeyPair::from_seed(&[byte; 32])
             .expect("deterministic test keypair")
@@ -1676,5 +1937,65 @@ mod tests {
         let a = reg.create_offer(seller, cid, 10).expect("first offer");
         let b = reg.create_offer(seller, cid, 20).expect("second offer");
         assert_ne!(a, b, "an incrementing counter must keep producing new ids");
+    }
+
+    #[test]
+    fn data_market_sale_uses_grant() {
+        let mut reg = MarketplaceRegistry::new();
+        let seller = addr(1);
+        let buyer = addr(2);
+        let stranger = addr(3);
+        let bud3_cid = crate::storage::bud3::content_id::ContentId::public(b"market-dataset-v3");
+        let manifest_id = ContentId(bud3_cid.digest);
+        let asset = DataAsset::new(seller, manifest_id, [0x55; 32], true);
+        let asset_id = reg.register_data_asset(asset.clone()).unwrap();
+        reg.bind_content_to_asset(manifest_id, asset_id, seller)
+            .unwrap();
+
+        // Reading protected content without a grant is refused.
+        assert!(reg
+            .authorize_content_read(&manifest_id, &buyer, None, 12)
+            .is_err());
+
+        // Seller authorizes bounded sale; buyer purchases an AccessGrant.
+        let auth = signed_sale_authorization(&asset);
+        let auth_id = reg.create_sale_authorization(auth).unwrap();
+        let sig = signed_purchase(&reg, auth_id, buyer, buyer, 12, 5, 2, [0xCC; 32], 2);
+        let (grant_id, receipt) = reg
+            .issue_grant_from_sale_authorization(auth_id, buyer, buyer, 12, 5, 2, [0xCC; 32], sig)
+            .unwrap();
+        assert_eq!(receipt.grant_id, grant_id);
+        assert_eq!(reg.data_assets.get(&asset_id).unwrap().owner, seller);
+
+        // Stranger cannot read with buyer's grant; buyer can read within window.
+        assert!(reg
+            .authorize_content_read(&manifest_id, &stranger, Some(&grant_id), 12)
+            .is_err());
+        assert!(reg
+            .authorize_content_read(&manifest_id, &buyer, Some(&grant_id), 12)
+            .is_ok());
+        assert!(reg
+            .authorize_content_read(&manifest_id, &buyer, Some(&grant_id), 25)
+            .is_err());
+    }
+
+    #[test]
+    fn offer_counter_saturates_and_encryption_policy_cap_holds() {
+        let mut reg = MarketplaceRegistry::new();
+        let seller = addr(1);
+        let cid = ContentId([0xEE; 32]);
+        reg.next_offer_id = u64::MAX;
+        let id = reg.create_offer(seller, cid, 50).unwrap();
+        assert_eq!(id, u64::MAX);
+        assert_eq!(reg.next_offer_id, u64::MAX);
+        assert!(reg.create_offer(seller, cid, 50).is_err());
+
+        for v in 1..=(MAX_ENCRYPTION_POLICIES as u32) {
+            reg.set_encryption_policy(EncryptionPolicy::post_quantum(v, 100, None))
+                .unwrap();
+        }
+        let next_v = (MAX_ENCRYPTION_POLICIES as u32) + 1;
+        let over = EncryptionPolicy::post_quantum(next_v, 100, None);
+        assert!(reg.set_encryption_policy(over).is_err());
     }
 }

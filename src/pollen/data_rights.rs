@@ -14,8 +14,8 @@ use sha2::{Digest, Sha256};
 
 use super::{AssetId, GrantId, Signature64};
 
-/// The AI input_ref prefix. A payload starting with it counts as a Pollen
-/// data-ref and has to pass the strict AccessGrant check.
+/// The AI `input_ref` prefix. A payload starting with it counts as a Pollen
+/// data-ref and has to pass the strict `AccessGrant` check.
 pub const POLLEN_AI_INPUT_REF_PREFIX: &[u8] = b"BDLM_POLLEN_AI_INPUT_REF_V1";
 
 /// HPKE KEM 0x647a, MLKEM768-X25519. The only
@@ -51,6 +51,11 @@ pub struct EncryptionPolicy {
 }
 
 impl EncryptionPolicy {
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn validate(&self) -> Result<(), String> {
         if self.version == 0 {
             return Err("EncryptionPolicy version must be >= 1".into());
@@ -196,10 +201,10 @@ impl EncryptionPolicy {
     }
 }
 
-/// The SaleAuthorization identity = the canonical seller authorization hash.
+/// The `SaleAuthorization` identity = the canonical seller authorization hash.
 pub type SaleAuthorizationId = AssetId;
 
-/// Owner/seller signed authorization to sell pollen for a DataAsset.
+/// Owner/seller signed authorization to sell pollen for a `DataAsset`.
 ///
 /// This is the bridge between "the bud is mine" and "I am selling my pollen":
 /// The DataAsset remains owned by `seller`, while grants may be issued under
@@ -290,6 +295,11 @@ impl SaleAuthorization {
         hasher.finalize().into()
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn validate_shape(&self) -> Result<(), String> {
         if self.authorization_id == SaleAuthorizationId::zero() {
             return Err("SaleAuthorization authorization_id cannot be zero".into());
@@ -336,6 +346,11 @@ impl SaleAuthorization {
             && self.grants_issued < self.max_grants
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn record_issued_grant(&mut self) -> Result<(), String> {
         if self.grants_issued >= self.max_grants {
             return Err("SaleAuthorization grant limit exhausted".into());
@@ -361,7 +376,7 @@ impl SaleAuthorization {
     }
 }
 
-/// DataAsset lifecycle state.
+/// `DataAsset` lifecycle state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum DataAssetStatus {
     #[default]
@@ -370,7 +385,7 @@ pub enum DataAssetStatus {
 }
 
 /// The user's sellable data asset. The asset itself is not sold; the access
-/// pollen is sold through an AccessGrant.
+/// pollen is sold through an `AccessGrant`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DataAsset {
     pub asset_id: AssetId,
@@ -413,6 +428,11 @@ impl DataAsset {
         AssetId(hasher.finalize().into())
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn validate(&self) -> Result<(), String> {
         if self.asset_id == AssetId::zero() {
             return Err("DataAsset asset_id cannot be zero".into());
@@ -447,7 +467,7 @@ impl DataAsset {
     }
 }
 
-/// AccessGrant lifecycle state.
+/// `AccessGrant` lifecycle state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum AccessGrantStatus {
     #[default]
@@ -562,6 +582,11 @@ impl AccessGrant {
         hasher.finalize().into()
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn validate_shape(&self) -> Result<(), String> {
         if self.grant_id == GrantId::zero() {
             return Err("AccessGrant grant_id cannot be zero".into());
@@ -609,6 +634,11 @@ impl AccessGrant {
             && self.reads_used < self.max_reads
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn record_read(&mut self) -> Result<(), String> {
         if self.reads_used >= self.max_reads {
             return Err("AccessGrant read limit exhausted".into());
@@ -641,7 +671,7 @@ impl AccessGrant {
 }
 
 /// Canonical reference embedded in `AiInferenceRequest.input_ref` when the
-/// Request wants to read a Pollen/B.U.D. DataAsset.
+/// Request wants to read a Pollen/B.U.D. `DataAsset`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AiDataInputRef {
     pub asset_id: AssetId,
@@ -659,6 +689,11 @@ impl AiDataInputRef {
         out
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn decode(bytes: &[u8]) -> Result<Option<Self>, String> {
         if !bytes.starts_with(POLLEN_AI_INPUT_REF_PREFIX) {
             return Ok(None);

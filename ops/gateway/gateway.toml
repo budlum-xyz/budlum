@@ -1,0 +1,52 @@
+# budlum.xyz gateway configuration.
+#
+# The process listens on plain HTTP. A terminator puts TLS in front, so this
+# file holds no key material and the binary never needs one.
+#
+# An empty `rpc` list, a missing `content_dir` or a missing blocklist file all
+# stop the process at startup. A gateway that cannot check a proof, cannot read
+# a byte or cannot read its own block list should not answer at all.
+
+# The suffix the gateway answers for. `ayaz.budlum.xyz` is `ayaz.bud`;
+# `shop.ayaz.budlum.xyz` is the `shop` subdomain of `ayaz.bud`.
+suffix = "budlum.xyz"
+
+# Plain HTTP. The terminator listens on 443.
+listen = "127.0.0.1:8080"
+
+# Every endpoint is asked and they must agree. One endpoint is enough to serve;
+# two is enough to notice a node that has drifted.
+rpc = [
+    "http://127.0.0.1:8545",
+]
+
+# The durable content cache. Objects are addressed by `ContentId`, so an entry
+# never goes stale; the budget is what bounds it.
+cache_dir = "/var/lib/budlum-gateway"
+cache_max_bytes = 10000000000
+
+# Requests per minute, per client address.
+rate_per_minute = 120
+
+# Who the clients are. The terminator in front of this process connects from
+# loopback and writes the client address into `X-Forwarded-For`; only that peer
+# is believed, and the client is the rightmost address in the header that is
+# not itself a trusted proxy. To serve clients that connect straight to this
+# port, set `allow_direct = true` and remove `trusted_proxies`: every forwarded
+# header is then ignored and the socket peer is the client. The process refuses
+# to start with neither of the two or with both, because a rate limit keyed on a
+# header the client wrote is no limit at all.
+trusted_proxies = ["127.0.0.1"]
+# allow_direct = true
+
+# A block list affects this gateway only. It never writes a chain record.
+# blocklist_file = "/etc/budlum-gateway/blocklist.txt"
+
+# The B.U.D. 3.0 content source is not wired yet. Until it is, the process
+# serves a local directory of published objects and refuses to start without
+# one, so an operator cannot mistake a gateway that answers 502 for a gateway
+# that works.
+# content_dir = "/var/lib/budlum-gateway/objects"
+
+# How long a resolved name is cached. A record can move, so this is short.
+resolve_ttl_secs = 10

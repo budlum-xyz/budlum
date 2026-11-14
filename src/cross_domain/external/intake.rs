@@ -64,7 +64,8 @@ use serde::{Deserialize, Serialize};
 /// `cross_domain::evm::sync_committee`, without recomputing the aggregation
 /// (the committee membership question belongs to the adapter's layout, not to
 /// the pairing).
-struct PairingBls;
+/// WIRING: External beacon light-client pairing verifier (`object_layer` and `ethereum` intake).
+pub(crate) struct PairingBls;
 
 impl BlsVerifier for PairingBls {
     fn verify_aggregate(
@@ -131,6 +132,10 @@ impl BlsVerifier for PairingBls {
         }
         Ok(())
     }
+
+    fn sync_committee_closed(&self) -> bool {
+        false
+    }
 }
 
 /// The adapter families this binary can construct. Data, so it can be
@@ -149,7 +154,7 @@ pub enum AdapterSpec {
         #[serde(default)]
         committee: Option<crate::cross_domain::external::ethereum::PinnedCommittee>,
     },
-    /// BudZKVM validity proofs for one network, pinned to one program and
+    /// `BudZKVM` validity proofs for one network, pinned to one program and
     /// one chain. A spec without the pins is
     /// the closed admission state: `register_domain` refuses it.
     ZkVm {
@@ -385,6 +390,11 @@ impl IntakeState {
         if matches!(spec, AdapterSpec::EthereumSync { .. }) && bls.is_none() {
             return Err(IntakeError::MissingBlsVerifier);
         }
+        if matches!(spec, AdapterSpec::EthereumSync { .. })
+            && bls.as_ref().is_some_and(|v| v.sync_committee_closed())
+        {
+            return Err(IntakeError::CommitteeNotPinned);
+        }
         // EthereumSync admission is
         // closed until a sync committee is pinned - the old shape let the
         // submitter name their own aggregate key.
@@ -475,6 +485,11 @@ impl IntakeState {
         };
         if matches!(entry.spec, AdapterSpec::EthereumSync { .. }) && bls.is_none() {
             return Err(IntakeError::MissingBlsVerifier);
+        }
+        if matches!(entry.spec, AdapterSpec::EthereumSync { .. })
+            && bls.as_ref().is_some_and(|v| v.sync_committee_closed())
+        {
+            return Err(IntakeError::CommitteeNotPinned);
         }
         let adapter = entry.spec.build(bls, None);
         // `now` is the live clock, not the
@@ -853,6 +868,10 @@ mod tests {
             }
             Ok(())
         }
+
+        fn sync_committee_closed(&self) -> bool {
+            false
+        }
     }
 
     fn eth_spec() -> AdapterSpec {
@@ -871,16 +890,20 @@ mod tests {
     /// A well-formed sync-committee evidence sample against the fixture
     /// layout, mirroring the framework's own golden builder.
     fn golden_for(spec: &AdapterSpec) -> RawConsensusEvidence {
-        let mut payload = vec![0u8; layout::LEN];
-        payload[layout::FINALIZED_ROOT].copy_from_slice(&[0xaa; 32]);
-        payload[layout::FINALIZED_SLOT].copy_from_slice(&64u64.to_le_bytes());
-        payload[layout::ATTESTED_SLOT].copy_from_slice(&128u64.to_le_bytes());
-        payload[layout::PERIOD].copy_from_slice(&0u64.to_le_bytes());
-        payload[layout::NEXT_COMMITTEE_ROOT].copy_from_slice(&[0xbb; 32]);
-        payload[layout::AGGREGATE_PUBKEY].copy_from_slice(&[0x11; 96]);
-        payload[layout::SIGNATURE].copy_from_slice(&[0x22; 96]);
-        payload[layout::PARTICIPATION_BITS].copy_from_slice(&[0xff; 64]);
-        payload[layout::STATE_ROOT].copy_from_slice(&[0xcc; 32]);
+        let committee = crate::cross_domain::external::ethereum::PinnedCommittee {
+            period: 0,
+            aggregate_pubkey: vec![0x11; 96],
+            next_committee_root: [0xbb; 32],
+        };
+        let payload = crate::cross_domain::external::ethereum::build_deneb_update_payload(
+            64,
+            128,
+            0,
+            &committee,
+            &[0x22; 96],
+            &[0xff; 64],
+            [0xcc; 32],
+        );
         let adapter = spec.build(Some(Box::new(StrictTestBls)), None);
         RawConsensusEvidence {
             adapter: adapter.descriptor().id,
@@ -1407,12 +1430,18 @@ mod tests {
         // A rival claim: same well-formed payload, different state root, so
         // the adapter derives a different claim for the same height.
         let mut rival = quorum_evidence(&spec, addr(3));
-        rival.payload[layout::STATE_ROOT].copy_from_slice(&[0xdd; 32]);
+        crate::cross_domain::external::ethereum::set_deneb_state_root(
+            &mut rival.payload,
+            [0xdd; 32],
+        );
         rival.declared_root = [0xdd; 32];
         // A third, different claim from the bonded poster: three seats, three
         // distinct answers, threshold 2.
         let mut rival_b = quorum_evidence(&spec, addr(9));
-        rival_b.payload[layout::STATE_ROOT].copy_from_slice(&[0xee; 32]);
+        crate::cross_domain::external::ethereum::set_deneb_state_root(
+            &mut rival_b.payload,
+            [0xee; 32],
+        );
         rival_b.declared_root = [0xee; 32];
         let _ = state.submit_evidence(&honest_a, Some(Box::new(StrictTestBls)));
         let _ = state.submit_evidence(&rival, Some(Box::new(StrictTestBls)));
@@ -1466,10 +1495,10 @@ mod tests {
         let spec = eth_spec();
         let a = quorum_evidence(&spec, addr(2));
         let mut b = quorum_evidence(&spec, addr(3));
-        b.payload[layout::STATE_ROOT].copy_from_slice(&[0xdd; 32]);
+        crate::cross_domain::external::ethereum::set_deneb_state_root(&mut b.payload, [0xdd; 32]);
         b.declared_root = [0xdd; 32];
         let mut c = quorum_evidence(&spec, addr(4));
-        c.payload[layout::STATE_ROOT].copy_from_slice(&[0xee; 32]);
+        crate::cross_domain::external::ethereum::set_deneb_state_root(&mut c.payload, [0xee; 32]);
         c.declared_root = [0xee; 32];
         let _ = state.submit_evidence(&a, Some(Box::new(StrictTestBls)));
         let _ = state.submit_evidence(&b, Some(Box::new(StrictTestBls)));
@@ -1696,5 +1725,95 @@ mod tests {
             )
             .unwrap_err();
         assert!(matches!(err, IntakeError::CommitteeNotPinned), "got: {err}");
+    }
+
+    /// EthereumSync admission and evidence verification are open on Testnet
+    /// (`45261`) with pinned committee + `PairingBls`, while Mainnet (`45260`)
+    /// stays gated (`MainnetDisabled`).
+    #[test]
+    fn ethereum_sync_committee_is_open_on_testnet() {
+        use crate::core::account::AccountState;
+        use crate::core::chain_config::Network;
+        use crate::cross_domain::external::ethereum::signing_root_v2;
+        use crate::cross_domain::external::external_tx::{
+            execute_external_domain_tx, ExternalDomainTx, ExternalDomainTxContext,
+            ExternalDomainTxError,
+        };
+        use bls12_381::{G1Affine, G1Projective, G2Affine, G2Projective, Scalar};
+
+        let mut state = AccountState::new();
+        let poster = addr(9);
+        let bond = u64::try_from(economics_bond()).unwrap();
+        state.add_balance(&poster, bond.saturating_mul(4));
+
+        let sk = Scalar::from(7u64);
+        let pk_compressed = G1Affine::from(G1Projective::generator() * sk).to_compressed();
+        let mut agg_pk = vec![0u8; 96];
+        agg_pk[..48].copy_from_slice(&pk_compressed);
+
+        let committee = crate::cross_domain::external::ethereum::PinnedCommittee {
+            period: 0,
+            aggregate_pubkey: agg_pk.clone(),
+            next_committee_root: [0xbb; 32],
+        };
+        let spec = AdapterSpec::EthereumSync {
+            network: "testnet".to_string(),
+            committee: Some(committee.clone()),
+        };
+        let mut payload = crate::cross_domain::external::ethereum::build_deneb_update_payload(
+            64,
+            128,
+            0,
+            &committee,
+            &[0u8; 96],
+            &[0xff; 64],
+            [0xcc; 32],
+        );
+        let update = crate::cross_domain::external::ethereum::parse_update(&payload).unwrap();
+        let root = signing_root_v2(&update);
+        let sig =
+            G2Affine::from(G2Projective::from(crate::chain::finality::hash_to_g2(&root)) * sk);
+        payload[layout::SIGNATURE].copy_from_slice(&sig.to_compressed());
+
+        let adapter = spec.build(Some(IntakeState::production_bls()), None);
+        let golden = RawConsensusEvidence {
+            adapter: adapter.descriptor().id,
+            evidence_version: 2,
+            network: "testnet".to_string(),
+            payload,
+            declared_height: 64,
+            declared_root: [0xcc; 32],
+            submitter: poster,
+        };
+        let req = RegistrationRequest {
+            golden,
+            versions: VersionPolicy::single(adapter.descriptor().id, 2, 0),
+            economics: IntakeState::conservative_economics(1_000_000),
+            policy: VerificationPolicy::strict(1_000),
+            bond_atoms: economics_bond(),
+            poster,
+            spec,
+        };
+        let tx = ExternalDomainTx::Register(Box::new(req));
+
+        let ctx_testnet = ExternalDomainTxContext {
+            sender: poster,
+            chain_id: Network::Testnet.chain_id().value(),
+            fee: 10,
+            bls: IntakeState::production_bls,
+        };
+        execute_external_domain_tx(&mut state, &ctx_testnet, &tx)
+            .expect("EthereumSync must succeed on testnet with real BLS signature");
+        assert_eq!(state.settlement.external_intake.entries.len(), 1);
+
+        let ctx_mainnet = ExternalDomainTxContext {
+            sender: poster,
+            chain_id: Network::Mainnet.chain_id().value(),
+            fee: 10,
+            bls: IntakeState::production_bls,
+        };
+        let err = execute_external_domain_tx(&mut state, &ctx_mainnet, &tx)
+            .expect_err("EthereumSync must stay closed on mainnet");
+        assert_eq!(err, ExternalDomainTxError::MainnetDisabled);
     }
 }

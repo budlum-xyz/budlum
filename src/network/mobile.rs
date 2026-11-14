@@ -8,7 +8,8 @@
 //!
 //! - **Battery-aware challenge policy:** verification frequency follows the
 //!   battery level.
-//! - **NAT connectivity:** relay/STUN for mobile nodes sitting behind a NAT.
+//! - **NAT topology:** records network hints; relay/STUN/DCUtR remain unwired
+//!   and cannot be reported as active connectivity.
 //! - **Self-hosted B.U.D.:** serving B.U.D. storage from the device.
 //! - **Lightweight sync:** stateless verification.
 
@@ -45,7 +46,7 @@ pub enum DeviceType {
     Tablet,
     /// A laptop on a mobile connection.
     Laptop,
-    /// An IoT device.
+    /// An `IoT` device.
     IoT,
 }
 
@@ -90,6 +91,11 @@ impl BatteryStatus {
         }
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn validate(&self) -> Result<(), String> {
         if self.level_pct > 100 {
             return Err("BatteryStatus level_pct must be <= 100".into());
@@ -121,9 +127,9 @@ pub struct NetworkStatus {
     pub connection_type: ConnectionType,
     /// Estimated bandwidth, in Kbps.
     pub bandwidth_kbps: u64,
-    /// Gecikme (ms).
+    /// Latency, in milliseconds.
     pub latency_ms: u32,
-    /// NAT tipi.
+    /// NAT classification.
     pub nat_type: NatType,
     /// Is there public IP reachability?
     pub public_ip: bool,
@@ -139,10 +145,10 @@ pub enum ConnectionType {
     Unknown,
 }
 
-/// NAT tipi.
+/// NAT classification.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum NatType {
-    /// NAT yok - genel IP.
+    /// No NAT: public IP.
     None,
     /// Full cone NAT: the most permissive.
     FullCone,
@@ -157,6 +163,11 @@ pub enum NatType {
 }
 
 impl NetworkStatus {
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn validate(&self) -> Result<(), String> {
         if self.bandwidth_kbps == 0 {
             return Err("NetworkStatus bandwidth_kbps must be >= 1".into());
@@ -183,6 +194,11 @@ pub struct StorageStatus {
 }
 
 impl StorageStatus {
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn validate(&self) -> Result<(), String> {
         if self.total_bytes == 0 {
             return Err("StorageStatus total_bytes must be >= 1".into());
@@ -204,6 +220,98 @@ impl StorageStatus {
     /// Is there enough storage, meaning at least 1 GB for B.U.D.?
     pub fn is_sufficient_for_bud(&self) -> bool {
         self.bud_available() >= 1_073_741_824 // 1 GB
+    }
+
+    /// Convenience: R-34 threshold (2 GiB free) below which mobile custody releases shares.
+    #[must_use]
+    pub const fn must_release_shares(&self) -> bool {
+        self.available_bytes < MOBILE_LOW_SPACE_RELEASE_BYTES
+    }
+}
+
+/// Convenience: Android 15+ 24-hour runtime cap on `dataSync` foreground services (6h).
+pub const ANDROID_15_DATASYNC_LIMIT_MINUTES_PER_24H: u32 = 360;
+
+/// Convenience: WorkManager unmetered fallback period when foreground service stops.
+pub const MOBILE_WORKMANAGER_PERIOD_MINUTES: u32 = 15;
+
+/// Convenience: free-space floor (2 GiB, R-34) triggering `ReleaseShares`.
+pub const MOBILE_LOW_SPACE_RELEASE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+
+/// Convenience: Android foreground service type modeled for mobile validator duty.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub enum AndroidForegroundKind {
+    /// Persistent `specialUse` service paired with WorkManager fallback.
+    SpecialUse,
+    /// Legacy `dataSync` service capped to 6 hours per 24 hours on Android 15+.
+    DataSync,
+}
+
+impl AndroidForegroundKind {
+    /// Convenience: maximum continuous foreground minutes per 24h window on Android 15+.
+    #[must_use]
+    pub const fn max_foreground_minutes_per_24h(self) -> u32 {
+        match self {
+            Self::SpecialUse => 24 * 60,
+            Self::DataSync => ANDROID_15_DATASYNC_LIMIT_MINUTES_PER_24H,
+        }
+    }
+
+    /// Convenience: only `SpecialUse` sustains 24-hour mobile validator duty.
+    #[must_use]
+    pub const fn supports_24h_validator_duty(self) -> bool {
+        matches!(self, Self::SpecialUse)
+    }
+}
+
+/// Convenience: platform-aware mobile validator policy (R-33, R-34, R-35).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MobileValidatorRuntimePolicy {
+    pub wifi_only: bool,
+    pub foreground_kind: AndroidForegroundKind,
+    pub workmanager_period_minutes: u32,
+}
+
+impl Default for MobileValidatorRuntimePolicy {
+    fn default() -> Self {
+        Self {
+            wifi_only: true,
+            foreground_kind: AndroidForegroundKind::SpecialUse,
+            workmanager_period_minutes: MOBILE_WORKMANAGER_PERIOD_MINUTES,
+        }
+    }
+}
+
+impl MobileValidatorRuntimePolicy {
+    /// Convenience: R-35 invariant - thermal pause is non-disablable in every policy.
+    #[must_use]
+    pub const fn thermal_pause_enabled(&self) -> bool {
+        true
+    }
+
+    /// Convenience: validates Android 15+ foreground service & WorkManager bounds.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
+    pub fn validate(&self) -> Result<(), String> {
+        if !self.foreground_kind.supports_24h_validator_duty() {
+            return Err(
+                "Android 15+ dataSync foreground service is capped at 6h/24h; \
+                 mobile validators must run under specialUse"
+                    .into(),
+            );
+        }
+        if self.workmanager_period_minutes < MOBILE_WORKMANAGER_PERIOD_MINUTES
+            || self.workmanager_period_minutes > 60
+        {
+            return Err(format!(
+                "WorkManager period {} min outside Android [15, 60] min bounds",
+                self.workmanager_period_minutes
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -315,20 +423,28 @@ pub struct NatTraversalStatus {
 }
 
 impl NatTraversalStatus {
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn validate(&self) -> Result<(), String> {
-        if self.using_relay {
-            let relay = self.relay_address.as_ref().ok_or_else(|| {
-                "NatTraversalStatus relay_address required when using_relay".to_string()
-            })?;
+        if self.using_relay && self.relay_address.is_none() {
+            return Err("NatTraversalStatus relay_address required when using_relay".into());
+        }
+        if let Some(relay) = &self.relay_address {
             if relay.is_empty()
                 || relay.len() > 256
                 || relay.bytes().any(|b| b.is_ascii_whitespace())
             {
                 return Err("NatTraversalStatus relay_address invalid".into());
             }
-            if self.hole_punched {
-                return Err("NatTraversalStatus cannot use relay and claim hole_punched".into());
-            }
+        }
+        // These fields are runtime outcomes, not predictions from the NAT type
+        // or from a configured address. The current swarm has no relay,
+        // DCUtR or AutoNAT behaviour, so it cannot prove any of them.
+        if self.using_relay || self.hole_punched || self.nat_detected {
+            return Err("NatTraversalStatus claims unimplemented NAT traversal".into());
         }
         Ok(())
     }
@@ -359,6 +475,11 @@ impl MobileNodeProfile {
         }
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn validate(&self) -> Result<(), String> {
         if self.address == Address::zero() {
             return Err("MobileNodeProfile address cannot be zero".into());
@@ -367,6 +488,9 @@ impl MobileNodeProfile {
         self.network.validate()?;
         self.storage.validate()?;
         self.nat_status.validate()?;
+        if self.network.nat_type == NatType::Symmetric && !self.network.public_ip {
+            return Err("MobileNodeProfile symmetric NAT requires an active relay reservation; NAT traversal is unavailable".into());
+        }
         // `can_accept_tasks` trusts the stored policy, so a policy that the
         // battery mode does not call for would enable work the battery state
         // must disable. The policy is derived, never chosen.
@@ -381,6 +505,11 @@ impl MobileNodeProfile {
         Ok(())
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn try_update_battery(
         &mut self,
         level_pct: u8,
@@ -399,6 +528,10 @@ impl MobileNodeProfile {
     }
 
     /// Updates the battery state and retunes the challenge policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn update_battery(
         &mut self,
         level_pct: u8,
@@ -428,25 +561,25 @@ impl MobileNodeProfile {
         };
         candidate.validate()?;
         self.network = candidate;
-
-        // Symmetric NAT means a relay is required
-        if nat_type == NatType::Symmetric && !public_ip {
-            self.nat_status.using_relay = true;
-            self.nat_status.hole_punched = false;
-        } else if nat_type == NatType::None || public_ip {
-            self.nat_status.using_relay = false;
-            self.nat_status.hole_punched = true;
-        }
-
-        self.nat_status.nat_detected = true;
+        // Changing the reported topology cannot establish a relay reservation,
+        // perform STUN detection or punch a hole. Invalidate any previous
+        // status; an address can be configured again separately, but cannot be
+        // reported as a working circuit without an actual transport event.
+        self.nat_status = NatTraversalStatus::default();
         Ok(())
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn set_relay_address(&mut self, relay_address: String) -> Result<(), String> {
         // Validate a candidate first, like `update_nat`: a refused address leaves the
         // profile as it was.
         let mut candidate = self.nat_status.clone();
-        candidate.using_relay = true;
+        // Configuring a candidate does not obtain a relay reservation.
+        candidate.using_relay = false;
         candidate.relay_address = Some(relay_address);
         candidate.hole_punched = false;
         candidate.validate()?;
@@ -576,8 +709,12 @@ mod tests {
     fn nat_symmetric_requires_relay() {
         let mut profile = MobileNodeProfile::new(test_address(), DeviceType::Phone);
         profile.update_nat(NatType::Symmetric, false).unwrap();
-        assert!(profile.nat_status.using_relay);
-        assert!(!profile.nat_status.hole_punched);
+        assert!(!profile.nat_status.using_relay);
+        assert!(!profile.nat_status.nat_detected);
+        assert!(profile
+            .validate()
+            .unwrap_err()
+            .contains("active relay reservation"));
     }
 
     #[test]
@@ -585,7 +722,25 @@ mod tests {
         let mut profile = MobileNodeProfile::new(test_address(), DeviceType::Phone);
         profile.update_nat(NatType::None, true).unwrap();
         assert!(!profile.nat_status.using_relay);
-        assert!(profile.nat_status.hole_punched);
+        assert!(!profile.nat_status.hole_punched);
+        assert!(!profile.nat_status.nat_detected);
+        assert!(profile.validate().is_ok());
+    }
+
+    #[test]
+    fn changing_network_invalidates_configured_relay_and_old_success_claims() {
+        let mut profile = MobileNodeProfile::new(test_address(), DeviceType::Phone);
+        profile
+            .set_relay_address("relay.example:4001".into())
+            .unwrap();
+        // Deserialized old profiles can contain stale success claims. A fresh
+        // topology input must not preserve them on the new network.
+        profile.nat_status.using_relay = true;
+        profile.update_nat(NatType::Symmetric, false).unwrap();
+        assert!(profile.nat_status.relay_address.is_none());
+        assert!(!profile.nat_status.using_relay);
+        assert!(!profile.nat_status.hole_punched);
+        assert!(!profile.nat_status.nat_detected);
     }
 
     #[test]
@@ -597,7 +752,12 @@ mod tests {
         assert!(profile
             .set_relay_address("relay.example:4001".to_string())
             .is_ok());
-        assert!(profile.nat_status.using_relay);
+        assert_eq!(
+            profile.nat_status.relay_address.as_deref(),
+            Some("relay.example:4001")
+        );
+        assert!(!profile.nat_status.using_relay);
+        assert!(profile.validate().is_ok());
     }
 
     /// `NatType::None` without a public address is a contradiction the
@@ -673,14 +833,44 @@ mod tests {
     }
 
     #[test]
-    fn relay_address_required_for_symmetric_nat_profile() {
+    fn configured_relay_is_not_an_active_reservation() {
         let mut profile = MobileNodeProfile::new(test_address(), DeviceType::Phone);
         profile.update_nat(NatType::Symmetric, false).unwrap();
-        assert!(profile.validate().unwrap_err().contains("relay_address"));
+        assert!(profile
+            .validate()
+            .unwrap_err()
+            .contains("active relay reservation"));
         profile
             .set_relay_address("relay.budlum.local:4001".into())
             .unwrap();
-        assert!(profile.validate().is_ok());
+        assert!(!profile.nat_status.using_relay);
+        assert!(profile
+            .validate()
+            .unwrap_err()
+            .contains("active relay reservation"));
+    }
+
+    #[test]
+    fn unverified_nat_success_claims_are_rejected() {
+        let mut profile = MobileNodeProfile::new(test_address(), DeviceType::Phone);
+        profile.nat_status.relay_address = Some("relay.budlum.local:4001".into());
+        profile.nat_status.using_relay = true;
+        assert!(profile
+            .validate()
+            .unwrap_err()
+            .contains("unimplemented NAT traversal"));
+        profile.nat_status.using_relay = false;
+        profile.nat_status.hole_punched = true;
+        assert!(profile
+            .validate()
+            .unwrap_err()
+            .contains("unimplemented NAT traversal"));
+        profile.nat_status.hole_punched = false;
+        profile.nat_status.nat_detected = true;
+        assert!(profile
+            .validate()
+            .unwrap_err()
+            .contains("unimplemented NAT traversal"));
     }
 
     #[test]
@@ -781,5 +971,31 @@ mod peer_budget_tests {
             "the profile already declined every task at this level, which is \
              why the peer budget had to move with it"
         );
+    }
+
+    #[test]
+    fn android_15_datasync_rejected_for_24h_validator_duty() {
+        let default_policy = MobileValidatorRuntimePolicy::default();
+        assert!(default_policy.wifi_only, "R-33 default must be Wi-Fi only");
+        assert!(default_policy.thermal_pause_enabled(), "R-35 thermal pause");
+        assert!(default_policy.validate().is_ok());
+
+        let datasync_policy = MobileValidatorRuntimePolicy {
+            wifi_only: true,
+            foreground_kind: AndroidForegroundKind::DataSync,
+            workmanager_period_minutes: MOBILE_WORKMANAGER_PERIOD_MINUTES,
+        };
+        assert_eq!(
+            AndroidForegroundKind::DataSync.max_foreground_minutes_per_24h(),
+            360
+        );
+        assert!(datasync_policy.validate().is_err());
+
+        let low_space = StorageStatus {
+            total_bytes: 64 * 1_073_741_824,
+            available_bytes: MOBILE_LOW_SPACE_RELEASE_BYTES - 1,
+            bud_reserved_bytes: 4 * 1_073_741_824,
+        };
+        assert!(low_space.must_release_shares());
     }
 }

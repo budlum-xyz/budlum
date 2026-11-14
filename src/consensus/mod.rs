@@ -9,6 +9,7 @@ pub mod pow;
 pub mod qc;
 pub mod registration;
 pub mod split_resolver;
+pub mod zk_verifier;
 use crate::core::block::Block;
 pub use poa::PoAEngine;
 pub use pos::PoSEngine;
@@ -340,7 +341,7 @@ pub trait ConsensusEngine: Send + Sync {
     fn record_block(
         &self,
         _block: &Block,
-        _storage: Option<&crate::storage::db::Storage>,
+        _storage: Option<&crate::persistence::db::Storage>,
     ) -> Result<(), ConsensusError> {
         Ok(())
     }
@@ -366,7 +367,7 @@ pub trait ConsensusEngine: Send + Sync {
         &self,
         _block: &Block,
         _chain: &[Block],
-        _storage: Option<&crate::storage::db::Storage>,
+        _storage: Option<&crate::persistence::db::Storage>,
     ) {
     }
 
@@ -389,10 +390,10 @@ pub trait ConsensusEngine: Send + Sync {
         &self,
         _height: u64,
         _chain: &[Block],
-        _storage: Option<&crate::storage::db::Storage>,
+        _storage: Option<&crate::persistence::db::Storage>,
     ) {
     }
-    fn load_state(&self, _storage: &crate::storage::db::Storage) -> Result<(), ConsensusError> {
+    fn load_state(&self, _storage: &crate::persistence::db::Storage) -> Result<(), ConsensusError> {
         Ok(())
     }
     fn drain_slashing_evidence(
@@ -544,7 +545,7 @@ pub trait ConsensusEngine: Send + Sync {
         // re-walked its locator nor reorged - it asked for the same index again
         // every second and never moved. A devnet node stayed at height 1 for the
         // whole run that way while the rest of the mesh reached 89, and its
-        // blocks were never on the chain the harness reads (AF-09).
+        // blocks were never on the chain the harness reads.
         //
         // The linkage test is two fields and it is the one the engines already
         // make, with the same message, so ordering it first changes no verdict

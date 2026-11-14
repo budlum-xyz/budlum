@@ -1,10 +1,10 @@
-//! MASAK/AML compliance primitives isolated to PoA domains.
+//! MASAK/AML compliance primitives isolated to `PoA` domains.
 //!
 //! The permissionless network must never inherit PoA-only compliance hooks. This
 //! Module therefore requires every state-changing operation to declare its
 //! Domain kind and fails closed for [`ComplianceDomainKind::Permissionless`].
 //!
-//! The compliance ledger for PoA domains: screening, freeze and travel-rule
+//! The compliance ledger for `PoA` domains: screening, freeze and travel-rule
 //! records, together with their audit trail.
 //!
 //! # A gate, not a ledger
@@ -18,7 +18,7 @@
 //!
 //!   * `Blockchain::freeze_poa_account` - the kind of the domain is read from
 //!     its **record**, not from the caller, so a caller cannot declare its own
-//!     domain to be "PoA" and manufacture freeze authority.
+//!     domain to be "`PoA`" and manufacture freeze authority.
 //!   * `Blockchain::validate_sovereign_audit_export` - the sovereign audit
 //!     bundle of a frozen operator is refused. The operator is read from the
 //!     **recorded template**, not from the bundle.
@@ -116,6 +116,11 @@ impl std::fmt::Display for PoaComplianceError {
 
 impl std::error::Error for PoaComplianceError {}
 
+/// Maximum compliance audit trail entries retained in memory.
+///
+/// Convenience: pub so compliance callers can observe the audit ring cap.
+pub const MAX_POA_COMPLIANCE_AUDIT_EVENTS: usize = 10_000;
+
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct PoaComplianceRegistry {
     screenings: BTreeMap<Address, ScreeningRecord>,
@@ -152,6 +157,18 @@ impl PoaComplianceRegistry {
         }
     }
 
+    fn push_audit_event(&mut self, event: ComplianceAuditEvent) {
+        if self.audit_log.len() >= MAX_POA_COMPLIANCE_AUDIT_EVENTS {
+            self.audit_log.remove(0);
+        }
+        self.audit_log.push(event);
+    }
+
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn screen_address(
         &mut self,
         domain: ComplianceDomainKind,
@@ -169,7 +186,7 @@ impl PoaComplianceRegistry {
             updated_block: block,
         };
         self.screenings.insert(address, record);
-        self.audit_log.push(ComplianceAuditEvent {
+        self.push_audit_event(ComplianceAuditEvent {
             action: ComplianceAction::ScreeningUpdated,
             address,
             block,
@@ -182,6 +199,10 @@ impl PoaComplianceRegistry {
     /// Freeze on the authority of a NAMED admin, not a
     /// bare `bool` anybody could pass. The caller verifies the admin against
     /// the domain's admin set first; the name lands in the audit trail.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn freeze_suspicious(
         &mut self,
         domain: ComplianceDomainKind,
@@ -203,7 +224,7 @@ impl PoaComplianceRegistry {
                 frozen_at_block: block,
             },
         );
-        self.audit_log.push(ComplianceAuditEvent {
+        self.push_audit_event(ComplianceAuditEvent {
             action: ComplianceAction::AccountFrozen,
             address,
             block,
@@ -216,6 +237,10 @@ impl PoaComplianceRegistry {
     /// The missing reverse. A freeze with no unfreeze is
     /// a life sentence handed out by a compliance screen - the same named
     /// admin authority, and the audit log keeps both edges.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn unfreeze(
         &mut self,
         domain: ComplianceDomainKind,
@@ -230,7 +255,7 @@ impl PoaComplianceRegistry {
         }
         let evidence_hash = Self::ensure_non_zero(reason_hash)?;
         self.freezes.remove(&address);
-        self.audit_log.push(ComplianceAuditEvent {
+        self.push_audit_event(ComplianceAuditEvent {
             action: ComplianceAction::AccountUnfrozen,
             address,
             block,
@@ -240,6 +265,11 @@ impl PoaComplianceRegistry {
         Ok(())
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn record_travel_rule_metadata(
         &mut self,
         domain: ComplianceDomainKind,
@@ -260,7 +290,7 @@ impl PoaComplianceRegistry {
                 recorded_block: block,
             },
         );
-        self.audit_log.push(ComplianceAuditEvent {
+        self.push_audit_event(ComplianceAuditEvent {
             action: ComplianceAction::TravelRuleMetadataRecorded,
             address: subject,
             block,
@@ -278,7 +308,7 @@ impl PoaComplianceRegistry {
         self.travel_rules.get(tx_hash)
     }
 
-    /// Permissionless domains deliberately ignore PoA freeze state.
+    /// Permissionless domains deliberately ignore `PoA` freeze state.
     pub fn is_frozen(&self, domain: ComplianceDomainKind, address: &Address) -> bool {
         domain == ComplianceDomainKind::PoA && self.freezes.contains_key(address)
     }
@@ -295,17 +325,20 @@ impl PoaComplianceRegistry {
         use sha3::{Digest, Sha3_256};
         let mut hasher = Sha3_256::new();
         hasher.update(b"BDLM_POA_COMPLIANCE_ROOT_V1");
+        hasher.update((self.screenings.len() as u64).to_le_bytes());
         for (addr, rec) in &self.screenings {
             hasher.update(addr.as_bytes());
             hasher.update([rec.status as u8]);
             hasher.update(rec.oracle_reference_hash);
             hasher.update(rec.updated_block.to_le_bytes());
         }
+        hasher.update((self.freezes.len() as u64).to_le_bytes());
         for (addr, rec) in &self.freezes {
             hasher.update(addr.as_bytes());
             hasher.update(rec.reason_hash);
             hasher.update(rec.frozen_at_block.to_le_bytes());
         }
+        hasher.update((self.travel_rules.len() as u64).to_le_bytes());
         for (tx_hash, rec) in &self.travel_rules {
             // Length first, like every other variable-shaped feed into a
             // consensus preimage: the key is a fixed `[u8; 32]` today, and
@@ -316,6 +349,7 @@ impl PoaComplianceRegistry {
             hasher.update(rec.metadata_hash);
             hasher.update(rec.recorded_block.to_le_bytes());
         }
+        hasher.update((self.audit_log.len() as u64).to_le_bytes());
         for event in &self.audit_log {
             hasher.update([event.action as u8]);
             hasher.update(event.address.as_bytes());
@@ -326,6 +360,11 @@ impl PoaComplianceRegistry {
         hasher.finalize().into()
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn export_audit_json(&self) -> Result<String, serde_json::Error> {
         serde_json::to_string(&self.audit_log)
     }
@@ -553,5 +592,22 @@ mod tests {
         assert_ne!(reg.root(), frozen_root, "the audit trail keeps both edges");
         // Determinism: same state, same fold.
         assert_eq!(reg.root(), reg.root());
+    }
+
+    #[test]
+    fn poa_compliance_root_binds_collection_boundaries_and_caps_audit_log() {
+        let mut reg = PoaComplianceRegistry::new();
+        for i in 0..=(MAX_POA_COMPLIANCE_AUDIT_EVENTS as u64) {
+            reg.screen_address(
+                ComplianceDomainKind::PoA,
+                addr((i % 250 + 1) as u8),
+                ScreeningStatus::Clear,
+                hash(1),
+                i + 1,
+            )
+            .unwrap();
+        }
+        assert_eq!(reg.audit_events().len(), MAX_POA_COMPLIANCE_AUDIT_EVENTS);
+        assert_eq!(reg.audit_events()[0].block, 2);
     }
 }

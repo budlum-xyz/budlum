@@ -81,7 +81,11 @@ fuzz_target!(|data: &[u8]| {
     // Mode 1 builds an envelope that passes every pre-STARK check, so the
     // proof bytes reach `postcard::from_bytes` and the STARK verifier. Mode 2
     // corrupts the stages named by a mask, so each early reject is also hit.
-    let corrupt = if mode % 3 == 1 { 0u8 } else { take(data, &mut i) };
+    let corrupt = if mode % 3 == 1 {
+        0u8
+    } else {
+        take(data, &mut i)
+    };
     let fuzz_version = take_u32(data, &mut i);
     let fuzz_backend = take_text(data, &mut i, 40);
     let fuzz_p3 = take_text(data, &mut i, 16);
@@ -90,10 +94,26 @@ fuzz_target!(|data: &[u8]| {
     let fuzz_degree = (take_u32(data, &mut i) % 32).max(1);
 
     let mut envelope = ProofEnvelope {
-        proof_format_version: if corrupt & 1 != 0 { fuzz_version } else { PROOF_FORMAT_VERSION },
-        backend: if corrupt & 2 != 0 { fuzz_backend } else { BACKEND.to_string() },
-        p3_version: if corrupt & 4 != 0 { fuzz_p3 } else { P3_VERSION.to_string() },
-        fri_params_id: if corrupt & 8 != 0 { fuzz_fri } else { FRI_ID.to_string() },
+        proof_format_version: if corrupt & 1 != 0 {
+            fuzz_version
+        } else {
+            PROOF_FORMAT_VERSION
+        },
+        backend: if corrupt & 2 != 0 {
+            fuzz_backend
+        } else {
+            BACKEND.to_string()
+        },
+        p3_version: if corrupt & 4 != 0 {
+            fuzz_p3
+        } else {
+            P3_VERSION.to_string()
+        },
+        fri_params_id: if corrupt & 8 != 0 {
+            fuzz_fri
+        } else {
+            FRI_ID.to_string()
+        },
         public_inputs_hash: [0u8; 32],
         proof_bytes,
         degree_bits: fuzz_degree,
@@ -123,7 +143,11 @@ fuzz_target!(|data: &[u8]| {
     if corrupt & 16 == 0 {
         inputs.program_hash = program_hash_of(&program);
     }
-    envelope.public_inputs_hash = if corrupt & 32 != 0 { fuzz_hash } else { inputs.hash() };
+    envelope.public_inputs_hash = if corrupt & 32 != 0 {
+        fuzz_hash
+    } else {
+        inputs.hash()
+    };
 
     // Serialize round-trip must not panic.
     if let Ok(bytes) = bincode::serialize(&envelope) {

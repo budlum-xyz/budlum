@@ -32,6 +32,56 @@ pub struct UnsignedTransfer {
 }
 
 impl UnsignedTransfer {
+    /// Construct an [`UnsignedTransfer`] targeting a `.bud` name ONLY after
+    /// verifying `proof` against a header the wallet trusts.
+    ///
+    /// The root and the epoch are read out of a [`crate::bns::HeaderSource`] at
+    /// `proof.header_height`, never taken from the caller or from the node's
+    /// answer, so a node answering an RPC call cannot choose what the
+    /// signature is checked against. There is no entry point that takes the
+    /// root as an argument.
+    ///
+    /// # Errors
+    ///
+    /// Refuses malformed names, expired registrations, Merkle root mismatches
+    /// and unauthenticated target substitution, plus a missing header at
+    /// `proof.header_height` (`HeaderUnknown`) and a header that is stale
+    /// against the tip (`StaleProofHeader`).
+    /// exposed for: the wallet crate's SDK surface - browser and mobile hosts call these directly.
+    #[allow(clippy::too_many_arguments)]
+    pub fn to_verified_bud_recipient_from_header<S: crate::bns::HeaderSource + ?Sized>(
+        from: [u8; 32],
+        bud_name: &str,
+        claimed_target: &[u8; 32],
+        proof: &crate::bns::WalletBnsProof,
+        headers: &S,
+        amount: u64,
+        fee: u64,
+        max_fee: u64,
+        priority_fee: u64,
+        nonce: u64,
+        timestamp_ms: u128,
+        chain_id: u64,
+    ) -> Result<Self, String> {
+        let verified_to = crate::bns::verify_bns_recipient_proof_from_header(
+            bud_name,
+            claimed_target,
+            proof,
+            headers,
+        )?;
+        Ok(Self {
+            from,
+            to: verified_to,
+            amount,
+            fee,
+            max_fee,
+            priority_fee,
+            nonce,
+            timestamp_ms,
+            chain_id,
+        })
+    }
+
     /// The hash the node verifies the signature over (V5).
     #[must_use]
     pub fn signing_hash(&self) -> [u8; 32] {
@@ -184,6 +234,113 @@ mod tests {
         assert_eq!(
             hex::encode(transfer.signing_hash_v7()),
             "616f18ed47f2a635b224c368855a4e21a8fe6231b7353c6465ac32ce964de3f7"
+        );
+    }
+
+    /// The whole point of the header-anchored constructor: the signed payload
+    /// carries the address proven against the wallet's own header, and a node
+    /// that answers with a proof folding to its own root cannot move it.
+    #[test]
+    fn a_header_anchored_transfer_uses_the_proof_and_refuses_a_missing_header() {
+        use crate::bns::{
+            compute_bns_leaf_digest, compute_bns_registry_root, fold_bns_merkle_branch,
+            HeaderSource, WalletBnsProof,
+        };
+
+        struct OneHeader {
+            height: u64,
+            root: [u8; 32],
+            epoch: u64,
+        }
+        impl HeaderSource for OneHeader {
+            fn bns_root_at(&self, height: u64) -> Option<([u8; 32], u64)> {
+                (height == self.height).then_some((self.root, self.epoch))
+            }
+            fn latest_height(&self) -> u64 {
+                self.height
+            }
+        }
+
+        // A record with no forwarding target: the proven recipient is the
+        // owner, which is the simplest shape that still exercises the walk.
+        let owner = [0x11u8; 32];
+        let meta = [0x33u8; 32];
+        let sib = [0x44u8; 32];
+        let mut hasher = sha2::Sha256::new();
+        {
+            use sha2::Digest as _;
+            hasher.update(b"BDLM_BNS_EXTRAS_V1");
+            hasher.update([0u8; 6]);
+            hasher.update(0u64.to_le_bytes());
+            hasher.update(0u64.to_le_bytes());
+        }
+        let extras_digest: [u8; 32] = {
+            use sha2::Digest as _;
+            hasher.finalize().into()
+        };
+        let leaf = compute_bns_leaf_digest("kaya.bud", &owner, 50, None, None, &extras_digest);
+        let names_root = fold_bns_merkle_branch(leaf, &[sib], &[true]).unwrap();
+        let root = compute_bns_registry_root(&meta, &names_root);
+        let proof = WalletBnsProof {
+            name: "kaya.bud".to_string(),
+            owner,
+            expires_at: 50,
+            content_id: None,
+            storage_root: None,
+            extras_digest,
+            extras_preimage: None,
+            meta_digest: meta,
+            siblings: vec![sib],
+            directions: vec![true],
+            header_height: 9,
+        };
+        let headers = OneHeader {
+            height: 9,
+            root,
+            epoch: 12,
+        };
+
+        let transfer = UnsignedTransfer::to_verified_bud_recipient_from_header(
+            [0x01u8; 32],
+            "kaya.bud",
+            &owner,
+            &proof,
+            &headers,
+            5,
+            1,
+            1,
+            0,
+            0,
+            1_800_000_000_000,
+            45_261,
+        )
+        .expect("the proof folds to the header root");
+        assert_eq!(transfer.to, owner, "the signed recipient is the proven one");
+
+        // The same proof against a header the wallet does not have is refused
+        // before any transfer exists.
+        let behind = OneHeader {
+            height: 8,
+            root,
+            epoch: 12,
+        };
+        let refused = UnsignedTransfer::to_verified_bud_recipient_from_header(
+            [0x01u8; 32],
+            "kaya.bud",
+            &owner,
+            &proof,
+            &behind,
+            5,
+            1,
+            1,
+            0,
+            0,
+            1_800_000_000_000,
+            45_261,
+        );
+        assert!(
+            refused.is_err(),
+            "no header at that height means no transfer to sign"
         );
     }
 

@@ -2,7 +2,7 @@
 //!
 //! WIRING: the remaining entry points go live through the executor's
 //! social-folder transaction arm (the door this module's docs describe:
-//! ownership questions stay with NftRegistry and the executor); the forest,
+//! ownership questions stay with `NftRegistry` and the executor); the forest,
 //! membership and move/refusal invariants are pinned by this file's tests.
 //!
 //! The user-facing model is the file manager, moved onto the chain: a folder
@@ -114,6 +114,10 @@ impl VaultRegistry {
     }
 
     /// A folder that exists and holds nothing is still a folder.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn register_folder(&mut self, folder: u64) -> Result<(), VaultError> {
         if self.folders.len() >= Self::MAX_FOLDERS && !self.folders.contains(&folder) {
             return Err(VaultError::TooManyFolders);
@@ -126,6 +130,10 @@ impl VaultRegistry {
     }
 
     /// Close a folder: only while empty.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn close_folder(&mut self, folder: u64) -> Result<(), VaultError> {
         if !self.folders.contains(&folder) {
             return Err(VaultError::UnknownFolder(folder));
@@ -163,6 +171,10 @@ impl VaultRegistry {
     }
 
     /// Add one token to one folder, keeping the forest a forest.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn add_member(&mut self, folder: u64, member: u64) -> Result<(), VaultError> {
         if !self.folders.contains(&folder) {
             return Err(VaultError::UnregisteredParent(folder));
@@ -194,6 +206,10 @@ impl VaultRegistry {
 
     /// Remove one token from one folder. What it lands in next is nobody's
     /// business here; the item is no longer this folder's.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn extract_member(&mut self, folder: u64, member: u64) -> Result<(), VaultError> {
         let list = self
             .members
@@ -212,6 +228,10 @@ impl VaultRegistry {
     /// folders, cycles, duplicates) checked BEFORE either list changes -
     /// a move that half-applied would be the token vanishing, which is the
     /// one failure this layer must not have.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn move_member(&mut self, from: u64, to: u64, member: u64) -> Result<(), VaultError> {
         if !self.folders.contains(&to) {
             return Err(VaultError::UnregisteredParent(to));

@@ -7,16 +7,16 @@
 //! Mikoriza: shared security from restaked Ethereum collateral (testnet
 //!).
 //!
-//! An Ethereum operator that restakes (EigenLayer first; Symbiotic and
+//! An Ethereum operator that restakes (`EigenLayer` first; Symbiotic and
 //! Babylon are later sources behind the same [`SharedSecuritySource`] trait)
 //! allocates part of its collateral to a Budlum operator set and binds a
 //! Budlum validator address and BLS key to it on Ethereum. The registrar
 //! contract emits one allocation event per change. Budlum reads that event
 //! only through an anchored external result, the same verified-evidence path
-//! the bridge, the relayer intents and Graft use: no trusted party reports
+//! the bridge, the relayer intents and AppBinding use: no trusted party reports
 //! Ethereum state.
 //!
-//! Two separate PoS systems keep running: Gasper on Ethereum and Budlum PoS
+//! Two separate `PoS` systems keep running: Gasper on Ethereum and Budlum `PoS`
 //! (leader election and BLS + ML-DSA finality) here. Keys are separate; an
 //! Ethereum validator key is never reused on Budlum.
 //!
@@ -124,7 +124,7 @@ pub trait SharedSecuritySource {
     }
 }
 
-/// The first adapter: EigenLayer operator sets.
+/// The first adapter: `EigenLayer` operator sets.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct EigenLayerSource;
 
@@ -161,7 +161,7 @@ impl RestakeSource {
     /// source is chosen by the transaction sender. Without this binding an
     /// `EigenLayer` claim could point at evidence anchored on any domain the
     /// sender registered itself, which is a chain nobody else vouched for.
-    /// EigenLayer settles on Ethereum, so the evidence must be Ethereum's.
+    /// `EigenLayer` settles on Ethereum, so the evidence must be Ethereum's.
     #[must_use]
     pub const fn external_chain(self) -> crate::core::transaction::ExternalChain {
         match self {
@@ -395,7 +395,7 @@ fn observe(
         .map_err(SettlementTxError::Refused)?;
     let adapter = source.adapter();
     if message.kind != MessageKind::Custom(adapter.allocation_kind().to_vec())
-        || message.sender != crate::settlement::graft::origin_emitter(&registrar)
+        || message.sender != crate::settlement::app_binding::origin_emitter(&registrar)
         || message.recipient != allocation.budlum_validator
         || message.correlation_id != Some(operator_correlation(&allocation.eth_operator))
         || message.payload_hash != adapter.allocation_payload_hash(allocation)
@@ -607,7 +607,7 @@ mod tests {
                 source_height: 3,
                 event_index: 0,
                 nonce,
-                sender: crate::settlement::graft::origin_emitter(&REGISTRAR),
+                sender: crate::settlement::app_binding::origin_emitter(&REGISTRAR),
                 recipient: allocation.budlum_validator,
                 payload_hash: allocation_payload_hash(RestakeSource::EigenLayer, allocation),
                 kind: MessageKind::Custom(ALLOCATION_KIND.to_vec()),
@@ -689,12 +689,26 @@ mod tests {
     fn the_door_is_closed_where_the_genesis_flag_is_off() {
         let operator = Address::from([1u8; 32]);
         let mut state = AccountState::new();
+        let mut domain = crate::domain::plugin::default_domain(
+            DOMAIN,
+            crate::domain::ConsensusKind::PoW,
+            45262,
+            crate::domain::POW_HEADER_CHAIN_ADAPTER,
+            1,
+        );
+        domain.domain_chain_id = 1;
+        domain.operator = Some(operator);
+        state.add_balance(&operator, domain.operator_bond.saturating_add(FEE));
+        crate::settlement::domains::register_domain(&mut state, domain).expect("domain");
+        let mainnet = crate::core::chain_config::Network::Mainnet
+            .chain_id()
+            .value();
         let testnet = crate::core::chain_config::Network::Testnet
             .chain_id()
             .value();
         let err = execute_shared_security_tx(
             &mut state,
-            &ctx(operator, testnet),
+            &ctx(operator, mainnet),
             &SharedSecurityTx::SetRegistrar {
                 domain_key: DOMAIN,
                 registrar: REGISTRAR.to_vec(),
@@ -702,6 +716,15 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.to_string().contains("not enabled"), "{err}");
+        assert!(execute_shared_security_tx(
+            &mut state,
+            &ctx(operator, testnet),
+            &SharedSecurityTx::SetRegistrar {
+                domain_key: DOMAIN,
+                registrar: REGISTRAR.to_vec(),
+            },
+        )
+        .is_ok());
     }
 
     #[test]

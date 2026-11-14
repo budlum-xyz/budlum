@@ -35,11 +35,11 @@ use budlum_core::crypto::primitives::KeyPair;
 use budlum_core::execution::executor::Executor;
 use budlum_core::execution::proof_verifier::{ExecutionPublicInputs, ProofEnvelope, ProofVerifier};
 use budlum_core::network::gossip_dedup::GossipDedup;
+use budlum_core::persistence::state_trie::MerkleTrie;
 use budlum_core::registry::permissionless::{
     PermissionlessRegistry, SlashingCondition, MIN_REGISTRATION_STAKE,
 };
 use budlum_core::registry::role::roles;
-use budlum_core::storage::merkle_trie::MerkleTrie;
 
 // ─── Helpers ────────────────────────────────────────────────────────
 

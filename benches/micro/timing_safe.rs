@@ -7,22 +7,22 @@
 //! Statistically audits that the `constant_time_eq_str` comparison in RPC
 //! authentication really stays constant time:
 //!
-//!   1. Positive control: verifies that an early-exit naive `==`-like comparison produces a
-//!      MEASURABLE timing difference between the "first byte differs" and "last byte differs"
-//!      classes (a harness sensitivity test).
-//!      If the control shows no difference the environment/harness is unreliable -> exit 2.
-//!   2. The real test: `constant_time_eq_str` must produce NO significant difference between the
-//!      same two classes. The verdict requires BOTH conditions together:
-//!      |Welch t| >= 4.5 **and** the observed difference being at least 5 percent of the known
-//!      leak measured in the same run -> exit 1.
+//! 1. Positive control: verifies that an early-exit naive `==`-like comparison produces a
+//!    MEASURABLE timing difference between the "first byte differs" and "last byte differs"
+//!    classes (a harness sensitivity test).
+//!    If the control shows no difference the environment/harness is unreliable -> exit 2.
+//! 2. The real test: `constant_time_eq_str` must produce NO significant difference between the
+//!    same two classes. The verdict requires BOTH conditions together:
+//!    |Welch t| >= 4.5 **and** the observed difference being at least 5 percent of the known
+//!    leak measured in the same run -> exit 1.
 //!
 //! Why two conditions: the t statistic answers "is there a difference", not "does the
 //! difference matter". Because `measure_min_per_batch` takes the batch minimum the
 //! variance is tiny; as the denominator shrinks t inflates. The tighter the measurement the
 //! MORE red the gate goes - even as constant-timeness improves. A real run:
 //!
-//!     control (naive, LEAKY) : mean_first=19.05ns mean_last=41.41ns |t|=83.62
-//!     constant_time_eq_str   : mean_first=119.48ns mean_last=118.45ns |t|=7.62
+//! control (naive, LEAKY) : mean_first=19.05ns mean_last=41.41ns |t|=83.62
+//! constant_time_eq_str : mean_first=119.48ns mean_last=118.45ns |t|=7.62
 //!
 //! The naive implementation leaks 22.36 ns; the real function 1.03 ns - three cycles at 3 GHz,
 //! that is on the order of `Instant::now()` resolution. The gate counted that as a
@@ -37,11 +37,11 @@
 //! literature). The threshold 4.5 is the dudect standard.
 //!
 //! Running:
-//!   cargo bench --bench timing_safe (this is what CI uses)
+//! cargo bench --bench timing_safe (this is what CI uses)
 //! Environment variables (for local in-depth analysis):
-//!   TIMING_SAFE_BATCHES (default 64), TIMING_SAFE_ITERS (default 4096 per batch per class)
-//!   TIMING_SAFE_PQ_SAMPLES (default 400) and TIMING_SAFE_SLH_SAMPLES (default 10): signs per
-//!   key class for the post-quantum signers
+//! TIMING_SAFE_BATCHES (default 64), TIMING_SAFE_ITERS (default 4096 per batch per class)
+//! TIMING_SAFE_PQ_SAMPLES (default 400) and TIMING_SAFE_SLH_SAMPLES (default 10): signs per
+//! key class for the post-quantum signers
 
 use std::env;
 use std::hint::black_box;
@@ -194,7 +194,7 @@ fn welch_t(a: &[f64], b: &[f64]) -> f64 {
         // sentinel has to say so in a way `is_finite()` can see: `f64::MAX`
         // used to be returned for different means, and it is finite, so the
         // caller's guard let a 30ns-vs-40ns flat pair through as an
-        // "infinitely significant" control (PR #81 review). NaN is not
+        // "infinitely significant" control. NaN is not
         // finite, compares false against every threshold, and is rejected
         // before any verdict.
         return f64::NAN;

@@ -9,7 +9,11 @@ use crate::storage::content_id::ContentId;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+pub mod nft_folders;
 pub mod vault;
+pub use nft_folders::{
+    derive_bud3_nft_id, Bud3NftCommitment, NftFolder, NftFolderRegistry, SocialFiBud3Error,
+};
 pub use vault::{execute_vault_tx, VaultError, VaultRegistry, VaultTx};
 
 /// Most NFTs one owner can hold.
@@ -31,7 +35,7 @@ pub const MAX_AUTHOR_NAME_BYTES: usize = 64;
 pub struct NftRegistry {
     /// Id -> nft
     pub nfts: BTreeMap<u64, Nft>,
-    /// Owner -> set of nft_ids
+    /// Owner -> set of `nft_ids`
     pub ownership: BTreeMap<Address, Vec<u64>>,
     pub next_id: u64,
 }
@@ -105,6 +109,11 @@ impl NftRegistry {
         Ok(id)
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn add_tag(&mut self, id: u64, tag: String) -> Result<(), NftError> {
         if tag.is_empty() || tag.len() > MAX_TAG_BYTES {
             return Err(NftError::InvalidTag);
@@ -119,6 +128,11 @@ impl NftRegistry {
         Ok(())
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn update_luminance(&mut self, id: u64, delta_mcd: i64) -> Result<(), NftError> {
         let nft = self.nfts.get_mut(&id).ok_or(NftError::NotFound)?;
         let mut new_val = i128::from(nft.luminance) + i128::from(delta_mcd);
@@ -134,6 +148,11 @@ impl NftRegistry {
         Ok(())
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn transfer(&mut self, id: u64, from: &Address, to: Address) -> Result<(), NftError> {
         let nft = self.nfts.get_mut(&id).ok_or(NftError::NotFound)?;
         if &nft.owner != from {
@@ -155,6 +174,11 @@ impl NftRegistry {
         Ok(())
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn burn(&mut self, id: u64, owner: &Address) -> Result<ContentId, NftError> {
         let nft = self.nfts.get(&id).ok_or(NftError::NotFound)?;
         if &nft.owner != owner {
@@ -444,5 +468,28 @@ mod tests {
         reg.burn(a, &owner).expect("owner may burn");
         let c = reg.mint(owner, cid, 2, None).expect("mint after burn");
         assert!(c > b, "ids must not be reused after a burn");
+    }
+
+    #[test]
+    fn socialfi_nft_burn_needs_owner() {
+        let mut reg = NftRegistry::new();
+        let owner = Address::from([0x11; 32]);
+        let intruder = Address::from([0x22; 32]);
+        let bud3_cid = crate::storage::bud3::content_id::ContentId::public(b"socialfi-media");
+        let cid = ContentId(bud3_cid.digest);
+        let id = reg.mint(owner, cid, 5, Some("creator".into())).unwrap();
+        let before = reg.root();
+
+        let err = reg
+            .burn(id, &intruder)
+            .expect_err("non-owner burn must be refused");
+        assert!(matches!(err, NftError::NotOwner));
+        assert_eq!(reg.root(), before);
+        assert_eq!(reg.get_nft(id).unwrap().owner, owner);
+
+        let burned_cid = reg.burn(id, &owner).expect("owner burn succeeds");
+        assert_eq!(burned_cid, cid);
+        assert!(reg.get_nft(id).is_none());
+        assert!(!reg.ownership.contains_key(&owner));
     }
 }

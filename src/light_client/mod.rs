@@ -1,3 +1,8 @@
+//! WIRING: unwired - `RemoteStateView::verify_for_chain` has no production caller yet.
+//! The rest is reached: `settlement::app_binding` verifies payment proofs
+//! through `LightClient::verify_global_header`, and the `budlum-light` binary
+//! drives the sync.
+//!
 //! Succinct light-client verification.
 //!
 //! Whitepaper v1.1: a light client bootstrapped from a single trusted
@@ -13,7 +18,7 @@
 //!   quorum (`LightClient::verify_checkpoint`). This is the whitepaper's
 //!   "BLS finality certificates as proofs".
 //! * [`QcBlob`] - the post-quantum quorum blob (`LightClient::verify_pq_
-//!   checkpoint`), the same attestation layer full nodes import.
+//! checkpoint`), the same attestation layer full nodes import.
 //!
 //! The verification is transport-agnostic: `LightClient::sync_plan` spells
 //! out the wire requests a transport must issue (the existing `GetHeaders`
@@ -29,25 +34,7 @@ use std::fmt;
 use crate::chain::finality::{FinalityCert, ValidatorSetSnapshot};
 use crate::consensus::qc::QcBlob;
 use crate::core::block::BlockHeader;
-
-/// A 64-character lowercase hex digest.
-/// A 64-character lowercase hex digest. `const fn` so the trust-anchor check
-/// can run in constant contexts; `u8::is_ascii_hexdigit` is const since Rust
-/// 1.87, which this crate's MSRV (1.97) satisfies.
-fn is_canonical_hash(hash: &str) -> bool {
-    let bytes = hash.as_bytes();
-    if bytes.len() != 64 {
-        return false;
-    }
-    let mut i = 0;
-    while i < bytes.len() {
-        if !bytes[i].is_ascii_hexdigit() {
-            return false;
-        }
-        i += 1;
-    }
-    true
-}
+use crate::network::protocol::is_canonical_hash;
 
 /// The single trust anchor a light client is bootstrapped from.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -418,8 +405,10 @@ impl LightClient {
     /// The same binding chain as [`Self::verify_checkpoint`], with the BLS
     /// aggregate replaced by the PQ quorum: every signature verifies against
     /// the snapshot's PQ public keys, no validator signs twice, and the
-    /// unique signers must carry the same stake and count quorum the BLS path
-    /// enforces.
+    /// unique signers must clear the legacy stake/count threshold. This
+    /// snapshot-only fallback cannot replay Instant Seat Handover without
+    /// finalized block records. The chain's PQ-alarm path uses the seat table;
+    /// migrating this light client requires that history and remains the work package work.
     ///
     /// # Errors
     ///
@@ -752,6 +741,89 @@ impl LightClient {
         Ok(())
     }
 
+    /// Generates a checkpoint-aware committee aggregate proof check via `bud_proof::sigagg` (`BLG-239`).
+    ///
+    /// Convenience: exposed for light-client committee batch callers.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LightClientError::VerificationFailed`] when the aggregated
+    /// batch does not meet `required_weight` or fails commitment verification.
+    pub fn verify_committee_batch(
+        batch: &bud_proof::sigagg::AggregatedSignatureBatch,
+        expected_committee_root: &[u8; 32],
+        required_weight: u64,
+    ) -> Result<(), LightClientError> {
+        bud_proof::sigagg::verify_aggregated_batch(batch, expected_committee_root, required_weight)
+            .map_err(|e| {
+                LightClientError::VerificationFailed(format!(
+                    "BLG-239 aggregated committee batch failed: {e:?}"
+                ))
+            })
+    }
+
+    /// Verifies an aggregated committee batch against `checkpoint.block_hash`
+    /// and `expected_committee_root`, ensuring `BLG-239` batch verification stays
+    /// wired on the production light-client path.
+    ///
+    /// Convenience: exposed for light-client checkpoint batch verification callers.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LightClientError`] if `checkpoint.block_hash` is not a 32-byte
+    /// hex digest, does not match `batch.message_digest`, or fails
+    /// [`Self::verify_committee_batch`].
+    pub fn apply_committee_batch_checkpoint(
+        &self,
+        checkpoint: &VerifiedCheckpoint,
+        batch: &bud_proof::sigagg::AggregatedSignatureBatch,
+        expected_committee_root: &[u8; 32],
+        required_weight: u64,
+    ) -> Result<(), LightClientError> {
+        let _ = &self.trusted;
+        let hash_bytes = hex::decode(&checkpoint.block_hash)
+            .map_err(|_| LightClientError::MalformedHash(checkpoint.block_hash.clone()))?;
+        if hash_bytes.as_slice() != batch.message_digest.as_slice() {
+            return Err(LightClientError::CertificateBinding(
+                "aggregated committee batch message_digest does not bind to checkpoint block_hash"
+                    .to_string(),
+            ));
+        }
+        Self::verify_committee_batch(batch, expected_committee_root, required_weight)
+    }
+
+    /// Evaluates Phase-A dual finality parity between the native finality path
+    /// and a secondary zkVM proof (`TA8`).
+    ///
+    /// Convenience: exposed for checkpoint dual-finality callers.
+    #[must_use]
+    pub fn evaluate_checkpoint_phase_a(
+        domain_id: crate::domain::types::DomainId,
+        native_result: (bool, crate::domain::types::Hash32),
+        zkvm_result: Option<(bool, crate::domain::types::Hash32)>,
+    ) -> crate::cross_domain::external::phase_a_dual::PhaseAVerdict {
+        crate::cross_domain::external::phase_a_dual::evaluate_phase_a_dual(
+            domain_id,
+            native_result,
+            zkvm_result,
+        )
+    }
+
+    /// Classifies a finalized checkpoint height against `proven_height` under
+    /// the bounded batch-proof lag rule (`TA5`).
+    ///
+    /// Convenience: exposed for checkpoint batch-proof status callers.
+    #[must_use]
+    pub const fn checkpoint_proof_status(
+        block_height: u64,
+        proven_height: u64,
+    ) -> crate::cross_domain::external::phase_a_dual::RootProofStatus {
+        crate::cross_domain::external::phase_a_dual::classify_root_proof_status(
+            block_height,
+            proven_height,
+        )
+    }
+
     /// The wire requests a transport must issue from this anchor: a
     /// `GetHeaders` locator rooted at the trusted hash, and the next
     /// checkpoint height a certificate is needed for.
@@ -761,6 +833,135 @@ impl LightClient {
             headers_locator: vec![self.trusted.block_hash.clone()],
             next_checkpoint_height: self.next_checkpoint_height(interval, target_height),
         }
+    }
+}
+
+/// One sibling link in a [`RemoteStateView`] Merkle inclusion path.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RemoteMerkleStep {
+    /// 32-byte sibling digest at this tree height.
+    pub sibling: [u8; 32],
+    /// True if `sibling` sits on the right (`H(node || sibling)`), false if on the left.
+    pub sibling_is_right: bool,
+}
+
+/// Verified cross-domain remote state view (`RemoteStateView`, section 1.2 / IP-60).
+///
+/// Binds an external domain's finalized `remote_state_root` to a checkpointed
+/// [`crate::settlement::GlobalBlockHeader`], verifies Merkle inclusion of
+/// `(state_key, state_value)`. Attached ownership/capability predicates stay
+/// closed until their public statement is bound to this exact leaf and domain;
+/// verifying an unrelated valid STARK is not ownership evidence.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct RemoteStateView {
+    /// Source external domain identifier.
+    pub remote_domain_id: u64,
+    /// Committed state root of the remote domain at `header.checkpoint_height`.
+    pub remote_state_root: [u8; 32],
+    /// Global block header anchored at the trusted checkpoint.
+    pub header: crate::settlement::GlobalBlockHeader,
+    /// Key inside the remote domain state tree.
+    pub state_key: Vec<u8>,
+    /// Claimed state value bytes stored under `state_key`.
+    pub state_value: Vec<u8>,
+    /// Merkle path from leaf digest up to `remote_state_root`.
+    pub inclusion_path: Vec<RemoteMerkleStep>,
+    /// Reserved for a future leaf-bound ownership/capability proof. Any
+    /// attached proof is refused until its relation to the leaf is specified.
+    pub predicate_proof: Option<bud_proof::predicates::PredicateProof>,
+}
+
+impl RemoteStateView {
+    /// Canonical commitment binding `remote_domain_id` and `remote_state_root`
+    /// into `GlobalBlockHeader::domain_commitment_root`.
+    #[must_use]
+    pub fn expected_domain_commitment(
+        remote_domain_id: u64,
+        remote_state_root: &[u8; 32],
+    ) -> [u8; 32] {
+        crate::core::hash::hash_fields_bytes(&[
+            b"BDLM_REMOTE_STATE_VIEW_V1",
+            &remote_domain_id.to_le_bytes(),
+            remote_state_root,
+        ])
+    }
+
+    /// Canonical leaf digest for `(state_key, state_value)`.
+    #[must_use]
+    pub fn leaf_digest(state_key: &[u8], state_value: &[u8]) -> [u8; 32] {
+        crate::core::hash::hash_fields_bytes(&[
+            b"BDLM_REMOTE_STATE_LEAF_V1",
+            state_key,
+            state_value,
+        ])
+    }
+
+    /// Reconstruct the Merkle root for `(state_key, state_value)` across `inclusion_path`.
+    #[must_use]
+    pub fn compute_merkle_root(
+        state_key: &[u8],
+        state_value: &[u8],
+        inclusion_path: &[RemoteMerkleStep],
+    ) -> [u8; 32] {
+        let mut current = Self::leaf_digest(state_key, state_value);
+        for step in inclusion_path {
+            current = if step.sibling_is_right {
+                crate::core::hash::hash_fields_bytes(&[
+                    b"BDLM_REMOTE_STATE_NODE_V1",
+                    &current,
+                    &step.sibling,
+                ])
+            } else {
+                crate::core::hash::hash_fields_bytes(&[
+                    b"BDLM_REMOTE_STATE_NODE_V1",
+                    &step.sibling,
+                    &current,
+                ])
+            };
+        }
+        current
+    }
+
+    /// Verify checkpoint binding, remote domain root commitment, and state
+    /// inclusion path. Unbound optional predicates remain fail-closed.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LightClientError`] if app binding is disabled on `chain_id`,
+    /// global header binding fails, domain commitment mismatches, Merkle inclusion
+    /// fails, or the attached `PredicateProof` is invalid.
+    pub fn verify_for_chain(
+        &self,
+        checkpoint: &VerifiedCheckpoint,
+        state_root_body: &crate::domain::types::Hash32,
+        chain_id: u64,
+    ) -> Result<(), LightClientError> {
+        if !crate::core::chain_config::app_binding_enabled_for_chain_id(chain_id) {
+            return Err(LightClientError::VerificationFailed(format!(
+                "RemoteStateView app binding disabled for chain_id {chain_id}"
+            )));
+        }
+        LightClient::verify_global_header(checkpoint, state_root_body, &self.header)?;
+        let expected_domain_root =
+            Self::expected_domain_commitment(self.remote_domain_id, &self.remote_state_root);
+        if self.header.domain_commitment_root != expected_domain_root {
+            return Err(LightClientError::GlobalHeaderBinding(
+                "remote_state_root does not match header.domain_commitment_root".to_string(),
+            ));
+        }
+        let recomputed_root =
+            Self::compute_merkle_root(&self.state_key, &self.state_value, &self.inclusion_path);
+        if recomputed_root != self.remote_state_root {
+            return Err(LightClientError::VerificationFailed(
+                "RemoteStateView Merkle inclusion proof failed".to_string(),
+            ));
+        }
+        if self.predicate_proof.is_some() {
+            return Err(LightClientError::VerificationFailed(
+                "RemoteStateView predicate is not bound to the committed state leaf".to_string(),
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -779,10 +980,26 @@ mod tests {
 
     const TEST_CHAIN_ID: u64 = crate::core::transaction::DEFAULT_CHAIN_ID;
 
+    /// The trust anchor is a 64-hex digest in its one canonical spelling: an
+    /// upper-case copy names the same block to a human, and a different string
+    /// to every comparison the client makes.
+    #[test]
+    fn an_upper_case_trust_anchor_is_refused() {
+        let trusted = TrustedCheckpoint {
+            height: 7,
+            block_hash: "AA".repeat(32),
+            set_hash: "bb".repeat(32),
+        };
+        assert!(matches!(
+            LightClient::new(trusted),
+            Err(LightClientError::MalformedHash(_))
+        ));
+    }
+
     fn make_bls_key(seed: u8) -> BlsKeypair {
         let mut sk_bytes = [0u8; 64];
         sk_bytes[0] = seed + 1;
-        BlsKeypair::from_seed(&sk_bytes)
+        BlsKeypair::from_seed(&sk_bytes).expect("a non-zero test seed")
     }
 
     fn make_bls_snapshot(n: usize, stake_each: u64) -> (ValidatorSetSnapshot, Vec<Scalar>) {
@@ -823,6 +1040,7 @@ mod tests {
     ) -> FinalityCert {
         let checkpoint_hash = header.hash.clone();
         let mut agg = FinalityAggregator::new(
+            crate::core::transaction::DEFAULT_CHAIN_ID,
             snapshot.epoch,
             header.index,
             checkpoint_hash.clone(),
@@ -893,6 +1111,7 @@ mod tests {
             agg_sig_bls: Vec::new(),
             bitmap: vec![1],
             set_hash: snapshot.set_hash.clone(),
+            seat_table_version: 0,
         };
         let err = client
             .verify_checkpoint(&header, &cert, &snapshot)
@@ -1399,8 +1618,11 @@ mod tests {
             identity_root: None,
             checkpoint_height: 10,
             external_intake_root: None,
-            graft_root: None,
+            app_binding_root: None,
             delegation_root: None,
+            object_layer_root: None,
+            proof_root: Some([7u8; 32]),
+            proven_height: 10,
         };
         state.global_header_summary = header.calculate_hash_bytes();
         let body = state.state_root_body();
@@ -1430,6 +1652,121 @@ mod tests {
         assert!(matches!(
             LightClient::verify_global_header(&checkpoint, &[7u8; 32], &header),
             Err(LightClientError::GlobalHeaderBinding(_))
+        ));
+    }
+
+    #[test]
+    fn remote_state_view_verifies_inclusion_and_refuses_unbound_predicates() {
+        use crate::core::account::AccountState;
+        use crate::settlement::GlobalBlockHeader;
+        use bud_proof::predicates::{
+            prove_predicate, verify_predicate, PredicateKind, PredicateStatement,
+        };
+
+        let key = b"domain:eth:vault:alice".to_vec();
+        let value = b"balance:1000000".to_vec();
+        let sibling_a = [0x11u8; 32];
+        let sibling_b = [0x22u8; 32];
+        let path = vec![
+            RemoteMerkleStep {
+                sibling: sibling_a,
+                sibling_is_right: true,
+            },
+            RemoteMerkleStep {
+                sibling: sibling_b,
+                sibling_is_right: false,
+            },
+        ];
+        let remote_root = RemoteStateView::compute_merkle_root(&key, &value, &path);
+        let remote_domain_id = 42u64;
+        let domain_commitment_root =
+            RemoteStateView::expected_domain_commitment(remote_domain_id, &remote_root);
+
+        // A valid, independent quorum proof must not confer ownership over
+        // this unrelated state leaf merely because its STARK verifies.
+        let pred_proof = prove_predicate(&PredicateStatement {
+            kind: PredicateKind::Yk6ThresholdQuorum,
+            lhs: 4,
+            rhs: 4,
+            aux: 1,
+            chain_id: TEST_CHAIN_ID,
+        })
+        .expect("independent quorum predicate proves");
+        verify_predicate(&pred_proof).expect("unrelated predicate really does verify");
+
+        let mut state = AccountState::new();
+        let header = GlobalBlockHeader {
+            version: 2,
+            global_height: 0,
+            previous_global_hash: [0u8; 32],
+            chain_id: TEST_CHAIN_ID,
+            timestamp_ms: 1,
+            domain_registry_root: [1u8; 32],
+            domain_commitment_root,
+            message_root: [3u8; 32],
+            bridge_state_root: [4u8; 32],
+            replay_nonce_root: [5u8; 32],
+            proposer: None,
+            settlement_finality_root: [6u8; 32],
+            storage_root: None,
+            ai_root: None,
+            identity_root: None,
+            checkpoint_height: 10,
+            external_intake_root: None,
+            app_binding_root: None,
+            delegation_root: None,
+            object_layer_root: None,
+            proof_root: Some([7u8; 32]),
+            proven_height: 10,
+        };
+        state.global_header_summary = header.calculate_hash_bytes();
+        let body = state.state_root_body();
+        let checkpoint = VerifiedCheckpoint {
+            height: 10,
+            block_hash: "aa".repeat(32),
+            set_hash: "bb".repeat(32),
+            epoch: 1,
+            state_root: state.calculate_state_root(),
+        };
+
+        let view = RemoteStateView {
+            remote_domain_id,
+            remote_state_root: remote_root,
+            header,
+            state_key: key,
+            state_value: value,
+            inclusion_path: path,
+            predicate_proof: None,
+        };
+        // The door is open on devnet and closed on the public networks.
+        let closed_chain = crate::core::chain_config::Network::Testnet
+            .chain_id()
+            .value();
+        assert!(matches!(
+            view.verify_for_chain(&checkpoint, &body, closed_chain),
+            Err(LightClientError::VerificationFailed(reason))
+                if reason.contains("app binding disabled")
+        ));
+        let open_chain = crate::core::chain_config::Network::Devnet
+            .chain_id()
+            .value();
+        assert!(view
+            .verify_for_chain(&checkpoint, &body, open_chain)
+            .is_ok());
+
+        let mut tampered_val = view.clone();
+        tampered_val.state_value = b"balance:9999999".to_vec();
+        assert!(matches!(
+            tampered_val.verify_for_chain(&checkpoint, &body, open_chain),
+            Err(LightClientError::VerificationFailed(_))
+        ));
+
+        let mut unbound_pred = view;
+        unbound_pred.predicate_proof = Some(pred_proof);
+        assert!(matches!(
+            unbound_pred.verify_for_chain(&checkpoint, &body, open_chain),
+            Err(LightClientError::VerificationFailed(reason))
+                if reason.contains("not bound to the committed state leaf")
         ));
     }
 }

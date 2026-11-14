@@ -333,3 +333,74 @@ impl<SC: StarkGenericConfig> p3_air::PermutationAirBuilder for VerifierConstrain
         &[]
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use p3_air::PermutationAirBuilder;
+    use p3_field::{BasedVectorSpace, PrimeCharacteristicRing};
+    use p3_goldilocks::Goldilocks;
+    use p3_matrix::dense::RowMajorMatrixView;
+
+    use super::*;
+    use crate::plonky3_prover::ChipStarkConfig;
+
+    type Challenge = <ChipStarkConfig as StarkGenericConfig>::Challenge;
+
+    #[test]
+    fn aux_window_exposes_current_and_next_slices() {
+        let win = AuxWindow {
+            current: vec![1u64, 2, 3],
+            next: vec![4u64, 5, 6],
+        };
+        assert_eq!(win.current_slice(), &[1, 2, 3]);
+        assert_eq!(win.next_slice(), &[4, 5, 6]);
+    }
+
+    #[test]
+    fn verifier_constraint_folder_accumulates_horner_polynomial() {
+        let dim = <Challenge as BasedVectorSpace<Goldilocks>>::DIMENSION;
+        let top_main = [Challenge::from_u64(10), Challenge::from_u64(20)];
+        let bot_main = [Challenge::from_u64(30), Challenge::from_u64(40)];
+        let top_aux = vec![Challenge::from_u64(1); dim];
+        let bot_aux = vec![Challenge::from_u64(2); dim];
+        let empty: [Challenge; 0] = [];
+        let main = ViewPair::new(
+            RowMajorMatrixView::new_row(&top_main),
+            RowMajorMatrixView::new_row(&bot_main),
+        );
+        let aux = ViewPair::new(
+            RowMajorMatrixView::new_row(&top_aux),
+            RowMajorMatrixView::new_row(&bot_aux),
+        );
+        let preprocessed = ViewPair::new(
+            RowMajorMatrixView::new(&empty, 0),
+            RowMajorMatrixView::new(&empty, 0),
+        );
+        let preprocessed_window = RowWindow::from_two_rows(&empty, &empty);
+        let pub_vals = [Goldilocks::from_u64(7)];
+        let alpha = Challenge::from_u64(5);
+        let mut folder = VerifierConstraintFolder::<ChipStarkConfig> {
+            main,
+            aux,
+            preprocessed,
+            preprocessed_window,
+            random: &empty,
+            public_values: &pub_vals,
+            is_first_row: Challenge::ONE,
+            is_last_row: Challenge::ZERO,
+            is_transition: Challenge::ONE,
+            alpha,
+            accumulator: Challenge::ZERO,
+        };
+        folder.assert_zero(Goldilocks::from_u64(3));
+        folder.assert_zero_ext(Challenge::from_u64(4));
+        assert_eq!(
+            folder.accumulator,
+            Challenge::from_u64(3) * alpha + Challenge::from_u64(4)
+        );
+        assert_eq!(folder.public_values().len(), 1);
+        let perm = folder.permutation();
+        assert_eq!(perm.current_slice().len(), 1);
+        assert_eq!(perm.next_slice().len(), 1);
+    }
+}

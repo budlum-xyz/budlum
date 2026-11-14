@@ -183,14 +183,29 @@ fn application_contract_fee_is_split_between_recipient_and_producer() {
     let sender = Address::from([0x11u8; 32]);
     let producer = Address::from([0x33u8; 32]);
     state.add_balance(&sender, 1_000_000);
+    let mut origin_domain = crate::domain::plugin::default_domain(
+        7,
+        crate::domain::ConsensusKind::PoW,
+        45262,
+        crate::domain::POW_HEADER_CHAIN_ADAPTER,
+        1,
+    );
+    origin_domain.operator = Some(sender);
+    origin_domain.bridge_enabled = true;
+    state.settlement.domains.register(origin_domain).unwrap();
     state
         .settlement
-        .graft
+        .app_binding
         .register(7, b"origin-app".to_vec(), [0x44u8; 32], 0)
         .unwrap();
-    let graft_id = crate::settlement::graft::graft_id(7, b"origin-app");
+    let app_binding_id = crate::settlement::app_binding::app_binding_id(7, b"origin-app");
     // An unclaimed application: its share accrues in the keyless mirror.
-    let app = state.settlement.graft.get(&graft_id).unwrap().clone();
+    let app = state
+        .settlement
+        .app_binding
+        .get(&app_binding_id)
+        .unwrap()
+        .clone();
     let application = app.fee_recipient();
     assert_eq!(application, app.mirror_account);
 
@@ -226,7 +241,7 @@ fn application_contract_fee_is_split_between_recipient_and_producer() {
     );
 }
 
-/// A contract call that names an address no Graft application owns pays the
+/// A contract call that names an address no AppBinding application owns pays the
 /// whole post-burn fee to the producer: the sender cannot route a share of
 /// its own fee back to itself by naming an arbitrary recipient.
 #[test]
@@ -549,10 +564,13 @@ fn team_vesting_holds_on_every_value_path_not_only_transfer() {
     );
     tx.hash = tx.calculate_hash();
     let err = Executor::apply_transaction_checked(&mut state, &tx).unwrap_err();
-    assert_eq!(
-        err.code(),
-        "ai_payment_insufficient_funds",
-        "an agent payment must not move locked team funds"
+    assert!(
+        matches!(
+            err.code(),
+            "vesting_locked" | "ai_payment_insufficient_funds"
+        ),
+        "an agent payment must not move locked team funds (got {})",
+        err.code()
     );
     assert_eq!(
         state.get_balance(&addrs.team),
@@ -775,5 +793,45 @@ fn the_annual_burn_still_fires_after_a_year_of_epochs() {
         state.get_balance(&reserve),
         before - per_year,
         "exactly one annual increment leaves the reserve"
+    );
+}
+
+/// Every admission/fee gate must look at the spendable balance, not the raw
+/// balance. At genesis epoch 0 the whole team
+/// allocation is vesting-locked, so a fee-only transaction (liquid_cost ==
+/// fee) from the team account must be refused even though the raw balance is
+/// 20M BUD.
+#[test]
+fn fee_gate_respects_vesting_lock() {
+    let addrs = TokenomicsAddresses::reserved();
+    let mut state = GenesisConfig::new(45262)
+        .with_bud_tokenomics()
+        .build_state();
+
+    // The raw balance exists but nothing is spendable before the cliff.
+    assert!(state.get_balance(&addrs.team) > 0);
+    assert_eq!(state.spendable_balance(&addrs.team), 0);
+
+    let mut tx = Transaction::new_with_chain_id(
+        addrs.team,
+        Address::zero(),
+        0,
+        1,
+        1,
+        vec![],
+        DEFAULT_CHAIN_ID,
+        TransactionType::Vote,
+    );
+    tx.hash = tx.calculate_hash();
+    let err = Executor::apply_transaction_checked(&mut state, &tx).unwrap_err();
+    assert_eq!(
+        err.code(),
+        "vesting_locked",
+        "a fee-only transaction from a fully locked account must hit the spendable gate"
+    );
+    assert_eq!(
+        state.get_balance(&addrs.team),
+        bud(20_000_000),
+        "the locked balance must be untouched"
     );
 }

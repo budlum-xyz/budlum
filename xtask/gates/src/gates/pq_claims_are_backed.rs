@@ -25,7 +25,7 @@
 //!    documents, marker or not, and an unscoped "quantum-resistant" (no layer
 //!    named on the same line) is refused too.
 //!
-//! The scanned set is the root READMEs, `docs/` (without `docs/audit/` and
+//! The scanned set is the root READMEs, `docs/` (without `docs/pq/` and
 //! `docs/pq/`, which are the ledgers and the design record themselves),
 //! `bud/README.md`, `budzero/README.md` and `crates/*/README*.md`.
 
@@ -383,7 +383,7 @@ fn is_scanned_document(rel: &str) -> bool {
     if !rel.contains('/') {
         return file.starts_with("README");
     }
-    if rel.starts_with("docs/audit/") || rel.starts_with("docs/pq/") {
+    if rel.starts_with("docs/pq/") {
         return false;
     }
     if rel.starts_with("docs/") {

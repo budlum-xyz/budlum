@@ -8,8 +8,8 @@
 //! An unpaired tail is promoted under its own domain tag, never paired
 //! with itself. The self-pairing made the tail contribute exactly what a
 //! duplicated leaf would, so the root of `[a, b, c]` equalled the root of
-//! `[a, b, c, c]`: two different commitments, one digest (the F-6 shape,
-//! in every tree that used this module's duplicate-tail rule). A promoted
+//! `[a, b, c, c]`: two different commitments, one digest (a duplicated-tail
+//! shape, in every tree that used this module's duplicate-tail rule). A promoted
 //! digest is produced by `promote` alone, which no `combine` call can
 //! reproduce, so the ambiguity is closed at the shape level and every
 //! binding inherits it.
@@ -254,9 +254,11 @@ pub fn merkle_root_from_proof(
     let mut idx = index;
     for sibling in siblings {
         cur = if sibling == &odd_promotion_sentinel() {
-            // The prover recorded a promotion: this digest had no sibling
-            // at this level and was hashed under the promotion function
-            // alone.
+            // Only an even-positioned tail (`idx % 2 == 0`) can ever lack a
+            // partner; an odd index always has a left sibling.
+            if !idx.is_multiple_of(2) {
+                return None;
+            }
             promote(&cur)
         } else if idx.is_multiple_of(2) {
             combine(&cur, sibling)
@@ -471,5 +473,20 @@ mod tests {
                 Some(root)
             );
         }
+    }
+
+    #[test]
+    fn merkle_root_from_proof_refuses_odd_index_promotion_phantom_leaf() {
+        let leaves = [[1u8; 32], [2u8; 32], [3u8; 32]];
+        let root = merkle_root(&leaves, combine_sha3, promote_sha3);
+        let tail_proof = merkle_proof(&leaves, 2, combine_sha3, promote_sha3).unwrap();
+        assert_eq!(
+            merkle_root_from_proof(&leaves[2], 2, &tail_proof, combine_sha3, promote_sha3),
+            Some(root)
+        );
+        assert_eq!(
+            merkle_root_from_proof(&leaves[2], 3, &tail_proof, combine_sha3, promote_sha3),
+            None
+        );
     }
 }

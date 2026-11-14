@@ -54,6 +54,7 @@ pub const fn activation_delay_epochs(p_type: &ProposalType) -> u64 {
         // Tunable numbers and parameter strings.
         ProposalType::ChangeBaseFee(_)
         | ProposalType::ChangeBlockReward(_)
+        | ProposalType::BnsSetBaseCost { .. }
         | ProposalType::ParameterUpdate(_, _) => GOVERNANCE_PARAMETER_ACTIVATION_DELAY_EPOCHS,
 
         // Rules the rest of the system is written against.
@@ -62,7 +63,8 @@ pub const fn activation_delay_epochs(p_type: &ProposalType) -> u64 {
         | ProposalType::SetConstitutionParameter(_)
         | ProposalType::UnfreezeConsensusDomain { .. }
         | ProposalType::ResetConsensusDomainTip { .. }
-        | ProposalType::PoaAddAdmin { .. } => GOVERNANCE_POLICY_ACTIVATION_DELAY_EPOCHS,
+        | ProposalType::PoaAddAdmin { .. }
+        | ProposalType::BnsSetPrimarySellers { .. } => GOVERNANCE_POLICY_ACTIVATION_DELAY_EPOCHS,
 
         // Actions aimed at one account.
         ProposalType::SlashValidator { .. }
@@ -96,6 +98,11 @@ pub fn is_governance_parameter_whitelisted(key: &str) -> bool {
     GOVERNANCE_PARAMETER_WHITELIST.contains(&key)
 }
 
+/// Performs the requested operation.
+///
+/// # Errors
+///
+/// Returns an error if the operation fails.
 pub fn validate_governance_parameter_update(key: &str, value: &str) -> Result<(), String> {
     if !is_governance_parameter_whitelisted(key) {
         return Err(format!("governance parameter is not whitelisted: {key}"));
@@ -182,6 +189,10 @@ pub fn validate_governance_parameter_update(key: &str, value: &str) -> Result<()
 /// Governance parameter values travel as strings; a switch accepts exactly
 /// `true` or `false`. Any other spelling is refused rather than being read as
 /// off, so a mistyped activation cannot pass a vote as a no-op.
+///
+/// # Errors
+///
+/// Returns an error if the operation fails.
 pub fn parse_governance_bool(key: &str, value: &str) -> Result<bool, String> {
     match value {
         "true" => Ok(true),
@@ -219,9 +230,9 @@ pub enum ProposalType {
     /// Validated fail-closed and cannot be weakened by governance.
     SetConstitutionParameter(ConstitutionParameter),
     /// Governance-controlled domain unfreeze
-    /// - domain_id: target consensus domain to unfreeze
-    /// - expected_validator_set_hash: 32-byte hash that must match current domain's validator_set_hash (anti-grind / anti-replay binding)
-    /// - justification_hash: hash of frozen reason / evidence reference (e.g., hash of audit report / governance forum post)
+    /// - `domain_id`: target consensus domain to unfreeze
+    /// - `expected_validator_set_hash`: 32-byte hash that must match current domain's `validator_set_hash` (anti-grind / anti-replay binding)
+    /// - `justification_hash`: hash of frozen reason / evidence reference (e.g., hash of audit report / governance forum post)
     ///
     /// Anti-replay: proposal id itself is unique and executed only once (Passed->Executed).
     /// Award the governance verification badge to a `budlum.xyz` app.
@@ -235,8 +246,7 @@ pub enum ProposalType {
     /// no path could set it, so it was permanently false. This is the path.
     /// The proposal binds the reviewed snapshot: the developer address, the
     /// manifest id and the website-url hash that voters evaluated. A passed
-    /// vote may not be retargeted to different content (HIGH, CWE-345;
-    /// BUDLUM finding #173).
+    /// vote may not be retargeted to different content (CWE-345).
     VerifyHubApp {
         app_id: u64,
         developer: crate::core::address::Address,
@@ -248,21 +258,21 @@ pub enum ProposalType {
         expected_validator_set_hash: [u8; 32],
         justification_hash: [u8; 32],
     },
-    /// Bootstrap or extend a PoA domain's admin set.
+    /// Bootstrap or extend a `PoA` domain's admin set.
     /// Governance is the trust root: the first admin of a domain arrives
     /// here, never through a transaction that appoints itself.
     PoaAddAdmin {
         domain_id: u32,
         admin: Address,
     },
-    /// Remove a PoA domain's admin by governance decision. This
+    /// Remove a `PoA` domain's admin by governance decision. This
     /// is the only path that may take the last admin - the admin door
     /// refuses it, because unpermissioning a domain is a governance act.
     PoaRemoveAdmin {
         domain_id: u32,
         admin: Address,
     },
-    /// Freeze an account on a PoA domain's compliance ledger (
+    /// Freeze an account on a `PoA` domain's compliance ledger (
     ///). Replaces the bare `bool` authority: the vote IS the
     /// authority, the named admin is the audit trail, and the domain kind
     /// is read from the domain record at application.
@@ -287,6 +297,20 @@ pub enum ProposalType {
         target_height: u64,
         target_hash: [u8; 32],
         justification_hash: [u8; 32],
+    },
+    /// Replace the authorized primary-seller address set for `.bud` marketplace
+    /// `Primary` listings.
+    BnsSetPrimarySellers {
+        sellers: Vec<Address>,
+    },
+    /// Replace the `.bud` renewal base cost (`BnsRegistry::base_cost`).
+    ///
+    /// B12: there is no other door to this number. A sale price that only the
+    /// genesis file can set is a price nobody can correct, and one that any
+    /// account can set is no price at all. The action changes one field and
+    /// touches no record: an existing registration keeps the term it paid for.
+    BnsSetBaseCost {
+        base_cost: u64,
     },
 }
 
@@ -357,6 +381,11 @@ impl Proposal {
         current_epoch >= self.activation_epoch()
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn add_vote(
         &mut self,
         voter: Address,
@@ -409,7 +438,7 @@ impl Proposal {
             .insert(*voter, current.saturating_sub(applied));
     }
 
-    /// Finalize proposal - now requires current_epoch >= end_epoch.
+    /// Finalize proposal - now requires `current_epoch` >= `end_epoch`.
     /// Previously, finalize could be called at any time, allowing early-finalize
     /// Attacks where a proposal with sufficient votes could be forced through
     /// Before the voting period ended.
@@ -440,7 +469,7 @@ pub struct GovernanceState {
     #[serde(default)]
     pub constitution: ConstitutionRegistry,
     /// Per-proposer current-epoch proposal count.
-    /// Key: (proposer_address, epoch). Value: accepted proposals submitted.
+    /// Key: (`proposer_address`, epoch). Value: accepted proposals submitted.
     /// The next proposal costs `2^count` times base fee; old epochs are pruned.
     #[serde(default, with = "proposer_epoch_count_as_seq")]
     pub proposer_epoch_count: std::collections::BTreeMap<(Address, u64), u64>,
@@ -551,6 +580,11 @@ impl GovernanceState {
         hasher.finalize().into()
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn create_proposal(
         &mut self,
         proposer: Address,
@@ -633,6 +667,15 @@ impl GovernanceState {
                         "ResetConsensusDomainTip justification_hash must be non-zero".into(),
                     );
                 }
+            }
+            ProposalType::BnsSetPrimarySellers { sellers } => {
+                let mut reg = crate::bns::BnsRegistry::new();
+                reg.set_primary_sellers(sellers.iter().copied())?;
+            }
+            ProposalType::BnsSetBaseCost { base_cost } => {
+                // The absolute bounds only: the tenfold step is relative to the
+                // live price, which the proposal cannot know at submission.
+                crate::bns::BnsRegistry::check_base_cost_bounds(*base_cost)?;
             }
             _ => {}
         }
@@ -755,6 +798,11 @@ impl GovernanceState {
             .unwrap_or(u64::MAX)
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn cancel_proposal(&mut self, proposal_id: u64, caller: &Address) -> Result<(), String> {
         let proposal = self
             .proposals
@@ -828,6 +876,16 @@ impl GovernanceState {
                     target_hash: *target_hash,
                     justification_hash: *justification_hash,
                 }),
+                ProposalType::BnsSetPrimarySellers { sellers } => {
+                    Some(GovernanceAction::BnsSetPrimarySellers {
+                        sellers: sellers.clone(),
+                    })
+                }
+                ProposalType::BnsSetBaseCost { base_cost } => {
+                    Some(GovernanceAction::BnsSetBaseCost {
+                        base_cost: *base_cost,
+                    })
+                }
                 // Applied (and marked Executed) by the account state at the
                 // epoch boundary, see the doc comment.
                 ProposalType::ChangeBaseFee(_)
@@ -865,21 +923,21 @@ pub enum GovernanceAction {
         expected_validator_set_hash: [u8; 32],
         justification_hash: [u8; 32],
     },
-    /// Bootstrap or extend a PoA domain's admin set.
+    /// Bootstrap or extend a `PoA` domain's admin set.
     /// Governance is the trust root: the first admin of a domain arrives
     /// here, never through a transaction that appoints itself.
     PoaAddAdmin {
         domain_id: u32,
         admin: Address,
     },
-    /// Remove a PoA domain's admin by governance decision. This
+    /// Remove a `PoA` domain's admin by governance decision. This
     /// is the only path that may take the last admin - the admin door
     /// refuses it, because unpermissioning a domain is a governance act.
     PoaRemoveAdmin {
         domain_id: u32,
         admin: Address,
     },
-    /// Freeze an account on a PoA domain's compliance ledger (
+    /// Freeze an account on a `PoA` domain's compliance ledger (
     ///). Replaces the bare `bool` authority: the vote IS the
     /// authority, the named admin is the audit trail, and the domain kind
     /// is read from the domain record at application.
@@ -902,6 +960,13 @@ pub enum GovernanceAction {
         target_height: u64,
         target_hash: [u8; 32],
         justification_hash: [u8; 32],
+    },
+    BnsSetPrimarySellers {
+        sellers: Vec<Address>,
+    },
+    /// Replace the `.bud` renewal base cost. Only the price moves.
+    BnsSetBaseCost {
+        base_cost: u64,
     },
 }
 
@@ -1227,7 +1292,7 @@ mod tests {
     /// The constitution's MinConstitutionProposalEpochs binds
     /// constitution amendments instead of the hard coded 10.
     #[test]
-    fn p20_f05_amendment_respects_min_constitution_proposal_epochs() {
+    fn amendment_respects_min_constitution_proposal_epochs() {
         let mut gov = GovernanceState::default();
         let proposer = Address::from([0x01; 32]);
         gov.constitution
@@ -1256,7 +1321,7 @@ mod tests {
 
     /// Proposals that execution would drop are refused up front.
     #[test]
-    fn p20_f07_unexecutable_proposals_are_refused_at_creation() {
+    fn unexecutable_proposals_are_refused_at_creation() {
         use crate::core::account::MAX_BASE_FEE;
         let mut gov = GovernanceState::default();
         let proposer = Address::from([0x01; 32]);
@@ -1478,7 +1543,7 @@ mod l4_tests {
     /// One proposer cannot fill the Active slots by using one
     /// proposal per epoch, which keeps the per-epoch fee multiplier at 1x.
     #[test]
-    fn p20_f01_one_proposer_cannot_exhaust_active_slots() {
+    fn one_proposer_cannot_exhaust_active_slots() {
         let mut gov = GovernanceState::default();
         let attacker = Address::from([0xA1; 32]);
         let mut accepted = 0u64;
@@ -1499,7 +1564,7 @@ mod l4_tests {
 
     /// Closed proposals leave state after the retention window.
     #[test]
-    fn p20_f02_closed_proposals_are_pruned() {
+    fn closed_proposals_are_pruned() {
         let mut gov = GovernanceState::default();
         let proposer = Address::from([0xB1; 32]);
         let closed = gov

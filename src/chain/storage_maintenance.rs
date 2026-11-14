@@ -148,7 +148,7 @@ pub(crate) fn accrue_operator_rewards(state: &mut AccountState, epoch: u64) -> (
 
 /// Open a retrieval challenge for every active deal whose interval elapsed
 /// this epoch. The byte range comes from the block's VRF output, folded with
-/// the deal and shard identity; a block without VRF entropy (a PoW or PoA
+/// the deal and shard identity; a block without VRF entropy (a `PoW` or `PoA`
 /// block) issues none rather than fall back to arithmetic a prover could
 /// precompute. Returns the number of challenges opened.
 pub(crate) fn issue_challenges(
@@ -291,15 +291,27 @@ pub(crate) fn apply_bond_slash(
     // it, so the confiscation adds it to destroyed supply without taking a
     // second bond from the operator's live balance.
     let burned = slashed_bond;
-    state.burned_total = state.burned_total.saturating_add(burned);
+    let next_slashed_total = state
+        .storage_registry
+        .economics
+        .slashed_bond_total
+        .checked_add(slashed_bond)
+        .ok_or_else(|| String::from("slashed storage-bond accounting overflowed u64"))?;
+    let next_burned_total = state
+        .storage_registry
+        .economics
+        .burned_bond_total
+        .checked_add(burned)
+        .ok_or_else(|| String::from("burned storage-bond accounting overflowed u64"))?;
+    state.record_destroyed(u128::from(burned));
     if burned > 0 {
         tracing::warn!(
             "Confiscated the escrowed bond {burned} of operator {operator} for {reason}"
         );
     }
     let ledger = &mut state.storage_registry.economics;
-    ledger.slashed_bond_total = ledger.slashed_bond_total.saturating_add(slashed_bond);
-    ledger.burned_bond_total = ledger.burned_bond_total.saturating_add(burned);
+    ledger.slashed_bond_total = next_slashed_total;
+    ledger.burned_bond_total = next_burned_total;
     ledger.record(StorageEconomicsEvent {
         epoch,
         deal_id,

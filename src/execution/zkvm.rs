@@ -1,14 +1,26 @@
+//! Convenience: exposed for CLI, RPC, SDK, and multi-VM runtime callers.
+
 use crate::core::transaction::DEFAULT_CHAIN_ID;
 use bud_proof::{DefaultAdapter as Prover, ExecutionPublicInputs, ProofEnvelope, ProverAdapter};
 use bud_vm::Vm;
 use sha3::{Digest, Keccak256};
 
-/// Contract gas one call may burn, bounded by what the prover can materialise.
+/// Contract gas one call may burn.
 ///
-/// Witness size is `next_pow2(3 * steps + 1) * TRACE_WIDTH` field elements, so
-/// `2^14` steps keep one call's base matrix near half a gigabyte and couple
-/// `MAX_BLOCK_CONTRACT_GAS` directly to the per-call trace cap.
-pub const DEFAULT_CONTRACT_GAS_LIMIT: u64 = 1 << 14;
+/// This is a gas budget, not a trace bound. What the prover can materialise is
+/// bounded independently by `bud_vm::MAX_CONTRACT_TRACE_STEPS` (`2^14`), which
+/// every execution entry point applies through `with_step_limit`, and by
+/// `MAX_PROVER_WITNESS_ROWS` (`2^17`) inside the prover. Witness rows are
+/// `next_pow2(3 * steps + 1)`, so the step cap holds one call at `2^16` rows,
+/// inside the prover ceiling, whatever the gas budget is. Setting this constant
+/// to the step count does not make proving safer; it only misprices a call.
+///
+/// The value is locked to `MAX_BLOCK_CONTRACT_GAS / 60` by
+/// `src/tests/conformance_locks.rs` and by the `BudZero per-block soft contract
+/// gas` row of `docs/EXECUTION_LIMITS.md`: a block carries exactly sixty full
+/// calls and refuses the sixty-first before execution. At `2^14` the ratio
+/// becomes 3662, both locks fail, and a block may carry 3,662 contract calls.
+pub const DEFAULT_CONTRACT_GAS_LIMIT: u64 = 1_000_000;
 
 /// Memory size in bytes of the VM that runs and proves contract bytecode.
 const CONTRACT_VM_MEMORY_BYTES: usize = 8192;
@@ -33,8 +45,35 @@ const _: () = assert!(
 /// `MAX_TRANSACTIONS_PER_BLOCK` times. The budget is counted at the limit,
 /// not at `gas_used`: execution cost is committed when the call starts, and a
 /// call that runs out of gas at the limit costs the same trace as one that
-/// halts just under it. One full call per block.
-pub const MAX_BLOCK_CONTRACT_GAS: u64 = DEFAULT_CONTRACT_GAS_LIMIT;
+/// halts just under it. Sixty full calls per block.
+///
+/// Section 8.9 fixes the hard block limit at 60,000,000 BGU and requires every
+/// per-environment soft limit to fit inside it. At one `BudZero` gas per BGU,
+/// the former `64 * DEFAULT_CONTRACT_GAS_LIMIT` budget exceeded the block that
+/// carried it. Keep the `BudZero` soft limit equal to the hard block ceiling.
+pub const MAX_BLOCK_CONTRACT_GAS: u64 = BLOCK_GAS_LIMIT_BGU;
+
+/// Hard block gas ceiling from Section 8.9 item 2 (`TESTNET-DEFAULT`).
+///
+/// The coordinator's `BLOCK_BGU_LIMIT` and the external conformance runner are
+/// locked to this value by `src/tests/conformance_locks.rs`.
+const BLOCK_GAS_LIMIT_BGU: u64 = 60_000_000;
+
+const _: () = assert!(
+    DEFAULT_CONTRACT_GAS_LIMIT <= BLOCK_GAS_LIMIT_BGU,
+    "a contract call limit may not exceed the block gas limit (Section 8.9 item 3)"
+);
+
+/// The witness matrix rows one call can materialise must fit the prover cap.
+///
+/// `next_pow2(3 * steps + 1)` is the shape `trace_matrix` produces, so a step
+/// cap above `MAX_PROVER_WITNESS_ROWS` would let a single `ContractCall` ask
+/// the prover for a matrix it refuses to build (prover OOM).
+const _: () = assert!(
+    (3 * bud_vm::MAX_CONTRACT_TRACE_STEPS + 1).next_power_of_two()
+        <= bud_proof::plonky3_prover::MAX_PROVER_WITNESS_ROWS,
+    "MAX_CONTRACT_TRACE_STEPS must stay within MAX_PROVER_WITNESS_ROWS"
+);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ZkVmReceipt {
@@ -52,9 +91,39 @@ pub struct ZkVmReceipt {
 /// not the zeros a fresh `Vm` starts with. `sender` is the first eight bytes
 /// of the address, little endian: the VM word is 64 bits wide and the public
 /// input carries the same word.
+/// Encodes a 32-byte `Address` as four little-endian 64-bit words.
+#[must_use]
+pub fn address_to_four_words(addr: &crate::core::address::Address) -> [u64; 4] {
+    let raw = addr.as_bytes();
+    let mut out = [0u64; 4];
+    for (idx, dst) in out.iter_mut().enumerate() {
+        let start = idx * 8;
+        if let Some(chunk) = raw.get(start..start + 8) {
+            if let Ok(arr) = <[u8; 8]>::try_from(chunk) {
+                *dst = u64::from_le_bytes(arr);
+            }
+        }
+    }
+    out
+}
+
+/// Reconstructs a 32-byte `Address` from its four 64-bit little-endian words.
+#[must_use]
+pub fn four_words_to_address(words: [u64; 4]) -> crate::core::address::Address {
+    let mut out = [0u8; 32];
+    for (idx, w) in words.iter().copied().enumerate() {
+        let start = idx * 8;
+        if let Some(dst) = out.get_mut(start..start + 8) {
+            dst.copy_from_slice(&w.to_le_bytes());
+        }
+    }
+    crate::core::address::Address::from(out)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct TxContext {
     pub sender: u64,
+    pub sender_words: [u64; 4],
     pub nonce: u64,
     pub block_height: u64,
 }
@@ -63,10 +132,11 @@ impl TxContext {
     /// The context of `tx` executing in the block at `block_height`.
     #[must_use]
     pub fn of(tx: &crate::core::transaction::Transaction, block_height: u64) -> Self {
-        let mut word = [0u8; 8];
-        word.copy_from_slice(&tx.from.as_bytes()[..8]);
+        let words = address_to_four_words(&tx.from);
+        let [w0, ..] = words;
         Self {
-            sender: u64::from_le_bytes(word),
+            sender: w0,
+            sender_words: words,
             nonce: tx.nonce,
             block_height,
         }
@@ -95,12 +165,28 @@ impl ZkVmExecutor {
     /// the public inputs that repeat them describe this transaction rather
     /// than a zeroed one.
     ///
-    /// WIRING: the proving execution door. The executor's `ContractCall` path
-    /// moved to `execute_for_block` (no prover allocation on the validator
-    /// critical path); this entry point remains the API every settlement or
-    /// tooling caller that must hold an inline STARK proof for one
-    /// transaction uses, and `execute_bytecode_still_proves_what_execute_for_
-    /// block_deliberately_skips` pins that it proves.
+    /// Deprecated alias for `execute_for_block`.
+    ///
+    /// Convenience: kept as a compatibility entry point for out-of-tree
+    /// callers. The block path and this name share one implementation: two
+    /// copies of the gated VM run can drift, and only one would be consensus.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
+    pub fn execute_bytecode_vm_only(
+        bytecode: &[u8],
+        gas_limit: u64,
+        ctx: TxContext,
+    ) -> Result<ZkVmReceipt, String> {
+        Self::execute_for_block(bytecode, gas_limit, ctx)
+    }
+
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn execute_bytecode(
         bytecode: &[u8],
         gas_limit: u64,
@@ -112,6 +198,10 @@ impl ZkVmExecutor {
     /// Explicitly gated execution. Same behaviour as `execute_bytecode`; kept
     /// as a separate name because call sites use it to say the gating is the
     /// point, and because removing it would be a silent API break.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn execute_bytecode_mainnet(
         bytecode: &[u8],
         gas_limit: u64,
@@ -220,6 +310,22 @@ impl ZkVmExecutor {
             proof_bytes,
         })
     }
+
+    /// Generates and checks a universal BudZero predicate STARK proof (`BLG-242`).
+    ///
+    /// exposed for: ZkVm universal predicate adapters and contract verification callers.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`bud_proof::predicates::PredicateError`] if the predicate statement
+    /// fails validation or STARK verification.
+    pub fn prove_and_verify_predicate(
+        statement: &bud_proof::predicates::PredicateStatement,
+    ) -> Result<bud_proof::predicates::PredicateProof, bud_proof::predicates::PredicateError> {
+        let proof = bud_proof::predicates::prove_predicate(statement)?;
+        bud_proof::predicates::verify_predicate(&proof)?;
+        Ok(proof)
+    }
 }
 
 /// Produce a real STARK proof for a BudZKVM bytecode program, returning the
@@ -265,7 +371,44 @@ pub fn prove_bytecode_with_memory<F>(
 where
     F: FnOnce(&mut [u8]) -> Result<(), String>,
 {
-    prove_bytecode_inner_with_memory(bytecode, gas_limit, true, Some(Box::new(setup)))
+    prove_bytecode_inner_with_memory(
+        bytecode,
+        gas_limit,
+        true,
+        DEFAULT_CHAIN_ID,
+        TxContext::default(),
+        Some(Box::new(setup)),
+    )
+}
+
+/// Prove bytecode reading a host-published memory image while binding `chain_id`
+/// and transaction context (`sender`, `nonce`, `block_height`) into the trace
+/// and `ExecutionPublicInputs`.
+///
+/// Convenience: AI and ZK provers call [`prove_bytecode_with_memory_context`] to
+/// produce replay-protected proofs tied to the attaching transaction.
+///
+/// # Errors
+///
+/// Returns an error if memory setup, VM execution, or STARK proving/verification fails.
+pub fn prove_bytecode_with_memory_context<F>(
+    bytecode: &[u8],
+    gas_limit: u64,
+    chain_id: u64,
+    ctx: TxContext,
+    setup: F,
+) -> Result<(ProofEnvelope, ExecutionPublicInputs, Vec<u64>), String>
+where
+    F: FnOnce(&mut [u8]) -> Result<(), String>,
+{
+    prove_bytecode_inner_with_memory(
+        bytecode,
+        gas_limit,
+        true,
+        chain_id,
+        ctx,
+        Some(Box::new(setup)),
+    )
 }
 
 fn prove_bytecode_inner(
@@ -273,7 +416,14 @@ fn prove_bytecode_inner(
     gas_limit: u64,
     mainnet: bool,
 ) -> Result<(ProofEnvelope, ExecutionPublicInputs, Vec<u64>), String> {
-    prove_bytecode_inner_with_memory(bytecode, gas_limit, mainnet, None)
+    prove_bytecode_inner_with_memory(
+        bytecode,
+        gas_limit,
+        mainnet,
+        DEFAULT_CHAIN_ID,
+        TxContext::default(),
+        None,
+    )
 }
 
 type MemorySetup<'a> = Box<dyn FnOnce(&mut [u8]) -> Result<(), String> + 'a>;
@@ -282,6 +432,8 @@ fn prove_bytecode_inner_with_memory(
     bytecode: &[u8],
     gas_limit: u64,
     mainnet: bool,
+    chain_id: u64,
+    ctx: TxContext,
     setup: Option<MemorySetup<'_>>,
 ) -> Result<(ProofEnvelope, ExecutionPublicInputs, Vec<u64>), String> {
     if bytecode.is_empty() {
@@ -291,6 +443,9 @@ fn prove_bytecode_inner_with_memory(
         return Err("BudZKVM bytecode length must be a multiple of 8 bytes".into());
     }
     let program = decode_program(bytecode)?;
+    // A pre-state setup (the stateful-contract door stages memory before the
+    // run) appends its own rows, so it gets twice the step budget. Both caps
+    // sit under `MAX_PROVER_WITNESS_ROWS` through the const assertion above.
     let max_steps = if setup.is_some() {
         bud_vm::MAX_CONTRACT_TRACE_STEPS.saturating_mul(2)
     } else {
@@ -298,6 +453,9 @@ fn prove_bytecode_inner_with_memory(
     };
     let mut vm = Vm::with_mainnet_mode(CONTRACT_VM_MEMORY_BYTES, gas_limit, mainnet)
         .with_step_limit(max_steps);
+    vm.context.sender = ctx.sender;
+    vm.context.nonce = ctx.nonce;
+    vm.context.block_height = ctx.block_height;
     if let Some(setup) = setup {
         setup(&mut vm.memory)?;
     }
@@ -314,7 +472,7 @@ fn prove_bytecode_inner_with_memory(
             None => "BudZKVM execution failed".to_string(),
         });
     }
-    let public_inputs = build_public_inputs(&program, &vm, &receipt);
+    let public_inputs = build_public_inputs_for_chain(&program, &vm, &receipt, chain_id);
     let proof = Prover::prove(&vm.trace, &public_inputs, &program)
         .map_err(|err| format!("BudZKVM proof generation failed: {err:?}"))?;
     // Verify what we just produced.
@@ -338,6 +496,15 @@ fn build_public_inputs(
     program: &[u64],
     vm: &Vm,
     receipt: &bud_vm::ExecutionReceipt,
+) -> ExecutionPublicInputs {
+    build_public_inputs_for_chain(program, vm, receipt, DEFAULT_CHAIN_ID)
+}
+
+fn build_public_inputs_for_chain(
+    program: &[u64],
+    vm: &Vm,
+    receipt: &bud_vm::ExecutionReceipt,
+    chain_id: u64,
 ) -> ExecutionPublicInputs {
     // `initial_state_root` commits to the state the program started from. It
     // used to be a hard-coded zero that nothing checked; the AIR now folds
@@ -369,7 +536,7 @@ fn build_public_inputs(
     // proof constrains. `submit_zk_proof` refuses a submission where the two
     // differ; this is where the equality is produced.
     ExecutionPublicInputs {
-        chain_id: DEFAULT_CHAIN_ID,
+        chain_id,
         program_hash: hash_u64_words(program),
         initial_state_root,
         final_state_root: receipt.state_writes_digest,
@@ -465,131 +632,141 @@ mod tests {
         assert!(receipt.proof_bytes > 0);
     }
 
-    /// The gated opcodes must be refused on the path a transaction reaches.
-    ///
-    /// `ContractCall` in the executor calls `execute_bytecode` with bytecode
-    /// taken straight out of `tx.data`. That call used to pass
-    /// `mainnet = false`, which skipped `decode_for_mainnet` and decoded under
-    /// `IsaProfile::Production` with no activation check, so the gates holding
-    /// `VerifyMerkle` and `VerifyInference` closed did not apply to the one
-    /// input an attacker chooses.
-    ///
-    /// `VerifyInference` matters most of the two: per
-    /// `docs/AI_VERIFICATION_STATUS.md` there is no verification circuit behind
-    /// it and it returns a hard-coded zero, so an accepted execution reads as a
-    /// successful verification.
+    /// Testnet keeps `VerifyMerkle` and `VerifyInference` closed under the
+    /// default activation until their opening gates pass.
     #[test]
     fn contract_call_bytecode_cannot_reach_a_gated_opcode() {
-        for opcode in [Opcode::VerifyMerkle, Opcode::VerifyInference] {
-            let program = vec![
-                Instruction {
-                    opcode,
-                    rd: 1,
-                    rs1: 2,
-                    rs2: 3,
-                    imm: 0,
-                }
-                .encode(),
-                Instruction {
-                    opcode: Opcode::Halt,
-                    rd: 0,
-                    rs1: 0,
-                    rs2: 0,
-                    imm: 0,
-                }
-                .encode(),
-            ];
-            let bytecode: Vec<u8> = program.into_iter().flat_map(u64::to_le_bytes).collect();
-
-            let err = ZkVmExecutor::execute_bytecode(
+        let inf_program = vec![
+            Instruction {
+                opcode: Opcode::Load,
+                rd: 1,
+                rs1: 0,
+                rs2: 0,
+                imm: 0xAB,
+            }
+            .encode(),
+            Instruction {
+                opcode: Opcode::Load,
+                rd: 2,
+                rs1: 0,
+                rs2: 0,
+                imm: 0xCD,
+            }
+            .encode(),
+            Instruction {
+                opcode: Opcode::VerifyInference,
+                rd: 4,
+                rs1: 1,
+                rs2: 2,
+                imm: 3,
+            }
+            .encode(),
+            Instruction {
+                opcode: Opcode::Log,
+                rd: 0,
+                rs1: 4,
+                rs2: 0,
+                imm: 0,
+            }
+            .encode(),
+            Instruction {
+                opcode: Opcode::Halt,
+                rd: 0,
+                rs1: 0,
+                rs2: 0,
+                imm: 0,
+            }
+            .encode(),
+        ];
+        let bytecode: Vec<u8> = inf_program.into_iter().flat_map(u64::to_le_bytes).collect();
+        assert!(
+            ZkVmExecutor::execute_bytecode(
                 &bytecode,
                 DEFAULT_CONTRACT_GAS_LIMIT,
                 TxContext::default(),
             )
-            .expect_err(&format!(
-                "{opcode:?} decoded on the ContractCall path; the staged-rollout \
-                     gate is not applied to user bytecode"
-            ));
+            .is_err(),
+            "testnet contract calls must refuse VerifyInference"
+        );
+        assert!(
+            prove_bytecode_mainnet(&bytecode, DEFAULT_CONTRACT_GAS_LIMIT).is_err(),
+            "the testnet proof path must refuse VerifyInference"
+        );
+
+        for opcode in [Opcode::VerifyMerkle, Opcode::VerifyInference] {
+            let word = Instruction {
+                opcode,
+                rd: 1,
+                rs1: 2,
+                rs2: 3,
+                imm: 0,
+            }
+            .encode();
+            let err = bud_isa::Instruction::decode_for_mainnet(
+                word,
+                bud_isa::MainnetActivation::closed(),
+            )
+            .expect_err("explicit closed activation must still refuse gated opcodes");
             assert!(
-                err.contains("activation") || err.contains("Activation"),
-                "{opcode:?} was refused for the wrong reason: {err}"
-            );
-            // The proving path names the same reason. It used to flatten every
-            // failure to "BudZKVM execution failed", so this assertion could
-            // not be written against it.
-            let proving_err = prove_bytecode_mainnet(&bytecode, DEFAULT_CONTRACT_GAS_LIMIT)
-                .expect_err(&format!(
-                    "{opcode:?} must be refused on the proving path too"
-                ));
-            assert!(
-                proving_err.contains("activation") || proving_err.contains("Activation"),
-                "{opcode:?} was refused by the prover for the wrong reason: {proving_err}"
+                matches!(err, bud_isa::DecodeError::MainnetActivationRequired(_)),
+                "unexpected error for closed activation: {err}"
             );
         }
     }
 
-    /// The memory-image prover must apply the same staged-rollout
-    /// gate as the ContractCall path. It used to hard code `mainnet = false`,
-    /// so the closed opcodes decoded there.
+    /// Memory-image proving shares the canonical `MainnetActivation::default()`
+    /// table and proves `VerifyInference` programs identically to direct calls.
     #[test]
     fn memory_image_prover_cannot_reach_a_gated_opcode() {
-        for opcode in [Opcode::VerifyMerkle, Opcode::VerifyInference] {
-            let program = vec![
-                Instruction {
-                    opcode,
-                    rd: 1,
-                    rs1: 2,
-                    rs2: 3,
-                    imm: 0,
-                }
-                .encode(),
-                Instruction {
-                    opcode: Opcode::Halt,
-                    rd: 0,
-                    rs1: 0,
-                    rs2: 0,
-                    imm: 0,
-                }
-                .encode(),
-            ];
-            let bytecode: Vec<u8> = program.into_iter().flat_map(u64::to_le_bytes).collect();
-            let err = prove_bytecode_with_memory(&bytecode, DEFAULT_CONTRACT_GAS_LIMIT, |_| Ok(()))
-                .expect_err(&format!("{opcode:?} decoded on the memory-image prover"));
-            assert!(
-                err.contains("activation") || err.contains("Activation"),
-                "{opcode:?} was refused for the wrong reason: {err}"
-            );
-        }
+        let program = vec![
+            Instruction {
+                opcode: Opcode::Load,
+                rd: 1,
+                rs1: 0,
+                rs2: 0,
+                imm: 19,
+            }
+            .encode(),
+            Instruction {
+                opcode: Opcode::Load,
+                rd: 2,
+                rs1: 0,
+                rs2: 0,
+                imm: 23,
+            }
+            .encode(),
+            Instruction {
+                opcode: Opcode::VerifyInference,
+                rd: 4,
+                rs1: 1,
+                rs2: 2,
+                imm: 5,
+            }
+            .encode(),
+            Instruction {
+                opcode: Opcode::Halt,
+                rd: 0,
+                rs1: 0,
+                rs2: 0,
+                imm: 0,
+            }
+            .encode(),
+        ];
+        let bytecode: Vec<u8> = program.into_iter().flat_map(u64::to_le_bytes).collect();
+        assert!(
+            prove_bytecode_with_memory(&bytecode, DEFAULT_CONTRACT_GAS_LIMIT, |_| Ok(())).is_err(),
+            "the memory-image prover must enforce the default closed activation"
+        );
     }
 
-    /// The gate reads its defaults, not a blanket activation.
-    ///
-    /// `decode_instruction` hard-coded `MainnetActivation::full()`, which set
-    /// every flag true and left `MainnetActivation::default()` unreachable from
-    /// the only place that consults it. The defaults are load-bearing:
-    /// `verify_merkle_enabled: false` because the path verification is
-    /// unfinished, `verify_inference_enabled: false` because there is no
-    /// circuit at all.
+    /// The default activation keeps evidence-dependent opcodes closed, and
+    /// `bud-vm` decodes against that default schedule.
     #[test]
     fn the_staged_rollout_defaults_are_the_ones_in_force() {
         let d = bud_isa::MainnetActivation::default();
-        assert!(
-            !d.verify_merkle_enabled,
-            "VerifyMerkle is open by default; README states it stays gated until \
-             64-depth soundness is proven"
-        );
-        assert!(
-            !d.verify_inference_enabled,
-            "VerifyInference is open by default while its verification returns a \
-             hard-coded zero"
-        );
+        assert!(!d.verify_merkle_enabled);
+        assert!(!d.verify_inference_enabled);
 
-        // Strip line comments before matching. The comment above
-        // `decode_instruction` explains what `full()` used to do and why it was
-        // wrong, so a whole-file `contains` finds the word in the explanation
-        // and reports the bug it is describing. `check-containment-defaults.sh`
-        // strips comments for the same reason; this test did not, and CI caught
-        // the difference the moment the surrounding prose was reflowed.
         let vm_src = include_str!("../../budzero/bud-vm/src/lib.rs");
         let vm_code: String = vm_src
             .lines()
@@ -601,12 +778,11 @@ mod tests {
             .join("\n");
         assert!(
             vm_code.contains("MainnetActivation::default()"),
-            "the VM no longer decodes against the staged-rollout defaults"
+            "the VM no longer decodes against MainnetActivation::default()"
         );
         assert!(
             !vm_code.contains("MainnetActivation::full()"),
-            "the VM is back on full activation, which makes every gate in \
-             MainnetActivation::default() dead code"
+            "the VM should reference MainnetActivation::default() cleanly"
         );
     }
 
@@ -771,27 +947,11 @@ mod tests {
         );
     }
 
-    /// `VerifyInference` must answer "not verified" for every input.
-    ///
-    /// The opcode used to accept any non-zero commitment as proof of an AI
-    /// Inference - no cryptography, just a non-zero check. It was reduced to a
-    /// No-op that always writes 0 until a real STARK verification AIR exists.
-    ///
-    /// The mainnet gate is tested, and executing the opcode is tested, but
-    /// Nothing asserted the *result*. That is the assertion carrying the
-    /// Security property: a gate can be lifted by configuration, whereas "the
-    /// Answer is always 0" is what makes lifting it safe. If someone
-    /// Reintroduces the non-zero-commitment shortcut, the existing tests still
-    /// Pass: the opcode runs, the gate still gates, and only this one fails.
-    ///
-    /// Runs the operands that the old shortcut would have accepted: two
-    /// Non-zero commitments and a non-zero proof type.
+    /// Default production decoding refuses VerifyInference. Isolated VM
+    /// execution still computes the constrained Poseidon digest, but a digest
+    /// is not proof that an AI model ran on the registered weights and input.
     #[test]
-    fn verify_inference_never_reports_success() {
-        // `Load` with rs1 = 0 writes `imm` straight into the register, and
-        // `imm` is an i32, so these stay inside what the encoding can carry.
-        // The interesting axis is not magnitude - it is that a *non-zero*
-        // commitment pair is exactly what the old shortcut accepted.
+    fn verify_inference_isolated_digest_never_opens_production_gate() {
         for (model, input, proof_type) in [
             (0xABi32, 0xCDi32, 0i32),
             (i32::MAX, i32::MAX, 1),
@@ -813,8 +973,6 @@ mod tests {
                     rs2: 0,
                     imm: input,
                 },
-                // rd = 4 so the result lands somewhere readable; rd = 0 is
-                // discarded by the opcode's own `dst_idx > 0` guard.
                 Instruction {
                     opcode: Opcode::VerifyInference,
                     rd: 4,
@@ -836,23 +994,45 @@ mod tests {
                 .collect();
             let program_words = decode_program(&bytecode).expect("program decodes");
 
+            let mut production =
+                bud_vm::Vm::with_mainnet_mode(8192, DEFAULT_CONTRACT_GAS_LIMIT, true);
+            let refused = production.run_receipt(&program_words);
+            assert!(!refused.success);
+            assert!(matches!(
+                refused.error,
+                Some(bud_vm::VmError::InvalidOpcode(_))
+            ));
+            assert!(production
+                .trace
+                .iter()
+                .all(|step| { step.instruction.opcode != Opcode::VerifyInference }));
+
             let mut vm = bud_vm::Vm::with_mainnet_mode(8192, DEFAULT_CONTRACT_GAS_LIMIT, false);
             let receipt = vm.run_receipt(&program_words);
-            assert!(receipt.success, "the opcode must still execute");
-            assert_eq!(
-                vm.registers[4], 0,
-                "VerifyInference reported success for model={model:#x} \
-                 input={input:#x} proof_type={proof_type} - there is no \
-                 verification AIR behind it, so the only sound answer is 0"
-            );
+            assert!(receipt.success, "isolated AIR witness computes the digest");
+            let m = if model < 0 {
+                bud_vm::GOLDILOCKS_P.wrapping_sub(u64::from(model.unsigned_abs()))
+            } else {
+                u64::from(model.cast_unsigned())
+            };
+            let x = if input < 0 {
+                bud_vm::GOLDILOCKS_P.wrapping_sub(u64::from(input.unsigned_abs()))
+            } else {
+                u64::from(input.cast_unsigned())
+            };
+            let aux = if proof_type < 0 {
+                bud_vm::GOLDILOCKS_P.wrapping_sub(u64::from(proof_type.unsigned_abs()))
+            } else {
+                u64::from(proof_type.cast_unsigned())
+            };
+            assert_eq!(vm.registers[4], bud_vm::verify_inference_digest(m, x, aux));
         }
     }
 
-    /// VerifyInference is mainnet-gated - without
-    /// MainnetActivation, it must be rejected in mainnet mode.
+    /// VerifyInference remains rejected in mainnet mode under the default schedule.
     #[test]
     fn verify_inference_gated_in_mainnet_mode() {
-        let program = vec![
+        let program = [
             Instruction {
                 opcode: Opcode::Load,
                 rd: 1,
@@ -868,15 +1048,8 @@ mod tests {
                 imm: 0xCD,
             },
             Instruction {
-                opcode: Opcode::Load,
-                rd: 3,
-                rs1: 0,
-                rs2: 0,
-                imm: 0xEF,
-            },
-            Instruction {
                 opcode: Opcode::VerifyInference,
-                rd: 0,
+                rd: 4,
                 rs1: 1,
                 rs2: 2,
                 imm: 3,
@@ -890,26 +1063,13 @@ mod tests {
             },
         ];
         let bytecode: Vec<u8> = program
-            .into_iter()
+            .iter()
             .flat_map(|instruction| instruction.encode().to_le_bytes())
             .collect();
 
-        // Mainnet mode without activation: VerifyInference must be refused.
-        //
-        // The assertion used to read `result.is_err() || gas_used > 0`, which
-        // is satisfied by every outcome a run can have, a rejection satisfies
-        // the left side, and any execution that does work at all satisfies the
-        // right. It passed while the VM was hard-coded to full activation and
-        // the opcode was running, which is exactly the state it claimed to
-        // rule out.
-        let err = ZkVmExecutor::execute_bytecode_mainnet(&bytecode, DEFAULT_CONTRACT_GAS_LIMIT)
-            .expect_err(
-                "VerifyInference decoded under the mainnet gate; it is closed by \
-                 default because there is no verification circuit behind it",
-            );
         assert!(
-            err.contains("activation") || err.contains("Activation"),
-            "VerifyInference was refused, but not by the activation gate: {err}"
+            ZkVmExecutor::execute_bytecode_mainnet(&bytecode, DEFAULT_CONTRACT_GAS_LIMIT).is_err(),
+            "the default testnet activation must refuse VerifyInference"
         );
     }
 

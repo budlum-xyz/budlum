@@ -257,7 +257,13 @@ mod tests {
     struct FixedChain(bool);
 
     impl ChainClient for FixedChain {
-        fn pollen_grant_active(&self, _c: &Hash32, _u: &Hash32) -> Result<bool, RpcError> {
+        fn data_market_grant_active(
+            &self,
+            _grant_id: &Hash32,
+            _asset_id: &Hash32,
+            _content_id: &Hash32,
+            _consumer: &Hash32,
+        ) -> Result<bool, RpcError> {
             Ok(true)
         }
         fn model_registered(&self, _m: &Hash32) -> Result<bool, RpcError> {

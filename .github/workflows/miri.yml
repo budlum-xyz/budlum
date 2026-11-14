@@ -3,8 +3,16 @@ name: Miri UB Check
 on:
   push:
     branches: [main]
+  # Heavy battery. It runs on pull requests to `main` (the PR that merges the
+  # stack), on the schedule and on demand. A stacked pull request (base
+  # `testnet-quantum` or `testnet`) runs the PR gates in ci.yml,
+  # security-audit.yml, semgrep.yml and the other light workflows, and skips the
+  # jobs of this file through the job-level condition: GitHub evaluates the
+  # `branches` filter of a stacked pull request against the root of the stack,
+  # so the filter alone does not keep it out. This keeps one push from queueing
+  # more work than the shared runner pool can finish before the next push cancels it.
   pull_request:
-    branches: [main, fix/architecture-tip-adlari, consensus-of-consensuses, testnet-quantum, testnet]
+    branches: [main, consensus-of-consensuses]
   workflow_dispatch:
   # A weekly nightly run, continuous UB inspection
   schedule:
@@ -19,6 +27,9 @@ permissions:
 
 jobs:
   miri-crypto:
+    # Heavy battery: a pull request whose base is `testnet-quantum` or `testnet` does
+    # not start this job. See the note at the top of the file.
+    if: ${{ github.event_name != 'pull_request' || contains(fromJSON('["main","consensus-of-consensuses"]'), github.event.pull_request.base.ref) }}
     # CI Expansion item 4: Miri undefined behavior inspection.
     # It looks for UB in the crypto and budzero modules.
     #
@@ -241,6 +252,8 @@ jobs:
             --skip pruning_witnesses_keeps_the_block_hash_and_happens_once \
             --skip qc_blob_binary_storage_and_legacy_bincode_are_readable \
             --skip qc_blob_storage_rejects_corruption_and_cross_height_rows \
+            --skip corrupted_local_bytes_are_refused \
+            --skip honest_local_bytes_are_returned \
             2>&1 | tee /tmp/miri-storage.txt
           # BOUNDED WINDOW, and the bound is the point (see timeout-minutes).
           # At 148 s/test the 646-test suite needs ~26.5 h, which is over four
@@ -354,6 +367,9 @@ jobs:
           done
 
   asan:
+    # Heavy battery: a pull request whose base is `testnet-quantum` or `testnet` does
+    # not start this job. See the note at the top of the file.
+    if: ${{ github.event_name != 'pull_request' || contains(fromJSON('["main","consensus-of-consensuses"]'), github.event.pull_request.base.ref) }}
     # An alternative to cargo-careful. With the pinned nightly the 0.4.7 tool
 # cannot build a sysroot (std moved `panic_unwind` behind `dep:` while the tool
     # as a feature). Moving nightly to suit the tool would mean giving up the

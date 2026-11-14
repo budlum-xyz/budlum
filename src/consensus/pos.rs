@@ -203,6 +203,10 @@ impl PoSEngine {
 
     /// Prune old slashing evidence to prevent unbounded growth.
     /// Keeps only evidence with header1.index >= `min_height`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn prune_slashing_evidence(&self, min_height: u64) -> Result<usize, ConsensusError> {
         let mut guard = self.slashing_evidence.write().map_err(|_| {
             ConsensusError("Failed to acquire write lock on slashing evidence".into())
@@ -225,7 +229,7 @@ impl PoSEngine {
     pub fn add_checkpoint(
         &self,
         block: &Block,
-        storage: Option<&crate::storage::db::Storage>,
+        storage: Option<&crate::persistence::db::Storage>,
     ) -> Result<(), ConsensusError> {
         let checkpoint = Checkpoint {
             block_index: block.index,
@@ -240,7 +244,7 @@ impl PoSEngine {
     fn commit_checkpoint(
         &self,
         checkpoint: &Checkpoint,
-        storage: Option<&crate::storage::db::Storage>,
+        storage: Option<&crate::persistence::db::Storage>,
     ) -> Result<(), ConsensusError> {
         if let Some(store) = storage {
             // Not `let _ =`: a checkpoint that fails to persist is not a
@@ -320,7 +324,7 @@ impl PoSEngine {
     }
 
     /// Derive epoch randomness from a canonical, already-established VRF
-    /// Transcript. Epoch `E` consumes epoch ` `, giving the source transcript
+    /// Transcript. Epoch `E` consumes epoch `E - 2`, giving the source transcript
     /// A full epoch to settle before it controls leader selection. Only verified
     /// VRF outputs and producer identities enter the transcript: block hashes,
     /// Timestamps and transaction ordering are deliberately excluded so a
@@ -572,7 +576,7 @@ impl PoSEngine {
         // Now we require at least one active, consensus-ready validator.
         if active_validators.is_empty() {
             return Err(ConsensusError(
-                "No active validators - PoS block production requires at least one                  consensus-ready validator. Bootstrap via genesis validator set or                  RegisterConsensusKeys transaction."
+                "No active validators - PoS block production requires at least one consensus-ready validator. Bootstrap via genesis validator set or RegisterConsensusKeys transaction."
                     .into(),
             ));
         }
@@ -1272,7 +1276,7 @@ impl ConsensusEngine for PoSEngine {
     fn record_block(
         &self,
         block: &Block,
-        storage: Option<&crate::storage::db::Storage>,
+        storage: Option<&crate::persistence::db::Storage>,
     ) -> Result<(), ConsensusError> {
         let epoch_length = self.epoch_length_checked()?;
         let producer = block
@@ -1390,7 +1394,7 @@ impl ConsensusEngine for PoSEngine {
         &self,
         height: u64,
         chain: &[Block],
-        storage: Option<&crate::storage::db::Storage>,
+        storage: Option<&crate::persistence::db::Storage>,
     ) {
         let promoted: Vec<Checkpoint> = {
             let Ok(mut pending) = self.pending_checkpoints.write() else {
@@ -1481,7 +1485,7 @@ impl ConsensusEngine for PoSEngine {
         &self,
         block: &Block,
         chain: &[Block],
-        _storage: Option<&crate::storage::db::Storage>,
+        _storage: Option<&crate::persistence::db::Storage>,
     ) {
         // The block is committed: the evidence it carried has now done its
         // job and leaves the pool. Everything the pool still holds is
@@ -1509,7 +1513,7 @@ impl ConsensusEngine for PoSEngine {
         }
     }
 
-    fn load_state(&self, storage: &crate::storage::db::Storage) -> Result<(), ConsensusError> {
+    fn load_state(&self, storage: &crate::persistence::db::Storage) -> Result<(), ConsensusError> {
         let seen = storage
             .load_all_seen_blocks()
             .map_err(|error| ConsensusError(format!("Failed to load seen PoS blocks: {error}")))?;
@@ -1798,7 +1802,7 @@ mod tests {
         };
         let engine = PoSEngine::new(config, None);
         let dir = tempfile::tempdir().unwrap();
-        let storage = crate::storage::db::Storage::new(dir.path().to_str().unwrap()).unwrap();
+        let storage = crate::persistence::db::Storage::new(dir.path().to_str().unwrap()).unwrap();
         let alice = KeyPair::generate().unwrap();
 
         let mut old = Block::new(1, "prev".into(), vec![]);
@@ -1840,6 +1844,21 @@ mod tests {
             1,
             "a dropped block must not consume the evidence pool"
         );
+    }
+
+    #[test]
+    fn empty_validator_error_message_has_no_extra_spaces() {
+        let engine = PoSEngine::new(PoSConfig::default(), None);
+        let genesis = Block::genesis();
+        let mut candidate = Block::new(1, genesis.hash.clone(), vec![]);
+        let error = engine
+            .preview_block_with_chain(&mut candidate, &AccountState::new(), &[genesis])
+            .unwrap_err();
+        assert_eq!(
+            error.0,
+            "No active validators - PoS block production requires at least one consensus-ready validator. Bootstrap via genesis validator set or RegisterConsensusKeys transaction."
+        );
+        assert!(!error.0.contains("  "), "message has extra spaces");
     }
 
     /// A block below the local checkpoint is part of every candidate

@@ -24,7 +24,7 @@ name: Security Audit
 
 on:
   pull_request:
-    branches: [main, fix/architecture-tip-adlari, consensus-of-consensuses, testnet-quantum, testnet]
+    branches: [main, consensus-of-consensuses, testnet-quantum, testnet]
   push:
     branches: [main]
   schedule:
@@ -42,6 +42,7 @@ jobs:
   actionlint:
     name: actionlint (workflow YAML lint)
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     permissions:
       contents: read
     steps:
@@ -53,6 +54,7 @@ jobs:
   zizmor:
     name: zizmor (GitHub Actions static analysis)
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     # BLOCKS. It used to carry `continue-on-error: true` with the justification
     # "informational". That justification was never measured: the tool reports ZERO
     # findings in the repository under the default persona, and none of the 73
@@ -169,6 +171,7 @@ jobs:
   codeql:
     name: CodeQL (Rust SAST)
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     permissions:
       contents: read
       security-events: write
@@ -218,6 +221,7 @@ jobs:
   msrv:
     name: MSRV check (1.97.1)
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -276,6 +280,7 @@ jobs:
   cargo-hack:
     name: cargo-hack feature matrix
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     # BLOCKS. The justification was "informational; may be slow/heavy" and neither
     # half had been measured. Measured: the job PASSED on the last three runs and
     # took 1 minute 58 seconds, less than half of CodeQL in the same workflow. So
@@ -396,6 +401,7 @@ jobs:
   hadolint:
     name: Hadolint (Dockerfile lint)
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -407,6 +413,7 @@ jobs:
   cross-arch:
     name: Cross-arch determinism (${{ matrix.runner }})
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -456,6 +463,7 @@ jobs:
   scorecard:
     name: OpenSSF Scorecard
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     permissions:
       contents: read
       security-events: write

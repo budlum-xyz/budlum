@@ -142,6 +142,11 @@ impl PartialEq for ProofMarketTx {
 impl Eq for ProofMarketTx {}
 
 impl ProofTaskKind {
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn validate(&self) -> Result<(), String> {
         match self {
             ProofTaskKind::DomainCommitment {
@@ -455,6 +460,11 @@ impl ProofTask {
             )
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn validate_shape(&self) -> Result<(), String> {
         if self.task_id == [0u8; 32] {
             return Err("ProofTask task_id cannot be zero".into());
@@ -517,6 +527,10 @@ impl ProofTask {
     ///
     /// A caller that genuinely does not gate on stake passes `u64::MAX`, which
     /// is a visible decision at the call site rather than a silent one here.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn assign(
         &mut self,
         prover: Address,
@@ -555,6 +569,10 @@ impl ProofTask {
     }
 
     /// Marks the task complete.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn complete(&mut self) -> Result<(), String> {
         match &self.status {
             ProofTaskStatus::Assigned { .. } => {
@@ -567,6 +585,10 @@ impl ProofTask {
     }
 
     /// Marks the task expired.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn expire(&mut self) -> Result<(), String> {
         if !self.is_active() {
             return Err("Only active tasks can expire".into());
@@ -647,6 +669,11 @@ impl ProofReceipt {
         }
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn validate_for_task(&self, task: &ProofTask) -> Result<(), String> {
         task.validate_shape()?;
         if self.task_id != task.task_id {
@@ -678,6 +705,10 @@ impl ProofReceipt {
     }
 
     /// Marks the receipt paid.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn mark_paid(&mut self) -> Result<(), String> {
         if self.status != ReceiptStatus::Pending {
             return Err("Receipt is not pending".to_string());
@@ -686,10 +717,17 @@ impl ProofReceipt {
         Ok(())
     }
 
-    /// Makbuzu iptal eder.
+    /// Marks an unpaid receipt revoked.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn revoke(&mut self, reason: String) -> Result<(), String> {
         if reason.is_empty() || reason.len() > 256 {
             return Err("Receipt revoke reason invalid".into());
+        }
+        if matches!(self.status, ReceiptStatus::Paid) {
+            return Err("Paid receipt cannot be revoked".to_string());
         }
         if matches!(self.status, ReceiptStatus::Revoked { .. }) {
             return Err("Receipt is already revoked".to_string());
@@ -810,6 +848,10 @@ impl ProofMarketState {
     /// The settlement transaction door debits the creator and credits escrow
     /// here in the same state transition, before `add_task` refuses an
     /// unfunded reward.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn fund_escrow(&mut self, creator: Address, amount: u64) -> Result<(), String> {
         let entry = self.escrowed.entry(creator).or_insert(0);
         *entry = entry
@@ -850,6 +892,10 @@ impl ProofMarketState {
     }
 
     /// Adds a new task.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn add_task(&mut self, task: ProofTask) -> Result<(), String> {
         task.validate_shape()?;
         // Only a pending task may enter. An assigned one would skip the
@@ -905,6 +951,10 @@ impl ProofMarketState {
     }
 
     /// Assign a pending task through the consensus door.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn assign_task(
         &mut self,
         task_id: [u8; 32],
@@ -921,6 +971,10 @@ impl ProofMarketState {
     }
 
     /// On completion, produces a receipt and removes the task.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn complete_task(
         &mut self,
         task_id: [u8; 32],
@@ -976,6 +1030,10 @@ impl ProofMarketState {
     }
 
     /// Pays the receipt and removes it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn pay_receipt(&mut self, receipt_idx: usize) -> Result<u64, String> {
         let receipt = self
             .pending_receipts
@@ -998,6 +1056,10 @@ impl ProofMarketState {
 
     /// Pays a receipt identified by its task rather than by a mutable vector
     /// index, returning the rooted prover and amount to credit.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn pay_receipt_for_task(&mut self, task_id: [u8; 32]) -> Result<(Address, u64), String> {
         let index = self
             .pending_receipts
@@ -1012,6 +1074,10 @@ impl ProofMarketState {
     /// Refunds a task whose deadline has passed. The reward was reserved when
     /// the task was created and is handed back to the creator account by the
     /// settlement door in the same state transition.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn refund_expired(
         &mut self,
         task_id: [u8; 32],
@@ -1044,6 +1110,10 @@ impl ProofMarketState {
     /// Fail an assigned task after the consensus verifier rejects its proof.
     /// The reserved reward returns to the task creator; the prover's registry
     /// bond remains available to the separate slashing path.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn fail_task(
         &mut self,
         task_id: [u8; 32],
@@ -1114,7 +1184,7 @@ impl ProofMarketState {
     /// Prune settled receipts (paid **and** revoked) from `pending_receipts`.
     ///
     /// Revoked receipts can never be paid, so keeping them jammed
-    /// the market at MAX_PROOF_MARKET_PENDING_RECEIPTS for good. Only
+    /// the market at `MAX_PROOF_MARKET_PENDING_RECEIPTS` for good. Only
     /// genuinely unpaid receipts may hold the queue.
     pub fn prune_paid_receipts(&mut self) -> usize {
         let before = self.pending_receipts.len();
@@ -1122,7 +1192,7 @@ impl ProofMarketState {
         before - self.pending_receipts.len()
     }
 
-    /// Cap active_tasks + pending_receipts to prevent unbounded memory
+    /// Cap `active_tasks` + `pending_receipts` to prevent unbounded memory
     /// Growth on long-running nodes.
     /// Only prune expired/expired tasks - never drop
     /// In-progress tasks that still have time remaining.

@@ -1,12 +1,26 @@
-# Budlum testnet
+# Budlum testnet operator notes (pre-launch)
 
 Budlum is the consensus of consensuses. Every network keeps its own rules.
 Budlum unifies their finality into a single proof.
 
-The testnet is the mainnet rehearsal: the same code path, the same supply
-rules and the same validator ceremony. Only the profile, the genesis and the
-parameter values differ. Values marked TESTNET-DEFAULT are testnet
-parameters.
+This file describes local testnet tooling, not a live public network. No public
+DNS name, genesis ceremony or launch-gate approval is recorded here. Check
+[the launch-gate evidence ledger](audit/TLG_REPORT.md) before claiming a
+public testnet or relying on a service. Values marked TESTNET-DEFAULT are
+configuration targets, not measured results.
+
+## First run: SoftHSM signer
+
+`config/testnet.toml` uses the SoftHSM signer. A fresh host has no token and
+no SoftHSM2 configuration, so follow `ops/TESTNET_FIRST_RUN.md` before
+starting a node. The short form: install `softhsm2`, copy
+`ops/softhsm2.conf` to `/etc/budlum/softhsm2.conf`, initialise the token,
+write the user PIN to `/etc/budlum/hsm.env`, and prepare a testnet-specific
+systemd override. The unit exports `SOFTHSM2_CONF`, but its generic mainnet
+`ExecStart` must not be started unchanged; genesis, peers and key paths remain
+operator prerequisites. The compatibility gateways and their public hosts are listed in
+`ops/Caddyfile.testnet`; the host-level startup and backup procedures are in
+`ops/TESTNET_FIRST_RUN.md` and `ops/BACKUP_AND_RESTORE.md`.
 
 `<TESTNET_DOMAIN>` stands for the testnet's DNS name. It is filled in when
 the operators publish it; until then no public endpoint exists, and every
@@ -21,20 +35,23 @@ address below is the one a node, faucet or indexer listens on locally.
 | P2P | `/dns4/seed1.<TESTNET_DOMAIN>/tcp/5001/p2p/<peer id>` | `0.0.0.0:5001` | waits for operators |
 | JSON-RPC (HTTPS) | `https://rpc.<TESTNET_DOMAIN>` | `127.0.0.1:28545` | waits for the domain |
 | WebSocket subscriptions | `wss://rpc.<TESTNET_DOMAIN>` | `127.0.0.1:28545` | `bud_subscribe("newHeads" \| "finalizedHeads" \| "logs", address?)` |
-| Faucet | `https://faucet.<TESTNET_DOMAIN>/request` | `127.0.0.1:18600` | binary ready (`budlum-faucet`) |
-| Explorer API | `https://explorer-api.<TESTNET_DOMAIN>` | `127.0.0.1:18700` | `budlum-indexer`; contract `docs/explorer-api.openapi.yaml` |
-| Metrics | not public | `127.0.0.1:29091` | ready |
+| Faucet | `https://faucet.<TESTNET_DOMAIN>/request` (not published) | `127.0.0.1:18600` | binary in tree; public deployment unverified |
+| Explorer API | `https://explorer-api.<TESTNET_DOMAIN>` (not published) | `127.0.0.1:18700` | `budlum-indexer`; contract [explorer-api.openapi.yaml](explorer-api.openapi.yaml); public deployment unverified |
+| Metrics | not public | `127.0.0.1:29091` | configured, not verified here |
 | Sepolia contracts | see below | - | not deployed |
 
 TLS is terminated by Caddy (`ops/Caddyfile.testnet`); the node, the faucet
 and the indexer speak plain HTTP on loopback. The operator RPC listener
 (`127.0.0.1:18546`) is never exposed.
 
-The public RPC needs no API key. It serves reads,
-`bud_sendRawTransaction`, `bud_estimateGas`, `bud_txPrecheck` and the
-`*Prepare*` methods that build unsigned transactions. Nothing on it can write
-consensus state outside a signed transaction (`src/rpc/method_class.rs`).
-Each client IP is rate limited (600 requests per minute).
+**Public vs. operator RPC authentication (`BLG-008` / `TLG-20`).** On testnet
+(`config/testnet.toml`, `chain_id = 45261`), the public listener sets
+`auth_required = false` for keyless public reads and signed-transaction
+submission (`bud_sendRawTransaction` / `eth_sendRawTransaction`) at 600 requests
+per minute per client IP, while all operator and administrative methods are
+refused on the public listener and require `BUDLUM_RPC_API_KEY` on the loopback
+operator listener (`operator_auth_required = true`). See
+[TLG-20](audit/TLG_REPORT.md).
 
 ## Use the testnet
 
@@ -44,16 +61,27 @@ Each client IP is rate limited (600 requests per minute).
    12-word phrases are refused. `bud wallet import` restores from the
    24 words (read from standard input); `bud wallet address` prints the
    address.
-2. **Get BUD.** Ask the faucet for 100 BUD (TESTNET-DEFAULT; one
-   request per address and per IP every 24 hours; 100,000 BUD per day in
-   total):
+2. **Get BUD when an operator makes the faucet available.** Its configured
+   limits are 100 BUD per grant, one grant per address and per client IP per
+   24 hours, and 100,000 BUD per UTC day (TESTNET-DEFAULT values in
+   `src/bin/budlum-faucet.rs`). There is no published public faucet URL yet.
+   After the operator verifies the challenge/response client and resolves
+   upstream node authentication, request from the locally started faucet
+   using the faucet client's work-challenge solver:
 
-   ```
-   curl -X POST https://faucet.<TESTNET_DOMAIN>/request -d '{"address":"0x<your address>"}'
+   ```bash
+   budlum-faucet request --url http://127.0.0.1:28600 \
+     --address 0x<64-hex-character-address>
    ```
 
-   The faucet sends an ordinary signed transfer; it appears in a block like
-   any other transaction.
+   The `budlum-faucet request` client and server challenge/response are
+   implemented in source; `bud faucet request` uses the shared challenge
+   client too. Neither command is **verified by a running testnet**. Do not
+   send an address-only `POST /request`: the server requires a fresh challenge
+   and solved nonce. A focused loopback harness exercised the shared client,
+   but it did not build the full `bud` binary or demonstrate a live HTTPS
+   transfer. Build both clients, run challenge/replay tests and prove a live
+   transfer before publishing either command as an operational step.
 3. **Send a transaction.** `bud` speaks plain HTTP, so point it at a node
    you run (or reach over an SSH tunnel):
 
@@ -78,11 +106,12 @@ Each client IP is rate limited (600 requests per minute).
    history. On the RPC: `bud_getTransactionByHash`, `bud query balance`.
 5. **Become a validator.** Follow `docs/VALIDATOR_GUIDE.md`: `bud validator
    init`, then `bud validator join` with at least 1,000 BUD of stake.
-6. **Delegate.** `bud delegate --validator 0x<validator> --amount-bud <n>`
-   delegates from the same wallet; `bud undelegate` starts the exit and
-   `bud withdraw-delegation` pays it out after the unbonding period
-. `bud_validatorProfile` and `bud_validatorList` show each
-   validator's commission, stake and record (`docs/DELEGATION.md`).
+6. **Delegate.** `bud --rpc-url http://127.0.0.1:28545
+   --signing-chain-id 45261 delegate --key-file ./secrets/wallet.json
+   --validator 0x<validator> --amount-bud <amount>` signs from that wallet;
+   `bud undelegate` starts the exit and `bud withdraw-delegation` pays it out
+   after the unbonding period. `bud_validatorProfile` and `bud_validatorList`
+   expose commission and stake (see [delegation guide](DELEGATION.md)).
 
 ## Parameters
 
@@ -109,8 +138,8 @@ The public Caddy host runs the services in **proxy mode**, not direct mode:
 
 ```
 budlum-faucet serve --rpc-url http://127.0.0.1:18545 \
-  --key-file ./secrets/faucet.seed --listen 127.0.0.1:18600 \
-  --trusted-proxy 127.0.0.1
+  --key-file ./secrets/faucet.seed --state-file ./data/testnet/faucet-state.json \
+  --listen 127.0.0.1:18600 --trusted-proxy 127.0.0.1
 budlum-indexer --rpc-url http://127.0.0.1:18545 \
   --db ./data/testnet/indexer --listen 127.0.0.1:18700 \
   --trusted-proxy 127.0.0.1
@@ -135,8 +164,15 @@ Its follower uses at most 300 RPCs per minute, leaving capacity under a
 600-per-minute node limit for other local users. Provision a dedicated node or
 adjust the node's quota if multiple indexers or other clients share its source
 IP. The faucet reserves a request's cooldown and daily allowance before RPC
-submission: if the node rejects a transaction or the reply is lost, the
-allowance remains spent for safety. Limits are in memory and reset on restart.
+submission: if the node rejects a transaction or the reply is lost, do not
+assume the allowance is available to retry. Start the faucet with the required
+`--state-file` on durable, access-controlled storage; keep it across restarts
+and back it up together with the funding key, following
+[the backup procedure](../ops/BACKUP_AND_RESTORE.md). Do not delete or reset
+this file to clear a cooldown or daily cap. Restore the state file before
+restarting the faucet; without it, restart safety and previously reserved
+allowances cannot be claimed. Verify the node's chain ID and funding balance
+before exposing the service.
 
 Two local rehearsals use the same image:
 
@@ -157,7 +193,7 @@ ceremony. See `contracts/README.md`.
 | Contract | Address |
 |---|---|
 | `BudlumFinalityVerifier` | not deployed |
-| `GraftExecutor` | not deployed |
+| `AppBindingExecutor` | not deployed |
 | `BudlumRemoteAccountFactory` | not deployed |
 | `BudlumRegistrar` (Mikoriza AVS) | not deployed |
 | `BudlumSlasher` (deployed by the registrar) | not deployed |

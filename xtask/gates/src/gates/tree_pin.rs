@@ -29,7 +29,7 @@ use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::path::Path;
 
-use super::regeneration::{hex32, keccak256};
+use super::canonical_programs_reproduce::{hex32, keccak256};
 
 /// Pin file, relative to the repo root.
 pub const PIN_FILE: &str = "xtask/gates/pins/budzero-tree.pins";

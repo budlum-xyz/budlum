@@ -1,15 +1,15 @@
-//! The post-quantum canonical source of regeneration.
+//! The post-quantum canonical source of state recovery.
 //!
 //! WIRING: wired - `Blockchain` keeps one [`PqCanonicalSource`] and feeds it
 //! with the anchors and Root Seals its emission pipeline built and verified
 //! (`Blockchain::emit_anchor_for`) and with the finality checkpoints that
 //! carry a verified ML-DSA QC blob; the node runtime's health tick
-//! (`src/network/regen_health_tick.rs`) reads canonical commitments and seal
+//! (`src/chain/state_recovery/tick.rs`) reads canonical commitments and seal
 //! ids only from it. Rules are pinned by this file's tests.
 //!
 //! # What counts as canonical
 //!
-//! A regeneration stage is trusted through a seal, and a seal is trusted only
+//! A recovery stage is trusted through a seal, and a seal is trusted only
 //! when a post-quantum signature family stands behind it:
 //!
 //! - **Polyp**: the latest Root Seal (SLH-DSA-SHAKE-256s, hash based). The
@@ -31,14 +31,14 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use super::regeneration_stage::Stage;
+use crate::chain::state_recovery::stage::Stage;
 use crate::crypto::scheme::{SchemeFamily, SchemeId};
 use crate::settlement::anchor_ledger::AnchorKeyLedger;
 use crate::settlement::pq_anchor::{verify_anchor_full, PqAnchor};
 use crate::settlement::root_seal::{verify_root_seal, RootSeal};
 
 /// Anchors the source keeps: a few days of six minute anchors is more than a
-/// regeneration ever looks back, and the bound keeps memory fixed.
+/// state recovery ever looks back, and the bound keeps memory fixed.
 pub const MAX_ANCHOR_ENTRIES: usize = 512;
 
 /// Finality checkpoints the source keeps.
@@ -110,7 +110,7 @@ impl SealId {
     /// Whether a post-quantum family of the seal still verifies under the
     /// scheme statuses of the chain. A quantum alarm that takes a
     /// family to `Disabled` kills every seal that only that family stood
-    /// behind, and regeneration then descends to the next safe seal.
+    /// behind, and state recovery then descends to the next safe seal.
     #[must_use]
     pub fn is_live(&self, registry: &crate::crypto::scheme::SchemeStatusRegistry) -> bool {
         self.schemes.iter().any(|code| {
@@ -175,7 +175,7 @@ struct Entry {
     seal: SealId,
 }
 
-/// The seals regeneration may trust, keyed by stage and height.
+/// The seals state recovery may trust, keyed by stage and height.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PqCanonicalSource {
     chain_id: u64,
@@ -269,7 +269,7 @@ impl PqCanonicalSource {
     /// chain verified for it: the ML-DSA-65 QC and, when it was required, the
     /// BLS certificate. A set with no post-quantum family (a BLS-only
     /// certificate) is refused: the checkpoint is then not canonical for
-    /// regeneration.
+    /// state recovery.
     ///
     /// The caller passes a checkpoint whose QC blob went through
     /// `Blockchain::import_qc_blob`; the source cannot re-verify a blob
@@ -415,8 +415,8 @@ pub(crate) fn test_seal(stage: Stage, height: u64) -> SealId {
 /// `snapshot` with the post-quantum seal of its stage and height.
 #[cfg(test)]
 pub(crate) fn sealed(
-    mut snapshot: super::regeneration_stage::StageSnapshot,
-) -> super::regeneration_stage::StageSnapshot {
+    mut snapshot: crate::chain::state_recovery::stage::StageSnapshot,
+) -> crate::chain::state_recovery::stage::StageSnapshot {
     snapshot.seal = Some(test_seal(snapshot.stage, snapshot.height));
     snapshot
 }

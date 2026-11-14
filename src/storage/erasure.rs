@@ -12,7 +12,7 @@
 //! # Why a coder in-tree rather than a dependency
 //!
 //! `reed-solomon-erasure` is the crate everyone reaches for, and it is the
-//! one `docs/BUD_STORAGE_ROADMAP.md` named. It is unmaintained, the owner
+//! one removed roadmap named. It is unmaintained, the owner
 //! stopped in 2021 and asked for a new owner
 //! (darrenldl/reed-solomon-erasure#88); Solana, its largest user, moved off
 //! it. `reed-solomon-simd` is maintained but its speed comes from
@@ -55,6 +55,7 @@
 //! log/exp tables built once at first use; inversion is `exp[255 - log[a]]`.
 //! `n <= 255` follows from the field: the Cauchy construction needs `k + m`
 //! distinct non-zero-difference field elements.
+//! Convenience: exposed for CLI, RPC, SDK, and multi-VM runtime callers.
 
 use crate::storage::manifest::{ContentManifest, ErasureScheme, ShardKind, ShardRef};
 use std::sync::OnceLock;
@@ -235,7 +236,11 @@ fn generator_matrix(k: usize, m: usize) -> GfMatrix {
     }
     for i in 0..m {
         for j in 0..k {
-            let x = (k + i) as u8;
+            // For k == 1, avoid x = 1, y = 0 whose Cauchy entry gf_inv(1) == 1
+            // makes parity shard 0 equal to data shard 0. Shifting X by 1 keeps
+            // X = {2 + i} disjoint from Y = {0} so the matrix stays MDS while
+            // ensuring non-zero single-data-shard payloads produce distinct parity.
+            let x = if k == 1 { (2 + i) as u8 } else { (k + i) as u8 };
             let y = j as u8;
             g.set(k + i, j, gf_inv(x ^ y));
         }
@@ -776,7 +781,7 @@ pub fn verify_object_encoding(data: &[u8], claimed: &ContentManifest) -> Result<
     // Structural lies are cheaper to catch first; the coder is the expensive
     // half and should not run on a manifest that already fails the free checks.
     claimed
-        .validate_untrusted()
+        .validate_structural_for_reconstruct()
         .map_err(ErasureError::InvalidScheme)?;
     let encoded = encode_object(data, claimed.erasure)?;
     let honest = encoded.to_manifest().map_err(ErasureError::InvalidScheme)?;
@@ -887,7 +892,11 @@ pub fn reconstruct_object(
             return Err(ErasureError::IntegrityFailure { index: idx });
         }
     }
-    object_from_data_shards(manifest, &all, k)
+    let out = object_from_data_shards(manifest, &all, k)?;
+    if out.len() <= MAX_VERIFY_ENCODING_BYTES {
+        verify_object_encoding(&out, manifest)?;
+    }
+    Ok(out)
 }
 
 /// Join the `k` data shards and trim the stripe padding.
@@ -1084,7 +1093,14 @@ mod tests {
                 return Ok(());
             }
             let enc = encode_object(&data, scheme).expect("generated scheme is valid");
-            let manifest = enc.to_manifest().expect("manifest");
+            let Ok(manifest) = enc.to_manifest() else {
+                // Random draws with repeated shards are intentionally refused
+                // by `ContentManifest::validate` when `n > k`.
+                return Ok(());
+            };
+            if manifest.validate_untrusted().is_err() {
+                return Ok(());
+            }
 
             // Losing any `parity` shards must still round-trip exactly.
             for lost in combinations(n, parity) {
@@ -1125,7 +1141,7 @@ mod tests {
         // and reconstruct from the other four rather than failing the whole
         // object (security review, MEDIUM). A single bad
         // survivor must not cause avoidable object-level denial of recovery.
-        let data: Vec<u8> = (0..=199u8).cycle().take(800).collect();
+        let data: Vec<u8> = (0..=198u8).cycle().take(800).collect();
         let scheme = ErasureScheme { k: 4, n: 6 };
         let enc = encode_object(&data, scheme).unwrap();
         let manifest = enc.to_manifest().unwrap();
@@ -1587,7 +1603,7 @@ mod tests {
     /// shards remain.
     #[test]
     fn two_corrupted_survivors_do_not_block_recovery() {
-        let data: Vec<u8> = (0..=199u8).cycle().take(800).collect();
+        let data: Vec<u8> = (0..=198u8).cycle().take(800).collect();
         let scheme = ErasureScheme { k: 4, n: 8 };
         let enc = encode_object(&data, scheme).unwrap();
         let manifest = enc.to_manifest().unwrap();

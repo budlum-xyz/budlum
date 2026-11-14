@@ -26,6 +26,7 @@ use crate::chain::finality::{
 };
 use crate::consensus::pow::PoWEngine;
 use crate::core::address::Address;
+use crate::core::transaction::DEFAULT_CHAIN_ID;
 #[cfg(test)]
 fn test_addr_from_byte(byte: u8) -> crate::core::address::Address {
     let mut b = [0u8; 32];
@@ -205,7 +206,13 @@ fn finality_rejects_equivocating_voter() {
     let (snap, sks) = make_snapshot_with_keys(4, 1000);
     let epoch = 1;
     let height = 10;
-    let mut agg = FinalityAggregator::new(epoch, height, "HASH_A".into(), snap.clone());
+    let mut agg = FinalityAggregator::new(
+        DEFAULT_CHAIN_ID,
+        epoch,
+        height,
+        "HASH_A".into(),
+        snap.clone(),
+    );
 
     // Voter 0 votes for the correct hash (HASH_A) -> accepted, no evidence.
     let pv_a = signed_prevote(&sks[0], epoch, height, "HASH_A", snap.validators[0].address);
@@ -258,7 +265,8 @@ fn finality_stays_pending_below_quorum() {
     let epoch = 1;
     let height = 10;
     let hash = "cp";
-    let mut agg = FinalityAggregator::new(epoch, height, hash.into(), snap.clone());
+    let mut agg =
+        FinalityAggregator::new(DEFAULT_CHAIN_ID, epoch, height, hash.into(), snap.clone());
 
     // Only 2/4 prevotes -> 2000 < 2667.
     drive_prevote_quorum(&mut agg, &snap, &sks, 2, epoch, height, hash);
@@ -287,7 +295,8 @@ fn finality_recovers_honest_subset_after_invalid_signature() {
     let epoch = 1;
     let height = 10;
     let hash = "cp";
-    let mut agg = FinalityAggregator::new(epoch, height, hash.into(), snap.clone());
+    let mut agg =
+        FinalityAggregator::new(DEFAULT_CHAIN_ID, epoch, height, hash.into(), snap.clone());
 
     drive_prevote_quorum(&mut agg, &snap, &sks, 4, epoch, height, hash);
     assert!(agg.prevote_quorum_reached);
@@ -345,7 +354,8 @@ fn finality_valid_quorum_produces_verifiable_cert() {
     let epoch = 1;
     let height = 10;
     let hash = "cp";
-    let mut agg = FinalityAggregator::new(epoch, height, hash.into(), snap.clone());
+    let mut agg =
+        FinalityAggregator::new(DEFAULT_CHAIN_ID, epoch, height, hash.into(), snap.clone());
 
     drive_prevote_quorum(&mut agg, &snap, &sks, 3, epoch, height, hash);
     for (sk, v) in sks.iter().zip(snap.validators.iter()).take(3) {
@@ -369,14 +379,26 @@ fn finality_prevents_split_brain_on_partition() {
     let height = 10;
 
     // Grup A: validator 0,1 -> HASH_A
-    let mut agg_a = FinalityAggregator::new(epoch, height, "HASH_A".into(), snap.clone());
+    let mut agg_a = FinalityAggregator::new(
+        DEFAULT_CHAIN_ID,
+        epoch,
+        height,
+        "HASH_A".into(),
+        snap.clone(),
+    );
     for (sk, v) in sks.iter().zip(snap.validators.iter()).take(2) {
         let pv = signed_prevote(sk, epoch, height, "HASH_A", v.address);
         agg_a.add_prevote(pv).expect("group A prevote");
     }
 
     // Grup B: validator 2,3 -> HASH_B
-    let mut agg_b = FinalityAggregator::new(epoch, height, "HASH_B".into(), snap.clone());
+    let mut agg_b = FinalityAggregator::new(
+        DEFAULT_CHAIN_ID,
+        epoch,
+        height,
+        "HASH_B".into(),
+        snap.clone(),
+    );
     for (sk, v) in sks.iter().zip(snap.validators.iter()).skip(2).take(2) {
         let pv = signed_prevote(sk, epoch, height, "HASH_B", v.address);
         agg_b.add_prevote(pv).expect("group B prevote");
@@ -406,7 +428,8 @@ fn finality_ignores_late_votes_after_cert() {
     let epoch = 1;
     let height = 10;
     let hash = "cp";
-    let mut agg = FinalityAggregator::new(epoch, height, hash.into(), snap.clone());
+    let mut agg =
+        FinalityAggregator::new(DEFAULT_CHAIN_ID, epoch, height, hash.into(), snap.clone());
 
     drive_prevote_quorum(&mut agg, &snap, &sks, 3, epoch, height, hash);
     for (sk, v) in sks.iter().zip(snap.validators.iter()).take(3) {
@@ -454,7 +477,13 @@ fn finality_honest_quorum_survives_byzantine_noise() {
     let height = 10;
     let honest_hash = "HONEST";
     let byz_hash = "BYZANTINE";
-    let mut agg = FinalityAggregator::new(epoch, height, honest_hash.into(), snap.clone());
+    let mut agg = FinalityAggregator::new(
+        DEFAULT_CHAIN_ID,
+        epoch,
+        height,
+        honest_hash.into(),
+        snap.clone(),
+    );
 
     // Let the byzantine noise arrive FIRST (conflicting hash) -> must be refused.
     for (sk, v) in sks.iter().zip(snap.validators.iter()).skip(5).take(2) {
@@ -519,8 +548,6 @@ fn finality_honest_quorum_survives_byzantine_noise() {
 /// path and applies a real slash.
 #[test]
 fn equivocation_generates_slashing_evidence() {
-    use crate::core::chain_config::FINALITY_CHECKPOINT_INTERVAL;
-
     // Two validators: `honest` produces the blocks, `equivocator` will double-sign.
     let mut hsk = [0u8; 64];
     hsk[0] = 11;
@@ -556,7 +583,7 @@ fn equivocation_generates_slashing_evidence() {
     assert_eq!(before.stake, 10_000);
     assert!(matches!(before.status, MemberStatus::Active));
 
-    let cp = FINALITY_CHECKPOINT_INTERVAL;
+    let cp = crate::core::chain_config::finality_checkpoint_interval_for_chain_id(45262);
     for _ in 1..cp {
         let _ = bc.produce_block(honest).unwrap();
     }
@@ -638,7 +665,6 @@ fn equivocation_generates_slashing_evidence() {
 fn equivocation_slashing_record_survives_snapshot_roundtrip() {
     use crate::chain::snapshot::{StateSnapshotV2, StateSnapshotV2Params};
     use crate::core::account::AccountState;
-    use crate::core::chain_config::FINALITY_CHECKPOINT_INTERVAL;
     use crate::registry::evidence::SlashingProof;
 
     // A BLS-keyed equivocator + an honest producer.
@@ -660,7 +686,7 @@ fn equivocation_slashing_record_survives_snapshot_roundtrip() {
     install_consensus_keys(&mut bc, honest, &honest_bls, honest_pk);
     install_consensus_keys(&mut bc, equivocator, &equiv_bls, equiv_pk);
 
-    let cp = FINALITY_CHECKPOINT_INTERVAL;
+    let cp = crate::core::chain_config::finality_checkpoint_interval_for_chain_id(45262);
     for _ in 1..cp {
         let _ = bc.produce_block(honest).unwrap();
     }
@@ -748,7 +774,6 @@ fn equivocation_slashing_record_survives_snapshot_roundtrip() {
 /// (`max_invalid_votes_per_epoch`) allows -> a slash is triggered through the end-to-end `handle_prevote` flow.
 #[test]
 fn repeated_invalid_signatures_trigger_slash() {
-    use crate::core::chain_config::FINALITY_CHECKPOINT_INTERVAL;
     use crate::registry::params::RegistryParams;
 
     let honest = test_addr_from_byte(1u8);
@@ -780,7 +805,7 @@ fn repeated_invalid_signatures_trigger_slash() {
         ..RegistryParams::default()
     });
 
-    let cp = FINALITY_CHECKPOINT_INTERVAL;
+    let cp = crate::core::chain_config::finality_checkpoint_interval_for_chain_id(45262);
     for _ in 1..cp {
         let _ = bc.produce_block(honest).unwrap();
     }
@@ -865,7 +890,6 @@ fn repeated_invalid_signatures_trigger_slash() {
 /// Yok).
 #[test]
 fn invalid_signatures_below_threshold_do_not_slash() {
-    use crate::core::chain_config::FINALITY_CHECKPOINT_INTERVAL;
     use crate::registry::params::RegistryParams;
 
     let honest = test_addr_from_byte(1u8);
@@ -894,7 +918,7 @@ fn invalid_signatures_below_threshold_do_not_slash() {
         ..RegistryParams::default()
     });
 
-    let cp = FINALITY_CHECKPOINT_INTERVAL;
+    let cp = crate::core::chain_config::finality_checkpoint_interval_for_chain_id(45262);
     for _ in 1..cp {
         let _ = bc.produce_block(honest).unwrap();
     }
@@ -938,8 +962,6 @@ fn invalid_signatures_below_threshold_do_not_slash() {
 /// signature at ingest - it never enters the aggregate and state does not change.
 #[test]
 fn blockchain_rejects_invalid_vote_signature_at_ingest() {
-    use crate::core::chain_config::FINALITY_CHECKPOINT_INTERVAL;
-
     let mut hsk = [0u8; 64];
     hsk[0] = 33;
     let honest_bls = Scalar::from_bytes_wide(&hsk);
@@ -954,7 +976,7 @@ fn blockchain_rejects_invalid_vote_signature_at_ingest() {
     bc.state.add_validator(honest, 10_000);
     bc.state.validators.get_mut(&honest).unwrap().bls_public_key = honest_pk;
 
-    let cp = FINALITY_CHECKPOINT_INTERVAL;
+    let cp = crate::core::chain_config::finality_checkpoint_interval_for_chain_id(45262);
     for _ in 1..cp {
         let _ = bc.produce_block(honest).unwrap();
     }
@@ -1015,7 +1037,6 @@ fn blockchain_rejects_invalid_vote_signature_at_ingest() {
 #[test]
 fn gossip_equivocation_orders_converge_and_forged_reports_fail_block_validation() {
     use crate::chain::finality::sign_bls;
-    use crate::core::chain_config::FINALITY_CHECKPOINT_INTERVAL;
 
     let mut esk = [0u8; 64];
     esk[0] = 55;
@@ -1041,7 +1062,7 @@ fn gossip_equivocation_orders_converge_and_forged_reports_fail_block_validation(
     install_consensus_keys(&mut node_a, equivocator, &equiv_bls, equiv_pk);
     install_consensus_keys(&mut node_a, honest, &honest_bls, honest_pk);
 
-    let cp = FINALITY_CHECKPOINT_INTERVAL;
+    let cp = crate::core::chain_config::finality_checkpoint_interval_for_chain_id(45262);
     for _ in 1..=cp {
         let _ = node_a.produce_block(honest).unwrap();
     }
@@ -1375,8 +1396,6 @@ const OTHER_CHAIN_ID: u64 = 45262 + 1;
 
 #[test]
 fn votes_signed_for_another_chain_are_refused_at_ingest() {
-    use crate::core::chain_config::FINALITY_CHECKPOINT_INTERVAL;
-
     let (bls_sk, bls_pk) = make_test_key(41);
     let voter = test_addr_from_byte(7u8);
 
@@ -1387,7 +1406,7 @@ fn votes_signed_for_another_chain_are_refused_at_ingest() {
     bc.state.add_validator(voter, 10_000);
     install_consensus_keys(&mut bc, voter, &bls_sk, bls_pk);
 
-    let cp = FINALITY_CHECKPOINT_INTERVAL;
+    let cp = crate::core::chain_config::finality_checkpoint_interval_for_chain_id(45262);
     for _ in 1..cp {
         let _ = bc.produce_block(voter).unwrap();
     }
@@ -1428,8 +1447,6 @@ fn votes_signed_for_another_chain_are_refused_at_ingest() {
 
 #[test]
 fn a_cross_chain_vote_pair_is_not_equivocation() {
-    use crate::core::chain_config::FINALITY_CHECKPOINT_INTERVAL;
-
     let (bls_sk, bls_pk) = make_test_key(43);
     let voter = test_addr_from_byte(9u8);
 
@@ -1439,7 +1456,7 @@ fn a_cross_chain_vote_pair_is_not_equivocation() {
     bc.state.add_validator(voter, 10_000);
     install_consensus_keys(&mut bc, voter, &bls_sk, bls_pk);
 
-    let cp = FINALITY_CHECKPOINT_INTERVAL;
+    let cp = crate::core::chain_config::finality_checkpoint_interval_for_chain_id(45262);
     for _ in 1..cp {
         let _ = bc.produce_block(voter).unwrap();
     }
@@ -1507,6 +1524,7 @@ fn a_finality_cert_from_another_chain_is_refused() {
         agg_sig_bls: vec![0u8; 48],
         bitmap: vec![1],
         set_hash: String::new(),
+        seat_table_version: 0,
     };
     let err = bc
         .handle_finality_cert(cert)
@@ -1550,6 +1568,7 @@ fn stale_epoch_cert_and_qc_blob_are_refused_for_later_checkpoint() {
         agg_sig_bls: vec![0u8; 48],
         bitmap: vec![1],
         set_hash: String::new(),
+        seat_table_version: 0,
     };
     let cert_err = bc
         .handle_finality_cert(stale_cert)
@@ -1611,8 +1630,14 @@ impl PqPrecommitHarness {
             validator.active = true;
             keys.push((address, validator_keys));
         }
-        let height = 10;
-        let hash = "a".repeat(64);
+        let height =
+            crate::core::chain_config::finality_checkpoint_interval_for_chain_id(node.chain_id);
+        let producer = keys.first().ok_or("producer")?.0;
+        for _ in 0..height {
+            node.produce_block(producer)
+                .ok_or("checkpoint production refused")?;
+        }
+        let hash = node.chain.last().ok_or("checkpoint")?.hash.clone();
         node.start_prevote_task(height, hash.clone());
         let snapshot = node
             .finality_aggregator
@@ -1760,7 +1785,7 @@ fn strix_4510256171_aggregator_rejects_stripped_precommit() -> Result<(), String
 #[test]
 fn strix_4510256171_no_certificate_without_pq_quorum() -> Result<(), String> {
     let (snapshot, keys) = make_snapshot_with_keys(4, 1000);
-    let mut round = FinalityAggregator::new(1, 10, "cp".into(), snapshot.clone());
+    let mut round = FinalityAggregator::new(45262, 1, 10, "cp".into(), snapshot.clone());
     drive_prevote_quorum(&mut round, &snapshot, &keys, 3, 1, 10, "cp");
     let mut node = Blockchain::new(Arc::new(PoWEngine::new(0)), None, 45262, None);
     node.finality_aggregator = Some(round);
@@ -1784,26 +1809,8 @@ fn strix_4510256171_no_certificate_without_pq_quorum() -> Result<(), String> {
 #[test]
 fn strix_4510256171_valid_hybrid_quorum_still_finalizes() -> Result<(), String> {
     let mut harness = PqPrecommitHarness::new()?;
-    let producer = harness.keys.first().ok_or("producer")?.0;
-    for _ in 0..harness.height {
-        harness
-            .node
-            .produce_block(producer)
-            .ok_or("checkpoint production refused")?;
-    }
     let checkpoint = harness.node.chain.last().ok_or("checkpoint")?.clone();
     assert_eq!(checkpoint.index, harness.height);
-    harness.hash = checkpoint.hash;
-    harness
-        .node
-        .start_prevote_task(harness.height, harness.hash.clone());
-    harness.snapshot = harness
-        .node
-        .finality_aggregator
-        .as_ref()
-        .ok_or("round")?
-        .validator_snapshot
-        .clone();
     harness.drive_prevotes()?;
     for index in 0..2 {
         let vote = harness.precommit(index)?;

@@ -16,12 +16,10 @@ const _: () = assert!(
 /// Which opcode activation state the CLI executes and verifies under.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
 enum ActivationArg {
-    /// The staged opcodes (`VerifyMerkle`, `VerifyInference`) stay closed:
-    /// the VM refuses them and the verifier refuses a proof whose program
-    /// contains one.
+    /// Canonical production activation: VerifyMerkle remains closed pending
+    /// a shard-bound challenge witness; VerifyInference has its own AIR gate.
     Default,
-    /// Every staged opcode is open. For a network that has activated them,
-    /// and for testing; never the production setting while they are closed.
+    /// Explicitly allow every staged opcode in isolated non-production tests.
     Full,
 }
 
@@ -35,17 +33,13 @@ impl ActivationArg {
 
     /// The activation state a signed relay report may be made under.
     ///
-    /// The signed payload does not record the activation state. A report made
-    /// under `full` would be byte-compatible with one made under the closed
-    /// default, so a reader could not tell that a program the production
-    /// verifier refuses had been accepted. Only the closed state is allowed.
+    /// Relay nodes pin to canonical `--activation default` so reports are
+    /// reproducible across operators.
     fn relay_state(self) -> Result<bud_isa::MainnetActivation, String> {
         match self {
             ActivationArg::Default => Ok(self.state()),
             ActivationArg::Full => Err(
-                "relay refuses --activation full: the signed report does not record the \
-                 activation state, so it could not be told from a report made under the \
-                 closed default"
+                "relay refuses --activation full: relay reports must use canonical --activation default"
                     .to_string(),
             ),
         }
@@ -72,7 +66,7 @@ struct Cli {
         global = true,
         value_enum,
         default_value_t = ActivationArg::Default,
-        help = "Opcode activation state for execution and verification: `default` keeps VerifyMerkle and VerifyInference closed (the VM refuses them; proofs whose program contains one are refused), `full` opens them"
+        help = "Opcode activation state for execution and verification: `default` enables AIR-backed VerifyMerkle and VerifyInference, `full` enables all staged opcodes"
     )]
     activation: ActivationArg,
 
@@ -281,9 +275,27 @@ fn check_chain_id(chain_id: u64) -> Result<(), String> {
     Ok(())
 }
 
+/// Mainnet and testnet proof execution must use the same canonical activation
+/// as validators. `full()` is for off-chain proof tests on other chain ids:
+/// allowing it under 45260/45261 would make the CLI produce a receipt the
+/// consensus VM (which keeps unbound VerifyMerkle closed) cannot accept.
+fn check_testnet_activation(
+    chain_id: u64,
+    activation: bud_isa::MainnetActivation,
+) -> Result<(), String> {
+    if matches!(chain_id, 45_260 | 45_261) && activation != bud_isa::MainnetActivation::default() {
+        return Err(
+            "production chain requires canonical default activation with VerifyMerkle closed"
+                .into(),
+        );
+    }
+    Ok(())
+}
+
 fn run_pipeline(config: ExecutionConfig) -> Result<ExecutionOutput, Box<dyn std::error::Error>> {
     use bud_state::StateBackend;
     check_chain_id(config.chain_id)?;
+    check_testnet_activation(config.chain_id, config.activation)?;
 
     debug!("Starting pipeline");
 
@@ -294,12 +306,12 @@ fn run_pipeline(config: ExecutionConfig) -> Result<ExecutionOutput, Box<dyn std:
         bud_state::State::load(&state_file).map_err(|e| format!("Failed to load state: {e}"))?;
     let pre_root = state.root();
 
-    // HIGH (2026-08-17): Vm::new leaves mainnet_mode=false; gated
-    // opcode'lar (VerifyMerkle/VerifyInference) non-mainnet decoder'da
-    // runs. The CLI default must be mainnet safe: mainnet_mode=true.
+    // Vm::new leaves mainnet_mode=false, which bypasses production opcode
+    // admission. The CLI default must use mainnet_mode=true; the shared
+    // ISA decoder then refuses VerifyMerkle but admits VerifyInference.
     //
-    // Only `--activation full` opens them: then the VM decodes without the
-    // gate, and the proof it just produced is verified under the same state.
+    // Only an explicit `--activation full` on a non-production chain opens
+    // the Merkle path; the VM and proof verifier share that activation state.
     let mainnet_mode = config.activation == bud_isa::MainnetActivation::default();
     let mut vm = Vm::with_mainnet_mode(bud_compiler::MIN_VM_MEMORY_BYTES, 1_000_000, mainnet_mode);
     if let Some(s) = config.sender {
@@ -1073,6 +1085,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         } => {
             let (envelope, expected_inputs, program) =
                 load_verifier_inputs(proof_file, public_inputs_file, bytecode_file)?;
+            check_testnet_activation(expected_inputs.chain_id, cli.activation.state())?;
 
             match bud_proof::Plonky3Adapter::verify_with_activation(
                 &envelope,
@@ -1211,6 +1224,48 @@ mod tests {
         assert!(check_chain_id(45262).is_ok());
     }
 
+    #[test]
+    fn testnet_rejects_noncanonical_activation() {
+        let active = bud_isa::MainnetActivation::default();
+        let closed = bud_isa::MainnetActivation::closed();
+        let altered = bud_isa::MainnetActivation {
+            privacy_commit_enabled: false,
+            ..active
+        };
+        assert!(!active.verify_merkle_enabled);
+        assert_eq!(closed, active, "closed is the canonical default schedule");
+        assert!(check_testnet_activation(45_260, active).is_ok());
+        assert!(check_testnet_activation(45_261, active).is_ok());
+        assert!(check_testnet_activation(45_262, active).is_ok());
+        assert!(check_testnet_activation(45_261, altered).is_err());
+        assert!(check_testnet_activation(45_261, bud_isa::MainnetActivation::full()).is_err());
+        assert!(check_testnet_activation(45_260, bud_isa::MainnetActivation::full()).is_err());
+        assert!(check_testnet_activation(45_262, bud_isa::MainnetActivation::full()).is_ok());
+
+        // The execution door refuses a noncanonical testnet activation
+        // before reading a state file or producing a receipt.
+        let result = run_pipeline(ExecutionConfig {
+            bytecode: vec![],
+            sender: None,
+            nonce: None,
+            block_height: None,
+            args: Vec::new(),
+            chain_id: 45_261,
+            state_in_file: Some("nonexistent-testnet-state.json".into()),
+            commit_state: false,
+            activation: altered,
+        });
+        let error = result
+            .err()
+            .expect("noncanonical testnet activation must fail");
+        assert!(
+            error
+                .to_string()
+                .contains("requires canonical default activation with VerifyMerkle closed"),
+            "{error}"
+        );
+    }
+
     /// The VM the CLI constructs must be **in mainnet mode**.
     ///
     /// `Vm::new` leaves the default at `mainnet_mode: false`, and in that mode
@@ -1277,7 +1332,7 @@ mod tests {
         let err = ActivationArg::Full
             .relay_state()
             .expect_err("a signed report under the open state must be refused");
-        assert!(err.contains("does not record"), "{err}");
+        assert!(err.contains("relay refuses --activation full"), "{err}");
     }
 
     /// The relay's argument set has to parse, and `--output` has to default:

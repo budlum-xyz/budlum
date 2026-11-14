@@ -1,4 +1,4 @@
-//! A domain whose finality is *proven*, not voted: the BudZKVM adapter.
+//! A domain whose finality is *proven*, not voted: the `BudZKVM` adapter.
 //!
 //! WIRING: wired - like every adapter in this tree, it is reachable through
 //! registry admission (`AdapterSpec::ZkVm` in the consensus-resident intake)
@@ -10,7 +10,7 @@
 //! validator set justified, an authority set asserted. A vote has an honesty
 //! assumption attached to it, and the profile has to say so.
 //!
-//! This one does not. A BudZKVM proof is checked by the chain's own STARK
+//! This one does not. A `BudZKVM` proof is checked by the chain's own STARK
 //! verifier against the public inputs the program committed to. There is no
 //! committee to be honest or dishonest, no bond to slash, no window to
 //! challenge. `TrustModel::Trustless` is not a claim about the external
@@ -268,6 +268,14 @@ impl ExternalFinalityAdapter for ZkVmFinalityAdapter {
         if policy.min_depth > 0 {
             return Err(AdapterError::Unavailable {
                 reason: "a proven attestation has no depth; this caller asked for one".to_string(),
+            });
+        }
+
+        // Empty or bare `[Halt]` bytecode performs zero computation and cannot
+        // attest an external state transition.
+        if crate::prover::is_empty_or_halt_only_program(&decoded.program) {
+            return Err(AdapterError::ConsensusRule {
+                rule: "an empty or bare Halt program cannot attest a state root".to_string(),
             });
         }
 
@@ -891,6 +899,35 @@ mod tests {
         assert!(
             matches!(err, AdapterError::ConsensusRule { .. }),
             "got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn zk_domain_refuses_empty_halt_proof() {
+        let canonical = bud_vm::syscall_context::build_syscall_context_check_program()
+            .expect("canonical build");
+        let pinned_hash = bud_proof::canonical_set::program_hash_of(&canonical);
+        let adapter = ZkVmFinalityAdapter::new("testnet", Some(pinned_hash), Some(1));
+
+        // Take a valid envelope structure and substitute a trivial 1-word Halt
+        // program (`[0]` / non-pinned program) claiming a forged state root.
+        let mut forged = honest_evidence(&adapter, canonical);
+        let mut decoded = ZkFinalityEvidence::decode(&forged.payload).expect("decode");
+        decoded.program = vec![0];
+        decoded.inputs.program_hash = bud_proof::canonical_set::program_hash_of(&decoded.program);
+        decoded.inputs.final_state_root = [0xFE; 32];
+        forged.declared_root = [0xFE; 32];
+        forged.payload = decoded.encode().expect("encode");
+
+        let err = adapter
+            .verify(&forged, &VerificationPolicy::proven(0))
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                AdapterError::Crypto { .. } | AdapterError::ConsensusRule { .. }
+            ),
+            "empty Halt program must not forge a state root: {err:?}"
         );
     }
 }

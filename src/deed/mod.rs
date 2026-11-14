@@ -1,12 +1,9 @@
-//! DeEd domain primitives.
+//! Education domain legacy manifest primitives.
 //!
-//! DeEd is an application domain on Budlum, not a new chain or settlement
-//! layer. This module holds the canonical manifest and the permissionless
-//! role vocabulary. The two roles bond through the `RoleBond` transaction
-//! door (`AccountState::bond_role`); an artifact's bytes are a B.U.D. content
-//! id registered through `StorageTx::RegisterManifest`. Rewards and bridge
-//! wiring are out of scope (: DeEd inherits the
-//! account layer's cryptography and is not developed further).
+//! B.U.D. 3.0 education artifact registration lives in `crate::education_domain`
+//! (`Bud3Tx::RegisterObject`). This module preserves the permissionless role IDs
+//! and deterministic manifest commitment vocabulary inherited by existing domain
+//! state.
 
 use crate::core::address::Address;
 use crate::core::hash::hash_fields_bytes;
@@ -14,7 +11,10 @@ use crate::registry::role::RoleId;
 use crate::storage::ContentId;
 use serde::{Deserialize, Serialize};
 
-/// Permissionless DeEd participant roles.
+pub mod education_domain;
+pub use education_domain::{EducationArtifact, EducationDomainError, EducationDomainRegistry};
+
+/// Permissionless `DeEd` participant roles.
 ///
 /// These IDs extend the open registry without changing the registry's policy:
 /// Registration still requires only the configured stake floor.
@@ -25,7 +25,7 @@ pub mod roles {
     pub const RESEARCH_CONTRIBUTOR: RoleId = RoleId(11);
 }
 
-/// DeEd artifact categories. The artifact bytes remain in B.U.D.; this enum
+/// `DeEd` artifact categories. The artifact bytes remain in B.U.D.; this enum
 /// Is the domain-level meaning committed by the manifest.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -66,7 +66,7 @@ impl Visibility {
     }
 }
 
-/// Canonical DeEd manifest. Content is addressed by B.U.D.; this record binds
+/// Canonical `DeEd` manifest. Content is addressed by B.U.D.; this record binds
 /// Its meaning, owner, visibility, and metadata into a deterministic identity.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Manifest {
@@ -79,6 +79,11 @@ pub struct Manifest {
 }
 
 impl Manifest {
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn validate(&self) -> Result<(), &'static str> {
         if self.contributor == Address::zero() {
             return Err("DeEd contributor cannot be the zero address");

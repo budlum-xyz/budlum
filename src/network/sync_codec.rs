@@ -76,6 +76,12 @@ impl request_response::Codec for SyncCodec {
     where
         T: AsyncWrite + Unpin + Send,
     {
+        if req.len() > MAX_SYNC_REQUEST_BYTES {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("sync request exceeds {MAX_SYNC_REQUEST_BYTES} bytes"),
+            ));
+        }
         io.write_all(&req).await?;
         io.close().await?;
         Ok(())
@@ -90,6 +96,12 @@ impl request_response::Codec for SyncCodec {
     where
         T: AsyncWrite + Unpin + Send,
     {
+        if resp.len() > MAX_SYNC_RESPONSE_BYTES {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("sync response exceeds {MAX_SYNC_RESPONSE_BYTES} bytes"),
+            ));
+        }
         io.write_all(&resp).await?;
         io.close().await?;
         Ok(())
@@ -117,5 +129,32 @@ mod tests {
         let mut io = Cursor::new(vec![7u8; 17]);
         let err = block_on(read_bounded(&mut io, 16)).unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn sync_codec_refuses_oversize_writes_symmetrically() {
+        use libp2p::request_response::Codec as _;
+        let mut codec = SyncCodec;
+        let proto = StreamProtocol::new("/budlum/sync/1.0.0");
+
+        let mut sink_req: Vec<u8> = Vec::new();
+        let req_err = block_on(codec.write_request(
+            &proto,
+            &mut sink_req,
+            vec![0u8; MAX_SYNC_REQUEST_BYTES + 1],
+        ))
+        .unwrap_err();
+        assert_eq!(req_err.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(sink_req.is_empty());
+
+        let mut sink_resp: Vec<u8> = Vec::new();
+        let resp_err = block_on(codec.write_response(
+            &proto,
+            &mut sink_resp,
+            vec![0u8; MAX_SYNC_RESPONSE_BYTES + 1],
+        ))
+        .unwrap_err();
+        assert_eq!(resp_err.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(sink_resp.is_empty());
     }
 }

@@ -125,6 +125,9 @@ pub enum NetworkMessage {
         bitmap: Vec<u8>,
         set_hash: String,
         scheme_id: String,
+        /// The seat table version the seats were counted under (section
+        /// 7.4.4); zero means the epoch's base table.
+        seat_table_version: u64,
     },
 
     GetFinalityCert {
@@ -140,6 +143,7 @@ pub enum NetworkMessage {
         bitmap: Vec<u8>,
         set_hash: String,
         scheme_id: String,
+        seat_table_version: u64,
     },
 
     GetQcBlob {
@@ -178,6 +182,12 @@ impl NetworkMessage {
         proto_msg.encode_to_vec()
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
+    #[cfg(test)]
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, String> {
         use prost::Message;
         let proto_msg = crate::network::proto_conversions::pb::ProtoNetworkMessage::decode(bytes)
@@ -185,6 +195,11 @@ impl NetworkMessage {
         Self::try_from(proto_msg)
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn from_bytes_validated(bytes: &[u8]) -> Result<Self, MessageError> {
         if bytes.len() > MAX_MESSAGE_SIZE {
             return Err(MessageError::TooLarge(bytes.len()));
@@ -223,6 +238,11 @@ impl NetworkMessage {
         Ok(message)
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn validate_block_size(block: &Block) -> Result<(), MessageError> {
         use prost::Message;
         let proto_block = crate::network::proto_conversions::pb::ProtoBlock::from(block);
@@ -233,6 +253,11 @@ impl NetworkMessage {
         Ok(())
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn validate_tx_size(tx: &Transaction) -> Result<(), MessageError> {
         use prost::Message;
         let proto_tx = crate::network::proto_conversions::pb::ProtoTransaction::from(tx);
@@ -243,6 +268,11 @@ impl NetworkMessage {
         Ok(())
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn validate_header_request(locator: &[String], limit: u32) -> Result<(), MessageError> {
         if limit == 0 || limit > MAX_HEADERS_PER_REQUEST {
             return Err(MessageError::ParseError(format!(
@@ -262,6 +292,11 @@ impl NetworkMessage {
         Ok(())
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn validate_header_batch(
         headers: &[BlockHeader],
         expected_chain_id: u64,
@@ -299,8 +334,25 @@ impl NetworkMessage {
     }
 }
 
+/// Whether `hash` is the canonical spelling of a 32-byte digest: exactly 64
+/// lowercase hexadecimal characters.
+///
+/// This is the one definition of the rule in the tree. It used to exist as
+/// three copies, and all three used `u8::is_ascii_hexdigit`, which accepts
+/// `A`-`F` as well, so each one documented a lowercase-only rule and enforced
+/// a mixed-case one. Every hash the tree writes is lowercase, so the looser
+/// predicate only ever admitted strings no honest producer emits: the gossip
+/// message id is a hash of the raw frame, which makes an upper-case copy of a
+/// signed vote a message the dedup table has never seen and a second trip
+/// through the signature check, and a header locator entry that no local hash
+/// can equal costs a sync round without ever naming a block.
+#[must_use]
 pub fn is_canonical_hash(hash: &str) -> bool {
-    hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit())
+    let bytes = hash.as_bytes();
+    bytes.len() == 64
+        && bytes
+            .iter()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
 }
 
 const MAX_SLASHING_ITEMS_PER_CONTAINER: usize = 64;
@@ -987,6 +1039,24 @@ mod tests {
             1,
         )
         .is_err());
+    }
+
+    /// One digest has one canonical spelling. An upper-case copy is a different
+    /// string to the dedup table and to a locator lookup, so it is refused at
+    /// the door instead of being carried as a second name for the same hash.
+    #[test]
+    fn only_lowercase_hex_is_a_canonical_hash() {
+        let canonical = "ab".repeat(32);
+        assert!(is_canonical_hash(&canonical));
+        assert!(!is_canonical_hash(&canonical.to_uppercase()));
+        assert!(!is_canonical_hash(&canonical[1..]));
+        assert!(
+            NetworkMessage::validate_header_request(std::slice::from_ref(&canonical), 1).is_ok()
+        );
+        assert!(
+            NetworkMessage::validate_header_request(&[canonical.to_uppercase()], 1).is_err(),
+            "an upper-case locator entry names no block and must be refused, not answered with an empty batch"
+        );
     }
 
     #[test]

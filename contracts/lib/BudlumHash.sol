@@ -6,7 +6,7 @@ pragma solidity 0.8.26;
 /// @title BudlumHash
 /// @notice Exact Solidity counterpart of Budlum's length-prefixed SHA-256 and
 ///         settlement Merkle root (`hash_fields_bytes` in src/crypto/hash.rs
-///         and `merkle_root_from_proof` in src/settlement/graft.rs).
+///         and `merkle_root_from_proof` in src/settlement/app_binding.rs).
 library BudlumHash {
     uint256 private constant U64_BYTE_LEN = 8;
     uint256 private constant BITS_PER_BYTE = 8;
@@ -57,6 +57,9 @@ library BudlumHash {
         bytes32 sentinel = hashFields(sentinelFields);
         for (uint256 i = 0; i < siblings.length; i++) {
             if (siblings[i] == sentinel) {
+                if (idx % MERKLE_PAIR_ARITY != 0) {
+                    return (false, bytes32(0));
+                }
                 bytes[] memory promoteFields = new bytes[](MERKLE_PROMOTE_FIELDS);
                 promoteFields[0] = "BDLM_MERKLE_ODD_PROMOTE_V1";
                 promoteFields[1] = bytes.concat(cur);

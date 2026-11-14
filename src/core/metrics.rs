@@ -1,5 +1,13 @@
-use prometheus::{Encoder, Histogram, HistogramOpts, IntCounter, IntGauge, Registry, TextEncoder};
+use prometheus::{
+    Encoder, Histogram, HistogramOpts, IntCounter, IntGauge, IntGaugeVec, Registry, TextEncoder,
+};
 use std::sync::Arc;
+
+/// Convenience: exposed for integer-only consensus audit latency observation.
+#[must_use]
+pub fn histogram_seconds_from_u64(seconds: u64) -> f64 {
+    u32::try_from(seconds).map_or(f64::from(u32::MAX), f64::from)
+}
 
 #[derive(Clone)]
 pub struct Metrics {
@@ -67,6 +75,9 @@ pub struct Metrics {
     pub peer_connection_quality: IntGauge,
     pub consensus_round_seconds: Histogram,
     pub finality_lag: IntGauge,
+    /// 1 when the recovery tracker is stalled or finality lag reaches the
+    /// chain-specific eight-checkpoint recovery threshold (Section 7.7).
+    pub finality_stalled: IntGauge,
     pub storage_db_size_bytes: IntGauge,
     /// Content chunks retained by the durable B.U.D. content store.
     pub content_store_chunks: IntGauge,
@@ -84,8 +95,8 @@ pub struct Metrics {
     pub settlement_frozen_domains: IntGauge,
     pub settlement_global_headers_sealed: IntCounter,
     pub settlement_equivocations_detected: IntCounter,
-    /// Graft settlement-door writes accepted in committed blocks.
-    pub graft_transactions_total: IntCounter,
+    /// AppBinding settlement-door writes accepted in committed blocks.
+    pub app_binding_transactions_total: IntCounter,
     /// BudZKVM contract calls in committed blocks.
     pub contract_calls_total: IntCounter,
     /// Mikoriza restaked validator rows in account state.
@@ -207,6 +218,42 @@ pub struct Metrics {
     pub bns_names_registered: IntCounter,
     /// BNS name rows retained in account state.
     pub bns_name_rows: IntGauge,
+    /// B15: names currently inside their grace window.
+    ///
+    /// The gauge the directive asks for beside the name count: a registry can
+    /// look healthy by row count while a large share of it is only waiting to
+    /// be reclaimed, and an owner in grace can still rescue the name.
+    pub bns_names_in_grace: IntGauge,
+    /// B15: open `.bud` marketplace offers, primary and resale together.
+    pub bns_open_offers: IntGauge,
+    /// B15: marketplace sales settled through `BnsBuyName`.
+    pub bns_sales_total: IntCounter,
+    /// B15: atoms paid to sellers by `BnsBuyName`, excluding fees.
+    pub bns_sales_amount_total: IntCounter,
+    /// B15: Renewal transactions applied.
+    pub bns_renewals_total: IntCounter,
+    /// B15: Transfer transactions applied.
+    pub bns_transfers_total: IntCounter,
+    /// B15: Marketplace offers created.
+    pub bns_offers_created_total: IntCounter,
+    /// B15: Marketplace offers cancelled.
+    pub bns_offers_cancelled_total: IntCounter,
+    /// B15: Forward-address writes applied.
+    pub bns_set_address_total: IntCounter,
+    /// B15: Reverse-resolution primary-name writes applied.
+    pub bns_set_primary_name_total: IntCounter,
+    /// B15: Text and profile record writes applied.
+    pub bns_set_records_total: IntCounter,
+    /// B15: Legacy content-pointer writes applied.
+    pub bns_set_content_total: IntCounter,
+    /// B15: B.U.D. 3.0 content bindings applied.
+    pub bns_set_bud3_content_total: IntCounter,
+    /// B15: Subdomains registered.
+    pub bns_register_subdomain_total: IntCounter,
+    /// B15: Subdomains removed.
+    pub bns_remove_subdomain_total: IntCounter,
+    /// B15: Storage-pointer writes applied.
+    pub bns_set_storage_total: IntCounter,
     /// Minted SocialFi NFTs retained in account state.
     pub nft_rows: IntGauge,
     /// Vault folders retained in account state.
@@ -239,6 +286,66 @@ pub struct Metrics {
     /// counter lives in the facade (it has no dependency on the node), and
     /// [`Metrics::encode`] folds it into this series before every scrape.
     pub pq_verifier_disagreement: IntCounter,
+    /// Head height minus finalized height, counted in finality checkpoints.
+    ///
+    /// `finality_lag` counts blocks, so the same one-checkpoint delay reads
+    /// as `5` on the testnet (5-block checkpoints) and `10` on mainnet. The
+    /// recovery threshold in Section 7.7 is stated in checkpoints, and an
+    /// operator should not have to divide by the interval at the alert. This
+    /// gauge is that division.
+    pub finality_lag_checkpoints: IntGauge,
+    /// Times a block was refused because its state root disagreed with the
+    /// state this node computed.
+    ///
+    /// A non-zero rate is a determinism split: the same chain, two
+    /// results. Counting it is what makes the divergence visible before two
+    /// nodes have forked from each other in silence.
+    pub state_root_mismatch_total: IntCounter,
+    /// Relayer requests whose result transaction is submitted but not yet
+    /// seen in a finalized block.
+    ///
+    /// These are the entries that keep a relayer restart from repeating an
+    /// external action. One that never goes down is a result the mempool
+    /// keeps dropping; the gauge is how an operator sees that without
+    /// reading the pending file by hand.
+    pub relay_reservations: IntGauge,
+    /// Relayer reservations whose external action was in flight and whose
+    /// result was never observed.
+    ///
+    /// A subset of [`Self::relay_reservations`] that needs a person: the
+    /// external transaction has to be looked up by nonce and the entry
+    /// cleared or completed. The worker logs it once per pass; this gauge is
+    /// the count an alert can page on.
+    pub relay_inflight_reservations: IntGauge,
+    /// Live B.U.D. 3.0 objects in the rooted registry.
+    pub bud3_objects: IntGauge,
+    /// Segments with at least one lost share.
+    ///
+    /// Distinct from [`Self::bud3_repair_backlog`] on purpose: repair is lazy
+    /// and fires at `f / 2` lost shares, so a segment can be deteriorating
+    /// while no task is open. The first gauge is the warning, the second is
+    /// the work.
+    pub bud3_segments_at_risk: IntGauge,
+    /// Segments that have reached the repair threshold and have an open
+    /// repair task.
+    pub bud3_repair_backlog: IntGauge,
+    /// Age of a currently open custody audit, sampled in seconds.
+    ///
+    /// The age is derived from the canonical audit deadline and class window;
+    /// no observability field enters consensus-serialized share state.
+    ///
+    /// A histogram rather than a gauge because the operator question is a
+    /// distribution: "are holders answering inside their window" is answered
+    /// by a high quantile against the window length, not by the age of the
+    /// oldest audit.
+    pub bud3_audit_latency_seconds: Histogram,
+    /// Live custody bytes per validator class (`class="full"` and
+    /// `class="mobile"`).
+    ///
+    /// The class split is the point: the mobile floor is a promise about how
+    /// much of the network's custody sits on phones, and a single total
+    /// hides it.
+    pub bud3_custody_bytes: IntGaugeVec,
 }
 
 impl Metrics {
@@ -356,6 +463,10 @@ impl Metrics {
         ))?;
         let finality_lag =
             IntGauge::new("budlum_finality_lag", "Head height minus finalized height")?;
+        let finality_stalled = IntGauge::new(
+            "budlum_finality_stalled",
+            "1 when recovery is stalled or finality lag reaches eight chain-specific checkpoint intervals",
+        )?;
         let storage_db_size_bytes = IntGauge::new(
             "budlum_storage_db_size_bytes",
             "Approximate storage size in bytes",
@@ -404,9 +515,9 @@ impl Metrics {
             "budlum_settlement_equivocations_detected",
             "Total settlement equivocations detected",
         )?;
-        let graft_transactions_total = IntCounter::new(
-            "budlum_graft_transactions_total",
-            "Total Graft settlement-door transactions processed",
+        let app_binding_transactions_total = IntCounter::new(
+            "budlum_app_binding_transactions_total",
+            "Total AppBinding settlement-door transactions processed",
         )?;
         let contract_calls_total = IntCounter::new(
             "budlum_contract_calls_total",
@@ -653,6 +764,68 @@ impl Metrics {
             "budlum_bns_name_rows",
             "BNS name rows retained in account state",
         )?;
+        let bns_names_in_grace = IntGauge::new(
+            "budlum_bns_names_in_grace",
+            "BNS names inside their grace window",
+        )?;
+        let bns_open_offers =
+            IntGauge::new("budlum_bns_open_offers", "Open .bud marketplace offers")?;
+        let bns_sales_total = IntCounter::new(
+            "budlum_bns_sales_total",
+            "BNS marketplace sales settled through BnsBuyName",
+        )?;
+        let bns_sales_amount_total = IntCounter::new(
+            "budlum_bns_sales_amount_total",
+            "Atoms paid to sellers by BnsBuyName, excluding fees",
+        )?;
+        let bns_renewals_total = IntCounter::new(
+            "budlum_bns_renewals_total",
+            "BNS renewal transactions applied",
+        )?;
+        let bns_transfers_total = IntCounter::new(
+            "budlum_bns_transfers_total",
+            "BNS transfer transactions applied",
+        )?;
+        let bns_offers_created_total = IntCounter::new(
+            "budlum_bns_offers_created_total",
+            "BNS marketplace offers created",
+        )?;
+        let bns_offers_cancelled_total = IntCounter::new(
+            "budlum_bns_offers_cancelled_total",
+            "BNS marketplace offers cancelled",
+        )?;
+        let bns_set_address_total = IntCounter::new(
+            "budlum_bns_set_address_total",
+            "BNS forward-address writes applied",
+        )?;
+        let bns_set_primary_name_total = IntCounter::new(
+            "budlum_bns_set_primary_name_total",
+            "BNS reverse-resolution primary-name writes applied",
+        )?;
+        let bns_set_records_total = IntCounter::new(
+            "budlum_bns_set_records_total",
+            "BNS text and profile record writes applied",
+        )?;
+        let bns_set_content_total = IntCounter::new(
+            "budlum_bns_set_content_total",
+            "BNS legacy content-pointer writes applied",
+        )?;
+        let bns_set_bud3_content_total = IntCounter::new(
+            "budlum_bns_set_bud3_content_total",
+            "BNS b.u.d. 3.0 content bindings applied",
+        )?;
+        let bns_register_subdomain_total = IntCounter::new(
+            "budlum_bns_register_subdomain_total",
+            "BNS subdomains registered",
+        )?;
+        let bns_remove_subdomain_total = IntCounter::new(
+            "budlum_bns_remove_subdomain_total",
+            "BNS subdomains removed",
+        )?;
+        let bns_set_storage_total = IntCounter::new(
+            "budlum_bns_set_storage_total",
+            "BNS storage-pointer writes applied",
+        )?;
         let nft_rows = IntGauge::new(
             "budlum_nft_rows",
             "Minted SocialFi NFTs retained in account state",
@@ -716,6 +889,51 @@ impl Metrics {
             "Total RPC requests rejected due to rate limiting",
         )?;
 
+        let finality_lag_checkpoints = IntGauge::new(
+            "budlum_finality_lag_checkpoints",
+            "Head height minus finalized height, in finality checkpoints",
+        )?;
+        let state_root_mismatch_total = IntCounter::new(
+            "budlum_state_root_mismatch_total",
+            "Blocks refused because their state root disagreed with the state this node computed",
+        )?;
+        let relay_reservations = IntGauge::new(
+            "budlum_relay_reservations",
+            "Relayer results submitted but not yet seen in a finalized block",
+        )?;
+        let relay_inflight_reservations = IntGauge::new(
+            "budlum_relay_inflight_reservations",
+            "Relayer reservations whose external action is in flight and needs an operator",
+        )?;
+        let bud3_objects = IntGauge::new(
+            "budlum_bud3_objects",
+            "Live B.U.D. 3.0 objects in the rooted registry",
+        )?;
+        let bud3_segments_at_risk = IntGauge::new(
+            "budlum_bud3_segments_at_risk",
+            "B.U.D. 3.0 segments with at least one lost share",
+        )?;
+        let bud3_repair_backlog = IntGauge::new(
+            "budlum_bud3_repair_backlog",
+            "B.U.D. 3.0 segments past the repair threshold with an open repair task",
+        )?;
+        let bud3_audit_latency_seconds = Histogram::with_opts(HistogramOpts::new(
+            "budlum_bud3_audit_latency_seconds",
+            "Age of a currently open B.U.D. 3.0 custody audit in seconds",
+        ))?;
+        let bud3_custody_bytes = IntGaugeVec::new(
+            prometheus::Opts::new(
+                "budlum_bud3_custody_bytes",
+                "B.U.D. 3.0 custody bytes required by live placement per validator class",
+            ),
+            &["class"],
+        )?;
+        bud3_custody_bytes.with_label_values(&["full"]).set(0);
+        bud3_custody_bytes.with_label_values(&["mobile"]).set(0);
+        bud3_custody_bytes
+            .with_label_values(&["mobile_opportunistic"])
+            .set(0);
+
         registry.register(Box::new(chain_height.clone()))?;
         registry.register(Box::new(account_rows.clone()))?;
         registry.register(Box::new(unbonding_rows.clone()))?;
@@ -747,6 +965,7 @@ impl Metrics {
         registry.register(Box::new(peer_connection_quality.clone()))?;
         registry.register(Box::new(consensus_round_seconds.clone()))?;
         registry.register(Box::new(finality_lag.clone()))?;
+        registry.register(Box::new(finality_stalled.clone()))?;
         registry.register(Box::new(storage_db_size_bytes.clone()))?;
         registry.register(Box::new(content_store_chunks.clone()))?;
         registry.register(Box::new(content_store_bytes.clone()))?;
@@ -759,7 +978,7 @@ impl Metrics {
         registry.register(Box::new(settlement_frozen_domains.clone()))?;
         registry.register(Box::new(settlement_global_headers_sealed.clone()))?;
         registry.register(Box::new(settlement_equivocations_detected.clone()))?;
-        registry.register(Box::new(graft_transactions_total.clone()))?;
+        registry.register(Box::new(app_binding_transactions_total.clone()))?;
         registry.register(Box::new(contract_calls_total.clone()))?;
         registry.register(Box::new(restaked_validator_rows.clone()))?;
         registry.register(Box::new(proof_market_active_tasks.clone()))?;
@@ -823,6 +1042,22 @@ impl Metrics {
         registry.register(Box::new(tokenomics_team_locked.clone()))?;
         registry.register(Box::new(bns_names_registered.clone()))?;
         registry.register(Box::new(bns_name_rows.clone()))?;
+        registry.register(Box::new(bns_names_in_grace.clone()))?;
+        registry.register(Box::new(bns_open_offers.clone()))?;
+        registry.register(Box::new(bns_sales_total.clone()))?;
+        registry.register(Box::new(bns_sales_amount_total.clone()))?;
+        registry.register(Box::new(bns_renewals_total.clone()))?;
+        registry.register(Box::new(bns_transfers_total.clone()))?;
+        registry.register(Box::new(bns_offers_created_total.clone()))?;
+        registry.register(Box::new(bns_offers_cancelled_total.clone()))?;
+        registry.register(Box::new(bns_set_address_total.clone()))?;
+        registry.register(Box::new(bns_set_primary_name_total.clone()))?;
+        registry.register(Box::new(bns_set_records_total.clone()))?;
+        registry.register(Box::new(bns_set_content_total.clone()))?;
+        registry.register(Box::new(bns_set_bud3_content_total.clone()))?;
+        registry.register(Box::new(bns_register_subdomain_total.clone()))?;
+        registry.register(Box::new(bns_remove_subdomain_total.clone()))?;
+        registry.register(Box::new(bns_set_storage_total.clone()))?;
         registry.register(Box::new(nft_rows.clone()))?;
         registry.register(Box::new(vault_folder_rows.clone()))?;
         registry.register(Box::new(vault_membership_rows.clone()))?;
@@ -838,6 +1073,15 @@ impl Metrics {
         registry.register(Box::new(slashing_events_total.clone()))?;
         registry.register(Box::new(pq_verifier_disagreement.clone()))?;
         registry.register(Box::new(rpc_rate_limited_total.clone()))?;
+        registry.register(Box::new(finality_lag_checkpoints.clone()))?;
+        registry.register(Box::new(state_root_mismatch_total.clone()))?;
+        registry.register(Box::new(relay_reservations.clone()))?;
+        registry.register(Box::new(relay_inflight_reservations.clone()))?;
+        registry.register(Box::new(bud3_objects.clone()))?;
+        registry.register(Box::new(bud3_segments_at_risk.clone()))?;
+        registry.register(Box::new(bud3_repair_backlog.clone()))?;
+        registry.register(Box::new(bud3_audit_latency_seconds.clone()))?;
+        registry.register(Box::new(bud3_custody_bytes.clone()))?;
 
         Ok(Metrics {
             registry: Arc::new(registry),
@@ -872,6 +1116,7 @@ impl Metrics {
             peer_connection_quality,
             consensus_round_seconds,
             finality_lag,
+            finality_stalled,
             storage_db_size_bytes,
             content_store_chunks,
             content_store_bytes,
@@ -884,7 +1129,7 @@ impl Metrics {
             settlement_frozen_domains,
             settlement_global_headers_sealed,
             settlement_equivocations_detected,
-            graft_transactions_total,
+            app_binding_transactions_total,
             contract_calls_total,
             restaked_validator_rows,
             proof_market_active_tasks,
@@ -949,6 +1194,22 @@ impl Metrics {
             tokenomics_team_locked,
             bns_names_registered,
             bns_name_rows,
+            bns_names_in_grace,
+            bns_open_offers,
+            bns_sales_total,
+            bns_sales_amount_total,
+            bns_renewals_total,
+            bns_transfers_total,
+            bns_offers_created_total,
+            bns_offers_cancelled_total,
+            bns_set_address_total,
+            bns_set_primary_name_total,
+            bns_set_records_total,
+            bns_set_content_total,
+            bns_set_bud3_content_total,
+            bns_register_subdomain_total,
+            bns_remove_subdomain_total,
+            bns_set_storage_total,
             nft_rows,
             vault_folder_rows,
             vault_membership_rows,
@@ -963,6 +1224,15 @@ impl Metrics {
             identity_revoked_rows,
             slashing_events_total,
             pq_verifier_disagreement,
+            finality_lag_checkpoints,
+            state_root_mismatch_total,
+            relay_reservations,
+            relay_inflight_reservations,
+            bud3_objects,
+            bud3_segments_at_risk,
+            bud3_repair_backlog,
+            bud3_audit_latency_seconds,
+            bud3_custody_bytes,
         })
     }
 
@@ -1026,6 +1296,7 @@ mod tests {
             "budlum_bridge_relayer_fee_ppm",
             "budlum_active_validators",
             "budlum_pending_finality_certificates",
+            "budlum_finality_stalled",
             "budlum_liveness_tracked_validators",
             "budlum_invalid_vote_tracked_validators",
             "budlum_poa_onboarding_audit_rows",
@@ -1073,6 +1344,22 @@ mod tests {
             "budlum_peer_connection_quality",
             "budlum_bns_names_registered",
             "budlum_bns_name_rows",
+            "budlum_bns_names_in_grace",
+            "budlum_bns_open_offers",
+            "budlum_bns_sales_total",
+            "budlum_bns_sales_amount_total",
+            "budlum_bns_renewals_total",
+            "budlum_bns_transfers_total",
+            "budlum_bns_offers_created_total",
+            "budlum_bns_offers_cancelled_total",
+            "budlum_bns_set_address_total",
+            "budlum_bns_set_primary_name_total",
+            "budlum_bns_set_records_total",
+            "budlum_bns_set_content_total",
+            "budlum_bns_set_bud3_content_total",
+            "budlum_bns_register_subdomain_total",
+            "budlum_bns_remove_subdomain_total",
+            "budlum_bns_set_storage_total",
             "budlum_nft_rows",
             "budlum_vault_folder_rows",
             "budlum_vault_membership_rows",
@@ -1103,6 +1390,7 @@ mod tests {
             "budlum_tokenomics_years_burned",
             "budlum_tokenomics_timed_burned_total",
             "budlum_tokenomics_team_locked",
+            "budlum_finality_stalled",
             "budlum_slashing_events_total",
             "budlum_pq_verifier_disagreement",
             "budlum_settlement_equivocations_detected",
@@ -1127,6 +1415,40 @@ mod tests {
             !scrape.contains("budlum_peer_count"),
             "deleted duplicate gauge must not reappear in scrapes"
         );
+    }
+
+    /// The readiness series are registered, exported, and start at their
+    /// honest zero.
+    ///
+    /// A console that renders a missing series as "no data" looks the same as
+    /// a quiet network, so the named readiness metrics are asserted to be in
+    /// the scrape body before anything writes them. `finality_stalled` is `0`
+    /// with nothing bound and `1` once the node is eight checkpoints behind;
+    /// the second half of that is `finality_gauges_follow_the_chain`, which
+    /// drives the real emit path.
+    #[test]
+    fn readiness_series_are_exported_before_they_are_written() {
+        let metrics = Metrics::new().expect("metric names are literals");
+        let scrape = metrics.encode();
+        for name in [
+            "budlum_finality_stalled",
+            "budlum_finality_lag_checkpoints",
+            "budlum_state_root_mismatch_total",
+            "budlum_relay_reservations",
+            "budlum_relay_inflight_reservations",
+            "budlum_bud3_objects",
+            "budlum_bud3_segments_at_risk",
+            "budlum_bud3_repair_backlog",
+            "budlum_bud3_audit_latency_seconds",
+            "budlum_bud3_custody_bytes",
+        ] {
+            assert!(
+                scrape.contains(name),
+                "readiness series {name} missing from the scrape"
+            );
+        }
+        assert_eq!(metrics.finality_stalled.get(), 0);
+        assert_eq!(metrics.state_root_mismatch_total.get(), 0);
     }
 
     /// A split verdict between the two ML-DSA libraries reaches the scrape.

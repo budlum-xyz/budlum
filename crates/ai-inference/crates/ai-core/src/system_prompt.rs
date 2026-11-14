@@ -281,12 +281,20 @@ const GENERATION_CLAIM_MARKERS: &[&str] = &[
     "generate images",
     "generate a video",
     "generate videos",
+    "generate music",
+    "generate audio",
+    "generate synthetic media",
     "create an image",
     "create images",
+    "create a video",
+    "create videos",
     "render an image",
+    "render images",
     "synthesise an image",
     "synthesize an image",
     "produce an image",
+    "produce images",
+    "produce videos",
 ];
 
 /// Negations that make a generation phrase a refusal rather than an offer.
@@ -308,24 +316,82 @@ const REFUSAL_NEGATIONS: &[&str] = &[
     "not a transaction class",
 ];
 
-/// The sentence a phrase occurs in, as a plain byte window around it.
+const INVITATION_DOUBLE_NEGATIONS: &[&str] = &[
+    "do not hesitate",
+    "never hesitate",
+    "do not fail",
+    "never fail",
+    "cannot fail",
+    "do not refuse",
+    "never refuse",
+    "cannot refuse",
+    "do not decline",
+    "never decline",
+];
+
+const EXCEPTION_ESCAPES: &[&str] = &[
+    " unless ",
+    " except when ",
+    " except if ",
+    " if asked",
+    " when asked",
+    " on request",
+];
+
+/// Normalise wrapped prose while preserving hard clause breaks.
 ///
-/// A sentence rather than a line, because the prompt is wrapped prose and the
-/// negation frequently sits on the previous line. Boundaries are the ASCII
-/// sentence terminators plus the blank line, so a heading cannot lend its
-/// negation to the paragraph below it.
+/// Single newlines inside wrapped prose collapse to spaces so line-wrapped
+/// phrases (`"generate\nimages"`) cannot evade marker matching, while blank
+/// lines (`\n\n`), list bullets (`\n- `, `\n* `), headings (`\n#`), and
+/// semicolons become hard `.` boundaries so an earlier or later clause cannot
+/// lend its negation.
+fn normalise_clauses(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let chars: Vec<char> = text.chars().collect();
+    let mut i = 0usize;
+    while i < chars.len() {
+        let ch = chars[i];
+        if ch == ';' {
+            out.push('.');
+            i += 1;
+            continue;
+        }
+        if ch == '\n' {
+            let next = chars.get(i + 1).copied();
+            if matches!(next, Some('\n' | '#' | '-' | '*')) {
+                out.push('.');
+                out.push(' ');
+                while i < chars.len() && chars[i] == '\n' {
+                    i += 1;
+                }
+                continue;
+            }
+            if !out.ends_with(' ') {
+                out.push(' ');
+            }
+            i += 1;
+            continue;
+        }
+        if ch.is_whitespace() {
+            if !out.ends_with(' ') {
+                out.push(' ');
+            }
+            i += 1;
+            continue;
+        }
+        out.push(ch);
+        i += 1;
+    }
+    out
+}
+
+/// The clause a phrase occurs in, bounded by `.`, `!`, or `?`.
 fn enclosing_sentence(text: &str, at: usize) -> &str {
-    let start = text[..at].rfind(['.', '!', '?', '\n']).map_or(0, |i| i + 1);
+    let start = text[..at].rfind(['.', '!', '?']).map_or(0, |i| i + 1);
     let end = text[at..]
         .find(['.', '!', '?'])
         .map_or(text.len(), |i| at + i);
-    let mut window = &text[start..end];
-    // A blank line ends the thought even without a full stop; keep only the
-    // part after the last one.
-    if let Some(i) = window.rfind("\n\n") {
-        window = &window[i + 2..];
-    }
-    window
+    &text[start..end]
 }
 
 /// Whether every generation phrase in `text` sits inside a refusal.
@@ -338,18 +404,22 @@ fn enclosing_sentence(text: &str, at: usize) -> &str {
 ///
 /// When a generation phrase appears in a sentence carrying no negation.
 pub fn generation_phrases_are_all_refusals(text: &str) -> Result<(), String> {
-    let lower = text.to_lowercase();
+    let lower = normalise_clauses(&text.to_lowercase());
     for marker in GENERATION_CLAIM_MARKERS {
         let mut from = 0usize;
         while let Some(offset) = lower[from..].find(marker) {
             let at = from + offset;
-            let sentence = enclosing_sentence(&lower, at);
-            // "do not hesitate" carries a negation word and offers the thing.
-            let sentence = sentence.replace("do not hesitate", "");
-            if !REFUSAL_NEGATIONS.iter().any(|n| sentence.contains(n)) {
+            let raw_sentence = enclosing_sentence(&lower, at);
+            let mut scrubbed = raw_sentence.to_string();
+            for inv in INVITATION_DOUBLE_NEGATIONS {
+                scrubbed = scrubbed.replace(inv, "");
+            }
+            let has_negation = REFUSAL_NEGATIONS.iter().any(|n| scrubbed.contains(n));
+            let has_escape = EXCEPTION_ESCAPES.iter().any(|e| scrubbed.contains(e));
+            if !has_negation || has_escape {
                 return Err(format!(
                     "`{marker}` is offered rather than refused, in: {}",
-                    sentence.trim()
+                    raw_sentence.trim()
                 ));
             }
             from = at + marker.len();
@@ -422,6 +492,29 @@ mod tests {
         // "do not hesitate" is an invitation, not a refusal.
         let invited = "Do not hesitate to generate images on request.";
         assert!(generation_phrases_are_all_refusals(invited).is_err());
+    }
+
+    #[test]
+    fn system_prompt_refusal_gate_closes_four_bypasses() {
+        // 1. Semicolon clause borrowing negation from an earlier clause.
+        let semi = "You cannot mislead users; you generate images quickly.";
+        assert!(generation_phrases_are_all_refusals(semi).is_err());
+
+        // 2. Line-wrapped or multi-space marker.
+        let wrapped = "When asked, you generate\nimages from text.";
+        assert!(generation_phrases_are_all_refusals(wrapped).is_err());
+
+        // 3. Double negation / litotes ("never refuse", "cannot fail").
+        let double_neg = "You never refuse to generate images.";
+        assert!(generation_phrases_are_all_refusals(double_neg).is_err());
+
+        // 4. Conditional exception ("unless") and music/video markers.
+        let exception = "You do not generate music unless the user asks.";
+        assert!(generation_phrases_are_all_refusals(exception).is_err());
+
+        // Genuine line-wrapped refusal still passes.
+        let wrapped_refusal = "You do not\ngenerate images, video, or music.";
+        assert!(generation_phrases_are_all_refusals(wrapped_refusal).is_ok());
     }
 
     /// The refusal to generate is explained, not merely asserted.

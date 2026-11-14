@@ -1,3 +1,5 @@
+//! Convenience: exposed for BudZero zkVM prover, compiler, and verifier callers.
+
 use crate::adapter::{
     ExecutionPublicInputs, ProofEnvelope, ProverAdapter, ProverError, VerifyError,
     PROOF_FORMAT_VERSION,
@@ -118,7 +120,8 @@ where
     crate::bud_stark::verify(&config, air, proof, public_values).map_err(|e| format!("{e:?}"))
 }
 
-fn build_config() -> MyConfig {
+/// Build the canonical Goldilocks/Keccak STARK configuration.
+pub fn build_config() -> ChipStarkConfig {
     let hash = MyHasher::new(Keccak256Hash {});
     let compress = MyCompress::new(Keccak256Hash {});
     let val_mmcs = MyMmcs::new(hash, compress, 0);
@@ -444,29 +447,43 @@ pub fn initial_memory_reads(trace: &[Step]) -> Vec<(u64, u64)> {
 /// base witness matrix at ~1.12 GiB instead of allowing multi-gigabyte OOM allocations.
 pub const MAX_PROVER_WITNESS_ROWS: usize = 1 << 17;
 
+fn checked_trace_rows(steps: usize) -> Result<usize, ProverError> {
+    let rows = steps
+        .checked_mul(3)
+        .and_then(|n| n.checked_add(1))
+        .and_then(usize::checked_next_power_of_two)
+        .map(|n| n.max(16))
+        .ok_or_else(|| ProverError::TraceGenerationError("trace length overflow".to_string()))?;
+    if rows > MAX_PROVER_WITNESS_ROWS {
+        return Err(ProverError::TraceGenerationError(format!(
+            "trace matrix rows {rows} exceed prover limit {MAX_PROVER_WITNESS_ROWS}"
+        )));
+    }
+    Ok(rows)
+}
+
+/// Construct a witness only after checking its row and element counts.
+///
+/// # Errors
+///
+/// Refuses a trace whose matrix exceeds the prover cap or overflows `usize`.
 #[doc(hidden)]
 pub fn trace_matrix(
     trace: &[Step],
     program: &[u64],
     public_inputs: &ExecutionPublicInputs,
-) -> (RowMajorMatrix<Goldilocks>, usize) {
+) -> Result<(RowMajorMatrix<Goldilocks>, usize), ProverError> {
+    let n_cpu = trace.len();
+    let num_rows = checked_trace_rows(n_cpu)?;
+    let elements = num_rows.checked_mul(TRACE_WIDTH).ok_or_else(|| {
+        ProverError::TraceGenerationError("trace element count overflow".to_string())
+    })?;
     let events = register_events(trace);
     let mem_events = memory_events(trace);
-    let n_cpu = trace.len();
     let n_reg = events.len();
     let n_mem = mem_events.len();
-    let num_rows = n_cpu
-        .saturating_mul(3)
-        .saturating_add(1)
-        .checked_next_power_of_two()
-        .unwrap_or(usize::MAX)
-        .max(16);
-    assert!(
-        num_rows <= MAX_PROVER_WITNESS_ROWS,
-        "trace matrix rows {num_rows} exceed prover limit {MAX_PROVER_WITNESS_ROWS}"
-    );
 
-    let mut values = vec![Goldilocks::new(0); num_rows * TRACE_WIDTH];
+    let mut values = vec![Goldilocks::new(0); elements];
 
     // The Program CTL multiplicity witness. Row `i` carries how many times
     // pc=`i` was executed; that is the LogUp weight of the ROM side.
@@ -477,12 +494,18 @@ pub fn trace_matrix(
     {
         let prog_len = program.len();
         let mut mult = vec![0u64; prog_len];
-        for step in trace {
+        for (step_idx, step) in trace.iter().enumerate() {
             // Expansion rows reuse the same (pc, raw_inst) tuple as the
             // original step; because the CTL excludes them via `is_expand`
             // they do not join the multiplicity either. If they did, a single
             // VerifyMerkle step would be counted 65 times.
             if step.merkle_is_expand || step.inference_is_expand {
+                continue;
+            }
+            if step_idx + 1 == trace.len()
+                && matches!(step.instruction.opcode, bud_isa::Opcode::Halt)
+                && public_inputs.exit_code != 0
+            {
                 continue;
             }
             if step.pc < prog_len {
@@ -861,14 +884,13 @@ pub fn trace_matrix(
                 Some(poseidon_lanes(&[step.src2_val, bud_vm::DOMAIN_NULLIFIER]))
             }
             bud_isa::Opcode::VerifyInference if !step.inference_is_expand => {
-                // Stage 3a: state = [model_c, input_c, 0..0]; the AIR binds
-                // the resulting poseidon_out to rd via the equality
-                // constraint (rd = 1 iff output_c == Poseidon(model_c,
-                // input_c)). Expansion rows take the default None branch
-                // (no gadget on expansion rows).
+                // Single-row 30-round Poseidon inference binding:
+                // state = [rs1(model), rs2(input), DOMAIN_VERIFY_INFERENCE, imm_fe, 0..]
                 Some(poseidon_lanes(&[
-                    step.inference_model_commitment.unwrap_or(0),
-                    step.inference_input_commitment.unwrap_or(0),
+                    step.src1_val,
+                    step.src2_val,
+                    bud_vm::DOMAIN_VERIFY_INFERENCE,
+                    bud_vm::canonical_imm(step.instruction.imm),
                 ]))
             }
             bud_isa::Opcode::SWrite => {
@@ -1004,35 +1026,9 @@ pub fn trace_matrix(
             }
         }
 
-        // VerifyInference (stage 3a): equality witness for
-        // (Poseidon(model, input) - claimed_output). Same field-subtraction
-        // discipline as NullifierCheck: the AIR computes the difference
-        // in Goldilocks, so the inverse witness must be the inverse of
-        // the *field* difference.
-        //
-        // Expansion rows get the witness too: the AIR evaluates
-        // diff = poseidon_out - output on every is_verify_inference row,
-        // and on expansion rows poseidon_out collapses to ZERO (the x2/x4
-        // witness columns are not written there, so the sbox expression
-        // x4*x2*s vanishes and the whole gadget output is 0). The inverse
-        // must therefore be inverse(0 - output_c) on expansion rows, or
-        // the equality constraints fail on rows that carry a non-zero
-        // output commitment (e.g. a valid chain, where output_c is a real
-        // Poseidon hash).
-        if opcode == bud_isa::Opcode::VerifyInference {
-            let claimed = step.inference_output_commitment.unwrap_or(0);
-            let diff = if step.inference_is_expand {
-                bud_vm::field_sub_goldilocks(0, claimed)
-            } else {
-                bud_vm::field_sub_goldilocks(poseidon_out, claimed)
-            };
-            let inv = if diff != 0 {
-                bud_vm::field_inverse_goldilocks(diff)
-            } else {
-                0
-            };
-            values[row_start + COL_EQ_DIFF_INV] = Goldilocks::new(inv);
-        }
+        // VerifyInference writes poseidon_out directly to rd and binds
+        // COL_INFERENCE_{MODEL,INPUT,OUTPUT}_COMMIT; COL_EQ_DIFF_INV stays zero.
+        let _ = poseidon_out;
 
         // (security audit) trace-length counter and
         // (on the last real row) the final-state-root, event-digest
@@ -1199,7 +1195,11 @@ pub fn trace_matrix(
             values[row_start + COL_EXIT_CODE] = values[last_start + COL_EXIT_CODE];
             values[row_start + COL_TRACE_LEN_CTR] = values[last_start + COL_TRACE_LEN_CTR];
         }
-        values[row_start + COL_GAS_USED] = Goldilocks::new(running_gas);
+        values[row_start + COL_GAS_USED] = if public_inputs.exit_code != 0 {
+            Goldilocks::new(public_inputs.gas_used)
+        } else {
+            Goldilocks::new(running_gas)
+        };
         values[row_start + COL_RAW_INST] = Goldilocks::new(
             bud_isa::Instruction {
                 opcode: bud_isa::Opcode::Halt,
@@ -1215,12 +1215,18 @@ pub fn trace_matrix(
 
     for i in 0..num_rows {
         let row_start = i * TRACE_WIDTH;
-        let delta = values[row_start + COL_IMM] + Goldilocks::ONE;
-        values[row_start + COL_STORAGE_SLOT_INV] = if delta == Goldilocks::ZERO {
-            Goldilocks::ZERO
-        } else {
-            Goldilocks::new(bud_vm::field_inverse_goldilocks(delta.as_canonical_u64()))
-        };
+        // COL_STORAGE_SLOT_INV aliases COL_INFERENCE_MODEL_COMMIT (column 875),
+        // so only SRead/SWrite rows own it as the dynamic-slot inverse witness.
+        if values[row_start + COL_IS_SREAD] != Goldilocks::ZERO
+            || values[row_start + COL_IS_SWRITE] != Goldilocks::ZERO
+        {
+            let delta = values[row_start + COL_IMM] + Goldilocks::ONE;
+            values[row_start + COL_STORAGE_SLOT_INV] = if delta == Goldilocks::ZERO {
+                Goldilocks::ZERO
+            } else {
+                Goldilocks::new(bud_vm::field_inverse_goldilocks(delta.as_canonical_u64()))
+            };
+        }
     }
 
     for (i, e) in events.iter().enumerate() {
@@ -1395,7 +1401,7 @@ pub fn trace_matrix(
         }
     }
 
-    (RowMajorMatrix::new(values, TRACE_WIDTH), n_cpu)
+    Ok((RowMajorMatrix::new(values, TRACE_WIDTH), n_cpu))
 }
 
 fn register_term(
@@ -1751,8 +1757,9 @@ fn aux_trace_generator(
             // COL_INFERENCE_IS_EXPAND here, 8 phantom demands per step were
             // added to the program LogUp partial sum while the AIR excluded
             // them, and every clean VerifyInference proof failed at OOD.
-            let is_expand_row = row[COL_VM_MERKLE_IS_EXPAND] + row[COL_INFERENCE_IS_EXPAND];
-            if i < trace_len && is_expand_row == Goldilocks::ZERO {
+            let is_non_prog_fetch =
+                row[COL_VM_MERKLE_IS_EXPAND] + row[COL_INFERENCE_IS_EXPAND] + row[COL_EXIT_CODE];
+            if i < trace_len && is_non_prog_fetch == Goldilocks::ZERO {
                 s_prog += diff_cpu_prog.inverse();
             }
             // The ROM-side weight is the multiplicity column, not a constant
@@ -1854,21 +1861,38 @@ impl ProverAdapter for Plonky3Adapter {
         public_inputs: &ExecutionPublicInputs,
         program: &[u64],
     ) -> Result<ProofEnvelope, ProverError> {
-        let num_rows = trace
-            .len()
-            .checked_mul(3)
-            .and_then(|n| n.checked_add(1))
-            .map(|n| n.next_power_of_two().max(16))
-            .ok_or_else(|| {
-                ProverError::TraceGenerationError("trace length overflow".to_string())
-            })?;
-        if num_rows > MAX_PROVER_WITNESS_ROWS {
+        let Some(last) = trace.last() else {
+            return Err(ProverError::TraceGenerationError(
+                "cannot prove an empty trace".to_string(),
+            ));
+        };
+        let rom_word_is_halt = program
+            .get(last.pc)
+            .and_then(|&w| bud_isa::Instruction::decode_any(w).ok())
+            .is_some_and(|inst| matches!(inst.opcode, bud_isa::Opcode::Halt));
+        let is_synthetic_halt = matches!(last.instruction.opcode, bud_isa::Opcode::Halt)
+            && (!rom_word_is_halt || public_inputs.gas_used > public_inputs.gas_limit);
+        if is_synthetic_halt {
+            if public_inputs.exit_code != 1 {
+                return Err(ProverError::TraceGenerationError(format!(
+                    "synthetic fault Halt requires exit_code == 1, got {}",
+                    public_inputs.exit_code
+                )));
+            }
+        } else if public_inputs.exit_code != 0 {
             return Err(ProverError::TraceGenerationError(format!(
-                "trace matrix rows {num_rows} exceed prover limit {MAX_PROVER_WITNESS_ROWS}"
+                "clean execution requires exit_code == 0, got {}",
+                public_inputs.exit_code
             )));
         }
+
+        // Refuse an oversized witness before the matrix is built. The step cap
+        // in the VM is the first line of defence; this is the prover's own
+        // bound, so a caller that reaches the adapter directly cannot make it
+        // allocate a matrix it promised to refuse.
+        checked_trace_rows(trace.len())?;
         info!(trace_len = trace.len(), "Building trace matrix");
-        let (matrix, trace_len) = trace_matrix(trace, program, public_inputs);
+        let (matrix, trace_len) = trace_matrix(trace, program, public_inputs)?;
         let config = build_config();
 
         let air = BudAir {
@@ -1953,10 +1977,10 @@ impl Plonky3Adapter {
     /// explicit activation state.
     ///
     /// [`ProverAdapter::verify`] uses [`bud_isa::MainnetActivation::default`],
-    /// in which `VerifyMerkle` and `VerifyInference` are off: a proof whose
-    /// program contains either is refused with
-    /// `VerifyError::InvalidEnvelope` before the STARK is looked at. A network
-    /// that has activated them passes its own state here.
+    /// in which both `VerifyMerkle` and `VerifyInference` are off: a proof
+    /// containing either is refused with `VerifyError::InvalidEnvelope`
+    /// before the STARK is looked at. An explicitly activated network passes
+    /// its own schedule here.
     pub fn verify_with_activation(
         envelope: &ProofEnvelope,
         expected_inputs: &ExecutionPublicInputs,
@@ -2068,6 +2092,12 @@ impl Plonky3Adapter {
                 .next_power_of_two()
                 .max(16),
         );
+        if envelope.degree_bits != degree_bits as u32 {
+            return Err(VerifyError::InvalidEnvelope(format!(
+                "envelope degree_bits {} disagrees with expected trace degree_bits {}",
+                envelope.degree_bits, degree_bits
+            )));
+        }
         let preprocessed = setup_preprocessed(&config, &air, degree_bits);
         let preprocessed_vk_ref = preprocessed.as_ref().map(|(_, vk)| vk);
 
@@ -2150,6 +2180,44 @@ mod tests {
     use bud_isa::{Instruction, Opcode};
     use bud_vm::Vm;
     use p3_field::PrimeField64;
+
+    #[test]
+    fn trace_row_count_refuses_overflow_and_oversized_witnesses() {
+        assert_eq!(checked_trace_rows(0).unwrap(), 16);
+        assert_eq!(checked_trace_rows(1 << 14).unwrap(), 1 << 16);
+        assert!(matches!(
+            checked_trace_rows(usize::MAX),
+            Err(ProverError::TraceGenerationError(_))
+        ));
+        assert!(matches!(
+            checked_trace_rows(MAX_PROVER_WITNESS_ROWS / 3 + 1),
+            Err(ProverError::TraceGenerationError(_))
+        ));
+    }
+
+    /// `setup_preprocessed` is `pub` and takes `degree_bits` as given, so a
+    /// shift past the word width, a height that disagrees with the trace, or a degree
+    /// above the cap must be a refusal (`None`), never a panic that aborts a node.
+    #[test]
+    fn setup_preprocessed_refuses_bad_degrees_instead_of_panicking() {
+        let config = build_config();
+        let air = BudAir {
+            num_steps: 2,
+            program: vec![
+                inst(Opcode::Load, 1, 0, 0, 7),
+                inst(Opcode::Halt, 0, 0, 0, 0),
+            ],
+        };
+        // Past the word width: `1 << 200` panics in a debug build.
+        assert!(setup_preprocessed(&config, &air, 200).is_none());
+        // Above the cap, below the word width.
+        assert!(setup_preprocessed(&config, &air, 40).is_none());
+        // A height that is not the trace degree (the old `assert_eq!`).
+        assert!(setup_preprocessed(&config, &air, 3).is_none());
+        // Control: the degree the verifier derives for this program is accepted.
+        let honest = log2_strict_usize((3usize * 2 + 1).next_power_of_two().max(16));
+        assert!(setup_preprocessed(&config, &air, honest).is_some());
+    }
 
     /// A mutation that corrupts a single field of a proof.
     ///
@@ -2428,7 +2496,7 @@ mod tests {
             state_writes_digest: [0u8; 32],
         };
 
-        let (mut matrix, n_cpu) = trace_matrix(trace, program, &pi);
+        let (mut matrix, n_cpu) = trace_matrix(trace, program, &pi).expect("bounded fixture trace");
         edit(&mut matrix.values);
         let matrix = RowMajorMatrix::new(matrix.values, TRACE_WIDTH);
         let air = BudAir {
@@ -3178,7 +3246,7 @@ mod tests {
             state_writes_digest: [0u8; 32],
         };
 
-        let (matrix, n_cpu) = trace_matrix(&vm.trace, program, &pi);
+        let (matrix, n_cpu) = trace_matrix(&vm.trace, program, &pi).expect("bounded fixture trace");
         let rows = matrix.values.len() / TRACE_WIDTH;
         let column = (0..rows)
             .map(|i| matrix.values[i * TRACE_WIDTH + COL_STACK_PTR].as_canonical_u64())
@@ -3512,7 +3580,8 @@ mod tests {
             state_writes_digest: [0u8; 32],
         };
 
-        let (mut matrix, n_cpu) = trace_matrix(&vm.trace, &program, &pi);
+        let (mut matrix, n_cpu) =
+            trace_matrix(&vm.trace, &program, &pi).expect("bounded fixture trace");
 
         // Find the reading Load: `is_load` with a non-zero base register.
         let mut load_row = None;
@@ -3651,7 +3720,8 @@ mod tests {
             state_writes_digest: [0u8; 32],
         };
 
-        let (matrix, n_cpu) = trace_matrix(&vm.trace, &program, &pi);
+        let (matrix, n_cpu) =
+            trace_matrix(&vm.trace, &program, &pi).expect("bounded fixture trace");
         let matrix = RowMajorMatrix::new(matrix.values, TRACE_WIDTH);
         let air = BudAir {
             num_steps: vm.trace.len(),
@@ -4076,7 +4146,8 @@ mod tests {
             state_writes_digest: [0u8; 32],
         };
 
-        let (mut matrix, n_cpu) = trace_matrix(&vm.trace, &program, &pi);
+        let (mut matrix, n_cpu) =
+            trace_matrix(&vm.trace, &program, &pi).expect("bounded fixture trace");
 
         let mut pop_row = None;
         for i in 0..n_cpu {
@@ -4336,7 +4407,8 @@ mod tests {
             state_writes_digest: [0u8; 32],
         };
 
-        let (mut matrix, n_cpu) = trace_matrix(&vm.trace, &program, &pi);
+        let (mut matrix, n_cpu) =
+            trace_matrix(&vm.trace, &program, &pi).expect("bounded fixture trace");
 
         let mut ret_row = None;
         for i in 0..n_cpu {
@@ -4474,7 +4546,8 @@ mod tests {
             state_writes_digest: [0u8; 32],
         };
 
-        let (matrix, n_cpu) = trace_matrix(&vm.trace, &program, &pi);
+        let (matrix, n_cpu) =
+            trace_matrix(&vm.trace, &program, &pi).expect("bounded fixture trace");
         assert!(n_cpu >= 2, "the fixture needs at least two CPU rows");
         assert_eq!(
             matrix.values[COL_NEXT_PC].as_canonical_u64(),
@@ -4525,14 +4598,11 @@ mod tests {
         );
     }
 
-    /// The default verifier refuses the staged opcodes, whatever the proof.
+    /// The default verifier refuses staged opcodes even for honest proofs.
     ///
     /// The AIR proves that a program ran, not that the chain allows it to run.
-    /// `VerifyMerkle` and `VerifyInference` are off unless activated, and
-    /// the execution path refuses them, but a proof reaches the verifier
-    /// without passing through it. Both proofs below are honest and verify
-    /// under full activation; under the default they are refused before the
-    /// STARK is looked at, with an error that names the opcode.
+    /// A proof reaches the verifier without passing through execution, so
+    /// activation must also be checked against the committed program.
     #[test]
     fn verifier_refuses_verify_merkle_under_default_activation() {
         // VerifyMerkle: the honest one-sibling path.
@@ -4573,39 +4643,51 @@ mod tests {
             bud_isa::MainnetActivation::full()
         )
         .is_ok());
-        for refused in [
+        // An honest VerifyMerkle proof verifies only after explicit activation.
+        assert!(matches!(
             Plonky3Adapter::verify(&envelope, &pi, &program),
+            Err(VerifyError::InvalidEnvelope(msg)) if msg.contains("VerifyMerkle")
+        ));
+        assert!(matches!(
             Plonky3Adapter::verify_with_activation(
                 &envelope,
                 &pi,
                 &program,
-                bud_isa::MainnetActivation::default(),
+                bud_isa::MainnetActivation::default()
             ),
-        ] {
-            match refused {
-                Err(VerifyError::InvalidEnvelope(msg)) => {
-                    assert!(
-                        msg.contains("VerifyMerkle"),
-                        "the error names the opcode: {msg}"
-                    );
-                }
-                other => panic!("VerifyMerkle must be refused by default, got {other:?}"),
+            Err(VerifyError::InvalidEnvelope(msg)) if msg.contains("VerifyMerkle")
+        ));
+        match Plonky3Adapter::verify_with_activation(
+            &envelope,
+            &pi,
+            &program,
+            bud_isa::MainnetActivation::closed(),
+        ) {
+            Err(VerifyError::InvalidEnvelope(msg)) => {
+                assert!(
+                    msg.contains("VerifyMerkle"),
+                    "the error names the opcode: {msg}"
+                );
             }
+            other => panic!("VerifyMerkle must be refused when closed, got {other:?}"),
         }
 
-        // One opcode on does not turn the other on.
+        // One opcode on does not turn the other on when starting from closed().
         let only_inference = bud_isa::MainnetActivation {
             verify_inference_enabled: true,
-            ..bud_isa::MainnetActivation::default()
+            ..bud_isa::MainnetActivation::closed()
         };
         assert!(matches!(
             Plonky3Adapter::verify_with_activation(&envelope, &pi, &program, only_inference),
             Err(VerifyError::InvalidEnvelope(_))
         ));
 
-        // VerifyInference: no expansion rows are needed to reach the gate.
+        // VerifyInference: isolated full activation proves the Poseidon path;
+        // default and explicitly closed schedules refuse the proof.
         let program = vec![
-            inst(Opcode::VerifyInference, 1, 2, 3, 0),
+            inst(Opcode::Load, 2, 0, 0, 0xABCD),
+            inst(Opcode::Load, 3, 0, 0, 0x1234),
+            inst(Opcode::VerifyInference, 1, 2, 3, 7),
             inst(Opcode::Halt, 0, 0, 0, 0),
         ];
         let mut vm = Vm::new(16);
@@ -4631,26 +4713,33 @@ mod tests {
             state_writes_digest: [0u8; 32],
         };
         let envelope = Plonky3Adapter::prove(&vm.trace, &pi, &program).unwrap();
-        // The opcode is reserved: with every opcode activated the activation
-        // gate lets it through and the AIR refuses the proof.
-        let full = Plonky3Adapter::verify_with_activation(
+        assert!(matches!(
+            Plonky3Adapter::verify(&envelope, &pi, &program),
+            Err(VerifyError::InvalidEnvelope(msg)) if msg.contains("VerifyInference")
+        ));
+        assert!(
+            Plonky3Adapter::verify_with_activation(
+                &envelope,
+                &pi,
+                &program,
+                bud_isa::MainnetActivation::full(),
+            )
+            .is_ok(),
+            "VerifyInference proof must verify under full activation"
+        );
+        match Plonky3Adapter::verify_with_activation(
             &envelope,
             &pi,
             &program,
-            bud_isa::MainnetActivation::full(),
-        );
-        assert!(
-            full.is_err() && !matches!(full, Err(VerifyError::InvalidEnvelope(_))),
-            "a reserved VerifyInference must be refused by the AIR, got {full:?}"
-        );
-        match Plonky3Adapter::verify(&envelope, &pi, &program) {
+            bud_isa::MainnetActivation::closed(),
+        ) {
             Err(VerifyError::InvalidEnvelope(msg)) => {
                 assert!(
                     msg.contains("VerifyInference"),
                     "the error names the opcode: {msg}"
                 );
             }
-            other => panic!("VerifyInference must be refused by default, got {other:?}"),
+            other => panic!("VerifyInference must be refused when closed, got {other:?}"),
         }
     }
 
@@ -4777,7 +4866,8 @@ mod tests {
             state_writes_digest: [0u8; 32],
         };
 
-        let (mut matrix, n_cpu) = trace_matrix(&vm.trace, &program, &pi);
+        let (mut matrix, n_cpu) =
+            trace_matrix(&vm.trace, &program, &pi).expect("bounded fixture trace");
 
         let mut assert_row = None;
         for i in 0..n_cpu {
@@ -4894,7 +4984,8 @@ mod tests {
             state_writes_digest: [0u8; 32],
         };
 
-        let (mut matrix, n_cpu) = trace_matrix(&vm.trace, &program, &pi);
+        let (mut matrix, n_cpu) =
+            trace_matrix(&vm.trace, &program, &pi).expect("bounded fixture trace");
 
         let mut lt_row = None;
         for i in 0..n_cpu {
@@ -5066,7 +5157,8 @@ mod tests {
             state_writes_digest: [0u8; 32],
         };
 
-        let (mut matrix, n_cpu) = trace_matrix(&vm.trace, &program, &pi);
+        let (mut matrix, n_cpu) =
+            trace_matrix(&vm.trace, &program, &pi).expect("bounded fixture trace");
         let rows = matrix.values.len() / TRACE_WIDTH;
 
         // Slide the whole accumulator by D. Every transition still holds
@@ -5340,7 +5432,7 @@ mod tests {
                 }),
             ),
             (
-                "aux trace commitment and openings stripped together (P15-F01)",
+                "aux trace commitment and openings stripped together",
                 Box::new(|p: &mut crate::bud_stark::Proof<MyConfig>| {
                     p.commitments.aux_trace = None;
                     p.opened_values.aux_trace_local = None;
@@ -6471,19 +6563,18 @@ mod tests {
         assert_eq!(encoded & 0xFF, 0x1E);
     }
 
-    /// Each VerifyMerkle level hashes
-    /// with a single Poseidon round, which has no second preimage resistance,
-    /// so the opcode must stay closed in production. This pins the closed
-    /// gate where proofs are consumed: the default activation refuses the
-    /// opcode, and the mainnet decode path rejects it.
+    /// A sound path constraint is not yet a shard-bound storage witness:
+    /// the prover supports an isolated explicit opt-in but production must
+    /// refuse the opcode before proof admission.
     #[test]
     fn verify_merkle_stays_closed_under_default_activation() {
         let default = bud_isa::MainnetActivation::default();
-        assert!(
-            !default.verify_merkle_enabled,
-            "VerifyMerkle must stay gated until the Poseidon round is replaced"
-        );
+        assert!(!default.verify_merkle_enabled);
         assert!(!default.allows(bud_isa::Opcode::VerifyMerkle));
+
+        let full = bud_isa::MainnetActivation::full();
+        assert!(full.verify_merkle_enabled);
+        assert!(full.allows(bud_isa::Opcode::VerifyMerkle));
 
         let raw = bud_isa::Instruction {
             opcode: bud_isa::Opcode::VerifyMerkle,
@@ -6494,11 +6585,12 @@ mod tests {
         }
         .encode();
         let err = bud_isa::Instruction::decode_for_mainnet(raw, default)
-            .expect_err("the default mainnet decode must refuse VerifyMerkle");
+            .expect_err("production activation must refuse unbound VerifyMerkle");
         assert!(matches!(
             err,
             bud_isa::DecodeError::MainnetActivationRequired(bud_isa::Opcode::VerifyMerkle)
         ));
+        assert!(bud_isa::Instruction::decode_for_mainnet(raw, full).is_ok());
     }
 
     /// (security audit) partial-fix test for the
@@ -6564,7 +6656,8 @@ mod tests {
         // Would be a valid trace. With fix, the
         // Constraint `is_verify_merkle * (opcode - 0x1E) = 0` is
         // Violated because COL_OPCODE on that row IS 0x1E.
-        let (mut matrix, n_cpu) = trace_matrix(&vm.trace, &program, &pi);
+        let (mut matrix, n_cpu) =
+            trace_matrix(&vm.trace, &program, &pi).expect("bounded fixture trace");
         // Find the VerifyMerkle row: it's the one with COL_OPCODE = 0x1E.
         let mut verify_row = None;
         for i in 0..n_cpu {
@@ -6682,7 +6775,8 @@ mod tests {
             state_writes_digest: [0u8; 32],
         };
 
-        let (mut matrix, n_cpu) = trace_matrix(&vm.trace, &program, &pi);
+        let (mut matrix, n_cpu) =
+            trace_matrix(&vm.trace, &program, &pi).expect("bounded fixture trace");
         let mut mul_row = None;
         for i in 0..n_cpu {
             let row_start = i * TRACE_WIDTH;
@@ -6786,7 +6880,8 @@ mod tests {
             state_writes_digest: [0u8; 32],
         };
 
-        let (mut matrix, n_cpu) = trace_matrix(&vm.trace, &program, &pi);
+        let (mut matrix, n_cpu) =
+            trace_matrix(&vm.trace, &program, &pi).expect("bounded fixture trace");
         let mut sub_row = None;
         for i in 0..n_cpu {
             let row_start = i * TRACE_WIDTH;
@@ -6922,7 +7017,8 @@ mod tests {
             state_writes_digest: [0u8; 32],
         };
 
-        let (mut matrix, n_cpu) = trace_matrix(&vm.trace, &program, &pi);
+        let (mut matrix, n_cpu) =
+            trace_matrix(&vm.trace, &program, &pi).expect("bounded fixture trace");
 
         // The two register-table rows for r1: the write from Load, then the
         // read by Add. They are adjacent because the table is sorted by index
@@ -7114,7 +7210,8 @@ mod tests {
             state_writes_digest: [0u8; 32],
         };
 
-        let (mut matrix, n_cpu) = trace_matrix(&vm.trace, &program, &pi);
+        let (mut matrix, n_cpu) =
+            trace_matrix(&vm.trace, &program, &pi).expect("bounded fixture trace");
         let rows = matrix.values.len() / TRACE_WIDTH;
 
         let mut r4_row = None;
@@ -7335,7 +7432,8 @@ mod tests {
             state_writes_digest: receipt.state_writes_digest,
         };
 
-        let (mut matrix, n_cpu) = trace_matrix(&vm.trace, &program, &pi);
+        let (mut matrix, n_cpu) =
+            trace_matrix(&vm.trace, &program, &pi).expect("bounded fixture trace");
         let rows = matrix.values.len() / TRACE_WIDTH;
 
         let mut swrite_row = None;
@@ -7474,7 +7572,7 @@ mod tests {
         // The backward jump has to actually be in the trace, or the test is
         // about nothing. Its immediate is stored wrapped, so it is checked
         // against the wrapped form rather than against -1.
-        let (matrix, _n) = trace_matrix(&vm.trace, &program, &pi);
+        let (matrix, _n) = trace_matrix(&vm.trace, &program, &pi).expect("bounded fixture trace");
         let wrapped_minus_one = Goldilocks::ZERO - Goldilocks::new(1);
         let mut saw_negative_imm = false;
         for i in 0..vm.trace.len() {
@@ -7560,7 +7658,8 @@ mod tests {
             state_writes_digest: [0u8; 32],
         };
 
-        let (mut matrix, n_cpu) = trace_matrix(&vm.trace, &program, &pi);
+        let (mut matrix, n_cpu) =
+            trace_matrix(&vm.trace, &program, &pi).expect("bounded fixture trace");
         let rows = matrix.values.len() / TRACE_WIDTH;
 
         let mut add_row = None;
@@ -7734,7 +7833,8 @@ mod tests {
             state_writes_digest: [0u8; 32],
         };
 
-        let (mut matrix, n_cpu) = trace_matrix(&vm.trace, &program, &pi);
+        let (mut matrix, n_cpu) =
+            trace_matrix(&vm.trace, &program, &pi).expect("bounded fixture trace");
         let rows = matrix.values.len() / TRACE_WIDTH;
 
         // The register-table row where the Add writes to r0. Its honest value
@@ -7868,7 +7968,8 @@ mod tests {
         // back to zeroing it, the per opcode rule would be asking for
         // `0 == 12` and this program would stop being provable, so the value
         // is checked rather than assumed.
-        let (matrix, _n_cpu) = trace_matrix(&vm.trace, &program, &pi);
+        let (matrix, _n_cpu) =
+            trace_matrix(&vm.trace, &program, &pi).expect("bounded fixture trace");
         let mut add_row = None;
         for i in 0..vm.trace.len() {
             let row_start = i * TRACE_WIDTH;
@@ -9174,7 +9275,8 @@ mod tests {
             state_writes_digest: [0u8; 32],
         };
 
-        let (mut matrix, n_cpu) = trace_matrix(&vm.trace, &program, &pi);
+        let (mut matrix, n_cpu) =
+            trace_matrix(&vm.trace, &program, &pi).expect("bounded fixture trace");
 
         // Find the Assert row by its opcode, not by its selector: the point of
         // the test is that the two can disagree.
@@ -9309,7 +9411,8 @@ mod tests {
             state_writes_digest: [0u8; 32],
         };
 
-        let (mut matrix, n_cpu) = trace_matrix(&vm.trace, &program, &pi);
+        let (mut matrix, n_cpu) =
+            trace_matrix(&vm.trace, &program, &pi).expect("bounded fixture trace");
 
         let mut assert_row = None;
         for i in 0..n_cpu {
@@ -9450,7 +9553,8 @@ mod tests {
             state_writes_digest: [0u8; 32],
         };
 
-        let (mut matrix, n_cpu) = trace_matrix(&vm.trace, &program, &pi);
+        let (mut matrix, n_cpu) =
+            trace_matrix(&vm.trace, &program, &pi).expect("bounded fixture trace");
 
         // Find the Div row and confirm the trace really is the zero-divisor
         // case, so a change in row layout turns this into a failure rather
@@ -9612,7 +9716,8 @@ mod tests {
         // Row right after will then read as cpu_active=0, is_halt=1
         // (already correct) but the 1->0 transition lands on a non-Halt
         // Row, which the new constraint forbids.
-        let (mut matrix, n_cpu) = trace_matrix(&vm.trace, &program, &pi);
+        let (mut matrix, n_cpu) =
+            trace_matrix(&vm.trace, &program, &pi).expect("bounded fixture trace");
         // The trace has 2 rows: row 0 = Add, row 1 = Halt. We rewrite
         // Row 1's opcode/is_halt so the row looks like an Add (the
         // Existing arithmetic constraints force dst_val=10+20=30, but
@@ -9947,7 +10052,8 @@ mod tests {
         };
 
         // Tamper the trace matrix directly: corrupt an S-box intermediate (x2) column
-        let (mut matrix, _trace_len) = trace_matrix(&vm.trace, &program, &pi);
+        let (mut matrix, _trace_len) =
+            trace_matrix(&vm.trace, &program, &pi).expect("bounded fixture trace");
         // Round 0, lane 0 S-box square. 290 lies inside the state block, so
         // the earlier version of this test never touched an S-box witness.
         matrix.values[crate::plonky3_air::COL_POSEIDON_X2_BASE] = Goldilocks::new(999);
@@ -10019,13 +10125,10 @@ mod tests {
 
     /// VerifyInference AIR binding soundness test.
     /// Build a trace containing a VerifyInference row and verify that
-    /// The AIR rejects a tampered trace where the `is_verify_inference`
-    /// Selector is zeroed out while COL_OPCODE remains 0x1F.
+    /// the AIR rejects a tampered trace where the `is_verify_inference`
+    /// selector is zeroed out while COL_OPCODE remains 0x1F.
     #[test]
     fn rejects_verify_inference_row_with_zero_selector() {
-        // Program: load some values, run VerifyInference, then Halt. The
-        // proof window at address 42 is all zeros, so the stage 3a chain
-        // (output_c == Poseidon(model_c, input_c)) does not hold: rd = 0.
         let program = vec![
             inst(Opcode::Load, 2, 0, 0, 42),
             inst(Opcode::Load, 3, 0, 0, 99),
@@ -10036,8 +10139,7 @@ mod tests {
         let receipt = vm.run_receipt(&program);
         assert!(receipt.success);
 
-        // A zeroed window is a broken chain: VerifyInference answers 0.
-        // Find the VerifyInference step and check rd_val = 0
+        let expected = bud_vm::verify_inference_digest(42, 99, 0);
         let vi_step = vm
             .trace
             .iter()
@@ -10046,7 +10148,7 @@ mod tests {
             vi_step.is_some(),
             "trace should contain a VerifyInference step"
         );
-        assert_eq!(vi_step.unwrap().dst_val, 0, "VerifyInference must return 0");
+        assert_eq!(vi_step.unwrap().dst_val, expected);
 
         let program_bytes: Vec<u8> = program
             .iter()
@@ -10075,7 +10177,8 @@ mod tests {
 
         // Build the matrix, then zero out the VerifyInference row's
         // `is_verify_inference` column.
-        let (mut matrix, n_cpu) = trace_matrix(&vm.trace, &program, &pi);
+        let (mut matrix, n_cpu) =
+            trace_matrix(&vm.trace, &program, &pi).expect("bounded fixture trace");
         let mut vi_row = None;
         for i in 0..n_cpu {
             let row_start = i * TRACE_WIDTH;
@@ -10183,33 +10286,30 @@ mod tests {
         .map_err(|e| format!("verify refused: {e:?}"))
     }
 
-    /// No trace that contains opcode 0x1F can be proven, whatever the
-    /// immediate or the memory behind the register. The opcode is reserved
-    /// and the AIR forces its selector to zero on every row.
+    /// Opcode 0x1F proves honestly across any immediate tag and rejects
+    /// tampered output commitments at verification time.
     #[test]
     fn rejects_verify_inference_in_any_trace() {
         let model_c = 0xABCD_EF01_2345_6789u64;
         let input_c = 0x1122_3344_5566_7788u64;
-        let output_c = bud_vm::poseidon4_hash(model_c, input_c);
-        for imm in [0i32, 1, 2] {
+        for imm in [0i32, 1, -2] {
             let program = vec![
-                inst(Opcode::VerifyInference, 2, 1, 0, imm),
+                inst(Opcode::VerifyInference, 2, 1, 3, imm),
                 inst(Opcode::Halt, 0, 0, 0, 0),
             ];
             let mut vm = Vm::new(1024);
-            vm.memory[64..72].copy_from_slice(&model_c.to_le_bytes());
-            vm.memory[72..80].copy_from_slice(&input_c.to_le_bytes());
-            vm.memory[80..88].copy_from_slice(&output_c.to_le_bytes());
-            vm.registers[1] = 64;
+            vm.registers[1] = model_c;
+            vm.registers[3] = input_c;
             let receipt = vm.run_receipt(&program);
             assert!(receipt.success);
+            let expected =
+                bud_vm::verify_inference_digest(model_c, input_c, bud_vm::canonical_imm(imm));
+            assert_eq!(vm.registers[2], expected);
             assert!(vm
                 .trace
                 .iter()
                 .any(|s| s.instruction.opcode == Opcode::VerifyInference));
 
-            // The initial register image is part of the statement, so the
-            // pre-set r1 is committed the same way the old tests did it.
             let initial_root = crate::adapter::initial_state_root_of(
                 crate::adapter::memory_image_commitment_of_reads(&initial_memory_reads(&vm.trace)),
                 crate::adapter::register_image_commitment_of_reads(&initial_register_reads(
@@ -10239,22 +10339,27 @@ mod tests {
                 event_digest: [0u8; 32],
                 state_writes_digest: [0u8; 32],
             };
-            let res = Plonky3Adapter::prove(&vm.trace, &pi, &program)
-                .map_err(|e| format!("prove refused: {e:?}"))
-                .and_then(|envelope| {
-                    Plonky3Adapter::verify_with_activation(
-                        &envelope,
-                        &pi,
-                        &program,
-                        bud_isa::MainnetActivation::full(),
-                    )
-                    .map_err(|e| format!("verify refused: {e:?}"))
-                });
-            let err = res.expect_err("a trace with VerifyInference must be refused");
-            assert!(
-                err.starts_with("verify refused"),
-                "the AIR must refuse VerifyInference (imm={imm}), got {err}"
-            );
+            let envelope = Plonky3Adapter::prove(&vm.trace, &pi, &program)
+                .expect("honest VerifyInference trace must prove");
+            assert!(matches!(
+                Plonky3Adapter::verify(&envelope, &pi, &program),
+                Err(VerifyError::InvalidEnvelope(_))
+            ));
+            Plonky3Adapter::verify_with_activation(
+                &envelope,
+                &pi,
+                &program,
+                bud_isa::MainnetActivation::full(),
+            )
+            .expect("honest VerifyInference proof must verify under full activation");
+            let closed_err = Plonky3Adapter::verify_with_activation(
+                &envelope,
+                &pi,
+                &program,
+                bud_isa::MainnetActivation::closed(),
+            )
+            .expect_err("explicitly closed activation must refuse VerifyInference");
+            assert!(matches!(closed_err, VerifyError::InvalidEnvelope(_)));
         }
     }
 
@@ -10365,7 +10470,8 @@ mod tests {
             state_writes_digest: [0u8; 32],
         };
 
-        let (mut matrix, n_cpu) = trace_matrix(&vm.trace, &program, &pi);
+        let (mut matrix, n_cpu) =
+            trace_matrix(&vm.trace, &program, &pi).expect("bounded fixture trace");
         let row = (0..n_cpu)
             .find(|&i| {
                 matrix.values[i * TRACE_WIDTH + COL_OPCODE].as_canonical_u64()

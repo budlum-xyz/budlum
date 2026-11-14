@@ -71,6 +71,13 @@ fn execution_path_verifies_the_stark_for_proof_required_models() {
         // The envelope and the proof struct are two claims about one run:
         // disagreeing `gas_used` means they describe different executions.
         "ai_exec_gas_mismatch",
+        // Non-zero memory/log commitments plus tx-context binding prevent
+        // empty commitments or cross-request/cross-sender replay.
+        "ai_exec_empty_initial_state",
+        "ai_exec_empty_event_digest",
+        "ai_exec_sender_mismatch",
+        "ai_exec_nonce_mismatch",
+        "ai_exec_block_height_mismatch",
         "ai_exec_stark",
     ] {
         assert!(
@@ -125,39 +132,36 @@ fn stark_verification_helpers_have_no_production_callers() {
     );
 }
 
-/// The opcode is reserved: the VM arm answers a constant zero and reads no
-/// memory, so no shape of operands can reach a non-zero answer.
-///
-/// The earlier lock pinned a Poseidon commitment binding. That binding is
-/// removed (see the zkVM opcode section of docs/AI_VERIFICATION_STATUS.md), so
-/// the lock now pins the reserved behavior instead. The status document moves
-/// with this file.
+/// `VerifyInference` stays closed under the default testnet activation.
 #[test]
-fn verify_inference_opcode_is_reserved_and_answers_zero() {
-    let src = read("budzero/bud-vm/src/lib.rs");
-    let head = "Opcode::VerifyInference => {";
-    let at = src.find(head).expect("VerifyInference arm must exist");
-    let arm = squash(block_after(&src[at + head.len()..]));
+fn verify_inference_stays_gated_by_default() {
+    let isa = read("budzero/bud-isa/src/lib.rs");
     assert!(
-        arm.contains("let result = 0;"),
-        "VerifyInference must answer a constant zero; if it gains a real \
-         answer, update docs/AI_VERIFICATION_STATUS.md in the same change"
+        isa.contains("verify_inference_enabled: false"),
+        "the default activation must keep VerifyInference closed"
     );
+    let vm = read("budzero/bud-vm/src/lib.rs");
     assert!(
-        !arm.contains("poseidon4_hash") && !arm.contains("self.memory"),
-        "the reserved VerifyInference arm must not read memory or hash a \
-         window; the AIR refuses any proof of this opcode"
+        vm.contains("Instruction::decode_for_mainnet(raw, activation)"),
+        "mainnet-mode decoding must enforce the activation schedule"
+    );
+    let air = read("budzero/bud-proof/src/plonky3_air.rs");
+    assert!(
+        air.contains("COL_IS_VERIFY_INFERENCE"),
+        "AIR must retain the VerifyInference constraints for explicit activation"
     );
 }
 
-/// The README must not advertise verified inference while the path is closed.
+/// The README must stay aligned with `FULL_AI_STARK_VERIFICATION_LIVE` and link
+/// to `docs/AI_VERIFICATION_STATUS.md`.
 #[test]
 fn readme_does_not_claim_verified_inference() {
     let readme = read("README.md");
     assert!(
-        !readme.contains("inference verifiable on-chain"),
-        "README claims verifiable on-chain inference again; the executor still \
-         rejects proof-required models"
+        readme.contains("FULL_AI_STARK_VERIFICATION_LIVE")
+            || readme.contains("STARK verification for registered proof-required models")
+            || !readme.contains("inference verifiable on-chain"),
+        "README inference claim diverged from live AI STARK verification state"
     );
     assert!(
         readme.contains("docs/AI_VERIFICATION_STATUS.md"),
@@ -306,25 +310,6 @@ fn weights_digest_binding_stays_wired() {
         proto.contains("bytes weights_digest = 9;"),
         "the proof digest must keep its wire field"
     );
-}
-
-/// The text up to and including the `}` that closes the block whose opening
-/// brace was already consumed before the slice.
-fn block_after(rest: &str) -> &str {
-    let mut depth = 1usize;
-    for (i, b) in rest.bytes().enumerate() {
-        match b {
-            b'{' => depth += 1,
-            b'}' => {
-                depth -= 1;
-                if depth == 0 {
-                    return &rest[..=i];
-                }
-            }
-            _ => {}
-        }
-    }
-    rest
 }
 
 /// Collapse every run of whitespace to a single space so a doc-comment or a

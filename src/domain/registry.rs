@@ -94,6 +94,11 @@ impl ConsensusDomainRegistry {
         self.register_inner(domain, false)
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn register(&mut self, domain: ConsensusDomain) -> Result<(), String> {
         self.register_inner(domain, true)
     }
@@ -127,6 +132,25 @@ impl ConsensusDomainRegistry {
                  through governance.",
                 domain.id
             ));
+        }
+        // Registration can provide a pre-populated allowlist; applying the bound only
+        // in `allow_zk_program` lets a newly registered domain bypass that bound.
+        // Duplicate entries are also ambiguous: the leaf hash deduplicates them,
+        // while the live registry retains them and counts them against the cap.
+        if domain.zk_program_allowlist.len() > MAX_ZK_PROGRAMS_PER_DOMAIN {
+            return Err(format!(
+                "Domain {} exceeds the zk program allowlist limit of {MAX_ZK_PROGRAMS_PER_DOMAIN}",
+                domain.id
+            ));
+        }
+        let mut programs = std::collections::BTreeSet::new();
+        for program in &domain.zk_program_allowlist {
+            if !programs.insert(program) {
+                return Err(format!(
+                    "Domain {} has a duplicate zk program in its allowlist",
+                    domain.id
+                ));
+            }
         }
         if !domain.has_operator_bond(MIN_DOMAIN_OPERATOR_BOND) {
             return Err(format!(
@@ -240,6 +264,11 @@ impl ConsensusDomainRegistry {
         self.domains.get_mut(&id)
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn set_status(&mut self, id: DomainId, status: DomainStatus) -> Result<(), String> {
         let domain = self
             .domains
@@ -252,6 +281,10 @@ impl ConsensusDomainRegistry {
     /// Lifecycle guard: use this for governance/operator-driven
     /// Transitions. `set_status` remains for migration/tests, while this helper
     /// Prevents accidental Active→Retired jumps and makes Retired terminal.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn transition_status_checked(
         &mut self,
         id: DomainId,
@@ -348,7 +381,7 @@ impl ConsensusDomainRegistry {
         Ok(())
     }
 
-    /// Freeze every active native domain whose class is classical (,
+    /// Freeze every active native domain whose class is classical (
     /// the quantum alarm at Isolate). The class is the observed one, or the
     /// one the consensus kind implies when nothing was observed yet. Returns
     /// the ids that moved, in id order.
@@ -563,6 +596,31 @@ mod tests {
                 .expect("under the cap");
         }
         assert!(registry.allow_zk_program(2, [200u8; 32]).is_err());
+    }
+
+    #[test]
+    fn registration_cannot_bypass_the_zk_allowlist_limit_or_commit_a_duplicate() {
+        let mut registry = ConsensusDomainRegistry::new();
+        let mut oversized = default_domain(2, ConsensusKind::Zk, 1338, "zk-proof-verification", 0);
+        oversized.zk_program_allowlist = (0..=MAX_ZK_PROGRAMS_PER_DOMAIN)
+            .map(|n| [u8::try_from(n).unwrap_or(0); 32])
+            .collect();
+        let error = registry.register(oversized).unwrap_err();
+        assert!(error.contains("allowlist limit"), "{error}");
+        assert!(registry.is_empty());
+
+        let mut duplicate = default_domain(3, ConsensusKind::Zk, 1338, "zk-proof-verification", 0);
+        duplicate.zk_program_allowlist = vec![[7; 32], [7; 32]];
+        let error = registry.register(duplicate).unwrap_err();
+        assert!(error.contains("duplicate zk program"), "{error}");
+        assert!(registry.is_empty());
+
+        let mut valid = default_domain(4, ConsensusKind::Zk, 1338, "zk-proof-verification", 0);
+        valid.zk_program_allowlist = vec![[7; 32], [8; 32]];
+        registry
+            .register(valid)
+            .expect("distinct programs within the bound");
+        assert_eq!(registry.get(4).unwrap().zk_program_allowlist.len(), 2);
     }
 
     #[test]

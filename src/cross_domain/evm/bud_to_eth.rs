@@ -97,6 +97,10 @@ pub const DEFAULT_BRIDGE_CAP: u128 = 1_000_000_000_000; // 1T $BUD (6 decimals)
 /// from a Budlum node and produces a `BudToEthClaim`, the calldata to be sent to
 /// the Ethereum bridge contract. The Ethereum contract verifies Budlum finality
 /// and unlocks.
+///
+/// # Errors
+///
+/// Returns an error if the operation fails.
 pub fn build_bud_to_eth_claim(
     bridge: &mut BridgeState,
     message_id: &MessageId,
@@ -154,6 +158,9 @@ pub fn build_bud_to_eth_claim(
             .recipient_eth
             .filter(|eth| *eth != [0u8; 20])
             .ok_or(BudToEthError::InvalidRecipient)?;
+        if burn_event_proof.is_empty() || finalized_header_hash == [0u8; 32] {
+            return Err(BudToEthError::FinalityProofMissing);
+        }
         (amount, asset_id, recipient_eth)
     };
 
@@ -284,18 +291,80 @@ mod tests {
         .unwrap_err();
         assert_eq!(err, BudToEthError::AmountExceedsCap);
 
-        // Burned past its expiry height: BurnExpired.
+        // Empty burn_event_proof or zero finalized_header_hash is refused.
         let err = build_bud_to_eth_claim(
             &mut bridge,
             &id,
-            500,
-            [0u8; 32],
+            100,
+            [0x11; 32],
             vec![1],
             vec![],
             DEFAULT_BRIDGE_CAP,
         )
         .unwrap_err();
+        assert_eq!(err, BudToEthError::FinalityProofMissing);
+
+        let err = build_bud_to_eth_claim(
+            &mut bridge,
+            &id,
+            100,
+            [0u8; 32],
+            vec![1],
+            vec![2],
+            DEFAULT_BRIDGE_CAP,
+        )
+        .unwrap_err();
+        assert_eq!(err, BudToEthError::FinalityProofMissing);
+
+        // Burned past its expiry height: BurnExpired.
+        let err = build_bud_to_eth_claim(
+            &mut bridge,
+            &id,
+            500,
+            [0x11; 32],
+            vec![1],
+            vec![2],
+            DEFAULT_BRIDGE_CAP,
+        )
+        .unwrap_err();
         assert_eq!(err, BudToEthError::BurnExpired);
+
+        let ok = build_bud_to_eth_claim(
+            &mut bridge,
+            &id,
+            100,
+            [0x11; 32],
+            vec![1],
+            vec![2],
+            DEFAULT_BRIDGE_CAP,
+        )
+        .unwrap();
+        assert_eq!(ok.recipient_eth, [9u8; 20]);
+
+        // Zero Ethereum recipient ([0u8; 20]) is refused so funds never unlock to 0x0.
+        let a2 = AssetId(hash_fields_bytes(&[b"bte-neg-2"]));
+        bridge.register_asset(a2, 1).unwrap();
+        let (t2, ev2) = bridge
+            .lock(1, 2, 30, 1, a2, owner, recipient, 100, 500)
+            .unwrap();
+        let id2 = t2.message_id;
+        bridge.mint(&ev2.message.unwrap(), 31).unwrap();
+        if bridge
+            .burn_with_event(id2, 2, 32, 0, 500, [0u8; 20])
+            .is_ok()
+        {
+            let err = build_bud_to_eth_claim(
+                &mut bridge,
+                &id2,
+                100,
+                [0x11; 32],
+                vec![1],
+                vec![2],
+                DEFAULT_BRIDGE_CAP,
+            )
+            .unwrap_err();
+            assert_eq!(err, BudToEthError::InvalidRecipient);
+        }
     }
 
     #[test]

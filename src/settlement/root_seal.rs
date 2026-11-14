@@ -9,7 +9,7 @@
 //! WIRING: the seal is built and verified by the anchor driver of the node
 //! (`Blockchain::emit_anchor_for` in `src/chain/blockchain.rs`) and its
 //! latest verified instance is the Polyp source of `PqCanonicalSource`
-//! (`src/domain/regen_health.rs`). The rules are pinned by this file's tests.
+//! (`src/chain/state_recovery/health.rs`). The rules are pinned by this file's tests.
 //!
 //! # What a seal signs
 //!

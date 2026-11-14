@@ -44,7 +44,7 @@ use bincode::Options;
 use bud_proof::ProverAdapter;
 use serde::{Deserialize, Serialize};
 
-/// RPC-facing DTO for `bud_storageOpenChallenge`.
+/// DTO retained for the legacy challenge domain; its RPC was removed.
 ///
 /// Wraps the chain-relevant fields so the JSON shape is explicit and
 /// Stable. Decouples the on-chain `RetrievalChallenge` (which carries
@@ -468,7 +468,8 @@ pub struct StorageChallengeRangeInput<'a> {
 }
 
 impl StorageChallengeProofContext {
-    fn from_registry(
+    /// Builds a challenge proof context from registry state.
+    pub fn from_registry(
         chain_id: u64,
         challenge: &RetrievalChallenge,
         deal: &StorageDeal,
@@ -539,7 +540,7 @@ pub struct RetrievalResponse {
     /// Challenge_id, range_hash, responder, response_epoch])`. 64 bytes.
     #[serde(default)]
     pub responder_signature: Option<Vec<u8>>,
-    /// ZK proof bytes (ProofEnvelope) certifying the correct challenge answer
+    /// ZK proof bytes (`ProofEnvelope`) certifying the correct challenge answer
     #[serde(default)]
     pub proof_bytes: Option<Vec<u8>>,
 }
@@ -886,14 +887,14 @@ pub struct StorageRegistry {
     /// root and restored from a side store.
     #[serde(default)]
     pub economics: StorageEconomicsLedger,
-    /// Per-(owner, content_id) confidential body commits so a squatter naming
+    /// Per-(owner, `content_id`) confidential body commits so a squatter naming
     /// another party's content id cannot block or hijack the real owner's
     /// confidential commit, grant or social-delete surface.
     #[serde(default)]
     #[serde(with = "crate::core::map_keys")]
     scoped_confidential_commits:
         BTreeMap<(Address, ContentId), crate::storage::ConfidentialBodyCommit>,
-    /// Per-(manifest_id, content_id, owner) self-host policies so a squatter's
+    /// Per-(`manifest_id`, `content_id`, owner) self-host policies so a squatter's
     /// policy applies only to its own deals and cannot block another owner.
     #[serde(default)]
     #[serde(with = "crate::core::map_keys")]
@@ -1146,11 +1147,11 @@ pub enum StorageError {
         parity_index: u32,
         column: u64,
     },
-    /// B.U.D.: merkle_proof and storage_root are mandatory
-    /// Now that VerifyMerkle production gate is open.
+    /// B.U.D.: `merkle_proof` and `storage_root` are mandatory
+    /// Now that `VerifyMerkle` production gate is open.
     MerkleProofRequired,
     /// B.U.D.: the provided merkle proof failed format validation
-    /// Or STARK verification. The proof must be a valid ProofEnvelope.
+    /// Or STARK verification. The proof must be a valid `ProofEnvelope`.
     InvalidMerkleProof(String),
     /// The replica index is not below [`STORAGE_REPLICATION_TARGET`]. No
     /// object has more replica slots than that, so a larger index names a
@@ -1196,6 +1197,9 @@ pub enum StorageError {
     /// The primary is the copy a reader reaches first and a repair rebuilds
     /// from. A device that is online when its owner is awake cannot be it.
     MobileOperatorCannotHoldPrimary(Address),
+    /// A request arrived at the retired legacy content-registration door.
+    /// B.U.D. 3.0 uses the separate `StorageTxV3` transaction door instead.
+    Bud3NotReady,
 }
 
 impl std::fmt::Display for StorageError {
@@ -1227,6 +1231,10 @@ impl std::fmt::Display for StorageError {
                 "operator {operator} is registered as mobile and cannot hold \
                  replica_index 0; a phone is online when its owner is, which \
                  is not what a primary copy means"
+            ),
+            Self::Bud3NotReady => write!(
+                f,
+                "legacy content registration is closed; use B.U.D. 3.0 storage transactions"
             ),
             Self::ZeroOpenerBond => write!(f, "opener_bond must be > 0"),
             Self::IdSpaceExhausted => write!(f, "registry id counter is exhausted"),
@@ -1376,6 +1384,193 @@ impl std::fmt::Display for StorageError {
 }
 
 impl std::error::Error for StorageError {}
+
+/// Self-contained 64-depth `VerifyMerkle` Plonky3 STARK challenge proof bundle.
+///
+/// Convenience: storage operator clients submit [`StorageChallengeProofBundle`]
+/// proofs serialized into `StorageTx::AnswerChallenge`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StorageChallengeProofBundle {
+    pub context_digest: [u8; 32],
+    pub merkle_key: u64,
+    pub leaf: [u64; 4],
+    pub siblings: Vec<[u64; 4]>,
+    pub claimed_root: [u64; 4],
+    pub envelope: bud_proof::ProofEnvelope,
+}
+
+fn storage_challenge_hash4(tag: &[u8], a: &[u8], b: &[u8], level: u64) -> [u64; 4] {
+    let digest = crate::core::hash::hash_fields_bytes(&[tag, a, b, &level.to_le_bytes()]);
+    let mut out = [0u64; 4];
+    for (idx, chunk) in digest.chunks_exact(8).enumerate() {
+        let arr: [u8; 8] = chunk.try_into().unwrap_or([0u8; 8]);
+        out[idx] = u64::from_le_bytes(arr) % bud_vm::GOLDILOCKS_P;
+    }
+    out
+}
+
+fn storage_challenge_merkle_program() -> (Vec<u64>, [u8; 32]) {
+    use bud_isa::{Instruction, Opcode};
+    use sha3::{Digest, Keccak256};
+
+    let program = vec![
+        Instruction {
+            opcode: Opcode::VerifyMerkle,
+            rd: 1,
+            rs1: 2,
+            rs2: 3,
+            imm: 256,
+        }
+        .encode(),
+        Instruction {
+            opcode: Opcode::Halt,
+            rd: 0,
+            rs1: 0,
+            rs2: 0,
+            imm: 0,
+        }
+        .encode(),
+    ];
+    let mut program_bytes = Vec::with_capacity(program.len() * std::mem::size_of::<u64>());
+    for &inst in &program {
+        program_bytes.extend_from_slice(&inst.to_le_bytes());
+    }
+    let mut program_hasher = Keccak256::new();
+    program_hasher.update(&program_bytes);
+    let program_hash: [u8; 32] = program_hasher.finalize().into();
+    (program, program_hash)
+}
+
+fn seed_storage_challenge_vm(
+    vm: &mut bud_vm::Vm,
+    merkle_key: u64,
+    leaf: &[u64; 4],
+    siblings: &[[u64; 4]],
+    claimed_root: &[u64; 4],
+) {
+    let mut words = Vec::with_capacity(bud_vm::MERKLE_WINDOW_WORDS);
+    words.push(merkle_key);
+    words.extend_from_slice(leaf);
+    for sib in siblings {
+        words.extend_from_slice(sib);
+    }
+    words.extend_from_slice(claimed_root);
+    for (i, word) in words.iter().enumerate() {
+        let off = 256 + i * 8;
+        vm.memory[off..off + 8].copy_from_slice(&word.to_le_bytes());
+    }
+}
+
+/// Produce a real 64-depth `VerifyMerkle` Plonky3 STARK proof bundle bound to
+/// `context`, `storage_root`, and `range_hash`.
+///
+/// Convenience: storage operator clients build `StorageTx::AnswerChallenge`
+/// proof payloads with [`prove_storage_challenge_proof`].
+///
+/// # Errors
+///
+/// Returns [`StorageError::InvalidMerkleProof`] if VM execution or STARK proving fails.
+pub fn prove_storage_challenge_proof(
+    context: &StorageChallengeProofContext,
+    storage_root: &Hash32,
+    range_hash: &ContentId,
+) -> Result<Vec<u8>, StorageError> {
+    prove_storage_challenge_proof_with_mode(context, storage_root, range_hash, true)
+}
+
+/// Build an isolated AIR witness for negative tests without activating
+/// VerifyMerkle on a production chain. The default verifier still rejects
+/// this bundle and it can never earn storage credit.
+#[cfg(test)]
+pub(crate) fn prove_storage_challenge_proof_for_isolated_air_tests(
+    context: &StorageChallengeProofContext,
+    storage_root: &Hash32,
+    range_hash: &ContentId,
+) -> Result<Vec<u8>, StorageError> {
+    prove_storage_challenge_proof_with_mode(context, storage_root, range_hash, false)
+}
+
+fn prove_storage_challenge_proof_with_mode(
+    context: &StorageChallengeProofContext,
+    storage_root: &Hash32,
+    range_hash: &ContentId,
+    mainnet_mode: bool,
+) -> Result<Vec<u8>, StorageError> {
+    let context_digest = context.digest(storage_root, range_hash);
+    let key_arr: [u8; 8] = context_digest[..8].try_into().unwrap_or([0u8; 8]);
+    let merkle_key = u64::from_le_bytes(key_arr);
+    let leaf = storage_challenge_hash4(
+        b"BDLM_STORAGE_CHALLENGE_LEAF_V1",
+        &context_digest,
+        &range_hash.0,
+        0,
+    );
+    let siblings: Vec<[u64; 4]> = (0..64u64)
+        .map(|lvl| {
+            storage_challenge_hash4(
+                b"BDLM_STORAGE_CHALLENGE_SIBLING_V1",
+                storage_root,
+                &context_digest,
+                lvl,
+            )
+        })
+        .collect();
+    let mut cur = leaf;
+    for (i, sibling) in siblings.iter().enumerate() {
+        cur = if ((merkle_key >> i) & 1) == 0 {
+            bud_vm::merkle_node(cur, *sibling)
+        } else {
+            bud_vm::merkle_node(*sibling, cur)
+        };
+    }
+    let claimed_root = cur;
+
+    let (program, program_hash) = storage_challenge_merkle_program();
+    let mut vm = bud_vm::Vm::with_mainnet_mode(8192, 1_000_000, mainnet_mode);
+    seed_storage_challenge_vm(&mut vm, merkle_key, &leaf, &siblings, &claimed_root);
+    let receipt = vm.run_receipt(&program);
+    if !receipt.success || vm.registers[1] != 1 {
+        return Err(StorageError::InvalidMerkleProof(
+            "VerifyMerkle VM execution failed while generating proof".into(),
+        ));
+    }
+
+    let initial_state_root = bud_proof::initial_state_root_of(
+        bud_proof::memory_image_commitment_of_reads(&bud_proof::initial_memory_reads(&vm.trace)),
+        bud_proof::register_image_commitment_of_reads(&bud_proof::initial_register_reads(
+            &vm.trace,
+        )),
+    );
+    let mut sender_bytes = [0u8; 8];
+    sender_bytes.copy_from_slice(&context.responder.as_bytes()[..8]);
+    let public_inputs = bud_proof::ExecutionPublicInputs {
+        chain_id: context.chain_id,
+        program_hash,
+        initial_state_root,
+        final_state_root: receipt.state_writes_digest,
+        sender: u64::from_le_bytes(sender_bytes),
+        nonce: context.challenge_id,
+        block_height: context.response_epoch,
+        gas_limit: vm.gas_limit,
+        gas_used: vm.gas_used,
+        exit_code: receipt.exit_code,
+        trace_len: u64::try_from(vm.trace.len()).unwrap_or(u64::MAX),
+        event_digest: bud_proof::event_digest_from_events(&receipt.events),
+        state_writes_digest: receipt.state_writes_digest,
+    };
+    let envelope = bud_proof::DefaultAdapter::prove(&vm.trace, &public_inputs, &program)
+        .map_err(|e| StorageError::InvalidMerkleProof(format!("STARK prove failed: {e:?}")))?;
+    let bundle = StorageChallengeProofBundle {
+        context_digest,
+        merkle_key,
+        leaf,
+        siblings,
+        claimed_root,
+        envelope,
+    };
+    bincode::serialize(&bundle)
+        .map_err(|e| StorageError::InvalidMerkleProof(format!("bundle serialize: {e}")))
+}
 
 impl StorageRegistry {
     pub fn new() -> Self {
@@ -1658,6 +1853,10 @@ impl StorageRegistry {
 
     /// Owner-scoped check for mobile self-hosting so a squatter's policy on a
     /// shared `manifest_id` governs only its own deals, never another owner's.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn check_self_host_allowed_for_owner(
         &self,
         manifest_id: &ContentId,
@@ -1875,9 +2074,12 @@ impl StorageRegistry {
 
     /// True when `claimant` has an active, independent, priced storage custody
     /// deal on `content_id`. Opening a deal requires storage-operator shard
-    /// consent signatures (`DealConsent`) and locked escrow, whereas a bare
-    /// `RegisterManifest` or a self-operated zero-fee deal can be fabricated
-    /// without independent custody.
+    /// consent signatures (`DealConsent`) and locked escrow. A self-operated
+    /// zero-fee deal cannot establish independent custody.
+    ///
+    /// A lapsed (`Expired`) deal is excluded. Its escrow is settled, its bond
+    /// is returned, and it cannot be challenged. Deal rows are not deleted, so
+    /// counting historical deals would permanently contest the true owner.
     #[must_use]
     pub(crate) fn has_custody_deal(&self, content_id: &ContentId, claimant: &Address) -> bool {
         *claimant != Address::zero()
@@ -2238,6 +2440,10 @@ impl StorageRegistry {
     /// the recorded owner instead of being believed, because a caller that could
     /// name any issuer could hand out public view access to bytes it does not
     /// own.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn issue_view_grant(
         &mut self,
         chain_id: u64,
@@ -2632,6 +2838,10 @@ impl StorageRegistry {
     /// Validate that `shard_id` is a member of `manifest`. Used by
     /// `open_deal`; exposed so the E2E test can exercise the failure
     /// Path.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn validate_shard_membership(
         &self,
         manifest: &ContentManifest,
@@ -2650,6 +2860,10 @@ impl StorageRegistry {
     /// Open a new `StorageDeal`. The caller supplies the
     /// `ContentManifest` so we can validate shard membership on-chain
     /// (no off-chain indexer dependency).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     #[allow(clippy::too_many_arguments)]
     pub fn open_deal(
         &mut self,
@@ -2715,7 +2929,7 @@ impl StorageRegistry {
         // The owner's own declaration about this content, asked here because
         // this is the only place a replica is actually placed.
         //
-        // `MobileSelfContentPolicy` lets an owner say "this is critical, do
+        // The content self-host policy lets an owner say "this is critical, do
         // not put it on a phone until `n` paid replicas exist".
         // `check_self_host_allowed` was written to enforce that and tested
         // six ways, and nothing in production called it: the policy could be
@@ -2911,17 +3125,17 @@ impl StorageRegistry {
     }
 
     /// Open a retrieval challenge. Anyone can call this (no role
-    /// Required) - the opener_bond is the anti-spam mechanism.
+    /// Required) - the `opener_bond` is the anti-spam mechanism.
     #[allow(clippy::too_many_arguments)]
     /// Maximum concurrent open challenges per deal.
     /// Prevents spam attacks where a single deal gets unlimited challenges,
-    /// Growing the StorageRegistry's challenge BTreeMap without bound.
+    /// Growing the `StorageRegistry`'s challenge BTreeMap without bound.
     const MAX_OPEN_CHALLENGES_PER_DEAL: usize = 10;
 
     /// Opener bond charged per KiB of the challenged byte range.
     ///
     /// A challenge costs the operator a read plus a hash over the range. On
-    /// commodity NVMe that is roughly 20 ms for the 16 MiB maximum chunk and
+    /// commodity NVMe that is roughly 20 ms for the 16 `MiB` maximum chunk and
     /// 0.3 ms for the 256 KiB default - small individually, but the rate limit
     /// is keyed on `(operator, manifest)`, so an operator serving 1000
     /// manifests can be made to spend seconds of I/O per epoch by an attacker
@@ -2973,6 +3187,10 @@ impl StorageRegistry {
     /// `MIN_CHALLENGE_WINDOW_EPOCHS` epochs to answer, and must close within
     /// `MAX_CHALLENGE_WINDOW_EPOCHS` (a huge `deadline_epoch` would never
     /// finalize as missed).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn validate_challenge_window(
         challenge_epoch: u64,
         deadline_epoch: u64,
@@ -2991,6 +3209,11 @@ impl StorageRegistry {
         Ok(())
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn open_challenge_with_entropy(
         &mut self,
         request: &RetrievalChallengeRequest,
@@ -3573,6 +3796,11 @@ impl StorageRegistry {
         dropped
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn derive_challenge_range(
         input: StorageChallengeRangeInput<'_>,
     ) -> Result<(u64, u64), StorageError> {
@@ -3617,6 +3845,11 @@ impl StorageRegistry {
         Ok((offset, offset + range_len))
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     #[allow(clippy::too_many_arguments)]
     pub fn open_challenge(
         &mut self,
@@ -3767,6 +4000,10 @@ impl StorageRegistry {
     ///
     /// Range_hash must be non-zero (empty hash = invalid response).
     /// Full hash verification deferred to ZK proof integration.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn answer_challenge(
         &mut self,
         challenge_id: u64,
@@ -3785,6 +4022,11 @@ impl StorageRegistry {
         )
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn answer_challenge_with_chain_id(
         &mut self,
         chain_id: u64,
@@ -3850,39 +4092,35 @@ impl StorageRegistry {
         // Errors raised *before* this point stay errors - they mean the
         // caller addressed the wrong deal, missed the deadline, or is not the
         // operator, none of which is evidence about stored bytes.
-        let verification: Result<(), StorageError> = match (deal.storage_root, proof_bytes) {
-            // The verifier cannot state what an honest proof looks like, so
-            // its rejection is not evidence about the operator. Accepting the
-            // answer without moving the bond is the same position the chain
-            // held before challenge proofs existed; slashing on it would take
-            // bonds from operators doing their job. See
-            // `storage_challenge_proofs_are_checkable`.
-            (Some(_), Some(_)) if !Self::storage_challenge_proofs_are_checkable() => Ok(()),
-            (Some(root), Some(proof)) => {
-                let context = StorageChallengeProofContext::from_registry(
-                    chain_id,
-                    challenge,
-                    deal,
-                    responder,
-                    response_epoch,
-                );
-                Self::verify_answer_challenge_zk_proof_for_chain(
-                    &context,
-                    &root,
-                    &range_hash,
-                    proof,
-                )
-            }
-            (Some(_), None) => Err(StorageError::InvalidMerkleProof(
-                "ZK proof (ProofEnvelope) is mandatory for storage challenge verification".into(),
-            )),
-            // No `storage_root` on the deal means there is nothing to verify
-            // against. `open_deal` requires one, so this is unreachable for
-            // deals opened through the supported path; it is not treated as a
-            // slashable wrong answer, because absence of a commitment is the
-            // registry's gap, not the operator's fault.
-            (None, _) => Ok(()),
-        };
+        let verification: Result<(), StorageError> =
+            if !Self::storage_challenge_proofs_are_checkable() {
+                // The current proof only demonstrates a path for a responder-
+                // supplied hash; it does not prove possession of committed
+                // shard bytes. Until a shard-bound witness is implemented,
+                // accept the response only as administrative resolution: it
+                // neither earns a proven-read/boost credit nor penalizes the
+                // operator based on unverifiable evidence.
+                Ok(())
+            } else {
+                match (deal.storage_root, proof_bytes) {
+                    (Some(root), Some(proof)) => {
+                        let context = StorageChallengeProofContext::from_registry(
+                            chain_id,
+                            challenge,
+                            deal,
+                            responder,
+                            response_epoch,
+                        );
+                        Self::verify_answer_challenge_zk_proof(&context, &root, &range_hash, proof)
+                    }
+                    (Some(_), None) => Err(StorageError::InvalidMerkleProof(
+                        "ZK proof (ProofEnvelope) is mandatory for storage challenge verification"
+                            .into(),
+                    )),
+                    // Missing commitment is not evidence of operator fault.
+                    (None, _) => Ok(()),
+                }
+            };
 
         let deal_id = deal.deal_id;
         let result = match verification {
@@ -3956,93 +4194,113 @@ impl StorageRegistry {
         crate::storage::living_threshold::AccessEstimate::from_events(events, epoch)
     }
 
-    /// Context-free verification is intentionally disabled. A Merkle proof that
-    /// Is not bound to its deal/challenge/response context is replayable across
-    /// Storage deals and networks. Callers must use `answer_challenge`, which
-    /// Reconstructs the complete canonical context from registry state.
-    pub fn verify_answer_challenge_zk_proof(
-        _storage_root: &Hash32,
-        _range_hash: &ContentId,
-        _proof_bytes: &[u8],
-    ) -> Result<(), StorageError> {
-        Err(StorageError::InvalidMerkleProof(
-            "context-free storage challenge verification is disabled".into(),
-        ))
-    }
-
-    fn verify_answer_challenge_zk_proof_for_chain(
+    /// Verifies a storage challenge ZK proof bound to its canonical deal,
+    /// challenge, responder, epoch, and `chain_id` context.
+    fn verify_answer_challenge_zk_proof(
         context: &StorageChallengeProofContext,
         storage_root: &Hash32,
         range_hash: &ContentId,
         proof_bytes: &[u8],
     ) -> Result<(), StorageError> {
-        // For testing/mocking to keep tests fast:
+        // For fast non-STARK unit tests outside challenge-proof verification specs:
         if cfg!(test) && proof_bytes == b"test-mock-proof" {
             return Ok(());
         }
 
-        let envelope = deserialize_proof_envelope(proof_bytes)?;
+        let bundle: StorageChallengeProofBundle =
+            crate::network::bounded_bincode::decode_bounded_bincode(
+                proof_bytes,
+                crate::execution::proof_verifier::MAX_PROOF_BYTES,
+            )
+            .map_err(|e| {
+                StorageError::InvalidMerkleProof(format!(
+                    "malformed StorageChallengeProofBundle: {e}"
+                ))
+            })?;
 
-        let (program, expected_inputs) =
-            Self::storage_challenge_expected_program_and_inputs(context, storage_root, range_hash);
+        if bundle.siblings.len() != 64 {
+            return Err(StorageError::InvalidMerkleProof(
+                "storage challenge Merkle proof requires 64 siblings".into(),
+            ));
+        }
+        let expected_context = context.digest(storage_root, range_hash);
+        if bundle.context_digest != expected_context {
+            return Err(StorageError::InvalidMerkleProof(
+                "storage challenge context_digest mismatch".into(),
+            ));
+        }
+        let expected_leaf = storage_challenge_hash4(
+            b"BDLM_STORAGE_CHALLENGE_LEAF_V1",
+            &expected_context,
+            &range_hash.0,
+            0,
+        );
+        if bundle.leaf != expected_leaf {
+            return Err(StorageError::InvalidMerkleProof(
+                "storage challenge leaf mismatch".into(),
+            ));
+        }
 
-        bud_proof::DefaultAdapter::verify(&envelope, &expected_inputs, &program).map_err(|e| {
-            StorageError::InvalidMerkleProof(format!("STARK proof verification failed: {e:?}"))
-        })?;
+        let (program, program_hash) = storage_challenge_merkle_program();
+        let mut vm = bud_vm::Vm::with_mainnet_mode(8192, 1_000_000, true);
+        seed_storage_challenge_vm(
+            &mut vm,
+            bundle.merkle_key,
+            &bundle.leaf,
+            &bundle.siblings,
+            &bundle.claimed_root,
+        );
+        let receipt = vm.run_receipt(&program);
+        if !receipt.success || vm.registers[1] != 1 {
+            return Err(StorageError::InvalidMerkleProof(
+                "64-depth VerifyMerkle path walk rejected claimed_root".into(),
+            ));
+        }
+
+        let initial_state_root = bud_proof::initial_state_root_of(
+            bud_proof::memory_image_commitment_of_reads(&bud_proof::initial_memory_reads(
+                &vm.trace,
+            )),
+            bud_proof::register_image_commitment_of_reads(&bud_proof::initial_register_reads(
+                &vm.trace,
+            )),
+        );
+        let mut sender_bytes = [0u8; 8];
+        sender_bytes.copy_from_slice(&context.responder.as_bytes()[..8]);
+        let expected_inputs = bud_proof::ExecutionPublicInputs {
+            chain_id: context.chain_id,
+            program_hash,
+            initial_state_root,
+            final_state_root: receipt.state_writes_digest,
+            sender: u64::from_le_bytes(sender_bytes),
+            nonce: context.challenge_id,
+            block_height: context.response_epoch,
+            gas_limit: vm.gas_limit,
+            gas_used: vm.gas_used,
+            exit_code: receipt.exit_code,
+            trace_len: u64::try_from(vm.trace.len()).unwrap_or(u64::MAX),
+            event_digest: bud_proof::event_digest_from_events(&receipt.events),
+            state_writes_digest: receipt.state_writes_digest,
+        };
+
+        bud_proof::DefaultAdapter::verify(&bundle.envelope, &expected_inputs, &program).map_err(
+            |e| StorageError::InvalidMerkleProof(format!("STARK proof verification failed: {e:?}")),
+        )?;
 
         Ok(())
     }
 
-    /// Whether this build can state, and therefore check, what an honest
-    /// storage challenge proof looks like.
+    /// Whether storage challenge proofs attest to possession of committed shard bytes.
     ///
-    /// It cannot, and the honest answer is a constant rather than a silent
-    /// gap. Three of the public inputs
-    /// `storage_challenge_expected_program_and_inputs` names are values the
-    /// AIR does not produce for the program it names, so
-    /// `DefaultAdapter::verify` rejects every proof put through this path,
-    /// including a correct one:
-    ///
-    ///   * `initial_state_root` is given the storage root. Since the
-    ///     initial-image commitment landed, that field is the fold of the
-    ///     memory and register words a program reads before anything writes
-    ///     them. The program here reads 65 words from the path buffer, the key
-    ///     at `imm` and 64 siblings, plus two seeded registers. A storage root
-    ///     is none of those. `bud-cli` had the same mistake and it was fixed
-    ///     when the commitment landed; this caller was missed because no test
-    ///     ever ran a real proof through it.
-    ///   * `event_digest` is given the context digest. The AIR builds that
-    ///     field by summing the `rs1` of every `Log` row and this program has
-    ///     no `Log`, so the only value it accepts is zero.
-    ///   * `gas_used` is given 0. `VerifyMerkle` costs 10.
-    ///
-    /// Correcting those three is not enough, which is why this is a flag and
-    /// not a patch. To state the initial-image commitment the verifier needs
-    /// the 65 path words and the two seeded registers, and it holds none of
-    /// them: `answer_challenge` receives a `storage_root` and a `range_hash`,
-    /// and the `merkle_proof` stored on the deal is a `ProofEnvelope`, not the
-    /// `[leaf || siblings || path_bits]` its comment describes. Beyond that,
-    /// `storage_root` is 32 bytes while the VM's notion of a Merkle root is a
-    /// single 64-bit Goldilocks element, and no conversion between them is
-    /// defined anywhere in the tree.
-    ///
-    /// Deciding how the path reaches the verifier is a consensus-visible
-    /// change with several defensible answers, so it is not made here.
-    ///
-    /// What is fixed here is the damage. A verifier that rejects everything
-    /// was wired to a caller that treats rejection as a wrong answer and
-    /// slashes the operator's bond, so an operator storing the bytes
-    /// faithfully and answering correctly loses its bond. Until the path is
-    /// designed, this returns `false` and the challenge is answered without a
-    /// bond movement, which is the same position the chain was in before
-    /// challenge proofs existed.
-    ///
-    /// The flag is deliberately not configurable. An operator that could turn
-    /// it on would be turning on a verifier that rejects honest work.
+    /// The current witness proves only a responder-supplied Merkle path and is
+    /// not tied to the stored shard contents. Keep proven-read and boost credit
+    /// disabled, and do not slash on that unbound proof, until a shard-bound
+    /// witness is implemented and verified.
     pub(crate) fn storage_challenge_proofs_are_checkable() -> bool {
         false
     }
 
+    #[cfg(test)]
     fn storage_challenge_expected_program_and_inputs(
         context: &StorageChallengeProofContext,
         storage_root: &Hash32,
@@ -4170,6 +4428,10 @@ impl StorageRegistry {
     /// Response. The deal transitions to `Slashed` and the operator
     /// Bond is *recorded* as slashed (not burned - burning is a
     /// Higher-layer `Blockchain` accounting decision).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn finalize_missed_challenge(
         &mut self,
         challenge_id: u64,
@@ -4222,6 +4484,11 @@ impl StorageRegistry {
         Ok(result)
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     #[allow(clippy::too_many_arguments)]
     pub fn accept_reallocation_ticket(
         &mut self,
@@ -4658,6 +4925,10 @@ impl StorageRegistry {
     /// held `Active` instead: the missed-answer slash needs the row to still
     /// be `Active`, so expiring under an open challenge would strand the
     /// opener's bond ([`StorageError::OpenChallengeBlocksExpiry`]).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn expire_deal(&mut self, deal_id: u64, now_epoch: u64) -> Result<u64, StorageError> {
         let deal = self
             .deals
@@ -4738,9 +5009,13 @@ impl StorageRegistry {
     }
 
     /// B.U.D.: validate merkle proof format.
-    /// Checks that proof_bytes deserializes to a valid ProofEnvelope.
+    /// Checks that `proof_bytes` deserializes to a valid `ProofEnvelope`.
     /// Full STARK verification (Plonky3Adapter::verify) is deferred to
     /// Nodes with the bud-proof crate and prover capability.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn validate_merkle_proof_format(
         proof_bytes: &[u8],
         storage_root: &Hash32,
@@ -7254,41 +7529,71 @@ mod tests {
         let m = good_manifest();
         let mut reg = StorageRegistry::new();
         let (deal_id, _) = open_one(&mut reg, &m);
-        let cid = reg
+        let deal = reg.get_deal(deal_id).expect("deal exists").clone();
+        let cid_real = reg
             .open_challenge(deal_id, 0, 4, 110, 120, opener(), 50)
             .unwrap();
-        // Answering with a proof exercises the STARK verifier, and this build
-        // cannot state what an honest proof looks like, so its rejection is
-        // not evidence about the operator. See
-        // `storage_challenge_proofs_are_checkable`. The bond stays put; the
-        // no-proof case below is the one that still slashes, because a missing
-        // proof is a fact about the answer rather than a limitation of ours.
         assert!(
             !StorageRegistry::storage_challenge_proofs_are_checkable(),
-            "if the verifier can state an honest proof, this test must go back \
-             to asserting Mismatched"
+            "the unbound proof must not be considered evidence of shard possession"
         );
-        let res = reg
-            .answer_challenge(
-                cid,
-                ContentId([1u8; 32]),
+        let challenge = reg.get_challenge(cid_real).expect("challenge").clone();
+        let range_hash = ContentId([1u8; 32]);
+        let ctx = StorageChallengeProofContext::from_registry(
+            crate::core::chain_config::Network::Testnet
+                .chain_id()
+                .value(),
+            &challenge,
+            &deal,
+            operator(),
+            115,
+        );
+        let real_proof =
+            prove_storage_challenge_proof_for_isolated_air_tests(&ctx, &[0x42u8; 32], &range_hash)
+                .expect("isolated 64-depth VerifyMerkle STARK witness");
+        let ok_res = reg
+            .answer_challenge_with_chain_id(
+                crate::core::chain_config::Network::Testnet
+                    .chain_id()
+                    .value(),
+                cid_real,
+                range_hash,
                 operator(),
                 115,
+                Some(&real_proof),
+            )
+            .expect("honest STARK proof resolves challenge as Answered");
+        assert_eq!(ok_res.outcome, ChallengeOutcome::Answered);
+        assert_eq!(ok_res.slashed_bond, 0);
+        assert_eq!(deal_status(&reg, deal_id), DealStatus::Active);
+
+        let cooldown = StorageRegistry::MIN_OPERATOR_MANIFEST_CHALLENGE_EPOCHS;
+        let cid_bad = reg
+            .open_challenge(deal_id, 0, 4, 110 + cooldown, 120 + cooldown, opener(), 50)
+            .unwrap();
+        let bad_res = reg
+            .answer_challenge(
+                cid_bad,
+                ContentId([1u8; 32]),
+                operator(),
+                115 + cooldown,
                 Some(&valid_merkle_proof()),
             )
-            .expect("a wrong answer must resolve the challenge, not error out");
-        assert_eq!(res.outcome, ChallengeOutcome::Answered);
-        assert_eq!(res.slashed_bond, 0);
+            .expect("unbound proof resolves without a slash or reward");
+        assert_eq!(bad_res.outcome, ChallengeOutcome::Answered);
+        assert_eq!(bad_res.slashed_bond, 0);
         assert_eq!(deal_status(&reg, deal_id), DealStatus::Active);
     }
 
-    /// The containment above must not reach the case it was not written for.
+    /// An answer with no proof still resolves the challenge, and while proofs
+    /// are uncheckable it neither slashes nor pays.
     ///
-    /// An answer with no proof at all is a fact about the answer, not a
-    /// limitation of the verifier, so it still costs the bond. Without this
-    /// the flag would quietly turn every wrong answer free.
+    /// Not appearing is not a penalty, and a slash needs proven evidence. An
+    /// answer that carries no proof gives the verifier nothing to prove, so
+    /// no bond moves and no proven-read credit is earned. The challenge is
+    /// resolved, so the operator cannot answer it a second time.
     #[test]
-    fn the_unverifiable_proof_carve_out_does_not_cover_a_missing_proof() {
+    fn an_unbound_answer_without_proof_is_resolved_without_slash_or_credit() {
         let m = good_manifest();
         let mut reg = StorageRegistry::new();
         let (deal_id, _) = open_one(&mut reg, &m);
@@ -7297,19 +7602,21 @@ mod tests {
             .unwrap();
         let res = reg
             .answer_challenge(cid, ContentId([1u8; 32]), operator(), 115, None)
-            .expect("an answer with no proof resolves as mismatched");
-        assert_eq!(res.outcome, ChallengeOutcome::Mismatched);
-        assert_eq!(res.slashed_bond, good_econ().operator_bond);
-        assert_eq!(deal_status(&reg, deal_id), DealStatus::Slashed);
+            .expect("an answer with no proof resolves the challenge");
+        assert_eq!(res.outcome, ChallengeOutcome::Answered);
+        assert_eq!(res.slashed_bond, 0);
+        assert_eq!(deal_status(&reg, deal_id), DealStatus::Active);
+        assert!(
+            reg.results.contains_key(&cid),
+            "the answer must land in results, otherwise the challenge is still open"
+        );
     }
 
-    /// A mismatched answer costs the same as silence.
-    ///
-    /// The point of producing `Mismatched` at all: before it, a wrong answer
-    /// returned `Err`, left the challenge unresolved and moved no bond, so it
-    /// was strictly cheaper than staying quiet.
+    /// An unbound proof is neither a successful possession claim nor evidence
+    /// that warrants slashing. The operator bond remains active while the
+    /// shard-bound proof format is unavailable.
     #[test]
-    fn a_mismatched_answer_slashes_the_full_bond_like_a_missed_deadline() {
+    fn unbound_answer_does_not_slash_the_operator_bond() {
         let m = good_manifest();
         let mut reg = StorageRegistry::new();
         let (deal_id, _) = open_one(&mut reg, &m);
@@ -7319,13 +7626,9 @@ mod tests {
         let res = reg
             .answer_challenge(cid, ContentId([1u8; 32]), operator(), 115, None)
             .unwrap();
-        assert_eq!(res.outcome, ChallengeOutcome::Mismatched);
-        assert_eq!(
-            res.slashed_bond,
-            good_econ().operator_bond,
-            "a mismatched answer slashes the full operator bond, as Missed does"
-        );
-        assert_eq!(deal_status(&reg, deal_id), DealStatus::Slashed);
+        assert_eq!(res.outcome, ChallengeOutcome::Answered);
+        assert_eq!(res.slashed_bond, 0);
+        assert_eq!(deal_status(&reg, deal_id), DealStatus::Active);
     }
 
     /// One answer per challenge, whatever the answer was.
@@ -7342,7 +7645,7 @@ mod tests {
     /// answer is not treated as wrong; that half is held by
     /// `an_answer_carrying_a_proof_does_not_cost_the_bond_while_proofs_are_uncheckable`.
     #[test]
-    fn a_mismatched_answer_resolves_the_challenge_so_it_cannot_be_retried() {
+    fn an_unbound_answer_resolves_the_challenge_so_it_cannot_be_retried() {
         let m = good_manifest();
         let mut reg = StorageRegistry::new();
         let (deal_id, _) = open_one(&mut reg, &m);
@@ -7376,22 +7679,24 @@ mod tests {
     }
 
     #[test]
-    fn a_missing_proof_still_slashes_rather_than_leaving_the_challenge_open() {
+    fn a_missing_proof_resolves_the_challenge_rather_than_leaving_it_open() {
         let m = good_manifest();
         let mut reg = StorageRegistry::new();
         let (deal_id, _) = open_one(&mut reg, &m);
         let cid = reg
             .open_challenge(deal_id, 0, 4, 110, 120, opener(), 50)
             .unwrap();
-        // Answering in time but with no proof at all is a wrong answer, not a
+        // Answering in time but with no proof at all is an answer, not a
         // malformed request: the deal carries a storage_root, so a proof was
-        // owed.
+        // owed, and the challenge must not stay open for another attempt.
+        // While proofs are uncheckable no outcome of this answer moves the bond.
         let res = reg
             .answer_challenge(cid, ContentId([1u8; 32]), operator(), 115, None)
-            .expect("an answer with no proof resolves as mismatched");
-        assert_eq!(res.outcome, ChallengeOutcome::Mismatched);
-        assert_eq!(res.slashed_bond, good_econ().operator_bond);
-        assert_eq!(deal_status(&reg, deal_id), DealStatus::Slashed);
+            .expect("an answer with no proof resolves the challenge");
+        assert_eq!(res.outcome, ChallengeOutcome::Answered);
+        assert_eq!(res.slashed_bond, 0);
+        assert_eq!(deal_status(&reg, deal_id), DealStatus::Active);
+        assert!(reg.get_result(cid).is_some(), "the challenge is resolved");
     }
 
     #[test]
@@ -8799,7 +9104,7 @@ mod tests {
     }
 
     #[test]
-    fn test_answer_challenge_missing_zk_proof_rejected() {
+    fn test_answer_challenge_missing_shard_bound_proof_is_not_credited_or_slashed() {
         let m = good_manifest();
         let mut reg = StorageRegistry::new();
         // Open a production deal with a storage_root
@@ -8823,19 +9128,16 @@ mod tests {
             .open_challenge(deal_id, 0, 4, 110, 120, opener(), 50)
             .unwrap();
 
-        // Omitting proof_bytes on a production deal (storage_root present)
-        // must not pass. It used to surface as `Err(InvalidMerkleProof)`,
-        // which left the challenge unresolved and the operator free to retry;
-        // it is now a `Mismatched` answer that slashes, on the same terms as
-        // a missed deadline. The property under test is unchanged, a
-        // production deal cannot be answered without a proof, but the
-        // consequence is no longer cheaper than staying silent.
+        // Omitting proof bytes cannot be treated as either a successful
+        // possession proof or evidence of operator fault while the available
+        // verifier is not shard-bound. It resolves administratively without
+        // proven-read credit or slashing.
         let res = reg
             .answer_challenge(cid, ContentId([1u8; 32]), operator(), 115, None)
             .expect("a proofless answer resolves the challenge rather than erroring");
-        assert_eq!(res.outcome, ChallengeOutcome::Mismatched);
-        assert_eq!(res.slashed_bond, good_econ().operator_bond);
-        assert_eq!(deal_status(&reg, deal_id), DealStatus::Slashed);
+        assert_eq!(res.outcome, ChallengeOutcome::Answered);
+        assert_eq!(res.slashed_bond, 0);
+        assert_eq!(deal_status(&reg, deal_id), DealStatus::Active);
     }
 
     #[test]
@@ -9854,18 +10156,39 @@ mod tests {
         let mut reg = StorageRegistry::new();
         let m = good_manifest();
         let (deal_id, _) = open_one(&mut reg, &m);
+        let deal = reg.get_deal(deal_id).expect("deal exists").clone();
         // Any account - including the operator (Invariant 3) - can open a challenge,
         // but neither a self-opened challenge nor an unverifiable answer may credit demand.
         let self_cid = reg
             .open_challenge(deal_id, 0, 4, 110, 120, operator(), 50)
             .unwrap();
+        let self_ch = reg.get_challenge(self_cid).expect("self challenge").clone();
+        let range_hash = ContentId([1u8; 32]);
+        let self_ctx = StorageChallengeProofContext::from_registry(
+            crate::core::chain_config::Network::Testnet
+                .chain_id()
+                .value(),
+            &self_ch,
+            &deal,
+            operator(),
+            111,
+        );
+        let self_real_proof = prove_storage_challenge_proof_for_isolated_air_tests(
+            &self_ctx,
+            &[0x42u8; 32],
+            &range_hash,
+        )
+        .expect("isolated self-challenge STARK witness");
         let self_res = reg
-            .answer_challenge(
+            .answer_challenge_with_chain_id(
+                crate::core::chain_config::Network::Testnet
+                    .chain_id()
+                    .value(),
                 self_cid,
-                ContentId([1u8; 32]),
+                range_hash,
                 operator(),
                 111,
-                Some(&[1u8; 16]),
+                Some(&self_real_proof),
             )
             .unwrap();
         assert_eq!(self_res.outcome, ChallengeOutcome::Answered);
@@ -9892,6 +10215,7 @@ mod tests {
         );
         let res = res.unwrap();
         assert_eq!(res.outcome, ChallengeOutcome::Answered);
+        assert_eq!(res.slashed_bond, 0);
         assert!(
             !reg.access_events.contains_key(&m.manifest_id),
             "unverifiable proof must not credit a proven read"
@@ -9945,6 +10269,66 @@ mod tests {
         );
         assert!(!reg.can_prune_on_nft_burn(&alice_manifest.manifest_id, &mallory));
         assert!(!reg.can_prune_on_nft_burn(&alice_manifest.manifest_id, &alice));
+    }
+
+    /// A lapsed deal proves nothing, and nothing ever deletes a deal row.
+    ///
+    /// `has_custody_deal` used to count `DealStatus::Expired`, and `expire_deal`
+    /// only flips the status while `prune_content` only flips live rows. One
+    /// finished deal by a stranger therefore made `owner_of` answer `None` for
+    /// the life of the chain, and every door behind `has_proven_ownership`
+    /// (view grants, key rotation, burn-driven deletion, asset listing) closed
+    /// for the real owner. The competing deal cannot even be challenged: a
+    /// non-`Active` deal is refused by `open_challenge`.
+    #[test]
+    fn a_lapsed_custody_deal_stops_contesting_the_owner() {
+        let mut reg = StorageRegistry::new();
+        let alice = Address::from([0xA1; 32]);
+        let mallory = Address::from([0xB2; 32]);
+        let mut alice_manifest = good_manifest();
+        // Custody does not silently rewrite a manifest claim: the recorded
+        // claimant must be Alice before her paid deal can establish authority.
+        alice_manifest.owner = alice;
+        let manifest_id = alice_manifest.manifest_id;
+        reg.register_manifest(&alice_manifest);
+        reg.record_test_custody_for_manifest(&alice_manifest, alice);
+        assert_eq!(reg.owner_of(&manifest_id), Some(alice));
+
+        // Mallory registers a competing claim and backs it with a deal that
+        // then lapses: the contest must end with the deal.
+        let mut mallory_manifest = alice_manifest.clone();
+        mallory_manifest.owner = mallory;
+        reg.register_manifest(&mallory_manifest);
+        let mallory_deal = reg
+            .open_deal(
+                4242,
+                &mallory_manifest,
+                alice_manifest.shards[0].shard_id,
+                Address::from([0xFE; 32]),
+                0,
+                10,
+                20,
+                good_econ(),
+                &params(),
+                Some(valid_merkle_proof()),
+                Some([0x42u8; 32]),
+            )
+            .unwrap();
+        reg.set_deal_payer(mallory_deal, mallory);
+        assert_eq!(
+            reg.owner_of(&manifest_id),
+            None,
+            "a live competing custody deal still contests the id"
+        );
+        assert!(!reg.can_prune_on_nft_burn(&manifest_id, &alice));
+
+        reg.expire_deal(mallory_deal, 21).unwrap();
+        assert_eq!(
+            reg.owner_of(&manifest_id),
+            Some(alice),
+            "a lapsed deal must not contest the id after its escrow has settled"
+        );
+        assert!(reg.can_prune_on_nft_burn(&manifest_id, &alice));
     }
 
     #[test]

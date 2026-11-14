@@ -5,6 +5,7 @@ pub mod domain_tags;
 pub mod facts;
 pub mod hpke;
 pub mod key_derivation;
+pub mod key_file;
 pub mod key_set_preimage;
 pub mod mainnet_policy;
 pub mod pkcs11;

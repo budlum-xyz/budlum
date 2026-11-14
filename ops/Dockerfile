@@ -40,6 +40,10 @@ WORKDIR /build
 # producing a bit-for-bit different binary.
 COPY Cargo.toml Cargo.lock build.rs rust-toolchain.toml ./
 COPY src/ ./src/
+# The VM-family modules embed these reviewed contract sources with
+# include_bytes! at compile time. They are not Cargo path dependencies, so
+# copying only src/ makes the release build fail for all four families.
+COPY contracts/object-layer/ ./contracts/object-layer/
 COPY benches/ ./benches/
 COPY proto/ ./proto/
 COPY budzero/ ./budzero/
@@ -48,6 +52,9 @@ COPY budzero/ ./budzero/
 # anything, it fails to resolve, which is how this line came to be missing
 # and be noticed the same hour.
 COPY crates/note-packing/ ./crates/note-packing/
+COPY crates/uel-abi/ ./crates/uel-abi/
+COPY crates/budlum-types/ ./crates/budlum-types/
+COPY crates/bud-codec/ ./crates/bud-codec/
 # Optional feature-gated research crate (`bpqs-research`); path dependencies
 # must exist in the build context even when their feature is off.
 COPY crates/bpqs/ ./crates/bpqs/
@@ -72,7 +79,7 @@ RUN pinned="$(sed -n 's/^channel *= *"\(.*\)"/\1/p' rust-toolchain.toml)" && \
     actual="${version_line#rustc }" && \
     actual="${actual%% *}" && \
     if [ "$pinned" != "$actual" ]; then \
-      echo "HATA: imaj rustc $actual tasiyor, rust-toolchain.toml $pinned pinliyor" >&2; \
+      echo "ERROR: image carries rustc $actual while rust-toolchain.toml pins $pinned" >&2; \
       exit 1; \
     fi && \
     echo "toolchain OK: rustc $actual == rust-toolchain.toml $pinned"
@@ -95,8 +102,10 @@ FROM cgr.dev/chainguard/wolfi-base@sha256:d13acb327aa77acf2752acea8c08456511a5b8
 # `ld-linux-x86-64.so.2`) and `libgcc_s.so.1`, while `coreutils`, `curl`, `grep`,
 # `sed`, `bash` and `shadow` preserve `date +%s%3N` in `ops/docker-compose.yml`
 # ceremony, the `node1` operator RPC healthcheck, and deterministic UID 1000 setup.
+# The eight-seat rehearsal's validator entrypoint is Python. The builder's
+# Python does not carry into this runtime image; install it explicitly.
 # hadolint ignore=DL3018
-RUN apk add --no-cache \
+RUN apk update && apk upgrade --no-cache && apk add --no-cache \
     bash \
     ca-certificates-bundle \
     coreutils \
@@ -105,6 +114,7 @@ RUN apk add --no-cache \
     grep \
     libgcc \
     openssl \
+    python3 \
     sed \
     shadow \
     tzdata

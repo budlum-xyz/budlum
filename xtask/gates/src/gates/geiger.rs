@@ -21,7 +21,7 @@ fn counters(line: &str) -> impl Iterator<Item = &str> {
 /// Is this crate name one of ours?
 fn is_first_party_name(name: &str) -> bool {
     name == "verifier-registry"
-        || name == "budscan"
+        || name == "budlum-explorer"
         || name.starts_with("budlum-")
         || name.starts_with("bud-")
 }
@@ -43,7 +43,7 @@ fn first_party_name(line: &str) -> Option<&str> {
     let name = tokens.get(version_at.checked_sub(1)?)?;
     // `verifier-registry` is the eighth budzero member and does not match the
     // name pattern; if it were not listed by name it would count as third party.
-    // The `budlum-*` crates and `budscan` are first-party path crates too.
+    // The `budlum-*` crates and `budlum-explorer` are first-party path crates too.
     is_first_party_name(name).then_some(*name)
 }
 
@@ -63,7 +63,7 @@ pub fn run(_root: &Path, out: &Path) -> Result<String, String> {
         // A cargo-geiger row leads with five unsafe counters and ends with the
         // crate name and version:
         //
-        //   0/0  0/0  0/0  0/0  0/0   ?  budlum-core 0.1.0
+        // 0/0 0/0 0/0 0/0 0/0 ? budlum-core 0.1.0
         //
         // The ported shell gate matched on `starts_with`, which is where the
         // crate name sits in `cargo tree` output but not here - so no line
@@ -185,7 +185,7 @@ mod tests {
         .unwrap();
         assert!(run(&dir, &f).is_err());
         // Build noise is not a first-party line: in the line `Checking bud-isa
-        // v0.1.0 (...)` the crate name occurs but there is no counter.
+        // v0.1.0 (..)` the crate name occurs but there is no counter.
         std::fs::write(
             &f,
             "    Checking bud-isa v0.1.0 (/w/budzero/bud-isa)\n    Checking bud-vm v0.1.0 (/w)\n",
@@ -211,8 +211,8 @@ mod name_tests {
         let row = "0/0  0/0  0/0  0/0  0/0   ?  budlum-bpqs 0.1.0";
         assert_eq!(first_party_name(row), Some("budlum-bpqs"));
         assert_eq!(
-            first_party_name("0/0 0/0 0/0 0/0 0/0 ? budscan 0.1.0"),
-            Some("budscan")
+            first_party_name("0/0 0/0 0/0 0/0 0/0 ? budlum-explorer 0.1.0"),
+            Some("budlum-explorer")
         );
         assert_eq!(first_party_name("0/0 0/0 0/0 0/0 0/0 ? serde 1.0.0"), None);
     }

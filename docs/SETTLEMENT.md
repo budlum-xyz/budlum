@@ -1,4 +1,4 @@
-# Settlement and Graft
+# Settlement and AppBinding
 
 Settlement writes are block-only. A signed `TransactionType::Settlement`
 transaction is the only production write path for the settlement registries;
@@ -13,11 +13,11 @@ RPC methods expose reads and point writers at `bud_sendRawTransaction`.
 | `RegisterDomain`, `SubmitCommitment`, `RegisterSovereignTemplate`, `SetZkProgram`, `SubmitZkProof` | consensus domains, their commitments and anchors |
 | `ProofMarket` | proof-market escrow, tasks, receipts, payments and refunds |
 | `RelayerIntent` | outbound relayer intents, solver bids, settlement and expiry |
-| `Graft` | Graft applications, payments, ownership claims and solver intents |
+| `AppBinding` | AppBinding applications, payments, ownership claims and solver intents |
 
 ## External evidence
 
-A relayer intent, a Graft claim and a Graft fulfilment prove something that
+A relayer intent, an AppBinding claim and an AppBinding fulfilment prove something that
 happened on another domain the same way the bridge relay does: a
 `RelayerExternalResult` whose cross-domain message is committed by its
 result leaf, and a Merkle path from that leaf to the external root consensus
@@ -26,10 +26,10 @@ that the message says the specific thing it needs: the intent it executed,
 the payout an application names, or the call a fulfilment made. A real but
 unrelated anchored event settles nothing.
 
-## Graft
+## Remote App Binding (`app_binding`)
 
-`SettlementTx::Graft` is the in-block side of Graft; `docs/GRAFT.md` is the
-integrator guide. In short:
+In-block settlement transactions implement remote app binding (`docs/APP_BINDING.md`
+is the integrator guide; active on testnet `45261` and devnet `45262` from genesis). In short:
 
 - `Register` is permissionless and idempotent and names no owner.
 - `Claim` sets the owner from an anchored claim event of the application.
@@ -39,8 +39,9 @@ integrator guide. In short:
 
 The registry, the payment window, open intents, domain executors and the
 claim replay set are part of the settlement root and of the global header
-(`graft_root`, V7). `bud_getGraftApplication`, `bud_graftPaymentProof` and the
-Graft fields of `bud_getSettlementInfo` are read-only.
+(`app_binding_root`, V7). `bud_getAppBindingApplication`, `bud_appBindingPaymentProof` and the
+remote-app-binding fields of `bud_getSettlementInfo` are read-only; these
+legacy wire identifiers remain unchanged for compatibility.
 
 ### Relayer intent awards
 

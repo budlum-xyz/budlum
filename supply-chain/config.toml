@@ -22,21 +22,6 @@ url = "https://raw.githubusercontent.com/mozilla/supply-chain/main/audits.toml"
 [imports.zcash]
 url = "https://raw.githubusercontent.com/zcash/rust-ecosystem/main/supply-chain/audits.toml"
 
-# libp2p 0.57.1 and its subcrates now come from crates.io (see Cargo.lock).
-# The normal cargo-vet policy audits registry crates. The old
-# audit-as-crates-io overrides were only for the unpublished git tree; keeping
-# them makes cargo-vet refuse to run because these crates are no longer forks.
-
-[[exemptions.bindgen]]
-version = "0.72.1"
-criteria = "safe-to-deploy"
-notes = "Build-time dependency of crabgrind; never part of a shipped binary."
-
-[[exemptions.cexpr]]
-version = "0.6.0"
-criteria = "safe-to-deploy"
-notes = "Build-time dependency of bindgen."
-
 [[exemptions.clang-sys]]
 version = "1.9.1"
 criteria = "safe-to-deploy"
@@ -172,16 +157,6 @@ version = "0.14.0"
 criteria = "safe-to-deploy"
 notes = "RustCrypto NIST P-256 (R1 canary + RFC 9380 suite); same audited codebase line as the 0.13.2 pin, now on the 0.14 graph with crypto-bigint 0.7."
 
-[[exemptions.pastey]]
-version = "0.2.3"
-criteria = "safe-to-deploy"
-notes = "Proc macro dependency of libcrux-sha3."
-
-[[exemptions.pkg-config]]
-version = "0.3.34"
-criteria = "safe-to-deploy"
-notes = "Build-time dependency of bindgen and crabgrind."
-
 [[exemptions.primefield]]
 version = "0.14.0"
 criteria = "safe-to-deploy"
@@ -192,16 +167,6 @@ version = "0.14.0"
 criteria = "safe-to-deploy"
 notes = "RustCrypto complete-addition-formulas layer under p192/p224/p256; follows the same audited curve code lineage as 0.13.6."
 
-[[exemptions.proc-macro-error-attr2]]
-version = "2.0.0"
-criteria = "safe-to-deploy"
-notes = "Proc macro helper of proc-macro-error2."
-
-[[exemptions.proc-macro-error2]]
-version = "2.0.1"
-criteria = "safe-to-deploy"
-notes = "Proc macro helper of hax-lib-macros."
-
 [[exemptions.sec1]]
 version = "0.8.1"
 criteria = "safe-to-deploy"
@@ -211,11 +176,6 @@ notes = "RustCrypto SEC1 point-encoding crate (compressed/uncompressed points); 
 version = "0.11.0"
 criteria = "safe-to-deploy"
 notes = "Dependency of slh-dsa 0.2 (SHAKE hash functions)."
-
-[[exemptions.shlex]]
-version = "1.3.0"
-criteria = "safe-to-deploy"
-notes = "Build-time dependency of bindgen."
 
 [[exemptions.slh-dsa]]
 version = "0.2.0-rc.5"
@@ -236,11 +196,6 @@ notes = "Proc macro of tls_codec, never expanded here."
 version = "0.14.1"
 criteria = "safe-to-deploy"
 notes = "zkcrypto windowed-NAF scalar multiplication tables, pure arithmetic used by k256 0.14."
-
-[[exemptions.zeroize]]
-version = "1.9.1"
-criteria = "safe-to-deploy"
-notes = "One pin for the PQ core and the HPKE module; libcrux-ml-dsa asks for 1.9 through tls_codec."
 
 [[exemptions.zeroize_derive]]
 version = "1.5.0"

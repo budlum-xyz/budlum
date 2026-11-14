@@ -87,8 +87,8 @@ pub struct PoAEngine {
     pub config: PoAConfig,
     keypair: Option<KeyPair>,
     signer: Option<Arc<dyn ConsensusSigner>>,
-    /// Optional isolated PoA authority set. When non-empty, only these
-    /// Addresses can be considered for PoA leadership even if other validators
+    /// Optional isolated `PoA` authority set. When non-empty, only these
+    /// Addresses can be considered for `PoA` leadership even if other validators
     /// Are active in the permissionless state.
     authorities: Vec<Address>,
     /// The validator-suite composite key of the
@@ -155,7 +155,7 @@ impl PoAEngine {
         self
     }
 
-    /// Validators allowed to lead or validate in this PoA domain right now.
+    /// Validators allowed to lead or validate in this `PoA` domain right now.
     ///
     /// Admission is decided by [`crate::registry::poa_onboarding`], recomputed
     /// at each block close and held in [`AccountState`] so every node agrees.
@@ -180,7 +180,7 @@ impl PoAEngine {
     ///
     /// The first attempt treated an empty admission registry as "nobody is
     /// admitted", which is right for a permissioned domain and wrong for
-    /// every other chain: a plain PoA devnet that never opted into admission
+    /// every other chain: a plain `PoA` devnet that never opted into admission
     /// control would have been unable to produce its first block. Two
     /// different situations - *gated and nobody let in* versus *not gated* -
     /// had been collapsed into the same silence.
@@ -221,7 +221,7 @@ impl PoAEngine {
             .collect()
     }
 
-    /// Deterministic leader selection for PoA.
+    /// Deterministic leader selection for `PoA`.
     ///
     /// Replaces pure round-robin (`block_index % n`) with a hash mix over
     /// `block_index` and the active validator set fingerprint so the next
@@ -495,7 +495,7 @@ impl ConsensusEngine for PoAEngine {
     ) -> Result<(), ConsensusError> {
         let expected =
             self.prepare_common(block, state, chain.last().map(|p| p.timestamp), chain)?;
-        // P01-F24: refuse a slot we do not lead before the caller applies any
+        // Refuse a slot we do not lead before the caller applies any
         // state. `prepare_common` names the round-0 leader for display when no
         // affordable round names us; previewing through to the end made every
         // non-leader PoA node compute the full state transition and then fail
@@ -542,15 +542,32 @@ impl ConsensusEngine for PoAEngine {
     ) -> Result<(), ConsensusError> {
         if block.index == 0 {
             if block.hash != block.calculate_hash() {
-                return Err(ConsensusError("Invalid genesis block hash".into()));
+                return Err(ConsensusError("Invalid block hash".into()));
             }
             return Ok(());
         }
         if let Some(prev_block) = chain.last() {
+            let expected_index = prev_block
+                .index
+                .checked_add(1)
+                .ok_or_else(|| ConsensusError("Block height overflow".into()))?;
+            if block.index != expected_index {
+                return Err(ConsensusError(format!(
+                    "Block height mismatch. Expected: {expected_index}, Got: {}",
+                    block.index
+                )));
+            }
             if block.previous_hash != prev_block.hash {
                 return Err(ConsensusError(format!(
                     "Previous hash mismatch. Expected: {}, Got: {}",
                     prev_block.hash, block.previous_hash
+                )));
+            }
+            let min_stamp = prev_block.timestamp.saturating_add(MIN_BLOCK_INTERVAL_MS);
+            if block.timestamp < min_stamp {
+                return Err(ConsensusError(format!(
+                    "PoA block timestamp {} precedes parent floor {}",
+                    block.timestamp, min_stamp
                 )));
             }
         }
@@ -605,6 +622,9 @@ impl ConsensusEngine for PoAEngine {
                         )));
                     }
                 }
+            }
+            if block.hash != block.calculate_hash() {
+                return Err(ConsensusError("Invalid block hash".into()));
             }
             // V5-SECURITY-12: the seed must match the one `prepare_common`
             // used - the grandparent, because the parent's hash is the
@@ -1195,5 +1215,45 @@ mod tests {
             error.0.contains("expected proposer") || error.0.contains("leader"),
             "the refusal must name the leader rule, got: {error:?}"
         );
+    }
+
+    #[test]
+    fn poa_validate_rejects_tampered_hash_height_and_backward_timestamp() {
+        let alice = crate::crypto::primitives::KeyPair::generate().unwrap();
+        let alice_addr = Address::from(alice.public_key_bytes());
+        let state = poa_state_with(&[alice_addr]);
+        let engine = PoAEngine::new(PoAConfig::default(), None);
+
+        let mut parent = Block::genesis();
+        parent.timestamp = 1_000_000;
+        parent.hash = parent.calculate_hash();
+
+        let mut bad_stamp = Block::new(1, parent.hash.clone(), vec![]);
+        bad_stamp.timestamp = parent.timestamp;
+        bad_stamp.producer = Some(alice_addr);
+        bad_stamp.sign(&alice);
+        let stamp_err = engine
+            .validate_block(&bad_stamp, std::slice::from_ref(&parent), &state)
+            .expect_err("round-0 block below parent floor must fail");
+        assert!(stamp_err.0.contains("precedes parent floor"));
+
+        let mut bad_height = Block::new(5, parent.hash.clone(), vec![]);
+        bad_height.timestamp = parent.timestamp + MIN_BLOCK_INTERVAL_MS;
+        bad_height.producer = Some(alice_addr);
+        bad_height.sign(&alice);
+        let height_err = engine
+            .validate_block(&bad_height, std::slice::from_ref(&parent), &state)
+            .expect_err("non-contiguous height must fail");
+        assert!(height_err.0.contains("Block height mismatch"));
+
+        let mut bad_hash = Block::new(1, parent.hash.clone(), vec![]);
+        bad_hash.timestamp = parent.timestamp + MIN_BLOCK_INTERVAL_MS;
+        bad_hash.producer = Some(alice_addr);
+        bad_hash.sign(&alice);
+        bad_hash.hash = "00".repeat(32);
+        let hash_err = engine
+            .validate_block(&bad_hash, &[parent], &state)
+            .expect_err("tampered hash must fail immediately");
+        assert!(hash_err.0.contains("Invalid block hash"));
     }
 }

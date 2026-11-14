@@ -12,7 +12,7 @@
 //! - It never exposes an `approve` / `admit` gate for PoW/PoS/BFT roles.
 //! - It knows nothing about KYC. KYC-gated membership lives in a *separate*
 //!   Module ([`crate::registry::poa_membership`]) with a separate data
-//!   Structure, so PoA's permissioned rules cannot leak in here.
+//!   Structure, so `PoA`'s permissioned rules cannot leak in here.
 
 use crate::core::address::Address;
 use crate::core::chain_config::slash_penalty;
@@ -213,7 +213,7 @@ pub enum RegistryError {
         role: RoleId,
     },
     /// The role-bond door registers the verifier family
-    /// and nothing else; any other RoleId is refused by name.
+    /// and nothing else; any other `RoleId` is refused by name.
     UnsupportedRole {
         role: RoleId,
     },
@@ -478,6 +478,11 @@ impl PermissionlessRegistry {
         self.params = params;
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn register(
         &mut self,
         account: Address,
@@ -510,6 +515,11 @@ impl PermissionlessRegistry {
 
     // Convenience wrappers for well-known roles (unified)
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn register_validator(
         &mut self,
         account: Address,
@@ -524,6 +534,11 @@ impl PermissionlessRegistry {
         )
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn register_verifier(
         &mut self,
         account: Address,
@@ -538,7 +553,11 @@ impl PermissionlessRegistry {
         )
     }
 
-    /// DeEd master verifier - alias to VERIFIER (RoleId 2)
+    /// `DeEd` master verifier - alias to VERIFIER (`RoleId` 2)
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn register_master_verifier(
         &mut self,
         account: Address,
@@ -553,6 +572,11 @@ impl PermissionlessRegistry {
         )
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn register_relayer(
         &mut self,
         account: Address,
@@ -567,6 +591,11 @@ impl PermissionlessRegistry {
         )
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn register_storage_operator(
         &mut self,
         account: Address,
@@ -581,6 +610,11 @@ impl PermissionlessRegistry {
         )
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn register_ai_verifier(
         &mut self,
         account: Address,
@@ -596,6 +630,10 @@ impl PermissionlessRegistry {
     }
 
     /// Supply-chain attester (ATTESTER=7) - unified registry
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn register_attester(
         &mut self,
         account: Address,
@@ -610,7 +648,11 @@ impl PermissionlessRegistry {
         )
     }
 
-    /// AI inference layer operator (RoleId 8) - must be preserved
+    /// AI inference layer operator (`RoleId` 8) - must be preserved
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn register_ai_operator(
         &mut self,
         account: Address,
@@ -625,7 +667,11 @@ impl PermissionlessRegistry {
         )
     }
 
-    /// SocialFi content validator (RoleId 9)
+    /// `SocialFi` content validator (`RoleId` 9)
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn register_content_validator(
         &mut self,
         account: Address,
@@ -694,6 +740,11 @@ impl PermissionlessRegistry {
         }
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn add_stake(
         &mut self,
         account: Address,
@@ -714,6 +765,11 @@ impl PermissionlessRegistry {
         Ok(reg.stake)
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn begin_unbonding(
         &mut self,
         account: Address,
@@ -724,6 +780,11 @@ impl PermissionlessRegistry {
         self.begin_unbonding_with_delay(account, role, current_epoch, unbonding_epochs)
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn begin_unbonding_with_delay(
         &mut self,
         account: Address,
@@ -751,6 +812,11 @@ impl PermissionlessRegistry {
         Ok(release_epoch)
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn withdraw(
         &mut self,
         account: Address,
@@ -798,6 +864,10 @@ impl PermissionlessRegistry {
     /// layer has not marked `ConsensusVerified`. An externally submitted
     /// report passes structural validation, so a path that only checks shape
     /// would cut real stake on an unverified claim.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn slash(
         &mut self,
         account: Address,
@@ -818,6 +888,10 @@ impl PermissionlessRegistry {
     /// Consensus/storage/relayer bonds. AI inference layer equivocation uses this path because
     /// The approved penalty is the RoleId(8) bond, not an implicit validator
     /// Slash unsupported by consensus evidence.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn slash_role_only(
         &mut self,
         account: Address,
@@ -900,6 +974,11 @@ impl PermissionlessRegistry {
         }
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn slash_from_report(
         &mut self,
         report: &SlashingReport,
@@ -908,18 +987,29 @@ impl PermissionlessRegistry {
         self.slash_from_report_at_epoch(report, 0)
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn slash_from_report_at_epoch(
         &mut self,
         report: &SlashingReport,
         current_epoch: u64,
     ) -> Result<Option<SlashOutcome>, EvidenceError> {
         report.is_actionable()?;
+        // V-4: a downtime/absence claim is never slashable evidence. It is
+        // observed by the suspension tracker instead. Explicit settlement
+        // bonds for an awarded but unexecuted job use a different door.
+        if matches!(
+            &report.proof,
+            crate::registry::evidence::SlashingProof::Liveness { .. }
+        ) {
+            return Ok(None);
+        }
         let condition = report.condition();
-        // A liveness fault no longer lands in
-        // `Slashed`, so the `AlreadySlashed` replay guard does not cover it.
-        // The history is the ledger of what has already been applied: a
-        // repeated liveness report is answered with a no-op instead of a
-        // second stake cut.
+        // History is the ledger of what has already been applied: a repeated
+        // report is answered with a no-op instead of a second stake cut.
         let window_key = permissionless_offence_window(&report.proof);
         let member_key = permissionless_member_key(report.role, report.offender);
         if let Some(wk) = window_key {
@@ -1049,6 +1139,11 @@ impl PermissionlessRegistry {
             .is_some_and(Registration::has_role_authority)
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn ensure_active_relayer(&self, account: &Address) -> Result<(), RegistryError> {
         if self.is_active_relayer(account) {
             Ok(())
@@ -1062,6 +1157,11 @@ impl PermissionlessRegistry {
             .is_some_and(Registration::has_role_authority)
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn ensure_active_attester(&self, account: &Address) -> Result<(), RegistryError> {
         if self.is_active_attester(account) {
             Ok(())
@@ -1177,6 +1277,10 @@ impl PermissionlessRegistry {
     /// of the chain. One validator also carries at most
     /// `max_delegations_per_validator` positions, which is what bounds the
     /// slice its own stake operations walk.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn delegate(
         &mut self,
         delegator: Address,
@@ -1242,6 +1346,10 @@ impl PermissionlessRegistry {
     /// destination either grows an existing position or takes a new one, under
     /// the same [`MAX_DELEGATIONS`] ceiling and the same entry-side bounds as
     /// [`Self::delegate`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn move_delegation(
         &mut self,
         delegator: Address,
@@ -1306,6 +1414,10 @@ impl PermissionlessRegistry {
     /// The table is sorted by `(validator, delegator)` and addressed by binary
     /// search, so the epoch close - which credits one debt per position it
     /// walked - no longer pays a scan of the whole table for each of them.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn credit_claimable_reward(
         &mut self,
         delegator: Address,
@@ -1353,6 +1465,10 @@ impl PermissionlessRegistry {
     /// to; a pair that appears twice in `credits` is merged as well. All or
     /// nothing: an amount that would overflow leaves the table unchanged, which
     /// is the same choice the single-credit door makes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn credit_claimable_rewards(
         &mut self,
         validator: Address,
@@ -1448,6 +1564,10 @@ impl PermissionlessRegistry {
     /// Take the claimable reward of one `(delegator, validator)` pair. The
     /// entry is removed before the caller credits anything, so a claim can
     /// never pay twice.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn claim_delegator_rewards(
         &mut self,
         delegator: Address,
@@ -1490,6 +1610,10 @@ impl PermissionlessRegistry {
     /// Move an active position into the canonical unbonding queue. The
     /// validator's consensus stake is adjusted by the account layer only
     /// after this operation succeeds.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn begin_delegation_unbonding(
         &mut self,
         delegator: Address,
@@ -1559,6 +1683,11 @@ impl PermissionlessRegistry {
             .fold(0u64, |total, entry| total.saturating_add(entry.amount))
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn withdraw_delegation(
         &mut self,
         delegator: Address,
@@ -1661,6 +1790,11 @@ impl PermissionlessRegistry {
             .map(|rate| rate.effective_epoch)
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn set_validator_commission(
         &mut self,
         validator: Address,
@@ -2290,11 +2424,10 @@ mod tests {
         assert!(reg.withdraw(addr(7), roles::VALIDATOR, release).is_ok());
     }
 
-    /// A liveness fault is a timed jail. The
-    /// entry is not Slashed at the registry level, so the release after the
-    /// jail expiry actually works.
+    /// V-4: a liveness/absence report produces no slash outcome, writes no
+    /// history and leaves the full bond untouched.
     #[test]
-    fn a_liveness_fault_does_not_slash_the_registry_entry() {
+    fn a_liveness_report_is_non_actionable_and_never_cuts_stake() {
         let mut reg = PermissionlessRegistry::new();
         reg.register_validator(addr(8), MIN_REGISTRATION_STAKE, 0)
             .unwrap();
@@ -2309,18 +2442,11 @@ mod tests {
             },
             None,
         );
-        let outcome = reg.slash_from_report(&report).unwrap();
-        assert!(outcome.is_some());
+        assert_eq!(reg.slash_from_report(&report).unwrap(), None);
         let entry = reg.registrations.get(&(roles::VALIDATOR, addr(8))).unwrap();
-        assert!(
-            matches!(entry.status, MemberStatus::Active),
-            "a liveness fault must not write Slashed: {:?}",
-            entry.status
-        );
-        assert!(
-            entry.stake < MIN_REGISTRATION_STAKE,
-            "the stake is still cut"
-        );
+        assert!(matches!(entry.status, MemberStatus::Active));
+        assert_eq!(entry.stake, MIN_REGISTRATION_STAKE);
+        assert!(reg.slashing_history().is_empty());
     }
 
     #[test]
@@ -2453,18 +2579,10 @@ mod tests {
         );
     }
 
-    /// A zero-penalty slash must still be recorded, mirroring budzero's
-    /// `verifier-registry`.
-    ///
-    /// A condition whose ratio is zero, such as liveness, makes the slash
-    /// "free": the stake does not change. The earlier code erased that event
-    /// from the history entirely, and having two ledgers give different answers
-    /// for the same entry quietly misled a caller who did not know which one was
-    /// being read. That is the G0 decision of 2026-08-22: record integrity is
-    /// canonical, so the event happened, it entered the record, and its penalty
-    /// is zero.
+    /// Even a zero configured liveness ratio does not turn an absence claim
+    /// into a slash record: absence belongs to suspension, not slashing (V-4).
     #[test]
-    fn a_zero_penalty_slash_is_still_recorded() {
+    fn a_zero_ratio_liveness_report_is_still_not_actionable() {
         let params = RegistryParams {
             liveness_slash_ratio_fixed: 0,
             ..RegistryParams::default()
@@ -2473,7 +2591,6 @@ mod tests {
         let a = addr(23);
         reg.register_relayer(a, MIN_REGISTRATION_STAKE, 0)
             .expect("registration");
-
         let report = crate::registry::evidence::SlashingReport::consensus_liveness(
             a,
             roles::RELAYER,
@@ -2485,23 +2602,11 @@ mod tests {
             },
             None,
         );
-        let outcome = reg
-            .slash_from_report(&report)
-            .expect("the report is actionable")
-            .expect("the slash was applied");
+        assert_eq!(reg.slash_from_report(&report).unwrap(), None);
+        assert!(reg.slashing_history().is_empty());
         assert_eq!(
-            outcome.penalty, 0,
-            "the ratio is zero, so the penalty must be zero"
-        );
-        assert_eq!(
-            reg.slashing_history().len(),
-            1,
-            "the event must enter the record: an offence with a zero penalty is still an offence"
-        );
-        assert_eq!(reg.slashing_history()[0].penalty, 0);
-        assert!(
-            reg.is_active_relayer(&a),
-            "a liveness fault is a timed jail, not a registry Slashed"
+            reg.get(&a, roles::RELAYER).unwrap().stake,
+            MIN_REGISTRATION_STAKE
         );
     }
 

@@ -13,7 +13,7 @@ the layer asks which finality proof holds for a fact, never which consensus prod
 value moves between domains without trusting an intermediary.
 
 [![CI](https://github.com/budlum-xyz/budlum/actions/workflows/ci.yml/badge.svg?branch=main&event=push)](https://github.com/budlum-xyz/budlum/actions/workflows/ci.yml?query=branch%3Amain+event%3Apush)
-[![Tests](https://img.shields.io/badge/tests-4507%20lib-blue)](https://github.com/budlum-xyz/budlum/actions/workflows/ci.yml?query=branch%3Amain+event%3Apush)
+[![Tests](https://img.shields.io/badge/tests-5454%20lib-blue)](https://github.com/budlum-xyz/budlum/actions/workflows/ci.yml?query=branch%3Amain+event%3Apush)
 [![Rust](https://img.shields.io/badge/rust-1.97.1-orange?logo=rust)](rust-toolchain.toml)
 [![License](https://img.shields.io/badge/license-PolyForm%20Shield%201.0.0-blue)](LICENSE.md)
 
@@ -22,10 +22,11 @@ value moves between domains without trusting an intermediary.
 ---
 
 > [!WARNING]
-> **Budlum has not launched a mainnet and has not been audited.** This repository is
-> research-grade, controlled-devnet software. Do not use it for real-value traffic.
-> See [Project status](#project-status) for exactly what is implemented, what is
-> deliberately unfinished, and what is not claimed.
+> **Budlum has not launched a mainnet and has not been audited.** No public testnet
+> launch or mainnet launch is evidenced here. No external audit has been performed.
+> This is development software. Do not use it for real-value traffic. The
+> [testnet launch-gate ledger](docs/audit/TLG_REPORT.md) distinguishes in-tree code
+> and synthetic fixtures from verified deployments.
 
 ---
 
@@ -33,7 +34,7 @@ value moves between domains without trusting an intermediary.
 
 - [Why Budlum](#why-budlum)
 - [How settlement works](#how-settlement-works)
-- [Operator scenarios](#operator-scenarios-measured)
+- [Operator scenarios](#operator-scenarios-code-examples-and-historical-measurement)
 - [Repository layout](#repository-layout)
 - [Getting started](#getting-started)
 - [Running a node](#running-a-node)
@@ -55,7 +56,7 @@ value moves between domains without trusting an intermediary.
 | **Bridge risk.** Custodial and multisig bridges have lost billions; the failures are almost always missing verification, not broken cryptography. | A `lock → mint → burn → unlock` lifecycle where every mint recomputes a bounded proof and re-derives the payload hash from `(asset_id, amount)` before crediting anything. |
 | **The quantum horizon.** Ed25519 and ECDSA are expected to be breakable within the lifetime of a chain launched today. | Hybrid finality: BLS12-381 aggregate signatures alongside a post-quantum scheme (ML-DSA-65 by default - FIPS 204 NIST final; legacy Dilithium5 available only for migration). <!-- claim:L-FINALITY-01 --> |
 | **Operator custody of user data.** "Decentralized" networks whose storage, RPC and inference all terminate at one company. | No admin key, no pause hook, no whitelist. Storage, RPC and AI endpoints run on any node; participation is stake-gated, not permission-gated. |
-| **Unverifiable off-chain compute.** AI output presented as fact with nothing behind it. | An in-tree zkVM (BudZero) that produces STARK proofs of execution. Inference proof *verification* is not yet enabled, the transaction path [fails closed](docs/AI_VERIFICATION_STATUS.md) rather than trusting an unverified result. |
+| **Unverifiable off-chain compute.** AI output presented as fact with nothing behind it. | An in-tree zkVM (BudZero) that produces and verifies Plonky3 STARK proofs for registered proof-required models bound to chain, model architecture, weights digest, and sender context ([status details](docs/AI_VERIFICATION_STATUS.md)). |
 
 **The data-sovereignty invariant.** No critical function in the network depends on a service
 operated by the Budlum team. This is not a value statement, it is a property the test suite
@@ -125,10 +126,12 @@ the code is the fact and the diagram is the bug.
 
 ---
 
-## Operator scenarios (measured)
+## Operator scenarios (code examples and historical measurement)
 
-Three production paths run end to end in CI. Every number below is read from a
-CI log; none of it is a local measurement.
+The following describe in-tree paths, not a public-network rehearsal. The
+storage benchmark below cites a historical CI job; its result is not a current
+B.U.D. 3.0 or launch-gate measurement. The other examples contain no new
+performance measurements.
 
 1. **Canonical proof relay.** `bud-cli relay` first re-derives both canonical
    check programs (private-transfer, syscall-context) from the pinned operand
@@ -194,9 +197,9 @@ dependencies, so the entire system builds, tests and ships as one tree.
 
 | Path | Contents |
 | --- | --- |
-| [`crates/`](crates) | Standalone workspaces: wallet-core, budscan, ai_inference, note-packing |
+| [`crates/`](crates) | Standalone workspaces: wallet-core, budlum-explorer, ai_inference, note-packing |
 | [`bud/`](bud) | B.U.D. 1.0/2.0/3.0 implementation (its own workspace) |
-| [`docs/`](docs) | Reference docs: ARCHITECTURE, SPECIFICATION, SECURITY, CONTRIBUTING, PROVENANCE_NOTES |
+| [`docs/`](docs) | Reference docs: ARCHITECTURE, SPECIFICATION, SECURITY, CONTRIBUTING, NOTICE |
 | [`config/`](config) | Devnet / testnet / mainnet profiles and genesis templates |
 | [`xtask/gates/`](xtask/gates) | CI gates, every one is self-testing (see [Engineering standards](#engineering-standards)) |
 | [`kani/`](kani) · [`fuzz/`](fuzz) | Model-checking harnesses and fuzz targets ([fuzz README](fuzz/README.md)) |
@@ -297,31 +300,36 @@ ceremony file.
 
 ### Testnet
 
-Testnet is mainnet's rehearsal: the same code path, the same supply rules, the same validator
-ceremony. Only the profile, the genesis and the parameter values differ - chain id `45261`,
-network id `BDLT`.
+The testnet profile uses chain id `45261` and network magic `BDLT`; this is
+configuration, **not** proof that a public network has launched. The operator
+must first complete the [launch gate](docs/audit/TLG_REPORT.md), a genesis
+ceremony and public endpoint deployment. For a local rehearsal:
 
-- **Wallet:** `bud wallet create --key-file ./secrets/wallet.json` (ML-DSA-87, 24 words).
-- **Get BUD:** the faucet grants 100 BUD per address per day. Ask it for a transfer like any
-  other: `curl -X POST https://faucet.<TESTNET_DOMAIN>/request -d '{"address":"0x<your address>"}'`.
-- **Become a validator:** at least 1,000 BUD of stake, then `bud validator join`; see
-  [docs/VALIDATOR_GUIDE.md](docs/VALIDATOR_GUIDE.md).
-- **Delegate:** `bud delegate`, see [docs/DELEGATION.md](docs/DELEGATION.md).
-- **Run a node:** `budlum-core --config config/testnet.toml`.
+- **Create a wallet:** `bud wallet create --key-file ./secrets/wallet.json`
+  (ML-DSA-87, 24 words; choose a password).
+- **Request BUD only after the faucet challenge client is built and
+  tested against a running node:** the configured grant is 100 BUD. The source
+  implements `budlum-faucet request --url http://127.0.0.1:28600 --address
+  0x<64-hex-character-address>`; it fetches and solves a work challenge.
+  Address-only POST requests are not valid onboarding. No public faucet DNS is
+  published; see [faucet prerequisites](docs/TESTNET.md#use-the-testnet).
+- **Join a validator:** generate keys first, then use `bud --rpc-url
+  http://127.0.0.1:28545 --signing-chain-id 45261 validator join --key-file
+  ./secrets/testnet-validator.key --stake-bud 1000` with enough funds for stake
+  and fees; see [validator guide](docs/VALIDATOR_GUIDE.md).
+- **Delegate:** `bud delegate --key-file ./secrets/wallet.json --validator
+  0x<validator-address> --amount-bud <amount>` with a signing chain id; see
+  [delegation guide](docs/DELEGATION.md).
+- **Run a node:** `budlum-core --config config/testnet.toml` after the operator
+  configures keys, peers and genesis as described in [the operator notes](docs/TESTNET.md).
 
 Every command that signs names its replay domain with `--signing-chain-id 45261` (`45260`
 mainnet, `45262` devnet). It has no default and the node's `bud_chainId` answer is only
 compared against it: a seed controls the same address on every network, so a node that chose
 the id would be choosing where your signature is valid.
 
-The **testnet readiness gate** - clean build and green CI, genesis/config/node start end to
-end, restart persistence with consistent counters, the network layer's size and rate limits,
-RPC auth and rate limiting, consensus and tokenomics, the panic bar, the operator docs and a
-secret-free history - is recorded row by row, with the code location and the test and the CI
-job that runs it, in
-[docs/audit/TESTNET_TRACEABILITY.md](docs/audit/TESTNET_TRACEABILITY.md). Endpoints,
-parameters and the local rehearsal are in [docs/TESTNET.md](docs/TESTNET.md); the gates that
-still stand between testnet and mainnet are in
+Testnet endpoints, parameters and the local rehearsal are in [docs/TESTNET.md](docs/TESTNET.md);
+the gates that still stand between testnet and mainnet are in
 [docs/MAINNET_READINESS.md](docs/MAINNET_READINESS.md).
 
 ### Node roles
@@ -397,12 +405,16 @@ BudZero, determinism, security audit, supply chain, fuzzing, Miri, semver and mo
 - **Determinism.** State roots and block hashes must be reproducible. A dedicated gate proves
   no hashing function iterates an unordered collection, a `HashMap` in a state-root path is
   a chain halt waiting for two nodes to disagree, and the gate catches it at review time.
-- **The badges cannot lie.** Every badge on this page is checked against the file it
-  points at: the test count against what the run measured, the Rust version against
-  `rust-toolchain.toml`, the licence against the SPDX id in `Cargo.toml`, and the CI badge
-  against the branch and event it is required to name, because an unfiltered badge reports
-  the newest run on any branch when the default branch has none. A mismatch fails the pull
-  request that caused it.
+- **Definition and placeholders.** Gates in `xtask/gates/` check the definition
+  block's pinned digest and reject new unrecorded placeholder slots and to-do
+  markers. These syntax checks do not establish that a testnet claim is wired
+  into production; [the launch ledger](docs/audit/TLG_REPORT.md) records that
+  missing evidence separately.
+- **Badge checking.** In CI, the badge gate compares the test count to that
+  run's measured count, the Rust version to `rust-toolchain.toml`, the license
+  to `Cargo.toml` and the CI badge to its branch and event filter. The static
+  count on this page is not evidence of a current testnet CI result or launch
+  approval.
 - **Tests must be tests.** Every name a gate declares as required is checked to actually carry
   `#[test]`, a required test that silently stopped existing would otherwise pass forever.
 - **Public API must be reached.** A `pub fn` in `src/` that nothing outside a test calls is
@@ -468,14 +480,14 @@ claim is made anywhere in this repository.
 **Quantum security, current rung (I-0):** Budlum approaches the quantum threat with a complete plan. Every layer has a defined solution, a metric and a completion gate. The Budlum wallet core signs today with NIST FIPS 204 ML-DSA-87. <!-- claim:S-I0 -->
 The register of claims, the evidence behind each and the rung each one needs is [`docs/pq/CLAIMS.md`](docs/pq/CLAIMS.md); only the sentence of the rung that has been reached is used.
 
-**Implemented and tested:** Heterogeneous Consensus on the Universal Settlement Layer (PoW/PoS/PoA/BFT) · BLS + post-quantum hybrid finality <!-- claim:L-FINALITY-01 -->
-· domain registry and finality adapters · cross-domain bridge lifecycle with forgery
-gates · permissionless stake registry with slashing and unbonding · in-tree BudZKVM with
-STARK proving · B.U.D. storage with deal and challenge economy · BNS `.bud` names · Pollen
-data marketplace · SocialFi primitives · AI inference layer · EVM chain adapter
-(RLP + MPT + receipt verification) · `$BUD` tokenomics · validator governance · snapshot V2
-with chunk-session binding · block-only relayer intents with escrowed solver fees,
-anchored receipt verification and expiry slashing.
+**In-tree implementation and tests, not public-testnet certification:** Consensus
+engines (PoW/PoS/PoA/BFT), hybrid finality <!-- claim:L-FINALITY-01 -->, domain adapters,
+bridge code, stake registry, BudZero prover, B.U.D. storage modules, BNS names,
+marketplace and SocialFi modules, EVM chain adapter, tokenomics, snapshots and
+relayer intents exist in the repository. Their presence is **not** proof that
+the bridge, a unified B.U.D. 3.0 production path, cross-environment execution
+or a physical-device testnet rehearsal has passed. See the
+[launch-gate evidence ledger](docs/audit/TLG_REPORT.md) for required evidence.
 
 **Deliberately not enabled, and pinned by tests that break if that changes:** on-chain AI
 inference proof *verification* ([status](docs/AI_VERIFICATION_STATUS.md)) · BudZKVM
@@ -500,10 +512,9 @@ done, and this page will not imply otherwise.
 | [SECURITY.md](docs/SECURITY.md) | Disclosure policy, supported versions, what to include in a report |
 | [CONTRIBUTING.md](docs/CONTRIBUTING.md) | Development setup, PR expectations, rules for consensus and execution changes |
 | [CODE_OF_CONDUCT.md](docs/CODE_OF_CONDUCT.md) | Community expectations |
-| [PROVENANCE_NOTES.md](docs/PROVENANCE_NOTES.md) | Per-module record of what each non-trivial implementation is based on |
 | [docs/VALIDATOR_ROLES.md](docs/VALIDATOR_ROLES.md) | Node roles and their operational requirements |
 | [docs/AI_VERIFICATION_STATUS.md](docs/AI_VERIFICATION_STATUS.md) | Exactly what the AI layer does and does not verify |
-| [docs/BUD_STORAGE_ROADMAP.md](docs/BUD_STORAGE_ROADMAP.md) | Storage layer roadmap |
+| [docs/STORAGE.md](docs/STORAGE.md) | The single storage system (B.U.D. 3.0), in construction |
 | [budzero/ARCHITECTURE.md](budzero/ARCHITECTURE.md) | BudZKVM ISA, VM, prover and verifier design |
 
 ---

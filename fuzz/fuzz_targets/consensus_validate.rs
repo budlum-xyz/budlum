@@ -90,6 +90,7 @@ fuzz_target!(|data: &[u8]| {
         shards_root: None,
         producer_public_key,
         witness_root,
+        seat_participation: None,
     };
 
     // Header encoding is deterministic and its hash survives a round trip.
@@ -97,7 +98,11 @@ fuzz_target!(|data: &[u8]| {
     assert_eq!(first, header.calculate_hash());
     if let Ok(bytes) = bincode::serialize(&header) {
         if let Ok(decoded) = bincode::deserialize::<BlockHeader>(&bytes) {
-            assert_eq!(decoded.calculate_hash(), first, "header hash changed in a round trip");
+            assert_eq!(
+                decoded.calculate_hash(),
+                first,
+                "header hash changed in a round trip"
+            );
         }
     }
 
@@ -113,7 +118,11 @@ fuzz_target!(|data: &[u8]| {
     block.timestamp = header.timestamp;
     block.producer = header.producer;
     block.chain_id = if flag & 4 == 4 { 1337 } else { header.chain_id };
-    block.index = if flag & 8 == 8 { before as u64 } else { header.index };
+    block.index = if flag & 8 == 8 {
+        before as u64
+    } else {
+        header.index
+    };
     block.state_root = header.state_root.clone();
     block.nonce = header.nonce;
     block.epoch = header.epoch;
@@ -129,12 +138,20 @@ fuzz_target!(|data: &[u8]| {
     block.hash = header.hash.clone();
     if block.hash != block.calculate_hash() {
         assert!(chain.validate_and_add_block(block.clone()).is_err());
-        assert_eq!(chain.chain.len(), before, "a refused block changed the chain");
+        assert_eq!(
+            chain.chain.len(),
+            before,
+            "a refused block changed the chain"
+        );
     }
 
     block.hash = block.calculate_hash();
     match chain.validate_and_add_block(block) {
         Ok(_) => assert_eq!(chain.chain.len(), before + 1),
-        Err(_) => assert_eq!(chain.chain.len(), before, "a refused block changed the chain"),
+        Err(_) => assert_eq!(
+            chain.chain.len(),
+            before,
+            "a refused block changed the chain"
+        ),
     }
 });

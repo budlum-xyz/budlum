@@ -219,9 +219,43 @@ pub const BIP39_WORDLIST: &[&str] = &[
     "zoo",
 ];
 
-/// Look up a word's index in the BIP39 wordlist.
+/// Look up a word's index in the BIP39 wordlist using a constant-time scan
+/// across all 2048 entries.
+///
+/// Every canonical BIP39 English word is 3..=8 ASCII bytes. Scanning the full
+/// table with fixed-width 8-byte XOR folding avoids position-dependent early
+/// returns that leak secret mnemonic word indices through timing.
+#[must_use]
 pub fn word_to_index(word: &str) -> Option<usize> {
-    BIP39_WORDLIST.iter().position(|&w| w == word)
+    let wb = word.as_bytes();
+    let mut query = [0u8; 8];
+    let copy_len = wb.len().min(8);
+    query[..copy_len].copy_from_slice(&wb[..copy_len]);
+    let len_ok = usize::from(!wb.is_empty() && wb.len() <= 8);
+
+    let mut matched_idx = 0usize;
+    let mut found = 0usize;
+    for (idx, &entry) in BIP39_WORDLIST.iter().enumerate() {
+        let eb = entry.as_bytes();
+        let mut slot = [0u8; 8];
+        slot[..eb.len()].copy_from_slice(eb);
+        let mut diff = wb.len() ^ eb.len();
+        let mut byte_idx = 0usize;
+        while byte_idx < 8 {
+            diff |= usize::from(query[byte_idx] ^ slot[byte_idx]);
+            byte_idx += 1;
+        }
+        let non_zero = ((diff | diff.wrapping_neg()) >> (usize::BITS - 1)) & 1;
+        let is_match = (1 ^ non_zero) & len_ok;
+        let mask = 0usize.wrapping_sub(is_match);
+        matched_idx |= idx & mask;
+        found |= is_match;
+    }
+    if found == 1 {
+        Some(matched_idx)
+    } else {
+        None
+    }
 }
 
 /// Look up a word by index in the BIP39 wordlist.
@@ -251,5 +285,15 @@ mod tests {
         assert_eq!(index_to_word(2047), Some("zoo"));
         assert_eq!(word_to_index("lubo"), None);
         assert_eq!(word_to_index("eurymede"), None);
+    }
+
+    #[test]
+    fn bip39_word_lookup_scans_full_table_accurately() {
+        for (idx, &w) in BIP39_WORDLIST.iter().enumerate() {
+            assert_eq!(word_to_index(w), Some(idx), "mismatch at {idx} ({w})");
+        }
+        assert_eq!(word_to_index(""), None);
+        assert_eq!(word_to_index("abandonment"), None);
+        assert_eq!(word_to_index("abando"), None);
     }
 }

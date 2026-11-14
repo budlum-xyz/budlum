@@ -74,13 +74,16 @@ const TRANSFER_JUSTIFICATIONS: &[(&str, usize, &str)] = &[
     ),
     (
         "src/execution/executor.rs",
-        3,
-        "bridge unlock inside a RelayerResult (the owner's burned share is \
-         returned; the relayer's cut was already minted on target arrival) and \
-         the two fee-split recipients of a transaction fee that was already \
-         paid - the application share to the recipient and the protocol share \
-         to the producer. The bridge mint inside a RelayerResult is not on \
-         this list: it creates supply and goes through `try_mint_balance`.",
+        4,
+        "one in `pay_agreeing_verifiers` (the requester's escrowed AI request \
+         fee `max_fee`, already debited when the request opened, split across \
+         the agreeing verifiers without creating supply), one bridge unlock \
+         inside a RelayerResult (the owner's burned share is returned; the \
+         relayer's cut was already minted on target arrival), and the two \
+         fee-split recipients of a transaction fee that was already paid - the \
+         application share to the recipient and the protocol share to the \
+         producer. The bridge mint inside a RelayerResult is not on this list: \
+         it creates supply and goes through `try_mint_balance`.",
     ),
     (
         "src/settlement/domains.rs",
@@ -93,7 +96,7 @@ const TRANSFER_JUSTIFICATIONS: &[(&str, usize, &str)] = &[
          Every line moves recorded value back to the party that paid it in.",
     ),
     (
-        "src/settlement/graft.rs",
+        "src/settlement/app_binding.rs",
         1,
         "one in `credit`: the intent payment moves the user's own escrowed \
          funds to the solver on fulfilment - the amount the intent locked, \

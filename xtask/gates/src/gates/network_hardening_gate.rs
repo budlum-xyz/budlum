@@ -31,10 +31,22 @@ pub(crate) const TESTS: &[&str] = &[
     "h5_score_map_ceiling_is_load_bearing",
     "h5_ceiling_refuses_rather_than_evicting_a_ban",
     "h5_tracked_peer_still_scored_when_map_is_full",
-    "simultaneous_dial_to_same_peer_is_recognized_as_already_connected",
+    // The eclipse bound covers both address families, and a
+    // peer-supplied length prefix is a claim the decoder budgets for instead
+    // of trusting.
+    "eclipse_bound_covers_ipv6_peers",
+    "ipv4_mapped_address_is_not_a_new_subnet",
+    "kademlia_refuses_private_addresses_on_public_network",
+    "p2p_bincode_is_bounded",
+    // Live testnet P2P connection, multi-chunk /sync, fork-recovery, and
+    // 2-hop BFT finality locks.
+    "duplicate_connection_event_for_admitted_peer_is_not_rejected_at_subnet_cap",
     "plan_sync_headers_skips_shared_locator_prefix_and_caps_fork_and_forward_windows",
+    "unjoined_next_height_block_and_connection_guards_are_wired",
     "unjoined_next_height_fork_sync_and_connection_guards_are_in_production_source",
     "deferred_votes_two_pass_replay_and_prevote_retry_until_precommit_quorum",
+    "failed_prevote_publish_still_advances_high_water_mark_and_blocks_reorg_equivocation",
+    "write_vote_history_file_persists_atomically_and_reports_unwritable_target",
 ];
 
 pub fn run(_root: &Path, log: &Path) -> Result<String, String> {

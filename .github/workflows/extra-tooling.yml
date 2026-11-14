@@ -23,8 +23,16 @@ name: Extra Tooling (security + quality)
 on:
   push:
     branches: [main]
+  # Heavy battery. It runs on pull requests to `main` (the PR that merges the
+  # stack), on the schedule and on demand. A stacked pull request (base
+  # `testnet-quantum` or `testnet`) runs the PR gates in ci.yml,
+  # security-audit.yml, semgrep.yml and the other light workflows, and skips the
+  # jobs of this file through the job-level condition: GitHub evaluates the
+  # `branches` filter of a stacked pull request against the root of the stack,
+  # so the filter alone does not keep it out. This keeps one push from queueing
+  # more work than the shared runner pool can finish before the next push cancels it.
   pull_request:
-    branches: [main, fix/architecture-tip-adlari, consensus-of-consensuses, testnet-quantum, testnet]
+    branches: [main, consensus-of-consensuses]
   schedule:
     - cron: "0 4 * * 1" # weekly, Monday 04:00 UTC
   workflow_dispatch:
@@ -44,6 +52,9 @@ jobs:
   # (`cargo audit bin`). For a chain, being able to prove which crate versions
   # the operator's binary was built from is a real need.
   auditable-audit:
+    # Heavy battery: a pull request whose base is `testnet-quantum` or `testnet` does
+    # not start this job. See the note at the top of the file.
+    if: ${{ github.event_name != 'pull_request' || contains(fromJSON('["main","consensus-of-consensuses"]'), github.event.pull_request.base.ref) }}
     name: Auditable + Audit (binary SBOM + CVE)
     runs-on: ubuntu-latest
     timeout-minutes: 40
@@ -142,6 +153,9 @@ jobs:
   # The canary is below: if an unused `libc` in a synthetic crate is not caught,
   # the job declares itself untrustworthy and fails, so "0 findings" cannot pass empty.
   dead-deps:
+    # Heavy battery: a pull request whose base is `testnet-quantum` or `testnet` does
+    # not start this job. See the note at the top of the file.
+    if: ${{ github.event_name != 'pull_request' || contains(fromJSON('["main","consensus-of-consensuses"]'), github.event.pull_request.base.ref) }}
     name: Dead Deps (machete + shear)
     runs-on: ubuntu-latest
     timeout-minutes: 25
@@ -276,6 +290,9 @@ jobs:
   # REPORT: not a gate. Failing on a size threshold before calibrating it would be
   # arbitrary; a few runs of real data must be collected first. The report goes into the PR summary.
   binary-size:
+    # Heavy battery: a pull request whose base is `testnet-quantum` or `testnet` does
+    # not start this job. See the note at the top of the file.
+    if: ${{ github.event_name != 'pull_request' || contains(fromJSON('["main","consensus-of-consensuses"]'), github.event.pull_request.base.ref) }}
     name: Binary Size (rapor)
     runs-on: ubuntu-latest
     timeout-minutes: 40
@@ -365,6 +382,9 @@ jobs:
   # noise in hand-edited supply-chain policies and hides the real change.
   # Gizler.
   config-lint:
+    # Heavy battery: a pull request whose base is `testnet-quantum` or `testnet` does
+    # not start this job. See the note at the top of the file.
+    if: ${{ github.event_name != 'pull_request' || contains(fromJSON('["main","consensus-of-consensuses"]'), github.event.pull_request.base.ref) }}
     name: Config Lint (taplo)
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -423,6 +443,9 @@ jobs:
   # Lowering the MSRV for a verification tool would weaken the promise made to
   # operators; the package stays separate.
   kani-proofs:
+    # Heavy battery: a pull request whose base is `testnet-quantum` or `testnet` does
+    # not start this job. See the note at the top of the file.
+    if: ${{ github.event_name != 'pull_request' || contains(fromJSON('["main","consensus-of-consensuses"]'), github.event.pull_request.base.ref) }}
     name: Kani Proofs (bond arithmetic)
     runs-on: ubuntu-latest
     # 9 of the 12 harnesses finish in seconds, 3 do not. That is not a guess, it was

@@ -31,14 +31,14 @@ name: Rust Quality
 
 on:
   pull_request:
-    branches: [main, fix/architecture-tip-adlari, consensus-of-consensuses, testnet-quantum, testnet]
+    branches: [main, consensus-of-consensuses, testnet-quantum, testnet]
   schedule:
     - cron: "0 6 * * 2" # weekly, Tuesday 06:00 UTC (Monday 05:30 is security-hardening)
   workflow_dispatch:
 
 concurrency:
   group: rust-quality-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 permissions:
   contents: read

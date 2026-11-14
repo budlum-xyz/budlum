@@ -1,0 +1,1449 @@
+//! The generic object-layer suite. Every family runs the same tests through
+//! its own wire format (`family::fixture_for`), so the core is proven not to
+//! depend on any family and every family is proven to deliver its parts.
+
+use crate::core::address::Address;
+use crate::domain::types::DomainId;
+use crate::object_layer::charter::CharterRefusal;
+use crate::object_layer::charter::{
+    CanonicalCodeHashes, CharterStatus, CodeProof, DataPolicy, DomainCharter, HomeCodeStateProof,
+};
+use crate::object_layer::family::class_ref_bytes;
+use crate::object_layer::family::{
+    fixture_for, profile_for, ArriveSpec, AssetKind, EventFixture, HomeVmFamily, RawEndpointEvent,
+    SliceSource,
+};
+use crate::object_layer::ids::{AssetClassId, AssetId, HomeIdentity};
+use crate::object_layer::registry::{
+    Call, ClassRegistration, ClassStatus, FreezeReason, HomeEventProof, HomeFinality,
+    HomeSliceProof, Location, ObjectLayerParams, ObjectLayerRegistry, Phase, Refusal,
+    DEFAULT_MIN_CLASS_BOND,
+};
+use crate::object_layer::rule::{
+    AssetSlice, ClassRule, ClassSlice, Condition, Holder, ReferenceSample, TemplateId,
+    TemplateParams, Verb,
+};
+use crate::object_layer::tx::{
+    ObjectLayerActivation, ObjectLayerTx, TxContext, TxRefusal, ACTIVATION,
+};
+
+const DOMAIN: DomainId = 42;
+const CANON_ENDPOINT: [u8; 32] = [0xc1; 32];
+const CANON_VERIFIER: [u8; 32] = [0xc2; 32];
+
+struct Proven(bool);
+
+impl HomeFinality for Proven {
+    fn event_is_proven(&self, _: &HomeEventProof) -> bool {
+        self.0
+    }
+}
+
+const YES: Proven = Proven(true);
+
+fn alice() -> Holder {
+    Holder::Account(Address([0xa1; 32]))
+}
+
+fn bob() -> Holder {
+    Holder::Account(Address([0xb0; 32]))
+}
+
+/// One family's test world.
+struct World {
+    fx: &'static dyn EventFixture,
+    reg: ObjectLayerRegistry,
+    endpoint: Vec<u8>,
+    fungible: Vec<u8>,
+    unique: Vec<u8>,
+    next_event: u64,
+}
+
+fn charter_for(family: HomeVmFamily, fx: &dyn EventFixture) -> DomainCharter {
+    let dev = profile_for(family).dev_chain();
+    DomainCharter {
+        vm_family: family,
+        chain_reference: dev.chain_reference.into(),
+        address_prefix: dev.address_prefix.into(),
+        endpoint: fx.address(0xe0),
+        endpoint_code_hash: CANON_ENDPOINT,
+        verifier: fx.address(0xe2),
+        verifier_code_hash: CANON_VERIFIER,
+        upgrade_notice: 100,
+        silence_window: 1_000,
+        data_policy: DataPolicy::Public,
+        status: CharterStatus::Active,
+    }
+}
+
+fn good_proof() -> CodeProof {
+    CodeProof {
+        endpoint_code_hash: CANON_ENDPOINT,
+        verifier_code_hash: CANON_VERIFIER,
+        home_proof: None,
+    }
+}
+
+fn params(family: HomeVmFamily) -> ObjectLayerParams {
+    let mut p = ObjectLayerParams::default();
+    p.canonical.insert(
+        family,
+        CanonicalCodeHashes {
+            endpoint: CANON_ENDPOINT,
+            verifier: CANON_VERIFIER,
+        },
+    );
+    p
+}
+
+fn template(id: TemplateId) -> ClassRule {
+    ClassRule::Template {
+        id,
+        params: TemplateParams::default(),
+    }
+}
+
+fn samples(kind: AssetKind) -> Vec<ReferenceSample> {
+    (1..=3u8)
+        .map(|n| {
+            let a = Holder::Account(Address([n; 32]));
+            let b = Holder::Account(Address([n + 100; 32]));
+            match kind {
+                AssetKind::Fungible => ReferenceSample {
+                    class_slice: ClassSlice::new(),
+                    before: AssetSlice::Fungible {
+                        balances: [(a, 10)].into_iter().collect(),
+                    },
+                    verbs: vec![Verb::Transfer {
+                        from: a,
+                        to: b,
+                        amount: u128::from(n),
+                    }],
+                    after: AssetSlice::Fungible {
+                        balances: [(a, 10 - u128::from(n)), (b, u128::from(n))]
+                            .into_iter()
+                            .collect(),
+                    },
+                },
+                AssetKind::Unique => ReferenceSample {
+                    class_slice: ClassSlice::new(),
+                    before: AssetSlice::Unique { holder: a },
+                    verbs: vec![Verb::Transfer {
+                        from: a,
+                        to: b,
+                        amount: 1,
+                    }],
+                    after: AssetSlice::Unique { holder: b },
+                },
+            }
+        })
+        .collect()
+}
+
+fn registration(
+    family: HomeVmFamily,
+    kind: AssetKind,
+    contract: Vec<u8>,
+    slice: ClassSlice,
+) -> ClassRegistration {
+    let id = match kind {
+        AssetKind::Fungible => TemplateId::FungibleV1,
+        AssetKind::Unique => TemplateId::UniqueV1,
+    };
+    let source = match profile_for(family).slice_read_rule() {
+        crate::object_layer::family::SliceReadRule::AccountAndStorageProof => {
+            SliceSource::AccountAndStorageProof
+        }
+        crate::object_layer::family::SliceReadRule::EndpointEvent => SliceSource::EndpointEvent,
+    };
+    ClassRegistration {
+        home_domain: DOMAIN,
+        kind,
+        contract,
+        rule: template(id),
+        slice,
+        slice_source: source,
+        samples: samples(kind),
+        bond: DEFAULT_MIN_CLASS_BOND,
+        state_proof: None,
+    }
+}
+
+impl World {
+    fn new(family: HomeVmFamily) -> Self {
+        let fx = fixture_for(family);
+        let mut reg = ObjectLayerRegistry::with_params(params(family));
+        assert_eq!(
+            reg.charter(DOMAIN, charter_for(family, fx), &good_proof(), true),
+            Ok(true)
+        );
+        let fungible = fx.address(0x10);
+        let unique = fx.address(0x12);
+        let mut slice = ClassSlice::new();
+        slice.insert(
+            profile_for(family).upgrade_authority_field().into(),
+            vec![1],
+        );
+        reg.register_class(
+            Address([9; 32]),
+            registration(family, AssetKind::Fungible, fungible.clone(), slice.clone()),
+        )
+        .expect("fungible class registers");
+        reg.register_class(
+            Address([9; 32]),
+            registration(family, AssetKind::Unique, unique.clone(), slice),
+        )
+        .expect("unique class registers");
+        Self {
+            fx,
+            reg,
+            endpoint: fx.address(0xe0),
+            fungible,
+            unique,
+            next_event: 0,
+        }
+    }
+
+    fn proof(&mut self, event: RawEndpointEvent) -> HomeEventProof {
+        self.next_event += 1;
+        HomeEventProof {
+            domain: DOMAIN,
+            home_height: 1_000 + self.next_event,
+            home_block_hash: [self.next_event as u8; 32],
+            event_id: self.next_event.to_le_bytes().to_vec(),
+            event,
+            phase: Phase::Final,
+            inclusion: Vec::new(),
+        }
+    }
+
+    fn class(&self, kind: AssetKind) -> AssetClassId {
+        let contract = match kind {
+            AssetKind::Fungible => &self.fungible,
+            AssetKind::Unique => &self.unique,
+        };
+        AssetClassId::derive(DOMAIN, &class_ref_bytes(kind, contract))
+    }
+
+    fn arrive_unique(
+        &mut self,
+        seed: u8,
+        depositor: &[u8],
+        to: Option<Holder>,
+    ) -> Result<AssetId, Refusal> {
+        let recipient = match to {
+            Some(Holder::Account(a)) => Some(a),
+            _ => None,
+        };
+        let raw = self.fx.arrive(
+            &self.endpoint,
+            ArriveSpec {
+                kind: AssetKind::Unique,
+                contract: &self.unique,
+                native_id: &self.fx.native_id(seed),
+                amount: 1,
+                depositor,
+                recipient,
+            },
+        );
+        let p = self.proof(raw);
+        self.reg.arrive(&p, &YES)
+    }
+
+    fn arrive_fungible(&mut self, amount: u128, to: Address) -> Result<AssetId, Refusal> {
+        let raw = self.fx.arrive(
+            &self.endpoint,
+            ArriveSpec {
+                kind: AssetKind::Fungible,
+                contract: &self.fungible,
+                native_id: &[],
+                amount,
+                depositor: &self.fx.address(0x31),
+                recipient: Some(to),
+            },
+        );
+        let p = self.proof(raw);
+        self.reg.arrive(&p, &YES)
+    }
+
+    fn unique_call(&self, seed: u8, from: Holder, to: Holder) -> Call {
+        Call {
+            class: self.class(AssetKind::Unique),
+            native_id: self.fx.native_id(seed),
+            verb: Verb::Transfer {
+                from,
+                to,
+                amount: 1,
+            },
+        }
+    }
+
+    fn fungible_call(&self, from: Holder, to: Holder, amount: u128) -> Call {
+        Call {
+            class: self.class(AssetKind::Fungible),
+            native_id: Vec::new(),
+            verb: Verb::Transfer { from, to, amount },
+        }
+    }
+}
+
+// ------------------------------------------------------------- per family
+
+fn charter_refuses_non_canonical_endpoint(family: HomeVmFamily) {
+    let fx = fixture_for(family);
+    let mut reg = ObjectLayerRegistry::with_params(params(family));
+    let mut bad = charter_for(family, fx);
+    bad.endpoint_code_hash = [0xee; 32];
+    let proof = CodeProof {
+        endpoint_code_hash: [0xee; 32],
+        verifier_code_hash: CANON_VERIFIER,
+        home_proof: None,
+    };
+    assert_eq!(
+        reg.charter(DOMAIN, bad, &proof, true),
+        Err(Refusal::Charter(CharterRefusal::NotCanonicalEndpoint))
+    );
+    // A proof that disagrees with the declared hashes is refused too.
+    let wrong = CodeProof {
+        endpoint_code_hash: [0xee; 32],
+        verifier_code_hash: CANON_VERIFIER,
+        home_proof: None,
+    };
+    assert_eq!(
+        reg.charter(DOMAIN, charter_for(family, fx), &wrong, true),
+        Err(Refusal::Charter(CharterRefusal::ProofDisagrees))
+    );
+    assert_eq!(
+        reg.charter(DOMAIN, charter_for(family, fx), &good_proof(), false),
+        Err(Refusal::Charter(CharterRefusal::DomainNotActive))
+    );
+    assert!(reg.is_empty());
+    // Idempotent for the same endpoint; a second binding is refused.
+    assert_eq!(
+        reg.charter(DOMAIN, charter_for(family, fx), &good_proof(), true),
+        Ok(true)
+    );
+    assert_eq!(
+        reg.charter(DOMAIN, charter_for(family, fx), &good_proof(), true),
+        Ok(false)
+    );
+    let mut other = charter_for(family, fx);
+    other.endpoint = fx.address(0xe4);
+    assert_eq!(
+        reg.charter(DOMAIN, other, &good_proof(), true),
+        Err(Refusal::Charter(CharterRefusal::AlreadyChartered))
+    );
+}
+
+fn arrival_round_trip_keeps_identity(family: HomeVmFamily) {
+    let mut w = World::new(family);
+    let depositor = w.fx.address(0x31);
+    let first = w.arrive_unique(7, &depositor, Some(alice())).unwrap();
+
+    // Single use: the same event carried twice is refused.
+    let raw = w.fx.arrive(
+        &w.endpoint,
+        ArriveSpec {
+            kind: AssetKind::Unique,
+            contract: &w.unique,
+            native_id: &w.fx.native_id(8),
+            amount: 1,
+            depositor: &depositor,
+            recipient: None,
+        },
+    );
+    let p = w.proof(raw);
+    w.reg.arrive(&p, &YES).unwrap();
+    assert_eq!(w.reg.arrive(&p, &YES), Err(Refusal::ArrivalAlreadyUsed));
+
+    // One location: a second arrival while the asset is here is refused.
+    assert_eq!(
+        w.arrive_unique(7, &depositor, Some(bob())),
+        Err(Refusal::AssetNotHere)
+    );
+
+    let class = w.class(AssetKind::Unique);
+    let native = w.fx.native_id(7);
+    let departure = w
+        .reg
+        .depart(alice(), class, &native, 1, w.fx.address(0x33), 5)
+        .unwrap();
+    // A departing asset is frozen.
+    assert_eq!(
+        w.reg.call(alice(), &[w.unique_call(7, alice(), bob())]),
+        Err(Refusal::AssetNotHere)
+    );
+    let raw = w.fx.released(&w.endpoint, &departure);
+    let p = w.proof(raw);
+    assert_eq!(w.reg.confirm_departure(&p, &YES), Ok(departure));
+    assert_eq!(w.reg.unique.get(&first).unwrap().location, Location::Home);
+
+    let again = w.arrive_unique(7, &depositor, Some(bob())).unwrap();
+    assert_eq!(first, again, "the round trip keeps the asset's identity");
+    assert_eq!(w.reg.unique.get(&again).unwrap().holder, Some(bob()));
+}
+
+fn home_call_binds_sender(family: HomeVmFamily) {
+    let mut w = World::new(family);
+    let h1 = w.fx.address(0x31);
+    let h2 = w.fx.address(0x33);
+    let asset = w.arrive_unique(3, &h1, None).unwrap();
+    let id1 = Holder::Home(HomeIdentity::derive(DOMAIN, &h1));
+    assert_eq!(w.reg.unique.get(&asset).unwrap().holder, Some(id1));
+
+    let calls = postcard::to_allocvec(&vec![w.unique_call(3, id1, alice())]).unwrap();
+    // Another sender cannot act for h1's home identity.
+    let raw = w.fx.call(&w.endpoint, &h2, 0, &calls);
+    let p = w.proof(raw);
+    assert_eq!(w.reg.home_call(&p, &YES), Err(Refusal::NotAuthorized));
+    // An unproven event is refused.
+    let raw = w.fx.call(&w.endpoint, &h1, 0, &calls);
+    let p = w.proof(raw);
+    assert_eq!(
+        w.reg.home_call(&p, &Proven(false)),
+        Err(Refusal::UnprovenEvent)
+    );
+    // A forged emitter is refused.
+    let mut forged = w.fx.call(&w.endpoint, &h1, 0, &calls);
+    forged.emitter = w.fx.address(0xe4);
+    let p = w.proof(forged);
+    assert_eq!(w.reg.home_call(&p, &YES), Err(Refusal::WrongEmitter));
+
+    let raw = w.fx.call(&w.endpoint, &h1, 0, &calls);
+    let p = w.proof(raw);
+    assert_eq!(
+        w.reg.home_call(&p, &YES),
+        Ok(HomeIdentity::derive(DOMAIN, &h1))
+    );
+    assert_eq!(w.reg.unique.get(&asset).unwrap().holder, Some(alice()));
+    // Replaying nonce 0 in a new event is refused.
+    let raw = w.fx.call(&w.endpoint, &h1, 0, &calls);
+    let p = w.proof(raw);
+    assert_eq!(
+        w.reg.home_call(&p, &YES),
+        Err(Refusal::HomeNonce {
+            expected: 1,
+            got: 0
+        })
+    );
+}
+
+fn slice_reads_follow_family_rule(family: HomeVmFamily) {
+    let mut w = World::new(family);
+    let mut reg = registration(
+        family,
+        AssetKind::Fungible,
+        w.fx.address(0x14),
+        ClassSlice::new(),
+    );
+    let admitted = reg.slice_source;
+    reg.slice_source = match admitted {
+        SliceSource::AccountAndStorageProof => SliceSource::EndpointEvent,
+        SliceSource::EndpointEvent => SliceSource::AccountAndStorageProof,
+    };
+    assert_eq!(
+        w.reg.register_class(Address([9; 32]), reg.clone()),
+        Err(Refusal::SliceSourceNotAdmitted)
+    );
+    reg.slice_source = admitted;
+    assert!(w.reg.register_class(Address([9; 32]), reg).is_ok());
+}
+
+fn upgrade_authority_change_freezes_class(family: HomeVmFamily) {
+    let mut w = World::new(family);
+    let field = profile_for(family).upgrade_authority_field().to_string();
+    let class = w.class(AssetKind::Unique);
+    w.arrive_unique(1, &w.fx.address(0x31), Some(alice()))
+        .unwrap();
+
+    // A non-registrant cannot refresh (and thereby freeze) the class.
+    let same: ClassSlice = [(field.clone(), vec![1])].into_iter().collect();
+    assert_eq!(
+        w.reg
+            .refresh_class(Address([8; 32]), class, same.clone(), Phase::Final),
+        Err(Refusal::NotAuthorized)
+    );
+    assert_eq!(
+        w.reg
+            .refresh_class(Address([9; 32]), class, same, Phase::Final),
+        Ok(ClassStatus::Active)
+    );
+    let changed: ClassSlice = [(field, vec![2])].into_iter().collect();
+    assert_eq!(
+        w.reg
+            .refresh_class(Address([9; 32]), class, changed, Phase::Final),
+        Ok(ClassStatus::Frozen(FreezeReason::UpgradeAuthorityChanged))
+    );
+    assert_eq!(
+        w.reg.call(alice(), &[w.unique_call(1, alice(), bob())]),
+        Err(Refusal::ClassFrozen)
+    );
+    // N-6: the exit stays open for a frozen class.
+    let native = w.fx.native_id(1);
+    assert!(w
+        .reg
+        .depart(alice(), class, &native, 1, w.fx.address(0x33), 9)
+        .is_ok());
+}
+
+fn custody_parity_holds(family: HomeVmFamily) {
+    let mut w = World::new(family);
+    let class = w.class(AssetKind::Fungible);
+    let Holder::Account(a) = alice() else {
+        unreachable!()
+    };
+    w.arrive_fungible(100, a).unwrap();
+    w.reg
+        .call(alice(), &[w.fungible_call(alice(), bob(), 30)])
+        .unwrap();
+    w.reg
+        .depart(alice(), class, &[], 20, w.fx.address(0x33), 3)
+        .unwrap();
+    assert_eq!(w.reg.balance(&class, &alice()), 50);
+    assert_eq!(w.reg.balance(&class, &bob()), 30);
+    assert_eq!(w.reg.recorded_custody(&class), 100);
+
+    assert_eq!(
+        w.reg.audit_custody(Address([8; 32]), class, 99),
+        Err(Refusal::NotAuthorized)
+    );
+    let audit = w.reg.audit_custody(Address([9; 32]), class, 100).unwrap();
+    assert_eq!(audit.delta, 0);
+    assert_eq!(
+        w.reg.classes.get(&class).unwrap().status,
+        ClassStatus::Active
+    );
+    let audit = w.reg.audit_custody(Address([9; 32]), class, 99).unwrap();
+    assert_eq!(audit.delta, -1);
+    assert_eq!(
+        w.reg.classes.get(&class).unwrap().status,
+        ClassStatus::Frozen(FreezeReason::CustodyDeficit)
+    );
+}
+
+macro_rules! family_suite {
+    ($family:expr, $charter:ident, $round_trip:ident, $home_call:ident, $slice:ident, $upgrade:ident, $parity:ident) => {
+        #[test]
+        fn $charter() {
+            charter_refuses_non_canonical_endpoint($family);
+        }
+        #[test]
+        fn $round_trip() {
+            arrival_round_trip_keeps_identity($family);
+        }
+        #[test]
+        fn $home_call() {
+            home_call_binds_sender($family);
+        }
+        #[test]
+        fn $slice() {
+            slice_reads_follow_family_rule($family);
+        }
+        #[test]
+        fn $upgrade() {
+            upgrade_authority_change_freezes_class($family);
+        }
+        #[test]
+        fn $parity() {
+            custody_parity_holds($family);
+        }
+    };
+}
+
+family_suite!(
+    HomeVmFamily::Evm,
+    evm_charter_refuses_non_canonical_endpoint,
+    evm_arrival_round_trip_keeps_identity,
+    evm_home_call_binds_sender,
+    evm_slice_reads_follow_family_rule,
+    evm_upgrade_authority_change_freezes_class,
+    evm_custody_parity_holds
+);
+family_suite!(
+    HomeVmFamily::CosmWasm,
+    cosmwasm_charter_refuses_non_canonical_endpoint,
+    cosmwasm_arrival_round_trip_keeps_identity,
+    cosmwasm_home_call_binds_sender,
+    cosmwasm_slice_reads_follow_family_rule,
+    cosmwasm_upgrade_authority_change_freezes_class,
+    cosmwasm_custody_parity_holds
+);
+family_suite!(
+    HomeVmFamily::Svm,
+    svm_charter_refuses_non_canonical_endpoint,
+    svm_arrival_round_trip_keeps_identity,
+    svm_home_call_binds_sender,
+    svm_slice_reads_follow_family_rule,
+    svm_upgrade_authority_change_freezes_class,
+    svm_custody_parity_holds
+);
+family_suite!(
+    HomeVmFamily::Move,
+    move_charter_refuses_non_canonical_endpoint,
+    move_arrival_round_trip_keeps_identity,
+    move_home_call_binds_sender,
+    move_slice_reads_follow_family_rule,
+    move_upgrade_authority_change_freezes_class,
+    move_custody_parity_holds
+);
+
+// ------------------------------------------------------------- core
+
+#[test]
+fn object_layer_core_has_no_family_branch() {
+    let core = [
+        ("ids.rs", include_str!("ids.rs")),
+        ("charter.rs", include_str!("charter.rs")),
+        ("rule.rs", include_str!("rule.rs")),
+        ("registry.rs", include_str!("registry.rs")),
+        ("tx.rs", include_str!("tx.rs")),
+        ("mod.rs", include_str!("mod.rs")),
+    ];
+    for (name, source) in core {
+        assert!(
+            !source.contains("HomeVmFamily::"),
+            "{name} names a family variant; family code belongs behind FamilyProfile"
+        );
+        for family in [
+            "family::evm",
+            "family::svm",
+            "family::cosmwasm",
+            "family::move_family",
+        ] {
+            assert!(!source.contains(family), "{name} imports {family}");
+        }
+    }
+}
+
+#[test]
+fn composite_refusal_does_not_mutate() {
+    let mut w = World::new(HomeVmFamily::Evm);
+    let Holder::Account(a) = alice() else {
+        unreachable!()
+    };
+    w.arrive_fungible(10, a).unwrap();
+    let before = w.reg.clone();
+    let calls = [
+        w.fungible_call(alice(), bob(), 4),
+        w.fungible_call(alice(), bob(), 7), // only 6 left: refused
+    ];
+    assert!(w.reg.call(alice(), &calls).is_err());
+    assert_eq!(w.reg, before);
+}
+
+#[test]
+fn composite_call_is_atomic_and_bounded() {
+    let mut w = World::new(HomeVmFamily::Move);
+    let Holder::Account(a) = alice() else {
+        unreachable!()
+    };
+    w.arrive_fungible(10, a).unwrap();
+    w.arrive_unique(1, &w.fx.address(0x31), Some(alice()))
+        .unwrap();
+    let class = w.class(AssetKind::Fungible);
+    w.reg
+        .call(
+            alice(),
+            &[
+                w.fungible_call(alice(), bob(), 4),
+                w.unique_call(1, alice(), bob()),
+            ],
+        )
+        .unwrap();
+    assert_eq!(w.reg.balance(&class, &bob()), 4);
+    let too_many: Vec<Call> = (0..17)
+        .map(|_| w.fungible_call(alice(), bob(), 1))
+        .collect();
+    assert_eq!(w.reg.call(alice(), &too_many), Err(Refusal::TooManyCalls));
+    assert_eq!(w.reg.call(alice(), &[]), Err(Refusal::EmptyComposite));
+}
+
+#[test]
+fn offer_accept_runs_both_sides_or_none() {
+    // A Move NFT for 25 units of an SVM-style fungible: here both classes
+    // live on one domain, the rule is the same per class either way.
+    let mut w = World::new(HomeVmFamily::Svm);
+    let Holder::Account(b) = bob() else {
+        unreachable!()
+    };
+    w.arrive_fungible(40, b).unwrap();
+    w.arrive_unique(2, &w.fx.address(0x31), Some(alice()))
+        .unwrap();
+    let fclass = w.class(AssetKind::Fungible);
+    let offer = w
+        .reg
+        .offer(
+            alice(),
+            vec![w.unique_call(2, alice(), bob())],
+            vec![Condition::Payment {
+                class: fclass,
+                to: alice(),
+                min_amount: 25,
+            }],
+            100,
+        )
+        .unwrap();
+    let before = w.reg.clone();
+    // Underpaying: the whole exchange is refused and nothing moves.
+    assert_eq!(
+        w.reg
+            .accept(bob(), offer, &[w.fungible_call(bob(), alice(), 24)], 10),
+        Err(Refusal::WantNotMet(0))
+    );
+    assert_eq!(w.reg, before);
+    w.reg
+        .accept(bob(), offer, &[w.fungible_call(bob(), alice(), 25)], 10)
+        .unwrap();
+    assert_eq!(w.reg.balance(&fclass, &alice()), 25);
+    let asset = AssetId::derive(&w.class(AssetKind::Unique), &w.fx.native_id(2));
+    assert_eq!(w.reg.unique.get(&asset).unwrap().holder, Some(bob()));
+    assert_eq!(
+        w.reg.accept(bob(), offer, &[], 10),
+        Err(Refusal::UnknownOffer)
+    );
+}
+
+#[test]
+fn object_layer_never_mints() {
+    let mut w = World::new(HomeVmFamily::CosmWasm);
+    let class = w.class(AssetKind::Fungible);
+    let Holder::Account(a) = alice() else {
+        unreachable!()
+    };
+    w.arrive_fungible(70, a).unwrap();
+    w.arrive_fungible(30, a).unwrap();
+    w.reg
+        .call(alice(), &[w.fungible_call(alice(), bob(), 55)])
+        .unwrap();
+    let _ = w.reg.call(bob(), &[w.fungible_call(bob(), alice(), 56)]);
+    w.reg
+        .depart(bob(), class, &[], 5, w.fx.address(0x33), 1)
+        .unwrap();
+    let placed: u128 = w.reg.balances.values().sum();
+    let departing: u128 = w.reg.departures.values().map(|d| d.amount).sum();
+    assert_eq!(placed + departing, 100);
+}
+
+#[test]
+fn escape_removes_asset_from_object_layer() {
+    let mut w = World::new(HomeVmFamily::Evm);
+    let asset = w
+        .arrive_unique(4, &w.fx.address(0x31), Some(alice()))
+        .unwrap();
+    let raw = w.fx.escaped(
+        &w.endpoint,
+        AssetKind::Unique,
+        &w.unique,
+        &w.fx.native_id(4),
+        &w.fx.address(0x31),
+    );
+    let p = w.proof(raw);
+    assert_eq!(w.reg.record_escape(&p, &YES), Ok(asset));
+    assert_eq!(w.reg.unique.get(&asset).unwrap().location, Location::Home);
+    assert_eq!(w.reg.unique.get(&asset).unwrap().holder, None);
+}
+
+#[test]
+fn tentative_events_are_refused_until_step_6() {
+    let mut w = World::new(HomeVmFamily::Evm);
+    let raw = w.fx.arrive(
+        &w.endpoint,
+        ArriveSpec {
+            kind: AssetKind::Unique,
+            contract: &w.unique,
+            native_id: &w.fx.native_id(1),
+            amount: 1,
+            depositor: &w.fx.address(0x31),
+            recipient: None,
+        },
+    );
+    let mut p = w.proof(raw);
+    p.phase = Phase::Tentative;
+    assert_eq!(w.reg.arrive(&p, &YES), Err(Refusal::TentativeClosed));
+}
+
+#[test]
+fn class_registration_refuses_closed_rules_and_wrong_templates() {
+    let mut w = World::new(HomeVmFamily::Evm);
+    let mut reg = registration(
+        HomeVmFamily::Evm,
+        AssetKind::Fungible,
+        w.fx.address(0x16),
+        ClassSlice::new(),
+    );
+    reg.rule = ClassRule::Native;
+    assert_eq!(
+        w.reg.register_class(Address([9; 32]), reg.clone()),
+        Err(Refusal::ClassClosedRule)
+    );
+    reg.rule = ClassRule::Program;
+    assert!(w.reg.register_class(Address([9; 32]), reg.clone()).is_ok());
+
+    reg.contract = w.fx.address(0x17);
+    reg.rule = ClassRule::Replica;
+    assert!(w.reg.register_class(Address([9; 32]), reg.clone()).is_ok());
+
+    reg.contract = w.fx.address(0x18);
+    reg.rule = template(TemplateId::UniqueV1);
+    assert_eq!(
+        w.reg.register_class(Address([9; 32]), reg.clone()),
+        Err(Refusal::TemplateNotForFamily)
+    );
+    reg.rule = template(TemplateId::FungibleV1);
+    reg.samples.truncate(2);
+    assert_eq!(
+        w.reg.register_class(Address([9; 32]), reg),
+        Err(Refusal::TooFewSamples)
+    );
+}
+
+#[test]
+fn object_layer_is_closed_on_testnet() {
+    let mut reg = ObjectLayerRegistry::default();
+    let ctx = TxContext {
+        height: 1_000_000,
+        signer: Address([1; 32]),
+        activation: ACTIVATION,
+        finality: &YES,
+        domain_active: &|_| true,
+        home_state_root: None,
+        require_home_state_proofs: false,
+        home_stipend_verifier: None,
+    };
+    assert!(ACTIVATION.is_open_at(0));
+    assert_eq!(
+        ObjectLayerTx::Challenge {
+            class: AssetClassId([0; 32])
+        }
+        .apply(&mut reg, &ctx),
+        Err(TxRefusal::Refused(Refusal::UnknownClass))
+    );
+
+    let closed = TxContext {
+        activation: ObjectLayerActivation { height: None },
+        ..ctx
+    };
+    let tx = ObjectLayerTx::Call { calls: Vec::new() };
+    assert_eq!(tx.apply(&mut reg, &closed), Err(TxRefusal::Closed));
+    assert!(reg.is_empty());
+}
+
+#[test]
+fn settlement_door_refuses_object_layer_on_testnet() {
+    let mut state = crate::core::account::AccountState::new();
+    let sender = Address([0x41; 32]);
+    let ctx = crate::settlement::domains::SettlementTxContext {
+        sender,
+        chain_id: crate::core::chain_config::Network::Testnet
+            .chain_id()
+            .value(),
+        fee: 0,
+        bls: || Box::new(crate::cross_domain::external::intake::PairingBls),
+    };
+    let tx = crate::settlement::domains::SettlementTx::ObjectLayer(Box::new(
+        ObjectLayerTx::SetTentativeConsent { consent: true },
+    ));
+    crate::settlement::domains::execute_settlement_tx(&mut state, &ctx, &tx)
+        .expect("object layer door is open on testnet 45261 from height 0");
+    assert!(!state.settlement.object_layer.is_empty());
+}
+
+#[test]
+fn tentative_single_dependency_consent_resolve_and_depart_guard() {
+    let mut w = World::new(HomeVmFamily::Evm);
+    let Holder::Account(alice_addr) = alice() else {
+        unreachable!()
+    };
+    let class = w.class(AssetKind::Fungible);
+    let contract = w.fungible.clone();
+
+    // Without consent, tentative arrival is refused.
+    let raw1 = w.fx.arrive(
+        &w.endpoint,
+        ArriveSpec {
+            kind: AssetKind::Fungible,
+            contract: &contract,
+            native_id: &[],
+            amount: 5,
+            depositor: &w.fx.address(0x31),
+            recipient: Some(alice_addr),
+        },
+    );
+    let mut p1 = w.proof(raw1);
+    p1.phase = Phase::Tentative;
+    assert_eq!(w.reg.arrive(&p1, &YES), Err(Refusal::TentativeClosed));
+
+    // Opt in: first tentative arrival succeeds and records one dependency.
+    w.reg.set_tentative_consent(alice_addr, true);
+    w.reg.arrive(&p1, &YES).unwrap();
+    assert_eq!(w.reg.dependencies.len(), 1);
+
+    // Single-dependency rule: a second tentative arrival before resolve is refused.
+    let raw2 = w.fx.arrive(
+        &w.endpoint,
+        ArriveSpec {
+            kind: AssetKind::Fungible,
+            contract: &contract,
+            native_id: &[],
+            amount: 3,
+            depositor: &w.fx.address(0x31),
+            recipient: Some(alice_addr),
+        },
+    );
+    let mut p2 = w.proof(raw2);
+    p2.phase = Phase::Tentative;
+    assert_eq!(
+        w.reg.arrive(&p2, &YES),
+        Err(Refusal::PendingTentativeDependency)
+    );
+
+    // Unresolved tentative balance cannot depart to home prematurely.
+    assert_eq!(
+        w.reg.depart(alice(), class, &[], 5, w.fx.address(0x41), 12),
+        Err(Refusal::PendingTentativeDependency)
+    );
+
+    // Resolve clears the dependency and enables both departure and future tentative arrivals.
+    let dep_id = *w.reg.dependencies.keys().next().unwrap();
+    w.reg.resolve(dep_id).unwrap();
+    assert!(w.reg.dependencies.is_empty());
+    w.reg
+        .depart(alice(), class, &[], 5, w.fx.address(0x41), 13)
+        .unwrap();
+}
+
+#[test]
+fn adopt_escape_record_v1_and_challenge_rebut_forgery_paths() {
+    let mut w = World::new(HomeVmFamily::CosmWasm);
+    let Holder::Account(alice_addr) = alice() else {
+        unreachable!()
+    };
+    let Holder::Account(bob_addr) = bob() else {
+        unreachable!()
+    };
+
+    // RecordV1 class registration and transfer.
+    let record_contract = w.fx.address(0x55);
+    let record_rule = ClassRule::Template {
+        id: crate::object_layer::rule::TemplateId::RecordV1,
+        params: Default::default(),
+    };
+    assert!(record_rule.is_open());
+    let record_samples = vec![
+        ReferenceSample {
+            class_slice: ClassSlice::new(),
+            before: AssetSlice::Unique { holder: alice() },
+            verbs: vec![Verb::Transfer {
+                from: alice(),
+                to: bob(),
+                amount: 1,
+            }],
+            after: AssetSlice::Unique { holder: bob() },
+        };
+        3
+    ];
+    let record_class = w
+        .reg
+        .register_class(
+            alice_addr,
+            ClassRegistration {
+                home_domain: DOMAIN,
+                kind: AssetKind::Unique,
+                contract: record_contract.clone(),
+                rule: record_rule,
+                slice: ClassSlice::new(),
+                slice_source: SliceSource::AccountAndStorageProof,
+                samples: record_samples,
+                bond: DEFAULT_MIN_CLASS_BOND,
+                state_proof: None,
+            },
+        )
+        .unwrap();
+
+    // Challenge & Rebut: non-holders cannot challenge; holder challenge opens countdown;
+    // non-registrant rebuttal is refused; registrant rebuttal clears or unfreezes.
+    assert_eq!(
+        w.reg.challenge(bob_addr, record_class, 40),
+        Err(Refusal::NotAuthorized)
+    );
+    let rec_arrive = w.fx.arrive(
+        &w.endpoint,
+        ArriveSpec {
+            kind: AssetKind::Unique,
+            contract: &record_contract,
+            native_id: &[0x01],
+            amount: 1,
+            depositor: &w.fx.address(0x55),
+            recipient: Some(bob_addr),
+        },
+    );
+    let rec_proof = w.proof(rec_arrive);
+    w.reg.arrive(&rec_proof, &YES).unwrap();
+
+    assert_eq!(
+        w.reg.challenge(bob_addr, record_class, 50).unwrap(),
+        ClassStatus::Active
+    );
+    assert_eq!(
+        w.reg.challenge(bob_addr, record_class, 60),
+        Err(Refusal::ChallengeAlreadyOpen)
+    );
+    assert_eq!(
+        w.reg.rebut(bob_addr, record_class, 60),
+        Err(Refusal::NotAuthorized)
+    );
+    w.reg.rebut(alice_addr, record_class, 60).unwrap();
+
+    w.reg.challenge(bob_addr, record_class, 100).unwrap();
+    assert_eq!(
+        w.reg.challenge(
+            bob_addr,
+            record_class,
+            100 + crate::object_layer::DEFAULT_CHALLENGE_WINDOW_BLOCKS
+        ),
+        Ok(ClassStatus::Frozen(FreezeReason::UnrebuttedChallenge))
+    );
+    w.reg
+        .rebut(
+            alice_addr,
+            record_class,
+            105 + crate::object_layer::DEFAULT_CHALLENGE_WINDOW_BLOCKS,
+        )
+        .unwrap();
+    assert_eq!(
+        w.reg.classes.get(&record_class).unwrap().status,
+        ClassStatus::Active
+    );
+
+    // Adopt: arrival without recipient lands under Holder::Home; unauthenticated
+    // `SetEscapeAddress` + `adopt` cannot steal it; only a proven home-chain
+    // adoption event signed by `depositor` moves the balance.
+    let depositor = w.fx.address(0x66);
+    let fungible_contract = w.fungible.clone();
+    let raw_home = w.fx.arrive(
+        &w.endpoint,
+        ArriveSpec {
+            kind: AssetKind::Fungible,
+            contract: &fungible_contract,
+            native_id: &[],
+            amount: 9,
+            depositor: &depositor,
+            recipient: None,
+        },
+    );
+    let arrive_home = w.proof(raw_home);
+    w.reg.arrive(&arrive_home, &YES).unwrap();
+
+    let mut binding = DOMAIN.to_le_bytes().to_vec();
+    binding.extend_from_slice(&depositor);
+    assert_eq!(w.reg.adopt(bob_addr, &binding), Err(Refusal::NotAuthorized));
+
+    w.reg
+        .set_escape_address(alice_addr, binding.clone())
+        .unwrap();
+    assert_eq!(
+        w.reg.adopt(alice_addr, &binding),
+        Err(Refusal::NotAuthorized)
+    );
+    let adopt_raw = w.fx.call(&w.endpoint, &depositor, 0, alice_addr.as_bytes());
+    let adopt_proof = w.proof(adopt_raw);
+    assert_eq!(
+        w.reg.adopt_with_proof(bob_addr, &adopt_proof, &YES),
+        Err(Refusal::NotAuthorized)
+    );
+    assert_eq!(
+        w.reg.adopt_with_proof(alice_addr, &adopt_proof, &YES),
+        Ok(1)
+    );
+    assert_eq!(w.reg.balance(&w.class(AssetKind::Fungible), &alice()), 9);
+}
+
+#[test]
+fn registry_round_trips_through_json_and_postcard() {
+    let mut w = World::new(HomeVmFamily::Svm);
+    let Holder::Account(a) = alice() else {
+        unreachable!()
+    };
+    w.arrive_fungible(5, a).unwrap();
+    w.arrive_unique(1, &w.fx.address(0x31), None).unwrap();
+    let json = serde_json::to_vec(&w.reg).expect("the V2 snapshot is JSON");
+    let back: ObjectLayerRegistry = serde_json::from_slice(&json).unwrap();
+    assert_eq!(back, w.reg);
+    let bin = postcard::to_allocvec(&w.reg).unwrap();
+    let back: ObjectLayerRegistry = postcard::from_bytes(&bin).unwrap();
+    assert_eq!(back.root(), w.reg.root());
+}
+
+#[test]
+fn object_layer_root_changes_with_content() {
+    let mut w = World::new(HomeVmFamily::Move);
+    let r0 = w.reg.root();
+    let Holder::Account(a) = alice() else {
+        unreachable!()
+    };
+    w.arrive_fungible(5, a).unwrap();
+    assert_ne!(r0, w.reg.root());
+}
+
+#[test]
+fn default_min_class_bond_and_charter_home_proof_enforced() {
+    use crate::consensus::merkle_tree::merkle_proof;
+    use crate::core::hash::hash_fields_bytes;
+    use crate::cross_domain::event_tree::MerkleProof;
+    use crate::settlement::commitment_tree::{
+        merkle_node_hash, merkle_odd_promote_hash, merkle_root,
+    };
+
+    assert_ne!(DEFAULT_MIN_CLASS_BOND, 0);
+    let fx = fixture_for(HomeVmFamily::CosmWasm);
+    let mut reg = ObjectLayerRegistry::with_params(params(HomeVmFamily::CosmWasm));
+    let ch = charter_for(HomeVmFamily::CosmWasm, fx);
+    let l0 = hash_fields_bytes(&[
+        b"BDLM_UOL_HOME_CODE_V1",
+        ch.chain_reference.as_bytes(),
+        &ch.endpoint,
+        &ch.endpoint_code_hash,
+    ]);
+    let l1 = hash_fields_bytes(&[
+        b"BDLM_UOL_HOME_CODE_V1",
+        ch.chain_reference.as_bytes(),
+        &ch.verifier,
+        &ch.verifier_code_hash,
+    ]);
+    let leaves = vec![l0, l1];
+    let state_root = merkle_root(&leaves);
+    let p0 = MerkleProof {
+        leaf: l0,
+        index: 0,
+        siblings: merkle_proof(&leaves, 0, merkle_node_hash, merkle_odd_promote_hash).unwrap(),
+    };
+    let p1 = MerkleProof {
+        leaf: l1,
+        index: 1,
+        siblings: merkle_proof(&leaves, 1, merkle_node_hash, merkle_odd_promote_hash).unwrap(),
+    };
+    let proven = CodeProof {
+        endpoint_code_hash: CANON_ENDPOINT,
+        verifier_code_hash: CANON_VERIFIER,
+        home_proof: Some(HomeCodeStateProof {
+            state_root,
+            endpoint_proof: vec![bincode::serialize(&p0).unwrap()],
+            verifier_proof: vec![bincode::serialize(&p1).unwrap()],
+        }),
+    };
+
+    assert_eq!(
+        reg.charter_verified(
+            DOMAIN,
+            ch.clone(),
+            &good_proof(),
+            true,
+            Some(state_root),
+            true
+        ),
+        Err(Refusal::Charter(CharterRefusal::ProofDisagrees))
+    );
+    assert_eq!(
+        reg.charter_verified(DOMAIN, ch.clone(), &proven, true, Some([0xEE; 32]), true),
+        Err(Refusal::Charter(CharterRefusal::ProofDisagrees))
+    );
+    assert_eq!(
+        reg.charter_verified(DOMAIN, ch, &proven, true, Some(state_root), true),
+        Ok(true)
+    );
+
+    let mut small_bond = registration(
+        HomeVmFamily::CosmWasm,
+        AssetKind::Fungible,
+        fx.address(0x70),
+        ClassSlice::new(),
+    );
+    small_bond.bond = DEFAULT_MIN_CLASS_BOND - 1;
+    assert_eq!(
+        reg.register_class(Address([9; 32]), small_bond),
+        Err(Refusal::BondTooSmall)
+    );
+}
+
+#[test]
+fn settlement_charter_requires_domain_operator_and_refresh_requires_state_proof() {
+    use crate::core::hash::hash_fields_bytes;
+    use crate::cross_domain::event_tree::MerkleProof;
+    use crate::domain::plugin::default_domain;
+    use crate::domain::types::ConsensusKind;
+    use crate::settlement::commitment_tree::merkle_root;
+
+    let mut state = crate::core::account::AccountState::new();
+    let dom = default_domain(DOMAIN, ConsensusKind::PoS, 45262, "pos-committee-v1", 1);
+    let operator = dom.operator.expect("operator set");
+    state.settlement.domains.register(dom).unwrap();
+
+    let fx = fixture_for(HomeVmFamily::CosmWasm);
+    let ch = charter_for(HomeVmFamily::CosmWasm, fx);
+    let attacker = Address([0x55; 32]);
+    assert_ne!(attacker, operator);
+    let ctx_attacker = crate::settlement::domains::SettlementTxContext {
+        sender: attacker,
+        chain_id: crate::core::chain_config::Network::Testnet
+            .chain_id()
+            .value(),
+        fee: 0,
+        bls: || Box::new(crate::cross_domain::external::intake::PairingBls),
+    };
+    let tx =
+        crate::settlement::domains::SettlementTx::ObjectLayer(Box::new(ObjectLayerTx::Charter {
+            domain: DOMAIN,
+            charter: ch.clone(),
+            proof: good_proof(),
+        }));
+    let err = crate::settlement::domains::execute_settlement_tx(&mut state, &ctx_attacker, &tx)
+        .unwrap_err();
+    assert!(format!("{err:?}").contains("operator"));
+
+    let mut w = World::new(HomeVmFamily::CosmWasm);
+    let class = w.class(AssetKind::Unique);
+    let field = profile_for(HomeVmFamily::CosmWasm)
+        .upgrade_authority_field()
+        .to_string();
+    let updates: ClassSlice = [(field.clone(), vec![2])].into_iter().collect();
+    assert_eq!(
+        w.reg.refresh_class_verified(
+            Address([9; 32]),
+            class,
+            updates.clone(),
+            Phase::Final,
+            (None, Some([0x11; 32]), true),
+        ),
+        Err(Refusal::UnprovenEvent)
+    );
+
+    let mut slice_bytes = Vec::new();
+    let k_bytes = field.as_bytes();
+    slice_bytes.extend_from_slice(&u32::try_from(k_bytes.len()).unwrap().to_le_bytes());
+    slice_bytes.extend_from_slice(k_bytes);
+    slice_bytes.extend_from_slice(&1u32.to_le_bytes());
+    slice_bytes.extend_from_slice(&[2]);
+    let leaf = hash_fields_bytes(&[
+        b"BDLM_UOL_SLICE_PROOF_V1",
+        ch.chain_reference.as_bytes(),
+        &w.unique,
+        &slice_bytes,
+    ]);
+    let root = merkle_root(&[leaf]);
+    let merkle = MerkleProof {
+        leaf,
+        index: 0,
+        siblings: Vec::new(),
+    };
+    let sp = HomeSliceProof {
+        state_root: root,
+        contract_account_proof: vec![bincode::serialize(&merkle).unwrap()],
+        storage_proofs: Vec::new(),
+    };
+    assert_eq!(
+        w.reg.refresh_class_verified(
+            Address([9; 32]),
+            class,
+            updates,
+            Phase::Final,
+            (Some(&sp), Some(root), true),
+        ),
+        Ok(ClassStatus::Frozen(FreezeReason::UpgradeAuthorityChanged))
+    );
+}
+
+#[test]
+fn uol_k2_guest_placement_preserves_custody_and_returns_on_proof() {
+    let mut w = World::new(HomeVmFamily::CosmWasm);
+    let guest_domain: DomainId = 99;
+    let guest_fx = fixture_for(HomeVmFamily::Svm);
+    w.reg.params.canonical.insert(
+        HomeVmFamily::Svm,
+        CanonicalCodeHashes {
+            endpoint: CANON_ENDPOINT,
+            verifier: CANON_VERIFIER,
+        },
+    );
+    w.reg
+        .charter(
+            guest_domain,
+            charter_for(HomeVmFamily::Svm, guest_fx),
+            &good_proof(),
+            true,
+        )
+        .unwrap();
+
+    let depositor = w.fx.address(0x31);
+    let asset = w.arrive_unique(77, &depositor, Some(alice())).unwrap();
+    let class = w.class(AssetKind::Unique);
+    let native = w.fx.native_id(77);
+    assert_eq!(w.reg.recorded_custody(&class), 1);
+
+    w.reg
+        .guest_place(alice(), class, &native, guest_domain, bob())
+        .unwrap();
+    assert_eq!(
+        w.reg.unique.get(&asset).unwrap().location,
+        Location::Guest {
+            domain: guest_domain,
+            holder: bob(),
+        }
+    );
+    assert_eq!(w.reg.recorded_custody(&class), 1);
+
+    let ret_raw = guest_fx.call(
+        &guest_fx.address(0xe0),
+        &guest_fx.address(0x22),
+        1,
+        b"return",
+    );
+    let ret_proof = HomeEventProof {
+        domain: guest_domain,
+        home_height: 55,
+        home_block_hash: [0x55; 32],
+        event_id: b"guest-return-1".to_vec(),
+        event: ret_raw,
+        phase: Phase::Final,
+        inclusion: Vec::new(),
+    };
+    w.reg
+        .guest_return(class, &native, alice(), &ret_proof, &YES)
+        .unwrap();
+    assert_eq!(
+        w.reg.unique.get(&asset).unwrap().location,
+        Location::ObjectLayer
+    );
+    assert_eq!(w.reg.unique.get(&asset).unwrap().holder, Some(alice()));
+    assert_eq!(w.reg.recorded_custody(&class), 1);
+}
+
+#[test]
+fn home_stipend_call_requires_verifier_and_enforces_nonce_and_cap() {
+    use crate::object_layer::registry::{MAX_HOME_STIPEND_ATTOS, MAX_HOME_STIPEND_TOTAL_ATTOS};
+    use crate::object_layer::tx::{HomeKeyScheme, HomeKeyStipendAuth, HomeStipendVerifier};
+
+    let mut w = World::new(HomeVmFamily::Evm);
+    let class = w.class(AssetKind::Fungible);
+    let home_addr = w.fx.address(0x55);
+    let home = HomeIdentity::derive(DOMAIN, &home_addr);
+    let home_holder = Holder::Home(home);
+    w.reg.balances.insert((class, home_holder), 500);
+
+    let action = ObjectLayerTx::Call {
+        calls: vec![Call {
+            class,
+            native_id: Vec::new(),
+            verb: Verb::Transfer {
+                from: home_holder,
+                to: bob(),
+                amount: 10,
+            },
+        }],
+    };
+    let auth = HomeKeyStipendAuth {
+        scheme: HomeKeyScheme::EthereumSecp256k1,
+        home_address: home_addr.clone(),
+        signer_pubkey: Vec::new(),
+        signature: vec![0xAA; 65],
+        nonce: 0,
+        requested_stipend_attos: MAX_HOME_STIPEND_ATTOS,
+    };
+
+    // Without a verifier (`None`), `HomeStipendCall` must fail closed.
+    assert_eq!(
+        w.reg.home_stipend_call(DOMAIN, &auth, &action, 1, None),
+        Err(Refusal::NotAuthorized)
+    );
+
+    struct AllowAllVerifier;
+    impl HomeStipendVerifier for AllowAllVerifier {
+        fn verify_stipend(
+            &self,
+            _domain: DomainId,
+            _auth: &HomeKeyStipendAuth,
+            _action_digest: &crate::domain::types::Hash32,
+        ) -> Result<(), Refusal> {
+            Ok(())
+        }
+    }
+
+    // Valid stipend call succeeds, increments nonce, and updates bob's balance.
+    w.reg
+        .home_stipend_call(DOMAIN, &auth, &action, 1, Some(&AllowAllVerifier))
+        .unwrap();
+    assert_eq!(w.reg.balance(&class, &bob()), 10);
+    assert_eq!(w.reg.home_stipend_nonces.get(&home).copied(), Some(1));
+
+    // Replaying nonce 0 is refused.
+    assert_eq!(
+        w.reg
+            .home_stipend_call(DOMAIN, &auth, &action, 2, Some(&AllowAllVerifier)),
+        Err(Refusal::HomeNonce {
+            expected: 1,
+            got: 0
+        })
+    );
+
+    // Nested `HomeStipendCall` and admin variants (`Challenge`) are refused.
+    let nested = ObjectLayerTx::HomeStipendCall {
+        domain: DOMAIN,
+        auth: HomeKeyStipendAuth {
+            nonce: 1,
+            ..auth.clone()
+        },
+        action: Box::new(action.clone()),
+    };
+    assert_eq!(
+        w.reg.home_stipend_call(
+            DOMAIN,
+            &HomeKeyStipendAuth {
+                nonce: 1,
+                ..auth.clone()
+            },
+            &nested,
+            2,
+            Some(&AllowAllVerifier),
+        ),
+        Err(Refusal::NotAuthorized)
+    );
+    assert_eq!(
+        w.reg.home_stipend_call(
+            DOMAIN,
+            &HomeKeyStipendAuth {
+                nonce: 1,
+                ..auth.clone()
+            },
+            &ObjectLayerTx::Challenge { class },
+            2,
+            Some(&AllowAllVerifier),
+        ),
+        Err(Refusal::NotAuthorized)
+    );
+
+    // Exceeding cumulative lifetime stipend cap is refused.
+    let rounds = u64::try_from(MAX_HOME_STIPEND_TOTAL_ATTOS / MAX_HOME_STIPEND_ATTOS).unwrap();
+    for nonce in 1..rounds {
+        let next_auth = HomeKeyStipendAuth {
+            nonce,
+            ..auth.clone()
+        };
+        w.reg
+            .home_stipend_call(
+                DOMAIN,
+                &next_auth,
+                &action,
+                2 + nonce,
+                Some(&AllowAllVerifier),
+            )
+            .unwrap();
+    }
+    let over_cap = HomeKeyStipendAuth {
+        nonce: rounds,
+        ..auth
+    };
+    assert_eq!(
+        w.reg
+            .home_stipend_call(DOMAIN, &over_cap, &action, 100, Some(&AllowAllVerifier)),
+        Err(Refusal::NotAuthorized)
+    );
+}

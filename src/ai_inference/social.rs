@@ -1,6 +1,6 @@
-//! The SocialFi and AI inference layer runtime integration.
+//! The `SocialFi` and AI inference layer runtime integration.
 //!
-//! An AI inference layer AI output is published on SocialFi as a **real NFT**
+//! An AI inference layer AI output is published on `SocialFi` as a **real NFT**
 //! (`NftRegistry::mint`), and social NFT content is turned into a
 //! closed-circuit data source for AI inference layer (`SocialDataRef`). Both directions
 //! work: AI inference layer to social (an NFT) and social to the AI inference layer (the `Pollen`
@@ -24,7 +24,7 @@ const FEDERATED_AI_EVENT_DOMAIN: &[u8] = b"BDLM-AI-FEDERATED-EVENT-v1";
 const AI_OUTPUT_EVENT_KIND: &str = "budlum.ai.output.v1";
 
 /// Clean-room federation event envelope for an AI output that was minted into
-/// SocialFi.
+/// `SocialFi`.
 ///
 /// This is Budlum-native code: it borrows only the general federation lesson from
 /// design briefs (stable event ids, explicit actor/object fields, and portable
@@ -126,7 +126,7 @@ impl FederatedAiOutputEvent {
     }
 }
 
-/// Mint an AI inference layer AI output as an NFT on SocialFi (the real
+/// Mint an AI inference layer AI output as an NFT on `SocialFi` (the real
 /// `NftRegistry::mint`). `output` is the bytes of the AI inference layer inference
 /// response; the ContentId is `ContentId::of(output)`.
 /// # Errors
@@ -155,6 +155,10 @@ pub fn social_nft_to_data_ref(nft_id: u64, content_id: ContentId, owner: Address
 }
 
 /// Add a tag to an AI inference layer NFT (for example "#ai-inference" or "#ai-output").
+///
+/// # Errors
+///
+/// Returns an error if the operation fails.
 pub fn tag_ai_nft(registry: &mut NftRegistry, nft_id: u64, tag: &str) -> Result<(), String> {
     registry
         .add_tag(nft_id, tag.to_string())

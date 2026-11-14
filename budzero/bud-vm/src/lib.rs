@@ -1,3 +1,5 @@
+//! Convenience: exposed for BudZero zkVM prover, compiler, and verifier callers.
+
 // Unsafe lock: this crate is at 0 unsafe today. The moment an `unsafe` block
 // enters, the build FAILs (a regression gate). The same policy as the main crate.
 #![forbid(unsafe_code)]
@@ -28,32 +30,11 @@ pub struct ExecutionReceipt {
     pub state_writes_digest: [u8; 32],
 }
 
-// Mainnet decoding uses the staged-rollout defaults, not full activation.
-//
-// The env var `BUDLUM_VERIFY_MERKLE` was removed for a good reason: an
-// operator could set it to "false" and turn off Merkle verification, which is
-// a configuration attack vector. But the replacement went past the target. It
-// hard-coded `MainnetActivation::full()`, which sets every gate to true and
-// makes `MainnetActivation::default()` unreachable from the only place that
-// consults it.
-//
-// The defaults are not decorative. `verify_merkle_enabled: false` is there
-// because the path verification is unfinished, and
-// `verify_inference_enabled: false` is there because, in the words of
-// `docs/AI_VERIFICATION_STATUS.md`, no circuit re-derives the verified output
-// from the model weights yet; the opcode only checks the commitment binding. README states plainly
-// that VerifyMerkle is "gated off in production until 64-depth soundness is
-// proven". With `full()`, both opcodes decode and execute on mainnet, and
-// nothing downstream stops them - the execute arm has no second check.
-//
-// So the fix is `default()`, not `full()`. Turning a gate on is then a source
-// change with a reviewer, which is what "staged rollout should use
-// governance/genesis config, not env vars" was asking for; an env var is
-// still not consulted anywhere.
+// Mainnet decoding reads `MainnetActivation::default()`: testnet keeps both
+// VerifyMerkle and VerifyInference closed until their opening gates pass.
+// `full()` enables isolated proof tests without changing production decoding.
 fn decode_instruction(raw: u64, mainnet_mode: bool) -> Result<bud_isa::Instruction, String> {
     if mainnet_mode {
-        // Staged-rollout defaults - no env var override, and no blanket
-        // activation either.
         let activation = bud_isa::MainnetActivation::default();
         bud_isa::Instruction::decode_for_mainnet(raw, activation).map_err(|e| e.to_string())
     } else {
@@ -98,6 +79,8 @@ pub struct Vm {
 
 pub struct Context {
     pub sender: u64,
+    /// Full 256-bit (4 x 64-bit little-endian words) caller identity ( execution leg).
+    pub sender_words: [u64; 4],
     pub nonce: u64,
     pub block_height: u64,
     /// (security audit) initial state root.
@@ -105,6 +88,36 @@ pub struct Context {
     /// Externally), but the prover trace records it on the first row
     /// So the AIR can bind `public_inputs.initial_state_root`.
     pub initial_state_root: [u8; 32],
+}
+
+impl Context {
+    /// Populate all four 64-bit words of `sender_words` and legacy `sender` from 32 LE bytes.
+    pub fn set_sender_bytes(&mut self, addr: &[u8; 32]) {
+        let mut words = [0u64; 4];
+        for (slot, chunk) in words.iter_mut().zip(addr.chunks_exact(8)) {
+            if let Ok(arr) = chunk.try_into() {
+                *slot = u64::from_le_bytes(arr);
+            }
+        }
+        self.sender = words.first().copied().unwrap_or(0);
+        self.sender_words = words;
+    }
+
+    /// Populate all four 64-bit words directly.
+    pub fn set_sender_words(&mut self, words: [u64; 4]) {
+        self.sender = words.first().copied().unwrap_or(0);
+        self.sender_words = words;
+    }
+
+    /// Effective 256-bit caller words (`[sender, 0, 0, 0]` when only legacy `sender` was set).
+    #[must_use]
+    pub const fn effective_sender_words(&self) -> [u64; 4] {
+        if matches!(self.sender_words, [0, 0, 0, 0]) && self.sender != 0 {
+            [self.sender, 0, 0, 0]
+        } else {
+            self.sender_words
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -250,6 +263,7 @@ impl Vm {
             events: Vec::new(),
             context: Context {
                 sender: 0,
+                sender_words: [0u64; 4],
                 nonce: 0,
                 block_height: 0,
                 initial_state_root: [0u8; 32],
@@ -281,12 +295,13 @@ impl Vm {
     }
 
     pub fn consume_gas(&mut self, amount: u64) -> Result<(), VmError> {
-        self.gas_used = self.gas_used.saturating_add(amount);
-        if self.gas_used > self.gas_limit {
+        let next = self.gas_used.saturating_add(amount);
+        if next > self.gas_limit {
             self.halted = true;
             self.error = Some(VmError::OutOfGas);
             return Err(VmError::OutOfGas);
         }
+        self.gas_used = next;
         Ok(())
     }
 
@@ -355,7 +370,19 @@ impl Vm {
         // Observed, so the trace still ends with a Halt row and the AIR
         // Termination constraint is satisfied. The set of fields that
         // `step` is allowed to mutate on error is: `halted` (set to true)
-        // And `error` (set to Some(...)). Do not push partial steps.
+        // And `error` (set to Some(...)). Do not push partial steps or
+        // advance `gas_used` for instructions absent from `self.trace`.
+        let prev_gas = self.gas_used;
+        match self.step_inner(program) {
+            Ok(()) => Ok(()),
+            Err(err) => {
+                self.gas_used = prev_gas;
+                Err(err)
+            }
+        }
+    }
+
+    fn step_inner(&mut self, program: &[u64]) -> Result<(), VmError> {
         self.registers[0] = 0; // Enforce r0 is always 0
         if self.halted {
             return Ok(());
@@ -393,7 +420,9 @@ impl Vm {
         let mut memory_addr = None;
         let mut memory_val = None;
         let mut is_memory_write = false;
-
+        let mut inference_model_commitment = None;
+        let mut inference_input_commitment = None;
+        let mut inference_output_commitment = None;
         let mut pending_merkle_walk: Option<MerkleWalk> = None;
 
         let (dst_val, next_pc) = match inst.opcode {
@@ -662,6 +691,11 @@ impl Vm {
                         self.events.push(src1_val);
                         self.context.block_height.saturating_add(src1_val)
                     }
+                    10..=13 if self.mainnet_mode || self.context.sender_words != [0u64; 4] => {
+                        let words = self.context.effective_sender_words();
+                        let idx = (inst.imm - 10) as usize;
+                        words.get(idx).copied().unwrap_or(0)
+                    }
                     _ => 0,
                 };
                 self.registers[dst_idx as usize] = result;
@@ -696,16 +730,19 @@ impl Vm {
                 self.pc += 1;
                 (result, cur_pc + 1)
             }
-            // VerifyInference is reserved. The VM always answers 0 and reads
-            // no memory. Any proof of a trace containing this opcode is
-            // refused by the AIR. Weights, input and output binding is
-            // planned through a hash-over-memory primitive, not here.
+            // VerifyInference (0x1F): 30-round Goldilocks width-12 Poseidon binding
+            // (model_commitment=rs1, input_commitment=rs2, DOMAIN_VERIFY_INFERENCE, aux_tag=imm) -> rd.
+            // Proven in a single trace row inside BudAir via the shared Poseidon gadget
+            // and Register LogUp + COL_INFERENCE_{MODEL,INPUT,OUTPUT}_COMMIT constraints.
             Opcode::VerifyInference => {
-                let result = 0;
-                let dst_idx = inst.rd;
+                let aux_tag = canonical_imm(inst.imm);
+                let result = verify_inference_digest(src1_val, src2_val, aux_tag);
                 if dst_idx as usize > 0 {
                     self.registers[dst_idx as usize] = result;
                 }
+                inference_model_commitment = Some(src1_val);
+                inference_input_commitment = Some(src2_val);
+                inference_output_commitment = Some(result);
                 self.pc += 1;
                 (result, cur_pc + 1)
             }
@@ -806,9 +843,9 @@ impl Vm {
             merkle_word: None,
             merkle_round: None,
             merkle_is_expand: false,
-            inference_model_commitment: None,
-            inference_input_commitment: None,
-            inference_output_commitment: None,
+            inference_model_commitment,
+            inference_input_commitment,
+            inference_output_commitment,
             inference_proof_round: None,
             inference_is_expand: false,
         });
@@ -1080,6 +1117,19 @@ pub struct MerkleWalk {
 /// A real separation needs a capacity tag, which changes the AIR.
 pub const DOMAIN_NULLIFIER: u64 = 0x4e55_4c4c_4946_4552; // "NULLIFER"
 
+/// Domain separator for `VerifyInference` (`0x1F`) 30-round Poseidon binding.
+pub const DOMAIN_VERIFY_INFERENCE: u64 = 0x494E_4645_5245_4E43; // "INFERENC"
+
+/// Convert signed 32-bit instruction immediate to its canonical Goldilocks element.
+#[must_use]
+pub const fn canonical_imm(imm: i32) -> u64 {
+    if imm < 0 {
+        GOLDILOCKS_P.wrapping_sub(imm.unsigned_abs() as u64)
+    } else {
+        imm.cast_unsigned() as u64
+    }
+}
+
 // The in-VM hash is the Poseidon parameter set: Goldilocks, width 12,
 // 8 full and 22 partial rounds, `alpha = 7`, capacity 4, output 4 elements.
 // The definition lives in `budlum-note-packing` so the wallet, the VM and the
@@ -1139,13 +1189,24 @@ pub fn poseidon4_hash_state(s: [u64; POSEIDON_WIDTH]) -> u64 {
     poseidon_full_hash_state(s)
 }
 
-/// Poseidon with 3 absorbed field elements (state = [a, b, c, 0, ...]).
-pub fn poseidon4_hash3(a: u64, b: u64, c: u64) -> u64 {
+/// Poseidon with 4 absorbed field elements (state = [a, b, c, d, 0, ...]).
+pub fn poseidon4_hash4(a: u64, b: u64, c: u64, d: u64) -> u64 {
     let mut state = [0u64; POSEIDON_WIDTH];
     state[0] = a;
     state[1] = b;
     state[2] = c;
+    state[3] = d;
     poseidon4_hash_state(state)
+}
+
+/// Canonical 30-round Poseidon inference output digest bound by `Opcode::VerifyInference`.
+pub fn verify_inference_digest(model_commit: u64, input_commit: u64, aux_tag: u64) -> u64 {
+    poseidon4_hash4(model_commit, input_commit, DOMAIN_VERIFY_INFERENCE, aux_tag)
+}
+
+/// Poseidon with 3 absorbed field elements (state = [a, b, c, 0, ...]).
+pub fn poseidon4_hash3(a: u64, b: u64, c: u64) -> u64 {
+    poseidon4_hash4(a, b, c, 0)
 }
 
 /// Poseidon with 2 absorbed field elements (state = [a, b, 0, ...]). Used by
@@ -1319,9 +1380,9 @@ mod tests {
         );
     }
 
-    /// VerifyInference is reserved. It reads no memory, even through a
-    /// register address whose window would wrap, and it leaves no inference
-    /// data in the trace.
+    /// VerifyInference computes a single-row 30-round Poseidon commitment over
+    /// `(rs1, rs2, DOMAIN_VERIFY_INFERENCE, canonical_imm(imm))`, reads no memory,
+    /// and never panics on wrapping register addresses.
     #[test]
     fn verify_inference_refuses_a_register_address_whose_window_wraps() {
         let program = vec![
@@ -1337,53 +1398,46 @@ mod tests {
             receipt.success,
             "the program must run to Halt rather than abort the process"
         );
-        assert_eq!(vm.registers[3], 0);
-        assert_no_inference_data(&vm);
+        let expected = verify_inference_digest(vm.registers[2], 0, 0);
+        assert_eq!(vm.registers[3], expected);
+        let vi = vm
+            .trace
+            .iter()
+            .find(|r| r.instruction.opcode == Opcode::VerifyInference)
+            .expect("VerifyInference trace row");
+        assert!(vi.memory_addr.is_none());
+        assert!(!vi.inference_is_expand);
+        assert_eq!(vi.inference_model_commitment, Some(vm.registers[2]));
+        assert_eq!(vi.inference_input_commitment, Some(0));
+        assert_eq!(vi.inference_output_commitment, Some(expected));
     }
 
-    fn assert_no_inference_data(vm: &Vm) {
-        assert!(
-            vm.trace.iter().all(|row| {
-                row.inference_model_commitment.is_none()
-                    && row.inference_input_commitment.is_none()
-                    && row.inference_output_commitment.is_none()
-                    && row.inference_proof_round.is_none()
-                    && !row.inference_is_expand
-            }),
-            "VerifyInference must leave no inference data in the trace"
-        );
-    }
-
-    /// Even a window that used to be a valid commitment chain answers 0, and
-    /// the trace holds exactly one VerifyInference row and no expansion rows.
+    /// VerifyInference produces a deterministic 30-round Poseidon output bound
+    /// to `(model_commit=rs1, input_commit=rs2, imm)` across single rows with no
+    /// expansion rows.
     #[test]
     fn verify_inference_always_returns_zero_and_emits_no_expansion_rows() {
         let model_c = 0xABCD_EF01_2345_6789u64;
         let input_c = 0x1122_3344_5566_7788u64;
-        let output_c = poseidon4_hash(model_c, input_c);
-        for imm in [0i32, 1] {
+        for imm in [0i32, 1, -7] {
             let mut vm = Vm::new(256);
-            vm.memory[64..72].copy_from_slice(&model_c.to_le_bytes());
-            vm.memory[72..80].copy_from_slice(&input_c.to_le_bytes());
-            vm.memory[80..88].copy_from_slice(&output_c.to_le_bytes());
-            vm.registers[1] = 64;
+            vm.registers[1] = model_c;
+            vm.registers[2] = input_c;
             let program = vec![
-                inst(Opcode::VerifyInference, 3, 1, 0, imm),
+                inst(Opcode::VerifyInference, 3, 1, 2, imm),
                 inst(Opcode::Halt, 0, 0, 0, 0),
             ];
             let receipt = vm.run_receipt(&program);
             assert!(receipt.success);
-            assert_eq!(
-                vm.registers[3], 0,
-                "reserved opcode must answer 0 (imm={imm})"
-            );
+            let expected = verify_inference_digest(model_c, input_c, canonical_imm(imm));
+            assert_eq!(vm.registers[3], expected, "digest mismatch (imm={imm})");
             let n = vm
                 .trace
                 .iter()
                 .filter(|r| r.instruction.opcode == Opcode::VerifyInference)
                 .count();
             assert_eq!(n, 1, "exactly one VerifyInference row, no expansion");
-            assert_no_inference_data(&vm);
+            assert!(vm.trace.iter().all(|r| !r.inference_is_expand));
         }
     }
 
@@ -2048,6 +2102,96 @@ mod poseidon_parameter_tests {
     }
 
     #[test]
+    fn production_vm_refuses_unbound_verify_merkle_before_writing_a_trace_row() {
+        let program = [
+            Instruction {
+                opcode: Opcode::VerifyMerkle,
+                rd: 1,
+                rs1: 0,
+                rs2: 0,
+                imm: 0,
+            }
+            .encode(),
+            Instruction {
+                opcode: Opcode::Halt,
+                rd: 0,
+                rs1: 0,
+                rs2: 0,
+                imm: 0,
+            }
+            .encode(),
+        ];
+        let mut vm = Vm::with_mainnet_mode(8192, 100_000, true);
+        let receipt = vm.run_receipt(&program);
+        assert!(!receipt.success);
+        assert!(matches!(receipt.error, Some(VmError::InvalidOpcode(_))));
+        assert!(vm
+            .trace
+            .iter()
+            .all(|step| step.instruction.opcode != Opcode::VerifyMerkle));
+    }
+
+    #[test]
+    fn budzero_sender_is_four_words() {
+        let mut addr = [0u8; 32];
+        addr[0..8].copy_from_slice(&0x1111_2222_3333_4444u64.to_le_bytes());
+        addr[8..16].copy_from_slice(&0x5555_6666_7777_8888u64.to_le_bytes());
+        addr[16..24].copy_from_slice(&0x9999_AAAA_BBBB_CCCCu64.to_le_bytes());
+        addr[24..32].copy_from_slice(&0xDDDD_EEEE_FFFF_0001u64.to_le_bytes());
+
+        let mut vm = Vm::with_mainnet_mode(256, 100_000, true);
+        vm.context.set_sender_bytes(&addr);
+
+        let program: Vec<u64> = [10i32, 11, 12, 13]
+            .into_iter()
+            .enumerate()
+            .flat_map(|(idx, imm)| {
+                let r = (idx + 1) as u8;
+                [
+                    Instruction {
+                        opcode: Opcode::Syscall,
+                        rd: r,
+                        rs1: 0,
+                        rs2: 0,
+                        imm,
+                    }
+                    .encode(),
+                    Instruction {
+                        opcode: Opcode::Log,
+                        rd: 0,
+                        rs1: r,
+                        rs2: 0,
+                        imm: 0,
+                    }
+                    .encode(),
+                ]
+            })
+            .chain(std::iter::once(
+                Instruction {
+                    opcode: Opcode::Halt,
+                    rd: 0,
+                    rs1: 0,
+                    rs2: 0,
+                    imm: 0,
+                }
+                .encode(),
+            ))
+            .collect();
+
+        let receipt = vm.run_receipt(&program);
+        assert!(receipt.success);
+        assert_eq!(
+            receipt.events,
+            vec![
+                0x1111_2222_3333_4444,
+                0x5555_6666_7777_8888,
+                0x9999_AAAA_BBBB_CCCC,
+                0xDDDD_EEEE_FFFF_0001,
+            ]
+        );
+    }
+
+    #[test]
     fn verify_merkle_loop_hits_out_of_gas_within_bounded_iterations() {
         assert_eq!(Vm::gas_cost(Opcode::VerifyMerkle), 10);
         let verify = Instruction {
@@ -2063,7 +2207,7 @@ mod poseidon_parameter_tests {
             rd: 0,
             rs1: 0,
             rs2: 0,
-            imm: 0,
+            imm: -1,
         }
         .encode();
         let program = vec![verify, jump];
@@ -2071,13 +2215,9 @@ mod poseidon_parameter_tests {
         let receipt = vm.run_receipt(&program);
         assert!(!receipt.success);
         assert_eq!(receipt.error, Some(VmError::OutOfGas));
-        // `consume_gas` adds the cost of the refused instruction to the counter
-        // before it compares against the limit, and the receipt keeps that
-        // addition: the loop always stops past the limit, but never further
-        // past it than one `VerifyMerkle` costs. That one-instruction overshoot
-        // is the DoS bound this calibration promises.
-        assert!(receipt.gas_used > 4_096);
-        assert!(receipt.gas_used <= 4_096 + Vm::gas_cost(Opcode::VerifyMerkle));
+        // The fixture loops back to VerifyMerkle, and the rejected charge must
+        // leave the receipt at or below the configured gas budget.
+        assert!(receipt.gas_used <= 4_096);
         assert!(vm.trace.len() <= 410 * (1 + MERKLE_ROUNDS) + 1);
     }
 

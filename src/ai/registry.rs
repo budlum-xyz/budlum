@@ -2,6 +2,7 @@
 //!
 //! Tracks active models, pending inference requests, accumulated verifier attestations,
 //! And finalized consensus outcomes. Provides deterministic `state_root` calculation.
+//! Convenience: exposed for CLI, RPC, SDK, and multi-VM runtime callers.
 
 use crate::ai::types::{
     AiAgentPayment, AiAgentPaymentReceipt, AiAgentPaymentSettlement, AiAgentReputation,
@@ -73,11 +74,11 @@ pub struct AiRegistry {
     pub results: BTreeMap<AiRequestId, Vec<AiInferenceResult>>,
     #[serde(with = "crate::core::map_keys")]
     pub outcomes: BTreeMap<AiRequestId, AiInferenceOutcome>,
-    /// Set of request IDs whose max_fee has been reclaimed
+    /// Set of request IDs whose `max_fee` has been reclaimed
     /// After deadline expiry without finalization. Prevents double-reclaim.
     pub reclaimed_fees: BTreeSet<AiRequestId>,
     /// Equivocation event record with block timestamp.
-    /// Maps (request_id, verifier_bytes) → block_number when detected.
+    /// Maps (`request_id`, `verifier_bytes`) → `block_number` when detected.
     /// Dispute window enforcement - equivocation events
     /// Expire after `DISPUTE_WINDOW_BLOCKS` blocks, preventing stale slashing.
     #[serde(with = "crate::core::map_keys")]
@@ -112,7 +113,7 @@ pub struct AiRegistry {
     /// Results to registered callback addresses.
     pub callback_queue: BTreeMap<Address, Vec<AiCallbackEvent>>,
     /// Execution proof registry.
-    /// Maps (request_id, verifier) → AiExecutionProof. When a verifier
+    /// Maps (`request_id`, verifier) → `AiExecutionProof`. When a verifier
     /// Submits a ZKVM-verified inference result, the proof is stored here.
     /// This enables trustless verification - the paradigm shift from
     /// "verifier says so" to "mathematics prove it."
@@ -124,15 +125,15 @@ pub struct AiRegistry {
     /// `execution_proofs` alone and never unlock a proof-gated payment.
     pub fully_verified_proofs: BTreeSet<(AiRequestId, [u8; 32])>,
     /// Verifier Quality of Service registry.
-    /// Maps verifier address → QoS metrics. Enables QoS-aware verifier
+    /// Maps verifier address → `QoS` metrics. Enables `QoS`-aware verifier
     /// Selection for the Agentic Economy.
     pub verifier_qos: BTreeMap<Address, AiVerifierQos>,
     /// Agent-to-Agent payment registry.
-    /// Maps payment_id → AiAgentPayment. Enables trustless value transfer
+    /// Maps `payment_id` → `AiAgentPayment`. Enables trustless value transfer
     /// Between AI agents in the Agentic Economy.
     #[serde(with = "crate::core::map_keys")]
     pub agent_payments: BTreeMap<[u8; 32], AiAgentPayment>,
-    /// Finalized payment receipts (payment_id never reusable).
+    /// Finalized payment receipts (`payment_id` never reusable).
     #[serde(with = "crate::core::map_keys")]
     pub settled_agent_payments: BTreeMap<[u8; 32], AiAgentPaymentSettlement>,
     /// Verifier whitelist - only whitelisted verifiers
@@ -142,7 +143,7 @@ pub struct AiRegistry {
     /// Verifier onboarding for the Agentic Economy.
     pub verifier_whitelist: BTreeSet<Address>,
     /// Agent reputation registry.
-    /// Maps agent address → AiAgentReputation. Tracks payment reliability,
+    /// Maps agent address → `AiAgentReputation`. Tracks payment reliability,
     /// Inference quality, and uptime for trust scoring in the Agentic Economy.
     pub agent_reputations: BTreeMap<Address, AiAgentReputation>,
 }
@@ -220,6 +221,11 @@ impl AiRegistry {
             && self.agent_reputations.is_empty()
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn register_model(&mut self, spec: AiModelSpec) -> Result<AiModelId, String> {
         spec.validate()?;
         // A proof-required model cannot be satisfied while the
@@ -288,6 +294,10 @@ impl AiRegistry {
     /// or a non-canonical `input_commitment`. Every caller of this method
     /// passes the same gate as the transaction path, so there is no second
     /// door into the request table.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn submit_request(
         &mut self,
         request: AiInferenceRequest,
@@ -370,6 +380,10 @@ impl AiRegistry {
 
     /// Submit an inference result with deadline + dispute enforcement.
     /// `current_block` is provided by the executor layer (defense-in-depth).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn submit_result(
         &mut self,
         result: AiInferenceResult,
@@ -417,7 +431,7 @@ impl AiRegistry {
         // which is the check request admission already makes on
         // `input_commitment`. Without it a verifier can group on the honest
         // commitment and ship different bytes: the outcome serves
-        // `output_ref`, the output NFT and Pollen `DataAsset` are minted from
+        // `output_ref`, the output NFT and Data Market `DataAsset` are minted from
         // it, and no dispute path covers the mismatch.
         let canonical = crate::ai::types::canonical_output_commitment(result.output_ref.as_slice());
         if result.output_commitment != canonical {
@@ -596,6 +610,10 @@ impl AiRegistry {
     /// Deactivate a model. Only the model owner can deactivate.
     /// An inactive model rejects new inference requests, but existing pending
     /// Requests/results continue to be processed normally.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn deactivate_model(
         &mut self,
         model_id: &AiModelId,
@@ -622,6 +640,10 @@ impl AiRegistry {
     }
 
     /// Reactivate a previously deactivated model. Only the model owner can reactivate.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn reactivate_model(
         &mut self,
         model_id: &AiModelId,
@@ -648,8 +670,12 @@ impl AiRegistry {
     }
 
     /// Update mutable model specification fields.
-    /// Only the model owner can update. Immutable fields (model_id, model_hash,
+    /// Only the model owner can update. Immutable fields (`model_id`, `model_hash`,
     /// Owner, version) cannot be changed - those require registering a new model.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     #[allow(clippy::too_many_arguments)]
     pub fn update_model_spec(
         &mut self,
@@ -741,6 +767,10 @@ impl AiRegistry {
     /// Transfer model ownership to a new address.
     /// Only the current owner can transfer. The new owner gains full control
     /// (deactivation, reactivation, spec updates, further transfers).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn transfer_model_ownership(
         &mut self,
         model_id: &AiModelId,
@@ -773,10 +803,10 @@ impl AiRegistry {
     /// Recently-expired data for a configurable retention window.
     ///
     /// Prunable items:
-    /// - Requests whose effective deadline has passed + retention_blocks,
+    /// - Requests whose effective deadline has passed + `retention_blocks`,
     ///   reclaimed and cancelled ones included
     /// - Results associated with pruned requests
-    /// - Outcomes that have been finalized + retention_blocks
+    /// - Outcomes that have been finalized + `retention_blocks`
     /// - Reclaimed and cancelled markers whose request row is gone
     ///
     /// Returns `(pruned, refunds)`. `refunds` holds one `(requester, max_fee)`
@@ -902,13 +932,17 @@ impl AiRegistry {
     }
     ///
     /// After a request's deadline has passed without reaching agreement threshold,
-    /// The requester can reclaim their escrowed max_fee. This prevents fee leaks
-    /// Where max_fee is deducted but never distributed (no verifiers, insufficient
+    /// The requester can reclaim their escrowed `max_fee`. This prevents fee leaks
+    /// Where `max_fee` is deducted but never distributed (no verifiers, insufficient
     /// Agreement, or deadline expiry before threshold reached).
     ///
     /// Returns `(requester_address, max_fee)` on success.
     /// Errors if: request not found, already finalized, not yet expired,
     /// already reclaimed, or already cancelled (the refund went out then).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn reclaim_fee(
         &mut self,
         request_id: &AiRequestId,
@@ -921,6 +955,10 @@ impl AiRegistry {
 
     /// Read-only form of [`Self::reclaim_fee`]: applies every rule and changes nothing.
     /// The status query uses it, so no registry copy is needed.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn check_reclaimable(
         &self,
         request_id: &AiRequestId,
@@ -985,6 +1023,10 @@ impl AiRegistry {
     /// Returns `(requester, max_fee)` on success for the executor to process refund.
     /// Errors if: request not found, not the requester, already finalized,
     /// already reclaimed, or already cancelled.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn cancel_request(
         &mut self,
         request_id: &AiRequestId,
@@ -1038,7 +1080,7 @@ impl AiRegistry {
     }
 
     /// Check if a verifier has equivocated on a request.
-    /// Returns true if the (request_id, verifier) pair is in the equivocation record
+    /// Returns true if the (`request_id`, verifier) pair is in the equivocation record
     /// AND the dispute window has not expired.
     pub fn has_equivocated(&self, request_id: &AiRequestId, verifier: &Address) -> bool {
         self.equivocation_events
@@ -1128,8 +1170,12 @@ impl AiRegistry {
     }
 
     /// Slash a verifier for equivocation.
-    /// Now enforces dispute window - cannot slash after DISPUTE_WINDOW_BLOCKS
+    /// Now enforces dispute window - cannot slash after `DISPUTE_WINDOW_BLOCKS`
     /// Have passed since the equivocation was detected.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn slash_equivocator(
         &mut self,
         request_id: &AiRequestId,
@@ -1175,6 +1221,10 @@ impl AiRegistry {
     /// Lock stake for an AI verifier.
     /// Verifiers must stake to participate in AI inference.
     /// This stake is slashable on equivocation, economic skin-in-the-game.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn lock_verifier_stake(&mut self, verifier: &Address, amount: u64) -> Result<u64, String> {
         if amount == 0 {
             return Err("Verifier stake must be > 0".into());
@@ -1193,6 +1243,10 @@ impl AiRegistry {
     /// Only an authorized operator, one that meets the stake threshold, may
     /// declare: otherwise an address with no stake could write a ceiling and
     /// pollute what `unservable_reason` reports.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn declare_effort_ceiling(
         &mut self,
         verifier: &Address,
@@ -1256,6 +1310,10 @@ impl AiRegistry {
     }
 
     /// Withdraw verifier stake (only if no pending equivocation).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn withdraw_verifier_stake(
         &mut self,
         verifier: &Address,
@@ -1415,6 +1473,10 @@ impl AiRegistry {
     /// Returns Ok if the proof commitments match the existing result.
     /// Returns Err if no result exists for this (request, verifier) pair,
     /// Or if commitments don't match.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn attach_execution_proof(
         &mut self,
         request_id: &AiRequestId,
@@ -1593,7 +1655,11 @@ impl AiRegistry {
     /// verification. `require_proof` escrow release gates on this, not on
     /// the structural-only `has_execution_proof`: a payer that asked for a
     /// verified proof must not be settled against envelope-shaped bytes.
-    fn has_verified_execution_proof(&self, request_id: &AiRequestId, verifier: &Address) -> bool {
+    pub fn has_verified_execution_proof(
+        &self,
+        request_id: &AiRequestId,
+        verifier: &Address,
+    ) -> bool {
         self.execution_proofs
             .contains_key(&(*request_id, verifier.0))
             && self
@@ -1603,19 +1669,24 @@ impl AiRegistry {
 
     // ===================== Verifier QoS =====================
 
-    /// Get QoS metrics for a verifier.
+    /// Get `QoS` metrics for a verifier.
     pub fn get_verifier_qos(&self, verifier: &Address) -> Option<&AiVerifierQos> {
         self.verifier_qos.get(verifier)
     }
 
     /// Get all verifiers ordered by reliability score (descending).
     /// Used for QoS-aware verifier selection in the Agentic Economy.
+    ///
+    /// The sort key is the integer permyriad score, not the `f64` display
+    /// score ( / ): a float key rounds differently between
+    /// builds and `partial_cmp` hides a `NaN` as `Equal`. Ties break on the
+    /// address, so the order is total and identical on every node.
     pub fn verifiers_by_reliability(&self) -> Vec<AiVerifierQos> {
         let mut qos_list: Vec<_> = self.verifier_qos.values().cloned().collect();
         qos_list.sort_by(|a, b| {
-            b.reliability_score()
-                .partial_cmp(&a.reliability_score())
-                .unwrap_or(std::cmp::Ordering::Equal)
+            b.reliability_score_permyriad()
+                .cmp(&a.reliability_score_permyriad())
+                .then_with(|| a.verifier.cmp(&b.verifier))
         });
         qos_list
     }
@@ -1623,6 +1694,10 @@ impl AiRegistry {
     // ===================== Agent-to-Agent Payment =====================
 
     /// Submit an agent-to-agent payment.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn submit_agent_payment(
         &mut self,
         payment: AiAgentPayment,
@@ -1680,6 +1755,10 @@ impl AiRegistry {
     }
 
     /// Release an escrowed payment to the recipient.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn release_agent_payment(
         &mut self,
         payment_id: &[u8; 32],
@@ -1729,6 +1808,10 @@ impl AiRegistry {
     }
 
     /// Reclaim an expired escrowed payment.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn reclaim_agent_payment(
         &mut self,
         payment_id: &[u8; 32],
@@ -1776,6 +1859,10 @@ impl AiRegistry {
 
     /// Record immediate (non-escrowed) settlement without dropping audit trail.
     /// Removes live escrow entry if present and inserts an immutable settlement receipt.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn settle_agent_payment_immediate(
         &mut self,
         payment_id: &[u8; 32],
@@ -2004,18 +2091,43 @@ impl AiRegistry {
     }
 
     /// Get all agents sorted by trust score (descending - highest trust first).
-    /// Returns Vec of (agent_address, trust_score) tuples.
+    /// Returns Vec of (`agent_address`, `trust_score`) tuples.
+    ///
+    /// The returned score is the `f64` display column, but the *ordering*
+    /// comes from the integer permyriad score ( / ), with the
+    /// address breaking ties. Keeping the float in the signature keeps the
+    /// RPC's display column stable while removing it from the decision.
     ///
     /// WIRING: the read model for ranking agents by trust; the operator
     /// surface that lists agents this way does not call it yet, so the
     /// ordering is pinned by this module's tests.
     pub fn agents_by_trust_score(&self) -> Vec<(Address, f64)> {
-        let mut scored: Vec<(Address, f64)> = self
+        let mut scored: Vec<(Address, u64, f64)> = self
             .agent_reputations
             .iter()
-            .map(|(addr, rep)| (*addr, rep.trust_score()))
+            .map(|(addr, rep)| (*addr, rep.trust_score_permyriad(), rep.trust_score()))
             .collect();
-        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        scored.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        scored
+            .into_iter()
+            .map(|(addr, _, score)| (addr, score))
+            .collect()
+    }
+
+    /// The agent ranking as integers: `(address, permyriad score)`, ordered
+    /// exactly as [`Self::agents_by_trust_score`] orders ( / ).
+    ///
+    /// This is the form a consensus or cross-process consumer should use.
+    /// One permyriad is 1/10_000 of a unit of trust; the range is
+    /// `0..=10_000`.
+    #[must_use]
+    pub fn agents_by_trust_score_permyriad(&self) -> Vec<(Address, u64)> {
+        let mut scored: Vec<(Address, u64)> = self
+            .agent_reputations
+            .iter()
+            .map(|(addr, rep)| (*addr, rep.trust_score_permyriad()))
+            .collect();
+        scored.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
         scored
     }
 
@@ -2030,18 +2142,19 @@ impl AiRegistry {
     /// The ranking in fixed-point permyriad scores (1/10_000 of a unit
     /// trust), ordered as `agents_by_trust_score` orders.
     /// The actor and RPC boundary carries this, not the raw
-    /// `f64` - a float crossing process boundaries is the Z8 rule, and
-    /// quantizing once, here, keeps every consumer's ordering identical
-    /// without re-deriving a sort key from a float.
+    /// `f64` - a float crossing process boundaries is the Z8 rule.
+    ///
+    ///  / : this used to re-quantize the display float
+    /// (`(score * 10_000.0).round() as u64`), which put a float back on the
+    /// boundary it was meant to keep off, and rounded where the ranking
+    /// truncates. It now returns the integer score itself, so the value the
+    /// boundary carries and the value the sort used are the same number.
+    /// The name is kept because the actor command and the RPC reply are
+    /// wired to it; the unit is permyriad, as the `trust_score_basis: 10_000`
+    /// field already advertised.
     #[must_use]
     pub fn agents_by_trust_score_permille(&self) -> Vec<(Address, u64)> {
-        self.agents_by_trust_score()
-            .into_iter()
-            .map(|(addr, score)| {
-                let q = (score * 10_000.0).round().clamp(0.0, u64::MAX as f64) as u64;
-                (addr, q)
-            })
-            .collect()
+        self.agents_by_trust_score_permyriad()
     }
 
     /// Calculate deterministic Merkle/SHA256 root of all AI registry maps.
@@ -2197,5 +2310,171 @@ impl AiRegistry {
 impl Default for AiRegistry {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //!  / : the ranking read models must order on integers.
+    //!
+    //! A float sort key is not a consensus-safe ordering: two nodes built
+    //! with different optimization settings may round the last bit of a
+    //! `f64` differently, and `partial_cmp` on a `NaN` silently degrades to
+    //! `Equal`. The scores stay available as `f64` for display, but the
+    //! *order* and the value that crosses the actor/RPC boundary come from
+    //! the fixed-point permyriad functions.
+    use super::AiRegistry;
+    use crate::ai::types::{AiAgentReputation, AiVerifierQos};
+    use crate::core::address::Address;
+
+    fn addr(byte: u8) -> Address {
+        Address::from([byte; 32])
+    }
+
+    /// The card's named lock: both rankings are ordered by their integer
+    /// score, and the integer score is what the boundary carries.
+    #[test]
+    fn ai_ranking_uses_integers() {
+        let mut registry = AiRegistry::new();
+
+        // Verifier QoS: 3/4 finalized with one equivocation beats 1/1 with
+        // two equivocations, and the integer score pins both values.
+        let mut strong = AiVerifierQos::new(addr(1));
+        strong.total_results_submitted = 4;
+        strong.successful_finalizations = 3;
+        strong.equivocation_count = 1;
+        let mut weak = AiVerifierQos::new(addr(2));
+        weak.total_results_submitted = 4;
+        weak.successful_finalizations = 4;
+        weak.equivocation_count = 3;
+        assert_eq!(strong.reliability_score_permyriad(), 6_750);
+        assert_eq!(weak.reliability_score_permyriad(), 7_000);
+        registry.verifier_qos.insert(addr(1), strong);
+        registry.verifier_qos.insert(addr(2), weak);
+
+        let by_reliability = registry.verifiers_by_reliability();
+        let expected: Vec<u64> = {
+            let mut scores: Vec<u64> = registry
+                .verifier_qos
+                .values()
+                .map(AiVerifierQos::reliability_score_permyriad)
+                .collect();
+            scores.sort_by(|a, b| b.cmp(a));
+            scores
+        };
+        let actual: Vec<u64> = by_reliability
+            .iter()
+            .map(AiVerifierQos::reliability_score_permyriad)
+            .collect();
+        assert_eq!(actual, expected, "QoS order must follow the integer score");
+        assert_eq!(actual, vec![7_000, 6_750]);
+
+        // Agent trust: the permille-named boundary accessor carries the
+        // permyriad integer, never a re-quantized float.
+        registry.record_reputation_payment_completed(&addr(3), 10);
+        registry.record_reputation_payment_completed(&addr(3), 11);
+        registry.record_reputation_payment_defaulted(&addr(4), 12);
+
+        let integer_ranking = registry.agents_by_trust_score_permyriad();
+        let displayed = registry.agents_by_trust_score();
+        assert_eq!(integer_ranking.len(), displayed.len());
+        for pair in integer_ranking.windows(2) {
+            assert!(pair[0].1 >= pair[1].1, "descending integer order");
+        }
+        for (i, (address, score)) in displayed.iter().enumerate() {
+            assert_eq!(*address, integer_ranking[i].0, "same order as integers");
+            let rep = registry.get_agent_reputation(address).unwrap();
+            assert_eq!(integer_ranking[i].1, rep.trust_score_permyriad());
+            assert!(
+                (*score - f64::from(u32::try_from(integer_ranking[i].1).unwrap()) / 10_000.0).abs()
+                    < 0.01
+            );
+        }
+        assert_eq!(
+            registry.agents_by_trust_score_permille(),
+            integer_ranking,
+            "the actor/RPC boundary must carry the integer score itself"
+        );
+        let top: Vec<Address> = registry.top_agents(1).into_iter().map(|(a, _)| a).collect();
+        assert_eq!(
+            top,
+            vec![integer_ranking[0].0],
+            "top-N is the same ordering, cut"
+        );
+    }
+
+    /// Equal integer scores keep the map's address order: no float compare,
+    /// no `unwrap_or(Equal)` hiding a `NaN`, no platform-dependent tie order.
+    #[test]
+    fn ai_ranking_breaks_ties_by_address() {
+        let mut registry = AiRegistry::new();
+        for byte in [9u8, 3, 7] {
+            let mut qos = AiVerifierQos::new(addr(byte));
+            qos.total_results_submitted = 2;
+            qos.successful_finalizations = 1;
+            registry.verifier_qos.insert(addr(byte), qos);
+            registry.record_reputation_payment_completed(&addr(byte), 1);
+        }
+        let qos_order: Vec<Address> = registry
+            .verifiers_by_reliability()
+            .into_iter()
+            .map(|q| q.verifier)
+            .collect();
+        assert_eq!(qos_order, vec![addr(3), addr(7), addr(9)]);
+
+        let agent_order: Vec<Address> = registry
+            .agents_by_trust_score_permyriad()
+            .into_iter()
+            .map(|(a, _)| a)
+            .collect();
+        assert_eq!(agent_order, vec![addr(3), addr(7), addr(9)]);
+    }
+
+    ///  overflow leg: the score arithmetic widens before it
+    /// multiplies. Counters at `u64::MAX` must produce a bounded score
+    /// instead of wrapping (debug panic / release wrap).
+    #[test]
+    fn ai_ranking_saturates_instead_of_overflowing() {
+        let mut qos = AiVerifierQos::new(addr(1));
+        qos.total_results_submitted = u64::MAX;
+        qos.successful_finalizations = u64::MAX;
+        qos.equivocation_count = u64::MAX;
+        assert_eq!(qos.reliability_score_permyriad(), 0);
+
+        let mut rep = AiAgentReputation::new(addr(1));
+        rep.payments_completed = u64::MAX;
+        rep.payments_defaulted = u64::MAX;
+        rep.results_submitted = u64::MAX;
+        rep.results_finalized = u64::MAX;
+        rep.equivocations = u64::MAX;
+        let score = rep.trust_score_permyriad();
+        assert!(score <= 10_000, "score must stay in basis points: {score}");
+    }
+
+    /// The display score and the ranking score are the same number to
+    /// within one basis point, so the RPC's float column and the integer
+    /// column can never tell two different stories about one agent.
+    #[test]
+    fn ai_ranking_integer_matches_display_within_one_basis_point() {
+        for (completed, defaulted, submitted, finalized, equivocations) in [
+            (0u64, 0u64, 0u64, 0u64, 0u64),
+            (1, 1, 2, 1, 1),
+            (7, 3, 11, 5, 2),
+            (100, 0, 100, 99, 0),
+            (0, 5, 0, 0, 0),
+        ] {
+            let mut rep = AiAgentReputation::new(addr(1));
+            rep.payments_completed = completed;
+            rep.payments_defaulted = defaulted;
+            rep.results_submitted = submitted;
+            rep.results_finalized = finalized;
+            rep.equivocations = equivocations;
+            let integer = f64::from(u32::try_from(rep.trust_score_permyriad()).unwrap()) / 10_000.0;
+            assert!(
+                (integer - rep.trust_score()).abs() <= 0.0002,
+                "integer {integer} vs display {} for {rep:?}",
+                rep.trust_score()
+            );
+        }
     }
 }

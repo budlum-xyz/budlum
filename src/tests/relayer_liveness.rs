@@ -1,7 +1,7 @@
 //! Tests for this turn's features:
-//!  1. CrossDomainMessage -> relayer registration gating
-//!  2. Slashing-report anti-spam fee (with refund on actionable reports)
-//!  3. Liveness fault detection -> slash via the existing report flow
+//! 1. CrossDomainMessage -> relayer registration gating
+//! 2. Slashing-report anti-spam fee (with refund on actionable reports)
+//! 3. Liveness fault detection -> slash via the existing report flow
 //!
 //! Unit-level behaviour of the liveness tracker itself lives in
 //! `registry::liveness::tests`; here we exercise the wiring through
@@ -15,9 +15,9 @@ use crate::core::address::Address;
 use crate::core::chain_config::FIXED_POINT_SCALE;
 use crate::cross_domain::message::{CrossDomainMessage, CrossDomainMessageParams};
 use crate::cross_domain::MessageKind;
+use crate::persistence::db::Storage;
 use crate::registry::evidence::{SlashingProof, SlashingReport};
 use crate::registry::role::roles;
-use crate::storage::db::Storage;
 use std::collections::HashSet;
 use std::sync::Arc;
 use tempfile::tempdir;
@@ -43,10 +43,8 @@ fn fresh_chain() -> Blockchain {
     bc
 }
 
-/// The default is observe-only (`liveness_slashing_enabled = false`), so the
-/// end-to-end slashing tests opt in explicitly instead of relying on a default
-/// that a later change can flip underneath them.
-fn enable_liveness_slashing(bc: &mut Blockchain) {
+/// Set the deprecated flag to prove it cannot re-enable absence slashing.
+fn set_legacy_liveness_flag(bc: &mut Blockchain) {
     let mut params = *bc.state.registry.params();
     params.liveness_slashing_enabled = true;
     bc.state.registry.set_params(params);
@@ -665,7 +663,10 @@ fn report_fee_insufficient_balance_rejected_without_state_change() {
     let err = bc
         .submit_registry_slashing_report(double_sign_report(&keys, Some(reporter)))
         .unwrap_err();
-    assert!(err.contains("insufficient balance"));
+    assert!(
+        err.contains("insufficient") && err.contains("balance"),
+        "err: {err}"
+    );
     // Offender not slashed.
     assert!(bc.state.registry.is_active(&offender, roles::VALIDATOR));
 }
@@ -713,48 +714,47 @@ fn state_with_validator(v: Address, stake: u64) -> AccountState {
 }
 
 #[test]
-fn consecutive_liveness_failures_trigger_slash() {
-    // Use an isolated AccountState with exactly one validator so the count is
-    // Deterministic (fresh_chain seeds a genesis validator).
+fn consecutive_liveness_failures_trigger_suspension() {
     let v = addr(0x21);
     let mut state = state_with_validator(v, 10_000);
     let k = state.registry.params().liveness_max_missed_epochs;
 
     let none: HashSet<Address> = HashSet::new();
-    // Miss k-1 epochs: no report yet.
     for e in 1..k {
         assert!(state.record_liveness_epoch(e, &none).is_empty());
     }
     assert!(state.registry.is_active(&v, roles::VALIDATOR));
-    // K-th consecutive miss produces exactly one report for this validator.
-    let reports = state.record_liveness_epoch(k, &none);
-    assert_eq!(reports.len(), 1);
-    assert_eq!(reports[0].offender, v);
+    let suspended = state.record_liveness_epoch(k, &none);
+    assert_eq!(suspended, vec![v]);
+    assert!(state.liveness.is_suspended(&v));
+    assert_eq!(
+        state.registry.get(&v, roles::VALIDATOR).unwrap().stake,
+        10_000
+    );
 }
 
 #[test]
-fn liveness_slash_applied_through_blockchain_flow() {
-    // End-to-end: reports generated at the chain level are routed through the
-    // Existing report->slash flow and the target validator ends up slashed.
+fn liveness_suspension_recorded_through_blockchain_flow() {
     let mut bc = fresh_chain();
-    enable_liveness_slashing(&mut bc);
+    set_legacy_liveness_flag(&mut bc);
     let v = addr(0x2A);
     bc.state.add_validator(v, 10_000);
     bc.state.sync_validator_registration(&v);
     let k = bc.state.registry.params().liveness_max_missed_epochs;
 
-    // Everyone participates except `v` (so the genesis validator is unaffected).
     let mut present: HashSet<Address> = bc.state.validators.keys().copied().collect();
     present.remove(&v);
-
     for e in 1..k {
         assert_eq!(bc.record_liveness_epoch(e, &present), 0);
     }
     assert_eq!(bc.record_liveness_epoch(k, &present), 1);
-    // A liveness fault is a timed jail: the validator
-    // leaves the active set but is not slashed, so its release is possible.
-    let jailed = bc.state.validators.get(&v).expect("still a validator");
-    assert!(jailed.jailed && !jailed.active && !jailed.slashed);
+    let validator = bc.state.validators.get(&v).expect("still a validator");
+    assert!(!validator.jailed && !validator.slashed);
+    assert!(bc.state.liveness.is_suspended(&v));
+    assert_eq!(
+        bc.state.registry.get(&v, roles::VALIDATOR).unwrap().stake,
+        10_000
+    );
 }
 
 #[test]
@@ -776,28 +776,24 @@ fn liveness_counter_resets_on_participation() {
 }
 
 #[test]
-fn liveness_slash_uses_configured_rate() {
+fn liveness_absence_never_cuts_stake() {
+    // V-4 / liveness tracking: whatever the old liveness ratio was configured to, absence
+    // suspends and leaves the stake exactly where it was.
     let mut bc = fresh_chain();
-    enable_liveness_slashing(&mut bc);
+    set_legacy_liveness_flag(&mut bc);
     let v = addr(0x23);
     let stake = 10_000u64;
     bc.state.add_validator(v, stake);
     bc.state.sync_validator_registration(&v);
     let k = bc.state.registry.params().liveness_max_missed_epochs;
-    let rate = bc.state.registry.params().liveness_slash_ratio_fixed;
-    // Computed by the same function production uses, not by a second copy of
-    // the expression. A test that recomputes the formula by hand agrees with
-    // production only until one of the two changes, and B35 was exactly that:
-    // five copies, two spellings of the narrowing, and a mirror test that
-    // compared them only where they happened to agree.
-    let expected_penalty = crate::core::chain_config::slash_penalty(stake, rate);
 
     let none: HashSet<Address> = HashSet::new();
     for e in 1..=k {
         bc.record_liveness_epoch(e, &none);
     }
     let member = bc.state.registry.get(&v, roles::VALIDATOR).unwrap();
-    assert_eq!(member.stake, stake - expected_penalty);
+    assert_eq!(member.stake, stake, "absence must never slash the stake");
+    assert!(bc.state.liveness.is_suspended(&v));
 }
 
 #[test]
@@ -817,7 +813,7 @@ fn liveness_does_not_affect_double_sign_flow() {
     assert_eq!(outcome.penalty, stake / 2);
 }
 
-// --- 4. Quarantine ledger persistence ( acceptance) ----------------------
+// --- 4. Quarantine ledger persistence (acceptance) ----------------------
 
 #[test]
 fn quarantine_ledger_rows_survive_restart_after_slash() {

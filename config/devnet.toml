@@ -27,6 +27,11 @@ public_listener = "127.0.0.1:8545"
 operator_listener = "127.0.0.1:8546"
 trusted_proxies = ["127.0.0.1"]
 enabled = true
+auth_required = false
+operator_auth_required = false
+api_key_env = "BUDLUM_RPC_API_KEY"
+allowed_ips = ["127.0.0.1", "::1"]
+rate_limit_per_minute = 0
 
 [metrics]
 listener = "127.0.0.1:9090"
@@ -37,3 +42,17 @@ backend = "local"
 
 [features]
 pruning = false
+
+[compat.ethereum]
+enabled = true
+listener = "127.0.0.1:18547"
+operator_listener = "127.0.0.1:18557"
+max_filters = 1024
+max_filters_per_peer = 32
+filter_ttl_secs = 300
+max_subscriptions = 512
+
+[compat.cosmos]
+enabled = true
+listener = "127.0.0.1:18550"
+rest_listener = "127.0.0.1:18551"

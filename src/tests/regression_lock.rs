@@ -325,8 +325,7 @@ mod relayer_escrow_silent_failure_regression {
     }
 
     /// Submit a result from a verifier.
-    /// (Verifier stake is mandatory after finding #359; the helper stakes
-    /// automatically.)
+    /// A verifier stake is mandatory, so the helper stakes automatically.
     fn submit_result(
         registry: &mut AiRegistry,
         request_id: AiRequestId,

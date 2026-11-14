@@ -17,9 +17,8 @@
 //! * one grant per client IP per cooldown window,
 //! * a daily cap on the total sent.
 //!
-//! The limits live in memory. A restart forgets cooldowns and the daily cap,
-//! so operators must protect restarts as well as the funding key; only the
-//! faucet balance is an absolute bound across restarts.
+//! The limits are persisted before submission. An unreadable or unwritable
+//! state file stops the faucet rather than silently resetting its allowances.
 //!
 //! # Chains
 //!
@@ -32,8 +31,9 @@
 //! ```text
 //! budlum-faucet keygen --out ./secrets/faucet.seed
 //! budlum-faucet serve --rpc-url http://127.0.0.1:18545 \
-//!     --key-file ./secrets/faucet.seed --listen 127.0.0.1:18600 --allow-direct
-//! curl -X POST http://127.0.0.1:18600/request -d '{"address":"0x..."}'
+//!     --key-file ./secrets/faucet.seed --state-file ./data/faucet-state.json \
+//!     --listen 127.0.0.1:18600 --allow-direct
+//! budlum-faucet request --url http://127.0.0.1:18600 --address 0x<64 hex digits>
 //! ```
 //!
 //! The key file holds the 32-byte ML-DSA-87 seed as hex. It is read from a
@@ -50,16 +50,18 @@ use hyper::body::{Bytes, Incoming};
 use hyper::{Method, Request, Response, StatusCode};
 use std::collections::BTreeMap;
 use std::net::{IpAddr, SocketAddr};
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::{Mutex, Semaphore};
 
+#[path = "support/faucet_client.rs"]
+mod faucet_client;
 #[path = "support/http.rs"]
 mod http_support;
+use faucet_client::{meets_difficulty, parse_address, pow_hash, request_funds, DEFAULT_AMOUNT_BUD};
 
-/// TESTNET-DEFAULT: 100 BUD per request.
-const DEFAULT_AMOUNT_BUD: u64 = 100;
 /// TESTNET-DEFAULT: one grant per address and per IP every 24 hours.
 const DEFAULT_COOLDOWN_SECS: u64 = 24 * 60 * 60;
 /// TESTNET-DEFAULT: at most 100000 BUD per UTC day.
@@ -78,6 +80,7 @@ const CLIENT_REQUESTS_PER_WINDOW: u32 = 10;
 const REQUEST_WINDOW_SECS: u64 = 60;
 const MAX_TRACKED_KEYS: usize = 200_000;
 const SECONDS_PER_DAY: u64 = 24 * 60 * 60;
+const CHALLENGE_LIFETIME_SECS: u64 = 120;
 
 #[derive(Parser, Debug)]
 #[command(name = "budlum-faucet", about = "Testnet BUD faucet")]
@@ -94,6 +97,15 @@ enum Command {
         #[arg(long)]
         out: String,
     },
+    /// Request testnet funds after solving the faucet's work challenge.
+    Request {
+        /// Faucet base URL (HTTPS except loopback development hosts).
+        #[arg(long)]
+        url: String,
+        /// Externally owned 32-byte recipient address.
+        #[arg(long)]
+        address: String,
+    },
     /// Serve faucet requests.
     Serve {
         /// The node's public JSON-RPC endpoint.
@@ -102,6 +114,9 @@ enum Command {
         /// The faucet key file written by `keygen`.
         #[arg(long)]
         key_file: String,
+        /// Persistent allowances; keep on durable storage, never delete on restart.
+        #[arg(long)]
+        state_file: PathBuf,
         /// Address the faucet's HTTP endpoint binds.
         #[arg(long, default_value = "127.0.0.1:18600")]
         listen: String,
@@ -178,12 +193,15 @@ impl Refusal {
 }
 
 /// The cooldown and cap bookkeeping, separate from I/O so it can be tested.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
 struct Ledger {
     by_address: BTreeMap<Address, u64>,
+    #[serde(with = "budlum_core::core::map_keys")]
     by_ip: BTreeMap<IpAddr, u64>,
     day: u64,
     sent_today: u64,
+    #[serde(default)]
+    grants_total: u64,
 }
 
 impl Ledger {
@@ -245,6 +263,121 @@ impl Ledger {
     }
 }
 
+/// Each reservation is durable before the node sees a signed transaction.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct StoredState {
+    version: u8,
+    chain_id: u64,
+    faucet_address: Address,
+    ledger: Ledger,
+    next_nonce: u64,
+}
+
+impl StoredState {
+    fn lock(path: &Path) -> Result<std::fs::File, String> {
+        let lock_path = path.with_extension("lock");
+        let mut options = std::fs::OpenOptions::new();
+        options.read(true).write(true).create(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            options.mode(0o600);
+        }
+        let lock = options
+            .open(&lock_path)
+            .map_err(|e| format!("cannot open faucet lock {}: {e}", lock_path.display()))?;
+        lock.try_lock().map_err(|e| {
+            format!(
+                "faucet state is already in use ({}): {e}",
+                lock_path.display()
+            )
+        })?;
+        Ok(lock)
+    }
+
+    fn new(chain_id: u64, faucet_address: Address) -> Self {
+        Self {
+            version: 1,
+            chain_id,
+            faucet_address,
+            ledger: Ledger::default(),
+            next_nonce: 0,
+        }
+    }
+
+    fn load(
+        path: &Path,
+        chain_id: u64,
+        faucet_address: Address,
+        chain_nonce: u64,
+    ) -> Result<Self, String> {
+        match std::fs::read(path) {
+            Ok(bytes) => {
+                let state: Self = serde_json::from_slice(&bytes)
+                    .map_err(|e| format!("invalid faucet state {}: {e}", path.display()))?;
+                if state.version != 1
+                    || state.chain_id != chain_id
+                    || state.faucet_address != faucet_address
+                {
+                    return Err("faucet state belongs to another version, chain or key".into());
+                }
+                Ok(state)
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                if chain_nonce != 0 {
+                    return Err("faucet state is missing for an account with previous transactions; restore the original state instead of resetting limits".into());
+                }
+                let state = Self::new(chain_id, faucet_address);
+                state.save(path)?;
+                Ok(state)
+            }
+            Err(e) => Err(format!("cannot read faucet state {}: {e}", path.display())),
+        }
+    }
+
+    fn verify_chain_nonce(&self, chain_nonce: u64) -> Result<(), String> {
+        if self.next_nonce != chain_nonce {
+            return Err(format!(
+                "faucet state next nonce {} differs from the confirmed chain nonce {chain_nonce}; wait for a pending submission or investigate other uses of the funding key before restarting",
+                self.next_nonce
+            ));
+        }
+        Ok(())
+    }
+
+    fn save(&self, path: &Path) -> Result<(), String> {
+        use std::io::Write as _;
+        let parent = path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
+        let bytes = serde_json::to_vec(self).map_err(|e| format!("encode faucet state: {e}"))?;
+        // A fresh name per write avoids following an attacker-supplied symlink.
+        let mut suffix = [0u8; 8];
+        rand_core::RngCore::fill_bytes(&mut rand_core::OsRng, &mut suffix);
+        let temporary = parent.join(format!(".faucet-{}.tmp", hex::encode(suffix)));
+        let write = (|| -> Result<(), std::io::Error> {
+            let mut options = std::fs::OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt as _;
+                options.mode(0o600);
+            }
+            let mut file = options.open(&temporary)?;
+            file.write_all(&bytes)?;
+            file.sync_all()?;
+            std::fs::rename(&temporary, path)?;
+            std::fs::File::open(parent)?.sync_all()?;
+            Ok(())
+        })();
+        if write.is_err() {
+            let _ = std::fs::remove_file(&temporary);
+        }
+        write.map_err(|e| format!("cannot persist faucet state {}: {e}", path.display()))
+    }
+}
+
 /// The two chains a faucet may serve.
 fn faucet_allowed_on(chain_id: u64) -> bool {
     chain_id == Network::Testnet.chain_id().value()
@@ -259,15 +392,15 @@ fn parse_request(body: &[u8]) -> Result<Address, String> {
         .get("address")
         .and_then(serde_json::Value::as_str)
         .ok_or("request needs an \"address\" string")?;
-    let hex = raw.strip_prefix("0x").unwrap_or(raw);
-    if hex.len() != 64 {
-        return Err("address must be 32 bytes of hex".into());
-    }
-    let address = Address::from_hex(hex).map_err(|e| format!("invalid address: {e}"))?;
-    if address == Address::zero() {
-        return Err("the zero address cannot receive".into());
-    }
-    Ok(address)
+    parse_address(raw)
+}
+
+#[derive(Clone)]
+struct Challenge {
+    address: Address,
+    token: [u8; 16],
+    expires_at: u64,
+    difficulty_bits: u8,
 }
 
 /// Read a node RPC answer that is a decimal or `0x` hex number.
@@ -344,12 +477,112 @@ struct Faucet {
     /// Per-client request arrivals, charged before a request may queue for a
     /// grant so one caller cannot hold the permit or spend the daily cap.
     request_window: Mutex<BTreeMap<IpAddr, (u64, u32)>>,
-    /// The ledger and the next nonce to use, under one lock so two requests
-    /// cannot pass the same cooldown or sign with the same nonce.
-    state: Mutex<(Ledger, u64)>,
+    /// At most one expiring challenge per peer; never persisted or reused.
+    challenges: Mutex<BTreeMap<IpAddr, Challenge>>,
+    /// The ledger and nonce are locked together to serialize grants.
+    state: Mutex<StoredState>,
+    state_file: PathBuf,
+    /// Hold an exclusive process lock across the entire serving lifetime.
+    _state_lock: std::fs::File,
+    /// Stop on a failed write or an ambiguous submission until reconciled.
+    halted: std::sync::atomic::AtomicBool,
 }
 
 impl Faucet {
+    async fn limit_requests(&self, ip: IpAddr, now: u64) -> Result<(), String> {
+        let mut window = self.request_window.lock().await;
+        if window.len() >= MAX_TRACKED_KEYS {
+            window.retain(|_, (start, _)| now.saturating_sub(*start) < REQUEST_WINDOW_SECS);
+        }
+        if window.len() >= MAX_TRACKED_KEYS && !window.contains_key(&ip) {
+            return Err("faucet rate-limit table full; retry in a minute".into());
+        }
+        let entry = window.entry(ip).or_insert((now, 0));
+        if now.saturating_sub(entry.0) >= REQUEST_WINDOW_SECS {
+            *entry = (now, 0);
+        }
+        if entry.1 >= CLIENT_REQUESTS_PER_WINDOW {
+            return Err("too many faucet requests from this client; retry in a minute".into());
+        }
+        entry.1 += 1;
+        Ok(())
+    }
+
+    async fn issue_challenge(
+        &self,
+        ip: IpAddr,
+        address: Address,
+        now: u64,
+    ) -> Result<serde_json::Value, String> {
+        let state = self.state.lock().await;
+        let grants = if state.ledger.day == now / SECONDS_PER_DAY {
+            state.ledger.sent_today / self.policy.amount
+        } else {
+            0
+        };
+        let difficulty_bits = (12 + (grants / 100).min(8)) as u8;
+        drop(state);
+        let mut token = [0u8; 16];
+        rand_core::RngCore::fill_bytes(&mut rand_core::OsRng, &mut token);
+        let expires_at = now.saturating_add(CHALLENGE_LIFETIME_SECS);
+        let mut challenges = self.challenges.lock().await;
+        if challenges.len() >= MAX_TRACKED_KEYS {
+            challenges.retain(|_, challenge| challenge.expires_at > now);
+        }
+        if challenges.len() >= MAX_TRACKED_KEYS && !challenges.contains_key(&ip) {
+            return Err("challenge capacity reached; retry later".into());
+        }
+        challenges.insert(
+            ip,
+            Challenge {
+                address,
+                token,
+                expires_at,
+                difficulty_bits,
+            },
+        );
+        Ok(serde_json::json!({
+            "challenge": hex::encode(token),
+            "difficulty_bits": difficulty_bits,
+            "expires_at": expires_at,
+            "chain_id": self.chain_id,
+        }))
+    }
+
+    async fn verify_challenge(
+        &self,
+        ip: IpAddr,
+        to: Address,
+        value: &serde_json::Value,
+        now: u64,
+    ) -> Result<(), String> {
+        let challenge = value
+            .get("challenge")
+            .and_then(|v| v.as_str())
+            .ok_or("request needs a challenge string")?;
+        let nonce = value
+            .get("nonce")
+            .and_then(|v| v.as_u64())
+            .ok_or("request needs an unsigned nonce")?;
+        let mut challenges = self.challenges.lock().await;
+        // Take before checking: one challenge yields at most one submission,
+        // including when a client retries after an ambiguous node response.
+        let issued = challenges
+            .remove(&ip)
+            .ok_or("request a fresh work challenge")?;
+        if now >= issued.expires_at
+            || issued.address != to
+            || challenge != hex::encode(issued.token)
+            || !meets_difficulty(
+                &pow_hash(self.chain_id, &issued.token, &to, nonce),
+                issued.difficulty_bits,
+            )
+        {
+            return Err("invalid or expired work challenge".into());
+        }
+        Ok(())
+    }
+
     async fn grant(
         &self,
         to: Address,
@@ -359,8 +592,14 @@ impl Faucet {
             .duration_since(UNIX_EPOCH)
             .map_or(0, |d| d.as_secs());
         let mut state = self.state.lock().await;
-        let (ledger, next_nonce) = &mut *state;
-        ledger
+        if self.halted.load(std::sync::atomic::Ordering::Acquire) {
+            return Err((
+                StatusCode::SERVICE_UNAVAILABLE,
+                "faucet is halted; reconcile the last submission or state write".into(),
+            ));
+        }
+        state
+            .ledger
             .check(&self.policy, &to, ip, now)
             .map_err(|refusal| (StatusCode::TOO_MANY_REQUESTS, refusal.message()))?;
 
@@ -370,7 +609,7 @@ impl Faucet {
             .await
             .and_then(|v| rpc_u64(&v, "bud_getNonce"))
             .map_err(|e| upstream_failure("bud_getNonce", &e))?;
-        let nonce = chain_nonce.max(*next_nonce);
+        let nonce = chain_nonce.max(state.next_nonce);
         let mut tx = Transaction::new_with_chain_id(
             self.address,
             to,
@@ -394,7 +633,19 @@ impl Faucet {
         // cooldown and daily allowance before sending, so an ambiguous RPC
         // timeout cannot yield unaccounted grants. Definite RPC refusals also
         // consume the allowance; this is safer than assuming no transfer ran.
-        ledger.record(&self.policy, to, ip, now);
+        state.ledger.record(&self.policy, to, ip, now);
+        // The nonce is reserved too: an accepted transaction may lose its RPC
+        // reply. Never reuse that nonce for a different recipient on restart.
+        state.next_nonce = nonce.saturating_add(1);
+        if let Err(e) = state.save(&self.state_file) {
+            self.halted
+                .store(true, std::sync::atomic::Ordering::Release);
+            eprintln!("budlum-faucet: {e}");
+            return Err((
+                StatusCode::SERVICE_UNAVAILABLE,
+                "faucet state is not writable".into(),
+            ));
+        }
         let hash = self
             .node
             .call("bud_sendRawTransaction", serde_json::json!([tx]))
@@ -403,14 +654,26 @@ impl Faucet {
                 // The upstream text can carry the node's URL and diagnostics,
                 // and this body is served to anonymous callers.
                 eprintln!("budlum-faucet: bud_sendRawTransaction failed: {e}");
+                // Whether the node accepted the transfer is unknown. Stop all
+                // subsequent grants until the reserved nonce is reconciled.
+                self.halted
+                    .store(true, std::sync::atomic::Ordering::Release);
                 (
                     StatusCode::BAD_GATEWAY,
                     "submission failed or its reply was lost; the allowance is reserved"
                         .to_string(),
                 )
             })?;
-
-        *next_nonce = nonce.saturating_add(1);
+        state.ledger.grants_total = state.ledger.grants_total.saturating_add(1);
+        if let Err(e) = state.save(&self.state_file) {
+            self.halted
+                .store(true, std::sync::atomic::Ordering::Release);
+            eprintln!("budlum-faucet: {e}");
+            return Err((
+                StatusCode::SERVICE_UNAVAILABLE,
+                "submission accepted, but faucet state is not writable".into(),
+            ));
+        }
         Ok(serde_json::json!({
             "to": format!("0x{}", to.to_hex()),
             "amount_atoms": self.policy.amount,
@@ -428,9 +691,23 @@ impl Faucet {
             "amount_atoms": self.policy.amount,
             "cooldown_secs": self.policy.cooldown_secs,
             "daily_cap_atoms": self.policy.daily_cap,
-            "sent_today_atoms": state.0.sent_today,
+            "sent_today_atoms": state.ledger.sent_today,
+            "accepting_requests": !self.halted.load(std::sync::atomic::Ordering::Acquire),
         })
     }
+
+    async fn metrics(&self) -> String {
+        let state = self.state.lock().await;
+        format_faucet_metrics(state.ledger.grants_total)
+    }
+}
+
+fn format_faucet_metrics(total: u64) -> String {
+    format!(
+        "# HELP budlum_faucet_grants_total Acknowledged signed transfers.\n\
+         # TYPE budlum_faucet_grants_total counter\n\
+         budlum_faucet_grants_total {total}\n"
+    )
 }
 
 fn json_response(status: StatusCode, body: &serde_json::Value) -> Response<Full<Bytes>> {
@@ -479,16 +756,50 @@ async fn handle(
     if method == Method::GET && path == "/health" {
         return Ok(json_response(StatusCode::OK, &faucet.health().await));
     }
-    if method != Method::POST || path != "/request" {
+    if method == Method::GET && path == "/metrics" {
+        let mut response = Response::new(Full::new(Bytes::from(faucet.metrics().await)));
+        response.headers_mut().insert(
+            hyper::header::CONTENT_TYPE,
+            hyper::header::HeaderValue::from_static("text/plain; version=0.0.4; charset=utf-8"),
+        );
+        return Ok(response);
+    }
+    if (method != Method::POST || path != "/request")
+        && (method != Method::GET || path != "/challenge")
+    {
         return Ok(error_response(
             StatusCode::NOT_FOUND,
-            "POST /request or GET /health",
+            "GET /challenge or POST /request",
         ));
     }
     let ip = match faucet.identity.client_ip(peer.ip(), request.headers()) {
         Ok(ip) => ip,
         Err(message) => return Ok(error_response(StatusCode::BAD_REQUEST, message)),
     };
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    if let Err(message) = faucet.limit_requests(ip, now).await {
+        return Ok(error_response(StatusCode::TOO_MANY_REQUESTS, &message));
+    }
+    if method == Method::GET {
+        let raw = request
+            .uri()
+            .query()
+            .and_then(|query| query.strip_prefix("address="))
+            .filter(|address| !address.contains('&'));
+        let to = match raw
+            .ok_or_else(|| "challenge needs an address".to_string())
+            .and_then(parse_address)
+        {
+            Ok(to) => to,
+            Err(e) => return Ok(error_response(StatusCode::BAD_REQUEST, &e)),
+        };
+        return Ok(match faucet.issue_challenge(ip, to, now).await {
+            Ok(challenge) => json_response(StatusCode::OK, &challenge),
+            Err(e) => error_response(StatusCode::TOO_MANY_REQUESTS, &e),
+        });
+    }
     let body = match read_request_body(request.into_body(), BODY_TIMEOUT).await {
         Ok(body) => body,
         Err(status) => {
@@ -502,31 +813,17 @@ async fn handle(
         Ok(to) => to,
         Err(e) => return Ok(error_response(StatusCode::BAD_REQUEST, &e)),
     };
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs());
-    {
-        let mut window = faucet.request_window.lock().await;
-        if window.len() >= MAX_TRACKED_KEYS {
-            window.retain(|_, (start, _)| now.saturating_sub(*start) < REQUEST_WINDOW_SECS);
-        }
-        if window.len() >= MAX_TRACKED_KEYS && !window.contains_key(&ip) {
+    let value: serde_json::Value = match serde_json::from_slice(&body) {
+        Ok(value) => value,
+        Err(_) => {
             return Ok(error_response(
-                StatusCode::TOO_MANY_REQUESTS,
-                "faucet rate-limit table full; retry in a minute",
-            ));
+                StatusCode::BAD_REQUEST,
+                "invalid request JSON",
+            ))
         }
-        let entry = window.entry(ip).or_insert((now, 0));
-        if now.saturating_sub(entry.0) >= REQUEST_WINDOW_SECS {
-            *entry = (now, 0);
-        }
-        if entry.1 >= CLIENT_REQUESTS_PER_WINDOW {
-            return Ok(error_response(
-                StatusCode::TOO_MANY_REQUESTS,
-                "too many faucet requests from this client; retry in a minute",
-            ));
-        }
-        entry.1 += 1;
+    };
+    if let Err(e) = faucet.verify_challenge(ip, to, &value, now).await {
+        return Ok(error_response(StatusCode::BAD_REQUEST, &e));
     }
     let Ok(permit) = faucet.grant_slots.clone().try_acquire_owned() else {
         return Ok(error_response(
@@ -549,8 +846,30 @@ async fn handle(
 }
 
 fn read_seed(path: &str) -> Result<[u8; 32], String> {
-    let text = std::fs::read_to_string(path).map_err(|e| format!("cannot read {path}: {e}"))?;
-    let bytes = hex::decode(text.trim()).map_err(|e| format!("{path} is not hex: {e}"))?;
+    use std::io::Read as _;
+    // Check and read the SAME descriptor: replacing a pathname between a
+    // permission check and read must not swap in a different signing seed.
+    let file = std::fs::File::open(path).map_err(|e| format!("cannot open {path}: {e}"))?;
+    let metadata = file
+        .metadata()
+        .map_err(|e| format!("cannot stat {path}: {e}"))?;
+    if !metadata.is_file() || metadata.len() > 128 {
+        return Err("faucet seed must be a regular file of at most 128 bytes".into());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        if metadata.permissions().mode() & 0o077 != 0 {
+            return Err("faucet seed must be an owner-only file (mode 0600)".into());
+        }
+    }
+    let mut text = zeroize::Zeroizing::new(String::new());
+    file.take(129)
+        .read_to_string(&mut text)
+        .map_err(|e| format!("cannot read {path}: {e}"))?;
+    let bytes = zeroize::Zeroizing::new(
+        hex::decode(text.trim()).map_err(|e| format!("{path} is not hex: {e}"))?,
+    );
     <[u8; 32]>::try_from(bytes.as_slice()).map_err(|_| format!("{path} must hold 32 bytes"))
 }
 
@@ -581,13 +900,17 @@ fn keygen(out: &str) -> Result<(), String> {
 async fn serve(
     rpc_url: String,
     key_file: &str,
+    state_file: PathBuf,
     listen: &str,
     policy: Policy,
     trusted_proxies: Vec<IpAddr>,
     allow_direct: bool,
 ) -> Result<(), String> {
+    budlum_core::crypto::tls::install_default_provider();
     let identity = http_support::ClientIdentity::new(allow_direct, trusted_proxies)?;
-    let key = WalletKeyPair::from_seed(&read_seed(key_file)?);
+    let seed = zeroize::Zeroizing::new(read_seed(key_file)?);
+    let key = WalletKeyPair::from_seed(&seed);
+    drop(seed);
     let address = key.address();
     let http = reqwest::Client::builder()
         .timeout(Duration::from_secs(15))
@@ -611,6 +934,23 @@ async fn serve(
             Network::Devnet.chain_id().value()
         ));
     }
+    if chain_id == Network::Testnet.chain_id().value()
+        && policy
+            != Policy::from_bud(
+                DEFAULT_AMOUNT_BUD,
+                DEFAULT_COOLDOWN_SECS,
+                DEFAULT_DAILY_CAP_BUD,
+            )?
+    {
+        return Err("testnet faucet limits are fixed at 100 BUD per address and IP per 24h and 100000 BUD per day".into());
+    }
+    let state_lock = StoredState::lock(&state_file)?;
+    let chain_nonce = node
+        .call("bud_getNonce", serde_json::json!([address.to_hex()]))
+        .await
+        .and_then(|v| rpc_u64(&v, "bud_getNonce"))?;
+    let stored = StoredState::load(&state_file, chain_id, address, chain_nonce)?;
+    stored.verify_chain_nonce(chain_nonce)?;
     let faucet = Arc::new(Faucet {
         node,
         key,
@@ -620,7 +960,11 @@ async fn serve(
         identity,
         grant_slots: Arc::new(Semaphore::new(1)),
         request_window: Mutex::new(BTreeMap::new()),
-        state: Mutex::new((Ledger::default(), 0)),
+        challenges: Mutex::new(BTreeMap::new()),
+        state: Mutex::new(stored),
+        state_file,
+        _state_lock: state_lock,
+        halted: std::sync::atomic::AtomicBool::new(false),
     });
     let listener = tokio::net::TcpListener::bind(listen)
         .await
@@ -689,9 +1033,13 @@ fn main() -> ExitCode {
     let cli = Cli::parse();
     let outcome = match cli.command {
         Command::Keygen { out } => keygen(&out),
+        Command::Request { url, address } => tokio::runtime::Runtime::new()
+            .map_err(|e| format!("tokio runtime: {e}"))
+            .and_then(|runtime| runtime.block_on(request_funds(&url, &address))),
         Command::Serve {
             rpc_url,
             key_file,
+            state_file,
             listen,
             amount_bud,
             cooldown_secs,
@@ -705,6 +1053,7 @@ fn main() -> ExitCode {
                     runtime.block_on(serve(
                         rpc_url,
                         &key_file,
+                        state_file,
                         &listen,
                         policy,
                         trusted_proxies,
@@ -725,7 +1074,8 @@ fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::{
-        faucet_allowed_on, parse_request, rpc_u64, Ledger, Policy, Refusal, DEFAULT_AMOUNT_BUD,
+        faucet_allowed_on, format_faucet_metrics, meets_difficulty, parse_request, pow_hash,
+        rpc_u64, Faucet, Ledger, Node, Policy, Refusal, StoredState, DEFAULT_AMOUNT_BUD,
         DEFAULT_COOLDOWN_SECS, DEFAULT_DAILY_CAP_BUD,
     };
     use budlum_core::core::address::Address;
@@ -743,6 +1093,171 @@ mod tests {
 
     fn ip(last: u8) -> IpAddr {
         IpAddr::from([203, 0, 113, last])
+    }
+
+    #[tokio::test]
+    async fn faucet_pow_difficulty_adjusts_and_replay_is_refused() {
+        budlum_core::crypto::tls::install_default_provider();
+        let dir = tempfile::tempdir().unwrap();
+        let state_file = dir.path().join("faucet-state.json");
+        let key = budlum_core::crypto::primitives::WalletKeyPair::from_seed(&[5u8; 32]);
+        let mut state = StoredState::new(Network::Testnet.chain_id().value(), key.address());
+        state.ledger.day = 1;
+        state.ledger.sent_today = policy().amount * 100;
+        let faucet = Faucet {
+            node: Node {
+                url: String::new(),
+                api_key: None,
+                http: reqwest::Client::new(),
+            },
+            address: key.address(),
+            key,
+            chain_id: Network::Testnet.chain_id().value(),
+            policy: policy(),
+            identity: super::http_support::ClientIdentity::new(true, vec![]).unwrap(),
+            grant_slots: std::sync::Arc::new(tokio::sync::Semaphore::new(1)),
+            request_window: tokio::sync::Mutex::new(Default::default()),
+            challenges: tokio::sync::Mutex::new(Default::default()),
+            state: tokio::sync::Mutex::new(state),
+            state_file,
+            _state_lock: StoredState::lock(&dir.path().join("faucet-state.json")).unwrap(),
+            halted: std::sync::atomic::AtomicBool::new(false),
+        };
+        let to = Address::from([9u8; 32]);
+        let now = super::SECONDS_PER_DAY + 1;
+        let challenge = faucet.issue_challenge(ip(1), to, now).await.unwrap();
+        assert_eq!(challenge["difficulty_bits"], 13);
+        let token = hex::decode(challenge["challenge"].as_str().unwrap()).unwrap();
+        let token: [u8; 16] = token.try_into().unwrap();
+        let nonce = (0u64..8_000_000)
+            .find(|n| meets_difficulty(&pow_hash(faucet.chain_id, &token, &to, *n), 13))
+            .unwrap();
+        let solution = serde_json::json!({
+            "challenge": challenge["challenge"], "nonce": nonce,
+        });
+        assert!(faucet
+            .verify_challenge(ip(1), to, &solution, now)
+            .await
+            .is_ok());
+        assert!(
+            faucet
+                .verify_challenge(ip(1), to, &solution, now)
+                .await
+                .is_err(),
+            "proofs cannot be replayed"
+        );
+        let challenge = faucet.issue_challenge(ip(1), to, now).await.unwrap();
+        let wrong = serde_json::json!({"challenge": challenge["challenge"], "nonce": nonce});
+        assert!(faucet
+            .verify_challenge(ip(1), Address::from([8u8; 32]), &wrong, now)
+            .await
+            .is_err());
+        let expired = faucet.issue_challenge(ip(1), to, now).await.unwrap();
+        let expired_solution =
+            serde_json::json!({"challenge": expired["challenge"], "nonce": nonce});
+        assert!(faucet
+            .verify_challenge(
+                ip(1),
+                to,
+                &expired_solution,
+                now + super::CHALLENGE_LIFETIME_SECS
+            )
+            .await
+            .is_err());
+    }
+
+    #[test]
+    fn faucet_limits_hold_across_restarts() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("faucet-state.json");
+        let chain = Network::Testnet.chain_id().value();
+        let address = Address::from([7u8; 32]);
+        let recipient = Address::from([8u8; 32]);
+        let lock = StoredState::lock(&path).unwrap();
+        assert!(
+            StoredState::lock(&path).is_err(),
+            "two faucet instances must not share a ledger"
+        );
+        drop(lock);
+        assert!(
+            StoredState::load(&path, chain, address, 1).is_err(),
+            "a lost ledger must not reset a spent account"
+        );
+        let mut state = StoredState::load(&path, chain, address, 0).unwrap();
+        state.ledger.record(&policy(), recipient, ip(1), 1_000);
+        state.next_nonce = 4;
+        state.ledger.grants_total = 1;
+        state.save(&path).unwrap();
+        let mut restored = StoredState::load(&path, chain, address, 4).unwrap();
+        assert_eq!(restored.next_nonce, 4);
+        assert!(restored.verify_chain_nonce(4).is_ok());
+        assert!(restored.verify_chain_nonce(3).is_err());
+        assert!(restored.verify_chain_nonce(5).is_err());
+        assert_eq!(restored.ledger.grants_total, 1);
+        assert_eq!(restored.ledger.sent_today, policy().amount);
+        assert!(matches!(
+            restored.ledger.check(&policy(), &recipient, ip(2), 1_001),
+            Err(Refusal::AddressCooldown { .. })
+        ));
+        assert!(matches!(
+            restored
+                .ledger
+                .check(&policy(), &Address::from([9u8; 32]), ip(1), 1_001),
+            Err(Refusal::IpCooldown { .. })
+        ));
+        assert!(StoredState::load(&path, chain + 1, address, 4).is_err());
+        assert!(StoredState::load(&path, chain, recipient, 4).is_err());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+    }
+
+    #[test]
+    fn faucet_metrics_export_acknowledged_submissions() {
+        let metrics = format_faucet_metrics(42);
+        assert!(metrics.contains("# TYPE budlum_faucet_grants_total counter\n"));
+        assert!(metrics.ends_with("budlum_faucet_grants_total 42\n"));
+    }
+
+    #[test]
+    fn faucet_refuses_corrupt_or_unwritable_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        std::fs::write(&path, b"{broken").unwrap();
+        assert!(StoredState::load(&path, 45261, Address::from([1; 32]), 0).is_err());
+        assert!(StoredState::load(
+            &dir.path().join("missing/state.json"),
+            45261,
+            Address::from([1; 32]),
+            0,
+        )
+        .is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn faucet_seed_must_be_owner_only_before_signing() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("faucet.seed");
+        std::fs::write(&path, format!("{}\n", "ab".repeat(32))).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(super::read_seed(path.to_str().unwrap()).is_err());
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(
+            super::read_seed(path.to_str().unwrap()).unwrap(),
+            [0xAB; 32]
+        );
+        std::fs::write(&path, "aa".repeat(65)).unwrap();
+        assert!(
+            super::read_seed(path.to_str().unwrap()).is_err(),
+            "oversize seed is refused before allocation"
+        );
     }
 
     #[test]

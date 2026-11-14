@@ -128,6 +128,9 @@ pub struct NodeConfig {
     pub rpc_auth_required: bool,
 
     #[arg(skip)]
+    pub rpc_operator_auth_required: bool,
+
+    #[arg(skip)]
     pub rpc_api_key_env: Option<String>,
 
     #[arg(skip)]
@@ -214,7 +217,7 @@ pub struct NodeConfig {
     #[arg(long)]
     pub restore_backup: Option<String>,
 
-    /// Migrate an existing database at path to ConsensusStateV2 schema (requires atomic backup first) and exit.
+    /// Migrate an existing database at path to `ConsensusStateV2` schema (requires atomic backup first) and exit.
     #[arg(long)]
     pub migrate_v2: Option<String>,
 
@@ -292,6 +295,10 @@ pub struct NodeConfig {
     #[arg(long, default_value = "./data/hsm/socket.sock")]
     pub hsm_socket_path: String,
 
+    /// Label of the token object the vendor-native BLS mechanism signs
+    /// through (). Defaults to the compiled-in `BUD_BLS_KEY`.
+    #[arg(long)]
+    pub pkcs11_bls_key_label: Option<String>,
     /// Vendor-native BLS mechanism ID for PKCS#11.
     #[arg(long)]
     pub pkcs11_bls_mechanism: Option<String>,
@@ -299,7 +306,7 @@ pub struct NodeConfig {
     #[arg(long)]
     pub pkcs11_pq_mechanism: Option<String>,
     /// Operator-configured BLS public key (hex), cross-checked against the
-    /// HSM-held PUBLIC_KEY object at startup.
+    /// HSM-held `PUBLIC_KEY` object at startup.
     #[arg(long)]
     pub pkcs11_bls_public_key: Option<String>,
     /// Operator-configured PQ public key (hex), cross-checked the same way.
@@ -389,6 +396,7 @@ impl Default for NodeConfig {
             // Setting `BUDLUM_RPC_AUTH_REQUIRED=0` in env), but a
             // Forgetful operator no longer ships an open node.
             rpc_auth_required: true,
+            rpc_operator_auth_required: false,
             rpc_api_key_env: None,
             // Same reasoning: empty `allowed_ips` means "allow all" in
             // The runtime check, so we now default to localhost-only and
@@ -434,6 +442,7 @@ impl Default for NodeConfig {
             pkcs11_slot_id: None,
             pkcs11_token_pin_env: None,
             pkcs11_key_label: None,
+            pkcs11_bls_key_label: None,
             hsm_socket_path: "./data/hsm/socket.sock".to_string(),
             pkcs11_bls_mechanism: None,
             pkcs11_pq_mechanism: None,
@@ -466,6 +475,42 @@ pub struct FileConfig {
     pub features: Option<FeaturesSection>,
     pub consensus: Option<ConsensusSection>, // for integration of other sections
     pub anchor: Option<AnchorSection>,
+    pub compat: Option<CompatSection>,
+}
+
+/// Ecosystem compatibility RPC gateway sections (`[compat.*]`, `Section 8.11.1`).
+#[derive(Debug, serde::Deserialize, Default, Clone)]
+#[serde(deny_unknown_fields)]
+/// Convenience: CLI config deserialization surface for compatibility RPC gateways.
+pub struct CompatSection {
+    pub ethereum: Option<CompatEthereumSection>,
+    pub solana: Option<CompatGatewayListenerSection>,
+    pub aptos: Option<CompatGatewayListenerSection>,
+    pub cosmos: Option<CompatGatewayListenerSection>,
+}
+
+/// `[compat.ethereum]` TOML configuration (`127.0.0.1:18547`).
+#[derive(Debug, serde::Deserialize, Default, Clone)]
+#[serde(deny_unknown_fields)]
+/// Convenience: parsed by `FileConfig` and consumed by `EthRpcConfig::from_section`.
+pub struct CompatEthereumSection {
+    pub enabled: Option<bool>,
+    pub listener: Option<String>,
+    pub operator_listener: Option<String>,
+    pub max_filters: Option<usize>,
+    pub max_filters_per_peer: Option<usize>,
+    pub filter_ttl_secs: Option<u64>,
+    pub max_subscriptions: Option<usize>,
+}
+
+/// Listener configuration for `[compat.solana]`, `[compat.aptos]`, and `[compat.cosmos]`.
+#[derive(Debug, serde::Deserialize, Default, Clone)]
+#[serde(deny_unknown_fields)]
+/// Convenience: CLI config deserialization surface for Solana, Aptos, and Cosmos gateways.
+pub struct CompatGatewayListenerSection {
+    pub enabled: Option<bool>,
+    pub listener: Option<String>,
+    pub rest_listener: Option<String>,
 }
 
 /// The `[anchor]` section: how this node emits PQ anchors.
@@ -572,6 +617,7 @@ pub struct RpcSection {
     pub host: Option<String>, // backwards-compatibility
     pub port: Option<u16>,    // backwards-compatibility
     pub auth_required: Option<bool>,
+    pub operator_auth_required: Option<bool>,
     pub allowed_ips: Option<Vec<String>>,
     pub cors_origins: Option<Vec<String>>,
     pub rate_limit_per_minute: Option<u64>,
@@ -617,6 +663,10 @@ pub struct Pkcs11Section {
     pub pq_public_key: Option<String>,
     /// Label of the ML-DSA-65 key pair signed with through PKCS#11 3.2.
     pub pq_key_label: Option<String>,
+    /// Label of the token object the vendor-native BLS mechanism signs
+    /// through (). Absent means the compiled-in `BUD_BLS_KEY`, which is
+    /// what every existing deployment uses.
+    pub bls_key_label: Option<String>,
     /// Vendor-native PQ/Dilithium mechanism ID.
     pub pq_mechanism: Option<String>,
 }
@@ -625,9 +675,8 @@ pub struct Pkcs11Section {
 #[serde(deny_unknown_fields)]
 pub struct FeaturesSection {
     pub pruning: Option<bool>,
-    /// F2 config-driven: VerifyMerkle staged rollout gate controlled via config
-    /// True = gate open (MainnetActivation::full), false = gate closed (default reject)
-    /// Default: true (gate opened, 4e2b920)
+    /// Legacy configuration field. Testnet keeps `VerifyMerkle` closed until
+    /// its opening gate passes; this value does not activate the opcode.
     pub verify_merkle: Option<bool>,
     /// Mobile mode (lightweight P2P/sharding)
     pub mobile_mode: Option<bool>,
@@ -878,6 +927,9 @@ impl NodeConfig {
             if let Some(auth) = rpc.auth_required {
                 self.rpc_auth_required = auth;
             }
+            if let Some(op_auth) = rpc.operator_auth_required {
+                self.rpc_operator_auth_required = op_auth;
+            }
         }
 
         if let Some(metrics) = fc.metrics {
@@ -960,6 +1012,9 @@ impl NodeConfig {
                     }
                     if self.pkcs11_pq_key_label.is_none() {
                         self.pkcs11_pq_key_label = pkcs11.pq_key_label;
+                    }
+                    if self.pkcs11_bls_key_label.is_none() {
+                        self.pkcs11_bls_key_label = pkcs11.bls_key_label;
                     }
                 }
                 if let Some(socket) = signer.hsm_socket_path {
@@ -1102,6 +1157,13 @@ impl NodeConfig {
                 std::process::exit(1);
             });
         }
+        if let Ok(op_auth_required) = std::env::var("BUDLUM_RPC_OPERATOR_AUTH_REQUIRED") {
+            self.rpc_operator_auth_required =
+                parse_env_bool(&op_auth_required).unwrap_or_else(|error| {
+                    eprintln!("CRITICAL: invalid BUDLUM_RPC_OPERATOR_AUTH_REQUIRED: {error}");
+                    std::process::exit(1);
+                });
+        }
         if let Ok(api_key_env) = std::env::var("BUDLUM_RPC_API_KEY_ENV") {
             if !api_key_env.trim().is_empty() {
                 self.rpc_api_key_env = Some(api_key_env);
@@ -1139,10 +1201,15 @@ impl NodeConfig {
         self.max_peers.unwrap_or(profile_cap).clamp(1, profile_cap)
     }
 
-    pub fn pruning_policy(&self) -> Result<crate::storage::PruningPolicy, String> {
-        let mode = crate::storage::NodeMode::from_role(&self.role)
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
+    pub fn pruning_policy(&self) -> Result<crate::persistence::PruningPolicy, String> {
+        let mode = crate::persistence::NodeMode::from_role(&self.role)
             .ok_or_else(|| format!("unknown node role '{}'", self.role))?;
-        Ok(crate::storage::PruningPolicy {
+        Ok(crate::persistence::PruningPolicy {
             mode,
             pruning_enabled: self.features_pruning,
             finalized_snapshot_retention: self.snapshot_dir.is_some(),
@@ -1412,7 +1479,11 @@ impl NodeConfig {
 
     /// Reads the validators file. A missing file is an empty list (the
     /// default path is optional); an unreadable, oversized or malformed file
-    /// is an error, so a PoA node never starts on a silently empty set.
+    /// is an error, so a `PoA` node never starts on a silently empty set.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn load_validators(&self) -> Result<Vec<String>, String> {
         let path = Path::new(&self.validators_file);
         if !path.exists() {
@@ -1740,7 +1811,7 @@ mod tests {
         assert_eq!(cfg.role, "archive");
         assert_eq!(
             cfg.pruning_policy().unwrap().mode,
-            crate::storage::NodeMode::Archive
+            crate::persistence::NodeMode::Archive
         );
     }
 
@@ -1758,7 +1829,7 @@ mod tests {
         assert_eq!(cfg.role, "validator");
         assert_eq!(
             cfg.pruning_policy().unwrap().mode,
-            crate::storage::NodeMode::Full
+            crate::persistence::NodeMode::Full
         );
     }
 
@@ -1872,11 +1943,28 @@ mod tests {
         });
         assert_eq!(cfg.signer_backend.as_deref(), Some("pkcs11"));
     }
+
+    #[test]
+    fn clap_parse_restores_secure_rpc_auth_and_allowlist_defaults() {
+        use clap::Parser;
+        let mut parsed = NodeConfig::try_parse_from(["budlum-node", "--role", "validator"])
+            .expect("CLI flags must parse");
+        // Clap's `#[arg(skip)]` initializes skipped fields with type defaults
+        // (`false` / empty Vec); `apply_secure_rpc_defaults` must restore the
+        // hardened `NodeConfig::default()` posture before file/env overlays.
+        parsed.apply_secure_rpc_defaults();
+        let expected = NodeConfig::default();
+        assert_eq!(parsed.rpc_auth_required, expected.rpc_auth_required);
+        assert!(parsed.rpc_auth_required);
+        assert_eq!(parsed.rpc_allowed_ips, expected.rpc_allowed_ips);
+        assert!(!parsed.rpc_allowed_ips.is_empty());
+    }
 }
 
 #[cfg(test)]
 mod persona_config_tests {
-    use super::FileConfig;
+    use super::{FileConfig, NodeConfig};
+    use clap::Parser as _;
 
     #[test]
     fn persona_configs_parse_as_strict_v2() {
@@ -1903,5 +1991,18 @@ mod persona_config_tests {
                 .expect_err("removed feature keys must not parse");
             assert!(error.to_string().contains(key), "unexpected error: {error}");
         }
+    }
+
+    #[test]
+    fn cli_metrics_listener_overrides_config_file() {
+        let mut cfg = NodeConfig::parse_from([
+            "budlum-core",
+            "--network=testnet",
+            "--metrics-listener=127.0.0.1:29093",
+        ]);
+        let fc: FileConfig = toml::from_str("[metrics]\nlistener = \"0.0.0.0:9090\"\n")
+            .expect("parse metrics config");
+        cfg.apply_file_config(fc);
+        assert_eq!(cfg.metrics_listener.as_deref(), Some("127.0.0.1:29093"));
     }
 }

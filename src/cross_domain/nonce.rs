@@ -9,6 +9,15 @@ use std::collections::BTreeMap;
 /// cannot drift apart by an edit to one of them.
 pub const FINALITY_PRUNE_DEPTH: u64 = 1000;
 
+/// Maximum forward jump accepted in a single [`ReplayNonceStore::mark_processed_at`]
+/// transition. Bounds how many skipped nonces one out-of-order message can burn
+/// so a single forged or corrupted jump cannot advance the high-water mark to
+/// `u64::MAX` and permanently brick the sender's channel.
+///
+/// Convenience: exposed so relayers and callers can check the forward-gap
+/// ceiling against their own batching window.
+pub const MAX_NONCE_GAP: u64 = 65_536;
+
 /// Replay protection for cross-domain messages, held as one high-water mark
 /// per (source, target, sender) direction.
 ///
@@ -96,6 +105,10 @@ impl ReplayNonceStore {
     /// replay, and a nonce the mark already passed is spent (see the gap
     /// semantics on the struct). The height is recorded next to the mark and
     /// committed in [`ReplayNonceStore::root`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn mark_processed_at(
         &mut self,
         source_domain: DomainId,
@@ -104,11 +117,24 @@ impl ReplayNonceStore {
         nonce: u64,
         current_height: u64,
     ) -> Result<(), String> {
+        if nonce == u64::MAX {
+            return Err("Cross-domain message nonce u64::MAX is reserved".into());
+        }
         let key = (source_domain, target_domain, *sender);
         if let Some((high_water, _)) = self.processed_high_water.get(&key) {
             if nonce <= *high_water {
                 return Err("Cross-domain message was already processed".into());
             }
+            if nonce - *high_water > MAX_NONCE_GAP {
+                let gap = nonce - *high_water;
+                return Err(format!(
+                    "Cross-domain nonce gap {gap} exceeds {MAX_NONCE_GAP}"
+                ));
+            }
+        } else if nonce > MAX_NONCE_GAP {
+            return Err(format!(
+                "Cross-domain initial nonce {nonce} exceeds {MAX_NONCE_GAP}"
+            ));
         }
         self.processed_high_water
             .insert(key, (nonce, current_height));
@@ -298,5 +324,21 @@ mod tests {
             bincode::deserialize::<ReplayNonceStore>(&bytes).is_err(),
             "the current shape must not silently accept the per-message row"
         );
+    }
+
+    #[test]
+    fn replay_nonce_store_refuses_u64_max_and_unbounded_jumps() {
+        let mut store = ReplayNonceStore::new();
+        let s = sender(9);
+        assert!(store.mark_processed_at(1, 2, &s, u64::MAX, 1).is_err());
+        assert!(store
+            .mark_processed_at(1, 2, &s, MAX_NONCE_GAP + 1, 1)
+            .is_err());
+        assert!(!store.is_processed(1, 2, &s, 0));
+        assert!(store.mark_processed_at(1, 2, &s, 0, 1).is_ok());
+        assert!(store
+            .mark_processed_at(1, 2, &s, MAX_NONCE_GAP + 1, 2)
+            .is_err());
+        assert!(store.mark_processed_at(1, 2, &s, 1, 2).is_ok());
     }
 }

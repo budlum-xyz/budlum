@@ -26,6 +26,74 @@ fn funded_state(addr: Address, balance: u64) -> AccountState {
 }
 
 #[test]
+fn private_transfer_with_composite_authorization_executes() {
+    use crate::crypto::ctx::PRIVATE_TRANSFER_V1;
+    use crate::crypto::key_derivation::RootSecret;
+
+    let account = RootSecret::derive(&[7u8; 32], "")
+        .unwrap()
+        .user_account(0, 0)
+        .unwrap();
+    let from = Address::from(account.address);
+    let mut state = funded_state(from, 1_000_000);
+    let chain_id = crate::core::transaction::DEFAULT_CHAIN_ID;
+    let commitment = hash_from_field(101);
+    let proof = hash_from_field(0xA11CE);
+    let nullifier = L1NoteRegistry::derive_nullifier(&commitment, &proof);
+    let output = hash_from_field(103);
+    state
+        .note_registry
+        .insert_note_for_owner(commitment, from)
+        .unwrap();
+
+    let digest = PrivateTransferSubmit::compute_public_digest(&[nullifier], &[output]);
+    let auth_message =
+        PrivateTransferSubmit::authorization_message(chain_id, from.as_bytes(), 0, &digest);
+    let authorization_sig = account
+        .signing
+        .sign_in(
+            &state.scheme_registry,
+            PRIVATE_TRANSFER_V1,
+            &auth_message,
+            &[4u8; 32],
+        )
+        .unwrap()
+        .encode();
+    let submit = PrivateTransferSubmit {
+        spent_commitments: vec![commitment],
+        nullifiers: vec![nullifier],
+        output_commitments: vec![output],
+        nullifier_proofs: vec![proof],
+        authorization_sig,
+        public_digest: digest,
+    };
+
+    let mut tx = Transaction::new_with_chain_id(
+        from,
+        Address::zero(),
+        0,
+        100,
+        0,
+        vec![],
+        chain_id,
+        TransactionType::PrivateTransferSubmit(submit),
+    );
+    tx.sign_v7(
+        &state.scheme_registry,
+        &account.signing,
+        &account.recovery_public_key,
+        &[5u8; 32],
+    )
+    .unwrap();
+
+    assert!(tx.verify_in(&state.scheme_registry));
+    Executor::apply_transaction(&mut state, &tx).expect("composite-authorized transfer");
+    assert!(!state.note_registry.contains_commitment(&commitment));
+    assert!(state.note_registry.contains_commitment(&output));
+    assert!(state.note_registry.is_nullifier_spent(&nullifier));
+}
+
+#[test]
 fn private_transfer_submit_spend_and_create() {
     let kp = KeyPair::generate().unwrap();
     let from = Address::from(kp.public_key_bytes());
@@ -170,6 +238,37 @@ fn privacy_note_insert_tx() {
 }
 
 #[test]
+fn testnet_privacy_precheck_reports_closed_feature() {
+    use crate::chain::blockchain::Blockchain;
+    use crate::consensus::pow::PoWEngine;
+    use crate::core::chain_config::Network;
+    use std::sync::Arc;
+
+    let keypair = KeyPair::generate().unwrap();
+    let from = Address::from(keypair.public_key_bytes());
+    let chain_id = Network::Mainnet.chain_id().value();
+    let mut chain = Blockchain::new(Arc::new(PoWEngine::new(1)), None, chain_id, None);
+    chain.state.add_balance(&from, 1_000_000);
+
+    let tx = signed_tx(
+        &keypair,
+        chain_id,
+        TransactionType::PrivacyNoteInsert(hash_from_field(42)),
+    );
+    let precheck = chain.tx_precheck(&tx);
+
+    assert_eq!(precheck["accepted"], false);
+    assert!(precheck["reasons"].as_array().is_some_and(|reasons| {
+        reasons.iter().any(|reason| {
+            reason == "privacy_mainnet_disabled"
+                || reason == "privacy_testnet_closed"
+                || reason == "privacy_disabled"
+        })
+    }));
+    assert!(chain.mempool.is_empty());
+}
+
+#[test]
 fn ai_mlp_guest_program_hash_stable() {
     let spec = FixedPointMlpSpec {
         dims: vec![2, 2, 1],
@@ -218,15 +317,21 @@ fn ai_mlp_host_eval_and_commitments() {
 }
 
 #[test]
-fn ai_require_execution_proof_blocks_finalize_without_proof() {
+fn ai_require_execution_proof_models_stay_closed_without_live_verifier() {
+    use crate::ai::execution::{matmul_program_hash, weights_digest, FixedPointMlpSpec};
     use crate::ai::registry::AiRegistry;
     use crate::ai::types::*;
 
+    const { assert!(!crate::ai::FULL_AI_STARK_VERIFICATION_LIVE) };
     let owner = test_addr_from_byte(1u8);
-    let verifier = test_addr_from_byte(2u8);
-    let mut reg = AiRegistry::new();
+    let spec_mlp = FixedPointMlpSpec {
+        dims: vec![2, 1],
+        weights: vec![2, 3],
+        biases: vec![1],
+    };
     let mid = AiModelId::of(&owner, &[9u8; 32], 1);
-    let err = reg
+    let mut registry = AiRegistry::new();
+    let err = registry
         .register_model(AiModelSpec {
             model_id: mid,
             model_hash: [9u8; 32],
@@ -240,20 +345,14 @@ fn ai_require_execution_proof_blocks_finalize_without_proof() {
             version: 1,
             active: true,
             require_execution_proof: true,
-            execution_program_hash: Some([7u8; 32]),
+            execution_program_hash: Some(matmul_program_hash(&spec_mlp).unwrap()),
             execution_class: 1,
-            execution_dims: None,
-            execution_weights_digest: Some([11u8; 32]),
+            execution_dims: Some(spec_mlp.dims.clone()),
+            execution_weights_digest: Some(weights_digest(&spec_mlp)),
             modalities: crate::ai_inference::perception::ModalitySet::text_only(),
         })
-        .expect_err(
-            "F-04: proof-required models cannot register while STARK verification is not live",
-        );
-    assert!(
-        err.contains("full AI STARK"),
-        "registration must name the missing verifier, got {err}"
-    );
-    let _ = verifier;
+        .expect_err("proof-required AI remains closed until its opening gates pass");
+    assert!(err.contains("not accepted until full AI STARK verification is live"));
 }
 
 fn transfer_fixture(
@@ -296,34 +395,117 @@ fn signed_tx(kp: &KeyPair, chain_id: u64, tx_type: TransactionType) -> Transacti
 }
 
 #[test]
-fn private_transfer_is_refused_on_mainnet_and_unknown_chain_ids() {
+fn private_transfer_admission_and_execution_are_closed_on_public_chains() {
     use crate::core::chain_config::Network;
+    use crate::crypto::ctx::PRIVATE_TRANSFER_V1;
+    use crate::crypto::key_derivation::RootSecret;
+    let account = RootSecret::derive(&[7u8; 32], "")
+        .unwrap()
+        .user_account(0, 0)
+        .unwrap();
+    let from = Address::from(account.address);
     for chain_id in [Network::Mainnet.chain_id().value(), 999_999] {
-        let kp = KeyPair::generate().unwrap();
-        let from = Address::from(kp.public_key_bytes());
         let mut state = funded_state(from, 1_000_000);
-        let (sub, c_in, c_out) = transfer_fixture(&kp, &mut state);
-        let tx = signed_tx(&kp, chain_id, TransactionType::PrivateTransferSubmit(sub));
+        let c_in = hash_from_field(21);
+        let proof = hash_from_field(0xA11CE);
+        let n1 = L1NoteRegistry::derive_nullifier(&c_in, &proof);
+        let c_out = hash_from_field(23);
+        state
+            .note_registry
+            .insert_note_for_owner(c_in, from)
+            .unwrap();
+        let digest = PrivateTransferSubmit::compute_public_digest(&[n1], &[c_out]);
+        let auth_msg =
+            PrivateTransferSubmit::authorization_message(chain_id, from.as_bytes(), 0, &digest);
+        let authorization_sig = account
+            .signing
+            .sign_in(
+                &state.scheme_registry,
+                PRIVATE_TRANSFER_V1,
+                &auth_msg,
+                &[4u8; 32],
+            )
+            .unwrap()
+            .encode();
+        let sub = PrivateTransferSubmit {
+            spent_commitments: vec![c_in],
+            nullifiers: vec![n1],
+            output_commitments: vec![c_out],
+            nullifier_proofs: vec![proof],
+            authorization_sig,
+            public_digest: digest,
+        };
+        let mut tx = Transaction::new_with_chain_id(
+            from,
+            Address::zero(),
+            0,
+            100,
+            0,
+            vec![],
+            chain_id,
+            TransactionType::PrivateTransferSubmit(sub),
+        );
+        tx.sign_v7(
+            &state.scheme_registry,
+            &account.signing,
+            &account.recovery_public_key,
+            &[5u8; 32],
+        )
+        .unwrap();
+        let validation_error = state
+            .validate_transaction(&tx)
+            .expect_err("the transaction admission gate must refuse this chain id");
+        assert!(validation_error.contains("transfers are disabled"));
         let err = Executor::apply_transaction(&mut state, &tx)
-            .expect_err("the privacy gate must refuse this chain id");
-        assert!(err.contains("disabled on mainnet"), "got: {err}");
+            .expect_err("the execution gate must refuse this chain id");
+        assert!(
+            err.contains("closed on") || err.contains("disabled on mainnet"),
+            "got: {err}"
+        );
         assert!(state.note_registry.contains_commitment(&c_in));
         assert!(!state.note_registry.contains_commitment(&c_out));
     }
 }
 
 #[test]
-fn privacy_note_insert_is_refused_on_mainnet_and_unknown_chain_ids() {
+fn note_insert_admission_and_execution_are_closed_on_public_chains() {
     use crate::core::chain_config::Network;
+    use crate::crypto::key_derivation::RootSecret;
+    let account = RootSecret::derive(&[7u8; 32], "")
+        .unwrap()
+        .user_account(0, 0)
+        .unwrap();
+    let from = Address::from(account.address);
     for chain_id in [Network::Mainnet.chain_id().value(), 999_999] {
-        let kp = KeyPair::generate().unwrap();
-        let from = Address::from(kp.public_key_bytes());
         let mut state = funded_state(from, 1_000_000);
         let c = hash_from_field(42);
-        let tx = signed_tx(&kp, chain_id, TransactionType::PrivacyNoteInsert(c));
+        let mut tx = Transaction::new_with_chain_id(
+            from,
+            Address::zero(),
+            0,
+            100,
+            0,
+            vec![],
+            chain_id,
+            TransactionType::PrivacyNoteInsert(c),
+        );
+        tx.sign_v7(
+            &state.scheme_registry,
+            &account.signing,
+            &account.recovery_public_key,
+            &[5u8; 32],
+        )
+        .unwrap();
+        let validation_error = state
+            .validate_transaction(&tx)
+            .expect_err("the transaction admission gate must refuse this chain id");
+        assert!(validation_error.contains("transfers are disabled"));
         let err = Executor::apply_transaction(&mut state, &tx)
-            .expect_err("the privacy gate must refuse this chain id");
-        assert!(err.contains("disabled on mainnet"), "got: {err}");
+            .expect_err("the execution gate must refuse this chain id");
+        assert!(
+            err.contains("closed on") || err.contains("disabled on mainnet"),
+            "got: {err}"
+        );
         assert!(!state.note_registry.contains_commitment(&c));
     }
 }
@@ -425,6 +607,272 @@ fn private_transfer_replayed_under_another_nonce_or_bare_digest_is_refused() {
     assert!(state.note_registry.contains_commitment(&c_in));
 }
 
+/// Devnet (`45262`) executes private transfers with authorization and
+/// ownership checks; Mainnet (`45260`) keeps the legacy boundary closed.
+#[test]
+fn private_transfer_is_open_on_devnet() {
+    use crate::core::chain_config::Network;
+    let mainnet = Network::Mainnet.chain_id().value();
+    let devnet = Network::Devnet.chain_id().value();
+    let kp = KeyPair::generate().unwrap();
+    let from = Address::from(kp.public_key_bytes());
+    let mut state = funded_state(from, 1_000_000);
+    let c_in = hash_from_field(11);
+    let proof = hash_from_field(0xA11CE);
+    let n1 = L1NoteRegistry::derive_nullifier(&c_in, &proof);
+    let c_out = hash_from_field(12);
+    state
+        .note_registry
+        .insert_note_for_owner(c_in, from)
+        .unwrap();
+    let digest = PrivateTransferSubmit::compute_public_digest(&[n1], &[c_out]);
+    let auth_msg =
+        PrivateTransferSubmit::authorization_message(devnet, from.as_bytes(), 0, &digest);
+    let sub = PrivateTransferSubmit {
+        spent_commitments: vec![c_in],
+        nullifiers: vec![n1],
+        output_commitments: vec![c_out],
+        nullifier_proofs: vec![proof],
+        authorization_sig: kp.sign(&auth_msg).to_vec(),
+        public_digest: digest,
+    };
+    let tx_devnet = signed_tx(
+        &kp,
+        devnet,
+        TransactionType::PrivateTransferSubmit(sub.clone()),
+    );
+    crate::execution::executor::Executor::apply_transaction_checked(&mut state, &tx_devnet)
+        .expect("devnet 45262 executes private transfers");
+    assert!(!state.note_registry.contains_commitment(&c_in));
+    assert!(state.note_registry.contains_commitment(&c_out));
+
+    let tx_mainnet = signed_tx(&kp, mainnet, TransactionType::PrivateTransferSubmit(sub));
+    let err =
+        crate::execution::executor::Executor::apply_transaction_checked(&mut state, &tx_mainnet)
+            .expect_err("mainnet must keep the legacy privacy surface closed");
+    match err {
+        crate::error::BudlumError::Validation { code, .. } => {
+            assert_eq!(code, "privacy_mainnet_disabled");
+        }
+        other => panic!("expected a validation refusal, got {other:?}"),
+    }
+}
+
+/// Note insertion executes on devnet (`45262`) and remains refused on mainnet (`45260`).
+#[test]
+fn note_registry_is_open_on_devnet() {
+    use crate::core::chain_config::Network;
+    let mainnet = Network::Mainnet.chain_id().value();
+    let devnet = Network::Devnet.chain_id().value();
+    let kp = KeyPair::generate().unwrap();
+    let from = Address::from(kp.public_key_bytes());
+    let mut state = funded_state(from, 1_000_000);
+    let c = hash_from_field(77);
+    let tx_devnet = signed_tx(&kp, devnet, TransactionType::PrivacyNoteInsert(c));
+    crate::execution::executor::Executor::apply_transaction_checked(&mut state, &tx_devnet)
+        .expect("devnet accepts note insertion");
+    assert!(state.note_registry.contains_commitment(&c));
+
+    let c_main = hash_from_field(78);
+    let tx_mainnet = signed_tx(&kp, mainnet, TransactionType::PrivacyNoteInsert(c_main));
+    let err =
+        crate::execution::executor::Executor::apply_transaction_checked(&mut state, &tx_mainnet)
+            .expect_err("mainnet must refuse note insertion");
+    match err {
+        crate::error::BudlumError::Validation { code, .. } => {
+            assert_eq!(code, "privacy_mainnet_disabled");
+        }
+        other => panic!("expected a validation refusal, got {other:?}"),
+    }
+    assert!(!state.note_registry.contains_commitment(&c_main));
+}
+
+/// AI execution proofs are open on devnet (`45262`) and gated on mainnet (`45260`).
+#[test]
+fn ai_execution_proof_is_open_on_devnet() {
+    use crate::core::chain_config::Network;
+    let mainnet = Network::Mainnet.chain_id().value();
+    let devnet = Network::Devnet.chain_id().value();
+    let kp = KeyPair::generate().unwrap();
+    let from = Address::from(kp.public_key_bytes());
+    let mut state = funded_state(from, 1_000_000);
+    let proof = crate::ai::types::AiExecutionProof {
+        model_id: crate::ai::types::AiModelId::new([7u8; 32]),
+        input_commitment: [1u8; 32],
+        output_commitment: [2u8; 32],
+        program_hash: [3u8; 32],
+        proof_bytes: vec![0xAB; 16],
+        steps: 1,
+        gas_used: 1,
+        weights_digest: None,
+        public_inputs: None,
+    };
+    let tx_devnet = signed_tx(
+        &kp,
+        devnet,
+        TransactionType::AiAttachExecutionProof {
+            request_id: crate::ai::types::AiRequestId::new([9u8; 32]),
+            proof: proof.clone(),
+        },
+    );
+    let err_devnet =
+        crate::execution::executor::Executor::apply_transaction_checked(&mut state, &tx_devnet)
+            .expect_err("unknown request must fail request lookup, not layer gate");
+    if let crate::error::BudlumError::Validation { code, .. } = err_devnet {
+        assert_ne!(code, "ai_layer_testnet_closed");
+    }
+
+    let tx_mainnet = signed_tx(
+        &kp,
+        mainnet,
+        TransactionType::AiAttachExecutionProof {
+            request_id: crate::ai::types::AiRequestId::new([9u8; 32]),
+            proof,
+        },
+    );
+    let err =
+        crate::execution::executor::Executor::apply_transaction_checked(&mut state, &tx_mainnet)
+            .expect_err("mainnet must refuse AI execution proofs");
+    match err {
+        crate::error::BudlumError::Validation { code, .. } => {
+            assert_eq!(code, "ai_layer_testnet_closed");
+        }
+        other => panic!("expected a validation refusal, got {other:?}"),
+    }
+}
+
+/// Entry to the AI verification layer is open on devnet and closed on mainnet.
+#[test]
+fn ai_layer_is_open_on_devnet() {
+    use crate::core::chain_config::Network;
+    let mainnet = Network::Mainnet.chain_id().value();
+    let devnet = Network::Devnet.chain_id().value();
+    let kp = KeyPair::generate().unwrap();
+    let from = Address::from(kp.public_key_bytes());
+
+    let cases: Vec<TransactionType> = vec![
+        TransactionType::AiOperatorBond,
+        TransactionType::AiModelDeactivate(crate::ai::types::AiModelId::new([7u8; 32])),
+        TransactionType::AiModelReactivate(crate::ai::types::AiModelId::new([7u8; 32])),
+        TransactionType::RoleBond {
+            role: crate::registry::role::roles::AI_VERIFIER.0,
+        },
+        TransactionType::RoleBond {
+            role: crate::registry::role::roles::AI_OPERATOR.0,
+        },
+    ];
+
+    for tx_type in cases {
+        let label = format!("{tx_type:?}");
+        let mut state = funded_state(from, 1_000_000);
+        let tx = signed_tx(&kp, mainnet, tx_type);
+        let err = crate::execution::executor::Executor::apply_transaction_checked(&mut state, &tx)
+            .expect_err("mainnet must refuse the AI layer");
+        match err {
+            crate::error::BudlumError::Validation { code, .. } => {
+                assert_eq!(code, "ai_layer_testnet_closed", "case {label}");
+            }
+            other => panic!("case {label}: expected a validation refusal, got {other:?}"),
+        }
+    }
+
+    let mut state = funded_state(from, 1_000_000);
+    let tx = signed_tx(&kp, devnet, TransactionType::AiOperatorBond);
+    if let Err(crate::error::BudlumError::Validation { code, .. }) =
+        crate::execution::executor::Executor::apply_transaction_checked(&mut state, &tx)
+    {
+        assert_ne!(code, "ai_layer_testnet_closed");
+    }
+}
+
+/// A native contract can submit an AI inference marker on devnet (`45262`),
+/// while mainnet (`45260`) still enforces the layer closure before mutation.
+#[test]
+fn contract_inference_event_is_open_on_devnet() {
+    use bud_isa::{Instruction, Opcode};
+    let mut program = Vec::new();
+    for value in [0x00A1_00A1, 7, 1, 10] {
+        program.push(
+            Instruction {
+                opcode: Opcode::Load,
+                rd: 1,
+                rs1: 0,
+                rs2: 0,
+                imm: value,
+            }
+            .encode(),
+        );
+        program.push(
+            Instruction {
+                opcode: Opcode::Log,
+                rd: 0,
+                rs1: 1,
+                rs2: 0,
+                imm: 0,
+            }
+            .encode(),
+        );
+    }
+    program.push(
+        Instruction {
+            opcode: Opcode::Halt,
+            rd: 0,
+            rs1: 0,
+            rs2: 0,
+            imm: 0,
+        }
+        .encode(),
+    );
+    let kp = KeyPair::generate().unwrap();
+    let from = Address::from(kp.public_key_bytes());
+    let bytecode: Vec<u8> = program.into_iter().flat_map(u64::to_le_bytes).collect();
+
+    let mut tx_test = Transaction::new_with_chain_id(
+        from,
+        Address::zero(),
+        0,
+        100,
+        0,
+        bytecode.clone(),
+        crate::core::chain_config::Network::Devnet
+            .chain_id()
+            .value(),
+        TransactionType::ContractCall,
+    );
+    tx_test.sign(&kp);
+    let mut state = funded_state(from, 1_000_000);
+    if let Err(crate::error::BudlumError::Validation { code, .. }) =
+        Executor::apply_transaction_checked(&mut state, &tx_test)
+    {
+        assert_ne!(code, "ai_layer_testnet_closed");
+    }
+
+    let mut tx_main = Transaction::new_with_chain_id(
+        from,
+        Address::zero(),
+        0,
+        100,
+        0,
+        bytecode,
+        crate::core::chain_config::Network::Mainnet
+            .chain_id()
+            .value(),
+        TransactionType::ContractCall,
+    );
+    tx_main.sign(&kp);
+    let mut main_state = funded_state(from, 1_000_000);
+    let before = main_state.calculate_state_root();
+    let error = Executor::apply_transaction_checked(&mut main_state, &tx_main)
+        .expect_err("the native inference event must stay closed on mainnet");
+    match error {
+        crate::error::BudlumError::Validation { code, .. } => {
+            assert_eq!(code, "ai_layer_testnet_closed");
+        }
+        other => panic!("expected a validation refusal, got {other:?}"),
+    }
+    assert_eq!(main_state.calculate_state_root(), before);
+}
+
 #[test]
 fn attacker_cannot_spend_victim_live_note_or_inflate_outputs() {
     let victim_kp = KeyPair::generate().unwrap();
@@ -447,7 +895,9 @@ fn attacker_cannot_spend_victim_live_note_or_inflate_outputs() {
     let stolen_out = hash_from_field(888);
     let digest = PrivateTransferSubmit::compute_public_digest(&[n_att], &[stolen_out]);
     let auth_msg = PrivateTransferSubmit::authorization_message(
-        crate::core::transaction::DEFAULT_CHAIN_ID,
+        crate::core::chain_config::Network::Devnet
+            .chain_id()
+            .value(),
         attacker.as_bytes(),
         0,
         &digest,
@@ -462,7 +912,9 @@ fn attacker_cannot_spend_victim_live_note_or_inflate_outputs() {
     };
     let steal_tx = signed_tx(
         &attacker_kp,
-        crate::core::transaction::DEFAULT_CHAIN_ID,
+        crate::core::chain_config::Network::Devnet
+            .chain_id()
+            .value(),
         TransactionType::PrivateTransferSubmit(steal_sub),
     );
     let err = Executor::apply_transaction(&mut state, &steal_tx)
@@ -478,7 +930,9 @@ fn attacker_cannot_spend_victim_live_note_or_inflate_outputs() {
     let out2 = hash_from_field(902);
     let inf_digest = PrivateTransferSubmit::compute_public_digest(&[n_own], &[out1, out2]);
     let inf_auth = PrivateTransferSubmit::authorization_message(
-        crate::core::transaction::DEFAULT_CHAIN_ID,
+        crate::core::chain_config::Network::Devnet
+            .chain_id()
+            .value(),
         victim.as_bytes(),
         0,
         &inf_digest,
@@ -493,7 +947,9 @@ fn attacker_cannot_spend_victim_live_note_or_inflate_outputs() {
     };
     let inflate_tx = signed_tx(
         &victim_kp,
-        crate::core::transaction::DEFAULT_CHAIN_ID,
+        crate::core::chain_config::Network::Devnet
+            .chain_id()
+            .value(),
         TransactionType::PrivateTransferSubmit(inflate_sub),
     );
     let inf_err = Executor::apply_transaction(&mut state, &inflate_tx)
@@ -503,4 +959,187 @@ fn attacker_cannot_spend_victim_live_note_or_inflate_outputs() {
         "got: {inf_err}"
     );
     assert!(state.note_registry.contains_commitment(&victim_note));
+}
+
+#[test]
+fn privacy_confidential_bundle_refuses_unbound_yk1_on_testnet() {
+    use crate::core::chain_config::Network;
+    use crate::crypto::primitives::KeyPair;
+    use crate::privacy::{L1NoteRegistry, PrivateTransferSubmit};
+
+    let testnet = Network::Testnet.chain_id().value();
+    let sender_kp = KeyPair::generate().unwrap();
+    let sender = Address::from(sender_kp.public_key_bytes());
+    let spent = L1NoteRegistry::derive_commitment(&sender, &hash_from_field(404));
+    let proof_note = hash_from_field(505);
+    let nf = L1NoteRegistry::derive_nullifier(&spent, &proof_note);
+    let out = hash_from_field(606);
+    let digest = PrivateTransferSubmit::compute_public_digest(&[nf], &[out]);
+    let auth_msg =
+        PrivateTransferSubmit::authorization_message(testnet, sender.as_bytes(), 0, &digest);
+    let sub = PrivateTransferSubmit {
+        spent_commitments: vec![spent],
+        nullifiers: vec![nf],
+        output_commitments: vec![out],
+        nullifier_proofs: vec![proof_note],
+        authorization_sig: sender_kp.sign(&auth_msg).to_vec(),
+        public_digest: digest,
+    };
+
+    let salt = [0x42u8; 32];
+    let invalid_value = sub
+        .prove_confidential_bundle(testnet, &salt, 1_000, 999)
+        .expect_err("unconserved values must be rejected before proving");
+    assert!(
+        invalid_value.contains("input_sum != output_sum"),
+        "{invalid_value}"
+    );
+    let gated = sub
+        .prove_confidential_bundle(testnet, &salt, 1_000, 1_000)
+        .expect_err("YK1 owner proof is not open under testnet's staged opcode schedule");
+    assert!(gated.contains("YK1 ownership proof failed"), "{gated}");
+    assert!(gated.contains("ActivationClosed(Yk1Ownership)"), "{gated}");
+    assert!(sub
+        .prove_confidential_bundle(Network::Mainnet.chain_id().value(), &salt, 1_000, 1_000)
+        .is_err());
+    // Independent privacy authorization, conservation and mainnet-gate
+    // regression tests still check their own boundaries; this test pins the
+    // missing witness-backed predicate gate instead of declaring success.
+}
+
+#[test]
+fn privacy_threshold_escrow_7_of_4_unlocks_on_devnet() {
+    use crate::core::chain_config::Network;
+    use crate::privacy::{
+        EscrowCommittee, ThresholdEscrow, ThresholdEscrowError, THRESHOLD_ESCROW_N,
+        THRESHOLD_ESCROW_T,
+    };
+
+    assert_eq!(THRESHOLD_ESCROW_N, 7);
+    assert_eq!(THRESHOLD_ESCROW_T, 4);
+    let devnet = Network::Devnet.chain_id().value();
+    let recipient = Address::from([0x77u8; 32]);
+    let seeds: [[u8; 32]; 7] = std::array::from_fn(|i| {
+        let mut s = [0u8; 32];
+        s[0] = (i as u8) + 1;
+        s[31] = 0x5A;
+        s
+    });
+    let members = (0..THRESHOLD_ESCROW_N)
+        .map(|i| EscrowCommittee::member_from_seed(i as u8, &seeds[i]).unwrap())
+        .collect();
+    let committee = EscrowCommittee {
+        escrow_id: [0x19u8; 32],
+        chain_id: devnet,
+        epoch: 1,
+        nonce: 0,
+        members,
+    };
+    let mut escrow = ThresholdEscrow::open(committee, [0x88u8; 32]).unwrap();
+    let shares: Vec<_> = (0..4)
+        .map(|i| escrow.sign_share(i as u8, &seeds[i], &recipient).unwrap())
+        .collect();
+    let quorum_proof = escrow.prove_quorum_predicate(4, &recipient).unwrap();
+
+    // Duplicate signer is refused.
+    let dup_shares = vec![
+        shares[0].clone(),
+        shares[0].clone(),
+        shares[1].clone(),
+        shares[2].clone(),
+    ];
+    assert_eq!(
+        escrow.unlock(&recipient, &dup_shares, &quorum_proof),
+        Err(ThresholdEscrowError::DuplicateSigner(0))
+    );
+
+    // Fewer than t = 4 valid shares is refused.
+    assert_eq!(
+        escrow.unlock(&recipient, &shares[..3], &quorum_proof),
+        Err(ThresholdEscrowError::InsufficientShares { got: 3, need: 4 })
+    );
+
+    let mut closed = escrow.clone();
+    closed.committee.chain_id = Network::Testnet.chain_id().value();
+    let refusal =
+        Executor::process_threshold_escrow_unlock(&mut closed, &recipient, &shares, &quorum_proof)
+            .expect_err("testnet escrow entry remains closed");
+    assert_eq!(refusal.code(), "privacy_testnet_closed");
+    assert!(!closed.unlocked);
+
+    // 4 valid ML-DSA-65 committee shares + YK6 STARK unlock cleanly via Executor.
+    let receipt =
+        Executor::process_threshold_escrow_unlock(&mut escrow, &recipient, &shares, &quorum_proof)
+            .expect("7-of-4 threshold escrow unlocks on devnet 45262");
+    assert_ne!(receipt, [0u8; 32]);
+    assert!(escrow.unlocked);
+
+    // Replay unlock fails closed.
+    assert_eq!(
+        escrow.unlock(&recipient, &shares, &quorum_proof),
+        Err(ThresholdEscrowError::AlreadyUnlocked)
+    );
+}
+
+#[test]
+fn ai_verification_layer_apb_tile64_and_bound_small_model_on_testnet() {
+    use crate::ai::answer_proof_bundle::{
+        prove_calculator_in_vm, AnswerProofBundle, CalcOp, CandidateSentence, SentenceClaimKind,
+    };
+    use crate::ai::execution::{input_commitment, FixedPointMlpSpec};
+    use crate::ai::types::{AiModelId, AiRequestId};
+    use crate::ai::verification_layer::{
+        prove_small_model_bound, prove_tile_64x64, DeterministicInferenceProfile, ModelRecordV2,
+        TILE_CELLS,
+    };
+    use crate::ai::{
+        audit_answer_proof_markdown, audit_bound_small_model_inference, audit_tile_64x64_proof,
+        verification_layer_capabilities,
+    };
+
+    assert_eq!(
+        verification_layer_capabilities(),
+        "vl0_to_vl3_dip_apb_bisection_tile64_wired"
+    );
+
+    // 1. ModelRecordV2 + DIP + request-bound small-model proof.
+    let spec = FixedPointMlpSpec {
+        dims: vec![2, 2, 1],
+        weights: vec![1, 2, 3, -1, 2, 1],
+        biases: vec![1, 0, 2],
+    };
+    let dip = DeterministicInferenceProfile {
+        quantization_bits: 16,
+        fixed_scale_shift: 1,
+        sampling_seed: 7,
+        tokenizer_digest: [0x11; 32],
+        runtime_digest: [0x22; 32],
+    };
+    let model_id = AiModelId::of(&Address::from([1u8; 32]), &[2u8; 32], 1);
+    let model = ModelRecordV2::from_mlp_spec(model_id, &spec, &dip).unwrap();
+    let req_id = AiRequestId([0x33; 32]);
+    let input = [4, 5];
+    let bound = prove_small_model_bound(req_id, &model, &spec, &input).unwrap();
+    assert_eq!(bound.input_commit, input_commitment(&input));
+    assert!(audit_bound_small_model_inference(&bound, &req_id, &model, &spec, &input).is_ok());
+
+    // 2. 64x64 tile step dispute proof.
+    let a = vec![2i32; TILE_CELLS];
+    let b = vec![3i32; TILE_CELLS];
+    let tile = prove_tile_64x64(&a, &b).unwrap();
+    assert!(audit_tile_64x64_proof(&tile, &a, &b).is_ok());
+
+    // 3. Answer Proof Bundle round-trip & prose tamper refusal.
+    let calc = prove_calculator_in_vm(6, 7, CalcOp::Mul).unwrap();
+    assert_eq!(calc.result_i32, 42);
+    let bundle = AnswerProofBundle::build(vec![CandidateSentence {
+        text: "Six times seven equals 42.".into(),
+        claim_kind: Some(SentenceClaimKind::ComputationBacked(calc)),
+    }])
+    .unwrap();
+    let md = bundle.to_markdown_document().unwrap();
+    let audited = audit_answer_proof_markdown(&md).expect("valid APB markdown audits cleanly");
+    assert!(audited.is_authentic());
+    let tampered_md = md.replace("equals 42.", "equals 43.");
+    assert!(audit_answer_proof_markdown(&tampered_md).is_err());
 }

@@ -14,8 +14,11 @@ const SCAN_ROOTS: &[&str] = &[
     "bud",
     "crates/ai-inference",
     "crates/bpqs",
-    "crates/budscan",
+    "crates/bud-codec",
+    "crates/budlum-explorer",
+    "crates/budlum-types",
     "crates/note-packing",
+    "crates/uel-abi",
     "crates/wallet-core",
 ];
 

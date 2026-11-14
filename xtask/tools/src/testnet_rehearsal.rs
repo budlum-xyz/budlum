@@ -13,7 +13,7 @@
 //! `budlum-indexer` processes on loopback using pre-built binaries in
 //! `target/release` (or `--bin-dir`), assembles a fresh testnet ceremony on
 //! chain `45261` wired as a 3-regular chordal ring, and runs the same live
-//! Graft, domain, delegation, BNS, faucet, and finality scenarios plus
+//! `AppBinding`, domain, delegation, BNS, faucet, and finality scenarios plus
 //! public/operator RPC split and multi-VM/storage checks.
 //!
 //! Each scenario's verdict and measurements go to the report file (default
@@ -141,6 +141,53 @@ fn is_eight_seat_repo(root: &Path) -> bool {
     root.join("ops/testnet-local-validator.py").is_file()
 }
 
+/// Four paired-seat launchers also represent eight validator identities, even
+/// though Compose has no separate `validator8` service.
+fn is_eight_seat_compose(compose: &str) -> bool {
+    compose.contains("\n  validator8:\n")
+        || count_text(
+            compose,
+            "entrypoint: [\"python3\", \"/home/budlum/testnet-local-validator.py\"]",
+        ) >= 4
+}
+
+/// Check the actual [rpc] key, not a substring of `operator_auth_required` or
+/// a comment. This dependency-free preflight only needs literal bools/integers.
+fn require_rpc_setting(profile: &str, key: &str, expected: &str) -> Result<(), String> {
+    let mut in_rpc = false;
+    let mut found = None;
+    for raw_line in profile.lines() {
+        let line = raw_line
+            .split_once('#')
+            .map_or(raw_line, |(before, _)| before)
+            .trim();
+        if line.starts_with('[') {
+            in_rpc = line == "[rpc]";
+            continue;
+        }
+        if !in_rpc {
+            continue;
+        }
+        let Some((name, value)) = line.split_once('=') else {
+            continue;
+        };
+        if name.trim() != key {
+            continue;
+        }
+        if found.replace(value.trim()).is_some() {
+            return Err(format!("testnet profile has duplicate [rpc] {key}"));
+        }
+    }
+    if found == Some(expected) {
+        Ok(())
+    } else {
+        Err(format!(
+            "testnet profile [rpc] {key}: expected {expected}, got {}",
+            found.unwrap_or("<missing>")
+        ))
+    }
+}
+
 fn preflight(root: &Path) -> Result<Vec<String>, String> {
     let mut checks = Vec::new();
     let genesis = required_file(root, "config/testnet-genesis.json", &mut checks)?;
@@ -151,16 +198,16 @@ fn preflight(root: &Path) -> Result<Vec<String>, String> {
     let compose = required_file(root, COMPOSE_FILE, &mut checks)?;
     let profile = required_file(root, "config/testnet.toml", &mut checks)?;
     require_text(&profile, "chain_id = 45261", "testnet profile")?;
-    require_text(
+    require_rpc_setting(
         &profile,
-        &format!("rate_limit_per_minute = {TESTNET_RPC_RATE_LIMIT_PER_MINUTE}"),
-        "testnet profile",
+        "rate_limit_per_minute",
+        &TESTNET_RPC_RATE_LIMIT_PER_MINUTE.to_string(),
     )?;
-    if compose.contains("\n  validator8:\n") {
-        require_text(&profile, "auth_required = false", "testnet profile")?;
-        require_text(&profile, "operator_auth_required = true", "testnet profile")?;
+    if is_eight_seat_compose(&compose) {
+        require_rpc_setting(&profile, "auth_required", "false")?;
+        require_rpc_setting(&profile, "operator_auth_required", "true")?;
     } else {
-        require_text(&profile, "auth_required = true", "testnet profile")?;
+        require_rpc_setting(&profile, "auth_required", "true")?;
     }
     for service in [
         "validator1:",
@@ -1082,7 +1129,6 @@ struct Wallets {
     alice: String,
     alice_file: String,
     bob: String,
-    bob_file: String,
 }
 
 fn scenario_faucet(backend: &Backend<'_>) -> Result<(Wallets, String), String> {
@@ -1102,7 +1148,6 @@ fn scenario_faucet(backend: &Backend<'_>) -> Result<(Wallets, String), String> {
             alice,
             alice_file,
             bob,
-            bob_file,
         },
         detail,
     ))
@@ -1186,7 +1231,7 @@ fn scenario_bns(backend: &Backend<'_>, wallets: &Wallets) -> Result<String, Stri
     Ok(format!("{name} -> {owner}"))
 }
 
-fn scenario_graft(backend: &Backend<'_>, wallets: &Wallets) -> Result<String, String> {
+fn scenario_app_binding(backend: &Backend<'_>, wallets: &Wallets) -> Result<String, String> {
     const DOMAIN: &str = "4242";
     const ORIGIN: &str = "00000000000000000000000000000000000000aa";
     backend.bud(&[
@@ -1207,56 +1252,44 @@ fn scenario_graft(backend: &Backend<'_>, wallets: &Wallets) -> Result<String, St
             .map(|_| ())
     })
     .ok_or("the PoW domain did not register within 120 s")?;
-    let ids = backend.bud(&["graft", "id", "--domain", DOMAIN, "--origin-app", ORIGIN])?;
-    let graft_id = line_value(&ids, "graft id: ").ok_or("graft id printed nothing")?;
-    let mirror = line_value(&ids, "mirror account: 0x").ok_or("graft id printed no mirror")?;
-    let app_binding_closed = match backend {
-        Backend::Compose { eight_seat, .. } => *eight_seat,
-        Backend::Local { stack, .. } => stack.eight_seat,
-    };
-    let signer_file = if app_binding_closed {
-        &wallets.bob_file
-    } else {
-        &wallets.alice_file
-    };
-    let before_tip = tip();
-    let reg_attempt = backend.bud(&[
-        "graft",
+    let ids = backend.bud(&[
+        "app-binding",
+        "id",
+        "--domain",
+        DOMAIN,
+        "--origin-app",
+        ORIGIN,
+    ])?;
+    let app_binding_id =
+        line_value(&ids, "app_binding id: ").ok_or("app_binding id printed nothing")?;
+    let mirror =
+        line_value(&ids, "mirror account: 0x").ok_or("app_binding id printed no mirror")?;
+    backend.bud(&[
+        "app-binding",
         "register",
         "--key-file",
-        signer_file,
+        &wallets.alice_file,
         "--domain",
         DOMAIN,
         "--origin-app",
         ORIGIN,
         "--manifest",
         "1111111111111111111111111111111111111111111111111111111111111111",
-    ]);
-    let query_params = format!("[\"{graft_id}\"]");
+    ])?;
+    let query_params = format!("[\"{app_binding_id}\"]");
     let lookup_registered = || {
-        call("bud_getGraftApplication", &query_params)
+        call("bud_getAppBindingApplication", &query_params)
             .filter(|value| *value != crate::json::Value::Null)
     };
-    if app_binding_closed {
-        if reg_attempt.is_ok() {
-            let _ = wait_for(15, || (tip() >= before_tip + 2).then_some(()));
-        }
-        if lookup_registered().is_some() {
-            return Err("app_binding registered on testnet despite containment".into());
-        }
-        return Ok(format!(
-            "domain {DOMAIN} registered; app_binding (mirror 0x{mirror}) contained on chain 45261"
-        ));
-    }
-    reg_attempt?;
-    wait_for(60, lookup_registered).ok_or("the Graft application did not register within 120 s")?;
+    wait_for(60, lookup_registered)
+        .ok_or("the AppBinding application did not register within 120 s")?;
     backend.bud(&[
-        "graft",
+        "app-binding",
         "pay",
         "--key-file",
         &wallets.alice_file,
-        "--graft-id",
-        &graft_id,
+        "--app-binding-id",
+        &app_binding_id,
         "--amount",
         "5000",
         "--origin-recipient",
@@ -1266,9 +1299,9 @@ fn scenario_graft(backend: &Backend<'_>, wallets: &Wallets) -> Result<String, St
         let amount = balance(&mirror);
         (amount >= 5000).then_some(amount)
     })
-    .ok_or("the Graft payment did not reach the mirror within 120 s")?;
+    .ok_or("the AppBinding payment did not reach the mirror within 120 s")?;
     Ok(format!(
-        "application {graft_id}: mirror 0x{mirror} holds {held}"
+        "application {app_binding_id}: mirror 0x{mirror} holds {held}"
     ))
 }
 
@@ -1570,8 +1603,8 @@ fn run_scenarios(backend: &mut Backend<'_>) -> Vec<Verdict> {
     ) && push("7. delegation", scenario_delegation(backend, &wallets))
         && push("8. BNS name", scenario_bns(backend, &wallets))
         && push(
-            "9. Graft register and pay",
-            scenario_graft(backend, &wallets),
+            "9. AppBinding register and pay",
+            scenario_app_binding(backend, &wallets),
         )
         && push("10. load", scenario_load(backend, &wallets))
         && push("11. validator loss and rejoin", scenario_chaos(backend));
@@ -1717,10 +1750,32 @@ mod tests {
     #[test]
     fn native_rpc_budget_matches_the_bounded_testnet_profile() {
         let profile = include_str!("../../../config/testnet.toml");
-        let needle = format!("rate_limit_per_minute = {TESTNET_RPC_RATE_LIMIT_PER_MINUTE}");
-        assert!(require_text(profile, &needle, "testnet profile").is_ok());
-        let drifted = profile.replace(&needle, "rate_limit_per_minute = 120");
-        assert!(require_text(&drifted, &needle, "testnet profile").is_err());
+        let expected = TESTNET_RPC_RATE_LIMIT_PER_MINUTE.to_string();
+        assert!(require_rpc_setting(profile, "rate_limit_per_minute", &expected).is_ok());
+        let drifted = profile.replace("rate_limit_per_minute = 600", "rate_limit_per_minute = 120");
+        assert!(require_rpc_setting(&drifted, "rate_limit_per_minute", &expected).is_err());
+    }
+
+    #[test]
+    fn paired_seats_require_exact_public_and_operator_rpc_policy() {
+        let compose = include_str!("../../../ops/testnet-local.yml");
+        assert!(is_eight_seat_compose(compose), "four paired-seat launchers");
+        assert!(!compose.contains("\n  validator8:\n"));
+        assert!(!is_eight_seat_compose("\n  validator4:\n"));
+
+        let profile = include_str!("../../../config/testnet.toml");
+        assert!(require_rpc_setting(profile, "auth_required", "false").is_ok());
+        assert!(require_rpc_setting(profile, "operator_auth_required", "true").is_ok());
+        let no_public_auth_key = profile.replacen("auth_required = false\n", "", 1);
+        assert!(require_rpc_setting(&no_public_auth_key, "auth_required", "true").is_err());
+        let closed_public_auth = profile.replace("auth_required = false", "auth_required = true");
+        assert!(require_rpc_setting(&closed_public_auth, "auth_required", "false").is_err());
+        assert!(require_rpc_setting(
+            "[rpc]\n# auth_required = false\noperator_auth_required = true\n",
+            "auth_required",
+            "true"
+        )
+        .is_err());
     }
 
     #[test]
@@ -1740,7 +1795,13 @@ mod tests {
             .split_once("\n  validator2:\n")
             .expect("validator2 service")
             .0;
-        assert!(bootnode.contains("bash -c 'exec 3<>/dev/tcp/127.0.0.1/5001'"));
+        assert!(bootnode.contains("bash -c 'exec 3<>/dev/tcp/127.0.0.1/5001"));
+        if is_eight_seat_compose(compose) {
+            assert!(
+                bootnode.contains("&& exec 4<>/dev/tcp/127.0.0.1/5002'"),
+                "the second validator seat must listen before other containers dial it"
+            );
+        }
         for (service, next) in [
             ("validator2", "validator3"),
             ("validator3", "validator4"),

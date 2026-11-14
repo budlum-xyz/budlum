@@ -1,4 +1,4 @@
-# BLG-1048 (P58-F02, decision A): the sensitive surfaces below carry owners
+# The sensitive surfaces below carry owners
 # again. The file used to be empty ("disabled to prevent PR deadlock"), which
 # left workflows, .quality, baselines, deny.toml and Cargo.toml with no review
 # owner at all - the baseline rule was convention plus ci-workflow-guards

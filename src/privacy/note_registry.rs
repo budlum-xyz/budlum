@@ -1,4 +1,5 @@
 //! On-chain note registry: live commitments + spent nullifiers.
+//! Convenience: exposed for CLI, RPC, SDK, and multi-VM runtime callers.
 
 use crate::core::address::Address;
 use serde::{Deserialize, Serialize};
@@ -72,7 +73,9 @@ impl L1NoteRegistry {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.live_commitments.is_empty() && self.spent_nullifiers.is_empty()
+        self.live_commitments.is_empty()
+            && self.spent_nullifiers.is_empty()
+            && self.spent_commitments.is_empty()
     }
 
     pub fn live_count(&self) -> usize {
@@ -108,7 +111,7 @@ impl L1NoteRegistry {
     }
 
     /// Genesis / faucet helper: insert a note without spending (internal + unit tests).
-    fn insert_note(&mut self, commitment: NoteHash) -> Result<(), String> {
+    pub(crate) fn insert_note(&mut self, commitment: NoteHash) -> Result<(), String> {
         if self.live_commitments.contains(&commitment) {
             return Err("note commitment already live".into());
         }
@@ -136,6 +139,10 @@ impl L1NoteRegistry {
 
     /// Insert a live note commitment bound to `owner`, so only `owner` may
     /// authorize spending it via `PrivateTransferSubmit`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn insert_note_for_owner(
         &mut self,
         commitment: NoteHash,
@@ -148,8 +155,11 @@ impl L1NoteRegistry {
 
     /// Apply a confidential transfer authorized by `spender`, enforcing both
     /// per-input note ownership and 1-for-1 note count conservation (preventing
-    /// unbacked note creation while value-carrying confidential pools remain
-    /// closed outside devnet).
+    /// unbacked note creation across active testnet and devnet privacy pools).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn apply_transfer_for_owner(
         &mut self,
         spender: &Address,
@@ -201,7 +211,11 @@ impl L1NoteRegistry {
 
     /// Apply transfer with nullifier derivation proofs.
     /// Each `proof[i]` must satisfy: `nullifier[i] == derive_nullifier(commitment[i], proof[i])`, a domain-separated SHA-256.
-    fn apply_transfer_with_proofs(
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
+    pub fn apply_transfer_with_proofs(
         &mut self,
         spent_commitments: &[NoteHash],
         nullifiers: &[NoteHash],
@@ -291,7 +305,11 @@ impl L1NoteRegistry {
         // rather than one input at a time: a transfer that would cross the
         // ceiling partway through must be refused before it starts, not after
         // it has consumed the inputs it had room for.
-        if self.spent_nullifiers.len().saturating_add(nullifiers.len()) > MAX_SPENT_NULLIFIERS {
+        let cur_spent = self.spent_commitments.len();
+        let spent_comm_after = cur_spent.saturating_add(spent_commitments.len());
+        if self.spent_nullifiers.len().saturating_add(nullifiers.len()) > MAX_SPENT_NULLIFIERS
+            || spent_comm_after > MAX_SPENT_NULLIFIERS
+        {
             return Err(format!(
                 "spent nullifier set full ({}/{}) - chain must compact before more private transfers",
                 self.spent_nullifiers.len(),
@@ -397,12 +415,12 @@ impl L1NoteRegistry {
 
     /// Enforce bounded storage via hard caps.
     /// Spent nullifiers are consensus replay protection, they cannot be deleted
-    /// Without breaking double-spend resistance. Instead, MAX_SPENT_NULLIFIERS
+    /// Without breaking double-spend resistance. Instead, `MAX_SPENT_NULLIFIERS`
     /// Enforces a hard ceiling (fail-closed): once the cap is reached, no new
     /// Private transfers are accepted until the chain performs a state migration
     /// To a non-deleting accumulator design (e.g., Bloom filter + Merkle mountain
     /// Range). This method is retained for API compatibility but pruning is now
-    /// Bounded by the MAX_SPENT_NULLIFIERS constant enforced at insertion time.
+    /// Bounded by the `MAX_SPENT_NULLIFIERS` constant enforced at insertion time.
     pub fn prune_spent_nullifiers(&mut self, _keep_count: usize) {
         // Intentional no-op: nullifiers are bounded by MAX_SPENT_NULLIFIERS
         // Enforced at insertion in apply_transfer_with_proofs. Deleting any
@@ -780,5 +798,14 @@ mod h3_tests {
         r.insert_note(note_hash(2)).unwrap();
         let root3 = r.state_root();
         assert_ne!(root1, root3, "state_root must change after mutation");
+    }
+
+    #[test]
+    fn spent_commitments_keep_registry_non_empty() {
+        let mut r = L1NoteRegistry::new();
+        assert!(r.is_empty());
+        let c = budlum_note_packing::hash_from_field(77);
+        r.spent_commitments.insert(c);
+        assert!(!r.is_empty());
     }
 }
