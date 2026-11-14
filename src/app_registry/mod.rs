@@ -1,6 +1,6 @@
 //! B.U.D. 3.0 App Registry (`src/app_registry/`,  item 5).
 //!
-//! Stores verified application metadata and B.U.D. 3.0 [`ContentRef`](crate::storage::bud3::ContentRef) bundle pointers.
+//! Stores verified application metadata and B.U.D. 3.0 [`ContentRef`] bundle pointers.
 //!
 //! exposed for: dApp directory RPC handlers and governance verification.
 
@@ -42,7 +42,7 @@ pub enum AppRegistryError {
     FeeBelowMinimum,
 }
 
-/// Registered application entry backed by a B.U.D. 3.0 [`ContentRef`](crate::storage::bud3::ContentRef).
+/// Registered application entry backed by a B.U.D. 3.0 [`ContentRef`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RegisteredApp {
     pub app_id: [u8; 32],
