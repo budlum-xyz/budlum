@@ -2,10 +2,17 @@ name: CI
 
 on:
   push:
-    # Validate stacked branch heads even when conflicts block PR events.
-    branches: [main, testnet-quantum, testnet]
+    # The stacked branches (testnet-quantum, testnet) are validated by the
+    # pull_request event below. A push trigger on them ran every job twice per
+    # commit under two concurrency groups (`refs/heads/<branch>` and
+    # `refs/pull/<n>/merge`), which doubled the queue and starved the runners.
+    branches: [main]
   pull_request:
     branches: [main, fix/architecture-tip-adlari, consensus-of-consensuses, testnet-quantum, testnet, 'arena/**']
+  # A manual run on a snapshot ref (a branch or a tag that names one commit).
+  # Its concurrency group is the snapshot ref, so a push to a stacked branch
+  # cannot cancel it, and a head gets one complete result.
+  workflow_dispatch:
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -473,7 +480,12 @@ jobs:
     name: Budlum Core
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    if: always()
+    # `always()` also holds after a cancel. A push that cancelled the run of the
+    # commit before it left this job queued behind a full pool, the old run
+    # stayed open, and the run for the new commit waited as `pending` with no
+    # jobs. `!cancelled()` still runs the job after a failure and lets a
+    # cancelled run end.
+    if: ${{ !cancelled() }}
     needs:
       - budlum-pq-build
       - budlum-pq-crypto
