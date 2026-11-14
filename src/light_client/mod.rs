@@ -1,3 +1,5 @@
+//! WIRING: unwired - `RemoteStateView` is IP-60 T-Expansion and no production transition consumes it before activation after M7.
+//!
 //! Succinct light-client verification.
 //!
 //! Whitepaper v1.1: a light client bootstrapped from a single trusted
