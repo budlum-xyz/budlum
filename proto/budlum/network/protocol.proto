@@ -8,8 +8,9 @@ enum ProtoTransactionType {
     UNSTAKE = 2;
     VOTE = 3;
     CONTRACT_CALL = 4;
-    reserved 5;
-    reserved "BNS_REGISTER";
+    // Retired. The number and name stay so an old client's payload is
+    // refused by the decoder, not misread as another type.
+    BNS_REGISTER = 5;
     BNS_SET_CONTENT = 6;
     BNS_REGISTER_SUBDOMAIN = 7;
     BNS_SET_STORAGE = 8;

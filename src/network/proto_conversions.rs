@@ -1252,6 +1252,9 @@ impl TryFrom<pb::ProtoTransaction> for Transaction {
             pb::ProtoTransactionType::BnsSetAddress => TransactionType::BnsSetAddress,
             pb::ProtoTransactionType::BnsSetPrimaryName => TransactionType::BnsSetPrimaryName,
             pb::ProtoTransactionType::BnsSetRecords => TransactionType::BnsSetRecords,
+            pb::ProtoTransactionType::BnsRegister => {
+                return Err("BnsRegister is retired; a name is bought through an offer".into())
+            }
             pb::ProtoTransactionType::BnsSetContent => TransactionType::BnsSetContent,
             pb::ProtoTransactionType::BnsSetBud3Content => TransactionType::BnsSetBud3Content,
             pb::ProtoTransactionType::BnsRegisterSubdomain => TransactionType::BnsRegisterSubdomain,

@@ -1674,9 +1674,13 @@ fn testnet_sealed_field_native_remote_view_and_blind_compute_stays_closed() {
         inclusion_path: path,
         predicate_proof: None,
     };
-    remote_view
+    let refused = remote_view
         .verify_for_chain(&checkpoint, &acct_state.state_root_body(), testnet_chain)
-        .expect("remote state view verifies cleanly");
+        .expect_err("the remote state view is closed on testnet");
+    assert!(
+        refused.to_string().contains("app binding disabled"),
+        "got {refused}"
+    );
 
     // 4. The MLP guest still proves in isolation; the unsigned owner-consent
     // and proof-required AI doors do not open on the production testnet.
