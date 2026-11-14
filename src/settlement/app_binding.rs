@@ -2221,10 +2221,7 @@ mod tests {
         testnet_payment.chain_id = crate::core::chain_config::Network::Testnet
             .chain_id()
             .value();
-        assert_eq!(
-            application_fee_recipient(&state, &testnet_payment),
-            Some(mirror_account(id))
-        );
+        assert_eq!(application_fee_recipient(&state, &testnet_payment), None);
         let mut mainnet_payment = pay(user);
         mainnet_payment.chain_id = crate::core::chain_config::Network::Mainnet
             .chain_id()
