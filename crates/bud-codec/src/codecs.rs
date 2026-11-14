@@ -401,12 +401,22 @@ mod range_coder {
         }
         let want =
             usize::try_from(content_len).map_err(|_| CodecError::TooLong { max: content_len })?;
+        // The decoder reads exactly as many bytes as the encoder wrote: four bytes of
+        // state up front and one per renormalisation, which is what the encoder emitted
+        // before its own four-byte flush. A stream that runs dry before the declared length
+        // does not back that length. Reading the rest as implied zero bytes would let the
+        // header, not the stored payload, decide how much work the decoder does.
+        let read = |at: usize, emitted: usize| -> Result<u8, CodecError> {
+            payload.get(at).copied().ok_or(CodecError::TooShort {
+                want: content_len,
+                got: emitted as u64,
+            })
+        };
         let mut pos = 5usize;
         let mut code = 0u64;
         for _ in 0..4 {
-            let b = payload.get(pos).copied().unwrap_or(0);
+            code = (code << 8) | u64::from(read(pos, 0)?);
             pos += 1;
-            code = (code << 8) | u64::from(b);
         }
 
         let mut models = BitModels::new();
@@ -437,7 +447,7 @@ mod range_coder {
                     if (low ^ (low + range)) >= u64::from(TOP) {
                         range = low.wrapping_neg() & u64::from(TOP - 1);
                     }
-                    let next_b = payload.get(pos).copied().unwrap_or(0);
+                    let next_b = read(pos, out.len())?;
                     pos += 1;
                     code = ((code << 8) | u64::from(next_b)) & u64::from(u32::MAX);
                     range <<= 8;
