@@ -366,7 +366,7 @@ impl ExecutionEnvironment for StatefulBudZeroEe {
                     if !is_owner_or_self {
                         return Ok(EeOutcome {
                             status: OutcomeStatus::Revert,
-                            output: b"unauthorized budzero storage write".to_vec(),
+                            output: b"unauthorized storage write from budzero".to_vec(),
                             gas_used: spent,
                         });
                     }

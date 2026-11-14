@@ -1,7 +1,9 @@
 //! Phase-A dual finality evaluation, binary segment recursion boundary checks,
 //! and block batch-proof status tracking ( TS8, TS9, TA4, TA5, TA8).
 //!
-//! WIRING: unwired - staged for  recursion and Phase-A dual-finality activation.
+//! WIRING: `GlobalBlockHeader::proof_status` and the light client's Phase-A
+//! checkpoint checks call into this module. No block-admission rule reads
+//! their answer yet.
 
 use crate::core::hash::hash_fields_bytes;
 use crate::domain::types::{DomainId, Hash32};

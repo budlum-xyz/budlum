@@ -22,7 +22,7 @@ use crate::storage::bud3::content_ref::ContentRef;
 /// something the browser treats as executable under a type the policy did not
 /// consider. `text/html` is here because a site is HTML; nothing that requires
 /// a plugin is.
-pub const ALLOWED_MIME_TYPES: &[&str] = &[
+const ALLOWED_MIME_TYPES: &[&str] = &[
     "text/html",
     "text/css",
     "text/plain",
@@ -67,7 +67,7 @@ pub enum RouteError {
     Malformed,
     /// The path is well-formed but the manifest does not carry it.
     NotFound,
-    /// The route names a content type outside [`ALLOWED_MIME_TYPES`].
+    /// The route names a content type outside `ALLOWED_MIME_TYPES`.
     DisallowedMime,
     /// The path resolves to the index, and the manifest has no such route.
     MissingIndex,
@@ -79,7 +79,7 @@ pub enum RouteError {
 /// (some stacks fold it into a separator), any `..` segment, and any empty
 /// segment other than the single trailing slash. A query string is not part of
 /// the path and must already have been stripped by the caller.
-pub fn is_well_formed_path(path: &str) -> bool {
+fn is_well_formed_path(path: &str) -> bool {
     if !path.starts_with('/') || path.contains('\0') || path.contains('\\') {
         return false;
     }
@@ -102,7 +102,7 @@ impl SiteManifest {
     ///
     /// # Errors
     ///
-    /// [`RouteError::Malformed`] for a path [`is_well_formed_path`] refuses,
+    /// [`RouteError::Malformed`] for a path `is_well_formed_path` refuses,
     /// [`RouteError::MissingIndex`] when the index route is absent,
     /// [`RouteError::NotFound`] for a path the manifest does not carry, and
     /// [`RouteError::DisallowedMime`] for a route whose type is not allowed.

@@ -10,7 +10,7 @@
 //! Public Suffix List. Before that a site can set a cookie for `.budlum.xyz`
 //! and affect the main site and every other name. The gateway's part of that
 //! rule is simple and absolute: it sets no cookie at all, ever. That is what
-//! [`is_forbidden_header`] enforces on the way out.
+//! `is_forbidden_header` enforces on the way out.
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
@@ -21,7 +21,7 @@ use std::collections::BTreeSet;
 /// put in an iframe, which removes the clickjacking surface a shared origin
 /// pattern would otherwise carry. `no-referrer` keeps one name from learning
 /// which other name a reader came from.
-pub const DEFAULT_CSP: &str = "default-src 'self'; frame-ancestors 'none'";
+const DEFAULT_CSP: &str = "default-src 'self'; frame-ancestors 'none'";
 
 /// A header the gateway must never emit.
 ///
@@ -32,7 +32,7 @@ pub const DEFAULT_CSP: &str = "default-src 'self'; frame-ancestors 'none'";
 /// authentication, transport security or policy that the gateway invents are
 /// read by the browser as if the site had made them.
 #[must_use]
-pub fn is_forbidden_header(name: &str) -> bool {
+fn is_forbidden_header(name: &str) -> bool {
     matches!(
         name.to_ascii_lowercase().as_str(),
         "set-cookie"
@@ -56,7 +56,7 @@ pub fn is_forbidden_header(name: &str) -> bool {
 /// deliberately conservative comparison: a directive the gateway cannot parse
 /// counts as wider, so an unparsable policy is refused rather than trusted.
 #[must_use]
-pub fn csp_is_at_least_as_strict(candidate: &str, baseline: &str) -> bool {
+fn csp_is_at_least_as_strict(candidate: &str, baseline: &str) -> bool {
     let parse = |policy: &str| -> Option<BTreeMap<String, Vec<String>>> {
         if policy.chars().any(char::is_control) {
             return None;
@@ -132,7 +132,7 @@ fn is_narrowing_directive(name: &str) -> bool {
 /// it is short lived. Caching a resolution for a year would serve a site whose
 /// name has changed hands.
 #[must_use]
-pub fn content_headers(mime: &str, cache_control: &str) -> Vec<(String, String)> {
+fn content_headers(mime: &str, cache_control: &str) -> Vec<(String, String)> {
     vec![
         ("content-type".to_string(), mime.to_string()),
         ("cache-control".to_string(), cache_control.to_string()),
@@ -159,7 +159,7 @@ pub const RESOLUTION_CACHE: &str = "public, max-age=10";
 /// to apply it otherwise.
 ///
 /// Returns the header list the gateway will actually send. A site's candidate
-/// policy that is not at least as strict as [`DEFAULT_CSP`] is dropped, and the
+/// policy that is not at least as strict as `DEFAULT_CSP` is dropped, and the
 /// baseline is sent: the gateway's policy is a floor, not a default.
 #[must_use]
 pub fn content_headers_with_csp(
@@ -392,6 +392,10 @@ mod tests {
 
     #[test]
     fn a_refused_site_policy_leaves_the_baseline_in_place() {
+        assert!(!csp_is_at_least_as_strict(
+            "default-src *; frame-ancestors *",
+            DEFAULT_CSP
+        ));
         let widened = content_headers_with_csp(
             "text/html",
             IMMUTABLE_CACHE,

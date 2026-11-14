@@ -11,8 +11,9 @@
 //! mutate only the proof envelope inside the fenced `apb` Markdown block while
 //! keeping the prose text byte-for-byte invariant.
 //!
-//! WIRING: unwired - post-launch T-Expansion Answer Proof Bundle;
-//! exercised by deterministic bundle tests until on-device assistant clients connect.
+//! WIRING: reached only through `ai::audit_answer_proof_markdown`. No
+//! transaction, RPC method or CLI command calls that door yet, so the bundle
+//! is exercised by its deterministic tests alone.
 
 use bud_isa::{Instruction, Opcode};
 use serde::{Deserialize, Serialize};

@@ -784,9 +784,7 @@ budzero/bud-vm/src/lib.rs	const	POSEIDON_ALPHA
 budzero/bud-vm/src/lib.rs	const	POSEIDON_ROUNDS_IN_USE
 budzero/bud-vm/src/lib.rs	enum	VmError
 budzero/bud-vm/src/lib.rs	fn	consume_gas
-budzero/bud-vm/src/lib.rs	fn	field_add_goldilocks
 budzero/bud-vm/src/lib.rs	fn	field_mul_goldilocks
-budzero/bud-vm/src/lib.rs	fn	poseidon4_hash
 budzero/bud-vm/src/lib.rs	fn	poseidon4_hash3
 budzero/bud-vm/src/lib.rs	fn	poseidon4_hash_state
 budzero/bud-vm/src/lib.rs	fn	poseidon_full_hash_state
@@ -989,7 +987,6 @@ crates/wallet-core/src/lib.rs	struct	WalletBindingExport
 crates/wallet-core/src/lib.rs	struct	WalletPrivacyConfig
 crates/wallet-core/src/lib.rs	type	PublicKeyBytes
 crates/wallet-core/src/lib.rs	type	SignatureBytes
-crates/wallet-core/src/privacy_crypto.rs	fn	poseidon4_hash
 crates/wallet-core/src/privacy_crypto.rs	fn	poseidon4_hash3
 crates/wallet-core/src/privacy_crypto.rs	fn	poseidon4_hash_state
 crates/wallet-core/src/privacy_transfer.rs	struct	PrivateNoteOutput
@@ -1064,9 +1061,6 @@ src/ai/execution/guest.rs	struct	GuestMemoryLayout
 src/ai/execution/model_class.rs	const	DEFAULT_EXECUTION_CLASS
 src/ai/execution/model_class.rs	struct	ModelClassLimits
 src/ai/execution/verify.rs	fn	expected_initial_state_root
-src/ai/execution/verify.rs	fn	is_fully_valid
-src/ai/execution/verify.rs	fn	verify_execution_proof_structural
-src/ai/execution/verify.rs	struct	ExecutionVerifyReport
 src/ai/registry.rs	const	DEFAULT_OPERATOR_CEILING
 src/ai/registry.rs	const	EQUIVOCATION_ERROR_PREFIX
 src/ai/registry.rs	const	MAX_CALLBACK_EVENTS_PER_ADDRESS
@@ -1107,7 +1101,6 @@ src/bin/budlum-relayer.rs	struct	BudlumBurnEvent
 src/bin/budlum-relayer.rs	struct	BudlumClient
 src/bin/budlum-relayer.rs	struct	EthClient
 src/bin/budlum-relayer.rs	struct	EthDepositEvent
-src/bns/registry.rs	const	GRACE_PERIOD
 src/bns/registry.rs	const	MAX_NAMES
 src/bns/registry.rs	const	MAX_SUBDOMAINS_PER_NAME
 src/bns/types.rs	fn	with_address

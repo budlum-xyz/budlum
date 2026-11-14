@@ -17,9 +17,9 @@ Graft|2|5
 Gövde|1|1
 Kiragi|6|16
 Liquid storage|0|0
-Living Threshold|5|15
+Living Threshold|6|16
 Mikoriza|19|66
-Mobile Self|13|117
+Mobile Self|13|123
 PUL|12|98
 Pollen|62|723
 Regeneration|27|108

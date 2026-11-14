@@ -249,6 +249,12 @@ const BUDGETS: &[Budget] = &[
         reason: "a benchmark harness where a panic aborts the measurement and nothing else; criterion has no error channel to return into",
     },
     Budget {
+        file: "crates/wallet-core/src/transfer.rs",
+        lint: "clippy::too_many_arguments",
+        count: 2,
+        reason: "the two SDK constructors for a transfer to a verified `.bud` recipient; every argument is a field the host signs over, and the browser and mobile bindings pass them positionally",
+    },
+    Budget {
         file: "src/ai/registry.rs",
         lint: "clippy::too_many_arguments",
         count: 1,
