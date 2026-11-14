@@ -124,6 +124,17 @@ impl RelayLedger {
         self.relayed.get(message_id)
     }
 
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.relayed.len()
+    }
+
+    /// Whether the ledger holds no relay record at all.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.relayed.is_empty()
+    }
+
     /// Drop records of relays that completed at or before `cutoff`.
     ///
     /// The ledger is replay protection for `process_relay`, and a relay can
@@ -164,11 +175,12 @@ const RELAY_RETENTION_BLOCKS: u64 = 10 * crate::cross_domain::nonce::FINALITY_PR
 
 /// Configuration for the Universal Relayer.
 ///
-/// BLG-0115 (P05-F08, karar B): the `relay_window_blocks`, `min_relayer_stake`
+/// (karar B): the `relay_window_blocks`, `min_relayer_stake`
 /// and `slash_ratio_*` fields are gone - nothing outside this file ever read
 /// them, and a config field nobody reads is a promise nobody keeps. Serde
 /// ignores them if an old config still carries them.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+/// WIRING: cross-domain surface - the relayer/bridge doors that read it land with their wiring.
 pub struct RelayerConfig {}
 
 /// The Universal Relayer orchestrator.
@@ -179,7 +191,7 @@ pub struct RelayerConfig {}
 ///
 /// Permissionless: any staked RELAYER role holder can submit relays.
 /// Slashing: invalid proofs or missed deadlines trigger economic penalties.
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UniversalRelayer {
     pub config: RelayerConfig,
     pub ledger: RelayLedger,
@@ -189,11 +201,11 @@ pub struct UniversalRelayer {
     pending: BTreeMap<MessageId, PendingRelay>,
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 ///
-/// Convenience: pub because the pending queue is persisted state
-/// the chain saves and restores with the relayer; the queue itself
-/// stays private to `UniversalRelayer`.
+/// Convenience: pub because the pending queue is consensus state the
+/// settlement registries carry with the relayer; the queue itself stays
+/// private to `UniversalRelayer`.
 pub struct PendingRelay {
     pub message_id: MessageId,
     pub source_domain: DomainId,
@@ -201,6 +213,12 @@ pub struct PendingRelay {
     pub source_event: DomainEvent,
     pub created_height: u64,
     pub expiry_height: u64,
+}
+
+impl Default for UniversalRelayer {
+    fn default() -> Self {
+        Self::new(RelayerConfig::default())
+    }
 }
 
 impl UniversalRelayer {
@@ -220,7 +238,7 @@ impl UniversalRelayer {
         message: &CrossDomainMessage,
         created_height: u64,
     ) -> Result<(), RelayerError> {
-        // BLG-0129 (P05-F22): the event and the message must be the SAME
+        // The event and the message must be the SAME
         // relay. Storing one while keying the other let a pending row hold
         // an event whose message was never the one being relayed.
         if source_event.message.as_ref() != Some(message) {
@@ -282,7 +300,7 @@ impl UniversalRelayer {
             .clone();
 
         // 2. Expiry check
-        // BLG-0119 (P05-F12): the boundary is exclusive - at
+        // The boundary is exclusive - at
         // `current_height == expiry_height` the sweep is already legal
         // (the expiry queue pops at `..=height`), so the relay must NOT be.
         // Two nodes ordering the pair differently could otherwise split
@@ -363,6 +381,12 @@ impl UniversalRelayer {
         self.pending.len()
     }
 
+    /// Number of retained successful relay records.
+    #[must_use]
+    pub fn relayed_count(&self) -> usize {
+        self.ledger.len()
+    }
+
     /// Get expired relays that should be slashed.
     pub fn expired_relays(&self, current_height: u64) -> Vec<&PendingRelay> {
         self.pending
@@ -407,6 +431,34 @@ impl UniversalRelayer {
     /// Merkle root of the relay ledger (for on-chain commitment).
     pub fn ledger_root(&self) -> Hash32 {
         self.ledger.root()
+    }
+
+    /// True when no relay is pending and the ledger holds no record.
+    pub fn is_empty(&self) -> bool {
+        self.pending.is_empty() && self.ledger.relayed.is_empty()
+    }
+
+    /// The commitment the settlement registries fold into the state root:
+    /// the ledger root and every pending relay in key order. The relayer is
+    /// consensus state, so two nodes that disagree
+    /// on the queue must disagree on the root.
+    pub fn state_root(&self) -> Hash32 {
+        let mut pending = Vec::new();
+        for relay in self.pending.values() {
+            pending.extend_from_slice(&relay.message_id);
+            pending.extend_from_slice(&relay.source_domain.to_le_bytes());
+            pending.extend_from_slice(&relay.target_domain.to_le_bytes());
+            pending.extend_from_slice(&relay.source_event.leaf_hash());
+            pending.extend_from_slice(&relay.created_height.to_le_bytes());
+            pending.extend_from_slice(&relay.expiry_height.to_le_bytes());
+        }
+        let count = u64::try_from(self.pending.len()).unwrap_or(u64::MAX);
+        hash_fields_bytes(&[
+            b"BDLM_RELAYER_STATE_V1",
+            &self.ledger.root(),
+            &count.to_le_bytes(),
+            &pending,
+        ])
     }
 }
 
@@ -760,7 +812,7 @@ mod tests {
         assert!(relayer.pending_relay(&message_b.message_id).is_none());
     }
 
-    /// P05-F05: a relay refused after the proof checks leaves no half state.
+    /// A relay refused after the proof checks leaves no half state.
     #[test]
     fn a_refused_relay_leaves_no_ledger_record_and_keeps_the_pending_entry() {
         let mut relayer = UniversalRelayer::new(RelayerConfig::default());
@@ -799,7 +851,7 @@ mod tests {
         assert!(matches!(second, Err(RelayerError::InvalidProof(_))));
     }
 
-    /// BLG-0119 (P05-F12): at the expiry height itself the relay is already
+    /// At the expiry height itself the relay is already
     /// refused - the sweep is legal there (`..=height`), so the boundary must
     /// not belong to both sides.
     #[test]
@@ -834,7 +886,7 @@ mod tests {
         );
     }
 
-    /// BLG-0126 (P05-F19): a relay that fails mid-way leaves NO half-state -
+    /// A relay that fails mid-way leaves NO half-state -
     /// nothing in the ledger, the pending row untouched.
     #[test]
     fn neg_half_relay_leaves_no_half_state() {

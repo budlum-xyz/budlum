@@ -38,7 +38,7 @@ it is production yet, and hash verification is deliberately **fail-closed**, in
 
 | Crate | Job |
 |---|---|
-| `ai-core` | The model identity, the dataset types and the LoRA manifest; mirror types, per decision K3 |
+| `ai-core` | The model identity, the dataset types and the LoRA manifest; mirror types, per decision |
 | `ai-data` | Closed-loop source checking, the record format, fail-closed verification |
 | `ai-serve` | The serving bridge configuration; the weight name is preserved and the served name is ours |
 | `ai-tune` | The training plan, LoRA in BF16 or FP16, with FP4 absent from the type system, plus the output hash lock |
@@ -53,7 +53,7 @@ cargo test --workspace
 
 ## Decisions
 
-K2, the base model, is abstract and approved before the first fine-tune. K3,
+, the base model, is abstract and approved before the first fine-tune. ,
 the type binding, is deferred, and the skeleton suits either option. The method
 is LoRA SFT.
 

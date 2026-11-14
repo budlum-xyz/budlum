@@ -7,27 +7,238 @@ use libp2p::{
     },
     noise, ping, request_response,
     swarm::{NetworkBehaviour, SwarmEvent},
-    tcp, yamux, Multiaddr, PeerId, StreamProtocol, Swarm,
+    tcp, tls, yamux, Multiaddr, PeerId, StreamProtocol, Swarm,
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::error::Error;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tracing::{info, warn};
 
 #[cfg(feature = "p2p-mdns")]
 use libp2p::{mdns, swarm::behaviour::toggle::Toggle};
 
+/// Whether a gossipsub publish refusal means the bytes are already in the mesh.
+///
+/// `PublishError::Duplicate` is gossipsub's answer to a message id it already
+/// holds: the same bytes were published by this node one beat earlier (the
+/// finality retry signs the same `(epoch, height, hash)` again, so the signature
+/// and therefore the message id do not change), or they arrived from a peer.
+/// Treating that as a delivery failure had two costs (RT-003, measured on a
+/// four-validator lab mesh): the retry re-published identical bytes for the life
+/// of the round - about 2.6 warnings per second per validator - and, on the
+/// prevote path, kept the vote out of `prevote_published`, so the node never
+/// recorded that it had already voted at that height.
+fn publish_reached_the_mesh(error: &gossipsub::PublishError) -> bool {
+    matches!(error, gossipsub::PublishError::Duplicate)
+}
+
 /// Maximum seconds a sync cycle may remain in
 /// "syncing" state (sync_state == 1) before it is considered orphaned
 /// And automatically reset. Prevents nodes from reporting stale
 /// "syncing" status indefinitely when a peer disconnects mid-sync or
 /// When gossipsub publish fails without a corresponding reset.
-const SYNC_TIMEOUT_SECS: u64 = 60;
+const SYNC_TIMEOUT_SECS: u64 = 15;
+/// Total lifetime one single-flight sync round may buy from its peer's own
+/// answers.
+///
+/// `SYNC_TIMEOUT_SECS` is the stall deadline for one unanswered request, and a
+/// multi-chunk round refreshes it on every answer. Without a ceiling on the
+/// round itself, a peer that keeps answering index-contiguous, hash-chained
+/// chunks - data the fork-recovery path stages without validating it against
+/// consensus - holds the node's only sync round for `chunks x SYNC_TIMEOUT_SECS`
+/// and never accrues an unanswered-sync strike, so the four-strike ban can never
+/// engage and no other peer can be asked. Four stall windows is enough for an
+/// honest but slow peer to finish a round; past it the round is closed and the
+/// peer is charged, which is what makes the strike path reachable.
+const MAX_SYNC_ROUND_SECS: u64 = SYNC_TIMEOUT_SECS.saturating_mul(4);
 /// Concurrent request/response streams per connection. The libp2p default is
 /// 100; with a 1 MiB request ceiling that pins 100 MiB or more per peer.
 const MAX_SYNC_CONCURRENT_STREAMS: usize = 16;
 const MAX_PENDING_BITSWAP_FETCH_WAITERS: usize = 128;
+/// QC blobs assembled at once, across all peers.
+const MAX_QC_ASSEMBLIES: usize = 8;
+/// A slow or malicious peer cannot occupy every outbound fetch slot.
+const MAX_QC_FETCHES_PER_PEER: usize = 1;
+/// A single peer cannot occupy the entire global serve table.
+const MAX_QC_SERVES_PER_PEER: usize = 2;
+/// Pending validated certificates retained for fetching when all slots are
+/// busy. The chain retains 100 pending certificates by default.
+const MAX_PENDING_QC_REQUESTS: usize = 128;
+const QC_RETRY_DELAY: Duration = Duration::from_secs(5);
+/// How long a partly received QC blob is kept.
+const QC_ASSEMBLY_TTL: Duration = Duration::from_secs(120);
+/// Most validators a QC blob may name on the wire. The snapshot check at
+/// import is the exact bound; this one only limits what is buffered before it.
+const MAX_QC_WIRE_VALIDATORS: usize = 2048;
+
+/// A QC response is accepted only for a request we made to this peer. Each
+/// request asks for exactly one chunk; the next is requested after validation.
+#[derive(Clone)]
+struct QcFetch {
+    peer: PeerId,
+    epoch: u64,
+    height: u64,
+    checkpoint_hash: String,
+    chunk_index: u32,
+    chunk_count: Option<u32>,
+}
+
+#[derive(Clone)]
+struct PendingQcFetch {
+    epoch: u64,
+    height: u64,
+    checkpoint_hash: String,
+    preferred: Option<PeerId>,
+    last_peer: Option<PeerId>,
+    ready_at: std::time::Instant,
+}
+
+fn enqueue_qc_fetch(queue: &mut VecDeque<PendingQcFetch>, pending: PendingQcFetch) {
+    if let Some(existing) = queue.iter_mut().find(|existing| {
+        existing.epoch == pending.epoch
+            && existing.height == pending.height
+            && existing.checkpoint_hash == pending.checkpoint_hash
+    }) {
+        // A new announcing peer is an opportunity to retry, not a second job.
+        if pending.preferred.is_some() && pending.preferred != existing.last_peer {
+            existing.preferred = pending.preferred;
+            existing.ready_at = pending.ready_at;
+        }
+        return;
+    }
+    if queue.len() >= MAX_PENDING_QC_REQUESTS {
+        // The chain's own pending-cert book also evicts oldest entries.
+        queue.pop_front();
+        warn!("QC retry queue full; dropped its oldest request");
+    }
+    queue.push_back(pending);
+}
+
+fn select_qc_peer(
+    peers: &[PeerId],
+    occupied: &HashMap<PeerId, usize>,
+    preferred: Option<PeerId>,
+    last_peer: Option<PeerId>,
+) -> Option<PeerId> {
+    let mut ordered: Vec<_> = peers
+        .iter()
+        .copied()
+        .filter(|peer| occupied.get(peer).copied().unwrap_or(0) < MAX_QC_FETCHES_PER_PEER)
+        .collect();
+    if let Some(peer) = preferred.filter(|p| Some(*p) != last_peer && ordered.contains(p)) {
+        return Some(peer);
+    }
+    // Visit every eligible peer before cycling, not merely the first peer
+    // different from the previous one (which can starve a third peer).
+    ordered.sort_by_key(|peer| peer.to_bytes());
+    if ordered.is_empty() {
+        return None;
+    }
+    let next = last_peer
+        .and_then(|last| ordered.iter().position(|peer| *peer == last))
+        .map_or(0, |index| (index + 1) % ordered.len());
+    Some(ordered[next])
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum QcServeAdmission {
+    Start,
+    Continue,
+    Busy,
+    Invalid,
+}
+
+type QcServeTable = HashMap<(PeerId, u64, u64), (std::time::Instant, u32)>;
+
+fn qc_serve_admission(
+    serves: &QcServeTable,
+    peer: PeerId,
+    epoch: u64,
+    height: u64,
+    chunk_index: u32,
+    max_chunks: usize,
+) -> QcServeAdmission {
+    if height == 0 || chunk_index as usize >= max_chunks {
+        return QcServeAdmission::Invalid;
+    }
+    let key = (peer, epoch, height);
+    if chunk_index == 0 {
+        if serves.contains_key(&key)
+            || serves.len() >= MAX_QC_ASSEMBLIES
+            || serves
+                .keys()
+                .filter(|(holder, _, _)| *holder == peer)
+                .count()
+                >= MAX_QC_SERVES_PER_PEER
+        {
+            QcServeAdmission::Busy
+        } else {
+            QcServeAdmission::Start
+        }
+    } else {
+        match serves.get(&key) {
+            Some((_, next)) if *next == chunk_index => QcServeAdmission::Continue,
+            Some(_) => QcServeAdmission::Invalid,
+            // A server may have released an old/expired transfer while the
+            // client was in flight. Ask it to restart; do not blame the peer.
+            None => QcServeAdmission::Busy,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum QcResponseAction {
+    InProgress,
+    Imported,
+    Missing,
+}
+
+/// Build a single bounded peer-bound response, never a gossip broadcast.
+fn qc_chunk_response(
+    epoch: u64,
+    height: u64,
+    index: u32,
+    blob: Option<crate::consensus::qc::QcBlob>,
+) -> Result<NetworkMessage, String> {
+    let missing = || NetworkMessage::QcBlobResponse {
+        epoch,
+        checkpoint_height: height,
+        checkpoint_hash: String::new(),
+        blob_data: Vec::new(),
+        found: false,
+        chunk_index: index,
+        chunk_count: 0,
+    };
+    let Some(blob) = blob else {
+        return Ok(missing());
+    };
+    if height == 0
+        || blob.epoch != epoch
+        || blob.checkpoint_height != height
+        || !blob.verify_merkle_root()
+        || blob.pq_signatures.len() > MAX_QC_WIRE_VALIDATORS
+    {
+        return Ok(missing());
+    }
+    let payload = blob.to_bytes()?;
+    let chunk_bytes = crate::consensus::qc::QC_CHUNK_BYTES;
+    let count =
+        u32::try_from(payload.len().div_ceil(chunk_bytes)).map_err(|_| "too many QC chunks")?;
+    if count == 0 || index >= count {
+        return Ok(missing());
+    }
+    let start = index as usize * chunk_bytes;
+    Ok(NetworkMessage::QcBlobResponse {
+        epoch,
+        checkpoint_height: height,
+        checkpoint_hash: blob.checkpoint_hash,
+        blob_data: payload[start..payload.len().min(start + chunk_bytes)].to_vec(),
+        found: true,
+        chunk_index: index,
+        chunk_count: count,
+    })
+}
 
 /// Double sign guard for precommits.
 ///
@@ -39,6 +250,156 @@ fn precommit_height_is_new(signed_height: u64, last_precommit_height: u64) -> bo
     signed_height > last_precommit_height
 }
 
+/// How long a cast vote waits for its round to reach quorum before the node
+/// publishes the same vote again.
+///
+/// Gossip delivers a vote to the mesh, not to every validator. On the devnet a
+/// single prevote reached one of four peers, and since every node signs once
+/// per checkpoint height nothing ever re-sent it: each round then sat one vote
+/// short with no way back, the chain kept producing, and finality stopped for
+/// the life of the process. Re-publishing the bytes already signed is
+/// idempotent at the receiver - the aggregator counts each voter once and the
+/// early-vote buffer de-duplicates by (voter, epoch, height) - and it is not a
+/// double sign: same epoch, same height, same hash.
+const FINALITY_VOTE_RETRY: Duration = Duration::from_secs(2);
+
+/// The vote this node last published, so a message lost in the mesh can be
+/// published again instead of being signed a second time.
+#[derive(Debug, Clone)]
+struct PublishedVote {
+    epoch: u64,
+    checkpoint_height: u64,
+    checkpoint_hash: String,
+    at: std::time::Instant,
+}
+
+/// Whether the beat re-publishes the vote it already cast for this round.
+///
+/// Only the identical round qualifies, and only while the round is short of
+/// quorum: a different hash at the same height is the one thing a validator
+/// must never sign twice.
+fn vote_retry_due(
+    published: Option<&PublishedVote>,
+    epoch: u64,
+    checkpoint_height: u64,
+    checkpoint_hash: &str,
+    now: std::time::Instant,
+) -> bool {
+    match published {
+        Some(vote) => {
+            vote.epoch == epoch
+                && vote.checkpoint_height == checkpoint_height
+                && vote.checkpoint_hash == checkpoint_hash
+                && now.saturating_duration_since(vote.at) >= FINALITY_VOTE_RETRY
+        }
+        None => false,
+    }
+}
+
+/// May this node sign a prevote at `checkpoint_height`?
+///
+/// Two ways in. The round is above every height this node has already voted,
+/// or it is the *identical* round being retried because it has no quorum yet.
+///
+/// # Why a reorged checkpoint is not voted a second time
+///
+/// A reorg can replace the block at the active finality checkpoint. The
+/// aggregator then holds a new hash at a height this node has already signed,
+/// so neither door opens and the node stays silent: signing a second, different
+/// hash at one height is equivocation, and it is the one fault a validator is
+/// slashed for. That silence is the safe half of the trade - it costs this
+/// node's vote at that height, not the network's finality, because a quorum
+/// needs two thirds and the honest validators that did not sign the abandoned
+/// hash still can.
+///
+/// Liveness resumes by itself at the next checkpoint: the interval moves the
+/// height past the high-water mark, so the first door opens again. What must
+/// not happen is the reverse - a node that re-signs to "catch up" and equivocates.
+#[must_use]
+fn prevote_is_due(checkpoint_height: u64, last_prevote_height: u64, retry: bool) -> bool {
+    checkpoint_height > last_prevote_height || retry
+}
+
+fn record_cast_prevote(
+    last_prevote_height: &mut u64,
+    prevote_published: &mut Option<PublishedVote>,
+    epoch: u64,
+    checkpoint_height: u64,
+    checkpoint_hash: &str,
+    now: std::time::Instant,
+) -> bool {
+    let advanced = checkpoint_height > *last_prevote_height;
+    if advanced {
+        *last_prevote_height = checkpoint_height;
+    }
+    *prevote_published = Some(PublishedVote {
+        epoch,
+        checkpoint_height,
+        checkpoint_hash: checkpoint_hash.to_string(),
+        at: now,
+    });
+    advanced
+}
+
+/// Whether a refused vote was refused for belonging to another round rather
+/// than for being wrong.
+///
+/// A vote only counts in an aggregator holding its own checkpoint, and an
+/// aggregator holds one round at a time: a validator one block behind signs
+/// the checkpoint it sees, and every node whose round has already moved on
+/// refuses it. That voter is honest - it is at a different tip, which the
+/// fork choice resolves - so the refusal says nothing about the sender.
+/// Charging bad behaviour for it is how a mesh bans its own validators, which
+/// is what the devnet did once the vote beat got fast enough to produce
+/// cross-round votes.
+///
+/// Membership belongs on the same list. An aggregator checks a vote against
+/// the validator snapshot it built for its own epoch, and that snapshot is
+/// taken from the state this node holds: across an epoch boundary a node one
+/// block behind still has the previous set, so a vote from a validator that
+/// joined - or one whose keys landed in the current block - reads as a
+/// stranger. The voter is a member; the reader is late.
+fn refusal_is_round_scope(error: &str) -> bool {
+    [
+        "Prevote epoch mismatch",
+        "Prevote checkpoint height mismatch",
+        "Precommit epoch mismatch",
+        "Precommit checkpoint height mismatch",
+        "Duplicate prevote",
+        "Duplicate precommit",
+        "Cannot precommit before prevote quorum",
+        "No active finality aggregator",
+        "Voter not in validator set",
+    ]
+    .iter()
+    .any(|refusal| error.contains(refusal))
+}
+
+fn refusal_is_benign_fork_or_lag(error: &str) -> bool {
+    [
+        "Prevote checkpoint hash mismatch",
+        "Precommit checkpoint hash mismatch",
+        "Rejecting early prevote beyond finality horizon",
+        "Rejecting early precommit beyond finality horizon",
+        "No validator snapshot for PQ attestation",
+        "PQ attestation signer is not in the validator snapshot",
+        "PQ attestation signer has no snapshot index",
+    ]
+    .iter()
+    .any(|refusal| error.contains(refusal))
+}
+
+fn budlum_topic_score_params() -> gossipsub::TopicScoreParams {
+    // Keep P1/P2/P4 active while disabling P3/P3b delivery-deficit penalties:
+    // sparse low-rate testnet meshes otherwise fall below the 20 msg/s default
+    // threshold and silently graylist honest validators across partitions.
+    gossipsub::TopicScoreParams {
+        mesh_message_deliveries_weight: 0.0,
+        mesh_failure_penalty_weight: 0.0,
+        ..Default::default()
+    }
+}
+
 /// First `max_chars` characters of a peer controlled string, for log lines.
 ///
 /// A byte slice such as `&s[..16]` panics when byte 16 is inside a multi byte
@@ -48,14 +409,46 @@ fn log_prefix(s: &str, max_chars: usize) -> String {
 }
 
 /// Extract IPv4 /24 key from a multiaddr (first 3 octets), if present.
+///
+/// Loopback addresses (`127.0.0.0/8`) return `None` so local multi-validator
+/// rehearsals on a single host do not trip the public `/24` eclipse ceiling.
 pub fn ipv4_slash24(addr: &Multiaddr) -> Option<[u8; 3]> {
     for proto in addr.iter() {
         if let libp2p::multiaddr::Protocol::Ip4(ip) = proto {
-            let o = ip.octets();
-            return Some([o[0], o[1], o[2]]);
+            if ip.is_loopback() {
+                return None;
+            }
+            let [a, b, c, _] = ip.octets();
+            return Some([a, b, c]);
         }
     }
     None
+}
+
+/// Whether a `Blockchain::add_transaction` refusal reflects benign mempool or
+/// block-inclusion ordering rather than a malformed or forged gossip payload.
+fn tx_refusal_is_pool_race(
+    tx: &crate::core::transaction::Transaction,
+    err: &str,
+    expected_chain_id: u64,
+) -> bool {
+    if tx.from == crate::core::address::Address::zero()
+        || tx.chain_id != expected_chain_id
+        || !tx.verify()
+    {
+        return false;
+    }
+    matches!(
+        err,
+        "Mempool error: DuplicateTransaction"
+            | "Mempool error: PoolFull"
+            | "Mempool error: PoolBytesFull"
+            | "Mempool error: FeeTooLow"
+            | "Mempool error: RbfFeeTooLow"
+            | "Mempool error: SenderLimitReached"
+            | "Mempool error: TransactionExpired"
+            | "Mempool error: InvalidNonce"
+    ) || err.starts_with("Invalid transaction: Invalid nonce:")
 }
 
 #[derive(NetworkBehaviour)]
@@ -68,6 +461,9 @@ pub struct BudlumBehaviour {
     kad: Kademlia<MemoryStore>,
     sync: request_response::Behaviour<crate::network::sync_codec::SyncCodec>,
     bitswap: request_response::Behaviour<bud_node::BitswapCodec>,
+    /// `/budlum/witness/1.0.0`: witnesses of a block for a node that
+    /// pruned them, checked against the block's `witness_root`.
+    witness: request_response::Behaviour<crate::network::witness_protocol::WitnessCodec>,
     /// Connection budget: without it a peer can open unbounded connections
     /// and exhaust memory (libp2p resource-management DoS, RUSTSEC-2022-0084).
     /// The incoming cap plus the per-peer cap also blunt eclipse attempts: an
@@ -80,9 +476,7 @@ use crate::chain::chain_actor::ChainHandle;
 use crate::chain::finality::{Precommit, Prevote};
 use crate::network::gossip_dedup::{DedupResult, GossipDedup};
 use crate::network::peer_manager::PeerManager;
-use crate::network::regen_health_tick::{
-    hash32, Checkpoint, CheckpointView, RegenHealthTick, TickOutcome,
-};
+use crate::network::regen_health_tick::{Checkpoint, CheckpointView, RegenHealthTick, TickOutcome};
 use std::sync::{Arc, Mutex};
 use tokio::sync::{mpsc, oneshot};
 #[allow(clippy::large_enum_variant)]
@@ -159,25 +553,6 @@ impl NodeClient {
         let _ = self.sender.try_send(NodeCommand::Broadcast(
             "blocks".into(),
             NetworkMessage::DomainCommitment(commitment),
-        ));
-    }
-    /// WIRING: the sync broadcast of verified commitments rides the settlement rollout; production callers land with that wave.
-    pub fn broadcast_verified_domain_commitment_sync(
-        &self,
-        payload: crate::domain::VerifiedDomainCommitment,
-    ) {
-        let _ = self.sender.try_send(NodeCommand::Broadcast(
-            "blocks".into(),
-            NetworkMessage::VerifiedDomainCommitment(payload),
-        ));
-    }
-    pub fn broadcast_cross_domain_message_sync(
-        &self,
-        msg: crate::cross_domain::CrossDomainMessage,
-    ) {
-        let _ = self.sender.try_send(NodeCommand::Broadcast(
-            "blocks".into(),
-            NetworkMessage::CrossDomainMessage(msg),
         ));
     }
     pub fn broadcast_slashing_evidence_sync(
@@ -379,6 +754,18 @@ pub fn load_or_generate_identity_key(path: Option<&str>) -> identity::Keypair {
     }
 }
 
+/// The gossipsub author signature is not a consensus input.
+///
+/// `MessageAuthenticity::Signed` makes the swarm sign every message with the
+/// node's Ed25519 identity key. That signature only says which peer relayed or
+/// authored a gossip frame; it is a classical signature and carries no
+/// security weight. No consensus decision rests on it: a block, a vote, an
+/// evidence record or a certificate is accepted on the composite signature
+/// inside its own payload, never on the gossip author. The one place the author
+/// field is read is the handshake, where it ties the handshake to the sending
+/// connection, and a forged author there only gets the frame dropped. The
+/// `gossip_author_is_not_a_consensus_input` test pins this by scanning this
+/// file for every read of the field.
 fn handshake_origin_matches_peer(
     propagation_source: PeerId,
     message_source: Option<PeerId>,
@@ -431,6 +818,78 @@ pub fn resolve_dns_seeds(seeds: &[String], port: u16) -> Vec<String> {
 /// One-shot responders that are all completed when the block arrives.
 pub type PendingBitswapFetches = HashMap<[u8; 32], Vec<oneshot::Sender<Result<Vec<u8>, String>>>>;
 
+/// Multi-frame range-sync cursor for the active `/sync` round.
+struct SyncRangeCursor {
+    peer: PeerId,
+    next_from: u64,
+    final_to: u64,
+    fork_recovery: bool,
+    chunks_remaining: u32,
+    staged_suffix: Vec<crate::core::block::Block>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum SyncHeaderPlan {
+    NothingNew,
+    AboveNext {
+        first: u64,
+    },
+    ForkDepthExceeded {
+        depth: u64,
+    },
+    Fetch {
+        from: u64,
+        final_to: u64,
+        fork_recovery: bool,
+        max_chunks: u32,
+    },
+}
+
+fn plan_sync_headers(
+    headers: &[crate::core::block::BlockHeader],
+    first_unheld: usize,
+    our_height: u64,
+) -> SyncHeaderPlan {
+    let Some(needed) = headers.get(first_unheld..) else {
+        return SyncHeaderPlan::NothingNew;
+    };
+    let (Some(first), Some(last)) = (needed.first(), needed.last()) else {
+        return SyncHeaderPlan::NothingNew;
+    };
+    let from = first.index;
+    let headers_end = last.index.saturating_add(1);
+    if from > our_height.saturating_add(1) {
+        return SyncHeaderPlan::AboveNext { first: from };
+    }
+    let max_batch = u64::try_from(crate::network::protocol::MAX_CHAIN_SYNC_BLOCKS).unwrap_or(1);
+    if from <= our_height {
+        let max_depth = u64::try_from(crate::consensus::MAX_REORG_DEPTH).unwrap_or(0);
+        let replaced = our_height.saturating_add(1).saturating_sub(from);
+        if replaced > max_depth {
+            return SyncHeaderPlan::ForkDepthExceeded { depth: replaced };
+        }
+        let final_to = headers_end
+            .min(our_height.saturating_add(1).saturating_add(max_batch))
+            .min(from.saturating_add(max_depth));
+        SyncHeaderPlan::Fetch {
+            from,
+            final_to,
+            fork_recovery: true,
+            max_chunks: 12,
+        }
+    } else {
+        let max_chunks = 4u32;
+        let final_to =
+            headers_end.min(from.saturating_add(max_batch.saturating_mul(u64::from(max_chunks))));
+        SyncHeaderPlan::Fetch {
+            from,
+            final_to,
+            fork_recovery: false,
+            max_chunks,
+        }
+    }
+}
+
 pub struct Node {
     swarm: Swarm<BudlumBehaviour>,
     command_rx: mpsc::Receiver<NodeCommand>,
@@ -439,6 +898,22 @@ pub struct Node {
     pub chain: ChainHandle,
     pub peer_manager: Arc<Mutex<PeerManager>>,
     pub gossip_dedup: Arc<Mutex<GossipDedup>>,
+    /// QC blobs in flight, one assembly per `(peer, epoch, height)`. At most
+    /// [`MAX_QC_ASSEMBLIES`] at once, and each one expires after
+    /// [`QC_ASSEMBLY_TTL`].
+    qc_assemblies:
+        HashMap<(PeerId, u64, u64), (std::time::Instant, crate::consensus::qc::QcBlobAssembler)>,
+    qc_fetches: HashMap<request_response::OutboundRequestId, QcFetch>,
+    /// Bounded work deferred by capacity, missing responses, or disconnects.
+    pending_qc_fetches: VecDeque<PendingQcFetch>,
+    /// Bounded in-progress deliveries: subsequent chunks spend the first
+    /// chunk's blob rate token, never a new token per 256 KiB frame.
+    qc_serves: QcServeTable,
+    /// Pending `/sync` finality certificate requests keyed by request id.
+    cert_fetches: HashMap<request_response::OutboundRequestId, (PeerId, u64)>,
+    sync_poll_cursor: usize,
+    last_observed_tip: u64,
+    stale_tip_ticks: u8,
     pub bootstrap_peers: Vec<String>,
     pub dns_seeds: Vec<String>,
     pub dns_seed_port: u16,
@@ -446,8 +921,30 @@ pub struct Node {
     pub sync_state: Arc<AtomicUsize>,
     /// Timestamp when sync_state was set to 1.
     pub sync_started_at: Arc<AtomicU64>,
+    /// Timestamp when the current sync *round* was opened.
+    ///
+    /// `sync_started_at` moves forward on every answered chunk, so it measures
+    /// the stall since the last answer; this one does not move until the round
+    /// is cleared, which is what bounds the round's total lifetime.
+    sync_round_started_at: Arc<AtomicU64>,
     /// Outbound request currently responsible for the one active sync round.
     active_sync_request: Option<request_response::OutboundRequestId>,
+    /// Peer currently serving the active single-flight sync round.
+    active_sync_peer: Option<PeerId>,
+    /// Peer whose most recent sync round stalled or failed unanswered, so the
+    /// next round prefers a different connected peer when one exists.
+    last_stalled_sync_peer: Option<PeerId>,
+    /// Multi-chunk range-sync cursor for the active sync round.
+    sync_range_cursor: Option<SyncRangeCursor>,
+    /// Spacing between the locator re-walks a fork signal triggers. Without it
+    /// a follower that cannot name an ancestor re-asks inside the same
+    /// iteration, the peer's rate limiter stops serving it, and the round
+    /// hangs (`ForkRewalkGate`, AF-17).
+    fork_rewalk: crate::network::fork_rewalk::ForkRewalkGate,
+    /// Votes that arrived before this node had the round to count them in
+    /// (`DeferredVotes`, AF-18). They are replayed when the round opens,
+    /// because a vote can never be retransmitted by its author.
+    deferred_votes: crate::network::deferred_votes::DeferredVotes,
     pub pending_bitswap_fetches: PendingBitswapFetches,
     /// The content id each outbound Bitswap request asked for. A response is
     /// checked against this, not against the cid the response claims.
@@ -455,7 +952,7 @@ pub struct Node {
     /// Target peer for each in-flight Bitswap request so `ConnectionClosed`
     /// retires only requests sent to the peer whose connection actually closed.
     bitswap_request_peers: HashMap<request_response::OutboundRequestId, PeerId>,
-    /// BLG-0212 (P11-F11): outstanding Bitswap answers per content id. A
+    /// Outstanding Bitswap answers per content id. A
     /// waiters list used to be removed only when a response delivered data;
     /// every `not_found`, every malformed response and every disconnected
     /// peer left the entry - and the callers in it - in the map forever.
@@ -472,6 +969,12 @@ pub struct Node {
     /// signing twice at one height. It used to be a local variable inside the
     /// event loop, which meant it started at zero on every restart.
     pub last_prevote_height: u64,
+    /// The prevote this node last published, for the retry in
+    /// [`FINALITY_VOTE_RETRY`]: the once-per-height marks above say a vote was
+    /// signed, not that it arrived.
+    prevote_published: Option<PublishedVote>,
+    /// The precommit this node last published, for the same retry.
+    precommit_published: Option<PublishedVote>,
     /// Where the vote high-water marks are persisted between runs.
     ///
     /// `None` disables persistence, which is what tests and ephemeral devnet
@@ -529,6 +1032,19 @@ pub struct Node {
     /// about its own view against the finality certificates, and it starts
     /// again from the live checkpoint on restart.
     regen_health: RegenHealthTick,
+    /// Transactions a reversion gave up, offered again after re-growth
+    ///, and the height the stash starts above.
+    regen_mempool: crate::domain::RegenMempool,
+    regen_stash_from: Option<u64>,
+    /// Witness requests in flight, with the root the answer must hash to.
+    witness_requests: HashMap<
+        request_response::OutboundRequestId,
+        (
+            crate::network::witness_protocol::WitnessRequest,
+            [u8; 32],
+            PeerId,
+        ),
+    >,
     /// Single-flight guard ensuring peer-supplied fork batches can keep at
     /// most one `reorg_to_peer_suffix` task running at a time (CWE-407).
     reorg_in_flight: Arc<std::sync::atomic::AtomicBool>,
@@ -541,6 +1057,9 @@ pub struct Node {
     /// never doubled up by the next one starting while its cost is still
     /// being paid.
     reorg_last_completed_at: Arc<AtomicU64>,
+    /// Consecutive reconstructions that ended in an error; see
+    /// [`REORG_MAX_BACKOFF_SECS`].
+    reorg_strikes: Arc<AtomicU32>,
 }
 
 /// RAII token releasing [`Node::reorg_in_flight`] when the active reorg task exits.
@@ -560,22 +1079,50 @@ impl Drop for ReorgFlightGuard {
     }
 }
 
-/// Shortest interval between two peer-triggered chain reconstructions.
+/// Shortest interval between two chain reconstructions.
 ///
-/// Five minutes: long enough that a peer broadcasting a fork batch every block
-/// cannot make the node re-walk its chain continuously, short enough that a
-/// genuine fork seen from a new peer is still adopted long before a human
-/// notices. A node that is actually behind does not depend on this path - it
-/// asks for the blocks it is missing over `/sync`, which is self-initiated and
-/// not throttled here.
-const REORG_MIN_INTERVAL_SECS: u64 = 300;
+/// Two seconds, and the reason is the devnet's own slot time: a fork has to
+/// be resolved within a slot or two or the mesh splits into two chains that
+/// each keep producing - every node then votes a different hash at the same
+/// checkpoint, no round ever reaches quorum, and the chain grows while
+/// finality stays at zero. The window started at five minutes, which the
+/// multi-node smoke cannot outrun.
+///
+/// What bounds the work over time is not this number but the way it is
+/// reached, and the backoff [`REORG_MAX_BACKOFF_SECS`] puts on top of it:
+/// single-flight means one reconstruction at a time, the fork depth is capped
+/// by `MAX_REORG_DEPTH`, the candidate has to beat this chain in fork choice,
+/// and the batch only exists as the answer to a sync request this node made
+/// itself. The interval only decides how often those attempts may repeat.
+const REORG_MIN_INTERVAL_SECS: u64 = 2;
 
-/// Has the minimum interval passed since the last reconstruction finished?
+/// Ceiling of the backoff a repeatedly failing reconstruction earns.
+///
+/// The floor above is what fork healing needs; the ceiling is what one peer
+/// cannot push past. Each reconstruction that reaches `try_reorg_suffix` and
+/// comes back an error doubles the window - 2, 4, 8, 16, 32, 64 - and any
+/// outcome that is not an error (a switch, or "not a better chain") resets it
+/// to the floor. A peer cannot do work forever at two-second intervals: it can
+/// only do it at the interval its own failure rate has bought. Honest fork
+/// healing is unaffected, because the fork it presents is either taken or
+/// known to be worse, and neither is an error.
+const REORG_MAX_BACKOFF_SECS: u64 = 64;
+
+/// The interval in force after `strikes` consecutive failing reconstructions.
+#[must_use]
+fn reorg_interval_secs(strikes: u32) -> u64 {
+    REORG_MIN_INTERVAL_SECS
+        .saturating_mul(1u64 << strikes.min(5))
+        .min(REORG_MAX_BACKOFF_SECS)
+}
+
+/// Has the current interval passed since the last reconstruction finished?
 ///
 /// `>=` on the boundary, and `saturating_sub` so a clock that steps backwards
 /// reads as "no time has passed" rather than as an enormous elapsed interval.
-fn reorg_interval_elapsed(last_completed: &AtomicU64, now: u64) -> bool {
-    now.saturating_sub(last_completed.load(Ordering::Acquire)) >= REORG_MIN_INTERVAL_SECS
+fn reorg_interval_elapsed(last_completed: &AtomicU64, strikes: &AtomicU32, now: u64) -> bool {
+    now.saturating_sub(last_completed.load(Ordering::Acquire))
+        >= reorg_interval_secs(strikes.load(Ordering::Acquire))
 }
 
 /// One attempted reconstruction: releases the single-flight flag and stamps
@@ -612,6 +1159,502 @@ struct VoteHistory {
 }
 
 impl Node {
+    /// Adds one chunk of a QC blob to its assembly. Returns the blob when the
+    /// last chunk arrives, `None` while chunks are missing.
+    ///
+    /// # Errors
+    ///
+    /// A message when the chunk is out of range, repeated, oversize, the
+    /// assembly table is full of other blobs, or the finished bytes do not
+    /// decode.
+    /// PARTIAL: allowed - a chunk that fails to push discards the whole
+    /// assembly on purpose: a half-assembled blob whose failed chunk
+    /// vanished could later complete from chunks the failure already
+    /// rejected; the error tells the peer to restart the transfer.
+    fn assemble_qc_chunk(
+        &mut self,
+        peer: PeerId,
+        epoch: u64,
+        height: u64,
+        chunk_index: u32,
+        chunk_count: u32,
+        chunk: Vec<u8>,
+    ) -> Result<Option<crate::consensus::qc::QcBlob>, String> {
+        use crate::consensus::qc::QcBlobAssembler;
+        let now = std::time::Instant::now();
+        self.qc_assemblies
+            .retain(|_, (started, _)| now.duration_since(*started) < QC_ASSEMBLY_TTL);
+        let key = (peer, epoch, height);
+        if !self.qc_assemblies.contains_key(&key) {
+            if self.qc_assemblies.len() >= MAX_QC_ASSEMBLIES {
+                return Err("too many QC blobs are being assembled".into());
+            }
+            let assembler = QcBlobAssembler::new(MAX_QC_WIRE_VALIDATORS, chunk_count as usize)?;
+            self.qc_assemblies.insert(key, (now, assembler));
+        }
+        let outcome = match self.qc_assemblies.get_mut(&key) {
+            Some((_, assembler)) => assembler.push(chunk_index as usize, chunk),
+            None => Err("QC assembly vanished".to_string()),
+        };
+        if let Err(e) = outcome {
+            self.qc_assemblies.remove(&key);
+            return Err(e);
+        }
+        let complete = self
+            .qc_assemblies
+            .get(&key)
+            .is_some_and(|(_, assembler)| assembler.is_complete());
+        if !complete {
+            return Ok(None);
+        }
+        match self.qc_assemblies.remove(&key) {
+            Some((_, assembler)) => assembler.finish().map(Some),
+            None => Err("QC assembly vanished".into()),
+        }
+    }
+
+    /// Does a finality-certificate refusal say this node lacks the block,
+    /// rather than that the peer lied?
+    ///
+    /// Two refusals belong here: the checkpoint block is not in this node's
+    /// chain yet, and this node holds a different block at that height (a
+    /// sibling fork). Both are conditions this node can fix by syncing, so
+    /// neither may be counted against the peer - a ban silences the peer that
+    /// would have carried this node across the fork.
+    fn finality_cert_names_a_block_we_lack(error: &str) -> bool {
+        let block_missing = error.contains("We don't have block at height");
+        let sibling_fork =
+            error.contains("Certificate hash") && error.contains("mismatch with our block hash");
+        let missing_epoch_set = error.contains("no validator set recorded for epoch");
+        block_missing || sibling_fork || missing_epoch_set
+    }
+
+    fn request_finality_cert(&mut self, peer: PeerId, checkpoint_height: u64) {
+        if checkpoint_height == 0
+            || self.cert_fetches.len() >= 8
+            || self
+                .cert_fetches
+                .values()
+                .any(|(_, h)| *h == checkpoint_height)
+        {
+            return;
+        }
+        let req = NetworkMessage::GetFinalityCert { checkpoint_height };
+        let req_id = self
+            .swarm
+            .behaviour_mut()
+            .sync
+            .send_request(&peer, req.to_bytes());
+        self.cert_fetches.insert(req_id, (peer, checkpoint_height));
+    }
+
+    async fn trigger_fork_sync(&mut self, peer_id: PeerId) {
+        if self.sync_state.load(Ordering::SeqCst) == 0 {
+            let locator = self.chain.get_locator().await;
+            let _ = self.request_headers_from_peer(Some(peer_id), locator, 500);
+        }
+    }
+
+    async fn request_next_finality_cert(&mut self, peer: PeerId) {
+        let chain_id = self.chain.get_chain_id().await;
+        let interval =
+            crate::core::chain_config::finality_checkpoint_interval_for_chain_id(chain_id);
+        let tip = self.chain.get_height().await;
+        let finalized = self.chain.get_finalized_height().await;
+        if interval > 0 && tip >= finalized.saturating_add(interval) {
+            let next_cp = (finalized / interval)
+                .saturating_add(1)
+                .saturating_mul(interval);
+            self.request_finality_cert(peer, next_cp);
+        }
+    }
+
+    async fn build_finality_cert_response(
+        chain: &ChainHandle,
+        checkpoint_height: u64,
+    ) -> NetworkMessage {
+        let chain_id = chain.get_chain_id().await;
+        let valid_cp = checkpoint_height > 0
+            && crate::chain::finality::is_checkpoint_height_for_chain(checkpoint_height, chain_id);
+        let mut cert = if valid_cp {
+            chain.get_finality_cert(checkpoint_height).await
+        } else {
+            None
+        };
+        if cert.is_none() && valid_cp {
+            let interval =
+                crate::core::chain_config::finality_checkpoint_interval_for_chain_id(chain_id);
+            let finalized = chain.get_finalized_height().await;
+            if interval > 0 && finalized > checkpoint_height {
+                let latest_cp = (finalized / interval).saturating_mul(interval);
+                if latest_cp >= checkpoint_height {
+                    cert = chain.get_finality_cert(latest_cp).await;
+                }
+            }
+        }
+        match cert {
+            Some(cert) => NetworkMessage::FinalityCertResponse {
+                found: true,
+                epoch: cert.epoch,
+                checkpoint_height: cert.checkpoint_height,
+                checkpoint_hash: cert.checkpoint_hash,
+                agg_sig_bls: cert.agg_sig_bls,
+                bitmap: cert.bitmap,
+                set_hash: cert.set_hash,
+                scheme_id: crate::chain::finality::BLS_SCHEME_RFC9380_V1.to_string(),
+            },
+            None => NetworkMessage::FinalityCertResponse {
+                found: false,
+                epoch: 0,
+                checkpoint_height: 0,
+                checkpoint_hash: String::new(),
+                agg_sig_bls: Vec::new(),
+                bitmap: Vec::new(),
+                set_hash: String::new(),
+                scheme_id: String::new(),
+            },
+        }
+    }
+
+    async fn handle_finality_cert_response(
+        &mut self,
+        peer: PeerId,
+        expected_height: u64,
+        response: &[u8],
+    ) {
+        match NetworkMessage::from_bytes_validated(response) {
+            Ok(NetworkMessage::FinalityCertResponse { found: false, .. }) => {
+                let chain_id = self.chain.get_chain_id().await;
+                let interval =
+                    crate::core::chain_config::finality_checkpoint_interval_for_chain_id(chain_id);
+                let tip = self.chain.get_height().await;
+                let finalized = self.chain.get_finalized_height().await;
+                let next = expected_height.saturating_add(interval);
+                if interval > 0
+                    && next <= tip
+                    && next <= finalized.saturating_add(interval.saturating_mul(16))
+                {
+                    self.request_finality_cert(peer, next);
+                }
+            }
+            Ok(NetworkMessage::FinalityCertResponse {
+                found: true,
+                epoch,
+                checkpoint_height,
+                checkpoint_hash,
+                agg_sig_bls,
+                bitmap,
+                set_hash,
+                scheme_id,
+            }) => {
+                let cert_chain_id = self.chain.get_chain_id().await;
+                if checkpoint_height < expected_height
+                    || !crate::chain::finality::is_checkpoint_height_for_chain(
+                        checkpoint_height,
+                        cert_chain_id,
+                    )
+                    || scheme_id != crate::chain::finality::BLS_SCHEME_RFC9380_V1
+                {
+                    self.peer_manager_lock().report_bad_behavior(&peer);
+                    return;
+                }
+                let qc_checkpoint_hash = checkpoint_hash.clone();
+                let cert = crate::chain::finality::FinalityCert {
+                    epoch,
+                    checkpoint_height,
+                    checkpoint_hash,
+                    chain_id: cert_chain_id,
+                    agg_sig_bls,
+                    bitmap,
+                    set_hash,
+                };
+                match self.chain.handle_finality_cert(cert).await {
+                    Ok(()) => {
+                        self.peer_manager_lock().report_good_behavior(&peer);
+                        let interval =
+                            crate::core::chain_config::finality_checkpoint_interval_for_chain_id(
+                                cert_chain_id,
+                            );
+                        let tip = self.chain.get_height().await;
+                        if interval > 0 && tip >= checkpoint_height.saturating_add(interval) {
+                            self.request_finality_cert(
+                                peer,
+                                checkpoint_height.saturating_add(interval),
+                            );
+                        }
+                    }
+                    Err(e) if e.contains("Missing verified QC blob") => {
+                        self.request_qc_blob(peer, epoch, checkpoint_height, qc_checkpoint_hash);
+                    }
+                    Err(e) if Self::finality_cert_names_a_block_we_lack(&e) => {
+                        self.sync_if_behind(peer, checkpoint_height).await;
+                        if e.contains("mismatch with our block hash") {
+                            self.trigger_fork_sync(peer).await;
+                        }
+                    }
+                    Err(e) => {
+                        warn!("Synced FinalityCert from {peer} rejected: {e}");
+                        self.peer_manager_lock().report_bad_behavior(&peer);
+                    }
+                }
+            }
+            Ok(_) | Err(_) => {
+                self.peer_manager_lock().report_bad_behavior(&peer);
+            }
+        }
+    }
+
+    async fn handle_sync_reconcile_tick(&mut self) {
+        self.expire_stuck_sync_round();
+        let tip = self.chain.get_height().await;
+        let finalized = self.chain.get_finalized_height().await;
+        if tip > self.last_observed_tip {
+            self.last_observed_tip = tip;
+            self.stale_tip_ticks = 0;
+        } else {
+            self.stale_tip_ticks = self.stale_tip_ticks.saturating_add(1);
+        }
+        let chain_id = self.chain.get_chain_id().await;
+        let interval =
+            crate::core::chain_config::finality_checkpoint_interval_for_chain_id(chain_id);
+        let (mut all_peers, mut sync_peers) = {
+            let pm = self.peer_manager_lock();
+            let active: Vec<PeerId> = pm
+                .connected_peers()
+                .into_iter()
+                .filter(|p| !pm.is_banned(p))
+                .collect();
+            let handshaked: Vec<PeerId> = active
+                .iter()
+                .copied()
+                .filter(|p| pm.is_handshaked(p))
+                .collect();
+            (active, handshaked)
+        };
+        all_peers.sort_by_key(|p| p.to_bytes());
+        sync_peers.sort_by_key(|p| p.to_bytes());
+        if !all_peers.is_empty() {
+            let peer = all_peers[self.sync_poll_cursor % all_peers.len()];
+            self.sync_poll_cursor = self.sync_poll_cursor.wrapping_add(1);
+            let hs = Self::handshake_message(&self.chain, false).await;
+            let sync = &mut self.swarm.behaviour_mut().sync;
+            let _ = sync.send_request(&peer, hs.to_bytes());
+        }
+        if !sync_peers.is_empty() {
+            let peer = sync_peers[self.sync_poll_cursor % sync_peers.len()];
+            let finality_lagging =
+                interval > 0 && tip >= finalized.saturating_add(interval.saturating_mul(2));
+            if self.sync_state.load(Ordering::SeqCst) == 0
+                && (self.stale_tip_ticks >= 2 || finality_lagging)
+            {
+                let locator = self.chain.get_locator().await;
+                let _ = self.request_headers_from_peer(Some(peer), locator, 500);
+            }
+            if interval > 0 && tip >= finalized.saturating_add(interval) {
+                let next_cp = (finalized / interval)
+                    .saturating_add(1)
+                    .saturating_mul(interval);
+                self.request_finality_cert(peer, next_cp);
+            }
+        }
+    }
+
+    /// Queue a validated missing QC, even when all fetch slots are busy.
+    fn request_qc_blob(&mut self, peer: PeerId, epoch: u64, height: u64, hash: String) {
+        if height == 0
+            || hash.len() > 128
+            || self
+                .qc_fetches
+                .values()
+                .any(|f| f.epoch == epoch && f.height == height && f.checkpoint_hash == hash)
+        {
+            return;
+        }
+        enqueue_qc_fetch(
+            &mut self.pending_qc_fetches,
+            PendingQcFetch {
+                epoch,
+                height,
+                checkpoint_hash: hash,
+                preferred: Some(peer),
+                last_peer: None,
+                ready_at: std::time::Instant::now(),
+            },
+        );
+        self.drain_qc_fetches();
+    }
+
+    fn retry_qc_fetch(&mut self, fetch: &QcFetch) {
+        enqueue_qc_fetch(
+            &mut self.pending_qc_fetches,
+            PendingQcFetch {
+                epoch: fetch.epoch,
+                height: fetch.height,
+                checkpoint_hash: fetch.checkpoint_hash.clone(),
+                preferred: None,
+                last_peer: Some(fetch.peer),
+                ready_at: std::time::Instant::now() + QC_RETRY_DELAY,
+            },
+        );
+    }
+
+    /// Drain at most the queue's initial size: disconnected peers and retry
+    /// delays cannot make the node loop spin. Each retry chooses a different
+    /// eligible peer when available and starts again at chunk zero.
+    fn drain_qc_fetches(&mut self) {
+        let count = self.pending_qc_fetches.len();
+        for _ in 0..count {
+            if self.qc_fetches.len() >= MAX_QC_ASSEMBLIES {
+                break;
+            }
+            let Some(pending) = self.pending_qc_fetches.pop_front() else {
+                break;
+            };
+            if pending.ready_at > std::time::Instant::now() {
+                self.pending_qc_fetches.push_back(pending);
+                continue;
+            }
+            let occupied: HashMap<PeerId, usize> =
+                self.qc_fetches
+                    .values()
+                    .fold(HashMap::new(), |mut counts, fetch| {
+                        *counts.entry(fetch.peer).or_default() += 1;
+                        counts
+                    });
+            let peers = {
+                let pm = self.peer_manager_lock();
+                pm.connected_peers()
+                    .into_iter()
+                    .filter(|peer| pm.is_handshaked(peer) && !pm.is_banned(peer))
+                    .collect::<Vec<_>>()
+            };
+            let Some(peer) =
+                select_qc_peer(&peers, &occupied, pending.preferred, pending.last_peer)
+            else {
+                self.pending_qc_fetches.push_back(pending);
+                continue;
+            };
+            let request = NetworkMessage::GetQcBlob {
+                epoch: pending.epoch,
+                checkpoint_height: pending.height,
+                chunk_index: 0,
+            };
+            let id = self
+                .swarm
+                .behaviour_mut()
+                .sync
+                .send_request(&peer, request.to_bytes());
+            self.qc_fetches.insert(
+                id,
+                QcFetch {
+                    peer,
+                    epoch: pending.epoch,
+                    height: pending.height,
+                    checkpoint_hash: pending.checkpoint_hash,
+                    chunk_index: 0,
+                    chunk_count: None,
+                },
+            );
+        }
+    }
+
+    /// Continue a peer-bound fetch, importing only a complete, matching blob.
+    /// PARTIAL: allowed - the removes are branch-local: the missing-response
+    /// path discards the assembly and returns before any later error, and
+    /// the metadata errors below run only on the found path, where no remove
+    /// has happened yet; text order after a remove is not control flow after
+    /// it.
+    async fn accept_qc_response(
+        &mut self,
+        fetch: QcFetch,
+        peer: PeerId,
+        response: NetworkMessage,
+    ) -> Result<QcResponseAction, String> {
+        let NetworkMessage::QcBlobResponse {
+            epoch,
+            checkpoint_height,
+            checkpoint_hash,
+            blob_data,
+            found,
+            chunk_index,
+            chunk_count,
+        } = response
+        else {
+            return Err("unexpected QC response type".into());
+        };
+        if peer != fetch.peer
+            || epoch != fetch.epoch
+            || checkpoint_height != fetch.height
+            || chunk_index != fetch.chunk_index
+        {
+            return Err("QC response does not match the outbound request".into());
+        }
+        if !found {
+            if chunk_count != 0 || !blob_data.is_empty() || !checkpoint_hash.is_empty() {
+                return Err("malformed missing QC response".into());
+            }
+            self.qc_assemblies.remove(&(peer, epoch, checkpoint_height));
+            return Ok(QcResponseAction::Missing);
+        }
+        let max_chunks = crate::consensus::qc::qc_blob_max_bytes(MAX_QC_WIRE_VALIDATORS)
+            .div_ceil(crate::consensus::qc::QC_CHUNK_BYTES);
+        if checkpoint_hash != fetch.checkpoint_hash
+            || chunk_count == 0
+            || chunk_count as usize > max_chunks
+            || chunk_index >= chunk_count
+            || fetch
+                .chunk_count
+                .is_some_and(|previous| previous != chunk_count)
+            || blob_data.is_empty()
+        {
+            return Err("invalid QC response metadata".into());
+        }
+        let blob = self.assemble_qc_chunk(
+            peer,
+            epoch,
+            checkpoint_height,
+            chunk_index,
+            chunk_count,
+            blob_data,
+        )?;
+        if let Some(blob) = blob {
+            if chunk_index + 1 != chunk_count
+                || blob.epoch != epoch
+                || blob.checkpoint_height != checkpoint_height
+                || blob.checkpoint_hash != fetch.checkpoint_hash
+            {
+                return Err("assembled QC blob does not match its request".into());
+            }
+            self.chain.import_qc_blob(blob).await?;
+            self.peer_manager_lock().report_good_behavior(&peer);
+            return Ok(QcResponseAction::Imported);
+        } else {
+            let next = chunk_index + 1;
+            if next >= chunk_count {
+                return Err("incomplete QC blob".into());
+            }
+            let request = NetworkMessage::GetQcBlob {
+                epoch,
+                checkpoint_height,
+                chunk_index: next,
+            };
+            let id = self
+                .swarm
+                .behaviour_mut()
+                .sync
+                .send_request(&peer, request.to_bytes());
+            self.qc_fetches.insert(
+                id,
+                QcFetch {
+                    chunk_index: next,
+                    chunk_count: Some(chunk_count),
+                    ..fetch
+                },
+            );
+        }
+        Ok(QcResponseAction::InProgress)
+    }
+
     /// Take the `PeerManager` lock, recovering if it was poisoned.
     ///
     /// A `Mutex` poisons when a thread panics while holding it, and every
@@ -697,12 +1740,23 @@ impl Node {
         let target = {
             let pm = self.peer_manager_lock();
             let eligible = |p: &PeerId| pm.is_handshaked(p) && !pm.is_banned(p);
-            match preferred.filter(eligible) {
+            let stalled = self.last_stalled_sync_peer;
+            match preferred.filter(|p| eligible(p) && Some(*p) != stalled) {
                 Some(p) => Some(p),
-                None => pm
-                    .get_best_peers(MAX_PEERS)
-                    .into_iter()
-                    .find(|p| pm.connected_peers().contains(p) && eligible(p)),
+                None => {
+                    let best = pm.get_best_peers(MAX_PEERS);
+                    best.iter()
+                        .copied()
+                        .find(|p| {
+                            pm.connected_peers().contains(p) && eligible(p) && Some(*p) != stalled
+                        })
+                        .or_else(|| {
+                            preferred.filter(eligible).or_else(|| {
+                                best.into_iter()
+                                    .find(|p| pm.connected_peers().contains(p) && eligible(p))
+                            })
+                        })
+                }
             }
         };
         let Some(peer) = target else {
@@ -710,18 +1764,17 @@ impl Node {
             return false;
         };
         let req = NetworkMessage::GetHeaders { locator, limit };
-        self.sync_state.store(1, Ordering::SeqCst);
-        self.sync_started_at.store(
+        self.begin_sync_round(
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs(),
-            Ordering::SeqCst,
         );
         if let Some(ref m) = self.metrics {
             m.p2p_sync_requests.inc();
         }
         let sync = &mut self.swarm.behaviour_mut().sync;
+        self.active_sync_peer = Some(peer);
         self.active_sync_request = Some(sync.send_request(&peer, req.to_bytes()));
         info!("Requesting headers from {peer} over /sync (limit {limit})");
         true
@@ -729,45 +1782,44 @@ impl Node {
 
     /// One regeneration health tick against the finalized checkpoints.
     ///
-    /// The canonical commitment for a height is the checkpoint hash in the
-    /// stored finality certificate; the held one is this node's own block
-    /// hash at that height. [`RegenHealthTick::observe`] decides and moves
-    /// the reversion ledger. This method gathers the view and acts on the
+    /// The canonical commitment of each stage comes from the post-quantum
+    /// source (Root Seal, verified anchor, finality checkpoint with its QC);
+    /// the held one is this node's own. [`RegenHealthTick::observe`] decides
+    /// and moves the reversion ledger. This method gathers the view and acts on the
     /// outcome: repair and revert open a sync round, alarms are logged as
     /// errors with their stable kind label.
     async fn regen_health_tick(&mut self) {
+        use crate::domain::regeneration_stage::Stage;
         let live = self.chain.get_finalized_height().await;
-        let chain_id = self.chain.get_chain_id().await;
-        let interval =
-            crate::core::chain_config::finality_checkpoint_interval_for_chain_id(chain_id);
-        let previous = live.checked_sub(interval);
-        let mut heights = vec![live];
-        heights.extend(previous);
-        let held = self.regen_health.held_height();
-        if !heights.contains(&held) {
-            heights.push(held);
+        let (polyp, previous) = self.chain.pq_sealed_heights(live).await;
+        // Every stage is read through the post-quantum canonical source: a
+        // BLS-only certificate or an unverified anchor yields no seal, and the
+        // tick treats a commitment without a seal as absent.
+        let mut wanted = vec![(Stage::Medusa, live)];
+        wanted.extend(previous.map(|height| (Stage::Ephyra, height)));
+        wanted.extend(polyp.map(|height| (Stage::Polyp, height)));
+        let held = (
+            self.regen_health.held_stage(),
+            self.regen_health.held_height(),
+        );
+        if !wanted.contains(&held) {
+            wanted.push(held);
         }
-        let mut checkpoints = Vec::with_capacity(heights.len());
-        for height in heights {
-            let local = self
-                .chain
-                .get_block(height)
-                .await
-                .and_then(|block| hash32(&block.hash));
-            let canonical = self
-                .chain
-                .get_finality_cert(height)
-                .await
-                .and_then(|cert| hash32(&cert.checkpoint_hash));
+        let mut checkpoints = Vec::with_capacity(wanted.len());
+        for (stage, height) in wanted {
+            let observed = self.chain.pq_stage_observation(stage, height).await;
             checkpoints.push(Checkpoint {
+                stage,
                 height,
-                local,
-                canonical,
+                local: observed.local,
+                canonical: observed.canonical,
+                seal: observed.seal,
             });
         }
         let view = CheckpointView {
             live,
             previous,
+            polyp,
             checkpoints,
         };
         let outcome = self.regen_health.observe(&view);
@@ -805,6 +1857,16 @@ impl Node {
                 "Regeneration health alarm: self-recovery is impossible or unsafe"
             ),
         }
+        match &outcome {
+            TickOutcome::Reverted(reversion) => {
+                self.stash_reverted_transactions(reversion.height_after, live)
+                    .await;
+            }
+            TickOutcome::Healthy if self.regen_health.held_stage() == Stage::Medusa => {
+                self.rebroadcast_stashed_transactions(live).await;
+            }
+            _ => {}
+        }
         if outcome.opens_sync() {
             let locator = self.chain.get_locator().await;
             if !self.request_headers_from_peer(None, locator, 500) {
@@ -813,10 +1875,152 @@ impl Node {
         }
     }
 
+    /// Ask `peer` for the witnesses of transactions of one block. The answer is
+    /// admitted only when it hashes to `witness_root` (the root the block
+    /// header commits); a peer that answers anything else is reported.
+    /// WIRING: unwired - no caller in this tree yet; kept as a declared surface, and nothing depends on it until one arrives.
+    pub fn request_witnesses(
+        &mut self,
+        peer: PeerId,
+        request: crate::network::witness_protocol::WitnessRequest,
+        witness_root: [u8; 32],
+    ) {
+        let id = self
+            .swarm
+            .behaviour_mut()
+            .witness
+            .send_request(&peer, request.encode());
+        self.witness_requests
+            .insert(id, (request, witness_root, peer));
+    }
+
+    /// The most blocks one reversion stashes transactions of.
+    const REGEN_STASH_MAX_BLOCKS: u64 = 2_000;
+
+    /// Keep the transactions of the heights a reversion gave up: the
+    /// view above `target` is rolled back, so what sat in it would vanish.
+    async fn stash_reverted_transactions(&mut self, target: u64, live: u64) {
+        let first = target.saturating_add(1);
+        let last = live.min(target.saturating_add(Self::REGEN_STASH_MAX_BLOCKS));
+        let mut kept = 0;
+        for height in first..=last {
+            let Some(block) = self.chain.get_block(height).await else {
+                continue;
+            };
+            kept += self.regen_mempool.stash(
+                &block.transactions,
+                height,
+                &crate::mempool::pool::charged_bytes,
+            );
+        }
+        self.regen_stash_from = Some(
+            self.regen_stash_from
+                .map_or(target, |held| held.min(target)),
+        );
+        info!(
+            kept,
+            target, live, "Regeneration: stashed the transactions of the reverted heights"
+        );
+    }
+
+    /// After the ledger is back at the adult stage, offer the stashed
+    /// transactions the canonical chain did not include to the mempool and the
+    /// network again. The mempool door validates them like any other.
+    async fn rebroadcast_stashed_transactions(&mut self, live: u64) {
+        let Some(from) = self.regen_stash_from else {
+            return;
+        };
+        if self.regen_mempool.is_empty() {
+            self.regen_stash_from = None;
+            return;
+        }
+        let mut confirmed = std::collections::HashSet::new();
+        let last = live.min(from.saturating_add(Self::REGEN_STASH_MAX_BLOCKS * 2));
+        for height in from.saturating_add(1)..=last {
+            if let Some(block) = self.chain.get_block(height).await {
+                confirmed.extend(block.transactions.iter().map(|tx| tx.hash.clone()));
+            }
+        }
+        let txs = self
+            .regen_mempool
+            .take_unconfirmed(live, &|hash| confirmed.contains(hash));
+        self.regen_stash_from = None;
+        let mut accepted = 0;
+        for tx in txs {
+            if self.chain.add_transaction(tx.clone()).await.is_ok() {
+                accepted += 1;
+                let msg = NetworkMessage::Transaction(tx);
+                let topic = gossipsub::IdentTopic::new("transactions");
+                if let Err(e) = self
+                    .swarm
+                    .behaviour_mut()
+                    .gossipsub
+                    .publish(topic, msg.to_bytes())
+                {
+                    warn!("Failed to gossip a re-offered transaction: {e}");
+                }
+            }
+        }
+        info!(
+            accepted,
+            "Regeneration: re-offered the stashed transactions after re-growth"
+        );
+    }
+
     fn clear_sync_round(&mut self) {
         self.sync_state.store(0, Ordering::SeqCst);
         self.sync_started_at.store(0, Ordering::SeqCst);
+        self.sync_round_started_at.store(0, Ordering::SeqCst);
         self.active_sync_request = None;
+        self.active_sync_peer = None;
+        self.sync_range_cursor = None;
+    }
+
+    /// Open the round clock: stamped once per round, never refreshed by an
+    /// answer, so [`MAX_SYNC_ROUND_SECS`] bounds the round and not the stall.
+    fn begin_sync_round(&mut self, now_secs: u64) {
+        self.sync_state.store(1, Ordering::SeqCst);
+        self.sync_started_at.store(now_secs, Ordering::SeqCst);
+        if self.sync_round_started_at.load(Ordering::SeqCst) == 0 {
+            self.sync_round_started_at.store(now_secs, Ordering::SeqCst);
+        }
+    }
+
+    /// Whether the active round may still buy time from its peer's answers.
+    ///
+    /// `false` once the round is older than [`MAX_SYNC_ROUND_SECS`]: the refresh
+    /// is then skipped, the stall sweep closes the round on its own clock and
+    /// charges `report_unanswered_request`, which is the only path that accrues
+    /// the four strikes a pinned peer is banned on.
+    fn sync_round_may_refresh(&self, now_secs: u64) -> bool {
+        let round_start = self.sync_round_started_at.load(Ordering::SeqCst);
+        round_start == 0 || now_secs.saturating_sub(round_start) < MAX_SYNC_ROUND_SECS
+    }
+
+    fn expire_stuck_sync_round(&mut self) {
+        if self.sync_state.load(Ordering::SeqCst) == 1 {
+            let started = self.sync_started_at.load(Ordering::SeqCst);
+            if started > 0 {
+                let now = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                if now.saturating_sub(started) > SYNC_TIMEOUT_SECS {
+                    warn!(
+                        "Sync state stuck for {}s (timeout={}s), resetting to 0",
+                        now.saturating_sub(started),
+                        SYNC_TIMEOUT_SECS,
+                    );
+                    if let Some(stalled_peer) = self.active_sync_peer {
+                        self.last_stalled_sync_peer = Some(stalled_peer);
+                        let mut pm = self.peer_manager_lock();
+                        pm.report_unanswered_request(&stalled_peer);
+                        pm.report_slow_sync(&stalled_peer);
+                    }
+                    self.clear_sync_round();
+                }
+            }
+        }
     }
 
     /// Try to switch to the fork that `suffix` belongs to.
@@ -830,6 +2034,8 @@ impl Node {
         peer: PeerId,
         flight_guard: ReorgFlightGuard,
         last_completed: Arc<AtomicU64>,
+        strikes: Arc<AtomicU32>,
+        peer_manager: Arc<Mutex<PeerManager>>,
     ) {
         // Peer-independent throttle (CWE-407). A batch is cheap to send and
         // proportional to the node's own chain to act on, so an attacker who
@@ -847,9 +2053,11 @@ impl Node {
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
-        if !reorg_interval_elapsed(&last_completed, now) {
+        if !reorg_interval_elapsed(&last_completed, &strikes, now) {
             warn!(
-                "Reorg from {peer} ignored: a peer-triggered reconstruction finished less than {REORG_MIN_INTERVAL_SECS}s ago"
+                "Reorg from {peer} ignored: the previous reconstruction finished less than {}s ago ({} consecutive failures)",
+                reorg_interval_secs(strikes.load(Ordering::Acquire)),
+                strikes.load(Ordering::Acquire)
             );
             return;
         }
@@ -910,14 +2118,42 @@ impl Node {
         };
         // The join happens on the chain actor's side of the boundary
         // (CWE-400). Reading the prefix here meant a genesis-wide copy whose
-        // size the peer chose with `start`, every five minutes, whether or not
-        // the candidate could win fork choice; the actor already holds the
+        // size the peer chose with `start`, on every allowed attempt, whether
+        // or not the candidate could win fork choice; the actor already holds the
         // chain and joins the suffix before copying anything, refusing a batch
         // that cannot make the chain longer for two integer comparisons.
         match chain.try_reorg_suffix(suffix).await {
-            Ok(true) => info!("Reorg to the chain of {peer} done"),
-            Ok(false) => info!("Reorg to the chain of {peer} not needed: not a better chain"),
-            Err(error) => warn!("Reorg to the chain of {peer} failed: {error}"),
+            Ok(true) => {
+                strikes.store(0, Ordering::Release);
+                // The round ceiling can now close a round against an honest but
+                // slow peer, charging it an unanswered-sync strike for a suffix
+                // that was delivered and accepted. Credit those strikes back
+                // here, where the chain has actually adopted the peer's blocks,
+                // so genuine fork recovery is never punished.
+                peer_manager
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .report_sync_success(&peer);
+                info!("Reorg to the chain of {peer} done");
+            }
+            Ok(false) => {
+                // A zero-work refusal ("not a better chain") proves nothing
+                // about the peer's honesty and must not wipe out backoff
+                // earned from failing reconstructions; otherwise one sync peer
+                // can alternate a failing suffix with a 1-block non-better
+                // suffix and force full-chain reconstruction at the floor rate.
+                info!("Reorg to the chain of {peer} not needed: not a better chain");
+            }
+            Err(error) => {
+                // A reconstruction that errored did the work and bought this
+                // node nothing. The next window is twice as long, up to
+                // `REORG_MAX_BACKOFF_SECS`.
+                let earned = strikes.fetch_add(1, Ordering::AcqRel).saturating_add(1);
+                warn!(
+                    "Reorg to the chain of {peer} failed: {error} (window now {}s)",
+                    reorg_interval_secs(earned)
+                );
+            }
         }
     }
 
@@ -1072,8 +2308,11 @@ impl Node {
         );
         {
             let mut pm = self.peer_manager_lock();
+            let was_handshaked = pm.is_handshaked(&peer_id);
             pm.set_handshaked(&peer_id, true);
-            pm.report_good_behavior(&peer_id);
+            if !was_handshaked {
+                pm.report_good_behavior(&peer_id);
+            }
         }
         Some(best_height)
     }
@@ -1232,13 +2471,19 @@ impl Node {
             ip_colocation_factor_threshold: 4.0,
             ..Default::default()
         };
+        score_params
+            .ip_colocation_factor_whitelist
+            .insert(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST));
+        score_params
+            .ip_colocation_factor_whitelist
+            .insert(std::net::IpAddr::V6(std::net::Ipv6Addr::LOCALHOST));
         // The topics this node publishes on. Registering them keeps the
         // per-topic score caps meaningful; without an entry a topic
         // contributes nothing and only the global penalties apply.
         for topic in ["blocks", "transactions"] {
             score_params.topics.insert(
                 gossipsub::IdentTopic::new(topic).hash(),
-                gossipsub::TopicScoreParams::default(),
+                budlum_topic_score_params(),
             );
         }
         let score_thresholds = gossipsub::PeerScoreThresholds::default();
@@ -1264,7 +2509,17 @@ impl Node {
         };
         let swarm = libp2p::SwarmBuilder::with_existing_identity(local_key)
             .with_tokio()
-            .with_tcp(tcp::Config::default(), noise::Config::new, yamux_config)?
+            .with_tcp(
+                tcp::Config::default(),
+                // TLS 1.3 first, Noise as the fallback the devnet
+                // still speaks. The security upgrade is negotiated per
+                // connection, so a TLS-only peer and a Noise-only peer both
+                // connect to this node.
+                (tls::Config::new, noise::Config::new),
+                yamux_config,
+            )?
+            // QUIC carries TLS 1.3 itself.
+            .with_quic()
             // The raw TCP transport only understands /ip4 and /ip6 multiaddrs;
             // It answers every /dns4, /dns6 or /dnsaddr dial with
             // MultiaddrNotSupported. `with_dns` layers the system resolver on
@@ -1322,6 +2577,13 @@ impl Node {
                         StreamProtocol::new(bud_node::BITSWAP_PROTOCOL_NAME),
                         request_response::ProtocolSupport::Full,
                     )],
+                    req_cfg.clone(),
+                );
+                let witness = request_response::Behaviour::new(
+                    [(
+                        StreamProtocol::new(crate::network::witness_protocol::WITNESS_PROTOCOL),
+                        request_response::ProtocolSupport::Full,
+                    )],
                     req_cfg,
                 );
 
@@ -1336,6 +2598,7 @@ impl Node {
                     kad: kademlia,
                     sync,
                     bitswap,
+                    witness,
                     limits: libp2p::connection_limits::Behaviour::new(
                         libp2p::connection_limits::ConnectionLimits::default()
                             .with_max_established(Some(
@@ -1359,6 +2622,7 @@ impl Node {
         let peer_count = Arc::new(AtomicUsize::new(0));
         let sync_state = Arc::new(AtomicUsize::new(0));
         let sync_started_at = Arc::new(AtomicU64::new(0));
+        let sync_round_started_at = Arc::new(AtomicU64::new(0));
         Ok(Node {
             swarm,
             peer_id,
@@ -1367,13 +2631,27 @@ impl Node {
             chain,
             peer_manager,
             gossip_dedup,
+            qc_assemblies: HashMap::new(),
+            qc_fetches: HashMap::new(),
+            pending_qc_fetches: VecDeque::new(),
+            qc_serves: HashMap::new(),
+            cert_fetches: HashMap::new(),
+            sync_poll_cursor: 0,
+            last_observed_tip: 0,
+            stale_tip_ticks: 0,
             bootstrap_peers: Vec::new(),
             dns_seeds: Vec::new(),
             dns_seed_port: 0,
             peer_count,
             sync_state,
             sync_started_at,
+            sync_round_started_at,
             active_sync_request: None,
+            active_sync_peer: None,
+            last_stalled_sync_peer: None,
+            sync_range_cursor: None,
+            fork_rewalk: crate::network::fork_rewalk::ForkRewalkGate::new(),
+            deferred_votes: crate::network::deferred_votes::DeferredVotes::new(),
             pending_bitswap_fetches: HashMap::new(),
             bitswap_pending_attempts: HashMap::new(),
             bitswap_requests: HashMap::new(),
@@ -1386,6 +2664,8 @@ impl Node {
             validator_address: None,
             last_precommit_height: 0,
             last_prevote_height: 0,
+            prevote_published: None,
+            precommit_published: None,
             vote_history_db: None,
             identity_path: None,
             banned_peer_db: None,
@@ -1398,8 +2678,12 @@ impl Node {
             mobile_profile: None,
             mobile_peer_ceiling: MAX_PEERS,
             regen_health: RegenHealthTick::default(),
+            regen_mempool: crate::domain::RegenMempool::new(),
+            regen_stash_from: None,
+            witness_requests: HashMap::new(),
             reorg_in_flight: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             reorg_last_completed_at: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            reorg_strikes: Arc::new(std::sync::atomic::AtomicU32::new(0)),
         })
     }
 
@@ -1578,6 +2862,11 @@ impl Node {
     pub fn listen(&mut self, port: u16) -> Result<(), Box<dyn Error>> {
         let addr: Multiaddr = format!("/ip4/0.0.0.0/tcp/{port}").parse()?;
         self.swarm.listen_on(addr)?;
+        // The same port over QUIC (UDP),.
+        let quic: Multiaddr = format!("/ip4/0.0.0.0/udp/{port}/quic-v1").parse()?;
+        if let Err(e) = self.swarm.listen_on(quic) {
+            warn!("QUIC listener not started: {e}");
+        }
         info!("Listening on port {port}");
         Ok(())
     }
@@ -1600,8 +2889,11 @@ impl Node {
         self.swarm
             .behaviour_mut()
             .kad
-            .add_address(&peer_id, multiaddr);
-        self.swarm.behaviour_mut().kad.bootstrap()?;
+            .add_address(&peer_id, multiaddr.clone());
+        if !self.swarm.is_connected(&peer_id) && peer_id != self.peer_id {
+            let _ = self.swarm.dial(multiaddr);
+        }
+        let _ = self.swarm.behaviour_mut().kad.bootstrap();
         Ok(())
     }
     /// Restore the vote high-water marks written by a previous run.
@@ -1651,33 +2943,36 @@ impl Node {
         }
     }
 
-    /// Record the vote high-water marks.
+    /// Record the vote high-water marks before any vote reaches the wire.
     ///
-    /// BLG-0210 (P11-F09): written BEFORE the vote is published, never
-    /// batched, and atomically. Persist-then-publish can at worst lose a
-    /// round (mark ahead of the wire); the old publish-then-persist order lost
-    /// the record of a vote everyone else saw.
-    fn save_vote_history(&self) {
+    /// Written BEFORE the vote is admitted or published, never batched, and
+    /// atomically. If `vote_history_db` is configured and persisting fails,
+    /// callers refuse to admit or gossip the vote so no peer ever observes a
+    /// signature whose high-water mark was not durably recorded on disk.
+    fn save_vote_history(&self) -> Result<(), String> {
         let Some(ref path) = self.vote_history_db else {
-            return;
+            return Ok(());
         };
-        let Some(parent) = path.parent() else {
+        Self::write_vote_history_file(path, self.last_prevote_height, self.last_precommit_height)
+    }
+
+    fn write_vote_history_file(
+        path: &std::path::Path,
+        last_prevote_height: u64,
+        last_precommit_height: u64,
+    ) -> Result<(), String> {
+        let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) else {
             warn!(path = %path.display(), "vote-history path has no parent directory");
-            return;
+            return Err("vote-history path has no parent directory".into());
         };
         if let Err(e) = std::fs::create_dir_all(parent) {
             warn!(error = %e, path = %path.display(), "Cannot create vote-history directory");
-            return;
+            return Err(format!("cannot create vote-history directory: {e}"));
         }
         let body = serde_json::json!({
-            "last_prevote_height": self.last_prevote_height,
-            "last_precommit_height": self.last_precommit_height,
+            "last_prevote_height": last_prevote_height,
+            "last_precommit_height": last_precommit_height,
         });
-        // BLG-0210 (P11-F09): tmp + fsync + rename. A plain `fs::write` left
-        // a truncated file behind when a crash landed mid-write; the loader
-        // parsed nothing, reset BOTH high-water marks to zero, and the vote
-        // that triggered the write was already on the wire - the exact
-        // double-sign window the marks exist to close.
         let tmp = parent.join(format!(
             ".{}.tmp",
             path.file_name()
@@ -1692,7 +2987,6 @@ impl Node {
                 f.sync_all()?;
             }
             std::fs::rename(&tmp, path)?;
-            // Durability of the rename itself; directory sync is best-effort.
             if let Ok(d) = std::fs::File::open(parent) {
                 let _ = d.sync_all();
             }
@@ -1700,9 +2994,14 @@ impl Node {
         })();
         if let Err(e) = write {
             let _ = std::fs::remove_file(&tmp);
-            warn!(error = %e, path = %path.display(),
-                  "Failed to persist vote history; a restart could re-sign a checkpoint");
+            warn!(
+                error = %e,
+                path = %path.display(),
+                "Failed to persist vote history; withholding finality vote rather than risking a restart double-sign"
+            );
+            return Err(format!("failed to persist vote history: {e}"));
         }
+        Ok(())
     }
 
     fn load_banned_peers_from_db(&self) {
@@ -1810,7 +3109,19 @@ impl Node {
 
         let mut gc_interval = tokio::time::interval(Duration::from_secs(60));
         let mut discovery_interval = tokio::time::interval(Duration::from_secs(300));
-        let mut finality_interval = tokio::time::interval(Duration::from_secs(30));
+        discovery_interval.reset();
+        // The vote beat. A checkpoint is `finality_checkpoint_interval` blocks
+        // away (two on the devnet, about 2.4 s) and an aggregator holds one
+        // round at a time, so the beat has to be well inside a round: on a
+        // 30 s beat the devnet mesh started 445 rounds and cast five votes,
+        // and every round was displaced before a quorum could form. One
+        // command round trip per beat is the cost.
+        let mut finality_interval = tokio::time::interval(Duration::from_millis(250));
+        // The health tick keeps its own, slower beat - it used to share the
+        // finality beat, and at 250 ms it would fire four times a second.
+        let mut finality_health_interval = tokio::time::interval(Duration::from_secs(30));
+        let mut qc_retry_interval = tokio::time::interval(QC_RETRY_DELAY);
+        let mut sync_reconcile_interval = tokio::time::interval(Duration::from_secs(4));
         let mut slashing_gossip_interval = tokio::time::interval(Duration::from_secs(5));
         let mut dht_interval = tokio::time::interval(DHT_BOOTSTRAP_INTERVAL);
         let mut banning_interval = tokio::time::interval(Duration::from_secs(60));
@@ -1865,23 +3176,7 @@ impl Node {
                     // The sync cycle is considered stuck (e.g., peer disconnected
                     // Mid-sync) and we reset it to 0 so the node reports correct
                     // Status and can initiate a new sync.
-                    if self.sync_state.load(Ordering::SeqCst) == 1 {
-                        let started = self.sync_started_at.load(Ordering::SeqCst);
-                        if started > 0 {
-                            let now = SystemTime::now()
-                                .duration_since(UNIX_EPOCH)
-                                .unwrap_or_default()
-                                .as_secs();
-                            if now.saturating_sub(started) > SYNC_TIMEOUT_SECS {
-                                warn!(
-                                    "Sync state stuck for {}s (timeout={}s), resetting to 0",
-                                    now.saturating_sub(started),
-                                    SYNC_TIMEOUT_SECS,
-                                );
-                                self.clear_sync_round();
-                            }
-                        }
-                    }
+                    self.expire_stuck_sync_round();
                 }
                 _ = discovery_interval.tick() => {
                     info!("Running periodic peer discovery...");
@@ -1891,11 +3186,22 @@ impl Node {
                         }
                     }
                 }
-                _ = finality_interval.tick() => {
+                _ = qc_retry_interval.tick() => {
+                    self.expire_stuck_sync_round();
+                    // Later finality makes older pending requests unnecessary.
+                    let finalized = self.chain.get_finalized_height().await;
+                    self.pending_qc_fetches.retain(|pending| pending.height > finalized);
+                    self.drain_qc_fetches();
+                }
+                _ = sync_reconcile_interval.tick() => {
+                    self.handle_sync_reconcile_tick().await;
+                }
+                _ = finality_health_interval.tick() => {
                     // Every node checks its own view, validator or not,
-                    // so the health tick runs before the validator gate.
+                    // so the health tick runs on a beat of its own.
                     self.regen_health_tick().await;
-
+                }
+                _ = finality_interval.tick() => {
                     // Resolve validator address lazily
                     if self.validator_address.is_none() {
                         self.validator_address = self.chain.get_validator_address().await;
@@ -1905,24 +3211,152 @@ impl Node {
                         continue;
                     };
 
-                    let height = self.chain.get_height().await;
-                    let chain_id = self.chain.get_chain_id().await;
-                    let checkpoint_interval =
-                        crate::core::chain_config::finality_checkpoint_interval_for_chain_id(
-                            chain_id,
-                        );
-                    let checkpoint_height = (height / checkpoint_interval) * checkpoint_interval;
-
                     // --- Check aggregator state for auto-precommit ---
+                    //
+                    // The aggregator also names the round this node votes in.
+                    // Deriving the checkpoint from the local tip instead made
+                    // nodes one block apart vote at different heights, and a
+                    // vote only counts in an aggregator that holds its own
+                    // height: no round ever saw a quorum.
                     let agg_state = self.chain.get_aggregator_state().await;
+                    // Votes that landed while this node had no round to count
+                    // them in are held by (epoch, height) and replayed the
+                    // first beat after that round opens. A vote is published
+                    // once - the same bytes are a duplicate to gossipsub - so
+                    // a dropped vote is a vote the author cannot re-send, and
+                    // the round it belonged to is short a validator forever
+                    // (AF-18).
+                    if agg_state.active {
+                        let due = self
+                            .deferred_votes
+                            .take_for(agg_state.epoch, agg_state.checkpoint_height);
+                        if !due.is_empty() {
+                            info!(
+                                "Finality: replaying {} vote(s) held for checkpoint height {} (epoch {})",
+                                due.len(),
+                                agg_state.checkpoint_height,
+                                agg_state.epoch
+                            );
+                        }
+                        let mut held_prevotes = Vec::new();
+                        let mut held_precommits = Vec::new();
+                        for vote in due {
+                            match vote {
+                                crate::network::deferred_votes::DeferredVote::Prevote(v) => {
+                                    held_prevotes.push(v);
+                                }
+                                crate::network::deferred_votes::DeferredVote::Precommit(v) => {
+                                    held_precommits.push(v);
+                                }
+                            }
+                        }
+                        for vote in held_prevotes {
+                            let relay = NetworkMessage::Prevote {
+                                epoch: vote.epoch,
+                                checkpoint_height: vote.checkpoint_height,
+                                checkpoint_hash: vote.checkpoint_hash.clone(),
+                                voter_id: vote.voter_id.to_hex(),
+                                sig_bls: vote.sig_bls.clone(),
+                                auth_sig: vote.auth_sig.clone(),
+                            };
+                            match self.chain.handle_prevote(vote).await {
+                                Ok(()) => {
+                                    let topic = gossipsub::IdentTopic::new("blocks");
+                                    let _ = self
+                                        .swarm
+                                        .behaviour_mut()
+                                        .gossipsub
+                                        .publish(topic, relay.to_bytes());
+                                }
+                                Err(e) => tracing::debug!("held prevote still refused: {e}"),
+                            }
+                        }
+                        for vote in held_precommits {
+                            let relay = NetworkMessage::Precommit {
+                                epoch: vote.epoch,
+                                checkpoint_height: vote.checkpoint_height,
+                                checkpoint_hash: vote.checkpoint_hash.clone(),
+                                voter_id: vote.voter_id.to_hex(),
+                                sig_bls: vote.sig_bls.clone(),
+                                auth_sig: vote.auth_sig.clone(),
+                                pq_sig: vote.pq_sig.clone(),
+                            };
+                            match self.chain.handle_precommit(vote.clone()).await {
+                                Ok(Some(cert)) => {
+                                    let topic = gossipsub::IdentTopic::new("blocks");
+                                    let _ = self
+                                        .swarm
+                                        .behaviour_mut()
+                                        .gossipsub
+                                        .publish(topic.clone(), relay.to_bytes());
+                                    let _ = self.swarm.behaviour_mut().gossipsub.publish(
+                                        topic,
+                                        NetworkMessage::FinalityCert {
+                                            epoch: cert.epoch,
+                                            checkpoint_height: cert.checkpoint_height,
+                                            checkpoint_hash: cert.checkpoint_hash,
+                                            agg_sig_bls: cert.agg_sig_bls,
+                                            bitmap: cert.bitmap,
+                                            set_hash: cert.set_hash,
+                                            scheme_id:
+                                                crate::chain::finality::BLS_SCHEME_RFC9380_V1
+                                                    .to_string(),
+                                        }
+                                        .to_bytes(),
+                                    );
+                                }
+                                Ok(None) => {
+                                    let topic = gossipsub::IdentTopic::new("blocks");
+                                    let _ = self
+                                        .swarm
+                                        .behaviour_mut()
+                                        .gossipsub
+                                        .publish(topic, relay.to_bytes());
+                                }
+                                Err(e) => {
+                                    if e.contains("Cannot precommit before prevote quorum") {
+                                        self.deferred_votes.push(
+                                            vote.epoch,
+                                            vote.checkpoint_height,
+                                            crate::network::deferred_votes::DeferredVote::Precommit(
+                                                vote,
+                                            ),
+                                        );
+                                    } else {
+                                        tracing::debug!("held precommit still refused: {e}");
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    // The replay above may have just supplied the prevote
+                    // quorum this beat is about to check, so the state is read
+                    // again rather than acted on one beat late.
+                    let agg_state = self.chain.get_aggregator_state().await;
+                    let precommit_retry = agg_state.active
+                        && agg_state.prevote_quorum_reached
+                        && !agg_state.precommit_quorum_reached
+                        && vote_retry_due(
+                            self.precommit_published.as_ref(),
+                            agg_state.epoch,
+                            agg_state.checkpoint_height,
+                            &agg_state.checkpoint_hash,
+                            std::time::Instant::now(),
+                        );
                     if agg_state.active
                         && agg_state.prevote_quorum_reached
                         && !agg_state.precommit_quorum_reached
-                        && precommit_height_is_new(
+                        && (precommit_height_is_new(
                             agg_state.checkpoint_height,
                             self.last_precommit_height,
-                        )
+                        ) || precommit_retry)
                     {
+                        if precommit_retry {
+                            info!(
+                                "Finality: re-publishing the precommit for checkpoint height {} (epoch {}): the round has no precommit quorum yet",
+                                agg_state.checkpoint_height, agg_state.epoch
+                            );
+                        }
                         match self.chain.sign_precommit(
                             agg_state.epoch,
                             agg_state.checkpoint_height,
@@ -1934,6 +3368,84 @@ impl Node {
                                     "Finality: auto-precommit for checkpoint height {} (epoch {})",
                                     agg_state.checkpoint_height, agg_state.epoch
                                 );
+                                // The vote is cast when the signature exists,
+                                // not when the mesh acknowledges it. Marking
+                                // only after a successful publish left the
+                                // height unmarked whenever the publish failed
+                                // (an empty mesh at startup answers
+                                // NoPeersSubscribedToTopic), and the next beat
+                                // then signed whatever hash the aggregator held
+                                // at that height: a second, *different* vote at
+                                // one height, the one thing a validator must
+                                // never cast. The mark advances here and the
+                                // signed round is remembered here; the retry
+                                // beat re-publishes exactly this round, because
+                                // `vote_retry_due` matches on epoch, height and
+                                // hash, and a round that has moved to another
+                                // hash at the same height is never signed again.
+                                let prev_precommit_height = self.last_precommit_height;
+                                let advanced = precommit_height_is_new(
+                                    agg_state.checkpoint_height,
+                                    self.last_precommit_height,
+                                );
+                                if advanced {
+                                    self.last_precommit_height = agg_state.checkpoint_height;
+                                    if let Err(e) = self.save_vote_history() {
+                                        self.last_precommit_height = prev_precommit_height;
+                                        tracing::error!(
+                                            error = %e,
+                                            height = agg_state.checkpoint_height,
+                                            "Refusing to publish precommit without durable vote-history mark"
+                                        );
+                                        continue;
+                                    }
+                                }
+                                self.precommit_published = Some(PublishedVote {
+                                    epoch: agg_state.epoch,
+                                    checkpoint_height: agg_state.checkpoint_height,
+                                    checkpoint_hash: agg_state.checkpoint_hash.clone(),
+                                    at: std::time::Instant::now(),
+                                });
+                                // Gossip does not echo a message back to the
+                                // node that published it, so the signature
+                                // this node just made is the one its own
+                                // aggregator never sees. A four-validator
+                                // round needs three precommits of four
+                                // thousand stake; counting only the peers'
+                                // leaves every node one short, and the round
+                                // sits at height two for the life of the
+                                // process. Added before it is gossiped, so the
+                                // local view is ahead of, never behind, the
+                                // mesh.
+                                match self.chain.handle_precommit(precommit.clone()).await {
+                                    // A retry re-publishes bytes this node
+                                    // already admitted; the round counted the
+                                    // vote the first time and says so. Not
+                                    // worth a warning every beat.
+                                    Err(e) if e.contains("Duplicate") => {
+                                        tracing::debug!("own precommit re-published: {e}");
+                                    }
+                                    Ok(Some(cert)) => {
+                                        let topic = gossipsub::IdentTopic::new("blocks");
+                                        let _ = self.swarm.behaviour_mut().gossipsub.publish(
+                                            topic,
+                                            NetworkMessage::FinalityCert {
+                                                epoch: cert.epoch,
+                                                checkpoint_height: cert.checkpoint_height,
+                                                checkpoint_hash: cert.checkpoint_hash,
+                                                agg_sig_bls: cert.agg_sig_bls,
+                                                bitmap: cert.bitmap,
+                                                set_hash: cert.set_hash,
+                                                scheme_id:
+                                                    crate::chain::finality::BLS_SCHEME_RFC9380_V1
+                                                        .to_string(),
+                                            }
+                                            .to_bytes(),
+                                        );
+                                    }
+                                    Ok(None) => {}
+                                    Err(e) => warn!("Own precommit not admitted: {e}"),
+                                }
                                 let vote_msg = NetworkMessage::Precommit {
                                     epoch: precommit.epoch,
                                     checkpoint_height: precommit.checkpoint_height,
@@ -1941,13 +3453,40 @@ impl Node {
                                     voter_id: voter_addr.to_hex(),
                                     sig_bls: precommit.sig_bls,
                                     auth_sig: precommit.auth_sig,
+                                    pq_sig: precommit.pq_sig,
                                 };
-                                // BLG-0210: the mark is durable before the
-                                // bytes leave on the wire.
-                                self.last_precommit_height = agg_state.checkpoint_height;
-                                self.save_vote_history();
                                 let topic = gossipsub::IdentTopic::new("blocks");
-                                let _ = self.swarm.behaviour_mut().gossipsub.publish(topic, vote_msg.to_bytes());
+                                match self
+                                    .swarm
+                                    .behaviour_mut()
+                                    .gossipsub
+                                    .publish(topic, vote_msg.to_bytes())
+                                {
+                                    Ok(_) => {}
+                                    // The same bytes are already in the mesh:
+                                    // the earlier publish of this round landed,
+                                    // so this is not a failure and must not be
+                                    // retried as one.
+                                    Err(e) if publish_reached_the_mesh(&e) => {
+                                        tracing::debug!(
+                                            "precommit for height {} is already in the mesh: {e}",
+                                            agg_state.checkpoint_height
+                                        );
+                                    }
+                                    // A vote that never reaches the mesh is
+                                    // indistinguishable from a vote that was
+                                    // never cast, and finality simply stops.
+                                    // The signed round stays remembered, so the
+                                    // retry beat re-publishes these bytes; the
+                                    // height is already marked, so no second
+                                    // vote can be signed at it.
+                                    Err(e) => {
+                                        warn!(
+                                            "Failed to gossip a finality vote: {e}; the vote for height {} stands and its bytes are re-published on the next beat",
+                                            agg_state.checkpoint_height
+                                        );
+                                    }
+                                }
                             }
                             Err(e) => {
                                 warn!("Failed to sign precommit: {e}");
@@ -1956,52 +3495,121 @@ impl Node {
                     }
 
                     // --- Periodic prevote ---
-                    if checkpoint_height > 0 && checkpoint_height > self.last_prevote_height {
-                        if let Some(block) = self.chain.get_block(checkpoint_height).await {
-                            // The receiving side derives the epoch as
-                            // checkpoint_height / epoch_len
-                            // (`Blockchain::start_prevote_task`).
-                            // Signing with the checkpoint-interval
-                            // divisor made every honest prevote fail
-                            // `add_prevote` with "Prevote epoch
-                            // mismatch" on every network where the two
-                            // divisors differ, so the prevote quorum
-                            // was never reached and native BLS
-                            // finality never advanced (P10-F01).
-                            let epoch = checkpoint_height
-                                / crate::core::chain_config::epoch_len_for_chain_id(
-                                    chain_id,
-                                );
-                            match self.chain.sign_prevote(
+                    //
+                    // The round named by the aggregator, not this node's own
+                    // tip. A vote counts only in an aggregator holding the
+                    // same height, so a node voting at its own checkpoint
+                    // (one or two blocks ahead of its peers) contributed to
+                    // no round at all.
+                    let prevote_retry = agg_state.active
+                        && !agg_state.precommit_quorum_reached
+                        && vote_retry_due(
+                            self.prevote_published.as_ref(),
+                            agg_state.epoch,
+                            agg_state.checkpoint_height,
+                            &agg_state.checkpoint_hash,
+                            std::time::Instant::now(),
+                        );
+                    if agg_state.active
+                        && agg_state.checkpoint_height > 0
+                        && prevote_is_due(
+                            agg_state.checkpoint_height,
+                            self.last_prevote_height,
+                            prevote_retry,
+                        )
+                    {
+                        if prevote_retry {
+                            info!(
+                                "Finality: re-publishing the prevote for checkpoint height {} (epoch {}): the round has no prevote quorum yet",
+                                agg_state.checkpoint_height, agg_state.epoch
+                            );
+                        }
+                        // The epoch the aggregator was started with, and the
+                        // round's own hash. Signing with the checkpoint-
+                        // interval divisor instead of the epoch length made
+                        // every honest prevote fail `add_prevote` with
+                        // "Prevote epoch mismatch" wherever the two divisors
+                        // differ.
+                        let epoch = agg_state.epoch;
+                        let checkpoint_height = agg_state.checkpoint_height;
+                        match self
+                            .chain
+                            .sign_prevote(
                                 epoch,
                                 checkpoint_height,
-                                block.hash.clone(),
+                                agg_state.checkpoint_hash.clone(),
                                 voter_addr,
-                            ).await {
-                                Ok(prevote) => {
-                                    info!("Finality: voting for checkpoint height {checkpoint_height} (epoch {epoch})");
-                                    let vote_msg = NetworkMessage::Prevote {
-                                        epoch: prevote.epoch,
-                                        checkpoint_height: prevote.checkpoint_height,
-                                        checkpoint_hash: prevote.checkpoint_hash,
-                                        voter_id: voter_addr.to_hex(),
-                                        sig_bls: prevote.sig_bls,
-                                        auth_sig: prevote.auth_sig,
-                                    };
-                                    // BLG-0210: persist-before-publish, as
-                                    // for the precommit above.
-                                    self.last_prevote_height = checkpoint_height;
-                                    self.save_vote_history();
-                                    let topic = gossipsub::IdentTopic::new("blocks");
-                                    let _ = self.swarm.behaviour_mut().gossipsub.publish(topic, vote_msg.to_bytes());
+                            )
+                            .await
+                        {
+                            Ok(prevote) => {
+                                info!("Finality: voting for checkpoint height {checkpoint_height} (epoch {epoch})");
+                                // Persist the high-water mark BEFORE admitting
+                                // or gossiping the prevote so neither a mid-round
+                                // crash nor a disk write failure can leave a
+                                // signed prevote on the wire with a stale mark
+                                // on disk.
+                                let prev_prevote_height = self.last_prevote_height;
+                                let prev_published = self.prevote_published.clone();
+                                if record_cast_prevote(
+                                    &mut self.last_prevote_height,
+                                    &mut self.prevote_published,
+                                    epoch,
+                                    checkpoint_height,
+                                    &agg_state.checkpoint_hash,
+                                    std::time::Instant::now(),
+                                ) {
+                                    if let Err(e) = self.save_vote_history() {
+                                        self.last_prevote_height = prev_prevote_height;
+                                        self.prevote_published = prev_published;
+                                        tracing::error!(
+                                            error = %e,
+                                            height = checkpoint_height,
+                                            "Refusing to publish prevote without durable vote-history mark"
+                                        );
+                                        continue;
+                                    }
                                 }
-                                Err(e) => {
-                                    warn!("Failed to sign prevote: {e}");
+                                match self.chain.handle_prevote(prevote.clone()).await {
+                                    Err(e) if e.contains("Duplicate") => {
+                                        tracing::debug!("own prevote re-published: {e}");
+                                    }
+                                    Err(e) => warn!("Own prevote not admitted: {e}"),
+                                    Ok(()) => {}
                                 }
+                                let vote_msg = NetworkMessage::Prevote {
+                                    epoch: prevote.epoch,
+                                    checkpoint_height: prevote.checkpoint_height,
+                                    checkpoint_hash: prevote.checkpoint_hash,
+                                    voter_id: voter_addr.to_hex(),
+                                    sig_bls: prevote.sig_bls,
+                                    auth_sig: prevote.auth_sig,
+                                };
+                                let topic = gossipsub::IdentTopic::new("blocks");
+                                let publish = self
+                                    .swarm
+                                    .behaviour_mut()
+                                    .gossipsub
+                                    .publish(topic, vote_msg.to_bytes());
+                                if let Err(e) = &publish {
+                                    if publish_reached_the_mesh(e) {
+                                        tracing::debug!(
+                                            "prevote for height {checkpoint_height} is already in the mesh: {e}"
+                                        );
+                                    } else {
+                                        warn!(
+                                            "Failed to gossip a finality vote: {e}; the vote for height {checkpoint_height} stands and its bytes are re-published on the next beat"
+                                        );
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                warn!("Failed to sign prevote: {e}");
                             }
                         }
                     }
                 }
+
                 _ = slashing_gossip_interval.tick() => {
                     for evidence in self.chain.drain_slashing_evidence().await {
                         let topic = gossipsub::IdentTopic::new("blocks");
@@ -2236,7 +3844,7 @@ impl Node {
                                             }
                                             entry.push(response);
                                             let want_cid = bud_node::store::ContentId(cid);
-                                            // BLG-0212: one attempt per peer asked;
+                                            // One attempt per peer asked;
                                             // the counter is what lets a failing route
                                             // (not_found, bad response, disconnect)
                                             // retire the waiters instead of parking them.
@@ -2266,7 +3874,8 @@ impl Node {
                         }
                         SwarmEvent::ConnectionEstablished { peer_id, endpoint, .. } => {
                             let remote = endpoint.get_remote_address();
-                            let subnet = ipv4_slash24(remote);
+                            let subnet: Option<crate::network::peer_manager::SubnetKey> =
+                                crate::network::peer_manager::peer_subnet_key(remote);
                             // Security review (HIGH): a banned peer
                             // could reconnect and carry on issuing
                             // /sync requests, because the handshaked
@@ -2289,9 +3898,10 @@ impl Node {
                             // node. The rest of this file recovers the
                             // guard and keeps enforcing; these four
                             // sites were the ones that did not.
-                            let admit = self
-                                .peer_manager_lock()
-                                .can_admit_subnet(subnet);
+                            let already_connected =
+                                self.peer_manager_lock().is_connected(&peer_id);
+                            let admit = already_connected
+                                || self.peer_manager_lock().can_admit_subnet(subnet);
                             if !admit {
                                 warn!(
                                     "Eclipse bound: rejecting {} from {:?} (/24 limit)",
@@ -2301,7 +3911,7 @@ impl Node {
                                 continue;
                             }
                             // H5.2 outbound diversity: an extra /24 limit for outbound connections.
-                            if endpoint.is_dialer() {
+                            if !already_connected && endpoint.is_dialer() {
                                 let ob_admit = self
                                     .peer_manager_lock()
                                     .can_admit_outbound_subnet(subnet);
@@ -2406,11 +4016,15 @@ impl Node {
                             num_established,
                             ..
                         } => {
+                            if num_established > 0 {
+                                continue;
+                            }
                             // Retire ONLY Bitswap requests addressed to `peer_id` when its
                             // last connection closes, and recompute remaining live asks per
                             // cid from `bitswap_requests` so unrelated peer churn never
                             // drains in-flight fetches (CWE-404).
                             if num_established == 0 {
+                                self.cert_fetches.retain(|_, (p, _)| *p != peer_id);
                                 let retired_ids: Vec<_> = self
                                     .bitswap_request_peers
                                     .iter()
@@ -2619,18 +4233,15 @@ impl Node {
 
                                     if !is_handshake_msg && !is_handshaked {
                                         warn!("Peer {} sent {:?} before completing handshake, dropping.", peer_id, msg);
-
-                                        {
-                                            let mut pm = self.peer_manager_lock();
-                                            pm.report_invalid_tx(&peer_id);
-                                        }
                                         // Dropped for the sender's state, not for the
-                                        // content: an honest copy must stay new.
+                                        // content: an honest copy must stay new, and a
+                                        // frame racing ahead of `/sync` HandshakeAck must
+                                        // be ignored rather than graylisting the peer.
                                         self.gossip_dedup
                                             .lock()
                                             .unwrap_or_else(|poisoned| poisoned.into_inner())
                                             .forget(&message.data);
-                                        self.report_gossip(&id, &peer_id, gossipsub::MessageAcceptance::Reject);
+                                        self.report_gossip(&id, &peer_id, gossipsub::MessageAcceptance::Ignore);
                                         continue;
                                     }
 
@@ -2712,12 +4323,46 @@ impl Node {
                                                     }
                                                 }
                                                 Err(e) => {
-                                                    warn!("Block validation failed: {e}");
+                                                    // `Previous hash mismatch` is a race, not a
+                                                    // forgery: the tip this node validated against
+                                                    // moved between the cheap checks and this call
+                                                    // (another arm imported a block at the same
+                                                    // height), and the same answer is what a peer on
+                                                    // the branch that won the slot sends. Ten of them
+                                                    // at `INVALID_BLOCK_PENALTY` ban an honest
+                                                    // validator for an hour, which is the mesh
+                                                    // silencing the node whose block it needs
+                                                    // (AF-09). The sender is still demoted, never
+                                                    // silenced; every other refusal keeps the
+                                                    // banning verdict.
+                                                    let unjoined = e.contains("Previous hash mismatch")
+                                                        || e.contains("Block height discontinuity")
+                                                        || block.index <= self.chain.get_height().await;
+                                                    warn!(
+                                                        peer = %peer_id,
+                                                        "Block validation failed (unjoined={unjoined}): {e}"
+                                                    );
                                                     {
                                                         let mut pm = self.peer_manager_lock();
-                                                        pm.report_invalid_block(&peer_id);
+                                                        if unjoined {
+                                                            pm.report_unjoined_block(&peer_id);
+                                                        } else {
+                                                            pm.report_invalid_block(&peer_id);
+                                                        }
                                                     }
-                                                    self.report_gossip(&id, &peer_id, gossipsub::MessageAcceptance::Reject);
+                                                    if unjoined && self.sync_state.load(Ordering::SeqCst) == 0 {
+                                                        let locator = self.chain.get_locator().await;
+                                                        let _ = self.request_headers_from_peer(Some(peer_id), locator, 500);
+                                                    }
+                                                    self.report_gossip(
+                                                        &id,
+                                                        &peer_id,
+                                                        if unjoined {
+                                                            gossipsub::MessageAcceptance::Ignore
+                                                        } else {
+                                                            gossipsub::MessageAcceptance::Reject
+                                                        },
+                                                    );
                                                     continue;
                                                 }
                                             }
@@ -2773,7 +4418,7 @@ impl Node {
                                         let hash_prefix: String = tx.hash.chars().take(8).collect();
                                         info!("Broadcasted tx: {} from: {} to: {} amount: {}",
                                             hash_prefix, tx.from, tx.to, tx.amount);
-                                        match self.chain.add_transaction(tx).await {
+                                        match self.chain.add_transaction(tx.clone()).await {
                                             Ok(_) => {
                                                 {
                                                     let mut pm = self.peer_manager_lock();
@@ -2781,12 +4426,31 @@ impl Node {
                                                 }
                                             }
                                             Err(e) => {
-                                                warn!("Failed to add transaction: {e}");
-                                                {
+                                                let expected_chain_id =
+                                                    self.chain.get_chain_id().await;
+                                                let pool_race = tx_refusal_is_pool_race(
+                                                    &tx,
+                                                    &e,
+                                                    expected_chain_id,
+                                                );
+                                                warn!(
+                                                    peer = %peer_id,
+                                                    pool_race,
+                                                    "Failed to add transaction: {e}"
+                                                );
+                                                if !pool_race {
                                                     let mut pm = self.peer_manager_lock();
                                                     pm.report_invalid_tx(&peer_id);
                                                 }
-                                                self.report_gossip(&id, &peer_id, gossipsub::MessageAcceptance::Reject);
+                                                self.report_gossip(
+                                                    &id,
+                                                    &peer_id,
+                                                    if pool_race {
+                                                        gossipsub::MessageAcceptance::Ignore
+                                                    } else {
+                                                        gossipsub::MessageAcceptance::Reject
+                                                    },
+                                                );
                                                 continue;
                                             }
                                         }
@@ -2918,10 +4582,18 @@ impl Node {
                                                     for block in blocks {
                                                         let h = self.chain.get_height().await;
                                                         if block.index == h + 1 {
-                                                            if let Ok(pruned_cids) = self.chain.validate_and_add_block(block.clone()).await {
-                                                                for cid in pruned_cids {
-                                                                    let _ = self.command_tx.send(NodeCommand::StoragePrune { cid }).await;
+                                                            match self.chain.validate_and_add_block(block.clone()).await {
+                                                                Ok(pruned_cids) => {
+                                                                    for cid in pruned_cids {
+                                                                        let _ = self.command_tx.send(NodeCommand::StoragePrune { cid }).await;
+                                                                    }
                                                                 }
+                                                                Err(e) => warn!(
+                                                                    peer = %peer_id,
+                                                                    index = block.index,
+                                                                    error = %e,
+                                                                    "gossip block refused"
+                                                                ),
                                                             }
                                                         }
                                                     }
@@ -2930,12 +4602,20 @@ impl Node {
                                                 for block in blocks {
                                                     let h = self.chain.get_height().await;
                                                     if block.index == h + 1 {
-                                                        if let Ok(pruned_cids) = self.chain.validate_and_add_block(block.clone()).await {
-                                                            for cid in pruned_cids {
-                                                                let _ = self.command_tx.send(NodeCommand::StoragePrune { cid }).await;
+                                                        match self.chain.validate_and_add_block(block.clone()).await {
+                                                            Ok(pruned_cids) => {
+                                                                for cid in pruned_cids {
+                                                                    let _ = self.command_tx.send(NodeCommand::StoragePrune { cid }).await;
+                                                                }
                                                             }
+                                                            Err(e) => warn!(
+                                                                peer = %peer_id,
+                                                                index = block.index,
+                                                                error = %e,
+                                                                "gossip block refused"
+                                                            ),
                                                         }
-                                                    }
+                                                        }
                                                 }
                                             }
                                         }
@@ -3112,7 +4792,15 @@ impl Node {
                                     }
 
                                     NetworkMessage::Prevote { epoch, checkpoint_height, checkpoint_hash, voter_id, sig_bls, auth_sig } => {
-                                        let rate_limit_ok = self.peer_manager_lock().check_vote_rate_limit(&peer_id);
+                                        let authored = handshake_origin_matches_peer(peer_id, message.source);
+                                        let rate_limit_ok = {
+                                            let mut pm = self.peer_manager_lock();
+                                            if authored {
+                                                pm.check_vote_rate_limit(&peer_id)
+                                            } else {
+                                                pm.check_vote_rate_limit_from(&peer_id, false)
+                                            }
+                                        };
                                         if !rate_limit_ok {
                                             warn!("Peer {peer_id} exceeded vote rate limit or lock error. Ignoring Prevote.");
                                             self.report_gossip(&id, &peer_id, gossipsub::MessageAcceptance::Ignore);
@@ -3146,7 +4834,7 @@ impl Node {
                                             sig_bls,
                                             auth_sig,
                                         };
-                                        match self.chain.handle_prevote(prevote).await {
+                                        match self.chain.handle_prevote(prevote.clone()).await {
                                             Ok(_) => {
                                                 {
                                                     let mut pm = self.peer_manager_lock();
@@ -3155,6 +4843,86 @@ impl Node {
                                             }
                                             Err(e) => {
                                                 warn!("Prevote from {peer_id} rejected: {e}");
+                                                if refusal_is_round_scope(&e) {
+                                                    // Round-scope refusals are raised before
+                                                    // membership and BLS verification, so
+                                                    // buffering on the error text alone lets an
+                                                    // unauthenticated peer evict honest early
+                                                    // votes. Require a registered validator BLS
+                                                    // signature before taking a slot.
+                                                    let authentic = self
+                                                        .chain
+                                                        .vote_is_from_registered_validator(
+                                                            voter_addr,
+                                                            prevote.auth_signing_message(),
+                                                            prevote.auth_sig.clone(),
+                                                            prevote.signing_message(),
+                                                            prevote.sig_bls.clone(),
+                                                        )
+                                                        .await;
+                                                    if !authentic {
+                                                        if !e.contains("Voter not in validator set") {
+                                                            self.peer_manager_lock().report_bad_behavior(&peer_id);
+                                                            self.report_gossip(&id, &peer_id, gossipsub::MessageAcceptance::Reject);
+                                                        } else {
+                                                            self.report_gossip(&id, &peer_id, gossipsub::MessageAcceptance::Ignore);
+                                                        }
+                                                        continue;
+                                                    }
+                                                    if !e.contains("Duplicate")
+                                                        && !e.contains("outside active window")
+                                                    {
+                                                        // The round may simply not be
+                                                        // open yet, and a vote is
+                                                        // published once: hold it
+                                                        // for the round it names
+                                                        // instead of spending its
+                                                        // only delivery (AF-18).
+                                                        self.deferred_votes.push(
+                                                            prevote.epoch,
+                                                            prevote.checkpoint_height,
+                                                            crate::network::deferred_votes::DeferredVote::Prevote(prevote),
+                                                        );
+                                                        self.report_gossip(&id, &peer_id, gossipsub::MessageAcceptance::Accept);
+                                                    } else {
+                                                        self.report_gossip(&id, &peer_id, gossipsub::MessageAcceptance::Ignore);
+                                                    }
+                                                    if e.contains("epoch mismatch")
+                                                        || e.contains("height mismatch")
+                                                    {
+                                                        self.trigger_fork_sync(peer_id).await;
+                                                    }
+                                                    continue;
+                                                }
+                                                if refusal_is_benign_fork_or_lag(&e) {
+                                                    let authentic = self
+                                                        .chain
+                                                        .vote_is_from_registered_validator(
+                                                            voter_addr,
+                                                            prevote.auth_signing_message(),
+                                                            prevote.auth_sig.clone(),
+                                                            prevote.signing_message(),
+                                                            prevote.sig_bls.clone(),
+                                                        )
+                                                        .await;
+                                                    if !authentic {
+                                                        self.peer_manager_lock()
+                                                            .report_bad_behavior(&peer_id);
+                                                        self.report_gossip(
+                                                            &id,
+                                                            &peer_id,
+                                                            gossipsub::MessageAcceptance::Reject,
+                                                        );
+                                                        continue;
+                                                    }
+                                                    self.report_gossip(
+                                                        &id,
+                                                        &peer_id,
+                                                        gossipsub::MessageAcceptance::Ignore,
+                                                    );
+                                                    self.trigger_fork_sync(peer_id).await;
+                                                    continue;
+                                                }
                                                 self.peer_manager_lock().report_bad_behavior(&peer_id);
                                                 self.report_gossip(&id, &peer_id, gossipsub::MessageAcceptance::Reject);
                                                 continue;
@@ -3162,8 +4930,16 @@ impl Node {
                                         }
                                     }
 
-                                    NetworkMessage::Precommit { epoch, checkpoint_height, checkpoint_hash, voter_id, sig_bls, auth_sig } => {
-                                        let rate_limit_ok = self.peer_manager_lock().check_vote_rate_limit(&peer_id);
+                                    NetworkMessage::Precommit { epoch, checkpoint_height, checkpoint_hash, voter_id, sig_bls, auth_sig, pq_sig } => {
+                                        let authored = handshake_origin_matches_peer(peer_id, message.source);
+                                        let rate_limit_ok = {
+                                            let mut pm = self.peer_manager_lock();
+                                            if authored {
+                                                pm.check_vote_rate_limit(&peer_id)
+                                            } else {
+                                                pm.check_vote_rate_limit_from(&peer_id, false)
+                                            }
+                                        };
                                         if !rate_limit_ok {
                                             warn!("Peer {peer_id} exceeded vote rate limit or lock error. Ignoring Precommit.");
                                             self.report_gossip(&id, &peer_id, gossipsub::MessageAcceptance::Ignore);
@@ -3191,8 +4967,9 @@ impl Node {
                                             voter_id: voter_addr,
                                             sig_bls,
                                             auth_sig,
+                                            pq_sig,
                                         };
-                                        match self.chain.handle_precommit(precommit).await {
+                                        match self.chain.handle_precommit(precommit.clone()).await {
                                             Ok(Some(cert)) => {
                                                 info!("FinalityCert produced from precommit: epoch={}, height={}", cert.epoch, cert.checkpoint_height);
                                                 {
@@ -3224,6 +5001,83 @@ impl Node {
                                             }
                                             Err(e) => {
                                                 warn!("Precommit from {peer_id} rejected: {e}");
+                                                if refusal_is_round_scope(&e) {
+                                                    let authentic = self
+                                                        .chain
+                                                        .vote_is_from_registered_validator(
+                                                            voter_addr,
+                                                            precommit.auth_signing_message(),
+                                                            precommit.auth_sig.clone(),
+                                                            precommit.signing_message(),
+                                                            precommit.sig_bls.clone(),
+                                                        )
+                                                        .await;
+                                                    if !authentic {
+                                                        if !e.contains("Voter not in validator set") {
+                                                            self.peer_manager_lock().report_bad_behavior(&peer_id);
+                                                            self.report_gossip(&id, &peer_id, gossipsub::MessageAcceptance::Reject);
+                                                        } else {
+                                                            self.report_gossip(&id, &peer_id, gossipsub::MessageAcceptance::Ignore);
+                                                        }
+                                                        continue;
+                                                    }
+                                                    if !e.contains("Duplicate")
+                                                        && !e.contains("outside active window")
+                                                    {
+                                                        // `Cannot precommit before
+                                                        // prevote quorum` is the
+                                                        // common case here: the
+                                                        // prevotes that justify this
+                                                        // precommit are still being
+                                                        // replayed. Hold the vote for
+                                                        // the round it names rather
+                                                        // than dropping its only
+                                                        // delivery (AF-18).
+                                                        self.deferred_votes.push(
+                                                            precommit.epoch,
+                                                            precommit.checkpoint_height,
+                                                            crate::network::deferred_votes::DeferredVote::Precommit(precommit),
+                                                        );
+                                                        self.report_gossip(&id, &peer_id, gossipsub::MessageAcceptance::Accept);
+                                                    } else {
+                                                        self.report_gossip(&id, &peer_id, gossipsub::MessageAcceptance::Ignore);
+                                                    }
+                                                    if e.contains("epoch mismatch")
+                                                        || e.contains("height mismatch")
+                                                    {
+                                                        self.trigger_fork_sync(peer_id).await;
+                                                    }
+                                                    continue;
+                                                }
+                                                if refusal_is_benign_fork_or_lag(&e) {
+                                                    let authentic = self
+                                                        .chain
+                                                        .vote_is_from_registered_validator(
+                                                            voter_addr,
+                                                            precommit.auth_signing_message(),
+                                                            precommit.auth_sig.clone(),
+                                                            precommit.signing_message(),
+                                                            precommit.sig_bls.clone(),
+                                                        )
+                                                        .await;
+                                                    if !authentic {
+                                                        self.peer_manager_lock()
+                                                            .report_bad_behavior(&peer_id);
+                                                        self.report_gossip(
+                                                            &id,
+                                                            &peer_id,
+                                                            gossipsub::MessageAcceptance::Reject,
+                                                        );
+                                                        continue;
+                                                    }
+                                                    self.report_gossip(
+                                                        &id,
+                                                        &peer_id,
+                                                        gossipsub::MessageAcceptance::Ignore,
+                                                    );
+                                                    self.trigger_fork_sync(peer_id).await;
+                                                    continue;
+                                                }
                                                 self.peer_manager_lock().report_bad_behavior(&peer_id);
                                                 self.report_gossip(&id, &peer_id, gossipsub::MessageAcceptance::Reject);
                                                 continue;
@@ -3240,7 +5094,15 @@ impl Node {
                                         set_hash,
                                         scheme_id,
                                     } => {
-                                        let rate_limit_ok = self.peer_manager_lock().check_vote_rate_limit(&peer_id);
+                                        let authored = handshake_origin_matches_peer(peer_id, message.source);
+                                        let rate_limit_ok = {
+                                            let mut pm = self.peer_manager_lock();
+                                            if authored {
+                                                pm.check_vote_rate_limit(&peer_id)
+                                            } else {
+                                                pm.check_vote_rate_limit_from(&peer_id, false)
+                                            }
+                                        };
                                         if !rate_limit_ok {
                                             warn!("Peer {peer_id} exceeded vote rate limit or lock error. Ignoring FinalityCert.");
                                             self.report_gossip(&id, &peer_id, gossipsub::MessageAcceptance::Ignore);
@@ -3275,6 +5137,7 @@ impl Node {
                                             set_hash,
                                         };
 
+                                        let qc_checkpoint_hash = cert.checkpoint_hash.clone();
                                         match self.chain.handle_finality_cert(cert).await {
                                             Ok(_) => {
                                                 {
@@ -3286,8 +5149,34 @@ impl Node {
                                                 warn!("Failed to apply FinalityCert from {peer_id}: {e}");
                                                 if e.contains("Missing verified QC blob") {
                                                     warn!(
-                                                        "Missing verified QC blob for FinalityCert from {peer_id}; refusing legacy gossip QC-blob fetch for epoch={epoch}, height={checkpoint_height}"
+                                                        "Missing verified QC blob for FinalityCert from {peer_id}; requesting over /sync for epoch={epoch}, height={checkpoint_height}"
                                                     );
+                                                    self.request_qc_blob(peer_id, epoch, checkpoint_height, qc_checkpoint_hash);
+                                                    self.report_gossip(&id, &peer_id, gossipsub::MessageAcceptance::Ignore);
+                                                } else if Self::finality_cert_names_a_block_we_lack(&e) {
+                                                    // A certificate for a checkpoint this node
+                                                    // does not hold, or holds a sibling of, is
+                                                    // a statement about WHERE THIS NODE IS -
+                                                    // behind, or on the losing side of a fork -
+                                                    // not about what the peer did. Counting it as
+                                                    // bad behaviour bans an honest peer, and a
+                                                    // ban costs this node the very messages it
+                                                    // needs to converge: the devnet mesh
+                                                    // measured exactly that (node2 banned
+                                                    // node1 over a height-2 sibling fork and
+                                                    // then ignored every announcement for the
+                                                    // next hour, stuck at tip 8 while node1
+                                                    // reached 41). Ask for the chain if the peer
+                                                    // is genuinely ahead, take the message as
+                                                    // information, and do not penalise it.
+                                                    warn!(
+                                                        "FinalityCert from {peer_id} names a checkpoint this node does not share (height={checkpoint_height}); treating it as a sync signal, not as peer misbehaviour"
+                                                    );
+                                                    self.sync_if_behind(peer_id, checkpoint_height)
+                                                        .await;
+                                                    if e.contains("mismatch with our block hash") {
+                                                        self.trigger_fork_sync(peer_id).await;
+                                                    }
                                                     self.report_gossip(&id, &peer_id, gossipsub::MessageAcceptance::Ignore);
                                                 } else {
                                                     self.peer_manager_lock().report_bad_behavior(&peer_id);
@@ -3298,77 +5187,49 @@ impl Node {
                                         }
                                     }
 
-                                    NetworkMessage::GetQcBlob { epoch, checkpoint_height } => {
+                                    NetworkMessage::GetFinalityCert { checkpoint_height } => {
+                                        warn!(
+                                            "Ignoring gossip GetFinalityCert from {peer_id}: \
+                                             point-to-point /sync only (height={checkpoint_height})"
+                                        );
+                                        self.report_gossip(
+                                            &id,
+                                            &peer_id,
+                                            gossipsub::MessageAcceptance::Ignore,
+                                        );
+                                        continue;
+                                    }
+                                    NetworkMessage::FinalityCertResponse { .. } => {
+                                        self.report_gossip(
+                                            &id,
+                                            &peer_id,
+                                            gossipsub::MessageAcceptance::Reject,
+                                        );
+                                        continue;
+                                    }
+
+                                    NetworkMessage::GetQcBlob { epoch, checkpoint_height, .. } => {
                                         warn!("Ignoring gossip GetQcBlob from {peer_id}: QC blob fetch is point-to-point; refusing epoch={epoch}, height={checkpoint_height}");
                                         self.report_gossip(&id, &peer_id, gossipsub::MessageAcceptance::Ignore);
                                         continue;
                                     }
-
-                                    NetworkMessage::QcBlobResponse { epoch, checkpoint_height, found, blob_data, .. } => {
-                                        let rate_limit_ok = self.peer_manager_lock().check_blob_rate_limit(&peer_id);
-                                        if !rate_limit_ok {
-                                            warn!("Peer {peer_id} exceeded blob rate limit or lock error. Ignoring QcBlobResponse.");
-                                            self.report_gossip(&id, &peer_id, gossipsub::MessageAcceptance::Ignore);
-                                            continue;
-                                        }
-                                        info!("QcBlobResponse from {peer_id}: epoch={epoch}, height={checkpoint_height}, found={found}");
-
-                                        if found {
-                                            match serde_json::from_slice::<crate::consensus::qc::QcBlob>(&blob_data) {
-                                                Ok(blob) => {
-                                                    if blob.epoch != epoch || blob.checkpoint_height != checkpoint_height {
-                                                        warn!(
-                                                            "QcBlobResponse metadata mismatch from {}: expected epoch={}, height={}, got epoch={}, height={}",
-                                                            peer_id,
-                                                            epoch,
-                                                            checkpoint_height,
-                                                            blob.epoch,
-                                                            blob.checkpoint_height
-                                                        );
-                                                        {
-                                                            let mut pm = self.peer_manager_lock();
-                                                            pm.report_bad_behavior(&peer_id);
-                                                        }
-                                                        self.report_gossip(&id, &peer_id, gossipsub::MessageAcceptance::Reject);
-                                                        continue;
-                                                    }
-
-                                                    match self.chain.import_qc_blob(blob).await {
-                                                        Ok(_) => {
-                                                            {
-                                                                let mut pm = self.peer_manager_lock();
-                                                                pm.report_good_behavior(&peer_id);
-                                                            }
-                                                        }
-                                                        Err(e) => {
-                                                            warn!("Failed to import QcBlob from {peer_id}: {e}");
-                                                            {
-                                                                let mut pm = self.peer_manager_lock();
-                                                                pm.report_bad_behavior(&peer_id);
-                                                            }
-                                                            self.report_gossip(&id, &peer_id, gossipsub::MessageAcceptance::Reject);
-                                                            continue;
-                                                        }
-                                                    }
-                                                }
-                                                Err(e) => {
-                                                    warn!("Failed to parse QcBlobResponse from {peer_id}: {e}");
-                                                    {
-                                                        let mut pm = self.peer_manager_lock();
-                                                        pm.report_bad_behavior(&peer_id);
-                                                    }
-                                                    self.report_gossip(&id, &peer_id, gossipsub::MessageAcceptance::Reject);
-                                                    continue;
-                                                }
-                                            }
-                                        } else {
-                                            self.report_gossip(&id, &peer_id, gossipsub::MessageAcceptance::Ignore);
-                                            continue;
-                                        }
+                                    NetworkMessage::QcBlobResponse { .. } => {
+                                        // No unsolicited or gossip-sourced QC blobs. Only a
+                                        // matching /sync request ID may open an assembly.
+                                        self.report_gossip(&id, &peer_id, gossipsub::MessageAcceptance::Reject);
+                                        continue;
                                     }
 
                                     NetworkMessage::QcFaultProof { proof_data } => {
-                                        let rate_limit_ok = self.peer_manager_lock().check_blob_rate_limit(&peer_id);
+                                        let authored = handshake_origin_matches_peer(peer_id, message.source);
+                                        let rate_limit_ok = {
+                                            let mut pm = self.peer_manager_lock();
+                                            if authored {
+                                                pm.check_blob_rate_limit(&peer_id)
+                                            } else {
+                                                pm.check_blob_rate_limit_from(&peer_id, false)
+                                            }
+                                        };
                                         if !rate_limit_ok {
                                             warn!("Peer {peer_id} exceeded blob rate limit or lock error. Ignoring QcFaultProof.");
                                             self.report_gossip(&id, &peer_id, gossipsub::MessageAcceptance::Ignore);
@@ -3426,15 +5287,13 @@ impl Node {
                                         // `AccountState::calculate_state_root`
                                         // folds into the state root, and no
                                         // block-execution path reproduces that
-                                        // write. A peer frame is a notification,
-                                        // not an authorized state transition -
-                                        // the operator listener is the only entry
-                                        // that carries the finality check plus the
-                                        // signed in-block StateUpdateTx, and a node
-                                        // that applied this one would seal blocks
-                                        // its peers reject.
+                                        // write. A commitment enters through the
+                                        // `Settlement` transaction (its verified
+                                        // finality plus its in-block state
+                                        // update); the gossip form is refused
+                                        // here, reported, and not forwarded.
                                         warn!(
-                                            "Ignoring gossiped VerifiedDomainCommitment from {} for domain {}; a verified commitment enters through the operator path and its in-block state update, never from a peer",
+                                            "Ignoring gossiped VerifiedDomainCommitment from {} for domain {}; commitments travel as Settlement transactions",
                                             peer_id, payload.commitment.domain_id
                                         );
                                         {
@@ -3445,14 +5304,18 @@ impl Node {
                                         continue;
                                     }
                                     NetworkMessage::CrossDomainMessage(msg_obj) => {
-                                        // Unauthenticated gossip frames must never drive the local
-                                        // validator/relayer key to sign, fund, or sequence an
-                                        // on-chain relay transaction: relayed messages enter via
-                                        // signed `TransactionType::CrossDomainMessage` transactions
-                                        // (or the operator-authenticated RPC door).
-                                        info!(
-                                            "Ignoring unauthenticated gossip CrossDomainMessage {:?} from {peer_id}",
-                                            msg_obj.message_id
+                                        // a gossiped message used to be
+                                        // inserted into the message registry
+                                        // (state-root bearing) whenever it
+                                        // arrived, so two nodes held different
+                                        // registries at the same height. A
+                                        // relayed message enters through the
+                                        // `RelayCrossDomainMessage` transaction
+                                        // now; the gossip form is dropped and
+                                        // not forwarded.
+                                        tracing::debug!(
+                                            "Dropping gossiped CrossDomainMessage {} from {peer_id}: relayed messages travel as RelayCrossDomainMessage transactions",
+                                            hex::encode(msg_obj.message_id)
                                         );
                                         self.report_gossip(&id, &peer_id, gossipsub::MessageAcceptance::Ignore);
                                         continue;
@@ -3465,7 +5328,7 @@ impl Node {
                                             &header.calculate_hash()[..16]
                                         );
                                         // Nothing about the header is validated here, so it
-                                        // earns neither a forward verdict nor score credit (P11-F03).
+                                        // earns neither a forward verdict nor score credit.
                                         self.report_gossip(&id, &peer_id, gossipsub::MessageAcceptance::Ignore);
                                         continue;
                                     }
@@ -3521,6 +5384,7 @@ impl Node {
                                             };
                                             if !pre_allowed {
                                                 warn!("Rejected sync request from banned/rate-limited peer {peer}");
+                                                let _ = self.swarm.behaviour_mut().sync.send_response(channel, Vec::new());
                                                 continue;
                                             }
                                             let parsed = NetworkMessage::from_bytes_validated(&request);
@@ -3533,10 +5397,12 @@ impl Node {
                                                 || self.peer_manager_lock().is_handshaked(&peer);
                                             if !handshaked {
                                                 warn!("Rejected sync request from unhandshaked peer {peer}");
+                                                let _ = self.swarm.behaviour_mut().sync.send_response(channel, Vec::new());
                                                 continue;
                                             }
                                             if is_handshake {
                                                 let Some((what, fields)) = parsed.ok().and_then(Self::handshake_fields) else {
+                                                    let _ = self.swarm.behaviour_mut().sync.send_response(channel, Vec::new());
                                                     continue;
                                                 };
                                                 let ack = what == "HandshakeAck";
@@ -3570,6 +5436,7 @@ impl Node {
                                                                 let mut pm = self.peer_manager_lock();
                                                                 pm.report_bad_behavior(&peer);
                                                             }
+                                                            let _ = self.swarm.behaviour_mut().sync.send_response(channel, Vec::new());
                                                             continue;
                                                         }
                                                         let start_idx_opt = self.chain.find_common_height(locator).await;
@@ -3594,6 +5461,7 @@ impl Node {
                                                                 let mut pm = self.peer_manager_lock();
                                                                 pm.report_bad_behavior(&peer);
                                                             }
+                                                            let _ = self.swarm.behaviour_mut().sync.send_response(channel, Vec::new());
                                                             continue;
                                                         }
                                                         let our_height = self.chain.get_height().await + 1;
@@ -3615,11 +5483,112 @@ impl Node {
                                                         let response = NetworkMessage::Blocks(blocks);
                                                         let _ = self.swarm.behaviour_mut().sync.send_response(channel, response.to_bytes());
                                                     }
-                                                    _ => {}
+                                                    NetworkMessage::GetFinalityCert {
+                                                        checkpoint_height,
+                                                    } => {
+                                                        let ans = Self::build_finality_cert_response(
+                                                            &self.chain,
+                                                            checkpoint_height,
+                                                        )
+                                                        .await
+                                                        .to_bytes();
+                                                        let sync =
+                                                            &mut self.swarm.behaviour_mut().sync;
+                                                        let _ = sync.send_response(channel, ans);
+                                                    }
+                                                    NetworkMessage::GetQcBlob { epoch, checkpoint_height, chunk_index } => {
+                                                        let max_chunks = crate::consensus::qc::qc_blob_max_bytes(MAX_QC_WIRE_VALIDATORS)
+                                                            .div_ceil(crate::consensus::qc::QC_CHUNK_BYTES);
+                                                        let now = std::time::Instant::now();
+                                                        self.qc_serves.retain(|_, (started, _)| now.duration_since(*started) < QC_ASSEMBLY_TTL);
+                                                        let key = (peer, epoch, checkpoint_height);
+                                                        let admission = qc_serve_admission(
+                                                            &self.qc_serves, peer, epoch, checkpoint_height, chunk_index, max_chunks,
+                                                        );
+                                                        if admission == QcServeAdmission::Invalid {
+                                                            self.peer_manager_lock().report_bad_behavior(&peer);
+                                                            let _ = self.swarm.behaviour_mut().sync.send_response(channel, Vec::new());
+                                                            continue;
+                                                        }
+                                                        // A saturated table, duplicate start or exhausted rate
+                                                        // budget is not an invalid request and must not ban an
+                                                        // honest peer. Reply missing so the fetcher can retry.
+                                                        let busy = admission == QcServeAdmission::Busy
+                                                            || (admission == QcServeAdmission::Start
+                                                                && !self.peer_manager_lock().check_blob_rate_limit_from(&peer, false));
+                                                        if busy {
+                                                            if let Ok(answer) = qc_chunk_response(epoch, checkpoint_height, chunk_index, None) {
+                                                                let _ = self.swarm.behaviour_mut().sync.send_response(channel, answer.to_bytes());
+                                                            }
+                                                            continue;
+                                                        }
+                                                        let blob = self.chain.get_qc_blob(checkpoint_height).await;
+                                                        match qc_chunk_response(epoch, checkpoint_height, chunk_index, blob) {
+                                                            Ok(answer @ NetworkMessage::QcBlobResponse { found: true, chunk_count, .. }) => {
+                                                                if chunk_index + 1 == chunk_count {
+                                                                    self.qc_serves.remove(&key);
+                                                                } else {
+                                                                    self.qc_serves.insert(key, (now, chunk_index + 1));
+                                                                }
+                                                                let _ = self.swarm.behaviour_mut().sync.send_response(channel, answer.to_bytes());
+                                                            }
+                                                            Ok(answer) => {
+                                                                self.qc_serves.remove(&key);
+                                                                let _ = self.swarm.behaviour_mut().sync.send_response(channel, answer.to_bytes());
+                                                            }
+                                                            Err(e) => {
+                                                                warn!("QC blob at height {checkpoint_height} cannot be served: {e}");
+                                                                let _ = self.swarm.behaviour_mut().sync.send_response(channel, Vec::new());
+                                                            }
+                                                        }
+                                                    }
+                                                    _ => {
+                                                        let _ = self.swarm.behaviour_mut().sync.send_response(channel, Vec::new());
+                                                    }
                                                 }
+                                            } else {
+                                                let _ = self.swarm.behaviour_mut().sync.send_response(channel, Vec::new());
                                             }
                                         }
                                         request_response::Message::Response { request_id, response } => {
+                                            if let Some((expected_peer, expected_height)) =
+                                                self.cert_fetches.remove(&request_id)
+                                            {
+                                                if peer != expected_peer {
+                                                    self.peer_manager_lock()
+                                                        .report_bad_behavior(&peer);
+                                                } else {
+                                                    self.handle_finality_cert_response(
+                                                        peer,
+                                                        expected_height,
+                                                        &response,
+                                                    )
+                                                    .await;
+                                                }
+                                                continue;
+                                            }
+                                            if let Some(fetch) = self.qc_fetches.remove(&request_id) {
+                                                let key = (fetch.peer, fetch.epoch, fetch.height);
+                                                let result = NetworkMessage::from_bytes_validated(&response)
+                                                    .map_err(|e| format!("{e:?}"));
+                                                let retry = fetch.clone();
+                                                let result = match result {
+                                                    Ok(msg) => self.accept_qc_response(fetch, peer, msg).await,
+                                                    Err(e) => Err(e),
+                                                };
+                                                match result {
+                                                    Ok(QcResponseAction::Missing) => self.retry_qc_fetch(&retry),
+                                                    Ok(QcResponseAction::Imported | QcResponseAction::InProgress) => {},
+                                                    Err(e) => {
+                                                        self.qc_assemblies.remove(&key);
+                                                        warn!("QC response from {peer} rejected: {e}");
+                                                        self.peer_manager_lock().report_bad_behavior(&peer);
+                                                        self.retry_qc_fetch(&retry);
+                                                    }
+                                                }
+                                                self.drain_qc_fetches();
+                                                continue;
+                                            }
                                             if let Ok(msg) = NetworkMessage::from_bytes_validated(&response) {
                                                 match msg {
                                                     NetworkMessage::Headers(headers) => {
@@ -3627,7 +5596,21 @@ impl Node {
                                                             continue;
                                                         }
                                                         let chain_id = self.chain.get_chain_id().await;
-                                                        if NetworkMessage::validate_header_batch(&headers, chain_id).is_err() {
+                                                        if let Err(error) =
+                                                            NetworkMessage::validate_header_batch(&headers, chain_id)
+                                                        {
+                                                            // Loud on purpose: this refusal ends
+                                                            // the round without the follower moving,
+                                                            // and a silent one is indistinguishable
+                                                            // from a peer that simply has nothing new.
+                                                            warn!(
+                                                                peer = %peer,
+                                                                error = ?error,
+                                                                count = headers.len(),
+                                                                first = headers.first().map(|h| h.index),
+                                                                last = headers.last().map(|h| h.index),
+                                                                "header batch refused; the sync round is closed"
+                                                            );
                                                             {
                                                                 let mut pm = self.peer_manager_lock();
                                                                 pm.report_invalid_block(&peer);
@@ -3640,36 +5623,113 @@ impl Node {
                                                             continue;
                                                         }
                                                         if headers.is_empty() {
-                                                            // The peer has nothing past our locator: we
-                                                            // are level with it. Nothing to fetch, so the
-                                                            // round closes now rather than at the timeout.
+                                                            let our_height = self.chain.get_height().await;
+                                                            info!(
+                                                                peer = %peer,
+                                                                our_height,
+                                                                "peer returned no headers past our locator"
+                                                            );
                                                             self.clear_sync_round();
-                                                        }
-                                                        if !headers.is_empty() {
-                                                            let from = headers[0].index;
-                                                            if let Some(last) = headers.last() {
-                                                                // GetBlocksRange uses a half-open [from, to) interval.
-                                                                let to = last.index.saturating_add(1);
-                                                                let req = NetworkMessage::GetBlocksRange { from, to };
-                                                                self.sync_state.store(1, Ordering::SeqCst);
-                                                                self.sync_started_at.store(
-                                                                    SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs(),
-                                                                    Ordering::SeqCst,
-                                                                );
-                                                                if let Some(ref m) = self.metrics {
-                                                                    m.p2p_sync_requests.inc();
+                                                        } else {
+                                                            let our_height = self.chain.get_height().await;
+                                                            let prefix_count =
+                                                                headers.partition_point(|h| h.index <= our_height);
+                                                            let mut lo = 0usize;
+                                                            let mut hi = prefix_count;
+                                                            while lo < hi {
+                                                                let mid = lo + (hi - lo) / 2;
+                                                                let matches_local = if let Some(hdr) = headers.get(mid) {
+                                                                    self.chain
+                                                                        .get_block(hdr.index)
+                                                                        .await
+                                                                        .is_some_and(|held| held.hash == hdr.hash)
+                                                                } else {
+                                                                    false
+                                                                };
+                                                                if matches_local {
+                                                                    lo = mid + 1;
+                                                                } else {
+                                                                    hi = mid;
                                                                 }
-                                                                self.active_sync_request = Some(
-                                                                    self.swarm
-                                                                        .behaviour_mut()
-                                                                        .sync
-                                                                        .send_request(&peer, req.to_bytes()),
-                                                                );
                                                             }
-                                                        }
-                                                        {
-                                                            let mut pm = self.peer_manager_lock();
-                                                            pm.report_good_behavior(&peer);
+                                                            match plan_sync_headers(&headers, lo, our_height) {
+                                                                SyncHeaderPlan::NothingNew => {
+                                                                    info!(
+                                                                        peer = %peer,
+                                                                        our_height,
+                                                                        "peer returned no unheld headers past our locator"
+                                                                    );
+                                                                    self.clear_sync_round();
+                                                                }
+                                                                SyncHeaderPlan::AboveNext { first } => {
+                                                                    warn!(
+                                                                        peer = %peer,
+                                                                        first,
+                                                                        our_height,
+                                                                        "sync header batch starts above the next block: walking the locator"
+                                                                    );
+                                                                    self.clear_sync_round();
+                                                                    self.peer_manager_lock()
+                                                                        .report_unjoined_block(&peer);
+                                                                    continue;
+                                                                }
+                                                                SyncHeaderPlan::ForkDepthExceeded { depth } => {
+                                                                    warn!(
+                                                                        peer = %peer,
+                                                                        depth,
+                                                                        our_height,
+                                                                        "sync header fork exceeds max reorg depth; closing round"
+                                                                    );
+                                                                    self.clear_sync_round();
+                                                                    self.peer_manager_lock()
+                                                                        .report_unjoined_block(&peer);
+                                                                    continue;
+                                                                }
+                                                                SyncHeaderPlan::Fetch {
+                                                                    from,
+                                                                    final_to,
+                                                                    fork_recovery,
+                                                                    max_chunks,
+                                                                } => {
+                                                                    let max_batch = u64::try_from(
+                                                                        crate::network::protocol::MAX_CHAIN_SYNC_BLOCKS,
+                                                                    )
+                                                                    .unwrap_or(1);
+                                                                    let chunk_to =
+                                                                        final_to.min(from.saturating_add(max_batch));
+                                                                    let req = NetworkMessage::GetBlocksRange {
+                                                                        from,
+                                                                        to: chunk_to,
+                                                                    };
+                                                                    self.begin_sync_round(
+                                                                        SystemTime::now()
+                                                                            .duration_since(UNIX_EPOCH)
+                                                                            .unwrap_or_default()
+                                                                            .as_secs(),
+                                                                    );
+                                                                    if let Some(ref m) = self.metrics {
+                                                                        m.p2p_sync_requests.inc();
+                                                                    }
+                                                                    self.active_sync_request = Some(
+                                                                        self.swarm
+                                                                            .behaviour_mut()
+                                                                            .sync
+                                                                            .send_request(&peer, req.to_bytes()),
+                                                                    );
+                                                                    self.sync_range_cursor = Some(SyncRangeCursor {
+                                                                        peer,
+                                                                        next_from: from,
+                                                                        final_to,
+                                                                        fork_recovery,
+                                                                        chunks_remaining: max_chunks.saturating_sub(1),
+                                                                        staged_suffix: Vec::new(),
+                                                                    });
+                                                                    self.peer_manager_lock()
+                                                                        .report_good_behavior(
+                                                                            &peer,
+                                                                        );
+                                                                }
+                                                            }
                                                         }
                                                     }
                                                     NetworkMessage::Blocks(blocks) => {
@@ -3684,72 +5744,381 @@ impl Node {
                                                             self.clear_sync_round();
                                                             continue;
                                                         }
-                                                        if !blocks.is_empty() {
-                                                            let start_idx = blocks[0].index;
-                                                            let our_block = self.chain.get_block(start_idx).await;
-                                                            if let Some(our_b) = our_block {
-                                                            if our_b.hash != blocks[0].hash {
-                                                                if let Some(flight_guard) = ReorgFlightGuard::try_acquire(&self.reorg_in_flight) {
-                                                                    let reorg_chain = self.chain.clone();
-                                                                    let reorg_peer = peer;
-                                                                    let last_completed = Arc::clone(&self.reorg_last_completed_at);
-                                                                    tokio::spawn(async move {
-                                                                        Self::reorg_to_peer_suffix(reorg_chain, blocks, reorg_peer, flight_guard, last_completed).await;
+                                                        let mut fork_retry = false;
+                                                        let mut non_fork_refusal = false;
+                                                        let mut joined = 0u32;
+                                                        let mut fork_suffix_ready: Option<Vec<crate::core::block::Block>> = None;
+                                                        let cursor_opt = self.sync_range_cursor.take();
+                                                        if let Some(mut cur) = cursor_opt.filter(|c| c.peer == peer) {
+                                                            let contiguous = !blocks.is_empty()
+                                                                && blocks
+                                                                    .iter()
+                                                                    .enumerate()
+                                                                    .all(|(i, b)| {
+                                                                        b.index == cur.next_from.saturating_add(i as u64)
                                                                     });
-                                                                } else {
-                                                                    warn!("Sync reorg from {peer} ignored: another reorg attempt is already in flight");
+                                                            if !contiguous {
+                                                                {
+                                                                    let mut pm = self.peer_manager_lock();
+                                                                    pm.report_invalid_block(&peer);
                                                                 }
+                                                                self.clear_sync_round();
+                                                                continue;
+                                                            }
+                                                            if cur.fork_recovery {
+                                                                let prev_ok = match cur.staged_suffix.last() {
+                                                                    Some(prev) => blocks
+                                                                        .first()
+                                                                        .is_some_and(|first| first.previous_hash == prev.hash),
+                                                                    None => true,
+                                                                };
+                                                                let inner_ok = blocks
+                                                                    .windows(2)
+                                                                    .all(|w| matches!(w, [a, b] if b.previous_hash == a.hash));
+                                                                let within_cap = cur
+                                                                    .staged_suffix
+                                                                    .len()
+                                                                    .saturating_add(blocks.len())
+                                                                    <= crate::consensus::MAX_REORG_DEPTH;
+                                                                if !prev_ok || !inner_ok || !within_cap {
+                                                                    {
+                                                                        let mut pm = self.peer_manager_lock();
+                                                                        pm.report_invalid_block(&peer);
+                                                                    }
+                                                                    self.clear_sync_round();
+                                                                    continue;
+                                                                }
+                                                                let next_from = blocks
+                                                                    .last()
+                                                                    .map_or(cur.next_from, |b| b.index.saturating_add(1));
+                                                                cur.staged_suffix.extend(blocks);
+                                                                cur.next_from = next_from;
+                                                                if cur.next_from < cur.final_to && cur.chunks_remaining > 0 {
+                                                                    cur.chunks_remaining -= 1;
+                                                                    let max_batch = u64::try_from(
+                                                                        crate::network::protocol::MAX_CHAIN_SYNC_BLOCKS,
+                                                                    )
+                                                                    .unwrap_or(1);
+                                                                    let chunk_to = cur
+                                                                        .final_to
+                                                                        .min(cur.next_from.saturating_add(max_batch));
+                                                                    let req = NetworkMessage::GetBlocksRange {
+                                                                        from: cur.next_from,
+                                                                        to: chunk_to,
+                                                                    };
+                                                                    // A chunk answer refreshes the stall
+                                                                    // deadline only while the round is inside
+                                                                    // its total budget. The fork-recovery path
+                                                                    // stages what the peer sent without
+                                                                    // validating it against consensus, so an
+                                                                    // unbounded refresh let one peer hold the
+                                                                    // node's only sync round and never accrue a
+                                                                    // strike.
+                                                                    let now_secs = SystemTime::now()
+                                                                        .duration_since(UNIX_EPOCH)
+                                                                        .unwrap_or_default()
+                                                                        .as_secs();
+                                                                    if self.sync_round_may_refresh(now_secs) {
+                                                                        self.sync_started_at
+                                                                            .store(now_secs, Ordering::SeqCst);
+                                                                    }
+                                                                    if let Some(ref m) = self.metrics {
+                                                                        m.p2p_sync_requests.inc();
+                                                                    }
+                                                                    self.active_sync_request = Some(
+                                                                        self.swarm
+                                                                            .behaviour_mut()
+                                                                            .sync
+                                                                            .send_request(&peer, req.to_bytes()),
+                                                                    );
+                                                                    self.sync_range_cursor = Some(cur);
+                                                                    self.peer_manager_lock()
+                                                                        .report_good_behavior(&peer);
+                                                                    continue;
+                                                                }
+                                                                fork_suffix_ready = Some(cur.staged_suffix);
+                                                            } else {
+                                                                let start_idx = cur.next_from;
+                                                                let our_height = self.chain.get_height().await;
+                                                                let ours = self.chain.get_block(start_idx).await;
+                                                                let shares_the_index = match (ours, blocks.first()) {
+                                                                    (Some(held), Some(first)) => held.hash != first.hash,
+                                                                    _ => false,
+                                                                };
+                                                                if start_idx > our_height.saturating_add(1) {
+                                                                    warn!(
+                                                                        peer = %peer,
+                                                                        first = start_idx,
+                                                                        our_height,
+                                                                        "sync batch starts above the next block: walking the locator"
+                                                                    );
+                                                                    fork_retry = true;
+                                                                } else if shares_the_index {
+                                                                    fork_suffix_ready = Some(blocks);
                                                                 } else {
+                                                                    let batch_len = blocks.len();
                                                                     for block in blocks {
                                                                         let h = self.chain.get_height().await;
                                                                         if block.index == h + 1 {
                                                                             let index = block.index;
-                                                                            if let Ok(pruned_cids) = self.chain.validate_and_add_block(block).await {
-                                                                                info!("Added block #{index} to local chain");
-                                                                                for cid in pruned_cids {
-                                                                                    let _ = self.command_tx.send(NodeCommand::StoragePrune { cid }).await;
+                                                                            match self.chain.validate_and_add_block(block).await {
+                                                                                Ok(pruned_cids) => {
+                                                                                    info!("Added block #{index} to local chain");
+                                                                                    joined = joined.saturating_add(1);
+                                                                                    for cid in pruned_cids {
+                                                                                        let _ = self.command_tx.send(NodeCommand::StoragePrune { cid }).await;
+                                                                                    }
+                                                                                }
+                                                                                Err(e) => {
+                                                                                    if e.contains("Previous hash mismatch")
+                                                                                        || e.contains("Block height discontinuity")
+                                                                                        || index <= self.chain.get_height().await
+                                                                                    {
+                                                                                        fork_retry = true;
+                                                                                    } else {
+                                                                                        non_fork_refusal = true;
+                                                                                        {
+                                                                                            let mut pm = self.peer_manager_lock();
+                                                                                            pm.report_invalid_block(&peer);
+                                                                                        }
+                                                                                    }
+                                                                                    warn!(
+                                                                                        peer = %peer,
+                                                                                        index,
+                                                                                        error = %e,
+                                                                                        "sync block refused"
+                                                                                    );
+                                                                                    if non_fork_refusal {
+                                                                                        break;
+                                                                                    }
                                                                                 }
                                                                             }
                                                                         }
                                                                     }
+                                                                    let next_from =
+                                                                        cur.next_from.saturating_add(u64::from(joined));
+                                                                    if !fork_retry
+                                                                        && usize::try_from(joined).unwrap_or(0) == batch_len
+                                                                        && next_from < cur.final_to
+                                                                        && cur.chunks_remaining > 0
+                                                                    {
+                                                                        cur.next_from = next_from;
+                                                                        cur.chunks_remaining -= 1;
+                                                                        self.fork_rewalk.record_progress();
+                                                                        let max_batch = u64::try_from(
+                                                                            crate::network::protocol::MAX_CHAIN_SYNC_BLOCKS,
+                                                                        )
+                                                                        .unwrap_or(1);
+                                                                        let chunk_to = cur
+                                                                            .final_to
+                                                                            .min(cur.next_from.saturating_add(max_batch));
+                                                                        let req = NetworkMessage::GetBlocksRange {
+                                                                            from: cur.next_from,
+                                                                            to: chunk_to,
+                                                                        };
+                                                                        // Same round ceiling as the
+                                                                        // fork-recovery continuation: validated
+                                                                        // progress refreshes the stall deadline,
+                                                                        // but no peer's answers may extend the
+                                                                        // round past `MAX_SYNC_ROUND_SECS`.
+                                                                        let now_secs = SystemTime::now()
+                                                                            .duration_since(UNIX_EPOCH)
+                                                                            .unwrap_or_default()
+                                                                            .as_secs();
+                                                                        if self.sync_round_may_refresh(now_secs) {
+                                                                            self.sync_started_at
+                                                                                .store(now_secs, Ordering::SeqCst);
+                                                                        }
+                                                                        if let Some(ref m) = self.metrics {
+                                                                            m.p2p_sync_requests.inc();
+                                                                        }
+                                                                        self.active_sync_request = Some(
+                                                                            self.swarm
+                                                                                .behaviour_mut()
+                                                                                .sync
+                                                                                .send_request(&peer, req.to_bytes()),
+                                                                        );
+                                                                        self.sync_range_cursor = Some(cur);
+                                                                        self.peer_manager_lock()
+                                                                            .report_good_behavior(&peer);
+                                                                        continue;
+                                                                    }
                                                                 }
+                                                            }
+                                                        } else if let Some(first_block) = blocks.first() {
+                                                            let start_idx = first_block.index;
+                                                            let first_hash = first_block.hash.clone();
+                                                            let our_height = self.chain.get_height().await;
+                                                            let ours = self.chain.get_block(start_idx).await;
+                                                            let shares_the_index =
+                                                                ours.is_some_and(|held| held.hash != first_hash);
+                                                            if start_idx > our_height.saturating_add(1) {
+                                                                warn!(
+                                                                    peer = %peer,
+                                                                    first = start_idx,
+                                                                    our_height,
+                                                                    "sync batch starts above the next block: walking the locator"
+                                                                );
+                                                                fork_retry = true;
+                                                            } else if shares_the_index {
+                                                                fork_suffix_ready = Some(blocks);
                                                             } else {
                                                                 for block in blocks {
                                                                     let h = self.chain.get_height().await;
                                                                     if block.index == h + 1 {
                                                                         let index = block.index;
-                                                                        if let Ok(pruned_cids) = self.chain.validate_and_add_block(block).await {
-                                                                            info!("Added block #{index} to local chain");
-                                                                            for cid in pruned_cids {
-                                                                                let _ = self.command_tx.send(NodeCommand::StoragePrune { cid }).await;
+                                                                        match self.chain.validate_and_add_block(block).await {
+                                                                            Ok(pruned_cids) => {
+                                                                                info!("Added block #{index} to local chain");
+                                                                                joined = joined.saturating_add(1);
+                                                                                for cid in pruned_cids {
+                                                                                    let _ = self.command_tx.send(NodeCommand::StoragePrune { cid }).await;
+                                                                                }
+                                                                            }
+                                                                            Err(e) => {
+                                                                                if e.contains("Previous hash mismatch")
+                                                                                    || e.contains("Block height discontinuity")
+                                                                                    || index <= self.chain.get_height().await
+                                                                                {
+                                                                                    fork_retry = true;
+                                                                                } else {
+                                                                                    non_fork_refusal = true;
+                                                                                    {
+                                                                                        let mut pm = self.peer_manager_lock();
+                                                                                        pm.report_invalid_block(&peer);
+                                                                                    }
+                                                                                }
+                                                                                warn!(
+                                                                                    peer = %peer,
+                                                                                    index,
+                                                                                    error = %e,
+                                                                                    "sync block refused"
+                                                                                );
+                                                                                if non_fork_refusal {
+                                                                                    break;
+                                                                                }
                                                                             }
                                                                         }
                                                                     }
                                                                 }
                                                             }
                                                         }
+                                                        if let Some(suffix_for_reorg) = fork_suffix_ready {
+                                                            if let Some(flight_guard) = ReorgFlightGuard::try_acquire(&self.reorg_in_flight) {
+                                                                let reorg_chain = self.chain.clone();
+                                                                let reorg_peer = peer;
+                                                                let last_completed = Arc::clone(&self.reorg_last_completed_at);
+                                                                let strikes = Arc::clone(&self.reorg_strikes);
+                                                                let reorg_pm = Arc::clone(&self.peer_manager);
+                                                                tokio::spawn(async move {
+                                                                    Self::reorg_to_peer_suffix(
+                                                                        reorg_chain,
+                                                                        suffix_for_reorg,
+                                                                        reorg_peer,
+                                                                        flight_guard,
+                                                                        last_completed,
+                                                                        strikes,
+                                                                        reorg_pm,
+                                                                    )
+                                                                    .await;
+                                                                });
+                                                            } else {
+                                                                warn!("Sync reorg from {peer} ignored: another reorg attempt is already in flight");
+                                                            }
+                                                        }
                                                         self.clear_sync_round();
-                                                        {
-                                                            let mut pm = self.peer_manager_lock();
-                                                            pm.report_good_behavior(&peer);
+                                                        if fork_retry {
+                                                            // A batch that does not join this
+                                                            // chain is a fork signal, not a
+                                                            // malformed block: the sender may be
+                                                            // sitting on a branch that won its
+                                                            // slot, and this node may simply have
+                                                            // moved its tip mid-flight. So the
+                                                            // sender is demoted in the sync order
+                                                            // (the re-walk below then asks someone
+                                                            // else) without being charged for an
+                                                            // invalid block, which bans on
+                                                            // repetition and took the devnet's
+                                                            // own validators out of the mesh.
+                                                            self.peer_manager_lock()
+                                                                .report_unjoined_block(&peer);
+                                                            // The walk is spaced: issued
+                                                            // inside this iteration it re-asks as
+                                                            // fast as the answers arrive, and the
+                                                            // peer's rate limiter answers a flood
+                                                            // by serving nothing at all. A refused
+                                                            // walk costs nothing - the next block
+                                                            // announcement asks again.
+                                                            let now = SystemTime::now()
+                                                                .duration_since(UNIX_EPOCH)
+                                                                .unwrap_or_default()
+                                                                .as_secs();
+                                                            if !self.fork_rewalk.may_walk(now) {
+                                                                info!(
+                                                                    peer = %peer,
+                                                                    backoff_secs = self.fork_rewalk.backoff_secs(),
+                                                                    "fork re-sync deferred: the locator was walked too recently"
+                                                                );
+                                                            } else {
+                                                                self.fork_rewalk.record_walk(now);
+                                                                let locator = self.chain.get_locator().await;
+                                                                if !self.request_headers_from_peer(None, locator, 500) {
+                                                                    info!(peer = %peer, "fork re-sync deferred: a sync round is already open");
+                                                                }
+                                                            }
+                                                        } else {
+                                                            if joined > 0 {
+                                                                if self.last_stalled_sync_peer == Some(peer) {
+                                                                    self.last_stalled_sync_peer = None;
+                                                                }
+                                                                self.fork_rewalk.record_progress();
+                                                                self.request_next_finality_cert(
+                                                                    peer,
+                                                                )
+                                                                .await;
+                                                                if !non_fork_refusal {
+                                                                    let mut pm =
+                                                                        self.peer_manager_lock();
+                                                                    pm.report_sync_success(&peer);
+                                                                }
+                                                            }
                                                         }
                                                     }
-                                                    _ => {}
+                                                    _ => {
+                                                        if self.active_sync_request == Some(request_id) {
+                                                            self.clear_sync_round();
+                                                        }
+                                                    }
                                                 }
+                                            } else if self.active_sync_request == Some(request_id) {
+                                                self.clear_sync_round();
                                             }
                                         }
                                     }
                                 }
                                 request_response::Event::OutboundFailure { peer, request_id, error, .. } => {
+                                    self.cert_fetches.remove(&request_id);
+                                    if let Some(fetch) = self.qc_fetches.remove(&request_id) {
+                                        self.qc_assemblies.remove(&(fetch.peer, fetch.epoch, fetch.height));
+                                        self.retry_qc_fetch(&fetch);
+                                        self.drain_qc_fetches();
+                                    }
                                     warn!("Outbound sync failure to {}: {:?}", peer, error);
                                     {
+                                        // A request this node chose to send
+                                        // that came back unanswered costs the
+                                        // peer its place in the sync order,
+                                        // not an hour of silence: the devnet
+                                        // lost its own validators to that ban
+                                        // and then could not finalize.
                                         let mut pm = self.peer_manager_lock();
-                                        pm.report_timeout(&peer);
+                                        pm.report_unanswered_request(&peer);
                                     }
                                     // Handshake requests share `/sync` with chain sync.
                                     // Only the request that owns the active round may
                                     // close it; an unrelated failure must leave it alone.
                                     if self.active_sync_request == Some(request_id) {
+                                        self.last_stalled_sync_peer = Some(peer);
                                         self.clear_sync_round();
                                     }
                                 }
@@ -3853,7 +6222,7 @@ impl Node {
                                                     }
                                                 }
                                             }
-                                            // BLG-0212: recompute remaining live asks from
+                                            // Recompute remaining live asks from
                                             // `bitswap_requests` using `requested_cid` (never
                                             // `response_cid`, which is peer-chosen!).
                                             if attempt_failed {
@@ -3880,6 +6249,89 @@ impl Node {
                                         }
                                     }
                                 }
+                            }
+                        }
+                        SwarmEvent::Behaviour(BudlumBehaviourEvent::Witness(event)) => {
+                            use crate::network::witness_protocol::{
+                                check_witnesses, WitnessRequest, WitnessResponse,
+                            };
+                            match event {
+                                request_response::Event::Message {
+                                    peer,
+                                    message:
+                                        request_response::Message::Request {
+                                            request, channel, ..
+                                        },
+                                    ..
+                                } => {
+                                    // Same boundary as /sync and Bitswap: a banned,
+                                    // unhandshaked or rate-limited peer gets nothing.
+                                    let allowed = {
+                                        let mut pm = self.peer_manager_lock();
+                                        !pm.is_banned(&peer)
+                                            && pm.is_handshaked(&peer)
+                                            && pm.check_rate_limit(&peer)
+                                    };
+                                    if !allowed {
+                                        warn!("Rejected a witness request from banned/unhandshaked/rate-limited peer {peer}");
+                                        continue;
+                                    }
+                                    if WitnessRequest::decode(&request).is_none() {
+                                        self.peer_manager_lock().report_bad_behavior(&peer);
+                                        continue;
+                                    }
+                                    // No witness storage yet: say so, never
+                                    // invent a witness.
+                                    let _ = self
+                                        .swarm
+                                        .behaviour_mut()
+                                        .witness
+                                        .send_response(channel, WitnessResponse::NotAvailable.encode());
+                                }
+                                request_response::Event::Message {
+                                    peer,
+                                    message:
+                                        request_response::Message::Response {
+                                            request_id,
+                                            response,
+                                        },
+                                    ..
+                                } => {
+                                    let Some((request, root, asked)) =
+                                        self.witness_requests.remove(&request_id)
+                                    else {
+                                        warn!("Unsolicited witness response from {peer}");
+                                        self.peer_manager_lock().report_bad_behavior(&peer);
+                                        continue;
+                                    };
+                                    if asked != peer {
+                                        self.peer_manager_lock().report_bad_behavior(&peer);
+                                        continue;
+                                    }
+                                    let verdict = WitnessResponse::decode(&response)
+                                        .ok_or(None)
+                                        .and_then(|decoded| {
+                                            check_witnesses(&request, &decoded, &root).map_err(Some)
+                                        });
+                                    match verdict {
+                                        Ok(()) => {
+                                            self.peer_manager_lock().report_good_behavior(&peer);
+                                            info!(
+                                                height = request.block_height,
+                                                count = request.tx_ids.len(),
+                                                "Witnesses verified against the witness_root"
+                                            );
+                                        }
+                                        Err(reason) => {
+                                            self.peer_manager_lock().report_bad_behavior(&peer);
+                                            warn!(?reason, "Witness response from {peer} refused");
+                                        }
+                                    }
+                                }
+                                request_response::Event::OutboundFailure { request_id, .. } => {
+                                    self.witness_requests.remove(&request_id);
+                                }
+                                _ => {}
                             }
                         }
                         _ => {}
@@ -4129,6 +6581,209 @@ mod mobile_profile_wiring_tests {
 
 #[cfg(test)]
 mod sync_handler_order_tests {
+    #[test]
+    fn qc_serve_capacity_is_per_peer_and_full_is_not_invalid() {
+        use super::{qc_serve_admission, QcServeAdmission, QcServeTable, MAX_QC_ASSEMBLIES};
+        use libp2p::PeerId;
+        let now = std::time::Instant::now();
+        let attacker = PeerId::random();
+        let honest = PeerId::random();
+        let mut table = QcServeTable::new();
+        table.insert((attacker, 1, 10), (now, 1));
+        table.insert((attacker, 1, 20), (now, 1));
+        assert_eq!(
+            qc_serve_admission(&table, attacker, 1, 30, 0, 100),
+            QcServeAdmission::Busy
+        );
+        assert_eq!(
+            qc_serve_admission(&table, honest, 1, 30, 0, 100),
+            QcServeAdmission::Start
+        );
+        assert_eq!(
+            qc_serve_admission(&table, attacker, 1, 10, 1, 100),
+            QcServeAdmission::Continue
+        );
+        assert_eq!(
+            qc_serve_admission(&table, attacker, 1, 10, 2, 100),
+            QcServeAdmission::Invalid
+        );
+        assert_eq!(
+            qc_serve_admission(&table, honest, 1, 99, 1, 100),
+            QcServeAdmission::Busy
+        );
+        while table.len() < MAX_QC_ASSEMBLIES {
+            table.insert((PeerId::random(), 1, 30), (now, 1));
+        }
+        assert_eq!(
+            qc_serve_admission(&table, honest, 1, 30, 0, 100),
+            QcServeAdmission::Busy
+        );
+    }
+
+    #[test]
+    fn qc_fetch_queue_defers_capacity_and_retries_other_peers() {
+        use super::{enqueue_qc_fetch, select_qc_peer, PendingQcFetch, MAX_PENDING_QC_REQUESTS};
+        use libp2p::PeerId;
+        let peer_a = PeerId::random();
+        let peer_b = PeerId::random();
+        let now = std::time::Instant::now();
+        let request = |height, preferred, last_peer| PendingQcFetch {
+            epoch: 1,
+            height,
+            checkpoint_hash: format!("{height:064x}"),
+            preferred,
+            last_peer,
+            ready_at: now,
+        };
+        let mut queue = std::collections::VecDeque::new();
+        for h in 1..=MAX_PENDING_QC_REQUESTS as u64 {
+            enqueue_qc_fetch(&mut queue, request(h, Some(peer_a), None));
+        }
+        assert_eq!(queue.len(), MAX_PENDING_QC_REQUESTS);
+        enqueue_qc_fetch(&mut queue, request(1, Some(peer_b), Some(peer_a)));
+        assert_eq!(
+            queue.len(),
+            MAX_PENDING_QC_REQUESTS,
+            "duplicate announcements do not consume slots"
+        );
+        let mut occupied = std::collections::HashMap::new();
+        assert_eq!(
+            select_qc_peer(&[peer_a, peer_b], &occupied, None, Some(peer_a)),
+            Some(peer_b)
+        );
+        assert_eq!(
+            select_qc_peer(&[peer_a], &occupied, None, Some(peer_a)),
+            Some(peer_a)
+        );
+        assert_eq!(select_qc_peer(&[], &occupied, Some(peer_a), None), None);
+        occupied.insert(peer_a, 1);
+        assert_eq!(
+            select_qc_peer(&[peer_a, peer_b], &occupied, Some(peer_a), None),
+            Some(peer_b),
+            "one slow peer cannot consume every fetch slot"
+        );
+        occupied.insert(peer_b, 1);
+        assert_eq!(
+            select_qc_peer(&[peer_a, peer_b], &occupied, None, None),
+            None
+        );
+        occupied.clear();
+        let peer_c = PeerId::random();
+        let peers = [peer_a, peer_b, peer_c];
+        let mut visited = std::collections::HashSet::new();
+        let mut last = None;
+        for _ in 0..3 {
+            let next = select_qc_peer(&peers, &occupied, None, last).unwrap();
+            visited.insert(next);
+            last = Some(next);
+        }
+        assert_eq!(visited.len(), 3, "every connected peer gets a retry");
+        enqueue_qc_fetch(
+            &mut queue,
+            request(MAX_PENDING_QC_REQUESTS as u64 + 1, None, None),
+        );
+        assert_eq!(queue.len(), MAX_PENDING_QC_REQUESTS);
+        assert_eq!(queue.front().unwrap().height, 2);
+    }
+
+    #[test]
+    fn thousand_validator_qc_is_served_in_binary_chunks_and_reassembled() {
+        use crate::consensus::qc::{PqSignatureEntry, QcBlob, QcBlobAssembler, QC_CHUNK_BYTES};
+        use crate::network::protocol::NetworkMessage;
+        let blob = QcBlob::new(
+            4,
+            100,
+            "checkpoint".into(),
+            (0..1000)
+                .map(|i| PqSignatureEntry {
+                    validator_index: i,
+                    validator_address: format!("validator-{i}"),
+                    // Synthetic bytes exercise the transport, not signature verification.
+                    pq_signature: vec![7; 3309],
+                })
+                .collect(),
+        );
+        let first = super::qc_chunk_response(4, 100, 0, Some(blob.clone())).unwrap();
+        let NetworkMessage::QcBlobResponse {
+            found: true,
+            chunk_count,
+            ..
+        } = first
+        else {
+            panic!("QC blob should be found");
+        };
+        assert!(chunk_count > 1);
+        let mut assembler = QcBlobAssembler::new(1000, chunk_count as usize).unwrap();
+        for index in 0..chunk_count {
+            let response = super::qc_chunk_response(4, 100, index, Some(blob.clone())).unwrap();
+            let received = NetworkMessage::from_bytes_validated(&response.to_bytes()).unwrap();
+            let NetworkMessage::QcBlobResponse {
+                found: true,
+                epoch,
+                checkpoint_height,
+                checkpoint_hash,
+                blob_data,
+                chunk_index,
+                chunk_count: count,
+            } = received
+            else {
+                panic!("expected QC response");
+            };
+            assert_eq!(
+                (epoch, checkpoint_height, checkpoint_hash.as_str()),
+                (4, 100, "checkpoint")
+            );
+            assert_eq!((chunk_index, count), (index, chunk_count));
+            assert!(blob_data.len() <= QC_CHUNK_BYTES);
+            assembler.push(chunk_index as usize, blob_data).unwrap();
+        }
+        let decoded = assembler.finish().unwrap();
+        assert_eq!(decoded.to_bytes().unwrap(), blob.to_bytes().unwrap());
+    }
+
+    #[test]
+    fn qc_serving_refuses_missing_epoch_and_invalid_chunk() {
+        use crate::consensus::qc::{PqSignatureEntry, QcBlob};
+        use crate::network::protocol::NetworkMessage;
+        let blob = QcBlob::new(
+            4,
+            100,
+            "checkpoint".into(),
+            vec![PqSignatureEntry {
+                validator_index: 0,
+                validator_address: "validator".into(),
+                pq_signature: vec![7; 3309],
+            }],
+        );
+        for response in [
+            super::qc_chunk_response(5, 100, 0, Some(blob.clone())).unwrap(),
+            super::qc_chunk_response(4, 100, 1, Some(blob)).unwrap(),
+            super::qc_chunk_response(4, 100, 0, None).unwrap(),
+        ] {
+            let NetworkMessage::QcBlobResponse {
+                found,
+                blob_data,
+                chunk_count,
+                ..
+            } = response
+            else {
+                panic!("expected QC response");
+            };
+            assert!(!found);
+            assert!(blob_data.is_empty());
+            assert_eq!(chunk_count, 0);
+        }
+        let request = NetworkMessage::GetQcBlob {
+            epoch: 4,
+            checkpoint_height: 100,
+            chunk_index: 1,
+        };
+        assert!(matches!(
+            NetworkMessage::from_bytes_validated(&request.to_bytes()),
+            Ok(NetworkMessage::GetQcBlob { chunk_index: 1, .. })
+        ));
+    }
+
     /// Production half of this file; the test modules would match their own text.
     fn production() -> &'static str {
         include_str!("node.rs")
@@ -4137,7 +6792,7 @@ mod sync_handler_order_tests {
             .unwrap_or("")
     }
 
-    /// BLG-0202: a multi byte character on the cut must not panic.
+    /// A multi byte character on the cut must not panic.
     #[test]
     fn log_prefix_survives_multibyte_input() {
         let hostile = format!("{}{}", "a".repeat(15), "\u{20ac}\u{20ac}");
@@ -4145,7 +6800,7 @@ mod sync_handler_order_tests {
         assert_eq!(super::log_prefix("abc", 16), "abc");
     }
 
-    /// BLG-0202: no byte slice of a peer string is left in the production path.
+    /// No byte slice of a peer string is left in the production path.
     #[test]
     fn no_byte_slice_of_checkpoint_hash_in_logs() {
         let needle = format!("{}[..16", "checkpoint_hash");
@@ -4154,7 +6809,7 @@ mod sync_handler_order_tests {
         assert!(!code.contains(&needle) && !code.contains(&needle2));
     }
 
-    /// BLG-0203 / CWE-693: gossipsub holds messages until per-arm validation
+    /// / CWE-693: gossipsub holds messages until per-arm validation
     /// succeeds; neither `Accept` nor `record_valid` may precede `match msg`.
     #[test]
     fn gossipsub_forwarding_waits_for_the_application_verdict() {
@@ -4179,7 +6834,7 @@ mod sync_handler_order_tests {
         );
     }
 
-    /// BLG-0204: gossip batches get the cheap checks and earn credit only
+    /// Gossip batches get the cheap checks and earn credit only
     /// when the chain moved.
     #[test]
     fn gossip_block_batches_are_prechecked_and_not_credited_blindly() {
@@ -4189,7 +6844,7 @@ mod sync_handler_order_tests {
         }
         assert!(code.contains("> height_before"));
         assert!(code.contains("> snap_height_before"));
-        // P11-F03: an unvalidated GlobalHeader earns no credit.
+        // An unvalidated GlobalHeader earns no credit.
         let arm = code
             .split_once("NetworkMessage::GlobalHeader(header) => {")
             .and_then(|(_, rest)| rest.split_once("Computed invalid message"))
@@ -4198,7 +6853,7 @@ mod sync_handler_order_tests {
         assert!(!arm.contains("report_good_behavior"));
     }
 
-    /// BLG-0205: the guard compares the height that is signed.
+    /// The guard compares the height that is signed.
     #[test]
     fn precommit_guard_blocks_equal_and_lower_aggregator_heights() {
         assert!(!super::precommit_height_is_new(100, 100));
@@ -4212,7 +6867,38 @@ mod sync_handler_order_tests {
         );
     }
 
-    /// BLG-0209: the cid a Bitswap response is checked against comes from the
+    /// A certificate for a checkpoint this node lacks, or holds a sibling of,
+    /// is a statement about where this node is - not evidence of peer
+    /// misbehaviour, and not a reason to ban the peer that would carry this
+    /// node across the fork.
+    #[test]
+    fn a_fork_or_a_missing_block_is_not_peer_misbehaviour() {
+        assert!(super::Node::finality_cert_names_a_block_we_lack(
+            "We don't have block at height 2 yet"
+        ));
+        assert!(super::Node::finality_cert_names_a_block_we_lack(
+            "Certificate hash 42270eadc3c1e745549f144102915ff24a8b96 mismatch with our block \
+             hash b05ae228ef2d8bd68b70a629ac2bfaac51dae9ae at height 2"
+        ));
+        // Everything else keeps the old verdict, which does penalise the peer.
+        assert!(!super::Node::finality_cert_names_a_block_we_lack(
+            "Missing verified QC blob for epoch 0, height 2"
+        ));
+        assert!(!super::Node::finality_cert_names_a_block_we_lack(
+            "aggregate signature does not verify"
+        ));
+        assert!(!super::Node::finality_cert_names_a_block_we_lack(
+            "Height 7 is not a valid checkpoint height"
+        ));
+        assert!(!super::Node::finality_cert_names_a_block_we_lack(
+            "Validator set hash mismatch"
+        ));
+        assert!(super::Node::finality_cert_names_a_block_we_lack(
+            "Finality cert rejected: no validator set recorded for epoch 1"
+        ));
+    }
+
+    /// The cid a Bitswap response is checked against comes from the
     /// request we sent.
     #[test]
     fn bitswap_response_is_checked_against_the_requested_cid() {
@@ -4227,7 +6913,7 @@ mod sync_handler_order_tests {
         assert!(code.contains("self.bitswap_requests.remove(request_id)"));
     }
 
-    /// BLG-0550: ban and rate limit run before the protobuf decode.
+    /// Ban and rate limit run before the protobuf decode.
     #[test]
     fn sync_request_checks_ban_and_rate_before_decode() {
         let code = production();
@@ -4242,7 +6928,7 @@ mod sync_handler_order_tests {
         assert!(rate < parse, "the decode must come after the rate limit");
     }
 
-    /// BLG-0551: the stream cap is set on the request/response config.
+    /// The stream cap is set on the request/response config.
     #[test]
     fn request_response_config_caps_concurrent_streams() {
         let code = production();
@@ -4276,6 +6962,111 @@ mod sync_handler_order_tests {
         );
     }
 
+    /// A reconstruction that keeps failing buys its peer a longer window, and
+    /// an honest outcome puts it back to the floor. This is what stops one peer
+    /// from commissioning chain-wide work every two seconds: the interval grows
+    /// with its own failure rate, and a single successful - or singly
+    /// unnecessary - attempt clears it.
+    #[test]
+    fn a_failing_reconstruction_backs_off_and_a_success_clears_it() {
+        assert_eq!(
+            super::reorg_interval_secs(0),
+            super::REORG_MIN_INTERVAL_SECS
+        );
+        assert_eq!(super::reorg_interval_secs(1), 4);
+        assert_eq!(super::reorg_interval_secs(2), 8);
+        assert_eq!(super::reorg_interval_secs(3), 16);
+        assert_eq!(super::reorg_interval_secs(5), super::REORG_MAX_BACKOFF_SECS);
+        assert_eq!(
+            super::reorg_interval_secs(9),
+            super::REORG_MAX_BACKOFF_SECS,
+            "the shift saturates at the ceiling instead of overflowing"
+        );
+
+        let completed = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let strikes = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let now = 1_000u64;
+        completed.store(now.saturating_sub(2), std::sync::atomic::Ordering::Release);
+        assert!(
+            super::reorg_interval_elapsed(&completed, &strikes, now),
+            "the floor lets the next attempt through after two seconds"
+        );
+        strikes.store(3, std::sync::atomic::Ordering::Release);
+        assert!(
+            !super::reorg_interval_elapsed(&completed, &strikes, now),
+            "after three failures the same two seconds are inside the window"
+        );
+        completed.store(now.saturating_sub(16), std::sync::atomic::Ordering::Release);
+        assert!(
+            super::reorg_interval_elapsed(&completed, &strikes, now),
+            "the window expires once the earned interval has passed"
+        );
+        strikes.store(0, std::sync::atomic::Ordering::Release);
+        assert!(
+            super::reorg_interval_elapsed(&completed, &strikes, now),
+            "a success returns the window to the floor"
+        );
+    }
+
+    /// A reorg that replaces the block at the active checkpoint leaves this
+    /// node silent at that height - re-signing a different hash there is
+    /// equivocation - and it votes again at the next checkpoint.
+    #[test]
+    fn a_reorged_checkpoint_is_not_voted_twice_and_the_next_one_is() {
+        // The identical round may be retried; a different hash at the same
+        // height may not, which is the whole reason the retry door exists.
+        let published = super::PublishedVote {
+            epoch: 1,
+            checkpoint_height: 10,
+            checkpoint_hash: "aa".repeat(32),
+            at: std::time::Instant::now()
+                - (super::FINALITY_VOTE_RETRY + std::time::Duration::from_secs(1)),
+        };
+        let now = std::time::Instant::now();
+        let same = super::vote_retry_due(
+            Some(&published),
+            published.epoch,
+            published.checkpoint_height,
+            &published.checkpoint_hash,
+            now,
+        );
+        let other_hash = super::vote_retry_due(
+            Some(&published),
+            published.epoch,
+            published.checkpoint_height,
+            &"bb".repeat(32),
+            now,
+        );
+        assert!(same, "the identical round is retried while it lacks quorum");
+        assert!(
+            !other_hash,
+            "a different hash at a signed height is refused"
+        );
+        assert!(
+            !super::prevote_is_due(
+                published.checkpoint_height,
+                published.checkpoint_height,
+                other_hash
+            ),
+            "so the node signs nothing at the reorged checkpoint height"
+        );
+        assert!(
+            super::prevote_is_due(
+                published.checkpoint_height + 10,
+                published.checkpoint_height,
+                false
+            ),
+            "and it votes again as soon as the interval clears the high-water mark"
+        );
+        assert!(
+            super::precommit_height_is_new(
+                published.checkpoint_height + 10,
+                published.checkpoint_height
+            ),
+            "the precommit high-water mark opens the same way"
+        );
+    }
+
     /// A peer-triggered reconstruction is throttled from completion, and an
     /// unsolicited gossip batch no longer triggers one at all.
     ///
@@ -4288,6 +7079,7 @@ mod sync_handler_order_tests {
     #[test]
     fn peer_triggered_reorgs_are_throttled_and_never_started_from_gossip() {
         let completed = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let strikes = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -4295,7 +7087,7 @@ mod sync_handler_order_tests {
         // Within the window: refused.
         completed.store(now, std::sync::atomic::Ordering::Release);
         assert!(
-            !super::reorg_interval_elapsed(&completed, now),
+            !super::reorg_interval_elapsed(&completed, &strikes, now),
             "a second attempt inside the interval must be refused"
         );
         // Past the window: allowed again.
@@ -4304,7 +7096,7 @@ mod sync_handler_order_tests {
             std::sync::atomic::Ordering::Release,
         );
         assert!(
-            super::reorg_interval_elapsed(&completed, now),
+            super::reorg_interval_elapsed(&completed, &strikes, now),
             "the interval must expire measured from completion"
         );
 
@@ -4374,5 +7166,395 @@ mod sync_handler_order_tests {
             arm.contains("MessageAcceptance::Ignore"),
             "unauthenticated CrossDomainMessage gossip must be ignored without forwarding"
         );
+    }
+
+    /// One peer must not be able to hold the node's single-flight sync round
+    /// open by answering every chunk.
+    ///
+    /// The fork-recovery continuation stages what the peer sent - index
+    /// contiguous and hash chained, but never validated against consensus - and
+    /// used to refresh the stall deadline on each answer, so a peer that keeps
+    /// replying keeps the round alive, never accrues an unanswered-sync strike,
+    /// and the four-strike ban cannot engage. The round now has its own ceiling:
+    /// past it the refresh is skipped, the stall sweep closes the round and
+    /// charges the peer, which is the only path that reaches a ban.
+    #[test]
+    fn a_sync_round_cannot_be_extended_past_its_ceiling_by_peer_answers() {
+        assert_eq!(
+            super::MAX_SYNC_ROUND_SECS,
+            super::SYNC_TIMEOUT_SECS.saturating_mul(4),
+            "four stall windows is the budget one round may buy from its peer"
+        );
+        let body = production();
+        let mut cursor = 0usize;
+        let mut stores = 0usize;
+        let mut bounded = 0usize;
+        while let Some(rel) = body[cursor..].find("sync_started_at") {
+            let at = cursor + rel;
+            cursor = at + 1;
+            // The continuations are nested deep enough that the `.store(` call
+            // sits on a line of its own, so the window has to span indentation.
+            if !body[at..body.len().min(at + 200)].contains(".store(") {
+                continue;
+            }
+            stores += 1;
+            let before = &body[at.saturating_sub(400)..at];
+            if before.contains("fn begin_sync_round")
+                || before.contains("fn clear_sync_round")
+                || before.contains("sync_round_may_refresh")
+            {
+                bounded += 1;
+            }
+        }
+        assert!(
+            stores >= 3,
+            "the round open, the round clear and the continuations all stamp the deadline"
+        );
+        assert_eq!(
+            stores, bounded,
+            "every write of the stall deadline must either open/close the round or sit \
+             behind the round ceiling; an unguarded refresh lets one peer pin the round"
+        );
+        assert!(
+            body.contains("report_sync_success(&peer)"),
+            "an accepted fork suffix must credit the peer's strikes back, so an honest \
+             but slow peer is not banned by the ceiling"
+        );
+    }
+}
+
+#[cfg(test)]
+mod gossip_author_tests {
+    use super::*;
+
+    /// A spoofed gossip author must not change consensus state: the author
+    /// field of a gossip frame is read only to tie a handshake to its
+    /// connection. Reading it anywhere else in this file would let a classical
+    /// signature steer a decision.
+    #[test]
+    fn gossip_author_is_not_a_consensus_input() {
+        let whole = include_str!("node.rs");
+        let production = whole
+            .split_once("#[cfg(test)]")
+            .map(|(before, _)| before)
+            .expect("this file keeps its tests behind #[cfg(test)]");
+        let reads: Vec<&str> = production
+            .lines()
+            .filter(|line| line.contains("message.source"))
+            .collect();
+        assert!(
+            !reads.is_empty(),
+            "the handshake check reads the author; the scan is measuring nothing"
+        );
+        for line in &reads {
+            assert!(
+                line.contains("handshake_origin_matches_peer")
+                    || line.trim_start().starts_with("message.source"),
+                "gossip author read outside the handshake origin check: {line}"
+            );
+        }
+    }
+
+    /// A relayed handshake (author is not the sending peer) is dropped, and a
+    /// frame with no author is dropped too.
+    #[test]
+    fn spoofed_handshake_author_is_rejected() {
+        let relay = PeerId::random();
+        let author = PeerId::random();
+        assert!(handshake_origin_matches_peer(relay, Some(relay)));
+        assert!(!handshake_origin_matches_peer(relay, Some(author)));
+        assert!(!handshake_origin_matches_peer(relay, None));
+    }
+}
+
+#[cfg(test)]
+mod finality_publish_tests {
+    use super::{ipv4_slash24, publish_reached_the_mesh, tx_refusal_is_pool_race};
+    use libp2p::gossipsub::PublishError;
+    use libp2p::Multiaddr;
+
+    /// RT-003: a re-published vote is not a failed vote.
+    ///
+    /// The finality retry signs the same `(epoch, height, hash)` again, so the
+    /// byte string - and with it the gossipsub message id - is unchanged.
+    /// gossipsub answers the second publish with `Duplicate`, which the node
+    /// treated as "the vote did not leave", re-published on the next beat, and
+    /// so produced ~2.6 warnings per second per validator for the whole round
+    /// while the round still had no quorum. Every other refusal is a real
+    /// failure and must stay one.
+    #[test]
+    fn a_duplicate_publish_counts_as_delivered_and_nothing_else_does() {
+        assert!(
+            publish_reached_the_mesh(&PublishError::Duplicate),
+            "duplicate bytes are already in the mesh"
+        );
+        assert!(!publish_reached_the_mesh(
+            &PublishError::NoPeersSubscribedToTopic
+        ));
+        assert!(!publish_reached_the_mesh(&PublishError::MessageTooLarge));
+        assert!(!publish_reached_the_mesh(&PublishError::AllQueuesFull(3)));
+        assert!(!publish_reached_the_mesh(&PublishError::TransformFailed(
+            std::io::Error::other("compression")
+        )));
+    }
+
+    #[test]
+    fn failed_prevote_publish_still_advances_high_water_mark_and_blocks_reorg_equivocation() {
+        use super::{
+            prevote_is_due, record_cast_prevote, vote_retry_due, PublishedVote, FINALITY_VOTE_RETRY,
+        };
+        let mut last_prevote_height = 0u64;
+        let mut prevote_published: Option<PublishedVote> = None;
+        let t0 = std::time::Instant::now();
+
+        // Validator signs prevote for hash_a at height 100; publish fails (e.g. NoPeersSubscribedToTopic).
+        assert!(prevote_is_due(100, last_prevote_height, false));
+        let advanced = record_cast_prevote(
+            &mut last_prevote_height,
+            &mut prevote_published,
+            1,
+            100,
+            "aa".repeat(32).as_str(),
+            t0,
+        );
+        assert!(advanced);
+        assert_eq!(last_prevote_height, 100);
+
+        // Reorg replaces height 100 with hash_b: retry is false and height is NOT > last_prevote_height.
+        let retry_different_hash = vote_retry_due(
+            prevote_published.as_ref(),
+            1,
+            100,
+            "bb".repeat(32).as_str(),
+            t0 + FINALITY_VOTE_RETRY,
+        );
+        assert!(!retry_different_hash);
+        assert!(
+            !prevote_is_due(100, last_prevote_height, retry_different_hash),
+            "validator must stay silent rather than signing a second hash at height 100"
+        );
+
+        // Identical round (epoch 1, height 100, hash_a) IS eligible for retry after FINALITY_VOTE_RETRY.
+        let retry_same_hash = vote_retry_due(
+            prevote_published.as_ref(),
+            1,
+            100,
+            "aa".repeat(32).as_str(),
+            t0 + FINALITY_VOTE_RETRY,
+        );
+        assert!(retry_same_hash);
+        assert!(prevote_is_due(100, last_prevote_height, retry_same_hash));
+    }
+    #[test]
+    fn write_vote_history_file_persists_atomically_and_reports_unwritable_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let history_path = dir.path().join("votes").join("history.json");
+        super::Node::write_vote_history_file(&history_path, 14, 12).unwrap();
+        let persisted: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&history_path).unwrap()).unwrap();
+        assert_eq!(persisted["last_prevote_height"], 14);
+        assert_eq!(persisted["last_precommit_height"], 12);
+
+        // Pointing the history file at an existing directory must fail loudly
+        // so the caller withholds the vote instead of gossiping unrecorded bytes.
+        let dir_as_file = dir.path().join("occupied_dir");
+        std::fs::create_dir_all(&dir_as_file).unwrap();
+        assert!(super::Node::write_vote_history_file(&dir_as_file, 16, 14).is_err());
+    }
+
+    #[test]
+    fn plan_sync_headers_skips_shared_locator_prefix_and_caps_fork_and_forward_windows() {
+        let headers: Vec<crate::core::block::BlockHeader> = (1..=47u64)
+            .map(|idx| {
+                let blk = crate::core::block::Block::new(idx, format!("{:064x}", idx - 1), vec![]);
+                crate::core::block::BlockHeader::from_block(&blk)
+            })
+            .collect();
+        let max_batch = u64::try_from(crate::network::protocol::MAX_CHAIN_SYNC_BLOCKS).unwrap();
+
+        assert_eq!(
+            super::plan_sync_headers(&headers, 7, 18),
+            super::SyncHeaderPlan::Fetch {
+                from: 8,
+                final_to: 19u64.saturating_add(max_batch).min(48),
+                fork_recovery: true,
+                max_chunks: 12,
+            }
+        );
+        assert_eq!(
+            super::plan_sync_headers(&headers, 7, 7),
+            super::SyncHeaderPlan::Fetch {
+                from: 8,
+                final_to: 8u64.saturating_add(max_batch.saturating_mul(4)).min(48),
+                fork_recovery: false,
+                max_chunks: 4,
+            }
+        );
+        assert_eq!(
+            super::plan_sync_headers(&headers, 10, 7),
+            super::SyncHeaderPlan::AboveNext { first: 11 }
+        );
+        assert_eq!(
+            super::plan_sync_headers(&headers, 0, 120),
+            super::SyncHeaderPlan::ForkDepthExceeded { depth: 120 }
+        );
+        assert_eq!(
+            super::plan_sync_headers(&headers, headers.len(), 47),
+            super::SyncHeaderPlan::NothingNew
+        );
+    }
+
+    fn production_source() -> &'static str {
+        include_str!("node.rs")
+            .split_once("#[cfg(test)]")
+            .map(|(before, _)| before)
+            .expect("node.rs keeps its tests behind #[cfg(test)]")
+    }
+
+    #[test]
+    fn unjoined_next_height_fork_sync_and_connection_guards_are_in_production_source() {
+        let src = production_source();
+        assert!(
+            src.contains("if unjoined && self.sync_state.load(Ordering::SeqCst) == 0"),
+            "an unjoined height+1 block must trigger header sync to resolve lockstep forks"
+        );
+        assert!(
+            src.contains("if num_established > 0 {"),
+            "ConnectionClosed must keep the peer connected while established connections remain"
+        );
+        assert!(
+            src.contains("!self.swarm.is_connected(&peer_id)"),
+            "bootstrap must skip dialing peers that already hold an active connection"
+        );
+        assert!(
+            src.contains("self.expire_stuck_sync_round();"),
+            "stalled sync rounds must be expired on the fast heartbeat"
+        );
+    }
+
+    #[test]
+    fn deferred_votes_two_pass_replay_and_prevote_retry_until_precommit_quorum() {
+        let src = production_source();
+        let prevotes_pos = src
+            .find("for vote in held_prevotes")
+            .expect("held_prevotes pass must exist");
+        let precommits_pos = src
+            .find("for vote in held_precommits")
+            .expect("held_precommits pass must exist");
+        assert!(
+            prevotes_pos < precommits_pos,
+            "deferred prevotes must replay before deferred precommits"
+        );
+        assert!(
+            src.contains("if e.contains(\"Cannot precommit before prevote quorum\")"),
+            "deferred precommits arriving before prevote quorum must be retained"
+        );
+        assert!(
+            src.contains("if !e.contains(\"Duplicate\")"),
+            "duplicate votes must not be re-queued into deferred_votes"
+        );
+        assert!(
+            src.contains("let prevote_retry = agg_state.active\n                        && !agg_state.precommit_quorum_reached"),
+            "prevote retry must stay active until precommit quorum is reached across 2-hop meshes"
+        );
+    }
+
+    #[test]
+    fn loopback_subnet_exemption_and_signed_tx_pool_race_classification() {
+        let lo: Multiaddr = "/ip4/127.0.0.1/tcp/25001".parse().unwrap();
+        let pub_addr: Multiaddr = "/ip4/203.0.113.7/tcp/5001".parse().unwrap();
+        assert_eq!(ipv4_slash24(&lo), None);
+        assert_eq!(ipv4_slash24(&pub_addr), Some([203, 0, 113]));
+
+        let signer = crate::crypto::primitives::KeyPair::generate().unwrap();
+        let sender = crate::core::address::Address::from(signer.public_key_bytes());
+        let recipient = crate::core::address::Address::from([0x22; 32]);
+        let mut signed =
+            crate::core::transaction::Transaction::new(sender, recipient, 1_000, Vec::new());
+        signed.chain_id = 45261;
+        signed.nonce = 7;
+        signed.sign(&signer);
+        assert!(tx_refusal_is_pool_race(
+            &signed,
+            "Invalid transaction: Invalid nonce: expected 8, got 7",
+            45261,
+        ));
+        assert!(tx_refusal_is_pool_race(
+            &signed,
+            "Mempool error: DuplicateTransaction",
+            45261,
+        ));
+        assert!(!tx_refusal_is_pool_race(
+            &signed,
+            "Invalid transaction: Invalid Chain ID: expected 45261, got 1",
+            45261,
+        ));
+        assert!(!tx_refusal_is_pool_race(
+            &signed,
+            "Mempool error: DuplicateTransaction",
+            45262,
+        ));
+        assert!(!tx_refusal_is_pool_race(
+            &signed,
+            "custom wrapper mentioning DuplicateTransaction",
+            45261,
+        ));
+
+        let unsigned =
+            crate::core::transaction::Transaction::new(sender, recipient, 1_000, Vec::new());
+        assert!(!tx_refusal_is_pool_race(
+            &unsigned,
+            "Invalid transaction: Invalid nonce: expected 1, got 0",
+            45261,
+        ));
+        assert!(!tx_refusal_is_pool_race(
+            &unsigned,
+            "Mempool error: DuplicateTransaction",
+            45261,
+        ));
+    }
+
+    #[test]
+    fn budlum_topic_score_params_pass_validation_and_avoid_mesh_starvation() {
+        use libp2p::gossipsub;
+        let mut score_params = gossipsub::PeerScoreParams::default();
+        for topic in ["blocks", "transactions"] {
+            let params = super::budlum_topic_score_params();
+            assert_eq!(params.mesh_message_deliveries_weight, 0.0);
+            assert_eq!(params.mesh_failure_penalty_weight, 0.0);
+            score_params
+                .topics
+                .insert(gossipsub::IdentTopic::new(topic).hash(), params);
+        }
+        let kp = libp2p::identity::Keypair::generate_ed25519();
+        let mut gs: gossipsub::Behaviour = gossipsub::Behaviour::new(
+            gossipsub::MessageAuthenticity::Signed(kp),
+            gossipsub::Config::default(),
+        )
+        .expect("gossipsub config");
+        gs.with_peer_score(score_params, gossipsub::PeerScoreThresholds::default())
+            .expect("budlum topic score params must satisfy PeerScoreParams::validate");
+    }
+
+    #[test]
+    fn benign_fork_and_lag_refusals_do_not_match_bad_signatures() {
+        assert!(super::refusal_is_benign_fork_or_lag(
+            "Prevote checkpoint hash mismatch"
+        ));
+        assert!(super::refusal_is_benign_fork_or_lag(
+            "Precommit checkpoint hash mismatch"
+        ));
+        assert!(super::refusal_is_benign_fork_or_lag(
+            "Rejecting early precommit beyond finality horizon"
+        ));
+        assert!(super::refusal_is_benign_fork_or_lag(
+            "No validator snapshot for PQ attestation"
+        ));
+        assert!(!super::refusal_is_benign_fork_or_lag(
+            "Invalid precommit signature: verification failed"
+        ));
+        assert!(!super::refusal_is_benign_fork_or_lag(
+            "Invalid PQ attestation in precommit: forged"
+        ));
     }
 }

@@ -69,7 +69,7 @@ jobs:
           ignore-unfixed: false
       - name: Trivy IMAGE SARIF yukle (Security sekmesi)
         if: always()
-        uses: github/codeql-action/upload-sarif@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
+        uses: github/codeql-action/upload-sarif@1fc58d04a4d4374f921bdac573c3811c240f9c26 # v4.39.2
         with:
           sarif_file: trivy-image.sarif
           category: trivy-image
@@ -126,7 +126,11 @@ jobs:
             if ! docker compose -f ops/docker-compose.yml -f ops/docker-compose.ci.yml -p budlum-multinode-smoke ps; then
               echo "::error::\`docker compose ps\` also failed - the failure diagnosis has no container state."
             fi
-            if ! docker compose -f ops/docker-compose.yml -f ops/docker-compose.ci.yml -p budlum-multinode-smoke logs --tail=150; then
+            # No tail: the failure this dump exists for (a node that never
+            # produced) is decided by lines from the first seconds of the run,
+            # and `--tail=150` cut exactly those. The stack lives four
+            # minutes, so the whole log is a few thousand lines.
+            if ! docker compose -f ops/docker-compose.yml -f ops/docker-compose.ci.yml -p budlum-multinode-smoke logs; then
               echo "::error::\`docker compose logs\` also failed - the failure diagnosis has no node logs."
             fi
             exit 1

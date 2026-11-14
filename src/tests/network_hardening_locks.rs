@@ -549,6 +549,53 @@ mod tests {
         );
     }
 
+    /// A gossip block that does not join this chain is not a forgery.
+    ///
+    /// `validate_and_add_block` runs after the cheap checks, so a block that
+    /// arrives for `height + 1` while another arm imports a different block at
+    /// that height is refused with `Previous hash mismatch`. Charging that as
+    /// an invalid block bans an honest validator for an hour at ten
+    /// occurrences (`BAN_THRESHOLD` is -100): a four-validator devnet that
+    /// splits a slot then silences the node whose block it needs, which is
+    /// AF-09. The arm must classify the refusal before it penalises, must
+    /// answer `Ignore` rather than `Reject`, and must keep the banning path for
+    /// every other refusal.
+    #[test]
+    fn a_block_that_does_not_join_the_chain_is_not_a_forgery() {
+        let arm = arm_between(
+            NODE_RS,
+            "NetworkMessage::Block(block) => {",
+            "NetworkMessage::Transaction(tx) => {",
+        );
+        let code: String = code_lines(arm).into_iter().map(|(_, l)| l + "\n").collect();
+        assert!(
+            code.contains("Previous hash mismatch"),
+            "the gossip Block arm must recognise the one refusal that is a fork signal"
+        );
+        assert!(
+            code.contains("report_unjoined_block("),
+            "a block that does not join this chain must be demoted without a ban"
+        );
+        assert!(
+            code.contains("report_invalid_block("),
+            "every other validation refusal must keep charging an invalid block"
+        );
+        assert!(
+            code.contains("MessageAcceptance::Ignore"),
+            "an unjoinable block is not a bad message: it must be ignored, not rejected"
+        );
+        assert!(
+            code.contains("MessageAcceptance::Reject"),
+            "a genuinely invalid block must still be rejected"
+        );
+        // The classification must be what decides, not a constant: the arm
+        // reads the refusal string into a value and branches on it.
+        assert!(
+            code.contains("let unjoined = e.contains(\"Previous hash mismatch\")"),
+            "the refusal must be classified into a value the penalty branches on"
+        );
+    }
+
     /// Canary for the comment stripper: a mention inside a comment must not
     /// trip the lock, and real code must.
     #[test]

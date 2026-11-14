@@ -53,7 +53,7 @@ pub enum RlpError {
     /// Trailing bytes left unconsumed after decoding, which is an injection
     /// surface.
     TrailingBytes,
-    /// The item budget was exceeded (BLG-0123): one input byte can become
+    /// The item budget was exceeded: one input byte can become
     /// one heap-allocated item, so the total is bounded.
     TooManyItems,
     /// The list nesting depth was exceeded, a DoS guard; RLP can technically nest
@@ -80,7 +80,7 @@ impl std::error::Error for RlpError {}
 /// endlessly nested lists.
 const MAX_DEPTH: usize = 32;
 
-/// Most items one `decode` call will build (BLG-0123/P05-F16). Orders of
+/// Most items one `decode` call will build. Orders of
 /// magnitude past any honest header or proof and still finite.
 const MAX_ITEMS: usize = 100_000;
 
@@ -162,7 +162,7 @@ fn decode_at<'a>(
     if depth > MAX_DEPTH {
         return Err(RlpError::NestingTooDeep);
     }
-    // BLG-0123 (P05-F16): every item costs a heap Vec, so one input byte
+    // Every item costs a heap Vec, so one input byte
     // could become one item. The budget bounds the amplification no matter
     // what the caller's byte limit is.
     if *budget == 0 {
@@ -182,7 +182,7 @@ fn decode_at<'a>(
     if first <= 0xb7 {
         let len = (first - 0x80) as usize;
         let payload = take_exact(&input[1..], len)?;
-        // BLG-0122 (P05-F15): a single byte below 0x80 has a one-byte
+        // A single byte below 0x80 has a one-byte
         // form; the 0x81-prefixed spelling is non-canonical and refused,
         // exactly as the module doc promises.
         if len == 1 && payload[0] < 0x80 {
@@ -294,7 +294,7 @@ pub fn decode_uint(item: &Item) -> Result<u64, RlpError> {
     };
     if !bytes.is_empty() && bytes[0] == 0 {
         return Err(RlpError::NonCanonical); // leading-zero integer encoding,
-                                            // including the bare 0x00 spelling of zero (BLG-0122/P05-F15):
+                                            // including the bare 0x00 spelling of zero:
                                             // canonical zero is the empty string, checked below.
     }
     if bytes.is_empty() {
@@ -513,7 +513,7 @@ mod tests {
         assert_eq!(back.decode().unwrap(), item);
     }
 
-    /// BLG-0122 (P05-F15): non-canonical forms are refused exactly as the
+    /// Non-canonical forms are refused exactly as the
     /// module doc promises.
     #[test]
     fn non_canonical_forms_are_refused() {
@@ -529,7 +529,7 @@ mod tests {
         assert_eq!(decode_uint(&empty), Ok(0));
     }
 
-    /// BLG-0123 (P05-F16): the item budget bounds the decode, whatever the
+    /// The item budget bounds the decode, whatever the
     /// caller's byte limit is.
     #[test]
     fn decode_refuses_an_item_flood() {
@@ -543,7 +543,7 @@ mod tests {
         assert!(matches!(decode(&enc), Err(RlpError::TooManyItems)));
     }
 
-    /// BLG-0126 (P05-F19): a nested list past MAX_DEPTH is refused, not
+    /// A nested list past MAX_DEPTH is refused, not
     /// recursed into.
     #[test]
     fn neg_nesting_too_deep_rejected() {

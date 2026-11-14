@@ -48,7 +48,7 @@ fn l3_code_path_roundtrips() {
 
 #[test]
 fn signature_wire_size_matches_the_cost_model() {
-    // BLG-0053 (F17): the sketch must count every serialized field -
+    // (F17): the sketch must count every serialized field -
     // epoch 4 + randomizer 16 + LEN*32 chains + T_LOG2*32 path. The old
     // formula omitted the randomizer (2660) and disagreed with
     // SECURITY-ARGUMENT.md's 2676.
@@ -177,7 +177,7 @@ const EXPECTED_KAT_DIGEST: [u8; 32] = [
 // Re-frozen 2026-09-22 for the bar-1 wire change (randomizer field +
 // MESSAGE_BIND_V1): the migration is justified in the commit message of the
 // implementation; the hasher now also absorbs sig.randomizer.
-// Re-frozen 2026-10-19 for P02-F19: every WOTS chain step now binds its
+// Re-frozen 2026-10-19 for: every WOTS chain step now binds its
 // absolute step index into the preimage (see `wots::chain_step`), so every
 // chain digest, public root and signature moved; kat/bpqs-kat-v1.txt and
 // KAT_ROWS were regenerated in the same change.

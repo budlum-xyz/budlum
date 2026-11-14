@@ -206,7 +206,7 @@ fn the_write_gate_answers_before_the_payload_is_read() {
 fn a_credential_id_is_content_derived_so_a_forged_issuer_reaches_nothing() {
     let mut registry = two_dids();
     let real = credential(9, 100, Some(1_000));
-    // BLG-0095: the door now needs the subject's consent for a third-party
+    // The door now needs the subject's consent for a third-party
     // issuance; this test is about ids, so it sets up through the Op layer.
     registry
         .apply(
@@ -271,7 +271,7 @@ fn a_revocation_is_not_a_toggle() {
     let c = credential(9, 100, Some(1_000));
     let id = credential_id(&c);
     // Setup through the Op layer: this test is about revocation semantics
-    // (BLG-0095 moved third-party issuance consent to the door).
+    // ( moved third-party issuance consent to the door).
     registry
         .apply(
             &POA,
@@ -315,7 +315,7 @@ fn issuance_refuses_a_credential_from_the_future_or_born_dead() {
 
     let mut future = credential(9, 500, Some(1_000));
     // Self-issued (subject == issuer): no consent gate, so the registry's
-    // own time checks are what answers (BLG-0095).
+    // own time checks are what answers.
     future.subject = addr(9);
     let err = execute_identity_tx(
         &mut registry,
@@ -381,7 +381,7 @@ fn an_unregistered_subject_cannot_be_handed_a_credential() {
         )
         .unwrap();
     // The subject `0x01..` was never registered, and it is not the issuer, so
-    // the third-party consent gate (BLG-0095) answers before the registry is
+    // the third-party consent gate answers before the registry is
     // asked who the subject is. Either refusal is a non-issuance; what must
     // never happen is the credential landing.
     let c = credential(9, 100, Some(1_000));
@@ -413,12 +413,12 @@ fn an_unregistered_subject_cannot_be_handed_a_credential() {
 #[test]
 fn the_same_credential_cannot_be_issued_twice() {
     let mut registry = two_dids();
-    // Self-issued, so the door's consent gate (BLG-0095) is not the refusal
+    // Self-issued, so the door's consent gate is not the refusal
     // under test.
     let mut c = credential(9, 100, Some(1_000));
     c.subject = addr(9);
     // Setup through the Op layer: this test is about revocation semantics
-    // (BLG-0095 moved third-party issuance consent to the door).
+    // ( moved third-party issuance consent to the door).
     registry
         .apply(
             &POA,

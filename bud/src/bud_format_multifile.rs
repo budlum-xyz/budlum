@@ -1,6 +1,6 @@
 //! B.U.D. 2.0 - Multi-File Tenant Dedup + Delta (2026-08-16)
 //!
-//! The code counterpart of the V7 66x backup scenario (K20 plus ideas F9/F10):
+//! The code counterpart of the V7 66x backup scenario ( plus ideas F9/F10):
 //! - **Content-addressed dedup:** chunks collapse to one via content_id (the
 //!   same chunk is stored once).
 //! - **Delta:** an XOR/delta against the previous version - a very small delta

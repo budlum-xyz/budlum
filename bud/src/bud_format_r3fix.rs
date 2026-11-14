@@ -9,7 +9,7 @@
 //! THE NEW R3: content is compressed BY CONTENT TYPE as in 2.0 (photo -> AVIF/JXL,
 //! video -> AV1/HEVC, audio -> FLAC, documents -> zstd) -> **a QR video derivative is
 //! produced** -> **it is bound to the recipe record** (a bodied recipe: codec + compressed body + the QR derivative commitment).
-//! What is held = the compressed body (the codec gain); the QR derivative is not kept (K-QR-GENISLEME).
+//! What is held = the compressed body (the codec gain); the QR derivative is not kept.
 //!
 //! Result: R3 is no longer a "raw floor" - it is a bodied recipe that compresses with its
 //! own codec, carries a QR derivative and is recipe-bound. The physical floor remains only
@@ -87,7 +87,7 @@ impl Codec {
 /// The R3 bodied recipe: codec + compressed body + the QR derivative commitment.
 #[derive(Debug, Clone)]
 pub struct R3Recipe {
-    pub commitment: [u8; 32], // the original content identity (K3)
+    pub commitment: [u8; 32], // the original content identity
     pub codec: Codec,
     pub body: Vec<u8>,                  // the codec-compressed body (WHAT IS HELD)
     pub qr_derivative_commit: [u8; 32], // the commitment of the QR video derivative (not kept)
@@ -140,7 +140,7 @@ impl R3Recipe {
         floor * erasure.max(1.0) / ratio
     }
 
-    /// The QR derivative IS NOT KEPT (K-QR-GENISLEME): its commitment suffices.
+    /// The QR derivative IS NOT KEPT: its commitment suffices.
     pub fn qr_is_not_stored(&self) -> bool {
         true
     }

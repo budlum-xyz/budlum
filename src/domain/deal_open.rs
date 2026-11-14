@@ -181,7 +181,11 @@ pub fn accept_reallocation_escrowed(
         ReallocationCause::NeverPlaced => {
             if !state
                 .storage_registry
-                .has_claim(&ticket.manifest_id, &payer)
+                .has_manifest_claim(&ticket.manifest_id, &payer)
+                || state
+                    .storage_registry
+                    .owner_of(&ticket.manifest_id)
+                    .is_some_and(|owner| owner != payer)
             {
                 return Err(format!(
                     "manifest {} does not belong to payer {payer}; refusing to fund never-placed ticket {ticket_id}",

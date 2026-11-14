@@ -221,7 +221,6 @@ fn is_allowed_reference(rel: &str) -> bool {
         || rel == CURATION_TOOL
         || rel == SELF_PATH
         || rel == "docs/NOTICE"
-        || rel == "docs/NOTICE.md"
         || rel == "docs/PROVENANCE_NOTES.md"
         || rel == "LICENSE.md"
         || rel.ends_with(&format!("/{BOUNDARY_NOTE}"))

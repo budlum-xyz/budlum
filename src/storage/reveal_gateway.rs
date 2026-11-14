@@ -1,4 +1,4 @@
-//! G4 reveal gateway (plan §CH G4): the bounded session table a gateway or
+//! G4 reveal gateway: the bounded session table a gateway or
 //! RPC handler owns on top of [`crate::storage::three_rpc`].
 //!
 //! `three_rpc::open_reveal_session` opens one session; a network-facing
@@ -217,15 +217,6 @@ impl RevealGateway {
     #[must_use]
     pub const fn revoke_generation(&self) -> u64 {
         self.revoke_generation
-    }
-
-    /// Start a revoke flow: call this BEFORE the chain mutation is
-    /// submitted, so every grant decision already in flight is stale by the
-    /// time the mutation can land. A revoke that fails keeps the bump; the
-    /// only cost is one retry of the racing reveal call, and its next chain
-    /// question gets the truthful answer.
-    pub const fn bump_revoke_generation(&mut self) {
-        self.revoke_generation = self.revoke_generation.wrapping_add(1);
     }
 
     /// Derive the public id for an internal counter value: a keyed hash, so
@@ -559,7 +550,7 @@ mod gateway_tests {
         }
     }
 
-    /// P30-F04: the expensive half of an open needs no table, so a handler
+    /// The expensive half of an open needs no table, so a handler
     /// can run it before it takes the gateway lock. The prepared session is
     /// admitted later and is the same session an open would have made.
     #[test]

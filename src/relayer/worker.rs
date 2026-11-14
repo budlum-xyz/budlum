@@ -33,6 +33,43 @@ use tracing::{error, info, warn};
 /// success is indistinguishable from an attacker, because the signature makes
 /// the lie authentic. That asymmetry is why every failure path below is a
 /// refusal and not a fallback.
+/// The key a relayer signs result transactions with.
+///
+/// A V3 account signs V7 composite transactions and is the only form a
+/// mainnet node admits. A legacy Ed25519 key signs V4, which devnet and
+/// testnet still accept.
+#[derive(Clone)]
+/// exposed for: public surface of this module - production readers land with the wiring change.
+pub enum RelayerKey {
+    /// The legacy Ed25519 key (V4).
+    Legacy(Arc<KeyPair>),
+    /// A V3 account (V7 composite).
+    V3(Arc<crate::crypto::key_derivation::UserAccount>),
+}
+
+impl RelayerKey {
+    /// Sign `tx` as its sender. The V3 form rewrites `from` to its Address V3.
+    fn sign(&self, tx: &mut Transaction) -> Result<(), String> {
+        match self {
+            Self::Legacy(kp) => {
+                tx.sign(kp);
+                Ok(())
+            }
+            Self::V3(account) => {
+                use rand::Rng;
+                let mut rnd = [0u8; 32];
+                rand::rng().fill_bytes(&mut rnd);
+                tx.sign_v7(
+                    &crate::crypto::scheme::SchemeStatusRegistry::genesis(),
+                    &account.signing,
+                    &account.recovery_public_key,
+                    &rnd,
+                )
+            }
+        }
+    }
+}
+
 pub struct RelayerWorker {
     chain: ChainHandle,
     /// Rewards for the relayer are minted in $BUD (Decision 9).
@@ -40,7 +77,7 @@ pub struct RelayerWorker {
     /// Relayer must sign result TXs.
     /// Without a signing key, the worker refuses to submit results
     /// (fail-closed).
-    relayer_keypair: Option<Arc<KeyPair>>,
+    relayer_keypair: Option<RelayerKey>,
     /// Chain adapters that can actually reach the external chains.
     ///
     /// Empty by default: a worker with no adapter can observe relay requests
@@ -225,7 +262,21 @@ impl RelayerWorker {
     /// cryptographically signed before injection into the chain.
     #[must_use]
     pub fn with_signing_key(mut self, keypair: Arc<KeyPair>) -> Self {
-        self.relayer_keypair = Some(keypair);
+        self.relayer_keypair = Some(RelayerKey::Legacy(keypair));
+        self
+    }
+
+    /// Bind a V3 account: result transactions are V7 composite transactions
+    /// from its Address V3, which replaces the address the worker was built
+    /// with so the nonce and the sender agree.
+    #[must_use]
+    /// WIRING: unwired - no caller in this tree yet; kept as a declared surface, and nothing depends on it until one arrives.
+    pub fn with_account(
+        mut self,
+        account: Arc<crate::crypto::key_derivation::UserAccount>,
+    ) -> Self {
+        self.relayer_address = Address::from(account.address);
+        self.relayer_keypair = Some(RelayerKey::V3(account));
         self
     }
 
@@ -622,7 +673,7 @@ impl RelayerWorker {
         request: &str,
         user: Address,
         result: &crate::core::transaction::RelayerExternalResult,
-        kp: &KeyPair,
+        kp: &RelayerKey,
     ) -> RelayOutcome {
         // The first result of a pass takes the chain's nonce; every later
         // one in the same pass takes the next number, because the chain
@@ -649,7 +700,10 @@ impl RelayerWorker {
             self.chain.get_chain_id().await,
             TransactionType::RelayerResult(result.clone()),
         );
-        result_tx.sign(kp);
+        if let Err(e) = kp.sign(&mut result_tx) {
+            error!(request, "Relayer: cannot sign the relay result: {e}");
+            return RelayOutcome::Retry;
+        }
         let tx_hash = result_tx.hash.clone();
         match self.chain.add_transaction(result_tx).await {
             Ok(()) => {
@@ -2190,7 +2244,7 @@ mod pending_results {
         );
     }
 
-    /// BLG-0716: a finalized result must survive a restart while the cursor
+    /// A finalized result must survive a restart while the cursor
     /// still holds the request's block, so the replay does not repeat the
     /// external action.
     #[tokio::test]

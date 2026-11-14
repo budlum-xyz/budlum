@@ -36,6 +36,14 @@ use std::sync::Arc;
 const CHECKPOINT_HEIGHT: u64 = 10;
 const CHAIN_ID: u64 = 45262;
 
+/// The epoch the certificate rule derives for that height: the checkpoint
+/// paths refuse a blob whose epoch disagrees with the height it certifies
+/// before signatures are ever looked at, so the fixture signs and stores the
+/// derived epoch rather than a literal.
+fn checkpoint_epoch() -> u64 {
+    CHECKPOINT_HEIGHT / crate::core::chain_config::epoch_len_for_chain_id(CHAIN_ID).max(1)
+}
+
 fn validator_address(i: u8) -> Address {
     let mut bytes = [0u8; 32];
     bytes[0] = i + 1;
@@ -51,7 +59,7 @@ fn snapshot_3_validators(epoch: u64, keys: &[PqKeyPair]) -> ValidatorSetSnapshot
         .enumerate()
         .map(|(i, key)| ValidatorEntry {
             address: validator_address(i as u8),
-            stake: 1_000_000,
+            stake: if i < 2 { 1_000_001 } else { 1_000_000 },
             bls_public_key: Vec::new(),
             pop_signature: Vec::new(),
             pq_public_key: key.public_key_bytes().to_vec(),
@@ -60,9 +68,10 @@ fn snapshot_3_validators(epoch: u64, keys: &[PqKeyPair]) -> ValidatorSetSnapshot
     ValidatorSetSnapshot::new(epoch, validators)
 }
 
-/// A chain with a real block at the checkpoint height and an epoch-0 validator
-/// snapshot registered, so `import_qc_blob` gets past its structural checks and
-/// reaches the quorum comparison this file is about.
+/// A chain with a real block at the checkpoint height and a validator
+/// snapshot registered under the derived checkpoint epoch, so
+/// `import_qc_blob` gets past its structural checks and reaches the quorum
+/// comparison this file is about.
 fn chain_ready_for_checkpoint() -> (Blockchain, String, Vec<PqKeyPair>) {
     let consensus = Arc::new(PoWEngine::new(0));
     let mut bc = Blockchain::new(consensus, None, CHAIN_ID, None);
@@ -83,8 +92,16 @@ fn chain_ready_for_checkpoint() -> (Blockchain, String, Vec<PqKeyPair>) {
         .clone();
 
     let keys: Vec<PqKeyPair> = (0..3).map(|_| PqKeyPair::generate()).collect();
+    let epoch = checkpoint_epoch();
+    // The lookup answers from the live state when the asked epoch is the
+    // chain's current one, and this PoW fixture has no bonded validators to
+    // build a live set from. The registered snapshot below IS the fixture's
+    // validator set, so the current index moves off the derived epoch the
+    // same way other fixtures pin it - the certificate rule above still
+    // derives the epoch from the height, and the signatures still carry it.
+    bc.state.epoch_index = epoch + 1;
     bc.validator_snapshots
-        .insert(0, snapshot_3_validators(0, &keys));
+        .insert(epoch, snapshot_3_validators(epoch, &keys));
 
     (bc, checkpoint_hash, keys)
 }
@@ -94,7 +111,7 @@ fn chain_ready_for_checkpoint() -> (Blockchain, String, Vec<PqKeyPair>) {
 fn signed_entry(keys: &[PqKeyPair], index: usize, checkpoint_hash: &str) -> PqSignatureEntry {
     sign_attestation(
         &keys[index],
-        0,
+        checkpoint_epoch(),
         CHECKPOINT_HEIGHT,
         checkpoint_hash,
         index as u32,
@@ -108,7 +125,12 @@ fn blob_with_distinct_sigs(count: usize, checkpoint_hash: &str, keys: &[PqKeyPai
     let sigs: Vec<PqSignatureEntry> = (0..count)
         .map(|i| signed_entry(keys, i, checkpoint_hash))
         .collect();
-    QcBlob::new(0, CHECKPOINT_HEIGHT, checkpoint_hash.to_string(), sigs)
+    QcBlob::new(
+        checkpoint_epoch(),
+        CHECKPOINT_HEIGHT,
+        checkpoint_hash.to_string(),
+        sigs,
+    )
 }
 
 /// A blob where one validator's genuine entry is repeated. The raw entry count
@@ -117,7 +139,12 @@ fn blob_with_repeated_sig(count: usize, checkpoint_hash: &str, keys: &[PqKeyPair
     let sigs: Vec<PqSignatureEntry> = (0..count)
         .map(|_| signed_entry(keys, 0, checkpoint_hash))
         .collect();
-    QcBlob::new(0, CHECKPOINT_HEIGHT, checkpoint_hash.to_string(), sigs)
+    QcBlob::new(
+        checkpoint_epoch(),
+        CHECKPOINT_HEIGHT,
+        checkpoint_hash.to_string(),
+        sigs,
+    )
 }
 
 /// Canary for the fixture itself. Every test below asserts a refusal, and a
@@ -133,7 +160,7 @@ fn the_fixture_reaches_the_quorum_check_and_not_an_earlier_rejection() {
         .expect_err("one signature out of three must not be accepted");
 
     assert!(
-        err.contains("unique verified signers"),
+        err.contains("QcBlob quorum not met:"),
         "the fixture fails before the quorum check is reached: {err}"
     );
 }
@@ -146,7 +173,7 @@ fn import_qc_blob_rejects_empty_signature_set() {
         .import_qc_blob(blob_with_distinct_sigs(0, &hash, &keys))
         .expect_err("a blob with no signatures at all must be refused");
 
-    assert!(err.contains("unique verified signers"), "got: {err}");
+    assert!(err.contains("QcBlob quorum not met:"), "got: {err}");
     assert!(
         bc.get_qc_blob(CHECKPOINT_HEIGHT).is_none(),
         "a refused blob must not be stored"
@@ -163,7 +190,7 @@ fn import_qc_blob_rejects_below_quorum_signature_count() {
         .expect_err("one signature out of three is below quorum");
 
     assert!(
-        err.contains("1 unique verified signers, need at least 2"),
+        err.contains("QcBlob quorum not met: 1 signers (need 2), stake 1000001 (need 2000002)"),
         "got: {err}"
     );
     assert!(

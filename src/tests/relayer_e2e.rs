@@ -82,7 +82,9 @@ fn relayer_enqueues_and_tracks_pending_relays() {
     // Initially no pending relays
     assert_eq!(bc.pending_relay_count(), 0);
     assert_eq!(
-        bc.universal_relayer
+        bc.state
+            .settlement
+            .relayer
             .expired_relays(bc.chain.len() as u64)
             .len(),
         0
@@ -118,33 +120,26 @@ fn enqueue_bridge_relay_increments_pending() {
     assert_eq!(bc.pending_relay_count(), 1);
 }
 
+/// A lock applied in a block enqueues its relay in the account state,
+/// and the restart (a replay of the stored blocks) brings the pending relay
+/// back with the same relayer state.
 #[test]
 fn pending_relay_persists_across_restart() {
+    use crate::tests::block_door_harness::BlockHarness;
+
     let dir = tempdir().unwrap();
     let db = dir.path().join("pending_restart.db");
-    let db_path = db.to_str().unwrap().to_string();
-    let storage = Storage::new(&db_path).unwrap();
-    let consensus = Arc::new(PoWEngine::new(0));
-    let mut bc = Blockchain::new(consensus, Some(storage), 45262, None);
+    let mut harness = BlockHarness::open(db.to_str().unwrap());
+    harness.lock_through_blocks(asset(1), Address::from([0x42; 32]), 100);
+    assert_eq!(harness.chain.pending_relay_count(), 1);
+    let relayer_root = harness.chain.state.settlement.relayer.state_root();
 
-    let a = asset(1);
-    let (event, message) = make_lock_event(1, 2, 100, a);
-    let message_id = message.message_id;
-    bc.enqueue_bridge_relay(event, &message);
-    assert_eq!(bc.pending_relay_count(), 1);
-    drop(bc);
-
-    let restarted = Blockchain::new(
-        Arc::new(PoWEngine::new(0)),
-        Some(Storage::new(&db_path).unwrap()),
-        45262,
-        None,
+    let restarted = harness.restart();
+    assert_eq!(restarted.chain.pending_relay_count(), 1);
+    assert_eq!(
+        restarted.chain.state.settlement.relayer.state_root(),
+        relayer_root
     );
-    assert_eq!(restarted.pending_relay_count(), 1);
-    assert!(restarted
-        .universal_relayer
-        .pending_relay(&message_id)
-        .is_some());
 }
 
 #[test]
@@ -178,7 +173,12 @@ fn lock_bridge_transfer_auto_enqueues_pending_relay() {
     let message_id = event.message.unwrap().message_id;
 
     assert_eq!(bc.pending_relay_count(), 1);
-    assert!(bc.universal_relayer.pending_relay(&message_id).is_some());
+    assert!(bc
+        .state
+        .settlement
+        .relayer
+        .pending_relay(&message_id)
+        .is_some());
 }
 
 #[test]
@@ -210,7 +210,7 @@ fn burn_bridge_transfer_with_event_auto_enqueues_pending_relay() {
     let lock_message = lock_event.message.unwrap();
     bc.state.bridge_state.mint(&lock_message, 0).unwrap();
     // The state-level mint is the row flip only; the credit half is the
-    // caller's (BLG-0108), and the burn debits what was credited.
+    // caller's, and the burn debits what was credited.
     bc.state.add_balance(&recipient(), 100);
 
     let burn_event = bc
@@ -219,7 +219,9 @@ fn burn_bridge_transfer_with_event_auto_enqueues_pending_relay() {
     let burn_message_id = burn_event.message.unwrap().message_id;
 
     assert!(bc
-        .universal_relayer
+        .state
+        .settlement
+        .relayer
         .pending_relay(&burn_message_id)
         .is_some());
 }
@@ -277,13 +279,15 @@ fn expired_relays_detects_past_expiry() {
 
     bc.enqueue_bridge_relay(event, &message);
     assert_eq!(
-        bc.universal_relayer
+        bc.state
+            .settlement
+            .relayer
             .expired_relays(bc.chain.len() as u64)
             .len(),
         0
     ); // not expired yet (chain len < 200)
-    assert_eq!(bc.universal_relayer.expired_relays(199).len(), 0);
-    assert_eq!(bc.universal_relayer.expired_relays(200).len(), 1);
+    assert_eq!(bc.state.settlement.relayer.expired_relays(199).len(), 0);
+    assert_eq!(bc.state.settlement.relayer.expired_relays(200).len(), 1);
 }
 
 #[test]
@@ -328,17 +332,27 @@ fn full_internal_relay_cycle_lock_mint() {
     tree.push(lock_event.clone());
     let proof = tree.proof(0).unwrap();
 
-    // 5b. The source domain anchors its event root on-chain via a domain
-    // Commitment; relay proofs are verified against that committed root.
+    // 5b. The source domain anchors its event root on-chain via an applied
+    // Domain commitment chain 1..=10; relay proofs verify against that tip.
     {
-        let mut b = crate::core::block::Block::new(10, bc.last_block().hash.clone(), vec![]);
-        b.state_root = "22".repeat(32);
-        b.tx_root = b.calculate_tx_root();
-        b.hash = b.calculate_hash();
-        let commitment =
-            crate::domain::DomainCommitment::from_block(&domains[0], &b, tree.root(), [0u8; 32], 0)
-                .unwrap();
-        bc.submit_domain_commitment(commitment).unwrap();
+        let mut parent_hash = bc.last_block().hash.clone();
+        for h in 1..=10u64 {
+            let mut b = crate::core::block::Block::new(h, parent_hash, vec![]);
+            b.state_root = "22".repeat(32);
+            b.tx_root = b.calculate_tx_root();
+            b.hash = b.calculate_hash();
+            parent_hash = b.hash.clone();
+            let event_root = if h == 10 { tree.root() } else { [0u8; 32] };
+            let commitment = crate::domain::DomainCommitment::from_block(
+                &domains[0],
+                &b,
+                event_root,
+                [0u8; 32],
+                h - 1,
+            )
+            .unwrap();
+            bc.submit_domain_commitment(commitment).unwrap();
+        }
     }
 
     // 6. Submit relay proof on Budlum
@@ -425,16 +439,26 @@ fn relayer_invalid_proof_is_rejected() {
     tree.push(lock_event.clone());
     let proof = tree.proof(0).unwrap();
 
-    // Anchor the source domain event root on-chain.
+    // Anchor the source domain event root on-chain via an applied 1..=10 chain.
     {
-        let mut b = crate::core::block::Block::new(10, bc.last_block().hash.clone(), vec![]);
-        b.state_root = "22".repeat(32);
-        b.tx_root = b.calculate_tx_root();
-        b.hash = b.calculate_hash();
-        let commitment =
-            crate::domain::DomainCommitment::from_block(&domains[0], &b, tree.root(), [0u8; 32], 0)
-                .unwrap();
-        bc.submit_domain_commitment(commitment).unwrap();
+        let mut parent_hash = bc.last_block().hash.clone();
+        for h in 1..=10u64 {
+            let mut b = crate::core::block::Block::new(h, parent_hash, vec![]);
+            b.state_root = "22".repeat(32);
+            b.tx_root = b.calculate_tx_root();
+            b.hash = b.calculate_hash();
+            parent_hash = b.hash.clone();
+            let event_root = if h == 10 { tree.root() } else { [0u8; 32] };
+            let commitment = crate::domain::DomainCommitment::from_block(
+                &domains[0],
+                &b,
+                event_root,
+                [0u8; 32],
+                h - 1,
+            )
+            .unwrap();
+            bc.submit_domain_commitment(commitment).unwrap();
+        }
     }
 
     // Tamper the proof leaf so it no longer verifies against the committed
@@ -488,7 +512,7 @@ fn full_internal_relay_cycle_burn_unlock() {
         .unwrap();
     let lock_msg = lock_event.message.unwrap();
     bc.state.bridge_state.mint(&lock_msg, 0).unwrap();
-    // Credit half of the mint (BLG-0108): the burn below debits it again.
+    // Credit half of the mint: the burn below debits it again.
     bc.state.add_balance(&recipient(), 100);
 
     // 3. Burn on Domain 2 via the blockchain wrapper so production relay
@@ -500,7 +524,12 @@ fn full_internal_relay_cycle_burn_unlock() {
     let burn_msg_id = burn_msg.message_id;
 
     // Production path now auto-enqueues the relay when the burn event is created.
-    assert!(bc.universal_relayer.pending_relay(&burn_msg_id).is_some());
+    assert!(bc
+        .state
+        .settlement
+        .relayer
+        .pending_relay(&burn_msg_id)
+        .is_some());
 
     // 4. Generate proof
     let mut tree = DomainEventTree::new();
@@ -508,16 +537,26 @@ fn full_internal_relay_cycle_burn_unlock() {
     let proof = tree.proof(0).unwrap();
 
     // 4b. The source domain anchors its event root on-chain (burn emitted at
-    // Domain 2, height 20); relay proof verifies against the committed root.
+    // Domain 2, height 20); relay proof verifies against the applied tip.
     {
-        let mut b = crate::core::block::Block::new(20, bc.last_block().hash.clone(), vec![]);
-        b.state_root = "22".repeat(32);
-        b.tx_root = b.calculate_tx_root();
-        b.hash = b.calculate_hash();
-        let commitment =
-            crate::domain::DomainCommitment::from_block(&domains[1], &b, tree.root(), [0u8; 32], 0)
-                .unwrap();
-        bc.submit_domain_commitment(commitment).unwrap();
+        let mut parent_hash = bc.last_block().hash.clone();
+        for h in 1..=20u64 {
+            let mut b = crate::core::block::Block::new(h, parent_hash, vec![]);
+            b.state_root = "22".repeat(32);
+            b.tx_root = b.calculate_tx_root();
+            b.hash = b.calculate_hash();
+            parent_hash = b.hash.clone();
+            let event_root = if h == 20 { tree.root() } else { [0u8; 32] };
+            let commitment = crate::domain::DomainCommitment::from_block(
+                &domains[1],
+                &b,
+                event_root,
+                [0u8; 32],
+                h - 1,
+            )
+            .unwrap();
+            bc.submit_domain_commitment(commitment).unwrap();
+        }
     }
 
     // 5. Submit relay proof

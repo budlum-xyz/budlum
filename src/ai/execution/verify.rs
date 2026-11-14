@@ -1,3 +1,4 @@
+//! WIRING: unwired - verify_execution_proof_structural is blocked on the MainnetActivation zkVM audit (verify_merkle_enabled: false); wiring it before the audit would put an unaudited prover on the acceptance path.
 //! Structural + cryptographic verification of AI execution proofs.
 
 use crate::ai::execution::stark::verify_execution_proof_stark;

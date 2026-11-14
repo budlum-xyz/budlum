@@ -96,7 +96,7 @@ const MUST_BLOCK: &[(&str, &str, &str)] = &[
         "security-audit.yml",
         "zizmor",
         "zizmor audits the workflows themselves, which is the entry surface the 2026 \
-         supply-chain wave came through, and this repository's CI signs the binary it \
+         supply-chain incident came through, and this repository's CI signs the binary it \
          publishes, so a misconfiguration here reaches the chain. It was softened as \
          `informational` on an unmeasured premise. Measured: zero findings at the \
          default persona, and of the pedantic persona's findings none reach medium. \

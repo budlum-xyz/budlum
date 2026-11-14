@@ -80,7 +80,12 @@ fn chaos_corrupt_view_recovers_within_n_blocks_via_canonical_reversion() {
             // Execute the verdict: the ledger, not the health layer, owns
             // the reversion rules.
             let event = damaged
-                .revert(&target, stress, &policy.reversion, &canonical)
+                .revert(
+                    &crate::domain::pq_canonical::sealed(target.clone()),
+                    stress,
+                    &policy.reversion,
+                    &canonical,
+                )
                 .expect("canonical reversion is always executable");
             assert_eq!(event.event_number, 1);
         }
@@ -100,7 +105,12 @@ fn chaos_corrupt_view_recovers_within_n_blocks_via_canonical_reversion() {
                     proofs_reusable: 40,
                     proofs_discarded: 8,
                     records_refiled: 12,
+                    proofs_classical_rederive: 0,
                 },
+                seal: Some(crate::domain::pq_canonical::test_seal(
+                    Stage::Medusa,
+                    RECOVERED_HEIGHT,
+                )),
             },
             &canonical,
         )
@@ -130,6 +140,7 @@ fn chaos_forged_audit_trail_recovers_by_full_reversion_within_n_blocks() {
             proofs_reusable: 7,
             proofs_discarded: 0,
             records_refiled: 9,
+            proofs_classical_rederive: 0,
         },
         event_number: 1,
     });
@@ -145,7 +156,12 @@ fn chaos_forged_audit_trail_recovers_by_full_reversion_within_n_blocks() {
             // refuses invalid ledgers, so damaged-trust state enters via the
             // door that trusts nothing inside the ledger.
             forged
-                .revert_after_forgery(&target, stress, &policy.reversion, &canonical)
+                .revert_after_forgery(
+                    &crate::domain::pq_canonical::sealed(target.clone()),
+                    stress,
+                    &policy.reversion,
+                    &canonical,
+                )
                 .expect("forgery-door recovery to a canonical polyp is allowed");
         }
         other => panic!("forged trail must be answered with full reversion, got {other:?}"),
@@ -160,6 +176,10 @@ fn chaos_forged_audit_trail_recovers_by_full_reversion_within_n_blocks() {
                 height: EPHYRA_HEIGHT,
                 commitment: C_EPHYRA,
                 carried: Transdifferentiated::default(),
+                seal: Some(crate::domain::pq_canonical::test_seal(
+                    Stage::Ephyra,
+                    EPHYRA_HEIGHT,
+                )),
             },
             &canonical,
         )
@@ -171,6 +191,10 @@ fn chaos_forged_audit_trail_recovers_by_full_reversion_within_n_blocks() {
                 height: RECOVERED_HEIGHT,
                 commitment: C_MEDUSA_RECOVERED,
                 carried: Transdifferentiated::default(),
+                seal: Some(crate::domain::pq_canonical::test_seal(
+                    Stage::Medusa,
+                    RECOVERED_HEIGHT,
+                )),
             },
             &canonical,
         )
@@ -209,7 +233,12 @@ fn chaos_compromised_anchor_reversion_follows_the_canonical_source_by_design() {
         panic!("a compromised anchor still yields a convergent verdict");
     };
     ledger
-        .revert(&target, stress, &policy.reversion, &adversarial_canonical)
+        .revert(
+            &crate::domain::pq_canonical::sealed(target.clone()),
+            stress,
+            &policy.reversion,
+            &adversarial_canonical,
+        )
         .expect("reversion follows the canonical source, by design");
     assert_eq!(
         ledger.commitment, [0xAD; 32],

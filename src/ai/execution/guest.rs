@@ -566,7 +566,7 @@ pub fn validate_gas_budget(
     spec: &FixedPointMlpSpec,
     proof_bytes_len: usize,
 ) -> Result<u64, String> {
-    // BLG-0099 (P04-F17): no ceiling parameter. `max_fee` is an escrowed
+    // No ceiling parameter. `max_fee` is an escrowed
     // balance in fee units and the estimate is in gas units - the two do
     // not compare, and the API that accepted both was the mistake. The
     // size bound is the only gate here; the gas estimate is returned so a
@@ -669,7 +669,7 @@ mod gas_tests {
         assert!(validate_gas_budget(&spec, MAX_PROOF_BYTES + 1).is_err());
     }
 
-    /// BLG-0099 (P04-F17): the fee ceiling is gone with its parameter (fee
+    /// The fee ceiling is gone with its parameter (fee
     /// units and gas units never compared) - what remains is the size gate
     /// and the estimate it hands back.
     #[test]
@@ -705,7 +705,7 @@ mod gas_tests {
 // [`emit_load_half`]).
 //
 // Branchless ReLU. `Jnz` skipped an instruction, which the Program CTL
-// argument in BudL_SPEC §9 does not model (every fetched row must be the
+// argument does not model (every fetched row must be the
 // row the program table holds at that pc). ReLU is therefore computed as a
 // multiplication by a selector bit - no control flow at all:
 //
@@ -1373,7 +1373,7 @@ mod matmul_tests {
         }
     }
 
-    /// No `Jnz`/`Jmp`: the Program CTL argument (BudL_SPEC §9) models a
+    /// No `Jnz`/`Jmp`: the Program CTL argument models a
     /// straight-line fetch, and the old ReLU jumped over an instruction.
     #[test]
     fn guest_program_is_branchless() {

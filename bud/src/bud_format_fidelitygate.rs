@@ -90,7 +90,7 @@ mod tests {
         assert!(!gate_allows(classify_lossy("sz", None, Some(0.01))));
     }
 
-    /// BLG-0612: a missing measurement, a negative or NaN error and a
+    /// A missing measurement, a negative or NaN error and a
     /// different spelling of the kind must not read as lossless.
     #[test]
     fn the_gate_fails_closed_on_missing_or_odd_measurements() {

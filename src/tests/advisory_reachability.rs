@@ -121,20 +121,11 @@ mod tests {
         }
     }
 
-    /// Every manifest that depends on libp2p must take it from the pinned
-    /// tree, and must pin it by full revision.
-    ///
-    /// The three workspaces resolve independently, so a crates.io requirement
-    /// left in any one of them puts the vulnerable yamux/hickory back into
-    /// that lockfile - six of the original nine Dependabot alerts.
-    ///
-    /// A direct git dependency is used rather than `[patch.crates-io]`
-    /// because tools that re-resolve the manifest in a scratch directory
-    /// (cargo-semver-checks among them) do not carry the patch table across,
-    /// and then cannot select a version at all.
+    /// Every manifest that depends on libp2p must use the published crates.io
+    /// `0.57.1+` line (no git pins anywhere) and lock `libp2p-gossipsub >= 0.50.1`
+    /// plus `quinn-udp >= 0.5.16`.
     #[test]
-    fn every_libp2p_dependency_is_pinned_to_the_tree() {
-        const REV: &str = "38b8a2c0e91bf6955f5357adcdd40d3b6683a0dd";
+    fn every_libp2p_dependency_is_published_and_patched() {
         for (name, manifest) in [
             ("Cargo.toml", include_str!("../../Cargo.toml")),
             (
@@ -148,24 +139,41 @@ mod tests {
                 .find(|l| l.trim_start().starts_with("libp2p = "))
                 .unwrap_or_else(|| panic!("{name}: no libp2p dependency line"));
             assert!(
-                dep.contains("git = \"https://github.com/libp2p/rust-libp2p\""),
-                "{name}: libp2p must come from the pinned tree, got: {dep}"
+                !dep.contains("git =") && !dep.contains("branch =") && !dep.contains("tag ="),
+                "{name}: libp2p must come from crates.io rather than a git source, got: {dep}"
             );
             assert!(
-                dep.contains(REV),
-                "{name}: libp2p must be pinned by full revision, got: {dep}"
+                dep.contains("0.57.1"),
+                "{name}: libp2p must require at least 0.57.1, got: {dep}"
             );
+        }
+
+        for (name, lock) in LOCKFILES {
+            let libp2p_versions = locked_versions_in(lock, "libp2p");
             assert!(
-                !dep.contains("branch =") && !dep.contains("tag ="),
-                "{name}: a branch or tag can move; pin by revision only"
+                !libp2p_versions.is_empty()
+                    && libp2p_versions
+                        .iter()
+                        .all(|v| version_at_least(v, "0.57.1")),
+                "{name}: expected libp2p >= 0.57.1, got {libp2p_versions:?}"
+            );
+            let quinn_udp_versions = locked_versions_in(lock, "quinn-udp");
+            assert!(
+                quinn_udp_versions.iter().all(|v| version_at_least(v, "0.5.16")),
+                "{name}: quinn-udp must be >= 0.5.16 (RUSTSEC-2026-0538), got {quinn_udp_versions:?}"
+            );
+            let gossipsub_versions = locked_versions_in(lock, "libp2p-gossipsub");
+            assert!(
+                gossipsub_versions.iter().all(|v| version_at_least(v, "0.50.1")),
+                "{name}: libp2p-gossipsub must be >= 0.50.1 (RUSTSEC-2026-0534), got {gossipsub_versions:?}"
             );
         }
     }
 
     /// No `[patch.crates-io]` may remain. It is what broke cargo-semver-checks,
-    /// and keeping both it and the git pin would be two sources of truth.
+    /// and all dependencies must resolve cleanly from crates.io.
     #[test]
-    fn no_patch_table_shadows_the_git_pin() {
+    fn no_patch_table_shadows_dependencies() {
         for (name, manifest) in [
             ("Cargo.toml", include_str!("../../Cargo.toml")),
             (
@@ -178,24 +186,23 @@ mod tests {
                 let code = line.split('#').next().unwrap_or("").trim();
                 assert_ne!(
                     code, "[patch.crates-io]",
-                    "{name} still carries a patch table; the git pin on the \
-                     dependency line is the single source of truth"
+                    "{name} still carries a patch table"
                 );
             }
         }
     }
 
-    /// cargo-deny denies unknown git sources, so the one exception has to be
-    /// allow-listed explicitly and by host, not switched off wholesale.
+    /// cargo-deny denies unknown git sources and permits zero git exceptions.
     #[test]
-    fn git_source_policy_stays_closed_except_for_libp2p() {
-        // Both cargo-deny configs, not just the root one: budzero keeps its own
-        // next to its manifest and CI runs the two as separate jobs, so a
-        // policy that lands in only one of them leaves the other gate red.
+    fn git_source_policy_stays_closed() {
         for (name, deny) in [
             (
                 ".quality/deny.toml",
                 include_str!("../../.quality/deny.toml"),
+            ),
+            (
+                ".quality/deny-fuzz.toml",
+                include_str!("../../.quality/deny-fuzz.toml"),
             ),
             ("budzero/deny.toml", include_str!("../../budzero/deny.toml")),
         ] {
@@ -204,35 +211,8 @@ mod tests {
                 "{name}: cargo-deny must keep denying unknown git sources"
             );
             assert!(
-                deny.contains("allow-git = [\"https://github.com/libp2p/rust-libp2p\"]"),
-                "{name}: the rust-libp2p host must be the only allowed git \
-                 source; a broader allow-list would let any git dependency \
-                 through"
-            );
-        }
-    }
-
-    /// The patch that delivers those versions has to stay, and it has to stay
-    /// explained. A bare `[patch.crates-io]` entry with no reason is how a
-    /// temporary pin becomes permanent.
-    #[test]
-    fn libp2p_patch_records_why_it_exists() {
-        let manifest = include_str!("../../Cargo.toml");
-        assert!(
-            manifest.contains("rust-libp2p"),
-            "the libp2p git pin is gone; if 0.57.0 was published, drop the pin \
-             *and* this test together, after checking the lockfile still \
-             resolves yamux >= 0.13.10 and hickory >= 0.26.1"
-        );
-        for advisory in [
-            "GHSA-vxx9-2994-q338",
-            "GHSA-3v94-mw7p-v465",
-            "GHSA-q2qq-hmj6-3wpp",
-        ] {
-            assert!(
-                manifest.contains(advisory),
-                "Cargo.toml must keep naming {advisory} as a reason for the \
-                 libp2p patch, otherwise the pin looks arbitrary"
+                deny.contains("allow-git = []"),
+                "{name}: allow-git must remain empty (zero git dependencies)"
             );
         }
     }
@@ -473,24 +453,18 @@ mod tests {
             );
         }
 
-        // The pin is by full revision, so record what was verified in that
-        // tree. Checked by hand against
-        // 38b8a2c0e91bf6955f5357adcdd40d3b6683a0dd:
-        //
-        //   behaviour.rs: const MAX_REMOTE_PRUNE_BACKOFF_SECONDS: u64 = 3600;
-        //   backoff.rs:   backoff_time.checked_add(slack)
-        //
-        // the bound that closes the insertion path and the checked arithmetic
-        // that closes the heartbeat path. If the revision moves, both have to
-        // be re-checked in the new tree.
-        let manifest = include_str!("../../Cargo.toml");
-        assert!(
-            manifest.contains("38b8a2c0e91bf6955f5357adcdd40d3b6683a0dd"),
-            "the libp2p revision changed. Re-verify in the new tree that \
-                 gossipsub still bounds remote PRUNE backoff \
-                 (MAX_REMOTE_PRUNE_BACKOFF_SECONDS) and still uses checked_add for \
-                 the heartbeat slack, then update this hash."
-        );
+        // Lockfile check replaces the temporary git pin check: every workspace
+        // resolving libp2p-gossipsub must resolve >= 0.50.1 from crates.io,
+        // which carries both bounded remote PRUNE backoff and checked heartbeat
+        // arithmetic (CVE-2026-33040, CVE-2026-34219, and RUSTSEC-2026-0534).
+        for (name, lock) in LOCKFILES {
+            for version in locked_versions_in(lock, "libp2p-gossipsub") {
+                assert!(
+                    version_at_least(&version, "0.50.1"),
+                    "{name}: libp2p-gossipsub {version} must be >= 0.50.1 (RUSTSEC-2026-0534)"
+                );
+            }
+        }
     }
 }
 

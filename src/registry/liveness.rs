@@ -20,7 +20,7 @@ use crate::registry::evidence::SlashingReport;
 use crate::registry::params::RegistryParams;
 use crate::registry::role::roles;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Per-validator consecutive-miss tracker.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -44,6 +44,15 @@ impl LivenessTracker {
     /// Current consecutive-miss count for a validator.
     pub fn missed_count(&self, validator: &Address) -> u64 {
         self.missed.get(validator).copied().unwrap_or(0)
+    }
+
+    #[must_use]
+    pub fn tracked_validator_count(&self) -> usize {
+        let mut validators = BTreeSet::new();
+        validators.extend(self.missed.keys().copied());
+        validators.extend(self.streak_start_epoch.keys().copied());
+        validators.extend(self.reported.keys().copied());
+        validators.len()
     }
 
     /// Record one epoch's worth of participation.

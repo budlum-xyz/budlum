@@ -181,7 +181,7 @@ impl SlashingReport {
                 signature_2,
                 ..
             } => {
-                // P16-F09: the same hash in another spelling ("AA", "aa",
+                // The same hash in another spelling ("AA", "aa",
                 // "0xaa") is still the same block, not a conflict.
                 if canonical_hash(block_hash_1) == canonical_hash(block_hash_2) {
                     return Err(EvidenceError::NonConflictingHashes);
@@ -300,7 +300,7 @@ mod tests {
         Address::from([b; 32])
     }
 
-    /// P16-F09: one hash in two spellings is not a double sign.
+    /// One hash in two spellings is not a double sign.
     #[test]
     fn spellings_of_one_hash_are_not_a_conflict() {
         for (a, b) in [("aa", "AA"), ("aa", "0xaa"), ("0XAA", "aa")] {

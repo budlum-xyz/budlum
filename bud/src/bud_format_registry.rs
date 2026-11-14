@@ -21,7 +21,7 @@ impl MimeRegistry {
         entries.insert("image/jpeg".into(), 11);
         entries.insert("image/png".into(), 12);
         entries.insert("video/mp4".into(), 10);
-        // K38: the pin has to be DETERMINISTIC. HashMap iteration order changes
+        // The pin has to be DETERMINISTIC. HashMap iteration order changes
         // from run to run (RandomState), so the same registry would produce a
         // DIFFERENT pin in two runs. The fix: the keys are processed in SORTED
         // order when computing the pin (no BTreeMap is needed, sorting is
@@ -44,7 +44,7 @@ impl MimeRegistry {
         h.finalize().into()
     }
 
-    /// The determinism proof: the same content gives the same pin (the K38
+    /// The determinism proof: the same content gives the same pin (the
     /// property).
     pub fn pin_matches(&self, other: &Self) -> bool {
         self.hash == other.hash && self.entries.len() == other.entries.len()
@@ -257,7 +257,7 @@ mod tests {
     }
     #[test]
     fn registry_pin_deterministic() {
-        // K38: two separate default_registry values have to produce the SAME
+        // Two separate default_registry values have to produce the SAME
         // pin, independently of HashMap order.
         let a = MimeRegistry::default_registry();
         let b = MimeRegistry::default_registry();

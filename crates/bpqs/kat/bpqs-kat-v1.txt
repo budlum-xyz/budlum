@@ -2,7 +2,7 @@
 #       regenerated 2026-10-19 for the step-bound chains below)
 # construction: epoch-chained Winternitz (one-time per epoch, q_max=1,
 #       PRF-derived 16B randomizer, MESSAGE_BIND_V1, chain steps bound
-#       to their absolute position (P02-F19))
+#       to their absolute position)
 # row: ParamsTestFast lane (N=32, LEN=67, T_LOG2=4) - identical hash
 #      discipline to the canonical L5/L3 rows, ceremony depth pruned.
 # pins: root_seed=0xA5*32, window=3, msg='bpqs-backend-differential-payload',

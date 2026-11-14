@@ -13,7 +13,7 @@
 //! HONESTY: because of f64 summation rounding, the round trip is accurate to
 //! about 1 ULP, which is roughly 2e-16 relative. F22 IS A RESEARCH SEED; the
 //! lossless storage path is the byte-oriented `bud_format_engine` line, and the
-//! K19 canary blocks this module from claiming to be bit-exact. BF16 and FP32
+//! canary blocks this module from claiming to be bit-exact. BF16 and FP32
 //! model input is compatible with `bud_format_model`.
 
 use sha3::{Digest, Sha3_256};

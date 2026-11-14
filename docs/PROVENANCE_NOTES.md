@@ -73,7 +73,7 @@ the crate's.
 
 - Ed25519: `ed25519-dalek`
 - BLS12-381 signatures and pairings, `bls12_381`, `blst`
-- Post-quantum signatures, `ml-dsa` (ML-DSA-65 validator / ML-DSA-87 wallet, FIPS 204 NIST final; DEFAULT), `pqcrypto-dilithium` (Dilithium5, round-3 legacy - migration only)
+- NIST PQ signature crates: `ml-dsa` (ML-DSA-65 validator / ML-DSA-87 wallet, FIPS 204 NIST final) verified a second time by `libcrux-ml-dsa` (portable backend), and `slh-dsa` (FIPS 205). The legacy `pqcrypto-dilithium` path (PQClean) was removed in.
 - SHA-2 / SHA-3 / Keccak / BLAKE2: `sha2`, `sha3`, `blake2`
 - AES-GCM, ChaCha20-Poly1305, `aes-gcm`, `chacha20poly1305`
 - sr25519 / VRF: `schnorrkel`

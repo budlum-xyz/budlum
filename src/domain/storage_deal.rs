@@ -1,5 +1,5 @@
 //! B.U.D. storage deals and retrieval challenges (
-//! Vision §8.5).
+//! Vision).
 //!
 //! **Production boundary:** the BudZKVM `VerifyMerkle` 64-depth soundness gate
 //! Is still treated as incomplete for mainnet claims. Every `open_deal` requires
@@ -21,12 +21,12 @@
 //!    Slashing-from-missed-challenge as a "this operator is unresponsive" signal,
 //!    NOT as a "this operator is destroying provable storage" signal.
 //!
-//! Data-sovereignty rule (plan §0.5): anyone (any account, no
+//! Data-sovereignty rule: anyone (any account, no
 //! Role required) may open a `RetrievalChallenge` and may submit a
 //! `StorageDeal`. There is no team-gated "official monitor" role.
 //!
 //! WIRING: wired - the durability half of this module is driven from
-//! `run_storage_maintenance` in `src/chain/chain_actor.rs`: the per-object
+//! the block-end maintenance in `src/chain/storage_maintenance.rs`: the per-object
 //! repair margin from `objects_below_own_repair_margin`, the shard view from
 //! `under_replicated_shards`, the repair action from
 //! `open_repair_tickets_for_free_slots`, and the placement advisory from
@@ -419,7 +419,7 @@ pub struct CodingAudit {
 /// it ever sees - so a pass is a spot check, not a proof of storage. Nothing in
 /// consensus reads `Passed`: deals stay `Active`, bonds do not move and repair
 /// is not suppressed by it, so an audit that passes buys the operator nothing
-/// it did not already have ([BLG-0152 S2]).
+/// it did not already have.
 ///
 /// The commitment is what makes the first half true. Before it, a memorised
 /// consistent column of some other object passed every audit, because the
@@ -721,11 +721,23 @@ pub struct StorageReallocationTicket {
     pub cause: ReallocationCause,
 }
 
+impl StorageReallocationTicket {
+    /// Whether this ticket is the repair ticket of the failed deal `deal_id`.
+    ///
+    /// `failed_deal_id` is a key only when the cause is `FailedDeal`. A
+    /// `NeverPlaced` ticket stores `0` as a placeholder, and deal ids start at
+    /// 0, so comparing the field alone made the first deal the chain accepted
+    /// look as if it already had a ticket.
+    fn names_failed_deal(&self, deal_id: u64) -> bool {
+        self.cause == ReallocationCause::FailedDeal && self.failed_deal_id == deal_id
+    }
+}
+
 /// On-chain, in-memory registry of all `StorageDeal`s, `RetrievalChallenge`s,
 /// And `ChallengeResult`s for a single storage domain. Backed by
 /// `BTreeMap` (the same primitive `permissionless::PermissionlessRegistry`
 /// Uses) so the registry is deterministic, cloneable, and
-/// `bincode`-serializable for sled storage (vision §8.4 atomic
+/// `bincode`-serializable for sled storage (vision atomic
 /// Persistence).
 ///
 /// **No admin hook**, no `pause_all`, no `freeze`, no team-only method
@@ -838,8 +850,8 @@ pub struct StorageRegistry {
     /// New fields go at the end: the registry row is bincode, which is
     /// positional, so a new field anywhere else would make every stored
     /// registry unreadable. `#[serde(default)]` keeps JSON snapshots taken
-    /// before the field loadable. A bincode row from an older build is
-    /// refused by `load_storage_registry`, not padded.
+    /// before the field loadable. A bincode snapshot from an older build is
+    /// refused, not padded.
     #[serde(default)]
     settled_tickets: BTreeMap<u64, Vec<u64>>,
     /// Next id for a stored coding audit.
@@ -867,9 +879,94 @@ pub struct StorageRegistry {
     /// registration never grants exclusive control over another party's content id.
     #[serde(default)]
     manifest_claims: std::collections::BTreeSet<(ContentId, Address)>,
+    /// The storage accounting the block-end maintenance keeps: the reward
+    /// cursor that stops an operator being paid twice for an epoch, the
+    /// slash and burn totals, and the recent economics events. It used to
+    /// live on `Blockchain`, written after the block outside the state
+    /// root and restored from a side store.
+    #[serde(default)]
+    pub economics: StorageEconomicsLedger,
+    /// Per-(owner, content_id) confidential body commits so a squatter naming
+    /// another party's content id cannot block or hijack the real owner's
+    /// confidential commit, grant or social-delete surface.
+    #[serde(default)]
+    #[serde(with = "crate::core::map_keys")]
+    scoped_confidential_commits:
+        BTreeMap<(Address, ContentId), crate::storage::ConfidentialBodyCommit>,
+    /// Per-(manifest_id, content_id, owner) self-host policies so a squatter's
+    /// policy applies only to its own deals and cannot block another owner.
+    #[serde(default)]
+    #[serde(with = "crate::core::map_keys")]
+    scoped_self_host_policies:
+        BTreeMap<(ContentId, ContentId, Address), crate::storage::MobileSelfContentPolicy>,
 }
 
 use std::collections::BTreeMap;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum StorageEconomicsEventKind {
+    OperatorRewardAccrued,
+    OperatorBondSlashed,
+    /// A deal reached `deal_end_epoch` without being slashed and its operator
+    /// bond was returned. The counterpart to `OperatorBondSlashed`: without it
+    /// the only recorded end-of-life for a bond was losing it.
+    OperatorBondReturned,
+    /// A slashed deal's unserved prepaid fee went back to the account that
+    /// escrowed it. The deal leaves the supply denominator with the slash, so
+    /// the refund is what keeps the committed total level instead of opening
+    /// minting headroom the fee never burned.
+    PayerRefund,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StorageEconomicsEvent {
+    pub epoch: u64,
+    pub deal_id: u64,
+    pub operator: Address,
+    pub amount: u64,
+    pub balance_effect: u64,
+    pub kind: StorageEconomicsEventKind,
+}
+
+/// How many economics events the ledger keeps. The oldest leave first, so
+/// the ledger stays bounded on a chain that runs for years.
+pub const MAX_STORAGE_ECONOMICS_EVENTS: usize = 4096;
+
+/// The storage accounting that is consensus state.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StorageEconomicsLedger {
+    pub slashed_bond_total: u64,
+    pub burned_bond_total: u64,
+    pub operator_rewards: BTreeMap<Address, u64>,
+    /// The epoch each deal has been paid through: the only thing standing
+    /// between an operator and being paid twice for the same epoch.
+    pub last_reward_epoch: BTreeMap<u64, u64>,
+    pub events: Vec<StorageEconomicsEvent>,
+}
+
+impl StorageEconomicsLedger {
+    /// Append an event, dropping the oldest past the bound.
+    pub fn record(&mut self, event: StorageEconomicsEvent) {
+        self.events.push(event);
+        if self.events.len() > MAX_STORAGE_ECONOMICS_EVENTS {
+            let excess = self.events.len() - MAX_STORAGE_ECONOMICS_EVENTS;
+            self.events.drain(..excess);
+        }
+    }
+
+    /// True when nothing was ever accounted.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+
+    /// The digest the registry root folds.
+    #[must_use]
+    pub fn root(&self) -> [u8; 32] {
+        let encoded = bincode::serialize(self).unwrap_or_else(|_| SERIALIZE_FAILED.to_vec());
+        hash_fields_bytes(&[b"BDLM_STORAGE_ECONOMICS_LEDGER_V1", &encoded])
+    }
+}
 
 /// Errors emitted by the registry. Enum-tagged for audit.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -926,6 +1023,19 @@ pub enum StorageError {
     OpenChallengeBlocksExpiry {
         deal_id: u64,
         open_challenges: u32,
+    },
+    /// A retrieval challenge named an answer deadline past the deal's own term.
+    ///
+    /// `expire_deal` holds a deal with an unresolved challenge `Active`, because
+    /// the missed-answer slash settles only an active row. The deadline the
+    /// opener chose therefore decided how long the deal outlived its term: the
+    /// bond was not returned, no expiry reallocation opened, and the departed
+    /// shard still counted live so repair skipped it. A question about these
+    /// bytes has to be answerable inside the term it is asked about.
+    ChallengeDeadlinePastDealTerm {
+        deal_id: u64,
+        deadline_epoch: u64,
+        deal_end_epoch: u64,
     },
     /// Caller referenced a challenge that does not exist.
     UnknownChallenge(u64),
@@ -1054,7 +1164,7 @@ pub enum StorageError {
         deal_id: u64,
         max: usize,
     },
-    /// F-18: too many concurrent open challenges across every manifest
+    /// Too many concurrent open challenges across every manifest
     /// of one operator. The (operator, manifest) interval alone lets an
     /// attacker scale I/O with the number of manifests.
     TooManyOpenChallengesPerOperator {
@@ -1130,6 +1240,15 @@ impl std::fmt::Display for StorageError {
                  {range_len}-byte challenge range"
             ),
             Self::UnknownDeal(id) => write!(f, "unknown deal {id}"),
+            Self::ChallengeDeadlinePastDealTerm {
+                deal_id,
+                deadline_epoch,
+                deal_end_epoch,
+            } => write!(
+                f,
+                "challenge deadline epoch {deadline_epoch} on deal {deal_id} runs past its term \
+                 {deal_end_epoch}: the deal would be held Active for the whole window"
+            ),
             Self::UnknownChallenge(id) => write!(f, "unknown challenge {id}"),
             Self::DealNotActive(id) => write!(f, "deal {id} is not Active"),
             Self::OpenChallengeBlocksExpiry {
@@ -1263,6 +1382,26 @@ impl StorageRegistry {
         Self::default()
     }
 
+    #[must_use]
+    pub fn manifest_count(&self) -> usize {
+        self.manifests.len()
+    }
+
+    #[must_use]
+    pub fn deal_count(&self) -> usize {
+        self.deals.len()
+    }
+
+    #[must_use]
+    pub fn challenge_count(&self) -> usize {
+        self.challenges.len()
+    }
+
+    #[must_use]
+    pub fn result_count(&self) -> usize {
+        self.results.len()
+    }
+
     pub fn is_empty(&self) -> bool {
         self.next_deal_id == 0
             && self.next_challenge_id == 0
@@ -1282,6 +1421,8 @@ impl StorageRegistry {
             && self.confidential_commits.is_empty()
             && self.confidential_owners.is_empty()
             && self.manifest_claims.is_empty()
+            && self.scoped_confidential_commits.is_empty()
+            && self.scoped_self_host_policies.is_empty()
     }
 
     pub fn root(&self) -> [u8; 32] {
@@ -1441,6 +1582,33 @@ impl StorageRegistry {
                 hasher.update(claimant.as_bytes());
             }
         }
+        // The reward cursor decides what the next maintenance pays, so two
+        // nodes that disagree about it pay different amounts a block later.
+        // Empty contributes no bytes.
+        if !self.economics.is_empty() {
+            hasher.update(self.economics.root());
+        }
+        if !self.scoped_confidential_commits.is_empty() {
+            hasher.update(b"BDLM_STORAGE_SCOPED_COMMITS_V1");
+            hasher.update((self.scoped_confidential_commits.len() as u64).to_le_bytes());
+            for ((owner, content_id), commit) in &self.scoped_confidential_commits {
+                hasher.update(owner.as_bytes());
+                hasher.update(content_id.0);
+                hasher.update(commit.commitment());
+            }
+        }
+        if !self.scoped_self_host_policies.is_empty() {
+            hasher.update(b"BDLM_STORAGE_SCOPED_SELF_HOST_V1");
+            hasher.update((self.scoped_self_host_policies.len() as u64).to_le_bytes());
+            for ((manifest_id, content_id, owner), policy) in &self.scoped_self_host_policies {
+                hasher.update(manifest_id.0);
+                hasher.update(content_id.0);
+                hasher.update(owner.as_bytes());
+                hasher.update(
+                    bincode::serialize(policy).unwrap_or_else(|_| SERIALIZE_FAILED.to_vec()),
+                );
+            }
+        }
         hasher.finalize().into()
     }
 
@@ -1472,8 +1640,61 @@ impl StorageRegistry {
                 reason,
             }
         })?;
-        self.self_host_policies
-            .insert((manifest_id, policy.content_id), policy);
+        let owner = policy.owner;
+        if owner != Address::zero() {
+            self.scoped_self_host_policies
+                .insert((manifest_id, policy.content_id, owner), policy.clone());
+        }
+        if !self
+            .self_host_policies
+            .contains_key(&(manifest_id, policy.content_id))
+            || self.owner_of(&manifest_id) == Some(owner)
+        {
+            self.self_host_policies
+                .insert((manifest_id, policy.content_id), policy);
+        }
+        Ok(())
+    }
+
+    /// Owner-scoped check for mobile self-hosting so a squatter's policy on a
+    /// shared `manifest_id` governs only its own deals, never another owner's.
+    pub fn check_self_host_allowed_for_owner(
+        &self,
+        manifest_id: &ContentId,
+        content_id: &ContentId,
+        owner: &Address,
+    ) -> Result<(), StorageError> {
+        if *owner == Address::zero() {
+            return self.check_self_host_allowed(manifest_id, content_id);
+        }
+        let policy = self
+            .scoped_self_host_policies
+            .get(&(*manifest_id, *content_id, *owner))
+            .or_else(|| {
+                self.self_host_policies
+                    .get(&(*manifest_id, *content_id))
+                    .filter(|p| p.owner == *owner || p.owner == Address::zero())
+            });
+        let Some(policy) = policy else {
+            return Ok(());
+        };
+        if !policy.self_host_allowed {
+            return Err(StorageError::SelfHostRefusedByPolicy {
+                content_id: *content_id,
+                reason: "the owner turned self-hosting off for this content".into(),
+            });
+        }
+        let paid = self.active_replica_count(manifest_id, content_id);
+        let required = usize::from(policy.required_paid_replicas);
+        if paid < required {
+            return Err(StorageError::SelfHostRefusedByPolicy {
+                content_id: *content_id,
+                reason: format!(
+                    "the owner asked for {required} paid replica(s) before \
+                     self-hosting and {paid} are open"
+                ),
+            });
+        }
         Ok(())
     }
 
@@ -1584,11 +1805,12 @@ impl StorageRegistry {
 
     pub fn register_manifest(&mut self, manifest: &ContentManifest) {
         let id = manifest.manifest_id;
-        if self.manifests.contains_key(&id) || self.confidential_commits.contains_key(&id) {
-            return;
-        }
         let claim_owner = manifest.owner;
-        self.manifests.insert(id, manifest.clone());
+        self.manifests.entry(id).or_insert_with(|| manifest.clone());
+        // `manifest_id` is content-addressed and excludes `owner`, so recording
+        // only the first writer's owner let a mempool front-runner or public
+        // content squatter seize the id permanently. Each registrant records
+        // its own `(id, owner)` claim without locking out later registrants.
         if claim_owner != Address::zero() {
             self.manifest_claims.insert((id, claim_owner));
         }
@@ -1598,6 +1820,23 @@ impl StorageRegistry {
     pub fn is_registered(&self, content_id: &ContentId) -> bool {
         self.manifests.contains_key(content_id)
             || self.confidential_commits.contains_key(content_id)
+            || self
+                .scoped_confidential_commits
+                .keys()
+                .any(|(_, cid)| cid == content_id)
+    }
+
+    /// True when `claimant` has already registered a manifest claim on `content_id`.
+    #[must_use]
+    pub fn has_manifest_claim(&self, content_id: &ContentId, claimant: &Address) -> bool {
+        *claimant != Address::zero() && self.manifest_claims.contains(&(*content_id, *claimant))
+    }
+
+    fn has_any_manifest_claim(&self, content_id: &ContentId) -> bool {
+        self.manifest_claims
+            .range((*content_id, Address::zero())..=(*content_id, Address::from([u8::MAX; 32])))
+            .next()
+            .is_some()
     }
 
     #[must_use]
@@ -1605,7 +1844,119 @@ impl StorageRegistry {
         if *claimant == Address::zero() {
             return false;
         }
-        self.owner_of(content_id) == Some(*claimant)
+        if self.manifest_claims.contains(&(*content_id, *claimant))
+            || self
+                .scoped_confidential_commits
+                .contains_key(&(*claimant, *content_id))
+        {
+            return true;
+        }
+        !self.has_any_manifest_claim(content_id)
+            && self.confidential_owners.get(content_id) == Some(claimant)
+    }
+
+    /// True when an active, custody-grade deal on `manifest_id` is funded by a
+    /// payer other than `caller`. A stranger's self-operated or zero-fee row
+    /// cannot freeze the custody-proven owner out of ownership or pruning.
+    #[must_use]
+    pub fn has_active_deal_for_other_payer(
+        &self,
+        manifest_id: &ContentId,
+        caller: &Address,
+    ) -> bool {
+        self.deals.values().any(|d| {
+            d.manifest_id == *manifest_id
+                && matches!(d.status, DealStatus::Active)
+                && d.payer != Some(*caller)
+                && d.payer
+                    .is_none_or(|p| d.operator != p && d.economics.fee_per_byte_epoch > 0)
+        })
+    }
+
+    /// True when `claimant` has an active, independent, priced storage custody
+    /// deal on `content_id`. Opening a deal requires storage-operator shard
+    /// consent signatures (`DealConsent`) and locked escrow, whereas a bare
+    /// `RegisterManifest` or a self-operated zero-fee deal can be fabricated
+    /// without independent custody.
+    #[must_use]
+    pub(crate) fn has_custody_deal(&self, content_id: &ContentId, claimant: &Address) -> bool {
+        *claimant != Address::zero()
+            && self.deals.values().any(|d| {
+                d.manifest_id == *content_id
+                    && matches!(d.status, DealStatus::Active)
+                    && d.payer == Some(*claimant)
+                    // A deal the claimant operates itself is not evidence that
+                    // it holds the bytes: the claimant supplies the operator
+                    // consent it is checked against, may price the deal at
+                    // zero, and the merkle envelope is only format-checked. An
+                    // independent, priced placement is the only row that can
+                    // establish or contest `owner_of`.
+                    && d.operator != *claimant
+                    && d.economics.fee_per_byte_epoch > 0
+            })
+    }
+
+    /// True when `claimant` holds uncontested, custody-backed ownership of
+    /// `content_id`: `owner_of(content_id) == Some(*claimant)` (so any competing
+    /// claim leaves the id contested with no canonical owner) AND `claimant`
+    /// holds a funded custody deal rather than a lone manifest claim.
+    #[must_use]
+    pub(crate) fn has_proven_ownership(&self, content_id: &ContentId, claimant: &Address) -> bool {
+        *claimant != Address::zero()
+            && self.owner_of(content_id) == Some(*claimant)
+            && self.has_custody_deal(content_id, claimant)
+            && !self.has_active_deal_for_other_payer(content_id, claimant)
+    }
+
+    /// Canonical custody-proven owner of `content_id`, or `None` if unregistered,
+    /// contested across multiple claimants, or backed only by a lone manifest claim.
+    #[must_use]
+    pub(crate) fn proven_owner_of(&self, content_id: &ContentId) -> Option<Address> {
+        let owner = self.owner_of(content_id)?;
+        self.has_proven_ownership(content_id, &owner)
+            .then_some(owner)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn record_test_custody_for_manifest(
+        &mut self,
+        manifest: &ContentManifest,
+        payer: Address,
+    ) {
+        let envelope = bud_proof::ProofEnvelope {
+            proof_format_version: 1,
+            backend: "test-backend".to_string(),
+            p3_version: "0.6".to_string(),
+            fri_params_id: "test-fri".to_string(),
+            public_inputs_hash: [0x42u8; 32],
+            proof_bytes: vec![0xABu8; 96],
+            degree_bits: 8,
+        };
+        let proof = bincode::serialize(&envelope).expect("envelope");
+        let deal_id = self
+            .open_deal(
+                42,
+                manifest,
+                manifest.shards[0].shard_id,
+                Address::from([0xFE; 32]),
+                0,
+                1,
+                200,
+                StorageEconomicsParams {
+                    operator_bond: 5_000_000,
+                    fee_per_byte_epoch: 100,
+                },
+                &crate::domain::storage_params::StorageDomainParams {
+                    chunk_size: 256,
+                    max_committed_chunks: 1000,
+                    challenge_interval: 10,
+                    min_operator_bond: 1_000_000,
+                },
+                Some(proof),
+                Some([0x42u8; 32]),
+            )
+            .expect("test custody deal opens");
+        self.set_deal_payer(deal_id, payer);
     }
 
     /// Scoped retraction of `caller`'s own un-paid `Plaintext` manifest when
@@ -1619,11 +1970,10 @@ impl StorageRegistry {
         let Some(existing) = self.manifests.get(manifest_id) else {
             return false;
         };
-        if existing.owner != *caller
-            || !matches!(
-                existing.encryption,
-                crate::storage::ContentEncryption::Plaintext
-            )
+        if !matches!(
+            existing.encryption,
+            crate::storage::ContentEncryption::Plaintext
+        ) || self.owner_of(manifest_id) != Some(*caller)
         {
             return false;
         }
@@ -1634,8 +1984,10 @@ impl StorageRegistry {
         if has_active_deal {
             return false;
         }
-        self.manifests.remove(manifest_id);
         self.manifest_claims.remove(&(*manifest_id, *caller));
+        if !self.has_any_manifest_claim(manifest_id) {
+            self.manifests.remove(manifest_id);
+        }
         true
     }
 
@@ -1896,23 +2248,7 @@ impl StorageRegistry {
         let issuer = auth
             .derived_owner()
             .map_err(crate::storage::ViewGrantError::Authorization)?;
-        if !self.has_claim(&content_id, &issuer) {
-            return match self.owner_of(&content_id) {
-                Some(owner) => Err(crate::storage::ViewGrantError::NotOwner { issuer, owner }),
-                None => {
-                    if self.manifests.contains_key(&content_id)
-                        || self.confidential_commits.contains_key(&content_id)
-                    {
-                        Err(crate::storage::ViewGrantError::NotOwner {
-                            issuer,
-                            owner: Address::zero(),
-                        })
-                    } else {
-                        Err(crate::storage::ViewGrantError::UnknownContent)
-                    }
-                }
-            };
-        }
+        self.check_grant_issuer(&content_id, issuer)?;
         let digest = crate::storage::grant_issue_digest(
             chain_id,
             self.view_grants.issued(),
@@ -1922,6 +2258,25 @@ impl StorageRegistry {
         );
         auth.verify(&digest, &issuer)
             .map_err(crate::storage::ViewGrantError::Authorization)?;
+        self.issue_view_grant_as(issuer, content_id, terms)
+    }
+
+    /// Issue a view grant on behalf of an `issuer` whose word is already
+    /// proven: the in-block door (`StorageTx::IssueViewGrant`) passes the
+    /// signed transaction sender, whose signature the block verified under
+    /// the chain's scheme statuses.
+    ///
+    /// # Errors
+    ///
+    /// [`crate::storage::ViewGrantError`] for unknown content or an issuer
+    /// that does not hold the content.
+    pub fn issue_view_grant_as(
+        &mut self,
+        issuer: Address,
+        content_id: ContentId,
+        terms: crate::storage::GrantIssueTerms,
+    ) -> Result<u64, crate::storage::ViewGrantError> {
+        self.check_grant_issuer(&content_id, issuer)?;
         self.view_grants.issue(
             content_id,
             issuer,
@@ -1930,6 +2285,32 @@ impl StorageRegistry {
             terms.policy,
             terms.opened_epoch,
         )
+    }
+
+    fn check_grant_issuer(
+        &self,
+        content_id: &ContentId,
+        issuer: Address,
+    ) -> Result<(), crate::storage::ViewGrantError> {
+        if !self.has_proven_ownership(content_id, &issuer) {
+            return match self.proven_owner_of(content_id) {
+                Some(owner) => Err(crate::storage::ViewGrantError::NotOwner { issuer, owner }),
+                None => {
+                    if self.is_registered(content_id) {
+                        Err(crate::storage::ViewGrantError::NotOwner {
+                            issuer,
+                            owner: self
+                                .owner_of(content_id)
+                                .filter(|o| *o != issuer)
+                                .unwrap_or_default(),
+                        })
+                    } else {
+                        Err(crate::storage::ViewGrantError::UnknownContent)
+                    }
+                }
+            };
+        }
+        Ok(())
     }
 
     /// Revoke one grant. Returns the row that was revoked, because whatever has
@@ -1965,6 +2346,36 @@ impl StorageRegistry {
         }
         auth.verify(&digest, &grant.issuer)
             .map_err(crate::storage::ViewGrantError::Authorization)?;
+        self.view_grants.revoke(grant_id, caller, at_epoch)?;
+        Ok(grant)
+    }
+
+    /// Revoke one grant on behalf of a `caller` whose word is already proven
+    /// (the in-block door passes the signed sender). Only the grant's issuer
+    /// may revoke it, the same rule the authorization path enforces by
+    /// checking the signature against the issuer.
+    ///
+    /// # Errors
+    ///
+    /// [`crate::storage::ViewGrantError`] for an unknown id or a caller who
+    /// did not issue the grant.
+    pub fn revoke_view_grant_as(
+        &mut self,
+        caller: Address,
+        grant_id: u64,
+        at_epoch: u64,
+    ) -> Result<crate::storage::ViewGrant, crate::storage::ViewGrantError> {
+        let grant = self
+            .view_grants
+            .get(grant_id)
+            .ok_or(crate::storage::ViewGrantError::UnknownGrant(grant_id))?
+            .clone();
+        if caller != grant.issuer {
+            return Err(crate::storage::ViewGrantError::NotOwner {
+                issuer: caller,
+                owner: grant.issuer,
+            });
+        }
         self.view_grants.revoke(grant_id, caller, at_epoch)?;
         Ok(grant)
     }
@@ -2036,33 +2447,43 @@ impl StorageRegistry {
         let digest = crate::storage::confidential_commit_digest(&commit, &owner);
         auth.verify(&digest, &owner)
             .map_err(|e| format!("confidential commit authorization: {e}"))?;
+        self.register_confidential_commit_as(owner, commit)
+    }
+
+    /// Register a confidential body commit for an `owner` whose word is
+    /// already proven: the in-block door (`StorageTx::CommitConfidentialBody`)
+    /// passes the signed transaction sender.
+    ///
+    /// # Errors
+    ///
+    /// See [`Self::register_confidential_commit`].
+    pub fn register_confidential_commit_as(
+        &mut self,
+        owner: Address,
+        commit: crate::storage::ConfidentialBodyCommit,
+    ) -> Result<[u8; 32], String> {
+        if owner == Address::zero() {
+            return Err(String::from(
+                "confidential body commit refused: zero address cannot hold a commit",
+            ));
+        }
         if let Some(m) = self.manifests.get(&commit.content_id) {
             if !m.edition.admits_body() {
                 return Err(String::from(
                     "confidential body commit refused: registered manifest is Three (recipe-only); bodies are Classic/2.0",
                 ));
             }
-            // Defence in depth for the authority order in `owner_of`: a commit
-            // registered against somebody else's manifest would leave two
-            // records disagreeing about who speaks for the content. Refusing it
-            // here means the disagreement never exists to be resolved.
-            if let Some(manifest_owner) = self.owner_of(&commit.content_id) {
-                if manifest_owner != owner {
-                    return Err(format!(
-                        "confidential body commit refused: 0x{:?} is registered to {manifest_owner:?}",
-                        commit.content_id
-                    ));
-                }
-            }
         }
         let commitment = commit.commitment();
         let content_id = commit.content_id;
-        // Registering a commit for an object somebody else already spoke for
-        // would move the view authority of a live object to the newcomer, and a
-        // grant issued under the old owner would silently start meaning the new
-        // one. Overwriting an already-open commitment is refused outright:
-        // whoever holds an object holds it until the object is closed.
-        if let Some(prev) = self.confidential_commits.get(&content_id) {
+        // Scope commits per `(owner, content_id)` and never promote an
+        // un-manifested commit into `confidential_owners` (`owner_of`), so:
+        // 1. an account committing an un-manifested content id never becomes
+        //    the global `owner_of` of that id;
+        // 2. a squatter's manifest claim or distinct commit cannot block the
+        //    real owner's `(owner, content_id)` commit, grant or social delete;
+        // 3. replaying the exact same commitment bytes under another sender is refused.
+        if let Some(prev) = self.scoped_confidential_commits.get(&(owner, content_id)) {
             return Err(if prev.commitment() == commitment {
                 format!("confidential body commit already registered for 0x{content_id:?}")
             } else {
@@ -2071,15 +2492,36 @@ impl StorageRegistry {
                 )
             });
         }
-        if let Some(prev_owner) = self.confidential_owners.get(&content_id) {
-            if *prev_owner != owner {
-                return Err(format!(
-                    "confidential body commit refused: 0x{content_id:?} is spoken for by {prev_owner:?}"
-                ));
-            }
+        let is_canonical_owner = self.owner_of(&content_id) == Some(owner);
+        if !is_canonical_owner
+            && (self
+                .scoped_confidential_commits
+                .iter()
+                .any(|((other, cid), prev)| {
+                    *cid == content_id && *other != owner && prev.commitment() == commitment
+                })
+                || self
+                    .confidential_commits
+                    .get(&content_id)
+                    .is_some_and(|prev| {
+                        prev.commitment() == commitment
+                            && self.confidential_owners.get(&content_id) != Some(&owner)
+                    }))
+        {
+            return Err(format!(
+                "confidential body commit refused: commitment for 0x{content_id:?} is already bound to another principal"
+            ));
         }
-        self.confidential_commits.insert(content_id, commit);
-        self.confidential_owners.insert(content_id, owner);
+        self.scoped_confidential_commits
+            .insert((owner, content_id), commit.clone());
+        if is_canonical_owner {
+            self.confidential_commits.insert(content_id, commit);
+            self.confidential_owners.insert(content_id, owner);
+        } else {
+            self.confidential_commits
+                .entry(content_id)
+                .or_insert(commit);
+        }
         Ok(commitment)
     }
 
@@ -2088,40 +2530,103 @@ impl StorageRegistry {
         &self,
         content_id: &ContentId,
     ) -> Option<&crate::storage::ConfidentialBodyCommit> {
-        self.confidential_commits.get(content_id)
+        if let Some(owner) = self.owner_of(content_id) {
+            if let Some(commit) = self.scoped_confidential_commits.get(&(owner, *content_id)) {
+                return Some(commit);
+            }
+        }
+        self.confidential_commits.get(content_id).or_else(|| {
+            self.scoped_confidential_commits
+                .iter()
+                .find_map(|((_, cid), commit)| (cid == content_id).then_some(commit))
+        })
     }
 
-    /// Who may speak for this content: the manifest owner, or the address that
-    /// registered a Classic confidential commit when there is no manifest. One
-    /// authority per object, and it is looked up rather than believed.
+    /// Who may speak for this content when a single canonical owner is queried
+    /// (RPC read queries, marketplace asset binding, and whole-object prunes).
     ///
-    /// The read path for wallets and auditors: before signing a grant, a holder
-    /// has to be able to ask who the chain believes owns an object. The refusals
-    /// of `issue_view_grant` are the write-side half; this is the same authority
-    /// made visible, so the two cannot disagree.
+    /// Because `manifest_id` is content-addressed and excludes `owner`, two
+    /// competing manifest claims keep ownership ambiguous (`None`) so a second
+    /// claimant cannot hijack ownership via a side deal or drive an NFT burn
+    /// over another registrant's data.
     #[must_use]
     pub fn owner_of(&self, content_id: &ContentId) -> Option<crate::core::address::Address> {
-        // A manifest claim is the primary authority, exactly as the rule above
-        // states. The confidential-commit owner answers only when the object
-        // has no manifest. The order used to be the other way round, which let
-        // any account become the authority for somebody else's registered
-        // content id just by registering a confidential commit for it - every
-        // grant, self-host declaration, read gate and prune decision resolves
-        // through this function.
-        let mut iter = self
-            .manifest_claims
-            .range((*content_id, Address::zero())..=(*content_id, Address::from([u8::MAX; 32])))
-            .map(|(_, claimant)| *claimant);
-        if let Some(first) = iter.next() {
-            // Two claims are ambiguous, and an ambiguous owner stays unusable
-            // rather than resolving to one of the two names.
-            return if iter.next().is_some() {
-                None
-            } else {
-                Some(first)
-            };
+        let claimants = || {
+            self.manifest_claims
+                .range((*content_id, Address::zero())..=(*content_id, Address::from([u8::MAX; 32])))
+                .map(|(_, claimant)| *claimant)
+        };
+        // A manifest claim costs one transaction: `manifest_id` is content-addressed
+        // and excludes `owner`, so anyone can record a bare claim on public content.
+        // Only custody-backed claims (`has_custody_deal`) can establish or contest
+        // canonical ownership once at least one custody-backed claimant exists.
+        let mut backed = claimants().filter(|c| self.has_custody_deal(content_id, c));
+        match (backed.next(), backed.next()) {
+            (Some(only), None) => return Some(only),
+            (Some(_), Some(_)) => return None,
+            (None, _) => {}
         }
-        self.confidential_owners.get(content_id).copied()
+        let mut any = claimants();
+        match (any.next(), any.next()) {
+            (Some(only), None) => Some(only),
+            (Some(_), Some(_)) => None,
+            (None, _) => self.confidential_owners.get(content_id).copied(),
+        }
+    }
+
+    /// True iff `burner` is the sole, uncontested owner of `content_id` across
+    /// manifest claims, active deals, confidential commits, self-host policies,
+    /// and live view grants, so burning an NFT cannot prune another party's
+    /// stored data or grants.
+    #[must_use]
+    pub fn can_prune_on_nft_burn(&self, content_id: &ContentId, burner: &Address) -> bool {
+        if *burner == Address::zero() || !self.has_proven_ownership(content_id, burner) {
+            return false;
+        }
+        if self.has_active_deal_for_other_payer(content_id, burner) {
+            return false;
+        }
+        if self
+            .confidential_owners
+            .get(content_id)
+            .is_some_and(|owner| owner != burner)
+        {
+            return false;
+        }
+        // A scoped commit on its own is not custody of the body: the commit
+        // door accepts one for any content id. Neither is a manifest claim -
+        // `manifest_id` is content-addressed and excludes `owner`, so any
+        // principal can copy a manifest and record a competing claim for the
+        // price of one transaction, and pairing that free claim with a scoped
+        // commit vetoed the real owner's burn prune permanently. Only a funded,
+        // operator-consented custody deal proves the stranger actually holds
+        // bytes this burn could destroy.
+        if self.scoped_confidential_commits.keys().any(|(owner, cid)| {
+            cid == content_id && owner != burner && self.has_custody_deal(content_id, owner)
+        }) {
+            return false;
+        }
+        if self
+            .scoped_self_host_policies
+            .keys()
+            .any(|(manifest_id, inner_cid, owner)| {
+                (manifest_id == content_id || inner_cid == content_id)
+                    && owner != burner
+                    && (self.has_custody_deal(content_id, owner)
+                        || self.has_custody_deal(manifest_id, owner))
+            })
+        {
+            return false;
+        }
+        if self
+            .view_grants
+            .live_for_content(content_id)
+            .into_iter()
+            .any(|grant| grant.issuer != *burner)
+        {
+            return false;
+        }
+        true
     }
 
     /// Validate that `shard_id` is a member of `manifest`. Used by
@@ -2225,7 +2730,11 @@ impl StorageRegistry {
         // The policy reaches the chain through `StorageTx::DeclareSelfHostPolicy`,
         // so this check reads what owners declared in block.
         if self.operator_class(&operator) == OperatorClass::Mobile {
-            self.check_self_host_allowed(&manifest.manifest_id, &shard_id)?;
+            self.check_self_host_allowed_for_owner(
+                &manifest.manifest_id,
+                &shard_id,
+                &manifest.owner,
+            )?;
         }
         // A deal-open carries its own copy of the manifest, and
         // `register_manifest` is first-writer-wins, so this path can seed the
@@ -2339,16 +2848,19 @@ impl StorageRegistry {
         auth: &crate::storage::GrantAuthorization,
         at_epoch: u64,
     ) -> Result<crate::storage::DeleteOutcome, crate::storage::ViewGrantError> {
-        let owner = self
-            .owner_of(&content_id)
-            .ok_or(crate::storage::ViewGrantError::UnknownContent)?;
+        if !self.is_registered(&content_id) {
+            return Err(crate::storage::ViewGrantError::UnknownContent);
+        }
         let caller = auth
             .derived_owner()
             .map_err(crate::storage::ViewGrantError::Authorization)?;
-        if caller != owner {
+        if !self.has_proven_ownership(&content_id, &caller) {
             return Err(crate::storage::ViewGrantError::NotOwner {
                 issuer: caller,
-                owner,
+                owner: self
+                    .owner_of(&content_id)
+                    .filter(|o| *o != caller)
+                    .unwrap_or_default(),
             });
         }
         let digest = crate::storage::social_delete_digest(
@@ -2358,13 +2870,41 @@ impl StorageRegistry {
             &caller,
             at_epoch,
         );
-        auth.verify(&digest, &owner)
+        auth.verify(&digest, &caller)
             .map_err(crate::storage::ViewGrantError::Authorization)?;
+        self.social_delete_as(caller, content_id, at_epoch)
+    }
+
+    /// Social delete on behalf of a `caller` whose word is already proven
+    /// (the in-block door passes the signed sender).
+    ///
+    /// # Errors
+    ///
+    /// [`crate::storage::ViewGrantError`] for unknown content or a caller who
+    /// holds no custody-proven ownership on the content.
+    pub fn social_delete_as(
+        &mut self,
+        caller: Address,
+        content_id: ContentId,
+        at_epoch: u64,
+    ) -> Result<crate::storage::DeleteOutcome, crate::storage::ViewGrantError> {
+        if !self.is_registered(&content_id) {
+            return Err(crate::storage::ViewGrantError::UnknownContent);
+        }
+        if !self.has_proven_ownership(&content_id, &caller) {
+            return Err(crate::storage::ViewGrantError::NotOwner {
+                issuer: caller,
+                owner: self
+                    .owner_of(&content_id)
+                    .filter(|o| *o != caller)
+                    .unwrap_or_default(),
+            });
+        }
         let mut hook = crate::storage::three_hooks::NopThreeHook;
         Ok(crate::storage::process_social_delete(
             &mut self.view_grants,
             content_id,
-            owner,
+            caller,
             at_epoch,
             &mut hook,
         ))
@@ -2397,12 +2937,12 @@ impl StorageRegistry {
     /// not free.
     pub const MIN_OPENER_BOND: u64 = 1;
 
-    /// F-18: concurrent open challenges across every manifest of one
+    /// Concurrent open challenges across every manifest of one
     /// operator. The (operator, manifest) interval alone lets an attacker
     /// scale I/O with the number of manifests the operator holds.
     pub const MAX_OPEN_CHALLENGES_PER_OPERATOR: usize = 16;
 
-    /// F-19: mainnet floor above the uncalibrated 1-unit-per-`KiB` rate.
+    /// Mainnet floor above the uncalibrated 1-unit-per-`KiB` rate.
     /// `required_opener_bond` for 16 `MiB` is 16_384; this floor dominates it.
     /// Storage economics stay disabled on mainnet today; the constant is
     /// the policy the actor will apply the day that gate opens.
@@ -2421,12 +2961,16 @@ impl StorageRegistry {
     /// Canonical epochs, including challenges opened through distinct deals.
     pub(crate) const MIN_OPERATOR_MANIFEST_CHALLENGE_EPOCHS: u64 = 4;
 
+    /// Shortest challenge answer window a caller may ask for, in epochs.
+    pub const MIN_CHALLENGE_WINDOW_EPOCHS: u64 = 10;
+
     /// Longest answer window a caller may ask for, in epochs.
     pub const MAX_CHALLENGE_WINDOW_EPOCHS: u64 = 1024;
 
     /// A challenge opened over RPC must start at the current epoch or
     /// earlier (a far-future `challenge_epoch` would push the per operator
-    /// rate limit minimum out for good) and must close within
+    /// rate limit minimum out for good), must allow at least
+    /// `MIN_CHALLENGE_WINDOW_EPOCHS` epochs to answer, and must close within
     /// `MAX_CHALLENGE_WINDOW_EPOCHS` (a huge `deadline_epoch` would never
     /// finalize as missed).
     pub fn validate_challenge_window(
@@ -2436,6 +2980,7 @@ impl StorageRegistry {
     ) -> Result<(), StorageError> {
         if challenge_epoch > current_epoch
             || deadline_epoch <= current_epoch
+            || deadline_epoch < challenge_epoch.saturating_add(Self::MIN_CHALLENGE_WINDOW_EPOCHS)
             || deadline_epoch > challenge_epoch.saturating_add(Self::MAX_CHALLENGE_WINDOW_EPOCHS)
         {
             return Err(StorageError::InvalidEpochRange {
@@ -3117,6 +3662,18 @@ impl StorageRegistry {
         if !deal.is_active() {
             return Err(StorageError::DealNotActive(deal_id));
         }
+        // Enforced here, at the registry door, so the transaction path and the
+        // automatic block-maintenance cadence inherit it instead of each having
+        // to remember: `expire_deal` holds a deal with an unresolved challenge
+        // `Active`, so a deadline past the term is what defers the bond return,
+        // the expiry reallocation and the shard repair ticket.
+        if deadline_epoch > deal.deal_end_epoch {
+            return Err(StorageError::ChallengeDeadlinePastDealTerm {
+                deal_id,
+                deadline_epoch,
+                deal_end_epoch: deal.deal_end_epoch,
+            });
+        }
         let operator = deal.operator;
         let manifest_id = deal.manifest_id;
         let shard_id = deal.shard_id;
@@ -3125,7 +3682,12 @@ impl StorageRegistry {
             .values()
             .filter_map(|challenge| {
                 let challenged_deal = self.deals.get(&challenge.deal_id)?;
-                (challenged_deal.operator == operator && challenged_deal.manifest_id == manifest_id)
+                // A self-challenge never shields the operator's manifest from
+                // an independent challenger's rate-limit window.
+                let counts_for_opener = opener == operator || challenge.opener != operator;
+                (counts_for_opener
+                    && challenged_deal.operator == operator
+                    && challenged_deal.manifest_id == manifest_id)
                     .then_some(
                         challenge
                             .challenge_epoch
@@ -3253,6 +3815,8 @@ impl StorageRegistry {
         // Copied before the mutable borrows below; the object a proven read
         // belongs to is the deal's manifest, not the shard.
         let challenge_manifest_id = deal.manifest_id;
+        let challenge_opener = challenge.opener;
+        let deal_operator = deal.operator;
         if !deal.is_active() {
             return Err(StorageError::DealNotActive(deal.deal_id));
         }
@@ -3338,22 +3902,13 @@ impl StorageRegistry {
                     "storage challenge answered with a proof that does not verify; \
                      slashing the operator bond"
                 );
-                let deal = self
-                    .deals
-                    .get_mut(&deal_id)
-                    .ok_or(StorageError::UnknownDeal(deal_id))?;
-                let slashed_bond = deal.economics.operator_bond;
-                deal.status = DealStatus::Slashed;
-                ChallengeResult {
-                    challenge_id,
-                    deal_id,
-                    outcome: ChallengeOutcome::Mismatched,
-                    finalized_epoch: response_epoch,
-                    slashed_bond,
-                }
+                self.slash_for_mismatched_answer(challenge_id, deal_id, response_epoch)?
             }
         };
-        if result.outcome == ChallengeOutcome::Answered {
+        if result.outcome == ChallengeOutcome::Answered
+            && challenge_opener != deal_operator
+            && Self::storage_challenge_proofs_are_checkable()
+        {
             self.record_proven_read(challenge_manifest_id, response_epoch);
         }
         self.results.insert(challenge_id, result.clone());
@@ -3549,6 +4104,68 @@ impl StorageRegistry {
         (program, expected_inputs)
     }
 
+    /// Opens the repair ticket for the slot a slashed deal leaves empty, once per
+    /// failed deal, and returns its id.
+    ///
+    /// Every exit that slashes a deal has to leave the redundancy layer a work
+    /// item. The missed-deadline exit did; the mismatched-answer exit slashed
+    /// the deal and opened nothing, and the free-slot sweep only reopens
+    /// `Expired` slots, so that replica was never replaced.
+    fn open_slash_reallocation(&mut self, deal_id: u64, now_epoch: u64) -> Option<u64> {
+        let deal = self.deals.get(&deal_id)?;
+        if self
+            .reallocations
+            .values()
+            .any(|ticket| ticket.names_failed_deal(deal_id))
+        {
+            return None;
+        }
+        let ticket_id = self.next_reallocation_id;
+        self.next_reallocation_id = self.next_reallocation_id.saturating_add(1);
+        let ticket = StorageReallocationTicket {
+            ticket_id,
+            failed_deal_id: deal_id,
+            replacement_deal_id: None,
+            domain_id: deal.domain_id,
+            manifest_id: deal.manifest_id,
+            shard_id: deal.shard_id,
+            replica_index: deal.replica_index,
+            slashed_operator: deal.operator,
+            opened_epoch: now_epoch,
+            deadline_epoch: now_epoch.saturating_add(REALLOCATION_ACCEPTANCE_EPOCHS),
+            status: ReallocationStatus::Pending,
+            // The candidate set is not in the registry; the recommendation is
+            // written after opening, by `annotate_expected_holders`.
+            expected_holder: None,
+            cause: ReallocationCause::FailedDeal,
+        };
+        self.reallocations.insert(ticket_id, ticket);
+        Some(ticket_id)
+    }
+
+    /// Slashes the deal behind a mismatched answer and opens its repair ticket.
+    fn slash_for_mismatched_answer(
+        &mut self,
+        challenge_id: u64,
+        deal_id: u64,
+        response_epoch: u64,
+    ) -> Result<ChallengeResult, StorageError> {
+        let deal = self
+            .deals
+            .get_mut(&deal_id)
+            .ok_or(StorageError::UnknownDeal(deal_id))?;
+        let slashed_bond = deal.economics.operator_bond;
+        deal.status = DealStatus::Slashed;
+        self.open_slash_reallocation(deal_id, response_epoch);
+        Ok(ChallengeResult {
+            challenge_id,
+            deal_id,
+            outcome: ChallengeOutcome::Mismatched,
+            finalized_epoch: response_epoch,
+            slashed_bond,
+        })
+    }
+
     /// Finalize a challenge whose deadline has elapsed without a
     /// Response. The deal transitions to `Slashed` and the operator
     /// Bond is *recorded* as slashed (not burned - burning is a
@@ -3572,7 +4189,7 @@ impl StorageRegistry {
             });
         }
         let deal_id = challenge.deal_id;
-        let (slash_amount, ticket) = {
+        let slash_amount = {
             let deal = self
                 .deals
                 .get_mut(&deal_id)
@@ -3590,37 +4207,9 @@ impl StorageRegistry {
             }
             let slash_amount = deal.economics.operator_bond;
             deal.status = DealStatus::Slashed;
-            let existing_ticket = self
-                .reallocations
-                .values()
-                .any(|ticket| ticket.failed_deal_id == deal_id);
-            let ticket = (!existing_ticket).then(|| {
-                let ticket_id = self.next_reallocation_id;
-                self.next_reallocation_id = self.next_reallocation_id.saturating_add(1);
-                StorageReallocationTicket {
-                    ticket_id,
-                    failed_deal_id: deal_id,
-                    replacement_deal_id: None,
-                    domain_id: deal.domain_id,
-                    manifest_id: deal.manifest_id,
-                    shard_id: deal.shard_id,
-                    replica_index: deal.replica_index,
-                    slashed_operator: deal.operator,
-                    opened_epoch: now_epoch,
-                    deadline_epoch: now_epoch.saturating_add(REALLOCATION_ACCEPTANCE_EPOCHS),
-                    status: ReallocationStatus::Pending,
-                    // The candidate set is not in the registry; the
-                    // recommendation is written after opening, by
-                    // `annotate_expected_holders`.
-                    expected_holder: None,
-                    cause: ReallocationCause::FailedDeal,
-                }
-            });
-            (slash_amount, ticket)
+            slash_amount
         };
-        if let Some(ticket) = ticket {
-            self.reallocations.insert(ticket.ticket_id, ticket);
-        }
+        self.open_slash_reallocation(deal_id, now_epoch);
 
         let result = ChallengeResult {
             challenge_id,
@@ -3661,11 +4250,34 @@ impl StorageRegistry {
                 replacement_operator,
             ));
         }
-        let manifest = self
+        let mut manifest = self
             .manifests
             .get(&ticket.manifest_id)
             .cloned()
             .ok_or(StorageError::UnknownManifest(ticket.manifest_id))?;
+        // `owner` is not part of the content-addressed `manifest_id` and
+        // `register_manifest` keeps only the first writer, so the stored
+        // `owner` may be an unrelated registrant. The placement policy that
+        // governs the repair belongs to the account whose bytes are being
+        // repaired: the payer of the failed deal, or the custody-proven owner.
+        //
+        // Only a ticket that names a failed deal names a deal id. A
+        // `NeverPlaced` ticket stores `0` as a placeholder and deal ids start at
+        // 0, so reading it would take the payer of the chain's first deal as
+        // the policy owner of every first placement.
+        let failed_payer = match ticket.cause {
+            ReallocationCause::FailedDeal => self
+                .deals
+                .get(&ticket.failed_deal_id)
+                .and_then(|deal| deal.payer),
+            ReallocationCause::NeverPlaced => None,
+        };
+        if let Some(policy_owner) = failed_payer
+            .or_else(|| self.proven_owner_of(&ticket.manifest_id))
+            .or_else(|| self.owner_of(&ticket.manifest_id))
+        {
+            manifest.owner = policy_owner;
+        }
         let replacement_deal_id = self.open_deal(
             ticket.domain_id,
             &manifest,
@@ -3788,7 +4400,7 @@ impl StorageRegistry {
         if self
             .reallocations
             .values()
-            .any(|ticket| ticket.failed_deal_id == deal_id)
+            .any(|ticket| ticket.names_failed_deal(deal_id))
         {
             return None;
         }
@@ -4064,7 +4676,7 @@ impl StorageRegistry {
         // challenge slash settles only an `Active` deal, so expiring under an
         // open challenge would strand the opener's bond and make silence
         // unpunishable. Held until the challenge closes, and the next epoch's
-        // sweep expires it then - the same rule the prune applies (BLG-0365).
+        // sweep expires it then - the same rule the prune applies.
         let open_challenges = self
             .challenges
             .values()
@@ -4184,7 +4796,7 @@ impl StorageRegistry {
                 let ticket = self
                     .reallocations
                     .values()
-                    .find(|ticket| ticket.failed_deal_id == deal_id);
+                    .find(|ticket| ticket.names_failed_deal(deal_id));
                 match ticket.map(|ticket| ticket.status) {
                     Some(ReallocationStatus::Pending) => {
                         Some(crate::storage::StorageLifecycleState::ReallocationPending)
@@ -4308,6 +4920,52 @@ impl StorageRegistry {
         self.deals.values()
     }
 
+    /// Union byte count of non-self retrieval challenges on `deal_id` that
+    /// resolved `ChallengeOutcome::Answered`, gated by `proofs_checkable`.
+    #[must_use]
+    pub(crate) fn verified_challenge_bytes_with_gate(
+        &self,
+        deal_id: u64,
+        operator: Address,
+        proofs_checkable: bool,
+    ) -> u64 {
+        if !proofs_checkable {
+            return 0;
+        }
+        let mut ranges: Vec<(u64, u64)> = self
+            .challenges
+            .values()
+            .filter(|c| {
+                c.deal_id == deal_id
+                    && c.opener != operator
+                    && c.byte_end > c.byte_start
+                    && self
+                        .results
+                        .get(&c.challenge_id)
+                        .is_some_and(|r| r.outcome == ChallengeOutcome::Answered)
+            })
+            .map(|c| (c.byte_start, c.byte_end))
+            .collect();
+        ranges.sort_unstable();
+        let mut iter = ranges.into_iter();
+        let Some((mut cur_start, mut cur_end)) = iter.next() else {
+            return 0;
+        };
+        let mut total = 0u64;
+        for (start, end) in iter {
+            if start <= cur_end {
+                if end > cur_end {
+                    cur_end = end;
+                }
+            } else {
+                total = total.saturating_add(cur_end - cur_start);
+                cur_start = start;
+                cur_end = end;
+            }
+        }
+        total.saturating_add(cur_end - cur_start)
+    }
+
     pub fn all_deals(&self) -> Vec<&StorageDeal> {
         self.deals.values().collect()
     }
@@ -4318,6 +4976,57 @@ impl StorageRegistry {
 
     pub fn all_results(&self) -> Vec<&ChallengeResult> {
         self.results.values().collect()
+    }
+
+    /// Drop settled retrieval challenges (and their results) once their
+    /// answer deadline is `MAX_CHALLENGE_WINDOW_EPOCHS` or more epochs old.
+    ///
+    /// An unresolved row is kept while its deal is still `Active`, because the
+    /// missed-answer slash needs it. Once the deal has left `Active` the row can
+    /// never resolve - both the answer and the missed paths refuse
+    /// `DealNotActive` - and it also stops counting against the per-deal and
+    /// per-operator caps, so keeping it would let a funded account grow the
+    /// registry root without bound. Both `challenges` and `results` are in the
+    /// deterministic registry root and rescanned each block, so bounded
+    /// retention keeps per-block cost and state size bounded.
+    pub fn prune_settled_challenges(&mut self, now_epoch: u64) -> usize {
+        let Some(cutoff) = now_epoch.checked_sub(Self::MAX_CHALLENGE_WINDOW_EPOCHS) else {
+            return 0;
+        };
+        let due: Vec<u64> = self
+            .challenges
+            .iter()
+            .filter_map(|(&id, challenge)| {
+                if challenge.deadline_epoch > cutoff {
+                    return None;
+                }
+                let resolvable = self
+                    .deals
+                    .get(&challenge.deal_id)
+                    .is_some_and(|deal| deal.is_active());
+                (self.results.contains_key(&id) || !resolvable).then_some(id)
+            })
+            .collect();
+        let mut dropped = 0;
+        for id in due {
+            let removed_challenge = self.challenges.remove(&id).is_some();
+            let removed_result = self.results.remove(&id).is_some();
+            if removed_challenge || removed_result {
+                dropped += 1;
+            }
+        }
+        let orphan_results: Vec<u64> = self
+            .results
+            .keys()
+            .filter(|id| !self.challenges.contains_key(id))
+            .copied()
+            .collect();
+        for id in orphan_results {
+            if self.results.remove(&id).is_some() {
+                dropped += 1;
+            }
+        }
+        dropped
     }
 
     pub fn active_replica_count(&self, manifest_id: &ContentId, shard_id: &ContentId) -> usize {
@@ -4520,7 +5229,7 @@ impl StorageRegistry {
     /// only settles `Active` deals, so a prune that flipped them straight to
     /// `Expired` made the bond - and the operator's whole stake for serving
     /// the object until its owner burned it - vanish from circulation
-    /// (P23-F01). The caller credits the returns; the content is gone by
+    /// The caller credits the returns; the content is gone by
     /// definition here, so the strand guard `expire_deal` applies does not.
     /// Fees for the partial epoch in progress are not settled: accrual is
     /// per completed epoch, the same rule a slashed deal follows.
@@ -4529,6 +5238,11 @@ impl StorageRegistry {
         manifest_id: &ContentId,
         now_epoch: u64,
     ) -> (u64, Vec<(Address, u64)>) {
+        let all_deal_ids: Vec<u64> = self
+            .deals_for_manifest(manifest_id)
+            .iter()
+            .map(|d| d.deal_id)
+            .collect();
         let deals: Vec<(u64, Address, u64)> = self
             .deals_for_manifest(manifest_id)
             .iter()
@@ -4536,7 +5250,7 @@ impl StorageRegistry {
             .map(|d| (d.deal_id, d.operator, d.economics.operator_bond))
             .collect();
 
-        // BLG-0365 (P24-F06): an open retrieval challenge is a live question
+        // An open retrieval challenge is a live question
         // about these exact bytes. Pruning under it would expire the deal,
         // `finalize_missed_challenge` would then refuse with DealNotActive,
         // and the challenge would never close - the opener's bond stuck, the
@@ -4574,8 +5288,14 @@ impl StorageRegistry {
         self.access_events.remove(manifest_id);
         self.confidential_commits.remove(manifest_id);
         self.confidential_owners.remove(manifest_id);
+        self.scoped_confidential_commits
+            .retain(|(_, cid), _| cid != manifest_id);
         self.self_host_policies
             .retain(|(policy_manifest, _), _| policy_manifest != manifest_id);
+        self.scoped_self_host_policies
+            .retain(|(policy_manifest, inner_cid, _), _| {
+                policy_manifest != manifest_id && inner_cid != manifest_id
+            });
         // The ownership claim is part of the record, so it goes with it. Left
         // behind it made `owner_of`/`has_claim` report an owner for content
         // that is no longer registered, and registration is first-writer-wins
@@ -4586,6 +5306,12 @@ impl StorageRegistry {
         // repair it.
         self.manifest_claims
             .retain(|(claimed, _)| claimed != manifest_id);
+        if !all_deal_ids.is_empty() {
+            self.challenges
+                .retain(|_, challenge| !all_deal_ids.contains(&challenge.deal_id));
+            self.results
+                .retain(|_, result| !all_deal_ids.contains(&result.deal_id));
+        }
 
         (pruned, bond_returns)
     }
@@ -4593,7 +5319,7 @@ impl StorageRegistry {
 
 /// Canonical, domain-tagged byte encoding of a `StorageDeal`. Used in
 /// Audit logs and the (future) `GlobalBlockHeader.storage_root` aggregation
-/// (vision §8.4).
+/// (vision).
 pub fn storage_deal_leaf_hash(deal: &StorageDeal) -> Hash32 {
     let status = [match deal.status {
         DealStatus::Active => 0,
@@ -4796,6 +5522,49 @@ mod tests {
         );
     }
 
+    #[test]
+    fn confidential_commit_as_refuses_unmanifested_or_foreign_content_id() {
+        use crate::storage::{
+            ConfidentialBodyCommit, ConfidentialProofKind, ContentCipher, ContentEncryption,
+        };
+        let mut reg = StorageRegistry::new();
+        let attacker = Address::from([0xEE; 32]);
+        let victim = Address::from([0x11; 32]);
+        let mut m = ContentManifest::from_bytes_sliced(b"classic private body bytes!!", 8).unwrap();
+        m.owner = victim;
+        let attacker_commit = ConfidentialBodyCommit::new(
+            m.manifest_id,
+            ContentEncryption::ClientSide(ContentCipher::Aes256Gcm),
+            [6u8; 32],
+            ConfidentialProofKind::HybridZkTee,
+        )
+        .unwrap();
+        let victim_commit = ConfidentialBodyCommit::new(
+            m.manifest_id,
+            ContentEncryption::ClientSide(ContentCipher::Aes256Gcm),
+            [7u8; 32],
+            ConfidentialProofKind::HybridZkTee,
+        )
+        .unwrap();
+        // Un-manifested id: scoped to attacker only; global `owner_of` stays None.
+        assert!(reg
+            .register_confidential_commit_as(attacker, attacker_commit)
+            .is_ok());
+        assert_eq!(reg.owner_of(&m.manifest_id), None);
+
+        // Manifest registered to victim: victim owns `m.manifest_id`, victim's
+        // own commit succeeds despite attacker's prior scoped commit, and
+        // replaying victim's exact commitment under attacker is refused.
+        reg.register_manifest(&m);
+        assert_eq!(reg.owner_of(&m.manifest_id), Some(victim));
+        assert!(reg
+            .register_confidential_commit_as(victim, victim_commit.clone())
+            .is_ok());
+        assert!(reg
+            .register_confidential_commit_as(attacker, victim_commit)
+            .is_err());
+    }
+
     /// A manifest claim outranks a confidential body commit.
     ///
     /// `owner_of` resolves who may issue a view grant, declare a self-host
@@ -4864,11 +5633,13 @@ mod tests {
         let mut m = good_manifest();
         m.owner = owner;
         reg.register_manifest(&m);
+        reg.record_test_custody_for_manifest(&m, owner);
         let content = m.manifest_id;
         let mut other = ContentManifest::from_bytes_sliced(b"another private body bytes...", 8)
             .expect("second manifest");
         other.owner = owner;
         reg.register_manifest(&other);
+        reg.record_test_custody_for_manifest(&other, owner);
         let other = other.manifest_id;
         assert_ne!(content, other, "the two objects must be distinct");
 
@@ -4887,7 +5658,7 @@ mod tests {
         );
         let auth = crate::storage::GrantAuthorization {
             owner_key: kp.public_key_bytes(),
-            signature: kp.sign(&digest).to_vec(),
+            signature: kp.sign(crate::crypto::ctx::STORAGE_V2, &digest).to_vec(),
         };
         reg.issue_view_grant(
             1,
@@ -4968,6 +5739,7 @@ mod tests {
         let mut m = good_manifest();
         m.owner = owner;
         reg.register_manifest(&m);
+        reg.record_test_custody_for_manifest(&m, owner);
         let key = [5u8; 32];
         let digest = crate::storage::grant_issue_digest(
             1,
@@ -4983,7 +5755,7 @@ mod tests {
         );
         let auth = crate::storage::GrantAuthorization {
             owner_key: kp.public_key_bytes(),
-            signature: kp.sign(&digest).to_vec(),
+            signature: kp.sign(crate::crypto::ctx::STORAGE_V2, &digest).to_vec(),
         };
         let before = reg.root();
         reg.issue_view_grant(
@@ -5001,7 +5773,7 @@ mod tests {
         assert_ne!(before, reg.root(), "a live grant must reach the state root");
     }
 
-    /// P28-F16: a captured issue authorisation cannot be replayed after the
+    /// A captured issue authorisation cannot be replayed after the
     /// grant is revoked, and a signature made for another chain is refused.
     #[cfg(feature = "wallet-ml-dsa")]
     #[test]
@@ -5014,6 +5786,7 @@ mod tests {
         let mut m = good_manifest();
         m.owner = owner;
         reg.register_manifest(&m);
+        reg.record_test_custody_for_manifest(&m, owner);
         let key = [6u8; 32];
         let policy = crate::storage::ViewPolicy::PublicKeyId;
         let sign = |chain: u64, nonce: u64| {
@@ -5031,7 +5804,7 @@ mod tests {
             );
             crate::storage::GrantAuthorization {
                 owner_key: kp.public_key_bytes(),
-                signature: kp.sign(&d).to_vec(),
+                signature: kp.sign(crate::crypto::ctx::STORAGE_V2, &d).to_vec(),
             }
         };
         let other_chain = sign(2, 0);
@@ -5065,7 +5838,7 @@ mod tests {
         let revoke_d = crate::storage::grant_revoke_digest(1, grant, &owner, 4);
         let revoke = crate::storage::GrantAuthorization {
             owner_key: kp.public_key_bytes(),
-            signature: kp.sign(&revoke_d).to_vec(),
+            signature: kp.sign(crate::crypto::ctx::STORAGE_V2, &revoke_d).to_vec(),
         };
         reg.revoke_view_grant(1, grant, &revoke, 4).expect("revoke");
         assert!(
@@ -5096,6 +5869,7 @@ mod tests {
         let mut m = good_manifest();
         m.owner = owner;
         reg.register_manifest(&m);
+        reg.record_test_custody_for_manifest(&m, owner);
         let key = [6u8; 32];
         let issue_digest = crate::storage::grant_issue_digest(
             1,
@@ -5111,7 +5885,9 @@ mod tests {
         );
         let issue = crate::storage::GrantAuthorization {
             owner_key: kp.public_key_bytes(),
-            signature: kp.sign(&issue_digest).to_vec(),
+            signature: kp
+                .sign(crate::crypto::ctx::STORAGE_V2, &issue_digest)
+                .to_vec(),
         };
         let grant = reg
             .issue_view_grant(
@@ -5146,7 +5922,9 @@ mod tests {
         let revoke_digest = crate::storage::grant_revoke_digest(1, grant, &owner, 4);
         let revoke = crate::storage::GrantAuthorization {
             owner_key: kp.public_key_bytes(),
-            signature: kp.sign(&revoke_digest).to_vec(),
+            signature: kp
+                .sign(crate::crypto::ctx::STORAGE_V2, &revoke_digest)
+                .to_vec(),
         };
         reg.revoke_view_grant(1, grant, &revoke, 4)
             .expect("the owner's signed revocation");
@@ -5783,15 +6561,18 @@ mod tests {
                 commit,
                 crate::storage::GrantAuthorization {
                     owner_key: kp.public_key_bytes(),
-                    signature: kp.sign(&digest).to_vec(),
+                    signature: kp.sign(crate::crypto::ctx::STORAGE_V2, &digest).to_vec(),
                 },
             )
         };
 
+        let kp1 = WalletKeyPair::generate();
+        let mut m1 = m.clone();
+        m1.owner = kp1.address();
         let mut reg = StorageRegistry::new();
-        reg.register_manifest(&m);
+        reg.register_manifest(&m1);
         let before = reg.root();
-        let (commit, auth) = signed_commit(&WalletKeyPair::generate());
+        let (commit, auth) = signed_commit(&kp1);
         reg.register_confidential_commit(commit, &auth).unwrap();
         let after = reg.root();
         assert_ne!(before, after, "the body commit must reach the root");
@@ -5799,9 +6580,12 @@ mod tests {
         // The owner alone moves the root too: same commitment, different
         // speaker. A fold over the commitments only would let a node swap who
         // owns an object without any state-root change.
+        let kp2 = WalletKeyPair::generate();
+        let mut m2 = m.clone();
+        m2.owner = kp2.address();
         let mut other_registry = StorageRegistry::new();
-        other_registry.register_manifest(&m);
-        let (commit2, auth2) = signed_commit(&WalletKeyPair::generate());
+        other_registry.register_manifest(&m2);
+        let (commit2, auth2) = signed_commit(&kp2);
         other_registry
             .register_confidential_commit(commit2, &auth2)
             .unwrap();
@@ -6257,7 +7041,7 @@ mod tests {
 
     #[test]
     fn a_full_id_counter_refuses_instead_of_overflowing() {
-        // P23-F15: the counters used a bare `+= 1`. With overflow checks on
+        // The counters used a bare `+= 1`. With overflow checks on
         // that is a panic, so a full counter must be a clean refusal.
         let m = good_manifest();
         let mut reg = StorageRegistry::new();
@@ -6307,17 +7091,17 @@ mod tests {
     #[test]
     fn a_deal_does_not_expire_under_an_open_challenge() {
         // The missed-challenge slash settles only an `Active` deal (open_one
-        // opens 100..200). A challenge may outlive the term - the deadline is
-        // its own - but the term may not pass while the question is open: the
-        // row would leave `Active`, `finalize_missed_challenge` would refuse
-        // with DealNotActive, and the opener's bond would be stranded with no
-        // slash. Held until the challenge closes.
+        // opens 100..200). A challenge closes on the block after its deadline,
+        // so a deadline on the term itself still leaves one epoch in which the
+        // term passes while the question is open: the row would leave `Active`,
+        // `finalize_missed_challenge` would refuse with DealNotActive, and the
+        // opener's bond would be stranded with no slash. Held until it closes.
         let m = good_manifest();
         let mut reg = StorageRegistry::new();
         let (deal_id, _) = open_one(&mut reg, &m);
         let challenge = reg
-            .open_challenge(deal_id, 0, 4, 110, 201, opener(), 50)
-            .expect("a challenge may run past the term");
+            .open_challenge(deal_id, 0, 4, 110, 200, opener(), 50)
+            .expect("a challenge may close on the deal's last epoch");
         assert!(matches!(
             reg.expire_deal(deal_id, 201),
             Err(StorageError::OpenChallengeBlocksExpiry {
@@ -6330,6 +7114,71 @@ mod tests {
         reg.finalize_missed_challenge(challenge, 202)
             .expect("silence is slashed");
         assert_eq!(reg.expire_deal(deal_id, 202).expect("nothing held"), 0);
+    }
+
+    /// The opener does not get to choose how long a deal outlives its term.
+    ///
+    /// `expire_deal` holds a deal with an unresolved challenge `Active`, so a
+    /// caller-chosen deadline was a caller-chosen delay of the bond return, the
+    /// expiry reallocation and the shard repair ticket - bought with the minimum
+    /// opener bond. Enforced at the registry door, so the automatic cadence
+    /// inherits it as well as the transaction path.
+    #[test]
+    fn a_challenge_deadline_past_the_deal_term_is_refused() {
+        let m = good_manifest();
+        let mut reg = StorageRegistry::new();
+        let (deal_id, _) = open_one(&mut reg, &m);
+        let root = reg.root();
+        assert!(matches!(
+            reg.open_challenge(deal_id, 0, 4, 110, 201, opener(), 50),
+            Err(StorageError::ChallengeDeadlinePastDealTerm {
+                deal_end_epoch: 200,
+                ..
+            })
+        ));
+        // Refused before anything is written: no row, no root change.
+        assert!(reg.all_challenges().is_empty());
+        assert_eq!(reg.root(), root);
+        // The last epoch of the term is still answerable inside the term.
+        reg.open_challenge(deal_id, 0, 4, 110, 200, opener(), 50)
+            .expect("a deadline on the term itself must be accepted");
+    }
+
+    /// An unresolved challenge whose deal can never be active again is not
+    /// evidence of anything: both resolution paths refuse `DealNotActive`, and
+    /// the row stops counting against the per-deal and per-operator caps, so
+    /// without the sweep it stays in the registry root for the life of the chain.
+    #[test]
+    fn an_unresolvable_challenge_leaves_the_log_with_the_settled_ones() {
+        let m = good_manifest();
+        let mut reg = StorageRegistry::new();
+        let (deal_id, _) = open_one(&mut reg, &m);
+        let challenge = reg
+            .open_challenge(deal_id, 0, 4, 110, 120, opener(), 50)
+            .expect("the challenge opens");
+        // The deal leaves `Active` without this challenge resolving - a slash
+        // settled on a sibling challenge, or an operator killed in the chaos
+        // paths. From here neither the answer nor the missed path can ever close
+        // the row (both refuse `DealNotActive`), and it no longer counts against
+        // the per-deal or per-operator caps.
+        reg.deals.get_mut(&deal_id).expect("the deal exists").status = DealStatus::Slashed;
+        assert!(matches!(
+            reg.open_challenge(deal_id, 0, 4, 131, 140, opener(), 50),
+            Err(StorageError::DealNotActive(_))
+        ));
+
+        let window = StorageRegistry::MAX_CHALLENGE_WINDOW_EPOCHS;
+        assert_eq!(reg.prune_settled_challenges(120 + window - 1), 0);
+        assert!(
+            reg.get_challenge(challenge).is_some(),
+            "inside the retention window the row is still evidence"
+        );
+        assert_eq!(reg.prune_settled_challenges(120 + window), 1);
+        assert!(
+            reg.get_challenge(challenge).is_none(),
+            "a row that can never resolve must not outlive the retention window"
+        );
+        assert!(reg.get_result(challenge).is_none());
     }
 
     #[test]
@@ -6912,6 +7761,138 @@ mod tests {
         assert_eq!(ticket.status, ReallocationStatus::Pending);
     }
 
+    /// `NeverPlaced` tickets carry `failed_deal_id: 0` as a placeholder, and
+    /// storage deal ids start at 0. Reading the placeholder as a key took the
+    /// payer of the first deal the chain ever accepted as the policy owner of
+    /// every first placement, and recorded that account as a claimant on
+    /// somebody else's manifest, which made `owner_of` contested.
+    #[test]
+    fn a_never_placed_ticket_does_not_borrow_the_payer_of_deal_zero() {
+        let mut reg = StorageRegistry::new();
+        let first = good_manifest();
+        let (deal_zero, _) = open_one(&mut reg, &first);
+        assert_eq!(deal_zero, 0, "the first deal id is the placeholder value");
+        let stranger = Address::from([0x77u8; 32]);
+        reg.set_deal_payer(deal_zero, stranger);
+
+        let mut other =
+            ContentManifest::from_bytes_sliced(b"bytes that belong to somebody else", 8).unwrap();
+        let owner = Address::from([0x55u8; 32]);
+        other.owner = owner;
+        reg.register_manifest(&other);
+        let ticket_id = reg
+            .open_never_placed_ticket(42, other.manifest_id, other.shards[0].shard_id, 0, 100)
+            .expect("a never-held shard opens a bootstrap ticket");
+
+        reg.accept_reallocation_ticket(
+            ticket_id,
+            replacement_operator(),
+            151,
+            250,
+            good_econ(),
+            &params(),
+            Some(valid_merkle_proof()),
+            Some([0x42u8; 32]),
+        )
+        .expect("the bootstrap ticket is accepted");
+
+        assert!(
+            !reg.manifest_claims.contains(&(other.manifest_id, stranger)),
+            "the payer of deal 0 must not become a claimant on another account's manifest"
+        );
+        assert_eq!(reg.owner_of(&other.manifest_id), Some(owner));
+    }
+
+    /// The same placeholder is read as a key when the registry asks whether a
+    /// failed deal already has a repair ticket. A never-placed ticket carries
+    /// `failed_deal_id: 0`, so it stood in for the repair ticket of deal 0 and
+    /// the first deal the chain accepted was never repaired on either exit.
+    #[test]
+    fn a_never_placed_ticket_is_not_the_repair_ticket_of_deal_zero() {
+        let mut reg = StorageRegistry::new();
+        let waiting =
+            ContentManifest::from_bytes_sliced(b"registered and never placed", 8).unwrap();
+        reg.register_manifest(&waiting);
+        reg.open_never_placed_ticket(42, waiting.manifest_id, waiting.shards[0].shard_id, 0, 90)
+            .expect("bootstrap ticket");
+
+        let m = good_manifest();
+        let (deal_zero, _) = open_one(&mut reg, &m);
+        assert_eq!(deal_zero, 0);
+
+        // The expiry exit.
+        let expiry = reg.open_expiry_reallocation(deal_zero, 300);
+        assert!(
+            expiry.is_some(),
+            "deal 0 must get its own repair ticket on expiry"
+        );
+        assert_eq!(
+            reg.get_reallocation_ticket(expiry.unwrap()).unwrap().cause,
+            ReallocationCause::FailedDeal
+        );
+    }
+
+    #[test]
+    fn a_slashed_deal_zero_gets_a_repair_ticket_and_a_lifecycle_state() {
+        let mut reg = StorageRegistry::new();
+        let waiting =
+            ContentManifest::from_bytes_sliced(b"registered and never placed", 8).unwrap();
+        reg.register_manifest(&waiting);
+        reg.open_never_placed_ticket(42, waiting.manifest_id, waiting.shards[0].shard_id, 0, 90)
+            .expect("bootstrap ticket");
+
+        let m = good_manifest();
+        let (deal_zero, _) = open_one(&mut reg, &m);
+        assert_eq!(deal_zero, 0);
+        let challenge_id = reg
+            .open_challenge(deal_zero, 0, 4, 110, 120, opener(), 50)
+            .unwrap();
+        reg.finalize_missed_challenge(challenge_id, 150).unwrap();
+
+        assert!(
+            reg.all_reallocation_tickets()
+                .iter()
+                .any(|t| t.cause == ReallocationCause::FailedDeal && t.failed_deal_id == deal_zero),
+            "the slashed first deal must have a repair ticket of its own"
+        );
+        assert_eq!(
+            reg.lifecycle_state(deal_zero),
+            Some(crate::storage::StorageLifecycleState::ReallocationPending)
+        );
+    }
+
+    /// Every exit that slashes a deal opens a repair ticket for its slot. The
+    /// mismatched-answer exit used to slash and open nothing, so the replica
+    /// was never replaced.
+    #[test]
+    fn a_mismatched_answer_slash_opens_a_repair_ticket_for_the_slot() {
+        let m = good_manifest();
+        let mut reg = StorageRegistry::new();
+        let (deal_id, shard_id) = open_one(&mut reg, &m);
+        let challenge_id = reg
+            .open_challenge(deal_id, 0, 4, 110, 120, opener(), 50)
+            .unwrap();
+
+        let result = reg
+            .slash_for_mismatched_answer(challenge_id, deal_id, 115)
+            .expect("the deal exists");
+
+        assert_eq!(result.outcome, ChallengeOutcome::Mismatched);
+        assert_eq!(result.slashed_bond, good_econ().operator_bond);
+        assert_eq!(deal_status(&reg, deal_id), DealStatus::Slashed);
+        let ticket = reg
+            .all_reallocation_tickets()
+            .into_iter()
+            .find(|t| t.names_failed_deal(deal_id))
+            .expect("the slashed slot has a repair ticket");
+        assert_eq!(ticket.shard_id, shard_id);
+        assert_eq!(ticket.slashed_operator, operator());
+        assert_eq!(ticket.status, ReallocationStatus::Pending);
+
+        // A second exit for the same deal opens no second ticket.
+        assert_eq!(reg.open_slash_reallocation(deal_id, 116), None);
+    }
+
     #[test]
     fn never_placed_ticket_opens_once_per_slot() {
         let m = good_manifest();
@@ -7226,7 +8207,7 @@ mod tests {
         assert!(matches!(err, StorageError::InvalidMerkleProof(_)));
     }
 
-    /// BLG-0365 (P24-F06): prune defers while a retrieval challenge is open
+    /// Prune defers while a retrieval challenge is open
     /// on one of the deals, and proceeds once the challenge has been
     /// finalized (the deal leaves Active with it).
     #[test]
@@ -7421,7 +8402,7 @@ mod tests {
         // Prune the content.
         let (pruned, bond_returns) = reg.prune_content(&manifest_id, 150);
         assert_eq!(pruned, 2);
-        // P23-F01: every expired deal hands its operator bond back to the
+        // Every expired deal hands its operator bond back to the
         // caller for settlement; the old u64-only return dropped them.
         assert_eq!(bond_returns.len(), 2);
         assert!(bond_returns.iter().all(|(_, bond)| *bond > 0));
@@ -7520,6 +8501,59 @@ mod tests {
         let (pruned, bond_returns) = reg.prune_content(&bogus, 100);
         assert_eq!(pruned, 0);
         assert!(bond_returns.is_empty());
+    }
+
+    #[test]
+    fn prune_settled_challenges_sweeps_expired_settled_rows_only() {
+        let m = good_manifest();
+        let mut reg = StorageRegistry::new();
+        let (deal_id, _) = open_one(&mut reg, &m);
+        let settled_id = reg
+            .open_challenge(deal_id, 0, 4, 110, 120, opener(), 50)
+            .unwrap();
+        reg.answer_challenge(
+            settled_id,
+            ContentId([1u8; 32]),
+            operator(),
+            115,
+            Some(&valid_merkle_proof()),
+        )
+        .unwrap();
+        let open_id = reg
+            .open_challenge(deal_id, 0, 4, 125, 135, opener(), 50)
+            .unwrap();
+
+        let last_kept = 120 + StorageRegistry::MAX_CHALLENGE_WINDOW_EPOCHS - 1;
+        assert_eq!(reg.prune_settled_challenges(last_kept), 0);
+        assert!(reg.get_challenge(settled_id).is_some());
+        assert!(reg.get_result(settled_id).is_some());
+
+        let root_before = reg.root();
+        assert_eq!(reg.prune_settled_challenges(last_kept + 1), 1);
+        assert!(reg.get_challenge(settled_id).is_none());
+        assert!(reg.get_result(settled_id).is_none());
+        assert_ne!(reg.root(), root_before);
+
+        assert!(reg.get_challenge(open_id).is_some());
+        assert_eq!(reg.prune_settled_challenges(last_kept + 10_000), 0);
+        assert!(reg.get_challenge(open_id).is_some());
+    }
+
+    #[test]
+    fn prune_content_clears_challenges_and_results_for_pruned_manifest() {
+        let m = good_manifest();
+        let mut reg = StorageRegistry::new();
+        let (deal_id, _) = open_one(&mut reg, &m);
+        let cid = reg
+            .open_challenge(deal_id, 0, 4, 110, 120, opener(), 50)
+            .unwrap();
+        reg.answer_challenge(cid, ContentId([2u8; 32]), operator(), 115, None)
+            .unwrap();
+        assert_eq!(reg.all_challenges().len(), 1);
+        assert_eq!(reg.all_results().len(), 1);
+        reg.prune_content(&m.manifest_id, 150);
+        assert!(reg.all_challenges().is_empty());
+        assert!(reg.all_results().is_empty());
     }
     /// REGRESSION: max concurrent open challenges per deal.
     #[test]
@@ -7673,11 +8707,14 @@ mod tests {
         let (deal_id, _) = open_one(&mut reg, &m);
         for i in 0..10 {
             let epoch = 110 + i as u64 * StorageRegistry::MIN_OPERATOR_MANIFEST_CHALLENGE_EPOCHS;
-            reg.open_challenge(deal_id, 0, 4, epoch, epoch + 90, opener(), 50)
+            // Inside the deal's own term (open_one opens 100..200): a deadline
+            // past the term is refused, because it would hold the deal `Active`
+            // past its expiry.
+            reg.open_challenge(deal_id, 0, 4, epoch, epoch + 40, opener(), 50)
                 .unwrap_or_else(|e| panic!("challenge {i} should open: {e:?}"));
         }
         let err = reg
-            .open_challenge(deal_id, 0, 4, 500, 600, opener(), 50)
+            .open_challenge(deal_id, 0, 4, 195, 200, opener(), 50)
             .unwrap_err();
         assert!(
             matches!(err, StorageError::TooManyOpenChallenges { .. }),
@@ -8454,7 +9491,7 @@ mod tests {
             let (mut reg, _, manifest) = coded();
             let id = open(&mut reg, &manifest, 1);
             let rec = stored(&reg, id);
-            // BLG-0365 refuses a prune under an open audit, so the
+            // refuses a prune under an open audit, so the
             // gone-manifest state is entered directly, as the expiry
             // sweep leaves it.
             reg.manifests.remove(&manifest.manifest_id);
@@ -8477,7 +9514,7 @@ mod tests {
             let id = open(&mut reg, &manifest, 1);
             let rec = stored(&reg, id);
             let (column, parity, proof) = honest(&encoded, &rec.audit);
-            // BLG-0365 refuses a prune under an open audit, so the
+            // refuses a prune under an open audit, so the
             // gone-manifest state is entered directly, as the expiry
             // sweep leaves it.
             reg.manifests.remove(&manifest.manifest_id);
@@ -8499,7 +9536,7 @@ mod tests {
             let id = open(&mut reg, &manifest, 1);
             let rec = stored(&reg, id);
             let (column, parity, proof) = honest(&encoded, &rec.audit);
-            // BLG-0365 refuses a prune under an open audit, so the
+            // refuses a prune under an open audit, so the
             // gone-manifest state is entered directly, as the expiry
             // sweep leaves it.
             reg.manifests.remove(&manifest.manifest_id);
@@ -8811,6 +9848,411 @@ mod tests {
             assert_eq!(reg.root(), back.root());
         }
     }
+
+    #[test]
+    fn self_opened_or_unverifiable_challenge_never_credits_proven_read() {
+        let mut reg = StorageRegistry::new();
+        let m = good_manifest();
+        let (deal_id, _) = open_one(&mut reg, &m);
+        // Any account - including the operator (Invariant 3) - can open a challenge,
+        // but neither a self-opened challenge nor an unverifiable answer may credit demand.
+        let self_cid = reg
+            .open_challenge(deal_id, 0, 4, 110, 120, operator(), 50)
+            .unwrap();
+        let self_res = reg
+            .answer_challenge(
+                self_cid,
+                ContentId([1u8; 32]),
+                operator(),
+                111,
+                Some(&[1u8; 16]),
+            )
+            .unwrap();
+        assert_eq!(self_res.outcome, ChallengeOutcome::Answered);
+        assert!(
+            !reg.access_events.contains_key(&m.manifest_id),
+            "self-opened challenge must never credit a proven read"
+        );
+        assert_eq!(
+            reg.verified_challenge_bytes_with_gate(deal_id, operator(), true),
+            0,
+            "self-opened challenge must never credit reward bytes even when proofs are checkable"
+        );
+
+        let cooldown = StorageRegistry::MIN_OPERATOR_MANIFEST_CHALLENGE_EPOCHS;
+        let cid = reg
+            .open_challenge(deal_id, 0, 4, 110 + cooldown, 120 + cooldown, opener(), 50)
+            .unwrap();
+        let res = reg.answer_challenge(
+            cid,
+            ContentId([1u8; 32]),
+            operator(),
+            115 + cooldown,
+            Some(&[1u8; 16]),
+        );
+        let res = res.unwrap();
+        assert_eq!(res.outcome, ChallengeOutcome::Answered);
+        assert!(
+            !reg.access_events.contains_key(&m.manifest_id),
+            "unverifiable proof must not credit a proven read"
+        );
+    }
+
+    #[test]
+    fn competing_manifest_and_paid_deal_cannot_hijack_owner_or_nft_burn_prune() {
+        let mut reg = StorageRegistry::new();
+        let alice = Address::from([0x11; 32]);
+        let mallory = Address::from([0x22; 32]);
+        let operator = Address::from([0x33; 32]);
+
+        let mut alice_manifest = good_manifest();
+        alice_manifest.owner = alice;
+        reg.register_manifest(&alice_manifest);
+        assert_eq!(reg.owner_of(&alice_manifest.manifest_id), Some(alice));
+        assert!(
+            !reg.can_prune_on_nft_burn(&alice_manifest.manifest_id, &alice),
+            "lone manifest claim without custody deal must not authorize hard prune"
+        );
+        reg.record_test_custody_for_manifest(&alice_manifest, alice);
+        assert!(reg.can_prune_on_nft_burn(&alice_manifest.manifest_id, &alice));
+
+        let mut mallory_manifest = alice_manifest.clone();
+        mallory_manifest.owner = mallory;
+        reg.register_manifest(&mallory_manifest);
+
+        let shard_id = alice_manifest.shards[0].shard_id;
+        let deal_id = reg
+            .open_deal(
+                42,
+                &mallory_manifest,
+                shard_id,
+                operator,
+                1,
+                10,
+                20,
+                good_econ(),
+                &params(),
+                Some(valid_merkle_proof()),
+                Some([0x42u8; 32]),
+            )
+            .unwrap();
+        reg.set_deal_payer(deal_id, mallory);
+
+        assert_eq!(
+            reg.owner_of(&alice_manifest.manifest_id),
+            None,
+            "a competing manifest + side deal must keep owner_of ambiguous"
+        );
+        assert!(!reg.can_prune_on_nft_burn(&alice_manifest.manifest_id, &mallory));
+        assert!(!reg.can_prune_on_nft_burn(&alice_manifest.manifest_id, &alice));
+    }
+
+    #[test]
+    fn expired_competing_custody_deal_does_not_keep_owner_contested() {
+        let mut reg = StorageRegistry::new();
+        let victim = Address::from([0x41; 32]);
+        let stranger = Address::from([0x42; 32]);
+        let operator = Address::from([0x43; 32]);
+
+        let mut victim_manifest = good_manifest();
+        victim_manifest.owner = victim;
+        let content_id = victim_manifest.manifest_id;
+        reg.register_manifest(&victim_manifest);
+        reg.record_test_custody_for_manifest(&victim_manifest, victim);
+
+        let mut stranger_manifest = victim_manifest.clone();
+        stranger_manifest.owner = stranger;
+        reg.register_manifest(&stranger_manifest);
+        let deal_id = reg
+            .open_deal(
+                42,
+                &stranger_manifest,
+                stranger_manifest.shards[0].shard_id,
+                operator,
+                1,
+                10,
+                20,
+                good_econ(),
+                &params(),
+                Some(valid_merkle_proof()),
+                Some([0x42u8; 32]),
+            )
+            .unwrap();
+        reg.set_deal_payer(deal_id, stranger);
+
+        assert_eq!(reg.owner_of(&content_id), None);
+        assert!(reg.has_custody_deal(&content_id, &stranger));
+
+        reg.deals.get_mut(&deal_id).unwrap().status = DealStatus::Expired;
+
+        assert!(!reg.has_custody_deal(&content_id, &stranger));
+        assert_eq!(
+            reg.owner_of(&content_id),
+            Some(victim),
+            "expired custody is history, not continuing authority over the content id"
+        );
+        assert!(reg.has_proven_ownership(&content_id, &victim));
+    }
+
+    #[test]
+    fn stranger_bare_scoped_confidential_commit_does_not_block_owner_prune() {
+        let mut reg = StorageRegistry::new();
+        let alice = Address::from([0xA1; 32]);
+        let stranger = Address::from([0xB2; 32]);
+        let mut alice_manifest = good_manifest();
+        alice_manifest.owner = alice;
+        let cid = alice_manifest.manifest_id;
+        reg.register_manifest(&alice_manifest);
+        reg.record_test_custody_for_manifest(&alice_manifest, alice);
+        assert!(reg.can_prune_on_nft_burn(&cid, &alice));
+
+        reg.register_confidential_commit_as(
+            stranger,
+            crate::storage::ConfidentialBodyCommit {
+                content_id: cid,
+                encryption: crate::storage::ContentEncryption::ClientSide(
+                    crate::storage::ContentCipher::Aes256Gcm,
+                ),
+                ciphertext_root: [0x77; 32],
+                proof_kind: crate::storage::ConfidentialProofKind::RetrievalChallenge,
+            },
+        )
+        .unwrap();
+        assert!(
+            reg.can_prune_on_nft_burn(&cid, &alice),
+            "inert third-party scoped commit without claim or custody deal must not block owner prune"
+        );
+
+        // A competing manifest claim costs one transaction: `manifest_id` is
+        // content-addressed and excludes `owner`, so the stranger can copy the
+        // manifest and record its own claim, which the registry keeps rather
+        // than refuses. Paired with the scoped commit above, that used to be
+        // enough to veto the owner's burn prune for good at no capital cost.
+        let mut stranger_manifest = good_manifest();
+        stranger_manifest.owner = stranger;
+        assert_eq!(stranger_manifest.manifest_id, cid);
+        reg.register_manifest(&stranger_manifest);
+        assert!(
+            reg.has_manifest_claim(&cid, &stranger),
+            "the free duplicate claim is recorded"
+        );
+        assert!(
+            reg.can_prune_on_nft_burn(&cid, &alice),
+            "a free duplicate manifest claim plus a scoped commit must not veto the owner's prune"
+        );
+    }
+
+    #[test]
+    fn stranger_free_self_host_policy_does_not_veto_owner_prune() {
+        let mut reg = StorageRegistry::new();
+        let alice = Address::from([0xA2; 32]);
+        let stranger = Address::from([0xB3; 32]);
+        let mut alice_manifest = good_manifest();
+        alice_manifest.owner = alice;
+        let cid = alice_manifest.manifest_id;
+        let shard_id = alice_manifest.shards[0].shard_id;
+        reg.register_manifest(&alice_manifest);
+        reg.record_test_custody_for_manifest(&alice_manifest, alice);
+        assert!(reg.can_prune_on_nft_burn(&cid, &alice));
+
+        let mut stranger_manifest = alice_manifest.clone();
+        stranger_manifest.owner = stranger;
+        reg.register_manifest(&stranger_manifest);
+        let stranger_profile = crate::storage::MobileSelfProfile {
+            owner: stranger,
+            device_commitment: [0x51; 32],
+            availability: crate::storage::MobileAvailabilityClass::AlwaysOnReplica,
+            max_storage_bytes: 1_000_000,
+            metered_network_ok: true,
+            battery_saver_aware: true,
+            last_seen_block: 1,
+        };
+        reg.declare_self_host_policy(
+            cid,
+            crate::storage::MobileSelfContentPolicy {
+                content_id: shard_id,
+                owner: stranger,
+                critical: false,
+                self_host_allowed: false,
+                required_paid_replicas: 3,
+            },
+            &stranger_profile,
+        )
+        .unwrap();
+
+        assert!(
+            reg.can_prune_on_nft_burn(&cid, &alice),
+            "a free self-host policy without custody must not veto the owner's prune"
+        );
+        let (_pruned, _bonds) = reg.prune_content(&cid, 10);
+        assert!(
+            reg.scoped_self_host_policies.is_empty(),
+            "pruning clears orphaned scoped self-host policies for the pruned manifest"
+        );
+    }
+
+    #[test]
+    fn self_operated_zero_fee_deal_does_not_forge_custody_or_contest_owner() {
+        let mut reg = StorageRegistry::new();
+        let alice = Address::from([0xA3; 32]);
+        let attacker = Address::from([0xB4; 32]);
+        let mut alice_manifest = good_manifest();
+        alice_manifest.owner = alice;
+        let cid = alice_manifest.manifest_id;
+        let shard_id = alice_manifest.shards[0].shard_id;
+        reg.register_manifest(&alice_manifest);
+        reg.record_test_custody_for_manifest(&alice_manifest, alice);
+        assert_eq!(reg.owner_of(&cid), Some(alice));
+        assert!(reg.has_proven_ownership(&cid, &alice));
+
+        let mut attacker_manifest = alice_manifest.clone();
+        attacker_manifest.owner = attacker;
+        reg.register_manifest(&attacker_manifest);
+        let zero_fee_self_econ = StorageEconomicsParams {
+            operator_bond: params().min_operator_bond,
+            fee_per_byte_epoch: 0,
+        };
+        let forged_deal = reg
+            .open_deal(
+                42,
+                &attacker_manifest,
+                shard_id,
+                attacker,
+                1,
+                10,
+                20,
+                zero_fee_self_econ,
+                &params(),
+                Some(valid_merkle_proof()),
+                Some([0x42u8; 32]),
+            )
+            .unwrap();
+        reg.set_deal_payer(forged_deal, attacker);
+
+        assert!(
+            !reg.has_custody_deal(&cid, &attacker),
+            "a self-operated zero-fee deal is not independent custody"
+        );
+        assert_eq!(
+            reg.owner_of(&cid),
+            Some(alice),
+            "a self-operated zero-fee deal must not contest the custody-proven owner"
+        );
+        assert!(
+            reg.has_proven_ownership(&cid, &alice),
+            "a stranger's self-operated zero-fee deal must not freeze proven ownership"
+        );
+        assert!(
+            reg.can_prune_on_nft_burn(&cid, &alice),
+            "a stranger's self-operated zero-fee deal must not veto owner prune"
+        );
+    }
+
+    #[test]
+    fn repair_placement_uses_failed_deal_payer_policy_not_first_registrant() {
+        let mut reg = StorageRegistry::new();
+        let squatter = Address::from([0xE1; 32]);
+        let real_owner = Address::from([0xE2; 32]);
+        let initial_op = Address::from([0xE3; 32]);
+        let mobile_rep = Address::from([0xE4; 32]);
+        let opener_addr = Address::from([0xE5; 32]);
+
+        let mut squatter_manifest = good_manifest();
+        squatter_manifest.owner = squatter;
+        let cid = squatter_manifest.manifest_id;
+        let shard_id = squatter_manifest.shards[0].shard_id;
+
+        // First registrant is the squatter; its copy sits in `reg.manifests`.
+        reg.register_manifest(&squatter_manifest);
+        let mut owner_manifest = squatter_manifest.clone();
+        owner_manifest.owner = real_owner;
+        reg.register_manifest(&owner_manifest);
+
+        // Squatter permits mobile placement; real owner forbids mobile placement.
+        let squatter_profile = crate::storage::MobileSelfProfile {
+            owner: squatter,
+            device_commitment: [0x61; 32],
+            availability: crate::storage::MobileAvailabilityClass::AlwaysOnReplica,
+            max_storage_bytes: 1_000_000,
+            metered_network_ok: true,
+            battery_saver_aware: true,
+            last_seen_block: 1,
+        };
+        let real_owner_profile = crate::storage::MobileSelfProfile {
+            owner: real_owner,
+            device_commitment: [0x62; 32],
+            availability: crate::storage::MobileAvailabilityClass::AlwaysOnReplica,
+            max_storage_bytes: 1_000_000,
+            metered_network_ok: true,
+            battery_saver_aware: true,
+            last_seen_block: 1,
+        };
+        reg.declare_self_host_policy(
+            cid,
+            crate::storage::MobileSelfContentPolicy {
+                content_id: shard_id,
+                owner: squatter,
+                critical: false,
+                self_host_allowed: true,
+                required_paid_replicas: 0,
+            },
+            &squatter_profile,
+        )
+        .unwrap();
+        reg.declare_self_host_policy(
+            cid,
+            crate::storage::MobileSelfContentPolicy {
+                content_id: shard_id,
+                owner: real_owner,
+                critical: false,
+                self_host_allowed: false,
+                required_paid_replicas: 2,
+            },
+            &real_owner_profile,
+        )
+        .unwrap();
+
+        let failed_deal = reg
+            .open_deal(
+                42,
+                &owner_manifest,
+                shard_id,
+                initial_op,
+                1,
+                10,
+                200,
+                good_econ(),
+                &params(),
+                Some(valid_merkle_proof()),
+                Some([0x42u8; 32]),
+            )
+            .unwrap();
+        reg.set_deal_payer(failed_deal, real_owner);
+
+        let challenge_id = reg
+            .open_challenge(failed_deal, 0, 4, 20, 30, opener_addr, 50)
+            .unwrap();
+        reg.finalize_missed_challenge(challenge_id, 40).unwrap();
+        let ticket_id = reg.all_reallocation_tickets()[0].ticket_id;
+
+        reg.set_operator_class(mobile_rep, OperatorClass::Mobile);
+        let err = reg
+            .accept_reallocation_ticket(
+                ticket_id,
+                mobile_rep,
+                41,
+                200,
+                good_econ(),
+                &params(),
+                Some(valid_merkle_proof()),
+                Some([0x42u8; 32]),
+            )
+            .unwrap_err();
+        assert!(
+            matches!(err, StorageError::SelfHostRefusedByPolicy { .. }),
+            "repair placement must enforce the failed-deal payer's policy, got {err:?}"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -9108,7 +10550,7 @@ mod demand_driven_replication_tests {
         let digest = crate::storage::confidential_commit_digest(&commit, &owner);
         let auth = crate::storage::GrantAuthorization {
             owner_key: kp.public_key_bytes(),
-            signature: kp.sign(&digest).to_vec(),
+            signature: kp.sign(crate::crypto::ctx::STORAGE_V2, &digest).to_vec(),
         };
         let err = reg
             .register_confidential_commit(commit, &auth)
@@ -9124,7 +10566,10 @@ mod demand_driven_replication_tests {
             ConfidentialBodyCommit, ConfidentialProofKind, ContentCipher, ContentEncryption,
         };
 
-        let m = ContentManifest::from_bytes_sliced(b"classic private body bytes!!", 8).unwrap();
+        let kp = WalletKeyPair::generate();
+        let owner = kp.address();
+        let mut m = ContentManifest::from_bytes_sliced(b"classic private body bytes!!", 8).unwrap();
+        m.owner = owner;
         let mut reg = StorageRegistry::new();
         reg.register_manifest(&m);
         let commit = ConfidentialBodyCommit::new(
@@ -9134,12 +10579,10 @@ mod demand_driven_replication_tests {
             ConfidentialProofKind::HybridZkTee,
         )
         .unwrap();
-        let kp = WalletKeyPair::generate();
-        let owner = kp.address();
         let digest = crate::storage::confidential_commit_digest(&commit, &owner);
         let auth = crate::storage::GrantAuthorization {
             owner_key: kp.public_key_bytes(),
-            signature: kp.sign(&digest).to_vec(),
+            signature: kp.sign(crate::crypto::ctx::STORAGE_V2, &digest).to_vec(),
         };
         let c = reg.register_confidential_commit(commit, &auth).unwrap();
         assert_eq!(c.len(), 32);
@@ -9153,6 +10596,44 @@ mod demand_driven_replication_tests {
             reg.confidential_owners.get(&m.manifest_id).copied(),
             Some(owner),
             "the commit must be recorded under the address that signed it"
+        );
+    }
+
+    #[test]
+    fn canonical_manifest_owner_overrides_front_run_confidential_commit_without_leaking_manifest_claim(
+    ) {
+        use crate::storage::{
+            ConfidentialBodyCommit, ConfidentialProofKind, ContentCipher, ContentEncryption,
+        };
+
+        let owner = Address::from([0x11; 32]);
+        let squatter = Address::from([0x22; 32]);
+        let mut m = ContentManifest::from_bytes_sliced(b"front-run private body bytes", 8).unwrap();
+        m.owner = owner;
+        let commit = ConfidentialBodyCommit::new(
+            m.manifest_id,
+            ContentEncryption::ClientSide(ContentCipher::Aes256Gcm),
+            [7u8; 32],
+            ConfidentialProofKind::HybridZkTee,
+        )
+        .unwrap();
+
+        let mut reg = StorageRegistry::new();
+        // Squatter replays the confidential commit before the manifest lands:
+        // neither `owner_of` nor `has_manifest_claim` may grant manifest authority.
+        reg.register_confidential_commit_as(squatter, commit.clone())
+            .unwrap();
+        assert_eq!(reg.owner_of(&m.manifest_id), None);
+        assert!(!reg.has_manifest_claim(&m.manifest_id, &squatter));
+
+        // Canonical manifest owner registers the manifest and commits the body:
+        // the squatter's front-run collision cannot block the canonical owner.
+        reg.register_manifest(&m);
+        assert_eq!(reg.owner_of(&m.manifest_id), Some(owner));
+        reg.register_confidential_commit_as(owner, commit).unwrap();
+        assert_eq!(
+            reg.confidential_owners.get(&m.manifest_id).copied(),
+            Some(owner)
         );
     }
 

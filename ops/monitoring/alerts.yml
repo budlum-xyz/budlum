@@ -1,0 +1,96 @@
+# Prometheus alert rules for a Budlum testnet.
+#
+# Loaded by ops/prometheus.yml (`rule_files`). Every expression reads a metric
+# the node exports (src/core/metrics.rs) or, for disk space, the standard
+# node_exporter filesystem gauges. Thresholds are testnet starting points:
+# 5-block finality checkpoints, 3 s slots, a 50 000-entry mempool.
+
+groups:
+  - name: budlum-consensus
+    rules:
+      - alert: BudlumFinalityStalled
+        # The finalized height has not moved for 10 minutes: no checkpoint
+        # gathered a two-thirds quorum.
+        expr: changes(budlum_finalized_height[10m]) == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Finality stalled on {{ $labels.node }}"
+          description: "budlum_finalized_height has not changed for 10 minutes."
+
+      - alert: BudlumFinalityLagHigh
+        # The tip runs far ahead of the last finalized block.
+        expr: budlum_finality_lag > 100
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Finality lag {{ $value }} blocks on {{ $labels.node }}"
+
+      - alert: BudlumChainHalted
+        # No new block for 5 minutes (100 slots of 3 s).
+        expr: changes(budlum_chain_height[5m]) == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "No new block on {{ $labels.node }} for 5 minutes"
+
+      - alert: BudlumForkSuspected
+        # Reorgs are expected to be rare and shallow; a burst means the nodes
+        # disagree on the chain.
+        expr: increase(budlum_reorgs_total[15m]) > 3
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $value }} reorgs in 15 minutes on {{ $labels.node }}"
+
+      - alert: BudlumNodesDisagreeOnHeight
+        # Followers more than 20 blocks behind the highest node.
+        expr: max(budlum_chain_height) - min(budlum_chain_height) > 20
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Nodes disagree on the chain height by {{ $value }} blocks"
+
+  - name: budlum-network
+    rules:
+      - alert: BudlumPeerCountLow
+        expr: budlum_p2p_peers_connected < 2
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.node }} has {{ $value }} peers"
+
+  - name: budlum-mempool
+    rules:
+      - alert: BudlumMempoolNearFull
+        # Testnet mempool capacity is 50 000 entries.
+        expr: budlum_mempool_size > 45000
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Mempool at {{ $value }} entries on {{ $labels.node }}"
+
+      - alert: BudlumMempoolEvicting
+        expr: increase(budlum_mempool_evictions[10m]) > 1000
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $value }} mempool evictions in 10 minutes on {{ $labels.node }}"
+
+  - name: budlum-disk
+    rules:
+      - alert: BudlumDiskFillingUp
+        # Needs node_exporter on the host; the node itself reports only its
+        # database size (budlum_storage_db_size_bytes).
+        expr: node_filesystem_avail_bytes{mountpoint="/"} / node_filesystem_size_bytes{mountpoint="/"} < 0.10
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Less than 10% disk left on {{ $labels.instance }}"

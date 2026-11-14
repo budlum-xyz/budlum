@@ -291,7 +291,9 @@ fn zero_state_root_commitment_is_refused_fail_closed() {
         "no anchor may be written for a zero root"
     );
     let domain = chain
-        .domain_registry
+        .state
+        .settlement
+        .domains
         .get(source.id)
         .expect("domain registered");
     assert_eq!(

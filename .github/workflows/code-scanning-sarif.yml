@@ -69,7 +69,7 @@ jobs:
         run: hadolint --no-fail --format sarif ops/Dockerfile > hadolint.sarif
       - name: Upload Hadolint SARIF
         if: always()
-        uses: github/codeql-action/upload-sarif@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
+        uses: github/codeql-action/upload-sarif@1fc58d04a4d4374f921bdac573c3811c240f9c26 # v4.39.2
         with:
           sarif_file: hadolint.sarif
           category: hadolint
@@ -88,7 +88,7 @@ jobs:
             sarif actionlint /tmp/actionlint.json actionlint.sarif
       - name: Upload actionlint SARIF
         if: always()
-        uses: github/codeql-action/upload-sarif@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
+        uses: github/codeql-action/upload-sarif@1fc58d04a4d4374f921bdac573c3811c240f9c26 # v4.39.2
         with:
           sarif_file: actionlint.sarif
           category: actionlint
@@ -103,7 +103,7 @@ jobs:
           exit-code: "0"
       - name: Upload Trivy Config SARIF
         if: always()
-        uses: github/codeql-action/upload-sarif@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
+        uses: github/codeql-action/upload-sarif@1fc58d04a4d4374f921bdac573c3811c240f9c26 # v4.39.2
         with:
           sarif_file: trivy-config.sarif
           category: trivy-config
@@ -140,7 +140,25 @@ jobs:
         with:
           shared-key: budlum-core
       - name: Install protoc
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
+        run: |
+          set -euo pipefail
+          if ! command -v protoc >/dev/null 2>&1; then
+            case "$(uname -m)" in
+              aarch64|arm64)
+                PROTOC_ZIP=protoc-29.3-linux-aarch_64.zip
+                PROTOC_SHA256=6427349140e01f06e049e707a58709a4f221ae73ab9a0425bc4a00c8d0e1ab32
+                ;;
+              *)
+                PROTOC_ZIP=protoc-29.3-linux-x86_64.zip
+                PROTOC_SHA256=3e866620c5be27664f3d2fa2d656b5f3e09b5152b42f1bedbf427b333e90021a
+                ;;
+            esac
+            curl -sSfL --retry 5 --retry-all-errors --retry-delay 2 -o /tmp/protoc.zip \
+              "https://github.com/protocolbuffers/protobuf/releases/download/v29.3/${PROTOC_ZIP}"
+            echo "${PROTOC_SHA256}  /tmp/protoc.zip" | sha256sum -c -
+            sudo unzip -q -o /tmp/protoc.zip -d /usr/local bin/protoc 'include/*'
+            rm -f /tmp/protoc.zip
+          fi
       - name: Install cargo-audit and cargo-deny (locked)
         run: |
           set -euo pipefail
@@ -160,7 +178,7 @@ jobs:
           echo "$clippy_status" > /tmp/clippy.status
       - name: Upload Clippy SARIF
         if: always()
-        uses: github/codeql-action/upload-sarif@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
+        uses: github/codeql-action/upload-sarif@1fc58d04a4d4374f921bdac573c3811c240f9c26 # v4.39.2
         with:
           sarif_file: clippy.sarif
           category: clippy
@@ -179,7 +197,7 @@ jobs:
             sarif cargo-audit /tmp/cargo-audit.json cargo-audit.sarif Cargo.lock
       - name: Upload cargo-audit SARIF
         if: always()
-        uses: github/codeql-action/upload-sarif@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
+        uses: github/codeql-action/upload-sarif@1fc58d04a4d4374f921bdac573c3811c240f9c26 # v4.39.2
         with:
           sarif_file: cargo-audit.sarif
           category: cargo-audit
@@ -195,7 +213,7 @@ jobs:
           echo "$deny_status" > /tmp/cargo-deny.status
       - name: Upload cargo-deny SARIF
         if: always()
-        uses: github/codeql-action/upload-sarif@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
+        uses: github/codeql-action/upload-sarif@1fc58d04a4d4374f921bdac573c3811c240f9c26 # v4.39.2
         with:
           sarif_file: cargo-deny.sarif
           category: cargo-deny
@@ -209,7 +227,8 @@ jobs:
   aderyn-sarif:
     name: Aderyn Solidity SAST (SARIF)
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # A cold, locked source build replaces the removed upstream binary asset.
+    timeout-minutes: 60
     permissions:
       contents: read
       security-events: write
@@ -231,21 +250,29 @@ jobs:
           echo "d5f23436f443edb85d8e76906d12f0a86ce0490e7663a9e608efeb7a93f149ef  /tmp/solc" | sha256sum -c -
           mkdir -p "$HOME/.svm/0.8.26"
           install -m 0755 /tmp/solc "$HOME/.svm/0.8.26/solc-0.8.26"
-      - name: Install Aderyn v0.6.8 (sha256 pinned)
+      - name: Install Rust for the Aderyn source build
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master 2026-09-12
+        with:
+          # Aderyn uses result_option_map_or_default; match the nightly already
+          # used by this repository's Miri jobs rather than enabling bootstrap.
+          toolchain: nightly-2026-07-19
+      # Upstream no longer publishes the Linux binary archive for this release.
+      # Build the same release from its verified source, retaining its lockfile.
+      - name: Install Aderyn v0.6.8 (sha256-verified source)
         run: |
           set -euo pipefail
-          curl -sSfL --retry 5 --retry-all-errors --retry-delay 3 -o /tmp/aderyn.tar.xz \
-            https://github.com/Cyfrin/aderyn/releases/download/aderyn-v0.6.8/aderyn-x86_64-unknown-linux-gnu.tar.xz
-          echo "ffd6ca658962e211a3ac821c646f69c8e14bf1b1001cbfe091bcd4535a691e46  /tmp/aderyn.tar.xz" | sha256sum -c -
-          mkdir -p /tmp/aderyn-bin
-          tar -xJf /tmp/aderyn.tar.xz -C /tmp/aderyn-bin
-          sudo install -m 0755 "$(find /tmp/aderyn-bin -name aderyn -type f | head -1)" /usr/local/bin/aderyn
+          curl -sSfL --retry 5 --retry-all-errors --retry-delay 3 -o /tmp/aderyn-source.tar.gz \
+            https://github.com/Cyfrin/aderyn/releases/download/aderyn-v0.6.8/source.tar.gz
+          echo "2d4afdb52bae30f8488e5d9470a281d284c0b286455b61b474e6c2e7dafe343a  /tmp/aderyn-source.tar.gz" | sha256sum -c -
+          mkdir -p /tmp/aderyn-source
+          tar -xzf /tmp/aderyn-source.tar.gz -C /tmp/aderyn-source --strip-components=1
+          cargo +nightly-2026-07-19 install --locked --path /tmp/aderyn-source/aderyn
           aderyn --version
       - name: Run Aderyn Solidity analysis (SARIF)
         run: aderyn contracts --output aderyn.sarif
       - name: Upload Aderyn SARIF
         if: always()
-        uses: github/codeql-action/upload-sarif@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
+        uses: github/codeql-action/upload-sarif@1fc58d04a4d4374f921bdac573c3811c240f9c26 # v4.39.2
         with:
           sarif_file: aderyn.sarif
           category: aderyn

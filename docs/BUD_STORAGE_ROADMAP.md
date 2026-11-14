@@ -8,6 +8,13 @@ of delivery dates.
 
 ## What exists today
 
+The node stores content chunks in a bounded `FileContentStore` beside the
+configured chain database (`<db_path>.content`). It rebuilds its CID index on
+startup, writes each chunk through a synced temporary file and rename, and
+checks the content address again on reads. Tests may use the bounded
+`MemoryContentStore`; production startup fails closed if the durable store
+cannot be opened, rather than silently losing chunks on restart.
+
 ```
 ContentId::of(chunk)          SHA-256 + "BDLM_CONTENT_V1" tag, 256 KiB chunks
         ↓

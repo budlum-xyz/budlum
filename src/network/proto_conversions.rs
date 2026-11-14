@@ -54,6 +54,58 @@ impl From<&Transaction> for pb::ProtoTransaction {
         let (tx_type_i32, type_payload) = match &tx.tx_type {
             TransactionType::Transfer => (pb::ProtoTransactionType::Transfer as i32, None),
             TransactionType::Stake => (pb::ProtoTransactionType::Stake as i32, None),
+            TransactionType::Delegate { validator } => (
+                pb::ProtoTransactionType::Delegate as i32,
+                Some(pb::proto_transaction::TypePayload::Delegation(
+                    pb::ProtoDelegation {
+                        validator: validator.as_bytes().to_vec(),
+                    },
+                )),
+            ),
+            TransactionType::Undelegate { validator } => (
+                pb::ProtoTransactionType::Undelegate as i32,
+                Some(pb::proto_transaction::TypePayload::Delegation(
+                    pb::ProtoDelegation {
+                        validator: validator.as_bytes().to_vec(),
+                    },
+                )),
+            ),
+            TransactionType::WithdrawDelegation { validator } => (
+                pb::ProtoTransactionType::WithdrawDelegation as i32,
+                Some(pb::proto_transaction::TypePayload::Delegation(
+                    pb::ProtoDelegation {
+                        validator: validator.as_bytes().to_vec(),
+                    },
+                )),
+            ),
+            TransactionType::Redelegate {
+                from_validator,
+                to_validator,
+            } => (
+                pb::ProtoTransactionType::Redelegate as i32,
+                Some(pb::proto_transaction::TypePayload::Redelegate(
+                    pb::ProtoRedelegate {
+                        from_validator: from_validator.as_bytes().to_vec(),
+                        to_validator: to_validator.as_bytes().to_vec(),
+                    },
+                )),
+            ),
+            TransactionType::ClaimRewards { validator } => (
+                pb::ProtoTransactionType::ClaimRewards as i32,
+                Some(pb::proto_transaction::TypePayload::Delegation(
+                    pb::ProtoDelegation {
+                        validator: validator.as_bytes().to_vec(),
+                    },
+                )),
+            ),
+            TransactionType::SetValidatorCommission { commission_ppm } => (
+                pb::ProtoTransactionType::SetValidatorCommission as i32,
+                Some(pb::proto_transaction::TypePayload::ValidatorCommission(
+                    pb::ProtoValidatorCommission {
+                        commission_ppm: *commission_ppm,
+                    },
+                )),
+            ),
             TransactionType::RegisterConsensusKeys(registration) => (
                 pb::ProtoTransactionType::RegisterConsensusKeys as i32,
                 Some(pb::proto_transaction::TypePayload::RegisterConsensusKeys(
@@ -88,6 +140,8 @@ impl From<&Transaction> for pb::ProtoTransaction {
             TransactionType::BnsSetStorage => {
                 (pb::ProtoTransactionType::BnsSetStorage as i32, None)
             }
+            TransactionType::BnsRenew => (pb::ProtoTransactionType::BnsRenew as i32, None),
+            TransactionType::BnsTransfer => (pb::ProtoTransactionType::BnsTransfer as i32, None),
             TransactionType::NftMint => (pb::ProtoTransactionType::NftMint as i32, None),
             TransactionType::NftTransfer => (pb::ProtoTransactionType::NftTransfer as i32, None),
             TransactionType::NftBurn => (pb::ProtoTransactionType::NftBurn as i32, None),
@@ -227,6 +281,50 @@ impl From<&Transaction> for pb::ProtoTransaction {
                     },
                 )),
             ),
+            TransactionType::RelayCrossDomainMessage(message) => (
+                pb::ProtoTransactionType::RelayCrossDomainMessage as i32,
+                Some(pb::proto_transaction::TypePayload::RelayCrossDomainMessage(
+                    cross_domain_message_to_proto(message),
+                )),
+            ),
+            TransactionType::RoleUnbond { role } => (
+                pb::ProtoTransactionType::RoleUnbond as i32,
+                Some(pb::proto_transaction::TypePayload::RoleUnbond(
+                    pb::ProtoRoleBond { role: *role },
+                )),
+            ),
+            TransactionType::CanaryCommit { commitment } => (
+                pb::ProtoTransactionType::CanaryCommit as i32,
+                Some(pb::proto_transaction::TypePayload::CanaryCommit(
+                    pb::ProtoCanaryCommit {
+                        commitment: commitment.to_vec(),
+                    },
+                )),
+            ),
+            TransactionType::RegisterFiliz { commitment, length } => (
+                pb::ProtoTransactionType::RegisterFiliz as i32,
+                Some(pb::proto_transaction::TypePayload::RegisterFiliz(
+                    pb::ProtoFilizRegistration {
+                        commitment: commitment.to_vec(),
+                        length: *length,
+                    },
+                )),
+            ),
+            TransactionType::CanaryReveal { canary, proof } => (
+                pb::ProtoTransactionType::CanaryReveal as i32,
+                Some(pb::proto_transaction::TypePayload::CanaryReveal(
+                    pb::ProtoCanaryReveal {
+                        canary: u32::from(*canary),
+                        proof: proof.clone(),
+                    },
+                )),
+            ),
+            TransactionType::RoleWithdraw { role } => (
+                pb::ProtoTransactionType::RoleWithdraw as i32,
+                Some(pb::proto_transaction::TypePayload::RoleWithdraw(
+                    pb::ProtoRoleBond { role: *role },
+                )),
+            ),
             TransactionType::Vault(vault_tx) => (
                 pb::ProtoTransactionType::Vault as i32,
                 Some(pb::proto_transaction::TypePayload::Vault(
@@ -240,6 +338,30 @@ impl From<&Transaction> for pb::ProtoTransaction {
                 Some(pb::proto_transaction::TypePayload::Storage(
                     pb::ProtoStorageTx {
                         data: bincode_payload_or_log("StorageTx", storage_tx),
+                    },
+                )),
+            ),
+            TransactionType::ExternalDomain(external_tx) => (
+                pb::ProtoTransactionType::ExternalDomain as i32,
+                Some(pb::proto_transaction::TypePayload::ExternalDomain(
+                    pb::ProtoExternalDomainTx {
+                        data: bincode_payload_or_log("ExternalDomainTx", external_tx),
+                    },
+                )),
+            ),
+            TransactionType::Settlement(settlement_tx) => (
+                pb::ProtoTransactionType::Settlement as i32,
+                Some(pb::proto_transaction::TypePayload::Settlement(
+                    pb::ProtoSettlementTx {
+                        data: bincode_payload_or_log("SettlementTx", settlement_tx),
+                    },
+                )),
+            ),
+            TransactionType::Bridge(bridge_tx) => (
+                pb::ProtoTransactionType::Bridge as i32,
+                Some(pb::proto_transaction::TypePayload::Bridge(
+                    pb::ProtoBridgeTx {
+                        data: bincode_payload_or_log("BridgeTx", bridge_tx),
                     },
                 )),
             ),
@@ -673,6 +795,54 @@ fn convert_proto_to_app_category(
     }
 }
 
+/// A cross-domain message on the wire. The sender envelope is not carried:
+/// the only transaction that carries a message on its own
+/// (`RelayCrossDomainMessage`) refuses a non-empty envelope, and the relayer
+/// result never read it.
+fn cross_domain_message_to_proto(
+    msg: &crate::cross_domain::message::CrossDomainMessage,
+) -> pb::ProtoCrossDomainMessagePayload {
+    let kind = match &msg.kind {
+        crate::cross_domain::message::MessageKind::BridgeLock => pb::ProtoMessageKind {
+            kind_type: pb::proto_message_kind::KindType::BridgeLock as i32,
+            custom_bytes: Vec::new(),
+        },
+        crate::cross_domain::message::MessageKind::BridgeMint => pb::ProtoMessageKind {
+            kind_type: pb::proto_message_kind::KindType::BridgeMint as i32,
+            custom_bytes: Vec::new(),
+        },
+        crate::cross_domain::message::MessageKind::BridgeBurn => pb::ProtoMessageKind {
+            kind_type: pb::proto_message_kind::KindType::BridgeBurn as i32,
+            custom_bytes: Vec::new(),
+        },
+        crate::cross_domain::message::MessageKind::BridgeUnlock => pb::ProtoMessageKind {
+            kind_type: pb::proto_message_kind::KindType::BridgeUnlock as i32,
+            custom_bytes: Vec::new(),
+        },
+        crate::cross_domain::message::MessageKind::Custom(b) => pb::ProtoMessageKind {
+            kind_type: pb::proto_message_kind::KindType::Custom as i32,
+            custom_bytes: b.clone(),
+        },
+    };
+    pb::ProtoCrossDomainMessagePayload {
+        message_id: hex::encode(msg.message_id),
+        correlation_id: msg.correlation_id.map(hex::encode).unwrap_or_default(),
+        source_domain: format!("{}", msg.source_domain),
+        target_domain: format!("{}", msg.target_domain),
+        source_height: msg.source_height,
+        event_index: msg.event_index,
+        nonce: msg.nonce,
+        sender: msg.sender.to_string(),
+        recipient: msg.recipient.to_string(),
+        payload_hash: hex::encode(msg.payload_hash),
+        kind: Some(kind),
+        expiry_height: msg.expiry_height,
+        source_quantum_class: u32::from(crate::cross_domain::message::quantum_class_code(
+            msg.source_quantum_class,
+        )),
+    }
+}
+
 fn convert_relayer_result_to_proto(
     res: &crate::core::transaction::RelayerExternalResult,
 ) -> pb::ProtoRelayerResult {
@@ -706,44 +876,7 @@ fn convert_relayer_result_to_proto(
         chain_type,
         custom_id,
     };
-    let proto_msg = res.message.as_ref().map(|msg| {
-        let kind = match &msg.kind {
-            crate::cross_domain::message::MessageKind::BridgeLock => pb::ProtoMessageKind {
-                kind_type: pb::proto_message_kind::KindType::BridgeLock as i32,
-                custom_bytes: Vec::new(),
-            },
-            crate::cross_domain::message::MessageKind::BridgeMint => pb::ProtoMessageKind {
-                kind_type: pb::proto_message_kind::KindType::BridgeMint as i32,
-                custom_bytes: Vec::new(),
-            },
-            crate::cross_domain::message::MessageKind::BridgeBurn => pb::ProtoMessageKind {
-                kind_type: pb::proto_message_kind::KindType::BridgeBurn as i32,
-                custom_bytes: Vec::new(),
-            },
-            crate::cross_domain::message::MessageKind::BridgeUnlock => pb::ProtoMessageKind {
-                kind_type: pb::proto_message_kind::KindType::BridgeUnlock as i32,
-                custom_bytes: Vec::new(),
-            },
-            crate::cross_domain::message::MessageKind::Custom(b) => pb::ProtoMessageKind {
-                kind_type: pb::proto_message_kind::KindType::Custom as i32,
-                custom_bytes: b.clone(),
-            },
-        };
-        pb::ProtoCrossDomainMessagePayload {
-            message_id: hex::encode(msg.message_id),
-            correlation_id: msg.correlation_id.map(hex::encode).unwrap_or_default(),
-            source_domain: format!("{}", msg.source_domain),
-            target_domain: format!("{}", msg.target_domain),
-            source_height: msg.source_height,
-            event_index: msg.event_index,
-            nonce: msg.nonce,
-            sender: msg.sender.to_string(),
-            recipient: msg.recipient.to_string(),
-            payload_hash: hex::encode(msg.payload_hash),
-            kind: Some(kind),
-            expiry_height: msg.expiry_height,
-        }
-    });
+    let proto_msg = res.message.as_ref().map(cross_domain_message_to_proto);
 
     pb::ProtoRelayerResult {
         chain: Some(proto_chain),
@@ -753,6 +886,93 @@ fn convert_relayer_result_to_proto(
         receipt_proof: res.receipt_proof.clone(),
         external_state_root: res.external_state_root.to_vec(),
     }
+}
+
+/// The inverse of [`cross_domain_message_to_proto`]. The envelope arrives
+/// empty because the wire does not carry it.
+fn proto_to_cross_domain_message(
+    p_msg: &pb::ProtoCrossDomainMessagePayload,
+) -> Result<crate::cross_domain::message::CrossDomainMessage, String> {
+    let msg_id_bytes =
+        hex::decode(&p_msg.message_id).map_err(|e| format!("Invalid message_id hex: {e}"))?;
+    let mut message_id = [0u8; 32];
+    if msg_id_bytes.len() != 32 {
+        return Err("message_id must be 32 bytes".into());
+    }
+    message_id.copy_from_slice(&msg_id_bytes);
+
+    let correlation_id = if p_msg.correlation_id.is_empty() {
+        None
+    } else {
+        let corr_bytes = hex::decode(&p_msg.correlation_id)
+            .map_err(|e| format!("Invalid correlation_id hex: {e}"))?;
+        if corr_bytes.len() != 32 {
+            return Err("correlation_id must be 32 bytes".into());
+        }
+        let mut arr = [0u8; 32];
+        arr.copy_from_slice(&corr_bytes);
+        Some(arr)
+    };
+
+    let src_dom = p_msg
+        .source_domain
+        .parse::<u32>()
+        .map_err(|e| format!("Invalid source_domain: {e}"))?;
+    let tgt_dom = p_msg
+        .target_domain
+        .parse::<u32>()
+        .map_err(|e| format!("Invalid target_domain: {e}"))?;
+
+    let payload_hash_bytes =
+        hex::decode(&p_msg.payload_hash).map_err(|e| format!("Invalid payload_hash hex: {e}"))?;
+    let mut payload_hash = [0u8; 32];
+    if payload_hash_bytes.len() != 32 {
+        return Err("payload_hash must be 32 bytes".into());
+    }
+    payload_hash.copy_from_slice(&payload_hash_bytes);
+
+    let p_kind = p_msg.kind.as_ref().ok_or("Missing message kind")?;
+    let kind = match pb::proto_message_kind::KindType::try_from(p_kind.kind_type) {
+        Ok(pb::proto_message_kind::KindType::BridgeLock) => {
+            crate::cross_domain::message::MessageKind::BridgeLock
+        }
+        Ok(pb::proto_message_kind::KindType::BridgeMint) => {
+            crate::cross_domain::message::MessageKind::BridgeMint
+        }
+        Ok(pb::proto_message_kind::KindType::BridgeBurn) => {
+            crate::cross_domain::message::MessageKind::BridgeBurn
+        }
+        Ok(pb::proto_message_kind::KindType::BridgeUnlock) => {
+            crate::cross_domain::message::MessageKind::BridgeUnlock
+        }
+        Ok(pb::proto_message_kind::KindType::Custom) => {
+            crate::cross_domain::message::MessageKind::Custom(p_kind.custom_bytes.clone())
+        }
+        Err(_) => return Err("Invalid cross domain message kind".into()),
+    };
+
+    Ok(crate::cross_domain::message::CrossDomainMessage {
+        message_id,
+        correlation_id,
+        source_domain: src_dom,
+        target_domain: tgt_dom,
+        source_height: p_msg.source_height,
+        event_index: p_msg.event_index,
+        nonce: p_msg.nonce,
+        sender: Address::from_hex(&p_msg.sender)
+            .map_err(|e| format!("Invalid message sender: {e}"))?,
+        recipient: Address::from_hex(&p_msg.recipient)
+            .map_err(|e| format!("Invalid message recipient: {e}"))?,
+        payload_hash,
+        kind,
+        sender_public_key: Vec::new(),
+        sender_signature: Vec::new(),
+        expiry_height: p_msg.expiry_height,
+        source_quantum_class: u8::try_from(p_msg.source_quantum_class)
+            .ok()
+            .and_then(crate::cross_domain::message::quantum_class_from_code)
+            .ok_or("Invalid cross domain message source quantum class")?,
+    })
 }
 
 fn convert_proto_to_relayer_result(
@@ -790,86 +1010,11 @@ fn convert_proto_to_relayer_result(
         Err(_) => return Err("Invalid external chain type".into()),
     };
 
-    let message = if let Some(ref p_msg) = proto.message {
-        let msg_id_bytes =
-            hex::decode(&p_msg.message_id).map_err(|e| format!("Invalid message_id hex: {e}"))?;
-        let mut message_id = [0u8; 32];
-        if msg_id_bytes.len() != 32 {
-            return Err("message_id must be 32 bytes".into());
-        }
-        message_id.copy_from_slice(&msg_id_bytes);
-
-        let correlation_id = if p_msg.correlation_id.is_empty() {
-            None
-        } else {
-            let corr_bytes = hex::decode(&p_msg.correlation_id)
-                .map_err(|e| format!("Invalid correlation_id hex: {e}"))?;
-            if corr_bytes.len() != 32 {
-                return Err("correlation_id must be 32 bytes".into());
-            }
-            let mut arr = [0u8; 32];
-            arr.copy_from_slice(&corr_bytes);
-            Some(arr)
-        };
-
-        let src_dom = p_msg
-            .source_domain
-            .parse::<u32>()
-            .map_err(|e| format!("Invalid source_domain: {e}"))?;
-        let tgt_dom = p_msg
-            .target_domain
-            .parse::<u32>()
-            .map_err(|e| format!("Invalid target_domain: {e}"))?;
-
-        let payload_hash_bytes = hex::decode(&p_msg.payload_hash)
-            .map_err(|e| format!("Invalid payload_hash hex: {e}"))?;
-        let mut payload_hash = [0u8; 32];
-        if payload_hash_bytes.len() != 32 {
-            return Err("payload_hash must be 32 bytes".into());
-        }
-        payload_hash.copy_from_slice(&payload_hash_bytes);
-
-        let p_kind = p_msg.kind.as_ref().ok_or("Missing message kind")?;
-        let kind = match pb::proto_message_kind::KindType::try_from(p_kind.kind_type) {
-            Ok(pb::proto_message_kind::KindType::BridgeLock) => {
-                crate::cross_domain::message::MessageKind::BridgeLock
-            }
-            Ok(pb::proto_message_kind::KindType::BridgeMint) => {
-                crate::cross_domain::message::MessageKind::BridgeMint
-            }
-            Ok(pb::proto_message_kind::KindType::BridgeBurn) => {
-                crate::cross_domain::message::MessageKind::BridgeBurn
-            }
-            Ok(pb::proto_message_kind::KindType::BridgeUnlock) => {
-                crate::cross_domain::message::MessageKind::BridgeUnlock
-            }
-            Ok(pb::proto_message_kind::KindType::Custom) => {
-                crate::cross_domain::message::MessageKind::Custom(p_kind.custom_bytes.clone())
-            }
-            Err(_) => return Err("Invalid cross domain message kind".into()),
-        };
-
-        Some(crate::cross_domain::message::CrossDomainMessage {
-            message_id,
-            correlation_id,
-            source_domain: src_dom,
-            target_domain: tgt_dom,
-            source_height: p_msg.source_height,
-            event_index: p_msg.event_index,
-            nonce: p_msg.nonce,
-            sender: Address::from_hex(&p_msg.sender)
-                .map_err(|e| format!("Invalid message sender: {e}"))?,
-            recipient: Address::from_hex(&p_msg.recipient)
-                .map_err(|e| format!("Invalid message recipient: {e}"))?,
-            payload_hash,
-            kind,
-            sender_public_key: Vec::new(),
-            sender_signature: Vec::new(),
-            expiry_height: p_msg.expiry_height,
-        })
-    } else {
-        None
-    };
+    let message = proto
+        .message
+        .as_ref()
+        .map(proto_to_cross_domain_message)
+        .transpose()?;
 
     let mut external_state_root = [0u8; 32];
     if proto.external_state_root.len() != 32 {
@@ -911,6 +1056,69 @@ impl TryFrom<pb::ProtoTransaction> for Transaction {
         let tx_type = match tx_type_proto {
             pb::ProtoTransactionType::Transfer => TransactionType::Transfer,
             pb::ProtoTransactionType::Stake => TransactionType::Stake,
+            pb::ProtoTransactionType::Delegate
+            | pb::ProtoTransactionType::Undelegate
+            | pb::ProtoTransactionType::WithdrawDelegation => {
+                let payload = match proto.type_payload {
+                    Some(pb::proto_transaction::TypePayload::Delegation(payload)) => payload,
+                    _ => return Err("Missing delegation payload".into()),
+                };
+                if payload.validator.len() != 32 {
+                    return Err("delegation validator must be 32 bytes".into());
+                }
+                let mut bytes = [0u8; 32];
+                bytes.copy_from_slice(&payload.validator);
+                let validator = Address::from(bytes);
+                match tx_type_proto {
+                    pb::ProtoTransactionType::Delegate => TransactionType::Delegate { validator },
+                    pb::ProtoTransactionType::Undelegate => {
+                        TransactionType::Undelegate { validator }
+                    }
+                    _ => TransactionType::WithdrawDelegation { validator },
+                }
+            }
+            pb::ProtoTransactionType::Redelegate => {
+                let payload = match proto.type_payload {
+                    Some(pb::proto_transaction::TypePayload::Redelegate(payload)) => payload,
+                    _ => return Err("Missing redelegation payload".into()),
+                };
+                if payload.from_validator.len() != 32 || payload.to_validator.len() != 32 {
+                    return Err("redelegation validators must be 32 bytes".into());
+                }
+                let mut from = [0u8; 32];
+                from.copy_from_slice(&payload.from_validator);
+                let mut to = [0u8; 32];
+                to.copy_from_slice(&payload.to_validator);
+                TransactionType::Redelegate {
+                    from_validator: Address::from(from),
+                    to_validator: Address::from(to),
+                }
+            }
+            pb::ProtoTransactionType::ClaimRewards => {
+                let payload = match proto.type_payload {
+                    Some(pb::proto_transaction::TypePayload::Delegation(payload)) => payload,
+                    _ => return Err("Missing reward claim payload".into()),
+                };
+                if payload.validator.len() != 32 {
+                    return Err("reward claim validator must be 32 bytes".into());
+                }
+                let mut bytes = [0u8; 32];
+                bytes.copy_from_slice(&payload.validator);
+                TransactionType::ClaimRewards {
+                    validator: Address::from(bytes),
+                }
+            }
+            pb::ProtoTransactionType::SetValidatorCommission => {
+                let payload = match proto.type_payload {
+                    Some(pb::proto_transaction::TypePayload::ValidatorCommission(payload)) => {
+                        payload
+                    }
+                    _ => return Err("Missing validator commission payload".into()),
+                };
+                TransactionType::SetValidatorCommission {
+                    commission_ppm: payload.commission_ppm,
+                }
+            }
             pb::ProtoTransactionType::RegisterConsensusKeys => {
                 let payload = match proto.type_payload {
                     Some(pb::proto_transaction::TypePayload::RegisterConsensusKeys(payload)) => {
@@ -938,6 +1146,8 @@ impl TryFrom<pb::ProtoTransaction> for Transaction {
             pb::ProtoTransactionType::BnsSetContent => TransactionType::BnsSetContent,
             pb::ProtoTransactionType::BnsRegisterSubdomain => TransactionType::BnsRegisterSubdomain,
             pb::ProtoTransactionType::BnsSetStorage => TransactionType::BnsSetStorage,
+            pb::ProtoTransactionType::BnsRenew => TransactionType::BnsRenew,
+            pb::ProtoTransactionType::BnsTransfer => TransactionType::BnsTransfer,
             pb::ProtoTransactionType::NftMint => TransactionType::NftMint,
             pb::ProtoTransactionType::NftTransfer => TransactionType::NftTransfer,
             pb::ProtoTransactionType::NftBurn => TransactionType::NftBurn,
@@ -1107,6 +1317,60 @@ impl TryFrom<pb::ProtoTransaction> for Transaction {
                         .map_err(|e| format!("Invalid cross-domain message payload: {e}"))?,
                 )
             }
+            pb::ProtoTransactionType::RelayCrossDomainMessage => {
+                let payload = match proto.type_payload {
+                    Some(pb::proto_transaction::TypePayload::RelayCrossDomainMessage(p)) => p,
+                    _ => return Err("Missing or mismatched RelayCrossDomainMessage payload".into()),
+                };
+                TransactionType::RelayCrossDomainMessage(proto_to_cross_domain_message(&payload)?)
+            }
+            pb::ProtoTransactionType::RoleUnbond => {
+                let payload = match proto.type_payload {
+                    Some(pb::proto_transaction::TypePayload::RoleUnbond(p)) => p,
+                    _ => return Err("Missing or mismatched RoleUnbond payload".into()),
+                };
+                TransactionType::RoleUnbond { role: payload.role }
+            }
+            pb::ProtoTransactionType::CanaryCommit => {
+                let payload = match proto.type_payload {
+                    Some(pb::proto_transaction::TypePayload::CanaryCommit(p)) => p,
+                    _ => return Err("Missing or mismatched CanaryCommit payload".into()),
+                };
+                let commitment = <[u8; 32]>::try_from(payload.commitment.as_slice())
+                    .map_err(|_| "CanaryCommit commitment is not 32 bytes".to_string())?;
+                TransactionType::CanaryCommit { commitment }
+            }
+            pb::ProtoTransactionType::RegisterFiliz => {
+                let payload = match proto.type_payload {
+                    Some(pb::proto_transaction::TypePayload::RegisterFiliz(p)) => p,
+                    _ => return Err("Missing or mismatched RegisterFiliz payload".into()),
+                };
+                let commitment = <[u8; 32]>::try_from(payload.commitment.as_slice())
+                    .map_err(|_| "RegisterFiliz commitment is not 32 bytes".to_string())?;
+                TransactionType::RegisterFiliz {
+                    commitment,
+                    length: payload.length,
+                }
+            }
+            pb::ProtoTransactionType::CanaryReveal => {
+                let payload = match proto.type_payload {
+                    Some(pb::proto_transaction::TypePayload::CanaryReveal(p)) => p,
+                    _ => return Err("Missing or mismatched CanaryReveal payload".into()),
+                };
+                let canary = u8::try_from(payload.canary)
+                    .map_err(|_| "CanaryReveal puzzle code is not a byte".to_string())?;
+                TransactionType::CanaryReveal {
+                    canary,
+                    proof: payload.proof,
+                }
+            }
+            pb::ProtoTransactionType::RoleWithdraw => {
+                let payload = match proto.type_payload {
+                    Some(pb::proto_transaction::TypePayload::RoleWithdraw(p)) => p,
+                    _ => return Err("Missing or mismatched RoleWithdraw payload".into()),
+                };
+                TransactionType::RoleWithdraw { role: payload.role }
+            }
             pb::ProtoTransactionType::Vault => {
                 let payload = match proto.type_payload {
                     Some(pb::proto_transaction::TypePayload::Vault(p)) => p,
@@ -1125,6 +1389,36 @@ impl TryFrom<pb::ProtoTransaction> for Transaction {
                 TransactionType::Storage(
                     bincode::deserialize(&payload.data)
                         .map_err(|e| format!("Invalid StorageTx payload: {e}"))?,
+                )
+            }
+            pb::ProtoTransactionType::ExternalDomain => {
+                let payload = match proto.type_payload {
+                    Some(pb::proto_transaction::TypePayload::ExternalDomain(p)) => p,
+                    _ => return Err("Missing or mismatched ExternalDomain payload".into()),
+                };
+                TransactionType::ExternalDomain(
+                    bincode::deserialize(&payload.data)
+                        .map_err(|e| format!("Invalid ExternalDomainTx payload: {e}"))?,
+                )
+            }
+            pb::ProtoTransactionType::Settlement => {
+                let payload = match proto.type_payload {
+                    Some(pb::proto_transaction::TypePayload::Settlement(p)) => p,
+                    _ => return Err("Missing or mismatched Settlement payload".into()),
+                };
+                TransactionType::Settlement(
+                    bincode::deserialize(&payload.data)
+                        .map_err(|e| format!("Invalid SettlementTx payload: {e}"))?,
+                )
+            }
+            pb::ProtoTransactionType::Bridge => {
+                let payload = match proto.type_payload {
+                    Some(pb::proto_transaction::TypePayload::Bridge(p)) => p,
+                    _ => return Err("Missing or mismatched Bridge payload".into()),
+                };
+                TransactionType::Bridge(
+                    bincode::deserialize(&payload.data)
+                        .map_err(|e| format!("Invalid BridgeTx payload: {e}"))?,
                 )
             }
             pb::ProtoTransactionType::AiModelRegister => {
@@ -1615,63 +1909,40 @@ impl TryFrom<pb::ProtoTransaction> for Transaction {
             signer_public_key: proto.signer_public_key,
             authorization: match proto.authorization {
                 Some(auth) => {
-                    use crate::core::transaction::{
-                        MAX_V6_AUTHORIZATION_OWNERS, MAX_V6_AUTHORIZATION_SIGNATURES,
-                        MAX_V6_OWNER_KEY_BYTES, MAX_V6_SCHEME_ID_BYTES, MAX_V6_SIGNATURE_BYTES,
+                    let (max_owners, max_sigs) = if proto.signature_version
+                        == crate::core::transaction::SIGNATURE_VERSION_V8
+                    {
+                        (
+                            crate::crypto::address_v3::MAX_MULTISIG_OWNERS,
+                            crate::core::transaction::MAX_V8_SIGNERS,
+                        )
+                    } else {
+                        (
+                            crate::core::transaction::MAX_V6_THRESHOLD_OWNERS,
+                            crate::core::transaction::MAX_V6_THRESHOLD_OWNERS,
+                        )
                     };
-                    if auth.scheme_id.len() > MAX_V6_SCHEME_ID_BYTES {
+                    if auth.owners.len() > max_owners {
                         return Err(format!(
-                            "authorization scheme_id length {} exceeds max {}",
-                            auth.scheme_id.len(),
-                            MAX_V6_SCHEME_ID_BYTES
+                            "authorization carries {} owners; maximum is {max_owners}",
+                            auth.owners.len()
                         ));
                     }
-                    if auth.owners.len() > MAX_V6_AUTHORIZATION_OWNERS {
+                    if auth.signatures.len() > max_sigs {
                         return Err(format!(
-                            "authorization owners count {} exceeds max {}",
-                            auth.owners.len(),
-                            MAX_V6_AUTHORIZATION_OWNERS
+                            "authorization carries {} signatures; maximum is {max_sigs}",
+                            auth.signatures.len()
                         ));
-                    }
-                    for owner in &auth.owners {
-                        if owner.len() > MAX_V6_OWNER_KEY_BYTES {
-                            return Err(format!(
-                                "authorization owner key length {} exceeds max {}",
-                                owner.len(),
-                                MAX_V6_OWNER_KEY_BYTES
-                            ));
-                        }
-                    }
-                    if auth.signatures.len() > MAX_V6_AUTHORIZATION_SIGNATURES {
-                        return Err(format!(
-                            "authorization signatures count {} exceeds max {}",
-                            auth.signatures.len(),
-                            MAX_V6_AUTHORIZATION_SIGNATURES
-                        ));
-                    }
-                    let mut signatures = Vec::with_capacity(auth.signatures.len());
-                    for s in auth.signatures {
-                        if s.public_key.len() > MAX_V6_OWNER_KEY_BYTES {
-                            return Err(format!(
-                                "authorization signer key length {} exceeds max {}",
-                                s.public_key.len(),
-                                MAX_V6_OWNER_KEY_BYTES
-                            ));
-                        }
-                        if s.signature.len() > MAX_V6_SIGNATURE_BYTES {
-                            return Err(format!(
-                                "authorization signature length {} exceeds max {}",
-                                s.signature.len(),
-                                MAX_V6_SIGNATURE_BYTES
-                            ));
-                        }
-                        signatures.push((s.public_key, s.signature));
                     }
                     Some(crate::core::transaction::MultisigAuthorizationV6 {
                         scheme_id: auth.scheme_id,
                         owners: auth.owners,
                         threshold: auth.threshold,
-                        signatures,
+                        signatures: auth
+                            .signatures
+                            .into_iter()
+                            .map(|s| (s.public_key, s.signature))
+                            .collect(),
                     })
                 }
                 None => None,
@@ -1734,6 +2005,8 @@ impl From<&BlockHeader> for pb::ProtoBlockHeader {
             validator_set_hash: header.validator_set_hash.clone(),
             storage_root: header.storage_root.map(Vec::from).unwrap_or_default(),
             shards_root: header.shards_root.map(Vec::from).unwrap_or_default(),
+            witness_root: header.witness_root.map(Vec::from).unwrap_or_default(),
+            producer_public_key: header.producer_public_key.clone(),
             slashing_reports: header
                 .slashing_reports
                 .as_ref()
@@ -1762,6 +2035,9 @@ impl TryFrom<pb::ProtoBlockHeader> for BlockHeader {
                     .map_err(|e| format!("Invalid producer address: {e}"))?,
             )
         };
+        if proto.slashing_evidence.len() > 64 {
+            return Err("Too many slashing evidence entries in block header".into());
+        }
         let mut evidence = Vec::new();
         for ev in proto.slashing_evidence {
             evidence.push(SlashingEvidence::try_from(ev)?);
@@ -1794,6 +2070,7 @@ impl TryFrom<pb::ProtoBlockHeader> for BlockHeader {
             previous_hash: proto.previous_hash,
             hash: proto.hash,
             producer,
+            producer_public_key: proto.producer_public_key,
             chain_id: proto.chain_id,
             state_root: proto.state_root,
             tx_root: proto.tx_root,
@@ -1807,6 +2084,7 @@ impl TryFrom<pb::ProtoBlockHeader> for BlockHeader {
             validator_set_hash: proto.validator_set_hash,
             storage_root: decode_optional_hash32(proto.storage_root, "block header storage_root")?,
             shards_root: decode_optional_hash32(proto.shards_root, "block header shards_root")?,
+            witness_root: decode_optional_hash32(proto.witness_root, "block header witness_root")?,
         })
     }
 }
@@ -1843,6 +2121,7 @@ impl From<&Block> for pb::ProtoBlock {
             validator_set_hash: block.validator_set_hash.clone(),
             storage_root: block.storage_root.map(Vec::from).unwrap_or_default(),
             shards_root: block.shards_root.map(Vec::from).unwrap_or_default(),
+            witness_root: block.witness_root.map(Vec::from).unwrap_or_default(),
             producer_public_key: block.producer_public_key.clone(),
             slashing_reports: block
                 .slashing_reports
@@ -1878,6 +2157,9 @@ impl TryFrom<pb::ProtoBlock> for Block {
             Some(proto.signature)
         };
 
+        if proto.slashing_evidence.len() > 64 {
+            return Err("Too many slashing evidence entries in block".into());
+        }
         let mut evidence = Vec::new();
         for ev in proto.slashing_evidence {
             evidence.push(SlashingEvidence::try_from(ev)?);
@@ -1905,7 +2187,10 @@ impl TryFrom<pb::ProtoBlock> for Block {
             Some(reports)
         };
 
-        let mut transactions = Vec::new();
+        if proto.transactions.len() > crate::consensus::MAX_TRANSACTIONS_PER_BLOCK {
+            return Err("Too many transactions in block".into());
+        }
+        let mut transactions = Vec::with_capacity(proto.transactions.len());
         for t in proto.transactions {
             transactions.push(Transaction::try_from(t)?);
         }
@@ -1932,6 +2217,7 @@ impl TryFrom<pb::ProtoBlock> for Block {
             validator_set_hash: proto.validator_set_hash,
             storage_root: decode_optional_hash32(proto.storage_root, "block storage_root")?,
             shards_root: decode_optional_hash32(proto.shards_root, "block shards_root")?,
+            witness_root: decode_optional_hash32(proto.witness_root, "block witness_root")?,
         })
     }
 }
@@ -2068,6 +2354,7 @@ impl From<&NetworkMessage> for pb::ProtoNetworkMessage {
                 voter_id,
                 sig_bls,
                 auth_sig,
+                pq_sig,
             } => pb::proto_network_message::Payload::Precommit(pb::ProtoPrecommit {
                 epoch: *epoch,
                 checkpoint_height: *checkpoint_height,
@@ -2075,6 +2362,7 @@ impl From<&NetworkMessage> for pb::ProtoNetworkMessage {
                 voter_id: voter_id.clone(),
                 sig_bls: sig_bls.clone(),
                 auth_sig: auth_sig.clone(),
+                pq_sig: pq_sig.clone(),
             }),
             NetworkMessage::FinalityCert {
                 epoch,
@@ -2093,12 +2381,46 @@ impl From<&NetworkMessage> for pb::ProtoNetworkMessage {
                 set_hash: set_hash.clone(),
                 scheme_id: scheme_id.clone(),
             }),
+            NetworkMessage::GetFinalityCert { checkpoint_height } => {
+                pb::proto_network_message::Payload::GetFinalityCert(pb::ProtoGetFinalityCert {
+                    checkpoint_height: *checkpoint_height,
+                })
+            }
+            NetworkMessage::FinalityCertResponse {
+                found,
+                epoch,
+                checkpoint_height,
+                checkpoint_hash,
+                agg_sig_bls,
+                bitmap,
+                set_hash,
+                scheme_id,
+            } => pb::proto_network_message::Payload::FinalityCertResponse(
+                pb::ProtoFinalityCertResponse {
+                    found: *found,
+                    cert: if *found {
+                        Some(pb::ProtoFinalityCert {
+                            epoch: *epoch,
+                            checkpoint_height: *checkpoint_height,
+                            checkpoint_hash: checkpoint_hash.clone(),
+                            agg_sig_bls: agg_sig_bls.clone(),
+                            bitmap: bitmap.clone(),
+                            set_hash: set_hash.clone(),
+                            scheme_id: scheme_id.clone(),
+                        })
+                    } else {
+                        None
+                    },
+                },
+            ),
             NetworkMessage::GetQcBlob {
                 epoch,
                 checkpoint_height,
+                chunk_index,
             } => pb::proto_network_message::Payload::GetQcBlob(pb::ProtoGetQcBlob {
                 epoch: *epoch,
                 checkpoint_height: *checkpoint_height,
+                chunk_index: *chunk_index,
             }),
             NetworkMessage::QcBlobResponse {
                 epoch,
@@ -2106,12 +2428,16 @@ impl From<&NetworkMessage> for pb::ProtoNetworkMessage {
                 checkpoint_hash,
                 blob_data,
                 found,
+                chunk_index,
+                chunk_count,
             } => pb::proto_network_message::Payload::QcBlobResponse(pb::ProtoQcBlobResponse {
                 epoch: *epoch,
                 checkpoint_height: *checkpoint_height,
                 checkpoint_hash: checkpoint_hash.clone(),
                 blob_data: blob_data.clone(),
                 found: *found,
+                chunk_index: *chunk_index,
+                chunk_count: *chunk_count,
             }),
             NetworkMessage::QcFaultProof { proof_data } => {
                 pb::proto_network_message::Payload::QcFaultProof(pb::ProtoQcFaultProof {
@@ -2162,15 +2488,23 @@ impl TryFrom<pb::ProtoNetworkMessage> for NetworkMessage {
             .payload
             .ok_or("Empty payload in ProtoNetworkMessage")?;
         match payload {
-            pb::proto_network_message::Payload::Handshake(h) => Ok(NetworkMessage::Handshake {
-                version_major: h.version_major,
-                version_minor: h.version_minor,
-                chain_id: h.chain_id,
-                best_height: h.best_height,
-                validator_set_hash: h.validator_set_hash,
-                supported_schemes: h.supported_schemes,
-            }),
+            pb::proto_network_message::Payload::Handshake(h) => {
+                if h.supported_schemes.len() > 64 {
+                    return Err("Handshake supported_schemes exceeds limit".into());
+                }
+                Ok(NetworkMessage::Handshake {
+                    version_major: h.version_major,
+                    version_minor: h.version_minor,
+                    chain_id: h.chain_id,
+                    best_height: h.best_height,
+                    validator_set_hash: h.validator_set_hash,
+                    supported_schemes: h.supported_schemes,
+                })
+            }
             pb::proto_network_message::Payload::HandshakeAck(h) => {
+                if h.supported_schemes.len() > 64 {
+                    return Err("HandshakeAck supported_schemes exceeds limit".into());
+                }
                 Ok(NetworkMessage::HandshakeAck {
                     version_major: h.version_major,
                     version_minor: h.version_minor,
@@ -2277,6 +2611,7 @@ impl TryFrom<pb::ProtoNetworkMessage> for NetworkMessage {
                 voter_id: v.voter_id,
                 sig_bls: v.sig_bls,
                 auth_sig: v.auth_sig,
+                pq_sig: v.pq_sig,
             }),
             pb::proto_network_message::Payload::FinalityCert(f) => {
                 Ok(NetworkMessage::FinalityCert {
@@ -2289,9 +2624,47 @@ impl TryFrom<pb::ProtoNetworkMessage> for NetworkMessage {
                     scheme_id: f.scheme_id,
                 })
             }
+            pb::proto_network_message::Payload::GetFinalityCert(q) => {
+                Ok(NetworkMessage::GetFinalityCert {
+                    checkpoint_height: q.checkpoint_height,
+                })
+            }
+            pb::proto_network_message::Payload::FinalityCertResponse(r) => {
+                if !r.found {
+                    if r.cert.is_some() {
+                        return Err(
+                            "FinalityCertResponse with found=false must not carry cert".into()
+                        );
+                    }
+                    return Ok(NetworkMessage::FinalityCertResponse {
+                        found: false,
+                        epoch: 0,
+                        checkpoint_height: 0,
+                        checkpoint_hash: String::new(),
+                        agg_sig_bls: Vec::new(),
+                        bitmap: Vec::new(),
+                        set_hash: String::new(),
+                        scheme_id: String::new(),
+                    });
+                }
+                let f = r
+                    .cert
+                    .ok_or("FinalityCertResponse with found=true is missing cert")?;
+                Ok(NetworkMessage::FinalityCertResponse {
+                    found: true,
+                    epoch: f.epoch,
+                    checkpoint_height: f.checkpoint_height,
+                    checkpoint_hash: f.checkpoint_hash,
+                    agg_sig_bls: f.agg_sig_bls,
+                    bitmap: f.bitmap,
+                    set_hash: f.set_hash,
+                    scheme_id: f.scheme_id,
+                })
+            }
             pb::proto_network_message::Payload::GetQcBlob(q) => Ok(NetworkMessage::GetQcBlob {
                 epoch: q.epoch,
                 checkpoint_height: q.checkpoint_height,
+                chunk_index: q.chunk_index,
             }),
             pb::proto_network_message::Payload::QcBlobResponse(q) => {
                 Ok(NetworkMessage::QcBlobResponse {
@@ -2300,6 +2673,8 @@ impl TryFrom<pb::ProtoNetworkMessage> for NetworkMessage {
                     checkpoint_hash: q.checkpoint_hash,
                     blob_data: q.blob_data,
                     found: q.found,
+                    chunk_index: q.chunk_index,
+                    chunk_count: q.chunk_count,
                 })
             }
             pb::proto_network_message::Payload::QcFaultProof(p) => {
@@ -2449,6 +2824,31 @@ mod tests {
             .clear();
         let legacy = Transaction::try_from(legacy_wire).unwrap();
         assert!(!legacy.verify());
+
+        // Wire decode must reject oversized owners and signatures before
+        // allocating a domain transaction.
+        let max_owners = crate::account_abstraction::threshold_mldsa::MAX_THRESHOLD_OWNERS;
+        let mut oversized_sigs = pb::ProtoTransaction::from(&tx);
+        oversized_sigs
+            .authorization
+            .as_mut()
+            .expect("V6 authorization on wire")
+            .signatures = vec![
+            pb::ProtoOwnerSignature {
+                public_key: vec![0u8; 32],
+                signature: vec![0u8; 64],
+            };
+            max_owners + 1
+        ];
+        assert!(Transaction::try_from(oversized_sigs).is_err());
+
+        let mut oversized_owners = pb::ProtoTransaction::from(&tx);
+        oversized_owners
+            .authorization
+            .as_mut()
+            .expect("V6 authorization on wire")
+            .owners = vec![vec![0u8; 32]; max_owners + 1];
+        assert!(Transaction::try_from(oversized_owners).is_err());
     }
 
     #[test]
@@ -2481,6 +2881,8 @@ mod tests {
             TransactionType::BnsSetContent,
             TransactionType::BnsRegisterSubdomain,
             TransactionType::BnsSetStorage,
+            TransactionType::BnsRenew,
+            TransactionType::BnsTransfer,
             TransactionType::NftMint,
             TransactionType::NftTransfer,
             TransactionType::NftBurn,
@@ -2633,7 +3035,7 @@ mod tests {
                 audit_id: 11,
                 data_column: vec![1, 2, 3, 4],
                 parity_byte: 5,
-                column_proof: vec![[7u8; 32], [8u8; 32]],
+                column_proof: vec![[6u8; 32], [7u8; 32]],
             }),
             TransactionType::Identity(crate::registry::IdentityTx::Register {
                 record: crate::registry::IdentityRecord::new(
@@ -2646,6 +3048,88 @@ mod tests {
                     0,
                 )
                 .expect("a one-method record with no guardians is well-formed"),
+            }),
+            TransactionType::ExternalDomain(
+                crate::cross_domain::external::ExternalDomainTx::ScheduleFork {
+                    domain: crate::cross_domain::external::DomainKey([8u8; 32]),
+                    old_version: 2,
+                    new_version: 3,
+                    fork_height: 500,
+                    grace_heights: 10,
+                },
+            ),
+            TransactionType::ExternalDomain(
+                crate::cross_domain::external::ExternalDomainTx::SetQuorumPolicy {
+                    domain: crate::cross_domain::external::DomainKey([8u8; 32]),
+                    policy: crate::cross_domain::external::QuorumPolicy::strict(2, 3),
+                },
+            ),
+            TransactionType::ExternalDomain(
+                crate::cross_domain::external::ExternalDomainTx::SubmitEvidence(Box::new(
+                    crate::cross_domain::external::RawConsensusEvidence {
+                        adapter: crate::cross_domain::external::AdapterId::from_name("eth"),
+                        evidence_version: 2,
+                        network: "sepolia".to_string(),
+                        payload: vec![7u8; 64],
+                        declared_height: 64,
+                        declared_root: [9u8; 32],
+                        submitter: from,
+                    },
+                )),
+            ),
+            TransactionType::Settlement(crate::settlement::domains::SettlementTx::SetZkProgram {
+                domain_id: 7,
+                program: [5u8; 32],
+                allow: true,
+            }),
+            TransactionType::Settlement(crate::settlement::domains::SettlementTx::RegisterDomain(
+                Box::new(crate::domain::ConsensusDomain {
+                    id: 9,
+                    kind: crate::domain::ConsensusKind::Bft,
+                    status: crate::domain::DomainStatus::Active,
+                    domain_chain_id: 45_263,
+                    operator: Some(from),
+                    operator_bond: 1_000,
+                    config_hash: [1u8; 32],
+                    validator_set_hash: [2u8; 32],
+                    finality_adapter: "bft-quorum-commit".to_string(),
+                    min_confirmations: 1,
+                    bridge_enabled: false,
+                    block_hash_scheme: crate::domain::RootScheme::Sha3_256,
+                    state_root_scheme: crate::domain::RootScheme::Sha3_256,
+                    tx_root_scheme: crate::domain::RootScheme::Sha3_256,
+                    last_committed_height: 0,
+                    last_committed_hash: [0u8; 32],
+                    pow_parameters: None,
+                    zk_program_allowlist: vec![[3u8; 32]],
+                    plugin_code_hash: None,
+                    genesis_state_root: [0u8; 32],
+                }),
+            )),
+            TransactionType::Bridge(crate::cross_domain::bridge_tx::BridgeTx::RegisterAsset {
+                asset_id: crate::cross_domain::AssetId([4u8; 32]),
+                domain: 3,
+            }),
+            TransactionType::Bridge(crate::cross_domain::bridge_tx::BridgeTx::Lock(
+                crate::cross_domain::bridge_tx::LockRequest {
+                    source_domain: 1,
+                    target_domain: 2,
+                    source_height: 10,
+                    event_index: 0,
+                    asset_id: crate::cross_domain::AssetId([4u8; 32]),
+                    recipient: from,
+                    amount: 500,
+                    expiry_height: 900,
+                },
+            )),
+            TransactionType::Bridge(crate::cross_domain::bridge_tx::BridgeTx::RelayProof {
+                message_id: [6u8; 32],
+                source_domain: 1,
+                proof: crate::cross_domain::MerkleProof {
+                    leaf: [7u8; 32],
+                    index: 1,
+                    siblings: vec![[8u8; 32]],
+                },
             }),
         ];
 
@@ -2705,6 +3189,15 @@ mod tests {
         proto.tx_type = pb::ProtoTransactionType::Storage as i32;
         assert!(Transaction::try_from(proto.clone()).is_err());
 
+        proto.tx_type = pb::ProtoTransactionType::ExternalDomain as i32;
+        assert!(Transaction::try_from(proto.clone()).is_err());
+
+        proto.tx_type = pb::ProtoTransactionType::Settlement as i32;
+        assert!(Transaction::try_from(proto.clone()).is_err());
+
+        proto.tx_type = pb::ProtoTransactionType::Bridge as i32;
+        assert!(Transaction::try_from(proto.clone()).is_err());
+
         proto.tx_type = 999; // Unknown transaction type tag
         assert!(Transaction::try_from(proto).is_err());
     }
@@ -2736,6 +3229,52 @@ mod tests {
             let error = Transaction::try_from(proto.clone()).expect_err("foreign version");
             assert!(error.contains("wire version"));
         }
+    }
+
+    /// A header that carries every optional field survives the wire and still
+    /// hashes to the hash it arrived with.
+    ///
+    /// This is the sync path's load-bearing property: a follower asks for
+    /// headers, and the first thing it does with the answer is
+    /// `validate_header_batch`, which recomputes each hash from the fields on
+    /// the wire. One field dropped by the encoder makes every header invalid,
+    /// the follower rejects the batch, and it re-asks the same peer for the
+    /// same headers forever - which looks like a slow follower, not a broken
+    /// message. The round-trip equality test above covers `Block::new`, whose
+    /// optional fields are all empty, so the encoders for those fields were
+    /// never exercised.
+    #[test]
+    fn a_header_with_every_optional_field_keeps_its_hash_across_the_wire() {
+        let keypair = KeyPair::generate().unwrap();
+        let from = Address::from(keypair.public_key_bytes());
+        let mut block = Block::new(10, "aa".repeat(32), vec![]);
+        block.state_root = "STATE_ROOT".to_string();
+        block.tx_root = "TX_ROOT".to_string();
+        block.storage_root = Some([0x11; 32]);
+        block.shards_root = Some([0x22; 32]);
+        block.witness_root = Some([0x33; 32]);
+        block.vrf_output = vec![0x44; 32];
+        block.vrf_proof = vec![0x55; 96];
+        block.validator_set_hash = "abc123".to_string();
+        block.producer = Some(from);
+        block.producer_public_key = keypair.public_key_bytes().to_vec();
+        block.epoch = 7;
+        block.slot = 21;
+        block.nonce = 4_242;
+        block.hash = block.calculate_hash();
+
+        let header = BlockHeader::from_block(&block);
+        let decoded = BlockHeader::try_from(pb::ProtoBlockHeader::from(&header))
+            .expect("a valid header must decode");
+        assert_eq!(decoded, header, "a field was lost on the wire");
+        assert_eq!(
+            decoded.calculate_hash(),
+            decoded.hash,
+            "the decoded header does not hash to the hash it carries, so \
+             validate_header_batch refuses every batch built from it"
+        );
+        NetworkMessage::validate_header_batch(std::slice::from_ref(&decoded), decoded.chain_id)
+            .expect("the header must pass the batch check a follower runs");
     }
 
     #[test]
@@ -2894,6 +3433,10 @@ mod tests {
             storage_root: None,
             ai_root: None,
             identity_root: None,
+            checkpoint_height: 70,
+            external_intake_root: Some([8u8; 32]),
+            graft_root: Some([9u8; 32]),
+            delegation_root: Some([10u8; 32]),
         };
         let msg = NetworkMessage::GlobalHeader(header.clone());
         let proto_msg = pb::ProtoNetworkMessage::from(&msg);
@@ -2904,6 +3447,38 @@ mod tests {
             NetworkMessage::GlobalHeader(decoded) => assert_eq!(decoded, header),
             _ => panic!("Expected GlobalHeader message"),
         }
+    }
+
+    /// the class survives the wire, and a byte that names no class is
+    /// refused rather than read as "no class".
+    #[test]
+    fn a_cross_domain_message_keeps_its_source_quantum_class_on_the_wire() {
+        use crate::crypto::facts::QuantumClass;
+        let inner = crate::cross_domain::CrossDomainMessage::new(
+            crate::cross_domain::message::CrossDomainMessageParams {
+                source_domain: 1,
+                target_domain: 2,
+                source_height: 10,
+                event_index: 0,
+                nonce: 42,
+                sender: crate::core::address::Address::zero(),
+                recipient: crate::core::address::Address::zero(),
+                payload_hash: [9u8; 32],
+                kind: crate::cross_domain::MessageKind::BridgeLock,
+                expiry_height: 100,
+            },
+        )
+        .with_source_quantum_class(Some(QuantumClass::Classical));
+        let proto = cross_domain_message_to_proto(&inner);
+        assert_eq!(proto.source_quantum_class, 1);
+        let back = proto_to_cross_domain_message(&proto).expect("decodes");
+        assert_eq!(back.source_quantum_class, Some(QuantumClass::Classical));
+        assert_eq!(back.message_id, inner.message_id);
+        assert!(back.verify_id());
+
+        let mut bad = proto;
+        bad.source_quantum_class = 9;
+        assert!(proto_to_cross_domain_message(&bad).is_err());
     }
 
     #[test]
@@ -2931,5 +3506,65 @@ mod tests {
             NetworkMessage::CrossDomainMessage(decoded) => assert_eq!(decoded, msg_inner),
             _ => panic!("Expected CrossDomainMessage"),
         }
+    }
+
+    #[test]
+    fn finality_cert_sync_messages_roundtrip_and_reject_malformed_missing() {
+        let req = NetworkMessage::GetFinalityCert {
+            checkpoint_height: 30,
+        };
+        let req_bytes = req.to_bytes();
+        assert!(matches!(
+            NetworkMessage::from_bytes_validated(&req_bytes),
+            Ok(NetworkMessage::GetFinalityCert {
+                checkpoint_height: 30
+            })
+        ));
+
+        let resp_found = NetworkMessage::FinalityCertResponse {
+            found: true,
+            epoch: 1,
+            checkpoint_height: 50,
+            checkpoint_hash: "aa".repeat(32),
+            agg_sig_bls: vec![1u8; 48],
+            bitmap: vec![0b0111],
+            set_hash: "bb".repeat(32),
+            scheme_id: crate::chain::finality::BLS_SCHEME_RFC9380_V1.to_string(),
+        };
+        let resp_bytes = resp_found.to_bytes();
+        assert!(matches!(
+            NetworkMessage::from_bytes_validated(&resp_bytes),
+            Ok(NetworkMessage::FinalityCertResponse {
+                found: true,
+                epoch: 1,
+                checkpoint_height: 50,
+                ..
+            })
+        ));
+
+        let resp_missing = NetworkMessage::FinalityCertResponse {
+            found: false,
+            epoch: 0,
+            checkpoint_height: 0,
+            checkpoint_hash: String::new(),
+            agg_sig_bls: Vec::new(),
+            bitmap: Vec::new(),
+            set_hash: String::new(),
+            scheme_id: String::new(),
+        };
+        assert!(matches!(
+            NetworkMessage::from_bytes_validated(&resp_missing.to_bytes()),
+            Ok(NetworkMessage::FinalityCertResponse { found: false, .. })
+        ));
+
+        let malformed = pb::ProtoNetworkMessage {
+            payload: Some(pb::proto_network_message::Payload::FinalityCertResponse(
+                pb::ProtoFinalityCertResponse {
+                    found: false,
+                    cert: Some(pb::ProtoFinalityCert::default()),
+                },
+            )),
+        };
+        assert!(NetworkMessage::try_from(malformed).is_err());
     }
 }

@@ -43,7 +43,25 @@ jobs:
         with:
           shared-key: budlum-core
       - name: Install protoc
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
+        run: |
+          set -euo pipefail
+          if ! command -v protoc >/dev/null 2>&1; then
+            case "$(uname -m)" in
+              aarch64|arm64)
+                PROTOC_ZIP=protoc-29.3-linux-aarch_64.zip
+                PROTOC_SHA256=6427349140e01f06e049e707a58709a4f221ae73ab9a0425bc4a00c8d0e1ab32
+                ;;
+              *)
+                PROTOC_ZIP=protoc-29.3-linux-x86_64.zip
+                PROTOC_SHA256=3e866620c5be27664f3d2fa2d656b5f3e09b5152b42f1bedbf427b333e90021a
+                ;;
+            esac
+            curl -sSfL --retry 5 --retry-all-errors --retry-delay 2 -o /tmp/protoc.zip \
+              "https://github.com/protocolbuffers/protobuf/releases/download/v29.3/${PROTOC_ZIP}"
+            echo "${PROTOC_SHA256}  /tmp/protoc.zip" | sha256sum -c -
+            sudo unzip -q -o /tmp/protoc.zip -d /usr/local bin/protoc 'include/*'
+            rm -f /tmp/protoc.zip
+          fi
       - name: Install cargo-udeps (locked; the crates.io version is evidenced in the log)
         run: cargo +nightly install cargo-udeps --locked
       - name: Canary (vacuous-gate protection)
@@ -105,7 +123,25 @@ jobs:
         with:
           shared-key: budlum-core
       - name: Install protoc
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
+        run: |
+          set -euo pipefail
+          if ! command -v protoc >/dev/null 2>&1; then
+            case "$(uname -m)" in
+              aarch64|arm64)
+                PROTOC_ZIP=protoc-29.3-linux-aarch_64.zip
+                PROTOC_SHA256=6427349140e01f06e049e707a58709a4f221ae73ab9a0425bc4a00c8d0e1ab32
+                ;;
+              *)
+                PROTOC_ZIP=protoc-29.3-linux-x86_64.zip
+                PROTOC_SHA256=3e866620c5be27664f3d2fa2d656b5f3e09b5152b42f1bedbf427b333e90021a
+                ;;
+            esac
+            curl -sSfL --retry 5 --retry-all-errors --retry-delay 2 -o /tmp/protoc.zip \
+              "https://github.com/protocolbuffers/protobuf/releases/download/v29.3/${PROTOC_ZIP}"
+            echo "${PROTOC_SHA256}  /tmp/protoc.zip" | sha256sum -c -
+            sudo unzip -q -o /tmp/protoc.zip -d /usr/local bin/protoc 'include/*'
+            rm -f /tmp/protoc.zip
+          fi
       - name: Install cargo-geiger (locked; the crates.io version is evidenced in the log)
         run: cargo install cargo-geiger --locked
       - name: Canary (vacuous-gate protection)
@@ -186,7 +222,7 @@ jobs:
             sarif cargo-geiger /tmp/geiger-all.txt cargo-geiger.sarif
       - name: Upload cargo-geiger SARIF (Security tab)
         if: always()
-        uses: github/codeql-action/upload-sarif@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
+        uses: github/codeql-action/upload-sarif@1fc58d04a4d4374f921bdac573c3811c240f9c26 # v4.39.2
         with:
           sarif_file: cargo-geiger.sarif
           category: cargo-geiger

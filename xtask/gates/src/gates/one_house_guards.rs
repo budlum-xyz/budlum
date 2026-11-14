@@ -58,13 +58,13 @@ const FAMILIES: &[Family] = &[
                 start: "MessageKind::BridgeLock => {",
             },
             Sibling {
-                name: "blockchain-verified-mint",
-                file: "src/chain/blockchain.rs",
-                start: "pub fn mint_bridge_transfer_from_verified_event(",
+                name: "bridge-door-verified-mint",
+                file: "src/cross_domain/bridge_tx.rs",
+                start: "pub fn mint_from_verified_event(",
             },
             Sibling {
-                name: "blockchain-relay-mint",
-                file: "src/chain/blockchain.rs",
+                name: "bridge-door-relay-mint",
+                file: "src/cross_domain/bridge_tx.rs",
                 start: "MessageKind::BridgeLock => {",
             },
         ],
@@ -98,13 +98,13 @@ const FAMILIES: &[Family] = &[
                 start: "MessageKind::BridgeBurn => {",
             },
             Sibling {
-                name: "blockchain-verified-unlock",
-                file: "src/chain/blockchain.rs",
-                start: "pub fn unlock_bridge_transfer_from_verified_event(",
+                name: "bridge-door-verified-unlock",
+                file: "src/cross_domain/bridge_tx.rs",
+                start: "pub fn unlock_from_verified_event(",
             },
             Sibling {
-                name: "blockchain-relay-unlock",
-                file: "src/chain/blockchain.rs",
+                name: "bridge-door-relay-unlock",
+                file: "src/cross_domain/bridge_tx.rs",
                 start: "MessageKind::BridgeBurn => {",
             },
         ],
@@ -359,7 +359,7 @@ pub fn self_test() -> Result<String, String> {
     let tmp = crate::gates::rust_literals::exclusive_scratch_dir("budlum-gates-ohg")?;
     let files = [
         "src/execution/executor.rs",
-        "src/chain/blockchain.rs",
+        "src/cross_domain/bridge_tx.rs",
         "src/consensus/pow.rs",
         "src/consensus/poa.rs",
         "src/consensus/pos.rs",
@@ -379,7 +379,7 @@ pub fn self_test() -> Result<String, String> {
     }
 
     // Break 1: the mint family loses its supply ceiling in one sibling.
-    let rel = "src/chain/blockchain.rs";
+    let rel = "src/cross_domain/bridge_tx.rs";
     let text = std::fs::read_to_string(tmp.join(rel)).map_err(|e| e.to_string())?;
     std::fs::write(
         tmp.join(rel),

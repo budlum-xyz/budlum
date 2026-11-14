@@ -1,9 +1,9 @@
 #![no_main]
 
-//! / §3.4 - reputation/peer-score/ban fuzz.
+//! / - reputation/peer-score/ban fuzz.
 //! Oracle: panic-freedom + score ∈ [MIN_SCORE, MAX_SCORE].
 
-use budlum_core::network::peer_manager::{PeerManager, MAX_SCORE, MIN_SCORE};
+use budlum_core::network::peer_manager::{PeerManager, SubnetKey, MAX_SCORE, MIN_SCORE};
 use libfuzzer_sys::fuzz_target;
 use libp2p::PeerId;
 
@@ -21,7 +21,7 @@ fuzz_target!(|data: &[u8]| {
     let steps = (take(data, &mut i) as usize) % 32;
     for _ in 0..steps {
         let subnet = if take(data, &mut i) & 1 == 1 {
-            Some([take(data, &mut i), take(data, &mut i), take(data, &mut i)])
+            Some(SubnetKey::from([take(data, &mut i), take(data, &mut i), take(data, &mut i)]))
         } else {
             None
         };

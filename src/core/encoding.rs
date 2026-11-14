@@ -158,6 +158,7 @@ mod tests {
             previous_hash: "abc".to_string(),
             hash: "def".to_string(),
             producer: Some(Address::from_hex(&"03".repeat(32)).unwrap()),
+            producer_public_key: Vec::new(),
             chain_id: 45262,
             state_root: "root".to_string(),
             tx_root: "tx_root".to_string(),
@@ -171,6 +172,7 @@ mod tests {
             validator_set_hash: String::new(),
             storage_root: None,
             shards_root: None,
+            witness_root: None,
         };
         let enc = encode_block_header(&header);
         assert!(!enc.is_empty());

@@ -264,7 +264,7 @@ mod tests {
 
     #[test]
     fn fastcdc_roundtrip_lossless() {
-        // K38: split -> join = the original
+        // Split -> join = the original
         let data: Vec<u8> = (0u8..=255).cycle().take(200_000).collect();
         let split = FastCdcSplit::split(&data, FCDC_MIN_CHUNK, FCDC_AVG_CHUNK, FCDC_MAX_CHUNK)
             .expect("split");

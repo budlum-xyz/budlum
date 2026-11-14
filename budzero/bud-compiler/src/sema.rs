@@ -196,7 +196,7 @@ impl SemanticAnalyzer {
         let mut errors = Vec::new();
 
         // 1. Register structs. A name declared twice is an error: the last
-        // definition used to win silently (P35-F22).
+        // definition used to win silently.
         for s in &contract.structs {
             let mut fields = HashMap::new();
             for f in &s.fields {
@@ -353,7 +353,7 @@ impl SemanticAnalyzer {
         );
         self.functions.insert(
             "verify_merkle_proof".to_string(),
-            (vec![Type::U64, Type::U64, Type::U64], Type::U64),
+            (vec![Type::U64], Type::U64),
         );
         self.functions
             .insert("msg::sender".to_string(), (vec![], Type::U64));

@@ -926,17 +926,16 @@ impl Codegen {
                     self.emit(Opcode::Syscall, res, 0, 0, 2);
                     res
                 } else if name == "verify_merkle_proof" {
-                    let r_root = self.generate_expr(&args[0], scope, storage);
-                    let r_leaf = self.generate_expr(&args[1], scope, storage);
-
-                    // The VM's VerifyMerkle opcode takes
-                    // The path *address* as an immediate (`imm`). The path
+                    // The VM's VerifyMerkle opcode takes only the address of the
+                    // path window, as an immediate (`imm`); `rs1` and `rs2` are not
+                    // read.
+                    // The path
                     // Address must therefore be a compile-time constant
                     // That fits in a signed 32-bit offset.
                     // Reject dynamic expressions and out-of-range literals
                     // Explicitly instead of silently truncating a register
                     // Number (the old `r_path as i32` bug).
-                    let path_addr = match &args[2] {
+                    let path_addr = match &args[0] {
                         Expr::Int(v) => *v,
                         _ => {
                             if self.error.is_none() {
@@ -963,7 +962,7 @@ impl Codegen {
                         );
                     }
                     let res = self.alloc_reg();
-                    self.emit(Opcode::VerifyMerkle, res, r_root, r_leaf, path_addr as i32);
+                    self.emit(Opcode::VerifyMerkle, res, 0, 0, path_addr as i32);
                     res
                 } else {
                     let saved_next_reg = self.next_reg;

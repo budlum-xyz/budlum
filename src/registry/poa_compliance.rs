@@ -82,7 +82,7 @@ pub struct ComplianceAuditEvent {
     pub address: Address,
     pub block: u64,
     pub evidence_hash: [u8; 32],
-    /// BLG-0091 (P04-F09): the admin whose authority the caller stood on.
+    /// The admin whose authority the caller stood on.
     /// `#[serde(default)]` keeps old serialized logs readable.
     #[serde(default)]
     pub admin: Address,
@@ -130,6 +130,11 @@ impl PoaComplianceRegistry {
         Self::default()
     }
 
+    #[must_use]
+    pub fn frozen_count(&self) -> usize {
+        self.freezes.len()
+    }
+
     fn ensure_poa(domain: ComplianceDomainKind) -> Result<(), PoaComplianceError> {
         match domain {
             ComplianceDomainKind::PoA => Ok(()),
@@ -174,7 +179,7 @@ impl PoaComplianceRegistry {
         Ok(())
     }
 
-    /// BLG-0091 (P04-F09): freeze on the authority of a NAMED admin, not a
+    /// Freeze on the authority of a NAMED admin, not a
     /// bare `bool` anybody could pass. The caller verifies the admin against
     /// the domain's admin set first; the name lands in the audit trail.
     pub fn freeze_suspicious(
@@ -208,7 +213,7 @@ impl PoaComplianceRegistry {
         Ok(())
     }
 
-    /// BLG-0091 (P04-F09): the missing reverse. A freeze with no unfreeze is
+    /// The missing reverse. A freeze with no unfreeze is
     /// a life sentence handed out by a compliance screen - the same named
     /// admin authority, and the audit log keeps both edges.
     pub fn unfreeze(
@@ -282,7 +287,7 @@ impl PoaComplianceRegistry {
         &self.audit_log
     }
 
-    /// BLG-0091 (P04-F09): the deterministic fold of the compliance ledger -
+    /// The deterministic fold of the compliance ledger -
     /// screenings, freezes and the audit trail. This is what enters the
     /// state root, so a snapshot that drops a freeze diverges at the next
     /// block instead of quietly clearing the gate.
@@ -531,7 +536,7 @@ mod tests {
         assert!(json.contains("evidence_hash"));
     }
 
-    /// BLG-0091 (P04-F09): freeze and unfreeze are both under the root, and
+    /// Freeze and unfreeze are both under the root, and
     /// the unfreeze actually clears the gate.
     #[test]
     fn a_freeze_moves_the_root_and_an_unfreeze_clears_the_gate() {

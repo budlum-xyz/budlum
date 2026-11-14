@@ -111,7 +111,7 @@ mod tests {
         assert!(!bad.integer_only(), "an interval machine opcode is refused");
     }
 
-    /// BLG-0649: the gate matches whole words. `fsub` and `sqrt` are refused,
+    /// The gate matches whole words. `fsub` and `sqrt` are refused,
     /// and `individual` (which holds `div`) is not.
     #[test]
     fn y15_gate_matches_whole_words() {

@@ -1,11 +1,11 @@
-//! A4 - optical channel codec gate (plan §CH A4, K-QR-KODEK).
+//! A4 - optical channel codec gate.
 //!
 //! In-tree we do **not** ship an H.264/VP9 muxer. What we can pin now is the
 //! *policy* measured in the 3.0 spec: which codecs are allowed to carry
 //! QR frames without destroying module readability, and that a mux step is
 //! optional and versioned separately from A1-A3.
 //!
-//! # Measured posture (spec K4/K5/K9)
+//! # Measured posture
 //!
 //! - H.264 CRF ≤ 28: lab green for fountain recovery (lossy on modules, fountain repairs).
 //! - VP9: green at high CRF in the measurement environment.
@@ -183,7 +183,7 @@ impl FrameMux for RawFrameConcat {
             off = end;
             out.push(fr);
         }
-        // BLG-0431: reject appended data instead of decoding an alias.
+        // Reject appended data instead of decoding an alias.
         if off != blob.len() {
             return Err(CodecError::TrailingBytes);
         }

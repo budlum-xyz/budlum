@@ -277,6 +277,32 @@ mod continuation_tests {
     use super::*;
 
     #[test]
+    fn aderyn_source_is_verified_before_extraction_and_installed_locked() {
+        let workflow = include_str!("../../../../.github/workflows/code-scanning-sarif.yml");
+        let job = workflow
+            .split("  aderyn-sarif:")
+            .nth(1)
+            .expect("Aderyn job");
+        let download = job
+            .find("/aderyn-v0.6.8/source.tar.gz")
+            .expect("release source");
+        let checksum = job
+            .find("sha256sum -c -\n          mkdir -p /tmp/aderyn-source")
+            .expect("source checksum must be enforced before extraction");
+        let extract = job
+            .find("tar -xzf /tmp/aderyn-source.tar.gz")
+            .expect("source extraction");
+        let install = job
+            .find("install --locked --path /tmp/aderyn-source/aderyn")
+            .expect("install must retain the release lockfile");
+        assert!(download < checksum && checksum < extract && extract < install);
+        assert!(
+            !job.contains("aderyn-x86_64-unknown-linux-gnu.tar.xz"),
+            "upstream no longer ships the binary archive"
+        );
+    }
+
+    #[test]
     fn a_checksum_url_on_the_continuation_line_is_found() {
         let text = "run: |\n  curl -sSfL -o /tmp/t.tar.gz \\\n    https://example.com/t.tar.gz.sha256\n  echo done\n";
         let hits: Vec<usize> = logical_lines(text)

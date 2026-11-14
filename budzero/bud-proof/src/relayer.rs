@@ -55,7 +55,7 @@ pub enum AlarmCode {
     DeserializationError,
     /// The proof is valid but the canonical transfer program's logged events
     /// broke conservation (Σinputs != Σoutputs). A proof attests the trace;
-    /// this is the law check the proof alone does not answer (K1).
+    /// this is the law check the proof alone does not answer.
     TransferViolation,
 }
 
@@ -375,7 +375,7 @@ pub fn verify_and_report_at(
     let verified = crate::plonky3_prover::Plonky3Adapter::verify_canonical_program_with_activation(
         envelope, pi, program, activation,
     );
-    // P15-F04: the report signs `envelope.degree_bits`, so it must be the
+    // The report signs `envelope.degree_bits`, so it must be the
     // value the verifier derived from `trace_len`, not a free field.
     let verified = verified.and_then(|()| check_degree_bits(envelope, pi));
     CanonicalRelayReport::from_outcome(envelope, pi, verified, at_unix)
@@ -402,13 +402,13 @@ fn check_degree_bits(
 }
 
 /// Verify and re-run the canonical transfer program against the bound public
-/// inputs (K1 of the BudZero regeneration design).
+/// inputs ( of the BudZero regeneration design).
 ///
 /// Today the canonical transfer is a fixed specimen, and every field re-derived
 /// here (`event_digest`, `initial_state_root`, `trace_len`, `exit_code`,
 /// `gas_used`) is already bound by the AIR - so a disagreement after a
 /// successful STARK verify means the proof path and the re-execution path
-/// disagreed, which is exactly the independent second derivation K1 exists to
+/// disagreed, which is exactly the independent second derivation exists to
 /// provide. Re-execution needs no untrusted inputs because the program is
 /// fixed and deterministic, and the `event_digest` is a field sum, not a hash,
 /// so nothing is read off caller-supplied events. When transfers become
@@ -426,7 +426,7 @@ pub trait SpentSet {
 }
 
 /// The re-execution of the canonical transfer program and the public-input
-/// values a correct proof must bind. Re-execution is the K1 motor: it needs
+/// values a correct proof must bind. Re-execution is the motor: it needs
 /// no untrusted inputs because the program is fixed and deterministic.
 struct TransferReexecution {
     receipt: bud_vm::ExecutionReceipt,
@@ -465,13 +465,13 @@ fn mark_transfer_violation(report: &mut CanonicalRelayReport, detail: String) {
 }
 
 /// Verify and re-run the canonical transfer program against the bound public
-/// inputs (K1 of the BudZero regeneration design).
+/// inputs ( of the BudZero regeneration design).
 ///
 /// Today the canonical transfer is a fixed specimen, and every field re-derived
 /// here (`event_digest`, `initial_state_root`, `trace_len`, `exit_code`,
 /// `gas_used`) is already bound by the AIR - so a disagreement after a
 /// successful STARK verify means the proof path and the re-execution path
-/// disagreed, which is exactly the independent second derivation K1 exists to
+/// disagreed, which is exactly the independent second derivation exists to
 /// provide. Re-execution needs no untrusted inputs because the program is
 /// fixed and deterministic, and the `event_digest` is a field sum, not a hash,
 /// so nothing is read off caller-supplied events. When transfers become
@@ -698,7 +698,7 @@ mod tests {
 
     fn prove_canonical() -> (ProofEnvelope, ExecutionPublicInputs, Vec<u64>) {
         let program = storage_challenge_program();
-        let mut vm = Vm::new(1024);
+        let mut vm = Vm::new(4096);
         // VerifyMerkle imm=256 as storage challenge: the VM is fail-closed on
         // mainnet; proof still must verify (kademe 1 path).
         let receipt = vm.run_receipt(&program);

@@ -20,8 +20,8 @@ pinned test named in section 9.
 
 Covers: the BPQS construction exactly as implemented in `crates/bpqs`:
 epoch-chained Winternitz few-time signatures over a Merkle epoch tree,
-with all three hash backends (canonical Poseidon2-Goldilocks-16, FIPS-202
-SHA3-256 and SHAKE-256) and both parameter rows (L5 canonical, L3
+with all three hash backends (canonical SHAKE-256, FIPS-202 SHA3-256, and
+the research-only Poseidon2-Goldilocks-16) and both parameter rows (L5 canonical, L3
 transportable; test rows share the same hash discipline).
 
 Does not cover, and explicitly does not claim: committee ceremony
@@ -165,7 +165,7 @@ Classical-quantum summary used below; "work" = calls to the primitive.
   standardized budgets: preimage 2^256 classical / 2^128 Grover,
   second-preimage same, collision 2^128 classical / ~2^85 BHT. These are
   the mature end of the tree and not argued in this document.
-- A3 (Poseidon2-Goldilocks-16, canonical): the sponge runs with 8 x
+- A3: the sponge runs with 8 x
   64-bit capacity elements = 512 bits of capacity, which is what a 256
   1st-preimage/128 collision budget asks of an ideal sponge. The
   assumption on record: the Poseidon2 permutation used induces no
@@ -174,9 +174,10 @@ Classical-quantum summary used below; "work" = calls to the primitive.
   design (risk R3 of the pre-registration): the PQ-hash literature for
   algebraic hashes is thin compared to FIPS-202, and this document does
   not raise it past ASSUMED. Section 6's residual-risk line is the
-  reason the SHAKE-256 backend exists and is exercised on every CI run:
-  if A3 is ever doubted, the canonical label moves by decision, not by
-  re-engineering.
+  reason the SHAKE-256 backend exists and is exercised on every CI run.
+  The canonical label has moved: of
+  made SHAKE-256 the canonical backend for any long-lived use, so A2 is the
+  assumption a deployment relies on and A3 stays a research assumption.
 - A4 (framing injectivity): the packaging (u16/u32 length prefixes) is
   injective on (domain, parts); the Poseidon backend's u32-per-element
   chunking is injective modulo exactly one ambiguity class - a final
@@ -525,7 +526,7 @@ SIGNED-PATH secret flow inventory (each item points at code):
    Scope, unchanged: this is a wall-clock test on one host, not a formal
    constant-time proof, and it covers the field arithmetic through the
    permutation - which is what the caveat named.
-5. shake256.rs (K12-class keccak): fixed 24-round permutation,
+5. shake256.rs (class keccak): fixed 24-round permutation,
    table-free by construction; absorb boundaries depend on input LENGTH
    (public), never on input bytes.
 6. Absent from the whole signing path: secret-indexed table access,

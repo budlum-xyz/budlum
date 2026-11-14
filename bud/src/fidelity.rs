@@ -1,6 +1,6 @@
 //! The fidelity core - whatever the resolution is, it is preserved; the format
 //! is free to change.
-//! ContentId = SHA3-256(domain-tag || length || canonical bytes) - cryptographic (K3 fix).
+//! ContentId = SHA3-256(domain-tag || length || canonical bytes) - cryptographic ( fix).
 //! Rendering is deterministic, float free, and the IHDR size is exact.
 
 use sha3::{Digest, Sha3_256};
@@ -38,7 +38,7 @@ pub struct ContentId([u8; 32]);
 
 impl ContentId {
     pub fn from_bytes(bytes: &[u8]) -> Self {
-        // K3 fix (2026-08-16): DefaultHasher and SipHash are NOT cryptographic (a collision can be forged
+        // fix (2026-08-16): DefaultHasher and SipHash are NOT cryptographic (a collision can be forged
         // forged). The real cryptographic hash: SHA3-256, domain-tagged + length-prefixed
         // (the same pattern as src/storage/content_id.rs: BDLM_CONTENT_V1).
         let mut h = Sha3_256::new();

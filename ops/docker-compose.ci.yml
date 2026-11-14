@@ -53,3 +53,8 @@ services:
       - RUST_LOG=info
       - BUDLUM_RPC_AUTH_REQUIRED=0
       - BUDLUM_RPC_ALLOWED_IPS=
+  node5:
+    environment:
+      - RUST_LOG=info
+      - BUDLUM_RPC_AUTH_REQUIRED=0
+      - BUDLUM_RPC_ALLOWED_IPS=

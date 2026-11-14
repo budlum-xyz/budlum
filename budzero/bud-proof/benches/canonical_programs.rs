@@ -151,7 +151,7 @@ fn matmul_guest_program_2_3_2() -> Vec<u64> {
     prog.push(instruction(Opcode::Log, 0, R_HASH, 0, 0));
     prog.push(instruction(Opcode::Halt, 0, 0, 0, 0));
     assert_eq!(prog.len(), 90, "matmul [2,3,2] must be 90 instructions");
-    // BLG-0238 (P14-F08): the length is the shape of the emitter, not its
+    // The length is the shape of the emitter, not its
     // identity - an emitter that drifted in ORDER still measured 90 rows and
     // the benchmark proved a program that is not the canonical guest. Pin the
     // same hash the tree pins (src/ai/execution/guest.rs
@@ -171,7 +171,7 @@ fn matmul_guest_program_2_3_2() -> Vec<u64> {
     prog
 }
 
-/// BLG-0238 (P14-F08): seed the VerifyMerkle inputs into the VM. The
+/// Seed the VerifyMerkle inputs into the VM. The
 /// challenge used to run on an all-zero memory: 64 expansion rows over zero
 /// siblings measure the prover's cost for a run that no verifier would ever
 /// see (the honest path has real path data), and a zero-filled run can only
@@ -179,27 +179,36 @@ fn matmul_guest_program_2_3_2() -> Vec<u64> {
 /// prover's own Merkle tests: key + 64 siblings from address 256, with the
 /// pre-computed root and leaf in the registers the instruction reads.
 fn seed_storage_challenge(vm: &mut Vm) {
+    // The path window at 256, in 8-byte words: the key, the 256-bit leaf, 64 levels of
+    // 256-bit siblings and the 256-bit root the walk reaches. `VerifyMerkle` reads every
+    // word of it; its register operands are not read.
     let key: u64 = 7;
-    let siblings: [u64; 64] = std::array::from_fn(|i| ((i as u64) * 31) + 1);
-    let leaf: u64 = 0xBEEF;
+    let leaf: [u64; 4] = [0xBEEF, 2, 3, 4];
+    let siblings: Vec<[u64; 4]> = (0..64u64)
+        .map(|i| {
+            let base = i * 31 + 1;
+            [base, base + 1, base + 2, base + 3]
+        })
+        .collect();
     let mut current = leaf;
-    for (i, &sibling) in siblings.iter().enumerate() {
+    for (i, sibling) in siblings.iter().enumerate() {
         let bit = (key >> i) & 1;
         current = if bit == 0 {
-            bud_vm::merkle_poseidon_round(current, sibling)
+            bud_vm::merkle_node(current, *sibling)
         } else {
-            bud_vm::merkle_poseidon_round(sibling, current)
+            bud_vm::merkle_node(*sibling, current)
         };
     }
-    vm.memory[256..264].copy_from_slice(&key.to_le_bytes());
-    for (i, &sibling) in siblings.iter().enumerate() {
-        let off = 264 + i * 8;
-        vm.memory[off..off + 8].copy_from_slice(&sibling.to_le_bytes());
+    let mut words = vec![key];
+    words.extend_from_slice(&leaf);
+    for sibling in &siblings {
+        words.extend_from_slice(sibling);
     }
-    // inst(VerifyMerkle, rd=1, rs1=2, rs2=3, imm=256): rs1 holds the root
-    // the path is checked against, rs2 the claimed leaf.
-    vm.registers[2] = current;
-    vm.registers[3] = leaf;
+    words.extend_from_slice(&current);
+    for (i, word) in words.iter().enumerate() {
+        let off = 256 + i * 8;
+        vm.memory[off..off + 8].copy_from_slice(&word.to_le_bytes());
+    }
 }
 
 fn run_one_with_seed(name: &str, program: &[u64], samples: u32, seed: impl Fn(&mut Vm)) {

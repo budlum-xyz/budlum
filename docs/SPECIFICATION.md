@@ -83,9 +83,9 @@ The node exposes a standard JSON-RPC 2.0 interface via **two separate listeners*
 |--------|-------------|
 | `bud_chainId` | Returns the chain ID. |
 | `bud_blockNumber` | Returns the latest block height. |
-| `bud_sendRawTransaction` | Submits a signed transaction. |
-| `bud_registerConsensusDomain` | Registers a new consensus domain. |
-| `bud_submitVerifiedDomainCommitment` | Submits a verified domain commitment. |
+| `bud_sendRawTransaction` | Submits a signed transaction (public). |
+| `bud_registerConsensusDomain` | **Operator listener only**; legacy management wrapper, refused on the public listener. The domain operator should submit the signed `Settlement::RegisterDomain` transaction through `bud_sendRawTransaction`. |
+| `bud_submitVerifiedDomainCommitment` | **Operator listener only**; legacy management wrapper, refused on the public listener. The domain operator should submit the signed `Settlement::SubmitCommitment` transaction through `bud_sendRawTransaction`. |
 | `bud_syncing` | Returns true if the node is currently syncing. |
 | `bud_health` | Health status: `status`, `blockHeight`, `peerCount`, `syncing`. |
 | `bud_nodeInfo` | Node identity: `chainId`, `peerId`, `validatorSetHash`, `rpcMode`. |
@@ -97,10 +97,11 @@ The node exposes a standard JSON-RPC 2.0 interface via **two separate listeners*
 ### 4.1 ConsensusSigner Trait
 Block signing is abstracted behind the `ConsensusSigner` trait (`src/crypto/signer.rs`):
 
-- **`KeyPairSigner`**: Local Ed25519 key file (devnet/testnet default).
-- **`Pkcs11Signer`**: Hardware Security Module via `cryptoki` (mainnet requirement). Loads the PKCS#11 module, opens a session on the configured slot, authenticates with the token PIN, and signs via CKM_EDDSA.
+- **`KeyPairSigner`**: Local Ed25519 material for block/consensus signatures; it may be augmented with BLS and PQ public/signing material for finality.
+- **`Pkcs11Signer`**: Hardware Security Module via `cryptoki` (an operator-selected backend, not a claim that testnet has HSM support). It loads the PKCS#11 module, opens a session on the configured slot, authenticates with the token PIN, and signs via CKM_EDDSA.
+- **Testnet profile**: `config/testnet.toml` selects the validator key path and `backend = "softhsm"`; it does not promise a generic Ed25519 key-file default. User V5 transactions use ML-DSA-87 account keys and carry their public key in the signed transaction.
 
-Both backends are injected into `PoSEngine` and `PoAEngine` via `with_signer()` constructors.
+Both consensus backends are injected into `PoSEngine` and `PoAEngine` via `with_signer()` constructors.
 
 ### 4.2 P2P Security (v0.3)
 

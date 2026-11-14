@@ -1,0 +1,884 @@
+//! Consensus-round behaviour and the negative-validation batch.
+//!
+//! The round rule is shared by PoS and PoA: the block nonce carries the
+//! leader round, the round is capped at [`MAX_LEADER_ROUNDS`], and a round
+//! `r > 0` must sit at least `MIN_BLOCK_INTERVAL_MS + r * ROUND_TIMEOUT_MS`
+//! after its parent. These tests pin the pieces the older suite never
+//! exercised: the round binding in the seed and threshold, the cap and floor
+//! refusals, checkpoint parking until quorum finality, and the missing
+//! negative cases named by.
+
+/// Whether the engine refused because the leader round the producer claims has
+/// not elapsed at wall clock. PoS and PoA enforce the same rule and word the
+/// refusal differently; the suites ask the question, not the sentence.
+fn round_not_elapsed(error: &str) -> bool {
+    error.contains("claimed before it elapsed") || error.contains("claimed ahead of wall clock")
+}
+
+#[cfg(test)]
+mod consensus_round_tests {
+    use super::round_not_elapsed;
+    use crate::consensus::poa::{PoAConfig, PoAEngine};
+    use crate::consensus::pos::{PoSConfig, PoSEngine};
+    use crate::consensus::pow::{PoWConfig, PoWEngine};
+    use crate::consensus::ConsensusEngine;
+    use crate::consensus::{MAX_LEADER_ROUNDS, MIN_BLOCK_INTERVAL_MS, ROUND_TIMEOUT_MS};
+    use crate::core::account::{AccountState, Validator};
+    use crate::core::address::Address;
+    use crate::core::block::Block;
+    use crate::crypto::primitives::ValidatorKeys;
+
+    /// A state holding exactly one fully consensus-ready validator (real VRF,
+    /// BLS + PoP and PQ keys), so validation reaches the round logic instead of
+    /// failing at the key checks.
+    fn ready_validator_state(keys: &ValidatorKeys) -> (AccountState, Address) {
+        let address = Address::from(keys.sig_key.public_key_bytes());
+        let mut state = AccountState::new();
+        state.add_validator(address, 2_000);
+        let bls = keys.bls_key.as_ref().expect("fixture has BLS keys");
+        let pop = bls.generate_pop(crate::core::transaction::DEFAULT_CHAIN_ID, &address);
+        if let Some(validator) = state.get_validator_mut(&address) {
+            validator.vrf_public_key = keys.vrf_key.public.to_bytes().to_vec();
+            validator.bls_public_key = bls.public_key.clone();
+            validator.pop_signature = pop;
+            validator.pq_public_key = keys
+                .pq_key
+                .as_ref()
+                .expect("fixture has PQ keys")
+                .public_key_bytes()
+                .to_vec();
+            validator.active = true;
+        }
+        (state, address)
+    }
+
+    /// A one-validator state with only what leader selection needs (PoA).
+    fn poa_state_with(addresses: &[Address]) -> AccountState {
+        let mut state = AccountState::new();
+        for address in addresses {
+            state
+                .validators
+                .insert(*address, Validator::new(*address, 1_000));
+            state.validators.get_mut(address).unwrap().active = true;
+        }
+        state
+    }
+
+    #[test]
+    fn pos_seed_binds_the_round() {
+        let engine = PoSEngine::new(PoSConfig::default(), None);
+        let chain = vec![Block::genesis()];
+        let chain_id = crate::core::transaction::DEFAULT_CHAIN_ID;
+        let round0 = engine
+            .calculate_seed_with_chain(chain_id, 0, 1, 0, &chain)
+            .unwrap();
+        let round1 = engine
+            .calculate_seed_with_chain(chain_id, 0, 1, 1, &chain)
+            .unwrap();
+        let round1_again = engine
+            .calculate_seed_with_chain(chain_id, 0, 1, 1, &chain)
+            .unwrap();
+        assert_ne!(
+            round0, round1,
+            "the round must re-roll the leader seed (P01-F01)"
+        );
+        assert_eq!(round1, round1_again, "the seed must stay deterministic");
+    }
+
+    #[test]
+    fn pos_validate_rejects_round_above_the_cap() {
+        let keys = ValidatorKeys::generate().unwrap();
+        let (state, address) = ready_validator_state(&keys);
+        let engine = PoSEngine::new(PoSConfig::default(), None);
+        let parent = Block::genesis();
+
+        let mut block = Block::new(1, parent.hash.clone(), vec![]);
+        block.slot = block.index;
+        block.producer = Some(address);
+        block.nonce = MAX_LEADER_ROUNDS + 1;
+        block.validator_set_hash = state
+            .consensus_validator_set_hash(block.chain_id)
+            .expect("fixture keys are consensus-ready");
+        block.sign(&keys.sig_key);
+
+        let error = engine
+            .validate_block(&block, &[parent], &state)
+            .expect_err("a round above the cap must be refused");
+        assert!(
+            error.0.contains("exceeds the cap"),
+            "the refusal must name the cap, got: {error:?}"
+        );
+    }
+
+    #[test]
+    fn pos_validate_rejects_a_premature_round_timestamp() {
+        let keys = ValidatorKeys::generate().unwrap();
+        let (state, address) = ready_validator_state(&keys);
+        let engine = PoSEngine::new(PoSConfig::default(), None);
+        let mut parent = Block::genesis();
+        parent.timestamp = 1_000_000;
+        parent.hash = parent.calculate_hash();
+
+        // Round 2 prices at parent + 1s + 2x3s. One second after the parent is
+        // far too early.
+        let mut block = Block::new(1, parent.hash.clone(), vec![]);
+        block.slot = block.index;
+        block.timestamp = parent.timestamp + MIN_BLOCK_INTERVAL_MS;
+        block.producer = Some(address);
+        block.nonce = 2;
+        block.validator_set_hash = state
+            .consensus_validator_set_hash(block.chain_id)
+            .expect("fixture keys are consensus-ready");
+        block.sign(&keys.sig_key);
+
+        let error = engine
+            .validate_block(&block, &[parent], &state)
+            .expect_err("a premature round must be refused");
+        assert!(
+            error.0.contains("claimed too early"),
+            "the refusal must name the timing floor, got: {error:?}"
+        );
+    }
+
+    /// A round claim costs wall time, and a header cannot buy it.
+    ///
+    /// The floor rule ("the block timestamp sits `MIN + r * ROUND_TIMEOUT_MS`
+    /// after the parent") compares two numbers the producer writes, so it
+    /// prices nothing on its own: a timestamp up to `MAX_FUTURE_BLOCK_TIME_MS`
+    /// ahead of the verifier makes rounds 0..=5 affordable the instant the
+    /// parent lands, and every validator elected in one of those rounds could
+    /// publish a valid competing block for a slot it does not lead (CWE-807).
+    /// The claim is now priced against the verifier's clock, with the same
+    /// `affordable_leader_round` the producer clamps itself with.
+    ///
+    /// Both directions are pinned here: a future-dated parent plus a header
+    /// that satisfies the floor is refused, and an old-enough parent lets the
+    /// same claim through the pricing gate.
+    #[test]
+    fn a_round_claim_is_priced_by_wall_time_not_by_the_header_alone() {
+        let keys = ValidatorKeys::generate().unwrap();
+        let (state, address) = ready_validator_state(&keys);
+        let engine = PoSEngine::new(PoSConfig::default(), None);
+        let now_ms = crate::consensus::now_millis();
+        let round = 2u64;
+
+        let fixture = |parent_ts: u128| {
+            let mut parent = Block::genesis();
+            parent.timestamp = parent_ts;
+            parent.hash = parent.calculate_hash();
+            let floor = parent
+                .timestamp
+                .saturating_add(MIN_BLOCK_INTERVAL_MS)
+                .saturating_add(ROUND_TIMEOUT_MS.saturating_mul(u128::from(round)));
+            let mut block = Block::new(1, parent.hash.clone(), vec![]);
+            block.slot = block.index;
+            block.timestamp = floor;
+            block.producer = Some(address);
+            block.nonce = round;
+            block.validator_set_hash = state
+                .consensus_validator_set_hash(block.chain_id)
+                .expect("fixture keys are consensus-ready");
+            block.sign(&keys.sig_key);
+            (parent, block)
+        };
+
+        // The producer's own header rule is satisfied by `floor`, but the
+        // parent is an hour in the future: round 2 has not elapsed anywhere.
+        let (parent, block) = fixture(now_ms + 3_600_000);
+        let error = engine
+            .validate_block(&block, &[parent], &state)
+            .expect_err("a future-dated parent must not buy an unearned round");
+        assert!(
+            round_not_elapsed(&error.0),
+            "the refusal must be the wall-clock price of the round, got: {error:?}"
+        );
+
+        // Same claim, a parent this node watched land a minute ago: round 2
+        // has genuinely elapsed, so the pricing gate lets it through and any
+        // later refusal is about something else.
+        let (parent, block) = fixture(now_ms.saturating_sub(60_000));
+        if let Err(error) = engine.validate_block(&block, &[parent], &state) {
+            assert!(
+                !round_not_elapsed(&error.0) && !error.0.contains("claimed too early"),
+                "an elapsed round must clear the pricing gates, got: {error:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn pos_round_floor_matches_the_pricing_formula() {
+        // The floor is part of consensus now: parent + MIN_BLOCK_INTERVAL_MS +
+        // round * ROUND_TIMEOUT_MS. Pin the constants so a silent change cannot
+        // reprice every round.
+        assert_eq!(MIN_BLOCK_INTERVAL_MS, 1_000);
+        assert_eq!(ROUND_TIMEOUT_MS, 3_000);
+        assert_eq!(MAX_LEADER_ROUNDS, 16);
+    }
+
+    #[test]
+    fn pos_checkpoint_parks_until_finalized() {
+        let engine = PoSEngine::new(PoSConfig::default(), None);
+        let chain_id = crate::core::transaction::DEFAULT_CHAIN_ID;
+        let epoch_length = crate::core::chain_config::epoch_len_for_chain_id(chain_id);
+
+        // A chain across two epoch boundaries (indices epoch_length and
+        // 2 * epoch_length) recorded the way the commit path does.
+        let producer_keys = crate::crypto::primitives::KeyPair::generate().unwrap();
+        let producer = Address::from(producer_keys.public_key_bytes());
+        let mut chain = vec![Block::genesis()];
+        for i in 1..=(2 * epoch_length) {
+            let previous = chain.last().unwrap().hash.clone();
+            let mut block = Block::new(i, previous, vec![]);
+            block.slot = block.index;
+            block.producer = Some(producer);
+            chain.push(block);
+        }
+        let first_boundary = chain[epoch_length as usize].clone();
+        let second_boundary = chain[(2 * epoch_length) as usize].clone();
+
+        engine
+            .record_block(&first_boundary, None)
+            .expect("recording the boundary block must succeed");
+        assert!(
+            engine.get_checkpoints().unwrap().is_empty(),
+            "the boundary checkpoint must stay parked until quorum finality (P01-F04)"
+        );
+
+        // A finalised height whose chain does not hold the block must drop it,
+        // not promote it.
+        engine.note_finalized_height(first_boundary.index, &chain[..1], None);
+        assert!(
+            engine.get_checkpoints().unwrap().is_empty(),
+            "a checkpoint on a losing fork must be dropped, not promoted"
+        );
+
+        // The next boundary, finalised against the chain that holds it, is
+        // promoted - and only it.
+        engine
+            .record_block(&second_boundary, None)
+            .expect("recording the boundary block must succeed");
+        engine.note_finalized_height(second_boundary.index, &chain, None);
+        let checkpoints = engine.get_checkpoints().unwrap();
+        assert_eq!(
+            checkpoints.len(),
+            1,
+            "only the finalised checkpoint is promoted"
+        );
+        assert_eq!(checkpoints[0].block_index, second_boundary.index);
+        assert_eq!(checkpoints[0].block_hash, second_boundary.hash);
+    }
+
+    #[test]
+    fn poa_leader_round_changes_the_expected_proposer() {
+        let mut addresses = Vec::new();
+        for i in 1..=4u8 {
+            let mut bytes = [0u8; 32];
+            bytes[0] = i;
+            addresses.push(Address::from(bytes));
+        }
+        let state = poa_state_with(&addresses);
+        let engine = PoAEngine::new(PoAConfig::default(), None);
+        let active = state.get_active_validators();
+        let entropy = [7u8; 32];
+
+        // Over a run of slots the round must actually re-roll someone: if the
+        // round term did nothing, every (slot, round) pair would name the same
+        // leader.
+        let mut changed = false;
+        for slot in 0..32u64 {
+            let round0 = engine
+                .expected_proposer_with_entropy(slot, &active, &entropy, 0)
+                .expect("active set is non-empty");
+            for round in 1..=MAX_LEADER_ROUNDS {
+                let later = engine
+                    .expected_proposer_with_entropy(slot, &active, &entropy, round)
+                    .expect("active set is non-empty");
+                if later.address != round0.address {
+                    changed = true;
+                    break;
+                }
+            }
+            if changed {
+                break;
+            }
+        }
+        assert!(
+            changed,
+            "no slot saw a leader change across rounds - the round term is not bound (P01-F02)"
+        );
+    }
+
+    #[test]
+    fn pow_mining_budget_aborts_and_reports() {
+        // Difficulty 32 is 2^128 work: only the budget can end this search.
+        let engine = PoWEngine::with_config(PoWConfig {
+            difficulty: 32,
+            mine_time_budget_ms: 0,
+            ..Default::default()
+        });
+        let mut block = Block::new(1, "0".repeat(64), vec![]);
+        block.hash = block.calculate_hash();
+        let error = engine
+            .prepare_block(&mut block, &AccountState::new())
+            .expect_err("an exhausted mining budget must abort the attempt");
+        assert!(
+            error.0.contains("mining budget exhausted"),
+            "the refusal must name the budget, got: {error:?}"
+        );
+    }
+
+    #[test]
+    fn pos_validate_rejects_wrong_validator_set_hash() {
+        let keys = ValidatorKeys::generate().unwrap();
+        let (state, address) = ready_validator_state(&keys);
+        let engine = PoSEngine::new(PoSConfig::default(), None);
+        let parent = Block::genesis();
+
+        let mut block = Block::new(1, parent.hash.clone(), vec![]);
+        block.slot = block.index;
+        block.producer = Some(address);
+        block.validator_set_hash = "deadbeef".repeat(8);
+        block.sign(&keys.sig_key);
+
+        let error = engine
+            .validate_block(&block, &[parent], &state)
+            .expect_err("a wrong validator set hash must be refused");
+        assert!(
+            error.0.contains("Validator set hash mismatch"),
+            "got: {error:?}"
+        );
+    }
+
+    #[test]
+    fn pos_validate_rejects_unknown_producer() {
+        let keys = ValidatorKeys::generate().unwrap();
+        let (state, _address) = ready_validator_state(&keys);
+        let engine = PoSEngine::new(PoSConfig::default(), None);
+        let parent = Block::genesis();
+
+        let stranger = crate::crypto::primitives::KeyPair::generate().unwrap();
+        let mut block = Block::new(1, parent.hash.clone(), vec![]);
+        block.slot = block.index;
+        block.producer = Some(Address::from(stranger.public_key_bytes()));
+        block.validator_set_hash = state
+            .consensus_validator_set_hash(block.chain_id)
+            .expect("fixture keys are consensus-ready");
+        block.sign(&stranger);
+
+        let error = engine
+            .validate_block(&block, &[parent], &state)
+            .expect_err("an unknown producer must be refused");
+        assert!(error.0.contains("Unknown block producer"), "got: {error:?}");
+    }
+
+    #[test]
+    fn pos_validate_rejects_invalid_slashing_evidence() {
+        let keys = ValidatorKeys::generate().unwrap();
+        let (state, address) = ready_validator_state(&keys);
+        let engine = PoSEngine::new(PoSConfig::default(), None);
+        let parent = Block::genesis();
+
+        let mut block = Block::new(1, parent.hash.clone(), vec![]);
+        block.slot = block.index;
+        block.producer = Some(address);
+        block.validator_set_hash = state
+            .consensus_validator_set_hash(block.chain_id)
+            .expect("fixture keys are consensus-ready");
+        // A real VRF so validation reaches the evidence checks behind it.
+        let seed = engine
+            .calculate_seed_with_chain(
+                block.chain_id,
+                block.epoch,
+                block.slot,
+                0,
+                std::slice::from_ref(&parent),
+            )
+            .expect("seed derivation succeeds");
+        let (vrf_io, vrf_proof, _) = keys
+            .vrf_key
+            .vrf_sign(schnorrkel::context::signing_context(b"BUDLUM_VRF").bytes(&seed));
+        block.vrf_output = vrf_io.to_preout().to_bytes().to_vec();
+        block.vrf_proof = vrf_proof.to_bytes().to_vec();
+        // Evidence over two different heights is structurally invalid.
+        use crate::consensus::pos::SlashingEvidence;
+        use crate::core::block::BlockHeader;
+        let mut header1 = BlockHeader::from_block(&parent);
+        header1.index = 5;
+        let mut header2 = BlockHeader::from_block(&parent);
+        header2.index = 6;
+        block.slashing_evidence = Some(vec![SlashingEvidence::new(
+            header1,
+            header2,
+            vec![0u8; 64],
+            vec![1u8; 64],
+        )]);
+        block.sign(&keys.sig_key);
+
+        let error = engine
+            .validate_block(&block, &[parent], &state)
+            .expect_err("invalid slashing evidence must be refused");
+        assert!(
+            error.0.contains("Invalid slashing evidence"),
+            "got: {error:?}"
+        );
+    }
+
+    #[test]
+    fn pos_preview_binds_the_nonce_to_the_round() {
+        let keys = ValidatorKeys::generate().unwrap();
+        let (mut state, address) = ready_validator_state(&keys);
+        state.add_balance(&address, 1);
+        let engine = PoSEngine::new(
+            PoSConfig {
+                min_stake: 1,
+                ..Default::default()
+            },
+            None,
+        );
+        let mut parent = Block::genesis();
+        parent.timestamp = 1_000_000;
+        parent.hash = parent.calculate_hash();
+
+        let mut block = Block::new(1, parent.hash.clone(), vec![]);
+        block.timestamp = parent.timestamp + MIN_BLOCK_INTERVAL_MS;
+        block.producer = Some(address);
+        let result =
+            engine.preview_block_with_chain(&mut block, &state, std::slice::from_ref(&parent));
+        if result.is_ok() {
+            assert!(
+                block.nonce <= MAX_LEADER_ROUNDS,
+                "preview must never claim a round above the cap (P01-F10), got {}",
+                block.nonce
+            );
+        }
+    }
+
+    /// once a Filiz Chain is active, the block's election proof is
+    /// the reveal opening it and the output is that reveal's eligibility
+    /// value; a reveal that opens nothing is refused before the threshold.
+    #[test]
+    fn pos_validate_reads_a_filiz_reveal_once_the_chain_is_active() {
+        use crate::consensus::filiz::{eligibility_output, FilizChain, FilizRegistration};
+        let keys = ValidatorKeys::generate().unwrap();
+        let (mut state, address) = ready_validator_state(&keys);
+        let chain = FilizChain::with_parameters(address.0, [9u8; 32], 64, 8).unwrap();
+        let mut registration = FilizRegistration::default();
+        registration
+            .register(address.0, chain.commitment(), chain.length(), 0)
+            .unwrap();
+        state.get_validator_mut(&address).unwrap().filiz = Some(registration);
+        let engine = PoSEngine::new(
+            PoSConfig {
+                min_stake: 1,
+                epoch_length: 1,
+            },
+            None,
+        );
+        // Epoch randomness for epoch E reads the transcript of epoch E - 2,
+        // so the fixture carries the blocks that window names: genesis and
+        // the block after it. The candidate then builds on the last of them.
+        let mut genesis = Block::genesis();
+        genesis.hash = genesis.calculate_hash();
+        let mut first = Block::new(1, genesis.hash.clone(), vec![]);
+        // Epoch 1 is the randomness window epoch 3 reads, and a source block
+        // above genesis must carry the VRF transcript of its producer.
+        first.producer = Some(address);
+        first.vrf_output = [0x11; 32].to_vec();
+        first.vrf_proof = vec![0x22];
+        first.hash = first.calculate_hash();
+        let parents = vec![genesis, first];
+        let parent = parents[1].clone();
+        let build = |reveal: [u8; 32]| {
+            let mut block = Block::new(3, parent.hash.clone(), vec![]);
+            block.slot = 3;
+            block.epoch = 3;
+            block.producer = Some(address);
+            block.validator_set_hash = state
+                .consensus_validator_set_hash(block.chain_id)
+                .expect("fixture keys are consensus-ready");
+            let seed = engine
+                .calculate_seed_with_chain(block.chain_id, 3, 3, 0, &parents)
+                .expect("seed derivation succeeds");
+            block.vrf_output =
+                eligibility_output(&address.0, &reveal, &seed, block.chain_id, 3).to_vec();
+            block.vrf_proof = reveal.to_vec();
+            block.sign(&keys.sig_key);
+            block
+        };
+
+        let honest = build(chain.next_reveal().unwrap());
+        if let Err(error) = engine.validate_block(&honest, &parents, &state) {
+            assert!(
+                !error.0.contains("Filiz") && !error.0.contains("VRF proof"),
+                "an honest reveal must pass the election check, got: {error:?}"
+            );
+        }
+
+        let forged = build([0x55; 32]);
+        let error = engine
+            .validate_block(&forged, &parents, &state)
+            .expect_err("a reveal that opens nothing must be refused");
+        assert!(
+            error.0.contains("Filiz reveal does not open"),
+            "got: {error:?}"
+        );
+    }
+}
+
+/// PoA applies the same round pricing as PoS (CWE-807).
+///
+/// The two engines duplicate the round rule; a fix in one of them is not a
+/// fix. An authority that leads round 0 must not be able to publish a valid
+/// block for round 2 just because it dated the parent an hour ahead.
+#[cfg(test)]
+mod poa_round_pricing_tests {
+    use super::round_not_elapsed;
+    use crate::consensus::poa::{PoAConfig, PoAEngine};
+    use crate::consensus::ConsensusEngine;
+    use crate::consensus::{MIN_BLOCK_INTERVAL_MS, ROUND_TIMEOUT_MS};
+    use crate::core::account::{AccountState, Validator};
+    use crate::core::address::Address;
+    use crate::core::block::Block;
+
+    fn single_authority_state() -> (AccountState, Address) {
+        let keys = crate::crypto::primitives::KeyPair::generate().unwrap();
+        let address = Address::from(keys.public_key_bytes());
+        let mut state = AccountState::new();
+        state
+            .validators
+            .insert(address, Validator::new(address, 1_000));
+        state.validators.get_mut(&address).unwrap().active = true;
+        (state, address)
+    }
+
+    /// The round rule prices a PoA claim identically on every node.
+    ///
+    /// The price used to be read off "when this node saw the parent land".
+    /// That is a value only one node has - its boot time for genesis, its load
+    /// instant for a tip restored from disk - so the same claim cleared the
+    /// gate on the node that committed the parent and was refused on the node
+    /// that joined a second later. A refused claim is a block refused for
+    /// good: the devnet mesh answered it by keeping two chains at height 1.
+    /// The parent's stamp is the value every node holding the block reads the
+    /// same way, so it is the only anchor the price may use.
+    #[test]
+    fn poa_prices_a_round_by_the_shared_stamp_whatever_this_node_saw() {
+        let (state, address) = single_authority_state();
+        let now_ms = crate::consensus::now_millis();
+        let round = 6u64;
+
+        let fixture = |parent_ts: u128| {
+            let mut parent = Block::genesis();
+            parent.timestamp = parent_ts;
+            parent.hash = parent.calculate_hash();
+            let mut block = Block::new(1, parent.hash.clone(), vec![]);
+            block.timestamp = parent
+                .timestamp
+                .saturating_add(MIN_BLOCK_INTERVAL_MS)
+                .saturating_add(ROUND_TIMEOUT_MS.saturating_mul(u128::from(round)));
+            block.producer = Some(address);
+            block.nonce = round;
+            (parent, block)
+        };
+
+        // Within ROUND_LADDER_SPAN_MS (49 s) and past round 6 (19 s): mesh
+        // sightings seconds apart agree on the shared parent stamp.
+        let (parent, block) = fixture(now_ms.saturating_sub(30_000));
+        for seen in [Some(parent.timestamp), Some(now_ms), None] {
+            let engine = PoAEngine::new(PoAConfig::default(), None);
+            if let Some(at) = seen {
+                engine.note_block_seen(&parent.hash, at);
+            }
+            if let Err(error) = engine.validate_block(&block, std::slice::from_ref(&parent), &state)
+            {
+                assert!(
+                    !round_not_elapsed(&error.0),
+                    "within the active ladder window the stamp is the shared anchor; \
+                     sighting {seen:?} must not change the price, got: {error:?}"
+                );
+            }
+        }
+
+        // A parent that lags wall time beyond ROUND_LADDER_SPAN_MS (49 s) is
+        // the schedule-lagged case RT-001 forked on: the stamp still prices the
+        // claim, so every sighting - a node that just adopted the parent, one
+        // that has held it for minutes, and one replaying it with no sighting
+        // at all - must reach the same verdict. Reading the adoption time here
+        // is what let a lab network keep two chains: the node that had just
+        // committed the parent refused the peer's retry-round block for good.
+        let (stale_parent, stale_block) = fixture(now_ms.saturating_sub(600_000));
+        let mut stale_verdicts = Vec::new();
+        for seen in [Some(stale_parent.timestamp), Some(now_ms), None] {
+            let engine = PoAEngine::new(PoAConfig::default(), None);
+            if let Some(at) = seen {
+                engine.note_block_seen(&stale_parent.hash, at);
+            }
+            let priced = match engine.validate_block(
+                &stale_block,
+                std::slice::from_ref(&stale_parent),
+                &state,
+            ) {
+                Ok(()) => false,
+                Err(error) => round_not_elapsed(&error.0),
+            };
+            stale_verdicts.push(priced);
+        }
+        assert_eq!(
+            stale_verdicts[0], stale_verdicts[1],
+            "a schedule-lagged parent must be priced from its stamp, not from this \
+             node's adoption time: {stale_verdicts:?} (stamp, adopted now, no sighting)"
+        );
+        assert_eq!(
+            stale_verdicts[0], stale_verdicts[2],
+            "a schedule-lagged parent must be priced from its stamp: {stale_verdicts:?}"
+        );
+        assert!(
+            !stale_verdicts[0],
+            "a parent ten minutes behind the clock prices round {round} as elapsed"
+        );
+
+        // A parent stamped an hour ahead prices at round 0 here and at every
+        // other node: a stamp can only ever be behind the shared clock, so the
+        // claim buys nothing until the moment it names has passed.
+        let engine = PoAEngine::new(PoAConfig::default(), None);
+        let (parent, block) = fixture(now_ms.saturating_add(3_600_000));
+        let error = engine
+            .validate_block(&block, std::slice::from_ref(&parent), &state)
+            .expect_err("a future-dated parent must not buy a PoA round");
+        assert!(
+            round_not_elapsed(&error.0),
+            "the refusal must be the wall-clock price of the round, got: {error:?}"
+        );
+    }
+
+    #[test]
+    fn poa_refuses_a_round_the_verifier_clock_has_not_reached() {
+        let (state, address) = single_authority_state();
+        let engine = PoAEngine::new(PoAConfig::default(), None);
+        let now_ms = crate::consensus::now_millis();
+        let round = 2u64;
+
+        let mut parent = Block::genesis();
+        parent.timestamp = now_ms + 3_600_000;
+        parent.hash = parent.calculate_hash();
+        let mut block = Block::new(1, parent.hash.clone(), vec![]);
+        block.timestamp = parent
+            .timestamp
+            .saturating_add(MIN_BLOCK_INTERVAL_MS)
+            .saturating_add(ROUND_TIMEOUT_MS.saturating_mul(u128::from(round)));
+        block.producer = Some(address);
+        block.nonce = round;
+
+        let error = engine
+            .validate_block(&block, &[parent], &state)
+            .expect_err("a future-dated parent must not buy an unearned PoA round");
+        assert!(
+            round_not_elapsed(&error.0),
+            "the PoA refusal must be the wall-clock price of the round, got: {error:?}"
+        );
+    }
+
+    /// A two-block candidate fork is priced the same way on every node, and the
+    /// floor still refuses a claim that is stamped before its round.
+    ///
+    /// The candidate chain is the reorg path: `try_reorg` replays a peer's
+    /// branch through this same gate, so anything that makes the verdict depend
+    /// on this node's own state makes the reorg undecidable. RT-001's refusal
+    /// read `Reorg to the chain of ... failed: Candidate consensus validation
+    /// failed at block 2: PoS leader round 1 claimed before it elapsed`, and the
+    /// fork never healed. The negative half is kept: pricing the round from the
+    /// shared stamp does not price anything if the floor is dropped.
+    #[test]
+    fn two_block_candidate_fork_is_priced_identically_on_every_node() {
+        let (state, address) = single_authority_state();
+        let now_ms = crate::consensus::now_millis();
+
+        // Schedule-lagged committed ancestor adopted right now.
+        let mut ancestor = Block::genesis();
+        ancestor.timestamp = now_ms.saturating_sub(600_000);
+        ancestor.hash = ancestor.calculate_hash();
+
+        // Uncommitted candidate block F1 at round 0.
+        let mut fork_1 = Block::new(1, ancestor.hash.clone(), vec![]);
+        fork_1.timestamp = ancestor.timestamp.saturating_add(MIN_BLOCK_INTERVAL_MS);
+        fork_1.producer = Some(address);
+        fork_1.nonce = 0;
+        fork_1.hash = fork_1.calculate_hash();
+
+        // Candidate child F2 at round 6 off uncommitted F1, stamped at the
+        // floor its round demands.
+        let round = 6u64;
+        let floor = fork_1
+            .timestamp
+            .saturating_add(MIN_BLOCK_INTERVAL_MS)
+            .saturating_add(ROUND_TIMEOUT_MS.saturating_mul(u128::from(round)));
+        let mut fork_2 = Block::new(2, fork_1.hash.clone(), vec![]);
+        fork_2.timestamp = floor;
+        fork_2.producer = Some(address);
+        fork_2.nonce = round;
+
+        let mut verdicts = Vec::new();
+        for seen in [Some(now_ms), Some(ancestor.timestamp), None] {
+            let engine = PoAEngine::new(PoAConfig::default(), None);
+            if let Some(at) = seen {
+                engine.note_block_seen(&ancestor.hash, at);
+            }
+            let priced =
+                match engine.validate_block(&fork_2, &[ancestor.clone(), fork_1.clone()], &state) {
+                    Ok(()) => false,
+                    Err(error) => round_not_elapsed(&error.0),
+                };
+            verdicts.push(priced);
+        }
+        assert_eq!(
+            verdicts[0], verdicts[1],
+            "a candidate fork must not be priced from this node's adoption record: {verdicts:?}"
+        );
+        assert_eq!(
+            verdicts[0], verdicts[2],
+            "a candidate fork must not be priced from this node's adoption record: {verdicts:?}"
+        );
+        assert!(
+            !verdicts[0],
+            "the floor is satisfied, so no sighting may refuse the claim"
+        );
+
+        // Same claim, stamped one millisecond under the floor: refused, whatever
+        // the sighting says. The deterministic half of the rule still bites.
+        let mut early = Block::new(2, fork_1.hash.clone(), vec![]);
+        early.timestamp = floor - 1;
+        early.producer = Some(address);
+        early.nonce = round;
+        for seen in [Some(now_ms), None] {
+            let engine = PoAEngine::new(PoAConfig::default(), None);
+            if let Some(at) = seen {
+                engine.note_block_seen(&ancestor.hash, at);
+            }
+            let error = engine
+                .validate_block(&early, &[ancestor.clone(), fork_1.clone()], &state)
+                .expect_err("a claim stamped under its floor must be refused");
+            assert!(
+                error.0.contains("claimed too early"),
+                "expected the floor refusal, got: {error:?}"
+            );
+        }
+    }
+}
+
+/// A round claim must be judged the same way by every node that holds the same
+/// parent and the same block.
+///
+/// RT-001: an eight-validator network on `915819c` forked permanently. Each node
+/// produced its own branch and every attempt to adopt a peer's branch was
+/// refused with `PoS leader round 1 claimed before it elapsed: only round 0 has
+/// been reached since the parent`, because the price of the claim was read from
+/// *when this node committed the parent* and not from the block. Three nodes
+/// holding one chain and one block must not reach three verdicts on it.
+#[cfg(test)]
+mod round_determinism_tests {
+    use super::round_not_elapsed;
+    use crate::consensus::pos::{PoSConfig, PoSEngine};
+    use crate::consensus::ConsensusEngine;
+    use crate::consensus::{MIN_BLOCK_INTERVAL_MS, ROUND_TIMEOUT_MS};
+    use crate::core::account::AccountState;
+    use crate::core::address::Address;
+    use crate::core::block::Block;
+    use crate::crypto::primitives::ValidatorKeys;
+
+    /// One fully consensus-ready validator, so validation reaches the round gate
+    /// instead of failing at the key checks.
+    fn ready_validator_state(keys: &ValidatorKeys) -> (AccountState, Address) {
+        let address = Address::from(keys.sig_key.public_key_bytes());
+        let mut state = AccountState::new();
+        state.add_validator(address, 2_000);
+        let bls = keys.bls_key.as_ref().expect("fixture has BLS keys");
+        let pop = bls.generate_pop(crate::core::transaction::DEFAULT_CHAIN_ID, &address);
+        if let Some(validator) = state.get_validator_mut(&address) {
+            validator.vrf_public_key = keys.vrf_key.public.to_bytes().to_vec();
+            validator.bls_public_key = bls.public_key.clone();
+            validator.pop_signature = pop;
+            validator.pq_public_key = keys
+                .pq_key
+                .as_ref()
+                .expect("fixture has PQ keys")
+                .public_key_bytes()
+                .to_vec();
+            validator.active = true;
+        }
+        (state, address)
+    }
+
+    /// The verdict of the round gate alone: whether validation refused the
+    /// claim, ignoring the checks behind it that this fixture does not satisfy.
+    fn round_verdict(
+        engine: &PoSEngine,
+        block: &Block,
+        parent: &Block,
+        state: &AccountState,
+    ) -> bool {
+        match engine.validate_block(block, std::slice::from_ref(parent), state) {
+            Ok(()) => false,
+            Err(error) => round_not_elapsed(&error.0),
+        }
+    }
+
+    #[test]
+    fn pos_round_verdict_does_not_depend_on_when_this_node_saw_the_parent() {
+        let keys = ValidatorKeys::generate().unwrap();
+        let (state, address) = ready_validator_state(&keys);
+        let now_ms = crate::consensus::now_millis();
+        let round = 1u64;
+
+        // A parent whose header stamp runs behind the wall clock by more than
+        // `ROUND_LADDER_SPAN_MS`, which is the ordinary state of a chain that
+        // produces slower than its slot schedule - the state the forked lab
+        // network was in.
+        let mut parent = Block::genesis();
+        parent.timestamp = now_ms.saturating_sub(600_000);
+        parent.hash = parent.calculate_hash();
+
+        let mut block = Block::new(1, parent.hash.clone(), vec![]);
+        block.slot = block.index;
+        block.timestamp = parent
+            .timestamp
+            .saturating_add(MIN_BLOCK_INTERVAL_MS)
+            .saturating_add(ROUND_TIMEOUT_MS.saturating_mul(u128::from(round)));
+        block.producer = Some(address);
+        block.nonce = round;
+        block.validator_set_hash = state
+            .consensus_validator_set_hash(block.chain_id)
+            .expect("fixture keys are consensus-ready");
+        block.sign(&keys.sig_key);
+
+        // Three honest nodes, one chain, one block. The only difference is
+        // their local record of when they adopted the parent.
+        let no_sighting = PoSEngine::new(PoSConfig::default(), None);
+        let adopted_now = PoSEngine::new(PoSConfig::default(), None);
+        adopted_now.note_block_seen(&parent.hash, now_ms);
+        let adopted_early = PoSEngine::new(PoSConfig::default(), None);
+        adopted_early.note_block_seen(&parent.hash, now_ms.saturating_sub(20_000));
+
+        let verdicts = [
+            round_verdict(&no_sighting, &block, &parent, &state),
+            round_verdict(&adopted_now, &block, &parent, &state),
+            round_verdict(&adopted_early, &block, &parent, &state),
+        ];
+        assert_eq!(
+            verdicts[0], verdicts[1],
+            "the round verdict must not move with this node's adoption time: \
+             {verdicts:?} (no sighting, adopted now, adopted early)"
+        );
+        assert_eq!(
+            verdicts[0], verdicts[2],
+            "the round verdict must not move with this node's adoption time: {verdicts:?}"
+        );
+
+        // And the price must be the one the shared header pair names: the
+        // parent is ten minutes older than the schedule, so every round up to
+        // the cap has elapsed for every node that holds it.
+        assert!(
+            !verdicts[0],
+            "a parent ten minutes behind the clock prices round {round} as elapsed"
+        );
+    }
+}

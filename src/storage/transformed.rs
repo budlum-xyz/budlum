@@ -1,4 +1,4 @@
-//! A0 - 2.0 → 3.0 transform contract (plan §CH A0 / §CJ.6).
+//! A0 - 2.0 → 3.0 transform contract.
 //!
 //! User product: content is **transformed** (format + ops) before the Three
 //! QR-video pipe. This module is the single mouth: classify → optional
@@ -12,7 +12,7 @@
 //!
 //! Real 2.0 codecs elsewhere still exist; new call sites must enter here so
 //! 3.0 never greps scattered helpers. Entropy-coded types **do not** try zlib
-//! (K-QR-SIKISTIR / spec section 16).
+//! (spec section 16).
 
 use crate::core::hash::calculate_hash_bytes;
 use flate2::write::ZlibEncoder;
@@ -287,7 +287,7 @@ pub struct TransformOpts {
     pub force_class: Option<ContentClass>,
     /// Apply shrink-only zlib here (default **false**).
     ///
-    /// Product rule: A1 pack already does K-QR-SIKISTIR. A0 default is
+    /// Product rule: A1 pack already does. A0 default is
     /// classify + pin only so the pipe does not double-zlib and so decode
     /// returns the same user bytes. Set true only for standalone 2.0 export
     /// paths that will not re-enter A1 compression.

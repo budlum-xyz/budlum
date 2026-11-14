@@ -1,0 +1,21 @@
+[package]
+name = "budlum-release"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.97.1"
+license = "LicenseRef-PolyForm-Shield-1.0.0"
+description = "Release signing: an SLH-DSA-SHAKE-256s signature over a SHA3-256 manifest of the release files."
+publish = false
+
+# Two dependencies, both pinned exactly: the FIPS 205 implementation the node
+# itself uses, and SHA3. Keys come from the operating system through std.
+[dependencies]
+slh-dsa = "=0.2.0-rc.5"
+sha3 = "=0.12.0"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "deny", priority = -1 }

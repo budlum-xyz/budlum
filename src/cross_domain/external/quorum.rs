@@ -2,9 +2,9 @@
 //! and disagree, what the chain does about it.
 //!
 //! WIRING: wired - `intake_quorum::QuorumRounds` runs these rules on the
-//! consensus intake. A domain with an installed `QuorumPolicy` (installed
-//! through `Blockchain::set_external_quorum_policy`, reached by the
-//! `bud_setExternalQuorumPolicy` RPC) sends every submission through a round
+//! consensus intake. A domain with an installed `QuorumPolicy` (installed by
+//! its registrant through the `ExternalDomainTx::SetQuorumPolicy`
+//! transaction, applied in block) sends every submission through a round
 //! keyed by external height; [`decide`] is called as answers accumulate and
 //! the round's state transitions are what `IntakeState::submit_to_round`
 //! acts on - commit on `AgreedClaim`, freeze the domain `Faulted` on a

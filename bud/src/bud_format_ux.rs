@@ -263,7 +263,7 @@ mod tests {
 
     #[test]
     fn long_video_behaviour_is_streaming() {
-        // long video: blocks arrive IN ORDER -> partial content is served immediately (K6)
+        // long video: blocks arrive IN ORDER -> partial content is served immediately
         let v = video_ux(2 * 1024 * 1024 * 1024);
         // the first blocks of segment 1 arrive first -> playback can start
         let first_segment_frames = qr_frame_count(256 * 1024 * 1024, 200, qr_capacity_bytes(40));

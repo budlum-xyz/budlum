@@ -581,8 +581,8 @@ impl bud_proof::relayer::SpentSet for InMemorySpentSet {
     }
 }
 
-/// The node-side ledger a relay consults: the chained alarm log (K3) and the
-/// derived quarantine ledger (K4). A fresh instance per CLI run records the
+/// The node-side ledger a relay consults: the chained alarm log and the
+/// derived quarantine ledger. A fresh instance per CLI run records the
 /// alarms the relay just produced and quarantines the offending program, so a
 /// later pass refuses it without a gossip round.
 struct NodeLedger {
@@ -603,7 +603,7 @@ fn alarm_kind_of(code: bud_proof::relayer::AlarmCode) -> bud_proof::alarm_log::A
     }
 }
 
-/// The alarm kinds that also quarantine the offending program (K4).
+/// The alarm kinds that also quarantine the offending program.
 fn quarantine_reason_of(
     kind: bud_proof::alarm_log::AlarmKind,
 ) -> Option<bud_proof::quarantine::QuarantineReason> {
@@ -710,7 +710,7 @@ fn write_signed_relay_report(req: &RelayRequest<'_>) -> Result<String, Box<dyn s
         .map_err(|e| format!("cannot read the system clock to stamp the report: {e}"))?;
 
     // The relay path: the spent-set check (S1) when a spent file is given, the
-    // re-execution check (K1) when asked, and the bare verify otherwise.
+    // re-execution check when asked, and the bare verify otherwise.
     let report = match &req.spent_set {
         Some(spent_set) => {
             let oracle = InMemorySpentSet::from_file(spent_set)?;
@@ -733,7 +733,7 @@ fn write_signed_relay_report(req: &RelayRequest<'_>) -> Result<String, Box<dyn s
         None => verify_and_report_at(&envelope, &expected_inputs, &program, req.activation, at),
     };
 
-    // Record the outcome into the node-side ledger (K3/K4) so the alarm chain
+    // Record the outcome into the node-side ledger so the alarm chain
     // and the derived ban are observable on every relay run.
     let mut ledger = NodeLedger {
         alarms: bud_proof::alarm_log::AlarmLog::new(),

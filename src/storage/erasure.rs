@@ -1563,7 +1563,7 @@ mod tests {
         ));
     }
 
-    /// P27-F06: a content_size that does not fit the data region is refused.
+    /// A content_size that does not fit the data region is refused.
     #[test]
     fn a_content_size_outside_the_data_region_is_refused() {
         let data: Vec<u8> = (0..=199u8).cycle().take(800).collect();
@@ -1583,7 +1583,7 @@ mod tests {
         ));
     }
 
-    /// P27-F07: two corrupted survivors must not block recovery while k clean
+    /// Two corrupted survivors must not block recovery while k clean
     /// shards remain.
     #[test]
     fn two_corrupted_survivors_do_not_block_recovery() {

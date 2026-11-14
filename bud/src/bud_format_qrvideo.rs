@@ -1,7 +1,7 @@
 //! B.U.D. 3.0 - QR-VIDEO DERIVATIVE LAYER (spec section 1 pipeline; independent derivation)
 //!
 //! The question behind it: "what if the content, once compressed, were sent as a QR video?"
-//! Spec measurement (K5/K10/K13): QR video CARRIES LOSSLESSLY but IS NOT STORAGE -
+//! Spec measurement: QR video CARRIES LOSSLESSLY but IS NOT STORAGE -
 //! in every regime it grows the compressed bytes 12-18x; it is a derivative, it is not kept, it is produced on demand.
 //!
 //! This module encodes the pipeline:
@@ -10,7 +10,7 @@
 //!   -> frame packing -> QR byte-mode frame -> video frame.
 //!   RECEIVE: parse the stream header -> decode frame -> drop pool -> peel -> verify the digest
 //!   -> decompress -> check the original length.
-//! Gate: K-QR-GENISLEME - a QR-video kind cannot be written to persistent storage (a derivative stays a derivative).
+//! Gate: - a QR-video kind cannot be written to persistent storage (a derivative stays a derivative).
 
 #![forbid(unsafe_code)]
 
@@ -47,7 +47,7 @@ const ELIM_BUDGET_BYTES: usize = 64 * 1024 * 1024;
 
 /// The systematic carousel (spec section 3-new): first k blocks in order (a drop = a single block),
 /// then k repair drops of uniform degree 4-24; the loop is endless.
-/// K6 proof: with zero loss the overhead is 1.00 and arrival is ordered (streaming playback).
+/// proof: with zero loss the overhead is 1.00 and arrival is ordered (streaming playback).
 #[derive(Debug, Clone)]
 pub struct Karusel {
     pub blocks: Vec<Vec<u8>>, // content blocks (BLOCK sized, the last one short)
@@ -346,7 +346,7 @@ impl KaruselDecoder {
     }
 
     /// Take a packed frame (the pack output): parse the header, process the drop.
-    /// A corrupt/foreign frame is dropped silently (K1: no wrong byte leaks).
+    /// A corrupt/foreign frame is dropped silently (no wrong byte leaks).
     pub fn add_frame(&mut self, frame: &[u8]) -> bool {
         if frame.len() < DAMLA_HDR_LEN || &frame[10..20] != b"BDLMQRV1AB" {
             return false;
@@ -515,13 +515,13 @@ impl KaruselDecoder {
     }
 }
 
-/// An attempt to write the derivative to storage -> REFUSED (the K-QR-GENISLEME gate).
+/// An attempt to write the derivative to storage -> REFUSED (the gate).
 /// A QR video is a derivative; it cannot enter `held_bytes`.
 pub fn qr_cannot_be_stored() -> Result<(), &'static str> {
     Err("K-QR-GENISLEME: a QR video is a derivative, it cannot be written to persistent storage")
 }
 
-/// The derivative growth ratio (video/raw) - the proof that it is >1 in every regime (K13).
+/// The derivative growth ratio (video/raw) - the proof that it is >1 in every regime.
 pub fn derivative_growth(derived_len: usize, original_len: usize) -> f64 {
     if original_len == 0 {
         return 1.0;
@@ -683,7 +683,7 @@ mod tests {
 
     #[test]
     fn derivative_growth_is_not_storage() {
-        // The QR-video layer (an uncompressed carousel) grows the body -> it is a derivative (K13)
+        // The QR-video layer (an uncompressed carousel) grows the body -> it is a derivative
         let data = b"compressible ".repeat(300);
         let derived = derive_stream(&data, 0, 1).unwrap();
         let growth = derivative_growth(derived.len(), data.len());
@@ -721,7 +721,7 @@ mod tests {
 
     #[test]
     fn decoder_completes_a_lossy_channel_with_repairs() {
-        // 30% systematic frame loss -> the repair drops close it (the K1 pattern)
+        // 30% systematic frame loss -> the repair drops close it (the pattern)
         let data: Vec<u8> = (7u8..=200).cycle().take(11 * BLOCK).collect();
         let k = Karusel::new(&data).unwrap();
         let mut dec = decoder_for(&data);

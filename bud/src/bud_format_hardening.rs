@@ -7,7 +7,7 @@
 //!    which means spam plus DoS. Hardening: a creation-fee floor, a step fee
 //!    floor and a spam gate.
 //! 2. **Recipe fabrication** - the claim "I found a recipe for organic content"
-//!    (pigeonhole K13). Hardening: a recipe verification gate, with no
+//!    (pigeonhole). Hardening: a recipe verification gate, with no
 //!    acceptance before the commitment matches.
 //! 3. **Derivative safety for QR** - the derivative is not stored, but its
 //!    commitment must still be verified. Hardening: a derivative commitment
@@ -62,7 +62,7 @@ pub fn revenue_guarantee(creation_fee_usd: f64, nft_per_tb: f64, ceiling: f64) -
 // ============================ 2. RECIPE FABRICATION HARDENING ============================
 
 /// Recipe verification gate: NO acceptance until the `produce` function meets
-/// the commitment. Pigeonhole (K13): a recipe CANNOT be fabricated for organic
+/// the commitment. Pigeonhole: a recipe CANNOT be fabricated for organic
 /// content - 200k attempts, 0 matches.
 pub fn verify_recipe(
     produce_fn: impl FnOnce(&[u8]) -> Vec<u8>,
@@ -74,7 +74,7 @@ pub fn verify_recipe(
     &cid == expected_commitment
 }
 
-/// Canary: 200k random recipe attempts must not match an organic target (K13).
+/// Canary: 200k random recipe attempts must not match an organic target.
 pub fn recipe_is_unfabricable_canary(target_bytes: &[u8], attempts: usize) -> bool {
     let target = crate::bud_format_container::content_id(target_bytes);
     for i in 0..attempts {
@@ -127,7 +127,7 @@ pub fn hit_the_floor(components: &CostComponents, ceiling: f64) -> bool {
 
 /// Honesty: production CPU cannot be counted as ZERO (a validator burns
 /// electricity), so this function REFUSES when production CPU is 0 (cost does
-/// not vanish, it moves to the right pocket - K14b).
+/// not vanish, it moves to the right pocket -).
 pub fn production_cpu_is_not_zero(components: &CostComponents) -> bool {
     components.production_cpu_usd_per_tb > 0.0
 }

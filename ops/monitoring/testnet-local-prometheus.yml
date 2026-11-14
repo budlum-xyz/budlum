@@ -1,0 +1,21 @@
+# Prometheus for ops/testnet-local.yml: the four validators and the RPC node.
+global:
+  scrape_interval: 15s
+  evaluation_interval: 30s
+
+rule_files:
+  - /etc/prometheus/alerts.yml
+
+scrape_configs:
+  - job_name: budlum-testnet-local
+    static_configs:
+      - targets: ["validator1:9090"]
+        labels: { node: "validator1", network: "testnet-local" }
+      - targets: ["validator2:9090"]
+        labels: { node: "validator2", network: "testnet-local" }
+      - targets: ["validator3:9090"]
+        labels: { node: "validator3", network: "testnet-local" }
+      - targets: ["validator4:9090"]
+        labels: { node: "validator4", network: "testnet-local" }
+      - targets: ["rpc:9090"]
+        labels: { node: "rpc", network: "testnet-local" }

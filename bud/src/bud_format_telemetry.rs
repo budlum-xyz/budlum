@@ -1,4 +1,4 @@
-//! B.U.D. 2.0 - ACCESS TELEMETRY (the culling stream - completing K106).
+//! B.U.D. 2.0 - ACCESS TELEMETRY (the culling stream - completing).
 //!
 //! Remaining work item #2: "the culling telemetry stream - feeding the access
 //! counter from the runner/production side."

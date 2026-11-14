@@ -1,4 +1,4 @@
-//! G1 payload encryption (plan §CH T11 / G1).
+//! G1 payload encryption (G1).
 //!
 //! Content bytes are sealed **before** A1 pack so carousel drops and optical
 //! frames never carry plaintext on the wire. The A1 container then stores
@@ -308,7 +308,7 @@ mod tests {
         assert!(open_payload(&key, &body).unwrap().is_empty());
     }
 
-    /// P27-F08 (b): open refuses a blob larger than any seal can produce.
+    /// (b): open refuses a blob larger than any seal can produce.
     #[test]
     fn open_refuses_a_blob_past_the_seal_cap() {
         let key = PayloadKey::derive(b"cap");

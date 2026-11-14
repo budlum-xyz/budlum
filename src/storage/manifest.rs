@@ -6,9 +6,9 @@
 //! Per-shard `ContentId`s and a deterministic `manifest_id` derived from
 //! Them. This matches the existing project rule "the chain carries the
 //! Proof/address of data, not the data itself" (`BudZKVM` STARK proof
-//! Analogy, plan §3.1).
+//! Analogy).
 //!
-//! Per the data-sovereignty rule (plan §0.5): the manifest is
+//! Per the data-sovereignty rule: the manifest is
 //! Fully reconstructable from public on-chain state by any independent
 //! Node. No "Budlum Inc. indexer" service is required.
 

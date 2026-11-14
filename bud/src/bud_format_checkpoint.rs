@@ -2,7 +2,7 @@
 //! (2026-08-16).
 //!
 //! Research: inspiration 2 D (a durable state machine plus checkpoint
-//! conformance), S.123 (decentralised agent coordination) and K53/K67 (the
+//! conformance), S.123 (decentralised agent coordination) and (the
 //! SEC 17a-4 audit trail: a hash chain plus a timestamp, an identity and a
 //! cryptographic proof). B.U.D.'s multi-format multi-ratio consensus is carried
 //! by a durable checkpoint: the chosen ratio and signature of every format is
@@ -55,7 +55,7 @@ impl Checkpoint {
         cp
     }
 
-    /// Domain-tagged cryptographic hash (the K3 pattern).
+    /// Domain-tagged cryptographic hash (the pattern).
     pub fn compute_hash(&self) -> [u8; 32] {
         let mut h = Sha3_256::new();
         h.update(Self::DOMAIN);

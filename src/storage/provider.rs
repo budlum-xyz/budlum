@@ -410,7 +410,7 @@ mod tests {
     }
 
     /// The put receipt hashes the length as a fixed u64, so it is the same on
-    /// 32 and 64 bit targets (P26-F12).
+    /// 32 and 64 bit targets.
     #[test]
     fn put_receipt_commitment_uses_fixed_width_length() {
         let (manifest, bytes) = manifest_and_bytes();

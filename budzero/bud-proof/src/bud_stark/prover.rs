@@ -1,7 +1,7 @@
 use p3_air::symbolic::{get_symbolic_constraints, AirLayout, SymbolicAirBuilder};
 use p3_air::{Air, RowWindow};
 use p3_challenger::{CanObserve, FieldChallenger};
-use p3_commit::{Pcs, PolynomialSpace};
+use p3_commit::{OpeningRequest, Pcs, PolynomialSpace, UnivariateStarkPcs};
 use p3_field::{PackedFieldExtension, PackedValue, PrimeCharacteristicRing};
 use p3_matrix::dense::{RowMajorMatrix, RowMajorMatrixView};
 use p3_matrix::Matrix;
@@ -159,8 +159,11 @@ where
     //      Trace_commit contains the root of the tree
     //      Trace_data contains the entire tree.
     //          - trace_data.leaves is the matrix containing `ET`.
-    let (trace_commit, trace_data) =
-        info_span!("commit to trace data").in_scope(|| pcs.commit([(ext_trace_domain, trace)]));
+    #[allow(clippy::expect_used)]
+    let (trace_commit, trace_data) = info_span!("commit to trace data").in_scope(|| {
+        pcs.commit([(ext_trace_domain, trace)])
+            .expect("trace fits FRI input bounds")
+    });
 
     // Preprocessed commitment and prover data (if any).
     let (preprocessed_commit, preprocessed_data_ref) = preprocessed
@@ -204,8 +207,11 @@ where
         random_challenges.push(rand_2);
         random_challenges.push(rand_3);
         let aux_trace = gen(&random_challenges);
-        let (commit, data) = info_span!("commit to aux trace")
-            .in_scope(|| pcs.commit([(ext_trace_domain, aux_trace)]));
+        #[allow(clippy::expect_used)]
+        let (commit, data) = info_span!("commit to aux trace").in_scope(|| {
+            pcs.commit([(ext_trace_domain, aux_trace)])
+                .expect("auxiliary trace fits FRI input bounds")
+        });
         challenger.observe(commit.clone());
         (Some(commit), Some(data))
     } else {
@@ -277,7 +283,7 @@ where
     // Vector space and so separating each element of `E` into `e + 1 = [E: F]` elements of `F`.
     //
     // Domain lies in the base field `F`; split
-    // `Q(x)` into `e + 1` polynomials `Q_0(x), ... , Q_e(x)` each contained in `F`.
+    // `Q(x)` into `e + 1` polynomials `Q_0(x), ..., Q_e(x)` each contained in `F`.
     // Such that `Q(x) = [Q_0(x), ... ,Q_e(x)]` holds for all `x` in `F`.
     let quotient_flat = RowMajorMatrix::new_col(quotient_values).flatten_to_base();
 
@@ -299,8 +305,12 @@ where
     //      Quotient_commit contains the root of the tree
     //      Quotient_data contains the entire tree.
     //          - quotient_data.leaves is a pair of matrices containing the `q_i0(x)` and `q_i1(x)`.
-    let (quotient_commit, quotient_data) = info_span!("commit to quotient poly chunks")
-        .in_scope(|| pcs.commit_quotient(quotient_domain, quotient_flat, num_quotient_chunks));
+    #[allow(clippy::expect_used)]
+    let (quotient_commit, quotient_data) =
+        info_span!("commit to quotient poly chunks").in_scope(|| {
+            pcs.commit_quotient(quotient_domain, quotient_flat, num_quotient_chunks)
+                .expect("quotient chunks fit FRI input bounds")
+        });
     challenger.observe(quotient_commit.clone());
 
     // If zk is enabled, we generate random extension field values of the size of the randomized trace. If `n` is the degree of the initial trace,
@@ -336,8 +346,8 @@ where
         // flag and the commitment come from different impls, so a mismatch
         // must degrade rather than abort the prover.
         match pcs.get_opt_randomization_poly_commitment(core::iter::once(ext_trace_domain)) {
-            Some((r_commit, r_data)) => (Some(r_commit), Some(r_data)),
-            None => (None, None),
+            Ok(Some((r_commit, r_data))) => (Some(r_commit), Some(r_data)),
+            Ok(None) | Err(_) => (None, None),
         }
     } else {
         (None, None)
@@ -379,32 +389,42 @@ where
         .expect("the trace domain supports next_point");
 
     let is_random = opt_r_data.is_some();
+    let trace_idx = usize::from(is_random);
+    let aux_idx = if aux_data.is_some() {
+        trace_idx + 1
+    } else {
+        trace_idx
+    };
+    let quotient_idx = aux_idx + 1;
+    let preprocessed_idx = quotient_idx + 1;
     let main_next = !air.main_next_row_columns().is_empty();
     let pre_next = !air.preprocessed_next_row_columns().is_empty();
     let (opened_values, opening_proof) = info_span!("open").in_scope(|| {
-        let round0 = opt_r_data.as_ref().map(|r_data| (r_data, vec![vec![zeta]]));
+        let round0 = opt_r_data
+            .as_ref()
+            .map(|r_data| OpeningRequest::from((r_data, vec![vec![zeta]])));
         let round1_points = if main_next {
             vec![zeta, zeta_next]
         } else {
             vec![zeta]
         };
-        let round1 = (&trace_data, vec![round1_points]);
+        let round1 = OpeningRequest::from((&trace_data, vec![round1_points]));
         let round1_aux = aux_data.as_ref().map(|data| {
             let aux_points = if main_next {
                 vec![zeta, zeta_next]
             } else {
                 vec![zeta]
             };
-            (data, vec![aux_points])
+            OpeningRequest::from((data, vec![aux_points]))
         });
-        let round2 = (&quotient_data, vec![vec![zeta]; num_quotient_chunks]); // open every chunk at zeta
+        let round2 = OpeningRequest::from((&quotient_data, vec![vec![zeta]; num_quotient_chunks])); // open every chunk at zeta
         let round3 = preprocessed_data_ref.map(|data| {
             let pre_points = if pre_next {
                 vec![zeta, zeta_next]
             } else {
                 vec![zeta]
             };
-            (data, vec![pre_points])
+            OpeningRequest::from((data, vec![pre_points]))
         });
 
         let rounds = round0
@@ -415,24 +435,14 @@ where
             .chain(round3)
             .collect();
 
-        pcs.open_with_preprocessing(rounds, &mut challenger, preprocessed_data_ref.is_some())
+        #[allow(clippy::expect_used)]
+        pcs.open_with_preprocessing(
+            rounds,
+            &mut challenger,
+            preprocessed_data_ref.map(|_| preprocessed_idx),
+        )
+        .expect("opening rounds fit FRI input bounds")
     });
-    let trace_idx = SC::Pcs::TRACE_IDX;
-    let aux_idx = if aux_data.is_some() {
-        trace_idx + 1
-    } else {
-        trace_idx
-    };
-    let quotient_idx = if aux_data.is_some() {
-        SC::Pcs::QUOTIENT_IDX + 1
-    } else {
-        SC::Pcs::QUOTIENT_IDX
-    };
-    let preprocessed_idx = if aux_data.is_some() {
-        SC::Pcs::PREPROCESSED_TRACE_IDX + 1
-    } else {
-        SC::Pcs::PREPROCESSED_TRACE_IDX
-    };
 
     let trace_local = opened_values[trace_idx][0][0].clone();
     let trace_next = if main_next {

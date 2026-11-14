@@ -31,6 +31,7 @@ pub mod poa_membership;
 pub mod poa_onboarding;
 pub mod quarantine_ledger;
 pub mod role;
+pub mod validator_profile;
 
 pub use identity::{
     address_of_did, authorize_recovery, credential_id, did_of, disclosure_proof,
@@ -39,7 +40,7 @@ pub use identity::{
     IdentityOp, IdentityRecord, IdentityRegistry, IdentityTx, MethodKind, VerificationMethod,
     DID_METHOD_NAME,
 };
-// BLG-0104 (P04-F22): the signing-digest helpers and the wallet-side fill
+// The signing-digest helpers and the wallet-side fill
 // API have no production caller in this tree - test-only until a wallet
 // binary consumes them (idle-code policy: test-only, not shipped).
 #[cfg(test)]
@@ -54,7 +55,7 @@ pub use invalid_vote::InvalidVoteTracker;
 pub use liveness::LivenessTracker;
 
 pub use evidence::{EvidenceError, ProofProvenance, SlashingProof, SlashingReport};
-pub use params::RegistryParams;
+pub use params::{ApplicationFeeSplit, RegistryParams};
 pub use permissionless::{
     MemberStatus, PermissionlessRegistry, Registration, RegistryError, SlashOutcome,
     SlashingCondition, MIN_REGISTRATION_STAKE, UNBONDING_EPOCHS,

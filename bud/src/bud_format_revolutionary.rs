@@ -581,7 +581,7 @@ mod tests {
         }
     }
 
-    /// BLG-0650: a secret value with a character outside the token set was
+    /// A secret value with a character outside the token set was
     /// cut there and the rest leaked, and keys such as DB_PASSWORD were not
     /// recognised.
     #[test]

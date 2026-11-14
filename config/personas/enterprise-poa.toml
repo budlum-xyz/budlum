@@ -62,7 +62,5 @@ type = "poa"
 min_stake = 1000
 
 [features]
-# Org mainnet v1 policy: keep off until separately reviewed (ch12 blocker 6).
-governance = false
-zkvm_contracts = false
+# Pruning remains off until separately reviewed (ch12 blocker 6).
 pruning = false

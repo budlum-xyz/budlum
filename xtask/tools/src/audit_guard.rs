@@ -40,9 +40,9 @@ const ACTIVE_PREFIXES: &[&str] = &[
     "bud/",
     "budzero/",
     "xtask/",
-    // BLG-1074 (P60-F07): `contracts/` is compile-only in CI
+    // `contracts/` is compile-only in CI
     // (solidity.yml) and deliberately un-deployed - BudlumFinalityVerifier
-    // is quarantined behind its F01-F06 fixes. The guard watches the path
+    // is quarantined behind its fixes. The guard watches the path
     // for action-pin drift like any other active source tree; watching it
     // is not a statement that the contract ships.
     "contracts/",

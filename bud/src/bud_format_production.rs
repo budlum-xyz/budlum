@@ -5,11 +5,11 @@
 //! `.bud` container can carry a production record AT THE MOMENT OF PRODUCTION,
 //! holding the real measured ratio, the pipeline identity, the original and
 //! stored sizes, and the `content_root` anchor. The record is hashed with a
-//! domain-tagged SHA3 (K3) and can be written into the checkpoint chain.
+//! domain-tagged SHA3 and can be written into the checkpoint chain.
 //!
 //! Verification, on chain: anyone can recompute `record_hash`, and `verify`
 //! checks ratio consistency, that `claimed_ratio` is approximately
-//! `original_len / stored_len`. The K19 gate: an unmeasured, inflated ratio
+//! `original_len / stored_len`. The gate: an unmeasured, inflated ratio
 //! claim, such as 17.19x against a real 7.83x, is REFUSED. A production proof
 //! is valid only when it comes from REAL production.
 //!
@@ -29,7 +29,7 @@ pub struct BudProductionRecord {
     pub pipe: String,
     pub original_len: u64,
     pub stored_len: u64,
-    pub payload_root: [u8; 32], // content_id(original), the K3 anchor
+    pub payload_root: [u8; 32], // content_id(original), the anchor
     pub ts_unix: u64,
     pub claimed_ratio: f64, // the ratio MEASURED during production, not invented
 }
@@ -62,7 +62,7 @@ impl BudProductionRecord {
         }
     }
 
-    /// The domain-tagged cryptographic hash, in the K3 pattern; an identity
+    /// The domain-tagged cryptographic hash, in the pattern; an identity
     /// writable on chain.
     pub fn record_hash(&self) -> [u8; 32] {
         let mut h = Sha3_256::new();
@@ -79,7 +79,7 @@ impl BudProductionRecord {
     }
 
     /// Consistency: does the ratio claim match the sizes, and are the values
-    /// valid (K38)?
+    /// valid ?
     pub fn verify(&self) -> bool {
         if !self.claimed_ratio.is_finite() || self.claimed_ratio <= 0.0 {
             return false;
@@ -160,7 +160,7 @@ impl BudProductionRecord {
         Some(rec)
     }
 
-    /// The K19 gate: a claim cannot exceed `max_multiple` times the value in the
+    /// The gate: a claim cannot exceed `max_multiple` times the value in the
     /// measurement table. Unmeasured exaggeration, an invented ratio, is REFUSED.
     pub fn plausible_against(&self, measured: f64, max_multiple: f64) -> bool {
         if !measured.is_finite() || measured <= 0.0 {
@@ -173,7 +173,7 @@ impl BudProductionRecord {
 pub struct ProductionGates;
 
 impl ProductionGates {
-    /// Is the record consistent and plausible against the measured ratio (K19)?
+    /// Is the record consistent and plausible against the measured ratio ?
     pub fn k_bud_production(rec: &BudProductionRecord, measured: f64) -> Result<(), &'static str> {
         if !rec.verify() {
             return Err("K-BUD-PRODUCTION: record inconsistent (ratio != len ratio)");
@@ -224,7 +224,7 @@ mod tests {
 
     #[test]
     fn production_ratio_gate_rejects_fake() {
-        // K19: a claim of 17.19x against a measured 7.83x is REFUSED, as invented.
+        // A claim of 17.19x against a measured 7.83x is REFUSED, as invented.
         let data = b"x".repeat(1000);
         let rec = BudProductionRecord::new(FormatCodec::Json, "structural+zstd19", &data, 58, 1);
         // 1000/58 is 17.24x, above 1.5 times the measured JSON figure of 7.83x, so

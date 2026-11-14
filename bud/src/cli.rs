@@ -1,5 +1,5 @@
 //! .bud CLI - encode/decode, ratio proof, bench, bft vote
-//! V7 plus K38: the .bud v2 container API (structural chunking plus whole-file
+//! V7 plus: the .bud v2 container API (structural chunking plus whole-file
 //! serialisation).
 
 #![forbid(unsafe_code)]
@@ -45,7 +45,7 @@ impl BudCli {
 
     /// Writes a .bud v2 container: structural chunking (compact, min_chunk)
     /// plus a serialised `BudV2File`. The losslessness guarantee is
-    /// `decode_container(encode_container(..)) == original` (K38).
+    /// `decode_container(encode_container) == original`.
     pub fn encode_container(
         kind: StructuralKind,
         codec: FormatCodec,
@@ -59,7 +59,7 @@ impl BudCli {
 
     /// Reads a .bud v2 container: verifies strictly (the header, the
     /// content_id of every chunk and the root) and then joins them. A corrupt
-    /// input or an input bomb gives `None`, never a panic (K38).
+    /// input or an input bomb gives `None`, never a panic.
     pub fn decode_container(bytes: &[u8]) -> Option<Vec<u8>> {
         let file = BudV2File::decode(bytes)?;
         let kind = file.header.codec.structural_kind();
@@ -107,7 +107,7 @@ mod tests {
     }
     #[test]
     fn cli_container_roundtrip_all_kinds() {
-        // K38: for every kind, encode_container then decode_container gives
+        // For every kind, encode_container then decode_container gives
         // back the original.
         let json = br#"[{"a":1},{"a":2},{"a":3},{"a":4}]"#;
         let csv = b"a,b,c\n1,2,3\n4,5,6\n7,8,9\n";

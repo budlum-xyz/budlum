@@ -581,7 +581,7 @@ mod open_deal {
         let digest = open_deal_consent_digest(chain_id, payer_address, nonce, body);
         GrantAuthorization {
             owner_key: op.public_key_bytes(),
-            signature: op.sign(&digest).to_vec(),
+            signature: op.sign(crate::crypto::ctx::STORAGE_V2, &digest).to_vec(),
         }
     }
 

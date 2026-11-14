@@ -1304,7 +1304,7 @@ mod tests {
         assert_eq!(near.rate_scaled(720), 50 * ACCESS_SCALE);
     }
 
-    /// P27-F01: reads closer together than one half-life must still decay.
+    /// Reads closer together than one half-life must still decay.
     #[test]
     fn steady_reads_inside_one_half_life_still_decay() {
         let mut a = AccessEstimate::new(0);
@@ -1329,7 +1329,7 @@ mod tests {
         assert!(derived.rate_scaled(7_200) / ACCESS_SCALE < 30);
     }
 
-    /// P27-F02: a bad event must not drop the valid events after it.
+    /// A bad event must not drop the valid events after it.
     #[test]
     fn a_bad_event_does_not_truncate_later_valid_events() {
         let events = [

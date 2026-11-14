@@ -1,5 +1,6 @@
 use crate::core::address::Address;
 use crate::core::hash::hash_fields_bytes;
+use crate::crypto::facts::QuantumClass;
 use crate::domain::types::{DomainId, Hash32};
 use serde::{Deserialize, Serialize};
 
@@ -56,7 +57,7 @@ pub struct CrossDomainMessage {
     pub payload_hash: Hash32,
     pub kind: MessageKind,
     pub expiry_height: u64,
-    /// BLG-0113 (P05-F06): the sender's authentication over
+    /// The sender's authentication over
     /// [`CrossDomainMessage::message_id`]. Envelope, not payload - the id
     /// binds the fields above and nothing here, exactly like a
     /// transaction's signature over its signing hash. An empty envelope is
@@ -65,7 +66,7 @@ pub struct CrossDomainMessage {
     /// arbitrary messages (or pre-register a predictable lock id).
     ///
     /// IDENTITY: excluded - the key is the envelope that authenticates the
-    /// id, and [`CrossDomainMessage::verify_sender_signature`] requires it
+    /// id, and [`CrossDomainMessage::verify_sender_signature_in`] requires it
     /// to derive the `sender` the id already binds, so a different key
     /// under the same id proves control of nothing new.
     #[serde(default)]
@@ -75,6 +76,48 @@ pub struct CrossDomainMessage {
     /// `sender_public_key` and the id instead.
     #[serde(default)]
     pub sender_signature: Vec<u8>,
+    /// The quantum class of the source domain when the message was relayed
+    /// the weakest class among the schemes its adapter has observed,
+    /// `None` while nothing is observed. A receiver reads it from the message
+    /// and does not have to look the source domain up.
+    ///
+    /// IDENTITY: included - the id commits to it (envelope version 3).
+    ///
+    /// SIGNING: included - the relay transaction's preimage carries it, and
+    /// the door refuses a class that differs from the one the chain derives
+    /// for the source domain.
+    #[serde(default)]
+    pub source_quantum_class: Option<QuantumClass>,
+}
+
+/// The envelope version: the tag the message id is hashed under. Version 3
+/// added `source_quantum_class`.
+/// WIRING: cross-domain surface - the relayer/bridge doors that read it land with their wiring.
+pub const MESSAGE_ENVELOPE_VERSION: u8 = 3;
+
+/// The byte a class takes in the id and in the signed relay preimage:
+/// `0` for no class, `1` classical, `2` lattice, `3` hash.
+#[must_use]
+pub const fn quantum_class_code(class: Option<QuantumClass>) -> u8 {
+    match class {
+        None => 0,
+        Some(QuantumClass::Classical) => 1,
+        Some(QuantumClass::Lattice) => 2,
+        Some(QuantumClass::Hash) => 3,
+    }
+}
+
+/// The inverse of [`quantum_class_code`]; `None` for a byte that names no
+/// class (the caller refuses it rather than reading it as "no class").
+#[must_use]
+pub const fn quantum_class_from_code(code: u8) -> Option<Option<QuantumClass>> {
+    match code {
+        0 => Some(None),
+        1 => Some(Some(QuantumClass::Classical)),
+        2 => Some(Some(QuantumClass::Lattice)),
+        3 => Some(Some(QuantumClass::Hash)),
+        _ => None,
+    }
 }
 
 impl CrossDomainMessage {
@@ -94,9 +137,20 @@ impl CrossDomainMessage {
             expiry_height: params.expiry_height,
             sender_public_key: Vec::new(),
             sender_signature: Vec::new(),
+            source_quantum_class: None,
         };
         message.message_id = message.calculate_message_id();
         message
+    }
+
+    /// The message with the source domain's quantum class set and the id
+    /// recomputed over it.
+    #[must_use]
+    /// WIRING: cross-domain surface - the relayer/bridge doors that read it land with their wiring.
+    pub fn with_source_quantum_class(mut self, class: Option<QuantumClass>) -> Self {
+        self.source_quantum_class = class;
+        self.message_id = self.calculate_message_id();
+        self
     }
 
     pub fn new_correlated(params: CrossDomainMessageParams, correlation_id: MessageId) -> Self {
@@ -107,7 +161,7 @@ impl CrossDomainMessage {
     }
 
     /// Signs [`CrossDomainMessage::message_id`] with the sender's Ed25519
-    /// account key (BLG-0113/P05-F06). The V4 derivation makes the key
+    /// account key. The V4 derivation makes the key
     /// bytes the address itself, so the envelope is self-identifying.
     ///
     /// WIRING: exposed for the sender side of the relayed-message door:
@@ -119,7 +173,7 @@ impl CrossDomainMessage {
         self.sender_signature = keypair.sign(&self.message_id).to_vec();
     }
 
-    /// Verifies the sender envelope (BLG-0113/P05-F06): the signature must
+    /// Verifies the sender envelope: the signature must
     /// open over [`CrossDomainMessage::message_id`] under a key that IS the
     /// declared sender - Ed25519 (the key bytes are the address) or
     /// ML-DSA-87 (the wallet address derives from the key). An empty
@@ -133,12 +187,30 @@ impl CrossDomainMessage {
     /// WIRING: called by `register_relayed_on_state`, the body of the
     /// `CrossDomainMessage` transaction, and by the relayer suite that asserts
     /// an unsigned or wrongly signed message is refused.
+    /// Convenience: kept for the CLI and stateless tests; relayed chain ingress
+    /// calls [`Self::verify_sender_signature_in`].
+    #[cfg(test)]
     pub fn verify_sender_signature(&self) -> Result<(), String> {
+        self.verify_sender_signature_in(&crate::crypto::scheme::SchemeStatusRegistry::genesis())
+    }
+
+    /// WIRING: wired into `register_relayed_on_state` so relayed cross-domain
+    /// messages consult the chain's live `SchemeStatusRegistry`.
+    pub fn verify_sender_signature_in(
+        &self,
+        scheme_registry: &crate::crypto::scheme::SchemeStatusRegistry,
+    ) -> Result<(), String> {
         if self.sender_public_key.is_empty() || self.sender_signature.is_empty() {
             return Err("cross-domain message carries no sender signature".into());
         }
+        if self.message_id != self.calculate_message_id() {
+            return Err("message_id does not match message fields".into());
+        }
         // Ed25519: the 32-byte address IS the public key (V4 derivation).
         if self.sender_public_key.len() == 32 {
+            if !scheme_registry.scheme_verifies(crate::crypto::scheme::SchemeId::ED25519) {
+                return Err("message sender scheme Ed25519 is disabled".to_string());
+            }
             let mut pk = [0u8; 32];
             pk.copy_from_slice(&self.sender_public_key);
             if Address::from(pk) != self.sender {
@@ -159,7 +231,9 @@ impl CrossDomainMessage {
         if addr != self.sender {
             return Err("message signer is not the declared sender".into());
         }
-        crate::crypto::primitives::verify_ml_dsa_87_signature(
+        crate::crypto::primitives::verify_ml_dsa_87_signature_in(
+            scheme_registry,
+            crate::crypto::ctx::CROSS_DOMAIN_V1,
             &self.message_id,
             &self.sender_signature,
             &self.sender_public_key,
@@ -169,13 +243,13 @@ impl CrossDomainMessage {
 
     pub fn calculate_message_id(&self) -> MessageId {
         let kind = self.kind.as_bytes();
-        // BLG-0121 (P05-F14): presence is folded in through the shared
+        // Presence is folded in through the shared
         // `presence_tagged` helper - `None` and `Some([0; 32])` used to
         // hash identically (the zero-id collision class the header fix
         // closed in core/hash.rs:22).
         let correlation_id = crate::core::hash::presence_tagged(self.correlation_id);
         hash_fields_bytes(&[
-            b"BDLM_CROSS_DOMAIN_MESSAGE_V2",
+            b"BDLM_CROSS_DOMAIN_MESSAGE_V3",
             &correlation_id,
             &self.source_domain.to_le_bytes(),
             &self.target_domain.to_le_bytes(),
@@ -187,6 +261,7 @@ impl CrossDomainMessage {
             &self.payload_hash,
             &kind,
             &self.expiry_height.to_le_bytes(),
+            &[quantum_class_code(self.source_quantum_class)],
         ])
     }
 
@@ -273,11 +348,79 @@ pub fn register_relayed_on_state(
         .registry
         .ensure_active_relayer(&relayer)
         .map_err(|e| e.to_string())?;
-    // BLG-0113 (P05-F06): the sender must SIGN the message id. The
+    // The sender must SIGN the message id. The
     // self-declared field alone let anybody name an active relayer and
     // register arbitrary messages - or pre-register a predictable lock id out
     // from under the real one.
-    message.verify_sender_signature()?;
+    message.verify_sender_signature_in(&state.scheme_registry)?;
+    register_relayed_cross_domain_on_state(state, message)
+}
+
+/// Register a message a relayer supplied, with the two gates that belong to
+/// that ingress and not to chain-built messages.
+///
+/// A relayer-supplied message proves nothing about its source domain: the
+/// domain, the height and the class are all the relayer's word. The class is
+/// the one field the record claims to know about the source domain, so it is
+/// derived from what that domain's adapter observed rather than read from the
+/// payload, and the quantum-alarm intake gate applies to it exactly as it does
+/// at delivery. Chain-built messages reach
+/// [`register_cross_domain_on_state`] directly and skip this.
+///
+/// # Errors
+///
+/// A class that differs from the one the chain derives for the source domain,
+/// the alarm's hold on classical-class messages, and
+/// [`register_cross_domain_on_state`]'s refusals.
+pub fn register_relayed_cross_domain_on_state(
+    state: &mut crate::core::account::AccountState,
+    message: &CrossDomainMessage,
+) -> Result<(), String> {
+    let source_domain = state
+        .settlement
+        .domains
+        .get(message.source_domain)
+        .ok_or_else(|| format!("unknown source domain {}", message.source_domain))?;
+    if source_domain.status != crate::domain::types::DomainStatus::Active {
+        return Err(format!(
+            "source domain {} is not active (status={:?})",
+            message.source_domain, source_domain.status
+        ));
+    }
+    if !source_domain.bridge_enabled {
+        return Err(format!(
+            "source domain {} is not bridge-enabled",
+            message.source_domain
+        ));
+    }
+    let derived = Some(
+        state
+            .settlement
+            .domains
+            .observed(message.source_domain)
+            .quantum_class()
+            .unwrap_or_else(|| {
+                crate::settlement::pq_anchor::domain_quantum_class(&source_domain.kind)
+            }),
+    );
+    if message.source_quantum_class != derived {
+        return Err(format!(
+            "relayed message carries source quantum class {:?}, the chain derives {:?} for source domain {}",
+            message.source_quantum_class, derived, message.source_domain
+        ));
+    }
+    // A relayed message carries no Merkle inclusion proof tying it to
+    // `message.source_height`, so that height is relayer-chosen and cannot
+    // anchor the Watch wait (naming an older committed height would let a
+    // brand-new message bypass the hold). Unproven relayed classical messages
+    // pass `None` and stay held during Watch; proven messages enter through
+    // `DeliverMessage` against their verified commitment's acceptance height.
+    crate::core::account::enforce_classical_message_intake(
+        message,
+        state.settlement.quantum.alarm(),
+        None,
+        state.current_block_height,
+    )?;
     register_cross_domain_on_state(state, message)
 }
 
@@ -314,7 +457,62 @@ mod tests {
         assert!(!tampered.verify_id());
     }
 
-    /// BLG-0121 (P05-F14): a `None` correlation and a present one are
+    /// the class is part of the identity. Changing it, or removing
+    /// it, produces another id, so a relay cannot rewrite what the receiver
+    /// reads without the id check failing.
+    #[test]
+    fn the_source_quantum_class_is_part_of_the_message_id() {
+        let params = CrossDomainMessageParams {
+            source_domain: 1,
+            target_domain: 2,
+            source_height: 3,
+            event_index: 0,
+            nonce: 4,
+            sender: Address::from([1u8; 32]),
+            recipient: Address::from([2u8; 32]),
+            payload_hash: [7u8; 32],
+            kind: MessageKind::BridgeLock,
+            expiry_height: 500,
+        };
+        let plain = CrossDomainMessage::new(params);
+        assert_eq!(plain.source_quantum_class, None);
+        let mut ids = vec![plain.message_id];
+        for class in [
+            QuantumClass::Classical,
+            QuantumClass::Lattice,
+            QuantumClass::Hash,
+        ] {
+            let classed = plain.clone().with_source_quantum_class(Some(class));
+            assert_eq!(classed.source_quantum_class, Some(class));
+            assert!(classed.verify_id());
+            ids.push(classed.message_id);
+            let mut rewritten = classed.clone();
+            rewritten.source_quantum_class = None;
+            assert!(!rewritten.verify_id(), "dropping the class breaks the id");
+        }
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids.len(), 4, "every class names another message");
+    }
+
+    #[test]
+    fn class_codes_round_trip_and_refuse_unknown_bytes() {
+        for class in [
+            None,
+            Some(QuantumClass::Classical),
+            Some(QuantumClass::Lattice),
+            Some(QuantumClass::Hash),
+        ] {
+            assert_eq!(
+                quantum_class_from_code(quantum_class_code(class)),
+                Some(class)
+            );
+        }
+        assert_eq!(quantum_class_from_code(4), None);
+        assert_eq!(MESSAGE_ENVELOPE_VERSION, 3);
+    }
+
+    /// A `None` correlation and a present one are
     /// DIFFERENT identities - the id folds presence, not just bytes. A
     /// correlated id of all zeros must not collapse into "no correlation".
     #[test]
@@ -340,5 +538,152 @@ mod tests {
         );
         assert_ne!(plain.message_id, real.message_id);
         assert_ne!(zeros.message_id, real.message_id);
+    }
+
+    #[test]
+    fn relayed_doors_enforce_derived_quantum_class_and_alarm_intake() {
+        use crate::core::account::AccountState;
+        use crate::core::transaction::{Transaction, TransactionType};
+        use crate::crypto::facts::{CryptoFacts, ObservedScheme};
+        use crate::crypto::primitives::KeyPair;
+        use crate::execution::executor::Executor;
+        use crate::security::quantum_canary::{CanaryClaim, CanaryId};
+
+        let mut state = AccountState::new();
+        let kp = KeyPair::generate().expect("ed25519 key");
+        let relayer = crate::core::address::Address::from(kp.public_key_bytes());
+        let min_stake = state.registry.params().min_stake;
+        state.add_balance(
+            &relayer,
+            min_stake.saturating_mul(4).saturating_add(1_000_000),
+        );
+        state
+            .bond_relayer(&relayer, min_stake)
+            .expect("bond relayer");
+
+        // Register domain 2 and record Classical observation on it.
+        state
+            .settlement
+            .domains
+            .register(crate::domain::plugin::default_domain(
+                2,
+                crate::domain::ConsensusKind::PoW,
+                2000,
+                crate::domain::POW_HEADER_CHAIN_ADAPTER,
+                1,
+            ))
+            .expect("register domain 2");
+        let mut facts = CryptoFacts::new();
+        facts.record(ObservedScheme::Secp256k1);
+        state.settlement.domains.record_observed(2, &facts);
+        assert_eq!(
+            state.settlement.domains.observed(2).quantum_class(),
+            Some(QuantumClass::Classical)
+        );
+
+        let build_msg = |nonce: u64, class: Option<QuantumClass>, sign_sender: bool| {
+            let mut m = CrossDomainMessage::new(CrossDomainMessageParams {
+                source_domain: 2,
+                target_domain: 3,
+                source_height: 10,
+                event_index: 0,
+                nonce,
+                sender: relayer,
+                recipient: crate::core::address::Address::from([0x77; 32]),
+                payload_hash: [nonce as u8; 32],
+                kind: MessageKind::Custom(b"relayed".to_vec()),
+                expiry_height: 500,
+            })
+            .with_source_quantum_class(class);
+            if sign_sender {
+                m.sender_public_key = kp.public_key_bytes().to_vec();
+                m.message_id = m.calculate_message_id();
+                m.sender_signature = kp.sign(&m.message_id).to_vec();
+            }
+            m
+        };
+
+        // 1) CrossDomainMessage door refuses forged Lattice label on Classical domain 2.
+        let forged_signed = build_msg(1, Some(QuantumClass::Lattice), true);
+        let err = register_relayed_on_state(&mut state, &forged_signed, relayer)
+            .expect_err("forged Lattice class on Classical domain must be refused");
+        assert!(err.contains("carries source quantum class"), "got: {err}");
+
+        // 2) RelayCrossDomainMessage transaction door also refuses forged Lattice label.
+        let forged_tx_msg = build_msg(2, Some(QuantumClass::Lattice), false);
+        let relay_tx = Transaction::new_with_chain_id(
+            relayer,
+            crate::core::address::Address::zero(),
+            0,
+            1_000,
+            0,
+            Vec::new(),
+            45261,
+            TransactionType::RelayCrossDomainMessage(forged_tx_msg),
+        );
+        let tx_err = Executor::apply_transaction_checked(&mut state, &relay_tx)
+            .expect_err("RelayCrossDomainMessage must refuse forged quantum class");
+        assert_eq!(tx_err.code(), "cross_domain_message_failed");
+
+        // 3) Matching Classical class succeeds when alarm is clear.
+        let valid_tx_msg = build_msg(3, Some(QuantumClass::Classical), false);
+        let ok_tx = Transaction::new_with_chain_id(
+            relayer,
+            crate::core::address::Address::zero(),
+            0,
+            1_000,
+            0,
+            Vec::new(),
+            45261,
+            TransactionType::RelayCrossDomainMessage(valid_tx_msg),
+        );
+        Executor::apply_transaction_checked(&mut state, &ok_tx)
+            .expect("matching derived class passes when alarm is clear");
+
+        // 4) Activate Watch alarm -> relayed door holds Classical intake even if
+        // a historical commitment at `source_height = 10` was accepted long ago.
+        state
+            .settlement
+            .commitments
+            .insert_at_height(
+                crate::domain::types::DomainCommitment {
+                    domain_id: 2,
+                    domain_height: 10,
+                    domain_block_hash: [0x11; 32],
+                    parent_domain_block_hash: [0u8; 32],
+                    state_root: [0x22; 32],
+                    tx_root: [0x33; 32],
+                    event_root: [0x44; 32],
+                    finality_proof_hash: [0x55; 32],
+                    consensus_kind: crate::domain::ConsensusKind::PoW,
+                    validator_set_hash: [0u8; 32],
+                    timestamp_ms: 1_000,
+                    sequence: 0,
+                    producer: None,
+                    state_updates: std::collections::BTreeMap::new(),
+                },
+                1,
+            )
+            .unwrap();
+        state.current_block_height = 700_000;
+        state.settlement.quantum.force_solved(
+            CanaryId::Ecc192,
+            CanaryClaim {
+                commit_height: 19,
+                claimer: relayer,
+                accepted_height: 20,
+            },
+        );
+        let mut held_signed = build_msg(4, Some(QuantumClass::Classical), true);
+        held_signed.expiry_height = 800_000;
+        held_signed.message_id = held_signed.calculate_message_id();
+        held_signed.sender_signature = kp.sign(&held_signed.message_id).to_vec();
+        let held_err = register_relayed_on_state(&mut state, &held_signed, relayer).expect_err(
+            "Watch alarm must hold classical relayed message even with historical committed height",
+        );
+        assert!(
+            held_err.contains("held by the quantum alarm"),
+            "got: {held_err}"
+        );
     }
 }

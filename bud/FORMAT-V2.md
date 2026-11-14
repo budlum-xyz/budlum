@@ -1,14 +1,14 @@
 # B.U.D. 2.0 Container Format - the .bud v2 spec (2026-08-16)
 
 This document is the BYTE-LEVEL contract of the `.bud` v2 container and its chunk encoders.
-Goal: an open, structured, machine-readable format (K72 - Data Act compliance) with verifier
-tests (K38). The document and the tests together form the format's proof chain.
+Goal: an open, structured, machine-readable format (Data Act compliance) with verifier
+tests. The document and the tests together form the format's proof chain.
 
 ## 1. General principles
 
 - **Losslessness completeness:** `restore(store(d)) == d` for EVERY d (including corrupt input).
 - **Deterministic:** the same input -> the same bytes (a dedup/proof anchor).
-- **Bomb protection:** every size field is bounded by ceilings (K25/K38).
+- **Bomb protection:** every size field is bounded by ceilings.
 - **Panic-free:** no parse path panics; corrupt input -> an error (None/Err).
 - **Type independence:** the structural chunking type does NOT affect losslessness, only chunk
   granularity (dedup/proof efficiency).
@@ -32,18 +32,18 @@ tests (K38). The document and the tests together form the format's proof chain.
 ```
 Total length: `57 + 4 + sum(40 + len_i)`. Trailing bytes -> STRICT REFUSAL (tamper detection).
 
-### content_id (K3/K31)
+### content_id
 ```
 SHA3-256("BDLM_CONTENT_V1" || u64_le(length) || bytes)
 ```
 - The root: `SHA3-256("BDLM_BUD_V2" || cid_0 || cid_1 || ... || cid_n)` - header.content_id.digest.
 - A chunk cid is always computed over the STORED bytes (Raw: raw; Huffman: compressed).
-- **The K31 decision (2026-08-16):** 32 bytes (SHA3-256) is KEPT - 256-bit collision resistance,
+- **The decision (2026-08-16):** 32 bytes (SHA3-256) is KEPT - 256-bit collision resistance,
   about 128-bit post-quantum security (Grover halves it), and it fits the dedup index/proof size.
   If an upgrade to 48-64 B (SHA3-384/512, BLAKE3) is needed it is done through the `MultiHash.algo`
-  field (K34): a reader REFUSES an unknown algo, the format does not break.
+  field: a reader REFUSES an unknown algo, the format does not break.
 
-## K60 zero egress (the business model)
+## zero egress (the business model)
 
 Access INSIDE the network (the same B.U.D. network / CDN / peer) has zero egress; only leaving to
 the Internet is charged (`EgressZone`, `egress_cost`, `holds_egress`). Egress is not added to the
@@ -72,7 +72,7 @@ storage cost - access to user data is free (the R2-like zero-egress advantage).
 - A single symbol -> length 1; empty input -> n=0, an empty body.
 - The padding bits of the last byte are free; decoding stops once the original length is reached.
 
-## 4. Structural chunking (structural_split, K38)
+## 4. Structural chunking (structural_split)
 
 - **Json:** delimiters are embedded into the chunks; a depth-1 comma is a boundary and is kept at
   the start of the NEXT chunk (`start = i`). Even if it is not an array or is malformed, a single
@@ -80,7 +80,7 @@ storage cost - access to user data is free (the R2-like zero-egress advantage).
 - **Csv/Log/Text:** `split_inclusive('\n')` - every chunk ends with a line break.
 - **Binary:** fixed 64 KiB blocks.
 - **Joining:** PURE concatenation - no `[`/`]` is added for any type.
-- **Compaction (K35):** adjacent chunks below min_chunk are merged (losslessly).
+- **Compaction:** adjacent chunks below min_chunk are merged (losslessly).
 
 ## 5. Format detection (bud_format_pipe::detect)
 
@@ -126,7 +126,7 @@ with what a downstream caller has to do.
 A transform BEFORE compression: an array of JSON records is split into column arrays (the values of
 the same key become adjacent -> zstd sees the repetitions). Two modes:
 - **Exact (mode 0):** the columns stay in the original record order -> `decode(encode(d)) == d`
-  BYTE FOR BYTE (K38). Key order is preserved via serde preserve_order.
+  BYTE FOR BYTE. Key order is preserved via serde preserve_order.
 - **OrderFree (mode 1):** the records are sorted deterministically -> the record SET is preserved
   (KF2); the sorting gain depends on the corpus (an extra gain with repeated key values).
 
@@ -144,7 +144,7 @@ Every .bud may carry a `BudProductionRecord` at production time:
 - `verify()`: claimed_ratio is approximately original_len/stored_len (tolerance 0.01); an invalid
   value is REFUSED.
 - `ProductionGates::k_bud_production(rec, measured)`: if the claim exceeds 1.5x the measurement
-  table it is REFUSED (K19) - unmeasured claims such as "17.19x" CANNOT PASS the production proof.
+  table it is REFUSED - unmeasured claims such as "17.19x" CANNOT PASS the production proof.
 - CLI: `bud produce-proof -i x.bud --pipe <pipe>`.
 
 The economic link: the $0.016/TB/month commitment is bound to the REAL ratio in the production
@@ -155,7 +155,7 @@ price: 0.23342 x 1.143 / 8.53 = about $0.031/TB/month (Exact columnar, a single 
 
 A deterministic corpus: 50k JSON records / 60k CSV lines / 80k LOG lines (seed=7).
 These values are identical to the runner's inline measurement (verified). The old table's
-8.48x/5.51x/7.68x values came from a different, non-reproducible corpus - by K19 honesty they were
+8.48x/5.51x/7.68x values came from a different, non-reproducible corpus - by honesty they were
 replaced with verified values (EK13).
 
 | Pipeline | Verified ratio |
@@ -170,6 +170,6 @@ replaced with verified values (EK13).
 | JSON columnar Exact (zstd19) | 8.53x (seed=7, 50k) - the invention transform |
 | JSON columnar OrderFree (zstd19) | 11.49x (seed=7, 50k; if record order is free) |
 
-The 17.19x JSON claim DOES NOT HOLD against these measurements (the K19 canary: 7.83x < 17.19x);
+The 17.19x JSON claim DOES NOT HOLD against these measurements (the canary: 7.83x < 17.19x);
 the $0.016/TB/month ceiling requires 17.02x for the selected wide code (18+3), e=1.1667
 (it required 18.76x while the code was EVENODD p=7, e=1.286) and 16.68x for flat 7+1 (1.143).

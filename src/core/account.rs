@@ -41,7 +41,15 @@ pub struct PendingDomainUnfreeze {
     pub justification_hash: [u8; 32],
 }
 
-/// BLG-0091 (P04-F09): a governance-queued PoA compliance freeze/unfreeze,
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PendingDomainTipReset {
+    pub domain_id: u32,
+    pub target_height: u64,
+    pub target_hash: [u8; 32],
+    pub justification_hash: [u8; 32],
+}
+
+/// A governance-queued PoA compliance freeze/unfreeze,
 /// applied by `Blockchain::apply_pending_poa_compliance` where the domain
 /// kind can be read from the domain record (never from the transaction).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -106,6 +114,16 @@ pub struct Validator {
     pub pop_signature: Vec<u8>,
     #[serde(default)]
     pub pq_public_key: Vec<u8>,
+    /// Mikoriza restaked weight: written only by
+    /// `settlement::shared_security::apply_restaked_weights` at the epoch
+    /// boundary, already capped. Zero for a validator with no allocation.
+    #[serde(default)]
+    pub restaked_weight: u64,
+    /// Filiz Chain leader-election commitment: written by the
+    /// `RegisterFiliz` door and advanced by each canonical block the
+    /// validator produced. `None` until the validator registers a chain.
+    #[serde(default)]
+    pub filiz: Option<crate::consensus::filiz::FilizRegistration>,
     /// Multi-role architecture: tracks which roles this validator has bonded for.
     /// A single validator can simultaneously serve as:
     /// - VALIDATOR (RoleId 1): consensus block production + finality
@@ -135,6 +153,8 @@ impl Validator {
             bls_public_key: Vec::new(),
             pop_signature: Vec::new(),
             pq_public_key: Vec::new(),
+            restaked_weight: 0,
+            filiz: None,
             roles,
         }
     }
@@ -259,6 +279,14 @@ impl Validator {
         missing
     }
 
+    /// Leader-election and finality weight: the bonded BUD stake plus the
+    /// Mikoriza restaked weight, capped and recomputed at every epoch
+    /// boundary.
+    #[must_use]
+    pub fn voting_weight(&self) -> u64 {
+        self.stake.saturating_add(self.restaked_weight)
+    }
+
     pub fn effective_stake(&self) -> u64 {
         if self.slashed || self.jailed {
             0
@@ -293,6 +321,16 @@ pub struct AccountState {
     /// through the snapshot's schema-6 field; the state root folds its
     /// `root()` only when non-empty, on the identity pattern.
     pub vault: crate::socialfi::VaultRegistry,
+    /// The scheme and suite statuses of this chain.
+    ///
+    /// Consensus state: every signature check that decides a block or a
+    /// transaction reads it (`crypto::pq::verify_in`), so a family the Frost
+    /// Alarm deprecated or disabled stops verifying in the same block on every
+    /// node. Persisted through the snapshot's schema-11 field; the state root
+    /// folds its commitment only when it differs from genesis, on the
+    /// identity pattern, so every chain that never moved a status keeps the
+    /// roots it always had.
+    pub scheme_registry: crate::crypto::scheme::SchemeStatusRegistry,
     /// The consensus kind this state machine executes as.
     ///
     /// Read from the node's own engine at construction and re-read wherever
@@ -326,19 +364,35 @@ pub struct AccountState {
     pub poa_admitted: BTreeMap<crate::domain::types::DomainId, BTreeSet<Address>>,
     pub message_registry: CrossDomainMessageRegistry,
     pub external_roots: BTreeMap<crate::domain::types::DomainId, crate::domain::types::Hash32>,
-    /// BLG-0155 (P07-F10): the money behind external-domain bonds. Every
+    /// The money behind external-domain bonds. Every
     /// registration and prover bond DEBITS the poster's balance into this
     /// escrow; a slash moves the penalty to the challenger's balance and
     /// burns the rest; release credits the remainder back. Before this the
     /// bond was "a declared number, not a signed stake transfer" and the
     /// honesty-gate economics were bookkeeping with no money behind them.
     pub external_bond_escrow: BTreeMap<Address, u64>,
+    /// The settlement registries (the external-domain intake first): state
+    /// that used to live on `Blockchain`, outside the state root, written by
+    /// operator RPCs. Written only by block execution now, and folded into
+    /// the root once it holds a record.
+    pub settlement: crate::settlement::SettlementRegistries,
     /// On-chain burn-reserve account the timed burn consumes. `None` when $BUD
     /// Tokenomics is not enabled for this chain (e.g. plain devnet genesis).
     pub burn_reserve_address: Option<Address>,
     /// Team account + its vesting schedule, enforced on transfers. `None` when
     /// $BUD tokenomics is not enabled.
     pub team_vesting: Option<(Address, crate::tokenomics::VestingSchedule)>,
+    /// Whether the epoch transition pays validation rewards from the
+    /// pre-funded pool (testnet item 8, the `reward_pool.enabled` genesis
+    /// parameter).
+    ///
+    /// Consensus state, not node config: the epoch payment moves balances, so
+    /// every node - replaying a block, restoring a snapshot or following a
+    /// peer - has to reach the same answer. Genesis writes it from
+    /// `GenesisConfig::reward_pool_enabled`; a state that was never told
+    /// (a fixture built by `AccountState::new`) defaults to off, which pays
+    /// nothing rather than paying from a pool nobody funded.
+    pub reward_pool_enabled: bool,
     pub unbonding_queue: Vec<UnbondingEntry>,
     storage: Option<Storage>,
     pub epoch_index: u64,
@@ -416,11 +470,14 @@ pub struct AccountState {
     /// Populated by executor when `GovernanceAction::UnfreezeConsensusDomain` is executed,
     /// Drained by `Blockchain` after `apply_block_effects`.
     pub pending_domain_unfreezes: Vec<PendingDomainUnfreeze>,
-    /// BLG-0090/0091 (P04-F08/F09): the PoA compliance ledger (screening,
+    /// Governance-controlled consensus-domain tip rollbacks awaiting deterministic
+    /// application inside `apply_block_effects` before `calculate_state_root`.
+    pub pending_domain_tip_resets: Vec<PendingDomainTipReset>,
+    /// (F09): the PoA compliance ledger (screening,
     /// freeze, travel-rule) in consensus state - rooted and snapshotted
     /// with everything else that decides writes.
     pub poa_compliance: crate::registry::PoaComplianceRegistry,
-    /// BLG-0091: governance-queued compliance freezes/unfreezes awaiting
+    /// Governance-queued compliance freezes/unfreezes awaiting
     /// application (see [`PendingPoaCompliance`]).
     pub pending_poa_freezes: Vec<PendingPoaCompliance>,
     pub pending_poa_unfreezes: Vec<PendingPoaCompliance>,
@@ -438,6 +495,47 @@ pub struct AccountState {
     /// sees no root change from this field existing.
     pub proof_market: crate::settlement::ProofMarketState,
 }
+/// Shared quantum-alarm intake gate for cross-domain message registration doors
+/// (`AccountState::register_relayed_cross_domain_message` and
+/// `settlement::domains::deliver_message`).
+pub(crate) fn enforce_classical_message_intake(
+    message: &crate::cross_domain::message::CrossDomainMessage,
+    alarm: &crate::security::quantum_canary::QuantumAlarmState,
+    anchored_budlum_height: Option<u64>,
+    current_block_height: u64,
+) -> Result<(), String> {
+    if message.source_quantum_class == Some(crate::crypto::facts::QuantumClass::Classical) {
+        use crate::security::alarm_effects::{classical_intake, ClassicalIntake};
+        match classical_intake(alarm) {
+            ClassicalIntake::Open => {}
+            ClassicalIntake::Wait(blocks) => {
+                // Age the Watch hold strictly from the Budlum block height at
+                // which the source commitment was accepted into consensus,
+                // never from `message.source_height` (which is chosen by the
+                // message builder or measured in a foreign block space).
+                let Some(anchored_at) = anchored_budlum_height else {
+                    return Err(
+                        "classical-class message is held by the quantum alarm: source commitment is not anchored on Budlum"
+                            .into(),
+                    );
+                };
+                let ready = anchored_at.saturating_add(blocks);
+                if current_block_height < ready {
+                    return Err(format!(
+                        "classical-class message is held by the quantum alarm until height {ready} (anchored at {anchored_at}, now {current_block_height})"
+                    ));
+                }
+            }
+            ClassicalIntake::Stopped => {
+                return Err(
+                    "the quantum alarm has stopped the intake of classical-class messages".into(),
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
 impl AccountState {
     pub fn new() -> Self {
         AccountState {
@@ -447,6 +545,7 @@ impl AccountState {
             timed_burn: crate::tokenomics::TimedBurnState::new(),
             burn_reserve_address: None,
             team_vesting: None,
+            reward_pool_enabled: false,
             unbonding_queue: Vec::new(),
             storage: None,
             epoch_index: 0,
@@ -459,6 +558,7 @@ impl AccountState {
             nft_registry: crate::socialfi::NftRegistry::new(),
             identity: crate::registry::IdentityRegistry::new(),
             vault: crate::socialfi::VaultRegistry::new(),
+            scheme_registry: crate::crypto::scheme::SchemeStatusRegistry::genesis(),
             execution_domain: crate::domain::ConsensusKind::PoS,
             marketplace: crate::pollen::MarketplaceRegistry::new(),
             storage_registry: StorageRegistry::new(),
@@ -471,6 +571,7 @@ impl AccountState {
             budlumxyz: crate::budlumxyz::BudlumxyzRegistry::new(),
             external_roots: BTreeMap::new(),
             external_bond_escrow: BTreeMap::new(),
+            settlement: crate::settlement::SettlementRegistries::new(),
             base_fee: MIN_TX_FEE,
             fee_distributions: Vec::new(),
             dirty_accounts: HashSet::new(),
@@ -488,6 +589,7 @@ impl AccountState {
             pending_bud_boost_share: 0,
             pending_bridge_burns: Vec::new(),
             pending_domain_unfreezes: Vec::new(),
+            pending_domain_tip_resets: Vec::new(),
             poa_compliance: crate::registry::PoaComplianceRegistry::new(),
             burned_total: 0,
             pending_poa_freezes: Vec::new(),
@@ -507,6 +609,7 @@ impl AccountState {
             timed_burn: crate::tokenomics::TimedBurnState::new(),
             burn_reserve_address: None,
             team_vesting: None,
+            reward_pool_enabled: false,
             unbonding_queue: Vec::new(),
             storage: Some(storage),
             epoch_index: 0,
@@ -526,11 +629,13 @@ impl AccountState {
             nft_registry: crate::socialfi::NftRegistry::new(),
             identity: crate::registry::IdentityRegistry::new(),
             vault: crate::socialfi::VaultRegistry::new(),
+            scheme_registry: crate::crypto::scheme::SchemeStatusRegistry::genesis(),
             execution_domain: crate::domain::ConsensusKind::PoS,
             marketplace: crate::pollen::MarketplaceRegistry::new(),
             budlumxyz: crate::budlumxyz::BudlumxyzRegistry::new(),
             external_roots: BTreeMap::new(),
             external_bond_escrow: BTreeMap::new(),
+            settlement: crate::settlement::SettlementRegistries::new(),
             base_fee: MIN_TX_FEE,
             fee_distributions: Vec::new(),
             dirty_accounts: HashSet::new(),
@@ -548,6 +653,7 @@ impl AccountState {
             pending_bud_boost_share: 0,
             pending_bridge_burns: Vec::new(),
             pending_domain_unfreezes: Vec::new(),
+            pending_domain_tip_resets: Vec::new(),
             poa_compliance: crate::registry::PoaComplianceRegistry::new(),
             burned_total: 0,
             pending_poa_freezes: Vec::new(),
@@ -576,6 +682,7 @@ impl AccountState {
             timed_burn: crate::tokenomics::TimedBurnState::new(),
             burn_reserve_address: None,
             team_vesting: None,
+            reward_pool_enabled: false,
             unbonding_queue: Vec::new(),
             storage: None,
             storage_registry: StorageRegistry::new(),
@@ -595,11 +702,13 @@ impl AccountState {
             nft_registry: crate::socialfi::NftRegistry::new(),
             identity: crate::registry::IdentityRegistry::new(),
             vault: crate::socialfi::VaultRegistry::new(),
+            scheme_registry: crate::crypto::scheme::SchemeStatusRegistry::genesis(),
             execution_domain: crate::domain::ConsensusKind::PoS,
             marketplace: crate::pollen::MarketplaceRegistry::new(),
             budlumxyz: crate::budlumxyz::BudlumxyzRegistry::new(),
             external_roots: BTreeMap::new(),
             external_bond_escrow: BTreeMap::new(),
+            settlement: crate::settlement::SettlementRegistries::new(),
             base_fee: MIN_TX_FEE,
             fee_distributions: Vec::new(),
             dirty_accounts: HashSet::new(),
@@ -617,6 +726,7 @@ impl AccountState {
             pending_bud_boost_share: 0,
             pending_bridge_burns: Vec::new(),
             pending_domain_unfreezes: Vec::new(),
+            pending_domain_tip_resets: Vec::new(),
             poa_compliance: crate::registry::PoaComplianceRegistry::new(),
             burned_total: 0,
             pending_poa_freezes: Vec::new(),
@@ -673,6 +783,12 @@ impl AccountState {
             poa_admitted: BTreeMap::new(),
             message_registry: snapshot.message_registry.clone().unwrap_or_default(),
             team_vesting,
+            // A snapshot taken before the flag existed means what that chain
+            // did: the network profile's answer. Absent on a testnet snapshot
+            // therefore restores `true`, not a silently disarmed pool.
+            reward_pool_enabled: snapshot.reward_pool_enabled.unwrap_or_else(|| {
+                crate::core::chain_config::reward_pool_for_chain_id(snapshot.chain_id).is_some()
+            }),
             unbonding_queue: snapshot.unbonding_queue.clone(),
             storage: None,
             epoch_index: snapshot.epoch_index,
@@ -684,12 +800,20 @@ impl AccountState {
             nft_registry: snapshot.nft_registry.clone().unwrap_or_default(),
             identity: snapshot.identity.clone().unwrap_or_default(),
             vault: snapshot.vault.clone().unwrap_or_default(),
+            // `verify_authentic` refuses a registry that does not restore, so
+            // reaching the fallback means the snapshot carried none.
+            scheme_registry: snapshot
+                .scheme_registry
+                .as_ref()
+                .and_then(|r| r.restore().ok())
+                .unwrap_or_else(crate::crypto::scheme::SchemeStatusRegistry::genesis),
             execution_domain: crate::domain::ConsensusKind::PoS,
             marketplace: snapshot.marketplace.clone().unwrap_or_default(),
             budlumxyz: snapshot.budlumxyz.clone().unwrap_or_default(),
             governance: snapshot.governance.clone().unwrap_or_default(),
             external_roots: snapshot.external_roots.clone().unwrap_or_default(),
             external_bond_escrow: snapshot.external_bond_escrow.clone().unwrap_or_default(),
+            settlement: snapshot.settlement.clone().unwrap_or_default(),
             base_fee: snapshot.base_fee,
             fee_distributions: Vec::new(),
             dirty_accounts: HashSet::new(),
@@ -704,12 +828,21 @@ impl AccountState {
             // Restore permissionless registry + liveness + invalid-vote
             // Tracker from snapshot when present, otherwise start empty (the
             // Snapshot may pre-date the registry, e.g. v1 chains).
-            registry: snapshot.registry.clone().unwrap_or_default(),
+            // The delegation tables are addressed by binary search over a
+            // sorted table, so the order a snapshot was written in is
+            // restored to the canonical one before anything reads or hashes
+            // it: two nodes holding the same rows must agree on the same root.
+            registry: {
+                let mut registry = snapshot.registry.clone().unwrap_or_default();
+                registry.reindex_delegations();
+                registry
+            },
             liveness: snapshot.liveness.clone().unwrap_or_default(),
             invalid_votes: snapshot.invalid_votes.clone().unwrap_or_default(),
             pending_bud_boost_share: 0,
             pending_bridge_burns: Vec::new(),
             pending_domain_unfreezes: Vec::new(),
+            pending_domain_tip_resets: Vec::new(),
             poa_compliance: snapshot.poa_compliance.clone().unwrap_or_default(),
             burned_total: snapshot.burned_total,
             pending_poa_freezes: Vec::new(),
@@ -795,6 +928,218 @@ impl AccountState {
         self.sync_validator_registration(address);
     }
 
+    /// Add voting stake delegated by a different account. Delegated value is
+    /// represented in the validator's aggregate stake for quorum and in the
+    /// registry position for ownership and reward accounting; it is debited
+    /// from the delegator's liquid balance exactly once.
+    pub fn delegate_to_validator(
+        &mut self,
+        delegator: &Address,
+        validator: &Address,
+        amount: u64,
+    ) -> Result<(), String> {
+        if amount == 0 {
+            return Err("delegation amount must be non-zero".into());
+        }
+        let validator_state = self
+            .validators
+            .get(validator)
+            .ok_or_else(|| "validator does not exist".to_string())?;
+        if !validator_state.is_eligible(self.epoch_index) || validator_state.slashed {
+            return Err("validator is not eligible for delegation".into());
+        }
+        if !self.registry.is_active(validator, roles::VALIDATOR) {
+            return Err("validator is not registered as active".into());
+        }
+        let current_delegated = self.registry.delegated_stake(validator);
+        if validator_state.stake.saturating_sub(current_delegated)
+            < self.registry.params().min_stake
+        {
+            return Err("validator self bond is below the delegation floor".into());
+        }
+        let new_stake = validator_state
+            .stake
+            .checked_add(amount)
+            .ok_or_else(|| "validator stake overflow".to_string())?;
+        if self.spendable_balance(delegator) < amount {
+            return Err("delegator does not have enough spendable balance".into());
+        }
+
+        // Perform the bounded position check/mutation before the balance and
+        // aggregate stake writes. All arithmetic that can refuse was checked
+        // above, so a successful registry mutation cannot leave a half-bond.
+        self.registry.delegate(*delegator, *validator, amount)?;
+        self.get_or_create(delegator).balance -= amount;
+        if let Some(entry) = self.validators.get_mut(validator) {
+            entry.stake = new_stake;
+        }
+        self.sync_validator_registration(validator);
+        Ok(())
+    }
+
+    /// Move an existing delegation from one validator to another. No liquid
+    /// balance moves: the position changes owner-validator pair, and the
+    /// aggregate voting weight follows it in the same block.
+    ///
+    /// The target has to satisfy the same admission rules as a fresh
+    /// delegation (registered, eligible, not slashed, self bond above the
+    /// floor), because redelegation is how a delegator reaches a validator
+    /// without an unbonding round trip.
+    pub fn redelegate_to_validator(
+        &mut self,
+        delegator: &Address,
+        from: &Address,
+        to: &Address,
+        amount: u64,
+    ) -> Result<(), String> {
+        if amount == 0 {
+            return Err("redelegation amount must be non-zero".into());
+        }
+        if from == to {
+            return Err("redelegation needs two different validators".into());
+        }
+        if delegator == to {
+            return Err("a validator cannot delegate to itself".into());
+        }
+        let active = self.registry.delegated_amount(*delegator, *from);
+        if active < amount {
+            return Err("redelegation exceeds the active position".into());
+        }
+        let target = self
+            .validators
+            .get(to)
+            .ok_or_else(|| "validator does not exist".to_string())?;
+        if !target.is_eligible(self.epoch_index) || target.slashed {
+            return Err("validator is not eligible for delegation".into());
+        }
+        if !self.registry.is_active(to, roles::VALIDATOR) {
+            return Err("validator is not registered as active".into());
+        }
+        let current_delegated = self.registry.delegated_stake(to);
+        if target.stake.saturating_sub(current_delegated) < self.registry.params().min_stake {
+            return Err("validator self bond is below the delegation floor".into());
+        }
+        let target_stake = target
+            .stake
+            .checked_add(amount)
+            .ok_or_else(|| "validator stake overflow".to_string())?;
+        let source_stake = self
+            .validators
+            .get(from)
+            .ok_or_else(|| "source validator does not exist".to_string())?
+            .stake
+            .checked_sub(amount)
+            .ok_or_else(|| "source validator stake does not cover the position".to_string())?;
+
+        // The registry mutation runs after every check that can refuse, so a
+        // refused redelegation leaves no half-moved position behind.
+        self.registry
+            .move_delegation(*delegator, *from, *to, amount)?;
+        if let Some(entry) = self.validators.get_mut(from) {
+            entry.stake = source_stake;
+        }
+        if let Some(entry) = self.validators.get_mut(to) {
+            entry.stake = target_stake;
+        }
+        self.sync_validator_registration(from);
+        self.sync_validator_registration(to);
+        Ok(())
+    }
+
+    /// Pay out what the epoch close credited to `delegator` for `validator`.
+    /// The registry entry is removed first: a claim that cannot be credited is
+    /// refused rather than paid twice.
+    pub fn claim_delegator_rewards(
+        &mut self,
+        delegator: &Address,
+        validator: &Address,
+    ) -> Result<u64, String> {
+        let amount = self
+            .registry
+            .claim_delegator_rewards(*delegator, *validator)?;
+        if self.try_add_balance(delegator, amount).is_err() {
+            // Put the debt back: the claim is refused, not lost.
+            self.registry
+                .credit_claimable_reward(*delegator, *validator, amount)?;
+            return Err("claimable reward cannot be credited".into());
+        }
+        Ok(amount)
+    }
+
+    /// Begin a delegation exit. The amount leaves active voting weight but
+    /// remains committed and slashable in the registry's unbonding queue.
+    pub fn begin_delegation_unbonding(
+        &mut self,
+        delegator: &Address,
+        validator: &Address,
+        amount: u64,
+    ) -> Result<(), String> {
+        let delegated = self.registry.delegated_amount(*delegator, *validator);
+        if delegated < amount || amount == 0 {
+            return Err("delegation unbond exceeds the active position".into());
+        }
+        let current_stake = self
+            .validators
+            .get(validator)
+            .ok_or_else(|| "validator does not exist".to_string())?
+            .stake;
+        let new_stake = current_stake
+            .checked_sub(amount)
+            .ok_or_else(|| "validator stake does not cover delegated position".to_string())?;
+        self.registry.begin_delegation_unbonding(
+            *delegator,
+            *validator,
+            amount,
+            self.epoch_index,
+        )?;
+        if let Some(entry) = self.validators.get_mut(validator) {
+            entry.stake = new_stake;
+        }
+        self.sync_validator_registration(validator);
+        Ok(())
+    }
+
+    /// Credit a matured delegation exit. No state is credited before the
+    /// registry atomically removes the matured queue entry.
+    pub fn withdraw_delegation(
+        &mut self,
+        delegator: &Address,
+        validator: &Address,
+    ) -> Result<u64, String> {
+        let amount =
+            self.registry
+                .withdrawable_delegation(*delegator, *validator, self.epoch_index);
+        if amount == 0 {
+            return Err("delegation is still unbonding or does not exist".into());
+        }
+        let new_balance = self
+            .get_balance(delegator)
+            .checked_add(amount)
+            .ok_or_else(|| "delegation withdrawal would overflow balance".to_string())?;
+        let withdrawn =
+            self.registry
+                .withdraw_delegation(*delegator, *validator, self.epoch_index)?;
+        debug_assert_eq!(amount, withdrawn);
+        self.get_or_create(delegator).balance = new_balance;
+        Ok(withdrawn)
+    }
+
+    pub fn set_validator_commission(
+        &mut self,
+        validator: &Address,
+        commission_ppm: u32,
+    ) -> Result<(), String> {
+        let state = self
+            .validators
+            .get(validator)
+            .ok_or_else(|| "validator does not exist".to_string())?;
+        if state.slashed || !self.registry.is_active(validator, roles::VALIDATOR) {
+            return Err("validator is not active".into());
+        }
+        self.registry
+            .set_validator_commission(*validator, commission_ppm, self.epoch_index)
+    }
+
     /// Shared bond path for the independently debited roles.
     ///
     /// `upsert_stake` takes the new TOTAL stake, so the total is the existing
@@ -857,12 +1202,113 @@ impl AccountState {
 
     /// Bond `amount` from the account's balance into the Relayer role. The
     /// Bond remains locked but slashable until the relayer begins unbonding.
+    /// exposed for: the crypto/key registry's public labels and shapes - production readers land with the anchor-ceremony and key-config doors (wiring pending).
     pub fn bond_relayer(
         &mut self,
         address: &Address,
         amount: u64,
     ) -> Result<u64, crate::registry::RegistryError> {
         self.bond_independent_role(address, crate::registry::role::roles::RELAYER, amount)
+    }
+
+    /// Register a relayed cross-domain message inside block execution.
+    ///
+    /// The rules are the ones the retired out-of-block door applied, with
+    /// the transaction signature in place of the message's own envelope:
+    /// the message must name the signer as its sender, the signer must hold
+    /// an active RELAYER bond (an unbonding bond still counts: it is locked
+    /// and slashable), the id must match its preimage, the two domains must
+    /// differ, and an expiry height must not have passed. Because this runs
+    /// inside the executor, every node registers the same message at the
+    /// same height and `message_root` agrees.
+    ///
+    /// # Errors
+    ///
+    /// A message naming the rule that refused; the registry is unchanged.
+    /// exposed for: the crypto/key registry's public labels and shapes - production readers land with the anchor-ceremony and key-config doors (wiring pending).
+    pub fn register_relayed_cross_domain_message(
+        &mut self,
+        signer: &Address,
+        message: &crate::cross_domain::message::CrossDomainMessage,
+    ) -> Result<(), String> {
+        if message.sender != *signer {
+            return Err("relayed message sender is not the transaction signer".into());
+        }
+        if !message.sender_public_key.is_empty() || !message.sender_signature.is_empty() {
+            return Err(
+                "relayed message carries a sender envelope; the transaction signature \
+                 authenticates the sender, so the envelope must be empty"
+                    .into(),
+            );
+        }
+        self.registry
+            .ensure_active_relayer(signer)
+            .map_err(|e| e.to_string())?;
+        if !message.verify_id() {
+            return Err(
+                "Cross-domain message ID does not match canonical preimage (potential forgery)"
+                    .into(),
+            );
+        }
+        // the class the message carries is the class the chain derives
+        // for its source domain, never one the relayer chose. A message that
+        // hides a classical source behind a lattice label (or the reverse) is
+        // refused here, before any rule reads the class.
+        let source_domain = self
+            .settlement
+            .domains
+            .get(message.source_domain)
+            .ok_or_else(|| format!("unknown source domain {}", message.source_domain))?;
+        if source_domain.status != crate::domain::types::DomainStatus::Active {
+            return Err(format!(
+                "source domain {} is not active (status={:?})",
+                message.source_domain, source_domain.status
+            ));
+        }
+        if !source_domain.bridge_enabled {
+            return Err(format!(
+                "source domain {} is not bridge-enabled",
+                message.source_domain
+            ));
+        }
+        let derived = Some(
+            self.settlement
+                .domains
+                .observed(message.source_domain)
+                .quantum_class()
+                .unwrap_or_else(|| {
+                    crate::settlement::pq_anchor::domain_quantum_class(&source_domain.kind)
+                }),
+        );
+        if message.source_quantum_class != derived {
+            return Err(format!(
+                "relayed message carries source quantum class {:?}, the chain derives {:?} for source domain {}",
+                message.source_quantum_class, derived, message.source_domain
+            ));
+        }
+        let anchored_height = self
+            .settlement
+            .commitments
+            .earliest_accepted_height(message.source_domain, message.source_height);
+        enforce_classical_message_intake(
+            message,
+            self.settlement.quantum.alarm(),
+            anchored_height,
+            self.current_block_height,
+        )?;
+        if message.source_domain == message.target_domain {
+            return Err(format!(
+                "Cross-domain message source and target domains must differ (both={})",
+                message.source_domain
+            ));
+        }
+        if message.expiry_height > 0 && self.current_block_height > message.expiry_height {
+            return Err(format!(
+                "Cross-domain message expired (expiry={}, current={})",
+                message.expiry_height, self.current_block_height
+            ));
+        }
+        self.message_registry.insert(message.clone())
     }
 
     /// Bond `amount` into the Prover role. Unlike the relayer role, prover
@@ -939,6 +1385,55 @@ impl AccountState {
         role: crate::registry::role::RoleId,
     ) -> Result<u64, String> {
         Self::ensure_withdrawable_role(role)?;
+        if role == crate::registry::role::roles::RELAYER {
+            // `PermissionlessRegistry::withdraw` deletes the registration, and
+            // both intent expiry doors skip the liveness slash when `get`
+            // returns nothing. Releasing the bond while this account is the
+            // awarded solver of a live Graft intent, or the awarded bidder of
+            // an unsettled relayer intent, would let it walk away from the
+            // penalty for work it was awarded and never honoured.
+            let awarded_graft = self
+                .settlement
+                .graft
+                .intents
+                .values()
+                .any(|intent| intent.awarded_solver == Some(*address));
+            let live_relayer_award =
+                self.settlement
+                    .relayer_policy
+                    .awards
+                    .iter()
+                    .any(|(intent_id, award)| {
+                        award.relayer == *address
+                            && self
+                                .settlement
+                                .relayer_policy
+                                .intents
+                                .contains_key(intent_id)
+                    });
+            if awarded_graft || live_relayer_award {
+                return Err(
+                    "a relayer bond backing a live awarded intent cannot be withdrawn".to_string(),
+                );
+            }
+        }
+        if role == crate::registry::role::roles::PROVER {
+            // Same obligation class as an awarded relayer: an assigned prover
+            // must not withdraw its bond before its task settles or expires,
+            // otherwise `slash_failed_prover` finds no registration to slash.
+            let assigned_task = self.proof_market.active_tasks.iter().any(|task| {
+                matches!(
+                    task.status,
+                    crate::settlement::proof_market::ProofTaskStatus::Assigned { prover, .. }
+                        if prover == *address
+                )
+            });
+            if assigned_task {
+                return Err(
+                    "a prover bond backing a live assigned task cannot be withdrawn".to_string(),
+                );
+            }
+        }
         let staked = self
             .registry
             .get(address, role)
@@ -1027,7 +1522,7 @@ impl AccountState {
         Ok(amount)
     }
 
-    /// BLG-0092 (P04-F10): bond into a permissionless application role at
+    /// Bond into a permissionless application role at
     /// the registration floor. This is the production registration path for
     /// the verifier family (VERIFIER/MASTER_VERIFIER, AI_VERIFIER, ATTESTER,
     /// CONTENT_VALIDATOR) - RoleIds that had none, leaving the ATTESTER
@@ -1063,6 +1558,11 @@ impl AccountState {
             roles::CONTENT_VALIDATOR => {
                 self.registry
                     .register_content_validator(*address, amount, epoch)?;
+            }
+            // DeEd participant roles: permissionless
+            // seats at the same floor; the artifact bytes live in B.U.D.
+            crate::deed::roles::INDUSTRY_SPONSOR | crate::deed::roles::RESEARCH_CONTRIBUTOR => {
+                self.registry.register(*address, role, amount, epoch)?;
             }
             other => {
                 return Err(crate::registry::RegistryError::UnsupportedRole { role: other });
@@ -1155,6 +1655,7 @@ impl AccountState {
         )
     }
 
+    /// exposed for: the crypto/key registry's public labels and shapes - production readers land with the anchor-ceremony and key-config doors (wiring pending).
     pub fn get_total_stake(&self) -> u64 {
         let total = self
             .validators
@@ -1166,6 +1667,18 @@ impl AccountState {
         // quorum maths never sees a small total.
         u64::try_from(total).unwrap_or(u64::MAX)
     }
+    /// The total leader-election and finality weight of the eligible
+    /// validators: stake plus Mikoriza restaked weight.
+    #[must_use]
+    pub fn get_total_voting_weight(&self) -> u64 {
+        let total = self
+            .validators
+            .values()
+            .filter(|v| v.is_eligible(self.epoch_index))
+            .fold(0u128, |acc, v| acc + u128::from(v.voting_weight()));
+        u64::try_from(total).unwrap_or(u64::MAX)
+    }
+
     pub fn get_active_validators(&self) -> Vec<&Validator> {
         let mut validators: Vec<&Validator> = self
             .validators
@@ -1266,6 +1779,23 @@ impl AccountState {
         )
     }
 
+    /// Return the live admission floor for the complete transaction. A transfer
+    /// pays the governed proportional rate; a governance proposal also pays
+    /// the sender's escalating proposal fee. The RPC must quote both rather
+    /// than signing a transaction that the chain immediately rejects.
+    pub(crate) fn required_transaction_fee(&self, tx: &Transaction) -> u64 {
+        match tx.tx_type {
+            TransactionType::Transfer => self
+                .registry
+                .params()
+                .required_transfer_fee(tx.amount, self.base_fee),
+            TransactionType::Vote if tx.data.len() > 9 => self
+                .base_fee
+                .max(self.required_governance_proposal_fee(&tx.from)),
+            _ => self.base_fee,
+        }
+    }
+
     pub fn validate_transaction(&self, tx: &Transaction) -> Result<(), String> {
         // The context argument is a spendable balance, so it has to be the
         // vesting-gated one; `get_balance` would let this entry point admit a
@@ -1310,6 +1840,50 @@ impl AccountState {
         distributions
     }
 
+    /// Hold the ML-DSA-65 half of a V7 validator transaction to the key the
+    /// validator registered.
+    ///
+    /// The stateless verifier only knows that the Ed25519 half is the sender
+    /// and that both halves signed. Without this check an attacker who can
+    /// forge the Ed25519 half would pair it with an ML-DSA-65 key of its own.
+    /// Once `RegisterConsensusKeys` recorded a key, only that key signs.
+    /// Before it there is nothing to hold the halves to: an unregistered
+    /// pair is chosen by whoever presents it, so a self-signed stake
+    /// attestation binds the transaction to no identity the chain trusts,
+    /// and a registration of "the key it signs with" is a tautology, not a
+    /// claim. An unregistered sender therefore cannot present a V7
+    /// validator transaction at all: enrolment goes through the
+    /// Ed25519-authorised path `bud validator join` sends (testnet), or
+    /// through the genesis ceremony (mainnet).
+    ///
+    /// # Errors
+    ///
+    /// A message naming the mismatch, or the refusal of an unregistered
+    /// validator transaction.
+    /// exposed for: the crypto/key registry's public labels and shapes - production readers land with the anchor-ceremony and key-config doors (wiring pending).
+    pub fn check_validator_v7_binding(&self, tx: &Transaction) -> Result<(), String> {
+        let Some(pq) = tx.v7_validator_pq_key() else {
+            return Ok(());
+        };
+        let registered = self
+            .validators
+            .get(&tx.from)
+            .map(|v| v.pq_public_key.as_slice())
+            .filter(|key| !key.is_empty());
+        match registered {
+            Some(key) if key == pq.as_slice() => Ok(()),
+            Some(_) => Err(
+                "the ML-DSA-65 key of this validator transaction is not the registered one".into(),
+            ),
+            None => Err(
+                "a validator with no registered ML-DSA-65 key cannot authorise a V7 \
+                 validator transaction; enrol through the Ed25519-authorised path or the \
+                 genesis ceremony"
+                    .into(),
+            ),
+        }
+    }
+
     /// Validate a transaction against the account state: nonce, spendable
     /// balance, fee and type. A zero-address sender is only admissible as the
     /// canonical genesis transaction (security audit, HIGH, CWE-306);
@@ -1321,7 +1895,7 @@ impl AccountState {
         spendable_balance: u64,
     ) -> Result<(), String> {
         if tx.from == Address::zero() {
-            if tx.verify() {
+            if tx.verify_in(&self.scheme_registry) {
                 return Ok(());
             }
             return Err(
@@ -1378,7 +1952,7 @@ impl AccountState {
                 .registry
                 .params()
                 .required_transfer_fee(tx.amount, self.base_fee),
-            _ => self.base_fee,
+            _ => self.required_transaction_fee(tx),
         };
         if tx.fee < required_fee {
             return Err(format!(
@@ -1386,23 +1960,34 @@ impl AccountState {
                 tx.fee, required_fee, self.base_fee, tx.amount
             ));
         }
-        // Overflow guard (security): reject amount+fee > u64::MAX explicitly.
-        // Total_cost uses saturating_add, which would silently clamp to
-        // U64::MAX and admit an otherwise unpayable transfer whenever the
-        // Sender happens to hold u64::MAX.
-        if tx.amount.checked_add(tx.fee).is_none() {
+        // Overflow guard (security): reject amount+fee > u64::MAX explicitly
+        // for transaction types that actually debit the signed amount. An
+        // undelegation/withdrawal moves already-locked value and only debits
+        // its fee, so its amount must not be treated as liquid cost.
+        let debits_amount = !matches!(
+            &tx.tx_type,
+            TransactionType::Undelegate { .. }
+                | TransactionType::WithdrawDelegation { .. }
+                | TransactionType::SetValidatorCommission { .. }
+        );
+        if debits_amount && tx.amount.checked_add(tx.fee).is_none() {
             return Err("Transaction amount + fee overflows u64".into());
         }
-        let total_cost = tx.total_cost();
+        let total_cost = if debits_amount {
+            tx.total_cost()
+        } else {
+            tx.fee
+        };
         if spendable_balance < total_cost {
             return Err(format!(
                 "Insufficient balance: {} < {} (amount: {}, fee: {})",
                 spendable_balance, total_cost, tx.amount, tx.fee
             ));
         }
-        if !tx.verify() {
+        if !tx.verify_in(&self.scheme_registry) {
             return Err("Invalid signature".into());
         }
+        self.check_validator_v7_binding(tx)?;
 
         match tx.tx_type {
             TransactionType::Transfer => {
@@ -1413,6 +1998,100 @@ impl AccountState {
             TransactionType::Stake => {
                 if tx.amount == 0 {
                     return Err("Stake amount must be > 0".into());
+                }
+            }
+            TransactionType::Delegate { validator } => {
+                if tx.amount == 0 || tx.to != Address::zero() || !tx.data.is_empty() {
+                    return Err(
+                        "Delegation requires a positive amount, zero recipient, and empty data"
+                            .into(),
+                    );
+                }
+                let target = self
+                    .validators
+                    .get(&validator)
+                    .ok_or_else(|| "Delegation target is not a validator".to_string())?;
+                if !target.is_eligible(self.epoch_index)
+                    || !self.registry.is_active(&validator, roles::VALIDATOR)
+                {
+                    return Err("Delegation target is not an active validator".into());
+                }
+            }
+            // An exit is never gated on the validator's health: a delegator
+            // must be able to leave a jailed or inactive validator, which is
+            // exactly when leaving matters. The position itself is the check.
+            TransactionType::Undelegate { validator } => {
+                if tx.amount == 0 || tx.to != Address::zero() || !tx.data.is_empty() {
+                    return Err(
+                        "Delegation unbond requires a positive amount, zero recipient, and empty data"
+                            .into(),
+                    );
+                }
+                if !self.validators.contains_key(&validator) {
+                    return Err("Delegation target is not a validator".into());
+                }
+                if self.registry.delegated_amount(tx.from, validator) < tx.amount {
+                    return Err("Delegation unbond exceeds the active position".into());
+                }
+            }
+            TransactionType::WithdrawDelegation { validator } => {
+                if tx.amount != 0 || tx.to != Address::zero() || !tx.data.is_empty() {
+                    return Err(
+                        "Delegation withdrawal requires zero amount, recipient, and data".into(),
+                    );
+                }
+                if !self.validators.contains_key(&validator) {
+                    return Err("Delegation target is not a validator".into());
+                }
+                if self
+                    .registry
+                    .withdrawable_delegation(tx.from, validator, self.epoch_index)
+                    == 0
+                {
+                    return Err("Delegation is still unbonding or does not exist".into());
+                }
+            }
+            TransactionType::SetValidatorCommission { commission_ppm } => {
+                if tx.amount != 0 || tx.to != Address::zero() || !tx.data.is_empty() {
+                    return Err(
+                        "Validator commission requires zero amount, recipient, and data".into(),
+                    );
+                }
+                if !self.validators.contains_key(&tx.from) {
+                    return Err("Only a validator can set validator commission".into());
+                }
+                if u64::from(commission_ppm) > self.registry.params().max_validator_commission_ppm {
+                    return Err("Validator commission exceeds the protocol maximum".into());
+                }
+                if !self.registry.is_active(&tx.from, roles::VALIDATOR) {
+                    return Err("Validator is not active".into());
+                }
+            }
+            TransactionType::BnsRenew => {
+                if tx.amount == 0 || tx.to != Address::zero() {
+                    return Err("BNS renewal requires a positive payment and zero recipient".into());
+                }
+                let (name, duration): (String, u64) = bincode::deserialize(&tx.data)
+                    .map_err(|e| format!("Invalid BNS renewal data: {e}"))?;
+                if duration == 0 {
+                    return Err("BNS renewal duration must be greater than zero".into());
+                }
+                let cost = self.bns_registry.calculate_cost(&name, duration);
+                if tx.amount != cost {
+                    return Err(format!(
+                        "BNS renewal requires exact payment: {} != {}",
+                        tx.amount, cost
+                    ));
+                }
+            }
+            TransactionType::BnsTransfer => {
+                if tx.amount != 0 || tx.to != Address::zero() {
+                    return Err("BNS transfer requires zero amount and recipient".into());
+                }
+                let (_name, new_owner): (String, Address) = bincode::deserialize(&tx.data)
+                    .map_err(|e| format!("Invalid BNS transfer data: {e}"))?;
+                if new_owner == Address::zero() {
+                    return Err("BNS transfer new owner cannot be the zero address".into());
                 }
             }
             TransactionType::RegisterConsensusKeys(ref registration) => {
@@ -1429,6 +2108,49 @@ impl AccountState {
                     return Err("Active validator key rotation is forbidden".into());
                 }
                 registration.validate(tx.from, tx.chain_id)?;
+            }
+            TransactionType::Redelegate {
+                from_validator,
+                to_validator,
+            } => {
+                if tx.amount == 0 || tx.to != Address::zero() || !tx.data.is_empty() {
+                    return Err(
+                        "Redelegation requires a positive amount, zero recipient, and empty data"
+                            .into(),
+                    );
+                }
+                if from_validator == to_validator {
+                    return Err("Redelegation needs two different validators".into());
+                }
+                if tx.from == to_validator {
+                    return Err("A validator cannot delegate to itself".into());
+                }
+            }
+            TransactionType::ClaimRewards { validator } => {
+                if tx.amount != 0 || tx.to != Address::zero() || !tx.data.is_empty() {
+                    return Err(
+                        "Claiming rewards requires zero amount, zero recipient, and empty data"
+                            .into(),
+                    );
+                }
+                if validator == Address::zero() {
+                    return Err("Claiming rewards needs a validator".into());
+                }
+            }
+            TransactionType::RegisterFiliz { commitment, length } => {
+                if tx.amount != 0 || tx.to != Address::zero() || !tx.data.is_empty() {
+                    return Err(
+                        "Filiz registration requires zero amount/recipient and empty data".into(),
+                    );
+                }
+                let validator = self
+                    .validators
+                    .get(&tx.from)
+                    .ok_or_else(|| "Only a validator can register a Filiz Chain".to_string())?;
+                let mut probe = validator.filiz.clone().unwrap_or_default();
+                probe
+                    .register(tx.from.0, commitment, length, self.epoch_index)
+                    .map_err(|e| format!("Filiz registration refused: {e:?}"))?;
             }
             TransactionType::AiOperatorBond => {
                 let required = self.required_ai_bond(tx.chain_id);
@@ -1468,6 +2190,34 @@ impl AccountState {
                     );
                 }
             }
+            TransactionType::RelayCrossDomainMessage(ref message) => {
+                if tx.amount != 0 || tx.to != Address::zero() || !tx.data.is_empty() {
+                    return Err(
+                        "Relayed cross-domain message requires zero amount/recipient and empty data"
+                            .into(),
+                    );
+                }
+                if message.sender != tx.from {
+                    return Err("Relayed cross-domain message sender is not the signer".into());
+                }
+                if !self.registry.is_active_relayer(&tx.from) {
+                    return Err(
+                        "Relayed cross-domain message signer is not an active relayer".into(),
+                    );
+                }
+            }
+            TransactionType::RoleUnbond { role } | TransactionType::RoleWithdraw { role } => {
+                if tx.amount != 0 || tx.to != Address::zero() || !tx.data.is_empty() {
+                    return Err(
+                        "Role unbond/withdraw requires zero amount/recipient and empty data".into(),
+                    );
+                }
+                let role = crate::registry::role::RoleId(role);
+                Self::ensure_withdrawable_role(role)?;
+                if self.registry.get(&tx.from, role).is_none() {
+                    return Err(format!("no {role} bond registered for {}", tx.from));
+                }
+            }
             TransactionType::AiOperatorWithdraw => {
                 if tx.amount != 0 || tx.to != Address::zero() || !tx.data.is_empty() {
                     return Err(
@@ -1480,8 +2230,10 @@ impl AccountState {
                     .ok_or_else(|| "AI inference layer operator is not registered".to_string())?;
                 match registration.status {
                     crate::registry::MemberStatus::Unbonding { release_epoch }
+                    | crate::registry::MemberStatus::SlashedUnbonding { release_epoch }
                         if self.epoch_index >= release_epoch => {}
-                    crate::registry::MemberStatus::Unbonding { release_epoch } => {
+                    crate::registry::MemberStatus::Unbonding { release_epoch }
+                    | crate::registry::MemberStatus::SlashedUnbonding { release_epoch } => {
                         return Err(format!(
                             "AI inference layer bond remains locked until epoch {release_epoch}"
                         ));
@@ -1503,10 +2255,12 @@ impl AccountState {
             }
             TransactionType::Unstake => {
                 if let Some(validator) = self.validators.get(&tx.from) {
-                    if validator.stake < tx.amount {
+                    let delegated = self.registry.delegated_stake(&tx.from);
+                    let self_stake = validator.stake.saturating_sub(delegated);
+                    if self_stake < tx.amount {
                         return Err(format!(
-                            "Insufficient stake: {} < {}",
-                            validator.stake, tx.amount
+                            "Insufficient self stake: {} < {} (delegated stake is locked separately)",
+                            self_stake, tx.amount
                         ));
                     }
                 } else {
@@ -1530,6 +2284,12 @@ impl AccountState {
             TransactionType::ContractCall => {
                 if tx.amount != 0 {
                     return Err("Contract call amount must be 0".into());
+                }
+                if self.burn_reserve_address == Some(tx.to) && tx.to != Address::zero() {
+                    return Err(
+                        "Contract call cannot name the schedule-controlled burn reserve as its application recipient"
+                            .into(),
+                    );
                 }
                 if tx.data.is_empty() || !tx.data.len().is_multiple_of(8) {
                     return Err("Contract call data must be non-empty BudZKVM bytecode".into());
@@ -1560,21 +2320,14 @@ impl AccountState {
                     );
                 }
             }
-            TransactionType::StateUpdate {
-                ref state_updates, ..
-            } => {
-                if tx.amount != 0 || tx.to != Address::zero() || !tx.data.is_empty() {
-                    return Err("State update requires zero amount/recipient and empty data".into());
-                }
-                if state_updates.is_empty() {
-                    return Err("State update requires at least one nonce write".into());
-                }
-                if state_updates.len() > crate::domain::types::MAX_STATE_UPDATES {
-                    return Err(format!(
-                        "State update exceeds {} nonce writes",
-                        crate::domain::types::MAX_STATE_UPDATES
-                    ));
-                }
+            TransactionType::StateUpdate { .. } => {
+                // /: commitment nonce writes are applied by the
+                // settlement door, beside the finality proof they follow.
+                return Err(
+                    "State update transactions are retired: commitment nonce writes are \
+                     applied by SettlementTx::SubmitCommitment"
+                        .into(),
+                );
             }
             _ => {}
         }
@@ -1594,10 +2347,11 @@ impl AccountState {
         }
     }
 
-    /// Slash a validator (bond, unbonding stake, and the registry mirror with
-    /// its cross-role sweep) and record what the slash destroyed in
-    /// `burned_total`. Measuring the drop in committed supply across the whole
-    /// call counts every bond touched by the sweep once and none twice.
+    /// Slash a validator (bond, unbonding stake, delegation exits and the
+    /// registry mirror with its cross-role sweep) and record what the slash
+    /// destroyed in `burned_total`. The destroyed amount is measured
+    /// as the drop in committed supply, so every bond the sweep touches is
+    /// counted once and none twice.
     pub fn slash_validator(
         &mut self,
         address: &Address,
@@ -1623,8 +2377,10 @@ impl AccountState {
             return Some(0);
         }
 
-        let mut penalty = slash_penalty(validator.stake, slash_ratio_fixed);
-        validator.stake = validator.stake.saturating_sub(penalty);
+        let stake_before = validator.stake;
+        let bond_penalty = slash_penalty(stake_before, slash_ratio_fixed);
+        let mut penalty = bond_penalty;
+        validator.stake = validator.stake.saturating_sub(bond_penalty);
 
         // Stake in the unbonding queue is still at risk. Without this cut a
         // validator could unstake before the proof arrives and keep it all.
@@ -1646,7 +2402,8 @@ impl AccountState {
 
         // Destroyed stake is recorded once by `slash_validator` via
         // `record_destroyed_since`, which covers the validator bond, the
-        // unbonding queue, and any cross-role bonds swept below.
+        // unbonding queue, delegation positions/exits, and any cross-role bonds
+        // swept below.
 
         let jail_epochs = 7;
         validator.jail_until = self.epoch_index.saturating_add(jail_epochs);
@@ -1687,6 +2444,12 @@ impl AccountState {
             crate::registry::permissionless::SlashingCondition::DoubleSign,
             slash_ratio_fixed,
         );
+        self.registry
+            .reduce_delegated_for_slash(address, bond_penalty, stake_before);
+        penalty = penalty.saturating_add(
+            self.registry
+                .slash_delegation_unbonding(address, slash_ratio_fixed),
+        );
 
         tracing::info!(
             "Slashed validator {} for {} stake due to {} (Jailed until epoch {})",
@@ -1709,15 +2472,33 @@ impl AccountState {
     /// as the governance path (`slash_validator`). A validator that is
     /// already slashed (registry or ledger) was cut once, so it is not cut
     /// a second time.
+    ///
+    /// What the report destroyed is recorded in `burned_total`, as
+    /// the drop in committed supply across the whole application.
     pub fn slash_from_report(
         &mut self,
         report: &crate::registry::evidence::SlashingReport,
     ) -> Result<Option<crate::registry::SlashOutcome>, crate::registry::EvidenceError> {
         let committed_before = self.total_bud_committed();
+        let outcome = self.slash_from_report_uncounted(report);
+        self.record_destroyed_since(committed_before);
+        outcome
+    }
+
+    fn slash_from_report_uncounted(
+        &mut self,
+        report: &crate::registry::evidence::SlashingReport,
+    ) -> Result<Option<crate::registry::SlashOutcome>, crate::registry::EvidenceError> {
         let already_slashed = self
             .registry
             .get(&report.offender, report.role)
-            .is_some_and(|entry| matches!(entry.status, crate::registry::MemberStatus::Slashed))
+            .is_some_and(|entry| {
+                matches!(
+                    entry.status,
+                    crate::registry::MemberStatus::Slashed
+                        | crate::registry::MemberStatus::SlashedUnbonding { .. }
+                )
+            })
             || self
                 .validators
                 .get(&report.offender)
@@ -1750,17 +2531,22 @@ impl AccountState {
             // bond untouched: quorum weight, the `Unstake` refund and the
             // RPC views all read `validators`, so the offender kept voting
             // with the stake the report had just cut - and an `Unstake`
-            // paid the penalty straight back (P04-F02). Mirror what
+            // paid the penalty straight back. Mirror what
             // `slash_validator` (the QC-fault path) does: cut the bond by
             // the same penalty, mark it slashed, leave the quorum. The
             // slashed flag is also what refuses the later `Unstake` and
             // `Stake`, so the cut cannot be unwound from either side.
             if outcome.is_some() {
+                let stake_before = self
+                    .validators
+                    .get(&report.offender)
+                    .map_or(0, |validator| validator.stake);
+                let bond_penalty = outcome.as_ref().map_or(0, |slash| slash.penalty);
                 if let Some(validator) = self.validators.get_mut(&report.offender) {
                     let penalty = outcome.as_ref().map(|o| o.penalty).unwrap_or(0);
                     validator.stake = validator.stake.saturating_sub(penalty);
                     if report.condition() == crate::registry::SlashingCondition::LivenessFault {
-                        // BLG-0087 (P04-F05, decision A+B): a liveness fault is
+                        // (decision A+B): a liveness fault is
                         // a TIMED jail, not a permanent slash. Writing
                         // `slashed = true` here made the release impossible -
                         // every activation predicate requires `!slashed` - and
@@ -1795,6 +2581,13 @@ impl AccountState {
                         );
                     }
                 }
+                self.registry.reduce_delegated_for_slash(
+                    &report.offender,
+                    bond_penalty,
+                    stake_before,
+                );
+                self.registry
+                    .slash_delegation_unbonding(&report.offender, ratio);
                 // A vote already cast carries weight equal to the voter's
                 // stake, while the quorum denominator (`get_total_stake`)
                 // counts only eligible stake. This report just took the
@@ -1812,7 +2605,6 @@ impl AccountState {
                 }
             }
         }
-        self.record_destroyed_since(committed_before);
         Ok(outcome)
     }
 
@@ -1898,15 +2690,22 @@ impl AccountState {
 
         self.process_unbonding();
 
+        // Mikoriza weights move only here, at the boundary.
+        let shared_security = crate::core::chain_config::shared_security_for_chain_id(chain_id);
+        crate::settlement::shared_security::apply_restaked_weights(self, &shared_security);
+
         // Close the proof market's epoch: expire tasks past their deadline,
-        // drop receipts that have been paid, and hold both vectors under
-        // their ceiling.
+        // return their escrowed rewards to the creator accounts, drop receipts
+        // that have been paid, and hold both vectors under their ceiling.
         //
-        // All three functions existed and none of them ran. `enforce_max_sizes`
-        // matters most: `add_task` bounds what arrives in a single call and
-        // says nothing about accumulation, so on a long-running node the only
-        // limit on `active_tasks` was how many tasks were ever opened.
-        //
+        // The refund is applied here, rather than left as an internal escrow
+        // credit, because this is the deterministic account-state transition
+        // every node runs at the same epoch boundary. A creator can also use
+        // the RefundExpired settlement door between boundaries.
+        let expired_refunds = self.proof_market.refund_expired_tasks(self.epoch_index);
+        for (creator, amount) in &expired_refunds {
+            self.add_balance(creator, *amount);
+        }
         // Swept before the timed burn below so an epoch that both expires
         // tasks and burns reserve leaves the market consistent with the root
         // taken at the end of this function.
@@ -2096,7 +2895,7 @@ impl AccountState {
                 }
             }
             ProposalType::PoaAddAdmin { domain_id, admin } => {
-                // BLG-0089 (P04-F07): governance is the trust root of a
+                // Governance is the trust root of a
                 // permissioned domain - the first admin arrives here, and
                 // later ones can too.
                 //
@@ -2135,7 +2934,7 @@ impl AccountState {
                 }
             }
             ProposalType::PoaRemoveAdmin { domain_id, admin } => {
-                // BLG-0094 (P04-F12): governance may take the last admin -
+                // Governance may take the last admin -
                 // unpermissioning a domain is a recorded decision, not an
                 // admin door action. The same kind gate applies: a domain that
                 // is not PoA and has no admins has nothing to remove, and
@@ -2163,7 +2962,7 @@ impl AccountState {
                 address,
                 reason_hash,
             } => {
-                // BLG-0091 (P04-F09): queued for the blockchain layer, which
+                // Queued for the blockchain layer, which
                 // reads the domain kind from the domain record and verifies
                 // the named admin before the ledger moves.
                 self.pending_poa_freezes.push(PendingPoaCompliance {
@@ -2274,6 +3073,13 @@ impl AccountState {
                 // Domain unfreeze is handled via GovernanceAction -> pending_domain_unfreezes queue
                 // And applied in Blockchain layer to ConsensusDomainRegistry (durable).
                 tracing::info!("Executing Governance: UnfreezeConsensusDomain {domain_id} queued for Blockchain registry");
+            }
+            ProposalType::ResetConsensusDomainTip { domain_id, .. } => {
+                // Handled via GovernanceAction -> pending_domain_tip_resets queue
+                // and drained deterministically inside apply_block_effects.
+                tracing::info!(
+                    "Executing Governance: ResetConsensusDomainTip {domain_id} queued for Blockchain registry"
+                );
             }
         }
     }
@@ -2388,6 +3194,11 @@ impl AccountState {
                     .parse::<u64>()
                     .map_err(|e| format!("invalid bridge_fee_ppm: {e}"))?;
             }
+            "app_fee_share_ppm" => {
+                params.app_fee_share_ppm = value
+                    .parse::<u64>()
+                    .map_err(|e| format!("invalid app_fee_share_ppm: {e}"))?;
+            }
             "ai_model_register_fee" => {
                 params.ai_model_register_fee = value
                     .parse::<u64>()
@@ -2407,11 +3218,11 @@ impl AccountState {
     /// consensus-owned [`Self::external_roots`] registry.
     ///
     /// This is the **create / supersede** step of the external-root anchor
-    /// lifecycle (AR-GE-6 / F-11). `external_roots` is the only source the
+    /// lifecycle (AR-GE-6 /). `external_roots` is the only source the
     /// relayer gate consults: a `RelayerResult` is accepted only when its
     /// declared `external_state_root` equals a finalized anchor. The write path
     /// is **consensus-only** - it is driven by a light-client-verified finality
-    /// fact for the domain (AR-GE-6 / F-12) - and a relayer transaction can
+    /// fact for the domain (AR-GE-6 /) - and a relayer transaction can
     /// never reach this method: the executor gate only reads `external_roots`.
     /// Keeping the write here, out of the relayer path, is what closes the
     /// relayer-data-to-open trap.
@@ -2601,13 +3412,19 @@ impl AccountState {
     /// The cap denominator includes liquid accounts, canonical validator stake,
     /// Validator unbonding entries, and independently debited role bonds such as
     /// AI_OPERATOR. Excluding role bonds would make a bond look like a supply
-    /// Burn and reopen false minting headroom.
+    /// Burn and reopen false minting headroom. Delegation exits, proof-market
+    /// escrow, relayer-intent escrow and Graft intent escrow are counted for the
+    /// same reason.
     pub fn total_bud_committed(&self) -> u128 {
         self.circulating_supply()
             .saturating_add(self.total_staked_supply())
             .saturating_add(self.total_unbonding_supply())
             .saturating_add(self.total_registry_role_bonded_supply())
+            .saturating_add(self.registry.total_delegation_unbonding_supply())
             .saturating_add(self.total_external_bonded_supply())
+            .saturating_add(self.proof_market.total_locked_supply())
+            .saturating_add(self.settlement.relayer_policy.total_escrowed_supply())
+            .saturating_add(self.settlement.graft.total_escrowed_supply())
             .saturating_add(self.total_storage_escrowed_supply())
     }
 
@@ -2633,7 +3450,8 @@ impl AccountState {
     /// remove exactly what was counted.
     fn total_storage_escrowed_supply(&self) -> u128 {
         let epoch = self.epoch_index;
-        self.storage_registry
+        let deals_escrow = self
+            .storage_registry
             .all_deals()
             .iter()
             .filter(|deal| deal.is_active())
@@ -2646,10 +3464,24 @@ impl AccountState {
                 total
                     .saturating_add(u128::from(deal.economics.operator_bond))
                     .saturating_add(u128::from(unearned))
-            })
+            });
+        // User-opened challenges debit `opener_bond` from the opener's balance
+        // until the challenge resolves (`answer_challenge` or
+        // `finalize_missed_challenges`). Count unresolved non-zero opener bonds
+        // so an open challenge never reopens temporary minting headroom.
+        let challenge_bonds = self
+            .storage_registry
+            .all_challenges()
+            .iter()
+            .filter(|c| c.opener != Address::zero() && c.opener_bond > 0)
+            .filter(|c| self.storage_registry.get_result(c.challenge_id).is_none())
+            .fold(0u128, |acc, c| {
+                acc.saturating_add(u128::from(c.opener_bond))
+            });
+        deals_escrow.saturating_add(challenge_bonds)
     }
 
-    /// Total $BUD escrowed as external-domain prover bonds (BLG-0155). A
+    /// Total $BUD escrowed as external-domain prover bonds. A
     /// bond is not a burn: it must keep counting against the fixed cap or
     /// every bond would open fake minting headroom.
     ///
@@ -2663,7 +3495,7 @@ impl AccountState {
     }
 
     /// Escrows an external-domain bond: the amount LEAVES the poster's
-    /// balance and enters [`Self::external_bond_escrow`] (BLG-0155/P07-F10).
+    /// balance and enters [`Self::external_bond_escrow`].
     ///
     /// # Errors
     ///
@@ -2687,7 +3519,7 @@ impl AccountState {
     }
 
     /// Releases escrowed bond back to its owner - the unbond half of the
-    /// lifecycle (BLG-0155). The escrow is the source of truth: a release
+    /// lifecycle. The escrow is the source of truth: a release
     /// can never credit more than what was locked.
     ///
     /// # Errors
@@ -2712,7 +3544,7 @@ impl AccountState {
         Ok(())
     }
 
-    /// Applies a slash to escrowed bond (BLG-0155): `taken` leaves the
+    /// Applies a slash to escrowed bond: `taken` leaves the
     /// escrow, `reward` lands in the challenger's balance, and the rest is
     /// BURNED - a slash that returns the remainder to the slashed prover
     /// would be theatre. Returns `(burned)`.
@@ -2721,6 +3553,8 @@ impl AccountState {
     ///
     /// The escrow does not hold `taken` for this prover, or the reward
     /// would exceed what was taken.
+    ///
+    /// WIRING: the money half of external prover slashing. Its door opens when a proof that an accepted attestation was false is defined; until then `bud_slashExternalProver` is closed and no transaction slashes (see `cross_domain::external::external_tx`).
     pub fn slash_external_bond(
         &mut self,
         prover: &Address,
@@ -2761,7 +3595,7 @@ impl AccountState {
     /// would reopen the same amount as mint headroom under the cap. The
     /// counter saturates rather than wraps: an overstated burn only closes
     /// headroom, it never opens it.
-    fn record_destroyed(&mut self, amount: u128) {
+    pub fn record_destroyed(&mut self, amount: u128) {
         let total = u128::from(self.burned_total).saturating_add(amount);
         self.burned_total = u64::try_from(total).unwrap_or(u64::MAX);
     }
@@ -2986,7 +3820,104 @@ impl AccountState {
         self.poa_admitted.get(&domain).cloned().unwrap_or_default()
     }
 
+    /// Live admitted PoA authorities for `domain` at `self.current_block_height`
+    /// (administratively approved and within KYC validity horizon).
+    #[must_use]
+    pub fn poa_live_admitted(&self, domain: crate::domain::types::DomainId) -> BTreeSet<Address> {
+        self.poa_onboarding
+            .live_admitted_members(domain, self.current_block_height)
+    }
+
+    /// The state root: the body digest of every committed field, folded
+    /// with the global header summary when a checkpoint header exists
+    /// ([`Self::root_from_opening`]).
     pub fn calculate_state_root(&mut self) -> String {
+        let body = self.state_root_body();
+        hex::encode(Self::root_from_opening(&body, &self.global_header_summary))
+    }
+
+    /// The state root from its opening. `body` is
+    /// the digest of every committed field with the global header summary
+    /// written as zeros; `summary` is the hash of the latest checkpoint
+    /// header. A state with no header keeps the body as its root, so a
+    /// chain before its first checkpoint keeps the roots it always had. A
+    /// light client that holds a finalized state root checks a header with
+    /// one hash: the body is the opening, the header hash the summary.
+    #[must_use]
+    pub fn root_from_opening(body: &[u8; 32], summary: &[u8; 32]) -> [u8; 32] {
+        if *summary == [0u8; 32] {
+            *body
+        } else {
+            crate::core::hash::hash_fields_bytes(&[
+                b"BDLM_STATE_ROOT_GLOBAL_HEADER_V1",
+                body,
+                summary,
+            ])
+        }
+    }
+
+    /// The body digest of the state root: every committed field, with the
+    /// global header summary written as zeros. See
+    /// [`Self::root_from_opening`].
+    /// Move a scheme one rung along its lifecycle because the Frost Alarm
+    /// accepted a proof in this block.
+    ///
+    /// # Errors
+    ///
+    /// [`crate::crypto::scheme::SchemeError`] when the step is not one rung
+    /// forward.
+    /// WIRING: unwired - no caller in this tree yet; kept as a declared surface, and nothing depends on it until one arrives.
+    pub fn scheme_transition_from_alarm(
+        &mut self,
+        id: crate::crypto::scheme::SchemeId,
+        to: crate::crypto::scheme::SchemeStatus,
+    ) -> Result<(), crate::crypto::scheme::SchemeError> {
+        self.scheme_registry.transition_scheme(
+            id,
+            to,
+            crate::crypto::scheme::TransitionSource::CanaryAlarm,
+        )
+    }
+
+    /// Move a scheme one rung because the cold committee signed an emergency
+    /// record.
+    ///
+    /// # Errors
+    ///
+    /// [`crate::crypto::scheme::SchemeError`] when the step is not one rung
+    /// forward.
+    /// WIRING: unwired - no caller in this tree yet; kept as a declared surface, and nothing depends on it until one arrives.
+    pub fn scheme_transition_from_cold_committee(
+        &mut self,
+        id: crate::crypto::scheme::SchemeId,
+        to: crate::crypto::scheme::SchemeStatus,
+    ) -> Result<(), crate::crypto::scheme::SchemeError> {
+        self.scheme_registry.transition_scheme(
+            id,
+            to,
+            crate::crypto::scheme::TransitionSource::ColdCommittee,
+        )
+    }
+
+    /// Open a `Reserved` scheme by an ordinary governance decision. The only
+    /// step governance may take is `Reserved -> Active`.
+    ///
+    /// # Errors
+    ///
+    /// [`crate::crypto::scheme::SchemeError`] when the scheme is not `Reserved`.
+    /// WIRING: unwired - no caller in this tree yet; kept as a declared surface, and nothing depends on it until one arrives.
+    pub fn scheme_activate_by_governance(
+        &mut self,
+        id: crate::crypto::scheme::SchemeId,
+    ) -> Result<(), crate::crypto::scheme::SchemeError> {
+        self.scheme_registry.transition_scheme(
+            id,
+            crate::crypto::scheme::SchemeStatus::Active,
+            crate::crypto::scheme::TransitionSource::Governance,
+        )
+    }
+
+    pub fn state_root_body(&mut self) -> [u8; 32] {
         use sha2::{Digest, Sha256};
 
         if self.accounts.is_empty() {
@@ -3146,6 +4077,20 @@ impl AccountState {
                 &val.pop_signature,
                 &val.pq_public_key,
             );
+            // Only once it is non-zero, so a chain without Mikoriza keeps its
+            // pinned roots.
+            if val.restaked_weight != 0 {
+                h.update(b"restaked_weight_v1");
+                h.update(val.restaked_weight.to_le_bytes());
+            }
+            // Same rule: only a validator that registered a Filiz Chain adds
+            // the field, length-prefixed.
+            if let Some(filiz) = &val.filiz {
+                let encoded = bincode::serialize(filiz).unwrap_or_default();
+                h.update(b"filiz_v1");
+                h.update((encoded.len() as u64).to_le_bytes());
+                h.update(&encoded);
+            }
             validator_hashes.push(h.finalize());
         }
         let validators_root = if validator_hashes.is_empty() {
@@ -3252,6 +4197,12 @@ impl AccountState {
             final_hasher.update(b"vault_v1");
             final_hasher.update(self.vault.root());
         }
+        // The scheme registry folds in once any status has moved from genesis
+        // (a chain that never moved one keeps its root byte-exact).
+        if !self.scheme_registry.is_genesis() {
+            final_hasher.update(b"scheme_registry_v1");
+            final_hasher.update(self.scheme_registry.commitment());
+        }
         final_hasher.update(b"pollen_v1");
         final_hasher.update(self.marketplace.root());
         if !self.budlumxyz.is_empty() {
@@ -3270,7 +4221,7 @@ impl AccountState {
             final_hasher.update(b"invalid_votes_v1");
             final_hasher.update(self.invalid_votes.root());
         }
-        // BLG-0090 (P04-F08): the PoA admission records were consensus gate
+        // The PoA admission records were consensus gate
         // state in neither the root nor the snapshot digest - hidden today,
         // wide open the moment the write path connected. They fold in as soon
         // as they hold anything (an empty registry leaves the root, and with
@@ -3281,7 +4232,7 @@ impl AccountState {
             final_hasher.update(b"poa_admission_v1");
             final_hasher.update(poa_admission_root);
         }
-        // BLG-0091 (P04-F09): the compliance ledger decides whether an
+        // The compliance ledger decides whether an
         // operator's audit export is refused; it is state like any other.
         let poa_compliance_root = self.poa_compliance.root();
         if poa_compliance_root != crate::registry::PoaComplianceRegistry::new().root() {
@@ -3295,7 +4246,7 @@ impl AccountState {
                     .unwrap_or_else(|_| STATE_SERIALIZE_FAILED.to_vec()),
             );
         }
-        // BLG-0155 (P07-F10): escrowed external bonds are consensus state -
+        // Escrowed external bonds are consensus state -
         // without this fold two nodes could disagree on the state root while
         // agreeing on every balance.
         if !self.external_bond_escrow.is_empty() {
@@ -3305,11 +4256,21 @@ impl AccountState {
                     .unwrap_or_else(|_| STATE_SERIALIZE_FAILED.to_vec()),
             );
         }
+        // the settlement registries moved here from `Blockchain`,
+        // where no block root covered them. Gated on non-empty like
+        // its neighbours, so a chain that never registered anything keeps
+        // its pinned roots.
+        if !self.settlement.is_empty() {
+            final_hasher.update(b"settlement_v1");
+            final_hasher.update(self.settlement.root());
+        }
         if self.governance.has_non_default_state() {
             final_hasher.update(b"governance_v1");
             final_hasher.update(self.governance.root());
         }
-        final_hasher.update(self.global_header_summary);
+        // The global header summary is folded outside the body
+        // (`root_from_opening`); its slot keeps the zeros it always held.
+        final_hasher.update([0u8; 32]);
         // Governance-unfreeze queue: applied at block close after the commit
         // (blockchain.rs), so at root time it can be non-empty and is
         // consensus state. Without this binding a restored snapshot could
@@ -3322,10 +4283,16 @@ impl AccountState {
                     .unwrap_or_else(|_| STATE_SERIALIZE_FAILED.to_vec()),
             );
         }
+        if !self.pending_domain_tip_resets.is_empty() {
+            final_hasher.update(b"domain_tip_reset_v1");
+            final_hasher.update(
+                bincode::serialize(&self.pending_domain_tip_resets)
+                    .unwrap_or_else(|_| STATE_SERIALIZE_FAILED.to_vec()),
+            );
+        }
         final_hasher.update(b"gov_disabled"); // governance version/enabled flags
 
-        let final_root = final_hasher.finalize();
-        hex::encode(final_root)
+        final_hasher.finalize().into()
     }
     pub fn clear_dirty(&mut self) {
         self.dirty_accounts.clear();
@@ -3336,6 +4303,78 @@ impl Default for AccountState {
         Self::new()
     }
 }
+#[cfg(test)]
+mod redelegation_and_claim_tests {
+    use super::*;
+
+    fn addr(b: u8) -> Address {
+        Address::from([b; 32])
+    }
+
+    #[test]
+    fn a_redelegation_moves_weight_without_an_unbonding_round_trip() {
+        let mut state = AccountState::new();
+        state.add_validator(addr(1), 1_000);
+        state.add_validator(addr(2), 1_000);
+        state.add_balance(&addr(9), 500);
+        state
+            .delegate_to_validator(&addr(9), &addr(1), 200)
+            .unwrap();
+
+        state
+            .redelegate_to_validator(&addr(9), &addr(1), &addr(2), 150)
+            .unwrap();
+
+        assert_eq!(state.registry.delegated_amount(addr(9), addr(1)), 50);
+        assert_eq!(state.registry.delegated_amount(addr(9), addr(2)), 150);
+        // Delegated weight counts inside the validator's stake - see the
+        // target below - so the source keeps the 50 still delegated to it:
+        // 1_000 of its own plus 200 delegated, less the 150 that moved.
+        assert_eq!(state.get_validator(&addr(1)).unwrap().stake, 1_050);
+        assert_eq!(state.get_validator(&addr(2)).unwrap().stake, 1_150);
+        // no liquid balance moves: redelegation is a position move
+        assert_eq!(state.get_balance(&addr(9)), 300);
+    }
+
+    #[test]
+    fn a_redelegation_refuses_more_than_the_position() {
+        let mut state = AccountState::new();
+        state.add_validator(addr(1), 1_000);
+        state.add_validator(addr(2), 1_000);
+        state.add_balance(&addr(9), 500);
+        state
+            .delegate_to_validator(&addr(9), &addr(1), 100)
+            .unwrap();
+        assert!(state
+            .redelegate_to_validator(&addr(9), &addr(1), &addr(2), 101)
+            .is_err());
+        assert_eq!(state.get_validator(&addr(1)).unwrap().stake, 1_100);
+        assert_eq!(state.get_validator(&addr(2)).unwrap().stake, 1_000);
+    }
+
+    #[test]
+    fn a_claim_pays_the_claimable_reward_exactly_once() {
+        let mut state = AccountState::new();
+        state.add_validator(addr(1), 1_000);
+        state.add_balance(&addr(9), 500);
+        state
+            .delegate_to_validator(&addr(9), &addr(1), 100)
+            .unwrap();
+        state
+            .registry
+            .credit_claimable_reward(addr(9), addr(1), 42)
+            .unwrap();
+
+        assert_eq!(
+            state.claim_delegator_rewards(&addr(9), &addr(1)).unwrap(),
+            42
+        );
+        assert_eq!(state.get_balance(&addr(9)), 442);
+        assert!(state.claim_delegator_rewards(&addr(9), &addr(1)).is_err());
+        assert_eq!(state.get_balance(&addr(9)), 442);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3387,7 +4426,7 @@ mod tests {
         // Below the floor and unregistered: refused, balance untouched.
         assert!(state.bond_relayer(&who, min - 1).is_err());
         assert_eq!(state.get_balance(&who), min * 3);
-        // Two bonds must add up in the registry (BLG-0086).
+        // Two bonds must add up in the registry.
         state.bond_relayer(&who, min).unwrap();
         state.bond_relayer(&who, 1).unwrap();
         let role = crate::registry::role::roles::RELAYER;
@@ -3425,7 +4464,7 @@ mod tests {
         assert_eq!(state.unbonding_queue[0].amount, 1_000 - cut);
     }
 
-    /// P04-F02: a slashing report must cut the ledger-side validator bond,
+    /// A slashing report must cut the ledger-side validator bond,
     /// not only the permissionless-registry entry. Quorum weight, the
     /// `Unstake` refund and the RPC views all read `validators`; with only
     /// the registry cut, the offender kept voting with the slashed stake and
@@ -3748,7 +4787,7 @@ mod tests {
         assert_eq!(state.get_balance(&proposer), proposer_before);
     }
 
-    /// BLG-0015: a start-up add must not reset a slashed validator to an
+    /// A start-up add must not reset a slashed validator to an
     /// active one with stake 1.
     #[test]
     fn ensure_validator_keeps_a_stored_validator() {
@@ -3946,6 +4985,55 @@ mod tests {
         assert_eq!(state.total_staked_supply(), 2_000);
         assert_eq!(state.total_unbonding_supply(), 3_000);
         assert_eq!(state.total_bud_committed(), 6_000);
+    }
+
+    #[test]
+    fn a_validator_slash_records_what_it_destroyed() {
+        let validator = test_addr_from_byte(23u8);
+        let mut state = AccountState::new();
+        state.add_validator(validator, 10_000);
+        state.unbonding_queue.push(UnbondingEntry {
+            address: validator,
+            amount: 2_000,
+            release_epoch: 99,
+        });
+        let headroom_before = state.supply_capacity_remaining();
+        let penalty = state
+            .slash_validator(
+                &validator,
+                crate::core::chain_config::FIXED_POINT_SCALE / 10,
+                "test",
+            )
+            .expect("a known validator is slashed");
+        assert!(penalty > 0);
+        assert_eq!(state.burned_total, penalty);
+        assert_eq!(
+            state.supply_capacity_remaining(),
+            headroom_before,
+            "a slash must not reopen mint headroom"
+        );
+    }
+
+    #[test]
+    fn a_role_slash_records_its_penalty() {
+        let operator = test_addr_from_byte(24u8);
+        let mut state = AccountState::new();
+        state.add_balance(&operator, 2_000);
+        state
+            .bond_ai_operator(&operator, 1_000, crate::core::transaction::DEFAULT_CHAIN_ID)
+            .expect("AI inference layer role bond");
+        let headroom_before = state.supply_capacity_remaining();
+        let outcome = state
+            .slash_role_destroying(
+                operator,
+                crate::registry::role::roles::AI_OPERATOR,
+                crate::registry::permissionless::SlashingCondition::MaliciousBehaviour,
+                crate::core::chain_config::FIXED_POINT_SCALE,
+            )
+            .expect("an active role bond is slashed");
+        assert_eq!(outcome.penalty, 1_000);
+        assert_eq!(state.burned_total, 1_000);
+        assert_eq!(state.supply_capacity_remaining(), headroom_before);
     }
 
     #[test]
@@ -4535,7 +5623,7 @@ mod tests {
         );
     }
 
-    /// BLG-0090/0091 (P04-F08/F09): the PoA gate state is ROOTED - an
+    /// (F09): the PoA gate state is ROOTED - an
     /// admission write or a compliance freeze moves the state root, so a
     /// node that skipped them diverges instead of agreeing silently.
     #[test]
@@ -4557,7 +5645,7 @@ mod tests {
         assert_ne!(after_admin, st.calculate_state_root());
     }
 
-    /// BLG-0092 (P04-F10): the verifier family registers through the bond
+    /// The verifier family registers through the bond
     /// path - the ATTESTER seat gets real stake instead of a permanent zero.
     #[test]
     fn the_verifier_family_registers_through_the_bond_path() {
@@ -4768,7 +5856,7 @@ mod tests {
         assert_eq!(root_before, state.calculate_state_root());
     }
 
-    /// AR-GE-6 / F-11: anchoring a finalized external root (the registry's
+    /// AR-GE-6 /: anchoring a finalized external root (the registry's
     /// create step) must move the state root, exactly like a direct insert.
     #[test]
     fn anchor_external_root_changes_state_root() {
@@ -4780,7 +5868,7 @@ mod tests {
         assert_ne!(state.calculate_state_root(), root_before);
     }
 
-    /// AR-GE-6 / F-11: the zero root encodes "no state commitment" and must be
+    /// AR-GE-6 /: the zero root encodes "no state commitment" and must be
     /// refused, so an empty anchor can never stand in for a real one.
     #[test]
     fn anchor_external_root_rejects_zero_root() {
@@ -4792,7 +5880,7 @@ mod tests {
         assert_eq!(state.calculate_state_root(), root_before);
     }
 
-    /// AR-GE-6 / F-11: one finalized root per domain; re-anchoring supersedes
+    /// AR-GE-6 /: one finalized root per domain; re-anchoring supersedes
     /// the prior root (the anchor tracks the domain's latest finality).
     #[test]
     fn anchor_external_root_supersedes_prior_anchor() {
@@ -4803,7 +5891,7 @@ mod tests {
         assert_eq!(state.external_roots.len(), 1);
     }
 
-    /// AR-GE-6 / F-12 (lifecycle pin): the relayer gate accepts a declared
+    /// AR-GE-6 / (lifecycle pin): the relayer gate accepts a declared
     /// `external_state_root` only when it equals a root already anchored
     /// through the consensus path. A relayer transaction has no write path
     /// into `external_roots`, so it cannot open an anchor for itself. This
@@ -4964,7 +6052,7 @@ mod c3_validator_readiness_tests {
         assert!(!v.verify_pop_is_valid(DEFAULT_CHAIN_ID));
     }
 
-    // ---- BLG-0155 (P07-F10): external bond escrow ----
+    // ----: external bond escrow ----
 
     #[test]
     fn a_bond_the_poster_cannot_pay_is_refused() {
@@ -5153,5 +6241,136 @@ mod c3_validator_readiness_tests {
         );
         assert_eq!(u128::from(state.burned_total), destroyed);
         assert_eq!(state.supply_capacity_remaining(), headroom_before);
+    }
+}
+
+#[cfg(test)]
+mod validator_v7_binding_tests {
+    use super::*;
+    use crate::crypto::composite::CompositeKeypair;
+    use crate::crypto::scheme::{SchemeStatusRegistry, SuiteId};
+
+    fn validator_key(tag: u8) -> CompositeKeypair {
+        CompositeKeypair::from_seeds(
+            SuiteId::VALIDATOR,
+            &[tag; crate::crypto::pq::ML_DSA_SEED_LEN],
+            &[tag.wrapping_add(1); 32],
+        )
+        .expect("validator suite seeds")
+    }
+
+    fn signed(key: &CompositeKeypair, tx_type: TransactionType) -> Transaction {
+        let mut tx = Transaction::new_with_chain_id(
+            Address::zero(),
+            Address::zero(),
+            0,
+            0,
+            0,
+            Vec::new(),
+            crate::core::transaction::DEFAULT_CHAIN_ID,
+            tx_type,
+        );
+        tx.sign_v7_validator(&SchemeStatusRegistry::genesis(), key, &[0u8; 32])
+            .expect("signs");
+        tx
+    }
+
+    #[test]
+    fn a_v7_validator_transaction_verifies_from_its_ed25519_address() {
+        let key = validator_key(3);
+        let tx = signed(&key, TransactionType::Stake);
+        assert!(tx.verify());
+        assert_eq!(
+            tx.from.as_bytes(),
+            &key.public_key().expect("public").ed,
+            "the sender is the Ed25519 half"
+        );
+        let mut moved = tx.clone();
+        moved.from = Address::from([9u8; 32]);
+        assert!(!moved.verify(), "another sender does not verify");
+    }
+
+    #[test]
+    fn an_unregistered_validator_transaction_is_refused() {
+        let state = AccountState::new();
+        let key = validator_key(3);
+        // Nothing about an unregistered key pair is attested: the sender
+        // presents both halves and the chain has registered neither.
+        assert!(state
+            .check_validator_v7_binding(&signed(&key, TransactionType::Stake))
+            .is_err());
+        assert!(state
+            .check_validator_v7_binding(&signed(&key, TransactionType::Transfer))
+            .is_err());
+    }
+
+    /// Regression: a stake was admitted before registration because
+    /// `StakingAttributes` carries the public key the stake names. The pair
+    /// is self-signed end to end - the ed25519 half and the ML-DSA-65 half
+    /// are chosen together by whoever sends it - so the attestation binds to
+    /// no identity the chain trusts. Fail closed instead.
+    #[test]
+    fn a_stake_before_registration_is_refused_at_the_binding_gate() {
+        let state = AccountState::new();
+        let key = validator_key(5);
+        let err = state
+            .check_validator_v7_binding(&signed(&key, TransactionType::Stake))
+            .expect_err("a pre-registration V7 stake must be refused");
+        assert!(
+            err.contains("no registered ML-DSA-65 key"),
+            "the refusal must name the missing registration, got: {err}"
+        );
+    }
+
+    /// Regression: registering "the very key it is signed with" was admitted
+    /// when the registration's ML-DSA-65 key equalled the key signing the
+    /// transaction. That equality is decided by the same sender, so it
+    /// proves nothing: the attacker generates both halves and satisfies the
+    /// check by construction. Fail closed instead; enrolment signs the
+    /// registration with the Ed25519-authorized key set.
+    #[test]
+    fn a_self_signed_key_registration_before_registration_is_refused() {
+        let state = AccountState::new();
+        let key = validator_key(6);
+        let public = key.public_key().expect("public");
+        let registration = crate::core::transaction::ConsensusKeyRegistration {
+            scheme_id: crate::chain::finality::BLS_SCHEME_RFC9380_V1.to_string(),
+            vrf_public_key: Vec::new(),
+            bls_public_key: Vec::new(),
+            pop_signature: Vec::new(),
+            pq_public_key: public.pq.clone(),
+        };
+        let err = state
+            .check_validator_v7_binding(&signed(
+                &key,
+                TransactionType::RegisterConsensusKeys(registration),
+            ))
+            .expect_err("a pre-registration V7 key registration must be refused");
+        assert!(
+            err.contains("no registered ML-DSA-65 key"),
+            "the refusal must name the missing registration, got: {err}"
+        );
+    }
+
+    #[test]
+    fn a_registered_validator_signs_only_with_its_registered_key() {
+        let mut state = AccountState::new();
+        let key = validator_key(3);
+        let tx = signed(&key, TransactionType::Unstake);
+        let mut validator = Validator::new(tx.from, 1_000);
+        validator.pq_public_key = key.public_key().expect("public").pq;
+        state.validators.insert(tx.from, validator);
+        assert!(state.check_validator_v7_binding(&tx).is_ok());
+
+        // Same Ed25519 half, another ML-DSA-65 key.
+        let forged = CompositeKeypair::from_seeds(
+            SuiteId::VALIDATOR,
+            &[7u8; crate::crypto::pq::ML_DSA_SEED_LEN],
+            &[4u8; 32],
+        )
+        .expect("seeds");
+        let forged_tx = signed(&forged, TransactionType::Unstake);
+        assert_eq!(forged_tx.from, tx.from);
+        assert!(state.check_validator_v7_binding(&forged_tx).is_err());
     }
 }

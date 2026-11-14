@@ -1,11 +1,11 @@
 //! Locks that assert the effect, not only that a call returned.
 //!
-//! P49-F06: the slashing matrix checked `is_ok()` for liveness and spam
+//! The slashing matrix checked `is_ok()` for liveness and spam
 //! reports and discarded the result of the unverified case, so a slash that
 //! never cut stake and a report that was silently skipped looked the same as a
 //! correct run. These tests read the registration before and after.
 //!
-//! P49-F04: sixty macro-generated tests in `security_auditor.rs` call
+//! Sixty macro-generated tests in `security_auditor.rs` call
 //! `validate_transaction` with an unsigned transaction on an empty state and
 //! assert `is_err()`, which fails at the first check whatever the nonce is.
 //! The overflow rule had no test that pins the reason, so it could be removed

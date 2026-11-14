@@ -218,7 +218,7 @@ pub fn decode_frames(
 ) -> Result<(PayloadKind, Vec<u8>), PipeError> {
     let mut rx = ProgressiveReceiver::new(*stream_commitment);
     for fr in frames {
-        // BLG-0431: a complete prefix is not permission to skip validating
+        // A complete prefix is not permission to skip validating
         // the remaining frames the caller supplied.
         rx.push_frame(fr)?;
     }

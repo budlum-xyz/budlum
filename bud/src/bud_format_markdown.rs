@@ -1,7 +1,7 @@
 //! B.U.D. 2.0 - markdown / AI file compression (2026-08-16)
 //!
 //! Scope: structural compression of markdown/text documents.
-//! Bulgular (K106):
+//! Bulgular:
 //!   - HTML -> markdown: 87.5-90 percent token reduction (web2md/Fern measurement) - md is the most efficient
 //!     human-readable format for an LLM.
 //!   - JSON → Markdown tablo: token %20-40 (reinforcementcoding).
@@ -321,7 +321,7 @@ mod tests {
         );
     }
 
-    /// BLG-0611: a CRLF document lost its CR in the split and came back
+    /// A CRLF document lost its CR in the split and came back
     /// changed. Input the split cannot restore byte for byte is refused.
     #[test]
     fn crlf_markdown_is_refused_not_changed() {
@@ -442,7 +442,7 @@ mod tests {
         );
     }
 
-    /// BLG-0610: every heading level 1 to 6 is recognised; seven marks or no
+    /// Every heading level 1 to 6 is recognised; seven marks or no
     /// space after the marks is not a heading.
     #[test]
     fn heading_levels_one_to_six_are_recognised() {
@@ -482,7 +482,7 @@ mod tests {
 
     #[test]
     fn md_token_efficiency_documented() {
-        // K106: md is the compressed form of HTML (87-90 percent of tokens); this transform splits the
+        // Md is the compressed form of HTML (87-90 percent of tokens); this transform splits the
         // structure so zstd sees it better. The heading tree also doubles as LLM context.
         let md = sample_md();
         let split = MarkdownSplit::encode(&md).unwrap();

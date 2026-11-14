@@ -252,7 +252,7 @@ fn judge(src: &str) -> Vec<String> {
         // Whitespace-compact unit-success detection covers `Ok(())`,
         // `Ok :: <(), String> (())`, `::Ok(())` etc. (CWE-697).
         let has_ok_success = ok_success_in(block);
-        let guarded_success = block.find("if tx.verify() {").is_some_and(|verify_start| {
+        let guarded_success = block.find("if tx.verify").is_some_and(|verify_start| {
             let verify_rest = &block[verify_start..];
             let mut verify_depth = 0i32;
             let mut verify_end = verify_rest.len();

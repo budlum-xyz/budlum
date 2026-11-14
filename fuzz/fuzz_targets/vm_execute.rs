@@ -66,7 +66,7 @@ const MAX_INSTRUCTIONS: usize = 4096;
 ///
 /// Low enough that a tight loop terminates quickly, high enough that a
 /// straight-line program of `MAX_INSTRUCTIONS` finishes.
-const GAS_LIMIT: u64 = 50_000;
+const GAS_LIMIT: u64 = 4_096;
 
 fuzz_target!(|data: &[u8]| {
     // Eight bytes per instruction word, little-endian. A trailing partial

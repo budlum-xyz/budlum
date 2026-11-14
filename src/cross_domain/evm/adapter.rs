@@ -1,5 +1,6 @@
+//! WIRING: unwired - verify_deposit_observed is reached only from the adapter fixture tests in this tree; the live relayer observation runs the adapter's verify_observation instead.
 //! F10.4 EvmChainAdapter - the ChainAdapter impl for the EVM leg. NOT a
-//! fully live path (BLG-0135/P06-F06): the off-chain half is a stub that
+//! fully live path: the off-chain half is a stub that
 //! refuses at broadcast, so the Ethereum-to-Budlum leg has no live end-to-end
 //! route. The on-chain verification below is real and deterministic; what it
 //! verifies today is produced only in tests.
@@ -30,7 +31,7 @@
 //! Security boundary: the wire format changed - the off-chain relayer tool
 //! must produce the leaf with the same formula. `verify_deposit` does MPT +
 //! header chain + status + log match over the full `EvmDepositProof`, but it
-//! is UNREACHABLE today (BLG-0135): no production path calls it.
+//! is UNREACHABLE today: no production path calls it.
 
 use crate::core::hash::hash_fields_bytes;
 use crate::core::transaction::{ExternalChain, ExternalTransaction, RelayerExternalResult};
@@ -40,6 +41,8 @@ use crate::cross_domain::evm::header::DEFAULT_CONFIRMATIONS;
 use crate::cross_domain::evm::verify::{
     verify_evm_receipt, DepositProofPackage, EvmDepositProof, VerifiedDeposit, VerifyError,
 };
+use crate::crypto::facts::{CryptoObserver, ObservedScheme};
+use crate::crypto::scheme::SchemeId;
 use crate::domain::types::Hash32;
 use bincode::Options;
 
@@ -58,8 +61,7 @@ pub const DEFAULT_DEPOSIT_TOPIC0: [u8; 32] = [0u8; 32];
 /// `verify_receipt_proof` is deterministic in Budlum consensus. The off-chain
 /// methods (`generate_receipt_proof`/`submit_transaction`/
 /// `wait_for_confirmation`) are an offline-test stub (the StubAdapter
-/// pattern) that REFUSES at broadcast - there is no live Ethereum RPC route
-/// (BLG-0135/P06-F06).
+/// pattern) that REFUSES at broadcast - there is no live Ethereum RPC route.
 ///
 /// `Debug` so a caller can `expect` on a `Result` carrying one. All three
 /// fields are public configuration already: a contract address, an event
@@ -78,7 +80,7 @@ pub struct EvmChainAdapter {
     pub deposit_topic0: [u8; 32],
     /// The N-confirmation threshold (the reorg window; mainnet is about 64).
     pub required_confirmations: u32,
-    /// BLG-0111 (P05-F04): the operator's trusted checkpoint `(number,
+    /// The operator's trusted checkpoint `(number,
     /// hash)` - the interim anchor the header chain must touch.
     pub trusted_checkpoint: Option<(u64, [u8; 32])>,
 }
@@ -93,7 +95,7 @@ impl EvmChainAdapter {
         }
     }
 
-    /// Pins the operator's trusted checkpoint - BLG-0111 (P05-F04) interim
+    /// Pins the operator's trusted checkpoint -interim
     /// form A of the finality rule: until relayers ship sync-committee
     /// attestations (form B), the deposit's header chain must touch this
     /// anchor or the deposit refuses.
@@ -129,7 +131,7 @@ impl EvmChainAdapter {
     ///
     /// A message naming which of the two is wrong.
     pub fn check_fit_for_relay(&self) -> Result<(), String> {
-        // BLG-0111 (P05-F04): without finality evidence every deposit would
+        // Without finality evidence every deposit would
         // refuse at verify time anyway - say it once, at setup. Form B
         // (sync-committee attestation) supersedes the anchor when relayers
         // ship it.
@@ -186,7 +188,7 @@ impl ChainAdapter for EvmChainAdapter {
     /// Off-chain (the relayer binary): produce a receipt + MPT proof from Ethereum RPC.
     ///
     /// This impl is an offline-test stub (the StubAdapter pattern) and
-    /// REFUSES - there is no live Ethereum RPC route (BLG-0135/P06-F06).
+    /// REFUSES - there is no live Ethereum RPC route.
     /// A production RPC client does not exist in this tree.
     async fn generate_receipt_proof(
         &self,
@@ -306,7 +308,7 @@ impl ChainAdapter for EvmChainAdapter {
                     .into(),
             ));
         }
-        // BLG-0136 (P06-F07, decision B interim): no sync attestation, no
+        // No sync attestation, no
         // accepted observation. `DepositProofPackage` cannot yet carry the
         // attestation and finality branch (decision A lands with the
         // committee work), and this seam built its proof with
@@ -316,7 +318,7 @@ impl ChainAdapter for EvmChainAdapter {
         // refuses to ACCEPT the result until the package can carry the
         // evidence.
         Err(AdapterError::ProofVerificationFailed(
-            "the deposit package carries no sync attestation; BLG-0136 interim: this \
+            "the deposit package carries no sync attestation interim: this \
              observation seam refuses until the package can carry the attestation and \
              finality branch"
                 .into(),
@@ -451,10 +453,47 @@ impl EvmChainAdapter {
                 proof.required_confirmations, self.required_confirmations
             )));
         }
-        // BLG-0111 (P05-F04): the operator's trusted checkpoint is the
+        // The operator's trusted checkpoint is the
         // interim finality anchor when the proof carries no sync attestation.
         verify_evm_receipt(proof, self.trusted_checkpoint.as_ref())
     }
+
+    /// [`Self::verify_deposit`], naming the schemes the proven deposit rests
+    /// on.
+    ///
+    /// A deposit that verified is a receipt in a chain whose transactions are
+    /// authorised by secp256k1 account signatures, so that scheme is a fact of
+    /// the claim even though this adapter never checks one signature itself.
+    /// BLS12-381 is named only when the proof carried a sync-committee
+    /// attestation, which is the one place a BLS aggregate was verified. A
+    /// proof finalised by the operator's trusted checkpoint alone has no BLS
+    /// fact, and the profile shows that too.
+    ///
+    /// # Errors
+    ///
+    /// Whatever [`Self::verify_deposit`] refuses with; nothing is observed
+    /// then.
+    pub fn verify_deposit_observed(
+        &self,
+        proof: &EvmDepositProof<'_>,
+        observer: &mut dyn CryptoObserver,
+    ) -> Result<VerifiedDeposit, VerifyError> {
+        let verified = self.verify_deposit(proof)?;
+        for scheme in deposit_schemes(proof.sync_attestation.is_some()) {
+            observer.observe(scheme);
+        }
+        Ok(verified)
+    }
+}
+
+/// The schemes a verified EVM deposit rests on: secp256k1 always, BLS12-381
+/// when a sync-committee attestation finalised the block.
+fn deposit_schemes(attested: bool) -> Vec<ObservedScheme> {
+    let mut schemes = vec![ObservedScheme::Secp256k1];
+    if attested {
+        schemes.push(ObservedScheme::Scheme(SchemeId::BLS12381_MINSIG));
+    }
+    schemes
 }
 
 /// Derives the receipt proof leaf from `tx_hash + bridge_address`.
@@ -653,6 +692,65 @@ mod tests {
             VerifyError::Header(m) => assert!(!m.contains("adapter floor"), "got: {m}"),
             other => panic!("expected a header decode error, got {other:?}"),
         }
+    }
+
+    /// a verified EVM deposit names secp256k1; BLS12-381 joins it when
+    /// a sync-committee attestation finalised the block. A refused proof
+    /// names nothing.
+    #[test]
+    fn a_verified_deposit_reports_secp256k1_and_bls_when_attested() {
+        use crate::crypto::facts::{CryptoFacts, QuantumClass};
+        let adapter = floor_three();
+        let f = fixtures::build_fixture(
+            &adapter.bridge_address,
+            adapter.deposit_topic0,
+            b"deposit-payload",
+            true,
+            3,
+        );
+        let confirmations = fixtures::conf_refs(&f);
+        let proof = EvmDepositProof {
+            target_header: &f.target_header,
+            confirmation_headers: &confirmations,
+            required_confirmations: 3,
+            proof_nodes: &f.proof_nodes,
+            receipt_key: &f.receipt_key,
+            tx_hash: "0xabc123",
+            emitter_address: &adapter.bridge_address,
+            deposit_topic0: &adapter.deposit_topic0,
+            sync_attestation: None,
+        };
+        let mut facts = CryptoFacts::new();
+        adapter
+            .verify_deposit_observed(&proof, &mut facts)
+            .expect("the anchored fixture verifies");
+        assert_eq!(facts.count(ObservedScheme::Secp256k1), 1);
+        assert_eq!(
+            facts.count(ObservedScheme::Scheme(SchemeId::BLS12381_MINSIG)),
+            0,
+            "no attestation, no BLS fact"
+        );
+        assert_eq!(facts.quantum_class(), Some(QuantumClass::Classical));
+
+        let mut attested = CryptoFacts::new();
+        for scheme in deposit_schemes(true) {
+            crate::crypto::facts::CryptoObserver::observe(&mut attested, scheme);
+        }
+        assert_eq!(attested.count(ObservedScheme::Secp256k1), 1);
+        assert_eq!(
+            attested.count(ObservedScheme::Scheme(SchemeId::BLS12381_MINSIG)),
+            1
+        );
+
+        let mut refused = CryptoFacts::new();
+        let below_floor = EvmDepositProof {
+            required_confirmations: 1,
+            ..proof
+        };
+        assert!(adapter
+            .verify_deposit_observed(&below_floor, &mut refused)
+            .is_err());
+        assert!(refused.is_empty(), "a refused proof observes nothing");
     }
 
     #[test]
@@ -874,7 +972,7 @@ mod tests {
     }
 
     /// `adapter` anchored at the target header of `source`'s fixture chain -
-    /// the interim finality anchor (BLG-0111) the chain must touch for the
+    /// the interim finality anchor the chain must touch for the
     /// later, more specific refusals to be reachable.
     fn anchored_to(adapter: EvmChainAdapter, source: &EvmChainAdapter) -> EvmChainAdapter {
         let f = fixtures::build_fixture(
@@ -900,7 +998,7 @@ mod tests {
         anchored_to(unanchored_floor_three(), &base)
     }
 
-    /// BLG-0136 (P06-F07, decision B interim): even a fully proven package
+    /// Even a fully proven package
     /// is REFUSED at this seam while it cannot carry a sync attestation. The
     /// old positive pinned the missing rule: an attestation-less package
     /// verified as final. Until the package gains the attestation and
@@ -911,7 +1009,7 @@ mod tests {
         let observation = observation_for(&adapter, 3);
         let err = adapter
             .verify_observation(&observation)
-            .expect_err("no sync attestation, no accepted observation (BLG-0136 interim)");
+            .expect_err("no sync attestation, no accepted observation ( interim)");
         // Either refusal is the contract: the 0111 finality rule (no
         // attestation and no checkpoint) or this seam's own attestation
         // gate. What is pinned is that attestation-less is not accepted.

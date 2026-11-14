@@ -22,6 +22,7 @@
 //! window; it is never reported as cryptographic finality.
 
 use serde::{Deserialize, Serialize};
+use sha3::{Digest, Keccak256};
 
 /// Final EIP-2537 allocation. The constants are part of the wire contract,
 /// not an implementation detail: early drafts used different addresses.
@@ -183,6 +184,8 @@ impl Default for EvmGasSchedule {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EvmHybridProof {
     pub chain_id: u64,
+    #[serde(default)]
+    pub epoch: u64,
     pub height: u64,
     pub state_root: [u8; 32],
     pub g1_hashed_message: Vec<u8>,
@@ -206,6 +209,25 @@ pub struct EvmHybridProof {
 pub const MAX_ML_DSA_FIELD_BYTES: usize = 8 * 1024;
 
 impl EvmHybridProof {
+    /// Returns the exact signing root used by
+    /// `BudlumFinalityVerifier.signingRoot`.
+    ///
+    /// Solidity's `abi.encodePacked` uses a 32-byte word for `block.chainid`
+    /// and fixed-width big-endian bytes for each `uint64`. Keeping this encoder
+    /// here prevents a relayer from signing a Rust-side representation that
+    /// the contract hashes differently.
+    #[must_use]
+    pub fn signing_root(&self, evm_chain_id: u64) -> [u8; 32] {
+        let mut encoded = Vec::with_capacity(27 + 32 + 8 + 32 + 8 + 8);
+        encoded.extend_from_slice(b"bud-finality-signing-root-v1");
+        encoded.extend_from_slice(&u256_word(evm_chain_id));
+        encoded.extend_from_slice(&self.height.to_be_bytes());
+        encoded.extend_from_slice(&self.state_root);
+        encoded.extend_from_slice(&self.epoch.to_be_bytes());
+        encoded.extend_from_slice(&self.chain_id.to_be_bytes());
+        Keccak256::digest(encoded).into()
+    }
+
     /// Performs shape and resource checks before selecting a verification mode.
     pub fn validate_shape(&self) -> Result<(), EvmPlanError> {
         let points = [
@@ -261,6 +283,160 @@ impl EvmHybridProof {
                     .saturating_mul(schedule.calldata_nonzero),
             )
     }
+}
+
+fn u256_word(value: u64) -> [u8; 32] {
+    let mut word = [0u8; 32];
+    word[24..].copy_from_slice(&value.to_be_bytes());
+    word
+}
+
+/// The explicit ABI payload accepted by `BudlumFinalityVerifier.verify`.
+///
+/// This is separate from [`EvmHybridProof`] because the planner's message
+/// point is a local precompile input, while the contract derives that point
+/// from the signing root and receives only the two uncompressed public/signature
+/// points named by the Solidity struct.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EvmFinalityAttestation {
+    pub height: u64,
+    pub state_root: [u8; 32],
+    pub epoch: u64,
+    pub budlum_chain_id: u64,
+    pub g2_aggregate_pubkey: Vec<u8>,
+    pub g2_generator: Vec<u8>,
+    pub g1_neg_signature: Vec<u8>,
+    pub ml_dsa_signature: Vec<u8>,
+    pub ml_dsa_pubkey: Vec<u8>,
+    pub ml_dsa_eth_variant: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum EvmEncodingError {
+    #[error("{field} has {actual} bytes; expected {expected}")]
+    WrongLength {
+        field: &'static str,
+        expected: usize,
+        actual: usize,
+    },
+}
+
+impl EvmFinalityAttestation {
+    /// Matches Solidity's `abi.encode` in `attestationDigest`, including the
+    /// dynamic string head and the five dynamic point/signature hashes.
+    #[must_use]
+    pub fn attestation_digest(&self) -> [u8; 32] {
+        let mut encoded = Vec::with_capacity(11 * 32 + 32);
+        let domain = b"bud-attestation-v1";
+        encoded.extend_from_slice(&u256_word(11 * 32));
+        encoded.extend_from_slice(&u256_word(self.height));
+        encoded.extend_from_slice(&self.state_root);
+        encoded.extend_from_slice(&u256_word(self.epoch));
+        encoded.extend_from_slice(&u256_word(self.budlum_chain_id));
+        for bytes in [
+            &self.g2_aggregate_pubkey,
+            &self.g2_generator,
+            &self.g1_neg_signature,
+            &self.ml_dsa_signature,
+            &self.ml_dsa_pubkey,
+        ] {
+            let hash: [u8; 32] = Keccak256::digest(bytes).into();
+            encoded.extend_from_slice(&hash);
+        }
+        encoded.extend_from_slice(&u256_word(if self.ml_dsa_eth_variant { 1 } else { 0 }));
+        encoded.extend_from_slice(&u256_word(domain.len() as u64));
+        encoded.extend_from_slice(domain);
+        encoded.resize(encoded.len() + padded_len(domain.len()) - domain.len(), 0);
+        Keccak256::digest(encoded).into()
+    }
+
+    #[must_use]
+    pub fn signing_root(&self, evm_chain_id: u64) -> [u8; 32] {
+        let mut encoded = Vec::with_capacity(27 + 32 + 8 + 32 + 8 + 8);
+        encoded.extend_from_slice(b"bud-finality-signing-root-v1");
+        encoded.extend_from_slice(&u256_word(evm_chain_id));
+        encoded.extend_from_slice(&self.height.to_be_bytes());
+        encoded.extend_from_slice(&self.state_root);
+        encoded.extend_from_slice(&self.epoch.to_be_bytes());
+        encoded.extend_from_slice(&self.budlum_chain_id.to_be_bytes());
+        Keccak256::digest(encoded).into()
+    }
+
+    /// ABI encodes the call data for `verify(Attestation)` exactly as Solidity
+    /// `abi.encodeWithSelector` does. The selector is included so the output
+    /// can be sent directly to an EVM transaction.
+    pub fn encode_verify_calldata(&self, evm_chain_id: u64) -> Result<Vec<u8>, EvmEncodingError> {
+        for (field, actual, expected) in [
+            (
+                "g2_aggregate_pubkey",
+                self.g2_aggregate_pubkey.len(),
+                256usize,
+            ),
+            ("g2_generator", self.g2_generator.len(), 256usize),
+            ("g1_neg_signature", self.g1_neg_signature.len(), 128usize),
+        ] {
+            if actual != expected {
+                return Err(EvmEncodingError::WrongLength {
+                    field,
+                    expected,
+                    actual,
+                });
+            }
+        }
+        if self.ml_dsa_signature.is_empty() {
+            return Err(EvmEncodingError::WrongLength {
+                field: "ml_dsa_signature",
+                expected: 1,
+                actual: 0,
+            });
+        }
+        if self.ml_dsa_pubkey.is_empty() {
+            return Err(EvmEncodingError::WrongLength {
+                field: "ml_dsa_pubkey",
+                expected: 1,
+                actual: 0,
+            });
+        }
+
+        let selector = Keccak256::digest(
+            b"verify((uint64,bytes32,uint64,uint64,bytes,bytes,bytes,bytes,bytes,bool)",
+        );
+        let mut out = selector[..4].to_vec();
+        // One dynamic tuple argument: the first word points past the outer
+        // head, and all offsets inside the tuple are relative to its start.
+        out.extend_from_slice(&u256_word(32));
+        let dynamic_fields = [
+            &self.g2_aggregate_pubkey,
+            &self.g2_generator,
+            &self.g1_neg_signature,
+            &self.ml_dsa_signature,
+            &self.ml_dsa_pubkey,
+        ];
+        let tuple_head_bytes = 10usize * 32;
+        let mut offset = tuple_head_bytes;
+        out.extend_from_slice(&u256_word(self.height));
+        out.extend_from_slice(&self.state_root);
+        out.extend_from_slice(&u256_word(self.epoch));
+        out.extend_from_slice(&u256_word(self.budlum_chain_id));
+        for bytes in &dynamic_fields {
+            out.extend_from_slice(&u256_word(offset as u64));
+            offset = offset.saturating_add(32 + padded_len(bytes.len()));
+        }
+        out.extend_from_slice(&u256_word(if self.ml_dsa_eth_variant { 1 } else { 0 }));
+        for bytes in dynamic_fields {
+            out.extend_from_slice(&u256_word(bytes.len() as u64));
+            out.extend_from_slice(bytes);
+            out.resize(out.len() + padded_len(bytes.len()) - bytes.len(), 0);
+        }
+        // A selector plus the ABI body is exactly what eth_sendRawTransaction
+        // expects after the transaction envelope has been signed.
+        let _ = evm_chain_id; // chain id enters the signing root, not the ABI struct.
+        Ok(out)
+    }
+}
+
+fn padded_len(length: usize) -> usize {
+    length.saturating_add(31) / 32 * 32
 }
 
 /// Why no plan was produced.
@@ -394,6 +570,7 @@ mod tests {
     fn proof(binding: MessageBinding) -> EvmHybridProof {
         EvmHybridProof {
             chain_id: 1,
+            epoch: 3,
             height: 42,
             state_root: [7; 32],
             g1_hashed_message: point(128, 1),

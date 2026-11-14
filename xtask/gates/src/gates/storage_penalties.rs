@@ -1,12 +1,12 @@
 //! Storage penalties must be enforced end to end.
 //!
 //! Ported from `scripts/check-storage-penalties-are-enforced.sh`. Nine
-//! claims over `src/domain/storage_deal.rs`, `src/domain/deal_open.rs` and
-//! `src/chain/blockchain.rs`:
+//! claims over `src/domain/storage_deal.rs`, `src/domain/deal_open.rs`,
+//! `src/domain/storage_tx.rs` and `src/chain/blockchain.rs`:
 //! the cooldown is a six-hour named constant, `begin_operator_cooldown` takes
 //! the later deadline, `prune_expired_cooldowns` exists and is called, `root`
-//! hashes both cooldowns and operator classes, `open_storage_deal_with_escrow`
-//! and `accept_storage_reallocation_with_escrow` route through
+//! hashes both cooldowns and operator classes, the in-block `open_deal` and
+//! `accept_reallocation` doors of `storage_tx.rs` route through
 //! `open_deal_escrowed` and `accept_reallocation_escrowed`, which enforce the
 //! cooldown, `open_deal` enforces the mobile-primary rule, and nine regression tests
 //! exist.
@@ -138,12 +138,12 @@ fn check_cooldown(deal_code: &str, chain_code: &str, problems: &mut Vec<String>)
 /// `open_deal` enforces the mobile-primary rule.
 fn check_root_escrow_deal(
     deal_code: &str,
-    chain_code: &str,
+    door_code: &str,
     open_code: &str,
     problems: &mut Vec<String>,
 ) -> usize {
     check_root_hashes_both_maps(deal_code, problems)
-        + check_escrow_wrappers(chain_code, problems)
+        + check_escrow_doors(door_code, problems)
         + check_shared_escrow_entries(open_code, problems)
         + check_refuse_cooling_operator(open_code, problems)
         + check_open_deal_primary_rule(deal_code, problems)
@@ -154,7 +154,11 @@ fn check_root_hashes_both_maps(deal_code: &str, problems: &mut Vec<String>) -> u
     let mut checked = 0usize;
     // 4. root hashes both maps.
     checked += 1;
-    let root_fn = body_of(deal_code, "pub fn root(");
+    // Anchor inside the registry impl: the file's economics ledger has its
+    // own `pub fn root(` earlier, and that one folds no operator maps.
+    let root_fn = deal_code
+        .find("impl StorageRegistry")
+        .and_then(|at| body_of(&deal_code[at..], "pub fn root("));
     match root_fn {
         None => problems
             .push("cannot find `StorageRegistry::root` to check what it commits to.".to_string()),
@@ -175,38 +179,36 @@ fn check_root_hashes_both_maps(deal_code: &str, problems: &mut Vec<String>) -> u
     checked
 }
 
-/// Check 5a: the RPC entry points route through the shared escrow paths.
-fn check_escrow_wrappers(chain_code: &str, problems: &mut Vec<String>) -> usize {
+/// Check 5a: the in-block doors route through the shared escrow paths.
+fn check_escrow_doors(door_code: &str, problems: &mut Vec<String>) -> usize {
     let mut checked = 0usize;
     checked += 1;
-    match body_of(chain_code, "pub fn open_storage_deal_with_escrow(") {
+    match body_of(door_code, "fn open_deal(") {
         None => problems.push(
-            "cannot find `open_storage_deal_with_escrow`. If it was renamed, \
+            "cannot find the `open_deal` door in `storage_tx.rs`. If it was renamed, \
              update this gate in the same commit so the enforcement stays watched."
                 .to_string(),
         ),
         Some(w) if !w.contains("open_deal_escrowed(") => problems.push(
-            "`open_storage_deal_with_escrow` does not call `open_deal_escrowed`. \
-             The cooldown check lives there, so a wrapper that skips it lets an \
-             operator in its cooldown take storage work."
+            "the `open_deal` door does not call `open_deal_escrowed`. The cooldown \
+             check lives there, so a door that skips it lets an operator in its \
+             cooldown take storage work."
                 .to_string(),
         ),
         Some(_) => {}
     }
     checked += 1;
-    match body_of(
-        chain_code,
-        "pub fn accept_storage_reallocation_with_escrow(",
-    ) {
+    match body_of(door_code, "fn accept_reallocation(") {
         None => problems.push(
-            "cannot find `accept_storage_reallocation_with_escrow`. If it was renamed, \
-             update this gate in the same commit so the enforcement stays watched."
+            "cannot find the `accept_reallocation` door in `storage_tx.rs`. If it was \
+             renamed, update this gate in the same commit so the enforcement stays \
+             watched."
                 .to_string(),
         ),
         Some(w) if !w.contains("accept_reallocation_escrowed(") => problems.push(
-            "`accept_storage_reallocation_with_escrow` does not call \
+            "the `accept_reallocation` door does not call \
              `accept_reallocation_escrowed`. The cooldown check lives there, so a \
-             wrapper that skips it lets an operator in its cooldown take a repair."
+             door that skips it lets an operator in its cooldown take a repair."
                 .to_string(),
         ),
         Some(_) => {}
@@ -415,6 +417,10 @@ pub fn run(root: &Path) -> Result<String, String> {
     let deal = root.join("src/domain/storage_deal.rs");
     let chain = root.join("src/chain/blockchain.rs");
     let open = root.join("src/domain/deal_open.rs");
+    let door = root.join("src/domain/storage_tx.rs");
+    if !door.is_file() {
+        return Err(format!("expected source file missing: {}", door.display()));
+    }
     if !deal.is_file() {
         return Err(format!("expected source file missing: {}", deal.display()));
     }
@@ -427,16 +433,24 @@ pub fn run(root: &Path) -> Result<String, String> {
     let open_src = std::fs::read_to_string(&open).map_err(|e| e.to_string())?;
     let deal_src = std::fs::read_to_string(&deal).map_err(|e| e.to_string())?;
     let chain_src = std::fs::read_to_string(&chain).map_err(|e| e.to_string())?;
+    // The expiry maintenance moved the cooldown prune call into
+    // storage_maintenance.rs; both chain files count as production callers.
+    let chain_src = match std::fs::read_to_string(root.join("src/chain/storage_maintenance.rs")) {
+        Ok(extra) => format!("{chain_src}\n{extra}"),
+        Err(_) => chain_src,
+    };
     let deal_code = strip_comments_and_literals(&deal_src);
     let chain_code = strip_comments_and_literals(&chain_src);
     let open_code = strip_comments_and_literals(&open_src);
+    let door_code =
+        strip_comments_and_literals(&std::fs::read_to_string(&door).map_err(|e| e.to_string())?);
     let mut problems: Vec<String> = Vec::new();
     let mut checked = 0usize;
 
     checked += check_cooldown(deal_code.as_str(), chain_code.as_str(), &mut problems);
     checked += check_root_escrow_deal(
         deal_code.as_str(),
-        chain_code.as_str(),
+        door_code.as_str(),
         open_code.as_str(),
         &mut problems,
     );
@@ -500,8 +514,10 @@ pub fn self_test() -> Result<String, String> {
         writeln!(deal, "#[test]\nfn {t}() {{}}").expect("writing to a String cannot fail");
     }
     std::fs::write(dir.join("src/domain/storage_deal.rs"), &deal).map_err(|e| e.to_string())?;
-    let chain = "fn f() {\n    self.state.storage_registry.prune_expired_cooldowns(now_unix);\n}\npub fn open_storage_deal_with_escrow() {\n    let _ = open_deal_escrowed(&mut self.state, &terms, payer, now_unix, bond, 0);\n}\npub fn accept_storage_reallocation_with_escrow() {\n    let _ = accept_reallocation_escrowed(&mut self.state, &terms, payer, now_unix, bond, 0);\n}\n";
+    let chain = "fn f() {\n    self.state.storage_registry.prune_expired_cooldowns(now_unix);\n}\n";
     std::fs::write(dir.join("src/chain/blockchain.rs"), chain).map_err(|e| e.to_string())?;
+    let doors = "fn open_deal(state: &mut AccountState) -> Result<(), E> {\n    open_deal_escrowed(state, &terms, ctx.sender, now_unix, bond, reserve)\n}\nfn accept_reallocation(state: &mut AccountState) -> Result<(), E> {\n    accept_reallocation_escrowed(state, &terms, ctx.sender, now_unix, bond, reserve)\n}\n";
+    std::fs::write(dir.join("src/domain/storage_tx.rs"), doors).map_err(|e| e.to_string())?;
     let open = "pub fn open_deal_escrowed() {\n    refuse_cooling_operator(state, &operator, now_unix)?;\n}\npub fn accept_reallocation_escrowed() {\n    refuse_cooling_operator(state, &operator, now_unix)?;\n}\nfn refuse_cooling_operator() {\n    let _ = state.storage_registry.operator_cooldown_until(operator, now_unix);\n}\n";
     std::fs::write(dir.join("src/domain/deal_open.rs"), open).map_err(|e| e.to_string())?;
     if run(&dir).is_err() {
@@ -540,28 +556,28 @@ pub fn self_test() -> Result<String, String> {
     }
     std::fs::write(dir.join("src/domain/deal_open.rs"), open).map_err(|e| e.to_string())?;
 
-    // Bad: the wrapper bypasses the shared path.
-    let bypass = chain.replace("open_deal_escrowed(", "something_else(");
-    std::fs::write(dir.join("src/chain/blockchain.rs"), bypass).map_err(|e| e.to_string())?;
+    // Bad: the deal-open door bypasses the shared path.
+    let bypass = doors.replace("open_deal_escrowed(", "something_else(");
+    std::fs::write(dir.join("src/domain/storage_tx.rs"), bypass).map_err(|e| e.to_string())?;
     if run(&dir).is_ok() {
         let _ = std::fs::remove_dir_all(&dir);
         return Err(String::from(
-            "canary: a wrapper that skips the shared open passed",
+            "canary: a deal-open door that skips the shared open passed",
         ));
     }
-    std::fs::write(dir.join("src/chain/blockchain.rs"), chain).map_err(|e| e.to_string())?;
+    std::fs::write(dir.join("src/domain/storage_tx.rs"), doors).map_err(|e| e.to_string())?;
 
-    // Bad: the repair wrapper bypasses the shared path.
-    let realloc_bypass = chain.replace("accept_reallocation_escrowed(", "something_else(");
-    std::fs::write(dir.join("src/chain/blockchain.rs"), realloc_bypass)
+    // Bad: the repair door bypasses the shared path.
+    let realloc_bypass = doors.replace("accept_reallocation_escrowed(", "something_else(");
+    std::fs::write(dir.join("src/domain/storage_tx.rs"), realloc_bypass)
         .map_err(|e| e.to_string())?;
     if run(&dir).is_ok() {
         let _ = std::fs::remove_dir_all(&dir);
         return Err(String::from(
-            "canary: a repair wrapper that skips the shared path passed",
+            "canary: a repair door that skips the shared path passed",
         ));
     }
-    std::fs::write(dir.join("src/chain/blockchain.rs"), chain).map_err(|e| e.to_string())?;
+    std::fs::write(dir.join("src/domain/storage_tx.rs"), doors).map_err(|e| e.to_string())?;
 
     // Bad: cooldown wrong length.
     let bad = deal.replace("6 * 60 * 60", "60");

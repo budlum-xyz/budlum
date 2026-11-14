@@ -434,7 +434,7 @@ mod tests {
 
     #[test]
     fn pollen_guard_covers_the_served_storage_root() {
-        // BLG-0713: storage_root is what the gateway serves; the guard must see it
+        // Storage_root is what the gateway serves; the guard must see it
         // even when content_id points elsewhere.
         let protected = [7u8; 32];
         let other = ContentId::of(b"unprotected");

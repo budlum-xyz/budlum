@@ -1,4 +1,4 @@
-//! B.U.D. 2.0 - SERVICE CLASSES (F16 plus the K71 SLA - the decision layer).
+//! B.U.D. 2.0 - SERVICE CLASSES (F16 plus the SLA - the decision layer).
 //!
 //! The economic decision: a single price of 0.016, with the CPU cost carried by
 //! the validator. This module defines the service classes as an INTERNAL

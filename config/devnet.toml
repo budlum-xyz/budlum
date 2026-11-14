@@ -36,6 +36,4 @@ key_file = "./secrets/devnet-validator.key"
 backend = "local"
 
 [features]
-governance = false
-zkvm_contracts = false
 pruning = false

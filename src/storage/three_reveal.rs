@@ -1,4 +1,4 @@
-//! G3 - reveal session (plan §CH G3).
+//! G3 - reveal session.
 //!
 //! After `may_view` / `may_open_three_recipe` succeeds, a short-lived session
 //! may re-emit frames **in memory**. Nothing is written to durable storage.
