@@ -194,7 +194,7 @@ impl GardenBudlumSettlement {
                 }
                 Ok(domain_id)
             }
-            FinalityStatus::Pending => Err("Garden PoA finality proof is pending".into()),
+            FinalityStatus::Pending { .. } => Err("Garden PoA finality proof is pending".into()),
             FinalityStatus::Rejected(reason) => {
                 Err(format!("Garden PoA finality proof rejected: {reason}"))
             }
