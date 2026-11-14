@@ -10,6 +10,10 @@ on:
   pull_request:
     # Run on the normal protected bases and on stacked continuation bases.
     branches: [main, consensus-of-consensuses, testnet-quantum, testnet, 'arena/**']
+  # A manual run on a snapshot ref (a branch or a tag that names one commit).
+  # Its concurrency group is the snapshot ref, so a push to a stacked branch
+  # cannot cancel it, and a head gets one complete result.
+  workflow_dispatch:
 
 concurrency:
   group: ci-${{ github.ref }}
