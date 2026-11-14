@@ -7542,11 +7542,13 @@ mod tests {
         assert_eq!(deal_status(&reg, deal_id), DealStatus::Active);
     }
 
-    /// The containment above must not reach the case it was not written for.
+    /// An answer with no proof still resolves the challenge, and while proofs
+    /// are uncheckable it neither slashes nor pays.
     ///
-    /// An answer with no proof at all is a fact about the answer, not a
-    /// limitation of the verifier, so it still costs the bond. Without this
-    /// the flag would quietly turn every wrong answer free.
+    /// Not appearing is not a penalty, and a slash needs proven evidence. An
+    /// answer that carries no proof gives the verifier nothing to prove, so
+    /// no bond moves and no proven-read credit is earned. The challenge is
+    /// resolved, so the operator cannot answer it a second time.
     #[test]
     fn an_unbound_answer_without_proof_is_resolved_without_slash_or_credit() {
         let m = good_manifest();
@@ -7557,10 +7559,14 @@ mod tests {
             .unwrap();
         let res = reg
             .answer_challenge(cid, ContentId([1u8; 32]), operator(), 115, None)
-            .expect("an answer with no proof resolves as mismatched");
+            .expect("an answer with no proof resolves the challenge");
         assert_eq!(res.outcome, ChallengeOutcome::Answered);
         assert_eq!(res.slashed_bond, 0);
         assert_eq!(deal_status(&reg, deal_id), DealStatus::Active);
+        assert!(
+            reg.results.contains_key(&cid),
+            "the answer must land in results, otherwise the challenge is still open"
+        );
     }
 
     /// An unbound proof is neither a successful possession claim nor evidence
@@ -7630,22 +7636,24 @@ mod tests {
     }
 
     #[test]
-    fn a_missing_proof_still_slashes_rather_than_leaving_the_challenge_open() {
+    fn a_missing_proof_resolves_the_challenge_rather_than_leaving_it_open() {
         let m = good_manifest();
         let mut reg = StorageRegistry::new();
         let (deal_id, _) = open_one(&mut reg, &m);
         let cid = reg
             .open_challenge(deal_id, 0, 4, 110, 120, opener(), 50)
             .unwrap();
-        // Answering in time but with no proof at all is a wrong answer, not a
+        // Answering in time but with no proof at all is an answer, not a
         // malformed request: the deal carries a storage_root, so a proof was
-        // owed.
+        // owed, and the challenge must not stay open for another attempt.
+        // While proofs are uncheckable no outcome of this answer moves the bond.
         let res = reg
             .answer_challenge(cid, ContentId([1u8; 32]), operator(), 115, None)
-            .expect("an answer with no proof resolves as mismatched");
+            .expect("an answer with no proof resolves the challenge");
         assert_eq!(res.outcome, ChallengeOutcome::Answered);
         assert_eq!(res.slashed_bond, 0);
         assert_eq!(deal_status(&reg, deal_id), DealStatus::Active);
+        assert!(reg.get_result(cid).is_some(), "the challenge is resolved");
     }
 
     #[test]
