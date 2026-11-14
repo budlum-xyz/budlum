@@ -864,7 +864,7 @@ impl VerifierRegistry {
             hasher.update(record.remaining_stake.to_le_bytes());
             hasher.update(record.report.offender.as_bytes());
             hasher.update(record.report.role.as_bytes());
-            let prov_tag = match record.report.provenance {
+            let prov_tag = match record.report.provenance() {
                 crate::evidence::ProofProvenance::ConsensusVerified => 0u8,
                 crate::evidence::ProofProvenance::Unverified => 1u8,
             };
@@ -1377,7 +1377,7 @@ mod tests {
 
     #[test]
     fn unverified_report_not_actionable() {
-        use crate::evidence::{ProofProvenance, SlashingProof};
+        use crate::evidence::SlashingProof;
 
         let mut reg = VerifierRegistry::new();
         reg.register_master_verifier(addr(10), 10_000, 0).unwrap();
@@ -1391,7 +1391,6 @@ mod tests {
                 missed: 5,
                 expected: 10,
             },
-            ProofProvenance::Unverified,
             None,
         );
 
@@ -1402,12 +1401,12 @@ mod tests {
 
     #[test]
     fn consensus_verified_report_slashes() {
-        use crate::evidence::{ProofProvenance, SlashingProof};
+        use crate::evidence::SlashingProof;
 
         let mut reg = VerifierRegistry::new();
         reg.register_master_verifier(addr(11), 10_000, 0).unwrap();
 
-        let report = SlashingReport::new(
+        let report = SlashingReport::new_verified(
             addr(11),
             roles::MASTER_VERIFIER,
             SlashingProof::Liveness {
@@ -1416,7 +1415,6 @@ mod tests {
                 missed: 5,
                 expected: 10,
             },
-            ProofProvenance::ConsensusVerified,
             None,
         );
 
@@ -1456,7 +1454,7 @@ mod tests {
     /// silently misanswered.
     #[test]
     fn the_slashing_history_stops_growing_at_the_cap() {
-        use crate::evidence::{ProofProvenance, SlashingProof};
+        use crate::evidence::SlashingProof;
 
         let mut reg = VerifierRegistry::new();
         let total = MAX_SLASHING_HISTORY + 3;
@@ -1466,7 +1464,7 @@ mod tests {
             raw[1] = (i % 256) as u8;
             let offender = Address::from(raw);
             reg.register_master_verifier(offender, 10_000, 0).unwrap();
-            let report = SlashingReport::new(
+            let report = SlashingReport::new_verified(
                 offender,
                 roles::MASTER_VERIFIER,
                 SlashingProof::Liveness {
@@ -1475,7 +1473,6 @@ mod tests {
                     missed: 5,
                     expected: 10,
                 },
-                ProofProvenance::ConsensusVerified,
                 None,
             );
             assert!(reg.slash_from_report(&report).unwrap().is_some());
@@ -1601,7 +1598,6 @@ mod tests {
                     tag: "t".into(),
                     data: vec![1],
                 },
-                crate::evidence::ProofProvenance::Unverified,
                 None,
             ),
             penalty: 5,
@@ -1631,12 +1627,11 @@ mod tests {
 
     #[test]
     fn liveness_offence_window_is_charged_at_most_once_even_after_history_eviction() {
-        use crate::evidence::ProofProvenance;
         let mut reg = VerifierRegistry::new();
         let victim = addr(0xAA);
         reg.register_master_verifier(victim, 10_000, 0).unwrap();
 
-        let first = SlashingReport::new(
+        let first = SlashingReport::new_verified(
             victim,
             roles::MASTER_VERIFIER,
             SlashingProof::Liveness {
@@ -1645,11 +1640,10 @@ mod tests {
                 missed: 5,
                 expected: 10,
             },
-            ProofProvenance::ConsensusVerified,
             None,
         );
         let outcome = reg.slash_from_report(&first).unwrap().expect("initial cut");
-        let modified_same_window = SlashingReport::new(
+        let modified_same_window = SlashingReport::new_verified(
             victim,
             roles::MASTER_VERIFIER,
             SlashingProof::Liveness {
@@ -1658,7 +1652,6 @@ mod tests {
                 missed: 8,
                 expected: 10,
             },
-            ProofProvenance::ConsensusVerified,
             Some(addr(0xBB)),
         );
         assert!(reg
@@ -1672,7 +1665,7 @@ mod tests {
             raw[1] = (i % 256) as u8;
             let other = Address::from(raw);
             reg.register_master_verifier(other, 10_000, 0).unwrap();
-            let r = SlashingReport::new(
+            let r = SlashingReport::new_verified(
                 other,
                 roles::MASTER_VERIFIER,
                 SlashingProof::Liveness {
@@ -1681,7 +1674,6 @@ mod tests {
                     missed: 6,
                     expected: 10,
                 },
-                ProofProvenance::ConsensusVerified,
                 None,
             );
             let _ = reg.slash_from_report(&r).unwrap();
@@ -1695,7 +1687,6 @@ mod tests {
 
     #[test]
     fn state_root_distinguishes_shifted_proof_field_boundaries() {
-        use crate::evidence::ProofProvenance;
         let mut reg_a = VerifierRegistry::new();
         let mut reg_b = VerifierRegistry::new();
         reg_a
@@ -1705,7 +1696,7 @@ mod tests {
             .register_master_verifier(addr(0xCC), 10_000, 0)
             .unwrap();
 
-        let report_a = SlashingReport::new(
+        let report_a = SlashingReport::new_verified(
             addr(0xCC),
             roles::MASTER_VERIFIER,
             SlashingProof::DoubleSign {
@@ -1715,10 +1706,9 @@ mod tests {
                 signature_1: vec![1],
                 signature_2: vec![2],
             },
-            ProofProvenance::ConsensusVerified,
             None,
         );
-        let report_b = SlashingReport::new(
+        let report_b = SlashingReport::new_verified(
             addr(0xCC),
             roles::MASTER_VERIFIER,
             SlashingProof::DoubleSign {
@@ -1728,7 +1718,6 @@ mod tests {
                 signature_1: vec![1],
                 signature_2: vec![2],
             },
-            ProofProvenance::ConsensusVerified,
             None,
         );
         reg_a.slash_from_report(&report_a).unwrap();
@@ -1738,8 +1727,6 @@ mod tests {
 
     #[test]
     fn param_ceilings_and_reporter_root_binding() {
-        use crate::evidence::ProofProvenance;
-
         let bad_stake = RegistryParams {
             min_stake: u64::MAX,
             ..RegistryParams::default()
@@ -1773,22 +1760,49 @@ mod tests {
             signature_1: vec![1],
             signature_2: vec![2],
         };
-        let r_none = SlashingReport::new(
-            addr(0xDD),
-            roles::MASTER_VERIFIER,
-            proof.clone(),
-            ProofProvenance::ConsensusVerified,
-            None,
-        );
-        let r_some = SlashingReport::new(
+        let r_none =
+            SlashingReport::new_verified(addr(0xDD), roles::MASTER_VERIFIER, proof.clone(), None);
+        let r_some = SlashingReport::new_verified(
             addr(0xDD),
             roles::MASTER_VERIFIER,
             proof,
-            ProofProvenance::ConsensusVerified,
             Some(addr(0xEE)),
         );
         reg_none.slash_from_report(&r_none).unwrap();
         reg_some.slash_from_report(&r_some).unwrap();
         assert_ne!(reg_none.state_root(), reg_some.state_root());
+    }
+
+    /// A decoded report cannot slash on its own say-so. An `Other` proof maps to
+    /// `MaliciousBehaviour`: the full cut and a terminal `Slashed`, so the claim decides a lot.
+    #[test]
+    fn a_decoded_report_cannot_slash_whatever_it_claims() {
+        use crate::evidence::SlashingProof;
+
+        let mut reg = VerifierRegistry::new();
+        reg.register_master_verifier(addr(12), 10_000, 0).unwrap();
+        let certified = SlashingReport::new_verified(
+            addr(12),
+            roles::MASTER_VERIFIER,
+            SlashingProof::Other {
+                tag: "malicious".into(),
+                data: vec![1],
+            },
+            None,
+        );
+        let wire = serde_json::to_string(&certified).unwrap();
+        assert!(
+            wire.contains("ConsensusVerified"),
+            "the claim is on the wire: {wire}"
+        );
+
+        let decoded: SlashingReport = serde_json::from_str(&wire).unwrap();
+        assert!(reg.slash_from_report(&decoded).is_err());
+        assert!(reg.is_active_master_verifier(&addr(12)));
+        assert!(reg.slashing_history().is_empty());
+
+        // Control: the same report, certified by this crate, slashes.
+        assert!(reg.slash_from_report(&certified).unwrap().is_some());
+        assert!(!reg.is_active_master_verifier(&addr(12)));
     }
 }
