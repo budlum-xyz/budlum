@@ -49,6 +49,12 @@ criteria = "safe-to-deploy"
 version = "0.5.2"
 notes = "RustCrypto first-party crate; reviewed this exact version source: zero unsafe blocks, no build script, no network or filesystem access. Bump is an API migration (GenericArray to Array, heapless to arrayvec, inout buffers); the RFC 8439 construction (Poly1305 mac key from keystream block 0, tag handling, counter flow) is unchanged from the already locked 0.10.1."
 
+[[audits.ecdsa]]
+who = "Budlum Security <security@budlum.xyz>"
+criteria = "safe-to-deploy"
+version = "0.17.0"
+notes = "RustCrypto first-party crate; reviewed 0.17.0 source (8 files): zero unsafe blocks, no build script, no network or filesystem access; pure-Rust generic ECDSA signing and verification over primeorder curves"
+
 [[audits.flate2]]
 who = "Budlum Security <security@budlum.xyz>"
 criteria = "safe-to-deploy"
@@ -145,6 +151,30 @@ criteria = "safe-to-deploy"
 version = "0.1.30"
 notes = "pixel-format conversion tables for image 0.25; reviewed 0.1.30: no build script, unsafe is SIMD conversion kernels behind is_x86_feature_detected guards; no FFI"
 
+[[audits.raptorq]]
+who = "Budlum Security <security@budlum.xyz>"
+criteria = "safe-to-deploy"
+version = "2.0.0"
+notes = "RFC 6330 RaptorQ fountain erasure coding used by budlum-core; reviewed 2.0.0 source (27 files): no build script, no network or filesystem access; unsafe is bounded to GF(256) octet arithmetic in src/octet.rs and src/octets.rs"
+
+[[audits.rfc6979]]
+who = "Budlum Security <security@budlum.xyz>"
+criteria = "safe-to-deploy"
+version = "0.6.0"
+notes = "RustCrypto first-party crate; reviewed 0.6.0 source (3 files): zero unsafe blocks, no build script, no network or filesystem access; pure-Rust RFC 6979 deterministic nonce generation"
+
+[[audits.ruzstd]]
+who = "Budlum Security <security@budlum.xyz>"
+criteria = "safe-to-deploy"
+version = "0.9.1"
+notes = "pure-Rust zstd decoder used by bud-codec; reviewed 0.9.1 source: no build script, no network access; unsafe is bounded to ringbuffer and decode-buffer cursor operations in src/decoding/{decode_buffer,ringbuffer}.rs"
+
+[[audits.serdect]]
+who = "Budlum Security <security@budlum.xyz>"
+criteria = "safe-to-deploy"
+version = "0.4.3"
+notes = "RustCrypto first-party constant-time serde hex helper; reviewed 0.4.3 source (9 files): zero unsafe blocks, no build script, no network or filesystem access"
+
 [[audits.qrcode]]
 who = "Budlum Security <security@budlum.xyz>"
 criteria = "safe-to-deploy"
@@ -174,3 +204,21 @@ who = "Budlum Security <security@budlum.xyz>"
 criteria = "safe-to-deploy"
 version = "0.6.1"
 notes = "RustCrypto first-party crate; reviewed this exact version source: zero unsafe blocks, no build script, no network or filesystem access. Bump is an API migration (GenericArray to Array, heapless to arrayvec, inout buffers); the RFC 8439 construction (Poly1305 mac key from keystream block 0, tag handling, counter flow) is unchanged from the already locked 0.10.1."
+
+[[audits.zstd]]
+who = "Budlum Security <security@budlum.xyz>"
+criteria = "safe-to-deploy"
+version = "0.13.4"
+notes = "safe Rust zstd compression wrapper used by bud-codec; reviewed 0.13.4 source: no build script, no network access; unsafe in src/stream/raw.rs uses bounds-checked WriteBuf slice offsets"
+
+[[audits.zstd-safe]]
+who = "Budlum Security <security@budlum.xyz>"
+criteria = "safe-to-deploy"
+version = "7.4.0"
+notes = "safe low-level wrapper around zstd-sys; reviewed 7.4.0 source: 10-line build.rs inspects DEP_ZSTD_* metadata only, unsafe calls wrap vendored zstd-sys C functions with explicit pointer/length lifetimes"
+
+[[audits.zstd-sys]]
+who = "Budlum Security <security@budlum.xyz>"
+criteria = "safe-to-deploy"
+version = "2.1.2+zstd.1.5.7"
+notes = "vendored libzstd 1.5.7 C FFI bindings; reviewed 2.1.2+zstd.1.5.7 build.rs and generated bindings: compiles vendored C sources via cc with no network downloads or external process fetches"
