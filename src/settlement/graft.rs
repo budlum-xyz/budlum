@@ -2690,4 +2690,95 @@ mod tests {
             "an already-slashed solver is not slashed a second time"
         );
     }
+
+    #[test]
+    fn awarded_graft_solver_cannot_withdraw_relayer_bond_before_expiry_and_gets_slashed() {
+        let operator = Address::from([0x81; 32]);
+        let user = Address::from([0x82; 32]);
+        let solver = Address::from([0x83; 32]);
+        let origin = vec![0xD1; 20];
+        let executor = vec![0xD2; 20];
+        let mut state = state_with_domain(operator);
+        state.add_balance(&user, 10_000);
+        let bond = state.registry.params().min_stake;
+        state.add_balance(&solver, bond);
+        state.bond_relayer(&solver, bond).unwrap();
+
+        execute_graft_tx(
+            &mut state,
+            &ctx(operator),
+            &GraftTx::SetExecutor {
+                domain_key: DOMAIN,
+                executor,
+            },
+        )
+        .unwrap();
+        execute_graft_tx(
+            &mut state,
+            &ctx(user),
+            &GraftTx::Register {
+                domain_key: DOMAIN,
+                origin_app: origin.clone(),
+                manifest_hash: [0x11; 32],
+            },
+        )
+        .unwrap();
+        let id = graft_id(DOMAIN, &origin);
+        execute_graft_tx(
+            &mut state,
+            &ctx(user),
+            &GraftTx::OpenIntent {
+                graft_id: id,
+                call_hash: [0x22; 32],
+                value: 0,
+                max_payment: 1_000,
+                solver_fee_cap: 100,
+                service_price: 0,
+                origin_beneficiary: vec![0x33; 20],
+                deadline_block: 10_000,
+            },
+        )
+        .unwrap();
+        let intent_id = *state.settlement.graft.intents.keys().next().unwrap();
+        execute_graft_tx(
+            &mut state,
+            &ctx(solver),
+            &GraftTx::Bid {
+                intent_id,
+                cost: 100,
+                fee: 10,
+            },
+        )
+        .unwrap();
+        execute_graft_tx(
+            &mut state,
+            &ctx(user),
+            &GraftTx::Award { intent_id, solver },
+        )
+        .unwrap();
+
+        let release_epoch = state
+            .begin_role_bond_unbonding(&solver, crate::registry::role::roles::RELAYER)
+            .unwrap();
+        state.epoch_index = release_epoch;
+        let err = state
+            .withdraw_role_bond(&solver, crate::registry::role::roles::RELAYER)
+            .unwrap_err();
+        assert!(
+            err.contains("live awarded intent"),
+            "solver must not withdraw bond while awarded Graft intent is live: {err}"
+        );
+
+        state.current_block_height = 10_001;
+        sweep_expired_intents(&mut state, 10_001).unwrap();
+        let stake_after = state
+            .registry
+            .get(&solver, crate::registry::role::roles::RELAYER)
+            .unwrap()
+            .stake;
+        assert!(
+            stake_after < bond,
+            "liveness slash must land on the retained unbonding bond ({stake_after} vs {bond})"
+        );
+    }
 }

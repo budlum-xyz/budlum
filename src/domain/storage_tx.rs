@@ -823,6 +823,11 @@ fn open_deal(
     {
         return Err(StorageTxError::DealManifestNotOwned { sender: ctx.sender });
     }
+    if let Some(canonical_owner) = state.storage_registry.proven_owner_of(&open.manifest_id) {
+        if canonical_owner != ctx.sender {
+            return Err(StorageTxError::DealManifestNotOwned { sender: ctx.sender });
+        }
+    }
     let digest = open_deal_consent_digest(ctx.chain_id, &ctx.sender, ctx.nonce, open);
     // The chain's live scheme statuses, not the genesis defaults (see
     // `accept_reallocation`).
@@ -2553,5 +2558,71 @@ mod tests {
         assert_eq!(state.get_balance(&opener), OPENER_FUNDS);
         assert!(state.storage_registry.all_challenges().is_empty());
         assert_eq!(state.storage_registry.root(), root);
+    }
+
+    #[test]
+    fn second_claimant_cannot_open_deal_against_custody_proven_owner() {
+        let mut state = AccountState::new();
+        let alice = Address::from([0xC1; 32]);
+        let attacker = Address::from([0xC2; 32]);
+        let alice_manifest = manifest_owned_by(alice);
+        let mid = alice_manifest.manifest_id;
+        let shard_id = alice_manifest.shards[0].shard_id;
+
+        execute_storage_tx(
+            &mut state,
+            &ctx(alice),
+            &StorageTx::RegisterManifest {
+                manifest: alice_manifest.clone(),
+            },
+        )
+        .unwrap();
+        state
+            .storage_registry
+            .record_test_custody_for_manifest(&alice_manifest, alice);
+        assert_eq!(state.storage_registry.proven_owner_of(&mid), Some(alice));
+
+        // Attacker records a duplicate manifest claim and attempts a self-operated zero-fee deal.
+        let mut attacker_manifest = alice_manifest.clone();
+        attacker_manifest.owner = attacker;
+        execute_storage_tx(
+            &mut state,
+            &ctx(attacker),
+            &StorageTx::RegisterManifest {
+                manifest: attacker_manifest,
+            },
+        )
+        .unwrap();
+
+        let open = StorageDealOpen {
+            domain_id: 42,
+            manifest_id: mid,
+            shard_id,
+            operator: attacker,
+            replica_index: 1,
+            start_epoch: 10,
+            end_epoch: 20,
+            economics: StorageEconomicsParams {
+                operator_bond: STORAGE_MIN_OPERATOR_BOND,
+                fee_per_byte_epoch: 0,
+            },
+            merkle_proof: proof(),
+            storage_root: [0x42; 32],
+            operator_consent: GrantAuthorization {
+                owner_key: [0u8; 2592],
+                signature: Vec::new(),
+            },
+        };
+        let err = execute_storage_tx(
+            &mut state,
+            &ctx(attacker),
+            &StorageTx::OpenDeal(Box::new(open)),
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            StorageTxError::DealManifestNotOwned { sender: attacker }
+        );
+        assert_eq!(state.storage_registry.proven_owner_of(&mid), Some(alice));
     }
 }
