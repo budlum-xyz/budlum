@@ -889,7 +889,6 @@ crates/ai-inference/crates/ai-integrations/src/rest.rs	struct	RestRequest
 crates/ai-inference/crates/ai-integrations/src/rest.rs	struct	RetryPolicy
 crates/ai-inference/crates/ai-integrations/src/ws.rs	enum	ConnState
 crates/ai-inference/crates/ai-integrations/src/ws.rs	fn	is_killed
-crates/ai-inference/crates/ai-integrations/src/ws.rs	fn	shared
 crates/ai-inference/crates/ai-integrations/src/ws.rs	fn	trigger
 crates/ai-inference/crates/ai-integrations/src/ws.rs	struct	KillSignal
 crates/ai-inference/crates/ai-integrations/src/ws.rs	struct	SessionTracker
@@ -1252,7 +1251,6 @@ src/cli/commands.rs	struct	ValidatorSection
 src/consensus/merkle_tree.rs	fn	merkle_rebuild_root
 src/consensus/merkle_tree.rs	fn	merkle_sibling_index
 src/consensus/mod.rs	const	MAX_FUTURE_BLOCK_TIME_MS
-src/consensus/poa.rs	fn	active_validator_count
 src/consensus/poa.rs	fn	expected_proposer_with_entropy
 src/consensus/poa.rs	fn	leader_slot_with_entropy
 src/consensus/poa.rs	fn	with_authorities
@@ -1427,10 +1425,7 @@ src/developer_os.rs	struct	RelayerPolicyFixture
 src/developer_os.rs	type	DeveloperProjectId
 src/domain/commitment_registry.rs	fn	get_by_block_hash
 src/domain/finality_adapter.rs	fn	hash_pow_header
-src/domain/finality_adapter.rs	fn	poa_authority_set_hash
-src/domain/finality_adapter.rs	fn	poa_commit_signing_message
 src/domain/finality_adapter.rs	fn	required_signatures
-src/domain/finality_adapter.rs	struct	PoAAuthoritySignature
 src/domain/finality_adapter.rs	struct	PoWHeader
 src/domain/fork_choice.rs	enum	DomainFinalityStatus
 src/domain/fork_choice.rs	enum	DomainLifecycleStatus

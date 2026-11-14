@@ -26,6 +26,7 @@ pub mod developer_os;
 pub mod domain;
 pub mod error;
 pub mod execution;
+pub mod garden;
 pub mod gateway;
 pub mod light_client;
 pub mod mempool;
