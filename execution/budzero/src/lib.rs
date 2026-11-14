@@ -247,7 +247,10 @@ impl ExecutionEnvironment for BudZeroWorker {
                     });
                 };
 
-                let mut vm = Vm::with_mainnet_mode(WORKER_VM_MEMORY_BYTES, call.gas_limit, true);
+                // Gas is not a bound on the trace: a one-gas loop records one row
+                // per step. The chain's own cap keeps a call at 2^14 rows.
+                let mut vm = Vm::with_mainnet_mode(WORKER_VM_MEMORY_BYTES, call.gas_limit, true)
+                    .with_step_limit(bud_vm::MAX_CONTRACT_TRACE_STEPS);
                 set_caller_256(&mut vm, &call.caller.id);
                 vm.context.block_height = ctx.height;
 
@@ -403,7 +406,9 @@ impl ExecutionEnvironment for BudZeroWorker {
             message,
         })?;
 
-        let mut vm = Vm::with_mainnet_mode(WORKER_VM_MEMORY_BYTES, 1_000_000, true);
+        // The read-only path charges no fee, so it needs the same trace cap.
+        let mut vm = Vm::with_mainnet_mode(WORKER_VM_MEMORY_BYTES, 1_000_000, true)
+            .with_step_limit(bud_vm::MAX_CONTRACT_TRACE_STEPS);
         vm.context.block_height = ctx.height;
         for slot in declared {
             let key = slot_key(&q.target.id, slot);
@@ -562,5 +567,171 @@ mod tests {
         };
         assert_eq!(res.status, OutcomeStatus::Success);
         assert_eq!(res.output, vec![0xAB; 32]);
+    }
+
+    /// A counter loop: `r1 = iterations`, then `r1 -= 1` until it is zero.
+    /// It records `3 + 2 * iterations` trace rows and costs about as much gas.
+    fn counter_loop(iterations: i32) -> Vec<u8> {
+        let steps = [
+            Instruction {
+                opcode: Opcode::Load,
+                rd: 1,
+                rs1: 0,
+                rs2: 0,
+                imm: iterations,
+            },
+            Instruction {
+                opcode: Opcode::Load,
+                rd: 2,
+                rs1: 0,
+                rs2: 0,
+                imm: 1,
+            },
+            Instruction {
+                opcode: Opcode::Sub,
+                rd: 1,
+                rs1: 1,
+                rs2: 2,
+                imm: 0,
+            },
+            Instruction {
+                opcode: Opcode::Jnz,
+                rd: 0,
+                rs1: 1,
+                rs2: 0,
+                imm: -1,
+            },
+            Instruction {
+                opcode: Opcode::Halt,
+                rd: 0,
+                rs1: 0,
+                rs2: 0,
+                imm: 0,
+            },
+        ];
+        steps
+            .iter()
+            .flat_map(|ins| ins.encode().to_le_bytes())
+            .collect()
+    }
+
+    /// One worker, one in-memory host, one deployed-or-not contract.
+    struct Fixture {
+        worker: BudZeroWorker,
+        host: MemoryHost,
+        ctx: BlockContext,
+        caller: EeIdentity,
+        target: EeIdentity,
+    }
+
+    impl Fixture {
+        fn new() -> Self {
+            let Ok(caller) = EeIdentity::new(EeId::BUDZERO, vec![0xAB; 32]) else {
+                panic!("caller");
+            };
+            let Ok(target) = EeIdentity::new(EeId::BUDZERO, vec![0xCD; 32]) else {
+                panic!("target");
+            };
+            Self {
+                worker: BudZeroWorker,
+                host: MemoryHost::new(5_000_000),
+                ctx: BlockContext {
+                    chain_id: 45261,
+                    height: 1,
+                    timestamp_ms: 1_000,
+                },
+                caller,
+                target,
+            }
+        }
+
+        fn deploy(&mut self, code: Vec<u8>) {
+            let Ok(out) = self.worker.execute(
+                &self.ctx,
+                &EeCall {
+                    kind: EeCallKind::Deploy,
+                    caller: self.caller.clone(),
+                    target: self.target.clone(),
+                    value: BudAmount(0),
+                    input: code,
+                    gas_limit: 500_000,
+                    depth: 0,
+                    tx_hash: [1u8; 32],
+                },
+                &mut self.host,
+            ) else {
+                panic!("deploy");
+            };
+            assert_eq!(out.status, OutcomeStatus::Success);
+        }
+
+        fn call(&mut self, gas_limit: u64) -> EeOutcome {
+            let Ok(out) = self.worker.execute(
+                &self.ctx,
+                &EeCall {
+                    kind: EeCallKind::Call,
+                    caller: self.caller.clone(),
+                    target: self.target.clone(),
+                    value: BudAmount(0),
+                    input: Vec::new(),
+                    gas_limit,
+                    depth: 0,
+                    tx_hash: [2u8; 32],
+                },
+                &mut self.host,
+            ) else {
+                panic!("call");
+            };
+            out
+        }
+
+        fn query(&self) -> Result<Vec<u8>, EeRefusal> {
+            let q = EeQuery {
+                target: self.target.clone(),
+                input: Vec::new(),
+            };
+            self.worker.query(&self.ctx, &q, &self.host)
+        }
+    }
+
+    /// About 20,000 rows: over the cap, and far under a million gas.
+    fn over_the_cap() -> Vec<u8> {
+        let rows = bud_vm::MAX_CONTRACT_TRACE_STEPS as i32;
+        counter_loop(rows / 2 + rows / 8)
+    }
+
+    /// Gas is not a bound on the trace. With a million gas, a loop that costs
+    /// one gas a step would record a million rows for every validator.
+    #[test]
+    fn a_call_is_cut_off_at_the_trace_cap_whatever_its_gas() {
+        let mut fx = Fixture::new();
+        fx.deploy(over_the_cap());
+        let out = fx.call(1_000_000);
+        assert_eq!(
+            out.status,
+            OutcomeStatus::Revert,
+            "a call that needs more rows than the cap is refused"
+        );
+    }
+
+    /// The read-only path charges no fee, so it is the cheaper way to spend a
+    /// validator's memory. It gets the same cap.
+    #[test]
+    fn a_query_is_cut_off_at_the_trace_cap() {
+        let mut fx = Fixture::new();
+        fx.deploy(over_the_cap());
+        let refused = fx.query();
+        assert!(
+            matches!(&refused, Err(r) if r.code == RefusalCode::Denied),
+            "a query past the trace cap must be refused: {refused:?}"
+        );
+    }
+
+    #[test]
+    fn a_call_and_a_query_under_the_trace_cap_still_run() {
+        let mut fx = Fixture::new();
+        fx.deploy(counter_loop(1_000));
+        assert_eq!(fx.call(1_000_000).status, OutcomeStatus::Success);
+        assert!(fx.query().is_ok());
     }
 }
