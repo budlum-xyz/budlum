@@ -13,7 +13,7 @@
 //! `budlum-indexer` processes on loopback using pre-built binaries in
 //! `target/release` (or `--bin-dir`), assembles a fresh testnet ceremony on
 //! chain `45261` wired as a 3-regular chordal ring, and runs the same live
-//! AppBinding, domain, delegation, BNS, faucet, and finality scenarios plus
+//! `AppBinding`, domain, delegation, BNS, faucet, and finality scenarios plus
 //! public/operator RPC split and multi-VM/storage checks.
 //!
 //! Each scenario's verdict and measurements go to the report file (default
