@@ -249,6 +249,12 @@ fn parse_address_from_extras_preimage(
 /// Verify a `.bud` Merkle proof against `expected_bns_root` at `current_epoch`
 /// and return the authenticated recipient address.
 ///
+/// This takes the root and the epoch as arguments, so it is only as good as
+/// whoever supplied them. It is not public: a root that came from the node's own
+/// answer would let a lying node choose the recipient. The only way in from outside
+/// the crate is [`verify_bns_recipient_proof_from_header`], which reads both from a
+/// header the wallet trusts.
+///
 /// * If `proof.extras_preimage` is `Some(bytes)`, verifies `BDLM_BNS_EXTRAS_V1`
 ///   and extracts the authenticated `record.address` forwarding target (failing
 ///   closed if `record.address` was cleared or zero).
@@ -259,26 +265,6 @@ fn parse_address_from_extras_preimage(
 ///
 /// Refuses invalid names, expired leaves (`expires_at <= current_epoch`), root
 /// mismatches, zero addresses, or unauthenticated target substitution.
-#[deprecated(
-    note = "the root and epoch come from the caller, so the proof is only as good as whoever supplied them; call `verify_bns_recipient_proof_from_header` with a `HeaderSource` the wallet trusts"
-)]
-pub fn verify_bns_recipient_proof(
-    requested_name: &str,
-    claimed_target: &[u8; 32],
-    proof: &WalletBnsProof,
-    expected_bns_root: &[u8; 32],
-    current_epoch: u64,
-) -> Result<[u8; 32], String> {
-    verify_recipient_against_root(
-        requested_name,
-        claimed_target,
-        proof,
-        expected_bns_root,
-        current_epoch,
-    )
-}
-
-/// The check itself, shared by the header path and the caller-supplied path.
 pub(crate) fn verify_recipient_against_root(
     requested_name: &str,
     claimed_target: &[u8; 32],
@@ -335,13 +321,13 @@ pub(crate) fn verify_recipient_against_root(
 
 /// Where the wallet gets the header root a `.bud` proof must fold to.
 ///
-/// A proof is only worth what its anchor is worth. [`verify_bns_recipient_proof`]
-/// takes `expected_bns_root` and `current_epoch` as bare arguments, so a caller
-/// that believes a node's JSON sells the user's signature for a root the node
-/// chose. This trait is the missing half: a wallet hands a source it trusts
-/// (a header it synced, a checkpoint it was compiled with, a light-client
-/// follow chain) and reads both values out of it, so the root and the epoch the
-/// proof is checked against come from the header, not from the answer.
+/// A proof is only worth what its anchor is worth. A check that took
+/// `expected_bns_root` and `current_epoch` as bare arguments would sell the
+/// user's signature for whatever root a node's JSON named. The crate has no such
+/// public entry point. A wallet hands a source it trusts (a header it synced, a
+/// checkpoint it was compiled with, a light-client follow chain) to this trait,
+/// and the root and the epoch the proof is checked against are read out of it,
+/// so they come from the header, not from the answer.
 ///
 /// A source that has no header at `height` returns `None`; the verifying
 /// entry point refuses a proof rather than guessing.
@@ -402,9 +388,11 @@ impl std::error::Error for StaleProofHeader {}
 ///
 /// # Errors
 ///
-/// Everything [`verify_bns_recipient_proof`] refuses, plus
-/// [`HeaderUnknown`] when `headers` has no header at `proof.header_height`
-/// and [`StaleProofHeader`] when that header is older than the tip allows.
+/// Refuses invalid names, expired leaves (`expires_at` at or before the header
+/// epoch), root mismatches, zero addresses and unauthenticated target
+/// substitution, plus [`HeaderUnknown`] when `headers` has no header at
+/// `proof.header_height` and [`StaleProofHeader`] when that header is older than
+/// the tip allows.
 pub fn verify_bns_recipient_proof_from_header<S: HeaderSource + ?Sized>(
     requested_name: &str,
     claimed_target: &[u8; 32],
@@ -617,9 +605,9 @@ mod tests {
         );
 
         // The forgery's branch is internally consistent: this is precisely
-        // the root a malicious node would offer with its answer. Do not call
-        // the deprecated root-from-caller API here; the production entry
-        // point must take a trusted header, not an attacker-controlled root.
+        // the root a malicious node would offer with its answer. The crate has
+        // no entry point that takes a root as an argument, so the only way to
+        // check a proof is against a trusted header.
         let forged_leaf = compute_bns_leaf_digest(
             &forged.name,
             &forged.owner,

@@ -33,66 +33,20 @@ pub struct UnsignedTransfer {
 
 impl UnsignedTransfer {
     /// Construct an [`UnsignedTransfer`] targeting a `.bud` name ONLY after
-    /// verifying `proof` against `expected_bns_root` at `current_epoch`.
+    /// verifying `proof` against a header the wallet trusts.
+    ///
+    /// The root and the epoch are read out of a [`crate::bns::HeaderSource`] at
+    /// `proof.header_height`, never taken from the caller or from the node's
+    /// answer, so a node answering an RPC call cannot choose what the
+    /// signature is checked against. There is no entry point that takes the
+    /// root as an argument.
     ///
     /// # Errors
     ///
-    /// Refuses malformed names, expired registrations, Merkle root mismatches,
-    /// or unauthenticated target substitution.
-    /// exposed for: the wallet crate's SDK surface - browser and mobile hosts call these directly.
-    #[allow(clippy::too_many_arguments)]
-    #[deprecated(
-        note = "the root and epoch come from the caller; call `to_verified_bud_recipient_from_header` with a `HeaderSource` the wallet trusts"
-    )]
-    pub fn to_verified_bud_recipient(
-        from: [u8; 32],
-        bud_name: &str,
-        claimed_target: &[u8; 32],
-        proof: &crate::bns::WalletBnsProof,
-        expected_bns_root: &[u8; 32],
-        current_epoch: u64,
-        amount: u64,
-        fee: u64,
-        max_fee: u64,
-        priority_fee: u64,
-        nonce: u64,
-        timestamp_ms: u128,
-        chain_id: u64,
-    ) -> Result<Self, String> {
-        let verified_to = crate::bns::verify_recipient_against_root(
-            bud_name,
-            claimed_target,
-            proof,
-            expected_bns_root,
-            current_epoch,
-        )?;
-        Ok(Self {
-            from,
-            to: verified_to,
-            amount,
-            fee,
-            max_fee,
-            priority_fee,
-            nonce,
-            timestamp_ms,
-            chain_id,
-        })
-    }
-
-    /// The same construction, with the root and epoch read from a header the
-    /// wallet trusts instead of from arguments.
-    ///
-    /// [`Self::to_verified_bud_recipient`] takes `expected_bns_root` and
-    /// `current_epoch` from its caller, so the value the user signs over is
-    /// only as good as whoever supplied them. This entry point takes a
-    /// [`HeaderSource`] and reads both out of `proof.header_height`, so a node
-    /// answering an RPC call cannot choose what the signature is checked
-    /// against.
-    ///
-    /// # Errors
-    ///
-    /// Everything [`Self::to_verified_bud_recipient`] refuses, plus a missing
-    /// header at `proof.header_height` (`HeaderUnknown`).
+    /// Refuses malformed names, expired registrations, Merkle root mismatches
+    /// and unauthenticated target substitution, plus a missing header at
+    /// `proof.header_height` (`HeaderUnknown`) and a header that is stale
+    /// against the tip (`StaleProofHeader`).
     /// exposed for: the wallet crate's SDK surface - browser and mobile hosts call these directly.
     #[allow(clippy::too_many_arguments)]
     pub fn to_verified_bud_recipient_from_header<S: crate::bns::HeaderSource + ?Sized>(
