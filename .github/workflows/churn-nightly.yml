@@ -1,0 +1,107 @@
+name: Churn Nightly
+
+# Validator churn and Instant Duty Handover scenarios (`tests/churn`).
+#
+# The suite runs N Full and M Mobile validators in one deterministic process with
+# message latency, packet loss, departure and return. It holds the invariants that
+# a departing validator cannot stop finality and cannot lose content: ten percent of
+# the Full validators leaving, every Mobile validator leaving, a finality stall that
+# enters recovery mode, and the seat, proposer, repair and custody handovers.
+#
+# `tests/rehearsal` is the in-process fixture of the T-1 to T-7 rehearsal drills and the
+# Android field-telemetry format. It is a fixture, not field evidence (the launch gate
+# report says so), and it still has to keep running: it had rotted unnoticed.
+#
+# Nothing ran either before. `ci.yml` runs `cargo test --lib` and the binaries, and an
+# integration target under `tests/` is not reached by either, so those invariants
+# were never checked by CI.
+
+on:
+  schedule:
+    - cron: "11 3 * * *"
+  workflow_dispatch:
+  # Heavy battery. It runs on pull requests to `main` (the PR that merges the
+  # stack), on the schedule and on demand. A stacked pull request skips the job
+  # through the job-level condition: GitHub evaluates the `branches` filter of a
+  # stacked pull request against the root of the stack.
+  pull_request:
+    branches: [main, consensus-of-consensuses]
+    paths:
+      - "src/validators/**"
+      - "src/registry/**"
+      - "src/consensus/**"
+      - "src/chain/finality*"
+      - "src/storage/bud3/custody*"
+      - "src/storage/bud3/repair*"
+      - "tests/churn/**"
+      - "tests/rehearsal/**"
+      - ".github/workflows/churn-nightly.yml"
+
+concurrency:
+  group: churn-nightly-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+permissions:
+  contents: read
+
+jobs:
+  churn:
+    # Heavy battery: a pull request whose base is `testnet-quantum` or `testnet` does
+    # not start this job. See the note at the top of the file.
+    if: ${{ github.event_name != 'pull_request' || contains(fromJSON('["main","consensus-of-consensuses"]'), github.event.pull_request.base.ref) }}
+    name: Churn simulation (tests/churn)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install protoc
+        run: |
+          set -euo pipefail
+          PROTOC_VER=29.3
+          case "$(uname -m)" in
+            aarch64|arm64)
+              PROTOC_ARCH=linux-aarch_64
+              PROTOC_SHA256=6427349140e01f06e049e707a58709a4f221ae73ab9a0425bc4a00c8d0e1ab32
+              ;;
+            *)
+              PROTOC_ARCH=linux-x86_64
+              PROTOC_SHA256=3e866620c5be27664f3d2fa2d656b5f3e09b5152b42f1bedbf427b333e90021a
+              ;;
+          esac
+          if ! command -v protoc >/dev/null 2>&1 || [ "$(protoc --version | awk '{print $2}')" != "${PROTOC_VER}" ]; then
+            curl -sSL --retry 3 --retry-delay 2 \
+              "https://github.com/protocolbuffers/protobuf/releases/download/v${PROTOC_VER}/protoc-${PROTOC_VER}-${PROTOC_ARCH}.zip" \
+              -o /tmp/protoc.zip
+            echo "${PROTOC_SHA256}  /tmp/protoc.zip" | sha256sum -c -
+            sudo unzip -q -o /tmp/protoc.zip -d /usr/local bin/protoc 'include/*'
+            rm -f /tmp/protoc.zip
+          fi
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master 2026-09-12
+        with:
+          toolchain: "1.97.1"
+      - name: Cache Cargo
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-churn-${{ hashFiles('**/Cargo.lock') }}
+      - name: Churn and handover scenarios
+        env:
+          CARGO_INCREMENTAL: "0"
+        run: |
+          set -euo pipefail
+          cargo test --locked --test churn 2>&1 | tee /tmp/churn.log
+          # A filter or a renamed target must not pass by running nothing.
+          grep -Eq '^test result: ok\. [1-9][0-9]* passed' /tmp/churn.log
+      - name: Rehearsal drill fixtures
+        env:
+          CARGO_INCREMENTAL: "0"
+        run: |
+          set -euo pipefail
+          cargo test --locked --test rehearsal 2>&1 | tee /tmp/rehearsal-fixtures.log
+          grep -Eq '^test result: ok\. [1-9][0-9]* passed' /tmp/rehearsal-fixtures.log
