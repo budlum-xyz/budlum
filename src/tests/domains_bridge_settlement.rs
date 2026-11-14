@@ -1,7 +1,7 @@
 //! Domains, cross-domain bridge, settlement, and testnet feature-matrix
 //! regression locks (`zk_domain_refuses_empty_halt_proof`,
 //! `bridge_e2e_lock_mint_burn_unlock`, `ethereum_sync_committee_is_open_on_testnet`,
-//! `shared_security_is_open_on_testnet`, `app_binding_is_open_on_testnet`,
+//! `shared_security_is_open_on_testnet`, `app_binding_is_open_on_devnet`,
 //! and functional regression names).
 
 use crate::chain::blockchain::Blockchain;
@@ -382,11 +382,11 @@ fn shared_security_is_open_on_testnet() {
     assert!(err.to_string().contains("not enabled"), "{err}");
 }
 
-/// Remote app binding (`app_binding`) is open on Testnet (`45261`) and gated
+/// Remote app binding (`app_binding`) is open on Devnet (`45262`) and gated
 /// on Mainnet (`45260`).
 #[test]
-fn app_binding_is_open_on_testnet() {
-    assert!(Network::Testnet.app_binding_enabled());
+fn app_binding_is_open_on_devnet() {
+    assert!(!Network::Testnet.app_binding_enabled());
     assert!(Network::Devnet.app_binding_enabled());
     assert!(!Network::Mainnet.app_binding_enabled());
     let registrant = addr(0x32);
@@ -402,9 +402,9 @@ fn app_binding_is_open_on_testnet() {
     domain.operator = Some(registrant);
     crate::settlement::domains::register_domain(&mut state, domain).expect("register domain");
 
-    let testnet_ctx = SettlementTxContext {
+    let devnet_ctx = SettlementTxContext {
         sender: registrant,
-        chain_id: Network::Testnet.chain_id().value(),
+        chain_id: Network::Devnet.chain_id().value(),
         fee: 5,
         bls: IntakeState::production_bls,
     };
@@ -413,8 +413,28 @@ fn app_binding_is_open_on_testnet() {
         origin_app: vec![0x44; 20],
         manifest_hash: [0x55; 32],
     };
-    execute_app_binding_tx(&mut state, &testnet_ctx, &tx)
-        .expect("app_binding must execute on testnet 45261");
+    let closed_ctx = SettlementTxContext {
+        sender: registrant,
+        chain_id: Network::Testnet.chain_id().value(),
+        fee: 5,
+        bls: IntakeState::production_bls,
+    };
+    let before = state.calculate_state_root();
+    let err = execute_app_binding_tx(&mut state, &closed_ctx, &tx)
+        .expect_err("testnet must refuse app binding");
+    assert!(err.to_string().contains("not enabled"), "{err}");
+    assert_eq!(state.calculate_state_root(), before);
+    let outer = execute_settlement_tx(
+        &mut state,
+        &closed_ctx,
+        &SettlementTx::AppBinding(Box::new(tx.clone())),
+    )
+    .expect_err("settlement must refuse app binding on testnet");
+    assert!(outer.to_string().contains("not enabled"), "{outer}");
+    assert_eq!(state.calculate_state_root(), before);
+
+    execute_app_binding_tx(&mut state, &devnet_ctx, &tx)
+        .expect("app_binding must execute on devnet 45262");
     assert_eq!(state.settlement.app_binding.apps.len(), 1);
 
     let mainnet_ctx = SettlementTxContext {
