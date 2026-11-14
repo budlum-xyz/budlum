@@ -251,8 +251,8 @@ const BUDGETS: &[Budget] = &[
     Budget {
         file: "crates/wallet-core/src/transfer.rs",
         lint: "clippy::too_many_arguments",
-        count: 2,
-        reason: "the two SDK constructors for a transfer to a verified `.bud` recipient; every argument is a field the host signs over, and the browser and mobile bindings pass them positionally",
+        count: 1,
+        reason: "the SDK constructor for a transfer to a verified `.bud` recipient; every argument is a field the host signs over, and the browser and mobile bindings pass them positionally",
     },
     Budget {
         file: "src/ai/registry.rs",
