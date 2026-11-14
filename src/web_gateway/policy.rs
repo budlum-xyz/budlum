@@ -243,7 +243,7 @@ impl RateLimiter {
 
     /// How many keys the limiter is tracking.
     #[must_use]
-    pub fn tracked_keys(&self) -> usize {
+    fn tracked_keys(&self) -> usize {
         self.counts.len()
     }
 }
