@@ -622,3 +622,185 @@ fn garden_separate_os_processes_tcp_consensus() {
 
     let _ = std::fs::remove_dir_all(&root);
 }
+
+struct GardenRelayProxy {
+    addr: std::net::SocketAddr,
+    shutdown: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    handle: Option<std::thread::JoinHandle<()>>,
+}
+
+impl GardenRelayProxy {
+    fn start(bind_addr: &str, target_addr: std::net::SocketAddr) -> Result<Self, String> {
+        use std::io::{BufRead, BufReader, Write};
+        use std::sync::atomic::Ordering;
+
+        let listener = std::net::TcpListener::bind(bind_addr)
+            .map_err(|e| format!("failed to bind Garden relay proxy {bind_addr}: {e}"))?;
+        listener
+            .set_nonblocking(true)
+            .map_err(|e| format!("failed to configure nonblocking relay socket: {e}"))?;
+        let addr = listener
+            .local_addr()
+            .map_err(|e| format!("failed to read relay local_addr: {e}"))?;
+        let shutdown = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let shutdown_bg = std::sync::Arc::clone(&shutdown);
+
+        let handle = std::thread::spawn(move || {
+            while !shutdown_bg.load(Ordering::Relaxed) {
+                match listener.accept() {
+                    Ok((mut client, _)) => {
+                        let _ = client.set_nonblocking(false);
+                        let mut reader = match client.try_clone() {
+                            Ok(c) => BufReader::new(c),
+                            Err(_) => continue,
+                        };
+                        let mut line = String::new();
+                        if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                            continue;
+                        }
+                        if let Ok(mut upstream) = std::net::TcpStream::connect(target_addr) {
+                            if upstream.write_all(line.as_bytes()).is_ok() {
+                                let _ = upstream.flush();
+                                let mut up_reader = BufReader::new(upstream);
+                                let mut resp_line = String::new();
+                                if up_reader.read_line(&mut resp_line).unwrap_or(0) > 0 {
+                                    let _ = client.write_all(resp_line.as_bytes());
+                                    let _ = client.flush();
+                                }
+                            }
+                        }
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+
+        Ok(Self {
+            addr,
+            shutdown,
+            handle: Some(handle),
+        })
+    }
+
+    fn stop(&mut self) {
+        self.shutdown
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        if let Some(h) = self.handle.take() {
+            let _ = h.join();
+        }
+    }
+}
+
+impl Drop for GardenRelayProxy {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
+#[test]
+fn garden_join_behind_nat() {
+    if maybe_run_worker_process() {
+        return;
+    }
+
+    let exe = std::env::current_exe().unwrap();
+    let root = temp_test_dir("nat_relay");
+    let host_dir = root.join("nat_host");
+    std::fs::create_dir_all(&host_dir).unwrap();
+    let host_ready_file = root.join("nat_host.ready");
+
+    // 1. Reserve and immediately drop a local port to represent a direct host
+    //    multiaddr blocked by NAT (connection refused immediately, no timeout lag).
+    let blocked_port = {
+        let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        probe.local_addr().unwrap().port()
+    };
+
+    // 2. Spawn the real Host GardenNodeServer in a separate OS process.
+    let mut host_child = Command::new(&exe)
+        .arg("--exact")
+        .arg("garden_join_behind_nat")
+        .arg("--nocapture")
+        .env("BUDLUM_GARDEN_WORKER_DIR", &host_dir)
+        .env("BUDLUM_GARDEN_WORKER_NAME", "nat-host")
+        .env("BUDLUM_GARDEN_WORKER_ROLE", "host")
+        .env("BUDLUM_GARDEN_WORKER_READY_FILE", &host_ready_file)
+        .stdout(Stdio::null())
+        .spawn()
+        .unwrap();
+
+    let host_real_addr: std::net::SocketAddr = {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            if let Ok(raw) = std::fs::read_to_string(&host_ready_file) {
+                if !raw.trim().is_empty() {
+                    break raw.trim().parse().unwrap();
+                }
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "NAT host worker did not write ready address in time"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    };
+
+    // 3. Start a 7.11-style TCP relay forwarder pointing to the real host server.
+    let mut relay = GardenRelayProxy::start("127.0.0.1:0", host_real_addr).unwrap();
+    let relay_multiaddr = format!(
+        "/ip4/127.0.0.1/tcp/{}/p2p/12D3KooWGardenRelayNAT",
+        relay.addr.port()
+    );
+
+    let genesis_resp =
+        GardenNodeClient::call(host_real_addr, &GardenPeerRequest::GetGenesis).unwrap();
+    let genesis: GardenGenesis = serde_json::from_value(genesis_resp.data).unwrap();
+
+    // Build an invite whose direct host_multiaddr is unreachable behind NAT,
+    // forcing the joining validator to route through relay_multiaddrs.
+    let nat_invite = GardenInvitePayload::from_genesis(
+        &genesis,
+        format!("/ip4/127.0.0.1/tcp/{blocked_port}"),
+        vec![relay_multiaddr],
+    )
+    .unwrap();
+    let invite_link = nat_invite.to_invite_link().unwrap();
+    let decoded_invite = GardenInvitePayload::decode_any(&invite_link).unwrap();
+
+    // 4. NATed validator fetches genesis, joins, and publishes via relay only.
+    let (gen_via_relay, used_relay) =
+        GardenNodeClient::call_via_invite(&decoded_invite, &GardenPeerRequest::GetGenesis).unwrap();
+    assert!(used_relay, "joiner behind NAT must route through the relay");
+    let fetched_genesis: GardenGenesis = serde_json::from_value(gen_via_relay.data).unwrap();
+    assert_eq!(fetched_genesis.chain_id, genesis.chain_id);
+
+    let nat_peer_dir = root.join("nat_peer");
+    std::fs::create_dir_all(&nat_peer_dir).unwrap();
+    let mut nat_peer = GardenNode::new("nat-peer".into(), Some(nat_peer_dir)).unwrap();
+    nat_peer
+        .init_from_invite(&decoded_invite, fetched_genesis)
+        .unwrap();
+
+    let join_tx = nat_peer
+        .sign_tx(
+            decoded_invite.chain_id,
+            GardenTxKind::JoinValidator {
+                pubkey: nat_peer.pubkey(),
+                display_name: "nat-peer".into(),
+            },
+        )
+        .unwrap();
+    let (tx_resp, used_relay_tx) =
+        GardenNodeClient::call_via_invite(&decoded_invite, &GardenPeerRequest::PublishTx(join_tx))
+            .unwrap();
+    assert!(used_relay_tx);
+    assert_eq!(tx_resp.data["accepted"], true);
+
+    let _ = GardenNodeClient::call(host_real_addr, &GardenPeerRequest::Shutdown);
+    let _ = host_child.wait();
+    relay.stop();
+    let _ = std::fs::remove_dir_all(&root);
+}

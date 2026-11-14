@@ -199,6 +199,37 @@ impl GardenInvitePayload {
             .map_err(|_| "genesis_hash_hex must be 32 bytes".to_string())?;
         Ok(arr)
     }
+
+    pub fn host_socket_addr(&self) -> Option<std::net::SocketAddr> {
+        parse_tcp_multiaddr(&self.host_multiaddr)
+    }
+
+    pub fn relay_socket_addrs(&self) -> Vec<std::net::SocketAddr> {
+        self.relay_multiaddrs
+            .iter()
+            .filter_map(|m| parse_tcp_multiaddr(m))
+            .collect()
+    }
+}
+
+/// Parse a `/ip4/<ip>/tcp/<port>[/...]` or `/ip6/<ip>/tcp/<port>[/...]` multiaddr
+/// into a `SocketAddr`.
+fn parse_tcp_multiaddr(multiaddr: &str) -> Option<std::net::SocketAddr> {
+    let parts: Vec<&str> = multiaddr.trim().split('/').collect();
+    // Expect leading empty segment from initial '/': ["", "ip4"|"ip6", ip, "tcp", port, ...]
+    if parts.len() < 5 || !parts[0].is_empty() {
+        return None;
+    }
+    let ip: std::net::IpAddr = match parts[1] {
+        "ip4" => parts[2].parse::<std::net::Ipv4Addr>().ok()?.into(),
+        "ip6" => parts[2].parse::<std::net::Ipv6Addr>().ok()?.into(),
+        _ => return None,
+    };
+    if parts[3] != "tcp" {
+        return None;
+    }
+    let port: u16 = parts[4].parse().ok()?;
+    Some(std::net::SocketAddr::new(ip, port))
 }
 
 fn compute_invite_checksum(

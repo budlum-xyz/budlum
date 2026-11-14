@@ -75,7 +75,7 @@ impl GardenBudlumSettlement {
             operator_bond: MIN_DOMAIN_OPERATOR_BOND,
             config_hash: genesis.genesis_hash,
             validator_set_hash: [0u8; 32],
-            finality_adapter: PoAFinalityAdapter::default().adapter_name().to_string(),
+            finality_adapter: PoAFinalityAdapter.adapter_name().to_string(),
             min_confirmations: 1,
             bridge_enabled: false,
             block_hash_scheme: RootScheme::Sha3_256,
@@ -170,7 +170,7 @@ impl GardenBudlumSettlement {
             authorities: current_authorities,
             signatures,
         };
-        let adapter = PoAFinalityAdapter::default();
+        let adapter = PoAFinalityAdapter;
         let status = adapter
             .verify_finality(&domain_snapshot, &commitment, &proof)
             .map_err(|e| format!("PoA finality verification error: {e}"))?;

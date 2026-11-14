@@ -8,8 +8,8 @@ use crate::garden::node::{
 };
 use crate::garden::storage::{GardenContentStore, GardenStoredObject};
 use crate::garden::types::{
-    verify_garden_execution_chain, GardenBlock, GardenContentKind, GardenLimits, GardenTrace,
-    GardenTxKind, SignedGardenTx,
+    verify_garden_execution_chain, GardenBlock, GardenContentKind, GardenGenesis, GardenLimits,
+    GardenTrace, GardenTxKind, SignedGardenTx,
 };
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
@@ -118,6 +118,45 @@ impl GardenService {
     ) -> Result<serde_json::Value, String> {
         let payload = GardenInvitePayload::decode_any(invite_or_qr)?;
         let storage_root = self.storage_root.as_ref().map(|r| r.join(&validator_name));
+        if !self.gardens.contains_key(&payload.chain_id.to_string()) {
+            // Remote Garden join over direct or 7.11-relayed TCP.
+            let (gen_resp, used_relay) =
+                GardenNodeClient::call_via_invite(&payload, &GardenPeerRequest::GetGenesis)?;
+            let genesis: GardenGenesis = serde_json::from_value(gen_resp.data)
+                .map_err(|e| format!("failed to decode remote Garden genesis: {e}"))?;
+            let mut joiner = GardenNode::new(validator_name.clone(), storage_root)?;
+            joiner.init_from_invite(&payload, genesis)?;
+            let joiner_pk = joiner.pubkey();
+            let joiner_hex = hex::encode(joiner_pk);
+            let join_tx = joiner.sign_tx(
+                payload.chain_id,
+                GardenTxKind::JoinValidator {
+                    pubkey: joiner_pk,
+                    display_name: validator_name,
+                },
+            )?;
+            let _ = GardenNodeClient::call_via_invite(
+                &payload,
+                &GardenPeerRequest::PublishTx(join_tx),
+            )?;
+            let mut participants = BTreeMap::new();
+            let host_clone = host_node_clone_for_participant(&joiner)?;
+            participants.insert(joiner_hex.clone(), joiner);
+            self.gardens.insert(
+                payload.chain_id.to_string(),
+                GardenServiceEntry {
+                    host_node: host_clone,
+                    participants,
+                    timestamp_ms: 1_700_000_000_000,
+                },
+            );
+            self.active_chain_id = Some(payload.chain_id);
+            return Ok(serde_json::json!({
+                "chain_id": payload.chain_id,
+                "validator_pubkey_hex": joiner_hex,
+                "used_relay": used_relay,
+            }));
+        }
         let mut bh = self.budlum_height;
         let entry = self.current_entry_mut(Some(payload.chain_id))?;
         let genesis = entry

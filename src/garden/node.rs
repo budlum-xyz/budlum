@@ -571,8 +571,18 @@ pub struct GardenNodeClient;
 
 impl GardenNodeClient {
     pub fn call(addr: SocketAddr, req: &GardenPeerRequest) -> Result<GardenPeerResponse, String> {
-        let mut stream = TcpStream::connect(addr)
+        Self::call_with_timeout(addr, req, std::time::Duration::from_secs(5))
+    }
+
+    fn call_with_timeout(
+        addr: SocketAddr,
+        req: &GardenPeerRequest,
+        timeout: std::time::Duration,
+    ) -> Result<GardenPeerResponse, String> {
+        let mut stream = TcpStream::connect_timeout(&addr, timeout)
             .map_err(|e| format!("failed to connect to Garden peer {addr}: {e}"))?;
+        let _ = stream.set_read_timeout(Some(timeout));
+        let _ = stream.set_write_timeout(Some(timeout));
         let encoded = serde_json::to_string(req)
             .map_err(|e| format!("failed to encode GardenPeerRequest: {e}"))?;
         stream
@@ -594,5 +604,29 @@ impl GardenNodeClient {
                 .error
                 .unwrap_or_else(|| "unknown Garden peer error".into()))
         }
+    }
+
+    /// Connect using an invite payload, trying the direct host multiaddr first
+    /// and falling back to advertised 7.11 relay multiaddrs when behind NAT.
+    /// Returns `(response, used_relay)`.
+    pub fn call_via_invite(
+        invite: &GardenInvitePayload,
+        req: &GardenPeerRequest,
+    ) -> Result<(GardenPeerResponse, bool), String> {
+        if let Some(direct) = invite.host_socket_addr() {
+            if let Ok(resp) =
+                Self::call_with_timeout(direct, req, std::time::Duration::from_millis(250))
+            {
+                return Ok((resp, false));
+            }
+        }
+        let mut last_err = String::from("no reachable direct or relay address in invite");
+        for relay in invite.relay_socket_addrs() {
+            match Self::call_with_timeout(relay, req, std::time::Duration::from_secs(5)) {
+                Ok(resp) => return Ok((resp, true)),
+                Err(e) => last_err = e,
+            }
+        }
+        Err(last_err)
     }
 }
