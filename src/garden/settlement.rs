@@ -1,244 +1,466 @@
+//! The link between a Garden chain and Budlum.
+//!
+//! A Garden registers as a sovereign PoA domain in Budlum's domain registry
+//! and reports its finality through the existing PoA finality adapter. There
+//! is no bridge: the domain is registered with `bridge_enabled = false`, so
+//! nothing of value on Budlum depends on it.
+//!
+//! The Garden status is visible on Budlum as the domain status: Active while
+//! the chain runs, Frozen while it stands still, Retired when it is over.
+
+use super::types::{garden_domain_id, GardenCommit, GardenGenesis, GardenKey};
+use crate::chain::chain_actor::ChainHandle;
 use crate::core::address::Address;
-use crate::core::hash::hash_fields_bytes;
-use crate::crypto::primitives::KeyPair;
 use crate::domain::finality_adapter::{
-    poa_authority_set_hash, poa_commit_signing_message, DomainFinalityAdapter, FinalityProof,
-    FinalityStatus, PoAAuthoritySignature, PoAFinalityAdapter,
+    hash_finality_proof, poa_authority_set_hash, FinalityProof, PoAAuthoritySignature,
 };
-use crate::domain::registry::{ConsensusDomainRegistry, MIN_DOMAIN_OPERATOR_BOND};
+use crate::domain::registry::MIN_DOMAIN_OPERATOR_BOND;
 use crate::domain::types::{
-    ConsensusDomain, ConsensusKind, DomainCommitment, DomainId, DomainStatus, RootScheme,
+    ConsensusDomain, ConsensusKind, DomainId, DomainStatus, Hash32, RootScheme,
+    VerifiedDomainCommitment,
 };
-use crate::garden::consensus::GardenChainState;
-use crate::garden::types::{GardenBlock, GardenGenesis, TAG_GARDEN_GENESIS};
-use std::collections::BTreeMap;
 
-/// Connects a Garden sovereign PoA domain directly to Budlum's
-/// `ConsensusDomainRegistry` and `PoAFinalityAdapter` without a bridge
-/// (Directive 4.1, 4.2).
-#[derive(Clone, Debug)]
-pub struct GardenBudlumSettlement {
-    pub registry: ConsensusDomainRegistry,
-    pub next_domain_id: DomainId,
-    /// Maps Garden chain ID string -> registered Budlum DomainId.
-    pub chain_to_domain: BTreeMap<String, DomainId>,
-    /// Tracks anchored commitments per domain id string.
-    pub anchored_heights: BTreeMap<String, u64>,
-}
+/// The finality adapter a Garden domain registers with.
+const GARDEN_FINALITY_ADAPTER: &str = "poa-authority-quorum";
 
-impl Default for GardenBudlumSettlement {
-    fn default() -> Self {
-        Self::new()
+/// The Budlum domain record of a Garden.
+///
+/// `operator_bond` is the registry's declared minimum. The registry records
+/// that number and never debits it, and a Garden mints and locks nothing.
+fn domain_record(
+    genesis: &GardenGenesis,
+    operator: GardenKey,
+    validator_set_hash: Hash32,
+) -> ConsensusDomain {
+    ConsensusDomain {
+        id: garden_domain_id(genesis.chain_id),
+        kind: ConsensusKind::PoA,
+        status: DomainStatus::Active,
+        domain_chain_id: genesis.chain_id,
+        operator: Some(Address(operator)),
+        operator_bond: MIN_DOMAIN_OPERATOR_BOND,
+        config_hash: genesis.hash(),
+        validator_set_hash,
+        finality_adapter: GARDEN_FINALITY_ADAPTER.to_string(),
+        min_confirmations: 1,
+        bridge_enabled: false,
+        block_hash_scheme: RootScheme::Sha256,
+        state_root_scheme: RootScheme::Sha256,
+        tx_root_scheme: RootScheme::Sha256,
+        last_committed_height: 0,
+        last_committed_hash: genesis.hash(),
+        pow_parameters: None,
+        zk_program_allowlist: Vec::new(),
+        plugin_code_hash: None,
     }
 }
 
-impl GardenBudlumSettlement {
-    pub fn new() -> Self {
-        Self {
-            registry: ConsensusDomainRegistry::new(),
-            next_domain_id: 1,
-            chain_to_domain: BTreeMap::new(),
-            anchored_heights: BTreeMap::new(),
-        }
+/// The hash of an authority set, in the form Budlum's PoA adapter derives it.
+pub fn authority_set_hash(chain_id: u64, authorities: &[GardenKey]) -> Result<Hash32, String> {
+    // The derivation reads only the domain id of the record it is given.
+    let probe = ConsensusDomain {
+        id: garden_domain_id(chain_id),
+        kind: ConsensusKind::PoA,
+        status: DomainStatus::Active,
+        domain_chain_id: chain_id,
+        operator: None,
+        operator_bond: 0,
+        config_hash: [0u8; 32],
+        validator_set_hash: [0u8; 32],
+        finality_adapter: GARDEN_FINALITY_ADAPTER.to_string(),
+        min_confirmations: 1,
+        bridge_enabled: false,
+        block_hash_scheme: RootScheme::Sha256,
+        state_root_scheme: RootScheme::Sha256,
+        tx_root_scheme: RootScheme::Sha256,
+        last_committed_height: 0,
+        last_committed_hash: [0u8; 32],
+        pow_parameters: None,
+        zk_program_allowlist: Vec::new(),
+        plugin_code_hash: None,
+    };
+    let addresses: Vec<Address> = authorities.iter().map(|key| Address(*key)).collect();
+    poa_authority_set_hash(&probe, &addresses).map_err(|e| e.to_string())
+}
+
+/// Turn a finalized Garden block into the payload Budlum verifies.
+///
+/// The proof carries the electorate of the block and the votes as they were
+/// signed: a Garden vote is a Budlum PoA commit signature.
+fn verified_commitment(
+    electorate: &[GardenKey],
+    commit: &GardenCommit,
+) -> Result<VerifiedDomainCommitment, String> {
+    let authorities: Vec<Address> = electorate.iter().map(|key| Address(*key)).collect();
+    let signatures = commit
+        .votes
+        .iter()
+        .map(|vote| PoAAuthoritySignature {
+            authority: Address(vote.voter),
+            signature: vote.signature.clone(),
+        })
+        .collect();
+    let proof = FinalityProof::PoA {
+        authorities,
+        signatures,
+    };
+    let mut commitment = commit.block.header.commitment();
+    commitment.finality_proof_hash = hash_finality_proof(&proof).map_err(|e| e.to_string())?;
+    Ok(VerifiedDomainCommitment { commitment, proof })
+}
+
+/// What the node's Budlum chain says about a Garden domain.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GardenDomainView {
+    pub domain_id: DomainId,
+    pub status: DomainStatus,
+    pub last_committed_height: u64,
+    pub last_committed_hash: Hash32,
+}
+
+/// The handle through which a Garden node talks to its Budlum chain.
+#[derive(Clone)]
+pub struct GardenBudlumLink {
+    chain: ChainHandle,
+}
+
+impl GardenBudlumLink {
+    pub fn new(chain: ChainHandle) -> Self {
+        Self { chain }
     }
 
-    /// Derive a deterministic Budlum `DomainId` for a Garden and register it in
-    /// `ConsensusDomainRegistry` as `ConsensusKind::PoA` with `bridge_enabled: false`.
-    pub fn register_garden_domain(
-        &mut self,
+    /// Register the Garden as a domain on this node's Budlum chain.
+    pub async fn register(
+        &self,
         genesis: &GardenGenesis,
-        active_authorities: &[[u8; 32]],
-    ) -> Result<DomainId, String> {
-        let chain_key = genesis.chain_id.value().to_string();
-        if let Some(existing) = self.chain_to_domain.get(&chain_key) {
-            return Ok(*existing);
-        }
-        if active_authorities.is_empty() {
-            return Err("cannot register Garden domain with zero authorities".into());
-        }
-
-        let mut domain_id = self.next_domain_id;
-        while self.registry.get(domain_id).is_some() {
-            domain_id = domain_id
-                .checked_add(1)
-                .ok_or_else(|| "exhausted Budlum DomainId space".to_string())?;
-        }
-        self.next_domain_id = domain_id.saturating_add(1);
-
-        let authorities: Vec<Address> = active_authorities.iter().map(|pk| Address(*pk)).collect();
-        let mut domain = ConsensusDomain {
-            id: domain_id,
-            kind: ConsensusKind::PoA,
-            status: DomainStatus::Active,
-            domain_chain_id: genesis.chain_id.value(),
-            operator: Some(Address(genesis.host_pubkey)),
-            operator_bond: MIN_DOMAIN_OPERATOR_BOND,
-            config_hash: genesis.genesis_hash,
-            validator_set_hash: [0u8; 32],
-            finality_adapter: PoAFinalityAdapter.adapter_name().to_string(),
-            min_confirmations: 1,
-            bridge_enabled: false,
-            block_hash_scheme: RootScheme::Sha3_256,
-            state_root_scheme: RootScheme::Sha3_256,
-            tx_root_scheme: RootScheme::Sha3_256,
-            last_committed_height: 0,
-            last_committed_hash: genesis.genesis_hash,
-            pow_parameters: None,
-            zk_program_allowlist: Vec::new(),
-            plugin_code_hash: None,
-        };
-        domain.validator_set_hash = poa_authority_set_hash(&domain, &authorities)
-            .map_err(|e| format!("failed to compute Garden PoA authority set hash: {e}"))?;
-
-        self.registry.register(domain)?;
-        self.chain_to_domain.insert(chain_key, domain_id);
-        self.anchored_heights.insert(domain_id.to_string(), 0);
-        Ok(domain_id)
+        operator: GardenKey,
+    ) -> Result<(), String> {
+        let hash = authority_set_hash(genesis.chain_id, &[genesis.host])?;
+        self.chain
+            .register_consensus_domain(domain_record(genesis, operator, hash))
+            .await
     }
 
-    /// Anchor a finalized Garden block directly into Budlum's PoA finality
-    /// adapter and record its height.
-    pub fn anchor_garden_block(
-        &mut self,
-        state: &mut GardenChainState,
-        block: &GardenBlock,
-        signer_keypairs: &[&KeyPair],
-        budlum_height: u64,
-    ) -> Result<DomainId, String> {
-        let chain_key = state.genesis.chain_id.value().to_string();
-        let domain_id = self
-            .chain_to_domain
-            .get(&chain_key)
-            .copied()
-            .ok_or_else(|| "Garden domain is not registered in Budlum registry".to_string())?;
-
-        let mut domain_snapshot = self
-            .registry
-            .get(domain_id)
-            .cloned()
-            .ok_or_else(|| format!("missing Budlum domain {domain_id}"))?;
-
-        let current_authorities: Vec<Address> = state
-            .liveness
-            .active_validator_pubkeys()
-            .into_iter()
-            .map(Address)
-            .collect();
-        if current_authorities.is_empty() {
-            return Err("cannot anchor block with zero active Garden authorities".into());
-        }
-
-        // Update domain's authority set commitment to match the current active
-        // Garden validators (classless open participation).
-        let updated_set_hash = poa_authority_set_hash(&domain_snapshot, &current_authorities)
-            .map_err(|e| format!("failed to refresh Garden authority hash: {e}"))?;
-        domain_snapshot.validator_set_hash = updated_set_hash;
-
-        let tx_root = hash_fields_bytes(&[
-            TAG_GARDEN_GENESIS,
-            &block.block_hash,
-            &(block.txs.len() as u64).to_le_bytes(),
-        ]);
-        let mut commitment = DomainCommitment {
-            domain_id,
-            domain_height: block.height,
-            domain_block_hash: block.block_hash,
-            parent_domain_block_hash: block.parent_hash,
-            state_root: block.state_root,
-            tx_root,
-            event_root: block.content_root,
-            finality_proof_hash: [0u8; 32],
-            consensus_kind: ConsensusKind::PoA,
-            validator_set_hash: updated_set_hash,
-            timestamp_ms: u128::from(block.timestamp_ms),
-            sequence: block.height,
-            producer: Some(Address(block.proposer)),
-            state_updates: BTreeMap::new(),
-        };
-
-        let msg =
-            poa_commit_signing_message(domain_snapshot.domain_chain_id, domain_id, &commitment);
-        let signatures: Vec<PoAAuthoritySignature> = signer_keypairs
-            .iter()
-            .map(|kp| PoAAuthoritySignature {
-                authority: Address(kp.public_key_bytes()),
-                signature: kp.sign(&msg).to_vec(),
-            })
-            .collect();
-
-        let proof = FinalityProof::PoA {
-            authorities: current_authorities,
-            signatures,
-        };
-        let adapter = PoAFinalityAdapter;
-        let status = adapter
-            .verify_finality(&domain_snapshot, &commitment, &proof)
-            .map_err(|e| format!("PoA finality verification error: {e}"))?;
-        match status {
-            FinalityStatus::Finalized => {
-                commitment.finality_proof_hash = block.block_hash;
-                if let Some(domain_mut) = self.registry.get_mut(domain_id) {
-                    domain_mut.validator_set_hash = updated_set_hash;
-                    domain_mut.last_committed_height = block.height;
-                    domain_mut.last_committed_hash = block.block_hash;
-                }
-                self.anchored_heights
-                    .insert(domain_id.to_string(), budlum_height);
-                state.budlum_domain_id = Some(domain_id);
-                state.last_anchored_budlum_height = Some(budlum_height);
-                for trace in state.traces.values_mut() {
-                    if trace.block_height == block.height {
-                        trace.budlum_domain_id = Some(domain_id);
-                        trace.budlum_anchored_height = Some(budlum_height);
-                    }
-                }
-                Ok(domain_id)
-            }
-            FinalityStatus::Pending { .. } => Err("Garden PoA finality proof is pending".into()),
-            FinalityStatus::Rejected(reason) => {
-                Err(format!("Garden PoA finality proof rejected: {reason}"))
-            }
-        }
+    /// Report one finalized Garden block to Budlum.
+    ///
+    /// The registered authority set is moved to the electorate of the block
+    /// first, then the commitment goes through Budlum's own PoA verification.
+    pub async fn report(
+        &self,
+        operator: GardenKey,
+        electorate: &[GardenKey],
+        commit: &GardenCommit,
+    ) -> Result<(), String> {
+        let domain_id = garden_domain_id(commit.block.header.chain_id);
+        self.chain
+            .rotate_bridgeless_poa_authority_set(
+                domain_id,
+                Address(operator),
+                commit.block.header.authority_set_hash,
+            )
+            .await?;
+        self.chain
+            .submit_verified_domain_commitment(verified_commitment(electorate, commit)?)
+            .await
     }
 
-    /// Synchronize the Garden's `Active` / `Frozen` / `Retired` status into
-    /// Budlum's `ConsensusDomainRegistry` via `transition_status_checked`
-    /// (Directive 4.2, 9.7-9.10).
-    pub fn sync_domain_status(
-        &mut self,
+    /// Move the Garden domain to `next` on this node's Budlum chain.
+    pub async fn move_domain(
+        &self,
         chain_id: u64,
-        target_status: DomainStatus,
-    ) -> Result<DomainStatus, String> {
-        let domain_id = self
-            .chain_to_domain
-            .get(&chain_id.to_string())
-            .copied()
-            .ok_or_else(|| "Garden domain not registered in Budlum registry".to_string())?;
-        let current = self
-            .registry
-            .get(domain_id)
-            .map(|d| d.status)
-            .ok_or_else(|| format!("missing Budlum domain {domain_id}"))?;
-        if current == target_status {
-            return Ok(current);
-        }
-        match (current, target_status) {
-            (DomainStatus::Active, DomainStatus::Retired) => {
-                self.registry
-                    .transition_status_checked(domain_id, DomainStatus::Frozen)?;
-                self.registry
-                    .transition_status_checked(domain_id, DomainStatus::Retired)?;
-            }
-            _ => {
-                self.registry
-                    .transition_status_checked(domain_id, target_status)?;
-            }
-        }
-        Ok(target_status)
+        operator: GardenKey,
+        next: DomainStatus,
+    ) -> Result<(), String> {
+        self.chain
+            .transition_bridgeless_poa_domain_status(
+                garden_domain_id(chain_id),
+                Address(operator),
+                next,
+            )
+            .await
     }
 
-    pub fn budlum_domain_status(&self, chain_id: u64) -> Option<DomainStatus> {
-        let domain_id = self.chain_to_domain.get(&chain_id.to_string()).copied()?;
-        self.registry.get(domain_id).map(|d| d.status)
+    /// End the Garden domain on this node's Budlum chain. The lifecycle has
+    /// no direct step from Active to Retired, so an active domain is frozen
+    /// first.
+    pub async fn retire(&self, chain_id: u64, operator: GardenKey) -> Result<(), String> {
+        self.move_domain(chain_id, operator, DomainStatus::Frozen)
+            .await?;
+        self.move_domain(chain_id, operator, DomainStatus::Retired)
+            .await
+    }
+
+    /// The Garden domain as this node's Budlum chain records it.
+    pub async fn view(&self, chain_id: u64) -> Option<GardenDomainView> {
+        let domain_id = garden_domain_id(chain_id);
+        self.chain
+            .get_consensus_domains()
+            .await
+            .into_iter()
+            .find(|domain| domain.id == domain_id)
+            .map(|domain| GardenDomainView {
+                domain_id,
+                status: domain.status,
+                last_committed_height: domain.last_committed_height,
+                last_committed_hash: domain.last_committed_hash,
+            })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::testkit::Net;
+    use super::super::types::GardenTxKind;
+    use super::*;
+    use crate::chain::blockchain::Blockchain;
+    use crate::consensus::pow::PoWEngine;
+    use crate::core::chain_config::Network;
+
+    fn budlum() -> Blockchain {
+        Blockchain::new(
+            std::sync::Arc::new(PoWEngine::new(2)),
+            None,
+            Network::Devnet.chain_id().value(),
+            None,
+        )
+    }
+
+    /// Register the Garden of `net` on `chain`, operated by the host.
+    fn register(chain: &mut Blockchain, net: &Net) -> DomainId {
+        let genesis = &net.ledger.state.genesis;
+        let hash = authority_set_hash(genesis.chain_id, &[genesis.host]).unwrap();
+        chain
+            .register_consensus_domain(domain_record(genesis, net.host, hash))
+            .unwrap();
+        garden_domain_id(genesis.chain_id)
+    }
+
+    /// Report the Garden block at `height` the way `GardenBudlumLink::report`
+    /// does it: follow the electorate, then hand over the PoA proof.
+    fn report(chain: &mut Blockchain, net: &Net, height: u64) -> Result<(), String> {
+        let (commit, electorate) = net.ledger.commit_at(height).ok_or("no such block")?;
+        chain.rotate_bridgeless_poa_authority_set(
+            garden_domain_id(commit.block.header.chain_id),
+            Address(net.host),
+            commit.block.header.authority_set_hash,
+        )?;
+        let verified = verified_commitment(electorate, commit)?;
+        chain.submit_verified_domain_commitment(verified.commitment, verified.proof)
+    }
+
+    #[test]
+    fn garden_finality_is_accepted_by_the_budlum_poa_adapter_as_members_change() {
+        let mut net = Net::new();
+        let mut chain = budlum();
+        let domain_id = register(&mut chain, &net);
+        let a = net.join("a");
+        let b = net.join("b");
+        net.commit(vec![net.publish(&a, 1)]).unwrap();
+        net.commit(vec![net.tx(&b, GardenTxKind::Leave)]).unwrap();
+        net.commit(vec![net.publish(&a, 2)]).unwrap();
+        for height in 1..=net.ledger.state.height {
+            report(&mut chain, &net, height).unwrap();
+            let domain = chain.domain_registry.get(domain_id).unwrap();
+            let (commit, _) = net.ledger.commit_at(height).unwrap();
+            assert_eq!(domain.last_committed_height, height);
+            assert_eq!(domain.last_committed_hash, commit.block.header.hash());
+            assert_eq!(
+                domain.validator_set_hash,
+                commit.block.header.authority_set_hash
+            );
+        }
+        let domain = chain.domain_registry.get(domain_id).unwrap();
+        assert_eq!(domain.status, DomainStatus::Active);
+        assert!(!domain.bridge_enabled);
+        assert_eq!(domain.kind, ConsensusKind::PoA);
+    }
+
+    #[test]
+    fn garden_block_without_the_quorum_is_refused_by_budlum() {
+        let mut net = Net::new();
+        let mut chain = budlum();
+        let domain_id = register(&mut chain, &net);
+        let a = net.join("a");
+        net.join("b");
+        net.join("c");
+        report(&mut chain, &net, 1).unwrap();
+        report(&mut chain, &net, 2).unwrap();
+        report(&mut chain, &net, 3).unwrap();
+        net.commit(vec![net.publish(&a, 1)]).unwrap();
+
+        let (commit, electorate) = net.ledger.commit_at(4).unwrap();
+        let mut thin = commit.clone();
+        thin.votes.truncate(2);
+        chain
+            .rotate_bridgeless_poa_authority_set(
+                domain_id,
+                Address(net.host),
+                commit.block.header.authority_set_hash,
+            )
+            .unwrap();
+        let before = chain.domain_registry.get(domain_id).unwrap().clone();
+        let verified = verified_commitment(electorate, &thin).unwrap();
+        let refusal = chain
+            .submit_verified_domain_commitment(verified.commitment, verified.proof)
+            .unwrap_err();
+        assert!(refusal.contains("required=3, observed=2"), "{refusal}");
+        assert_eq!(chain.domain_registry.get(domain_id).unwrap(), &before);
+
+        // A proof that names a smaller electorate than the registered one
+        // does not pass either: the adapter recomputes the set hash.
+        let small: Vec<GardenKey> = thin.votes.iter().map(|vote| vote.voter).collect();
+        let verified = verified_commitment(&small, &thin).unwrap();
+        assert!(chain
+            .submit_verified_domain_commitment(verified.commitment, verified.proof)
+            .is_err());
+        assert_eq!(chain.domain_registry.get(domain_id).unwrap(), &before);
+
+        report(&mut chain, &net, 4).unwrap();
+    }
+
+    #[test]
+    fn garden_domain_changes_only_through_its_operator() {
+        let mut net = Net::new();
+        let mut chain = budlum();
+        let domain_id = register(&mut chain, &net);
+        let stranger = net.join("a");
+        let before = chain.domain_registry.get(domain_id).unwrap().clone();
+
+        let refusal = chain
+            .rotate_bridgeless_poa_authority_set(domain_id, Address(stranger), [7u8; 32])
+            .unwrap_err();
+        assert!(refusal.contains("not operated by the caller"), "{refusal}");
+        let refusal = chain
+            .transition_bridgeless_poa_domain_status(
+                domain_id,
+                Address(stranger),
+                DomainStatus::Frozen,
+            )
+            .unwrap_err();
+        assert!(refusal.contains("not operated by the caller"), "{refusal}");
+        let refusal = chain
+            .rotate_bridgeless_poa_authority_set(domain_id, Address(net.host), [0u8; 32])
+            .unwrap_err();
+        assert!(refusal.contains("zero"), "{refusal}");
+        let refusal = chain
+            .rotate_bridgeless_poa_authority_set(domain_id + 1, Address(net.host), [7u8; 32])
+            .unwrap_err();
+        assert!(refusal.contains("Unknown consensus domain"), "{refusal}");
+        assert_eq!(chain.domain_registry.get(domain_id).unwrap(), &before);
+    }
+
+    #[test]
+    fn garden_operator_entry_points_refuse_a_bridge_domain() {
+        let net = Net::new();
+        let mut chain = budlum();
+        let genesis = &net.ledger.state.genesis;
+        let hash = authority_set_hash(genesis.chain_id, &[genesis.host]).unwrap();
+        let mut bridged = domain_record(genesis, net.host, hash);
+        bridged.bridge_enabled = true;
+        let domain_id = bridged.id;
+        chain.register_consensus_domain(bridged).unwrap();
+        let before = chain.domain_registry.get(domain_id).unwrap().clone();
+
+        let refusal = chain
+            .rotate_bridgeless_poa_authority_set(domain_id, Address(net.host), [7u8; 32])
+            .unwrap_err();
+        assert!(refusal.contains("bridge-enabled"), "{refusal}");
+        let refusal = chain
+            .transition_bridgeless_poa_domain_status(
+                domain_id,
+                Address(net.host),
+                DomainStatus::Frozen,
+            )
+            .unwrap_err();
+        assert!(refusal.contains("bridge-enabled"), "{refusal}");
+        assert_eq!(chain.domain_registry.get(domain_id).unwrap(), &before);
+    }
+
+    #[test]
+    fn garden_status_on_budlum_follows_active_frozen_retired() {
+        let mut net = Net::new();
+        let mut chain = budlum();
+        let domain_id = register(&mut chain, &net);
+        let host = Address(net.host);
+        let a = net.join("a");
+        report(&mut chain, &net, 1).unwrap();
+        let status = |chain: &Blockchain| chain.domain_registry.get(domain_id).unwrap().status;
+
+        let refusal = chain
+            .transition_bridgeless_poa_domain_status(domain_id, host, DomainStatus::Retired)
+            .unwrap_err();
+        assert!(refusal.contains("Illegal domain lifecycle"), "{refusal}");
+        assert_eq!(status(&chain), DomainStatus::Active);
+
+        chain
+            .transition_bridgeless_poa_domain_status(domain_id, host, DomainStatus::Frozen)
+            .unwrap();
+        assert_eq!(status(&chain), DomainStatus::Frozen);
+        // Budlum takes no Garden block while the domain is frozen.
+        net.commit(vec![net.publish(&a, 1)]).unwrap();
+        assert!(report(&mut chain, &net, 2).is_err());
+        assert_eq!(
+            chain
+                .domain_registry
+                .get(domain_id)
+                .unwrap()
+                .last_committed_height,
+            1
+        );
+
+        chain
+            .transition_bridgeless_poa_domain_status(domain_id, host, DomainStatus::Active)
+            .unwrap();
+        report(&mut chain, &net, 2).unwrap();
+
+        chain
+            .transition_bridgeless_poa_domain_status(domain_id, host, DomainStatus::Frozen)
+            .unwrap();
+        chain
+            .transition_bridgeless_poa_domain_status(domain_id, host, DomainStatus::Retired)
+            .unwrap();
+        assert_eq!(status(&chain), DomainStatus::Retired);
+        for next in [DomainStatus::Active, DomainStatus::Frozen] {
+            assert!(chain
+                .transition_bridgeless_poa_domain_status(domain_id, host, next)
+                .is_err());
+        }
+        let refusal = chain
+            .rotate_bridgeless_poa_authority_set(domain_id, host, [7u8; 32])
+            .unwrap_err();
+        assert!(refusal.contains("retired"), "{refusal}");
+        assert_eq!(status(&chain), DomainStatus::Retired);
+    }
+
+    #[test]
+    fn garden_fork_seen_by_budlum_cannot_be_reactivated_by_the_operator() {
+        let mut net = Net::new();
+        let mut chain = budlum();
+        let domain_id = register(&mut chain, &net);
+        let host = Address(net.host);
+        let token = net.tx(&net.host, GardenTxKind::Leave);
+        // Two different first blocks, both signed by the host alone.
+        let mut other = Net {
+            ledger: net.ledger.clone(),
+            keys: net.keys.clone(),
+            host: net.host,
+            clock: net.clock + 500,
+        };
+        net.join("a");
+        other.commit(vec![token]).unwrap();
+        report(&mut chain, &net, 1).unwrap();
+        assert!(report(&mut chain, &other, 1).is_err());
+        assert_eq!(
+            chain.domain_registry.get(domain_id).unwrap().status,
+            DomainStatus::Frozen
+        );
+        let refusal = chain
+            .transition_bridgeless_poa_domain_status(domain_id, host, DomainStatus::Active)
+            .unwrap_err();
+        assert!(refusal.contains("quarantined"), "{refusal}");
+        assert_eq!(
+            chain.domain_registry.get(domain_id).unwrap().status,
+            DomainStatus::Frozen
+        );
     }
 }

@@ -889,6 +889,7 @@ crates/ai-inference/crates/ai-integrations/src/rest.rs	struct	RestRequest
 crates/ai-inference/crates/ai-integrations/src/rest.rs	struct	RetryPolicy
 crates/ai-inference/crates/ai-integrations/src/ws.rs	enum	ConnState
 crates/ai-inference/crates/ai-integrations/src/ws.rs	fn	is_killed
+crates/ai-inference/crates/ai-integrations/src/ws.rs	fn	shared
 crates/ai-inference/crates/ai-integrations/src/ws.rs	fn	trigger
 crates/ai-inference/crates/ai-integrations/src/ws.rs	struct	KillSignal
 crates/ai-inference/crates/ai-integrations/src/ws.rs	struct	SessionTracker
@@ -1251,6 +1252,7 @@ src/cli/commands.rs	struct	ValidatorSection
 src/consensus/merkle_tree.rs	fn	merkle_rebuild_root
 src/consensus/merkle_tree.rs	fn	merkle_sibling_index
 src/consensus/mod.rs	const	MAX_FUTURE_BLOCK_TIME_MS
+src/consensus/poa.rs	fn	active_validator_count
 src/consensus/poa.rs	fn	expected_proposer_with_entropy
 src/consensus/poa.rs	fn	leader_slot_with_entropy
 src/consensus/poa.rs	fn	with_authorities

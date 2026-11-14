@@ -1,5 +1,9 @@
 //! Server admission for the 1.0 mobile-self profile: the network-side
 //! measurement that a device really is the server of its own content.
+//!
+//! WIRING: unwired - measured: the only caller is
+//! `OneShareRegistry::admit_as_server`, and no production module builds a
+//! `OneShareRegistry`, so no production path reaches this check.
 
 use crate::storage::mobile_self::CustodyLedger;
 

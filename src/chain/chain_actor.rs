@@ -131,6 +131,18 @@ pub enum ChainCommand {
         crate::domain::ConsensusDomain,
         oneshot::Sender<Result<(), String>>,
     ),
+    RotateBridgelessPoaAuthoritySet {
+        domain_id: crate::domain::DomainId,
+        operator: Address,
+        validator_set_hash: crate::domain::Hash32,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    TransitionBridgelessPoaDomainStatus {
+        domain_id: crate::domain::DomainId,
+        operator: Address,
+        next: crate::domain::DomainStatus,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
     RegisterSovereignTemplate(
         Box<crate::domain::SovereignDomainTemplate>,
         oneshot::Sender<Result<(), String>>,
@@ -1627,6 +1639,49 @@ impl ChainHandle {
         let _ = self
             .tx
             .send(ChainCommand::RegisterConsensusDomain(domain, tx))
+            .await;
+        rx.await
+            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
+    }
+
+    /// Replace the registered authority set of a bridgeless PoA domain the
+    /// caller operates.
+    pub async fn rotate_bridgeless_poa_authority_set(
+        &self,
+        domain_id: crate::domain::DomainId,
+        operator: Address,
+        validator_set_hash: crate::domain::Hash32,
+    ) -> Result<(), String> {
+        let (reply, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::RotateBridgelessPoaAuthoritySet {
+                domain_id,
+                operator,
+                validator_set_hash,
+                reply,
+            })
+            .await;
+        rx.await
+            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
+    }
+
+    /// Move a bridgeless PoA domain the caller operates along its lifecycle.
+    pub async fn transition_bridgeless_poa_domain_status(
+        &self,
+        domain_id: crate::domain::DomainId,
+        operator: Address,
+        next: crate::domain::DomainStatus,
+    ) -> Result<(), String> {
+        let (reply, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::TransitionBridgelessPoaDomainStatus {
+                domain_id,
+                operator,
+                next,
+                reply,
+            })
             .await;
         rx.await
             .unwrap_or_else(|_| Err("Actor dropped".to_string()))
@@ -3735,6 +3790,30 @@ impl ChainActor {
                 }
                 ChainCommand::RegisterConsensusDomain(domain, res_tx) => {
                     let _ = res_tx.send(self.blockchain.register_consensus_domain(domain));
+                }
+                ChainCommand::RotateBridgelessPoaAuthoritySet {
+                    domain_id,
+                    operator,
+                    validator_set_hash,
+                    reply,
+                } => {
+                    let _ = reply.send(self.blockchain.rotate_bridgeless_poa_authority_set(
+                        domain_id,
+                        operator,
+                        validator_set_hash,
+                    ));
+                }
+                ChainCommand::TransitionBridgelessPoaDomainStatus {
+                    domain_id,
+                    operator,
+                    next,
+                    reply,
+                } => {
+                    let _ =
+                        reply
+                            .send(self.blockchain.transition_bridgeless_poa_domain_status(
+                                domain_id, operator, next,
+                            ));
                 }
                 ChainCommand::RegisterSovereignTemplate(template, res_tx) => {
                     let _ = res_tx.send(self.blockchain.register_sovereign_template(*template));
