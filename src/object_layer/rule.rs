@@ -186,7 +186,10 @@ fn verify_program_rule(class_slice: &ClassSlice) -> Result<(), RuleRefusal> {
         arr.copy_from_slice(chunk);
         words.push(u64::from_le_bytes(arr));
     }
-    let mut vm = bud_vm::Vm::with_mainnet_mode(1024, 100_000, true);
+    // A rule program is class data anyone can publish. Gas does not bound the
+    // trace, so the rule gets the chain's own cap on recorded rows.
+    let mut vm = bud_vm::Vm::with_mainnet_mode(1024, 100_000, true)
+        .with_step_limit(bud_vm::MAX_CONTRACT_TRACE_STEPS);
     let receipt = vm.run_receipt(&words);
     if !receipt.success || receipt.error.is_some() || receipt.exit_code != 0 {
         return Err(RuleRefusal::Paused);
@@ -594,6 +597,56 @@ mod tests {
             apply_rule(&ClassRule::Program, &fail_slice, &before, &verb),
             Err(RuleRefusal::Paused)
         );
+    }
+
+    /// A counter loop that records `3 + 2 * iterations` trace rows.
+    fn counter_loop_rule(iterations: i32) -> ClassSlice {
+        use bud_isa::{Instruction, Opcode};
+
+        let steps = [
+            (Opcode::Load, 1u8, 0u8, 0u8, iterations),
+            (Opcode::Load, 2, 0, 0, 1),
+            (Opcode::Sub, 1, 1, 2, 0),
+            (Opcode::Jnz, 0, 1, 0, -1),
+            (Opcode::Halt, 0, 0, 0, 0),
+        ];
+        let mut code = Vec::new();
+        for (opcode, rd, rs1, rs2, imm) in steps {
+            let word = Instruction {
+                opcode,
+                rd,
+                rs1,
+                rs2,
+                imm,
+            }
+            .encode();
+            code.extend_from_slice(&word.to_le_bytes());
+        }
+        let mut slice = ClassSlice::new();
+        slice.insert(String::from("program_bytecode"), code);
+        slice
+    }
+
+    /// Gas does not bound the trace. A rule that needs more rows than the
+    /// chain's cap is refused, though its gas budget would have allowed it.
+    #[test]
+    fn a_program_rule_is_cut_off_at_the_trace_cap() {
+        let before = AssetSlice::Unique { holder: acct(1) };
+        let verb = Verb::Transfer {
+            from: acct(1),
+            to: acct(2),
+            amount: 1,
+        };
+        let rows = bud_vm::MAX_CONTRACT_TRACE_STEPS as i32;
+        // About 20,000 rows and about 20,000 gas, far under the 100,000 budget.
+        let long = counter_loop_rule(rows / 2 + rows / 8);
+        assert_eq!(
+            apply_rule(&ClassRule::Program, &long, &before, &verb),
+            Err(RuleRefusal::Paused)
+        );
+        // A short loop still runs.
+        let short = counter_loop_rule(1_000);
+        assert!(apply_rule(&ClassRule::Program, &short, &before, &verb).is_ok());
     }
 
     #[test]
