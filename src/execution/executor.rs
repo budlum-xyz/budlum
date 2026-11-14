@@ -3446,12 +3446,17 @@ impl Executor {
                         model.as_ref(),
                         Some((program, inputs)),
                     ),
-                    None => crate::ai::execution::verify_execution_proof_structural_with_model(
-                        proof,
-                        &req,
-                        &res,
-                        model.as_ref(),
-                    ),
+                    None => match model.as_ref() {
+                        Some(spec) => crate::ai::execution::verify_execution_proof_structural_with_model(
+                            proof,
+                            &req,
+                            &res,
+                            Some(spec),
+                        ),
+                        None => crate::ai::execution::verify_execution_proof_structural(
+                            proof, &req, &res,
+                        ),
+                    },
                 };
                 if !report.is_structurally_valid() {
                     return Err(BudlumError::validation(

@@ -21,8 +21,8 @@ use crate::cross_domain::event_tree::MerkleProof;
 use crate::cross_domain::evm::account_proof;
 use crate::domain::types::{DomainId, Hash32};
 use crate::object_layer::charter::{
-    check_charter_at_state_root, CanonicalCodeHashes, CharterRefusal, CharterStatus, CodeProof,
-    DomainCharter,
+    check_charter, check_charter_at_state_root, CanonicalCodeHashes, CharterRefusal, CharterStatus,
+    CodeProof, DomainCharter,
 };
 use crate::object_layer::family::{
     class_ref_bytes, profile_for, AssetKind, EndpointEvent, FamilyError, HomeVmFamily,
@@ -501,14 +501,18 @@ impl ObjectLayerRegistry {
         {
             return Err(Refusal::Charter(CharterRefusal::ProofDisagrees));
         }
-        check_charter_at_state_root(
-            &charter,
-            proof,
-            self.params.canonical.get(&charter.vm_family),
-            domain_active,
-            expected_home_state_root,
-        )
-        .map_err(Refusal::Charter)?;
+        let canonical = self.params.canonical.get(&charter.vm_family);
+        let validation = match expected_home_state_root {
+            Some(state_root) => check_charter_at_state_root(
+                &charter,
+                proof,
+                canonical,
+                domain_active,
+                Some(state_root),
+            ),
+            None => check_charter(&charter, proof, canonical, domain_active),
+        };
+        validation.map_err(Refusal::Charter)?;
         if let Some(existing) = self.charters.get(&domain) {
             return if existing.same_binding(&charter) {
                 Ok(false)
