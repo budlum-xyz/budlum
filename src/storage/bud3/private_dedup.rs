@@ -20,3 +20,22 @@ pub use threshold::{
     PrivateDedupError, SealedDedupSubmission, ThresholdOprfShare, DEFAULT_OPRF_THRESHOLD,
     MAX_PRIVATE_DEDUP_QUERIES_PER_EPOCH, TESTNET_PRIVATE_DEDUP_ENABLED,
 };
+
+#[cfg(test)]
+mod tests {
+    use super::{ACTIVATION, TESTNET_PRIVATE_DEDUP_ENABLED};
+
+    /// A closed feature refuses on the testnet chain id. This pins the two
+    /// switches that keep the experimental private-dedup helpers closed. The
+    /// request and upload doors, and the proof that a closed request spends no
+    /// quota, are in `committee::tests` and `threshold::tests`.
+    #[test]
+    fn private_dedup_is_closed_on_testnet() {
+        // `black_box` keeps the lint that rejects asserts on constants out of
+        // the way without weakening the assertion: the flag is read as data.
+        assert!(!std::hint::black_box(TESTNET_PRIVATE_DEDUP_ENABLED));
+        assert_eq!(ACTIVATION.height, None);
+        assert!(!ACTIVATION.is_active(0));
+        assert!(!ACTIVATION.is_active(u64::MAX));
+    }
+}
