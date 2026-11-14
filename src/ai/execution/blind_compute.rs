@@ -1,3 +1,5 @@
+//! WIRING: unwired - this IP-60 T-Expansion proof path waits for IP-56 and activation after M7.
+//!
 //! Confidential Data Market computation (`ComputeWithoutSeeing`, IP-60 step 8).
 //!
 //! Combines a sealed B.U.D. 3.0 object manifest (`CipherProfile::Aead` or

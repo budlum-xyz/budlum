@@ -1,3 +1,5 @@
+//! WIRING: unwired - the ZK QC fault-proof path stays fail-closed until BudZero STARK verification is integrated.
+//!
 //! ZK QC fault proof verifier.
 //!
 //! This module is fail-closed on testnet. It refuses every ZK QC fault

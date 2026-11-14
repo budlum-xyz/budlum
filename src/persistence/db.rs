@@ -1073,8 +1073,9 @@ impl Storage {
 
     /// Rebuild the Handoff Certificate chain from disk and verify every step.
     ///
-    /// This is the restore half of the pair `save_handoff_cert` /
-    /// `load_handoff_certs`. A stored certificate is only evidence if it still
+    /// WIRING: exposed for node recovery tools that restore persisted handoff
+    /// state. This is the restore half of `save_handoff_cert` / `load_handoff_certs`.
+    /// A stored certificate is only evidence if it still
     /// verifies against the validator set its epoch names, so the walk pairs
     /// each certificate with the persisted snapshot of the same epoch and
     /// hands the whole chain to `follow_handoffs`.
@@ -1084,6 +1085,8 @@ impl Storage {
     /// verify, together with the epoch the caller may continue from. Refusing
     /// the whole load instead would turn one pruned snapshot into a node that
     /// cannot boot.
+    ///
+    /// WIRING: exposed for recovery clients that restore the verified chain.
     ///
     /// # Errors
     ///

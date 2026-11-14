@@ -438,7 +438,7 @@ pub struct OptionalProofJobReceipt {
 }
 
 /// Decode BudZero bytecode under canonical active testnet/mainnet opcode rules
-/// (`VerifyMerkle` and `VerifyInference` enabled under `MainnetActivation::default()`).
+/// (`VerifyMerkle` and `VerifyInference` closed under `MainnetActivation::default()`).
 ///
 /// # Errors
 ///
@@ -527,22 +527,9 @@ mod tests {
                 imm: 0,
             },
         ]);
-        ee.validate_deploy(&active)
-            .expect("VerifyMerkle is active on testnet under MainnetActivation::default()");
         assert!(
-            bud_isa::Instruction::decode_for_mainnet(
-                Instruction {
-                    opcode: Opcode::VerifyMerkle,
-                    rd: 0,
-                    rs1: 1,
-                    rs2: 2,
-                    imm: 0,
-                }
-                .encode(),
-                bud_isa::MainnetActivation::closed(),
-            )
-            .is_err(),
-            "explicit MainnetActivation::closed() still refuses VerifyMerkle"
+            ee.validate_deploy(&active).is_err(),
+            "testnet deployment must refuse VerifyMerkle until the opening gates pass"
         );
     }
 
@@ -565,22 +552,9 @@ mod tests {
                 imm: 0,
             },
         ]);
-        ee.validate_deploy(&active)
-            .expect("VerifyInference is active on testnet under MainnetActivation::default()");
         assert!(
-            bud_isa::Instruction::decode_for_mainnet(
-                Instruction {
-                    opcode: Opcode::VerifyInference,
-                    rd: 0,
-                    rs1: 1,
-                    rs2: 2,
-                    imm: 0,
-                }
-                .encode(),
-                bud_isa::MainnetActivation::closed(),
-            )
-            .is_err(),
-            "explicit MainnetActivation::closed() still refuses VerifyInference"
+            ee.validate_deploy(&active).is_err(),
+            "testnet deployment must refuse VerifyInference until the opening gates pass"
         );
     }
 
