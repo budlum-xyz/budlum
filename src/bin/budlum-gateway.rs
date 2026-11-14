@@ -433,13 +433,19 @@ fn optional_address(
 /// root for any height, and every request answers 502: a gateway with no
 /// verified header is a gateway with nothing to say.
 struct PinnedHeaderRoots {
-    /// Height to root, pinned by the operator from a header they checked.
-    pinned: std::collections::BTreeMap<u64, [u8; 32]>,
+    /// Height to the root and the epoch, both pinned by the operator from a
+    /// header they checked. The epoch is pinned next to the root because expiry
+    /// can only be judged against a header, never against the answering node.
+    pinned: std::collections::BTreeMap<u64, ([u8; 32], u64)>,
 }
 
 impl StateRoots for PinnedHeaderRoots {
     fn verified_state_root(&self, height: u64) -> Option<[u8; 32]> {
-        self.pinned.get(&height).copied()
+        self.pinned.get(&height).map(|(root, _)| *root)
+    }
+
+    fn verified_epoch(&self, height: u64) -> Option<u64> {
+        self.pinned.get(&height).map(|(_, epoch)| *epoch)
     }
 }
 
@@ -985,6 +991,20 @@ mod tests {
         };
         assert_eq!(roots.verified_state_root(0), None);
         assert_eq!(roots.verified_state_root(1_000_000), None);
+        assert_eq!(roots.verified_epoch(0), None);
+        assert_eq!(roots.verified_epoch(1_000_000), None);
+    }
+
+    #[test]
+    fn a_pinned_checkpoint_gives_the_epoch_next_to_the_root() {
+        let roots = PinnedHeaderRoots {
+            pinned: std::collections::BTreeMap::from([(7u64, ([0xab; 32], 100u64))]),
+        };
+        assert_eq!(roots.verified_state_root(7), Some([0xab; 32]));
+        assert_eq!(roots.verified_epoch(7), Some(100));
+        // A height that was not pinned has neither.
+        assert_eq!(roots.verified_state_root(8), None);
+        assert_eq!(roots.verified_epoch(8), None);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

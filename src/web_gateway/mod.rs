@@ -6,9 +6,10 @@
 //! Still absent, and named so they are not mistaken for done: the B.U.D. 3.0
 //! content source (the binary uses a directory source today and refuses to
 //! start without one), the light client that would fill `PinnedHeaderRoots`
-//! with verified roots, the sealed-content symbol-bundle path, TLS termination
-//! and `ops/gateway/`. A gateway whose pinned root set is empty answers 502 to
-//! every request, which is the honest state until the light client is wired.
+//! with verified roots and epochs, the sealed-content symbol-bundle path, TLS
+//! termination and `ops/gateway/`. A gateway whose pinned header set is empty
+//! answers 502 to every request, which is the honest state until the light
+//! client is wired.
 //!
 //! The `budlum.xyz` network gateway (B14).
 //!

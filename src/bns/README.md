@@ -167,11 +167,12 @@
     recomputed from the rows, not updated incrementally.
   - `wallet-core` verifies a recipient proof (`verify_bns_recipient_proof`).
     It has no `resolve_bns` and no generated mobile or browser bindings for it.
-  - The gateway binary reads pinned header roots from its configuration and
-    takes the epoch from the node answer. It does not follow headers with the
-    light client. Its content source is a local directory and its content
-    cache is in memory. `serve` and `tls` live in the binary, not in
-    `src/web_gateway/`.
+  - The gateway binary reads pinned header roots and epochs from its
+    configuration and judges expiry against the pinned epoch, never against
+    the epoch a node answer carries. A height with a root and no pinned epoch
+    is unknown. It does not follow headers with the light client. Its content
+    source is a local directory and its content cache is in memory. `serve`
+    and `tls` live in the binary, not in `src/web_gateway/`.
 
 ### Proof hardening (review findings)
 

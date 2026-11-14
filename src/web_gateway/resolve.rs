@@ -40,11 +40,20 @@ use super::manifest::{Route, RouteError, SiteManifest};
 /// The HTTP status the gateway answers with when a proof does not verify.
 const PROOF_FAILED_STATUS: u16 = 502;
 
-/// A verified state root for a block height.
+/// Verified headers, as the light client knows them.
 pub trait StateRoots {
     /// The state root of the header at `height`, already verified by the light
     /// client. `None` means the client has not seen that height.
     fn verified_state_root(&self, height: u64) -> Option<[u8; 32]>;
+
+    /// The epoch of the header at `height`, from the same verified header.
+    ///
+    /// Expiry is decided against this epoch and never against one the
+    /// answering node supplies. The root does not commit to the epoch, so an
+    /// answer that carries its own can date an expired record to before its
+    /// term ended. `None` means there is no verified epoch for that height, so
+    /// no expiry verdict can be made.
+    fn verified_epoch(&self, height: u64) -> Option<u64>;
 }
 
 /// One RPC answer: a height, the proof it claims for a name, and the epoch.
@@ -56,7 +65,9 @@ pub trait StateRoots {
 pub struct NameProof {
     /// The height the answering node claims the proof belongs to.
     pub height: u64,
-    /// The epoch the answering node says it is.
+    /// The epoch the answering node says it is. It is a claim. Only the
+    /// consistency check against the proof's own epoch reads it. Expiry is
+    /// judged against the epoch of the verified header.
     pub epoch: u64,
     /// The Merkle proof itself, checked against the root of `height`.
     pub proof: crate::bns::types::BnsStateProof,
@@ -177,6 +188,9 @@ fn agreed_proof<P: NameProver>(provers: &[P], name: &str) -> Result<NameProof, G
 
 /// Check `answer` against `root` and return the live branch it proves.
 ///
+/// `epoch` is the epoch of the verified header at `answer.height`, never the
+/// epoch the answer claims.
+///
 /// An expired record is told apart from a bad proof. The proof of an expired
 /// record is first checked one epoch before its expiry, so only a record that
 /// really folds to `root` is answered as expired. Anything else is a failed
@@ -189,6 +203,7 @@ fn agreed_proof<P: NameProver>(provers: &[P], name: &str) -> Result<NameProof, G
 fn verified_branch<'a>(
     answer: &'a NameProof,
     root: &[u8; 32],
+    epoch: u64,
 ) -> Result<&'a BnsMerkleBranch, GatewayError> {
     if answer.epoch != answer.proof.epoch {
         return Err(GatewayError::ProofFailed(
@@ -199,7 +214,7 @@ fn verified_branch<'a>(
         .proof
         .entry
         .as_ref()
-        .filter(|entry| answer.proof.included && entry.expires_at <= answer.epoch)
+        .filter(|entry| answer.proof.included && entry.expires_at <= epoch)
         .map(|entry| entry.expires_at);
     if let Some(expires_at) = lapsed {
         let before = expires_at
@@ -209,7 +224,7 @@ fn verified_branch<'a>(
             .map_err(GatewayError::ProofFailed)?;
         return Err(GatewayError::Expired);
     }
-    BnsRegistry::verify_state_proof(&answer.proof, root, answer.epoch)
+    BnsRegistry::verify_state_proof(&answer.proof, root, epoch)
         .map_err(GatewayError::ProofFailed)?
         .ok_or(GatewayError::NotFound)
 }
@@ -217,10 +232,11 @@ fn verified_branch<'a>(
 /// Resolve `target` through a proof the light client has already checked.
 ///
 /// Steps, in order: agree a proof across the configured nodes, take the state
-/// root of the proof's height from the light client (never from the answer),
-/// require the proof to fold to that root, read the record from the folded
-/// branch, refuse an expired record, then take the subdomain's content when a
-/// subdomain was asked for and the name's own content otherwise.
+/// root and the epoch of the proof's height from the light client (never from
+/// the answer), require the proof to fold to that root, read the record from
+/// the folded branch, refuse a record that is expired at that epoch, then take
+/// the subdomain's content when a subdomain was asked for and the name's own
+/// content otherwise.
 ///
 /// # Errors
 ///
@@ -237,7 +253,10 @@ pub fn resolve_verified<P: NameProver, R: StateRoots + ?Sized>(
     let root = roots
         .verified_state_root(answer.height)
         .ok_or(GatewayError::UnknownHeight(answer.height))?;
-    let branch = verified_branch(&answer, &root)?;
+    let epoch = roots
+        .verified_epoch(answer.height)
+        .ok_or(GatewayError::UnknownHeight(answer.height))?;
+    let branch = verified_branch(&answer, &root, epoch)?;
     if let Some(sub) = &target.sub {
         let extras = branch
             .extras
@@ -416,11 +435,16 @@ mod tests {
         }
     }
 
-    struct Roots(BTreeMap<u64, [u8; 32]>);
+    /// Verified headers: height to (root, epoch).
+    struct Roots(BTreeMap<u64, ([u8; 32], u64)>);
 
     impl StateRoots for Roots {
         fn verified_state_root(&self, height: u64) -> Option<[u8; 32]> {
-            self.0.get(&height).copied()
+            self.0.get(&height).map(|(root, _)| *root)
+        }
+
+        fn verified_epoch(&self, height: u64) -> Option<u64> {
+            self.0.get(&height).map(|(_, epoch)| *epoch)
         }
     }
 
@@ -463,7 +487,7 @@ mod tests {
         let prover = FakeProver {
             answer: Ok(proof_from(&reg, "ayaz.bud", 7, 100)),
         };
-        let roots = Roots(BTreeMap::from([(7u64, reg.root())]));
+        let roots = Roots(BTreeMap::from([(7u64, (reg.root(), 100))]));
         let resolved = resolve_verified(&[prover], &roots, &target(None)).unwrap();
         assert_eq!(resolved.height, 7);
         assert_eq!(resolved.branch.name, "ayaz.bud");
@@ -479,7 +503,7 @@ mod tests {
         let prover = FakeProver {
             answer: Ok(proof_from(&reg, "ayaz.bud", 9, 100)),
         };
-        let roots = Roots(BTreeMap::from([(7u64, reg.root())]));
+        let roots = Roots(BTreeMap::from([(7u64, (reg.root(), 100))]));
         assert_eq!(
             resolve_verified(&[prover], &roots, &target(None)),
             Err(GatewayError::UnknownHeight(9))
@@ -492,7 +516,7 @@ mod tests {
         let mut answer = proof_from(&reg, "ayaz.bud", 7, 100);
         answer.proof.entry.as_mut().unwrap().owner = Address::from([0x99; 32]);
         let prover = FakeProver { answer: Ok(answer) };
-        let roots = Roots(BTreeMap::from([(7u64, reg.root())]));
+        let roots = Roots(BTreeMap::from([(7u64, (reg.root(), 100))]));
         let err = resolve_verified(&[prover], &roots, &target(None)).unwrap_err();
         assert_eq!(err.status(), PROOF_FAILED_STATUS);
         assert!(matches!(err, GatewayError::ProofFailed(_)));
@@ -516,7 +540,7 @@ mod tests {
         let prover = FakeProver {
             answer: Ok(proof_from(&reg, "ayaz.bud", 7, 200)),
         };
-        let roots = Roots(BTreeMap::from([(7u64, reg.root())]));
+        let roots = Roots(BTreeMap::from([(7u64, (reg.root(), 200))]));
         // The proof's own expiry check runs *after* the Merkle check. A
         // verified expired record is a 404, not an invalid-proof 502.
         let err = resolve_verified(&[prover], &roots, &target(None)).unwrap_err();
@@ -537,11 +561,67 @@ mod tests {
         assert_eq!(err.status(), PROOF_FAILED_STATUS);
     }
 
+    /// The root does not commit to the epoch. A node that reports an epoch
+    /// inside the term must not keep an expired record resolving.
+    #[test]
+    fn a_node_cannot_date_an_expired_record_to_before_its_term() {
+        // The record expires at 110. The verified header is at epoch 200.
+        let reg = registry_with(None);
+        let roots = Roots(BTreeMap::from([(7u64, (reg.root(), 200))]));
+        // The node claims epoch 100 and builds its proof for it.
+        let prover = FakeProver {
+            answer: Ok(proof_from(&reg, "ayaz.bud", 7, 100)),
+        };
+        let err = resolve_verified(&[prover], &roots, &target(None)).unwrap_err();
+        assert_eq!(err, GatewayError::Expired);
+        assert_eq!(err.status(), 404);
+    }
+
+    /// The same lie the other way: a node that reports a late epoch must not
+    /// turn a live record into a 404.
+    #[test]
+    fn a_node_cannot_expire_a_live_record_by_reporting_a_late_epoch() {
+        let reg = registry_with(None);
+        let roots = Roots(BTreeMap::from([(7u64, (reg.root(), 100))]));
+        let prover = FakeProver {
+            answer: Ok(proof_from(&reg, "ayaz.bud", 7, 200)),
+        };
+        let resolved = resolve_verified(&[prover], &roots, &target(None)).unwrap();
+        assert_eq!(resolved.branch.name, "ayaz.bud");
+        assert_eq!(resolved.branch.expires_at, 110);
+    }
+
+    /// A header with a root and no epoch is a header the gateway cannot judge
+    /// expiry against, so the height is unknown.
+    #[test]
+    fn a_height_with_a_root_and_no_verified_epoch_is_unknown() {
+        struct RootOnly([u8; 32]);
+
+        impl StateRoots for RootOnly {
+            fn verified_state_root(&self, _height: u64) -> Option<[u8; 32]> {
+                Some(self.0)
+            }
+
+            fn verified_epoch(&self, _height: u64) -> Option<u64> {
+                None
+            }
+        }
+
+        let reg = registry_with(None);
+        let prover = FakeProver {
+            answer: Ok(proof_from(&reg, "ayaz.bud", 7, 100)),
+        };
+        assert_eq!(
+            resolve_verified(&[prover], &RootOnly(reg.root()), &target(None)),
+            Err(GatewayError::UnknownHeight(7))
+        );
+    }
+
     #[test]
     fn provers_must_agree_and_an_empty_set_is_not_agreement() {
         let reg = registry_with(None);
         let honest = proof_from(&reg, "ayaz.bud", 7, 100);
-        let roots = Roots(BTreeMap::from([(7u64, reg.root())]));
+        let roots = Roots(BTreeMap::from([(7u64, (reg.root(), 100))]));
 
         let one = FakeProver {
             answer: Ok(honest.clone()),
@@ -606,7 +686,7 @@ mod tests {
                 proof: reg.prove_name("beta.bud", 100),
             }),
         };
-        let roots = Roots(BTreeMap::from([(7u64, reg.root())]));
+        let roots = Roots(BTreeMap::from([(7u64, (reg.root(), 100))]));
         assert_eq!(
             resolve_verified(&[prover], &roots, &missing),
             Err(GatewayError::NotFound)
@@ -621,7 +701,7 @@ mod tests {
             .unwrap();
         reg.register_subdomain("ayaz.bud", "shop".to_string(), owner, &owner, 101)
             .unwrap();
-        let roots = Roots(BTreeMap::from([(7u64, reg.root())]));
+        let roots = Roots(BTreeMap::from([(7u64, (reg.root(), 100))]));
 
         // The registered subdomain resolves.
         let prover = FakeProver {
