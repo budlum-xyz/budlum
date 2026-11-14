@@ -4436,10 +4436,12 @@ mod tests {
     /// are incomplete. The verifier still rejects forged commitments.
     #[test]
     fn full_stark_verification_flag_is_locked_off_until_inputs_are_bound() {
-        assert!(
-            !FULL_AI_STARK_VERIFICATION_LIVE,
-            "proof-required AI models remain closed until their opening gates pass"
-        );
+        const {
+            assert!(
+                !FULL_AI_STARK_VERIFICATION_LIVE,
+                "proof-required AI models remain closed until their opening gates pass"
+            );
+        }
         let spec = crate::ai::execution::FixedPointMlpSpec {
             dims: vec![2, 1],
             weights: vec![2, 3],
