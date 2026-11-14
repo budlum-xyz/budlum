@@ -3,7 +3,7 @@
 use crate::ai::types::{AiExecutionProof, AiModelId, AiRequestId};
 use crate::core::account::AccountState;
 use crate::core::address::Address;
-use crate::core::chain_config::Network;
+use crate::core::chain_config::{app_binding_enabled_for_chain_id, Network};
 use crate::core::transaction::{Transaction, TransactionType};
 use crate::execution::executor::{check_transaction_features, Executor};
 use crate::privacy::PrivateTransferSubmit;
@@ -73,4 +73,14 @@ fn ai_layer_is_closed_on_testnet() {
         .expect_err("AI entry must be closed pending its prerequisites");
     assert_eq!(error.code(), "ai_layer_testnet_closed");
     assert!(check_transaction_features(Network::Devnet.chain_id().value(), &tx).is_ok());
+}
+
+#[test]
+fn app_binding_is_closed_on_testnet() {
+    assert!(!app_binding_enabled_for_chain_id(
+        Network::Testnet.chain_id().value()
+    ));
+    assert!(app_binding_enabled_for_chain_id(
+        Network::Devnet.chain_id().value()
+    ));
 }

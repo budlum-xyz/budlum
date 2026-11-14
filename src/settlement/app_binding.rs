@@ -828,10 +828,9 @@ pub fn execute_app_binding_tx(
     ctx: &SettlementTxContext,
     tx: &AppBindingTx,
 ) -> Result<(), SettlementTxError> {
-    // Remote application binding is open from genesis on testnet (45261) and
-    // devnet (45262), and remains closed on mainnet (45260) unless explicitly
-    // activated. Refuse before registry or balances move, including direct callers
-    // that bypass the outer settlement door.
+    // Remote application binding remains closed on public networks until
+    // explicitly activated. Refuse before registry or balances move, including
+    // direct callers that bypass the outer settlement door.
     if !app_binding_enabled_for_chain_id(ctx.chain_id) {
         return Err(refused("app_binding is not enabled on this chain"));
     }
