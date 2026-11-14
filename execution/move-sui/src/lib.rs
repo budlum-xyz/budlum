@@ -46,6 +46,14 @@ pub const SUI_CMD_STEP_BGU: u64 = 1_200;
 /// Gas charged per published module byte in BGU.
 pub const SUI_PUBLISH_PER_BYTE_BGU: u64 = 25;
 
+/// Largest object a `MoveCall` may write, and the largest argument it may append (`100 KiB`, the
+/// same cap as a package).
+pub const MAX_SUI_OBJECT_BYTES: usize = 102_400;
+
+/// Gas charged per byte of an object a `MoveCall` rewrites, in BGU. The write rewrites the whole
+/// object, so the object's new size is what it costs.
+pub const SUI_OBJECT_WRITE_PER_BYTE_BGU: u64 = 25;
+
 /// `1 MIST = 10^9 attoBUD` (`9` decimals).
 pub const ATTO_PER_MIST: u128 = 1_000_000_000;
 
@@ -571,18 +579,46 @@ impl ExecutionEnvironment for MoveSuiWorker {
                             gas_used,
                         ));
                     }
+                    if arg_bytes.len() > MAX_SUI_OBJECT_BYTES {
+                        return Ok(ee_reverted(
+                            b"arguments exceed the object size cap".to_vec(),
+                            gas_used,
+                        ));
+                    }
+                    // A Move module can only write the objects whose type it defines. The
+                    // worker does not run the bytecode, so it applies that rule from the type
+                    // tag: a package writes `0x<its id>::...` objects and nothing else. A
+                    // shared framework coin, or an object another package defines, is out of
+                    // reach whatever the package's functions do.
+                    let package_prefix = format!("0x{}::", hex::encode(package_id));
                     let mut lamport_ver: u64 = 1;
                     for sid in shared_inputs {
                         let Ok(Some(mut sh)) = read_sui_object(host, sid) else {
                             return Ok(ee_reverted(b"shared input missing".to_vec(), gas_used));
                         };
-                        if !matches!(sh.owner, SuiOwner::Shared { .. })
-                            && sh.owner != SuiOwner::AddressOwner(sender32)
-                        {
+                        let owner_may_write = match &sh.owner {
+                            SuiOwner::Shared { .. } => true,
+                            SuiOwner::AddressOwner(owner) => *owner == sender32,
+                            SuiOwner::ObjectOwner(_) | SuiOwner::Immutable => false,
+                        };
+                        if !owner_may_write || !sh.type_tag.starts_with(&package_prefix) {
                             return Ok(ee_reverted(
                                 b"shared input unauthorized".to_vec(),
                                 gas_used,
                             ));
+                        }
+                        let grown = sh.contents.len().saturating_add(arg_bytes.len());
+                        if grown > MAX_SUI_OBJECT_BYTES {
+                            return Ok(ee_reverted(
+                                b"object would exceed the size cap".to_vec(),
+                                gas_used,
+                            ));
+                        }
+                        let write_cost = SUI_CMD_STEP_BGU.saturating_add(
+                            (grown as u64).saturating_mul(SUI_OBJECT_WRITE_PER_BYTE_BGU),
+                        );
+                        if charge_gas(&mut gas_used, call.gas_limit, write_cost, host).is_err() {
+                            return Ok(ee_out_of_gas(call.gas_limit));
                         }
                         lamport_ver = lamport_ver.max(sh.version.saturating_add(1));
                         sh.version = lamport_ver;
@@ -934,15 +970,149 @@ mod tests {
         assert_eq!(bob_coin.owner, SuiOwner::AddressOwner(bob));
     }
 
-    /// Directive IP-50 gate: `sui_cli_publish_runs_unchanged`.
+    fn publisher() -> EeIdentity {
+        let Ok(id) = EeIdentity::new(EeId::MOVE_SUI, vec![0x77; 32]) else {
+            panic!("publisher");
+        };
+        id
+    }
+
+    /// Run `commands` as `caller` and return the outcome. Every call gets its own `tx`, which
+    /// names the objects it creates.
+    fn run(
+        worker: &mut MoveSuiWorker,
+        host: &mut MemoryHost,
+        caller: &EeIdentity,
+        commands: Vec<SuiPtbCommand>,
+        tx: u8,
+    ) -> EeOutcome {
+        let Ok(input) = serde_json::to_vec(&SuiPtb { commands }) else {
+            panic!("ptb");
+        };
+        let Ok(out) = worker.execute(
+            &active_ctx(),
+            &EeCall {
+                kind: EeCallKind::Call,
+                caller: caller.clone(),
+                target: caller.clone(),
+                value: BudAmount(0),
+                input,
+                gas_limit: 8_000_000,
+                depth: 0,
+                tx_hash: [tx; 32],
+            },
+            host,
+        ) else {
+            panic!("execute");
+        };
+        out
+    }
+
+    fn ids(out: &EeOutcome) -> Vec<[u8; 32]> {
+        let Ok(ids) = serde_json::from_slice(&out.output) else {
+            panic!("ids");
+        };
+        ids
+    }
+
+    /// Publish a package with a `counter` module and the publisher's first gas coin.
+    /// Returns `(package id, coin id)`.
+    fn publish(
+        worker: &mut MoveSuiWorker,
+        host: &mut MemoryHost,
+        who: &EeIdentity,
+        module: &str,
+        tx: u8,
+    ) -> ([u8; 32], [u8; 32]) {
+        let out = run(
+            worker,
+            host,
+            who,
+            vec![SuiPtbCommand::PublishPackage {
+                modules: vec![SuiCompiledModule {
+                    name: module.to_string(),
+                    exported_functions: vec!["create".to_string(), "increment".to_string()],
+                    bytecode: vec![0xA1, 0x1C, 0xEB, 0x0B],
+                }],
+                initial_coin_mist: 250,
+            }],
+            tx,
+        );
+        assert_eq!(out.status, OutcomeStatus::Success);
+        let published = ids(&out);
+        let (Some(&pkg), Some(&coin)) = (published.first(), published.get(1)) else {
+            panic!("package and coin");
+        };
+        (pkg, coin)
+    }
+
+    fn call(
+        package_id: [u8; 32],
+        module: &str,
+        inputs: Vec<[u8; 32]>,
+        args: Vec<u8>,
+    ) -> SuiPtbCommand {
+        SuiPtbCommand::MoveCall {
+            package_id,
+            module: module.to_string(),
+            function: "increment".to_string(),
+            shared_inputs: inputs,
+            arg_bytes: args,
+        }
+    }
+
+    /// `create` a package object holding `contents` and share it. Returns its id.
+    fn create_shared(
+        worker: &mut MoveSuiWorker,
+        host: &mut MemoryHost,
+        who: &EeIdentity,
+        package_id: [u8; 32],
+        contents: Vec<u8>,
+        tx: u8,
+    ) -> [u8; 32] {
+        let out = run(
+            worker,
+            host,
+            who,
+            vec![SuiPtbCommand::MoveCall {
+                package_id,
+                module: "counter".to_string(),
+                function: "create".to_string(),
+                shared_inputs: Vec::new(),
+                arg_bytes: contents,
+            }],
+            tx,
+        );
+        assert_eq!(out.status, OutcomeStatus::Success);
+        let Some(&object_id) = ids(&out).first() else {
+            panic!("created object");
+        };
+        let shared = run(
+            worker,
+            host,
+            who,
+            vec![SuiPtbCommand::ShareObject { object_id }],
+            tx.wrapping_add(1),
+        );
+        assert_eq!(shared.status, OutcomeStatus::Success);
+        object_id
+    }
+
+    fn contents(host: &MemoryHost, id: &[u8; 32]) -> Vec<u8> {
+        let Ok(Some(object)) = read_sui_object(host, id) else {
+            panic!("object");
+        };
+        object.contents
+    }
+
+    /// Directive IP-50 gate: `sui_cli_publish_runs_unchanged`. A package creates its own
+    /// object, shares it and increments it: the object's type is the package's, so the
+    /// write is the package's to make.
     #[test]
     fn sui_cli_publish_runs_unchanged() {
         let mut worker = MoveSuiWorker::new();
         let mut host = MemoryHost::new(10_000_000);
-        let publisher = [0x77u8; 32];
-        let Ok(pub_id) = EeIdentity::new(EeId::MOVE_SUI, publisher.to_vec()) else {
-            panic!("pub_id");
-        };
+        let who = publisher();
         let modules = vec![SuiCompiledModule {
             name: "counter".to_string(),
             exported_functions: vec!["create".to_string(), "increment".to_string()],
@@ -953,72 +1123,202 @@ mod tests {
         };
         assert!(worker.validate_deploy(&bundle).is_ok());
 
-        let Ok(ptb_bytes) = serde_json::to_vec(&SuiPtb {
-            commands: vec![SuiPtbCommand::PublishPackage {
-                modules,
-                initial_coin_mist: 250,
-            }],
-        }) else {
-            panic!("ptb");
-        };
-        let Ok(pub_out) = worker.execute(
-            &active_ctx(),
-            &EeCall {
-                kind: EeCallKind::Call,
-                caller: pub_id.clone(),
-                target: pub_id.clone(),
-                value: BudAmount(0),
-                input: ptb_bytes,
-                gas_limit: 2_000_000,
-                depth: 0,
-                tx_hash: [0x99; 32],
-            },
+        let (pkg_id, _coin) = publish(&mut worker, &mut host, &who, "counter", 0x99);
+        let object_id = create_shared(&mut worker, &mut host, &who, pkg_id, vec![0], 0x9A);
+        let out = run(
+            &mut worker,
             &mut host,
-        ) else {
-            panic!("publish");
-        };
-        assert_eq!(pub_out.status, OutcomeStatus::Success);
-        let Ok(ids): Result<Vec<[u8; 32]>, _> = serde_json::from_slice(&pub_out.output) else {
-            panic!("ids");
-        };
-        let (Some(&pkg_id), Some(&shared_seed_id)) = (ids.first(), ids.get(1)) else {
-            panic!("pkg + seed");
-        };
+            &who,
+            vec![call(pkg_id, "counter", vec![object_id], vec![1])],
+            0x9C,
+        );
+        assert_eq!(out.status, OutcomeStatus::Success);
+        assert_eq!(contents(&host, &object_id), vec![0, 1]);
+        assert_eq!(
+            host.logs.len(),
+            2,
+            "one log for create and one for increment"
+        );
+    }
 
-        // Share object and invoke `counter::increment`.
-        let Ok(call_bytes) = serde_json::to_vec(&SuiPtb {
-            commands: vec![
-                SuiPtbCommand::ShareObject {
-                    object_id: shared_seed_id,
-                },
-                SuiPtbCommand::MoveCall {
-                    package_id: pkg_id,
-                    module: "counter".to_string(),
-                    function: "increment".to_string(),
-                    shared_inputs: vec![shared_seed_id],
-                    arg_bytes: vec![1],
-                },
-            ],
-        }) else {
-            panic!("call_bytes");
-        };
-        let Ok(call_out) = worker.execute(
-            &active_ctx(),
-            &EeCall {
-                kind: EeCallKind::Call,
-                caller: pub_id.clone(),
-                target: pub_id,
-                value: BudAmount(0),
-                input: call_bytes,
-                gas_limit: 2_000_000,
-                depth: 0,
-                tx_hash: [0x9A; 32],
-            },
+    /// A shared object belongs to the package that defines its type. Another package used to
+    /// append its own bytes to it.
+    #[test]
+    fn a_package_cannot_write_to_a_shared_object_it_does_not_define() {
+        let mut worker = MoveSuiWorker::new();
+        let mut host = MemoryHost::new(10_000_000);
+        let who = publisher();
+        let (victim_pkg, _) = publish(&mut worker, &mut host, &who, "counter", 0x10);
+        let (other_pkg, _) = publish(&mut worker, &mut host, &who, "counter", 0x11);
+        assert_ne!(victim_pkg, other_pkg);
+        let object_id = create_shared(&mut worker, &mut host, &who, victim_pkg, vec![5, 5], 0x12);
+
+        let out = run(
+            &mut worker,
             &mut host,
-        ) else {
-            panic!("move call");
-        };
-        assert_eq!(call_out.status, OutcomeStatus::Success);
-        assert_eq!(host.logs.len(), 1);
+            &who,
+            vec![call(other_pkg, "counter", vec![object_id], vec![0xEE])],
+            0x14,
+        );
+        assert_eq!(out.status, OutcomeStatus::Revert);
+        assert_eq!(out.output, b"shared input unauthorized".to_vec());
+        assert_eq!(contents(&host, &object_id), vec![5, 5]);
+
+        // The defining package still can.
+        let own = run(
+            &mut worker,
+            &mut host,
+            &who,
+            vec![call(victim_pkg, "counter", vec![object_id], vec![0xEE])],
+            0x15,
+        );
+        assert_eq!(own.status, OutcomeStatus::Success);
+        assert_eq!(contents(&host, &object_id), vec![5, 5, 0xEE]);
+    }
+
+    /// A framework coin is `0x2::coin::Coin<...>`: no package defines it. A package used to be
+    /// able to append bytes to a coin that was shared or owned by the caller, and so corrupt it.
+    #[test]
+    fn a_shared_framework_coin_cannot_be_written_by_a_package() {
+        let mut worker = MoveSuiWorker::new();
+        let mut host = MemoryHost::new(10_000_000);
+        let who = publisher();
+        let (pkg, coin) = publish(&mut worker, &mut host, &who, "counter", 0x20);
+        let before = contents(&host, &coin);
+
+        // Owned by the caller.
+        let owned = run(
+            &mut worker,
+            &mut host,
+            &who,
+            vec![call(pkg, "counter", vec![coin], vec![1])],
+            0x21,
+        );
+        assert_eq!(owned.status, OutcomeStatus::Revert);
+        assert_eq!(owned.output, b"shared input unauthorized".to_vec());
+
+        // Shared.
+        let shared = run(
+            &mut worker,
+            &mut host,
+            &who,
+            vec![SuiPtbCommand::ShareObject { object_id: coin }],
+            0x22,
+        );
+        assert_eq!(shared.status, OutcomeStatus::Success);
+        let out = run(
+            &mut worker,
+            &mut host,
+            &who,
+            vec![call(pkg, "counter", vec![coin], vec![1])],
+            0x23,
+        );
+        assert_eq!(out.status, OutcomeStatus::Revert);
+        assert_eq!(out.output, b"shared input unauthorized".to_vec());
+        assert_eq!(contents(&host, &coin), before);
+
+        // A package is immutable, and is not an input either.
+        let immutable = run(
+            &mut worker,
+            &mut host,
+            &who,
+            vec![call(pkg, "counter", vec![pkg], vec![1])],
+            0x24,
+        );
+        assert_eq!(immutable.status, OutcomeStatus::Revert);
+    }
+
+    /// An object and an argument are bounded like a package. A call used to grow an object
+    /// without limit, one argument at a time.
+    #[test]
+    fn a_shared_object_cannot_grow_past_the_size_cap() {
+        let mut worker = MoveSuiWorker::new();
+        let mut host = MemoryHost::new(100_000_000);
+        let who = publisher();
+        let (pkg, _) = publish(&mut worker, &mut host, &who, "counter", 0x30);
+        let object_id = create_shared(
+            &mut worker,
+            &mut host,
+            &who,
+            pkg,
+            vec![7; MAX_SUI_OBJECT_BYTES - 10],
+            0x31,
+        );
+
+        // Ten bytes fit exactly, eleven do not.
+        let fits = run(
+            &mut worker,
+            &mut host,
+            &who,
+            vec![call(pkg, "counter", vec![object_id], vec![1; 10])],
+            0x33,
+        );
+        assert_eq!(fits.status, OutcomeStatus::Success);
+        assert_eq!(contents(&host, &object_id).len(), MAX_SUI_OBJECT_BYTES);
+        let over = run(
+            &mut worker,
+            &mut host,
+            &who,
+            vec![call(pkg, "counter", vec![object_id], vec![1])],
+            0x34,
+        );
+        assert_eq!(over.status, OutcomeStatus::Revert);
+        assert_eq!(contents(&host, &object_id).len(), MAX_SUI_OBJECT_BYTES);
+
+        // An argument past the cap is refused before any object is read.
+        let huge = run(
+            &mut worker,
+            &mut host,
+            &who,
+            vec![call(
+                pkg,
+                "counter",
+                Vec::new(),
+                vec![1; MAX_SUI_OBJECT_BYTES + 1],
+            )],
+            0x35,
+        );
+        assert_eq!(huge.status, OutcomeStatus::Revert);
+    }
+
+    /// Each object a call rewrites costs a command step and a charge per byte of the object's
+    /// new size. A call used to rewrite any number of objects for the price of the command.
+    #[test]
+    fn writing_to_shared_inputs_is_metered_per_input_and_per_byte() {
+        let mut worker = MoveSuiWorker::new();
+        let mut host = MemoryHost::new(100_000_000);
+        let who = publisher();
+        let (pkg, _) = publish(&mut worker, &mut host, &who, "counter", 0x40);
+        let x = create_shared(&mut worker, &mut host, &who, pkg, vec![1; 10], 0x41);
+        let y = create_shared(&mut worker, &mut host, &who, pkg, vec![2; 20], 0x43);
+
+        let none = run(
+            &mut worker,
+            &mut host,
+            &who,
+            vec![call(pkg, "counter", Vec::new(), vec![9; 5])],
+            0x45,
+        );
+        let one = run(
+            &mut worker,
+            &mut host,
+            &who,
+            vec![call(pkg, "counter", vec![x], vec![9; 5])],
+            0x46,
+        );
+        let two = run(
+            &mut worker,
+            &mut host,
+            &who,
+            vec![call(pkg, "counter", vec![x, y], vec![9; 5])],
+            0x47,
+        );
+        for out in [&none, &one, &two] {
+            assert_eq!(out.status, OutcomeStatus::Success);
+        }
+        let cost = |current: u64| SUI_CMD_STEP_BGU + (current + 5) * SUI_OBJECT_WRITE_PER_BYTE_BGU;
+        // `x` held 10 bytes when `one` ran. It held 15 when `two` ran, and `y` held 20.
+        assert_eq!(one.gas_used - none.gas_used, cost(10));
+        assert_eq!(two.gas_used - none.gas_used, cost(15) + cost(20));
     }
 }
