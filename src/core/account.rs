@@ -1560,6 +1560,55 @@ impl AccountState {
         role: crate::registry::role::RoleId,
     ) -> Result<u64, String> {
         Self::ensure_withdrawable_role(role)?;
+        if role == crate::registry::role::roles::RELAYER {
+            // `PermissionlessRegistry::withdraw` deletes the registration, and
+            // both intent expiry doors skip the liveness slash when `get`
+            // returns nothing. Releasing the bond while this account is the
+            // awarded solver of a live Graft intent, or the awarded bidder of
+            // an unsettled relayer intent, would let it walk away from the
+            // penalty for work it was awarded and never honoured.
+            let awarded_graft = self
+                .settlement
+                .graft
+                .intents
+                .values()
+                .any(|intent| intent.awarded_solver == Some(*address));
+            let live_relayer_award =
+                self.settlement
+                    .relayer_policy
+                    .awards
+                    .iter()
+                    .any(|(intent_id, award)| {
+                        award.relayer == *address
+                            && self
+                                .settlement
+                                .relayer_policy
+                                .intents
+                                .contains_key(intent_id)
+                    });
+            if awarded_graft || live_relayer_award {
+                return Err(
+                    "a relayer bond backing a live awarded intent cannot be withdrawn".to_string(),
+                );
+            }
+        }
+        if role == crate::registry::role::roles::PROVER {
+            // Same obligation class as an awarded relayer: an assigned prover
+            // must not withdraw its bond before its task settles or expires,
+            // otherwise `slash_failed_prover` finds no registration to slash.
+            let assigned_task = self.proof_market.active_tasks.iter().any(|task| {
+                matches!(
+                    task.status,
+                    crate::settlement::proof_market::ProofTaskStatus::Assigned { prover, .. }
+                        if prover == *address
+                )
+            });
+            if assigned_task {
+                return Err(
+                    "a prover bond backing a live assigned task cannot be withdrawn".to_string(),
+                );
+            }
+        }
         let staked = self
             .registry
             .get(address, role)
