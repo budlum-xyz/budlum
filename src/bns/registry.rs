@@ -807,7 +807,7 @@ impl BnsRegistry {
         })
     }
 
-    /// Bind or clear (`None`) a verified B.U.D. 3.0 [`ContentRef`] on a live `.bud`
+    /// Bind or clear (`None`) a verified B.U.D. 3.0 [`ContentRef`](crate::storage::bud3::content_ref::ContentRef) on a live `.bud`
     /// name owned by `caller`, checking object existence and `ContentId` parity in
     /// `bud3_registry`.
     ///
@@ -867,7 +867,7 @@ impl BnsRegistry {
         Ok(())
     }
 
-    /// Resolve the live B.U.D. 3.0 [`ContentRef`] bound to `name` (`None` if
+    /// Resolve the live B.U.D. 3.0 [`ContentRef`](crate::storage::bud3::content_ref::ContentRef) bound to `name` (`None` if
     /// unbound, unknown, or expired).
     #[must_use]
     pub fn resolve_bud3_content(

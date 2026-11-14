@@ -1815,3 +1815,160 @@ proptest! {
         prop_assert_eq!(registry_over(&order).root(), registry_over(&sorted).root());
     }
 }
+
+// Every BNS write type moves its own counter, a sale moves the sale counter
+// and the paid total, and the three gauges are exported by name.
+#[test]
+fn bns_metrics_export_one_counter_per_type_and_the_named_gauges() {
+    use crate::chain::blockchain::Blockchain;
+    use crate::consensus::pow::PoWEngine;
+    use crate::core::metrics::Metrics;
+    use std::sync::Arc;
+
+    let metrics = Arc::new(Metrics::new().expect("metric names are literals"));
+    let chain = Blockchain::new(Arc::new(PoWEngine::new(0)), None, DEFAULT_CHAIN_ID, None)
+        .with_metrics(Arc::clone(&metrics));
+
+    let doors: [(TransactionType, &str); 13] = [
+        (TransactionType::BnsBuyName, "budlum_bns_sales_total"),
+        (TransactionType::BnsRenew, "budlum_bns_renewals_total"),
+        (TransactionType::BnsTransfer, "budlum_bns_transfers_total"),
+        (
+            TransactionType::BnsCreateOffer,
+            "budlum_bns_offers_created_total",
+        ),
+        (
+            TransactionType::BnsCancelOffer,
+            "budlum_bns_offers_cancelled_total",
+        ),
+        (
+            TransactionType::BnsSetAddress,
+            "budlum_bns_set_address_total",
+        ),
+        (
+            TransactionType::BnsSetPrimaryName,
+            "budlum_bns_set_primary_name_total",
+        ),
+        (
+            TransactionType::BnsSetRecords,
+            "budlum_bns_set_records_total",
+        ),
+        (
+            TransactionType::BnsSetContent,
+            "budlum_bns_set_content_total",
+        ),
+        (
+            TransactionType::BnsSetBud3Content,
+            "budlum_bns_set_bud3_content_total",
+        ),
+        (
+            TransactionType::BnsRegisterSubdomain,
+            "budlum_bns_register_subdomain_total",
+        ),
+        (
+            TransactionType::BnsRemoveSubdomain,
+            "budlum_bns_remove_subdomain_total",
+        ),
+        (
+            TransactionType::BnsSetStorage,
+            "budlum_bns_set_storage_total",
+        ),
+    ];
+
+    let txs: Vec<Transaction> = doors
+        .iter()
+        .map(|(tx_type, _)| lifecycle_tx(addr(0x41), 700, 1, 0, tx_type.clone(), Vec::new()))
+        .collect();
+    chain.emit_applied_tx_metrics(&txs, 0);
+    chain.emit_chain_metrics();
+
+    let encoded = metrics.encode();
+    for (_, series) in &doors {
+        assert!(
+            encoded.contains(&format!("{series} 1")),
+            "{series} did not move exactly once"
+        );
+    }
+    // One sale of 700 atoms: the fee is not part of the paid total.
+    assert!(encoded.contains("budlum_bns_sales_amount_total 700"));
+    assert!(encoded.contains("budlum_bns_names_registered 1"));
+    for gauge in [
+        "budlum_bns_name_rows ",
+        "budlum_bns_names_in_grace ",
+        "budlum_bns_open_offers ",
+    ] {
+        assert!(encoded.contains(gauge), "{gauge} is not exported");
+    }
+
+    // A transfer of coins is not a BNS write and moves none of them.
+    let before = metrics.encode();
+    chain.emit_applied_tx_metrics(
+        &[lifecycle_tx(
+            addr(0x41),
+            5,
+            1,
+            1,
+            TransactionType::Transfer,
+            Vec::new(),
+        )],
+        0,
+    );
+    let after = metrics.encode();
+    let bns_lines = |text: &str| -> Vec<String> {
+        text.lines()
+            .filter(|line| line.starts_with("budlum_bns_"))
+            .map(str::to_string)
+            .collect()
+    };
+    assert_eq!(bns_lines(&before), bns_lines(&after));
+}
+
+// A name may only point at content the chain has a row for.
+#[test]
+fn bns_set_content_refuses_unknown_content_and_binds_a_registered_manifest() {
+    let key = KeyPair::from_seed(&[7u8; 32]).unwrap();
+    let alice = Address::from(key.public_key_bytes());
+    let name = "pages.bud".to_string();
+    let mut state = AccountState::new();
+    state.add_balance(&alice, 10_000);
+    state
+        .bns_registry
+        .register(name.clone(), alice, 0, 100)
+        .unwrap();
+
+    let manifest =
+        crate::storage::manifest::ContentManifest::from_bytes_sliced(b"a small site", 8).unwrap();
+    let known = manifest.manifest_id;
+    let unknown = crate::storage::content_id::ContentId([0x5A; 32]);
+    assert_ne!(known, unknown);
+
+    let mut refused = lifecycle_tx(
+        alice,
+        0,
+        1,
+        0,
+        TransactionType::BnsSetContent,
+        bincode::serialize(&(name.clone(), unknown)).unwrap(),
+    );
+    refused.sign(&key);
+    let err = Executor::apply_transaction_checked(&mut state, &refused).unwrap_err();
+    assert_eq!(err.code(), "bns_content_unknown");
+    assert_eq!(state.bns_registry.resolve_content(&name, 1), None);
+    assert_eq!(state.get_nonce(&alice), 0);
+    assert_eq!(state.get_balance(&alice), 10_000);
+
+    state.storage_registry.register_manifest(&manifest);
+    let mut bound = lifecycle_tx(
+        alice,
+        0,
+        1,
+        0,
+        TransactionType::BnsSetContent,
+        bincode::serialize(&(name.clone(), known)).unwrap(),
+    );
+    bound.sign(&key);
+    Executor::apply_transaction_checked(&mut state, &bound).unwrap();
+    assert_eq!(state.bns_registry.resolve_content(&name, 1), Some(known));
+    assert_eq!(state.get_nonce(&alice), 1);
+    assert_eq!(state.get_balance(&alice), 9_999);
+}

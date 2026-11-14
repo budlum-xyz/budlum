@@ -54,7 +54,7 @@ pub fn is_forbidden_header(name: &str) -> bool {
 /// the baseline directives: it must carry `default-src` and `frame-ancestors`,
 /// and it must not add a scheme or host the baseline does not reach. This is a
 /// deliberately conservative comparison: a directive the gateway cannot parse
-/// counts as wider, so an unparseable policy is refused rather than trusted.
+/// counts as wider, so an unparsable policy is refused rather than trusted.
 #[must_use]
 pub fn csp_is_at_least_as_strict(candidate: &str, baseline: &str) -> bool {
     let parse = |policy: &str| -> BTreeMap<String, Vec<String>> {
@@ -77,6 +77,10 @@ pub fn csp_is_at_least_as_strict(candidate: &str, baseline: &str) -> bool {
         let Some(candidate_values) = candidate.get(name) else {
             return false;
         };
+        // `'none'` on its own reaches nothing, so it narrows any baseline.
+        if candidate_values.len() == 1 && candidate_values[0] == "'none'" {
+            continue;
+        }
         for value in candidate_values {
             if !baseline_values.contains(value) {
                 return false;
@@ -345,7 +349,7 @@ mod tests {
             "frame-ancestors 'none'",
             DEFAULT_CSP
         ));
-        // Unparseable is refused, not trusted.
+        // Unparsable is refused, not trusted.
         assert!(!csp_is_at_least_as_strict("", DEFAULT_CSP));
     }
 
