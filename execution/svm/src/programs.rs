@@ -193,6 +193,35 @@ pub fn encode_borsh_universal_call(call: &BorshUniversalCall) -> Vec<u8> {
     out
 }
 
+/// Domain tag of the address a mint lives at.
+pub const SPL_MINT_DOMAIN: &[u8] = b"BDLM_SVM_SPL_MINT_V1";
+
+/// The address of the mint that `caller` initializes with `seed`: the first off-curve candidate of
+/// `SHA-256(domain || caller || seed || bump)` for `bump` from 255 down to 0.
+///
+/// A mint address is a global identity. It is a function of the account that initializes the
+/// mint and of a seed that account picks, so no other account can take it first, and an
+/// instruction cannot name the address it wants. `None` only if all 256 candidates are on the
+/// curve, which does not happen in practice.
+#[must_use]
+pub fn derive_spl_mint_address(caller: &[u8; 32], seed: &[u8; 32]) -> Option<[u8; 32]> {
+    for bump in (0..=255u8).rev() {
+        let mut h = Sha256::new();
+        h.update(SPL_MINT_DOMAIN);
+        h.update(caller);
+        h.update(seed);
+        h.update([bump]);
+        let candidate: [u8; 32] = h.finalize().into();
+        if curve25519_dalek::edwards::CompressedEdwardsY(candidate)
+            .decompress()
+            .is_none()
+        {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
 /// Derive a deterministic off-curve Associated Token Account address for
 /// `(wallet, token_program, mint)`.
 #[must_use]
