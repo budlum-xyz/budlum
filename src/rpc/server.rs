@@ -6280,12 +6280,12 @@ impl BudlumApiServer for RpcServer {
     }
 
     async fn budlumxyz_get_apps(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
-        let apps = self.chain.budlumxyz_get_apps().await;
+        let apps = cap_list_response(self.chain.budlumxyz_get_apps().await);
         Ok(serde_json::json!(apps))
     }
 
     async fn budlumxyz_get_app_binding_apps(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
-        let apps = self.chain.budlumxyz_get_app_binding_apps().await;
+        let apps = cap_list_response(self.chain.budlumxyz_get_app_binding_apps().await);
         Ok(serde_json::json!(apps))
     }
 

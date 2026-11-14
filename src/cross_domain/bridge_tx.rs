@@ -252,6 +252,9 @@ pub fn register_asset(
         .map_err(|e| e.to_string())
 }
 
+/// Maximum lock expiry window above `source_height`, matching `MAX_BURN_EXPIRY_BLOCKS`.
+pub const MAX_BRIDGE_LOCK_EXPIRY_BLOCKS: u64 = 100_000;
+
 /// Lock `amount` of the owner's balance: open the transfer, register its
 /// message, debit the owner and enqueue the relay. `reserve` is what the
 /// owner must still hold afterwards (the transaction fee).
@@ -285,6 +288,16 @@ pub fn lock(
     }
     if params.expiry_height <= params.source_height {
         return Err("Bridge transfer expiry must be after source height".into());
+    }
+    if params.expiry_height
+        > params
+            .source_height
+            .saturating_add(MAX_BRIDGE_LOCK_EXPIRY_BLOCKS)
+    {
+        return Err(format!(
+            "Bridge transfer expiry exceeds the protocol window (source height {}, expiry {}, max window {MAX_BRIDGE_LOCK_EXPIRY_BLOCKS} blocks)",
+            params.source_height, params.expiry_height
+        ));
     }
     // The owner is debited, so the balance is checked before the transfer
     // row exists: a refusal after the insert would leave a lock that never
@@ -1410,5 +1423,30 @@ mod tests {
         );
         let stopped = ensure_domain_class_intake(&state, 7, 10).unwrap_err();
         assert!(stopped.contains("stopped the intake"), "{stopped}");
+    }
+
+    #[test]
+    fn bridge_lock_rejects_unbounded_expiry_height() {
+        let (mut state, _) = bridged();
+        let owner = Address::from([0x33; 32]);
+        state.add_balance(&owner, 1_000 + FEE);
+        let base = lock_request(100);
+        let over_window = LockRequest {
+            expiry_height: base.source_height + MAX_BRIDGE_LOCK_EXPIRY_BLOCKS + 1,
+            ..base.clone()
+        };
+        assert!(lock(&mut state, owner, &over_window, FEE, 5).is_err());
+
+        let max_uint = LockRequest {
+            expiry_height: u64::MAX,
+            ..base.clone()
+        };
+        assert!(lock(&mut state, owner, &max_uint, FEE, 5).is_err());
+
+        let at_limit = LockRequest {
+            expiry_height: base.source_height + MAX_BRIDGE_LOCK_EXPIRY_BLOCKS,
+            ..base
+        };
+        assert!(lock(&mut state, owner, &at_limit, FEE, 5).is_ok());
     }
 }
