@@ -4256,6 +4256,7 @@ impl ChainActor {
                     let _ = response.send(receipts);
                 }
                 ChainCommand::HubGetAppBindingApps { response } => {
+                    const MAX_APP_LIST_ROWS: usize = 1000;
                     let apps = self
                         .blockchain
                         .state
@@ -4263,17 +4264,20 @@ impl ChainActor {
                         .app_binding
                         .apps
                         .values()
+                        .take(MAX_APP_LIST_ROWS)
                         .cloned()
                         .collect();
                     let _ = response.send(apps);
                 }
                 ChainCommand::HubGetApps { response } => {
+                    const MAX_APP_LIST_ROWS: usize = 1000;
                     let apps: Vec<_> = self
                         .blockchain
                         .state
                         .budlumxyz
                         .apps
                         .values()
+                        .take(MAX_APP_LIST_ROWS)
                         .cloned()
                         .collect();
                     let _ = response.send(apps);
