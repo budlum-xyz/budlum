@@ -1060,6 +1060,20 @@ impl HostApi for HostBridge<'_> {
                 "non-zero value transfer forbidden in static universal call",
             )));
         }
+        // `from` is the worker's claim, and a call without value never reaches
+        // the debit check below. Bind it to an identity the host already knows
+        // for this frame: an identity in the executing contract's environment,
+        // the caller the host handed this frame, or an identity in the callee's
+        // own environment. The last is how a worker translates its caller into
+        // the callee's namespace before it calls across.
+        if call.from.ee != self.frame_actor.ee
+            && call.from != self.frame_caller
+            && call.from.ee != call.to_ee
+        {
+            return Err(HostError::Denied(String::from(
+                "universal call may only speak for the executing environment, the caller of this frame, or an identity in the callee environment",
+            )));
+        }
         let budget = call.gas_limit.min(self.overlay.remaining_bgu());
         let parent_depth = self.overlay.universal_depth();
         self.overlay.push_universal_frame_with_budget(
@@ -1209,6 +1223,14 @@ impl HostApi for HostBridge<'_> {
     }
 
     fn emit_log(&mut self, log: EeLog) -> Result<(), HostError> {
+        // A log is recorded as fact. The emitter is the worker's claim, and the
+        // host knows which environment this frame belongs to.
+        if log.emitter.ee != self.frame_actor.ee {
+            return Err(HostError::Denied(format!(
+                "EE {:?} may not emit a log attributed to environment {:?}",
+                self.frame_actor.ee, log.emitter.ee
+            )));
+        }
         self.overlay.emit_log(log)
     }
 
@@ -1275,3 +1297,5 @@ mod evm_wasm_universal_call_tests;
 mod review_2_attack_tests;
 #[cfg(test)]
 mod svm_move_tests;
+#[cfg(test)]
+mod worker_identity_tests;
