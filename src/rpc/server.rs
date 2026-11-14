@@ -345,19 +345,21 @@ pub struct RpcServer {
     /// If `None`, metrics are silently skipped (e.g. in tests without a
     /// Global registry).
     metrics: Option<Arc<crate::core::metrics::Metrics>>,
-    garden: Arc<Mutex<crate::garden::GardenService>>,
+    /// The Garden of this node. Both listeners share one service, and every
+    /// `bud_garden*` method is answered on the operator listener only.
+    garden: Arc<crate::garden::GardenService>,
 }
 
 impl RpcServer {
     pub fn new(chain: ChainHandle, node: NodeClient) -> Self {
         Self {
+            garden: Arc::new(crate::garden::GardenService::new(Some(chain.clone()), None)),
             chain,
             node,
             security: RpcSecurityConfig::default(),
             mode: RpcMode::Public,
             reveal_gateway: Arc::new(Mutex::new(crate::storage::RevealGateway::new())),
             metrics: None,
-            garden: Arc::new(Mutex::new(crate::garden::GardenService::default())),
         }
     }
 
@@ -367,13 +369,13 @@ impl RpcServer {
         security: RpcSecurityConfig,
     ) -> Self {
         Self {
+            garden: Arc::new(crate::garden::GardenService::new(Some(chain.clone()), None)),
             chain,
             node,
             security,
             mode: RpcMode::Public,
             reveal_gateway: Arc::new(Mutex::new(crate::storage::RevealGateway::new())),
             metrics: None,
-            garden: Arc::new(Mutex::new(crate::garden::GardenService::default())),
         }
     }
 
@@ -384,18 +386,25 @@ impl RpcServer {
         mode: RpcMode,
     ) -> Self {
         Self {
+            garden: Arc::new(crate::garden::GardenService::new(Some(chain.clone()), None)),
             chain,
             node,
             security,
             mode,
             reveal_gateway: Arc::new(Mutex::new(crate::storage::RevealGateway::new())),
             metrics: None,
-            garden: Arc::new(Mutex::new(crate::garden::GardenService::default())),
         }
     }
 
     pub fn with_metrics(mut self, metrics: Arc<crate::core::metrics::Metrics>) -> Self {
         self.metrics = Some(metrics);
+        self
+    }
+
+    /// Use `garden` as this listener's Garden, so that every listener of one
+    /// node answers for the same Garden.
+    pub fn with_garden(mut self, garden: Arc<crate::garden::GardenService>) -> Self {
+        self.garden = garden;
         self
     }
 
@@ -509,6 +518,11 @@ impl RpcServer {
                 None::<()>,
             ))
         }
+    }
+
+    /// A Garden refusal as a JSON-RPC error. The message is the reason.
+    fn garden_refusal(reason: String) -> ErrorObjectOwned {
+        ErrorObjectOwned::owned(-32000, reason, None::<()>)
     }
 
     fn to_hex(n: u64) -> String {
@@ -6607,243 +6621,83 @@ impl BudlumApiServer for RpcServer {
     async fn garden_create(
         &self,
         title: String,
-        host_name: String,
-        host_multiaddr: String,
-        relay_multiaddrs: Vec<String>,
-        nonce: u64,
+        name: String,
+        options: Option<crate::garden::GardenOptions>,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
         self.require_operator("bud_gardenCreate")?;
-        let mut guard = self
-            .garden
-            .lock()
-            .map_err(|_| ErrorObjectOwned::owned(-32603, "garden lock poisoned", None::<()>))?;
-        let (invite, status) = guard
-            .create_garden(title, host_name, host_multiaddr, relay_multiaddrs, nonce)
-            .map_err(|e| ErrorObjectOwned::owned(-32602, e, None::<()>))?;
-        let link = invite
-            .to_invite_link()
-            .map_err(|e| ErrorObjectOwned::owned(-32603, e, None::<()>))?;
-        let qr_payload = invite
-            .to_qr_payload()
-            .map_err(|e| ErrorObjectOwned::owned(-32603, e, None::<()>))?;
-        Ok(serde_json::json!({
-            "chain_id": status.chain_id,
-            "invite_link": link,
-            "qr_payload": qr_payload,
-            "status": status,
-        }))
+        self.garden
+            .create(title, name, options.unwrap_or_default())
+            .await
+            .map_err(Self::garden_refusal)
     }
 
-    async fn garden_invite(
-        &self,
-        chain_id: Option<u64>,
-    ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        let guard = self
-            .garden
-            .lock()
-            .map_err(|_| ErrorObjectOwned::owned(-32603, "garden lock poisoned", None::<()>))?;
-        guard
-            .get_invite(chain_id)
-            .map_err(|e| ErrorObjectOwned::owned(-32602, e, None::<()>))
+    async fn garden_invite(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
+        self.require_operator("bud_gardenInvite")?;
+        self.garden.invite().await.map_err(Self::garden_refusal)
     }
 
     async fn garden_join(
         &self,
-        invite_or_qr: String,
-        validator_name: String,
+        invite: String,
+        name: String,
+        options: Option<crate::garden::GardenOptions>,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
         self.require_operator("bud_gardenJoin")?;
-        let mut guard = self
-            .garden
-            .lock()
-            .map_err(|_| ErrorObjectOwned::owned(-32603, "garden lock poisoned", None::<()>))?;
-        guard
-            .join_by_invite(&invite_or_qr, validator_name)
-            .map_err(|e| ErrorObjectOwned::owned(-32602, e, None::<()>))
+        self.garden
+            .join(invite, name, options.unwrap_or_default())
+            .await
+            .map_err(Self::garden_refusal)
     }
 
-    async fn garden_leave(
-        &self,
-        chain_id: Option<u64>,
-        validator_pubkey_hex: String,
-    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+    async fn garden_leave(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
         self.require_operator("bud_gardenLeave")?;
-        let mut guard = self
-            .garden
-            .lock()
-            .map_err(|_| ErrorObjectOwned::owned(-32603, "garden lock poisoned", None::<()>))?;
-        let snap = guard
-            .leave_validator(chain_id, &validator_pubkey_hex)
-            .map_err(|e| ErrorObjectOwned::owned(-32602, e, None::<()>))?;
-        serde_json::to_value(snap)
-            .map_err(|e| ErrorObjectOwned::owned(-32603, e.to_string(), None::<()>))
+        self.garden.leave().await.map_err(Self::garden_refusal)
     }
 
-    async fn garden_return(
-        &self,
-        chain_id: Option<u64>,
-        validator_pubkey_hex: String,
-    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+    async fn garden_return(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
         self.require_operator("bud_gardenReturn")?;
-        let mut guard = self
-            .garden
-            .lock()
-            .map_err(|_| ErrorObjectOwned::owned(-32603, "garden lock poisoned", None::<()>))?;
-        let snap = guard
-            .return_validator(chain_id, &validator_pubkey_hex)
-            .map_err(|e| ErrorObjectOwned::owned(-32602, e, None::<()>))?;
-        serde_json::to_value(snap)
-            .map_err(|e| ErrorObjectOwned::owned(-32603, e.to_string(), None::<()>))
+        self.garden.rejoin().await.map_err(Self::garden_refusal)
     }
 
-    async fn garden_status(
-        &self,
-        chain_id: Option<u64>,
-    ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        let guard = self
-            .garden
-            .lock()
-            .map_err(|_| ErrorObjectOwned::owned(-32603, "garden lock poisoned", None::<()>))?;
-        let snap = guard
-            .status(chain_id)
-            .map_err(|e| ErrorObjectOwned::owned(-32602, e, None::<()>))?;
-        serde_json::to_value(snap)
-            .map_err(|e| ErrorObjectOwned::owned(-32603, e.to_string(), None::<()>))
+    async fn garden_status(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
+        self.require_operator("bud_gardenStatus")?;
+        self.garden.status().await.map_err(Self::garden_refusal)
     }
 
     async fn garden_publish(
         &self,
-        chain_id: u64,
-        sender_pubkey_hex: String,
         kind: String,
-        title_or_mime: String,
-        body_or_filename: String,
-        payload_hex: String,
+        payload: String,
+        encoding: Option<String>,
+        mime: Option<String>,
+        caption: Option<String>,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
         self.require_operator("bud_gardenPublish")?;
-        let node_chain_id = self.chain.get_chain_id().await;
-        if crate::garden::is_primary_budlum_chain(chain_id) {
-            return Err(ErrorObjectOwned::owned(
-                -32602,
-                format!(
-                    "garden transactions are closed on primary Budlum chain {} (node chain {})",
-                    chain_id, node_chain_id
-                ),
-                None::<()>,
-            ));
-        }
-        let content_kind = match kind.as_str() {
-            "message" => crate::garden::GardenContentKind::Message,
-            "post" => crate::garden::GardenContentKind::Post,
-            "image" => crate::garden::GardenContentKind::Image,
-            other => {
-                return Err(ErrorObjectOwned::owned(
-                    -32602,
-                    format!("unknown garden content kind: {other}"),
-                    None::<()>,
-                ));
-            }
-        };
-        let clean_hex = payload_hex.strip_prefix("0x").unwrap_or(&payload_hex);
-        let payload_bytes = hex::decode(clean_hex).map_err(|e| {
-            ErrorObjectOwned::owned(-32602, format!("invalid payload_hex: {e}"), None::<()>)
-        })?;
-        let mut guard = self
-            .garden
-            .lock()
-            .map_err(|_| ErrorObjectOwned::owned(-32603, "garden lock poisoned", None::<()>))?;
-        guard
-            .publish_content(
-                chain_id,
-                &sender_pubkey_hex,
-                content_kind,
-                title_or_mime,
-                body_or_filename,
-                payload_bytes,
-            )
-            .map_err(|e| ErrorObjectOwned::owned(-32602, e, None::<()>))
-    }
-
-    async fn garden_resolve_content(
-        &self,
-        chain_id: Option<u64>,
-        content_id_hex: String,
-    ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        let guard = self
-            .garden
-            .lock()
-            .map_err(|_| ErrorObjectOwned::owned(-32603, "garden lock poisoned", None::<()>))?;
-        let obj = guard
-            .resolve_content(chain_id, &content_id_hex)
-            .map_err(|e| ErrorObjectOwned::owned(-32602, e, None::<()>))?;
-        serde_json::to_value(obj)
-            .map_err(|e| ErrorObjectOwned::owned(-32603, e.to_string(), None::<()>))
-    }
-
-    async fn garden_trace(
-        &self,
-        chain_id: Option<u64>,
-        id_hex: String,
-    ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        let guard = self
-            .garden
-            .lock()
-            .map_err(|_| ErrorObjectOwned::owned(-32603, "garden lock poisoned", None::<()>))?;
-        let trace = guard
-            .query_trace(chain_id, &id_hex)
-            .map_err(|e| ErrorObjectOwned::owned(-32602, e, None::<()>))?;
-        serde_json::to_value(trace)
-            .map_err(|e| ErrorObjectOwned::owned(-32603, e.to_string(), None::<()>))
-    }
-
-    async fn garden_advance_round(
-        &self,
-        chain_id: Option<u64>,
-    ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        self.require_operator("bud_gardenAdvanceRound")?;
-        let mut guard = self
-            .garden
-            .lock()
-            .map_err(|_| ErrorObjectOwned::owned(-32603, "garden lock poisoned", None::<()>))?;
-        guard
-            .advance_round(chain_id)
-            .map_err(|e| ErrorObjectOwned::owned(-32602, e, None::<()>))
-    }
-
-    async fn garden_peer_status(
-        &self,
-        chain_id: Option<u64>,
-        peer_addr: Option<String>,
-    ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        self.require_operator("bud_gardenPeerStatus")?;
-        let Some(addr) = peer_addr else {
-            let guard = self
-                .garden
-                .lock()
-                .map_err(|_| ErrorObjectOwned::owned(-32603, "garden lock poisoned", None::<()>))?;
-            let probe = guard
-                .probe_local_node_listener(chain_id)
-                .map_err(|e| ErrorObjectOwned::owned(-32602, e, None::<()>))?;
-            return Ok(serde_json::json!({ "local_probe": probe }));
-        };
-        let garden = self.garden.clone();
-        let query = tokio::task::spawn_blocking(move || {
-            let guard = garden
-                .lock()
-                .map_err(|_| "garden lock poisoned".to_string())?;
-            guard.query_peer_status(&addr)
-        });
-        let resp = tokio::time::timeout(std::time::Duration::from_secs(5), query)
+        self.garden
+            .publish(kind, payload, encoding, mime, caption)
             .await
-            .map_err(|_| {
-                ErrorObjectOwned::owned(-32000, "garden peer status timed out", None::<()>)
-            })?
-            .map_err(|e| {
-                ErrorObjectOwned::owned(-32603, format!("garden peer task failed: {e}"), None::<()>)
-            })?
-            .map_err(|e| ErrorObjectOwned::owned(-32602, e, None::<()>))?;
-        serde_json::to_value(resp)
-            .map_err(|e| ErrorObjectOwned::owned(-32603, e.to_string(), None::<()>))
+            .map_err(Self::garden_refusal)
+    }
+
+    async fn garden_resolve(
+        &self,
+        content_id: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        self.require_operator("bud_gardenResolve")?;
+        self.garden
+            .resolve(content_id)
+            .await
+            .map_err(Self::garden_refusal)
+    }
+
+    async fn garden_trace(&self, id: String) -> Result<serde_json::Value, ErrorObjectOwned> {
+        self.require_operator("bud_gardenTrace")?;
+        self.garden.trace(id).await.map_err(Self::garden_refusal)
+    }
+
+    async fn garden_feed(&self, limit: Option<u32>) -> Result<serde_json::Value, ErrorObjectOwned> {
+        self.require_operator("bud_gardenFeed")?;
+        self.garden.feed(limit).await.map_err(Self::garden_refusal)
     }
 }
 

@@ -1459,6 +1459,117 @@ impl Blockchain {
         Ok(())
     }
 
+    /// The registered domain `domain_id`, when it is a bridgeless PoA domain
+    /// operated by `operator`.
+    ///
+    /// The two operator entry points below are limited to this shape on
+    /// purpose. A bridge-enabled domain holds assets on Budlum, so its
+    /// authority set and lifecycle stay with governance. A bridgeless PoA
+    /// domain holds nothing here: its commitments only report its own
+    /// finality, and the operator who registered it is the only party the
+    /// record speaks for.
+    fn bridgeless_poa_domain_operated_by(
+        &self,
+        domain_id: crate::domain::DomainId,
+        operator: Address,
+    ) -> Result<&ConsensusDomain, String> {
+        let domain = self
+            .domain_registry
+            .get(domain_id)
+            .ok_or_else(|| format!("Unknown consensus domain {domain_id}"))?;
+        if domain.kind != ConsensusKind::PoA {
+            return Err(format!("Domain {domain_id} is not a PoA domain"));
+        }
+        if domain.bridge_enabled {
+            return Err(format!(
+                "Domain {domain_id} is bridge-enabled: its authority set and lifecycle change \
+                 through governance, not through its operator"
+            ));
+        }
+        if domain.operator != Some(operator) {
+            return Err(format!("Domain {domain_id} is not operated by the caller"));
+        }
+        Ok(domain)
+    }
+
+    /// Replace the registered authority set of a bridgeless PoA domain.
+    ///
+    /// A PoA domain whose members come and go needs its registered
+    /// `validator_set_hash` to follow, because the PoA adapter refuses a proof
+    /// whose authority set differs from the registered one. The refusals
+    /// change nothing.
+    pub fn rotate_bridgeless_poa_authority_set(
+        &mut self,
+        domain_id: crate::domain::DomainId,
+        operator: Address,
+        validator_set_hash: crate::domain::Hash32,
+    ) -> Result<(), String> {
+        let domain = self.bridgeless_poa_domain_operated_by(domain_id, operator)?;
+        if domain.status == DomainStatus::Retired {
+            return Err(format!("Domain {domain_id} is retired"));
+        }
+        if validator_set_hash == [0u8; 32] {
+            return Err(format!(
+                "Domain {domain_id} cannot rotate to an unregistered (zero) authority set"
+            ));
+        }
+        if domain.validator_set_hash == validator_set_hash {
+            return Ok(());
+        }
+        let mut updated = domain.clone();
+        updated.validator_set_hash = validator_set_hash;
+        self.store_updated_consensus_domain(updated)
+    }
+
+    /// Move a bridgeless PoA domain along its lifecycle: Active to Frozen,
+    /// Frozen to Active, Frozen to Retired.
+    ///
+    /// A domain that the chain froze for equivocation stays frozen: the
+    /// operator is the accused party there, and only governance lifts that.
+    pub fn transition_bridgeless_poa_domain_status(
+        &mut self,
+        domain_id: crate::domain::DomainId,
+        operator: Address,
+        next: DomainStatus,
+    ) -> Result<(), String> {
+        let domain = self.bridgeless_poa_domain_operated_by(domain_id, operator)?;
+        if domain.status == next {
+            return Ok(());
+        }
+        let quarantined = self
+            .quarantine_ledger
+            .quarantined_entities
+            .contains_key(&crate::registry::QuarantineLedger::domain_target(domain_id));
+        if quarantined && next == DomainStatus::Active {
+            return Err(format!(
+                "Domain {domain_id} is quarantined for equivocation; its operator cannot \
+                 reactivate it"
+            ));
+        }
+        let mut updated = domain.clone();
+        let mut scratch = ConsensusDomainRegistry::new();
+        scratch.restore_persisted(updated.clone())?;
+        scratch.transition_status_checked(domain_id, next)?;
+        updated.status = next;
+        self.store_updated_consensus_domain(updated)
+    }
+
+    /// Persist `updated` and then put it in the registry, so a failed write
+    /// leaves the registry as it was.
+    fn store_updated_consensus_domain(&mut self, updated: ConsensusDomain) -> Result<(), String> {
+        if let Some(store) = &self.storage {
+            store
+                .save_consensus_domain(&updated)
+                .map_err(|e| format!("Failed to persist consensus domain: {e}"))?;
+        }
+        let slot = self
+            .domain_registry
+            .get_mut(updated.id)
+            .ok_or_else(|| format!("Unknown consensus domain {}", updated.id))?;
+        *slot = updated;
+        Ok(())
+    }
+
     pub fn submit_slashing_evidence(&mut self, evidence: SlashingEvidence) -> Result<(), String> {
         // Cheap checks first. Any peer can sign headers with a throwaway key,
         // so the producer must be a known validator and the headers must be

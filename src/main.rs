@@ -1463,12 +1463,19 @@ async fn main() {
             );
             std::process::exit(1);
         };
+        // One Garden per node, shared by both listeners. Its content lives
+        // under the node's database directory.
+        let garden = Arc::new(budlum_core::garden::GardenService::new(
+            Some(chain.clone()),
+            Some(std::path::PathBuf::from(&config.db_path)),
+        ));
         let pub_server = RpcServer::with_security_and_mode(
             chain.clone(),
             node.get_client(),
             rpc_security.clone(),
             RpcMode::Public,
         )
+        .with_garden(garden.clone())
         .with_metrics(metrics.clone());
         let pub_addr = public_addr.clone();
         tokio::spawn(async move {
@@ -1513,6 +1520,7 @@ async fn main() {
                 op_security,
                 RpcMode::Operator,
             )
+            .with_garden(garden.clone())
             .with_metrics(metrics.clone());
             let op_addr = operator_addr.clone();
             tokio::spawn(async move {
