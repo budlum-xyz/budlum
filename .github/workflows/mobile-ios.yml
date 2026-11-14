@@ -22,6 +22,9 @@ concurrency:
 
 jobs:
   ios-opportunistic-validator:
+    # Heavy battery: a pull request whose base is `testnet-quantum` or `testnet` does
+    # not start this job. See the note at the top of the file.
+    if: ${{ github.event_name != 'pull_request' || contains(fromJSON('["main","consensus-of-consensuses"]'), github.event.pull_request.base.ref) }}
     name: iOS Opportunistic Validator Swift Package Tests
     runs-on: macos-latest
     timeout-minutes: 20

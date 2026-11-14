@@ -24,6 +24,9 @@ permissions:
 
 jobs:
   uel-conformance:
+    # Heavy battery: a pull request whose base is `testnet-quantum` or `testnet` does
+    # not start this job. See the note at the top of the file.
+    if: ${{ github.event_name != 'pull_request' || contains(fromJSON('["main","consensus-of-consensuses"]'), github.event.pull_request.base.ref) }}
     name: UEL Conformance & Calibration (${{ matrix.arch }})
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
@@ -101,6 +104,9 @@ jobs:
           retention-days: 30
 
   uel-cross-arch-root-compare:
+    # Heavy battery: a pull request whose base is `testnet-quantum` or `testnet` does
+    # not start this job. See the note at the top of the file.
+    if: ${{ github.event_name != 'pull_request' || contains(fromJSON('["main","consensus-of-consensuses"]'), github.event.pull_request.base.ref) }}
     name: UEL Cross-Arch Root Compare (x86_64 = aarch64)
     needs: uel-conformance
     runs-on: ubuntu-24.04
@@ -134,6 +140,9 @@ jobs:
           echo "OK: UEL execution_root is byte-for-byte identical on x86_64 and aarch64."
 
   cosmwasm-endpoint:
+    # Heavy battery: a pull request whose base is `testnet-quantum` or `testnet` does
+    # not start this job. See the note at the top of the file.
+    if: ${{ github.event_name != 'pull_request' || contains(fromJSON('["main","consensus-of-consensuses"]'), github.event.pull_request.base.ref) }}
     name: CosmWasm settlement endpoint compiles
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -170,6 +179,9 @@ jobs:
           done
 
   svm-endpoint:
+    # Heavy battery: a pull request whose base is `testnet-quantum` or `testnet` does
+    # not start this job. See the note at the top of the file.
+    if: ${{ github.event_name != 'pull_request' || contains(fromJSON('["main","consensus-of-consensuses"]'), github.event.pull_request.base.ref) }}
     name: SVM settlement endpoint compiles
     runs-on: ubuntu-latest
     timeout-minutes: 30

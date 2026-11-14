@@ -4,11 +4,13 @@ on:
   push:
     branches: [main]
   # Heavy battery. It runs on pull requests to `main` (the PR that merges the
-  # stack), on the schedule below where one exists, and on demand. Stacked pull
-  # requests (`testnet-quantum`, `testnet`) run the PR gates in ci.yml,
-  # security-audit.yml, semgrep.yml and the other light workflows. This keeps
-  # one push from queueing more work than the shared runner pool can finish
-  # before the next push cancels it.
+  # stack), on the schedule and on demand. A stacked pull request (base
+  # `testnet-quantum` or `testnet`) runs the PR gates in ci.yml,
+  # security-audit.yml, semgrep.yml and the other light workflows, and skips the
+  # jobs of this file through the job-level condition: GitHub evaluates the
+  # `branches` filter of a stacked pull request against the root of the stack,
+  # so the filter alone does not keep it out. This keeps one push from queueing
+  # more work than the shared runner pool can finish before the next push cancels it.
   pull_request:
     branches: [main, consensus-of-consensuses]
   # Section 16.2 puts this workflow on a pull request *and* on a nightly run.
@@ -29,6 +31,9 @@ permissions:
 
 jobs:
   genesis-reproducibility:
+    # Heavy battery: a pull request whose base is `testnet-quantum` or `testnet` does
+    # not start this job. See the note at the top of the file.
+    if: ${{ github.event_name != 'pull_request' || contains(fromJSON('["main","consensus-of-consensuses"]'), github.event.pull_request.base.ref) }}
     # CI Expansion item 1: genesis reproducibility check.
     # Build twice, it must produce the same genesis hash.
     name: Genesis Reproducibility (item 1)
@@ -103,6 +108,9 @@ jobs:
           echo "OK: Genesis hashes match."
 
   cross-platform-determinism:
+    # Heavy battery: a pull request whose base is `testnet-quantum` or `testnet` does
+    # not start this job. See the note at the top of the file.
+    if: ${{ github.event_name != 'pull_request' || contains(fromJSON('["main","consensus-of-consensuses"]'), github.event.pull_request.base.ref) }}
     # CI Expansion item 2: cross-platform determinism matrix.
     #
     # Hardening (2026-07-21):
@@ -228,6 +236,9 @@ jobs:
           retention-days: 30
 
   consensus-digest-compare:
+    # Heavy battery: a pull request whose base is `testnet-quantum` or `testnet` does
+    # not start this job. See the note at the top of the file.
+    if: ${{ github.event_name != 'pull_request' || contains(fromJSON('["main","consensus-of-consensuses"]'), github.event.pull_request.base.ref) }}
     # The complement of item 2: the three platform digests must be byte-equal.
     name: Consensus Digest Compare (Linux = macOS = Windows)
     needs: cross-platform-determinism
@@ -267,6 +278,9 @@ jobs:
           echo "OK: the consensus output is BYTE-EQUAL on all three platforms."
 
   pq-vector-determinism:
+    # Heavy battery: a pull request whose base is `testnet-quantum` or `testnet` does
+    # not start this job. See the note at the top of the file.
+    if: ${{ github.event_name != 'pull_request' || contains(fromJSON('["main","consensus-of-consensuses"]'), github.event.pull_request.base.ref) }}
     # the ML-DSA and SLH-DSA vectors (NIST ACVP, Wycheproof, the explicit bug
     # vectors) give every vector the same verdict on every platform. The wallet crate
     # mounts the node's own PQ source files (`crates/wallet-core/src/crypto.rs`), so
@@ -335,6 +349,9 @@ jobs:
           retention-days: 30
 
   pq-digest-compare:
+    # Heavy battery: a pull request whose base is `testnet-quantum` or `testnet` does
+    # not start this job. See the note at the top of the file.
+    if: ${{ github.event_name != 'pull_request' || contains(fromJSON('["main","consensus-of-consensuses"]'), github.event.pull_request.base.ref) }}
     # The complement of pq-vector-determinism: the four platform digests are byte-equal.
     name: PQ Digest Compare (x86_64 = native = aarch64 = wasm32)
     needs: pq-vector-determinism
