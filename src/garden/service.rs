@@ -1,588 +1,748 @@
+//! The node-level Garden entry point behind the `bud_garden*` RPC methods.
+//!
+//! A node holds at most one Garden at a time. Creating, joining and leaving
+//! are local actions of the node: they start or stop the validator runtime.
+//! Everything that changes the Garden itself goes through a block.
+//!
+//! The service never acts for a key a caller names. It signs with the key of
+//! this node's own validator, which lives in memory only.
+
+use super::invite::GardenInvite;
+use super::node::{
+    random_bytes, spawn, GardenEntry, GardenHandle, GardenLeaveOutcome, GardenNodeConfig,
+};
+use super::settlement::GardenBudlumLink;
+use super::types::{status_label, GardenContentKind, GardenLimits};
+use crate::chain::chain_actor::ChainHandle;
 use crate::crypto::primitives::KeyPair;
-use crate::domain::types::DomainStatus;
-use crate::garden::invite::GardenInvitePayload;
-use crate::garden::liveness::GardenPresenceSignal;
-use crate::garden::node::{
-    GardenNode, GardenNodeClient, GardenNodeServer, GardenPeerRequest, GardenPeerResponse,
-    GardenStatusSnapshot,
-};
-use crate::garden::storage::{GardenContentStore, GardenStoredObject};
-use crate::garden::types::{
-    is_safe_validator_label, verify_garden_execution_chain, GardenBlock, GardenContentKind,
-    GardenGenesis, GardenLimits, GardenTrace, GardenTxKind, SignedGardenTx,
-};
-use std::collections::BTreeMap;
-use std::net::SocketAddr;
+use crate::domain::types::Hash32;
+use serde::Deserialize;
+use serde_json::{json, Value};
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
+use tokio::sync::Mutex;
 
-/// High-level Garden coordinator wired into Budlum's `RpcServer` to serve
-/// `bud_garden*` JSON-RPC calls cleanly.
-pub struct GardenService {
-    /// Keyed by chain_id string for deterministic string-keyed serialization.
-    gardens: BTreeMap<String, GardenServiceEntry>,
-    active_chain_id: Option<u64>,
-    storage_root: Option<PathBuf>,
-    budlum_height: u64,
+/// The address a Garden swarm listens on when the caller names none. It is
+/// unspecified, so the validator is treated as not reachable from outside
+/// and is reached through the peers it dialed.
+const DEFAULT_LISTEN: &str = "/ip4/0.0.0.0/tcp/0";
+/// How long entering a Garden may take.
+const ENTER_TIMEOUT: Duration = Duration::from_secs(60);
+/// Largest payload a publish request may carry as text, in bytes.
+const MAX_PUBLISH_TEXT_BYTES: usize = 40 * 1024 * 1024;
+
+/// Optional settings of `bud_gardenCreate` and `bud_gardenJoin`.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GardenOptions {
+    /// Multiaddr the Garden swarm listens on.
+    pub listen: Option<String>,
+    /// Reachable address to announce, without the peer id.
+    pub announce: Option<String>,
+    pub max_validators: Option<u32>,
+    pub max_object_bytes: Option<u32>,
+    pub max_block_txs: Option<u32>,
+    pub max_sender_txs_per_block: Option<u32>,
+    pub round_ms: Option<u32>,
+    pub presence_interval_ms: Option<u32>,
+    pub host_timeout_ms: Option<u32>,
+    pub suspend_after_ms: Option<u32>,
 }
 
-struct GardenServiceEntry {
-    host_node: GardenNode,
-    participants: BTreeMap<String, GardenNode>,
-    timestamp_ms: u64,
-}
-
-impl Default for GardenService {
-    fn default() -> Self {
-        Self::new(None)
+impl GardenOptions {
+    fn limits(&self) -> Result<GardenLimits, String> {
+        let base = GardenLimits::testnet_default();
+        let limits = GardenLimits {
+            max_validators: self.max_validators.unwrap_or(base.max_validators),
+            max_object_bytes: self.max_object_bytes.unwrap_or(base.max_object_bytes),
+            max_block_txs: self.max_block_txs.unwrap_or(base.max_block_txs),
+            max_sender_txs_per_block: self
+                .max_sender_txs_per_block
+                .unwrap_or(base.max_sender_txs_per_block),
+            round_ms: self.round_ms.unwrap_or(base.round_ms),
+            presence_interval_ms: self
+                .presence_interval_ms
+                .unwrap_or(base.presence_interval_ms),
+            host_timeout_ms: self.host_timeout_ms.unwrap_or(base.host_timeout_ms),
+            suspend_after_ms: self.suspend_after_ms.unwrap_or(base.suspend_after_ms),
+        };
+        limits.validate()?;
+        Ok(limits)
     }
+}
+
+/// What this node needs to take its place in a Garden again.
+struct Seat {
+    secret: [u8; 32],
+    config: GardenNodeConfig,
+}
+
+enum Slot {
+    Empty,
+    Running(GardenHandle, Seat),
+    /// The node left and may return while the Garden lives.
+    Away(Seat, GardenInvite),
+}
+
+/// The Garden of this node.
+pub struct GardenService {
+    chain: Option<ChainHandle>,
+    content_dir: Option<PathBuf>,
+    slot: Mutex<Slot>,
+}
+
+impl std::fmt::Debug for GardenService {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GardenService")
+            .field("content_dir", &self.content_dir)
+            .finish_non_exhaustive()
+    }
+}
+
+fn parse_id(label: &str, value: &str) -> Result<Hash32, String> {
+    let bytes = hex::decode(value.trim_start_matches("0x"))
+        .map_err(|_| format!("{label} must be 64 hex digits"))?;
+    Hash32::try_from(bytes.as_slice()).map_err(|_| format!("{label} must be 64 hex digits"))
 }
 
 impl GardenService {
-    pub fn new(storage_root: Option<PathBuf>) -> Self {
+    /// Build the service of a node.
+    ///
+    /// `chain` is the node's Budlum chain; with it every Garden registers as
+    /// a domain there. `data_dir` is the node's data directory; Garden
+    /// content goes under `garden/` inside it. A validator key never
+    /// survives a restart, so anything a stopped process left there belongs
+    /// to no one and is removed.
+    pub fn new(chain: Option<ChainHandle>, data_dir: Option<PathBuf>) -> Self {
+        let content_dir = data_dir.map(|dir| dir.join("garden"));
+        if let Some(dir) = &content_dir {
+            if dir.exists() {
+                if let Err(e) = std::fs::remove_dir_all(dir) {
+                    tracing::warn!(error = %e, "stale garden content could not be removed");
+                }
+            }
+        }
         Self {
-            gardens: BTreeMap::new(),
-            active_chain_id: None,
-            storage_root,
-            budlum_height: 1,
+            chain,
+            content_dir,
+            slot: Mutex::new(Slot::Empty),
         }
     }
 
-    fn current_entry_mut(
-        &mut self,
-        chain_id: Option<u64>,
-    ) -> Result<&mut GardenServiceEntry, String> {
-        let target = chain_id
-            .or(self.active_chain_id)
-            .ok_or_else(|| "no active Garden exists on this node".to_string())?;
-        self.gardens
-            .get_mut(&target.to_string())
-            .ok_or_else(|| format!("Garden chain {} not found", target))
+    fn link(&self) -> Option<GardenBudlumLink> {
+        self.chain.clone().map(GardenBudlumLink::new)
     }
 
-    fn current_entry(&self, chain_id: Option<u64>) -> Result<&GardenServiceEntry, String> {
-        let target = chain_id
-            .or(self.active_chain_id)
-            .ok_or_else(|| "no active Garden exists on this node".to_string())?;
-        self.gardens
-            .get(&target.to_string())
-            .ok_or_else(|| format!("Garden chain {} not found", target))
+    fn config(&self, name: String, options: &GardenOptions) -> GardenNodeConfig {
+        GardenNodeConfig {
+            name,
+            listen: options
+                .listen
+                .clone()
+                .unwrap_or_else(|| DEFAULT_LISTEN.to_string()),
+            announce: options.announce.clone(),
+            content_dir: self.content_dir.clone(),
+        }
     }
 
-    pub fn create_garden(
-        &mut self,
-        title: String,
-        host_name: String,
-        host_multiaddr: String,
-        relay_multiaddrs: Vec<String>,
-        nonce: u64,
-    ) -> Result<(GardenInvitePayload, GardenStatusSnapshot), String> {
-        const MAX_GARDENS_PER_NODE: usize = 16;
-        const MAX_ADDR_BYTES: usize = 256;
-        const MAX_RELAYS_PER_INVITE: usize = 16;
-        if !is_safe_validator_label(&host_name) {
-            return Err("host_name must be 1..=64 safe path-free bytes".into());
-        }
-        if host_multiaddr.trim().is_empty() || host_multiaddr.len() > MAX_ADDR_BYTES {
-            return Err("host_multiaddr must be 1..=256 bytes".into());
-        }
-        if relay_multiaddrs.len() > MAX_RELAYS_PER_INVITE
-            || relay_multiaddrs
-                .iter()
-                .any(|r| r.trim().is_empty() || r.len() > MAX_ADDR_BYTES)
-        {
-            return Err("relay_multiaddrs exceeds count or byte limit".into());
-        }
-        // Evict Retired gardens before enforcing the active/frozen capacity cap.
-        self.gardens.retain(|_, entry| {
-            entry
-                .host_node
-                .state
-                .as_ref()
-                .is_some_and(|s| s.status() != DomainStatus::Retired)
-        });
-        if self.gardens.len() >= MAX_GARDENS_PER_NODE {
-            return Err(format!(
-                "maximum active Gardens per node ({MAX_GARDENS_PER_NODE}) reached"
-            ));
-        }
-        let host_storage = self.storage_root.as_ref().map(|r| r.join("host"));
-        let mut host_node = GardenNode::new(host_name, host_storage)?;
-        host_node.set_network_addrs(host_multiaddr, relay_multiaddrs);
-        let invite =
-            host_node.create_garden(title, 1_700_000_000_000, nonce, GardenLimits::default())?;
-        let snap = host_node.status_snapshot()?;
-        let _dir_opt = host_node.storage_dir();
-        let chain_id = snap.chain_id;
-        let host_hex = hex::encode(host_node.pubkey());
-        let mut participants = BTreeMap::new();
-        participants.insert(host_hex, host_node_clone_for_participant(&host_node)?);
-        self.gardens.insert(
-            chain_id.to_string(),
-            GardenServiceEntry {
-                host_node,
-                participants,
-                timestamp_ms: 1_700_000_000_000,
-            },
-        );
-        self.active_chain_id = Some(chain_id);
-        Ok((invite, snap))
-    }
-
-    pub fn get_invite(&self, chain_id: Option<u64>) -> Result<serde_json::Value, String> {
-        let entry = self.current_entry(chain_id)?;
-        let payload = entry.host_node.invite_payload()?;
-        let link = payload.to_invite_link()?;
-        let qr_payload = payload.to_qr_payload()?;
-        Ok(serde_json::json!({
-            "invite_link": link,
-            "qr_payload": qr_payload,
-            "payload": payload,
-        }))
-    }
-
-    pub fn join_by_invite(
-        &mut self,
-        invite_or_qr: &str,
-        validator_name: String,
-    ) -> Result<serde_json::Value, String> {
-        if !is_safe_validator_label(&validator_name) {
-            return Err("validator_name must be 1..=64 safe path-free bytes".into());
-        }
-        let payload = GardenInvitePayload::decode_any(invite_or_qr)?;
-        let chain_key = payload.chain_id.to_string();
-        let storage_root = self.storage_root.as_ref().map(|r| r.join(&validator_name));
-        if let std::collections::btree_map::Entry::Vacant(vacant) = self.gardens.entry(chain_key) {
-            // Remote Garden join over direct or 7.11-relayed TCP.
-            let (gen_resp, used_relay) =
-                GardenNodeClient::call_via_invite(&payload, &GardenPeerRequest::GetGenesis)?;
-            let genesis: GardenGenesis = serde_json::from_value(gen_resp.data)
-                .map_err(|e| format!("failed to decode remote Garden genesis: {e}"))?;
-            let mut joiner = GardenNode::new(validator_name.clone(), storage_root)?;
-            joiner.init_from_invite(&payload, genesis)?;
-            let joiner_pk = joiner.pubkey();
-            let joiner_hex = hex::encode(joiner_pk);
-            let join_tx = joiner.sign_tx(
-                payload.chain_id,
-                GardenTxKind::JoinValidator {
-                    pubkey: joiner_pk,
-                    display_name: validator_name,
-                },
-            )?;
-            let _ = GardenNodeClient::call_via_invite(
-                &payload,
-                &GardenPeerRequest::PublishTx(join_tx),
-            )?;
-            let mut participants = BTreeMap::new();
-            let host_clone = host_node_clone_for_participant(&joiner)?;
-            participants.insert(joiner_hex.clone(), joiner);
-            vacant.insert(GardenServiceEntry {
-                host_node: host_clone,
-                participants,
-                timestamp_ms: 1_700_000_000_000,
-            });
-            self.active_chain_id = Some(payload.chain_id);
-            return Ok(serde_json::json!({
-                "chain_id": payload.chain_id,
-                "validator_pubkey_hex": joiner_hex,
-                "used_relay": used_relay,
-            }));
-        }
-        let mut bh = self.budlum_height;
-        let entry = self.current_entry_mut(Some(payload.chain_id))?;
-        let genesis = entry
-            .host_node
-            .state
-            .as_ref()
-            .ok_or_else(|| "host has no genesis".to_string())?
-            .genesis
-            .clone();
-
-        let mut joiner = GardenNode::new(validator_name.clone(), storage_root)?;
-        joiner.init_from_invite(&payload, genesis)?;
-        let joiner_pk = joiner.pubkey();
-        let joiner_hex = hex::encode(joiner_pk);
-        let join_tx = joiner.sign_tx(
-            payload.chain_id,
-            GardenTxKind::JoinValidator {
-                pubkey: joiner_pk,
-                display_name: validator_name,
-            },
-        )?;
-
-        if let Some(host_state) = entry.host_node.state.as_ref() {
-            for b in &host_state.blocks {
-                joiner.apply_finalized_block(b.clone())?;
+    /// Wait until the validator is in the identity record as active.
+    async fn wait_until_member(handle: &GardenHandle) -> Result<Value, String> {
+        let started = Instant::now();
+        loop {
+            let status = handle.status().await?;
+            if status.pointer("/me/member").and_then(Value::as_str) == Some("Active") {
+                return Ok(status);
             }
-        }
-
-        let block =
-            Self::finalize_tx_across_entry(entry, &mut bh, vec![join_tx], Some(&mut joiner))?;
-        entry.participants.insert(joiner_hex.clone(), joiner);
-        self.budlum_height = bh;
-        Ok(serde_json::json!({
-            "chain_id": payload.chain_id,
-            "validator_pubkey_hex": joiner_hex,
-            "joined_at_height": block.height,
-        }))
-    }
-
-    pub fn leave_validator(
-        &mut self,
-        chain_id: Option<u64>,
-        validator_pubkey_hex: &str,
-    ) -> Result<GardenStatusSnapshot, String> {
-        let mut bh = self.budlum_height;
-        let entry = self.current_entry_mut(chain_id)?;
-        let chain_num = entry
-            .host_node
-            .state
-            .as_ref()
-            .ok_or_else(|| "host has no Garden state".to_string())?
-            .genesis
-            .chain_id
-            .value();
-        let leave_tx = {
-            let participant = entry
-                .participants
-                .get_mut(validator_pubkey_hex)
-                .ok_or_else(|| format!("unknown Garden validator {}", validator_pubkey_hex))?;
-            let pk = participant.pubkey();
-            participant.sign_tx(chain_num, GardenTxKind::LeaveValidator { pubkey: pk })?
-        };
-        Self::finalize_tx_across_entry(entry, &mut bh, vec![leave_tx], None)?;
-        let is_retired = entry
-            .host_node
-            .state
-            .as_ref()
-            .is_some_and(|s| s.status() == DomainStatus::Retired);
-        if is_retired {
-            for p in entry.participants.values_mut() {
-                let _ = p.leave_local_cleanup();
-            }
-        } else if let Some(p) = entry.participants.get_mut(validator_pubkey_hex) {
-            p.leave_local_cleanup()?;
-        }
-        let snap = entry.host_node.status_snapshot()?;
-        self.budlum_height = bh;
-        Ok(snap)
-    }
-
-    pub fn return_validator(
-        &mut self,
-        chain_id: Option<u64>,
-        validator_pubkey_hex: &str,
-    ) -> Result<GardenStatusSnapshot, String> {
-        let mut bh = self.budlum_height;
-        let storage_root = self.storage_root.clone();
-        let entry = self.current_entry_mut(chain_id)?;
-        let chain_num = entry
-            .host_node
-            .state
-            .as_ref()
-            .ok_or_else(|| "host has no Garden state".to_string())?
-            .genesis
-            .chain_id
-            .value();
-        // Refresh returning node from host's current state so it catches up
-        // before proposing/applying the ReturnValidator block.
-        let host_state_snapshot = entry.host_node.state.clone();
-        let return_tx = {
-            let participant = entry
-                .participants
-                .get_mut(validator_pubkey_hex)
-                .ok_or_else(|| format!("unknown Garden validator {}", validator_pubkey_hex))?;
-            if let Some(mut refreshed) = host_state_snapshot {
-                let node_dir = match storage_root.as_ref() {
-                    Some(root) if is_safe_validator_label(&participant.display_name) => {
-                        Some(root.join(&participant.display_name))
-                    }
-                    _ => None,
-                };
-                if let Some(dir_root) = node_dir.as_deref() {
-                    if let Ok(rebuilt_store) = GardenContentStore::new(
-                        chain_num,
-                        refreshed.genesis.limits.clone(),
-                        refreshed.genesis.placement_table.clone(),
-                        Some(dir_root),
-                    ) {
-                        let active = refreshed.liveness.active_validator_pubkeys();
-                        let mut fresh_store = rebuilt_store;
-                        for cid in refreshed.content_to_tx.keys() {
-                            if let Ok(obj) = refreshed.store.resolve_and_verify(cid) {
-                                let _ = fresh_store.put_object(
-                                    obj.kind,
-                                    obj.mime_type,
-                                    obj.payload,
-                                    &active,
-                                );
-                            }
-                        }
-                        refreshed.store = fresh_store;
-                    }
-                }
-                participant.state = Some(refreshed);
-            }
-            let pk = participant.pubkey();
-            participant.sign_tx(chain_num, GardenTxKind::ReturnValidator { pubkey: pk })?
-        };
-        Self::finalize_tx_across_entry(entry, &mut bh, vec![return_tx], None)?;
-        let snap = entry.host_node.status_snapshot()?;
-        self.budlum_height = bh;
-        Ok(snap)
-    }
-
-    pub fn publish_content(
-        &mut self,
-        chain_id: u64,
-        sender_pubkey_hex: &str,
-        kind: GardenContentKind,
-        title_or_mime: String,
-        body_or_filename: String,
-        payload_bytes: Vec<u8>,
-    ) -> Result<serde_json::Value, String> {
-        verify_garden_execution_chain(chain_id)?;
-        let mut bh = self.budlum_height;
-        let entry = self.current_entry_mut(Some(chain_id))?;
-        let tx_kind = match kind {
-            GardenContentKind::Message => GardenTxKind::PublishMessage {
-                text: String::from_utf8(payload_bytes)
-                    .map_err(|_| "message payload must be valid UTF-8".to_string())?,
-            },
-            GardenContentKind::Post => GardenTxKind::PublishPost {
-                title: title_or_mime,
-                body: body_or_filename,
-                image_content_id: None,
-            },
-            GardenContentKind::Image => {
-                let cid = GardenContentStore::compute_content_id(
-                    &GardenContentKind::Image,
-                    &payload_bytes,
+            if started.elapsed() >= ENTER_TIMEOUT {
+                let _ = handle.leave().await;
+                return Err(
+                    "the Garden did not admit this node in time; it may be frozen or full".into(),
                 );
-                GardenTxKind::PublishImage {
-                    mime_type: title_or_mime,
-                    filename: body_or_filename,
-                    content_id: cid,
-                    data: payload_bytes,
-                }
             }
-        };
-        let signed_tx = {
-            let participant = entry
-                .participants
-                .get_mut(sender_pubkey_hex)
-                .ok_or_else(|| format!("unknown Garden sender {}", sender_pubkey_hex))?;
-            participant.sign_tx(chain_id, tx_kind)?
-        };
-        let tx_hash_hex = hex::encode(signed_tx.tx_hash);
-        let block = match Self::finalize_tx_across_entry(entry, &mut bh, vec![signed_tx], None) {
-            Ok(b) => b,
-            Err(e) => {
-                if let Some(p) = entry.participants.get_mut(sender_pubkey_hex) {
-                    p.next_tx_nonce = p.next_tx_nonce.saturating_sub(1);
-                }
-                return Err(e);
-            }
-        };
-        let trace = entry.host_node.query_trace(&tx_hash_hex);
-        self.budlum_height = bh;
-        Ok(serde_json::json!({
-            "chain_id": chain_id,
-            "tx_hash_hex": tx_hash_hex,
-            "block_height": block.height,
-            "trace": trace,
-        }))
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
     }
 
-    pub fn status(&self, chain_id: Option<u64>) -> Result<GardenStatusSnapshot, String> {
-        self.current_entry(chain_id)?.host_node.status_snapshot()
-    }
-
-    pub fn advance_round(&mut self, chain_id: Option<u64>) -> Result<serde_json::Value, String> {
-        let entry = self.current_entry_mut(chain_id)?;
-        let (round, leader) = {
-            let state = entry
-                .host_node
-                .state
-                .as_mut()
-                .ok_or_else(|| "host has no Garden state".to_string())?;
-            state.advance_round()?
-        };
-        for p in entry.participants.values_mut() {
-            if let Some(s) = p.state.as_mut() {
-                let _ = s.advance_round();
+    /// Drop the link of an earlier Garden the node walked away from.
+    async fn forget(&self, seat: &Seat, invite: &GardenInvite) {
+        if let (Some(link), Ok(key)) = (self.link(), KeyPair::from_seed(&seat.secret)) {
+            if let Err(e) = link.retire(invite.chain_id, key.public_key_bytes()).await {
+                tracing::warn!(error = %e, "garden domain could not be retired");
             }
         }
-        Ok(serde_json::json!({
-            "round": round,
-            "next_proposer_hex": hex::encode(leader),
-        }))
     }
 
-    /// Query a remote Garden node over TCP (`GardenPeerRequest::GetStatus`).
-    pub fn query_peer_status(&self, peer_addr: &str) -> Result<GardenPeerResponse, String> {
-        let addr: SocketAddr = peer_addr
-            .parse()
-            .map_err(|e| format!("invalid peer socket address '{peer_addr}': {e}"))?;
-        let unreachable = match addr.ip() {
-            std::net::IpAddr::V4(v4) => {
-                v4.is_unspecified() || v4.is_multicast() || v4.is_link_local() || v4.is_broadcast()
-            }
-            std::net::IpAddr::V6(v6) => {
-                v6.is_unspecified() || v6.is_multicast() || v6.is_unicast_link_local()
-            }
-        };
-        if unreachable {
-            return Err(format!(
-                "refusing to probe non-routable Garden peer address {addr}"
-            ));
-        }
-        GardenNodeClient::call(addr, &GardenPeerRequest::GetStatus)
-    }
-
-    /// Spawn a temporary local peer listener for an ephemeral probe and stop it.
-    pub fn probe_local_node_listener(&self, chain_id: Option<u64>) -> Result<String, String> {
-        let entry = self.current_entry(chain_id)?;
-        let probe_node = host_node_clone_for_participant(&entry.host_node)?;
-        let mut srv = GardenNodeServer::start("127.0.0.1:0", probe_node)?;
-        let resp = GardenNodeClient::call(srv.addr, &GardenPeerRequest::GetStatus)?;
-        srv.stop();
-        let _stopped = srv.is_stopped();
-        Ok(resp.data.to_string())
-    }
-
-    pub fn query_trace(&self, chain_id: Option<u64>, id_hex: &str) -> Result<GardenTrace, String> {
-        self.current_entry(chain_id)?
-            .host_node
-            .query_trace(id_hex)
-            .ok_or_else(|| format!("trace not found for {}", id_hex))
-    }
-
-    pub fn resolve_content(
+    async fn enter(
         &self,
-        chain_id: Option<u64>,
-        content_id_hex: &str,
-    ) -> Result<GardenStoredObject, String> {
-        self.current_entry(chain_id)?
-            .host_node
-            .resolve_content(content_id_hex)
+        entry: GardenEntry,
+        seat: Seat,
+    ) -> Result<(GardenHandle, Seat, Value), String> {
+        let handle = spawn(entry, seat.config.clone(), seat.secret, self.link()).await?;
+        let status = Self::wait_until_member(&handle).await?;
+        Ok((handle, seat, status))
     }
 
-    /// Record a signed host presence signal (7.8) and update Garden + Budlum status.
-    pub fn record_host_presence(
-        &mut self,
-        chain_id: Option<u64>,
-        signal: &GardenPresenceSignal,
-    ) -> Result<DomainStatus, String> {
-        let entry = self.current_entry_mut(chain_id)?;
-        let state = entry
-            .host_node
-            .state
-            .as_mut()
-            .ok_or_else(|| "host has no Garden state".to_string())?;
-        let new_status = state.apply_host_presence(signal)?;
-        entry
-            .host_node
-            .settlement
-            .sync_domain_status(state.genesis.chain_id.value(), new_status)?;
-        Ok(new_status)
+    /// Found a Garden. This node becomes its host.
+    pub async fn create(
+        &self,
+        title: String,
+        name: String,
+        options: GardenOptions,
+    ) -> Result<Value, String> {
+        let limits = options.limits()?;
+        let mut slot = self.slot.lock().await;
+        match &*slot {
+            Slot::Running(..) => {
+                return Err("this node already runs a Garden; leave it first".into())
+            }
+            Slot::Away(seat, invite) => self.forget(seat, invite).await,
+            Slot::Empty => {}
+        }
+        *slot = Slot::Empty;
+        let seat = Seat {
+            secret: random_bytes(),
+            config: self.config(name, &options),
+        };
+        let (handle, seat, status) = self
+            .enter(GardenEntry::Create { title, limits }, seat)
+            .await?;
+        let link = handle.invite().await?.to_link();
+        *slot = Slot::Running(handle, seat);
+        Ok(json!({ "garden": status, "invite": link, "qr": link }))
     }
 
-    fn finalize_tx_across_entry(
-        entry: &mut GardenServiceEntry,
-        budlum_height: &mut u64,
-        txs: Vec<SignedGardenTx>,
-        extra_joiner: Option<&mut GardenNode>,
-    ) -> Result<GardenBlock, String> {
-        entry.timestamp_ms = entry.timestamp_ms.saturating_add(1_000);
-        let ts = entry.timestamp_ms;
-
-        let (next_height, round, expected_proposer) = {
-            let state = entry
-                .host_node
-                .state
-                .as_ref()
-                .ok_or_else(|| "host has no Garden state".to_string())?;
-            let h = state.height.saturating_add(1);
-            let r = state.current_round;
-            let p = state.expected_proposer(h, r)?;
-            (h, r, p)
+    /// Join a Garden with an invite link or QR content.
+    pub async fn join(
+        &self,
+        invite: String,
+        name: String,
+        options: GardenOptions,
+    ) -> Result<Value, String> {
+        let invite = GardenInvite::parse(&invite)?;
+        let mut slot = self.slot.lock().await;
+        match &*slot {
+            Slot::Running(..) => {
+                return Err("this node already runs a Garden; leave it first".into())
+            }
+            Slot::Away(_, away) if away.chain_id == invite.chain_id => {
+                return Err(
+                    "this node only stepped out of that Garden; use bud_gardenReturn".into(),
+                )
+            }
+            Slot::Away(seat, away) => self.forget(seat, away).await,
+            Slot::Empty => {}
+        }
+        *slot = Slot::Empty;
+        let seat = Seat {
+            secret: random_bytes(),
+            config: self.config(name, &options),
         };
-        let proposer_hex = hex::encode(expected_proposer);
-        let proposer_kp = entry
-            .participants
-            .get(&proposer_hex)
-            .map(|n| n.keypair.clone())
-            .ok_or_else(|| "expected PoA proposer keypair not found".to_string())?;
+        let (handle, seat, status) = self.enter(GardenEntry::Invite(invite), seat).await?;
+        *slot = Slot::Running(handle, seat);
+        Ok(json!({ "garden": status }))
+    }
 
-        let mut block = {
-            let state = entry
-                .host_node
-                .state
-                .as_ref()
-                .ok_or_else(|| "host has no Garden state".to_string())?;
-            state.build_block(&proposer_kp, round, ts, txs)?
+    /// Leave the Garden. The node wipes the Garden data from its disk and
+    /// keeps what it needs to return. Leaving again while away forgets the
+    /// Garden for good.
+    pub async fn leave(&self) -> Result<Value, String> {
+        let mut slot = self.slot.lock().await;
+        match std::mem::replace(&mut *slot, Slot::Empty) {
+            Slot::Empty => Err("this node is in no Garden".into()),
+            Slot::Running(handle, seat) => {
+                let outcome: GardenLeaveOutcome = match handle.leave().await {
+                    Ok(outcome) => outcome,
+                    Err(e) => {
+                        // The validator did not answer; it keeps its place
+                        // so the caller can look at it and try again.
+                        *slot = Slot::Running(handle, seat);
+                        return Err(e);
+                    }
+                };
+                let answer = json!({
+                    "left": true,
+                    "retired": outcome.retired,
+                    "can_return": !outcome.retired,
+                    "chain_id": format!("{:016x}", outcome.chain_id),
+                    "height": outcome.height,
+                });
+                if !outcome.retired {
+                    *slot = Slot::Away(seat, outcome.invite);
+                }
+                Ok(answer)
+            }
+            Slot::Away(seat, invite) => {
+                self.forget(&seat, &invite).await;
+                Ok(json!({
+                    "left": true,
+                    "retired": true,
+                    "can_return": false,
+                    "chain_id": format!("{:016x}", invite.chain_id),
+                }))
+            }
+        }
+    }
+
+    /// Return to the Garden this node stepped out of.
+    pub async fn rejoin(&self) -> Result<Value, String> {
+        let mut slot = self.slot.lock().await;
+        match std::mem::replace(&mut *slot, Slot::Empty) {
+            Slot::Away(seat, invite) => {
+                let again = Seat {
+                    secret: seat.secret,
+                    config: seat.config.clone(),
+                };
+                match self.enter(GardenEntry::Invite(invite.clone()), again).await {
+                    Ok((handle, seat, status)) => {
+                        *slot = Slot::Running(handle, seat);
+                        Ok(json!({ "garden": status }))
+                    }
+                    Err(e) => {
+                        *slot = Slot::Away(seat, invite);
+                        Err(e)
+                    }
+                }
+            }
+            other => {
+                let running = matches!(other, Slot::Running(..));
+                *slot = other;
+                Err(if running {
+                    "this node is already in its Garden".into()
+                } else {
+                    "this node has no Garden to return to".into()
+                })
+            }
+        }
+    }
+
+    /// The running validator, or the reason there is none.
+    async fn running(&self) -> Result<GardenHandle, String> {
+        match &*self.slot.lock().await {
+            Slot::Running(handle, _) => Ok(handle.clone()),
+            Slot::Away(..) => Err("this node stepped out of its Garden; return first".into()),
+            Slot::Empty => Err("this node is in no Garden".into()),
+        }
+    }
+
+    /// The Garden as this node sees it, and its status on Budlum.
+    pub async fn status(&self) -> Result<Value, String> {
+        let mut slot = self.slot.lock().await;
+        let stopped = match &*slot {
+            Slot::Empty => return Ok(json!({ "garden": Value::Null })),
+            Slot::Away(_, invite) => {
+                let budlum = match self.link() {
+                    Some(link) => link.view(invite.chain_id).await.map(|view| {
+                        json!({
+                            "linked": true,
+                            "domain_id": view.domain_id,
+                            "status": status_label(view.status),
+                            "finalized_height": view.last_committed_height,
+                        })
+                    }),
+                    None => None,
+                };
+                return Ok(json!({
+                    "garden": {
+                        "chain_id": format!("{:016x}", invite.chain_id),
+                        "status": "Away",
+                        "budlum": budlum,
+                    }
+                }));
+            }
+            Slot::Running(handle, _) => match handle.status().await {
+                Ok(status) => return Ok(json!({ "garden": status })),
+                Err(_) => handle.chain_id(),
+            },
         };
+        // The validator stopped on its own: the Garden ended without it.
+        *slot = Slot::Empty;
+        let budlum = match self.link() {
+            Some(link) => link
+                .view(stopped)
+                .await
+                .map(|view| json!({ "status": status_label(view.status) })),
+            None => None,
+        };
+        Ok(
+            json!({ "garden": Value::Null, "ended": { "chain_id": format!("{stopped:016x}"), "budlum": budlum } }),
+        )
+    }
 
-        let mut collected_votes = Vec::new();
-        let mut signer_kps: Vec<KeyPair> = Vec::new();
-        for p in entry.participants.values() {
-            if let Ok(vote) = p.vote_on_block(&block) {
-                collected_votes.push(vote);
-                signer_kps.push(p.keypair.clone());
-            }
-        }
-        block.votes = collected_votes;
+    /// The invite link of the running Garden. It is also the QR content.
+    pub async fn invite(&self) -> Result<Value, String> {
+        let link = self.running().await?.invite().await?.to_link();
+        Ok(json!({ "invite": link, "qr": link }))
+    }
 
-        entry.host_node.apply_finalized_block(block.clone())?;
-        let mut returning_pks = std::collections::BTreeSet::new();
-        for tx in &block.txs {
-            if let GardenTxKind::ReturnValidator { pubkey } = &tx.tx.kind {
-                returning_pks.insert(*pubkey);
-            }
+    /// Publish a message, a post or an image. `encoding` is `utf8` or `hex`.
+    pub async fn publish(
+        &self,
+        kind: String,
+        payload: String,
+        encoding: Option<String>,
+        mime: Option<String>,
+        caption: Option<String>,
+    ) -> Result<Value, String> {
+        let kind = GardenContentKind::parse(&kind)?;
+        if payload.len() > MAX_PUBLISH_TEXT_BYTES {
+            return Err("payload is too large".into());
         }
-        for p in entry.participants.values_mut() {
-            let pk = p.pubkey();
-            let was_active = p
-                .state
-                .as_ref()
-                .is_some_and(|s| s.liveness.is_active_validator(&pk));
-            if was_active || returning_pks.contains(&pk) {
-                p.apply_finalized_block(block.clone())?;
-            }
-        }
-        if let Some(joiner) = extra_joiner {
-            joiner.apply_finalized_block(block.clone())?;
-        }
+        let (bytes, default_mime) = match encoding.as_deref().unwrap_or("utf8") {
+            "utf8" => (payload.into_bytes(), "text/plain; charset=utf-8"),
+            "hex" => (
+                hex::decode(&payload).map_err(|_| "payload is not hex".to_string())?,
+                "application/octet-stream",
+            ),
+            other => return Err(format!("unknown encoding '{other}', expected utf8 or hex")),
+        };
+        self.running()
+            .await?
+            .publish(
+                kind,
+                bytes,
+                mime.unwrap_or_else(|| default_mime.to_string()),
+                caption.unwrap_or_default(),
+            )
+            .await
+    }
 
-        *budlum_height = budlum_height.saturating_add(1);
-        let bh = *budlum_height;
-        if let Some(state) = entry.host_node.state.as_mut() {
-            if state.liveness.active_validator_count() > 0 && next_height > 0 {
-                let refs: Vec<&KeyPair> = signer_kps.iter().collect();
-                let _ = entry
-                    .host_node
-                    .settlement
-                    .anchor_garden_block(state, &block, &refs, bh);
-            }
-        }
+    /// Resolve an object on this node and verify it against its content id.
+    pub async fn resolve(&self, content_id: String) -> Result<Value, String> {
+        let id = parse_id("content id", &content_id)?;
+        let bytes = self.running().await?.resolve(id).await?;
+        Ok(json!({
+            "content_id": hex::encode(id),
+            "size": bytes.len(),
+            "verified": true,
+            "text": std::str::from_utf8(&bytes).ok(),
+            "hex": hex::encode(&bytes),
+        }))
+    }
 
-        Ok(block)
+    /// The path of a transaction, or of a published object, through the
+    /// chain: the transaction, its block and the validators that signed.
+    pub async fn trace(&self, id: String) -> Result<Value, String> {
+        let id = parse_id("transaction id", &id)?;
+        self.running().await?.trace(id).await
+    }
+
+    /// The newest published objects.
+    pub async fn feed(&self, limit: Option<u32>) -> Result<Value, String> {
+        self.running()
+            .await?
+            .feed(limit.unwrap_or(50) as usize)
+            .await
     }
 }
 
-fn host_node_clone_for_participant(host: &GardenNode) -> Result<GardenNode, String> {
-    let mut node = GardenNode::from_keypair(host.keypair.clone(), host.display_name.clone(), None);
-    node.set_network_addrs(host.host_multiaddr.clone(), host.relay_multiaddrs.clone());
-    node.settlement = host.settlement.clone();
-    if let Some(s) = &host.state {
-        let mut p_state = crate::garden::consensus::GardenChainState::new(
-            s.genesis.clone(),
-            host.display_name.clone(),
-            None,
-        )?;
-        p_state.budlum_domain_id = s.budlum_domain_id;
-        p_state.last_anchored_budlum_height = s.last_anchored_budlum_height;
-        node.state = Some(p_state);
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::chain::blockchain::Blockchain;
+    use crate::chain::chain_actor::ChainActor;
+    use crate::consensus::pow::PoWEngine;
+    use crate::core::chain_config::Network;
+    use crate::domain::types::DomainStatus;
+    use std::path::Path;
+
+    fn options() -> GardenOptions {
+        GardenOptions {
+            listen: Some("/ip4/127.0.0.1/tcp/0".into()),
+            round_ms: Some(200),
+            presence_interval_ms: Some(200),
+            host_timeout_ms: Some(1500),
+            suspend_after_ms: Some(3000),
+            ..GardenOptions::default()
+        }
     }
-    Ok(node)
+
+    fn text(value: &Value, pointer: &str) -> String {
+        value
+            .pointer(pointer)
+            .and_then(Value::as_str)
+            .unwrap_or_else(|| panic!("no text at {pointer} in {value}"))
+            .to_string()
+    }
+
+    fn files_under(dir: &Path) -> Vec<PathBuf> {
+        let mut found = Vec::new();
+        let mut pending = vec![dir.to_path_buf()];
+        while let Some(next) = pending.pop() {
+            let Ok(entries) = std::fs::read_dir(&next) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    pending.push(path);
+                } else {
+                    found.push(path);
+                }
+            }
+        }
+        found
+    }
+
+    async fn wait_final(service: &GardenService, tx: &str) -> Value {
+        for _ in 0..600 {
+            if let Ok(trace) = service.trace(tx.to_string()).await {
+                if trace.pointer("/stage").and_then(Value::as_str) == Some("final") {
+                    return trace;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        panic!("transaction {tx} did not become final");
+    }
+
+    async fn wait_status(service: &GardenService, wanted: &str) -> Value {
+        let mut last = Value::Null;
+        for _ in 0..600 {
+            last = service.status().await.unwrap();
+            if last.pointer("/garden/status").and_then(Value::as_str) == Some(wanted) {
+                return last;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        panic!("Garden did not become {wanted}: {last}");
+    }
+
+    #[tokio::test]
+    async fn garden_service_holds_one_garden_and_bounds_what_a_caller_asks_for() {
+        let service = GardenService::new(None, None);
+        let huge = GardenOptions {
+            max_validators: Some(1_000_000),
+            ..options()
+        };
+        let refusal = service
+            .create("Room".into(), "host".into(), huge)
+            .await
+            .unwrap_err();
+        assert!(refusal.contains("max_validators"), "{refusal}");
+        let huge = GardenOptions {
+            max_object_bytes: Some(u32::MAX),
+            ..options()
+        };
+        assert!(service
+            .create("Room".into(), "host".into(), huge)
+            .await
+            .is_err());
+        assert_eq!(service.status().await.unwrap()["garden"], Value::Null);
+
+        service
+            .create("Room".into(), "host".into(), options())
+            .await
+            .unwrap();
+        for _ in 0..3 {
+            let refusal = service
+                .create("Another".into(), "host".into(), options())
+                .await
+                .unwrap_err();
+            assert!(refusal.contains("already runs a Garden"), "{refusal}");
+        }
+        let unknown: Result<GardenOptions, _> =
+            serde_json::from_value(json!({ "listen": "/ip4/127.0.0.1/tcp/0", "peers": 9 }));
+        assert!(unknown.is_err());
+        service.leave().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn garden_service_keeps_caller_text_out_of_file_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let service = GardenService::new(None, Some(dir.path().to_path_buf()));
+        for (title, name) in [
+            ("../../outside", "host"),
+            ("Room", "../../outside"),
+            ("Room", "a/b"),
+            ("Room\u{0}", "host"),
+            ("Room", ""),
+        ] {
+            assert!(
+                service
+                    .create(title.into(), name.into(), options())
+                    .await
+                    .is_err(),
+                "{title:?} / {name:?} was accepted"
+            );
+        }
+        assert!(files_under(dir.path()).is_empty());
+
+        let created = service
+            .create("Room".into(), "host".into(), options())
+            .await
+            .unwrap();
+        let chain_id = text(&created, "/garden/chain_id");
+        let published = service
+            .publish("post".into(), "a post".into(), None, None, None)
+            .await
+            .unwrap();
+        wait_final(&service, &text(&published, "/tx_id")).await;
+        let files = files_under(dir.path());
+        assert!(!files.is_empty());
+        let root = dir.path().join("garden").join(&chain_id);
+        for file in &files {
+            assert!(file.starts_with(&root), "{file:?} is outside {root:?}");
+        }
+        let left = service.leave().await.unwrap();
+        assert_eq!(left["retired"], json!(true));
+        assert!(files_under(dir.path()).is_empty());
+    }
+
+    #[tokio::test]
+    async fn garden_service_removes_what_a_stopped_process_left_behind() {
+        let dir = tempfile::tempdir().unwrap();
+        let stale = dir.path().join("garden").join("00000000000000aa");
+        std::fs::create_dir_all(&stale).unwrap();
+        std::fs::write(stale.join("object"), b"left over").unwrap();
+        std::fs::write(dir.path().join("other"), b"not garden data").unwrap();
+        let _service = GardenService::new(None, Some(dir.path().to_path_buf()));
+        assert_eq!(files_under(dir.path()), vec![dir.path().join("other")]);
+    }
+
+    #[tokio::test]
+    async fn garden_services_share_content_and_wipe_it_when_they_leave() {
+        let host_dir = tempfile::tempdir().unwrap();
+        let guest_dir = tempfile::tempdir().unwrap();
+        let host = GardenService::new(None, Some(host_dir.path().to_path_buf()));
+        let guest = GardenService::new(None, Some(guest_dir.path().to_path_buf()));
+        let created = host
+            .create("Room".into(), "host".into(), options())
+            .await
+            .unwrap();
+        let invite = text(&created, "/invite");
+        assert_eq!(invite, text(&created, "/qr"));
+        let joined = guest
+            .join(invite.clone(), "guest".into(), options())
+            .await
+            .unwrap();
+        assert_eq!(text(&joined, "/garden/me/member"), "Active");
+
+        let image = vec![0x5a_u8; 70_000];
+        let published = guest
+            .publish(
+                "image".into(),
+                hex::encode(&image),
+                Some("hex".into()),
+                Some("image/png".into()),
+                None,
+            )
+            .await
+            .unwrap();
+        let tx = text(&published, "/tx_id");
+        let content_id = text(&published, "/content_id");
+        let trace = wait_final(&host, &tx).await;
+        assert_eq!(text(&trace, "/transaction/sender_name"), "guest");
+        assert_eq!(trace.pointer("/finality/needed"), Some(&json!(2)));
+        let resolved = host.resolve(content_id.clone()).await.unwrap();
+        assert_eq!(text(&resolved, "/hex"), hex::encode(&image));
+        assert_eq!(text(&resolved, "/content_id"), content_id);
+        assert!(!files_under(host_dir.path()).is_empty());
+
+        // The guest steps out: its disk is clean and it may come back.
+        let left = guest.leave().await.unwrap();
+        assert_eq!(left["can_return"], json!(true));
+        assert!(files_under(guest_dir.path()).is_empty());
+        assert_eq!(
+            text(&guest.status().await.unwrap(), "/garden/status"),
+            "Away"
+        );
+        assert!(guest.resolve(content_id.clone()).await.is_err());
+        let refusal = guest
+            .join(invite, "guest".into(), options())
+            .await
+            .unwrap_err();
+        assert!(refusal.contains("bud_gardenReturn"), "{refusal}");
+        let back = guest.rejoin().await.unwrap();
+        assert_eq!(text(&back, "/garden/me/member"), "Active");
+        let resolved = guest.resolve(content_id.clone()).await.unwrap();
+        assert_eq!(text(&resolved, "/hex"), hex::encode(&image));
+
+        // The host steps out: the Garden stands still and stays readable.
+        host.leave().await.unwrap();
+        wait_status(&guest, "Frozen").await;
+        let refusal = guest
+            .publish("message".into(), "anyone?".into(), None, None, None)
+            .await
+            .unwrap_err();
+        assert!(refusal.contains("frozen"), "{refusal}");
+        assert_eq!(
+            text(&guest.resolve(content_id.clone()).await.unwrap(), "/hex"),
+            hex::encode(&image)
+        );
+        host.rejoin().await.unwrap();
+        wait_status(&guest, "Active").await;
+
+        // Everyone leaves: the Garden is over and no disk keeps its data.
+        let left = guest.leave().await.unwrap();
+        assert_eq!(left["retired"], json!(false));
+        let left = host.leave().await.unwrap();
+        assert_eq!(left["retired"], json!(true));
+        assert_eq!(host.status().await.unwrap()["garden"], Value::Null);
+        assert!(files_under(host_dir.path()).is_empty());
+        assert!(files_under(guest_dir.path()).is_empty());
+        assert!(host.rejoin().await.is_err());
+    }
+
+    #[tokio::test]
+    async fn garden_service_shows_the_garden_on_budlum_until_it_retires() {
+        let blockchain = Blockchain::new(
+            std::sync::Arc::new(PoWEngine::new(2)),
+            None,
+            Network::Devnet.chain_id().value(),
+            None,
+        );
+        let (actor, chain) = ChainActor::new(blockchain);
+        tokio::spawn(async move {
+            actor.run().await;
+        });
+        let service = GardenService::new(Some(chain.clone()), None);
+        let created = service
+            .create("Room".into(), "host".into(), options())
+            .await
+            .unwrap();
+        assert_eq!(text(&created, "/garden/budlum/status"), "Active");
+        let domain_id = created
+            .pointer("/garden/budlum/domain_id")
+            .and_then(Value::as_u64)
+            .unwrap();
+
+        let published = service
+            .publish("message".into(), "hello".into(), None, None, None)
+            .await
+            .unwrap();
+        wait_final(&service, &text(&published, "/tx_id")).await;
+        let mut reported = false;
+        for _ in 0..200 {
+            let status = service.status().await.unwrap();
+            let height = status.pointer("/garden/height").and_then(Value::as_u64);
+            if height.is_some()
+                && status
+                    .pointer("/garden/budlum/finalized_height")
+                    .and_then(Value::as_u64)
+                    == height
+                && text(&status, "/garden/budlum/finalized_hash")
+                    == text(&status, "/garden/last_hash")
+            {
+                reported = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(reported, "Budlum did not record the Garden block");
+        let record = |domains: Vec<crate::domain::ConsensusDomain>| {
+            domains
+                .into_iter()
+                .find(|domain| u64::from(domain.id) == domain_id)
+                .unwrap()
+        };
+        let domain = record(chain.get_consensus_domains().await);
+        assert_eq!(domain.status, DomainStatus::Active);
+        assert_eq!(domain.last_committed_height, 1);
+        assert!(!domain.bridge_enabled);
+
+        let left = service.leave().await.unwrap();
+        assert_eq!(left["retired"], json!(true));
+        let domain = record(chain.get_consensus_domains().await);
+        assert_eq!(domain.status, DomainStatus::Retired);
+    }
 }

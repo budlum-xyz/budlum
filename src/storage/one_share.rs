@@ -11,6 +11,11 @@
 //! because there is no storage: the network holds a marker, the user holds the
 //! bytes. The single screen assembles from these shares, so everything the
 //! user can see is shown in one place with its responsibility attributed.
+//!
+//! WIRING: unwired - measured: no production module builds a
+//! `OneShareRegistry` or calls `screen`, `endpoint_refs`, `admit_as_server`
+//! or `all_user_held`. The module used to pass as wired only because `create`
+//! was a name no other module exported, so any `.create(` call counted.
 
 use crate::core::address::Address;
 use crate::storage::content_id::ContentId;

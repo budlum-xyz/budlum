@@ -192,7 +192,6 @@ src/storage/mobile_self.rs:availability_label
 src/storage/mobile_self.rs:put_user_content
 src/storage/mobile_self.rs:recommendation_for_content
 src/storage/mobile_self.rs:user_held_items
-src/storage/one_share.rs:all_user_held
 src/storage/one_share.rs:storage_fee_owed_usd
 src/storage/one_view.rs:contract_digest
 src/storage/one_view.rs:honest_custody
