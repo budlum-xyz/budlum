@@ -2654,10 +2654,12 @@ mod tests {
         let award =
             SettlementTx::RelayerIntent(Box::new(crate::relayer::policy::RelayerIntentTx::Award {
                 intent_id: [1; 32],
+                solver: Address::from([9; 32]),
             }));
         let other_award =
             SettlementTx::RelayerIntent(Box::new(crate::relayer::policy::RelayerIntentTx::Award {
                 intent_id: [2; 32],
+                solver: Address::from([9; 32]),
             }));
         let shared = SettlementTx::SharedSecurity(Box::new(
             crate::settlement::shared_security::SharedSecurityTx::SetRegistrar {
@@ -4203,9 +4205,12 @@ fn encode_relayer_intent_tx(tx: &crate::relayer::policy::RelayerIntentTx, out: &
             put_u8(out, 3);
             put_fixed(out, intent_id);
         }
-        RelayerIntentTx::Award { intent_id } => {
+        RelayerIntentTx::Award { intent_id, solver } => {
             put_u8(out, 4);
             put_fixed(out, intent_id);
+            // The named solver is part of the signed preimage: without it a
+            // relayer could redirect an owner's award to another bid.
+            put_fixed(out, solver.as_bytes());
         }
     }
 }

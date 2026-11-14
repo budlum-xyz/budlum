@@ -56,10 +56,24 @@ pub enum RelayerIntentTx {
     /// Expire an intent after its deadline, refunding its owner and slashing
     /// a still-live awarded bid that was not honoured.
     Expire { intent_id: [u8; 32] },
-    /// Freeze the cheapest eligible bid before a solver acts. Only the
-    /// owner may award, and an active award cannot be displaced. Appended to
-    /// preserve existing bincode enum discriminants.
-    Award { intent_id: [u8; 32] },
+    /// Freeze the bid of the solver the owner names, before that solver acts.
+    /// Only the owner may award, and an active award cannot be displaced.
+    ///
+    /// The owner names the solver because this door is irrevocable while the
+    /// awarded bid is live, and `settle_intent` requires the award before any
+    /// bid may be fulfilled or refunded. Awarding the cheapest bid instead
+    /// turned the door into a price auction that any bonded relayer could win
+    /// with one atom and then never honour, locking the owner's escrow until
+    /// the deadline. The named bid must also leave at least
+    /// `MIN_RELAYER_AWARD_WINDOW_BLOCKS` before it expires, so a bid expiring
+    /// exactly at the intent deadline can no longer take the intent for its
+    /// whole life.
+    ///
+    /// Appended to preserve existing bincode enum discriminants.
+    Award {
+        intent_id: [u8; 32],
+        solver: Address,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -649,12 +663,24 @@ impl RelayerPolicyRegistry {
         })
     }
 
-    /// Lock a winner before external execution. An owner can replace an
-    /// expired award, but never displace a still-live one with a later bid.
+    /// Lock the solver the owner names before external execution. An owner can
+    /// replace an expired award, but never displace a still-live one.
+    ///
+    /// The solver is named, not auctioned: see [`RelayerIntentTx::Award`]. The
+    /// named bid must still leave `MIN_RELAYER_AWARD_WINDOW_BLOCKS` of its own
+    /// life, so a bid that expires at the intent deadline cannot be frozen for
+    /// the whole intent and then left unhonoured.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the intent is unknown or settled, the caller is not
+    /// the owner, the intent is too close to its deadline, a live award already
+    /// exists, the named solver has no bid, or that bid expires too soon.
     pub fn award_intent(
         &mut self,
         intent_id: [u8; 32],
         owner: Address,
+        solver: Address,
         current_block: u64,
     ) -> Result<RelayerAward, String> {
         let intent = self
@@ -681,10 +707,17 @@ impl RelayerPolicyRegistry {
                 return Err("RelayerPolicyRegistry already has an active award".into());
             }
         }
-        let relayer = self
-            .best_bid_at(&intent_id, current_block)
-            .ok_or_else(|| "RelayerPolicyRegistry has no eligible bid".to_string())?
-            .relayer;
+        let bid = self
+            .bids
+            .get(&intent_id)
+            .into_iter()
+            .flatten()
+            .find(|bid| bid.relayer == solver)
+            .ok_or_else(|| "RelayerPolicyRegistry solver has no bid".to_string())?;
+        if bid.expires_at_block.saturating_sub(current_block) < MIN_RELAYER_AWARD_WINDOW_BLOCKS {
+            return Err("RelayerPolicyRegistry selected bid expires too soon".into());
+        }
+        let relayer = bid.relayer;
         let award = RelayerAward {
             relayer,
             awarded_at_block: current_block,
@@ -1211,12 +1244,87 @@ mod tests {
             second.relayer
         );
         let before = registry.root();
-        registry.award_intent(intent_id, owner, 10).unwrap();
+        registry
+            .award_intent(intent_id, owner, second.relayer, 10)
+            .unwrap();
         let settlement = registry
             .settle_intent(intent_id, second.relayer, second.quoted_fee, 20)
             .unwrap();
         assert_eq!(settlement.status, IntentSettlementStatus::Executed);
         assert_ne!(before, registry.root());
+    }
+
+    #[test]
+    fn the_owner_names_the_solver_and_a_deadline_long_one_atom_bid_cannot_take_the_intent() {
+        let owner = addr(1);
+        let policy = make_policy(owner);
+        let mut registry = RelayerPolicyRegistry::new();
+        let id = registry
+            .submit_intent(intent(owner, &policy), &policy, 10)
+            .unwrap();
+        let deadline = registry.intents[&id].deadline_block;
+        let bid = |relayer, quoted_fee, expires_at_block| SolverBid {
+            intent_id: id,
+            relayer,
+            quoted_fee,
+            proof_commitment: [3; 32],
+            bond: 10,
+            expires_at_block,
+        };
+        // The griefing bid: one atom, expiring exactly at the intent deadline,
+        // so it is live at every height an award is allowed and the expiry
+        // sweep never slashes it.
+        registry.submit_bid(bid(addr(9), 1, deadline), 10).unwrap();
+        // The solver the owner actually wants to pay.
+        registry
+            .submit_bid(bid(addr(8), 40, deadline + 40), 10)
+            .unwrap();
+        assert_eq!(registry.best_bid_at(&id, 10).unwrap().relayer, addr(9));
+
+        // The award goes to the named solver, not to the cheapest bid.
+        let award = registry.award_intent(id, owner, addr(8), 10).unwrap();
+        assert_eq!(award.relayer, addr(8));
+        assert_eq!(registry.awards[&id].relayer, addr(8));
+
+        // A solver with no bid cannot be named.
+        let mut other = RelayerPolicyRegistry::new();
+        let oid = other
+            .submit_intent(intent(owner, &policy), &policy, 10)
+            .unwrap();
+        other.submit_bid(bid(addr(9), 1, deadline), 10).unwrap();
+        assert!(other
+            .award_intent(oid, owner, addr(7), 10)
+            .unwrap_err()
+            .contains("solver has no bid"));
+
+        // A bid that lapses before the intent deadline is refused once it no
+        // longer leaves the award window of its own life. The intent itself is
+        // still far enough from its deadline here, so this is the bid's own
+        // expiry that refuses the award, not the intent-level window check.
+        let mut short = RelayerPolicyRegistry::new();
+        let sid = short
+            .submit_intent(intent(owner, &policy), &policy, 10)
+            .unwrap();
+        let short_deadline = short.intents[&sid].deadline_block;
+        short
+            .submit_bid(
+                SolverBid {
+                    intent_id: sid,
+                    relayer: addr(9),
+                    quoted_fee: 1,
+                    proof_commitment: [3; 32],
+                    bond: 10,
+                    expires_at_block: short_deadline - MIN_RELAYER_AWARD_WINDOW_BLOCKS / 2,
+                },
+                10,
+            )
+            .unwrap();
+        let at = short_deadline - MIN_RELAYER_AWARD_WINDOW_BLOCKS;
+        assert!(short_deadline - at >= MIN_RELAYER_AWARD_WINDOW_BLOCKS);
+        assert!(short
+            .award_intent(sid, owner, addr(9), at)
+            .unwrap_err()
+            .contains("expires too soon"));
     }
 
     #[test]
@@ -1237,10 +1345,13 @@ mod tests {
         };
         registry.submit_bid(bid(addr(9), 10, 20), 10).unwrap();
         registry.submit_bid(bid(addr(8), 20, 45), 10).unwrap();
-        assert!(registry.award_intent(id, addr(7), 10).is_err());
+        assert!(registry.award_intent(id, addr(7), addr(9), 10).is_err());
         let before_award = registry.root();
         assert_eq!(
-            registry.award_intent(id, owner, 10).unwrap().relayer,
+            registry
+                .award_intent(id, owner, addr(9), 10)
+                .unwrap()
+                .relayer,
             addr(9)
         );
         assert_ne!(before_award, registry.root());
@@ -1250,14 +1361,17 @@ mod tests {
         assert_eq!(restored.awards[&id].relayer, addr(9));
         registry.submit_bid(bid(addr(6), 1, 45), 11).unwrap();
         assert!(
-            registry.award_intent(id, owner, 11).is_err(),
+            registry.award_intent(id, owner, addr(6), 11).is_err(),
             "a later underbid cannot change a live award"
         );
         let mut original_winner = registry.clone();
         assert!(original_winner.settle_intent(id, addr(6), 1, 12).is_err());
         original_winner.settle_intent(id, addr(9), 10, 12).unwrap();
         assert_eq!(
-            registry.award_intent(id, owner, 20).unwrap().relayer,
+            registry
+                .award_intent(id, owner, addr(6), 20)
+                .unwrap()
+                .relayer,
             addr(6)
         );
         assert!(registry.settle_intent(id, addr(9), 10, 21).is_err());
@@ -1306,7 +1420,9 @@ mod tests {
             expires_at_block: 80,
         };
         registry.submit_bid(bid, 10).unwrap();
-        registry.award_intent(intent_id, owner, 10).unwrap();
+        registry
+            .award_intent(intent_id, owner, addr(9), 10)
+            .unwrap();
         assert!(registry
             .settle_intent(intent_id, addr(9), 40, 50)
             .unwrap_err()
@@ -1354,7 +1470,9 @@ mod tests {
             expires_at_block: 30,
         };
         registry.submit_bid(bid, 10).unwrap();
-        registry.award_intent(intent_id, owner, 10).unwrap();
+        registry
+            .award_intent(intent_id, owner, addr(9), 10)
+            .unwrap();
         assert!(registry
             .settle_intent(intent_id, addr(9), 41, 20)
             .unwrap_err()
@@ -1388,7 +1506,7 @@ mod tests {
             intent.intent_id = intent.calculate_id();
             let id = registry.submit_intent(intent, &policy, 10).unwrap();
             registry.submit_bid(bid_for(id, addr(9), 40), 10).unwrap();
-            registry.award_intent(id, owner, 10).unwrap();
+            registry.award_intent(id, owner, addr(9), 10).unwrap();
             ids.push(id);
         }
         // Settled out of key order: the age order is ids[1], ids[2], ids[0].
@@ -1446,7 +1564,9 @@ mod tests {
                 10,
             )
             .unwrap();
-        registry.award_intent(intent_id, owner, 10).unwrap();
+        registry
+            .award_intent(intent_id, owner, addr(9), 10)
+            .unwrap();
         assert_eq!(registry.prune_expired(50), 0);
         let (returned_owner, escrow, bids) = registry.expire_intent(intent_id, 50).unwrap();
         assert_eq!(returned_owner, owner);
