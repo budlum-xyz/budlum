@@ -749,10 +749,11 @@ mod tests {
         let code = minimal_budzero_program();
         assert!(worker.validate_deploy(&code).is_ok());
 
-        // Testnet/mainnet active opcodes decode cleanly; unactivated or invalid words still fail.
-        for active in [Opcode::VerifyMerkle, Opcode::VerifyInference] {
+        // The default schedule keeps both opcodes closed, so a deploy that
+        // carries one is refused. Invalid words fail as well.
+        for gated in [Opcode::VerifyMerkle, Opcode::VerifyInference] {
             let raw_u64 = Instruction {
-                opcode: active,
+                opcode: gated,
                 rd: 1,
                 rs1: 0,
                 rs2: 0,
@@ -760,7 +761,7 @@ mod tests {
             }
             .encode();
             let raw = raw_u64.to_le_bytes();
-            assert!(worker.validate_deploy(&raw).is_ok());
+            assert!(worker.validate_deploy(&raw).is_err());
             assert!(bud_isa::Instruction::decode_for_mainnet(
                 raw_u64,
                 bud_isa::MainnetActivation::closed(),

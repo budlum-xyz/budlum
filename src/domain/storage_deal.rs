@@ -2055,9 +2055,8 @@ impl StorageRegistry {
             d.manifest_id == *manifest_id
                 && matches!(d.status, DealStatus::Active)
                 && d.payer != Some(*caller)
-                && d.payer.map_or(true, |p| {
-                    d.operator != p && d.economics.fee_per_byte_epoch > 0
-                })
+                && d.payer
+                    .is_none_or(|p| d.operator != p && d.economics.fee_per_byte_epoch > 0)
         })
     }
 
