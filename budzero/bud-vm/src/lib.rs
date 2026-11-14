@@ -2207,7 +2207,7 @@ mod poseidon_parameter_tests {
             rd: 0,
             rs1: 0,
             rs2: 0,
-            imm: 0,
+            imm: -1,
         }
         .encode();
         let program = vec![verify, jump];
@@ -2215,10 +2215,9 @@ mod poseidon_parameter_tests {
         let receipt = vm.run_receipt(&program);
         assert!(!receipt.success);
         assert_eq!(receipt.error, Some(VmError::OutOfGas));
-        // `consume_gas` includes the refused instruction in the receipt;
-        // charge at most one VerifyMerkle beyond the limit.
-        assert!(receipt.gas_used > 4_096);
-        assert!(receipt.gas_used <= 4_096 + Vm::gas_cost(Opcode::VerifyMerkle));
+        // The fixture loops back to VerifyMerkle, and the rejected charge must
+        // leave the receipt at or below the configured gas budget.
+        assert!(receipt.gas_used <= 4_096);
         assert!(vm.trace.len() <= 410 * (1 + MERKLE_ROUNDS) + 1);
     }
 
