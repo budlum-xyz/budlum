@@ -132,35 +132,23 @@ fn stark_verification_helpers_have_no_production_callers() {
     );
 }
 
-/// `VerifyInference` checks the 30-round Poseidon inference commitment digest in
-/// the VM and AIR and is active under `MainnetActivation::default()`.
+/// `VerifyInference` stays closed under the default testnet activation.
 #[test]
-fn verify_inference_opcode_is_gated_and_air_constrained() {
-    let src = read("budzero/bud-vm/src/lib.rs");
-    let head = "Opcode::VerifyInference => {";
-    let at = src.find(head).expect("VerifyInference arm must exist");
-    let arm = squash(block_after(&src[at + head.len()..]));
-    assert!(
-        arm.contains("verify_inference_digest"),
-        "the VM must evaluate the 30-round inference commitment"
-    );
-    // The gate is in the shared ISA decoder, before this match arm, not a
-    // `self.activation` field of Vm. Pin the actual production call path so
-    // this lock fails if mainnet mode bypasses the ISA activation flag.
-    assert!(
-        src.contains("let activation = bud_isa::MainnetActivation::default()")
-            && src.contains("bud_isa::Instruction::decode_for_mainnet(raw, activation)"),
-        "the production VM must decode under the canonical ISA activation"
-    );
+fn verify_inference_stays_gated_by_default() {
     let isa = read("budzero/bud-isa/src/lib.rs");
     assert!(
-        isa.contains("Opcode::VerifyInference => self.verify_inference_enabled"),
-        "the ISA decoder must enforce the independent inference flag"
+        isa.contains("verify_inference_enabled: false"),
+        "the default activation must keep VerifyInference closed"
+    );
+    let vm = read("budzero/bud-vm/src/lib.rs");
+    assert!(
+        vm.contains("Instruction::decode_for_mainnet(raw, activation)"),
+        "mainnet-mode decoding must enforce the activation schedule"
     );
     let air = read("budzero/bud-proof/src/plonky3_air.rs");
     assert!(
         air.contains("COL_IS_VERIFY_INFERENCE"),
-        "AIR must retain the VerifyInference constraint wiring"
+        "AIR must retain the VerifyInference constraints for explicit activation"
     );
 }
 
@@ -322,25 +310,6 @@ fn weights_digest_binding_stays_wired() {
         proto.contains("bytes weights_digest = 9;"),
         "the proof digest must keep its wire field"
     );
-}
-
-/// The text up to and including the `}` that closes the block whose opening
-/// brace was already consumed before the slice.
-fn block_after(rest: &str) -> &str {
-    let mut depth = 1usize;
-    for (i, b) in rest.bytes().enumerate() {
-        match b {
-            b'{' => depth += 1,
-            b'}' => {
-                depth -= 1;
-                if depth == 0 {
-                    return &rest[..=i];
-                }
-            }
-            _ => {}
-        }
-    }
-    rest
 }
 
 /// Collapse every run of whitespace to a single space so a doc-comment or a

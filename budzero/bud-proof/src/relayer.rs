@@ -756,9 +756,8 @@ mod tests {
         assert!(report.relay_token_line().contains("relay-status alarm"));
     }
 
-    /// A relay on production default refuses the canonical but still-unbound
-    /// storage challenge. An isolated full-activation proof demonstrates that
-    /// the refusal is the opcode gate, not a malformed STARK.
+    /// The default testnet activation refuses the canonical storage challenge;
+    /// only an explicit full activation permits it.
     #[test]
     fn default_activation_refuses_the_canonical_verify_merkle_program() {
         let (envelope, pi, program) = prove_canonical();
@@ -783,7 +782,7 @@ mod tests {
         assert_ne!(
             report.status,
             RelayStatus::Ok,
-            "the production-default opcode must not be accepted"
+            "the closed opcode must not be accepted"
         );
         assert_eq!(report.status, RelayStatus::Alarm);
         let alarm = report.alarm.as_ref().expect("alarm present");

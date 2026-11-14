@@ -1325,7 +1325,7 @@ mod tests {
         let err = ActivationArg::Full
             .relay_state()
             .expect_err("a signed report under the open state must be refused");
-        assert!(err.contains("does not record"), "{err}");
+        assert!(err.contains("relay refuses --activation full"), "{err}");
     }
 
     /// The relay's argument set has to parse, and `--output` has to default:
