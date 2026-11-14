@@ -38,7 +38,7 @@ use super::host::Target;
 use super::manifest::{Route, RouteError, SiteManifest};
 
 /// The HTTP status the gateway answers with when a proof does not verify.
-pub const PROOF_FAILED_STATUS: u16 = 502;
+const PROOF_FAILED_STATUS: u16 = 502;
 
 /// A verified state root for a block height.
 pub trait StateRoots {
@@ -90,6 +90,9 @@ pub trait ContentSource {
 }
 
 /// A resolved name: the branch that proved it and the height it was proved at.
+///
+/// exposed for: the gateway binary, which receives it from
+/// [`resolve_verified`] and reads both fields.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Resolved {
     /// The verified branch. Every field the gateway serves comes from here.
@@ -154,7 +157,7 @@ impl GatewayError {
 ///
 /// [`GatewayError::NoProverAnswered`] when no prover produced a proof, and
 /// [`GatewayError::ProversDisagree`] when two produced different ones.
-pub fn agreed_proof<P: NameProver>(provers: &[P], name: &str) -> Result<NameProof, GatewayError> {
+fn agreed_proof<P: NameProver>(provers: &[P], name: &str) -> Result<NameProof, GatewayError> {
     let mut agreed: Option<NameProof> = None;
     for prover in provers {
         let Ok(answer) = prover.proof_for(name) else {
@@ -183,7 +186,7 @@ pub fn agreed_proof<P: NameProver>(provers: &[P], name: &str) -> Result<NameProo
 ///
 /// [`GatewayError::ProofFailed`], [`GatewayError::NotFound`] or
 /// [`GatewayError::Expired`].
-pub fn verified_branch<'a>(
+fn verified_branch<'a>(
     answer: &'a NameProof,
     root: &[u8; 32],
 ) -> Result<&'a BnsMerkleBranch, GatewayError> {
@@ -225,7 +228,7 @@ pub fn verified_branch<'a>(
 /// [`GatewayError::NotFound`], [`GatewayError::Expired`],
 /// [`GatewayError::NoSuchSubdomain`] or [`GatewayError::NoContent`], in that
 /// order of precedence.
-pub fn resolve_verified<P: NameProver, R: StateRoots>(
+pub fn resolve_verified<P: NameProver, R: StateRoots + ?Sized>(
     provers: &[P],
     roots: &R,
     target: &Target,

@@ -184,7 +184,7 @@ impl BnsRegistry {
     ///
     /// Returns [`BnsError::NameTaken`] when the record is still within
     /// `current_epoch < expires_at + GRACE_PERIOD`.
-    pub fn reclaim_expired(&mut self, name: &str, current_epoch: u64) -> Result<(), BnsError> {
+    fn reclaim_expired(&mut self, name: &str, current_epoch: u64) -> Result<(), BnsError> {
         let Some(record) = self.names.get(name) else {
             return Ok(());
         };
@@ -1214,7 +1214,7 @@ impl BnsRegistry {
 
     /// The extras a name record discloses, in the shape a proof carries.
     #[must_use]
-    pub(crate) fn extras_from_record(record: &NameRecord) -> crate::bns::types::BnsBranchExtras {
+    fn extras_from_record(record: &NameRecord) -> crate::bns::types::BnsBranchExtras {
         crate::bns::types::BnsBranchExtras {
             resolver: record.resolver,
             address: record.address,
@@ -1230,7 +1230,7 @@ impl BnsRegistry {
     /// The commitment over a disclosed extras pre-image (`BDLM_BNS_EXTRAS_V1`).
     ///
     /// The encoding is the one the leaf digest already used, so the digest of
-    /// [`Self::extras_from_record`] equals [`Self::record_extras_digest`] field
+    /// `Self::extras_from_record` equals [`Self::record_extras_digest`] field
     /// for field. A proof that ships its extras can therefore be checked
     /// against the header root instead of being believed.
     #[must_use]

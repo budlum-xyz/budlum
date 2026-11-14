@@ -1,4 +1,7 @@
-//! WIRING: unwired - `RemoteStateView` is IP-60 T-Expansion and no production transition consumes it before activation after M7.
+//! WIRING: unwired - `RemoteStateView::verify_for_chain` has no production caller yet.
+//! The rest is reached: `settlement::app_binding` verifies payment proofs
+//! through `LightClient::verify_global_header`, and the `budlum-light` binary
+//! drives the sync.
 //!
 //! Succinct light-client verification.
 //!

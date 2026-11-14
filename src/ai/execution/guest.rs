@@ -191,6 +191,9 @@ pub fn input_commitment(limbs: &[i32]) -> [u8; 32] {
 /// Encodes `i32` output limbs in canonical little-endian order so
 /// `AiInferenceResult::output_ref` and `canonical_output_commitment` match
 /// the proven STARK inference output commitment end-to-end.
+///
+/// exposed for: a requester building `output_ref` bytes outside this module;
+/// today only the blind-compute and B.U.D. 3.0 door tests do.
 #[must_use]
 pub fn encode_output_limbs(limbs: &[i32]) -> Vec<u8> {
     limbs.iter().flat_map(|x| x.to_le_bytes()).collect()
@@ -200,6 +203,9 @@ pub fn encode_output_limbs(limbs: &[i32]) -> Vec<u8> {
 /// The request and its execution proof must use the *same* admission hash:
 /// `AI_INPUT_COMMIT_V1` over these bytes, not the separate SHA3 limb commitment
 /// used by the private-execution guest.
+///
+/// exposed for: a requester building `input_ref` bytes outside this module;
+/// today only the blind-compute and B.U.D. 3.0 door tests do.
 #[must_use]
 pub fn encode_input_limbs(limbs: &[i32]) -> Vec<u8> {
     encode_output_limbs(limbs)
