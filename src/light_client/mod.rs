@@ -741,29 +741,45 @@ impl LightClient {
         Ok(())
     }
 
-    /// Generates a checkpoint-aware committee aggregate proof check via `bud_proof::sigagg` (`BLG-239`).
+    /// Checks an aggregated committee batch with `bud_proof::sigagg` (`BLG-239`) against the
+    /// committee this light client trusts.
+    ///
+    /// A batch carries its own committee root, weights and key digests, so none of that
+    /// authenticates it. `committee` and `verify_signature` are the caller's: the batch must
+    /// carry the root derived from `committee`, every entry must match a member, every signature
+    /// must verify, and the quorum is the weight of the verified signers.
     ///
     /// Convenience: exposed for light-client committee batch callers.
     ///
     /// # Errors
     ///
     /// Returns [`LightClientError::VerificationFailed`] when the aggregated
-    /// batch does not meet `required_weight` or fails commitment verification.
-    pub fn verify_committee_batch(
+    /// batch does not match the committee, carries a signature that does not
+    /// verify, or does not meet `required_weight`.
+    pub fn verify_committee_batch<F>(
         batch: &bud_proof::sigagg::AggregatedSignatureBatch,
-        expected_committee_root: &[u8; 32],
+        committee: &[bud_proof::sigagg::CommitteeMember],
         required_weight: u64,
-    ) -> Result<(), LightClientError> {
-        bud_proof::sigagg::verify_aggregated_batch(batch, expected_committee_root, required_weight)
-            .map_err(|e| {
-                LightClientError::VerificationFailed(format!(
-                    "BLG-239 aggregated committee batch failed: {e:?}"
-                ))
-            })
+        verify_signature: F,
+    ) -> Result<(), LightClientError>
+    where
+        F: Fn(&bud_proof::sigagg::SignerSignature, &[u8; 32]) -> bool,
+    {
+        bud_proof::sigagg::verify_aggregated_batch(
+            batch,
+            committee,
+            required_weight,
+            verify_signature,
+        )
+        .map_err(|e| {
+            LightClientError::VerificationFailed(format!(
+                "BLG-239 aggregated committee batch failed: {e:?}"
+            ))
+        })
     }
 
     /// Verifies an aggregated committee batch against `checkpoint.block_hash`
-    /// and `expected_committee_root`, ensuring `BLG-239` batch verification stays
+    /// and the trusted `committee`, ensuring `BLG-239` batch verification stays
     /// wired on the production light-client path.
     ///
     /// Convenience: exposed for light-client checkpoint batch verification callers.
@@ -773,13 +789,17 @@ impl LightClient {
     /// Returns [`LightClientError`] if `checkpoint.block_hash` is not a 32-byte
     /// hex digest, does not match `batch.message_digest`, or fails
     /// [`Self::verify_committee_batch`].
-    pub fn apply_committee_batch_checkpoint(
+    pub fn apply_committee_batch_checkpoint<F>(
         &self,
         checkpoint: &VerifiedCheckpoint,
         batch: &bud_proof::sigagg::AggregatedSignatureBatch,
-        expected_committee_root: &[u8; 32],
+        committee: &[bud_proof::sigagg::CommitteeMember],
         required_weight: u64,
-    ) -> Result<(), LightClientError> {
+        verify_signature: F,
+    ) -> Result<(), LightClientError>
+    where
+        F: Fn(&bud_proof::sigagg::SignerSignature, &[u8; 32]) -> bool,
+    {
         let _ = &self.trusted;
         let hash_bytes = hex::decode(&checkpoint.block_hash)
             .map_err(|_| LightClientError::MalformedHash(checkpoint.block_hash.clone()))?;
@@ -789,7 +809,7 @@ impl LightClient {
                     .to_string(),
             ));
         }
-        Self::verify_committee_batch(batch, expected_committee_root, required_weight)
+        Self::verify_committee_batch(batch, committee, required_weight, verify_signature)
     }
 
     /// Evaluates Phase-A dual finality parity between the native finality path
@@ -979,6 +999,47 @@ mod tests {
     use bls12_381::{G1Affine, G1Projective, Scalar};
 
     const TEST_CHAIN_ID: u64 = crate::core::transaction::DEFAULT_CHAIN_ID;
+
+    /// The committee batch check takes the committee and the signature check from the caller. A
+    /// batch of filler bytes with the committee's own root and weights used to pass, because
+    /// nothing verified a signature and the batch declared its own quorum.
+    #[test]
+    fn a_committee_batch_of_filler_signatures_is_refused() {
+        use bud_proof::sigagg::{
+            aggregate_signatures, compute_committee_root, CommitteeMember, SignatureScheme,
+            SignerSignature,
+        };
+        let committee: Vec<CommitteeMember> = vec![
+            (0, 30, SignatureScheme::Ed25519, [1u8; 32]),
+            (1, 40, SignatureScheme::Bls, [2u8; 32]),
+            (2, 50, SignatureScheme::MlDsa87, [3u8; 32]),
+        ];
+        let entries: Vec<SignerSignature> = committee
+            .iter()
+            .map(|&(idx, weight, scheme, key)| SignerSignature {
+                signer_index: idx,
+                weight,
+                scheme,
+                public_key_digest: key,
+                signature: vec![0xA5; scheme.min_signature_len()],
+                threshold_witness: None,
+            })
+            .collect();
+        let batch = aggregate_signatures([0x42u8; 32], compute_committee_root(&committee), entries)
+            .expect("a well-formed batch");
+
+        // A verifier that checks the signatures refuses the filler.
+        match LightClient::verify_committee_batch(&batch, &committee, 80, |_, _| false) {
+            Err(LightClientError::VerificationFailed(message)) => {
+                assert!(message.contains("InvalidSignature"), "{message}");
+            }
+            other => panic!("filler signatures must be refused: {other:?}"),
+        }
+        // Control: the same batch passes when the caller's verifier accepts it,
+        assert!(LightClient::verify_committee_batch(&batch, &committee, 80, |_, _| true).is_ok());
+        // and the quorum is the committee's weight, not a number the batch declares.
+        assert!(LightClient::verify_committee_batch(&batch, &committee, 121, |_, _| true).is_err());
+    }
 
     /// The trust anchor is a 64-hex digest in its one canonical spelling: an
     /// upper-case copy names the same block to a human, and a different string
