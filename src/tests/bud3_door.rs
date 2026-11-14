@@ -1569,7 +1569,7 @@ fn testnet_sealed_field_native_remote_view_and_blind_compute_stays_closed() {
         AiInferenceRequest, AiInferenceResult, AiModelId, AiModelSpec, AiRequestId, BoundedBytes,
     };
     use crate::light_client::{RemoteMerkleStep, RemoteStateView, VerifiedCheckpoint};
-    use crate::privacy::{EscrowCommittee, EscrowedDisclosure, THRESHOLD_ESCROW_N};
+    use crate::privacy::{EscrowCommittee, ThresholdEscrow, THRESHOLD_ESCROW_N};
     use crate::settlement::GlobalBlockHeader;
     use crate::storage::bud3::{
         open_sealed_object_with_profile, seal_object_with_profile, sealed_key_commitment,
@@ -1601,7 +1601,7 @@ fn testnet_sealed_field_native_remote_view_and_blind_compute_stays_closed() {
     let rpc = Bud3RpcService::default();
     assert!(rpc.archival_candidates(100).is_empty());
 
-    // 2. EscrowedDisclosure (ThresholdEscrow) open on testnet committee.
+    // 2. ThresholdEscrow open on testnet committee.
     let testnet_chain = crate::core::chain_config::Network::Testnet
         .chain_id()
         .value();
@@ -1620,7 +1620,7 @@ fn testnet_sealed_field_native_remote_view_and_blind_compute_stays_closed() {
         nonce: 0,
         members,
     };
-    let escrow = EscrowedDisclosure::open(committee, manifest.object_commitment)
+    let escrow = ThresholdEscrow::open(committee, manifest.object_commitment)
         .expect("escrow committee opens cleanly");
     assert_eq!(escrow.amount_commitment, manifest.object_commitment);
 

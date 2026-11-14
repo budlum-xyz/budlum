@@ -1,11 +1,9 @@
 //! Containment defaults check for `budzero`.
 //!
-//! `MainnetActivation` in `bud-isa` now enables both AIR-backed `VerifyMerkle`
-//! (64-depth 30-round Poseidon path verification) and `VerifyInference`
-//! (30-round Poseidon inference commitment digest) under
-//! `MainnetActivation::default()`, while `bud-vm` decodes against
-//! `MainnetActivation::default()` and `src/execution/zkvm.rs` keeps mainnet
-//! execution mode enabled.
+//! `MainnetActivation::default()` in `bud-isa` keeps `VerifyMerkle` and
+//! `VerifyInference` closed. A caller that wants them names an explicit
+//! schedule. `bud-vm` decodes against `MainnetActivation::default()` and
+//! `src/execution/zkvm.rs` keeps mainnet execution mode enabled.
 
 use std::fmt::Write as _;
 use std::fs;
@@ -37,14 +35,14 @@ pub fn check(isa_code: &str, vm_code: &str, zkvm_code: &str) -> Result<String, S
     for flag in ["verify_merkle_enabled", "verify_inference_enabled"] {
         let on = format!("{flag}: true");
         let off = format!("{flag}: false");
-        if !default_body.contains(&on) {
+        if !default_body.contains(&off) {
             missing.push(format!(
-                "MainnetActivation::default() must enable {flag} (AIR-backed verification is active)."
+                "MainnetActivation::default() must keep {flag} closed."
             ));
         }
-        if default_body.contains(&off) {
+        if default_body.contains(&on) {
             missing.push(format!(
-                "MainnetActivation::default() disables {flag} somewhere in the impl."
+                "MainnetActivation::default() opens {flag} somewhere in the impl."
             ));
         }
     }
@@ -62,8 +60,17 @@ pub fn check(isa_code: &str, vm_code: &str, zkvm_code: &str) -> Result<String, S
     if zkvm_code.contains("with_mainnet_mode(") && zkvm_code.contains("false)") {
         // Test helpers may construct non-mainnet VMs, so check production path.
         if let Some(exec_idx) = zkvm_code.find("pub fn execute_bytecode_mainnet") {
-            let fn_slice = &zkvm_code[exec_idx..zkvm_code.len().min(exec_idx + 1200)];
-            if !fn_slice.contains("with_mainnet_mode") || fn_slice.contains("false") {
+            // Read this function's body only: the neighbouring test helper
+            // builds a non-mainnet VM on purpose.
+            let rest = &zkvm_code[exec_idx..];
+            let fn_slice = &rest[..rest.find("\n    }\n").unwrap_or(rest.len())];
+            let direct = fn_slice.contains("with_mainnet_mode");
+            // The door may delegate, as long as it passes `true` to the one
+            // inner function that builds the VM from that flag.
+            let delegated = fn_slice.contains("execute_bytecode_inner(")
+                && fn_slice.contains(", true,")
+                && zkvm_code.contains("gas_limit, mainnet)");
+            if !(direct || delegated) || fn_slice.contains("false") {
                 missing.push(String::from(
                     "execute_bytecode_mainnet does not invoke Vm::with_mainnet_mode(..., true).",
                 ));
@@ -80,7 +87,7 @@ pub fn check(isa_code: &str, vm_code: &str, zkvm_code: &str) -> Result<String, S
     }
 
     Ok(String::from(
-        "OK: MainnetActivation::default() enables VerifyMerkle & VerifyInference, and bud-vm reads default().",
+        "OK: MainnetActivation::default() keeps VerifyMerkle & VerifyInference closed, and bud-vm reads default().",
     ))
 }
 
@@ -109,19 +116,19 @@ pub fn run(root: &Path) -> Result<String, String> {
 ///
 /// # Errors
 ///
-/// Returns an error if the canary check stops distinguishing valid defaults from closed/mismatched ones.
+/// Returns an error if the canary check stops distinguishing valid defaults from opened/mismatched ones.
 pub fn self_test() -> Result<String, String> {
-    let good_isa = "pub struct MainnetActivation {}\nimpl Default for MainnetActivation {\n    fn default() -> Self {\n        Self {\n            verify_merkle_enabled: true,\n            verify_inference_enabled: true,\n        }\n    }\n}\n";
+    let good_isa = "pub struct MainnetActivation {}\nimpl Default for MainnetActivation {\n    fn default() -> Self {\n        Self {\n            verify_merkle_enabled: false,\n            verify_inference_enabled: false,\n        }\n    }\n}\n";
     let good_vm = "fn decode() { MainnetActivation::default(); }\n";
     let good_zkvm =
         "pub fn execute_bytecode_mainnet() { Vm::with_mainnet_mode(1024, 100, true); }\n";
     if check(good_isa, good_vm, good_zkvm).is_err() {
-        return Err(String::from("canary: active default fixture failed"));
+        return Err(String::from("canary: closed default fixture failed"));
     }
 
-    let closed_isa = "pub struct MainnetActivation {}\nimpl Default for MainnetActivation {\n    fn default() -> Self {\n        Self {\n            verify_merkle_enabled: false,\n            verify_inference_enabled: true,\n        }\n    }\n}\n";
-    if check(closed_isa, good_vm, good_zkvm).is_ok() {
-        return Err(String::from("canary: closed VerifyMerkle flag passed"));
+    let opened_isa = "pub struct MainnetActivation {}\nimpl Default for MainnetActivation {\n    fn default() -> Self {\n        Self {\n            verify_merkle_enabled: true,\n            verify_inference_enabled: false,\n        }\n    }\n}\n";
+    if check(opened_isa, good_vm, good_zkvm).is_ok() {
+        return Err(String::from("canary: opened VerifyMerkle flag passed"));
     }
 
     let full_vm = "fn decode() { MainnetActivation::full(); }\n";
@@ -132,6 +139,6 @@ pub fn self_test() -> Result<String, String> {
     }
 
     Ok(String::from(
-        "canary OK: active defaults -> PASS, closed/full override -> FAIL.",
+        "canary OK: closed defaults -> PASS, opened/full override -> FAIL.",
     ))
 }

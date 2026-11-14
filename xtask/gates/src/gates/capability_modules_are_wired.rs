@@ -817,6 +817,20 @@ fn measure(root: &Path) -> Result<Outcome, String> {
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_default();
 
+        // A crate-visible function called from another module is a call into
+        // this module too. It does not make the module a capability surface,
+        // so it is read here and not in the export count. Only a name no
+        // other production file defines can stand as evidence.
+        let crate_fns: Vec<String> = names_after(body, "pub(crate) fn", true)
+            .into_iter()
+            .filter(|n| {
+                let definition = format!("fn {n}(");
+                !production
+                    .iter()
+                    .any(|other| other != path && bodies[other].contains(&definition))
+            })
+            .collect();
+
         let mut wired = false;
         'outer: for other in &production {
             if other == path {
@@ -825,6 +839,12 @@ fn measure(root: &Path) -> Result<Outcome, String> {
             let hay = &evidence[other];
             for n in &identifying {
                 if mentions(hay, n, &mod_name, fns.contains(n), &own_types) {
+                    wired = true;
+                    break 'outer;
+                }
+            }
+            for n in &crate_fns {
+                if mentions(hay, n, &mod_name, true, &own_types) {
                     wired = true;
                     break 'outer;
                 }

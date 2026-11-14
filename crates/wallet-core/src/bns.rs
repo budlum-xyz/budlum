@@ -269,6 +269,23 @@ pub fn verify_bns_recipient_proof(
     expected_bns_root: &[u8; 32],
     current_epoch: u64,
 ) -> Result<[u8; 32], String> {
+    verify_recipient_against_root(
+        requested_name,
+        claimed_target,
+        proof,
+        expected_bns_root,
+        current_epoch,
+    )
+}
+
+/// The check itself, shared by the header path and the caller-supplied path.
+pub(crate) fn verify_recipient_against_root(
+    requested_name: &str,
+    claimed_target: &[u8; 32],
+    proof: &WalletBnsProof,
+    expected_bns_root: &[u8; 32],
+    current_epoch: u64,
+) -> Result<[u8; 32], String> {
     if !is_valid_bud_name(requested_name) {
         return Err(format!("invalid .bud name '{requested_name}'"));
     }
@@ -356,8 +373,7 @@ pub fn verify_bns_recipient_proof_from_header<S: HeaderSource + ?Sized>(
     let (root, epoch) = headers
         .bns_root_at(proof.header_height)
         .ok_or_else(|| HeaderUnknown(proof.header_height).to_string())?;
-    #[allow(deprecated)] // the header path is the sanctioned wrapper around it
-    verify_bns_recipient_proof(requested_name, claimed_target, proof, &root, epoch)
+    verify_recipient_against_root(requested_name, claimed_target, proof, &root, epoch)
 }
 
 /// No header at the named height in the source the wallet trusts.

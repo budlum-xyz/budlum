@@ -59,8 +59,7 @@ impl UnsignedTransfer {
         timestamp_ms: u128,
         chain_id: u64,
     ) -> Result<Self, String> {
-        #[allow(deprecated)] // this function is the deprecated wrapper itself
-        let verified_to = crate::bns::verify_bns_recipient_proof(
+        let verified_to = crate::bns::verify_recipient_against_root(
             bud_name,
             claimed_target,
             proof,

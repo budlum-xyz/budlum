@@ -417,6 +417,9 @@ fn log_prefix(s: &str, max_chars: usize) -> String {
 /// reported itself as enforced, and the profile value was measured on the one
 /// family an attacker would not use. The bucket now covers both
 /// families; see [`crate::network::peer_manager::SubnetKey`].
+///
+/// exposed for: the admission tests in `peer_manager.rs`, which must count a
+/// peer in the same bucket the dial path computes here.
 pub(crate) fn subnet_bucket(addr: &Multiaddr) -> Option<crate::network::peer_manager::SubnetKey> {
     use libp2p::multiaddr::Protocol;
     for proto in addr.iter() {
