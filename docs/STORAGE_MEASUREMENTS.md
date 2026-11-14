@@ -99,7 +99,7 @@ codec on chain `45261`).
 | `ContentId` invariance across context generation rotation | `100%` invariant (`SHA-256(plaintext)`) | `bud3_context_rotation_keeps_content_id` |
 | Burned corpus eviction on next generation rotation | `0` retained bytes in next manifest | `bud3_context_burned_corpus_leaves` |
 | Context savings fee routing | `100%` to `context_maintenance_pool` (`0` on exact dedup) | `bud3_context_fee_goes_to_pool` |
-| Cross-owner sealed deduplication public leakage | `0` bits (uniform Padme bucket + batched epoch counter) | `bud3_private_dedup_hides_match_from_public` |
+| Cross-owner sealed deduplication | Closed on testnet `45261`. No leakage figure is claimed: the transcript shares are not a threshold OPRF | `private_dedup_is_closed_on_testnet` |
 
 ## 4. Verification Locks
 
@@ -110,8 +110,7 @@ codec on chain `45261`).
  - `bud3_context_burned_corpus_leaves`
  - `bud3_context_fee_goes_to_pool`
  - `access_tiering_tracks_hot_and_cold_transitions`
-- `cargo test --lib storage::bud3::private_dedup::tests`
- - `private_dedup_is_open_on_testnet`
- - `bud3_private_dedup_rate_limited`
- - `bud3_private_dedup_needs_ownership_proof`
- - `bud3_private_dedup_hides_match_from_public`
+- `cargo test --lib storage::bud3::private_dedup`
+ - `private_dedup_is_closed_on_testnet`
+ - `private_dedup_request_and_upload_stay_closed_without_balance_or_index_changes`
+ - `private_dedup_refuses_unverified_ownership_even_if_enabled`
