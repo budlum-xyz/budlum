@@ -1227,7 +1227,6 @@ fn build_transfer(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 fn run_tx_send(
     rpc_url: &str,
     to: &str,

@@ -12,8 +12,9 @@
 //!    journal digest binding, request anti-replay, and deferred
 //!    `InferenceAssumption` discharge.
 //!
-//! WIRING: unwired - post-launch T-Expansion AI Verification Layer;
-//! closed until governance activates VL-2/VL-3 dispute and proof doors.
+//! WIRING: reached only through the audit doors in `ai/mod.rs`. No
+//! transaction or RPC method calls those doors yet; the dispute and proof
+//! paths stay closed until governance activates VL-2 and VL-3.
 
 use std::collections::{BTreeMap, BTreeSet};
 

@@ -52,8 +52,8 @@ use budlum_core::web_gateway::policy::{
     IMMUTABLE_CACHE, RESOLUTION_CACHE,
 };
 use budlum_core::web_gateway::resolve::{
-    agreed_proof, content_ref_of, route_of, verified_branch, CacheMiss, ContentCache,
-    ContentSource, GatewayError, NameProof, NameProver, StateRoots,
+    content_ref_of, resolve_verified, route_of, CacheMiss, ContentCache, ContentSource,
+    GatewayError, NameProof, NameProver, StateRoots,
 };
 use hyper::body::Bytes;
 use hyper::header::{HeaderName, HeaderValue};
@@ -555,6 +555,7 @@ async fn handle(
             Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),
         };
+        limiter.prune(now);
         if limiter.check(&client, now) == LimitDecision::Refused {
             let response = plain(StatusCode::TOO_MANY_REQUESTS, "too many requests");
             return Ok(response);
@@ -655,25 +656,11 @@ fn resolve_name(
             }
         }
     }
-    let answer = agreed_proof(&state.provers, name)?;
-    let root = state
-        .roots
-        .verified_state_root(answer.height)
-        .ok_or(GatewayError::UnknownHeight(answer.height))?;
-    let branch = verified_branch(&answer, &root)?;
-    if let Some(sub) = &target.sub {
-        let extras = branch
-            .extras
-            .as_ref()
-            .ok_or_else(|| GatewayError::ProofFailed("branch carries no extras".into()))?;
-        if !extras.subdomains.contains_key(sub) {
-            return Err(GatewayError::NoSuchSubdomain(sub.clone()));
-        }
-    }
-    let content = content_ref_of(branch).ok_or(GatewayError::NoContent)?;
+    let proved = resolve_verified(&state.provers, state.roots.as_ref(), target)?;
+    let content = content_ref_of(&proved.branch).ok_or(GatewayError::NoContent)?;
     let resolved = CachedResolution {
         content,
-        height: answer.height,
+        height: proved.height,
     };
     tracing::debug!(
         name,
@@ -989,9 +976,9 @@ mod tests {
             content_dir: None,
             resolve_ttl_secs: 10,
         };
-        let error = build_state(config)
-            .err()
-            .expect("the state must be refused");
+        let refused = build_state(config);
+        assert!(refused.is_err(), "the state must be refused");
+        let error = refused.err().unwrap_or_default();
         assert!(error.contains("content_dir"), "got {error}");
     }
 
@@ -1008,9 +995,9 @@ mod tests {
             content_dir: Some(std::env::temp_dir()),
             resolve_ttl_secs: 10,
         };
-        let error = build_state(config)
-            .err()
-            .expect("the state must be refused");
+        let refused = build_state(config);
+        assert!(refused.is_err(), "the state must be refused");
+        let error = refused.err().unwrap_or_default();
         assert!(error.contains("rpc"), "got {error}");
     }
 

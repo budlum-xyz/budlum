@@ -5,8 +5,9 @@
 //! bound to the original plaintext. Sealed content never enters a shared
 //! context. Burned corpus objects leave on the next context rotation.
 //!
-//! WIRING: shared compression context and access tiering, active on testnet
-//! `45261` from genesis (`ACTIVATION` height `Some(0)`).
+//! WIRING: unwired - nothing in production creates a `ContextState`.
+//! The same holds for the two payload doors here. The fee path the chain runs lives in
+//! `committed.rs`; this module is reached by its own tests only.
 
 use std::collections::BTreeMap;
 

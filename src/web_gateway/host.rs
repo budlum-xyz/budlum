@@ -43,7 +43,7 @@ pub struct Target {
 /// record backs every one of them, and an explicit record wins over the
 /// wildcard.
 #[must_use]
-pub fn is_reserved_label(label: &str) -> bool {
+fn is_reserved_label(label: &str) -> bool {
     RESERVED_LABELS.contains(&label)
 }
 
