@@ -10,10 +10,10 @@ fn sender(byte: u8) -> Address {
 
 #[test]
 fn finality_prune_depth_is_at_least_100() {
+    let depth = std::hint::black_box(FINALITY_PRUNE_DEPTH);
     assert!(
-        FINALITY_PRUNE_DEPTH >= 100,
-        "prune depth {} is too shallow for safe finality",
-        FINALITY_PRUNE_DEPTH
+        depth >= 100,
+        "prune depth {depth} is too shallow for safe finality"
     );
 }
 
