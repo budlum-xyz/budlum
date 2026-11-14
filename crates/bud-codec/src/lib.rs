@@ -261,6 +261,84 @@ mod tests {
             .collect()
     }
 
+    /// The adaptive range coder, by its id in the registry.
+    const CONTEXT_MIX_ID: CodecId = 8;
+
+    /// A context-mix stream the way a hostile writer builds it: the header names a length,
+    /// the four bytes of coder state are zero, and nothing else follows.
+    fn hollow_context_mix(declared: u32) -> Vec<u8> {
+        let tag = codecs::encode_codec(CONTEXT_MIX_ID, b"x").unwrap()[0];
+        let mut payload = vec![tag];
+        payload.extend_from_slice(&declared.to_le_bytes());
+        payload.extend_from_slice(&[0u8; 4]);
+        payload
+    }
+
+    /// The declared length used to decide the work: the decoder read past the end of the
+    /// payload as zero bytes, so a nine byte object cost a megabyte of decoding, and up to
+    /// the 64 MiB ceiling.
+    #[test]
+    fn a_declared_length_the_stream_cannot_back_is_refused() {
+        let declared = 1u32 << 20;
+        let hollow = hollow_context_mix(declared);
+        assert_eq!(hollow.len(), 9);
+        match decode(CONTEXT_MIX_ID, &hollow, u64::from(declared)) {
+            Err(CodecError::TooShort { want, got }) => {
+                assert_eq!(want, u64::from(declared));
+                assert!(
+                    got < 1 << 16,
+                    "the decoder stopped after {got} bytes, which is what nine coded bytes can say"
+                );
+            }
+            other => panic!("a hollow stream must be refused as too short: {other:?}"),
+        }
+    }
+
+    /// A stream cut anywhere inside its tail used to decode to the right length with the
+    /// missing bytes read as zeros: either silently different content, or the same content
+    /// from a payload that was never the stored one.
+    #[test]
+    fn a_context_mix_stream_that_loses_its_tail_is_refused() {
+        for content in [text(4096), noise(3000), vec![0u8; 5000]] {
+            let len = content.len() as u64;
+            let encoded = codecs::encode_codec(CONTEXT_MIX_ID, &content).unwrap();
+            assert_eq!(decode(CONTEXT_MIX_ID, &encoded, len).unwrap(), content);
+            for cut in [1usize, 2, 3, 4, 5, 8] {
+                let short = &encoded[..encoded.len() - cut];
+                assert!(
+                    decode(CONTEXT_MIX_ID, short, len).is_err(),
+                    "{cut} bytes of {len} cut from the tail must be refused"
+                );
+            }
+        }
+    }
+
+    /// The control for the two tests above: no stream the encoder writes reads past its own
+    /// last byte, so refusing at the end of the payload never refuses a real object.
+    #[test]
+    fn every_context_mix_stream_the_encoder_writes_decodes() {
+        let contents: Vec<Vec<u8>> = vec![
+            Vec::new(),
+            vec![0x7f],
+            (0u8..=254).collect(),
+            text(100_000),
+            noise(20_000),
+            vec![0u8; 70_000],
+            vec![0xffu8; 33_333],
+            (0..40_000usize).map(|i| (i % 2) as u8 * 255).collect(),
+            (0..40_000usize).map(|i| (i / 97 % 251) as u8).collect(),
+        ];
+        for content in contents {
+            let encoded = codecs::encode_codec(CONTEXT_MIX_ID, &content).unwrap();
+            assert_eq!(
+                decode(CONTEXT_MIX_ID, &encoded, content.len() as u64).unwrap(),
+                content,
+                "{} bytes did not round trip",
+                content.len()
+            );
+        }
+    }
+
     #[test]
     fn text_selects_zstd_and_round_trips() {
         let c = text(100_000);
