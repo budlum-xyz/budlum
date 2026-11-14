@@ -142,8 +142,8 @@
     and the gates keep their positive and negative canaries.
 
   - **Content existence at the consensus door:** `BnsSetContent` is refused
-    with `bns_content_unknown` unless the id is a registered plaintext manifest
-    or a live public B.U.D. 3.0 object. Sealed content binds only through
+    with `bns_content_unknown` unless the id is a public B.U.D. 3.0 object
+    whose shares are all confirmed. Sealed content binds only through
     `BnsSetBud3Content`, which checks the NFT grant.
   - **`bud_bnsPrepareSetStorage`:** builds the `BnsSetStorage` template and
     refuses a root that is not 32 bytes.

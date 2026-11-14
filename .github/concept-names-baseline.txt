@@ -21,7 +21,7 @@ Living Threshold|5|15
 Mikoriza|19|66
 Mobile Self|13|117
 PUL|12|98
-Pollen|63|725
+Pollen|62|723
 Regeneration|27|108
 Sera|0|0
 Tarif|52|1413
