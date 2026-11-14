@@ -95,8 +95,8 @@ fn control_honest_logging_proof_is_accepted() {
     );
 }
 
-/// A valid VerifyInference trace proves and verifies end-to-end under default
-/// activation, and fails under explicit `MainnetActivation::closed()`.
+/// A VerifyInference trace can be proven, but default and closed activation
+/// must refuse verification; only an explicit full schedule accepts it.
 #[test]
 fn verify_inference_is_refused_in_any_trace() {
     let model_c = 0xABCD_EF01_2345_6789u64;
@@ -123,9 +123,9 @@ fn verify_inference_is_refused_in_any_trace() {
         Plonky3Adapter::prove(&vm.trace, &pi, &program),
         "VerifyInference prove",
     );
-    must_ok(
-        Plonky3Adapter::verify(&envelope, &pi, &program),
-        "VerifyInference default verify",
+    assert!(
+        Plonky3Adapter::verify(&envelope, &pi, &program).is_err(),
+        "default activation must refuse VerifyInference"
     );
     must_ok(
         Plonky3Adapter::verify_with_activation(&envelope, &pi, &program, MainnetActivation::full()),
