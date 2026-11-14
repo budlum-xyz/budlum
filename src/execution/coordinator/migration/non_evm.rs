@@ -64,8 +64,8 @@ pub struct Ics23ExistenceProof {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WasmMigrationRequest {
     /// Target Budlum chain ID (`45261` on testnet).
-    pub chain_id: u64,
-    /// Chain ID signed by the source creator (`must == chain_id`).
+    /// Budlum chain ID the source creator signed for. It must equal the chain
+    /// the node runs; the node supplies that, never the request.
     pub budlum_chain_id: u64,
     /// Registered source Cosmos domain ID.
     pub source_domain_id: u32,
@@ -94,7 +94,6 @@ pub struct WasmMigrationRequest {
 /// Verified Solana account migration request (`8.12.3` SVM row).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SvmMigrationRequest {
-    pub chain_id: u64,
     pub budlum_chain_id: u64,
     pub source_domain_id: u32,
     pub source_slot: u64,
@@ -132,7 +131,6 @@ pub struct MoveStateProofEntry {
 /// Verified Aptos Move account/module/resource migration request (`8.12.3` Move row).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MoveMigrationRequest {
-    pub chain_id: u64,
     pub budlum_chain_id: u64,
     pub source_domain_id: u32,
     pub source_version: u64,
@@ -339,6 +337,23 @@ pub fn fold_sha3_merkle(leaf: [u8; 32], index: usize, siblings: &[[u8; 32]]) -> 
     cur
 }
 
+/// The source root must be one this chain anchored for the source domain.
+///
+/// A request carries its own root. A proof checked against that root only shows
+/// the request agrees with itself, so anyone could fabricate a source state for
+/// any address and install it. The consensus-owned anchor is the one root the
+/// migrator cannot choose.
+fn require_attested_root(
+    state: &AccountState,
+    domain: u32,
+    root: &[u8; 32],
+) -> Result<(), ImportError> {
+    match state.external_roots.get(&domain) {
+        Some(anchored) if anchored == root => Ok(()),
+        _ => Err(ImportError::SourceNotAttested { domain }),
+    }
+}
+
 fn check_target_unoccupied(
     account_state: &AccountState,
     exec_state: &ExecutionState,
@@ -382,13 +397,15 @@ pub(crate) fn apply_wasm_migration(
     migrator: &Address,
     req: WasmMigrationRequest,
     fee_schedule: &MigrationFeeSchedule,
+    chain_id: u64,
 ) -> Result<([u8; 32], Vec<u8>, usize, MigrationFeeQuote), ImportError> {
-    if req.budlum_chain_id != req.chain_id {
+    if req.budlum_chain_id != chain_id {
         return Err(ImportError::ChainMismatch {
             signed: req.budlum_chain_id,
-            expected: req.chain_id,
+            expected: chain_id,
         });
     }
+    require_attested_root(state, req.source_domain_id, &req.state_root)?;
     if req.storage_entries.len() > MAX_CHUNK_SLOTS {
         return Err(ImportError::ChunkTooLarge {
             slots: req.storage_entries.len(),
@@ -503,13 +520,15 @@ pub(crate) fn apply_svm_migration(
     migrator: &Address,
     req: SvmMigrationRequest,
     fee_schedule: &MigrationFeeSchedule,
+    chain_id: u64,
 ) -> Result<([u8; 32], usize, MigrationFeeQuote), ImportError> {
-    if req.budlum_chain_id != req.chain_id {
+    if req.budlum_chain_id != chain_id {
         return Err(ImportError::ChainMismatch {
             signed: req.budlum_chain_id,
-            expected: req.chain_id,
+            expected: chain_id,
         });
     }
+    require_attested_root(state, req.source_domain_id, &req.accounts_root)?;
     if req.pubkey == FORBIDDEN_SVM_VOTE_PROGRAM_ID
         || req.pubkey == FORBIDDEN_SVM_STAKE_PROGRAM_ID
         || req.owner == FORBIDDEN_SVM_VOTE_PROGRAM_ID
@@ -634,13 +653,15 @@ pub(crate) fn apply_move_migration(
     migrator: &Address,
     req: MoveMigrationRequest,
     fee_schedule: &MigrationFeeSchedule,
+    chain_id: u64,
 ) -> Result<([u8; 32], usize, MigrationFeeQuote), ImportError> {
-    if req.budlum_chain_id != req.chain_id {
+    if req.budlum_chain_id != chain_id {
         return Err(ImportError::ChainMismatch {
             signed: req.budlum_chain_id,
-            expected: req.chain_id,
+            expected: chain_id,
         });
     }
+    require_attested_root(state, req.source_domain_id, &req.state_root)?;
     if req.entries.is_empty() || req.entries.len() > MAX_CHUNK_SLOTS {
         return Err(ImportError::ChunkTooLarge {
             slots: req.entries.len(),

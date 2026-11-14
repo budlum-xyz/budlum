@@ -18,7 +18,16 @@ slots, **without migrating source-chain ETH balance** (`8.12.2` item 7).
 2. **EIP-712 `MigrationAuthorization`:**
  - Domain: `name = "Budlum Migration"`, `version = "1"`, `chainId = budlumChainId`,
  `verifyingContract = contract`.
- - Struct: `MigrationAuthorization(address contract,uint256 budlumChainId,uint256 sourceBlock)`.
+ - Struct: `MigrationAuthorization(address contract,uint256 budlumChainId,uint256 sourceBlock,bytes32 stateRoot,bytes32 codeHash)`.
+ - The signature covers the payload it admits. `stateRoot` is the source root the
+   account proof must open under. `codeHash` is the runtime code hash the proven
+   account must hold. One signature authorizes one state of one contract, not any
+   state (`a_signature_does_not_authorize_another_state_root`,
+   `a_signature_does_not_authorize_other_code`).
+ - The chain id is the node's. `begin_import` and every door take it from the caller,
+   and a request has no chain id field. A signature made for another Budlum chain is
+   refused whatever the request says
+   (`a_signature_for_another_chain_is_refused_whatever_the_request_says`).
  - Must recover to the proven deployment authority (`uel_migration_requires_deployer_authorization`).
 3. **Finalized account and storage MPT proofs (`8.12.2` items 3-5):**
  - `account_proof::verify_account` verifies `[nonce, balance, storageRoot, codeHash]`
@@ -57,14 +66,18 @@ computation, and static bytecode dependency scanning:
 ```bash
 # 1. Compute the EIP-712 signing digest for the contract deployer:
 bud-migrate digest --contract 0xa3183498b579bd228aa2b62101c40cc1da978f24 \
- --chain-id 45261 --source-block 19000000
+ --chain-id 45261 --source-block 19000000 \
+ --state-root 0x<source stateRoot> --code-hash 0x<runtime code hash>
 
 # 2. Scan runtime bytecode for PUSH20 hardcoded addresses and external CALLs:
 bud-migrate analyze --code-file./token.runtime.hex --json
 
 # 3. Verify with node-owned pricing (the migrator bundle cannot set the schedule):
-bud-migrate verify./sepolia-erc20-bundle.json./chain-fee-schedule.json
+bud-migrate verify./sepolia-erc20-bundle.json./chain-fee-schedule.json --chain-id 45261
 ```
+
+The chain id is node configuration too. It is a flag and never a bundle field. A
+bundle that carries a `chain_id` is rejected as an unknown field.
 
 The second file is node-owned chain configuration with `bgu_per_proof_node`,
 `bgu_per_code_byte`, `bgu_per_storage_slot`, `attos_per_bgu` and
