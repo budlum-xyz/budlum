@@ -697,6 +697,129 @@ fn budzero_stateful_storage_persists_across_blocks() {
     );
 }
 
+/// A BudZero contract's storage is its owner's to write. The owner is the account that deployed
+/// it, and a call from anyone else that carries a slot and a value is refused with the storage
+/// untouched.
+#[test]
+fn a_non_owner_cannot_write_the_storage_of_a_budzero_contract() {
+    let owner = Address::from([0x83; 32]);
+    let stranger = Address::from([0x84; 32]);
+    let proposer = Address::from([0x82; 32]);
+    let mut state = funded_state(&[owner, stranger, proposer]);
+    let mut coord = ExecutionCoordinator::new();
+
+    let program = [
+        Instruction {
+            opcode: Opcode::Load,
+            rd: 1,
+            rs1: 0,
+            rs2: 0,
+            imm: 7,
+        }
+        .encode(),
+        Instruction {
+            opcode: Opcode::Log,
+            rd: 0,
+            rs1: 1,
+            rs2: 0,
+            imm: 0,
+        }
+        .encode(),
+        Instruction {
+            opcode: Opcode::Halt,
+            rd: 0,
+            rs1: 0,
+            rs2: 0,
+            imm: 0,
+        }
+        .encode(),
+    ];
+    let code: Vec<u8> = program.into_iter().flat_map(u64::to_le_bytes).collect();
+    let deploy = UelTx {
+        tx_hash: [0xB5; 32],
+        sender: owner,
+        nonce: 0,
+        ee: EeId::BUDZERO,
+        action: UelAction::Deploy {
+            code,
+            salt: [0xAB; 32],
+        },
+        value_attos: 0,
+        gas_limit_bgu: 200_000,
+        max_fee_per_bgu_attos: MIN_UEL_BASE_FEE_ATTOS * 2,
+        max_priority_fee_per_bgu_attos: 0,
+    };
+    let deployed = state
+        .execute_uel_block(&mut coord, sample_ctx(), proposer, &[deploy])
+        .expect("deploy budzero contract");
+    assert_eq!(deployed[0].status, UelReceiptStatus::Success);
+    let contract = deployed[0]
+        .contract_address
+        .expect("budzero contract address");
+
+    let slot = [0x45u8; 32];
+    let mut full_key = contract.0.to_vec();
+    full_key.extend_from_slice(&slot);
+    let write = |hash: u8, sender: Address, nonce: u64, value: &[u8]| {
+        let mut input = slot.to_vec();
+        input.extend_from_slice(value);
+        UelTx {
+            tx_hash: [hash; 32],
+            sender,
+            nonce,
+            ee: EeId::BUDZERO,
+            action: UelAction::Call {
+                target: contract.0.to_vec(),
+                input,
+            },
+            value_attos: 0,
+            gas_limit_bgu: 500_000,
+            max_fee_per_bgu_attos: MIN_UEL_BASE_FEE_ATTOS * 2,
+            max_priority_fee_per_bgu_attos: 0,
+        }
+    };
+
+    // The stranger's write is refused and leaves the slot as it was.
+    let refused = state
+        .execute_uel_block(
+            &mut coord,
+            sample_ctx(),
+            proposer,
+            &[write(0xB6, stranger, 0, b"stranger-wrote-this")],
+        )
+        .expect("stranger block");
+    assert_eq!(refused[0].status, UelReceiptStatus::Revert);
+    assert_eq!(
+        refused[0].output,
+        b"unauthorized storage write from budzero".to_vec()
+    );
+    assert_eq!(
+        state
+            .execution_state
+            .read("ee/budzero/storage", &full_key)
+            .expect("read the slot"),
+        None
+    );
+
+    // Control: the owner can write the same slot.
+    let accepted = state
+        .execute_uel_block(
+            &mut coord,
+            sample_ctx(),
+            proposer,
+            &[write(0xB7, owner, 1, b"owner-wrote-this")],
+        )
+        .expect("owner block");
+    assert_eq!(accepted[0].status, UelReceiptStatus::Success);
+    assert_eq!(
+        state
+            .execution_state
+            .read("ee/budzero/storage", &full_key)
+            .expect("read the slot"),
+        Some(b"owner-wrote-this".to_vec())
+    );
+}
+
 #[test]
 fn host_bridge_refuses_cross_ee_namespace_write_and_static_write() {
     let actor = Address::from([0x11; 32]);
