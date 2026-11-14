@@ -5,7 +5,7 @@ use std::collections::BTreeSet;
 
 use budlum_core::core::address::Address;
 use budlum_core::registry::handover::HandoverCoordinator;
-use budlum_core::registry::presence::{PresenceClass, PresenceTracker};
+use budlum_core::registry::presence::{PresenceClass, PresenceTracker, MOBILE_SUSPENSION_HOURS};
 use budlum_core::registry::rehearsal::{
     analyze_mobile_field_logs, evaluate_rehearsal_drills, verify_rehearsal_topology,
     RehearsalDrillReport, RehearsalTopology, RehearsalValidatorNode, MIN_REHEARSAL_STEADY_SECS,
@@ -19,6 +19,10 @@ use budlum_core::storage::bud3::placement::{Class, Share};
 use budlum_core::storage::bud3::registry::Bud3Registry;
 use budlum_core::storage::bud3::view::{view_from_network, MemorySymbolNetwork};
 use budlum_core::storage::bud3::volume::{root_of, AggregationVolume, Visibility};
+
+/// The rehearsal topology: a three-second slot and fifty blocks per epoch (Section 11.10).
+const SLOT_SECS: u64 = 3;
+const EPOCH_BLOCKS: u64 = 50;
 
 const P: Profile = Profile {
     id: 0,
@@ -55,7 +59,7 @@ fn rehearsal_t1_to_t7_drills_and_mobile_field_matrix_hold() {
 
     // 2. Simulate T-1, T-3, and T-4 on live B.U.D. 3.0 + PresenceTracker + HandoverCoordinator state.
     let mut bud3 = Bud3Registry::default();
-    let mut presence = PresenceTracker::new(3, 50);
+    let mut presence = PresenceTracker::new(SLOT_SECS, EPOCH_BLOCKS);
     for i in 0..8u8 {
         presence.register_validator(Address([i + 1; 32]), PresenceClass::Full, 10_000_000_000, 0);
     }
@@ -100,10 +104,15 @@ fn rehearsal_t1_to_t7_drills_and_mobile_field_matrix_hold() {
         .unwrap();
     bud3.bind_nft(nft_id, [1u8; 32], &key).unwrap();
 
-    // T-1: Full validators participate while Mobile validators remain silent for 25 epochs (> 24h window);
-    // Mobile validators transition to non-slashing suspension while Full-class reads succeed uninterrupted.
+    // T-1: Full validators participate while Mobile validators remain silent past the Android
+    // suspension window; Mobile validators transition to non-slashing suspension while Full-class
+    // reads succeed uninterrupted. The window is a number of hours (72, Section 7.2), so the number
+    // of epochs follows from the epoch length and is not written here as a literal: at a three-second
+    // slot and fifty blocks per epoch it is 1,728, and the earlier fixed 26 epochs were about 65
+    // minutes, which no suspension rule in the tree has ever matched.
+    let silent_epochs = MOBILE_SUSPENSION_HOURS * 3_600 / (SLOT_SECS * EPOCH_BLOCKS);
     let active_full: BTreeSet<Address> = (0..8u8).map(|i| Address([i + 1; 32])).collect();
-    for epoch in 1..=26 {
+    for epoch in 1..=silent_epochs + 1 {
         for v in &active_full {
             presence.record_full_seat_participation(v, epoch);
         }
@@ -175,7 +184,9 @@ fn rehearsal_t1_to_t7_drills_and_mobile_field_matrix_hold() {
     evaluate_rehearsal_drills(&report).unwrap();
 
     // 3. : Verify 20-device Android JSONL field telemetry stream + full suite runner.
-    let tiers = ["entry4_gb", "midrange6_gb", "midrange8_gb", "flagship12_gb"];
+    // The tiers of `MobileDeviceTier` and `docs/MOBILE_DEVICE_MATRIX.md`. The fixture
+    // named a fourth tier, `midrange6_gb`, that neither of them defines.
+    let tiers = ["entry4_gb", "midrange8_gb", "flagship12_gb"];
     let mut jsonl = String::new();
     for dev in 0..20u8 {
         jsonl.push_str(&format!(
