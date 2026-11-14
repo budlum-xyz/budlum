@@ -1995,10 +1995,10 @@ pub(crate) fn execute_relayer_intent_tx(
                 .try_add_balance(&owner, refund)
                 .map_err(SettlementTxError::Refused)
         }
-        RelayerIntentTx::Award { intent_id } => state
+        RelayerIntentTx::Award { intent_id, solver } => state
             .settlement
             .relayer_policy
-            .award_intent(*intent_id, ctx.sender, state.current_block_height)
+            .award_intent(*intent_id, ctx.sender, *solver, state.current_block_height)
             .map(|_| ())
             .map_err(SettlementTxError::Refused),
         RelayerIntentTx::Expire { intent_id } => {
@@ -3277,7 +3277,8 @@ mod tests {
             &mut state,
             &ctx(relayer),
             &SettlementTx::RelayerIntent(Box::new(crate::relayer::RelayerIntentTx::Award {
-                intent_id: intent.intent_id
+                intent_id: intent.intent_id,
+                solver: relayer,
             }))
         )
         .is_err());
@@ -3286,6 +3287,7 @@ mod tests {
             &ctx(owner),
             &SettlementTx::RelayerIntent(Box::new(crate::relayer::RelayerIntentTx::Award {
                 intent_id: intent.intent_id,
+                solver: relayer,
             })),
         )
         .unwrap();
@@ -3321,16 +3323,13 @@ mod tests {
         ));
     }
 
-    /// The refund is not welded to the penalty.
-    ///
-    /// `is_slashable()` accepts a `SlashedUnbonding` bidder (the bond is still
-    /// positive), and `slash_role_only` answers that same status with
-    /// `AlreadySlashed`. Propagating that error aborted the whole `Expire`, so
-    /// the owner's escrow stayed locked while `Settle` refused the expired
-    /// intent and `prune_expired` skipped the escrowed row: one already
-    /// punished bidder froze a recoverable job forever.
+    /// An earlier liveness fault does not release a bidder from a *different*
+    /// accepted job: a liveness slash keeps the role Active, so expiry charges
+    /// the unhonoured award again while still refunding the owner's escrow.
+    /// The distinct `SlashedUnbonding` case below checks the AlreadySlashed
+    /// refusal and verifies that its refund succeeds without a second charge.
     #[test]
-    fn relayer_intent_expiry_refunds_an_owner_whose_bidder_is_already_slashed() {
+    fn relayer_intent_expiry_refunds_owner_and_charges_a_second_liveness_fault() {
         let owner = Address::from([0x61; 32]);
         let relayer = Address::from([0x62; 32]);
         let mut state = AccountState::new();
@@ -3399,13 +3398,13 @@ mod tests {
             &ctx(owner),
             &SettlementTx::RelayerIntent(Box::new(crate::relayer::RelayerIntentTx::Award {
                 intent_id: intent.intent_id,
+                solver: relayer,
             })),
         )
         .unwrap();
 
-        // The bidder has already paid a liveness fault elsewhere, and its bond
-        // is still positive, so `is_slashable()` stays true while
-        // `slash_role_only` refuses a second cut.
+        // The bidder paid for a previous liveness fault elsewhere. Its role
+        // remains Active, so this separate unhonoured award remains slashable.
         state
             .registry
             .slash_role_only(
@@ -3441,14 +3440,22 @@ mod tests {
             50 + FEE,
             "the owner is made whole"
         );
+        let stake_after_expiry = state
+            .registry
+            .get(&relayer, crate::registry::role::roles::RELAYER)
+            .unwrap()
+            .stake;
+        assert!(
+            stake_after_expiry < stake_after_first_slash,
+            "the unhonoured award is a separate liveness fault"
+        );
         assert_eq!(
-            state
-                .registry
-                .get(&relayer, crate::registry::role::roles::RELAYER)
-                .unwrap()
-                .stake,
-            stake_after_first_slash,
-            "the second slash is refused, and the refusal is not an abort"
+            stake_after_first_slash - stake_after_expiry,
+            crate::core::chain_config::slash_penalty(
+                stake_after_first_slash,
+                state.registry.params().liveness_slash_ratio_fixed,
+            ),
+            "charge only the configured liveness penalty for this job"
         );
         assert!(!state
             .settlement
@@ -3533,6 +3540,7 @@ mod tests {
             &ctx(owner),
             &SettlementTx::RelayerIntent(Box::new(crate::relayer::RelayerIntentTx::Award {
                 intent_id: intent.intent_id,
+                solver: relayer,
             })),
         )
         .unwrap();
@@ -3662,6 +3670,7 @@ mod tests {
             &ctx(owner),
             &SettlementTx::RelayerIntent(Box::new(crate::relayer::RelayerIntentTx::Award {
                 intent_id: intent.intent_id,
+                solver: relayer,
             })),
         )
         .unwrap();
@@ -4237,7 +4246,12 @@ mod tests {
         blk.state_root = hex::encode([0xdd; 32]);
         blk.hash = blk.calculate_hash();
         let mut com = commitment(&domain, &blk, 0);
-        com.domain_block_hash = [0xaa; 32];
+        // A live attestation must bind the commitment's block hash. Do not
+        // make this a quorum test of an unauthenticated [0xaa; 32] hash.
+        com.domain_block_hash =
+            crate::cross_domain::external::ethereum::parse_update(&next_evidence.payload)
+                .unwrap()
+                .finalized_root;
         com.tx_root = [0u8; 32];
         com.event_root = [0u8; 32];
         com.validator_set_hash = [0u8; 32];
@@ -4377,7 +4391,13 @@ mod tests {
         blk.state_root = hex::encode([0xdd; 32]);
         blk.hash = blk.calculate_hash();
         let mut com = commitment(&domain, &blk, 0);
-        com.domain_block_hash = [0xaa; 32];
+        // Keep the commitment's hash authenticated in both the pre-policy
+        // rejection and the post-quorum acceptance; otherwise the test is
+        // rejected by the block-hash binding before it tests quorum.
+        com.domain_block_hash =
+            crate::cross_domain::external::ethereum::parse_update(&pre_ev.payload)
+                .unwrap()
+                .finalized_root;
         com.tx_root = [0u8; 32];
         com.event_root = [0u8; 32];
         com.validator_set_hash = [0u8; 32];

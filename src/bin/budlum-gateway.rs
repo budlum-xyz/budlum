@@ -52,8 +52,8 @@ use budlum_core::web_gateway::policy::{
     IMMUTABLE_CACHE, RESOLUTION_CACHE,
 };
 use budlum_core::web_gateway::resolve::{
-    agreed_proof, content_ref_of, route_of, ContentCache, ContentSource, GatewayError, NameProof,
-    NameProver, StateRoots,
+    agreed_proof, content_ref_of, route_of, verified_branch, CacheMiss, ContentCache,
+    ContentSource, GatewayError, NameProof, NameProver, StateRoots,
 };
 use hyper::body::Bytes;
 use hyper::header::{HeaderName, HeaderValue};
@@ -316,10 +316,40 @@ fn decode_extras(
         storage_root_height: value
             .get("storage_root_height")
             .and_then(serde_json::Value::as_u64),
-        bud3_content: None,
+        // The RPC encodes this reference as {kind, digest, len,
+        // object_commitment, nft_id}, not a serde ContentRef. Dropping a
+        // non-null value here changes the committed extras and would make
+        // every real B.U.D. 3.0 site fail proof verification.
+        bud3_content: match value.get("bud3_content") {
+            Some(v) if !v.is_null() => Some(decode_bud3_ref(v)?),
+            _ => None,
+        },
         subdomains,
         records,
     })
+}
+
+fn decode_bud3_ref(
+    value: &serde_json::Value,
+) -> Result<budlum_core::storage::bud3::content_ref::ContentRef, String> {
+    use budlum_core::storage::bud3::content_id::{ContentId, ContentIdKind};
+    let kind = match value.get("kind").and_then(serde_json::Value::as_str) {
+        Some("public") => ContentIdKind::Public,
+        Some("sealed") => ContentIdKind::Sealed,
+        _ => return Err("extras.bud3_content.kind is missing or invalid".into()),
+    };
+    let content_id = ContentId {
+        kind,
+        digest: hex32_field(value, "digest")?,
+        len: value
+            .get("len")
+            .and_then(serde_json::Value::as_u64)
+            .ok_or("extras.bud3_content.len is missing or invalid")?,
+    };
+    let commitment = hex32_field(value, "object_commitment")?;
+    let nft_id = optional_hex32(value, "nft_id")?;
+    budlum_core::storage::bud3::content_ref::ContentRef::new(content_id, commitment, nft_id)
+        .map_err(|e| format!("invalid extras.bud3_content: {e:?}"))
 }
 
 fn hex32(raw: &str) -> Result<[u8; 32], String> {
@@ -413,7 +443,14 @@ impl ContentSource for DirectorySource {
         content: &budlum_core::storage::bud3::content_ref::ContentRef,
     ) -> Result<Vec<u8>, String> {
         let path = self.root.join(hex::encode(content.content_id.digest));
-        std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))
+        let bytes = std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+        // This read also backs fetch_manifest: parse no unverified site rules
+        // and serve no body unless both digest and length match the public
+        // identifier proved by BNS. A sealed object has no public site route.
+        if !content.content_id.matches_public(&bytes) {
+            return Err("content bytes do not match the proved public ContentId".into());
+        }
+        Ok(bytes)
     }
 
     fn fetch_manifest(
@@ -566,8 +603,14 @@ async fn handle(
                     Ok(guard) => guard,
                     Err(poisoned) => poisoned.into_inner(),
                 };
-                let _ = cache.insert(&route.content, bytes.clone());
-                bytes
+                match cache.insert(&route.content, bytes.clone()) {
+                    Ok(()) | Err(CacheMiss::TooLarge) => bytes,
+                    Err(CacheMiss::DigestMismatch) => {
+                        // A source cannot bypass the cache's integrity check
+                        // on a miss by supplying mismatched bytes.
+                        return Ok(plain(StatusCode::BAD_GATEWAY, "content unavailable"));
+                    }
+                }
             }
             Err(_) => {
                 let response = plain(StatusCode::BAD_GATEWAY, "content unavailable");
@@ -617,7 +660,7 @@ fn resolve_name(
         .roots
         .verified_state_root(answer.height)
         .ok_or(GatewayError::UnknownHeight(answer.height))?;
-    let branch = budlum_core::web_gateway::resolve::verified_branch(&answer, &root)?;
+    let branch = verified_branch(&answer, &root)?;
     if let Some(sub) = &target.sub {
         let extras = branch
             .extras
@@ -663,6 +706,10 @@ fn load_config(path: &std::path::Path) -> Result<GatewayConfig, String> {
 }
 
 fn build_state(config: GatewayConfig) -> Result<GatewayState, String> {
+    // reqwest uses the process-wide rustls provider. With its provider-less
+    // feature set, it must inherit Budlum's TLS 1.3 hybrid-only provider
+    // before the first client is constructed (including standalone tests).
+    budlum_core::crypto::tls::install_default_provider();
     if config.rpc.is_empty() {
         return Err("config names no rpc endpoint, so no proof can be checked".into());
     }
@@ -811,6 +858,13 @@ mod tests {
                     "consensus_domain_id": null,
                     "storage_domain_id": null,
                     "storage_root_height": null,
+                    "bud3_content": {
+                        "kind": "public",
+                        "digest": format!("0x{}", "88".repeat(32)),
+                        "len": 42,
+                        "object_commitment": format!("0x{}", "99".repeat(32)),
+                        "nft_id": format!("0x{}", "aa".repeat(32))
+                    },
                     "subdomains": {"shop": format!("0x{}", "77".repeat(32))},
                     "records": {"addr.eth": "0xabc"}
                 }
@@ -829,6 +883,75 @@ mod tests {
             extras.records.get("addr.eth").map(String::as_str),
             Some("0xabc")
         );
+        let bud3 = extras.bud3_content.expect("RPC B.U.D. 3.0 reference");
+        assert_eq!(
+            bud3.content_id.kind,
+            budlum_core::storage::bud3::content_id::ContentIdKind::Public
+        );
+        assert_eq!(bud3.content_id.digest, [0x88; 32]);
+        assert_eq!(bud3.content_id.len, 42);
+        assert_eq!(bud3.object_commitment, [0x99; 32]);
+        assert_eq!(bud3.nft_id, Some([0xAA; 32]));
+    }
+
+    #[test]
+    fn malformed_bud3_reference_cannot_be_silently_dropped_by_decoder() {
+        let mut ref_json = serde_json::json!({
+            "kind": "public",
+            "digest": format!("0x{}", "88".repeat(32)),
+            "len": 42,
+            "object_commitment": format!("0x{}", "99".repeat(32)),
+            "nft_id": null
+        });
+        ref_json["len"] = serde_json::json!("42");
+        assert!(decode_bud3_ref(&ref_json).is_err());
+        ref_json["len"] = serde_json::json!(42);
+        ref_json["object_commitment"] = serde_json::json!(format!("0x{}", "00".repeat(32)));
+        assert!(decode_bud3_ref(&ref_json).is_err());
+        ref_json["object_commitment"] = serde_json::json!(format!("0x{}", "99".repeat(32)));
+        ref_json["kind"] = serde_json::json!("unknown");
+        assert!(decode_bud3_ref(&ref_json).is_err());
+    }
+
+    #[test]
+    fn the_directory_source_checks_manifest_and_body_bytes_against_the_proved_id() {
+        use budlum_core::storage::bud3::content_id::ContentId;
+        use budlum_core::storage::bud3::content_ref::ContentRef;
+        let dir = tempfile::tempdir().unwrap();
+        let source = DirectorySource {
+            root: dir.path().to_path_buf(),
+        };
+        let manifest = SiteManifest {
+            index: "/index.html".into(),
+            routes: std::collections::BTreeMap::new(),
+            csp: None,
+        };
+        let bytes = serde_json::to_vec(&manifest).unwrap();
+        let content = ContentRef::new(ContentId::public(&bytes), [0x42; 32], None).unwrap();
+        let path = dir.path().join(hex::encode(content.content_id.digest));
+        std::fs::write(&path, &bytes).unwrap();
+        assert_eq!(source.fetch(&content).unwrap(), bytes);
+        assert_eq!(source.fetch_manifest(&content).unwrap(), manifest);
+
+        // Neither a different body nor a forged length with the same digest
+        // can be interpreted as an authenticated manifest or served as bytes.
+        std::fs::write(&path, b"{\"index\":\"/attacker.html\",\"routes\":{}}").unwrap();
+        assert!(source
+            .fetch_manifest(&content)
+            .unwrap_err()
+            .contains("ContentId"));
+        assert!(source.fetch(&content).is_err());
+        std::fs::write(&path, &bytes).unwrap();
+        let forged_len = ContentRef::new(
+            ContentId {
+                len: content.content_id.len + 1,
+                ..content.content_id
+            },
+            content.object_commitment,
+            None,
+        )
+        .unwrap();
+        assert!(source.fetch_manifest(&forged_len).is_err());
     }
 
     #[test]
@@ -841,6 +964,16 @@ mod tests {
         };
         assert_eq!(roots.verified_state_root(0), None);
         assert_eq!(roots.verified_state_root(1_000_000), None);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn rpc_bridge_uses_the_async_client_without_panicking_on_a_transport_failure() {
+        budlum_core::crypto::tls::install_default_provider();
+        let prover = RpcProver::new("http://127.0.0.1:1".into()).unwrap();
+        assert!(
+            prover.proof_for("ayaz.bud").is_err(),
+            "a failed RPC is an ordinary refused proof, not a runtime panic"
+        );
     }
 
     #[test]

@@ -36,10 +36,14 @@ pub mod move_family;
 pub mod svm;
 
 use crate::core::address::Address;
+use crate::core::hash::hash_fields_bytes;
+use crate::cross_domain::event_tree::MerkleProof;
 use crate::cross_domain::external::spec::{FinalityKind, TimeUnit};
 use crate::domain::types::Hash32;
+use crate::object_layer::charter::CharterRefusal;
 use crate::object_layer::ids::DepartureId;
-use crate::object_layer::rule::TemplateId;
+use crate::object_layer::registry::{HomeSliceProof, Refusal};
+use crate::object_layer::rule::{ClassSlice, TemplateId};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
@@ -294,12 +298,80 @@ pub trait FamilyProfile: Sync {
     ) -> Result<EndpointEvent, FamilyError>;
 
     fn slice_read_rule(&self) -> SliceReadRule;
+
+    /// Prove a contract's current state slice against the finalized home root.
+    /// Non-EVM families use their canonical tagged event-tree leaf; the EVM
+    /// family overrides this with authenticated account and storage tries.
+    /// The object-layer core only checks the expected root and delegates.
+    fn verify_home_slice_proof(
+        &self,
+        chain_reference: &str,
+        contract: &[u8],
+        slice: &ClassSlice,
+        proof: &HomeSliceProof,
+    ) -> Result<(), Refusal> {
+        let [raw] = proof.contract_account_proof.as_slice() else {
+            return Err(Refusal::UnprovenEvent);
+        };
+        let merkle: MerkleProof = bincode::deserialize(raw).map_err(|_| Refusal::UnprovenEvent)?;
+        let mut slice_bytes = Vec::new();
+        for (key, value) in slice {
+            let key_bytes = key.as_bytes();
+            let key_len = u32::try_from(key_bytes.len()).map_err(|_| Refusal::Overflow)?;
+            let value_len = u32::try_from(value.len()).map_err(|_| Refusal::Overflow)?;
+            slice_bytes.extend_from_slice(&key_len.to_le_bytes());
+            slice_bytes.extend_from_slice(key_bytes);
+            slice_bytes.extend_from_slice(&value_len.to_le_bytes());
+            slice_bytes.extend_from_slice(value);
+        }
+        let expected_leaf = hash_fields_bytes(&[
+            b"BDLM_UOL_SLICE_PROOF_V1",
+            chain_reference.as_bytes(),
+            contract,
+            &slice_bytes,
+        ]);
+        if merkle.leaf != expected_leaf || !merkle.verify(proof.state_root) {
+            return Err(Refusal::UnprovenEvent);
+        }
+        Ok(())
+    }
+
     /// The class-slice field that holds the home code's upgrade authority. A
     /// change of this field freezes the class for new transitions.
     fn upgrade_authority_field(&self) -> &'static str;
 
     fn validate_address(&self, raw: &[u8]) -> Result<(), FamilyError>;
     fn display_address(&self, ctx: &FamilyContext<'_>, raw: &[u8]) -> String;
+
+    /// Verify a code-hash inclusion against the finalized home state root.
+    /// The non-EVM families share the tagged event-tree proof; EVM overrides
+    /// this with its account trie proof. The charter core must not choose a
+    /// proof format on behalf of a family.
+    fn verify_home_code_entry(
+        &self,
+        chain_reference: &str,
+        address: &[u8],
+        expected_code_hash: Hash32,
+        state_root: Hash32,
+        proof_nodes: &[Vec<u8>],
+    ) -> Result<(), CharterRefusal> {
+        let [raw] = proof_nodes else {
+            return Err(CharterRefusal::ProofDisagrees);
+        };
+        let merkle: MerkleProof =
+            bincode::deserialize(raw).map_err(|_| CharterRefusal::ProofDisagrees)?;
+        let expected_leaf = hash_fields_bytes(&[
+            b"BDLM_UOL_HOME_CODE_V1",
+            chain_reference.as_bytes(),
+            address,
+            &expected_code_hash,
+        ]);
+        if merkle.leaf != expected_leaf || !merkle.verify(state_root) {
+            return Err(CharterRefusal::ProofDisagrees);
+        }
+        Ok(())
+    }
+
     fn validate_native_id(&self, kind: AssetKind, raw: &[u8]) -> Result<(), FamilyError>;
     fn display_native_id(&self, raw: &[u8]) -> String;
     /// How the home-call payload is wrapped on the home chain.

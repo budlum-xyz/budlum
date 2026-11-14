@@ -57,19 +57,31 @@ pub fn is_forbidden_header(name: &str) -> bool {
 /// counts as wider, so an unparsable policy is refused rather than trusted.
 #[must_use]
 pub fn csp_is_at_least_as_strict(candidate: &str, baseline: &str) -> bool {
-    let parse = |policy: &str| -> BTreeMap<String, Vec<String>> {
-        policy
-            .split(';')
-            .filter_map(|directive| {
-                let mut parts = directive.split_whitespace();
-                let name = parts.next()?.to_ascii_lowercase();
-                let values: Vec<String> = parts.map(|v| v.to_ascii_lowercase()).collect();
-                Some((name, values))
-            })
-            .collect()
+    let parse = |policy: &str| -> Option<BTreeMap<String, Vec<String>>> {
+        if policy.chars().any(char::is_control) {
+            return None;
+        }
+        let mut parsed = BTreeMap::new();
+        for directive in policy.split(';') {
+            let mut parts = directive.split_whitespace();
+            let Some(name) = parts.next() else {
+                continue;
+            };
+            if !name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-') {
+                return None;
+            }
+            let values = parts.map(str::to_ascii_lowercase).collect();
+            // Browsers honor the first duplicate directive; a map that kept
+            // the last one could approve `default-src *; default-src 'none'`.
+            if parsed.insert(name.to_ascii_lowercase(), values).is_some() {
+                return None;
+            }
+        }
+        Some(parsed)
     };
-    let candidate = parse(candidate);
-    let baseline = parse(baseline);
+    let (Some(candidate), Some(baseline)) = (parse(candidate), parse(baseline)) else {
+        return false;
+    };
     if candidate.is_empty() {
         return false;
     }
@@ -77,7 +89,12 @@ pub fn csp_is_at_least_as_strict(candidate: &str, baseline: &str) -> bool {
         let Some(candidate_values) = candidate.get(name) else {
             return false;
         };
-        // `'none'` on its own reaches nothing, so it narrows any baseline.
+        if candidate_values.is_empty() {
+            return false;
+        }
+        // CSP's `'none'` is the empty source set, and therefore narrower
+        // than any source list. It only means that when it stands alone:
+        // `'none' https://host` is not an empty set (and is not accepted).
         if candidate_values.len() == 1 && candidate_values[0] == "'none'" {
             continue;
         }
@@ -334,9 +351,14 @@ mod tests {
             "default-src 'self'; frame-ancestors 'none'; sandbox",
             DEFAULT_CSP
         ));
-        // Widening: an extra source.
+        // Widening: an extra source. In particular, `'none'` only narrows
+        // when it is the sole source (CSP ignores it when combined).
         assert!(!csp_is_at_least_as_strict(
             "default-src 'self' https://cdn.example; frame-ancestors 'none'",
+            DEFAULT_CSP
+        ));
+        assert!(!csp_is_at_least_as_strict(
+            "default-src 'none' https://cdn.example; frame-ancestors 'none'",
             DEFAULT_CSP
         ));
         // Widening: framing allowed.
@@ -351,6 +373,20 @@ mod tests {
         ));
         // Unparsable is refused, not trusted.
         assert!(!csp_is_at_least_as_strict("", DEFAULT_CSP));
+        // Reject duplicates rather than evaluating the last while a browser
+        // enforces the first (which could be arbitrarily permissive).
+        assert!(!csp_is_at_least_as_strict(
+            "default-src *; default-src 'none'; frame-ancestors 'none'",
+            DEFAULT_CSP
+        ));
+        assert!(!csp_is_at_least_as_strict(
+            "default-src 'self'; frame-ancestors *; frame-ancestors 'none'",
+            DEFAULT_CSP
+        ));
+        assert!(!csp_is_at_least_as_strict(
+            "default-src 'self'; frame-ancestors 'none'\r\nx: y",
+            DEFAULT_CSP
+        ));
     }
 
     #[test]

@@ -277,7 +277,7 @@ this document has to be updated with the change.
 
 ## The zkVM opcode
 
-`VerifyInference` (0x1F) evaluates `verify_inference_digest(model_commitment, input_commitment, aux_tag)` using the 30-round Poseidon2 hash in the VM and writes the digest (or checks binding) across the AIR (`COL_IS_VERIFY_INFERENCE`). Both `VerifyMerkle` (0x1E) and `VerifyInference` (0x1F) are enabled on testnet under `MainnetActivation::default()`.
+`VerifyInference` (0x1F) evaluates `verify_inference_digest(model_commitment, input_commitment, aux_tag)` using the 30-round Poseidon2 hash in the VM and writes the digest (or checks binding) across the AIR (`COL_IS_VERIFY_INFERENCE`). `VerifyInference` is enabled under `MainnetActivation::default()`; `VerifyMerkle` (0x1E) remains closed on testnet and mainnet because its path proof does not bind the challenged storage shard. Isolated `full()` tests are not production activation.
 
 In addition, transaction-level AI STARK verification (`FULL_AI_STARK_VERIFICATION_LIVE = true`) verifies the Plonky3 STARK proof against the registered guest program, `chain_id`, `weights_digest`, non-zero `initial_state_root`, non-zero `event_digest`, and attaching transaction context (`sender`, `nonce`, `block_height`). Note that arbitrary large transformer models outside the fixed-point MLP guest remain unsupported on-chain; `prove_mlp_inference_with_context` handles verified MLP workloads.
 

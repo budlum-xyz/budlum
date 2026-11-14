@@ -21,7 +21,10 @@
 //! the testnet by `ACTIVATION`.
 
 use crate::core::address::Address;
+use crate::cross_domain::evm::account_proof;
 use crate::cross_domain::external::spec::{FinalityKind, TimeUnit};
+use crate::domain::types::Hash32;
+use crate::object_layer::charter::CharterRefusal;
 use crate::object_layer::family::encoding::{
     abi_address, abi_bytes, abi_u128, abi_word, eip55, keccak256,
 };
@@ -30,7 +33,8 @@ use crate::object_layer::family::{
     FamilyError, FamilyFinality, FamilyProfile, HomeVmFamily, RawEndpointEvent, SliceReadRule,
 };
 use crate::object_layer::ids::DepartureId;
-use crate::object_layer::rule::TemplateId;
+use crate::object_layer::registry::{HomeSliceProof, Refusal};
+use crate::object_layer::rule::{ClassSlice, TemplateId};
 
 pub const ARRIVE_SIGNATURE: &str = "Arrive(uint8,address,uint256,uint256,address,bytes32)";
 pub const HOME_CALL_SIGNATURE: &str = "HomeCall(address,uint64,bytes)";
@@ -91,6 +95,65 @@ pub fn uint256_decimal(be: &[u8]) -> String {
 }
 
 impl FamilyProfile for EvmFamily {
+    fn verify_home_code_entry(
+        &self,
+        _chain_reference: &str,
+        address: &[u8],
+        expected_code_hash: Hash32,
+        state_root: Hash32,
+        proof_nodes: &[Vec<u8>],
+    ) -> Result<(), CharterRefusal> {
+        if proof_nodes.is_empty() {
+            return Err(CharterRefusal::ProofDisagrees);
+        }
+        let addr20: [u8; 20] = address.try_into().map_err(|_| CharterRefusal::BadAddress)?;
+        let acct = account_proof::verify_account(proof_nodes, &state_root, &addr20)
+            .map_err(|_| CharterRefusal::ProofDisagrees)?;
+        if acct.code_hash != expected_code_hash {
+            return Err(CharterRefusal::ProofDisagrees);
+        }
+        Ok(())
+    }
+
+    fn verify_home_slice_proof(
+        &self,
+        _chain_reference: &str,
+        contract: &[u8],
+        slice: &ClassSlice,
+        proof: &HomeSliceProof,
+    ) -> Result<(), Refusal> {
+        let addr20: [u8; 20] = contract.try_into().map_err(|_| Refusal::UnprovenEvent)?;
+        let acct = account_proof::verify_account(
+            &proof.contract_account_proof,
+            &proof.state_root,
+            &addr20,
+        )
+        .map_err(|_| Refusal::UnprovenEvent)?;
+        if !slice.is_empty() && proof.storage_proofs.is_empty() {
+            return Err(Refusal::UnprovenEvent);
+        }
+        for (slot, expected_val, nodes) in &proof.storage_proofs {
+            let proven = account_proof::verify_storage(nodes, &acct.storage_root, slot)
+                .map_err(|_| Refusal::UnprovenEvent)?
+                .unwrap_or([0u8; 32]);
+            if proven != *expected_val {
+                return Err(Refusal::UnprovenEvent);
+            }
+        }
+        if let Some(auth) = slice.get(self.upgrade_authority_field()) {
+            let bound = proof.storage_proofs.iter().any(|(_, val, _)| {
+                val.as_slice() == auth.as_slice()
+                    || (auth.len() <= 32
+                        && !auth.is_empty()
+                        && val.get(32 - auth.len()..) == Some(auth.as_slice()))
+            });
+            if !bound {
+                return Err(Refusal::UnprovenEvent);
+            }
+        }
+        Ok(())
+    }
+
     fn family(&self) -> HomeVmFamily {
         HomeVmFamily::Evm
     }

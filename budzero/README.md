@@ -66,24 +66,24 @@ cargo test --workspace
 
 ## Soundness work (honest status)
 
-This crate set is the [`budzero/`](./) tree **inside this monorepo** (there is no separate `budlum-xyz/BudZero` checkout; this is the source). **Z-B:** `proves_verify_merkle_valid_64_depth` is green. Both `VerifyMerkle` and `VerifyInference` are backed by AIR constraints and enabled under `MainnetActivation::default()` (`MainnetActivation::closed()` retains an explicit opt-out toggle for differential testing).
+This crate set is the [`budzero/`](./) tree **inside this monorepo** (there is no separate `budlum-xyz/BudZero` checkout; this is the source). **Z-B:** `proves_verify_merkle_valid_64_depth` is green. Both `VerifyMerkle` and `VerifyInference` have isolated AIR proof tests, but only `VerifyInference` is enabled under `MainnetActivation::default()`. The 64-depth Merkle path remains closed in production until a challenged shard is bound to that proof. `MainnetActivation::full()` is only used to test the unactivated path.
 
 | Item | Status |
 | --- | --- |
 | Public inputs (Z-A) | Bound (incl. event_digest Log fix ) |
 | `VerifyMerkle` path AIR (Z-B) | Expansion + Poseidon round checks; pre-round currents, single-round path hash, original-only root check, expand gas |
 | Valid 64-depth prove | OK `proves_verify_merkle_valid_64_depth` green (matrix chain + full prove/verify) |
-| Production gate | `MainnetActivation::default()` **on** (`VerifyMerkle` and `VerifyInference` active); ISA `is_experimental()==false` |
+| Production gate | `MainnetActivation::default()` keeps `VerifyMerkle` **off** pending shard-bound storage proof; `VerifyInference` stays on independently |
 | `VerifyInference` | Opcode, gas, and 30-round Poseidon commitment AIR (`DOMAIN_VERIFY_INFERENCE`) active under `MainnetActivation::default()` |
 | Termination / halt (Z-C/D) | Landed .zk |
 | Storage gas (SRead/SWrite) | Higher than Load/Store; AIR aligned |
 | performance benches | Planned Tur **13.5** |
 | external audit | Checklist Tur **13.9** (not claimed done) |
 
-Z-B 64-depth soundness proof is green. Merkle membership and inference commitment
-checks inside STARK proofs are cryptographically constrained and enabled by default.
-**B.U.D.** proof-of-storage productization remains a separate integration on top of
-this L1 primitive.
+Z-B's 64-depth path proof is exercised under explicit full activation; it is
+**not** a shard-bound storage-possession proof. Production Merkle admission and
+storage credit remain closed. The independent inference commitment AIR is
+active by default. B.U.D. must first bind the challenge to the stored shard.
 
 ---
 

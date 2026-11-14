@@ -206,9 +206,9 @@ happened never to trigger; at 30 rounds it fell immediately. Fixed with
 **Privacy flags opened.** `privacy_commit_enabled`, `nullifier_check_enabled`
 and `sum_conservation_enabled` are now **ON** under
 `MainnetActivation::default()`. The gate went because the reason for the gate
-went. `verify_merkle_enabled` and `verify_inference_enabled` stay closed for
-their own reasons (unfinished path verification; a verification circuit that is
-not in service).
+went. `verify_merkle_enabled` stays closed until the path proof is bound to
+the challenged shard bytes (the AIR path alone is not a storage witness).
+`verify_inference_enabled` is independent and active with its 30-round AIR.
 
 Lock: `privacy_opcodes_are_open_only_while_poseidon_is_strong` falls if the
 round count drops below 30 - an open gate depends on the strong-permutation

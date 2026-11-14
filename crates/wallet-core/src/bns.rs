@@ -117,9 +117,9 @@ pub struct WalletBnsProof {
     pub storage_root: Option<[u8; 32]>,
     pub extras_digest: [u8; 32],
     /// Optional raw body committed after `b"BDLM_BNS_EXTRAS_V1"`. When supplied,
-    /// `verify_bns_recipient_proof` verifies `SHA256("BDLM_BNS_EXTRAS_V1" || preimage) == extras_digest`
-    /// and extracts the authenticated `record.address` forwarding target; when
-    /// `None`, `verify_bns_owner_proof` authenticates `owner` directly.
+    /// `verify_bns_recipient_proof_from_header` verifies the digest against a
+    /// trusted header root and extracts the authenticated `record.address`;
+    /// when absent, the proof can authenticate `owner` directly.
     pub extras_preimage: Option<Vec<u8>>,
     pub meta_digest: [u8; 32],
     pub siblings: Vec<[u8; 32]>,
@@ -452,14 +452,8 @@ mod tests {
         let meta = [0x33u8; 32];
         let sib = [0x44u8; 32];
         let (forged_preimage, forged_extras) = sample_extras_preimage(Some(attacker));
-        let forged_leaf = compute_bns_leaf_digest(
-            "ayaz.bud",
-            &genuine.owner,
-            50,
-            None,
-            None,
-            &forged_extras,
-        );
+        let forged_leaf =
+            compute_bns_leaf_digest("ayaz.bud", &genuine.owner, 50, None, None, &forged_extras);
         let forged_names = fold_bns_merkle_branch(forged_leaf, &[sib], &[true]).unwrap();
         let forged_root = compute_bns_registry_root(&meta, &forged_names);
         let forged = WalletBnsProof {
@@ -490,12 +484,25 @@ mod tests {
             "a proof folding to the nodes own root must not verify against the headers root"
         );
 
-        // The same forgery verifies the moment the root is taken from the
-        // answer instead of the header. That is the defect this closes.
+        // The forgery's branch is internally consistent: this is precisely
+        // the root a malicious node would offer with its answer. Do not call
+        // the deprecated root-from-caller API here; the production entry
+        // point must take a trusted header, not an attacker-controlled root.
+        let forged_leaf = compute_bns_leaf_digest(
+            &forged.name,
+            &forged.owner,
+            forged.expires_at,
+            forged.content_id.as_ref(),
+            forged.storage_root.as_ref(),
+            &forged.extras_digest,
+        );
         assert_eq!(
-            verify_bns_recipient_proof("ayaz.bud", &attacker, &forged, &forged_root, 10).unwrap(),
-            attacker,
-            "taken from the answer, the forgery passes - which is the whole point"
+            compute_bns_registry_root(
+                &forged.meta_digest,
+                &fold_bns_merkle_branch(forged_leaf, &forged.siblings, &forged.directions).unwrap(),
+            ),
+            forged_root,
+            "the attacker can produce a self-consistent but untrusted root"
         );
 
         // And the genuine proof still passes against the real root.
@@ -605,21 +612,35 @@ mod tests {
             header_height: 7,
         };
 
-        // Authentic vault target verifies!
+        let headers = OneHeader {
+            height: 7,
+            root: expected_root,
+            epoch: 10,
+        };
+        // The authenticated forwarding target verifies against the header.
         assert_eq!(
-            verify_bns_recipient_proof("ayaz.bud", &vault, &proof, &expected_root, 10).unwrap(),
+            verify_bns_recipient_proof_from_header("ayaz.bud", &vault, &proof, &headers).unwrap(),
             vault
         );
-        // Substituting attacker address or even `owner` when `record.address == Some(vault)` fails closed!
+        // Neither an attacker address nor the owner can replace a proven target.
         assert!(
-            verify_bns_recipient_proof("ayaz.bud", &attacker, &proof, &expected_root, 10).is_err()
+            verify_bns_recipient_proof_from_header("ayaz.bud", &attacker, &proof, &headers)
+                .is_err()
         );
         assert!(
-            verify_bns_recipient_proof("ayaz.bud", &owner, &proof, &expected_root, 10).is_err()
+            verify_bns_recipient_proof_from_header("ayaz.bud", &owner, &proof, &headers).is_err()
         );
-        // Expired at epoch 50 fails closed!
-        assert!(
-            verify_bns_recipient_proof("ayaz.bud", &vault, &proof, &expected_root, 50).is_err()
-        );
+        // A proven record whose expiration has passed is also refused.
+        let expired_headers = OneHeader {
+            epoch: 50,
+            ..headers
+        };
+        assert!(verify_bns_recipient_proof_from_header(
+            "ayaz.bud",
+            &vault,
+            &proof,
+            &expired_headers
+        )
+        .is_err());
     }
 }

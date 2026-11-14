@@ -61,14 +61,16 @@ fn verify_merkle_is_closed_on_testnet() {
             imm: 0,
         },
     ]);
-    decode_budzero_for_testnet(&bytecode)
-        .expect("VerifyMerkle is enabled at BudZero EE deploy validation on testnet");
-    ZkVmExecutor::execute_bytecode_mainnet(&bytecode, DEFAULT_CONTRACT_GAS_LIMIT)
-        .expect("VerifyMerkle executes and proves on testnet under MainnetActivation::default()");
+    let refusal = decode_budzero_for_testnet(&bytecode)
+        .expect_err("an unbound storage path must not deploy on testnet");
+    assert!(refusal.contains("VerifyMerkle"), "{refusal}");
+    let refusal = ZkVmExecutor::execute_bytecode_mainnet(&bytecode, DEFAULT_CONTRACT_GAS_LIMIT)
+        .expect_err("the production VM must not prove unbound VerifyMerkle");
+    assert!(format!("{refusal:?}").contains("VerifyMerkle"));
 }
 
 #[test]
-fn verify_inference_is_closed_on_testnet() {
+fn verify_inference_is_active_on_testnet() {
     let bytecode = encode_program(&[
         Instruction {
             opcode: Opcode::Load,

@@ -615,9 +615,10 @@ fn open_challenge(
 /// The registry decides every refusal before it records a result. An answer
 /// it accepts resolves the challenge: the opener gets the bond back (the
 /// opener called correctly whether the operator answered well or not), and a
-/// `Mismatched` outcome slashes the operator bond, which `open_deal` already
-/// debited, so the slash is recorded as burned supply and the operator enters
-/// the cooldown a missed challenge starts.
+/// `Mismatched` outcome, *only when a shard-bound verifier is active*, slashes
+/// the operator bond, which `open_deal` already debited. With the current
+/// unbound proof format an answer only closes the challenge administratively:
+/// it earns no proven-read credit and is neither a slash nor proof of custody.
 fn answer_challenge(
     state: &mut AccountState,
     ctx: &StorageTxContext,
@@ -1015,6 +1016,22 @@ mod tests {
         // intentionally closed and is tested separately above.
         state.storage_registry.register_manifest(&m);
         m
+    }
+
+    fn registered_with_test_custody(state: &mut AccountState) -> ContentManifest {
+        let manifest = registered(state);
+        // Grant and delete authority requires a funded, consent-backed deal;
+        // a bare historical manifest claim must not satisfy the custody gate.
+        state
+            .storage_registry
+            .record_test_custody_for_manifest(&manifest, owner());
+        assert_eq!(
+            state
+                .storage_registry
+                .proven_owner_of(&manifest.manifest_id),
+            Some(owner())
+        );
+        manifest
     }
 
     fn profile_for(who: Address) -> MobileSelfProfile {
@@ -1735,12 +1752,21 @@ mod tests {
     }
 
     #[test]
-    fn an_answer_without_a_proof_slashes_the_operator_and_refunds_the_opener() {
+    fn an_unbound_answer_without_a_proof_cannot_slash_or_credit_and_refunds_the_opener() {
+        assert!(
+            !StorageRegistry::storage_challenge_proofs_are_checkable(),
+            "a shard-bound proof is required before any answer can establish possession"
+        );
         let mut state = AccountState::new();
         let (op, opener, deal_id) = challengeable(&mut state);
         execute_storage_tx(&mut state, &ctx(opener), &open_challenge_tx(deal_id)).expect("opens");
         let id = only_challenge_id(&state);
         let burned_before = state.burned_total;
+        let manifest_id = state
+            .storage_registry
+            .get_deal(deal_id)
+            .unwrap()
+            .manifest_id;
 
         execute_storage_tx(
             &mut state,
@@ -1751,37 +1777,37 @@ mod tests {
                 proof: Vec::new(),
             },
         )
-        .expect("a wrong answer is an accepted transaction");
+        .expect("unverifiable answer resolves administratively");
 
         let result = state.storage_registry.get_result(id).expect("resolved");
-        assert_eq!(result.outcome, ChallengeOutcome::Mismatched);
+        assert_eq!(result.outcome, ChallengeOutcome::Answered);
+        assert_eq!(result.slashed_bond, 0);
+        assert_eq!(state.burned_total, burned_before);
+        assert!(!in_cooldown(&state, &op));
         assert_eq!(
-            state.burned_total,
-            burned_before + result.slashed_bond,
-            "the slashed bond is recorded as burned"
+            state.storage_registry.get_deal(deal_id).unwrap().status,
+            crate::domain::storage_deal::DealStatus::Active
         );
-        assert!(in_cooldown(&state, &op), "the operator enters the cooldown");
+        assert_eq!(
+            state.storage_registry.access_estimate(&manifest_id, 150),
+            crate::storage::living_threshold::AccessEstimate::new(150),
+            "an unbound response never counts as a proven read"
+        );
         assert_eq!(
             state.get_balance(&opener),
             OPENER_FUNDS,
-            "the opener called correctly and gets the bond back"
+            "a resolved challenge returns the opener's bond"
         );
     }
 
-    /// A wrong answer returns the payer the fee of the epochs the deal will
-    /// never serve.
-    ///
-    /// The slash takes the deal out of `Active`, and
-    /// `total_storage_escrowed_supply` only counts the unserved part of a live
-    /// deal's prepaid fee. Settling the wrong-answer path with the cooldown and
-    /// the burned bond alone therefore dropped the payer's remaining prepaid
-    /// fee out of the supply accounting entirely: it was not refunded, not
-    /// burned, and the supply cap gained exactly that much minting headroom,
-    /// while any operator could trigger it on its own deal by answering with an
-    /// empty proof. The missed-deadline path always refunded it; both outcomes
-    /// settle through the same routine now.
+    /// An unbound answer cannot slash a live deal or release its unearned
+    /// prepaid fee. The fee remains in escrow until genuine deal expiry or a
+    /// missed deadline (the latter is covered by the storage-economics tests).
+    /// Otherwise an operator could trigger an artificial refund/slash simply
+    /// by answering with an empty proof that could not attest to shard bytes.
     #[test]
-    fn a_wrong_answer_slash_returns_the_unserved_fee_to_the_payer() {
+    fn an_unbound_answer_leaves_the_unserved_fee_in_live_escrow() {
+        assert!(!StorageRegistry::storage_challenge_proofs_are_checkable());
         let mut state = AccountState::new();
         let m = registered(&mut state);
         let payer = owner();
@@ -1855,10 +1881,16 @@ mod tests {
                 proof: Vec::new(),
             },
         )
-        .expect("a wrong answer is an accepted transaction");
+        .expect("an unbound answer only resolves administratively");
 
         let result = state.storage_registry.get_result(id).expect("resolved");
-        assert_eq!(result.outcome, ChallengeOutcome::Mismatched);
+        assert_eq!(result.outcome, ChallengeOutcome::Answered);
+        assert_eq!(result.slashed_bond, 0);
+        assert_eq!(
+            state.storage_registry.get_deal(deal_id).unwrap().status,
+            crate::domain::storage_deal::DealStatus::Active,
+            "the fee remains held by a live deal"
+        );
         let duration = deal.duration_epochs();
         let served = 150u64.saturating_sub(deal.deal_start_epoch).min(duration);
         let unearned = deal
@@ -1867,15 +1899,12 @@ mod tests {
         assert!(unearned > 0, "the fixture leaves epochs unserved");
         assert_eq!(
             state.get_balance(&payer),
-            payer_before + unearned,
-            "the unserved fee returns to the payer instead of vanishing"
+            payer_before,
+            "the payer cannot withdraw an unserved fee while the deal is active"
         );
+        assert_eq!(state.burned_total, burned_before, "no slash took place");
         assert!(
-            state.burned_total >= burned_before + result.slashed_bond,
-            "the confiscated bond is still burned"
-        );
-        assert!(
-            state
+            !state
                 .storage_registry
                 .economics
                 .events
@@ -1883,18 +1912,13 @@ mod tests {
                 .any(|e| e.kind
                     == crate::domain::storage_deal::StorageEconomicsEventKind::PayerRefund
                     && e.deal_id == deal_id),
-            "the refund is in the storage economics ledger"
+            "no premature payer refund is recorded"
         );
-        // The finding's measurable consequence: the slash takes the deal out of
-        // the escrow total, so the committed supply fell by the bond *and* the
-        // unserved fee. With the refund the fall is the bond alone (the fee
-        // returns to the payer's balance, which is committed supply too).
-        let committed_after = state.total_bud_committed();
-        assert!(
-            committed_before.saturating_sub(committed_after) <= u128::from(result.slashed_bond),
-            "the unserved fee left the committed total with the slash: before {committed_before}, \
-             after {committed_after}, bond {}",
-            result.slashed_bond
+        assert_eq!(state.get_balance(&opener), OPENER_FUNDS);
+        assert_eq!(
+            state.total_bud_committed(),
+            committed_before,
+            "the unearned fee is still included in the live escrow total"
         );
     }
 
@@ -1910,7 +1934,7 @@ mod tests {
     #[test]
     fn the_owner_issues_and_revokes_a_view_grant_in_block() {
         let mut state = AccountState::new();
-        let m = registered(&mut state);
+        let m = registered_with_test_custody(&mut state);
         let viewer = Address::from([4u8; 32]);
         state.epoch_index = 3;
         execute_storage_tx(&mut state, &ctx(owner()), &grant_tx(&m, viewer)).expect("issues");
@@ -1932,7 +1956,7 @@ mod tests {
     #[test]
     fn a_stranger_cannot_issue_or_revoke_a_grant_over_someone_elses_content() {
         let mut state = AccountState::new();
-        let m = registered(&mut state);
+        let m = registered_with_test_custody(&mut state);
         let stranger = Address::from([9u8; 32]);
         let root = state.storage_registry.root();
         let err =
@@ -1956,7 +1980,7 @@ mod tests {
     #[test]
     fn only_the_owner_social_deletes_and_every_live_grant_goes() {
         let mut state = AccountState::new();
-        let m = registered(&mut state);
+        let m = registered_with_test_custody(&mut state);
         let viewer = Address::from([4u8; 32]);
         execute_storage_tx(&mut state, &ctx(owner()), &grant_tx(&m, viewer)).expect("issues");
         let delete = StorageTx::SocialDelete {
@@ -2157,24 +2181,27 @@ mod tests {
         .expect("squatter commits under its own namespace");
         assert!(state.storage_registry.is_registered(&mid));
 
-        // 2. Real owner is NOT locked out: RegisterManifest, CommitConfidentialBody,
-        //    IssueViewGrant, SocialDelete, and self-host check all succeed for victim.
+        // 2. A historical registry fixture keeps both rival claims; the
+        // legacy RegisterManifest transaction itself stays closed until
+        // StorageTxV3 replaces it. Confidential commits remain owner-scoped;
+        // grants and deletes require proof of actual custody.
         state.storage_registry.register_manifest(&victim_manifest);
         // Ambiguous while neither holds a third-party deal: squatter cannot claim sole owner_of.
         assert_eq!(state.storage_registry.owner_of(&mid), None);
         assert!(state.storage_registry.has_claim(&mid, &victim));
-        assert_eq!(
-            execute_storage_tx(
-                &mut state,
-                &ctx(squatter),
-                &StorageTx::RegisterManifest {
-                    manifest: squatter_manifest.clone(),
-                },
-            )
-            .unwrap_err(),
-            StorageTxError::AlreadyRegistered
+        let refusal = execute_storage_tx(
+            &mut state,
+            &ctx(squatter),
+            &StorageTx::RegisterManifest {
+                manifest: squatter_manifest.clone(),
+            },
+        )
+        .unwrap_err();
+        assert!(
+            matches!(&refusal, StorageTxError::Refused(message) if message.contains("B.U.D. 3.0")),
+            "legacy registration must remain closed: {refusal}"
         );
-        assert_eq!(state.storage_registry.owner_of(&mid), Some(victim));
+        assert_eq!(state.storage_registry.owner_of(&mid), None);
 
         let victim_commit = ConfidentialBodyCommit::new(
             mid,
@@ -2191,65 +2218,47 @@ mod tests {
             },
         )
         .expect("real owner commits confidential body in its own namespace");
-        execute_storage_tx(
-            &mut state,
-            &ctx(victim),
-            &StorageTx::IssueViewGrant {
-                content_id: mid,
-                grantee: Some(grantee),
-                key_id: [0x55; 32],
-                policy: ViewPolicy::NamedGrantee,
-            },
-        )
-        .expect("real owner issues view grant");
-        // Squatter social delete cannot revoke victim's grant.
-        execute_storage_tx(
-            &mut state,
-            &ctx(squatter),
-            &StorageTx::SocialDelete { content_id: mid },
-        )
-        .expect("squatter social delete runs in squatter namespace");
-        assert_eq!(
-            state
-                .storage_registry
-                .view_grants
-                .live_for_content(&mid)
-                .len(),
-            1,
-            "squatter social delete must leave victim's grant live"
-        );
-        // Squatter's self_host_allowed = false policy does not block victim.
+        // An unbacked manifest or a scoped confidential commitment must not
+        // authorize either claimant to issue grants or delete content. The
+        // squatter's free claim cannot grant itself the victim's keys.
+        let before_unproven_access = state.storage_registry.root();
+        for claimant in [victim, squatter] {
+            let refusal = execute_storage_tx(
+                &mut state,
+                &ctx(claimant),
+                &StorageTx::IssueViewGrant {
+                    content_id: mid,
+                    grantee: Some(grantee),
+                    key_id: [0x55; 32],
+                    policy: ViewPolicy::NamedGrantee,
+                },
+            )
+            .unwrap_err();
+            assert!(matches!(refusal, StorageTxError::ViewGrantRefused(_)));
+            let refusal = execute_storage_tx(
+                &mut state,
+                &ctx(claimant),
+                &StorageTx::SocialDelete { content_id: mid },
+            )
+            .unwrap_err();
+            assert!(matches!(refusal, StorageTxError::ViewGrantRefused(_)));
+        }
+        assert_eq!(state.storage_registry.live_view_grant_count(&mid), 0);
+        assert_eq!(state.storage_registry.root(), before_unproven_access);
+        // The squatter's self-host policy does not apply to the victim.
         assert!(state
             .storage_registry
             .check_self_host_allowed_for_owner(&mid, &victim_manifest.shards[0].shard_id, &victim)
             .is_ok());
-        // Victim's own social delete revokes victim's grant.
-        execute_storage_tx(
-            &mut state,
-            &ctx(victim),
-            &StorageTx::SocialDelete { content_id: mid },
-        )
-        .expect("victim social delete");
-        assert!(state
-            .storage_registry
-            .view_grants
-            .live_for_content(&mid)
-            .is_empty());
 
-        // Competing RegisterManifest is recorded rather than refused, while a
-        // custody-proven owner retains `owner_of`, `proven_owner_of`, grant,
-        // social-delete, and data-asset registration authority.
-        execute_storage_tx(
-            &mut state,
-            &ctx(squatter),
-            &StorageTx::RegisterManifest {
-                manifest: squatter_manifest.clone(),
-            },
-        )
-        .expect("competing manifest claim is recorded");
+        // A custody-backed claim restores canonical authority in the presence
+        // of the free, competing squatter claim. The old registration door is
+        // still closed, so build the historical custody fixture at the registry.
+        state
+            .storage_registry
+            .record_test_custody_for_manifest(&victim_manifest, victim);
         assert_eq!(state.storage_registry.owner_of(&mid), Some(victim));
         assert_eq!(state.storage_registry.proven_owner_of(&mid), Some(victim));
-
         execute_storage_tx(
             &mut state,
             &ctx(victim),
@@ -2260,25 +2269,22 @@ mod tests {
                 policy: ViewPolicy::NamedGrantee,
             },
         )
-        .expect("custody-proven owner keeps view grant authority after rival manifest");
+        .expect("custody-proven owner keeps view-grant authority");
+        let refusal = execute_storage_tx(
+            &mut state,
+            &ctx(squatter),
+            &StorageTx::SocialDelete { content_id: mid },
+        )
+        .unwrap_err();
+        assert!(matches!(refusal, StorageTxError::ViewGrantRefused(_)));
+        assert_eq!(state.storage_registry.live_view_grant_count(&mid), 1);
         execute_storage_tx(
             &mut state,
             &ctx(victim),
             &StorageTx::SocialDelete { content_id: mid },
         )
-        .expect("custody-proven owner keeps social delete authority after rival manifest");
-
-        assert_eq!(
-            execute_storage_tx(
-                &mut state,
-                &ctx(squatter),
-                &StorageTx::RegisterManifest {
-                    manifest: squatter_manifest.clone(),
-                },
-            )
-            .unwrap_err(),
-            StorageTxError::AlreadyRegistered
-        );
+        .expect("custody-proven owner keeps social-delete authority");
+        assert_eq!(state.storage_registry.live_view_grant_count(&mid), 0);
 
         state.add_balance(&victim, 1_000);
         let asset = crate::pollen::DataAsset::new(victim, mid, [0x77; 32], true);
@@ -2295,12 +2301,14 @@ mod tests {
         crate::execution::executor::Executor::apply_transaction_checked(&mut state, &tx)
             .expect("custody-proven owner keeps data asset registration authority");
 
+        // The signer cannot submit somebody else's manifest through the
+        // closed legacy door either; that check still runs before the gate.
         assert_eq!(
             execute_storage_tx(
                 &mut state,
                 &ctx(squatter),
                 &StorageTx::RegisterManifest {
-                    manifest: squatter_manifest,
+                    manifest: victim_manifest,
                 },
             )
             .unwrap_err(),
@@ -2372,12 +2380,13 @@ mod tests {
             op,
             state.epoch_index,
         );
-        let real_proof = crate::domain::storage_deal::prove_storage_challenge_proof(
-            &proof_ctx,
-            &[0x42u8; 32],
-            &range_hash,
-        )
-        .expect("real self-challenge STARK proof");
+        let real_proof =
+            crate::domain::storage_deal::prove_storage_challenge_proof_for_isolated_air_tests(
+                &proof_ctx,
+                &[0x42u8; 32],
+                &range_hash,
+            )
+            .expect("isolated self-challenge STARK witness");
         execute_storage_tx(
             &mut state,
             &ctx(op),

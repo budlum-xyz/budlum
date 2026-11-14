@@ -12,9 +12,6 @@
 //! the state is held by `SettlementRegistries::object_layer` and closed on
 //! the testnet by `ACTIVATION`.
 
-use crate::core::hash::hash_fields_bytes;
-use crate::cross_domain::event_tree::MerkleProof;
-use crate::cross_domain::evm::account_proof;
 use crate::domain::types::Hash32;
 use crate::object_layer::family::{profile_for, FamilyContext, HomeVmFamily};
 use serde::{Deserialize, Serialize};
@@ -116,47 +113,6 @@ pub enum CharterRefusal {
     AlreadyChartered,
 }
 
-fn verify_home_code_entry(
-    vm_family: HomeVmFamily,
-    chain_reference: &str,
-    address: &[u8],
-    expected_code_hash: Hash32,
-    state_root: Hash32,
-    proof_nodes: &[Vec<u8>],
-) -> Result<(), CharterRefusal> {
-    if proof_nodes.is_empty() {
-        return Err(CharterRefusal::ProofDisagrees);
-    }
-    match vm_family {
-        HomeVmFamily::Evm => {
-            let addr20: [u8; 20] = address.try_into().map_err(|_| CharterRefusal::BadAddress)?;
-            let acct = account_proof::verify_account(proof_nodes, &state_root, &addr20)
-                .map_err(|_| CharterRefusal::ProofDisagrees)?;
-            if acct.code_hash != expected_code_hash {
-                return Err(CharterRefusal::ProofDisagrees);
-            }
-            Ok(())
-        }
-        HomeVmFamily::CosmWasm | HomeVmFamily::Svm | HomeVmFamily::Move => {
-            let [raw] = proof_nodes else {
-                return Err(CharterRefusal::ProofDisagrees);
-            };
-            let merkle: MerkleProof =
-                bincode::deserialize(raw).map_err(|_| CharterRefusal::ProofDisagrees)?;
-            let expected_leaf = hash_fields_bytes(&[
-                b"BDLM_UOL_HOME_CODE_V1",
-                chain_reference.as_bytes(),
-                address,
-                &expected_code_hash,
-            ]);
-            if merkle.leaf != expected_leaf || !merkle.verify(state_root) {
-                return Err(CharterRefusal::ProofDisagrees);
-            }
-            Ok(())
-        }
-    }
-}
-
 /// Check one charter against the proofs and the canonical hashes.
 ///
 /// # Errors
@@ -213,16 +169,14 @@ pub fn check_charter_at_state_root(
         }
     }
     if let Some(hp) = proof.home_proof.as_ref() {
-        verify_home_code_entry(
-            charter.vm_family,
+        family.verify_home_code_entry(
             &charter.chain_reference,
             &charter.endpoint,
             charter.endpoint_code_hash,
             hp.state_root,
             &hp.endpoint_proof,
         )?;
-        verify_home_code_entry(
-            charter.vm_family,
+        family.verify_home_code_entry(
             &charter.chain_reference,
             &charter.verifier,
             charter.verifier_code_hash,

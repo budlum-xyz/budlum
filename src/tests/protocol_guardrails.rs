@@ -52,12 +52,21 @@ fn storage_proof_bundle_envelope() -> Vec<u8> {
         responder: addr(1),
         response_epoch: 15,
     };
-    crate::domain::storage_deal::prove_storage_challenge_proof(
+    assert!(
+        crate::domain::storage_deal::prove_storage_challenge_proof(
+            &context,
+            &[0x42; 32],
+            &crate::storage::content_id::ContentId([0x33; 32]),
+        )
+        .is_err(),
+        "the production builder must not bypass the closed VerifyMerkle gate"
+    );
+    crate::domain::storage_deal::prove_storage_challenge_proof_for_isolated_air_tests(
         &context,
         &[0x42; 32],
         &crate::storage::content_id::ContentId([0x33; 32]),
     )
-    .expect("real STARK storage challenge proof bundle")
+    .expect("isolated AIR witness; production VerifyMerkle remains closed")
 }
 
 #[test]
@@ -134,16 +143,19 @@ fn proof_required_models_are_refused_without_a_live_verifier() {
 }
 
 #[test]
-fn mainnet_inference_and_merkle_features_stay_closed() {
+fn production_merkle_and_storage_credit_stay_closed_until_shard_binding() {
     let d = bud_isa::MainnetActivation::default();
-    assert!(d.verify_merkle_enabled, "VerifyMerkle is active on testnet");
     assert!(
-        d.verify_inference_enabled,
-        "VerifyInference is active on testnet"
+        !d.verify_merkle_enabled,
+        "a 64-depth path proof alone cannot attest possession of the challenged shard"
     );
     assert!(
-        StorageRegistry::storage_challenge_proofs_are_checkable(),
-        "64-depth VerifyMerkle STARK verification is active"
+        d.verify_inference_enabled,
+        "inference has an independent 30-round AIR and must not be disabled to close storage"
+    );
+    assert!(
+        !StorageRegistry::storage_challenge_proofs_are_checkable(),
+        "an unbound storage witness must not earn proof credit or trigger slashing"
     );
     let toml = include_str!("../../config/mainnet.toml");
     assert!(

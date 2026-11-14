@@ -272,10 +272,10 @@ mod testnet_closures {
             .collect()
     }
 
-    /// A signed `ContractCall` on the testnet chain id using `VerifyMerkle` or
-    /// `VerifyInference` executes cleanly under `MainnetActivation::default()`,
-    /// while `MainnetActivation::closed()` continues to refuse both opcodes.
-    fn runs_on_testnet_and_refused_when_closed(opcode: Opcode) {
+    /// A signed `ContractCall` on testnet uses the same ISA activation as the
+    /// proof verifier. Merkle must fail before it can claim storage credit;
+    /// inference retains its independent 30-round AIR proof path.
+    fn production_opcode_admission(opcode: Opcode, admitted: bool) {
         let keypair = KeyPair::generate().expect("keypair");
         let from = Address::from(keypair.public_key_bytes());
         let mut state = AccountState::new();
@@ -287,26 +287,34 @@ mod testnet_closures {
             0,
             25,
             0,
-            code.clone(),
+            code,
             Network::Testnet.chain_id().value(),
             TransactionType::ContractCall,
         );
         tx.sign(&keypair);
-        Executor::apply_transaction(&mut state, &tx)
-            .expect("active testnet opcodes must execute and prove cleanly");
-        assert_eq!(state.get_nonce(&from), 1);
-
-        let closed = bud_isa::MainnetActivation::closed();
-        assert!(!closed.allows(opcode));
+        let result = Executor::apply_transaction(&mut state, &tx);
+        if admitted {
+            result.expect("inference executes under the canonical testnet activation");
+            assert_eq!(state.get_nonce(&from), 1);
+        } else {
+            let err = result.expect_err("unbound VerifyMerkle is closed on testnet");
+            assert!(format!("{err:?}").contains("VerifyMerkle"), "{err:?}");
+            assert_eq!(
+                state.get_nonce(&from),
+                0,
+                "refusal must not consume a nonce"
+            );
+        }
+        assert!(!bud_isa::MainnetActivation::closed().allows(opcode));
     }
 
     #[test]
     fn verify_merkle_is_closed_on_testnet() {
-        runs_on_testnet_and_refused_when_closed(Opcode::VerifyMerkle);
+        production_opcode_admission(Opcode::VerifyMerkle, false);
     }
 
     #[test]
-    fn verify_inference_is_closed_on_testnet() {
-        runs_on_testnet_and_refused_when_closed(Opcode::VerifyInference);
+    fn verify_inference_is_active_on_testnet() {
+        production_opcode_admission(Opcode::VerifyInference, true);
     }
 }

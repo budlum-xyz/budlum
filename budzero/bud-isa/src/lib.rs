@@ -33,15 +33,10 @@ pub enum Opcode {
     SWrite = 0x1C,
     Syscall = 0x1D,
     VerifyMerkle = 0x1E,
-    /// Reserved opcode. It verifies nothing.
-    ///
-    /// Semantics: VerifyInference rd, rs1, rs2, imm
-    ///   Rd = always 0. The VM reads no memory and ignores the operands.
-    ///   The AIR forces the opcode selector to zero, so no proof of a trace
-    ///   that contains this opcode can verify.
-    ///
-    /// The number stays reserved. Mainnet decoding is also gated: it needs
-    /// explicit activation via MainnetActivation.
+    /// Compute the 30-round Poseidon commitment of the model and input
+    /// commitments, domain-separated by the canonical immediate tag. The
+    /// AIR constrains the resulting trace row; decoding still consults the
+    /// independent `verify_inference_enabled` activation flag.
     VerifyInference = 0x1F,
     /// Privacy layer - commitment for private transfer.
     /// Binds amount + recipient + blinding into a Poseidon commitment hash.
@@ -82,19 +77,16 @@ pub enum IsaProfile {
     Testing,
 }
 
-/// Controls which opcodes
-/// Are active on mainnet. Default: VerifyMerkle and VerifyInference NOT
-/// Active on mainnet (staged rollout). After ceremony completion, flip
-/// The corresponding flags to true.
+/// Controls staged opcodes in production. `VerifyMerkle` remains off until
+/// its proof is bound to the challenged shard; `VerifyInference` and the
+/// privacy opcodes retain their independently tested default activation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MainnetActivation {
     /// False = OFF on mainnet (staged rollout) - the same as bool::default,
     /// kept explicit for clarity alongside the privacy gates.
     pub verify_merkle_enabled: bool,
-    /// AI inference verification opcode gate.
-    /// False means OFF on mainnet - it requires post-ceremony activation.
-    /// When true, the reserved VerifyInference (0x1F) opcode decodes on
-    /// mainnet. It still answers 0, and the AIR refuses any proof of it.
+    /// AI inference commitment opcode gate. Active by default with the
+    /// 30-round Poseidon AIR; `closed()` retains a test-only refusal path.
     pub verify_inference_enabled: bool,
     /// Privacy-layer opcode gates (staged rollout).
     pub privacy_commit_enabled: bool,
@@ -103,7 +95,7 @@ pub struct MainnetActivation {
 }
 
 impl Default for MainnetActivation {
-    /// Privacy opcodes are on; Merkle and inference verification are not.
+    /// Privacy and inference are on; the production Merkle proof gate is off.
     ///
     /// The privacy three (`PrivacyCommit`, `NullifierCheck`,
     /// `SumConservation`) were held closed because they hash through a
@@ -116,10 +108,12 @@ impl Default for MainnetActivation {
     /// `R_P = 22`, 30 rounds, and the AIR constrains every one of them. The
     /// reason for the gate is gone, so the gate is gone.
     ///
-    /// `VerifyMerkle` and `VerifyInference` stay closed for reasons that have
-    /// nothing to do with Poseidon. `VerifyInference` is a reserved opcode:
-    /// it returns zero and the AIR refuses any proof of it; see
-    /// `docs/AI_VERIFICATION_STATUS.md`.
+    /// `VerifyInference` is backed by its 30-round AIR path and stays enabled.
+    /// `VerifyMerkle` is different: proving a 64-level path does not prove
+    /// possession of the shard bytes committed by a storage challenge.
+    /// Storage challenge credit and slashing remain closed until that binding
+    /// exists; production execution and verification must keep its opcode
+    /// closed too, while isolated proof tests may opt into `full()`.
     ///
     /// The rationale for `VerifyMerkle` has changed. For a long time it read
     /// "unfinished path verification", and that was true: the 64 expansion rows
@@ -130,15 +124,14 @@ impl Default for MainnetActivation {
     /// claimed root there itself, without touching the expansion rows, produced
     /// a proof that verified. That was measured, and it did.
     ///
-    /// That gap is now closed (`plonky3_air.rs`, "The output of the last round
-    /// ..."; `rejects_verify_merkle_root_not_produced_by_the_path`). The gate
-    /// Activation schedule used when no override is configured: all five
-    /// staged opcodes (`VerifyMerkle`, `VerifyInference`, `PrivacyCommit`,
-    /// `NullifierCheck`, `SumConservation`) are backed by full 30-round
-    /// Poseidon AIR constraints and enabled on testnet/devnet/mainnet execution.
+    /// That path gap is now closed (`plonky3_air.rs`, "The output of the last
+    /// round ..."; `rejects_verify_merkle_root_not_produced_by_the_path`).
+    /// The missing shard-content binding is a separate admission problem.
+    /// Until it lands, `VerifyMerkle` stays off by default on every production
+    /// network even though explicit `full()` still exercises the proof in tests.
     fn default() -> Self {
         Self {
-            verify_merkle_enabled: true,
+            verify_merkle_enabled: false,
             verify_inference_enabled: true,
             privacy_commit_enabled: true,
             nullifier_check_enabled: true,
@@ -352,16 +345,17 @@ impl Instruction {
 mod tests {
     use super::*;
 
-    /// `VerifyMerkle` is active under default activation once the full
-    /// 30-round Poseidon path check is enabled, while `closed()` continues to gate it.
+    /// Proof correctness alone is not a shard-content binding. The ordinary
+    /// production schedule stays closed while explicit full-activation tests
+    /// may prove the opcode in isolation.
     #[test]
-    fn verify_merkle_gate_stays_closed_until_full_poseidon() {
+    fn verify_merkle_gate_stays_closed_until_shard_proof_is_bound() {
         let default = MainnetActivation::default();
-        assert!(default.verify_merkle_enabled);
-        assert!(default.allows(Opcode::VerifyMerkle));
-        let closed = MainnetActivation::closed();
-        assert!(!closed.verify_merkle_enabled);
-        assert!(!closed.allows(Opcode::VerifyMerkle));
+        assert!(!default.verify_merkle_enabled);
+        assert!(!default.allows(Opcode::VerifyMerkle));
+        let full = MainnetActivation::full();
+        assert!(full.verify_merkle_enabled);
+        assert!(full.allows(Opcode::VerifyMerkle));
     }
 
     #[test]
@@ -390,11 +384,8 @@ mod tests {
             imm: 0,
         }
         .encode();
-        let inst = Instruction::decode_for_mainnet(raw, MainnetActivation::default())
-            .expect("VerifyMerkle allowed by default activation");
-        assert_eq!(inst.opcode, Opcode::VerifyMerkle);
-        let err = Instruction::decode_for_mainnet(raw, MainnetActivation::closed())
-            .expect_err("VerifyMerkle blocked under closed activation");
+        let err = Instruction::decode_for_mainnet(raw, MainnetActivation::default())
+            .expect_err("VerifyMerkle blocked under default production activation");
         assert!(matches!(
             err,
             DecodeError::MainnetActivationRequired(Opcode::VerifyMerkle)
@@ -550,11 +541,15 @@ mod tests {
         }
     }
 
-    /// Under `MainnetActivation::default()` both opcodes are open backed by
-    /// the 30-round Poseidon AIR; `MainnetActivation::closed()` still refuses them.
+    /// The independent gates do not rise together: 30-round inference is
+    /// live, but an unbound Merkle storage witness remains unusable on every
+    /// production chain. Both paths still refuse under explicit `closed()`.
     #[test]
-    fn d2_mainnet_activation_default_still_rejects_merkle_and_inference() {
-        for op in [Opcode::VerifyMerkle, Opcode::VerifyInference] {
+    fn d2_merkle_is_closed_while_inference_is_active_by_default() {
+        for (op, enabled) in [
+            (Opcode::VerifyMerkle, false),
+            (Opcode::VerifyInference, true),
+        ] {
             let raw = Instruction {
                 opcode: op,
                 rd: 1,
@@ -563,14 +558,15 @@ mod tests {
                 imm: 0,
             }
             .encode();
-            let inst = Instruction::decode_for_mainnet(raw, MainnetActivation::default())
-                .unwrap_or_else(|e| panic!("{op:?} must decode by default, got {e:?}"));
-            assert_eq!(inst.opcode, op);
-            let err = Instruction::decode_for_mainnet(raw, MainnetActivation::closed())
-                .expect_err("must stay blocked when explicitly closed");
-            assert!(
-                matches!(err, DecodeError::MainnetActivationRequired(_)),
-                "{op:?} must require activation when closed"
+            let result = Instruction::decode_for_mainnet(raw, MainnetActivation::default());
+            if enabled {
+                assert_eq!(result.unwrap().opcode, op);
+            } else {
+                assert_eq!(result, Err(DecodeError::MainnetActivationRequired(op)));
+            }
+            assert_eq!(
+                Instruction::decode_for_mainnet(raw, MainnetActivation::closed()),
+                Err(DecodeError::MainnetActivationRequired(op))
             );
         }
     }
@@ -633,18 +629,18 @@ mod tests {
         }
     }
 
-    /// VerifyMerkle and VerifyInference are active under default() now that both
-    /// are backed by full 30-round Poseidon AIR constraints, and refused under closed().
+    /// Merkle remains gated in production until its shard binding is proved;
+    /// inference uses an independent, already active AIR-backed path.
     #[test]
-    fn merkle_and_inference_stay_gated_by_default() {
+    fn merkle_and_inference_have_independent_default_gates() {
         let default = MainnetActivation::default();
-        assert!(default.verify_merkle_enabled);
+        assert!(!default.verify_merkle_enabled);
         assert!(default.verify_inference_enabled);
-        assert!(default.allows(Opcode::VerifyMerkle));
+        assert!(!default.allows(Opcode::VerifyMerkle));
         assert!(default.allows(Opcode::VerifyInference));
+        let full = MainnetActivation::full();
+        assert!(full.allows(Opcode::VerifyMerkle));
         let closed = MainnetActivation::closed();
-        assert!(!closed.verify_merkle_enabled);
-        assert!(!closed.verify_inference_enabled);
         assert!(!closed.allows(Opcode::VerifyMerkle));
         assert!(!closed.allows(Opcode::VerifyInference));
     }

@@ -437,8 +437,9 @@ pub struct OptionalProofJobReceipt {
     pub alters_consensus_state: bool,
 }
 
-/// Decode BudZero bytecode under canonical active testnet/mainnet opcode rules
-/// (`VerifyMerkle` and `VerifyInference` enabled under `MainnetActivation::default()`).
+/// Decode BudZero bytecode under canonical production opcode rules. The
+/// Merkle path remains closed until a shard-bound witness is available;
+/// inference uses its independent active AIR-backed gate.
 ///
 /// # Errors
 ///
@@ -527,8 +528,10 @@ mod tests {
                 imm: 0,
             },
         ]);
-        ee.validate_deploy(&active)
-            .expect("VerifyMerkle is active on testnet under MainnetActivation::default()");
+        let refusal = ee
+            .validate_deploy(&active)
+            .expect_err("unbound VerifyMerkle must not deploy on testnet");
+        assert!(format!("{refusal:?}").contains("VerifyMerkle"));
         assert!(
             bud_isa::Instruction::decode_for_mainnet(
                 Instruction {
@@ -539,15 +542,15 @@ mod tests {
                     imm: 0,
                 }
                 .encode(),
-                bud_isa::MainnetActivation::closed(),
+                bud_isa::MainnetActivation::full(),
             )
-            .is_err(),
-            "explicit MainnetActivation::closed() still refuses VerifyMerkle"
+            .is_ok(),
+            "isolated full-activation tests still exercise the proven path"
         );
     }
 
     #[test]
-    fn verify_inference_is_closed_on_testnet() {
+    fn verify_inference_is_active_on_testnet() {
         let ee = BudZeroEe::new();
         let active = encode_instrs(&[
             Instruction {

@@ -196,6 +196,15 @@ pub fn encode_output_limbs(limbs: &[i32]) -> Vec<u8> {
     limbs.iter().flat_map(|x| x.to_le_bytes()).collect()
 }
 
+/// Canonical little-endian input bytes for an MLP request's `input_ref`.
+/// The request and its execution proof must use the *same* admission hash:
+/// `AI_INPUT_COMMIT_V1` over these bytes, not the separate SHA3 limb commitment
+/// used by the private-execution guest.
+#[must_use]
+pub fn encode_input_limbs(limbs: &[i32]) -> Vec<u8> {
+    encode_output_limbs(limbs)
+}
+
 pub fn output_commitment(limbs: &[i32]) -> [u8; 32] {
     commit_i32_limbs(b"BDLM_AI_OUTPUT_V1", limbs)
 }
@@ -377,7 +386,7 @@ pub fn prove_mlp_inference_with_context(
         ));
     }
 
-    let in_c = input_commitment(input);
+    let in_c = crate::ai::types::canonical_input_commitment(&encode_input_limbs(input));
     let out_c = crate::ai::types::canonical_output_commitment(&encode_output_limbs(&host_output));
     let words = build_matmul_guest_program(spec)?;
     let program_hash = stark_program_hash_from_words(&words);
@@ -438,7 +447,7 @@ pub fn prove_mlp_inference(
         ));
     }
 
-    let in_c = input_commitment(input);
+    let in_c = crate::ai::types::canonical_input_commitment(&encode_input_limbs(input));
     let out_c = crate::ai::types::canonical_output_commitment(&encode_output_limbs(&host_output));
     let words = build_matmul_guest_program(spec)?;
     // The proof carries the hash the STARK binds, not the registry

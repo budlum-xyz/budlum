@@ -1463,6 +1463,27 @@ pub fn prove_storage_challenge_proof(
     storage_root: &Hash32,
     range_hash: &ContentId,
 ) -> Result<Vec<u8>, StorageError> {
+    prove_storage_challenge_proof_with_mode(context, storage_root, range_hash, true)
+}
+
+/// Build an isolated AIR witness for negative tests without activating
+/// VerifyMerkle on a production chain. The default verifier still rejects
+/// this bundle and it can never earn storage credit.
+#[cfg(test)]
+pub(crate) fn prove_storage_challenge_proof_for_isolated_air_tests(
+    context: &StorageChallengeProofContext,
+    storage_root: &Hash32,
+    range_hash: &ContentId,
+) -> Result<Vec<u8>, StorageError> {
+    prove_storage_challenge_proof_with_mode(context, storage_root, range_hash, false)
+}
+
+fn prove_storage_challenge_proof_with_mode(
+    context: &StorageChallengeProofContext,
+    storage_root: &Hash32,
+    range_hash: &ContentId,
+    mainnet_mode: bool,
+) -> Result<Vec<u8>, StorageError> {
     let context_digest = context.digest(storage_root, range_hash);
     let key_arr: [u8; 8] = context_digest[..8].try_into().unwrap_or([0u8; 8]);
     let merkle_key = u64::from_le_bytes(key_arr);
@@ -1493,7 +1514,7 @@ pub fn prove_storage_challenge_proof(
     let claimed_root = cur;
 
     let (program, program_hash) = storage_challenge_merkle_program();
-    let mut vm = bud_vm::Vm::with_mainnet_mode(8192, 1_000_000, true);
+    let mut vm = bud_vm::Vm::with_mainnet_mode(8192, 1_000_000, mainnet_mode);
     seed_storage_challenge_vm(&mut vm, merkle_key, &leaf, &siblings, &claimed_root);
     let receipt = vm.run_receipt(&program);
     if !receipt.success || vm.registers[1] != 1 {
@@ -7459,8 +7480,9 @@ mod tests {
             operator(),
             115,
         );
-        let real_proof = prove_storage_challenge_proof(&ctx, &[0x42u8; 32], &range_hash)
-            .expect("real 64-depth VerifyMerkle STARK proof");
+        let real_proof =
+            prove_storage_challenge_proof_for_isolated_air_tests(&ctx, &[0x42u8; 32], &range_hash)
+                .expect("isolated 64-depth VerifyMerkle STARK witness");
         let ok_res = reg
             .answer_challenge_with_chain_id(
                 crate::core::chain_config::Network::Testnet
@@ -9943,8 +9965,12 @@ mod tests {
             operator(),
             111,
         );
-        let self_real_proof = prove_storage_challenge_proof(&self_ctx, &[0x42u8; 32], &range_hash)
-            .expect("real self-challenge STARK proof");
+        let self_real_proof = prove_storage_challenge_proof_for_isolated_air_tests(
+            &self_ctx,
+            &[0x42u8; 32],
+            &range_hash,
+        )
+        .expect("isolated self-challenge STARK witness");
         let self_res = reg
             .answer_challenge_with_chain_id(
                 crate::core::chain_config::Network::Testnet
@@ -10051,7 +10077,10 @@ mod tests {
         let mut reg = StorageRegistry::new();
         let alice = Address::from([0xA1; 32]);
         let mallory = Address::from([0xB2; 32]);
-        let alice_manifest = good_manifest();
+        let mut alice_manifest = good_manifest();
+        // Custody does not silently rewrite a manifest claim: the recorded
+        // claimant must be Alice before her paid deal can establish authority.
+        alice_manifest.owner = alice;
         let manifest_id = alice_manifest.manifest_id;
         reg.register_manifest(&alice_manifest);
         reg.record_test_custody_for_manifest(&alice_manifest, alice);

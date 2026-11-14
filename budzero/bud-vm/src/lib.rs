@@ -30,12 +30,11 @@ pub struct ExecutionReceipt {
     pub state_writes_digest: [u8; 32],
 }
 
-// Mainnet decoding reads `MainnetActivation::default()`. Both
-// `VerifyMerkle` (64-depth 30-round Poseidon path verification) and
-// `VerifyInference` (30-round Poseidon commitment binding over
-// `DOMAIN_VERIFY_INFERENCE`) are backed by AIR constraints and enabled under
-// `MainnetActivation::default()`. `MainnetActivation::closed()` retains an
-// explicit off toggle for compatibility and differential testing.
+// Mainnet decoding reads `MainnetActivation::default()`. The 64-depth
+// VerifyMerkle path AIR can be exercised under explicit `full()` in tests,
+// but production stays closed until the path is bound to challenged shard
+// contents. VerifyInference's independent 30-round Poseidon commitment AIR
+// remains enabled; `closed()` can still refuse both for differential tests.
 fn decode_instruction(raw: u64, mainnet_mode: bool) -> Result<bud_isa::Instruction, String> {
     if mainnet_mode {
         let activation = bud_isa::MainnetActivation::default();
@@ -2105,6 +2104,36 @@ mod poseidon_parameter_tests {
     }
 
     #[test]
+    fn production_vm_refuses_unbound_verify_merkle_before_writing_a_trace_row() {
+        let program = [
+            Instruction {
+                opcode: Opcode::VerifyMerkle,
+                rd: 1,
+                rs1: 0,
+                rs2: 0,
+                imm: 0,
+            }
+            .encode(),
+            Instruction {
+                opcode: Opcode::Halt,
+                rd: 0,
+                rs1: 0,
+                rs2: 0,
+                imm: 0,
+            }
+            .encode(),
+        ];
+        let mut vm = Vm::with_mainnet_mode(8192, 100_000, true);
+        let receipt = vm.run_receipt(&program);
+        assert!(!receipt.success);
+        assert!(matches!(receipt.error, Some(VmError::InvalidOpcode(_))));
+        assert!(vm
+            .trace
+            .iter()
+            .all(|step| step.instruction.opcode != Opcode::VerifyMerkle));
+    }
+
+    #[test]
     fn budzero_sender_is_four_words() {
         let mut addr = [0u8; 32];
         addr[0..8].copy_from_slice(&0x1111_2222_3333_4444u64.to_le_bytes());
@@ -2188,13 +2217,12 @@ mod poseidon_parameter_tests {
         let receipt = vm.run_receipt(&program);
         assert!(!receipt.success);
         assert_eq!(receipt.error, Some(VmError::OutOfGas));
-        // `consume_gas` adds the cost of the refused instruction to the counter
-        // before it compares against the limit, and the receipt keeps that
-        // addition: the loop always stops past the limit, but never further
-        // past it than one `VerifyMerkle` costs. That one-instruction overshoot
-        // is the DoS bound this calibration promises.
-        assert!(receipt.gas_used > 4_096);
-        assert!(receipt.gas_used <= 4_096 + Vm::gas_cost(Opcode::VerifyMerkle));
+        // The failing instruction has no trace row and charges no gas: step()
+        // restores its prior gas counter before run_receipt adds the terminal
+        // Halt row. The last successful instruction stays within the limit;
+        // adding the next VerifyMerkle would exceed it.
+        assert!(receipt.gas_used <= 4_096);
+        assert!(receipt.gas_used + Vm::gas_cost(Opcode::VerifyMerkle) > 4_096);
         assert!(vm.trace.len() <= 410 * (1 + MERKLE_ROUNDS) + 1);
     }
 
