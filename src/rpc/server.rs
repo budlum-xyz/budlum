@@ -6612,6 +6612,7 @@ impl BudlumApiServer for RpcServer {
         relay_multiaddrs: Vec<String>,
         nonce: u64,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        self.require_operator("bud_gardenCreate")?;
         let mut guard = self
             .garden
             .lock()
@@ -6651,6 +6652,7 @@ impl BudlumApiServer for RpcServer {
         invite_or_qr: String,
         validator_name: String,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        self.require_operator("bud_gardenJoin")?;
         let mut guard = self
             .garden
             .lock()
@@ -6665,6 +6667,7 @@ impl BudlumApiServer for RpcServer {
         chain_id: Option<u64>,
         validator_pubkey_hex: String,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        self.require_operator("bud_gardenLeave")?;
         let mut guard = self
             .garden
             .lock()
@@ -6681,6 +6684,7 @@ impl BudlumApiServer for RpcServer {
         chain_id: Option<u64>,
         validator_pubkey_hex: String,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        self.require_operator("bud_gardenReturn")?;
         let mut guard = self
             .garden
             .lock()
@@ -6716,6 +6720,7 @@ impl BudlumApiServer for RpcServer {
         body_or_filename: String,
         payload_hex: String,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        self.require_operator("bud_gardenPublish")?;
         let node_chain_id = self.chain.get_chain_id().await;
         if crate::garden::is_primary_budlum_chain(chain_id) {
             return Err(ErrorObjectOwned::owned(
@@ -6795,6 +6800,7 @@ impl BudlumApiServer for RpcServer {
         &self,
         chain_id: Option<u64>,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        self.require_operator("bud_gardenAdvanceRound")?;
         let mut guard = self
             .garden
             .lock()
@@ -6809,22 +6815,35 @@ impl BudlumApiServer for RpcServer {
         chain_id: Option<u64>,
         peer_addr: Option<String>,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        let guard = self
-            .garden
-            .lock()
-            .map_err(|_| ErrorObjectOwned::owned(-32603, "garden lock poisoned", None::<()>))?;
-        if let Some(addr) = peer_addr {
-            let resp = guard
-                .query_peer_status(&addr)
-                .map_err(|e| ErrorObjectOwned::owned(-32602, e, None::<()>))?;
-            serde_json::to_value(resp)
-                .map_err(|e| ErrorObjectOwned::owned(-32603, e.to_string(), None::<()>))
-        } else {
+        self.require_operator("bud_gardenPeerStatus")?;
+        let Some(addr) = peer_addr else {
+            let guard = self
+                .garden
+                .lock()
+                .map_err(|_| ErrorObjectOwned::owned(-32603, "garden lock poisoned", None::<()>))?;
             let probe = guard
                 .probe_local_node_listener(chain_id)
                 .map_err(|e| ErrorObjectOwned::owned(-32602, e, None::<()>))?;
-            Ok(serde_json::json!({ "local_probe": probe }))
-        }
+            return Ok(serde_json::json!({ "local_probe": probe }));
+        };
+        let garden = self.garden.clone();
+        let query = tokio::task::spawn_blocking(move || {
+            let guard = garden
+                .lock()
+                .map_err(|_| "garden lock poisoned".to_string())?;
+            guard.query_peer_status(&addr)
+        });
+        let resp = tokio::time::timeout(std::time::Duration::from_secs(5), query)
+            .await
+            .map_err(|_| {
+                ErrorObjectOwned::owned(-32000, "garden peer status timed out", None::<()>)
+            })?
+            .map_err(|e| {
+                ErrorObjectOwned::owned(-32603, format!("garden peer task failed: {e}"), None::<()>)
+            })?
+            .map_err(|e| ErrorObjectOwned::owned(-32602, e, None::<()>))?;
+        serde_json::to_value(resp)
+            .map_err(|e| ErrorObjectOwned::owned(-32603, e.to_string(), None::<()>))
     }
 }
 

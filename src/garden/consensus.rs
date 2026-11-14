@@ -162,8 +162,8 @@ impl GardenChainState {
                 if &signed_tx.tx.sender != pubkey {
                     return Err("JoinValidator must be signed by the joining validator".into());
                 }
-                if display_name.trim().is_empty() || display_name.len() > 64 {
-                    return Err("validator display_name must be 1..=64 bytes".into());
+                if !crate::garden::types::is_safe_validator_label(display_name) {
+                    return Err("validator display_name must be 1..=64 safe path-free bytes".into());
                 }
                 if self.liveness.is_active_validator(pubkey) {
                     return Err("validator already active".into());

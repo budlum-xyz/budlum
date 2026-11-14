@@ -194,6 +194,13 @@ impl GardenContentStore {
         let obj = if let Some(in_mem) = self.objects.get(content_id_hex) {
             in_mem.clone()
         } else if let Some(dir) = &self.storage_dir {
+            if content_id_hex.len() != 64 || !content_id_hex.bytes().all(|b| b.is_ascii_hexdigit())
+            {
+                return Err(format!(
+                    "garden content id must be a 64-character hex digest, got {} bytes",
+                    content_id_hex.len()
+                ));
+            }
             let file_path = dir.join(format!("{content_id_hex}.bud3.json"));
             let raw = std::fs::read(&file_path)
                 .map_err(|_| format!("garden content {} not found on node", content_id_hex))?;

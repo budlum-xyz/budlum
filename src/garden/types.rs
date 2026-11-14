@@ -209,20 +209,7 @@ impl GardenGenesis {
         }
         let chain_id = GardenChainId::derive(&host_pubkey, nonce);
         let placement_table = GardenPlacementTable::from_limits(&limits);
-        let genesis_hash = hash_fields_bytes(&[
-            TAG_GARDEN_GENESIS,
-            &chain_id.value().to_le_bytes(),
-            title.as_bytes(),
-            &host_pubkey,
-            &created_unix_ms.to_le_bytes(),
-            &nonce.to_le_bytes(),
-            &(limits.max_validators as u64).to_le_bytes(),
-            &(limits.max_object_bytes as u64).to_le_bytes(),
-            &(limits.max_requests_per_window as u64).to_le_bytes(),
-            &limits.host_liveness_timeout_epochs.to_le_bytes(),
-            &(placement_table.target_replicas as u64).to_le_bytes(),
-        ]);
-        Ok(Self {
+        let mut genesis = Self {
             chain_id,
             title,
             host_pubkey,
@@ -230,9 +217,60 @@ impl GardenGenesis {
             nonce,
             limits,
             placement_table,
-            genesis_hash,
-        })
+            genesis_hash: [0u8; 32],
+        };
+        genesis.genesis_hash = genesis.compute_hash();
+        Ok(genesis)
     }
+
+    /// Recompute the genesis commitment from the canonical genesis fields.
+    pub fn compute_hash(&self) -> [u8; 32] {
+        hash_fields_bytes(&[
+            TAG_GARDEN_GENESIS,
+            &self.chain_id.value().to_le_bytes(),
+            self.title.as_bytes(),
+            &self.host_pubkey,
+            &self.created_unix_ms.to_le_bytes(),
+            &self.nonce.to_le_bytes(),
+            &(self.limits.max_validators as u64).to_le_bytes(),
+            &(self.limits.max_object_bytes as u64).to_le_bytes(),
+            &(self.limits.max_requests_per_window as u64).to_le_bytes(),
+            &self.limits.host_liveness_timeout_epochs.to_le_bytes(),
+            &(self.placement_table.target_replicas as u64).to_le_bytes(),
+        ])
+    }
+
+    /// Verify that a peer-supplied genesis satisfies `GardenLimits`, chain ID
+    /// derivation, placement table derivation, and its own commitment hash.
+    pub fn verify(&self) -> Result<(), String> {
+        if self.title.trim().is_empty() || self.title.len() > 128 {
+            return Err("garden title must be 1..=128 non-empty bytes".into());
+        }
+        self.limits.validate()?;
+        if GardenChainId::derive(&self.host_pubkey, self.nonce) != self.chain_id {
+            return Err("genesis chain_id does not match host_pubkey and nonce".into());
+        }
+        if GardenPlacementTable::from_limits(&self.limits) != self.placement_table {
+            return Err("genesis placement_table does not match limits".into());
+        }
+        if self.compute_hash() != self.genesis_hash {
+            return Err("genesis_hash verification failed".into());
+        }
+        Ok(())
+    }
+}
+
+/// Validate a validator display label so it cannot escape filesystem paths.
+pub fn is_safe_validator_label(name: &str) -> bool {
+    !name.trim().is_empty()
+        && name.len() <= 64
+        && name != "."
+        && name != ".."
+        && !name.contains('/')
+        && !name.contains('\\')
+        && !name.contains(':')
+        && !name.contains('\0')
+        && !name.chars().any(char::is_control)
 }
 
 /// PoA participant entry inside Garden.
