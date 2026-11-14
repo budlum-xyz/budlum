@@ -47,6 +47,8 @@
 //! - `tee_enabled`: execution-time confidentiality - **fail-closed** without a
 //!   Linked SGX/Nitro runtime (no silent plaintext fallback).
 
+#[cfg(test)]
+mod api_surface_tests;
 mod bip39_wordlist;
 /// `.bud` recipient validation and Merkle state-proof verification.
 pub mod bns;

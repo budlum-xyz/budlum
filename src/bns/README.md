@@ -165,8 +165,10 @@
   - The name tree is a binary Merkle tree over the sorted names with
     adjacent-leaf absence proofs. It is not a sparse Merkle tree and is
     recomputed from the rows, not updated incrementally.
-  - `wallet-core` verifies a recipient proof (`verify_bns_recipient_proof`).
-    It has no `resolve_bns` and no generated mobile or browser bindings for it.
+  - `wallet-core` verifies a recipient proof against a header it trusts
+    (`verify_bns_recipient_proof_from_header`). No entry point takes a root
+    as an argument. It has no `resolve_bns` and no generated mobile or
+    browser bindings for it.
   - The gateway binary reads pinned header roots and epochs from its
     configuration and judges expiry against the pinned epoch, never against
     the epoch a node answer carries. A height with a root and no pinned epoch
