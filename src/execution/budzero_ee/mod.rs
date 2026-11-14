@@ -253,7 +253,10 @@ impl ExecutionEnvironment for BudZeroEe {
                     });
                 };
 
-                let mut vm = Vm::with_mainnet_mode(BUDZERO_VM_MEMORY_BYTES, call.gas_limit, true);
+                // Gas is not a bound on the trace: a one-gas loop records one row
+                // per step. The chain's own cap keeps a call at 2^14 rows.
+                let mut vm = Vm::with_mainnet_mode(BUDZERO_VM_MEMORY_BYTES, call.gas_limit, true)
+                    .with_step_limit(bud_vm::MAX_CONTRACT_TRACE_STEPS);
                 apply_caller_words(&mut vm, &call.caller.id);
                 vm.context.block_height = ctx.height;
 
@@ -352,7 +355,9 @@ impl ExecutionEnvironment for BudZeroEe {
                 message,
             })?;
 
-        let mut vm = Vm::with_mainnet_mode(BUDZERO_VM_MEMORY_BYTES, 1_000_000, true);
+        // The read-only path charges no fee, so it needs the same trace cap.
+        let mut vm = Vm::with_mainnet_mode(BUDZERO_VM_MEMORY_BYTES, 1_000_000, true)
+            .with_step_limit(bud_vm::MAX_CONTRACT_TRACE_STEPS);
         vm.context.block_height = ctx.height;
         for slot in declared {
             let key = storage_key(&q.target.id, slot);
@@ -799,6 +804,132 @@ mod tests {
             .unwrap();
         assert_eq!(out.status, OutcomeStatus::Success);
         assert_eq!(out.output, sender32);
+    }
+
+    /// A counter loop: `r1 = iterations`, then `r1 -= 1` until it is zero.
+    /// It records `3 + 2 * iterations` trace rows and costs about as much gas.
+    fn counter_loop(iterations: i32) -> Vec<u8> {
+        encode_instrs(&[
+            Instruction {
+                opcode: Opcode::Load,
+                rd: 1,
+                rs1: 0,
+                rs2: 0,
+                imm: iterations,
+            },
+            Instruction {
+                opcode: Opcode::Load,
+                rd: 2,
+                rs1: 0,
+                rs2: 0,
+                imm: 1,
+            },
+            Instruction {
+                opcode: Opcode::Sub,
+                rd: 1,
+                rs1: 1,
+                rs2: 2,
+                imm: 0,
+            },
+            Instruction {
+                opcode: Opcode::Jnz,
+                rd: 0,
+                rs1: 1,
+                rs2: 0,
+                imm: -1,
+            },
+            Instruction {
+                opcode: Opcode::Halt,
+                rd: 0,
+                rs1: 0,
+                rs2: 0,
+                imm: 0,
+            },
+        ])
+    }
+
+    /// Deploy `code`, then call it with `gas_limit` and also query it.
+    fn deploy_call_query(
+        code: Vec<u8>,
+        gas_limit: u64,
+    ) -> (OutcomeStatus, Result<Vec<u8>, EeRefusal>) {
+        let mut ee = BudZeroEe::new();
+        let mut host = InMemoryHost::new(5_000_000);
+        let ctx = BlockContext {
+            chain_id: 45261,
+            height: 3,
+            timestamp_ms: 1_700_000_000_000,
+        };
+        let caller = EeIdentity::new(EeId::BUDZERO, vec![0xAA; 32]).unwrap();
+        let contract = EeIdentity::new(EeId::BUDZERO, vec![0xCC; 32]).unwrap();
+        let deployed = ee
+            .execute(
+                &ctx,
+                &EeCall {
+                    kind: EeCallKind::Deploy,
+                    caller: caller.clone(),
+                    target: contract.clone(),
+                    value: BudAmount(0),
+                    input: code,
+                    gas_limit: 500_000,
+                    depth: 0,
+                    tx_hash: [6u8; 32],
+                },
+                &mut host,
+            )
+            .unwrap();
+        assert_eq!(deployed.status, OutcomeStatus::Success);
+        let called = ee
+            .execute(
+                &ctx,
+                &EeCall {
+                    kind: EeCallKind::Call,
+                    caller,
+                    target: contract.clone(),
+                    value: BudAmount(0),
+                    input: Vec::new(),
+                    gas_limit,
+                    depth: 0,
+                    tx_hash: [7u8; 32],
+                },
+                &mut host,
+            )
+            .unwrap();
+        let queried = ee.query(
+            &ctx,
+            &EeQuery {
+                target: contract,
+                input: Vec::new(),
+            },
+            &host,
+        );
+        (called.status, queried)
+    }
+
+    /// Gas is not a bound on the trace. With a million gas, a loop that costs
+    /// one gas a step would record a million rows for every validator, and the
+    /// read-only query path charges no fee at all.
+    #[test]
+    fn a_call_and_a_query_are_cut_off_at_the_trace_cap_whatever_the_gas() {
+        let rows = bud_vm::MAX_CONTRACT_TRACE_STEPS as i32;
+        // About 20,000 rows: over the cap, far under a million gas.
+        let (call, query) = deploy_call_query(counter_loop(rows / 2 + rows / 8), 1_000_000);
+        assert_eq!(
+            call,
+            OutcomeStatus::Revert,
+            "a call that needs more rows than the cap is refused"
+        );
+        assert!(
+            matches!(&query, Err(r) if r.code == RefusalCode::Denied),
+            "a query past the trace cap must be refused: {query:?}"
+        );
+    }
+
+    #[test]
+    fn a_call_and_a_query_under_the_trace_cap_still_run() {
+        let (call, query) = deploy_call_query(counter_loop(1_000), 1_000_000);
+        assert_eq!(call, OutcomeStatus::Success);
+        assert!(query.is_ok(), "{query:?}");
     }
 }
 
