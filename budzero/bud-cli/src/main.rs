@@ -1228,16 +1228,21 @@ mod tests {
     fn testnet_rejects_noncanonical_activation() {
         let active = bud_isa::MainnetActivation::default();
         let closed = bud_isa::MainnetActivation::closed();
+        let altered = bud_isa::MainnetActivation {
+            privacy_commit_enabled: false,
+            ..active
+        };
         assert!(!active.verify_merkle_enabled);
+        assert_eq!(closed, active, "closed is the canonical default schedule");
         assert!(check_testnet_activation(45_260, active).is_ok());
         assert!(check_testnet_activation(45_261, active).is_ok());
         assert!(check_testnet_activation(45_262, active).is_ok());
-        assert!(check_testnet_activation(45_261, closed).is_err());
+        assert!(check_testnet_activation(45_261, altered).is_err());
         assert!(check_testnet_activation(45_261, bud_isa::MainnetActivation::full()).is_err());
         assert!(check_testnet_activation(45_260, bud_isa::MainnetActivation::full()).is_err());
         assert!(check_testnet_activation(45_262, bud_isa::MainnetActivation::full()).is_ok());
 
-        // The execution door refuses downgraded/closed testnet activation
+        // The execution door refuses a noncanonical testnet activation
         // before reading a state file or producing a receipt.
         let result = run_pipeline(ExecutionConfig {
             bytecode: vec![],
@@ -1248,9 +1253,11 @@ mod tests {
             chain_id: 45_261,
             state_in_file: Some("nonexistent-testnet-state.json".into()),
             commit_state: false,
-            activation: closed,
+            activation: altered,
         });
-        let error = result.err().expect("closed testnet activation must fail");
+        let error = result
+            .err()
+            .expect("noncanonical testnet activation must fail");
         assert!(
             error
                 .to_string()
