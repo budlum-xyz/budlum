@@ -110,8 +110,12 @@ impl UnsignedTransfer {
         timestamp_ms: u128,
         chain_id: u64,
     ) -> Result<Self, String> {
-        let verified_to =
-            crate::bns::verify_bns_recipient_proof_from_header(bud_name, claimed_target, proof, headers)?;
+        let verified_to = crate::bns::verify_bns_recipient_proof_from_header(
+            bud_name,
+            claimed_target,
+            proof,
+            headers,
+        )?;
         Ok(Self {
             from,
             to: verified_to,

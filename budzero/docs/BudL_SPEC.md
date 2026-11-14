@@ -477,10 +477,10 @@ expansion rows carry the real immediate now.
 `rejects_verify_merkle_with_a_sibling_not_in_memory` pins it, and removing the
 Merkle terms from the demand side drops four Merkle tests.
 
-**What remains before the gate can open.** The path is now sound in the STARK:
-direction bits are bound to the key, the key and siblings are bound to memory,
-the Poseidon chain and the final root are constrained. What has not happened
-is an external review of the whole opcode against a real sparse-Merkle-tree
-deployment, which is what `MainnetActivation` is for. `verify_merkle_enabled`
-stays false until then, but it is now a process gate rather than a known
-soundness hole.
+**What remains before the gate can open.** The path is constrained in the STARK:
+direction bits are bound to the key, the key and siblings to memory, and the
+Poseidon chain to the final root. A storage challenge's current witness does
+**not** bind those memory bytes to the challenged shard committed by the object;
+credit or slashing based on it would not prove possession. `verify_merkle_enabled`
+stays false until that separate binding exists and is independently verified.
+An isolated `MainnetActivation::full()` test proves only the path primitive.

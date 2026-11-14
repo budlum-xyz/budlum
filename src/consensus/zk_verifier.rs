@@ -1,5 +1,9 @@
 //! ZK QC fault proof verifier.
 //!
+//! WIRING: unwired - the only caller is `QcFaultProof::verify_against_blob`,
+//! itself uncalled by production. A fault proof cannot open this closed
+//! verifier until a real STARK challenge and a production caller are wired.
+//!
 //! This module is fail-closed on testnet. It refuses every ZK QC fault
 //! proof. A BudZero STARK verifier is not integrated yet. No pairing
 //! based SNARK sits on a Budlum verification path.

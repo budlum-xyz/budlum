@@ -16,10 +16,10 @@ const _: () = assert!(
 /// Which opcode activation state the CLI executes and verifies under.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
 enum ActivationArg {
-    /// Canonical activation (`VerifyMerkle` and `VerifyInference` live with AIR
-    /// constraints under `MainnetActivation::default()`).
+    /// Canonical production activation: VerifyMerkle remains closed pending
+    /// a shard-bound challenge witness; VerifyInference has its own AIR gate.
     Default,
-    /// Explicitly allow every staged opcode (same runtime table as active default).
+    /// Explicitly allow every staged opcode in isolated non-production tests.
     Full,
 }
 
@@ -275,19 +275,17 @@ fn check_chain_id(chain_id: u64) -> Result<(), String> {
     Ok(())
 }
 
-/// Testnet activation enforcement: proof execution and verification on testnet
-/// (`45261`) run under `MainnetActivation::default()` (with 64-depth Poseidon
-/// `VerifyMerkle` and 30-round Poseidon `VerifyInference` live) and refuse any
-/// downgraded closed activation.
+/// Mainnet and testnet proof execution must use the same canonical activation
+/// as validators. `full()` is for off-chain proof tests on other chain ids:
+/// allowing it under 45260/45261 would make the CLI produce a receipt the
+/// consensus VM (which keeps unbound VerifyMerkle closed) cannot accept.
 fn check_testnet_activation(
     chain_id: u64,
     activation: bud_isa::MainnetActivation,
 ) -> Result<(), String> {
-    if chain_id == 45_261
-        && (!activation.verify_merkle_enabled || !activation.verify_inference_enabled)
-    {
+    if matches!(chain_id, 45_260 | 45_261) && activation != bud_isa::MainnetActivation::default() {
         return Err(
-            "testnet requires active VerifyMerkle and VerifyInference under canonical default activation"
+            "production chain requires canonical default activation with VerifyMerkle closed"
                 .into(),
         );
     }
@@ -308,12 +306,12 @@ fn run_pipeline(config: ExecutionConfig) -> Result<ExecutionOutput, Box<dyn std:
         bud_state::State::load(&state_file).map_err(|e| format!("Failed to load state: {e}"))?;
     let pre_root = state.root();
 
-    // HIGH (2026-08-17): Vm::new leaves mainnet_mode=false; gated
-    // opcode'lar (VerifyMerkle/VerifyInference) non-mainnet decoder'da
-    // runs. The CLI default must be mainnet safe: mainnet_mode=true.
+    // Vm::new leaves mainnet_mode=false, which bypasses production opcode
+    // admission. The CLI default must use mainnet_mode=true; the shared
+    // ISA decoder then refuses VerifyMerkle but admits VerifyInference.
     //
-    // Only `--activation full` opens them: then the VM decodes without the
-    // gate, and the proof it just produced is verified under the same state.
+    // Only an explicit `--activation full` on a non-production chain opens
+    // the Merkle path; the VM and proof verifier share that activation state.
     let mainnet_mode = config.activation == bud_isa::MainnetActivation::default();
     let mut vm = Vm::with_mainnet_mode(bud_compiler::MIN_VM_MEMORY_BYTES, 1_000_000, mainnet_mode);
     if let Some(s) = config.sender {
@@ -1227,12 +1225,17 @@ mod tests {
     }
 
     #[test]
-    fn testnet_proof_activation_is_closed() {
+    fn testnet_rejects_noncanonical_activation() {
         let active = bud_isa::MainnetActivation::default();
         let closed = bud_isa::MainnetActivation::closed();
+        assert!(!active.verify_merkle_enabled);
+        assert!(check_testnet_activation(45_260, active).is_ok());
         assert!(check_testnet_activation(45_261, active).is_ok());
         assert!(check_testnet_activation(45_262, active).is_ok());
         assert!(check_testnet_activation(45_261, closed).is_err());
+        assert!(check_testnet_activation(45_261, bud_isa::MainnetActivation::full()).is_err());
+        assert!(check_testnet_activation(45_260, bud_isa::MainnetActivation::full()).is_err());
+        assert!(check_testnet_activation(45_262, bud_isa::MainnetActivation::full()).is_ok());
 
         // The execution door refuses downgraded/closed testnet activation
         // before reading a state file or producing a receipt.
@@ -1251,7 +1254,7 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("testnet requires active VerifyMerkle and VerifyInference"),
+                .contains("requires canonical default activation with VerifyMerkle closed"),
             "{error}"
         );
     }

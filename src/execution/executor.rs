@@ -5953,12 +5953,13 @@ mod tests {
         };
         state.ai_registry.register_model(model_spec).unwrap();
 
+        let input_ref = crate::ai::execution::encode_input_limbs(&input);
         let mut req = AiInferenceRequest {
             request_id: AiRequestId::default(),
             requester: owner,
             model_id,
-            input_commitment: crate::ai::execution::input_commitment(&input),
-            input_ref: BoundedBytes::empty(),
+            input_commitment: crate::ai::types::canonical_input_commitment(&input_ref),
+            input_ref: BoundedBytes::try_new(input_ref).unwrap(),
             max_fee: 100,
             callback: None,
             submitted_at_block: 0,
@@ -5972,6 +5973,7 @@ mod tests {
             effort: crate::ai_inference::effort::EffortTier::default(),
         };
         req.request_id = req.calculate_id();
+        let request_commitment = req.input_commitment;
         let req_id = state.ai_registry.submit_request(req, 0).unwrap();
 
         let (proof, host_out) = prove_mlp_inference_with_context(
@@ -5987,7 +5989,11 @@ mod tests {
             },
         )
         .expect("context-bound STARK proof");
-        assert_eq!(host_out, vec![23]);
+        assert_eq!(host_out, vec![24]);
+        assert_eq!(
+            proof.input_commitment, request_commitment,
+            "the prover must use the request's canonical input commitment"
+        );
 
         let output_bytes = crate::ai::execution::encode_output_limbs(&host_out);
         let mut result = AiInferenceResult {

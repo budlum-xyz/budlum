@@ -488,7 +488,10 @@ mod tests {
 
         let mut r = Bud3Registry::default();
         let content: Vec<u8> = (0..1500u32).map(|i| (i % 249) as u8).collect();
-        let up = prepare_public_upload(&content, &P, &Bud3Limits::default(), 8).unwrap();
+        // The BOF-1 envelope needs 13 source symbols for this fixture; 8
+        // cannot satisfy the upload's k+2 admission rule. Keep enough live
+        // symbols *after* one half is lost to reconstruct a real repair.
+        let up = prepare_public_upload(&content, &P, &Bud3Limits::default(), 32).unwrap();
         let total = u32::try_from(up.segments[0].len()).unwrap();
         let half = total / 2;
         let shares = vec![
@@ -529,6 +532,10 @@ mod tests {
                 .unwrap()
                 .encode();
         let enc = SegmentEncoder::new(0, &obj_bytes, &P).unwrap();
+        assert!(
+            half >= enc.k(),
+            "the surviving share must decode the segment"
+        );
         let fresh = enc
             .repair_symbols(next_esi - enc.k(), lost.symbols)
             .unwrap();
@@ -543,8 +550,9 @@ mod tests {
             first_esi: next_esi,
             symbols: lost.symbols,
         };
+        let live = &up.segments[0][..usize::try_from(half).unwrap()];
         let witness = RepairWitness::ProvenSymbols(
-            build_repair_proven_witness(0, &up.segments[0], &up.segments[0]).unwrap(),
+            build_repair_proven_witness(0, &up.segments[0], live).unwrap(),
         );
         let tx = StorageTxV3::RecordRepair {
             object: key,
@@ -556,6 +564,10 @@ mod tests {
         };
         assert_eq!(apply(&mut r, uploader, tx, 100), Ok(Applied::Repaired));
         r.ack(&key, &[20u8; 32]).unwrap();
+        // The consensus block transition settles confirmed replacement shares
+        // before the obsolete lost shares leave custody accounting. Model that
+        // boundary explicitly: an ACK alone is not a completed repair.
+        assert_eq!(r.settle_repairs(), 1);
         assert!(r.repairs_due(&key).is_empty());
     }
 }
