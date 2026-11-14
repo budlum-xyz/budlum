@@ -9,7 +9,7 @@ use crate::garden::types::{
     GardenTxKind, GardenVote, SignedGardenTx,
 };
 use serde::{Deserialize, Serialize};
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::{
@@ -215,6 +215,7 @@ impl GardenNode {
         genesis: GardenGenesis,
     ) -> Result<(), String> {
         invite.validate()?;
+        genesis.verify()?;
         if genesis.chain_id.value() != invite.chain_id {
             return Err("genesis chain_id does not match invite".into());
         }
@@ -579,10 +580,15 @@ impl GardenNodeClient {
         req: &GardenPeerRequest,
         timeout: std::time::Duration,
     ) -> Result<GardenPeerResponse, String> {
+        const MAX_RESPONSE_BYTES: u64 = 8 * 1024 * 1024;
         let mut stream = TcpStream::connect_timeout(&addr, timeout)
             .map_err(|e| format!("failed to connect to Garden peer {addr}: {e}"))?;
-        let _ = stream.set_read_timeout(Some(timeout));
-        let _ = stream.set_write_timeout(Some(timeout));
+        stream
+            .set_read_timeout(Some(timeout))
+            .map_err(|e| format!("failed to set Garden peer read timeout: {e}"))?;
+        stream
+            .set_write_timeout(Some(timeout))
+            .map_err(|e| format!("failed to set Garden peer write timeout: {e}"))?;
         let encoded = serde_json::to_string(req)
             .map_err(|e| format!("failed to encode GardenPeerRequest: {e}"))?;
         stream
@@ -590,11 +596,14 @@ impl GardenNodeClient {
             .map_err(|e| format!("failed to send GardenPeerRequest: {e}"))?;
         let _ = stream.flush();
 
-        let mut reader = BufReader::new(stream);
+        let mut reader = BufReader::new(stream.take(MAX_RESPONSE_BYTES + 1));
         let mut line = String::new();
-        reader
+        let n = reader
             .read_line(&mut line)
             .map_err(|e| format!("failed to read GardenPeerResponse: {e}"))?;
+        if (n as u64) > MAX_RESPONSE_BYTES {
+            return Err("Garden peer response exceeded size limit".into());
+        }
         let resp: GardenPeerResponse = serde_json::from_str(line.trim())
             .map_err(|e| format!("failed to decode GardenPeerResponse: {e}"))?;
         if resp.ok {
