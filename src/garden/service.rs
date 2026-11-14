@@ -117,8 +117,9 @@ impl GardenService {
         validator_name: String,
     ) -> Result<serde_json::Value, String> {
         let payload = GardenInvitePayload::decode_any(invite_or_qr)?;
+        let chain_key = payload.chain_id.to_string();
         let storage_root = self.storage_root.as_ref().map(|r| r.join(&validator_name));
-        if !self.gardens.contains_key(&payload.chain_id.to_string()) {
+        if let std::collections::btree_map::Entry::Vacant(vacant) = self.gardens.entry(chain_key) {
             // Remote Garden join over direct or 7.11-relayed TCP.
             let (gen_resp, used_relay) =
                 GardenNodeClient::call_via_invite(&payload, &GardenPeerRequest::GetGenesis)?;
@@ -142,14 +143,11 @@ impl GardenService {
             let mut participants = BTreeMap::new();
             let host_clone = host_node_clone_for_participant(&joiner)?;
             participants.insert(joiner_hex.clone(), joiner);
-            self.gardens.insert(
-                payload.chain_id.to_string(),
-                GardenServiceEntry {
-                    host_node: host_clone,
-                    participants,
-                    timestamp_ms: 1_700_000_000_000,
-                },
-            );
+            vacant.insert(GardenServiceEntry {
+                host_node: host_clone,
+                participants,
+                timestamp_ms: 1_700_000_000_000,
+            });
             self.active_chain_id = Some(payload.chain_id);
             return Ok(serde_json::json!({
                 "chain_id": payload.chain_id,
