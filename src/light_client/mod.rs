@@ -1738,24 +1738,33 @@ mod tests {
             inclusion_path: path,
             predicate_proof: None,
         };
-        let testnet_chain = crate::core::chain_config::Network::Testnet
+        // The door is open on devnet and closed on the public networks.
+        let closed_chain = crate::core::chain_config::Network::Testnet
+            .chain_id()
+            .value();
+        assert!(matches!(
+            view.verify_for_chain(&checkpoint, &body, closed_chain),
+            Err(LightClientError::VerificationFailed(reason))
+                if reason.contains("app binding disabled")
+        ));
+        let open_chain = crate::core::chain_config::Network::Devnet
             .chain_id()
             .value();
         assert!(view
-            .verify_for_chain(&checkpoint, &body, testnet_chain)
+            .verify_for_chain(&checkpoint, &body, open_chain)
             .is_ok());
 
         let mut tampered_val = view.clone();
         tampered_val.state_value = b"balance:9999999".to_vec();
         assert!(matches!(
-            tampered_val.verify_for_chain(&checkpoint, &body, testnet_chain),
+            tampered_val.verify_for_chain(&checkpoint, &body, open_chain),
             Err(LightClientError::VerificationFailed(_))
         ));
 
         let mut unbound_pred = view;
         unbound_pred.predicate_proof = Some(pred_proof);
         assert!(matches!(
-            unbound_pred.verify_for_chain(&checkpoint, &body, testnet_chain),
+            unbound_pred.verify_for_chain(&checkpoint, &body, open_chain),
             Err(LightClientError::VerificationFailed(reason))
                 if reason.contains("not bound to the committed state leaf")
         ));
