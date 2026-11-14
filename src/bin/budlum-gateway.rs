@@ -319,7 +319,6 @@ fn decode_extras(
         }
     }
     Ok(budlum_core::bns::types::BnsBranchExtras {
-        resolver: optional_address(value, "resolver")?,
         address: optional_address(value, "address")?,
         consensus_domain_id: value
             .get("consensus_domain_id")
@@ -880,7 +879,6 @@ mod tests {
                 "leaf_index": 0,
                 "tree_size": 1,
                 "extras": {
-                    "resolver": null,
                     "address": format!("0x{}", "44".repeat(32)),
                     "consensus_domain_id": null,
                     "storage_domain_id": null,

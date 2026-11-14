@@ -269,8 +269,8 @@ mod tests {
         let mut hasher = sha2::Sha256::new();
         {
             use sha2::Digest as _;
-            hasher.update(b"BDLM_BNS_EXTRAS_V1");
-            hasher.update([0u8; 6]);
+            hasher.update(b"BDLM_BNS_EXTRAS_V2");
+            hasher.update([0u8; 5]);
             hasher.update(0u64.to_le_bytes());
             hasher.update(0u64.to_le_bytes());
         }

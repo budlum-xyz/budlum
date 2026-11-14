@@ -583,7 +583,7 @@ impl BnsRegistry {
 
     /// Transfer ownership of a live (non-expired) name to a new owner. Only
     /// The current owner may transfer. The pointers the previous owner set
-    /// (resolver, address, storage, content and subdomains) are cleared and the
+    /// (address, storage, content and subdomains) are cleared and the
     /// address points at the new owner, so the name never resolves to the
     /// previous owner after the transfer.
     ///
@@ -616,7 +616,6 @@ impl BnsRegistry {
         let prev_address = existing.address;
         let record = self.names.get_mut(name).ok_or(BnsError::InvalidName)?;
         record.owner = new_owner;
-        record.resolver = None;
         record.address = Some(new_owner);
         record.consensus_domain_id = None;
         record.storage_root = None;
@@ -1216,7 +1215,6 @@ impl BnsRegistry {
     #[must_use]
     fn extras_from_record(record: &NameRecord) -> crate::bns::types::BnsBranchExtras {
         crate::bns::types::BnsBranchExtras {
-            resolver: record.resolver,
             address: record.address,
             consensus_domain_id: record.consensus_domain_id,
             storage_domain_id: record.storage_domain_id,
@@ -1227,7 +1225,7 @@ impl BnsRegistry {
         }
     }
 
-    /// The commitment over a disclosed extras pre-image (`BDLM_BNS_EXTRAS_V1`).
+    /// The commitment over a disclosed extras pre-image (`BDLM_BNS_EXTRAS_V2`).
     ///
     /// The encoding is the one the leaf digest already used, so the digest of
     /// `Self::extras_from_record` equals [`Self::record_extras_digest`] field
@@ -1237,14 +1235,7 @@ impl BnsRegistry {
     pub(crate) fn extras_digest(extras: &crate::bns::types::BnsBranchExtras) -> [u8; 32] {
         use sha2::{Digest, Sha256};
         let mut hasher = Sha256::new();
-        hasher.update(b"BDLM_BNS_EXTRAS_V1");
-        match extras.resolver {
-            Some(resolver) => {
-                hasher.update([1u8]);
-                hasher.update(resolver.0);
-            }
-            None => hasher.update([0u8]),
-        }
+        hasher.update(b"BDLM_BNS_EXTRAS_V2");
         match extras.address {
             Some(address) => {
                 hasher.update([1u8]);

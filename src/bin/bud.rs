@@ -3050,10 +3050,6 @@ fn parse_branch_extras_json(
         Some(v) if !v.is_null() => Some(Address::from(decode_hex32_field(v, "extras.address")?)),
         _ => None,
     };
-    let resolver = match val.get("resolver") {
-        Some(v) if !v.is_null() => Some(Address::from(decode_hex32_field(v, "extras.resolver")?)),
-        _ => None,
-    };
     let mut subdomains = std::collections::BTreeMap::new();
     if let Some(map) = val.get("subdomains").and_then(serde_json::Value::as_object) {
         for (label, owner) in map {
@@ -3073,7 +3069,6 @@ fn parse_branch_extras_json(
         }
     }
     Ok(budlum_core::bns::types::BnsBranchExtras {
-        resolver,
         address,
         consensus_domain_id: val
             .get("consensus_domain_id")
