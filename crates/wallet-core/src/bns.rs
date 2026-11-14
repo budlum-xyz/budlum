@@ -349,27 +349,76 @@ pub trait HeaderSource {
     /// The committed `.bud` registry root (`bns_v1`) at `height`, and the
     /// epoch that header belongs to.
     fn bns_root_at(&self, height: u64) -> Option<([u8; 32], u64)>;
+
+    /// The highest header this source holds. A proof anchored far below it
+    /// replays registry state that a later header has already superseded.
+    fn latest_height(&self) -> u64;
 }
+
+/// How far below the wallet's own tip a proof's header may sit, in blocks.
+///
+/// One checkpoint interval at the testnet parameters (five blocks, fifteen
+/// seconds): a node and a wallet rarely hold the same newest header, so a
+/// proof one checkpoint behind is a race, not a replay. A proof further back
+/// is refused, because a name that changed hands since then would still resolve
+/// to the previous owner.
+const MAX_PROOF_LAG_BLOCKS: u64 = 5;
+
+/// The proof is anchored at a header older than the wallet's own tip allows.
+///
+/// A distinct type, like [`HeaderUnknown`], so a caller can tell a replayed
+/// answer from a wallet that is behind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StaleProofHeader {
+    /// The header height the proof names.
+    pub anchored_at: u64,
+    /// The highest header the wallet holds.
+    pub tip: u64,
+}
+
+impl std::fmt::Display for StaleProofHeader {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "proof is anchored at header {} but the wallet's tip is {}; a name that changed hands \
+             since then would still resolve to its previous owner",
+            self.anchored_at, self.tip
+        )
+    }
+}
+
+impl std::error::Error for StaleProofHeader {}
 
 /// Verify a `.bud` recipient proof against the root and epoch of the header it
 /// claims to belong to, read from `headers`.
 ///
 /// This is the entry point a wallet should call. The root and the epoch come
 /// from `headers`, never from the proof's carrier, so a lying node cannot
-/// change what the signature is checked against: the only thing it can still
-/// change is which header height it names, and then the answer no longer
-/// matches the header the wallet holds.
+/// change what the signature is checked against. What it can still choose is
+/// which header height it names, and a wallet that synced history holds old
+/// headers too, so the height must also be recent: a proof anchored more than
+/// one checkpoint below the wallet's own tip is refused, which stops a node
+/// from replaying a header at which the name still pointed at a previous owner.
 ///
 /// # Errors
 ///
 /// Everything [`verify_bns_recipient_proof`] refuses, plus
-/// [`HeaderUnknown`] when `headers` has no header at `proof.header_height`.
+/// [`HeaderUnknown`] when `headers` has no header at `proof.header_height`
+/// and [`StaleProofHeader`] when that header is older than the tip allows.
 pub fn verify_bns_recipient_proof_from_header<S: HeaderSource + ?Sized>(
     requested_name: &str,
     claimed_target: &[u8; 32],
     proof: &WalletBnsProof,
     headers: &S,
 ) -> Result<[u8; 32], String> {
+    let tip = headers.latest_height();
+    if proof.header_height.saturating_add(MAX_PROOF_LAG_BLOCKS) < tip {
+        return Err(StaleProofHeader {
+            anchored_at: proof.header_height,
+            tip,
+        }
+        .to_string());
+    }
     let (root, epoch) = headers
         .bns_root_at(proof.header_height)
         .ok_or_else(|| HeaderUnknown(proof.header_height).to_string())?;
@@ -411,6 +460,10 @@ mod tests {
         fn bns_root_at(&self, height: u64) -> Option<([u8; 32], u64)> {
             (height == self.height).then_some((self.root, self.epoch))
         }
+
+        fn latest_height(&self) -> u64 {
+            self.height
+        }
     }
 
     /// The proof a node would send for `ayaz.bud` at header height 7.
@@ -437,6 +490,69 @@ mod tests {
             header_height: 7,
         };
         (proof, root, vault)
+    }
+
+    /// A wallet that synced history: it still holds the old header a node can
+    /// replay, and its own tip is further on.
+    struct SyncedHeaders {
+        old_height: u64,
+        root: [u8; 32],
+        epoch: u64,
+        tip: u64,
+    }
+
+    impl HeaderSource for SyncedHeaders {
+        fn bns_root_at(&self, height: u64) -> Option<([u8; 32], u64)> {
+            (height == self.old_height).then_some((self.root, self.epoch))
+        }
+
+        fn latest_height(&self) -> u64 {
+            self.tip
+        }
+    }
+
+    /// The replay. A name changed hands after header 7, and a lying node answers
+    /// with the proof anchored at header 7, a header the wallet still holds, at
+    /// which the name still pointed at the previous owner. The header is real
+    /// and the proof folds to its root, so only the age of the anchor can refuse
+    /// it.
+    #[test]
+    fn a_proof_anchored_below_the_wallet_tip_is_a_replay_and_is_refused() {
+        let (proof, root, vault) = header_anchored_fixture();
+        let tip = 7 + MAX_PROOF_LAG_BLOCKS + 1;
+        let synced = SyncedHeaders {
+            old_height: 7,
+            root,
+            epoch: 10,
+            tip,
+        };
+        let refused = verify_bns_recipient_proof_from_header("ayaz.bud", &vault, &proof, &synced)
+            .unwrap_err();
+        assert_eq!(
+            refused,
+            StaleProofHeader {
+                anchored_at: 7,
+                tip,
+            }
+            .to_string()
+        );
+    }
+
+    /// A node and a wallet rarely hold the same newest header, so a proof one
+    /// checkpoint behind the tip is a race and still verifies.
+    #[test]
+    fn a_proof_one_checkpoint_behind_the_wallet_tip_still_verifies() {
+        let (proof, root, vault) = header_anchored_fixture();
+        let synced = SyncedHeaders {
+            old_height: 7,
+            root,
+            epoch: 10,
+            tip: 7 + MAX_PROOF_LAG_BLOCKS,
+        };
+        assert_eq!(
+            verify_bns_recipient_proof_from_header("ayaz.bud", &vault, &proof, &synced).unwrap(),
+            vault
+        );
     }
 
     #[test]

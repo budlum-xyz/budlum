@@ -492,7 +492,12 @@ jobs:
     name: Budlum Core
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    if: always()
+    # `always()` also holds after a cancel. A push that cancelled the run of the
+    # commit before it left this job queued behind a full pool, the old run
+    # stayed open, and the run for the new commit waited as `pending` with no
+    # jobs. `!cancelled()` still runs the job after a failure and lets a
+    # cancelled run end. The gate `ci-jobs-end-on-cancel` holds the rule.
+    if: ${{ !cancelled() }}
     needs:
       - budlum-pq-build
       - budlum-pq-crypto

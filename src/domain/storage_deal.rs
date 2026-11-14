@@ -722,6 +722,18 @@ pub struct StorageReallocationTicket {
     pub cause: ReallocationCause,
 }
 
+impl StorageReallocationTicket {
+    /// Whether this ticket is the repair ticket of the failed deal `deal_id`.
+    ///
+    /// `failed_deal_id` is a key only when the cause is `FailedDeal`. A
+    /// `NeverPlaced` ticket stores `0` as a placeholder, and deal ids start at
+    /// 0, so comparing the field alone made the first deal the chain accepted
+    /// look as if it already had a ticket.
+    fn names_failed_deal(&self, deal_id: u64) -> bool {
+        self.cause == ReallocationCause::FailedDeal && self.failed_deal_id == deal_id
+    }
+}
+
 /// On-chain, in-memory registry of all `StorageDeal`s, `RetrievalChallenge`s,
 /// And `ChallengeResult`s for a single storage domain. Backed by
 /// `BTreeMap` (the same primitive `permissionless::PermissionlessRegistry`
@@ -4128,19 +4140,7 @@ impl StorageRegistry {
                     "storage challenge answered with a proof that does not verify; \
                      slashing the operator bond"
                 );
-                let deal = self
-                    .deals
-                    .get_mut(&deal_id)
-                    .ok_or(StorageError::UnknownDeal(deal_id))?;
-                let slashed_bond = deal.economics.operator_bond;
-                deal.status = DealStatus::Slashed;
-                ChallengeResult {
-                    challenge_id,
-                    deal_id,
-                    outcome: ChallengeOutcome::Mismatched,
-                    finalized_epoch: response_epoch,
-                    slashed_bond,
-                }
+                self.slash_for_mismatched_answer(challenge_id, deal_id, response_epoch)?
             }
         };
         if result.outcome == ChallengeOutcome::Answered
@@ -4362,6 +4362,68 @@ impl StorageRegistry {
         (program, expected_inputs)
     }
 
+    /// Opens the repair ticket for the slot a slashed deal leaves empty, once per
+    /// failed deal, and returns its id.
+    ///
+    /// Every exit that slashes a deal has to leave the redundancy layer a work
+    /// item. The missed-deadline exit did; the mismatched-answer exit slashed
+    /// the deal and opened nothing, and the free-slot sweep only reopens
+    /// `Expired` slots, so that replica was never replaced.
+    fn open_slash_reallocation(&mut self, deal_id: u64, now_epoch: u64) -> Option<u64> {
+        let deal = self.deals.get(&deal_id)?;
+        if self
+            .reallocations
+            .values()
+            .any(|ticket| ticket.names_failed_deal(deal_id))
+        {
+            return None;
+        }
+        let ticket_id = self.next_reallocation_id;
+        self.next_reallocation_id = self.next_reallocation_id.saturating_add(1);
+        let ticket = StorageReallocationTicket {
+            ticket_id,
+            failed_deal_id: deal_id,
+            replacement_deal_id: None,
+            domain_id: deal.domain_id,
+            manifest_id: deal.manifest_id,
+            shard_id: deal.shard_id,
+            replica_index: deal.replica_index,
+            slashed_operator: deal.operator,
+            opened_epoch: now_epoch,
+            deadline_epoch: now_epoch.saturating_add(REALLOCATION_ACCEPTANCE_EPOCHS),
+            status: ReallocationStatus::Pending,
+            // The candidate set is not in the registry; the recommendation is
+            // written after opening, by `annotate_expected_holders`.
+            expected_holder: None,
+            cause: ReallocationCause::FailedDeal,
+        };
+        self.reallocations.insert(ticket_id, ticket);
+        Some(ticket_id)
+    }
+
+    /// Slashes the deal behind a mismatched answer and opens its repair ticket.
+    fn slash_for_mismatched_answer(
+        &mut self,
+        challenge_id: u64,
+        deal_id: u64,
+        response_epoch: u64,
+    ) -> Result<ChallengeResult, StorageError> {
+        let deal = self
+            .deals
+            .get_mut(&deal_id)
+            .ok_or(StorageError::UnknownDeal(deal_id))?;
+        let slashed_bond = deal.economics.operator_bond;
+        deal.status = DealStatus::Slashed;
+        self.open_slash_reallocation(deal_id, response_epoch);
+        Ok(ChallengeResult {
+            challenge_id,
+            deal_id,
+            outcome: ChallengeOutcome::Mismatched,
+            finalized_epoch: response_epoch,
+            slashed_bond,
+        })
+    }
+
     /// Finalize a challenge whose deadline has elapsed without a
     /// Response. The deal transitions to `Slashed` and the operator
     /// Bond is *recorded* as slashed (not burned - burning is a
@@ -4389,7 +4451,7 @@ impl StorageRegistry {
             });
         }
         let deal_id = challenge.deal_id;
-        let (slash_amount, ticket) = {
+        let slash_amount = {
             let deal = self
                 .deals
                 .get_mut(&deal_id)
@@ -4407,37 +4469,9 @@ impl StorageRegistry {
             }
             let slash_amount = deal.economics.operator_bond;
             deal.status = DealStatus::Slashed;
-            let existing_ticket = self
-                .reallocations
-                .values()
-                .any(|ticket| ticket.failed_deal_id == deal_id);
-            let ticket = (!existing_ticket).then(|| {
-                let ticket_id = self.next_reallocation_id;
-                self.next_reallocation_id = self.next_reallocation_id.saturating_add(1);
-                StorageReallocationTicket {
-                    ticket_id,
-                    failed_deal_id: deal_id,
-                    replacement_deal_id: None,
-                    domain_id: deal.domain_id,
-                    manifest_id: deal.manifest_id,
-                    shard_id: deal.shard_id,
-                    replica_index: deal.replica_index,
-                    slashed_operator: deal.operator,
-                    opened_epoch: now_epoch,
-                    deadline_epoch: now_epoch.saturating_add(REALLOCATION_ACCEPTANCE_EPOCHS),
-                    status: ReallocationStatus::Pending,
-                    // The candidate set is not in the registry; the
-                    // recommendation is written after opening, by
-                    // `annotate_expected_holders`.
-                    expected_holder: None,
-                    cause: ReallocationCause::FailedDeal,
-                }
-            });
-            (slash_amount, ticket)
+            slash_amount
         };
-        if let Some(ticket) = ticket {
-            self.reallocations.insert(ticket.ticket_id, ticket);
-        }
+        self.open_slash_reallocation(deal_id, now_epoch);
 
         let result = ChallengeResult {
             challenge_id,
@@ -4493,10 +4527,19 @@ impl StorageRegistry {
         // `owner` may be an unrelated registrant. The placement policy that
         // governs the repair belongs to the account whose bytes are being
         // repaired: the payer of the failed deal, or the custody-proven owner.
-        if let Some(policy_owner) = self
-            .deals
-            .get(&ticket.failed_deal_id)
-            .and_then(|deal| deal.payer)
+        //
+        // Only a ticket that names a failed deal names a deal id. A
+        // `NeverPlaced` ticket stores `0` as a placeholder and deal ids start at
+        // 0, so reading it would take the payer of the chain's first deal as
+        // the policy owner of every first placement.
+        let failed_payer = match ticket.cause {
+            ReallocationCause::FailedDeal => self
+                .deals
+                .get(&ticket.failed_deal_id)
+                .and_then(|deal| deal.payer),
+            ReallocationCause::NeverPlaced => None,
+        };
+        if let Some(policy_owner) = failed_payer
             .or_else(|| self.proven_owner_of(&ticket.manifest_id))
             .or_else(|| self.owner_of(&ticket.manifest_id))
         {
@@ -4624,7 +4667,7 @@ impl StorageRegistry {
         if self
             .reallocations
             .values()
-            .any(|ticket| ticket.failed_deal_id == deal_id)
+            .any(|ticket| ticket.names_failed_deal(deal_id))
         {
             return None;
         }
@@ -5028,7 +5071,7 @@ impl StorageRegistry {
                 let ticket = self
                     .reallocations
                     .values()
-                    .find(|ticket| ticket.failed_deal_id == deal_id);
+                    .find(|ticket| ticket.names_failed_deal(deal_id));
                 match ticket.map(|ticket| ticket.status) {
                     Some(ReallocationStatus::Pending) => {
                         Some(crate::storage::StorageLifecycleState::ReallocationPending)
@@ -8021,6 +8064,138 @@ mod tests {
         assert_eq!(ticket.shard_id, shard_id);
         assert_eq!(ticket.domain_id, 42);
         assert_eq!(ticket.status, ReallocationStatus::Pending);
+    }
+
+    /// `NeverPlaced` tickets carry `failed_deal_id: 0` as a placeholder, and
+    /// storage deal ids start at 0. Reading the placeholder as a key took the
+    /// payer of the first deal the chain ever accepted as the policy owner of
+    /// every first placement, and recorded that account as a claimant on
+    /// somebody else's manifest, which made `owner_of` contested.
+    #[test]
+    fn a_never_placed_ticket_does_not_borrow_the_payer_of_deal_zero() {
+        let mut reg = StorageRegistry::new();
+        let first = good_manifest();
+        let (deal_zero, _) = open_one(&mut reg, &first);
+        assert_eq!(deal_zero, 0, "the first deal id is the placeholder value");
+        let stranger = Address::from([0x77u8; 32]);
+        reg.set_deal_payer(deal_zero, stranger);
+
+        let mut other =
+            ContentManifest::from_bytes_sliced(b"bytes that belong to somebody else", 8).unwrap();
+        let owner = Address::from([0x55u8; 32]);
+        other.owner = owner;
+        reg.register_manifest(&other);
+        let ticket_id = reg
+            .open_never_placed_ticket(42, other.manifest_id, other.shards[0].shard_id, 0, 100)
+            .expect("a never-held shard opens a bootstrap ticket");
+
+        reg.accept_reallocation_ticket(
+            ticket_id,
+            replacement_operator(),
+            151,
+            250,
+            good_econ(),
+            &params(),
+            Some(valid_merkle_proof()),
+            Some([0x42u8; 32]),
+        )
+        .expect("the bootstrap ticket is accepted");
+
+        assert!(
+            !reg.manifest_claims.contains(&(other.manifest_id, stranger)),
+            "the payer of deal 0 must not become a claimant on another account's manifest"
+        );
+        assert_eq!(reg.owner_of(&other.manifest_id), Some(owner));
+    }
+
+    /// The same placeholder is read as a key when the registry asks whether a
+    /// failed deal already has a repair ticket. A never-placed ticket carries
+    /// `failed_deal_id: 0`, so it stood in for the repair ticket of deal 0 and
+    /// the first deal the chain accepted was never repaired on either exit.
+    #[test]
+    fn a_never_placed_ticket_is_not_the_repair_ticket_of_deal_zero() {
+        let mut reg = StorageRegistry::new();
+        let waiting =
+            ContentManifest::from_bytes_sliced(b"registered and never placed", 8).unwrap();
+        reg.register_manifest(&waiting);
+        reg.open_never_placed_ticket(42, waiting.manifest_id, waiting.shards[0].shard_id, 0, 90)
+            .expect("bootstrap ticket");
+
+        let m = good_manifest();
+        let (deal_zero, _) = open_one(&mut reg, &m);
+        assert_eq!(deal_zero, 0);
+
+        // The expiry exit.
+        let expiry = reg.open_expiry_reallocation(deal_zero, 300);
+        assert!(
+            expiry.is_some(),
+            "deal 0 must get its own repair ticket on expiry"
+        );
+        assert_eq!(
+            reg.get_reallocation_ticket(expiry.unwrap()).unwrap().cause,
+            ReallocationCause::FailedDeal
+        );
+    }
+
+    #[test]
+    fn a_slashed_deal_zero_gets_a_repair_ticket_and_a_lifecycle_state() {
+        let mut reg = StorageRegistry::new();
+        let waiting =
+            ContentManifest::from_bytes_sliced(b"registered and never placed", 8).unwrap();
+        reg.register_manifest(&waiting);
+        reg.open_never_placed_ticket(42, waiting.manifest_id, waiting.shards[0].shard_id, 0, 90)
+            .expect("bootstrap ticket");
+
+        let m = good_manifest();
+        let (deal_zero, _) = open_one(&mut reg, &m);
+        assert_eq!(deal_zero, 0);
+        let challenge_id = reg
+            .open_challenge(deal_zero, 0, 4, 110, 120, opener(), 50)
+            .unwrap();
+        reg.finalize_missed_challenge(challenge_id, 150).unwrap();
+
+        assert!(
+            reg.all_reallocation_tickets()
+                .iter()
+                .any(|t| t.cause == ReallocationCause::FailedDeal && t.failed_deal_id == deal_zero),
+            "the slashed first deal must have a repair ticket of its own"
+        );
+        assert_eq!(
+            reg.lifecycle_state(deal_zero),
+            Some(crate::storage::StorageLifecycleState::ReallocationPending)
+        );
+    }
+
+    /// Every exit that slashes a deal opens a repair ticket for its slot. The
+    /// mismatched-answer exit used to slash and open nothing, so the replica
+    /// was never replaced.
+    #[test]
+    fn a_mismatched_answer_slash_opens_a_repair_ticket_for_the_slot() {
+        let m = good_manifest();
+        let mut reg = StorageRegistry::new();
+        let (deal_id, shard_id) = open_one(&mut reg, &m);
+        let challenge_id = reg
+            .open_challenge(deal_id, 0, 4, 110, 120, opener(), 50)
+            .unwrap();
+
+        let result = reg
+            .slash_for_mismatched_answer(challenge_id, deal_id, 115)
+            .expect("the deal exists");
+
+        assert_eq!(result.outcome, ChallengeOutcome::Mismatched);
+        assert_eq!(result.slashed_bond, good_econ().operator_bond);
+        assert_eq!(deal_status(&reg, deal_id), DealStatus::Slashed);
+        let ticket = reg
+            .all_reallocation_tickets()
+            .into_iter()
+            .find(|t| t.names_failed_deal(deal_id))
+            .expect("the slashed slot has a repair ticket");
+        assert_eq!(ticket.shard_id, shard_id);
+        assert_eq!(ticket.slashed_operator, operator());
+        assert_eq!(ticket.status, ReallocationStatus::Pending);
+
+        // A second exit for the same deal opens no second ticket.
+        assert_eq!(reg.open_slash_reallocation(deal_id, 116), None);
     }
 
     #[test]

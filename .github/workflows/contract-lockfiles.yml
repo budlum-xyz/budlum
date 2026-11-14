@@ -8,6 +8,10 @@ on:
       - contracts/object-layer/cosmwasm/Cargo.toml
       - contracts/object-layer/svm/Cargo.toml
 
+concurrency:
+  group: contract-lockfiles-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
