@@ -14,11 +14,11 @@ feature, while the code deliberately refuses to perform it.
 | Initial guest memory (weights, biases, input) folded into an accumulator claim; the fold is collidable (see below), so the image is checked outside the proof | partial | `COL_MEM_INIT_ACC`, `initial_state_root` |
 | Claimed weights digest checked against the registered digest, outside the proof (the prover's word on which weights sat in memory; the AIR does not constrain the image, see "What this is and is not") | partial | `AiModelSpec::execution_weights_digest` |
 | Claimed output commitment bound to the proved guest result | open | `prove_mlp_inference` packages the host commitment; the guest output enters only the logged, non-binding accumulator (see "Bind the claimed output" below) |
-| STARK verification of an inference proof on the transaction path | working (`FULL_AI_STARK_VERIFICATION_LIVE = true`) | `src/execution/executor.rs`, `src/ai/execution/` |
+| STARK verification of an inference proof on the transaction path | closed on testnet (`FULL_AI_STARK_VERIFICATION_LIVE = false`) pending BLG-059 to BLG-062 and the VL-1 opening gate | `src/execution/executor.rs`, `src/ai/execution/` |
 | Perception declaration (what is read, in which modality, how much) enforced fail-closed at admission | working | `ai_inference::admit_inference_request`, `AiInferenceRequest::perception` (request-id V3) |
 | Model modality declaration checked against the read it is asked to serve | working | `AiModelSpec::modalities`, `ModalitySet` |
 | SocialFi bridge: finalized AI inference layer output minted as requester-owned NFT | working (best-effort) | `src/execution/executor.rs` -> `ai_inference::social::ai_output_to_nft` |
-| `VerifyInference` opcode (0x1F) inside the zkVM | **working (30-round Poseidon digest + AIR constraints)**: active under `MainnetActivation::default()` (`verify_inference_enabled = true`) | `budzero/bud-vm/src/lib.rs`, `budzero/bud-proof/src/plonky3_air.rs` |
+| `VerifyInference` opcode (0x1F) inside the zkVM | AIR constraints exist; the opcode is closed under `MainnetActivation::default()` until its testnet opening gate passes | `budzero/bud-vm/src/lib.rs`, `budzero/bud-proof/src/plonky3_air.rs` |
 
 ## Perception declaration (V3)
 
@@ -277,9 +277,9 @@ this document has to be updated with the change.
 
 ## The zkVM opcode
 
-`VerifyInference` (0x1F) evaluates `verify_inference_digest(model_commitment, input_commitment, aux_tag)` using the 30-round Poseidon2 hash in the VM and writes the digest (or checks binding) across the AIR (`COL_IS_VERIFY_INFERENCE`). Both `VerifyMerkle` (0x1E) and `VerifyInference` (0x1F) are enabled on testnet under `MainnetActivation::default()`.
+`VerifyInference` (0x1F) has 30-round Poseidon2 AIR constraints. The default testnet activation keeps it closed. `VerifyMerkle` (0x1E) also remains closed until its own opening gate and independent review pass.
 
-In addition, transaction-level AI STARK verification (`FULL_AI_STARK_VERIFICATION_LIVE = true`) verifies the Plonky3 STARK proof against the registered guest program, `chain_id`, `weights_digest`, non-zero `initial_state_root`, non-zero `event_digest`, and attaching transaction context (`sender`, `nonce`, `block_height`). Note that arbitrary large transformer models outside the fixed-point MLP guest remain unsupported on-chain; `prove_mlp_inference_with_context` handles verified MLP workloads.
+Transaction-level AI STARK verification stays disabled on testnet (`FULL_AI_STARK_VERIFICATION_LIVE = false`) until BLG-059 through BLG-062 are closed and the VL-1 opening gate is verified. The proof implementation and its low-level tests do not enable the consensus feature. Arbitrary large transformer models outside the fixed-point MLP guest remain unsupported on-chain.
 
 ## What closing the gap requires (status)
 
