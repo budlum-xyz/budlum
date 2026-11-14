@@ -10,11 +10,12 @@ fn sender(byte: u8) -> Address {
 
 #[test]
 fn finality_prune_depth_is_at_least_100() {
-    assert!(
-        FINALITY_PRUNE_DEPTH >= 100,
-        "prune depth {} is too shallow for safe finality",
-        FINALITY_PRUNE_DEPTH
-    );
+    const {
+        assert!(
+            FINALITY_PRUNE_DEPTH >= 100,
+            "the prune depth is too shallow for safe finality"
+        );
+    }
 }
 
 #[test]

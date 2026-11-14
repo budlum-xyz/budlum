@@ -2454,14 +2454,9 @@ mod tests {
         let mid = alice_manifest.manifest_id;
         let shard_id = alice_manifest.shards[0].shard_id;
 
-        execute_storage_tx(
-            &mut state,
-            &ctx(alice),
-            &StorageTx::RegisterManifest {
-                manifest: alice_manifest.clone(),
-            },
-        )
-        .unwrap();
+        // Registry fixture: the legacy registration transaction is closed and
+        // has its own test above.
+        state.storage_registry.register_manifest(&alice_manifest);
         state
             .storage_registry
             .record_test_custody_for_manifest(&alice_manifest, alice);
@@ -2470,14 +2465,7 @@ mod tests {
         // Attacker records a duplicate manifest claim and attempts a self-operated zero-fee deal.
         let mut attacker_manifest = alice_manifest.clone();
         attacker_manifest.owner = attacker;
-        execute_storage_tx(
-            &mut state,
-            &ctx(attacker),
-            &StorageTx::RegisterManifest {
-                manifest: attacker_manifest,
-            },
-        )
-        .unwrap();
+        state.storage_registry.register_manifest(&attacker_manifest);
 
         let open = StorageDealOpen {
             domain_id: 42,
