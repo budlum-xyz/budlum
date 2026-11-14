@@ -241,7 +241,8 @@ impl RateLimiter {
         self.counts.retain(|_, (open, _)| *open == window);
     }
 
-    /// How many keys the limiter is tracking.
+    /// Test-only view of limiter key retention after a window is pruned.
+    #[cfg(test)]
     #[must_use]
     fn tracked_keys(&self) -> usize {
         self.counts.len()
