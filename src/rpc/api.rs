@@ -1296,4 +1296,97 @@ pub trait BudlumApi {
         requester: String,
         document: String,
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Create an isolated Garden PoA domain on this node.
+    #[method(name = "bud_gardenCreate")]
+    async fn garden_create(
+        &self,
+        title: String,
+        host_name: String,
+        host_multiaddr: String,
+        relay_multiaddrs: Vec<String>,
+        nonce: u64,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Return the shareable deep link and identical QR payload for an active Garden.
+    #[method(name = "bud_gardenInvite")]
+    async fn garden_invite(
+        &self,
+        chain_id: Option<u64>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Join an existing Garden using its invite link or QR payload.
+    #[method(name = "bud_gardenJoin")]
+    async fn garden_join(
+        &self,
+        invite_or_qr: String,
+        validator_name: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Leave a Garden as a validator or host.
+    #[method(name = "bud_gardenLeave")]
+    async fn garden_leave(
+        &self,
+        chain_id: Option<u64>,
+        validator_pubkey_hex: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Return a previously joined validator or host to the Garden.
+    #[method(name = "bud_gardenReturn")]
+    async fn garden_return(
+        &self,
+        chain_id: Option<u64>,
+        validator_pubkey_hex: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Query the current Garden chain and Budlum registry status.
+    #[method(name = "bud_gardenStatus")]
+    async fn garden_status(
+        &self,
+        chain_id: Option<u64>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Publish a message, social post, or image inside an isolated Garden chain.
+    /// Explicitly refused on Budlum Testnet (45261) and Mainnet (45260).
+    #[method(name = "bud_gardenPublish")]
+    async fn garden_publish(
+        &self,
+        chain_id: u64,
+        sender_pubkey_hex: String,
+        kind: String,
+        title_or_mime: String,
+        body_or_filename: String,
+        payload_hex: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Resolve and verify B.U.D. 3.0 content stored inside the Garden.
+    #[method(name = "bud_gardenResolveContent")]
+    async fn garden_resolve_content(
+        &self,
+        chain_id: Option<u64>,
+        content_id_hex: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Query the verifiable chain trace of a Garden transaction or content item.
+    #[method(name = "bud_gardenTrace")]
+    async fn garden_trace(
+        &self,
+        chain_id: Option<u64>,
+        id_hex: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Advance the Garden PoA round when the current slot leader skipped publishing.
+    #[method(name = "bud_gardenAdvanceRound")]
+    async fn garden_advance_round(
+        &self,
+        chain_id: Option<u64>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Query a remote Garden node over TCP or run a local peer listener probe.
+    #[method(name = "bud_gardenPeerStatus")]
+    async fn garden_peer_status(
+        &self,
+        chain_id: Option<u64>,
+        peer_addr: Option<String>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
 }
