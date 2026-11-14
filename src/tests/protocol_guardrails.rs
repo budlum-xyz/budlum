@@ -64,7 +64,7 @@ fn mainnet_pkcs11_requires_a_module_path() {
 
 #[test]
 fn proof_required_models_are_refused_without_a_live_verifier() {
-    assert!(!FULL_AI_STARK_VERIFICATION_LIVE);
+    const { assert!(!FULL_AI_STARK_VERIFICATION_LIVE) };
     let mut reg = AiRegistry::new();
     let dims = vec![2u16, 1];
     let spec_for_hash = crate::ai::execution::FixedPointMlpSpec {
