@@ -54,22 +54,30 @@ pub fn is_forbidden_header(name: &str) -> bool {
 /// the baseline directives: it must carry `default-src` and `frame-ancestors`,
 /// and it must not add a scheme or host the baseline does not reach. This is a
 /// deliberately conservative comparison: a directive the gateway cannot parse
-/// counts as wider, so an unparsable policy is refused rather than trusted.
+/// counts as wider, so a policy the gateway cannot parse is refused rather than trusted.
 #[must_use]
 pub fn csp_is_at_least_as_strict(candidate: &str, baseline: &str) -> bool {
-    let parse = |policy: &str| -> BTreeMap<String, Vec<String>> {
-        policy
-            .split(';')
-            .filter_map(|directive| {
-                let mut parts = directive.split_whitespace();
-                let name = parts.next()?.to_ascii_lowercase();
-                let values: Vec<String> = parts.map(|v| v.to_ascii_lowercase()).collect();
-                Some((name, values))
-            })
-            .collect()
+    let parse = |policy: &str| -> Option<BTreeMap<String, Vec<String>>> {
+        let mut directives = BTreeMap::new();
+        for directive in policy.split(';') {
+            let mut parts = directive.split_whitespace();
+            let Some(name) = parts.next() else {
+                continue;
+            };
+            let name = name.to_ascii_lowercase();
+            let values: Vec<String> = parts.map(|value| value.to_ascii_lowercase()).collect();
+            if directives.insert(name, values).is_some() {
+                return None;
+            }
+        }
+        Some(directives)
     };
-    let candidate = parse(candidate);
-    let baseline = parse(baseline);
+    let Some(candidate) = parse(candidate) else {
+        return false;
+    };
+    let Some(baseline) = parse(baseline) else {
+        return false;
+    };
     if candidate.is_empty() {
         return false;
     }
@@ -349,8 +357,14 @@ mod tests {
             "frame-ancestors 'none'",
             DEFAULT_CSP
         ));
-        // Unparsable is refused, not trusted.
+        // A policy the gateway cannot parse is refused, not trusted.
         assert!(!csp_is_at_least_as_strict("", DEFAULT_CSP));
+        // The browser uses the first duplicate directive. Refuse duplicates
+        // instead of comparing a later, more restrictive value.
+        assert!(!csp_is_at_least_as_strict(
+            "default-src *; default-src 'none'; frame-ancestors 'none'",
+            DEFAULT_CSP
+        ));
     }
 
     #[test]

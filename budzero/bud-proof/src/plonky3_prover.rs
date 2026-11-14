@@ -459,10 +459,10 @@ pub fn trace_matrix(
     let n_reg = events.len();
     let n_mem = mem_events.len();
     let num_rows = n_cpu
-        .checked_mul(3)
-        .and_then(|n| n.checked_add(1))
-        .expect("trace row count overflow")
-        .next_power_of_two()
+        .saturating_mul(3)
+        .saturating_add(1)
+        .checked_next_power_of_two()
+        .unwrap_or(usize::MAX)
         .max(16);
     assert!(
         num_rows <= MAX_PROVER_WITNESS_ROWS,
@@ -4625,16 +4625,16 @@ mod tests {
             bud_isa::MainnetActivation::full()
         )
         .is_ok());
-        // Default activation and full activation both verify honest VerifyMerkle
-        // proofs; explicit `closed()` activation still refuses them cleanly.
-        assert!(Plonky3Adapter::verify(&envelope, &pi, &program).is_ok());
+        // The default testnet activation refuses the proof; an explicit full
+        // activation permits it after the opening gates pass.
+        assert!(Plonky3Adapter::verify(&envelope, &pi, &program).is_err());
         assert!(Plonky3Adapter::verify_with_activation(
             &envelope,
             &pi,
             &program,
             bud_isa::MainnetActivation::default()
         )
-        .is_ok());
+        .is_err());
         match Plonky3Adapter::verify_with_activation(
             &envelope,
             &pi,
@@ -4660,8 +4660,8 @@ mod tests {
             Err(VerifyError::InvalidEnvelope(_))
         ));
 
-        // VerifyInference: honest 30-round Poseidon proof verifies under default and full,
-        // and refuses under explicit `closed()`.
+        // VerifyInference stays refused under the default testnet schedule.
+        // An explicit full schedule exercises the proof constraints.
         let program = vec![
             inst(Opcode::Load, 2, 0, 0, 0xABCD),
             inst(Opcode::Load, 3, 0, 0, 0x1234),
@@ -4692,8 +4692,8 @@ mod tests {
         };
         let envelope = Plonky3Adapter::prove(&vm.trace, &pi, &program).unwrap();
         assert!(
-            Plonky3Adapter::verify(&envelope, &pi, &program).is_ok(),
-            "VerifyInference proof must verify under default activation"
+            Plonky3Adapter::verify(&envelope, &pi, &program).is_err(),
+            "VerifyInference proof must be refused under the default testnet activation"
         );
         assert!(
             Plonky3Adapter::verify_with_activation(
@@ -6538,16 +6538,16 @@ mod tests {
         assert_eq!(encoded & 0xFF, 0x1E);
     }
 
-    /// VerifyMerkle is active under `MainnetActivation::default()` and must still
-    /// refuse under explicit `MainnetActivation::closed()`.
+    /// VerifyMerkle stays closed by default and opens only under an explicit schedule.
     #[test]
     fn verify_merkle_stays_closed_under_default_activation() {
         let default = bud_isa::MainnetActivation::default();
-        assert!(
-            default.verify_merkle_enabled,
-            "VerifyMerkle uses full 30-round Poseidon compression and is enabled by default"
-        );
-        assert!(default.allows(bud_isa::Opcode::VerifyMerkle));
+        assert!(!default.verify_merkle_enabled);
+        assert!(!default.allows(bud_isa::Opcode::VerifyMerkle));
+
+        let full = bud_isa::MainnetActivation::full();
+        assert!(full.verify_merkle_enabled);
+        assert!(full.allows(bud_isa::Opcode::VerifyMerkle));
 
         let closed = bud_isa::MainnetActivation::closed();
         assert!(!closed.verify_merkle_enabled);
@@ -6561,8 +6561,8 @@ mod tests {
             imm: 0,
         }
         .encode();
-        let err = bud_isa::Instruction::decode_for_mainnet(raw, closed)
-            .expect_err("explicitly closed activation must refuse VerifyMerkle");
+        let err = bud_isa::Instruction::decode_for_mainnet(raw, default)
+            .expect_err("default testnet activation must refuse VerifyMerkle");
         assert!(matches!(
             err,
             bud_isa::DecodeError::MainnetActivationRequired(bud_isa::Opcode::VerifyMerkle)
@@ -10302,15 +10302,17 @@ mod tests {
             };
             let envelope = Plonky3Adapter::prove(&vm.trace, &pi, &program)
                 .expect("honest VerifyInference trace must prove");
-            Plonky3Adapter::verify(&envelope, &pi, &program)
-                .expect("honest VerifyInference proof must verify under default activation");
+            assert!(
+                Plonky3Adapter::verify(&envelope, &pi, &program).is_err(),
+                "default testnet activation must refuse VerifyInference"
+            );
             Plonky3Adapter::verify_with_activation(
                 &envelope,
                 &pi,
                 &program,
                 bud_isa::MainnetActivation::full(),
             )
-            .expect("honest VerifyInference proof must verify under full activation");
+            .expect("honest VerifyInference proof must verify under explicit full activation");
             let closed_err = Plonky3Adapter::verify_with_activation(
                 &envelope,
                 &pi,

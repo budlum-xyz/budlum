@@ -30,12 +30,9 @@ pub struct ExecutionReceipt {
     pub state_writes_digest: [u8; 32],
 }
 
-// Mainnet decoding reads `MainnetActivation::default()`. Both
-// `VerifyMerkle` (64-depth 30-round Poseidon path verification) and
-// `VerifyInference` (30-round Poseidon commitment binding over
-// `DOMAIN_VERIFY_INFERENCE`) are backed by AIR constraints and enabled under
-// `MainnetActivation::default()`. `MainnetActivation::closed()` retains an
-// explicit off toggle for compatibility and differential testing.
+// Mainnet decoding reads `MainnetActivation::default()`. Testnet keeps
+// `VerifyMerkle` and `VerifyInference` closed until their opening gates pass.
+// `MainnetActivation::full()` is an explicit schedule for gated verification.
 fn decode_instruction(raw: u64, mainnet_mode: bool) -> Result<bud_isa::Instruction, String> {
     if mainnet_mode {
         let activation = bud_isa::MainnetActivation::default();
@@ -1419,7 +1416,7 @@ mod tests {
     /// to `(model_commit=rs1, input_commit=rs2, imm)` across single rows with no
     /// expansion rows.
     #[test]
-    fn verify_inference_always_returns_zero_and_emits_no_expansion_rows() {
+    fn verify_inference_computes_digest_and_emits_no_expansion_rows() {
         let model_c = 0xABCD_EF01_2345_6789u64;
         let input_c = 0x1122_3344_5566_7788u64;
         for imm in [0i32, 1, -7] {
