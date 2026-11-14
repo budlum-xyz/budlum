@@ -3079,7 +3079,7 @@ mod tests {
     }
 
     #[test]
-    fn awarded_graft_solver_cannot_withdraw_relayer_bond_before_expiry_and_gets_slashed() {
+    fn awarded_app_binding_solver_cannot_withdraw_relayer_bond_before_expiry_and_gets_slashed() {
         let operator = Address::from([0x81; 32]);
         let user = Address::from([0x82; 32]);
         let solver = Address::from([0x83; 32]);
@@ -3091,31 +3091,31 @@ mod tests {
         state.add_balance(&solver, bond);
         state.bond_relayer(&solver, bond).unwrap();
 
-        execute_graft_tx(
+        execute_app_binding_tx(
             &mut state,
             &ctx(operator),
-            &GraftTx::SetExecutor {
+            &AppBindingTx::SetExecutor {
                 domain_key: DOMAIN,
                 executor,
             },
         )
         .unwrap();
-        execute_graft_tx(
+        execute_app_binding_tx(
             &mut state,
             &ctx(user),
-            &GraftTx::Register {
+            &AppBindingTx::Register {
                 domain_key: DOMAIN,
                 origin_app: origin.clone(),
                 manifest_hash: [0x11; 32],
             },
         )
         .unwrap();
-        let id = graft_id(DOMAIN, &origin);
-        execute_graft_tx(
+        let id = app_binding_id(DOMAIN, &origin);
+        execute_app_binding_tx(
             &mut state,
             &ctx(user),
-            &GraftTx::OpenIntent {
-                graft_id: id,
+            &AppBindingTx::OpenIntent {
+                app_binding_id: id,
                 call_hash: [0x22; 32],
                 value: 0,
                 max_payment: 1_000,
@@ -3126,21 +3126,21 @@ mod tests {
             },
         )
         .unwrap();
-        let intent_id = *state.settlement.graft.intents.keys().next().unwrap();
-        execute_graft_tx(
+        let intent_id = *state.settlement.app_binding.intents.keys().next().unwrap();
+        execute_app_binding_tx(
             &mut state,
             &ctx(solver),
-            &GraftTx::Bid {
+            &AppBindingTx::Bid {
                 intent_id,
                 cost: 100,
                 fee: 10,
             },
         )
         .unwrap();
-        execute_graft_tx(
+        execute_app_binding_tx(
             &mut state,
             &ctx(user),
-            &GraftTx::Award { intent_id, solver },
+            &AppBindingTx::Award { intent_id, solver },
         )
         .unwrap();
 
@@ -3153,7 +3153,7 @@ mod tests {
             .unwrap_err();
         assert!(
             err.contains("live awarded intent"),
-            "solver must not withdraw bond while awarded Graft intent is live: {err}"
+            "solver must not withdraw bond while awarded AppBinding intent is live: {err}"
         );
 
         state.current_block_height = 10_001;

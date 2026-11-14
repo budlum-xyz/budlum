@@ -26,7 +26,7 @@ pub(crate) const TESTS: &[&str] = &[
     "tests::bns_expanded::bns_expiry_index_reclaims_the_earliest_expired_name_without_a_scan",
     "tests::bns_expanded::bns_expiry_index_tracks_renewal_prune_and_rebuild",
     "tests::bns_expanded::bns_expiry_index_is_not_committed_to_the_root",
-    "tests::bns_expanded::bns_metrics_export_one_counter_per_type_and_the_named_gauges",
+    "chain::blockchain::bns_metrics_export_one_counter_per_type_and_the_named_gauges",
     "tests::bns_expanded::bns_root_is_independent_of_insertion_order",
     "tests::bns_expanded::bns_absence_proof_boundaries_must_be_adjacent_positions",
     "tests::bns_expanded::bns_set_content_refuses_unknown_content_and_binds_a_registered_object",

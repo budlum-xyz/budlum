@@ -33,20 +33,6 @@ fn precompile_scheme_allowed(scheme: CallScheme) -> bool {
     matches!(scheme, CallScheme::Call | CallScheme::StaticCall)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::precompile_scheme_allowed;
-    use revm::interpreter::CallScheme;
-
-    #[test]
-    fn host_precompiles_reject_delegate_and_callcode_schemes() {
-        assert!(precompile_scheme_allowed(CallScheme::Call));
-        assert!(precompile_scheme_allowed(CallScheme::StaticCall));
-        assert!(!precompile_scheme_allowed(CallScheme::DelegateCall));
-        assert!(!precompile_scheme_allowed(CallScheme::CallCode));
-    }
-}
-
 /// ABI-encode event data `(uint8 ee, bytes target, bool ok)` for `UniversalCallExecuted`.
 #[must_use]
 pub fn encode_universal_call_executed_data(ee: u8, target: &[u8], ok: bool) -> Vec<u8> {
@@ -660,5 +646,19 @@ pub(crate) fn handle_universal_precompile_call(
                 mem_offset,
             ))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::precompile_scheme_allowed;
+    use revm::interpreter::CallScheme;
+
+    #[test]
+    fn host_precompiles_reject_delegate_and_callcode_schemes() {
+        assert!(precompile_scheme_allowed(CallScheme::Call));
+        assert!(precompile_scheme_allowed(CallScheme::StaticCall));
+        assert!(!precompile_scheme_allowed(CallScheme::DelegateCall));
+        assert!(!precompile_scheme_allowed(CallScheme::CallCode));
     }
 }

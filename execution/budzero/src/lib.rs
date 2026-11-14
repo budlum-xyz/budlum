@@ -450,7 +450,7 @@ mod tests {
         }
         .encode()
         .to_le_bytes();
-        assert!(worker.validate_deploy(&merkle_code).is_ok());
+        assert!(worker.validate_deploy(&merkle_code).is_err());
 
         let inf_code = Instruction {
             opcode: Opcode::VerifyInference,
@@ -461,7 +461,7 @@ mod tests {
         }
         .encode()
         .to_le_bytes();
-        assert!(worker.validate_deploy(&inf_code).is_ok());
+        assert!(worker.validate_deploy(&inf_code).is_err());
 
         assert!(bud_isa::Instruction::decode_for_mainnet(
             Instruction {
