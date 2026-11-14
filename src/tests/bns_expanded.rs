@@ -136,6 +136,11 @@ fn test_bns_transfer() {
     let alice = addr(1);
     let bob = addr(2);
 
+    assert_eq!(
+        reg.transfer("missing.bud", &alice, bob, 10),
+        Err(BnsError::InvalidName),
+        "transfer of an absent name must return a refusal"
+    );
     reg.register("transfer.bud".to_string(), alice, 0, 1000)
         .unwrap();
 

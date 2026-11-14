@@ -113,7 +113,8 @@ pub enum CharterRefusal {
     AlreadyChartered,
 }
 
-/// Check one charter against the proofs and the canonical hashes.
+/// Convenience: public entry point for clients that validate a charter without
+/// a finalized home-chain state root; it still checks proofs and canonical hashes.
 ///
 /// # Errors
 ///

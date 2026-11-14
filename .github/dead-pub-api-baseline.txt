@@ -23,7 +23,6 @@
 # entry the gate cannot match is an entry that never matches again.
 src/account_abstraction/tee_attestation.rs:kq_wallet_tee_attestation
 src/account_abstraction/tee_attestation.rs:kq_wallet_tee_runtime
-src/ai/execution/verify.rs:is_fully_valid
 src/ai/registry.rs:clear_whitelist
 src/ai/registry.rs:get_payment_escrow_status
 src/ai/registry.rs:get_request
