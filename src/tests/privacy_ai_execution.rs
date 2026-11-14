@@ -358,7 +358,10 @@ fn ai_require_execution_proof_blocks_finalize_without_proof() {
         request_id: AiRequestId::default(),
         requester: owner,
         model_id: mid,
-        input_commitment: crate::ai::execution::input_commitment(&[4, 5]),
+        // This test submits no proof. Its empty input ref still needs the
+        // canonical request commitment; the guest-only limb commitment is a
+        // different scheme and cannot authenticate a request's input_ref.
+        input_commitment: crate::ai::types::canonical_input_commitment(&[]),
         input_ref: BoundedBytes::empty(),
         max_fee: 10,
         callback: None,

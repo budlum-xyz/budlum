@@ -180,9 +180,13 @@ pub fn derive_alias_bytes(addr: &Address, ee: EeId) -> Result<Vec<u8>, String> {
         EeId::EVM | EeId::POLKAVM => Ok(derive_evm_alias(addr).to_vec()),
         EeId::WASM => Ok(derive_wasm_alias(addr).into_bytes()),
         EeId::SVM => derive_svm_alias(addr).map(|(pk, _)| pk.to_vec()),
-        EeId::MOVE | EeId::MOVE_SUI | EeId::CAIRO | EeId::TVM | EeId::UTXO | EeId::PLUTUS => {
-            Ok(derive_move_alias(addr).to_vec())
-        }
+        EeId::MOVE
+        | EeId::MOVE_SUI
+        | EeId::CAIRO
+        | EeId::TVM
+        | EeId::UTXO
+        | EeId::PLUTUS
+        | EeId::RV32 => Ok(derive_move_alias(addr).to_vec()),
         EeId::NEAR_WASM => {
             let mut h = Sha256::new();
             h.update(b"BDLM_NEAR_ALIAS_V1");
@@ -217,6 +221,15 @@ pub fn alias_storage_key(addr: &Address, ee: EeId) -> [u8; 33] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rv32_deploy_has_a_bounded_canonical_alias_and_unknown_ees_are_refused() {
+        let address = Address::from([0x91; 32]);
+        let alias = derive_alias_bytes(&address, EeId::RV32).expect("RV32 is catalogued");
+        assert_eq!(alias, derive_move_alias(&address));
+        assert_eq!(alias.len(), 32);
+        assert!(derive_alias_bytes(&address, EeId(0xFD)).is_err());
+    }
 
     #[test]
     fn uel_svm_alias_is_off_curve() {

@@ -4,6 +4,10 @@
 //! `CipherProfile::FieldNative`), a zero-knowledge [`ConsentProof`] bound to a
 //! `DeletionSet` tombstone check, and full Plonky3 STARK verification of the
 //! AI execution proof without ever exposing the sealed dataset plaintext.
+//!
+//! WIRING: unwired - no production transaction admits a
+//! ComputeWithoutSeeingBundle. The verifier remains a helper, not an active
+//! authorization check, until the confidential inference transaction exists.
 
 use crate::ai::execution::verify::{verify_execution_proof_full, ExecutionVerifyReport};
 use crate::ai::types::{

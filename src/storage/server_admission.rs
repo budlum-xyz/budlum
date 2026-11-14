@@ -1,5 +1,9 @@
 //! Server admission for the 1.0 mobile-self profile: the network-side
 //! measurement that a device really is the server of its own content.
+//!
+//! WIRING: unwired - only the legacy `one_share::admit_as_server` scaffold
+//! calls this function. B.U.D. 3.0 admission is separate; this is not an
+//! active network gate and must not be credited as one.
 
 use crate::storage::mobile_self::CustodyLedger;
 
