@@ -302,6 +302,9 @@ mod tests {
             fn bns_root_at(&self, height: u64) -> Option<([u8; 32], u64)> {
                 (height == self.height).then_some((self.root, self.epoch))
             }
+            fn latest_height(&self) -> u64 {
+                self.height
+            }
         }
 
         // A record with no forwarding target: the proven recipient is the
