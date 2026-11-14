@@ -1,9 +1,9 @@
 //! Offline EVM Migration Kit verifier and bundle tool (directive 8.12).
 //!
 //! Commands:
-//! - `bud-migrate digest --contract 0x... --chain-id <id> --source-block <n>`
+//! - `bud-migrate digest --contract 0x... --chain-id <id> --source-block <n> --state-root 0x... --code-hash 0x...`
 //! - `bud-migrate analyze --code-file <path> [--json]`
-//! - `bud-migrate verify <bundle.json> <chain-fee-schedule.json>`
+//! - `bud-migrate verify <bundle.json> <chain-fee-schedule.json> --chain-id <id>`
 
 use std::collections::BTreeMap;
 use std::env;
@@ -51,8 +51,9 @@ fn usage() -> String {
         "",
         "Commands:",
         "  digest   --contract 0x<20-bytes> --chain-id <u64> --source-block <u64>",
+        "           --state-root 0x<32-bytes> --code-hash 0x<32-bytes>",
         "  analyze  --code-file <path> [--json]",
-        "  verify   <bundle.json> <chain-fee-schedule.json>",
+        "  verify   <bundle.json> <chain-fee-schedule.json> --chain-id <u64>",
     ]
     .join("\n")
 }
@@ -61,6 +62,8 @@ fn run_digest(args: &[String]) -> Result<String, String> {
     let mut contract = None;
     let mut chain_id = None;
     let mut source_block = None;
+    let mut state_root = None;
+    let mut code_hash = None;
     let mut idx = 0usize;
     while let Some(flag) = args.get(idx) {
         let val = args
@@ -70,6 +73,8 @@ fn run_digest(args: &[String]) -> Result<String, String> {
             "--contract" => contract = Some(parse_hex_array::<20>(val)?),
             "--chain-id" => chain_id = Some(parse_u64(val, "--chain-id")?),
             "--source-block" => source_block = Some(parse_u64(val, "--source-block")?),
+            "--state-root" => state_root = Some(parse_hex_array::<32>(val)?),
+            "--code-hash" => code_hash = Some(parse_hex_array::<32>(val)?),
             other => return Err(format!("unknown digest option `{other}`")),
         }
         idx += 2;
@@ -78,6 +83,8 @@ fn run_digest(args: &[String]) -> Result<String, String> {
         contract: contract.ok_or_else(|| String::from("--contract is required"))?,
         budlum_chain_id: chain_id.ok_or_else(|| String::from("--chain-id is required"))?,
         source_block: source_block.ok_or_else(|| String::from("--source-block is required"))?,
+        state_root: state_root.ok_or_else(|| String::from("--state-root is required"))?,
+        code_hash: code_hash.ok_or_else(|| String::from("--code-hash is required"))?,
         signature: Vec::new(),
     };
     Ok(format!("0x{}", hex::encode(auth.digest())))
@@ -133,13 +140,17 @@ fn format_dependency_report(report: &DependencyReport, scanned_bytes: usize) -> 
 }
 
 fn run_verify(args: &[String]) -> Result<String, String> {
-    if args.len() != 2 {
-        return Err(String::from(
-            "verify expects <bundle.json> and <chain-fee-schedule.json>",
-        ));
+    let usage = "verify expects <bundle.json> <chain-fee-schedule.json> --chain-id <u64>";
+    let (path, fee_path, flag, value) = match args {
+        [path, fee_path, flag, value] => (path, fee_path, flag, value),
+        _ => return Err(String::from(usage)),
+    };
+    // The chain id is node configuration, like the fee schedule: a bundle that
+    // named its own chain would let one deployer signature replay anywhere.
+    if flag != "--chain-id" {
+        return Err(String::from(usage));
     }
-    let path = &args[0];
-    let fee_path = &args[1];
+    let chain_id = parse_u64(value, "--chain-id")?;
     let raw = fs::read_to_string(path).map_err(|e| format!("read {path}: {e}"))?;
     let bundle: MigrationBundleFile =
         serde_json::from_str(&raw).map_err(|e| format!("parse {path}: {e}"))?;
@@ -147,13 +158,14 @@ fn run_verify(args: &[String]) -> Result<String, String> {
     let fee_raw = fs::read_to_string(fee_path).map_err(|e| format!("read {fee_path}: {e}"))?;
     let fee_schedule: MigrationFeeSchedule =
         serde_json::from_str(&fee_raw).map_err(|e| format!("parse {fee_path}: {e}"))?;
-    let output = verify_bundle(bundle, &fee_schedule)?;
+    let output = verify_bundle(bundle, &fee_schedule, chain_id)?;
     serde_json::to_string_pretty(&output).map_err(|e| format!("encode output: {e}"))
 }
 
 fn verify_bundle(
     bundle: MigrationBundleFile,
     fee_schedule: &MigrationFeeSchedule,
+    chain_id: u64,
 ) -> Result<VerifiedMigrationOutput, String> {
     let deployment = bundle.deployment.into_proof()?;
     let evidence = verify_deployment(&deployment, bundle.source_chain_id)
@@ -170,10 +182,11 @@ fn verify_bundle(
         contract: parse_hex_array::<20>(&bundle.authorization.contract)?,
         budlum_chain_id: bundle.authorization.budlum_chain_id,
         source_block: bundle.authorization.source_block,
+        state_root: parse_hex_array::<32>(&bundle.authorization.state_root)?,
+        code_hash: parse_hex_array::<32>(&bundle.authorization.code_hash)?,
         signature: parse_hex_bytes(&bundle.authorization.signature)?,
     };
     let request = MigrationRequest {
-        chain_id: bundle.chain_id,
         source_chain_id: bundle.source_chain_id,
         source_domain: bundle.source_domain,
         source_block: bundle.source_block,
@@ -184,7 +197,7 @@ fn verify_bundle(
         code,
         occupied: bundle.occupied,
     };
-    let mut plan = begin_import(request).map_err(|e| e.to_string())?;
+    let mut plan = begin_import(request, chain_id).map_err(|e| e.to_string())?;
     for chunk in bundle.chunks {
         let decoded = chunk.into_chunk()?;
         plan.import_chunk(&decoded).map_err(|e| e.to_string())?;
@@ -204,7 +217,6 @@ fn verify_bundle(
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct MigrationBundleFile {
-    chain_id: u64,
     source_chain_id: u64,
     source_domain: String,
     source_block: u64,
@@ -250,6 +262,8 @@ struct AuthorizationFile {
     contract: String,
     budlum_chain_id: u64,
     source_block: u64,
+    state_root: String,
+    code_hash: String,
     signature: String,
 }
 
@@ -408,4 +422,82 @@ fn parse_hex_array<const N: usize>(value: &str) -> Result<[u8; N], String> {
     bytes
         .try_into()
         .map_err(|_| format!("expected {N} hex bytes, got {len}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const CONTRACT: &str = "0xa3183498b579bd228aa2b62101c40cc1da978f24";
+    /// The same known answer the library pins in
+    /// `the_authorization_digest_matches_the_known_answer`, reached through the CLI.
+    const KNOWN_ANSWER: &str = "0xa270d0a4b367237f543fc31799b0483e5739224c286716cecdfe7acc14da9df8";
+
+    fn args(parts: &[&str]) -> Vec<String> {
+        parts.iter().map(|part| (*part).to_string()).collect()
+    }
+
+    fn digest_args(with_root: bool, with_code: bool) -> Vec<String> {
+        let state_root = format!("0x{}", "11".repeat(32));
+        let code_hash = format!("0x{}", "22".repeat(32));
+        let mut out = args(&[
+            "--contract",
+            CONTRACT,
+            "--chain-id",
+            "45261",
+            "--source-block",
+            "19000000",
+        ]);
+        if with_root {
+            out.extend(args(&["--state-root", &state_root]));
+        }
+        if with_code {
+            out.extend(args(&["--code-hash", &code_hash]));
+        }
+        out
+    }
+
+    #[test]
+    fn the_digest_command_prints_the_known_answer() {
+        assert_eq!(
+            run_digest(&digest_args(true, true)),
+            Ok(KNOWN_ANSWER.to_string())
+        );
+    }
+
+    #[test]
+    fn the_digest_command_refuses_a_signature_that_names_no_payload() {
+        assert_eq!(
+            run_digest(&digest_args(false, false)),
+            Err(String::from("--state-root is required"))
+        );
+        assert_eq!(
+            run_digest(&digest_args(true, false)),
+            Err(String::from("--code-hash is required"))
+        );
+    }
+
+    #[test]
+    fn verify_takes_the_chain_id_from_the_node_and_nowhere_else() {
+        for bad in [
+            args(&["bundle.json", "fees.json"]),
+            args(&["bundle.json", "fees.json", "--chain", "45261"]),
+            args(&["bundle.json", "fees.json", "--chain-id"]),
+        ] {
+            let error = run_verify(&bad).expect_err("the chain id flag is required");
+            assert!(error.contains("--chain-id <u64>"), "{error}");
+        }
+        let error = run_verify(&args(&["bundle.json", "fees.json", "--chain-id", "x"]))
+            .expect_err("a chain id is a number");
+        assert!(error.contains("--chain-id"), "{error}");
+    }
+
+    #[test]
+    fn a_bundle_that_names_its_own_chain_is_refused() {
+        let error = match serde_json::from_str::<MigrationBundleFile>(r#"{"chain_id": 45261}"#) {
+            Ok(_) => panic!("a bundle with a chain_id field must be refused"),
+            Err(error) => error.to_string(),
+        };
+        assert!(error.contains("unknown field `chain_id`"), "{error}");
+    }
 }

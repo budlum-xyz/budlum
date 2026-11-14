@@ -52,17 +52,25 @@ const DOMAIN_NAME: &str = "Budlum Migration";
 const DOMAIN_VERSION: &str = "1";
 const DOMAIN_TYPE: &str =
     "EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)";
-const AUTHORIZATION_TYPE: &str =
-    "MigrationAuthorization(address contract,uint256 budlumChainId,uint256 sourceBlock)";
+const AUTHORIZATION_TYPE: &str = "MigrationAuthorization(address contract,uint256 budlumChainId,uint256 sourceBlock,bytes32 stateRoot,bytes32 codeHash)";
 /// Maximum proven storage slots carried in one `ImportEvmStorageChunk`.
 pub const MAX_CHUNK_SLOTS: usize = 4096;
 
 /// EIP-712 `MigrationAuthorization` signed by the account with deployment authority.
+///
+/// The signature covers the payload it admits: the source `stateRoot` the
+/// account proof must open under and the runtime `codeHash` the proven account
+/// must hold. A signature that named only the contract would let whoever
+/// submits it choose the code and the state.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MigrationAuthorization {
     pub contract: [u8; 20],
     pub budlum_chain_id: u64,
     pub source_block: u64,
+    /// Source `stateRoot` the deployer signed for.
+    pub state_root: [u8; 32],
+    /// Runtime code hash the deployer signed for.
+    pub code_hash: [u8; 32],
     pub signature: Vec<u8>,
 }
 
@@ -82,11 +90,13 @@ impl MigrationAuthorization {
     }
 
     fn struct_hash(&self) -> [u8; 32] {
-        let mut encoded = Vec::with_capacity(128);
+        let mut encoded = Vec::with_capacity(192);
         encoded.extend_from_slice(&Self::type_hash());
         encoded.extend_from_slice(&word_from_address(&self.contract));
         encoded.extend_from_slice(&word_from_u64(self.budlum_chain_id));
         encoded.extend_from_slice(&word_from_u64(self.source_block));
+        encoded.extend_from_slice(&self.state_root);
+        encoded.extend_from_slice(&self.code_hash);
         mpt::keccak256(&encoded)
     }
 
@@ -121,6 +131,12 @@ pub enum ImportError {
     },
     ContractMismatch,
     SourceBlockMismatch,
+    /// The deployer signed for another state root or code than the request carries.
+    PayloadMismatch,
+    /// The request's source root is not one this chain anchored for the source domain.
+    SourceNotAttested {
+        domain: u32,
+    },
     DeploymentAfterSource {
         deployment_block: u64,
         source_block: u64,
@@ -171,6 +187,14 @@ impl std::fmt::Display for ImportError {
             }
             Self::ContractMismatch => write!(f, "migration: contract mismatch"),
             Self::SourceBlockMismatch => write!(f, "migration: source block mismatch"),
+            Self::PayloadMismatch => write!(
+                f,
+                "migration: authorization does not cover the supplied state root and code"
+            ),
+            Self::SourceNotAttested { domain } => write!(
+                f,
+                "migration: source root is not anchored for domain {domain}"
+            ),
             Self::DeploymentAfterSource {
                 deployment_block,
                 source_block,
@@ -267,7 +291,6 @@ pub struct ImportEvmStorageChunk {
 /// Inputs starting a verified EVM contract migration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MigrationRequest {
-    pub chain_id: u64,
     pub source_chain_id: u64,
     pub source_domain: String,
     pub source_block: u64,
@@ -361,18 +384,30 @@ pub enum MigrationTxOutcome {
 
 /// Verifies deployment authority and the finalized source account proof.
 ///
+/// `chain_id` is the chain the node is running. It never comes from the
+/// request: a request that names its own chain would let one deployer
+/// signature replay on every Budlum chain.
+///
 /// # Errors
 ///
 /// Returns an error if the operation fails.
-pub fn begin_import(request: MigrationRequest) -> Result<MigrationPlan, ImportError> {
-    if request.authorization.budlum_chain_id != request.chain_id {
+pub fn begin_import(
+    request: MigrationRequest,
+    chain_id: u64,
+) -> Result<MigrationPlan, ImportError> {
+    if request.authorization.budlum_chain_id != chain_id {
         return Err(ImportError::ChainMismatch {
             signed: request.authorization.budlum_chain_id,
-            expected: request.chain_id,
+            expected: chain_id,
         });
     }
     if request.authorization.source_block != request.source_block {
         return Err(ImportError::SourceBlockMismatch);
+    }
+    // The deployer signed for one state root. A request that opens its account
+    // under another root is not what was authorized.
+    if request.authorization.state_root != request.state_root {
+        return Err(ImportError::PayloadMismatch);
     }
     if request.deployment.deployment_block > request.source_block {
         return Err(ImportError::DeploymentAfterSource {
@@ -403,6 +438,9 @@ pub fn begin_import(request: MigrationRequest) -> Result<MigrationPlan, ImportEr
         &request.state_root,
         &evidence.contract,
     )?;
+    if account.code_hash != request.authorization.code_hash {
+        return Err(ImportError::PayloadMismatch);
+    }
     account_proof::check_code(&request.code, &account.code_hash)?;
     let proof_nodes = request
         .deployment
@@ -593,6 +631,7 @@ pub fn apply_migration_tx(
     migrator: &Address,
     tx: MigrationTx,
     fee_schedule: &MigrationFeeSchedule,
+    chain_id: u64,
 ) -> Result<MigrationTxOutcome, ImportError> {
     match tx {
         MigrationTx::BeginEvmImport(mut req) => {
@@ -607,7 +646,7 @@ pub fn apply_migration_tx(
             }
             let live_occupied = is_evm_address_occupied(state, &state.execution_state, &target)?;
             req.occupied = req.occupied || live_occupied;
-            let plan = begin_import(*req)?;
+            let plan = begin_import(*req, chain_id)?;
             let actual = plan.source().address;
             let actual_hex = hex::encode(actual);
             if state
@@ -703,7 +742,7 @@ pub fn apply_migration_tx(
         }
         MigrationTx::ImportWasmContract(req) => {
             let (code_hash, contract, keys, fee) =
-                non_evm::apply_wasm_migration(state, migrator, *req, fee_schedule)?;
+                non_evm::apply_wasm_migration(state, migrator, *req, fee_schedule, chain_id)?;
             Ok(MigrationTxOutcome::WasmImported {
                 contract,
                 code_hash,
@@ -713,7 +752,7 @@ pub fn apply_migration_tx(
         }
         MigrationTx::ImportSvmAccount(req) => {
             let (pubkey, data_len, fee) =
-                non_evm::apply_svm_migration(state, migrator, *req, fee_schedule)?;
+                non_evm::apply_svm_migration(state, migrator, *req, fee_schedule, chain_id)?;
             Ok(MigrationTxOutcome::SvmImported {
                 pubkey,
                 data_len,
@@ -722,7 +761,7 @@ pub fn apply_migration_tx(
         }
         MigrationTx::ImportMoveResource(req) => {
             let (account, entries, fee) =
-                non_evm::apply_move_migration(state, migrator, *req, fee_schedule)?;
+                non_evm::apply_move_migration(state, migrator, *req, fee_schedule, chain_id)?;
             Ok(MigrationTxOutcome::MoveImported {
                 account,
                 entries,
@@ -767,15 +806,16 @@ mod tests {
     ];
     const CHAIN_ID: u64 = 45_261;
     const SOURCE_BLOCK: u64 = 19_000_000;
-    const DIGEST: &str = "1c54f42d9a721ba55e152ed0e5c46755a98f842b49ce6b7f62fdb21fd2e4873c";
-    const SIG_PARTS: &[&str] = &[
-        "edc403919610bc9e64e52cbc8c6cd59251aaa6281ead68fc06491493037f84b1",
-        "3a475a7f48338c4109062580d6452955c8049f557658f7a04956a7d8365ff0741c",
-    ];
-    const OTHER_SIG_PARTS: &[&str] = &[
-        "7af821799fb21b71b7122537279cfa28d5f47a3c5eb2d19d9c2a2e8506190b2a",
-        "28f996eda74ef31781c1d10e941b91a41436c8bd8d1e06fbec663c77befbc4d91b",
-    ];
+    /// The deployer of the fixture transaction signs with secp256k1 secret key
+    /// `1`, whose address is `0x7e5f4552091a69125d5dfcb7b8c2659029395bdf`.
+    const DEPLOYER_SECRET: u8 = 1;
+    /// Any other key: it signs, but it did not deploy.
+    const OTHER_SECRET: u8 = 2;
+    /// EIP-712 digest of `known_answer_authorization`, computed outside this
+    /// crate from the type string and the domain, so a drift in the encoding
+    /// fails here and not only in a wallet.
+    const KNOWN_ANSWER_DIGEST: &str =
+        "a270d0a4b367237f543fc31799b0483e5739224c286716cecdfe7acc14da9df8";
 
     fn decode_joined(parts: &[&str]) -> Vec<u8> {
         let s: String = parts.iter().copied().collect();
@@ -789,13 +829,42 @@ mod tests {
             .expect("20 bytes")
     }
 
-    fn authorization() -> MigrationAuthorization {
+    /// The digest of a fixed authorization, for the known-answer test.
+    fn known_answer_authorization() -> MigrationAuthorization {
         MigrationAuthorization {
             contract: address_of(CONTRACT),
             budlum_chain_id: CHAIN_ID,
             source_block: SOURCE_BLOCK,
-            signature: decode_joined(SIG_PARTS),
+            state_root: [0x11; 32],
+            code_hash: [0x22; 32],
+            signature: Vec::new(),
         }
+    }
+
+    /// `r || s || v` over the authorization digest, with `v` in `{27, 28}`.
+    fn sign_authorization(auth: &MigrationAuthorization, secret_byte: u8) -> Vec<u8> {
+        use k256::ecdsa::SigningKey;
+        let mut secret = [0u8; 32];
+        secret[31] = secret_byte;
+        let key = SigningKey::from_bytes((&secret).into()).expect("secp256k1 key");
+        let (sig, rec_id) = key.sign_prehash_recoverable(&auth.digest());
+        let mut out = sig.to_bytes().to_vec();
+        out.push(27 + rec_id.to_byte());
+        out
+    }
+
+    /// An authorization the deployer signs for exactly this root and code.
+    fn authorization_for(state_root: [u8; 32], code: &[u8]) -> MigrationAuthorization {
+        let mut auth = MigrationAuthorization {
+            contract: address_of(CONTRACT),
+            budlum_chain_id: CHAIN_ID,
+            source_block: SOURCE_BLOCK,
+            state_root,
+            code_hash: account_proof::code_hash(code),
+            signature: Vec::new(),
+        };
+        auth.signature = sign_authorization(&auth, DEPLOYER_SECRET);
+        auth
     }
 
     fn uint_bytes(value: u128) -> Vec<u8> {
@@ -873,12 +942,11 @@ mod tests {
         );
         let state_root = mpt::keccak256(&account_node);
         let req = MigrationRequest {
-            chain_id: CHAIN_ID,
             source_chain_id: SOURCE_CHAIN_ID,
             source_domain: String::from("sepolia"),
             source_block: SOURCE_BLOCK,
             deployment: deployment_proof(),
-            authorization: authorization(),
+            authorization: authorization_for(state_root, &code),
             state_root,
             account_proof: vec![account_node],
             code,
@@ -888,22 +956,37 @@ mod tests {
     }
 
     #[test]
+    fn the_authorization_digest_matches_the_known_answer() {
+        assert_eq!(
+            hex::encode(known_answer_authorization().digest()),
+            KNOWN_ANSWER_DIGEST
+        );
+        // Every field of the struct is in the digest.
+        let base = known_answer_authorization().digest();
+        let mut other = known_answer_authorization();
+        other.state_root = [0x12; 32];
+        assert_ne!(other.digest(), base);
+        let mut other = known_answer_authorization();
+        other.code_hash = [0x23; 32];
+        assert_ne!(other.digest(), base);
+    }
+
+    #[test]
     fn uel_migration_requires_deployer_authorization() {
-        assert_eq!(hex::encode(authorization().digest()), DIGEST);
         let (req, _) = request_with_code(sample_code(), [0u8; 32], 42);
-        assert!(begin_import(req.clone()).is_ok());
+        assert!(begin_import(req.clone(), CHAIN_ID).is_ok());
 
         let mut other = req.clone();
-        other.authorization.signature = decode_joined(OTHER_SIG_PARTS);
+        other.authorization.signature = sign_authorization(&other.authorization, OTHER_SECRET);
         assert!(matches!(
-            begin_import(other),
+            begin_import(other, CHAIN_ID),
             Err(ImportError::NotTheDeployer { .. })
         ));
 
         let mut other_chain = req.clone();
         other_chain.authorization.budlum_chain_id = CHAIN_ID + 1;
         assert_eq!(
-            begin_import(other_chain),
+            begin_import(other_chain, CHAIN_ID),
             Err(ImportError::ChainMismatch {
                 signed: CHAIN_ID + 1,
                 expected: CHAIN_ID,
@@ -913,9 +996,55 @@ mod tests {
         let mut truncated = req;
         truncated.authorization.signature.truncate(64);
         assert!(matches!(
-            begin_import(truncated),
+            begin_import(truncated, CHAIN_ID),
             Err(ImportError::Signature(RecoverError::Length))
         ));
+    }
+
+    /// The chain id is the node's. A deployer who signed for another Budlum
+    /// chain, with a request that is consistent about it, is still refused.
+    #[test]
+    fn a_signature_for_another_chain_is_refused_whatever_the_request_says() {
+        let other_chain = CHAIN_ID + 1;
+        let (mut req, _) = request_with_code(sample_code(), [0u8; 32], 42);
+        req.authorization.budlum_chain_id = other_chain;
+        req.authorization.signature = sign_authorization(&req.authorization, DEPLOYER_SECRET);
+        // The request is valid for `other_chain` ...
+        assert!(begin_import(req.clone(), other_chain).is_ok());
+        // ... and refused by a node running `CHAIN_ID`.
+        assert_eq!(
+            begin_import(req, CHAIN_ID),
+            Err(ImportError::ChainMismatch {
+                signed: other_chain,
+                expected: CHAIN_ID,
+            })
+        );
+    }
+
+    /// One deployer signature authorizes one state root and one code hash. The
+    /// submitter cannot swap in another account that the proof also opens.
+    #[test]
+    fn a_signature_does_not_authorize_another_state_root() {
+        let (signed_for, _) = request_with_code(sample_code(), [0u8; 32], 42);
+        // Another state: same contract and code, different storage root.
+        let (mut swapped, _) = request_with_code(sample_code(), [0u8; 32], 43);
+        assert_ne!(swapped.state_root, signed_for.state_root);
+        swapped.authorization = signed_for.authorization;
+        assert_eq!(
+            begin_import(swapped, CHAIN_ID),
+            Err(ImportError::PayloadMismatch)
+        );
+    }
+
+    #[test]
+    fn a_signature_does_not_authorize_other_code() {
+        let (mut req, _) = request_with_code(sample_code(), [0u8; 32], 42);
+        // The deployer signs the right root for different code.
+        req.authorization = authorization_for(req.state_root, b"contract Other {}");
+        assert_eq!(
+            begin_import(req, CHAIN_ID),
+            Err(ImportError::PayloadMismatch)
+        );
     }
 
     #[test]
@@ -923,7 +1052,7 @@ mod tests {
         let (mut request, _) = request_with_code(sample_code(), [0u8; 32], 42);
         request.code = b"contract Other {}".to_vec();
         assert_eq!(
-            begin_import(request),
+            begin_import(request, CHAIN_ID),
             Err(ImportError::Proof(AccountProofError::CodeHashMismatch))
         );
     }
@@ -932,7 +1061,10 @@ mod tests {
     fn migration_refuses_occupied_address() {
         let (mut req, _) = request_with_code(sample_code(), [0u8; 32], 42);
         req.occupied = true;
-        assert_eq!(begin_import(req), Err(ImportError::AddressOccupied));
+        assert_eq!(
+            begin_import(req, CHAIN_ID),
+            Err(ImportError::AddressOccupied)
+        );
 
         // Live coordinator check: pre-existing EVM account at target refuses BeginEvmImport.
         let mut state = AccountState::new();
@@ -949,6 +1081,7 @@ mod tests {
                 &migrator,
                 MigrationTx::BeginEvmImport(Box::new(live_req)),
                 &fee_schedule(),
+                CHAIN_ID,
             ),
             Err(ImportError::AddressOccupied)
         );
@@ -959,7 +1092,7 @@ mod tests {
         let (mut request, _) = request_with_code(sample_code(), [0u8; 32], 42);
         request.deployment.deployment_block = SOURCE_BLOCK + 1;
         assert_eq!(
-            begin_import(request),
+            begin_import(request, CHAIN_ID),
             Err(ImportError::DeploymentAfterSource {
                 deployment_block: SOURCE_BLOCK + 1,
                 source_block: SOURCE_BLOCK,
@@ -971,7 +1104,7 @@ mod tests {
     fn migration_finalize_refuses_incomplete_storage() {
         let slot = [0x42u8; 32];
         let (request, expected) = request_with_code(sample_code(), slot, 42);
-        let plan = begin_import(request).expect("authorized and proven");
+        let plan = begin_import(request, CHAIN_ID).expect("authorized and proven");
         let computed = storage_root::compute_storage_root(&BTreeMap::new());
         assert_eq!(
             plan.finalize(&fee_schedule()),
@@ -984,7 +1117,7 @@ mod tests {
         let code = b"contract Token {}".to_vec();
         let slot = [0x42u8; 32];
         let (req, storage_root) = request_with_code(code.clone(), slot, 42);
-        let mut plan = begin_import(req).expect("authorized and proven");
+        let mut plan = begin_import(req, CHAIN_ID).expect("authorized and proven");
 
         let (storage_node, _) = slot_fixture(&slot, 42);
         let mut value = [0u8; 32];
@@ -1023,7 +1156,7 @@ mod tests {
     fn migration_import_chunk_failure_is_atomic_g4() {
         let slot = [0x42u8; 32];
         let (req, _) = request_with_code(sample_code(), slot, 42);
-        let mut plan = begin_import(req).expect("plan");
+        let mut plan = begin_import(req, CHAIN_ID).expect("plan");
         let before = plan.clone();
 
         let (storage_node, _) = slot_fixture(&slot, 42);
@@ -1075,6 +1208,7 @@ mod tests {
                 &migrator,
                 MigrationTx::BeginEvmImport(Box::new(req)),
                 &sched,
+                CHAIN_ID,
             )
             .expect("BeginEvmImport");
 
@@ -1096,6 +1230,7 @@ mod tests {
                     }],
                 }),
                 &sched,
+                CHAIN_ID,
             )
             .expect("ImportEvmStorageChunk");
 
@@ -1107,6 +1242,7 @@ mod tests {
                     contract: address_of(CONTRACT),
                 },
                 &sched,
+                CHAIN_ID,
             )
             .expect("FinalizeEvmImport");
         let MigrationTxOutcome::Finalized(rec) = out else {
