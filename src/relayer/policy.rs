@@ -26,6 +26,12 @@ use std::collections::{BTreeMap, BTreeSet};
 pub const MAX_RELAYER_INTENTS: usize = 10_000;
 pub const MAX_RELAYER_BIDS_PER_INTENT: usize = 64;
 pub const MAX_RELAYER_SETTLEMENTS: usize = 10_000;
+/// Longest time an intent may hold one of the `MAX_RELAYER_INTENTS` slots.
+///
+/// The prune sweep keeps every escrowed row until its deadline, so an unbounded
+/// deadline rents a global slot for the life of the chain. 259,200 blocks is
+/// about nine days at the three-second testnet slot.
+const MAX_RELAYER_INTENT_LIFETIME_BLOCKS: u64 = 259_200;
 /// Minimum time a new award must leave both the selected solver and the
 /// intent to deliver an anchored proof; operators should use longer windows
 /// when the target chain's finality needs them.
@@ -303,6 +309,9 @@ impl UserIntent {
         }
         if self.deadline_block <= current_block {
             return Err("UserIntent expired".into());
+        }
+        if self.deadline_block > current_block.saturating_add(MAX_RELAYER_INTENT_LIFETIME_BLOCKS) {
+            return Err("UserIntent deadline is too far ahead".into());
         }
         if self.max_fee == 0 {
             return Err("UserIntent max_fee must be >= 1".into());
@@ -1151,6 +1160,42 @@ mod tests {
         let policy = make_policy(owner);
         let intent = intent(owner, &policy);
         assert!(intent.validate(&policy, 10).is_ok());
+    }
+
+    /// A deadline is how long an intent holds one of the chain-wide slots.
+    ///
+    /// `validate` only checked that the deadline was in the future, and the
+    /// prune sweep keeps every escrowed row, so ten thousand opens with a
+    /// deadline of `u64::MAX` filled `MAX_RELAYER_INTENTS` for the life of the
+    /// chain and every other user was refused. The longest lifetime is 259,200
+    /// blocks, about nine days at the three-second testnet slot.
+    #[test]
+    fn an_intent_cannot_hold_a_slot_beyond_the_longest_lifetime() {
+        let owner = addr(1);
+        let policy = make_policy(owner);
+        let current = 10u64;
+        let with_deadline = |deadline: u64| {
+            let mut intent = intent(owner, &policy);
+            intent.deadline_block = deadline;
+            intent.intent_id = intent.calculate_id();
+            intent
+        };
+        assert!(
+            with_deadline(current + 259_200)
+                .validate(&policy, current)
+                .is_ok(),
+            "the longest allowed lifetime is accepted"
+        );
+        assert!(
+            with_deadline(current + 259_201)
+                .validate(&policy, current)
+                .is_err(),
+            "one block past the longest lifetime is refused"
+        );
+        assert!(
+            with_deadline(u64::MAX).validate(&policy, current).is_err(),
+            "an intent that never expires is refused"
+        );
     }
 
     #[test]
