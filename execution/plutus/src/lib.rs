@@ -46,6 +46,12 @@ pub enum UplcTerm {
     RedeemerInt,
     RedeemerBytes,
     CtxHeight,
+    /// The identity that signed the transaction (`ScriptContext` signatories), as bytes. Compare
+    /// it with `EqualsBytes`: a validator that is not public checks it before anything else.
+    Signatory,
+    /// The identity that deployed the script, as bytes. `EqualsBytes(Signatory, Owner)` is the
+    /// owner-only check.
+    Owner,
     Add(Box<UplcTerm>, Box<UplcTerm>),
     EqualsInt(Box<UplcTerm>, Box<UplcTerm>),
     EqualsBytes(Box<UplcTerm>, Box<UplcTerm>),
@@ -144,6 +150,14 @@ fn datum_key(hash32: &[u8; 32]) -> Vec<u8> {
     k
 }
 
+/// The identity that deployed the script: what `UplcTerm::Owner` evaluates to.
+fn owner_key(hash32: &[u8; 32]) -> Vec<u8> {
+    let mut k = Vec::with_capacity(38);
+    k.extend_from_slice(b"owner:");
+    k.extend_from_slice(hash32);
+    k
+}
+
 fn derive_script_hash(caller: &[u8], tx_hash: &[u8; 32]) -> [u8; 32] {
     let mut h = Sha256::new();
     h.update(b"BDLM_PLUTUS_SCRIPT_V1");
@@ -164,6 +178,9 @@ struct EvalCtx<'a> {
     datum_int: i64,
     redeemer_int: i64,
     redeemer_bytes: &'a [u8],
+    /// Who signed the call, and who deployed the script.
+    signatory: &'a [u8],
+    owner: &'a [u8],
     height: u64,
     steps: usize,
     gas_used: u64,
@@ -194,6 +211,8 @@ fn eval_uplc(
         UplcTerm::RedeemerInt => Ok(UplcVal::Int(ev.redeemer_int)),
         UplcTerm::RedeemerBytes => Ok(UplcVal::Bytes(ev.redeemer_bytes.to_vec())),
         UplcTerm::CtxHeight => Ok(UplcVal::Int(i64::try_from(ev.height).unwrap_or(i64::MAX))),
+        UplcTerm::Signatory => Ok(UplcVal::Bytes(ev.signatory.to_vec())),
+        UplcTerm::Owner => Ok(UplcVal::Bytes(ev.owner.to_vec())),
         UplcTerm::Add(a, b) => match (eval_uplc(a, ev, host)?, eval_uplc(b, ev, host)?) {
             (UplcVal::Int(x), UplcVal::Int(y)) => x
                 .checked_add(y)
@@ -330,6 +349,9 @@ impl ExecutionEnvironment for PlutusWorker {
                         Some(&prog.initial_datum_int.to_le_bytes()),
                     )
                     .is_err()
+                || host
+                    .write(&ns, &owner_key(&script_hash), Some(&call.caller.id))
+                    .is_err()
             {
                 return Ok(EeOutcome {
                     status: OutcomeStatus::Revert,
@@ -379,10 +401,17 @@ impl ExecutionEnvironment for PlutusWorker {
             .and_then(|b| <[u8; 8]>::try_from(b.as_slice()).ok())
             .map_or(prog.initial_datum_int, i64::from_le_bytes);
 
+        let owner = host
+            .read(&ns, &owner_key(&script_hash))
+            .ok()
+            .flatten()
+            .unwrap_or_default();
         let mut ev = EvalCtx {
             datum_int: cur_datum,
             redeemer_int: spend.redeemer_int,
             redeemer_bytes: &spend.redeemer_bytes,
+            signatory: &call.caller.id,
+            owner: &owner,
             height: ctx.height,
             steps: 0,
             gas_used,
@@ -636,5 +665,151 @@ mod tests {
             panic!("query");
         };
         assert_eq!(q_bytes, 11i64.to_le_bytes());
+    }
+
+    fn deploy_validator(
+        worker: &mut PlutusWorker,
+        host: &mut MemoryHost,
+        who: &EeIdentity,
+        validator: UplcTerm,
+        tx: u8,
+    ) -> EeIdentity {
+        let prog = PlutusValidatorProgram {
+            uplc_version: String::from("1.1.0"),
+            initial_datum_int: 10,
+            validator,
+        };
+        let Ok(blob) = encode_plutus_blob(&prog) else {
+            panic!("blob");
+        };
+        let Ok(dep) = worker.execute(
+            &ctx(),
+            &EeCall {
+                kind: EeCallKind::Deploy,
+                caller: who.clone(),
+                target: who.clone(),
+                value: budlum_uel_abi::BudAmount(0),
+                input: blob,
+                gas_limit: 500_000,
+                depth: 0,
+                tx_hash: [tx; 32],
+            },
+            host,
+        ) else {
+            panic!("deploy");
+        };
+        assert_eq!(dep.status, OutcomeStatus::Success);
+        let Ok(target) = EeIdentity::new(EeId::PLUTUS, dep.output) else {
+            panic!("target");
+        };
+        target
+    }
+
+    fn set_datum(
+        worker: &mut PlutusWorker,
+        host: &mut MemoryHost,
+        who: &EeIdentity,
+        target: &EeIdentity,
+        datum: i64,
+    ) -> EeOutcome {
+        let Ok(input) = serde_json::to_vec(&PlutusSpendInput {
+            new_datum_int: Some(datum),
+            redeemer_int: 0,
+            redeemer_bytes: Vec::new(),
+        }) else {
+            panic!("input");
+        };
+        let Ok(out) = worker.execute(
+            &ctx(),
+            &EeCall {
+                kind: EeCallKind::Call,
+                caller: who.clone(),
+                target: target.clone(),
+                value: budlum_uel_abi::BudAmount(0),
+                input,
+                gas_limit: 500_000,
+                depth: 0,
+                tx_hash: [0x77; 32],
+            },
+            host,
+        ) else {
+            panic!("call");
+        };
+        out
+    }
+
+    fn datum(worker: &PlutusWorker, host: &MemoryHost, target: &EeIdentity) -> i64 {
+        let Ok(bytes) = worker.query(
+            &ctx(),
+            &EeQuery {
+                target: target.clone(),
+                input: Vec::new(),
+            },
+            host,
+        ) else {
+            panic!("query");
+        };
+        let Ok(word) = <[u8; 8]>::try_from(bytes.as_slice()) else {
+            panic!("datum word");
+        };
+        i64::from_le_bytes(word)
+    }
+
+    /// The workers used to give a validator no way to read who signed the call, so any account
+    /// could drive any validator and rewrite its datum. A validator can now read the signatory and
+    /// the owner, and a validator that does not look stays public.
+    #[test]
+    fn a_validator_can_restrict_a_spend_to_its_owner_and_leave_the_rest_public() {
+        let bob_id = vec![0x3C; 32];
+        let owner_only = UplcTerm::IfThenElse {
+            cond: Box::new(UplcTerm::EqualsBytes(
+                Box::new(UplcTerm::Signatory),
+                Box::new(UplcTerm::Owner),
+            )),
+            then_branch: Box::new(UplcTerm::ConstInt(1)),
+            else_branch: Box::new(UplcTerm::Error),
+        };
+        let bob_only = UplcTerm::EqualsBytes(
+            Box::new(UplcTerm::Signatory),
+            Box::new(UplcTerm::ConstBytes(bob_id.clone())),
+        );
+        let mut worker = PlutusWorker::new();
+        let mut host = MemoryHost::new(5_000_000);
+        let Ok(alice) = EeIdentity::new(EeId::PLUTUS, vec![0x3B; 32]) else {
+            panic!("alice")
+        };
+        let Ok(bob) = EeIdentity::new(EeId::PLUTUS, bob_id) else {
+            panic!("bob")
+        };
+        let Ok(mallory) = EeIdentity::new(EeId::PLUTUS, vec![0x3D; 32]) else {
+            panic!("mallory")
+        };
+        let public = deploy_validator(&mut worker, &mut host, &alice, UplcTerm::ConstInt(1), 0x51);
+        let owned = deploy_validator(&mut worker, &mut host, &alice, owner_only, 0x52);
+        let named = deploy_validator(&mut worker, &mut host, &alice, bob_only, 0x53);
+
+        // A validator that does not look at the signatory is open to anyone.
+        let out = set_datum(&mut worker, &mut host, &mallory, &public, 7);
+        assert_eq!(out.status, OutcomeStatus::Success);
+        assert_eq!(datum(&worker, &host, &public), 7);
+
+        // The owner-only validator refuses everyone but the account that deployed it.
+        for stranger in [&mallory, &bob] {
+            let out = set_datum(&mut worker, &mut host, stranger, &owned, 1_000_000);
+            assert_eq!(out.status, OutcomeStatus::Revert);
+            assert_eq!(out.output, b"UPLC Error term reached".to_vec());
+            assert_eq!(datum(&worker, &host, &owned), 10);
+        }
+        let out = set_datum(&mut worker, &mut host, &alice, &owned, 9);
+        assert_eq!(out.status, OutcomeStatus::Success);
+        assert_eq!(datum(&worker, &host, &owned), 9);
+
+        // A validator for one named account refuses the owner too.
+        let out = set_datum(&mut worker, &mut host, &alice, &named, 11);
+        assert_eq!(out.status, OutcomeStatus::Revert);
+        assert_eq!(out.output, b"UPLC validator returned false".to_vec());
+        let out = set_datum(&mut worker, &mut host, &bob, &named, 13);
+        assert_eq!(out.status, OutcomeStatus::Success);
+        assert_eq!(datum(&worker, &host, &named), 13);
     }
 }

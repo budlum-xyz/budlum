@@ -44,11 +44,28 @@ pub enum TvmInsn {
     Mul,
     Equal,
     ThrowIfZero(u16),
-    LoadC4Word { key: String },
-    StoreC4Word { key: String },
-    HashC4Cell { key: String },
-    EmitExtOut { topic: [u8; 32] },
+    LoadC4Word {
+        key: String,
+    },
+    StoreC4Word {
+        key: String,
+    },
+    HashC4Cell {
+        key: String,
+    },
+    EmitExtOut {
+        topic: [u8; 32],
+    },
     AcceptRetTop,
+    /// Throws `code` unless the sender of the message is the account that deployed the contract
+    /// (`throw_unless(code, equal_slices(sender, owner))`). Put it first in a handler that is not
+    /// public.
+    ThrowUnlessOwner(u16),
+    /// Throws `code` unless the sender of the message is exactly `id`.
+    ThrowUnlessCaller {
+        id: Vec<u8>,
+        code: u16,
+    },
 }
 
 /// TVM internal message handler keyed by 32-bit CRC/FunC op selector.
@@ -125,6 +142,14 @@ fn code_key(addr32: &[u8; 32]) -> Vec<u8> {
     k
 }
 
+/// The account that deployed the contract: the one `TvmInsn::ThrowUnlessOwner` admits.
+fn owner_key(addr32: &[u8; 32]) -> Vec<u8> {
+    let mut k = Vec::with_capacity(6 + 32);
+    k.extend_from_slice(b"owner:");
+    k.extend_from_slice(addr32);
+    k
+}
+
 fn c4_key(addr32: &[u8; 32], slot: &str) -> Vec<u8> {
     let mut k = Vec::with_capacity(36 + slot.len());
     k.extend_from_slice(b"c4:");
@@ -150,13 +175,19 @@ fn ee_wire_fault(err: impl std::fmt::Display) -> EeFault {
     }
 }
 
+/// What a body runs as: the namespace, the contract, who sent the message and the gas cap.
+struct TvmScope<'a> {
+    ns: &'a Namespace,
+    addr32: &'a [u8; 32],
+    caller: &'a [u8],
+    gas_limit: u64,
+}
+
 fn run_tvm_body(
-    ns: &Namespace,
-    addr32: &[u8; 32],
+    scope: &TvmScope<'_>,
     insns: &[TvmInsn],
     args: &[i128],
     gas_used: &mut u64,
-    gas_limit: u64,
     host: &mut dyn HostApi,
 ) -> Result<Vec<u8>, Vec<u8>> {
     let mut stack: Vec<i128> = Vec::new();
@@ -164,7 +195,7 @@ fn run_tvm_body(
         let Some(next) = gas_used.checked_add(300) else {
             return Err(b"OUT_OF_GAS".to_vec());
         };
-        if next > gas_limit || host.charge(300).is_err() {
+        if next > scope.gas_limit || host.charge(300).is_err() {
             return Err(b"OUT_OF_GAS".to_vec());
         }
         *gas_used = next;
@@ -217,9 +248,20 @@ fn run_tvm_body(
                     return Err(format!("TVM_EXIT_{code}").into_bytes());
                 }
             }
+            TvmInsn::ThrowUnlessOwner(code) => {
+                let owner = host.read(scope.ns, &owner_key(scope.addr32)).ok().flatten();
+                if owner.as_deref() != Some(scope.caller) {
+                    return Err(format!("TVM_EXIT_{code}").into_bytes());
+                }
+            }
+            TvmInsn::ThrowUnlessCaller { id, code } => {
+                if id.as_slice() != scope.caller {
+                    return Err(format!("TVM_EXIT_{code}").into_bytes());
+                }
+            }
             TvmInsn::LoadC4Word { key } => {
                 let raw = host
-                    .read(ns, &c4_key(addr32, key))
+                    .read(scope.ns, &c4_key(scope.addr32, key))
                     .ok()
                     .flatten()
                     .and_then(|b| <[u8; 16]>::try_from(b.as_slice()).ok())
@@ -231,7 +273,11 @@ fn run_tvm_body(
                     return Err(b"TVM stack underflow".to_vec());
                 };
                 if host
-                    .write(ns, &c4_key(addr32, key), Some(&val.to_le_bytes()))
+                    .write(
+                        scope.ns,
+                        &c4_key(scope.addr32, key),
+                        Some(&val.to_le_bytes()),
+                    )
                     .is_err()
                 {
                     return Err(b"TVM c4 write failed".to_vec());
@@ -239,7 +285,7 @@ fn run_tvm_body(
             }
             TvmInsn::HashC4Cell { key } => {
                 let raw = host
-                    .read(ns, &c4_key(addr32, key))
+                    .read(scope.ns, &c4_key(scope.addr32, key))
                     .ok()
                     .flatten()
                     .unwrap_or_default();
@@ -256,7 +302,7 @@ fn run_tvm_body(
                     .emit_log(EeLog {
                         emitter: EeIdentity {
                             ee: EeId::TVM,
-                            id: addr32.to_vec(),
+                            id: scope.addr32.to_vec(),
                         },
                         topics: vec![topic.to_vec()],
                         data: top.to_le_bytes().to_vec(),
@@ -374,15 +420,25 @@ impl ExecutionEnvironment for TvmWorker {
                     gas_used,
                 });
             }
-            match run_tvm_body(
-                &ns,
-                &addr,
-                &contract.init,
-                &[],
-                &mut gas_used,
-                call.gas_limit,
-                host,
-            ) {
+            // The deployer is the owner. The init body runs as the deployer, so a
+            // `ThrowUnlessOwner` in it passes.
+            if host
+                .write(&ns, &owner_key(&addr), Some(&call.caller.id))
+                .is_err()
+            {
+                return Ok(EeOutcome {
+                    status: OutcomeStatus::Revert,
+                    output: b"TVM owner write error".to_vec(),
+                    gas_used,
+                });
+            }
+            let scope = TvmScope {
+                ns: &ns,
+                addr32: &addr,
+                caller: &call.caller.id,
+                gas_limit: call.gas_limit,
+            };
+            match run_tvm_body(&scope, &contract.init, &[], &mut gas_used, host) {
                 Ok(_) => Ok(EeOutcome {
                     status: OutcomeStatus::Success,
                     output: addr.to_vec(),
@@ -435,15 +491,13 @@ impl ExecutionEnvironment for TvmWorker {
                     gas_used,
                 });
             };
-            match run_tvm_body(
-                &ns,
-                &target32,
-                &handler.body,
-                &msg.args,
-                &mut gas_used,
-                call.gas_limit,
-                host,
-            ) {
+            let scope = TvmScope {
+                ns: &ns,
+                addr32: &target32,
+                caller: &call.caller.id,
+                gas_limit: call.gas_limit,
+            };
+            match run_tvm_body(&scope, &handler.body, &msg.args, &mut gas_used, host) {
                 Ok(out) => Ok(EeOutcome {
                     status: OutcomeStatus::Success,
                     output: out,
@@ -635,5 +689,165 @@ mod tests {
             panic!("query");
         };
         assert_eq!(q_bytes, 50i128.to_le_bytes());
+    }
+
+    fn deploy_as(
+        worker: &mut TvmWorker,
+        host: &mut MemoryHost,
+        who: &EeIdentity,
+        contract: &TvmContract,
+    ) -> EeIdentity {
+        let Ok(blob) = encode_tvm_blob(contract) else {
+            panic!("blob");
+        };
+        let Ok(dep) = worker.execute(
+            &ctx(),
+            &EeCall {
+                kind: EeCallKind::Deploy,
+                caller: who.clone(),
+                target: who.clone(),
+                value: budlum_uel_abi::BudAmount(0),
+                input: blob,
+                gas_limit: 500_000,
+                depth: 0,
+                tx_hash: [0x41; 32],
+            },
+            host,
+        ) else {
+            panic!("deploy");
+        };
+        assert_eq!(dep.status, OutcomeStatus::Success);
+        let Ok(target) = EeIdentity::new(EeId::TVM, dep.output) else {
+            panic!("target");
+        };
+        target
+    }
+
+    fn send(
+        worker: &mut TvmWorker,
+        host: &mut MemoryHost,
+        who: &EeIdentity,
+        target: &EeIdentity,
+        op: u32,
+        word: i128,
+    ) -> EeOutcome {
+        let Ok(input) = serde_json::to_vec(&TvmInternalMsg {
+            op,
+            args: vec![word],
+        }) else {
+            panic!("msg");
+        };
+        let Ok(out) = worker.execute(
+            &ctx(),
+            &EeCall {
+                kind: EeCallKind::Call,
+                caller: who.clone(),
+                target: target.clone(),
+                value: budlum_uel_abi::BudAmount(0),
+                input,
+                gas_limit: 500_000,
+                depth: 0,
+                tx_hash: [0x42; 32],
+            },
+            host,
+        ) else {
+            panic!("call");
+        };
+        out
+    }
+
+    fn balance(worker: &TvmWorker, host: &MemoryHost, target: &EeIdentity) -> i128 {
+        let Ok(bytes) = worker.query(
+            &ctx(),
+            &EeQuery {
+                target: target.clone(),
+                input: b"balance".to_vec(),
+            },
+            host,
+        ) else {
+            panic!("query");
+        };
+        let Ok(word) = <[u8; 16]>::try_from(bytes.as_slice()) else {
+            panic!("balance word");
+        };
+        i128::from_le_bytes(word)
+    }
+
+    /// The workers used to give a contract no way to read who sent the message, so any account
+    /// could drive any handler of any contract. A handler now restricts itself to the owner, or to
+    /// one named account, and every handler that does not say so stays public.
+    #[test]
+    fn a_contract_can_restrict_a_handler_to_its_owner_and_leave_the_rest_public() {
+        let set = |guard: Option<TvmInsn>| {
+            let mut body: Vec<TvmInsn> = guard.into_iter().collect();
+            body.push(TvmInsn::PushMsgWord(0));
+            body.push(TvmInsn::StoreC4Word {
+                key: String::from("balance"),
+            });
+            body
+        };
+        let bob_id = vec![0x2B; 32];
+        let contract = TvmContract {
+            init: vec![
+                TvmInsn::PushInt(42),
+                TvmInsn::StoreC4Word {
+                    key: String::from("balance"),
+                },
+            ],
+            handlers: vec![
+                TvmMethod {
+                    op: 0x10,
+                    body: set(None),
+                },
+                TvmMethod {
+                    op: 0x11,
+                    body: set(Some(TvmInsn::ThrowUnlessOwner(401))),
+                },
+                TvmMethod {
+                    op: 0x12,
+                    body: set(Some(TvmInsn::ThrowUnlessCaller {
+                        id: bob_id.clone(),
+                        code: 402,
+                    })),
+                },
+            ],
+        };
+        let mut worker = TvmWorker::new();
+        let mut host = MemoryHost::new(5_000_000);
+        let Ok(alice) = EeIdentity::new(EeId::TVM, vec![0x2A; 32]) else {
+            panic!("alice")
+        };
+        let Ok(bob) = EeIdentity::new(EeId::TVM, bob_id) else {
+            panic!("bob")
+        };
+        let Ok(mallory) = EeIdentity::new(EeId::TVM, vec![0x2C; 32]) else {
+            panic!("mallory")
+        };
+        let target = deploy_as(&mut worker, &mut host, &alice, &contract);
+        assert_eq!(balance(&worker, &host, &target), 42);
+
+        // A public handler is open to anyone.
+        let out = send(&mut worker, &mut host, &mallory, &target, 0x10, 7);
+        assert_eq!(out.status, OutcomeStatus::Success);
+        assert_eq!(balance(&worker, &host, &target), 7);
+
+        // The owner-only handler refuses everyone but the account that deployed the contract.
+        for stranger in [&mallory, &bob] {
+            let out = send(&mut worker, &mut host, stranger, &target, 0x11, 1_000_000);
+            assert_eq!(out.status, OutcomeStatus::Revert);
+            assert_eq!(out.output, b"TVM_EXIT_401".to_vec());
+            assert_eq!(balance(&worker, &host, &target), 7);
+        }
+        let out = send(&mut worker, &mut host, &alice, &target, 0x11, 9);
+        assert_eq!(out.status, OutcomeStatus::Success);
+        assert_eq!(balance(&worker, &host, &target), 9);
+
+        // A handler for one named account refuses the owner too.
+        let out = send(&mut worker, &mut host, &alice, &target, 0x12, 11);
+        assert_eq!(out.status, OutcomeStatus::Revert);
+        assert_eq!(out.output, b"TVM_EXIT_402".to_vec());
+        let out = send(&mut worker, &mut host, &bob, &target, 0x12, 13);
+        assert_eq!(out.status, OutcomeStatus::Success);
+        assert_eq!(balance(&worker, &host, &target), 13);
     }
 }
