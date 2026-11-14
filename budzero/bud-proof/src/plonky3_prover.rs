@@ -456,10 +456,10 @@ pub fn trace_matrix(
     let n_reg = events.len();
     let n_mem = mem_events.len();
     let num_rows = n_cpu
-        .checked_mul(3)
-        .and_then(|n| n.checked_add(1))
-        .expect("trace row count overflow")
-        .next_power_of_two()
+        .saturating_mul(3)
+        .saturating_add(1)
+        .checked_next_power_of_two()
+        .unwrap_or(usize::MAX)
         .max(16);
     assert!(
         num_rows <= MAX_PROVER_WITNESS_ROWS,
