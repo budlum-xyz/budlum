@@ -28,6 +28,9 @@ concurrency:
 
 jobs:
   android-validator-and-log-analyzer:
+    # Heavy battery: a pull request whose base is `testnet-quantum` or `testnet` does
+    # not start this job. See the note at the top of the file.
+    if: ${{ github.event_name != 'pull_request' || contains(fromJSON('["main","consensus-of-consensuses"]'), github.event.pull_request.base.ref) }}
     name: Mobile Log Analyzer & Android Validator Suite
     runs-on: ubuntu-24.04
     timeout-minutes: 20
@@ -112,6 +115,9 @@ jobs:
           java -ea -cp /tmp/budlum-mobile-android-tests.jar network.budlum.validator.MobileValidatorUnitTest
 
   android-gradle:
+    # Heavy battery: a pull request whose base is `testnet-quantum` or `testnet` does
+    # not start this job. See the note at the top of the file.
+    if: ${{ github.event_name != 'pull_request' || contains(fromJSON('["main","consensus-of-consensuses"]'), github.event.pull_request.base.ref) }}
     name: Android Gradle build and unit tests
     runs-on: ubuntu-24.04
     timeout-minutes: 30
