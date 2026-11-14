@@ -1424,6 +1424,68 @@ fn bns_per_name_merkle_proofs_verify_inclusion_absence_tampering_and_expiry() {
         .is_none());
 }
 
+/// A branch shows what the header root commits to, and nothing else. `extras_digest` commits to the
+/// forwarding address, the records, the subdomains and the B.U.D. 3.0 reference, but it is 32
+/// opaque bytes, so a node that answers a proof request could ship any pre-image next to it. The
+/// verifier opens the commitment: a branch whose extras do not fold to the digest is refused, and
+/// so is one whose top-level `address` contradicts its own extras.
+#[test]
+fn a_bns_branch_cannot_show_extras_the_root_does_not_commit_to() {
+    use std::collections::BTreeMap;
+
+    let mut reg = BnsRegistry::new();
+    let alice = addr(1);
+    let merchant = addr(7);
+    let attacker = addr(9);
+    reg.register("shop.bud".to_string(), alice, 1, 50).unwrap();
+    reg.set_address("shop.bud", &alice, Some(merchant), None, 2)
+        .unwrap();
+    let mut updates = BTreeMap::new();
+    updates.insert("url".to_string(), Some("https://shop.example".to_string()));
+    reg.set_records("shop.bud", &alice, &updates, 2).unwrap();
+    let root = reg.root();
+    let proof = reg.prove_name("shop.bud", 5);
+
+    // Control: the honest proof verifies and shows the extras the root commits to.
+    let branch = BnsRegistry::verify_state_proof(&proof, &root, 5)
+        .unwrap()
+        .unwrap();
+    let extras = branch.extras.as_ref().expect("the prover ships the extras");
+    assert_eq!(extras.address, Some(merchant));
+    assert_eq!(
+        extras.records.get("url").map(String::as_str),
+        Some("https://shop.example")
+    );
+
+    // A swapped forwarding address, in the extras and in the top-level copy: the digest the
+    // root commits to does not fold from it.
+    let mut swapped = proof.clone();
+    {
+        let entry = swapped.entry.as_mut().unwrap();
+        entry.address = Some(attacker);
+        entry.extras.as_mut().unwrap().address = Some(attacker);
+    }
+    assert!(BnsRegistry::verify_state_proof(&swapped, &root, 5).is_err());
+
+    // A record the owner never published.
+    let mut extra_record = proof.clone();
+    extra_record
+        .entry
+        .as_mut()
+        .unwrap()
+        .extras
+        .as_mut()
+        .unwrap()
+        .records
+        .insert("wallet".to_string(), "0xdead".to_string());
+    assert!(BnsRegistry::verify_state_proof(&extra_record, &root, 5).is_err());
+
+    // A top-level address that contradicts the extras behind the digest.
+    let mut contradicting = proof.clone();
+    contradicting.entry.as_mut().unwrap().address = Some(attacker);
+    assert!(BnsRegistry::verify_state_proof(&contradicting, &root, 5).is_err());
+}
+
 /// An absence proof must place its boundaries, not merely spell them.
 ///
 /// Order alone proves nothing: every branch in the tree sorts next to some
