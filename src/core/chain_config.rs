@@ -228,11 +228,11 @@ impl Network {
 
     /// Whether remote app binding (`app_binding`) is enabled on this profile.
     ///
-    /// Enabled on Testnet (`45261`) and Devnet (`45262`); closed on Mainnet
-    /// (`45260`) until explicit launch activation.
+    /// Enabled on Devnet (`45262`); public networks remain closed until
+    /// explicit launch activation.
     #[must_use]
     pub const fn app_binding_enabled(&self) -> bool {
-        matches!(self, Network::Devnet | Network::Testnet)
+        matches!(self, Network::Devnet)
     }
 
     pub fn mempool_config(&self) -> crate::mempool::pool::MempoolConfig {
