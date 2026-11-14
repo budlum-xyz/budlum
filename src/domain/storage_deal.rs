@@ -1843,7 +1843,9 @@ impl StorageRegistry {
             && self.confidential_owners.get(content_id) == Some(claimant)
     }
 
-    /// True when an active deal on `manifest_id` is funded by a payer other than `caller`.
+    /// True when an active, custody-grade deal on `manifest_id` is funded by a
+    /// payer other than `caller`. A stranger's self-operated or zero-fee row
+    /// cannot freeze the custody-proven owner out of ownership or pruning.
     #[must_use]
     pub fn has_active_deal_for_other_payer(
         &self,
@@ -1854,14 +1856,17 @@ impl StorageRegistry {
             d.manifest_id == *manifest_id
                 && matches!(d.status, DealStatus::Active)
                 && d.payer != Some(*caller)
+                && d.payer.map_or(true, |p| {
+                    d.operator != p && d.economics.fee_per_byte_epoch > 0
+                })
         })
     }
 
-    /// True when `claimant` has an active operator-consented storage custody
+    /// True when `claimant` has an active, independent, priced storage custody
     /// deal on `content_id`. Opening a deal requires storage-operator shard
     /// consent signatures (`DealConsent`) and locked escrow, whereas a bare
-    /// `RegisterManifest` on a content-addressed `manifest_id` excludes `owner`
-    /// and can be copied from the mempool by anyone.
+    /// `RegisterManifest` or a self-operated zero-fee deal can be fabricated
+    /// without independent custody.
     #[must_use]
     pub(crate) fn has_custody_deal(&self, content_id: &ContentId, claimant: &Address) -> bool {
         *claimant != Address::zero()
@@ -1869,6 +1874,14 @@ impl StorageRegistry {
                 d.manifest_id == *content_id
                     && matches!(d.status, DealStatus::Active)
                     && d.payer == Some(*claimant)
+                    // A deal the claimant operates itself is not evidence that
+                    // it holds the bytes: the claimant supplies the operator
+                    // consent it is checked against, may price the deal at
+                    // zero, and the merkle envelope is only format-checked. An
+                    // independent, priced placement is the only row that can
+                    // establish or contest `owner_of`.
+                    && d.operator != *claimant
+                    && d.economics.fee_per_byte_epoch > 0
             })
     }
 
@@ -2586,7 +2599,10 @@ impl StorageRegistry {
             .scoped_self_host_policies
             .keys()
             .any(|(manifest_id, inner_cid, owner)| {
-                (manifest_id == content_id || inner_cid == content_id) && owner != burner
+                (manifest_id == content_id || inner_cid == content_id)
+                    && owner != burner
+                    && (self.has_custody_deal(content_id, owner)
+                        || self.has_custody_deal(manifest_id, owner))
             })
         {
             return false;
@@ -4201,11 +4217,25 @@ impl StorageRegistry {
                 replacement_operator,
             ));
         }
-        let manifest = self
+        let mut manifest = self
             .manifests
             .get(&ticket.manifest_id)
             .cloned()
             .ok_or(StorageError::UnknownManifest(ticket.manifest_id))?;
+        // `owner` is not part of the content-addressed `manifest_id` and
+        // `register_manifest` keeps only the first writer, so the stored
+        // `owner` may be an unrelated registrant. The placement policy that
+        // governs the repair belongs to the account whose bytes are being
+        // repaired: the payer of the failed deal, or the custody-proven owner.
+        if let Some(policy_owner) = self
+            .deals
+            .get(&ticket.failed_deal_id)
+            .and_then(|deal| deal.payer)
+            .or_else(|| self.proven_owner_of(&ticket.manifest_id))
+            .or_else(|| self.owner_of(&ticket.manifest_id))
+        {
+            manifest.owner = policy_owner;
+        }
         let replacement_deal_id = self.open_deal(
             ticket.domain_id,
             &manifest,
@@ -5221,7 +5251,9 @@ impl StorageRegistry {
         self.self_host_policies
             .retain(|(policy_manifest, _), _| policy_manifest != manifest_id);
         self.scoped_self_host_policies
-            .retain(|(policy_manifest, _, _), _| policy_manifest != manifest_id);
+            .retain(|(policy_manifest, inner_cid, _), _| {
+                policy_manifest != manifest_id && inner_cid != manifest_id
+            });
         // The ownership claim is part of the record, so it goes with it. Left
         // behind it made `owner_of`/`has_claim` report an owner for content
         // that is no longer registered, and registration is first-writer-wins
@@ -9833,6 +9865,218 @@ mod tests {
         assert!(
             reg.can_prune_on_nft_burn(&cid, &alice),
             "a free duplicate manifest claim plus a scoped commit must not veto the owner's prune"
+        );
+    }
+
+    #[test]
+    fn stranger_free_self_host_policy_does_not_veto_owner_prune() {
+        let mut reg = StorageRegistry::new();
+        let alice = Address::from([0xA2; 32]);
+        let stranger = Address::from([0xB3; 32]);
+        let mut alice_manifest = good_manifest();
+        alice_manifest.owner = alice;
+        let cid = alice_manifest.manifest_id;
+        let shard_id = alice_manifest.shards[0].shard_id;
+        reg.register_manifest(&alice_manifest);
+        reg.record_test_custody_for_manifest(&alice_manifest, alice);
+        assert!(reg.can_prune_on_nft_burn(&cid, &alice));
+
+        let mut stranger_manifest = alice_manifest.clone();
+        stranger_manifest.owner = stranger;
+        reg.register_manifest(&stranger_manifest);
+        let stranger_profile = crate::storage::MobileSelfProfile {
+            owner: stranger,
+            device_commitment: [0x51; 32],
+            availability: crate::storage::MobileAvailabilityClass::AlwaysOnReplica,
+            max_storage_bytes: 1_000_000,
+            metered_network_ok: true,
+            battery_saver_aware: true,
+            last_seen_block: 1,
+        };
+        reg.declare_self_host_policy(
+            cid,
+            crate::storage::MobileSelfContentPolicy {
+                content_id: shard_id,
+                owner: stranger,
+                critical: false,
+                self_host_allowed: false,
+                required_paid_replicas: 3,
+            },
+            &stranger_profile,
+        )
+        .unwrap();
+
+        assert!(
+            reg.can_prune_on_nft_burn(&cid, &alice),
+            "a free self-host policy without custody must not veto the owner's prune"
+        );
+        let (_pruned, _bonds) = reg.prune_content(&cid, 10);
+        assert!(
+            reg.scoped_self_host_policies.is_empty(),
+            "pruning clears orphaned scoped self-host policies for the pruned manifest"
+        );
+    }
+
+    #[test]
+    fn self_operated_zero_fee_deal_does_not_forge_custody_or_contest_owner() {
+        let mut reg = StorageRegistry::new();
+        let alice = Address::from([0xA3; 32]);
+        let attacker = Address::from([0xB4; 32]);
+        let mut alice_manifest = good_manifest();
+        alice_manifest.owner = alice;
+        let cid = alice_manifest.manifest_id;
+        let shard_id = alice_manifest.shards[0].shard_id;
+        reg.register_manifest(&alice_manifest);
+        reg.record_test_custody_for_manifest(&alice_manifest, alice);
+        assert_eq!(reg.owner_of(&cid), Some(alice));
+        assert!(reg.has_proven_ownership(&cid, &alice));
+
+        let mut attacker_manifest = alice_manifest.clone();
+        attacker_manifest.owner = attacker;
+        reg.register_manifest(&attacker_manifest);
+        let zero_fee_self_econ = StorageEconomicsParams {
+            operator_bond: params().min_operator_bond,
+            fee_per_byte_epoch: 0,
+        };
+        let forged_deal = reg
+            .open_deal(
+                42,
+                &attacker_manifest,
+                shard_id,
+                attacker,
+                1,
+                10,
+                20,
+                zero_fee_self_econ,
+                &params(),
+                Some(valid_merkle_proof()),
+                Some([0x42u8; 32]),
+            )
+            .unwrap();
+        reg.set_deal_payer(forged_deal, attacker);
+
+        assert!(
+            !reg.has_custody_deal(&cid, &attacker),
+            "a self-operated zero-fee deal is not independent custody"
+        );
+        assert_eq!(
+            reg.owner_of(&cid),
+            Some(alice),
+            "a self-operated zero-fee deal must not contest the custody-proven owner"
+        );
+        assert!(
+            reg.has_proven_ownership(&cid, &alice),
+            "a stranger's self-operated zero-fee deal must not freeze proven ownership"
+        );
+        assert!(
+            reg.can_prune_on_nft_burn(&cid, &alice),
+            "a stranger's self-operated zero-fee deal must not veto owner prune"
+        );
+    }
+
+    #[test]
+    fn repair_placement_uses_failed_deal_payer_policy_not_first_registrant() {
+        let mut reg = StorageRegistry::new();
+        let squatter = Address::from([0xE1; 32]);
+        let real_owner = Address::from([0xE2; 32]);
+        let initial_op = Address::from([0xE3; 32]);
+        let mobile_rep = Address::from([0xE4; 32]);
+        let opener_addr = Address::from([0xE5; 32]);
+
+        let mut squatter_manifest = good_manifest();
+        squatter_manifest.owner = squatter;
+        let cid = squatter_manifest.manifest_id;
+        let shard_id = squatter_manifest.shards[0].shard_id;
+
+        // First registrant is the squatter; its copy sits in `reg.manifests`.
+        reg.register_manifest(&squatter_manifest);
+        let mut owner_manifest = squatter_manifest.clone();
+        owner_manifest.owner = real_owner;
+        reg.register_manifest(&owner_manifest);
+
+        // Squatter permits mobile placement; real owner forbids mobile placement.
+        let squatter_profile = crate::storage::MobileSelfProfile {
+            owner: squatter,
+            device_commitment: [0x61; 32],
+            availability: crate::storage::MobileAvailabilityClass::AlwaysOnReplica,
+            max_storage_bytes: 1_000_000,
+            metered_network_ok: true,
+            battery_saver_aware: true,
+            last_seen_block: 1,
+        };
+        let real_owner_profile = crate::storage::MobileSelfProfile {
+            owner: real_owner,
+            device_commitment: [0x62; 32],
+            availability: crate::storage::MobileAvailabilityClass::AlwaysOnReplica,
+            max_storage_bytes: 1_000_000,
+            metered_network_ok: true,
+            battery_saver_aware: true,
+            last_seen_block: 1,
+        };
+        reg.declare_self_host_policy(
+            cid,
+            crate::storage::MobileSelfContentPolicy {
+                content_id: shard_id,
+                owner: squatter,
+                critical: false,
+                self_host_allowed: true,
+                required_paid_replicas: 0,
+            },
+            &squatter_profile,
+        )
+        .unwrap();
+        reg.declare_self_host_policy(
+            cid,
+            crate::storage::MobileSelfContentPolicy {
+                content_id: shard_id,
+                owner: real_owner,
+                critical: false,
+                self_host_allowed: false,
+                required_paid_replicas: 2,
+            },
+            &real_owner_profile,
+        )
+        .unwrap();
+
+        let failed_deal = reg
+            .open_deal(
+                42,
+                &owner_manifest,
+                shard_id,
+                initial_op,
+                1,
+                10,
+                200,
+                good_econ(),
+                &params(),
+                Some(valid_merkle_proof()),
+                Some([0x42u8; 32]),
+            )
+            .unwrap();
+        reg.set_deal_payer(failed_deal, real_owner);
+
+        let challenge_id = reg
+            .open_challenge(failed_deal, 0, 4, 20, 30, opener_addr, 50)
+            .unwrap();
+        reg.finalize_missed_challenge(challenge_id, 40).unwrap();
+        let ticket_id = reg.all_reallocation_tickets()[0].ticket_id;
+
+        reg.set_operator_class(mobile_rep, OperatorClass::Mobile);
+        let err = reg
+            .accept_reallocation_ticket(
+                ticket_id,
+                mobile_rep,
+                41,
+                200,
+                good_econ(),
+                &params(),
+                Some(valid_merkle_proof()),
+                Some([0x42u8; 32]),
+            )
+            .unwrap_err();
+        assert!(
+            matches!(err, StorageError::SelfHostRefusedByPolicy { .. }),
+            "repair placement must enforce the failed-deal payer's policy, got {err:?}"
         );
     }
 }
