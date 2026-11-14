@@ -172,9 +172,14 @@ pub enum SigAggError {
     ZeroWeight(u32),
     MalformedSignature(u32),
     InvalidThresholdWitness(u32),
-    InsufficientWeight { have: u64, required: u64 },
+    InsufficientWeight {
+        have: u64,
+        required: u64,
+    },
     CommitteeMismatch,
     AggregateDigestMismatch,
+    /// The signature of this signer does not verify for the batch's message.
+    InvalidSignature(u32),
 }
 
 fn leaf_hash(sig: &SignerSignature, message_digest: &[u8; 32]) -> [u8; 32] {
@@ -293,26 +298,54 @@ pub fn aggregate_signatures(
     })
 }
 
-/// Verify an [`AggregatedSignatureBatch`] against an expected committee root and
-/// required quorum weight.
+/// A committee member as the verifier knows it, not as a batch claims it:
+/// `(signer_index, weight, scheme, public_key_digest)`, the tuple [`compute_committee_root`]
+/// commits to.
+pub type CommitteeMember = (u32, u64, SignatureScheme, [u8; 32]);
+
+/// Verify an [`AggregatedSignatureBatch`] against the committee the verifier trusts.
+///
+/// A batch carries its own committee root, per-signer weights and key digests, so none of
+/// that authenticates anything: a batch built from filler bytes re-hashes cleanly. The
+/// verifier therefore supplies the committee and the signature check, and nothing the batch
+/// says is taken as given:
+///
+/// * the committee root is derived from `committee`, and the batch must carry it;
+/// * every signature entry must match a member of `committee` in index, weight, scheme and
+///   key digest, so a batch cannot name a signer the committee does not contain or declare a
+///   weight of its own;
+/// * `verify_signature(entry, message_digest)` must accept every signature, and one that does
+///   not fails the whole batch;
+/// * the quorum is the weight of the signers whose signatures verified. The batch's own
+///   `total_weight` is only checked against the recomputed one.
 ///
 /// # Errors
 ///
-/// Fails closed if weight is below threshold, committee root differs, or any
-/// signature entry / aggregate commitment is invalid.
-pub fn verify_aggregated_batch(
+/// [`SigAggError::CommitteeMismatch`] when the root or an entry does not match `committee`,
+/// the errors of [`aggregate_signatures`] for a malformed batch,
+/// [`SigAggError::AggregateDigestMismatch`] when a commitment was altered,
+/// [`SigAggError::InvalidSignature`] when `verify_signature` refuses an entry, and
+/// [`SigAggError::InsufficientWeight`] when the verified weight is below `required_weight`.
+pub fn verify_aggregated_batch<F>(
     batch: &AggregatedSignatureBatch,
-    expected_committee_root: &[u8; 32],
+    committee: &[CommitteeMember],
     required_weight: u64,
-) -> Result<(), SigAggError> {
-    if batch.committee_root != *expected_committee_root {
+    verify_signature: F,
+) -> Result<(), SigAggError>
+where
+    F: Fn(&SignerSignature, &[u8; 32]) -> bool,
+{
+    if batch.committee_root != compute_committee_root(committee) {
         return Err(SigAggError::CommitteeMismatch);
     }
-    if batch.total_weight < required_weight {
-        return Err(SigAggError::InsufficientWeight {
-            have: batch.total_weight,
-            required: required_weight,
-        });
+    for sig in &batch.signatures {
+        let Some(&(_, weight, scheme, key)) = committee.iter().find(|m| m.0 == sig.signer_index)
+        else {
+            return Err(SigAggError::CommitteeMismatch);
+        };
+        if sig.weight != weight || sig.scheme != scheme || sig.public_key_digest != key {
+            return Err(SigAggError::CommitteeMismatch);
+        }
     }
     let recomputed = aggregate_signatures(
         batch.message_digest,
@@ -324,6 +357,19 @@ pub fn verify_aggregated_batch(
         || recomputed.signer_indices != batch.signer_indices
     {
         return Err(SigAggError::AggregateDigestMismatch);
+    }
+    let mut verified_weight = 0u64;
+    for sig in &batch.signatures {
+        if !verify_signature(sig, &batch.message_digest) {
+            return Err(SigAggError::InvalidSignature(sig.signer_index));
+        }
+        verified_weight = verified_weight.saturating_add(sig.weight);
+    }
+    if verified_weight < required_weight {
+        return Err(SigAggError::InsufficientWeight {
+            have: verified_weight,
+            required: required_weight,
+        });
     }
     Ok(())
 }
@@ -355,23 +401,62 @@ mod tests {
         }
     }
 
+    /// What a signature is worth in these tests: the key digest and the message, hashed, repeated
+    /// to the length of the scheme. A stand-in for a real verifier, which the caller supplies.
+    fn sign(key: &[u8; 32], message: &[u8; 32], scheme: SignatureScheme) -> Vec<u8> {
+        let mut preimage = Vec::from(&key[..]);
+        preimage.extend_from_slice(message);
+        let digest = keccak256_bytes(&preimage);
+        digest
+            .iter()
+            .copied()
+            .cycle()
+            .take(scheme.min_signature_len())
+            .collect()
+    }
+
+    fn verifies(entry: &SignerSignature, message: &[u8; 32]) -> bool {
+        entry.signature == sign(&entry.public_key_digest, message, entry.scheme)
+    }
+
+    fn committee() -> Vec<CommitteeMember> {
+        vec![
+            (0, 30, SignatureScheme::Ed25519, [1u8; 32]),
+            (1, 40, SignatureScheme::Bls, [2u8; 32]),
+            (2, 50, SignatureScheme::MlDsa87, [3u8; 32]),
+        ]
+    }
+
+    fn honest(member: &CommitteeMember, message: &[u8; 32]) -> SignerSignature {
+        SignerSignature {
+            signer_index: member.0,
+            weight: member.1,
+            scheme: member.2,
+            public_key_digest: member.3,
+            signature: sign(&member.3, message, member.2),
+            threshold_witness: None,
+        }
+    }
+
+    fn batch_of(
+        committee: &[CommitteeMember],
+        message: [u8; 32],
+        entries: Vec<SignerSignature>,
+    ) -> AggregatedSignatureBatch {
+        aggregate_signatures(message, compute_committee_root(committee), entries).unwrap()
+    }
+
     #[test]
     fn multi_scheme_committee_batch_aggregates_and_verifies() {
-        let s0 = sample_sig(0, SignatureScheme::Ed25519, 30);
-        let s1 = sample_sig(1, SignatureScheme::Bls, 40);
-        let s2 = sample_sig(2, SignatureScheme::MlDsa87, 50);
-        let committee = compute_committee_root(&[
-            (0, 30, SignatureScheme::Ed25519, s0.public_key_digest),
-            (1, 40, SignatureScheme::Bls, s1.public_key_digest),
-            (2, 50, SignatureScheme::MlDsa87, s2.public_key_digest),
-        ]);
+        let committee = committee();
         let msg = [0x11u8; 32];
-        let batch = aggregate_signatures(msg, committee, vec![s0, s1, s2]).expect("aggregate");
+        let entries: Vec<_> = committee.iter().map(|m| honest(m, &msg)).collect();
+        let batch = batch_of(&committee, msg, entries);
         assert_eq!(batch.total_weight, 120);
-        verify_aggregated_batch(&batch, &committee, 80).expect("quorum verifies");
+        verify_aggregated_batch(&batch, &committee, 80, verifies).expect("quorum verifies");
 
         assert_eq!(
-            verify_aggregated_batch(&batch, &committee, 121).unwrap_err(),
+            verify_aggregated_batch(&batch, &committee, 121, verifies).unwrap_err(),
             SigAggError::InsufficientWeight {
                 have: 120,
                 required: 121
@@ -381,8 +466,137 @@ mod tests {
         let mut tampered = batch;
         tampered.aggregate_digest[0] ^= 1;
         assert_eq!(
-            verify_aggregated_batch(&tampered, &committee, 80).unwrap_err(),
+            verify_aggregated_batch(&tampered, &committee, 80, verifies).unwrap_err(),
             SigAggError::AggregateDigestMismatch
+        );
+    }
+
+    /// The batch used to be re-hashed and nothing else: filler bytes of the right length, the
+    /// committee's own root and weights, and a quorum passed. No signature was ever verified.
+    #[test]
+    fn a_fabricated_batch_is_refused() {
+        let committee = committee();
+        let msg = [0x44u8; 32];
+        let entries: Vec<_> = committee
+            .iter()
+            .map(|m| SignerSignature {
+                signature: vec![0xA5; m.2.min_signature_len()],
+                ..honest(m, &msg)
+            })
+            .collect();
+        let batch = batch_of(&committee, msg, entries);
+        assert_eq!(batch.total_weight, 120);
+        assert_eq!(
+            verify_aggregated_batch(&batch, &committee, 80, verifies).unwrap_err(),
+            SigAggError::InvalidSignature(0)
+        );
+    }
+
+    #[test]
+    fn a_signature_over_another_message_is_refused() {
+        let committee = committee();
+        let signed_message = [0x55u8; 32];
+        let batch_message = [0x66u8; 32];
+        let entries: Vec<_> = committee
+            .iter()
+            .map(|m| honest(m, &signed_message))
+            .collect();
+        let batch = batch_of(&committee, batch_message, entries);
+        assert_eq!(
+            verify_aggregated_batch(&batch, &committee, 80, verifies).unwrap_err(),
+            SigAggError::InvalidSignature(0)
+        );
+    }
+
+    /// One bad signature fails the batch, even when the others are a quorum on their own.
+    #[test]
+    fn a_signature_that_does_not_verify_fails_a_batch_that_is_a_quorum_without_it() {
+        let committee = committee();
+        let msg = [0x77u8; 32];
+        let mut entries: Vec<_> = committee.iter().map(|m| honest(m, &msg)).collect();
+        entries[2].signature = vec![0xA5; SignatureScheme::MlDsa87.min_signature_len()];
+        let batch = batch_of(&committee, msg, entries);
+        assert_eq!(
+            verify_aggregated_batch(&batch, &committee, 60, verifies).unwrap_err(),
+            SigAggError::InvalidSignature(2)
+        );
+    }
+
+    /// The quorum is the committee weight of the verified signers. A batch used to declare its
+    /// own weight: the sum of the weights its entries claimed.
+    #[test]
+    fn a_batch_cannot_declare_its_own_weight() {
+        let committee = committee();
+        let msg = [0x88u8; 32];
+        let mut entry = honest(&committee[0], &msg);
+        entry.weight = 1_000_000;
+        let batch = batch_of(&committee, msg, vec![entry]);
+        assert_eq!(batch.total_weight, 1_000_000);
+        assert_eq!(
+            verify_aggregated_batch(&batch, &committee, 80, verifies).unwrap_err(),
+            SigAggError::CommitteeMismatch
+        );
+        // The honest weight of the same signer is below the quorum.
+        let honest_batch = batch_of(&committee, msg, vec![honest(&committee[0], &msg)]);
+        assert_eq!(
+            verify_aggregated_batch(&honest_batch, &committee, 80, verifies).unwrap_err(),
+            SigAggError::InsufficientWeight {
+                have: 30,
+                required: 80
+            }
+        );
+    }
+
+    #[test]
+    fn a_batch_cannot_name_a_signer_the_committee_does_not_contain() {
+        let committee = committee();
+        let msg = [0x99u8; 32];
+        let outsider: CommitteeMember = (7, 500, SignatureScheme::Ed25519, [9u8; 32]);
+        let batch = batch_of(&committee, msg, vec![honest(&outsider, &msg)]);
+        assert_eq!(
+            verify_aggregated_batch(&batch, &committee, 80, verifies).unwrap_err(),
+            SigAggError::CommitteeMismatch
+        );
+    }
+
+    /// A member's scheme and key are the committee's. An attacker's own key, with a signature
+    /// that is valid under it, must not stand in for the member.
+    #[test]
+    fn a_batch_cannot_switch_the_scheme_or_the_key_of_a_member() {
+        let committee = committee();
+        let msg = [0xAAu8; 32];
+        let own_key: CommitteeMember = (0, committee[0].1, committee[0].2, [0xEEu8; 32]);
+        let batch = batch_of(&committee, msg, vec![honest(&own_key, &msg)]);
+        assert!(
+            verifies(&batch.signatures[0], &msg),
+            "valid under its own key"
+        );
+        assert_eq!(
+            verify_aggregated_batch(&batch, &committee, 1, verifies).unwrap_err(),
+            SigAggError::CommitteeMismatch
+        );
+
+        let other_scheme: CommitteeMember =
+            (0, committee[0].1, SignatureScheme::MlDsa87, committee[0].3);
+        let batch = batch_of(&committee, msg, vec![honest(&other_scheme, &msg)]);
+        assert_eq!(
+            verify_aggregated_batch(&batch, &committee, 1, verifies).unwrap_err(),
+            SigAggError::CommitteeMismatch
+        );
+    }
+
+    /// The root is the verifier's: a batch built over a committee of its own is refused.
+    #[test]
+    fn a_batch_cannot_carry_a_committee_root_the_verifier_did_not_derive() {
+        let committee = committee();
+        let msg = [0xBBu8; 32];
+        let mut forged_committee = committee.clone();
+        forged_committee[0].1 = 10_000;
+        let forged_entry = honest(&forged_committee[0], &msg);
+        let batch = batch_of(&forged_committee, msg, vec![forged_entry]);
+        assert_eq!(
+            verify_aggregated_batch(&batch, &committee, 80, verifies).unwrap_err(),
+            SigAggError::CommitteeMismatch
         );
     }
 
