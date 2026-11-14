@@ -1093,7 +1093,7 @@ mod tests {
     /// forwarding address, so a user who trusted the Verified badge paid the
     /// relayer instead of the name's owner.
     #[test]
-    fn a_swapped_address_under_a_valid_proof_is_not_verified() {
+    fn a_swapped_address_under_a_valid_bns_proof_is_not_verified() {
         let owner = addr(0x31);
         let attacker = addr(0x32);
         let mut reg = BnsRegistry::new();

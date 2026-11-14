@@ -1,7 +1,7 @@
 //! Deterministic parallel scheduling of a block's transactions.
 //!
-//! WIRING: the coordinator exposes [`ExecutionCoordinator::execute_account_block`]
-//! and [`ExecutionCoordinator::execute_account_block_checked`], reaching both
+//! WIRING: the coordinator exposes `ExecutionCoordinator::execute_account_block`
+//! and `ExecutionCoordinator::execute_account_block_checked`, reaching both
 //! [`execute_block_with_policy`] (under [`ParallelSchedulerPolicy::testnet_launch`])
 //! and [`execute_block_checked`].
 //!

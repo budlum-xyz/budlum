@@ -163,13 +163,47 @@ pub fn agreed_proof<P: NameProver>(provers: &[P], name: &str) -> Result<NameProo
         match &agreed {
             None => agreed = Some(answer),
             Some(first) => {
-                if first.proof != answer.proof || first.epoch != answer.epoch {
+                if *first != answer {
                     return Err(GatewayError::ProversDisagree);
                 }
             }
         }
     }
     agreed.ok_or(GatewayError::NoProverAnswered)
+}
+
+/// Check `answer` against `root` and return the live branch it proves.
+///
+/// An expired record is told apart from a bad proof. The proof of an expired
+/// record is first checked one epoch before its expiry, so only a record that
+/// really folds to `root` is answered as expired. Anything else is a failed
+/// proof.
+///
+/// # Errors
+///
+/// [`GatewayError::ProofFailed`], [`GatewayError::NotFound`] or
+/// [`GatewayError::Expired`].
+pub fn verified_branch<'a>(
+    answer: &'a NameProof,
+    root: &[u8; 32],
+) -> Result<&'a BnsMerkleBranch, GatewayError> {
+    let lapsed = answer
+        .proof
+        .entry
+        .as_ref()
+        .filter(|entry| answer.proof.included && entry.expires_at <= answer.epoch)
+        .map(|entry| entry.expires_at);
+    if let Some(expires_at) = lapsed {
+        let before = expires_at
+            .checked_sub(1)
+            .ok_or_else(|| GatewayError::ProofFailed("record expires at epoch zero".into()))?;
+        BnsRegistry::verify_state_proof(&answer.proof, root, before)
+            .map_err(GatewayError::ProofFailed)?;
+        return Err(GatewayError::Expired);
+    }
+    BnsRegistry::verify_state_proof(&answer.proof, root, answer.epoch)
+        .map_err(GatewayError::ProofFailed)?
+        .ok_or(GatewayError::NotFound)
 }
 
 /// Resolve `target` through a proof the light client has already checked.
@@ -195,29 +229,18 @@ pub fn resolve_verified<P: NameProver, R: StateRoots>(
     let root = roots
         .verified_state_root(answer.height)
         .ok_or(GatewayError::UnknownHeight(answer.height))?;
-    let branch = BnsRegistry::verify_state_proof(&answer.proof, &root, answer.epoch)
-        .map_err(GatewayError::ProofFailed)?
-        .ok_or(GatewayError::NotFound)?;
-    if branch.expires_at <= answer.epoch {
-        return Err(GatewayError::Expired);
-    }
+    let branch = verified_branch(&answer, &root)?;
     if let Some(sub) = &target.sub {
         let extras = branch
             .extras
             .as_ref()
             .ok_or_else(|| GatewayError::ProofFailed("branch carries no extras".into()))?;
-        let sub_owner = extras
-            .subdomains
-            .get(sub)
-            .ok_or_else(|| GatewayError::NoSuchSubdomain(sub.clone()))?;
-        // The subdomain exists and is owned. Its content is the name's content
-        // unless the subdomain has its own B.U.D. 3.0 reference, which the
-        // registry does not model separately today: a subdomain is an owner
-        // pointer, so a site under it serves the same manifest. Stating that
-        // here is cheaper than letting the gateway invent a lookup.
-        let _ = sub_owner;
-        let content = branch.extras.as_ref().and_then(|extras| extras.address);
-        let _ = content;
+        // A subdomain is an owner pointer under the name. It has no content
+        // of its own, so it serves the name's manifest once it is proven to
+        // exist.
+        if !extras.subdomains.contains_key(sub) {
+            return Err(GatewayError::NoSuchSubdomain(sub.clone()));
+        }
     }
     Ok(Resolved {
         branch: branch.clone(),

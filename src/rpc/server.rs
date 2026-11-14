@@ -5550,6 +5550,67 @@ impl BudlumApiServer for RpcServer {
         }))
     }
 
+    async fn bns_prepare_set_storage(
+        &self,
+        name: String,
+        owner: String,
+        storage_root: String,
+        storage_domain_id: u32,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        if !crate::bns::BnsRegistry::is_valid_name(&name) {
+            return Err(ErrorObjectOwned::owned(
+                -32602,
+                "Invalid BNS name: expected <label>.bud with 3..=32 lowercase label characters",
+                None::<()>,
+            ));
+        }
+        let clean_owner = owner.strip_prefix("0x").unwrap_or(&owner);
+        let owner_addr = Address::from_hex(clean_owner).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Invalid owner address: {e}"), None::<()>)
+        })?;
+
+        let clean_root = storage_root.strip_prefix("0x").unwrap_or(&storage_root);
+        let root_bytes = hex::decode(clean_root).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Invalid storage root hex: {e}"), None::<()>)
+        })?;
+        let root: [u8; 32] = root_bytes.try_into().map_err(|_| {
+            ErrorObjectOwned::owned(-32602, "Storage root must be 32 bytes", None::<()>)
+        })?;
+
+        let data = bincode::serialize(&(name.clone(), root, storage_domain_id))
+            .map_err(|e| ErrorObjectOwned::owned(-32000, e.to_string(), None::<()>))?;
+
+        let tx = crate::core::transaction::Transaction {
+            from: owner_addr,
+            to: Address::zero(),
+            amount: 0,
+            fee: 500,
+            max_fee: 500,
+            priority_fee: 0,
+            nonce: self.chain.get_nonce(&owner_addr).await,
+            data,
+            timestamp: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis(),
+            hash: String::new(),
+            signature: None,
+            signer_public_key: Vec::new(),
+            authorization: None,
+            chain_id: self.chain.get_chain_id().await,
+            signature_version: crate::core::transaction::SIGNATURE_VERSION_V5,
+            tx_type: crate::core::transaction::TransactionType::BnsSetStorage,
+        };
+        let tx = self.finish_template(tx).await?;
+        Ok(serde_json::json!({
+            "name": name,
+            "owner": owner,
+            "storage_root": storage_root,
+            "storage_domain_id": storage_domain_id,
+            "tx_template": tx,
+        }))
+    }
+
     async fn bns_prepare_renew(
         &self,
         name: String,
