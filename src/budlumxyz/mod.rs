@@ -41,7 +41,14 @@ pub const MAX_APP_URL_BYTES: usize = 256;
 
 fn is_valid_app_url(url: &str) -> bool {
     let trimmed = url.trim();
-    if trimmed.is_empty() || url.len() > MAX_APP_URL_BYTES || url.chars().any(char::is_control) {
+    if trimmed.is_empty()
+        || url.len() > MAX_APP_URL_BYTES
+        || url.chars().any(char::is_control)
+        || trimmed.chars().any(char::is_whitespace)
+        || trimmed
+            .chars()
+            .any(|c| matches!(c, '<' | '>' | '"' | '\'' | '`' | '\\'))
+    {
         return false;
     }
     // If a URI scheme is present before any path separator, allow only safe
@@ -62,7 +69,10 @@ fn is_valid_app_url(url: &str) -> bool {
             || scheme.eq_ignore_ascii_case("bud")
             || scheme.eq_ignore_ascii_case("ipfs");
     }
-    true
+    // Without an explicit `scheme://`, refuse entity-encoded schemes (`&#58;`,
+    // `&colon;`), percent-encoded colons, and script-like punctuation while
+    // still permitting bare test labels/domains such as `example.bud`.
+    !trimmed.contains('&') && !trimmed.contains(';') && !trimmed.contains('%')
 }
 
 impl BudlumxyzRegistry {
@@ -686,6 +696,11 @@ mod tests {
             "javascript:alert(1)",
             "JAVASCRIPT:alert(1)",
             "  javascript:alert(1)",
+            "javascript&#58;alert(1)",
+            "&#x6a;avascript:alert(1)",
+            "data&#x3a;text/html,<script>alert(1)</script>",
+            "<script>alert(1)</script>",
+            "https://example.bud/<script>",
             "data:text/html,<script>alert(1)</script>",
             "vbscript:msgbox(1)",
             "http://insecure.example",
