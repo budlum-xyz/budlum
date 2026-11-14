@@ -14,6 +14,14 @@ on:
     branches: [main, consensus-of-consensuses, testnet-quantum, testnet, 'arena/**']
     types: [opened, synchronize, reopened]
 
+# One run per pull request. Without this a push did not cancel the run of the
+# commit before it, so every push of a busy stacked branch left another copy of
+# `cargo fmt`, `cargo clippy --all-targets` and `cargo test --lib` running for
+# commits nobody reads any more, and five of them held a quarter of the runner pool.
+concurrency:
+  group: diff-surface-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
