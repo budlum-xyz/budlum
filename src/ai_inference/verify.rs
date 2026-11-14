@@ -1,5 +1,9 @@
 //! STARK verification and proof-production helpers (bud-proof `DefaultAdapter`).
 //!
+//! WIRING: unwired - these bincode-based helper verifiers are deliberately
+//! not called by consensus; the transaction verifier uses postcard and checks
+//! the registered model through `ai::execution::verify_execution_proof_full`.
+//!
 //! **This module is NOT the production path, but saying "verification is not
 //! wired" is no longer true either.** On-chain inference verification does not
 //! go through this file; the transaction path calls

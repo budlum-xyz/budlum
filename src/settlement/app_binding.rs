@@ -1392,7 +1392,6 @@ pub fn execute_app_binding_tx(
             if block <= intent.deadline_block {
                 return Err(refused("AppBinding intent has not expired"));
             }
-            preflight_credits(state, &[(intent.owner, intent.max_payment)])?;
             settle_expired_intent(state, &intent)
         }
     }
@@ -1409,15 +1408,17 @@ fn settle_expired_intent(
     state: &mut AccountState,
     intent: &AppBindingIntent,
 ) -> Result<(), SettlementTxError> {
-    if state
+    if !state
         .settlement
         .app_binding
         .intents
-        .remove(&intent.intent_id)
-        .is_none()
+        .contains_key(&intent.intent_id)
     {
         return Ok(());
     }
+    // Refund and the block-end sweep share the same preflight. A rejected
+    // credit cannot remove escrow or slash the awarded solver first.
+    preflight_credits(state, &[(intent.owner, intent.max_payment)])?;
     // Bidding alone is not a promise to execute: only the solver actually
     // awarded the work held it open.
     if let Some(solver) = intent.awarded_solver {
@@ -1488,6 +1489,11 @@ fn settle_expired_intent(
             }
         }
     }
+    state
+        .settlement
+        .app_binding
+        .intents
+        .remove(&intent.intent_id);
     credit(state, &intent.owner, intent.max_payment)
 }
 
@@ -1513,6 +1519,14 @@ pub(crate) fn sweep_expired_intents(
         .filter(|intent| block > intent.deadline_block)
         .cloned()
         .collect();
+    // Preflight *all* credits together. A single owner may have several
+    // expired intents; checking each after retiring the previous one would
+    // fail on a later overflow with the earlier escrow already spent.
+    let refunds: Vec<_> = expired
+        .iter()
+        .map(|intent| (intent.owner, intent.max_payment))
+        .collect();
+    preflight_credits(state, &refunds)?;
     for intent in &expired {
         settle_expired_intent(state, intent)?;
     }
@@ -2775,6 +2789,60 @@ mod tests {
         state.current_block_height = 1_301;
         let user_before = state.get_balance(&user);
         let height = state.current_block_height;
+        let registry_before = state.settlement.app_binding.root();
+        let solver_stake_before = state
+            .registry
+            .get(&solver, crate::registry::role::roles::RELAYER)
+            .unwrap()
+            .stake;
+        state.get_or_create(&user).balance = u64::MAX;
+        assert!(
+            execute_app_binding_tx(
+                &mut state,
+                &ctx(user),
+                &AppBindingTx::Refund {
+                    intent_id: awarded_id,
+                },
+            )
+            .is_err(),
+            "an overflowing explicit refund may not slash the solver first"
+        );
+        assert_eq!(state.settlement.app_binding.root(), registry_before);
+        assert_eq!(
+            state
+                .registry
+                .get(&solver, crate::registry::role::roles::RELAYER)
+                .unwrap()
+                .stake,
+            solver_stake_before,
+        );
+
+        let total_refunds = state.settlement.app_binding.intents[&short_id].max_payment
+            + state.settlement.app_binding.intents[&awarded_id].max_payment;
+        let almost_full = u64::MAX - total_refunds + 1;
+        assert!(almost_full
+            .checked_add(state.settlement.app_binding.intents[&short_id].max_payment)
+            .is_some());
+        assert!(almost_full
+            .checked_add(state.settlement.app_binding.intents[&awarded_id].max_payment)
+            .is_some());
+        state.get_or_create(&user).balance = almost_full;
+        assert!(
+            sweep_expired_intents(&mut state, height).is_err(),
+            "two individually payable refunds must be preflighted together"
+        );
+        assert_eq!(state.get_balance(&user), almost_full);
+        assert_eq!(state.settlement.app_binding.root(), registry_before);
+        assert_eq!(
+            state
+                .registry
+                .get(&solver, crate::registry::role::roles::RELAYER)
+                .unwrap()
+                .stake,
+            solver_stake_before,
+            "the refused sweep may not slash its awarded solver"
+        );
+        state.get_or_create(&user).balance = user_before;
         sweep_expired_intents(&mut state, height).unwrap();
         assert!(
             !state

@@ -8,11 +8,11 @@ use sha3::{Digest, Keccak256};
 /// Contract gas one call may burn.
 ///
 /// This is a gas budget, not a trace bound. What the prover can materialise is
-/// bounded independently by `bud_vm::MAX_CONTRACT_TRACE_STEPS` (`2^14`), which
-/// every execution entry point applies through `with_step_limit`, and by
-/// `MAX_PROVER_WITNESS_ROWS` (`2^17`) inside the prover. Witness rows are
-/// `next_pow2(3 * steps + 1)`, so the step cap holds one call at `2^16` rows,
-/// inside the prover ceiling, whatever the gas budget is. Setting this constant
+/// bounded independently by `bud_vm::MAX_CONTRACT_TRACE_STEPS` (`2^14`) for
+/// ordinary runs and twice that for the stateful host-seeded setup, through
+/// `with_step_limit`, and by `MAX_PROVER_WITNESS_ROWS` (`2^17`) in the prover.
+/// Witness rows are `next_pow2(3 * steps + 1)`; both step caps fit inside
+/// the prover ceiling, whatever the gas budget is. Setting this constant
 /// to the step count does not make proving safer; it only misprices a call.
 ///
 /// The value is locked to `MAX_BLOCK_CONTRACT_GAS / 60` by
@@ -64,15 +64,13 @@ const _: () = assert!(
     "a contract call limit may not exceed the block gas limit (Section 8.9 item 3)"
 );
 
-/// The witness matrix rows one call can materialise must fit the prover cap.
-///
-/// `next_pow2(3 * steps + 1)` is the shape `trace_matrix` produces, so a step
-/// cap above `MAX_PROVER_WITNESS_ROWS` would let a single `ContractCall` ask
-/// the prover for a matrix it refuses to build (prover OOM).
+/// The stateful host-seeded proof route can use twice the normal VM step cap.
+/// Its matrix must fit the same prover ceiling before any witness is allocated;
+/// the ordinary route is checked independently above.
 const _: () = assert!(
-    (3 * bud_vm::MAX_CONTRACT_TRACE_STEPS + 1).next_power_of_two()
+    (3 * (bud_vm::MAX_CONTRACT_TRACE_STEPS * 2) + 1).next_power_of_two()
         <= bud_proof::plonky3_prover::MAX_PROVER_WITNESS_ROWS,
-    "MAX_CONTRACT_TRACE_STEPS must stay within MAX_PROVER_WITNESS_ROWS"
+    "host-seeded contract trace must stay within MAX_PROVER_WITNESS_ROWS"
 );
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -632,9 +630,9 @@ mod tests {
         assert!(receipt.proof_bytes > 0);
     }
 
-    /// Both `VerifyMerkle` and `VerifyInference` are active under
-    /// `MainnetActivation::default()` (backed by Poseidon AIR constraints) and
-    /// remain gated off under explicit `MainnetActivation::closed()`.
+    /// An independent inference commitment is available to contract calls,
+    /// but the 64-depth storage path remains closed until it binds a shard.
+    /// Explicit `closed()` still refuses both staged opcodes.
     #[test]
     fn contract_call_bytecode_cannot_reach_a_gated_opcode() {
         let inf_program = vec![
@@ -712,6 +710,43 @@ mod tests {
                 "unexpected error for closed activation: {err}"
             );
         }
+        let merkle = Instruction {
+            opcode: Opcode::VerifyMerkle,
+            rd: 1,
+            rs1: 0,
+            rs2: 0,
+            imm: 0,
+        }
+        .encode();
+        assert_eq!(
+            bud_isa::Instruction::decode_for_mainnet(merkle, bud_isa::MainnetActivation::default()),
+            Err(bud_isa::DecodeError::MainnetActivationRequired(
+                Opcode::VerifyMerkle
+            ))
+        );
+        let bytecode: Vec<u8> = [
+            merkle,
+            Instruction {
+                opcode: Opcode::Halt,
+                rd: 0,
+                rs1: 0,
+                rs2: 0,
+                imm: 0,
+            }
+            .encode(),
+        ]
+        .into_iter()
+        .flat_map(u64::to_le_bytes)
+        .collect();
+        assert!(
+            ZkVmExecutor::execute_bytecode(
+                &bytecode,
+                DEFAULT_CONTRACT_GAS_LIMIT,
+                TxContext::default()
+            )
+            .is_err(),
+            "ContractCall must not reach an unbound storage path"
+        );
     }
 
     /// Memory-image proving shares the canonical `MainnetActivation::default()`
@@ -759,14 +794,14 @@ mod tests {
         Prover::verify(&env, &pi, &words).expect("memory-image proof verifies");
     }
 
-    /// `MainnetActivation::default()` is active for AIR-backed `VerifyMerkle`
-    /// and `VerifyInference`, and `bud-vm` reads `MainnetActivation::default()`.
+    /// Production decoding must keep the 64-depth path closed until a shard-
+    /// bound challenge proof exists; its independent inference gate stays on.
     #[test]
     fn the_staged_rollout_defaults_are_the_ones_in_force() {
         let d = bud_isa::MainnetActivation::default();
         assert!(
-            d.verify_merkle_enabled,
-            "VerifyMerkle is enabled by default with 64-depth 30-round Poseidon constraints"
+            !d.verify_merkle_enabled,
+            "an AIR path alone does not bind a challenged shard's bytes"
         );
         assert!(
             d.verify_inference_enabled,

@@ -145,7 +145,12 @@ pub fn verify_execution_proof_full(
     model: Option<&AiModelSpec>,
     program_and_pi: Option<(&[u64], &ExecutionPublicInputs)>,
 ) -> ExecutionVerifyReport {
-    let mut rep = verify_execution_proof_structural_with_model(proof, request, result, model);
+    let mut rep = match model {
+        Some(model) => {
+            verify_execution_proof_structural_with_model(proof, request, result, Some(model))
+        }
+        None => verify_execution_proof_structural(proof, request, result),
+    };
     if let Some((program, pi)) = program_and_pi {
         match verify_execution_proof_stark(proof, program, pi) {
             Ok(()) => rep.stark_ok = Some(true),

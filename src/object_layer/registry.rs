@@ -17,8 +17,6 @@
 
 use crate::core::address::Address;
 use crate::core::hash::hash_fields_bytes;
-use crate::cross_domain::event_tree::MerkleProof;
-use crate::cross_domain::evm::account_proof;
 use crate::domain::types::{DomainId, Hash32};
 use crate::object_layer::charter::{
     check_charter_at_state_root, CanonicalCodeHashes, CharterRefusal, CharterStatus, CodeProof,
@@ -160,68 +158,7 @@ pub fn verify_home_slice_proof(
             return Err(Refusal::UnprovenEvent);
         }
     }
-    match family {
-        HomeVmFamily::Evm => {
-            let addr20: [u8; 20] = contract.try_into().map_err(|_| Refusal::UnprovenEvent)?;
-            let acct = account_proof::verify_account(
-                &proof.contract_account_proof,
-                &proof.state_root,
-                &addr20,
-            )
-            .map_err(|_| Refusal::UnprovenEvent)?;
-            if !slice.is_empty() && proof.storage_proofs.is_empty() {
-                return Err(Refusal::UnprovenEvent);
-            }
-            for (slot, expected_val, nodes) in &proof.storage_proofs {
-                let proven = account_proof::verify_storage(nodes, &acct.storage_root, slot)
-                    .map_err(|_| Refusal::UnprovenEvent)?
-                    .unwrap_or([0u8; 32]);
-                if proven != *expected_val {
-                    return Err(Refusal::UnprovenEvent);
-                }
-            }
-            let auth_field = profile_for(family).upgrade_authority_field();
-            if let Some(auth) = slice.get(auth_field) {
-                let bound = proof.storage_proofs.iter().any(|(_, val, _)| {
-                    val.as_slice() == auth.as_slice()
-                        || (auth.len() <= 32
-                            && !auth.is_empty()
-                            && val.get(32 - auth.len()..) == Some(auth.as_slice()))
-                });
-                if !bound {
-                    return Err(Refusal::UnprovenEvent);
-                }
-            }
-            Ok(())
-        }
-        HomeVmFamily::CosmWasm | HomeVmFamily::Svm | HomeVmFamily::Move => {
-            let [raw] = proof.contract_account_proof.as_slice() else {
-                return Err(Refusal::UnprovenEvent);
-            };
-            let merkle: MerkleProof =
-                bincode::deserialize(raw).map_err(|_| Refusal::UnprovenEvent)?;
-            let mut slice_bytes = Vec::new();
-            for (k, v) in slice {
-                let k_bytes = k.as_bytes();
-                let k_len = u32::try_from(k_bytes.len()).map_err(|_| Refusal::Overflow)?;
-                let v_len = u32::try_from(v.len()).map_err(|_| Refusal::Overflow)?;
-                slice_bytes.extend_from_slice(&k_len.to_le_bytes());
-                slice_bytes.extend_from_slice(k_bytes);
-                slice_bytes.extend_from_slice(&v_len.to_le_bytes());
-                slice_bytes.extend_from_slice(v);
-            }
-            let expected_leaf = hash_fields_bytes(&[
-                b"BDLM_UOL_SLICE_PROOF_V1",
-                chain_reference.as_bytes(),
-                contract,
-                &slice_bytes,
-            ]);
-            if merkle.leaf != expected_leaf || !merkle.verify(proof.state_root) {
-                return Err(Refusal::UnprovenEvent);
-            }
-            Ok(())
-        }
-    }
+    profile_for(family).verify_home_slice_proof(chain_reference, contract, slice, proof)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

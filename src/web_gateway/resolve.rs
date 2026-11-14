@@ -187,6 +187,11 @@ pub fn verified_branch<'a>(
     answer: &'a NameProof,
     root: &[u8; 32],
 ) -> Result<&'a BnsMerkleBranch, GatewayError> {
+    if answer.epoch != answer.proof.epoch {
+        return Err(GatewayError::ProofFailed(
+            "answer epoch differs from proof epoch".into(),
+        ));
+    }
     let lapsed = answer
         .proof
         .entry
@@ -248,18 +253,25 @@ pub fn resolve_verified<P: NameProver, R: StateRoots>(
     })
 }
 
-/// The `ContentRef` a name record points at.
+/// The proved B.U.D. 3.0 `ContentRef` a name record points at.
 ///
-/// The record's `content_id` and `storage_root` are the two halves of a
-/// B.U.D. 3.0 reference: the id names the bytes and the root names the object
-/// commitment. A record with only one of them is a name with no site.
+/// The legacy `content_id` and `storage_root` fields are unrelated to the
+/// B.U.D. 3.0 identifier and object commitment. `set_bud3_content` writes
+/// only `bud3_content`; requiring those legacy fields would make a valid,
+/// independently verified B.U.D. 3.0 site look empty. A public gateway
+/// serves only public content and validates the complete reference again.
 #[must_use]
 pub fn content_ref_of(branch: &BnsMerkleBranch) -> Option<ContentRef> {
-    branch
-        .extras
-        .as_ref()
-        .and_then(|extras| extras.bud3_content)
-        .filter(|_content| branch.content_id.is_some() && branch.storage_root.is_some())
+    let content = branch.extras.as_ref()?.bud3_content?;
+    if content.content_id.kind != crate::storage::bud3::content_id::ContentIdKind::Public {
+        return None;
+    }
+    ContentRef::new(
+        content.content_id,
+        content.object_commitment,
+        content.nft_id,
+    )
+    .ok()
 }
 
 /// Resolve a request path against a site.
@@ -324,7 +336,7 @@ impl ContentCache {
     /// [`CacheMiss::TooLarge`] when the object alone exceeds the budget.
     pub fn insert(&mut self, content: &ContentRef, bytes: Vec<u8>) -> Result<(), CacheMiss> {
         let public = crate::storage::bud3::content_id::ContentId::public(&bytes);
-        if public.digest != content.content_id.digest {
+        if public != content.content_id {
             return Err(CacheMiss::DigestMismatch);
         }
         if bytes.len() > self.max_bytes {
@@ -353,9 +365,8 @@ impl ContentCache {
     /// become a bad page.
     pub fn get(&mut self, content: &ContentRef) -> Option<&[u8]> {
         let key = content.object_commitment;
-        let digest = content.content_id.digest;
         let valid = self.entries.get(&key).is_some_and(|bytes| {
-            crate::storage::bud3::content_id::ContentId::public(bytes).digest == digest
+            crate::storage::bud3::content_id::ContentId::public(bytes) == content.content_id
         });
         if !valid {
             if let Some(dropped) = self.entries.remove(&key) {
@@ -415,13 +426,11 @@ mod tests {
         let mut reg = BnsRegistry::new();
         reg.register("ayaz.bud".to_string(), owner, 10, 100)
             .unwrap();
-        if let Some((content_id, storage_root)) = content {
-            let legacy_id = crate::storage::content_id::ContentId(content_id.digest);
-            reg.set_content("ayaz.bud", &owner, legacy_id, 101).unwrap();
-            reg.set_storage("ayaz.bud", owner, storage_root, 0, 101)
-                .unwrap();
-            let bud3_content =
-                ContentRef::new(content_id, storage_root, None).expect("non-zero halves");
+        if let Some((content_id, object_commitment)) = content {
+            let bud3_content = ContentRef::new(content_id, object_commitment, None)
+                .expect("non-zero B.U.D. 3.0 reference");
+            // B.U.D. 3.0 registration writes this field, not the unrelated
+            // legacy `content_id` and `storage_root` fields.
             reg.names
                 .get_mut("ayaz.bud")
                 .expect("registered above")
@@ -484,6 +493,18 @@ mod tests {
         let err = resolve_verified(&[prover], &roots, &target(None)).unwrap_err();
         assert_eq!(err.status(), PROOF_FAILED_STATUS);
         assert!(matches!(err, GatewayError::ProofFailed(_)));
+
+        let mut inconsistent = proof_from(&reg, "ayaz.bud", 7, 100);
+        inconsistent.epoch = 99;
+        let err = resolve_verified(
+            &[FakeProver {
+                answer: Ok(inconsistent),
+            }],
+            &roots,
+            &target(None),
+        )
+        .unwrap_err();
+        assert!(matches!(err, GatewayError::ProofFailed(_)));
     }
 
     #[test]
@@ -493,10 +514,24 @@ mod tests {
             answer: Ok(proof_from(&reg, "ayaz.bud", 7, 200)),
         };
         let roots = Roots(BTreeMap::from([(7u64, reg.root())]));
-        // The proof's own expiry check fires first: a proof of an expired
-        // record is refused. Either way the answer is not a page.
+        // The proof's own expiry check runs *after* the Merkle check. A
+        // verified expired record is a 404, not an invalid-proof 502.
         let err = resolve_verified(&[prover], &roots, &target(None)).unwrap_err();
+        assert_eq!(err, GatewayError::Expired);
         assert_eq!(err.status(), 404);
+
+        let mut tampered = proof_from(&reg, "ayaz.bud", 7, 200);
+        tampered.proof.entry.as_mut().unwrap().owner = Address::from([0x99; 32]);
+        let err = resolve_verified(
+            &[FakeProver {
+                answer: Ok(tampered),
+            }],
+            &roots,
+            &target(None),
+        )
+        .unwrap_err();
+        assert!(matches!(err, GatewayError::ProofFailed(_)));
+        assert_eq!(err.status(), PROOF_FAILED_STATUS);
     }
 
     #[test]
@@ -511,6 +546,8 @@ mod tests {
         let same = FakeProver {
             answer: Ok(honest.clone()),
         };
+        // The Merkle branch can be byte-for-byte identical at two heights;
+        // the nodes still disagree on which verified header anchors it.
         let differing = FakeProver {
             answer: Ok(proof_from(&reg, "ayaz.bud", 8, 100)),
         };
@@ -601,14 +638,33 @@ mod tests {
     }
 
     #[test]
-    fn a_record_without_content_is_a_404_and_a_ref_starts_from_both_halves() {
-        let reg = registry_with(None);
+    fn only_a_proven_public_bud3_reference_resolves_even_without_legacy_fields() {
+        let mut reg = registry_with(None);
         let proof = reg.prove_name("ayaz.bud", 100);
         let branch = BnsRegistry::verify_state_proof(&proof, &reg.root(), 100)
             .unwrap()
             .unwrap();
         assert_eq!(content_ref_of(branch), None);
 
+        // Legacy fields alone cannot manufacture a B.U.D. 3.0 reference.
+        let owner = Address::from([0x11; 32]);
+        reg.set_content(
+            "ayaz.bud",
+            &owner,
+            crate::storage::content_id::ContentId::of(b"legacy content"),
+            101,
+        )
+        .unwrap();
+        reg.set_storage("ayaz.bud", owner, [0x44; 32], 0, 101)
+            .unwrap();
+        let proof = reg.prove_name("ayaz.bud", 100);
+        let branch = BnsRegistry::verify_state_proof(&proof, &reg.root(), 100)
+            .unwrap()
+            .unwrap();
+        assert_eq!(content_ref_of(branch), None);
+
+        // A B.U.D. 3.0-only record is a complete site reference, without
+        // populating either legacy field (as the production setter does).
         let reg = registry_with(Some((
             ContentId {
                 kind: ContentIdKind::Public,
@@ -621,9 +677,29 @@ mod tests {
         let branch = BnsRegistry::verify_state_proof(&proof, &reg.root(), 100)
             .unwrap()
             .unwrap();
-        let content = content_ref_of(branch).expect("both halves are present");
+        assert_eq!(branch.content_id, None);
+        assert_eq!(branch.storage_root, None);
+        let content = content_ref_of(branch).expect("authenticated B.U.D. 3.0 reference");
         assert_eq!(content.content_id.digest, [0x22; 32]);
         assert_eq!(content.object_commitment, [0x33; 32]);
+
+        let reg = registry_with(Some((
+            ContentId {
+                kind: ContentIdKind::Sealed,
+                digest: [0x55; 32],
+                len: 4,
+            },
+            [0x66; 32],
+        )));
+        let proof = reg.prove_name("ayaz.bud", 100);
+        let branch = BnsRegistry::verify_state_proof(&proof, &reg.root(), 100)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            content_ref_of(branch),
+            None,
+            "public gateway refuses sealed data"
+        );
     }
 
     #[test]
@@ -650,6 +726,24 @@ mod tests {
             cache.insert(&wrong, b"tampered".to_vec()),
             Err(CacheMiss::DigestMismatch)
         );
+        // The length is part of a B.U.D. 3.0 ContentId, not a hint. A
+        // matching digest with a forged length cannot pass the cache door.
+        let wrong_len = ContentRef::new(
+            ContentId {
+                len: content.content_id.len + 1,
+                ..content.content_id
+            },
+            [0xAA; 32],
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            cache.insert(&wrong_len, bytes.clone()),
+            Err(CacheMiss::DigestMismatch)
+        );
+        let wrong_lookup =
+            ContentRef::new(wrong_len.content_id, content.object_commitment, None).unwrap();
+        assert_eq!(cache.get(&wrong_lookup), None);
 
         // An object larger than the budget is refused rather than evicting
         // everything else for one page.
