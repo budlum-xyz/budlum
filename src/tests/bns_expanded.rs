@@ -1925,50 +1925,96 @@ fn bns_metrics_export_one_counter_per_type_and_the_named_gauges() {
 
 // A name may only point at content the chain has a row for.
 #[test]
-fn bns_set_content_refuses_unknown_content_and_binds_a_registered_manifest() {
+fn bns_set_content_refuses_unknown_content_and_binds_a_registered_object() {
+    use crate::storage::bud3::limits::{Bud3Limits, Profile};
+    use crate::storage::bud3::pipeline::prepare_public_upload;
+    use crate::storage::bud3::placement::{Class, Share};
+
+    const PROFILE: Profile = Profile {
+        id: 0,
+        qr_version: 40,
+        symbol_size: 128,
+        fps: 10,
+        k_max: 16,
+    };
+
     let key = KeyPair::from_seed(&[7u8; 32]).unwrap();
     let alice = Address::from(key.public_key_bytes());
     let name = "pages.bud".to_string();
     let mut state = AccountState::new();
+    state.epoch_index = 1;
     state.add_balance(&alice, 10_000);
     state
         .bns_registry
-        .register(name.clone(), alice, 0, 100)
+        .register(name.clone(), alice, 1, 50)
         .unwrap();
 
-    let manifest =
-        crate::storage::manifest::ContentManifest::from_bytes_sliced(b"a small site", 8).unwrap();
-    let known = manifest.manifest_id;
-    let unknown = crate::storage::content_id::ContentId([0x5A; 32]);
-    assert_ne!(known, unknown);
+    let body = b"<html><body>a small site</body></html>".repeat(6);
+    let up = prepare_public_upload(&body, &PROFILE, &Bud3Limits::default(), 8).unwrap();
+    let object = up.record.commitment;
+    let known = crate::storage::content_id::ContentId(up.record.content_id.digest);
+    let holder = [7u8; 32];
 
-    let mut refused = lifecycle_tx(
-        alice,
-        0,
-        1,
-        0,
-        TransactionType::BnsSetContent,
-        bincode::serialize(&(name.clone(), unknown)).unwrap(),
-    );
-    refused.sign(&key);
-    let err = Executor::apply_transaction_checked(&mut state, &refused).unwrap_err();
+    let set_content = |cid: crate::storage::content_id::ContentId| {
+        let mut tx = lifecycle_tx(
+            alice,
+            0,
+            1,
+            0,
+            TransactionType::BnsSetContent,
+            bincode::serialize(&(name.clone(), cid)).unwrap(),
+        );
+        tx.sign(&key);
+        tx
+    };
+
+    // Nothing is registered yet, so the id names nothing.
+    let err = Executor::apply_transaction_checked(&mut state, &set_content(known)).unwrap_err();
     assert_eq!(err.code(), "bns_content_unknown");
-    assert_eq!(state.bns_registry.resolve_content(&name, 1), None);
+    assert_eq!(state.bns_registry.resolve_content(&name, 2), None);
     assert_eq!(state.get_nonce(&alice), 0);
     assert_eq!(state.get_balance(&alice), 10_000);
 
-    state.storage_registry.register_manifest(&manifest);
-    let mut bound = lifecycle_tx(
+    state
+        .bud3_registry
+        .register_object(
+            alice.0,
+            up.record,
+            vec![(
+                0,
+                Share {
+                    validator: holder,
+                    class: Class::Full,
+                    first_esi: 0,
+                    symbols: 8,
+                },
+            )],
+            1,
+            50,
+        )
+        .unwrap();
+    // Registered but not yet held: still not content a name can point at.
+    let err = Executor::apply_transaction_checked(&mut state, &set_content(known)).unwrap_err();
+    assert_eq!(err.code(), "bns_content_unknown");
+
+    state.bud3_registry.ack(&object, &holder).unwrap();
+    Executor::apply_transaction_checked(&mut state, &set_content(known)).unwrap();
+    assert_eq!(state.bns_registry.resolve_content(&name, 2), Some(known));
+    assert_eq!(state.get_nonce(&alice), 1);
+    assert_eq!(state.get_balance(&alice), 9_999);
+
+    // A different id is still refused once some content exists.
+    let other = crate::storage::content_id::ContentId([0x5A; 32]);
+    let mut tx = lifecycle_tx(
         alice,
         0,
         1,
-        0,
+        1,
         TransactionType::BnsSetContent,
-        bincode::serialize(&(name.clone(), known)).unwrap(),
+        bincode::serialize(&(name.clone(), other)).unwrap(),
     );
-    bound.sign(&key);
-    Executor::apply_transaction_checked(&mut state, &bound).unwrap();
-    assert_eq!(state.bns_registry.resolve_content(&name, 1), Some(known));
-    assert_eq!(state.get_nonce(&alice), 1);
-    assert_eq!(state.get_balance(&alice), 9_999);
+    tx.sign(&key);
+    let err = Executor::apply_transaction_checked(&mut state, &tx).unwrap_err();
+    assert_eq!(err.code(), "bns_content_unknown");
+    assert_eq!(state.bns_registry.resolve_content(&name, 2), Some(known));
 }
