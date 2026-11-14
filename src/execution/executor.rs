@@ -5893,7 +5893,7 @@ mod tests {
 
     #[test]
     fn ai_attach_execution_proof_is_gated_on_testnet() {
-        assert!(!crate::ai::FULL_AI_STARK_VERIFICATION_LIVE);
+        const { assert!(!crate::ai::FULL_AI_STARK_VERIFICATION_LIVE) };
         let owner = Address::from([0x31; 32]);
         let spec = crate::ai::execution::FixedPointMlpSpec {
             dims: vec![2, 1],
