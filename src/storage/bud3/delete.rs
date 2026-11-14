@@ -34,7 +34,8 @@ pub struct DeletionSet {
 }
 
 impl DeletionSet {
-    /// Record an unlinkable grant tag as cryptographically erased.
+    /// WIRING: exposed to consent and compute verifiers that build revocation
+    /// snapshots. Record an unlinkable grant tag as cryptographically erased.
     pub fn tombstone_grant(&mut self, grant_tag: [u8; 32]) {
         self.revoked_grants.insert(grant_tag);
     }
@@ -76,7 +77,8 @@ impl DeletionSet {
         self.revoked_grants.is_empty() && self.deleted_objects.is_empty()
     }
 
-    /// Canonical domain-separated commitment over the sorted tombstone sets.
+    /// WIRING: exposed to transaction builders and indexers that commit the
+    /// canonical domain-separated root of the sorted tombstone sets.
     #[must_use]
     pub fn deletion_root(&self) -> [u8; 32] {
         let mut acc = hash_fields_bytes(&[DELETION_SET_TAG, b"INIT"]);

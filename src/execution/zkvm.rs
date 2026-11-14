@@ -167,9 +167,9 @@ impl ZkVmExecutor {
     ///
     /// Deprecated alias for `execute_for_block`.
     ///
-    /// Kept so an out-of-tree caller does not break. The block path and this
-    /// name now share one implementation: two copies of the gated VM run can
-    /// drift, and only one of them would be the consensus door.
+    /// Convenience: kept as a compatibility entry point for out-of-tree
+    /// callers. The block path and this name share one implementation: two
+    /// copies of the gated VM run can drift, and only one would be consensus.
     ///
     /// # Errors
     ///
