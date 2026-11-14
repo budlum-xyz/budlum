@@ -1564,12 +1564,12 @@ impl AccountState {
             // `PermissionlessRegistry::withdraw` deletes the registration, and
             // both intent expiry doors skip the liveness slash when `get`
             // returns nothing. Releasing the bond while this account is the
-            // awarded solver of a live Graft intent, or the awarded bidder of
+            // awarded solver of a live AppBinding intent, or the awarded bidder of
             // an unsettled relayer intent, would let it walk away from the
             // penalty for work it was awarded and never honoured.
-            let awarded_graft = self
+            let awarded_app_binding = self
                 .settlement
-                .graft
+                .app_binding
                 .intents
                 .values()
                 .any(|intent| intent.awarded_solver == Some(*address));
@@ -1586,7 +1586,7 @@ impl AccountState {
                                 .intents
                                 .contains_key(intent_id)
                     });
-            if awarded_graft || live_relayer_award {
+            if awarded_app_binding || live_relayer_award {
                 return Err(
                     "a relayer bond backing a live awarded intent cannot be withdrawn".to_string(),
                 );

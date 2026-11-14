@@ -542,7 +542,7 @@ impl Blockchain {
     /// re-apply the same height will recount; prometheus counters already
     /// reset on process restart, and the alternative (remembering every
     /// hash ever applied) is a second consensus log.
-    pub(crate) fn emit_applied_tx_metrics(
+    fn emit_applied_tx_metrics(
         &self,
         txs: &[crate::core::transaction::Transaction],
         outcomes_before: usize,
@@ -12299,6 +12299,118 @@ fn slashing_ratios_come_from_registry_params_not_hardcoded() {
         diff <= stake_before / 100,
         "slash must follow the configured 7% ratio, expected ~{expected_slash}, got {actual_slash} (diff {diff})"
     );
+}
+
+// Every BNS write type moves its own counter, a sale moves the sale counter
+// and the paid total, and the three gauges are exported by name.
+#[cfg(test)]
+#[test]
+fn bns_metrics_export_one_counter_per_type_and_the_named_gauges() {
+    use crate::consensus::pow::PoWEngine;
+    use crate::core::address::Address;
+    use crate::core::metrics::Metrics;
+    use crate::core::transaction::{Transaction, TransactionType, DEFAULT_CHAIN_ID};
+
+    let sender = Address::from([0x41; 32]);
+    let tx_of = |amount: u64, nonce: u64, tx_type: TransactionType| {
+        Transaction::new_with_chain_id(
+            sender,
+            Address::zero(),
+            amount,
+            1,
+            nonce,
+            Vec::new(),
+            DEFAULT_CHAIN_ID,
+            tx_type,
+        )
+    };
+
+    let metrics = Arc::new(Metrics::new().expect("metric names are literals"));
+    let chain = Blockchain::new(Arc::new(PoWEngine::new(0)), None, DEFAULT_CHAIN_ID, None)
+        .with_metrics(Arc::clone(&metrics));
+
+    let doors: [(TransactionType, &str); 13] = [
+        (TransactionType::BnsBuyName, "budlum_bns_sales_total"),
+        (TransactionType::BnsRenew, "budlum_bns_renewals_total"),
+        (TransactionType::BnsTransfer, "budlum_bns_transfers_total"),
+        (
+            TransactionType::BnsCreateOffer,
+            "budlum_bns_offers_created_total",
+        ),
+        (
+            TransactionType::BnsCancelOffer,
+            "budlum_bns_offers_cancelled_total",
+        ),
+        (
+            TransactionType::BnsSetAddress,
+            "budlum_bns_set_address_total",
+        ),
+        (
+            TransactionType::BnsSetPrimaryName,
+            "budlum_bns_set_primary_name_total",
+        ),
+        (
+            TransactionType::BnsSetRecords,
+            "budlum_bns_set_records_total",
+        ),
+        (
+            TransactionType::BnsSetContent,
+            "budlum_bns_set_content_total",
+        ),
+        (
+            TransactionType::BnsSetBud3Content,
+            "budlum_bns_set_bud3_content_total",
+        ),
+        (
+            TransactionType::BnsRegisterSubdomain,
+            "budlum_bns_register_subdomain_total",
+        ),
+        (
+            TransactionType::BnsRemoveSubdomain,
+            "budlum_bns_remove_subdomain_total",
+        ),
+        (
+            TransactionType::BnsSetStorage,
+            "budlum_bns_set_storage_total",
+        ),
+    ];
+
+    let txs: Vec<Transaction> = doors
+        .iter()
+        .map(|(tx_type, _)| tx_of(700, 0, tx_type.clone()))
+        .collect();
+    chain.emit_applied_tx_metrics(&txs, 0);
+    chain.emit_chain_metrics();
+
+    let encoded = metrics.encode();
+    for (_, series) in &doors {
+        assert!(
+            encoded.contains(&format!("{series} 1")),
+            "{series} did not move exactly once"
+        );
+    }
+    // One sale of 700 atoms: the fee is not part of the paid total.
+    assert!(encoded.contains("budlum_bns_sales_amount_total 700"));
+    assert!(encoded.contains("budlum_bns_names_registered 1"));
+    for gauge in [
+        "budlum_bns_name_rows ",
+        "budlum_bns_names_in_grace ",
+        "budlum_bns_open_offers ",
+    ] {
+        assert!(encoded.contains(gauge), "{gauge} is not exported");
+    }
+
+    // A transfer of coins is not a BNS write and moves none of them.
+    let before = metrics.encode();
+    chain.emit_applied_tx_metrics(&[tx_of(5, 1, TransactionType::Transfer)], 0);
+    let after = metrics.encode();
+    let bns_lines = |text: &str| -> Vec<String> {
+        text.lines()
+            .filter(|line| line.starts_with("budlum_bns_"))
+            .map(str::to_string)
+            .collect()
+    };
+    assert_eq!(bns_lines(&before), bns_lines(&after));
 }
 
 #[cfg(test)]

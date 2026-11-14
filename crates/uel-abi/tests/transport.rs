@@ -13,8 +13,8 @@ use budlum_uel_abi::transport::{
     panic_digest, serve_connection, EeClient, ServeEnd, TransportError,
 };
 use budlum_uel_abi::{
-    BlockContext, BudAmount, EeCall, EeCallKind, EeId, EeIdentity, EeQuery, HostRead, Namespace,
-    OutcomeStatus, RefusalCode, UniversalResult, WireError,
+    BlockContext, BudAmount, EeCall, EeCallKind, EeId, EeIdentity, EeOutcome, EeQuery, HostRead,
+    Namespace, OutcomeStatus, RefusalCode, UniversalResult, WireError,
 };
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
@@ -662,7 +662,6 @@ fn uel_abi_rejects_cross_ee_namespace_access() {
                             status: OutcomeStatus::Success,
                             output: vec![],
                             gas_used: 100,
-                            logs: vec![],
                         })
                             .into(),
                     )),
