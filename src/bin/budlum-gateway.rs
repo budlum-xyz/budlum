@@ -62,6 +62,10 @@ use hyper::{Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 use serde::Deserialize;
 use tokio::net::TcpListener;
+use tokio::sync::Semaphore;
+
+#[path = "support/http.rs"]
+mod http_support;
 
 /// The file an operator passes as the only argument.
 #[derive(Debug, Clone, Deserialize)]
@@ -92,6 +96,17 @@ struct GatewayConfig {
     /// How long a cached name resolution is trusted, in seconds.
     #[serde(default = "default_resolve_ttl")]
     resolve_ttl_secs: u64,
+    /// Serve clients that connect directly. Forwarded headers are ignored and
+    /// the socket peer is the client. Set this or `trusted_proxies`, not both,
+    /// and not neither: a gateway that does not know who its clients are
+    /// refuses to start.
+    #[serde(default)]
+    allow_direct: bool,
+    /// The immediate peers allowed to connect, normally the TLS terminator in
+    /// front of this process. Each must send one valid `X-Forwarded-For`, and
+    /// the client is its rightmost address that is not itself a trusted proxy.
+    #[serde(default)]
+    trusted_proxies: Vec<std::net::IpAddr>,
 }
 
 fn default_suffix() -> String {
@@ -122,6 +137,7 @@ struct GatewayState {
     roots: Arc<dyn StateRoots + Send + Sync>,
     content: Arc<dyn ContentSource + Send + Sync>,
     blocklist: BlockList,
+    identity: http_support::ClientIdentity,
     limiter: std::sync::Mutex<RateLimiter>,
     cache: std::sync::Mutex<ContentCache>,
     resolved: std::sync::Mutex<std::collections::BTreeMap<String, (u64, CachedResolution)>>,
@@ -514,6 +530,7 @@ fn error_response(error: &GatewayError) -> Response<BoxBody> {
 async fn handle(
     request: Request<hyper::body::Incoming>,
     state: Arc<GatewayState>,
+    peer: SocketAddr,
 ) -> Result<Response<BoxBody>, std::convert::Infallible> {
     let method = request.method().clone();
     if method != hyper::Method::GET && method != hyper::Method::HEAD {
@@ -538,14 +555,12 @@ async fn handle(
         );
         return Ok(response);
     }
-    let client = request
-        .headers()
-        .get("x-forwarded-for")
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.split(',').next())
-        .unwrap_or("unknown")
-        .trim()
-        .to_string();
+    // The client is the socket peer, or the address a configured proxy vouches
+    // for. A header the client wrote itself is never a source of identity.
+    let client = match state.identity.client_ip(peer.ip(), request.headers()) {
+        Ok(ip) => ip.to_string(),
+        Err(reason) => return Ok(plain(StatusCode::BAD_REQUEST, reason)),
+    };
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -555,7 +570,6 @@ async fn handle(
             Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),
         };
-        limiter.prune(now);
         if limiter.check(&client, now) == LimitDecision::Refused {
             let response = plain(StatusCode::TOO_MANY_REQUESTS, "too many requests");
             return Ok(response);
@@ -700,6 +714,13 @@ fn build_state(config: GatewayConfig) -> Result<GatewayState, String> {
     if config.rpc.is_empty() {
         return Err("config names no rpc endpoint, so no proof can be checked".into());
     }
+    let identity =
+        http_support::ClientIdentity::new(config.allow_direct, config.trusted_proxies.clone())
+            .map_err(|_| {
+                "set exactly one of `allow_direct = true` or a non-empty `trusted_proxies` list: \
+                 a gateway that does not know who its clients are cannot rate limit them"
+                    .to_string()
+            })?;
     let mut provers = Vec::with_capacity(config.rpc.len());
     for url in &config.rpc {
         provers.push(RpcProver::new(url.clone())?);
@@ -740,6 +761,7 @@ fn build_state(config: GatewayConfig) -> Result<GatewayState, String> {
         }),
         content: Arc::new(DirectorySource { root: content_dir }),
         blocklist,
+        identity,
         limiter: std::sync::Mutex::new(RateLimiter::new(rate, 60)),
         cache: std::sync::Mutex::new(ContentCache::new(cache_max)),
         resolved: std::sync::Mutex::new(std::collections::BTreeMap::new()),
@@ -767,26 +789,38 @@ async fn main() -> Result<(), String> {
         cache_dir = %state.config.cache_dir.display(),
         "the content cache is held in memory; nothing is written under cache_dir yet"
     );
+    let connections = Arc::new(Semaphore::new(http_support::MAX_CONNECTIONS));
     loop {
-        let (stream, _peer) = match listener.accept().await {
+        let (stream, peer) = match listener.accept().await {
             Ok(pair) => pair,
             Err(e) => {
                 tracing::warn!(error = %e, "accept failed");
                 continue;
             }
         };
+        let Ok(permit) = Arc::clone(&connections).try_acquire_owned() else {
+            // Over the connection budget: drop the socket instead of queueing it.
+            continue;
+        };
         let state = Arc::clone(&state);
         tokio::spawn(async move {
+            let _permit = permit;
             let io = TokioIo::new(stream);
             let service = service_fn(move |request| {
                 let state = Arc::clone(&state);
-                async move { handle(request, state).await }
+                async move { handle(request, state, peer).await }
             });
-            if let Err(e) = hyper::server::conn::http1::Builder::new()
-                .serve_connection(io, service)
-                .await
-            {
-                tracing::debug!(error = %e, "connection ended");
+            let mut builder = hyper::server::conn::http1::Builder::new();
+            builder
+                .timer(hyper_util::rt::TokioTimer::new())
+                .header_read_timeout(http_support::HEADER_TIMEOUT)
+                .max_buf_size(http_support::MAX_HEADER_BYTES)
+                .keep_alive(false);
+            let connection = builder.serve_connection(io, service);
+            match tokio::time::timeout(http_support::CONNECTION_LIFETIME, connection).await {
+                Ok(Err(e)) => tracing::debug!(error = %e, "connection ended"),
+                Err(_) => tracing::debug!(%peer, "connection timed out"),
+                Ok(Ok(())) => {}
             }
         });
     }
@@ -975,6 +1009,8 @@ mod tests {
             blocklist_file: None,
             content_dir: None,
             resolve_ttl_secs: 10,
+            allow_direct: true,
+            trusted_proxies: Vec::new(),
         };
         let refused = build_state(config);
         assert!(refused.is_err(), "the state must be refused");
@@ -994,11 +1030,79 @@ mod tests {
             blocklist_file: None,
             content_dir: Some(std::env::temp_dir()),
             resolve_ttl_secs: 10,
+            allow_direct: true,
+            trusted_proxies: Vec::new(),
         };
         let refused = build_state(config);
         assert!(refused.is_err(), "the state must be refused");
         let error = refused.err().unwrap_or_default();
         assert!(error.contains("rpc"), "got {error}");
+    }
+
+    fn serving_config(allow_direct: bool, trusted_proxies: Vec<std::net::IpAddr>) -> GatewayConfig {
+        GatewayConfig {
+            suffix: "budlum.xyz".into(),
+            listen: "127.0.0.1:0".into(),
+            rpc: vec!["http://127.0.0.1:8545".into()],
+            cache_dir: std::env::temp_dir(),
+            cache_max_bytes: 1024,
+            rate_per_minute: 10,
+            blocklist_file: None,
+            content_dir: Some(std::env::temp_dir()),
+            resolve_ttl_secs: 10,
+            allow_direct,
+            trusted_proxies,
+        }
+    }
+
+    #[test]
+    fn a_configuration_that_does_not_say_who_its_clients_are_is_refused() {
+        for config in [
+            serving_config(false, Vec::new()),
+            serving_config(true, vec!["127.0.0.1".parse().expect("literal address")]),
+        ] {
+            let refused = build_state(config);
+            assert!(refused.is_err(), "exactly one identity mode must be set");
+            let error = refused.err().unwrap_or_default();
+            assert!(error.contains("allow_direct"), "got {error}");
+        }
+    }
+
+    #[test]
+    fn a_direct_gateway_charges_the_socket_peer_and_ignores_forwarded_for() {
+        let state = build_state(serving_config(true, Vec::new()))
+            .unwrap_or_else(|e| panic!("a direct gateway starts: {e}"));
+        let peer: std::net::IpAddr = "203.0.113.9".parse().expect("literal address");
+        let mut headers = hyper::HeaderMap::new();
+        // The header a client wrote itself: one address, then another.
+        headers.insert("x-forwarded-for", HeaderValue::from_static("198.51.100.1"));
+        assert_eq!(state.identity.client_ip(peer, &headers), Ok(peer));
+        headers.insert("x-forwarded-for", HeaderValue::from_static("198.51.100.2"));
+        assert_eq!(
+            state.identity.client_ip(peer, &headers),
+            Ok(peer),
+            "rotating the header does not rotate the identity"
+        );
+    }
+
+    #[test]
+    fn a_proxied_gateway_takes_the_client_from_its_proxy_and_refuses_everyone_else() {
+        let proxy: std::net::IpAddr = "127.0.0.1".parse().expect("literal address");
+        let client: std::net::IpAddr = "203.0.113.50".parse().expect("literal address");
+        let state = build_state(serving_config(false, vec![proxy]))
+            .unwrap_or_else(|e| panic!("a proxied gateway starts: {e}"));
+        let mut headers = hyper::HeaderMap::new();
+        // A client behind the proxy writes its own first hop; the proxy appends
+        // the address it actually saw.
+        headers.insert(
+            "x-forwarded-for",
+            HeaderValue::from_static("198.51.100.1, 203.0.113.50"),
+        );
+        assert_eq!(state.identity.client_ip(proxy, &headers), Ok(client));
+        assert!(
+            state.identity.client_ip(client, &headers).is_err(),
+            "a peer that is not a configured proxy is refused"
+        );
     }
 
     #[test]

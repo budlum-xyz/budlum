@@ -2,21 +2,23 @@
 
 Inspected source at `62b7beeca453dda88693b928c69f7e5c8d585490`.
 **Do not advertise another network's application as working through the
-Budlum testnet.** The transaction door is open on chain `45261`
-(`docs/APP_BINDING.md`), but an open door is not an origin-chain user journey.
-A fixture or a configured chain flag cannot replace one.
+Budlum testnet.** The transaction door is closed on chain `45261` and open on
+devnet `45262` (`docs/APP_BINDING.md`). An open door is not an origin-chain
+user journey. A fixture or a configured chain flag cannot replace one.
 
 ## Activation gate: wired, not runtime-verified
 
 `src/core/chain_config.rs` defines `app_binding_enabled_for_chain_id`, true
-on testnet (`45261`) and devnet (`45262`) and false on mainnet and on an
+on devnet (`45262`) and false on testnet (`45261`), on mainnet and on an
 unknown chain. The pre-match guard in `execute_app_binding_tx`
 (`src/settlement/app_binding.rs`) refuses a closed chain before moving a
 balance or registering an application. The outer `SettlementTx::AppBinding`
-arm uses that same door. `app_binding_is_open_on_testnet` in
-`src/tests/domains_bridge_settlement.rs` tests both entry points and the
-mainnet refusal. The guard and the named test are source evidence, not a
-successful testnet rehearsal.
+arm uses that same door. `app_binding_is_open_on_devnet` in
+`src/tests/domains_bridge_settlement.rs` runs the direct entry point on
+devnet. It checks that both entry points refuse testnet and that the outer
+one refuses mainnet. `app_binding_is_closed_on_testnet` in
+`src/tests/testnet_closed_features.rs` pins the flag per chain. The guard and
+the named tests are source evidence, not a successful testnet rehearsal.
 
 ## Devnet implementation by level, not an end-to-end assertion
 
@@ -35,9 +37,11 @@ foreign app performed the requested action.
 
 ## Conditions for future public testnet instructions
 
-1. Run `app_binding_is_open_on_testnet` at both direct and signed/in-block
-   entry points on the shipped SHA; the source-level guard alone is not a
-   passing test. Mainnet stays closed until its own activation decision.
+1. Open testnet by an explicit activation decision. That decision replaces
+   `app_binding_is_closed_on_testnet` with a test that runs both the direct
+   and the signed/in-block entry point on the shipped SHA; the source-level
+   guard alone is not a passing test. Mainnet stays closed until its own
+   activation decision.
 2. Complete origin-domain verifier/executor configuration, deploy contracts,
    pin addresses and finality trust roots, and pass both positive and negative
    cross-chain tests. Record real genesis, network URL, activation height,

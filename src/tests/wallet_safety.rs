@@ -13,7 +13,8 @@ fn mnemonic_is_24_words() {
 
 #[test]
 fn kdf_iterations_at_least_100k() {
-    const { assert!(DEFAULT_KDF_ITERATIONS >= 100_000) };
+    let iterations = std::hint::black_box(DEFAULT_KDF_ITERATIONS);
+    assert!(iterations >= 100_000);
 }
 
 #[test]
