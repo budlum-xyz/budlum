@@ -322,7 +322,7 @@ fn ai_require_execution_proof_models_stay_closed_without_live_verifier() {
     use crate::ai::registry::AiRegistry;
     use crate::ai::types::*;
 
-    assert!(!crate::ai::FULL_AI_STARK_VERIFICATION_LIVE);
+    const { assert!(!crate::ai::FULL_AI_STARK_VERIFICATION_LIVE) };
     let owner = test_addr_from_byte(1u8);
     let spec_mlp = FixedPointMlpSpec {
         dims: vec![2, 1],
@@ -353,6 +353,45 @@ fn ai_require_execution_proof_models_stay_closed_without_live_verifier() {
         })
         .expect_err("proof-required AI remains closed until its opening gates pass");
     assert!(err.contains("not accepted until full AI STARK verification is live"));
+}
+
+fn transfer_fixture(
+    kp: &KeyPair,
+    state: &mut AccountState,
+) -> (PrivateTransferSubmit, [u8; 32], [u8; 32]) {
+    let c_in = hash_from_field(21);
+    let proof = hash_from_field(0xA11CE);
+    let n1 = L1NoteRegistry::derive_nullifier(&c_in, &proof);
+    let c_out = hash_from_field(23);
+    let from = Address::from(kp.public_key_bytes());
+    state
+        .note_registry
+        .insert_note_for_owner(c_in, from)
+        .unwrap();
+    let digest = PrivateTransferSubmit::compute_public_digest(&[n1], &[c_out]);
+    let auth_msg = PrivateTransferSubmit::authorization_message(
+        crate::core::transaction::DEFAULT_CHAIN_ID,
+        from.as_bytes(),
+        0,
+        &digest,
+    );
+    let sub = PrivateTransferSubmit {
+        spent_commitments: vec![c_in],
+        nullifiers: vec![n1],
+        output_commitments: vec![c_out],
+        nullifier_proofs: vec![proof],
+        authorization_sig: kp.sign(&auth_msg).to_vec(),
+        public_digest: digest,
+    };
+    (sub, c_in, c_out)
+}
+
+fn signed_tx(kp: &KeyPair, chain_id: u64, tx_type: TransactionType) -> Transaction {
+    let from = Address::from(kp.public_key_bytes());
+    let mut tx =
+        Transaction::new_with_chain_id(from, Address::zero(), 0, 100, 0, vec![], chain_id, tx_type);
+    tx.sign(kp);
+    tx
 }
 
 #[test]
