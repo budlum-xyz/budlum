@@ -87,6 +87,13 @@ pub enum PolkaVmInsn {
     SealReturnU32 {
         rs: u8,
     },
+    /// `seal_caller` compared with the account that deployed the contract: aborts unless they are
+    /// equal. Put it first in a message that is not public.
+    RequireOwner,
+    /// `seal_caller` compared with `id`: aborts unless the caller is exactly that account.
+    RequireCaller {
+        id: [u8; 32],
+    },
 }
 
 /// Exported 4-byte selector handler (`ink!` message / constructor or `resolc` ABI).
@@ -145,6 +152,7 @@ const fn regs_in_range(ins: &PolkaVmInsn) -> bool {
         PolkaVmInsn::SealSetStorageU32 { rs, .. }
         | PolkaVmInsn::SealDepositEvent { rs, .. }
         | PolkaVmInsn::SealReturnU32 { rs } => (rs as usize) < REG_COUNT,
+        PolkaVmInsn::RequireOwner | PolkaVmInsn::RequireCaller { .. } => true,
         PolkaVmInsn::Add { rd, rs1, rs2 }
         | PolkaVmInsn::Sub { rd, rs1, rs2 }
         | PolkaVmInsn::Mul { rd, rs1, rs2 } => {
@@ -155,6 +163,13 @@ const fn regs_in_range(ins: &PolkaVmInsn) -> bool {
 
 fn code_key(contract: &[u8; 32]) -> Vec<u8> {
     let mut k = b"code:".to_vec();
+    k.extend_from_slice(contract);
+    k
+}
+
+/// The account that deployed the contract: the one `PolkaVmInsn::RequireOwner` admits.
+fn owner_key(contract: &[u8; 32]) -> Vec<u8> {
+    let mut k = b"owner:".to_vec();
     k.extend_from_slice(contract);
     k
 }
@@ -175,13 +190,19 @@ fn derive_contract_addr(deployer: &[u8; 32], tx_hash: &[u8; 32]) -> [u8; 32] {
     h.finalize().into()
 }
 
+/// What a run executes as: the namespace, the contract, the caller and the gas cap.
+struct PvmScope<'a> {
+    ns: &'a Namespace,
+    contract: &'a [u8; 32],
+    caller: &'a [u8; 32],
+    gas_limit: u64,
+}
+
 fn run_rv32em(
-    ns: &Namespace,
-    contract: &[u8; 32],
+    scope: &PvmScope<'_>,
     insns: &[PolkaVmInsn],
     args_tail: &[u8],
     gas_used: &mut u64,
-    gas_limit: u64,
     host: &mut dyn HostApi,
 ) -> Result<Vec<u8>, &'static [u8]> {
     let mut regs = [0u32; REG_COUNT];
@@ -192,7 +213,7 @@ fn run_rv32em(
             _ => 50,
         };
         let next = gas_used.saturating_add(cost);
-        if next > gas_limit || host.charge(cost).is_err() {
+        if next > scope.gas_limit || host.charge(cost).is_err() {
             return Err(b"OUT_OF_GAS");
         }
         *gas_used = next;
@@ -247,15 +268,15 @@ fn run_rv32em(
             }
             PolkaVmInsn::SealSetStorageU32 { slot, rs } => {
                 let val = regs.get(rs as usize).copied().unwrap_or(0).to_le_bytes();
-                let sk = stor_key(contract, &slot);
-                if host.write(ns, &sk, Some(&val)).is_err() {
+                let sk = stor_key(scope.contract, &slot);
+                if host.write(scope.ns, &sk, Some(&val)).is_err() {
                     return Err(b"SEAL_STORAGE_ERR");
                 }
             }
             PolkaVmInsn::SealGetStorageU32 { rd, slot } => {
-                let sk = stor_key(contract, &slot);
+                let sk = stor_key(scope.contract, &slot);
                 let val = host
-                    .read(ns, &sk)
+                    .read(scope.ns, &sk)
                     .ok()
                     .flatten()
                     .and_then(|b| <[u8; 4]>::try_from(b.as_slice()).ok())
@@ -270,11 +291,25 @@ fn run_rv32em(
                 let _ = host.emit_log(EeLog {
                     emitter: EeIdentity {
                         ee: EeId::POLKAVM,
-                        id: contract.to_vec(),
+                        id: scope.contract.to_vec(),
                     },
                     topics: vec![topic.to_vec()],
                     data: val.to_vec(),
                 });
+            }
+            PolkaVmInsn::RequireOwner => {
+                let owner = host
+                    .read(scope.ns, &owner_key(scope.contract))
+                    .ok()
+                    .flatten();
+                if owner.as_deref() != Some(scope.caller.as_slice()) {
+                    return Err(b"CALLER_NOT_OWNER");
+                }
+            }
+            PolkaVmInsn::RequireCaller { id } => {
+                if id != *scope.caller {
+                    return Err(b"CALLER_NOT_ALLOWED");
+                }
             }
             PolkaVmInsn::SealReturnU32 { rs } => {
                 let val = regs.get(rs as usize).copied().unwrap_or(0).to_le_bytes();
@@ -369,15 +404,18 @@ impl ExecutionEnvironment for PolkaVmWorker {
             {
                 return Ok(ee_reverted(b"code write err".to_vec(), gas_used));
             }
-            match run_rv32em(
-                &ns,
-                &addr,
-                &prog.constructor,
-                &[],
-                &mut gas_used,
-                call.gas_limit,
-                host,
-            ) {
+            // The deployer is the owner. The constructor runs as the deployer, so a
+            // `RequireOwner` in it passes.
+            if host.write(&ns, &owner_key(&addr), Some(&caller32)).is_err() {
+                return Ok(ee_reverted(b"owner write err".to_vec(), gas_used));
+            }
+            let scope = PvmScope {
+                ns: &ns,
+                contract: &addr,
+                caller: &caller32,
+                gas_limit: call.gas_limit,
+            };
+            match run_rv32em(&scope, &prog.constructor, &[], &mut gas_used, host) {
                 Ok(_) => Ok(ee_success(addr.to_vec(), gas_used)),
                 Err(b"OUT_OF_GAS") => Ok(ee_out_of_gas(call.gas_limit)),
                 Err(r) => Ok(ee_reverted(r.to_vec(), gas_used)),
@@ -401,15 +439,13 @@ impl ExecutionEnvironment for PolkaVmWorker {
             let Some(disp) = prog.dispatches.iter().find(|d| d.selector == sel_slice) else {
                 return Ok(ee_reverted(b"unknown ink! selector".to_vec(), gas_used));
             };
-            match run_rv32em(
-                &ns,
-                &target32,
-                &disp.insns,
-                args_tail,
-                &mut gas_used,
-                call.gas_limit,
-                host,
-            ) {
+            let scope = PvmScope {
+                ns: &ns,
+                contract: &target32,
+                caller: &caller32,
+                gas_limit: call.gas_limit,
+            };
+            match run_rv32em(&scope, &disp.insns, args_tail, &mut gas_used, host) {
                 Ok(out) => Ok(ee_success(out, gas_used)),
                 Err(b"OUT_OF_GAS") => Ok(ee_out_of_gas(call.gas_limit)),
                 Err(r) => Ok(ee_reverted(r.to_vec(), gas_used)),
@@ -625,5 +661,178 @@ mod tests {
         assert_eq!(call_out.status, OutcomeStatus::Success);
         assert_eq!(call_out.output, 42u32.to_le_bytes());
         assert_eq!(host.logs.len(), 1);
+    }
+
+    fn ctx_open() -> BlockContext {
+        BlockContext {
+            chain_id: BUDLUM_TESTNET_CHAIN_ID,
+            height: PROPOSED_POLKAVM_ACTIVATION_HEIGHT,
+            timestamp_ms: 1_793_923_200_000,
+        }
+    }
+
+    fn deploy_as(
+        worker: &mut PolkaVmWorker,
+        host: &mut MemoryHost,
+        who: &EeIdentity,
+        prog: &PolkaVmProgram,
+    ) -> EeIdentity {
+        let Ok(blob) = encode_polkavm_blob(prog) else {
+            panic!("blob");
+        };
+        let Ok(dep) = worker.execute(
+            &ctx_open(),
+            &EeCall {
+                kind: EeCallKind::Deploy,
+                caller: who.clone(),
+                target: who.clone(),
+                value: BudAmount(0),
+                input: blob,
+                gas_limit: 500_000,
+                depth: 0,
+                tx_hash: [0x61; 32],
+            },
+            host,
+        ) else {
+            panic!("deploy");
+        };
+        assert_eq!(dep.status, OutcomeStatus::Success);
+        let Ok(contract) = EeIdentity::new(EeId::POLKAVM, dep.output) else {
+            panic!("contract");
+        };
+        contract
+    }
+
+    fn message(
+        worker: &mut PolkaVmWorker,
+        host: &mut MemoryHost,
+        who: &EeIdentity,
+        contract: &EeIdentity,
+        selector: [u8; 4],
+        word: u32,
+    ) -> EeOutcome {
+        let mut input = selector.to_vec();
+        input.extend_from_slice(&word.to_le_bytes());
+        let Ok(out) = worker.execute(
+            &ctx_open(),
+            &EeCall {
+                kind: EeCallKind::Call,
+                caller: who.clone(),
+                target: contract.clone(),
+                value: BudAmount(0),
+                input,
+                gas_limit: 500_000,
+                depth: 0,
+                tx_hash: [0x62; 32],
+            },
+            host,
+        ) else {
+            panic!("call");
+        };
+        out
+    }
+
+    fn stored(
+        worker: &PolkaVmWorker,
+        host: &MemoryHost,
+        contract: &EeIdentity,
+        slot: [u8; 32],
+    ) -> u32 {
+        let Ok(bytes) = worker.query(
+            &ctx_open(),
+            &EeQuery {
+                target: contract.clone(),
+                input: slot.to_vec(),
+            },
+            host,
+        ) else {
+            panic!("query");
+        };
+        <[u8; 4]>::try_from(bytes.as_slice()).map_or(0, u32::from_le_bytes)
+    }
+
+    /// The workers used to give a contract no way to read who called, so any account could drive
+    /// any message of any contract. A message now restricts itself to the owner, or to one named
+    /// account, and every message that does not say so stays public.
+    #[test]
+    fn a_contract_can_restrict_a_message_to_its_owner_and_leave_the_rest_public() {
+        let slot = [0x09u8; 32];
+        let bob_id = [0x12u8; 32];
+        let set = |guard: Option<PolkaVmInsn>| {
+            let mut insns: Vec<PolkaVmInsn> = guard.into_iter().collect();
+            insns.push(PolkaVmInsn::SealInputU32 {
+                rd: 0,
+                word_index: 0,
+            });
+            insns.push(PolkaVmInsn::SealSetStorageU32 { slot, rs: 0 });
+            insns
+        };
+        let public = [0, 0, 0, 1];
+        let admin = [0, 0, 0, 2];
+        let for_bob = [0, 0, 0, 3];
+        let prog = PolkaVmProgram {
+            constructor: vec![
+                PolkaVmInsn::LoadImm { rd: 0, imm: 10 },
+                PolkaVmInsn::SealSetStorageU32 { slot, rs: 0 },
+            ],
+            dispatches: vec![
+                PolkaVmDispatch {
+                    selector: public,
+                    insns: set(None),
+                },
+                PolkaVmDispatch {
+                    selector: admin,
+                    insns: set(Some(PolkaVmInsn::RequireOwner)),
+                },
+                PolkaVmDispatch {
+                    selector: for_bob,
+                    insns: set(Some(PolkaVmInsn::RequireCaller { id: bob_id })),
+                },
+            ],
+        };
+        let mut worker = PolkaVmWorker::new();
+        let mut host = MemoryHost::new(5_000_000);
+        let Ok(alice) = EeIdentity::new(EeId::POLKAVM, vec![0x11; 32]) else {
+            panic!("alice")
+        };
+        let Ok(bob) = EeIdentity::new(EeId::POLKAVM, bob_id.to_vec()) else {
+            panic!("bob")
+        };
+        let Ok(mallory) = EeIdentity::new(EeId::POLKAVM, vec![0x13; 32]) else {
+            panic!("mallory")
+        };
+        let contract = deploy_as(&mut worker, &mut host, &alice, &prog);
+        assert_eq!(stored(&worker, &host, &contract, slot), 10);
+
+        // A public message is open to anyone.
+        let out = message(&mut worker, &mut host, &mallory, &contract, public, 7);
+        assert_eq!(out.status, OutcomeStatus::Success);
+        assert_eq!(stored(&worker, &host, &contract, slot), 7);
+
+        // The owner-only message refuses everyone but the account that deployed the contract.
+        for stranger in [&mallory, &bob] {
+            let out = message(
+                &mut worker,
+                &mut host,
+                stranger,
+                &contract,
+                admin,
+                1_000_000,
+            );
+            assert_eq!(out.status, OutcomeStatus::Revert);
+            assert_eq!(out.output, b"CALLER_NOT_OWNER".to_vec());
+            assert_eq!(stored(&worker, &host, &contract, slot), 7);
+        }
+        let out = message(&mut worker, &mut host, &alice, &contract, admin, 9);
+        assert_eq!(out.status, OutcomeStatus::Success);
+        assert_eq!(stored(&worker, &host, &contract, slot), 9);
+
+        // A message for one named account refuses the owner too.
+        let out = message(&mut worker, &mut host, &alice, &contract, for_bob, 11);
+        assert_eq!(out.status, OutcomeStatus::Revert);
+        assert_eq!(out.output, b"CALLER_NOT_ALLOWED".to_vec());
+        let out = message(&mut worker, &mut host, &bob, &contract, for_bob, 13);
+        assert_eq!(out.status, OutcomeStatus::Success);
+        assert_eq!(stored(&worker, &host, &contract, slot), 13);
     }
 }

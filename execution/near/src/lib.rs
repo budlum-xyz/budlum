@@ -67,6 +67,11 @@ pub enum NearOp {
     },
     /// Aborts contract execution deterministically (`env::panic_str`).
     Panic { message: String },
+    /// `assert_eq!(env::predecessor_account_id(), owner_id)`: aborts unless the caller is the
+    /// account that deployed the contract. Put it first in a method that is not public.
+    RequireOwner,
+    /// `assert_eq!(env::predecessor_account_id(), id)`: aborts unless the caller is exactly `id`.
+    RequireCaller { id: Vec<u8> },
 }
 
 /// NEAR WASM contract method definition.
@@ -160,6 +165,14 @@ fn account_id_key(account_bytes: &[u8]) -> String {
 fn code_key(contract: &str) -> Vec<u8> {
     let mut k = Vec::with_capacity(5 + contract.len());
     k.extend_from_slice(b"code:");
+    k.extend_from_slice(contract.as_bytes());
+    k
+}
+
+/// The account that deployed the contract: the one `NearOp::RequireOwner` admits.
+fn owner_key(contract: &str) -> Vec<u8> {
+    let mut k = Vec::with_capacity(6 + contract.len());
+    k.extend_from_slice(b"owner:");
     k.extend_from_slice(contract.as_bytes());
     k
 }
@@ -284,6 +297,20 @@ fn run_near_ops(
                     .is_err()
                 {
                     return Err(b"storage write refused".to_vec());
+                }
+            }
+            NearOp::RequireOwner => {
+                let owner = host
+                    .read(scope.ns, &owner_key(scope.contract_id))
+                    .ok()
+                    .flatten();
+                if owner.as_deref() != Some(scope.caller_id) {
+                    return Err(b"caller is not the contract owner".to_vec());
+                }
+            }
+            NearOp::RequireCaller { id } => {
+                if id.as_slice() != scope.caller_id {
+                    return Err(b"caller is not the required account".to_vec());
                 }
             }
             NearOp::StorageReturn { key } => {
@@ -434,6 +461,17 @@ impl ExecutionEnvironment for NearWasmWorker {
             {
                 return Ok(ee_reverted(
                     b"failed to store NEAR contract".to_vec(),
+                    gas_used,
+                ));
+            }
+            // The deployer is the owner. The init ops run as the deployer, so a
+            // `RequireOwner` in them passes.
+            if host
+                .write(&ns, &owner_key(&contract_id), Some(&call.caller.id))
+                .is_err()
+            {
+                return Ok(ee_reverted(
+                    b"failed to record the NEAR contract owner".to_vec(),
                     gas_used,
                 ));
             }
@@ -658,5 +696,198 @@ mod tests {
             panic!("query");
         };
         assert_eq!(q_bytes, 15u64.to_le_bytes());
+    }
+
+    fn deploy_as(
+        worker: &mut NearWasmWorker,
+        host: &mut MemoryHost,
+        who: &EeIdentity,
+        prog: &NearContractProgram,
+    ) -> EeIdentity {
+        let Ok(blob) = encode_near_blob(prog) else {
+            panic!("blob");
+        };
+        let Ok(dep) = worker.execute(
+            &ctx(),
+            &EeCall {
+                kind: EeCallKind::Deploy,
+                caller: who.clone(),
+                target: who.clone(),
+                value: BudAmount(0),
+                input: blob,
+                gas_limit: 500_000,
+                depth: 0,
+                tx_hash: [0x31; 32],
+            },
+            host,
+        ) else {
+            panic!("deploy");
+        };
+        assert_eq!(dep.status, OutcomeStatus::Success);
+        let Ok(target) = EeIdentity::new(EeId::NEAR_WASM, dep.output) else {
+            panic!("target");
+        };
+        target
+    }
+
+    fn call_method(
+        worker: &mut NearWasmWorker,
+        host: &mut MemoryHost,
+        who: &EeIdentity,
+        target: &EeIdentity,
+        method: &str,
+        value: &[u8],
+    ) -> EeOutcome {
+        let mut args = BTreeMap::new();
+        args.insert(String::from("v"), value.to_vec());
+        let Ok(input) = serde_json::to_vec(&NearFunctionCall {
+            method_name: method.to_string(),
+            args,
+        }) else {
+            panic!("input");
+        };
+        let Ok(out) = worker.execute(
+            &ctx(),
+            &EeCall {
+                kind: EeCallKind::Call,
+                caller: who.clone(),
+                target: target.clone(),
+                value: BudAmount(0),
+                input,
+                gas_limit: 500_000,
+                depth: 0,
+                tx_hash: [0x32; 32],
+            },
+            host,
+        ) else {
+            panic!("call");
+        };
+        out
+    }
+
+    fn stored(worker: &NearWasmWorker, host: &MemoryHost, target: &EeIdentity) -> Vec<u8> {
+        let Ok(bytes) = worker.query(
+            &ctx(),
+            &EeQuery {
+                target: target.clone(),
+                input: b"value".to_vec(),
+            },
+            host,
+        ) else {
+            panic!("query");
+        };
+        bytes
+    }
+
+    /// The workers used to give a contract no way to read who called, so any account could drive
+    /// any method of any contract. A contract now restricts a method to its owner, or to one named
+    /// account, and every method that does not say so stays public.
+    #[test]
+    fn a_contract_can_restrict_a_method_to_its_owner_and_leave_the_rest_public() {
+        let set = |guard: Option<NearOp>| {
+            let mut ops: Vec<NearOp> = guard.into_iter().collect();
+            ops.push(NearOp::SetFromArg {
+                storage_key: String::from("value"),
+                arg_key: String::from("v"),
+            });
+            ops
+        };
+        let bob_id = b"bob.budlum".to_vec();
+        let prog = NearContractProgram {
+            abi_version: String::from("near-sdk-5"),
+            init_ops: vec![NearOp::StorageWrite {
+                key: String::from("value"),
+                value: b"init".to_vec(),
+            }],
+            methods: vec![
+                NearMethod {
+                    name: String::from("set_public"),
+                    is_view: false,
+                    ops: set(None),
+                },
+                NearMethod {
+                    name: String::from("set_admin"),
+                    is_view: false,
+                    ops: set(Some(NearOp::RequireOwner)),
+                },
+                NearMethod {
+                    name: String::from("set_for_bob"),
+                    is_view: false,
+                    ops: set(Some(NearOp::RequireCaller { id: bob_id.clone() })),
+                },
+            ],
+        };
+        let mut worker = NearWasmWorker::new();
+        let mut host = MemoryHost::new(5_000_000);
+        let Ok(alice) = EeIdentity::new(EeId::NEAR_WASM, b"alice.budlum".to_vec()) else {
+            panic!("alice")
+        };
+        let Ok(bob) = EeIdentity::new(EeId::NEAR_WASM, bob_id) else {
+            panic!("bob")
+        };
+        let Ok(mallory) = EeIdentity::new(EeId::NEAR_WASM, b"mallory.budlum".to_vec()) else {
+            panic!("mallory")
+        };
+        let target = deploy_as(&mut worker, &mut host, &alice, &prog);
+        assert_eq!(stored(&worker, &host, &target), b"init".to_vec());
+
+        // A public method is open to anyone.
+        let out = call_method(
+            &mut worker,
+            &mut host,
+            &mallory,
+            &target,
+            "set_public",
+            b"by-mallory",
+        );
+        assert_eq!(out.status, OutcomeStatus::Success);
+        assert_eq!(stored(&worker, &host, &target), b"by-mallory".to_vec());
+
+        // The owner-only method refuses everyone but the account that deployed the contract.
+        for stranger in [&mallory, &bob] {
+            let out = call_method(
+                &mut worker,
+                &mut host,
+                stranger,
+                &target,
+                "set_admin",
+                b"stolen",
+            );
+            assert_eq!(out.status, OutcomeStatus::Revert);
+            assert_eq!(out.output, b"caller is not the contract owner".to_vec());
+            assert_eq!(stored(&worker, &host, &target), b"by-mallory".to_vec());
+        }
+        let out = call_method(
+            &mut worker,
+            &mut host,
+            &alice,
+            &target,
+            "set_admin",
+            b"by-owner",
+        );
+        assert_eq!(out.status, OutcomeStatus::Success);
+        assert_eq!(stored(&worker, &host, &target), b"by-owner".to_vec());
+
+        // A method for one named account refuses the owner too.
+        let out = call_method(
+            &mut worker,
+            &mut host,
+            &alice,
+            &target,
+            "set_for_bob",
+            b"by-alice",
+        );
+        assert_eq!(out.status, OutcomeStatus::Revert);
+        assert_eq!(out.output, b"caller is not the required account".to_vec());
+        let out = call_method(
+            &mut worker,
+            &mut host,
+            &bob,
+            &target,
+            "set_for_bob",
+            b"by-bob",
+        );
+        assert_eq!(out.status, OutcomeStatus::Success);
+        assert_eq!(stored(&worker, &host, &target), b"by-bob".to_vec());
     }
 }
