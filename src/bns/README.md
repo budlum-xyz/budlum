@@ -87,7 +87,7 @@
   - **B9 ($O(\log N)$ per-name Merkle state proofs and browser verification):**
     upgrades `BnsRegistry::root()` (`BDLM_BNS_REGISTRY_V3`) to commit
     `meta_digest` (`BDLM_BNS_META_V1`) + binary `names_merkle_root`
-    (`BDLM_BNS_LEAF_V1`, `BDLM_BNS_EXTRAS_V1`, `BDLM_BNS_NODE_V1`), adds
+    (`BDLM_BNS_LEAF_V1`, `BDLM_BNS_EXTRAS_V2`, `BDLM_BNS_NODE_V1`), adds
     `prove_name` / `verify_state_proof` (supporting both inclusion and adjacent
     boundary non-existence proofs), upgrades `budlum-explorer`
     `BnsInclusionProof::PerName` to produce `Strength::Verified` against
@@ -96,7 +96,7 @@
   - **B10 (`wallet-core` `.bud` recipient validation and proof-verified transfers):**
     adds `crates/wallet-core/src/bns.rs` (`parse_recipient_input`,
     `WalletBnsProof`, `verify_bns_recipient_proof` authenticating custom
-    `record.address` via `BDLM_BNS_EXTRAS_V1` + `BDLM_BNS_LEAF_V1` +
+    `record.address` via `BDLM_BNS_EXTRAS_V2` + `BDLM_BNS_LEAF_V1` +
     `BDLM_BNS_REGISTRY_V3`), `UnsignedTransfer::to_verified_bud_recipient`, and
     transport-free `bud_bns{Resolve,ResolveFull,GetProof,ReverseResolve}` JSON-RPC
     builders/readers in `crates/wallet-core/src/rpc.rs`.
@@ -159,9 +159,10 @@
   - A subdomain is an owner pointer (`BTreeMap<String, Address>`). There is
     no `SubdomainRecord`, no `BnsSetSubdomainContent` and no subdomain content
     RPC, so a subdomain serves the content of its parent name.
-  - `NameRecord` still carries the unused `resolver` field and two content
-    fields (`content_id` and `bud3_content`). They are not merged into one
-    `ContentRef`.
+  - `NameRecord` carries two content fields (`content_id` and
+    `bud3_content`). They are not merged into one `ContentRef`. The unused
+    `resolver` field is gone, and the extras commitment that lost it is
+    `BDLM_BNS_EXTRAS_V2`.
   - The name tree is a binary Merkle tree over the sorted names with
     adjacent-leaf absence proofs. It is not a sparse Merkle tree and is
     recomputed from the rows, not updated incrementally.
@@ -192,7 +193,7 @@ root does not say.
   branch without a position still verifies for inclusion and is refused for
   non-inclusion.
 - **Extras ship their pre-image.** `BnsMerkleBranch::extras` is the
-  `BnsBranchExtras` the `extras_digest` commits to: resolver, address, both
+  `BnsBranchExtras` the `extras_digest` commits to: address, both
   domain ids, storage root height, the B.U.D. 3.0 reference, subdomains and
   records. `verify_state_proof` recomputes the digest from it and refuses the
   branch on any mismatch, and refuses a top-level `address` that contradicts
