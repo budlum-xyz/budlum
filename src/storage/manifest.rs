@@ -816,6 +816,12 @@ impl ContentManifest {
             if !seen.insert(s.index) {
                 return Err(format!("Duplicate shard index {}", s.index));
             }
+            if s.index >= self.shard_count {
+                return Err(format!(
+                    "Shard index {} is outside shard_count {}",
+                    s.index, self.shard_count
+                ));
+            }
             if self.erasure.n > self.erasure.k && !seen_ids.insert(s.shard_id) {
                 return Err(format!(
                     "Shard {} repeats the content id of another shard in the same code word",
@@ -855,6 +861,67 @@ impl ContentManifest {
                 "erasure k {} does not match the {data} data shards present",
                 self.erasure.k
             ));
+        }
+
+        // Sizes are economic and challenge inputs, not display metadata. Bind
+        // them to the only byte layout the declared scheme can emit before a
+        // manifest can be priced. Reed-Solomon emits one equal, padded stripe
+        // for every data and parity shard. Pure slicing emits equal chunks
+        // followed by at most one shorter tail chunk.
+        if self.erasure.n > self.erasure.k {
+            let stripe = u64::from(self.shards[0].size);
+            for shard in &self.shards {
+                if u64::from(shard.size) != stripe {
+                    return Err(format!(
+                        "Shard {} lists {} bytes; erasure code ({},{}) emits equal {stripe}-byte stripes",
+                        shard.index, shard.size, self.erasure.k, self.erasure.n
+                    ));
+                }
+                let expected_kind = if shard.index < self.erasure.k {
+                    ShardKind::Data
+                } else {
+                    ShardKind::Parity
+                };
+                if shard.kind != expected_kind {
+                    return Err(format!(
+                        "Shard {} is {:?}; erasure code ({},{}) requires {:?} at that index",
+                        shard.index, shard.kind, self.erasure.k, self.erasure.n, expected_kind
+                    ));
+                }
+            }
+            let content_size = self.content_size();
+            let first_byte_in_last_data_stripe =
+                u64::from(self.erasure.k.saturating_sub(1)).saturating_mul(stripe);
+            let data_capacity = u64::from(self.erasure.k).saturating_mul(stripe);
+            if content_size <= first_byte_in_last_data_stripe || content_size > data_capacity {
+                return Err(format!(
+                    "content_size {content_size} does not fit {} data stripes of {stripe} bytes",
+                    self.erasure.k
+                ));
+            }
+        } else {
+            if self.content_size() != self.total_size {
+                return Err(format!(
+                    "replicated/sliced content_size {} must equal stored total_size {}",
+                    self.content_size(),
+                    self.total_size
+                ));
+            }
+            let chunk = self
+                .shards
+                .iter()
+                .map(|shard| shard.size)
+                .max()
+                .unwrap_or(0);
+            let final_index = self.shard_count.saturating_sub(1);
+            for shard in &self.shards {
+                if shard.index != final_index && shard.size != chunk {
+                    return Err(format!(
+                        "Shard {} lists {} bytes; only final shard {final_index} may be shorter than the {chunk}-byte slice size",
+                        shard.index, shard.size
+                    ));
+                }
+            }
         }
         // An encryption claim is mostly unverifiable from a manifest: the
         // chain holds no bytes, so it cannot tell ciphertext from anything
@@ -1315,6 +1382,40 @@ mod tests {
         assert_eq!(replicated.shards.len(), 2);
         assert_eq!(replicated.shards[0].shard_id, replicated.shards[1].shard_id);
         assert!(replicated.validate_untrusted().is_ok());
+    }
+
+    #[test]
+    fn declared_shard_sizes_must_match_the_coders_layout() {
+        let scheme = ErasureScheme { k: 4, n: 6 };
+        let body: Vec<u8> = (0..33u8).collect();
+        let mut coded = crate::storage::erasure::encode_object(&body, scheme)
+            .unwrap()
+            .to_manifest()
+            .unwrap();
+        coded.shards[0].size -= 1;
+        coded.total_size -= 1;
+        coded.recompute_id();
+        let error = coded
+            .validate_untrusted()
+            .expect_err("one short code-word stripe must be refused");
+        assert!(error.contains("equal"), "{error}");
+
+        let mut sliced = ContentManifest::from_bytes_sliced(b"abcdefghijklmnopqrst", 8).unwrap();
+        assert_eq!(
+            sliced
+                .shards
+                .iter()
+                .map(|shard| shard.size)
+                .collect::<Vec<_>>(),
+            vec![8, 8, 4]
+        );
+        sliced.shards[0].size = 4;
+        sliced.shards[2].size = 8;
+        sliced.recompute_id();
+        let error = sliced
+            .validate_untrusted()
+            .expect_err("a short non-tail slice must be refused");
+        assert!(error.contains("only final shard"), "{error}");
     }
 
     #[test]

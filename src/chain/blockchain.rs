@@ -6826,10 +6826,6 @@ impl Blockchain {
     }
 
     pub fn handle_finality_cert(&mut self, cert: FinalityCert) -> Result<(), String> {
-        if cert.checkpoint_height <= self.finalized_height {
-            return Ok(());
-        }
-
         // Chain binding: the aggregated precommit signatures were produced
         // for `cert.chain_id`, and the pairing check rebuilds the preimage
         // from it. A certificate for another network is refused here rather
@@ -6851,6 +6847,71 @@ impl Blockchain {
             ));
         }
 
+        self.require_checkpoint_epoch(cert.epoch, cert.checkpoint_height, "Finality certificate")?;
+        let snapshot = self.require_validator_snapshot(cert.epoch)?;
+
+        // /: finality is the BLS certificate AND the ML-DSA QC of the
+        // same signers. At Isolate (Zemheri) the BLS half drops out: its curve
+        // fell, so a certificate it signed proves nothing. The QC alone
+        // decides, and it must carry the same stake and signer count quorum.
+        //
+        // Authentication deliberately precedes the local block lookup. The
+        // network treats a missing block or sibling hash as a free sync hint;
+        // checking availability first let any handshaked peer buy that work
+        // with an invalid aggregate signature. In quantum-alarm mode the BLS
+        // half is disabled, so the QC itself has to be verified before it can
+        // buy the same hint.
+        let bls_required = crate::security::alarm_effects::bls_required_for_finality(
+            self.state.settlement.quantum.alarm(),
+        );
+        let mut alarm_verified_blob = None;
+        if bls_required {
+            cert.verify(&snapshot)?;
+        } else {
+            if cert.set_hash != snapshot.set_hash {
+                return Err("Validator set hash mismatch".into());
+            }
+            if cert.epoch != snapshot.epoch {
+                return Err("Epoch mismatch".into());
+            }
+            let blob = match self.get_qc_blob(cert.checkpoint_height) {
+                Some(blob) => blob,
+                None => {
+                    let checkpoint_height = cert.checkpoint_height;
+                    self.queue_pending_finality_cert(cert);
+                    return Err(format!(
+                        "Missing verified QC blob for checkpoint {checkpoint_height}"
+                    ));
+                }
+            };
+            Self::ensure_blob_matches_checkpoint(&blob, &cert.checkpoint_hash)?;
+            let verified_signers = blob.verify_against_snapshot_in(
+                &self.state.scheme_registry,
+                &snapshot,
+                Some(&[]),
+                Some(self.state.epoch_index),
+            )?;
+            let stake: u128 = verified_signers
+                .iter()
+                .filter_map(|idx| snapshot.validators.get(*idx))
+                .map(|validator| u128::from(validator.stake))
+                .sum();
+            if stake < snapshot.quorum_stake() || verified_signers.len() < snapshot.quorum_count() {
+                return Err(format!(
+                    "ML-DSA QC quorum not met under the quantum alarm: {} signers, stake {stake}",
+                    verified_signers.len()
+                ));
+            }
+            alarm_verified_blob = Some(blob);
+        }
+
+        // A stale certificate changes nothing, but it is not accepted until
+        // its active finality scheme has authenticated it. This prevents an
+        // unverified old-height stream from earning peer reputation.
+        if cert.checkpoint_height <= self.finalized_height {
+            return Ok(());
+        }
+
         if let Some(block) = self.chain.get(cert.checkpoint_height as usize) {
             if block.hash != cert.checkpoint_hash {
                 return Err(format!(
@@ -6865,62 +6926,29 @@ impl Blockchain {
             ));
         }
 
-        self.require_checkpoint_epoch(cert.epoch, cert.checkpoint_height, "Finality certificate")?;
-        let snapshot = self.require_validator_snapshot(cert.epoch)?;
-
-        // /: finality is the BLS certificate AND the ML-DSA QC of the
-        // same signers. At Isolate (Zemheri) the BLS half drops out: its curve
-        // fell, so a certificate it signed proves nothing. The QC alone
-        // decides, and it must carry the same stake and signer count quorum.
-        let bls_required = crate::security::alarm_effects::bls_required_for_finality(
-            self.state.settlement.quantum.alarm(),
-        );
-        if bls_required {
-            cert.verify(&snapshot)?;
+        let blob = if let Some(blob) = alarm_verified_blob {
+            blob
         } else {
-            if cert.set_hash != snapshot.set_hash {
-                return Err("Validator set hash mismatch".into());
-            }
-            if cert.epoch != snapshot.epoch {
-                return Err("Epoch mismatch".into());
-            }
-        }
-
-        let blob = match self.get_qc_blob(cert.checkpoint_height) {
-            Some(blob) => blob,
-            None => {
-                let checkpoint_height = cert.checkpoint_height;
-                self.queue_pending_finality_cert(cert);
-                return Err(format!(
-                    "Missing verified QC blob for checkpoint {checkpoint_height}"
-                ));
-            }
+            let blob = match self.get_qc_blob(cert.checkpoint_height) {
+                Some(blob) => blob,
+                None => {
+                    let checkpoint_height = cert.checkpoint_height;
+                    self.queue_pending_finality_cert(cert);
+                    return Err(format!(
+                        "Missing verified QC blob for checkpoint {checkpoint_height}"
+                    ));
+                }
+            };
+            Self::ensure_blob_matches_checkpoint(&blob, &cert.checkpoint_hash)?;
+            let signer_indices = cert.signer_indices(snapshot.validators.len());
+            blob.verify_against_snapshot_in(
+                &self.state.scheme_registry,
+                &snapshot,
+                Some(&signer_indices),
+                Some(self.state.epoch_index),
+            )?;
+            blob
         };
-        Self::ensure_blob_matches_checkpoint(&blob, &cert.checkpoint_hash)?;
-        let signer_indices = if bls_required {
-            cert.signer_indices(snapshot.validators.len())
-        } else {
-            Vec::new()
-        };
-        let verified_signers = blob.verify_against_snapshot_in(
-            &self.state.scheme_registry,
-            &snapshot,
-            Some(&signer_indices),
-            Some(self.state.epoch_index),
-        )?;
-        if !bls_required {
-            let stake: u128 = verified_signers
-                .iter()
-                .filter_map(|idx| snapshot.validators.get(*idx))
-                .map(|validator| u128::from(validator.stake))
-                .sum();
-            if stake < snapshot.quorum_stake() || verified_signers.len() < snapshot.quorum_count() {
-                return Err(format!(
-                    "ML-DSA QC quorum not met under the quantum alarm: {} signers, stake {stake}",
-                    verified_signers.len()
-                ));
-            }
-        }
         self.maybe_apply_detected_qc_faults(&snapshot, &blob)?;
 
         self.finalized_height = cert.checkpoint_height;

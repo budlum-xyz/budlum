@@ -3015,6 +3015,7 @@ mod tests {
                     domain_id: 7,
                     manifest_id: crate::storage::ContentId([1u8; 32]),
                     shard_id: crate::storage::ContentId([2u8; 32]),
+                    shard_size: 512,
                     operator: to,
                     replica_index: 1,
                     start_epoch: 3,
