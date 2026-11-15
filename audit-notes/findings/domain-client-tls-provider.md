@@ -2,7 +2,7 @@
 
 - **Identifier:** B-0003
 - **Severity:** high (the tool cannot submit at all; it is a crash, not a wrong answer)
-- **Status:** fix in the PR #110 working tree, awaiting the green re-run. The failure was observed on the tree before the fix (see "Observed evidence"), and observed again after an insufficient first attempt (see "The first attempt did not work"). No passing run is captured yet.
+- **Status:** fixed and green locally on `testnet-quantum` as `f4619898` (rebased onto `10dea2c2`), not pushed at the time of writing, no CI result. The failure was observed on the tree before the fix (see "Observed evidence"), and observed again after an insufficient first attempt (see "The first attempt did not work"). No passing run is captured yet.
 - **Related:** PR #110 adds these two binaries; they do not exist on captured `main`.
 
 ## Location
@@ -80,7 +80,7 @@ test tests::submission_checks_the_network_before_signing_or_sending ... FAILED
 test result: FAILED. 3 passed; 1 failed
 ```
 
-The reporter binary failed identically in the same stage run (`tests::submission_checks_the_network_before_signing_or_sending ... FAILED`, 4 passed, 1 failed). Both failures were observed before any install line existed; the two fix attempts and their re-runs are recorded in the report.
+The reporter binary failed identically in the same stage run (`tests::submission_checks_the_network_before_signing_or_sending ... FAILED`, 4 passed, 1 failed). Both failures were observed before any install line existed. After the fix: `cargo test --bin budlum-domain-producer` 2 passed, `cargo test --bin budlum-domain-reporter` 2 passed, each including `submission_checks_the_network_before_signing_or_sending`.
 
 ## Note on why the unit tests missed it
 

@@ -2,7 +2,7 @@
 
 - **Identifier:** B-0004
 - **Severity:** medium (as reported by Strix on PR #110 head `ea384116`; the bond of a well-behaved operator is at risk, not chain state)
-- **Status:** fix in the PR #110 working tree on top of `ea384116`, verification running. No CI result and no push yet at the time of writing.
+- **Status:** fixed locally on `testnet-quantum` as `f4619898` (rebased onto head `10dea2c2`), not yet pushed and with no CI result. Local evidence below.
 - **Origin:** Strix inline finding `1d0558c0-cfdd-444f-86e5-336c180bc96a` on PR #110, three comments at 2026-11-15T15:04Z. Independently traced in the code below; the trace agrees with the report.
 
 ## Location
@@ -54,4 +54,4 @@ The change is wire-visible: it alters the consent preimage and the signed transa
 - `the_repair_consent_digest_commits_the_shard_size` — two accepts differing only in `shard_size` produce different consent digests and different transaction hashes.
 - `a_repair_acceptance_must_name_the_size_the_manifest_lists` — an otherwise valid, correctly signed acceptance naming `listed_size + 1` is refused with `consent names N bytes but the registered shard's entry is M`, the state root does not move, and no replacement deal is opened.
 
-Both tests are in `src/domain/storage_tx.rs` and run under the `wallet-ml-dsa` feature. The red-before-fix direction is structural rather than observed: before the change the field did not exist, so the mismatched consent could not be expressed at all — the compiler refuses the old test. What the tests pin is that the *new* field is inside both preimages and that the chain enforces it.
+Both tests are in `src/domain/storage_tx.rs` and run under the `wallet-ml-dsa` feature. Local run on the patched tree: `cargo test --lib storage_tx` -> 74 passed, `cargo test --lib core::transaction` -> 54 passed, both domain-client binaries -> 2 passed each, `cargo fmt --all -- --check` clean. The red-before-fix direction is structural rather than observed: before the change the field did not exist, so the mismatched consent could not be expressed at all — the compiler refuses the old test. What the tests pin is that the *new* field is inside both preimages and that the chain enforces it.
