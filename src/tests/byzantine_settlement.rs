@@ -543,7 +543,7 @@ mod byzantine_settlement_tests {
 
         let alice = Address::from([0xA1u8; 32]);
         let mut harness = BlockHarness::open(path_str);
-        let pow = harness.operated_domain(1);
+        let pow = harness.operated_domain(101);
         harness.register_domain(pow.clone());
 
         let mut block = Block::new(1, "h1".to_string(), vec![]);
@@ -554,7 +554,7 @@ mod byzantine_settlement_tests {
         assert_eq!(harness.chain.state.get_nonce(&alice), 1);
 
         let harness = harness.restart();
-        assert!(harness.chain.state.settlement.domains.get(1).is_some());
+        assert!(harness.chain.state.settlement.domains.get(101).is_some());
         assert_eq!(harness.chain.state.settlement.commitments.len(), 0);
         assert_eq!(harness.chain.state.get_nonce(&alice), 0);
     }
