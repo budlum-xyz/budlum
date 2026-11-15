@@ -2265,3 +2265,211 @@ fn bns_set_subdomain_content_belongs_to_the_subdomain_owner() {
         None
     );
 }
+
+// Every BNS transaction type, signed by an address that owns nothing here.
+// Each one is refused, and the refusal leaves the whole state root, the
+// signer's balance and the signer's nonce where they were. One row per type,
+// so a new type without a row is visible in review.
+#[test]
+fn bns_every_door_refuses_a_stranger_and_leaves_the_state_untouched() {
+    use crate::bns::{CreateNameOffer, OfferKind};
+
+    let owner_key = KeyPair::from_seed(&[31u8; 32]).unwrap();
+    let owner = Address::from(owner_key.public_key_bytes());
+    let sub_key = KeyPair::from_seed(&[32u8; 32]).unwrap();
+    let sub_owner = Address::from(sub_key.public_key_bytes());
+    let stranger_key = KeyPair::from_seed(&[33u8; 32]).unwrap();
+    let stranger = Address::from(stranger_key.public_key_bytes());
+    let name = "matrix.bud".to_string();
+    let storage_root = [0x6C; 32];
+    let storage_domain = 9u32;
+
+    let mut state = AccountState::new();
+    state.epoch_index = 1;
+    for who in [&owner, &sub_owner, &stranger] {
+        state.add_balance(who, 1_000_000);
+    }
+    state
+        .bns_registry
+        .register(name.clone(), owner, 1, 100)
+        .unwrap();
+    state
+        .bns_registry
+        .register_subdomain(&name, "app".to_string(), sub_owner, &owner, 1)
+        .unwrap();
+    assert!(state.anchor_external_root(storage_domain, storage_root));
+
+    // The owner lists the name, so there is an offer to cancel and to buy.
+    let mut listing = lifecycle_tx(
+        owner,
+        0,
+        1,
+        0,
+        TransactionType::BnsCreateOffer,
+        bincode::serialize(&CreateNameOffer {
+            name: name.clone(),
+            price_atoms: 5_000,
+            duration: 0,
+            kind: OfferKind::Resale,
+            expires_at_epoch: 60,
+        })
+        .unwrap(),
+    );
+    listing.sign(&owner_key);
+    Executor::apply_transaction_checked(&mut state, &listing).unwrap();
+
+    let rows: Vec<(&str, TransactionType, u64, Vec<u8>)> = vec![
+        (
+            "resale offer for a name of someone else",
+            TransactionType::BnsCreateOffer,
+            0,
+            bincode::serialize(&CreateNameOffer {
+                name: name.clone(),
+                price_atoms: 1,
+                duration: 0,
+                kind: OfferKind::Resale,
+                expires_at_epoch: 60,
+            })
+            .unwrap(),
+        ),
+        (
+            "primary offer by an address that is no primary seller",
+            TransactionType::BnsCreateOffer,
+            0,
+            bincode::serialize(&CreateNameOffer {
+                name: "fresh.bud".to_string(),
+                price_atoms: 1,
+                duration: 100,
+                kind: OfferKind::Primary,
+                expires_at_epoch: 60,
+            })
+            .unwrap(),
+        ),
+        (
+            "cancel the offer of someone else",
+            TransactionType::BnsCancelOffer,
+            0,
+            bincode::serialize(&1u64).unwrap(),
+        ),
+        (
+            "buy below the price",
+            TransactionType::BnsBuyName,
+            4_999,
+            bincode::serialize(&1u64).unwrap(),
+        ),
+        (
+            "renew",
+            TransactionType::BnsRenew,
+            0,
+            bincode::serialize(&(name.clone(), 20u64)).unwrap(),
+        ),
+        (
+            "transfer",
+            TransactionType::BnsTransfer,
+            0,
+            bincode::serialize(&(name.clone(), stranger)).unwrap(),
+        ),
+        (
+            "set address",
+            TransactionType::BnsSetAddress,
+            0,
+            bincode::serialize(&(name.clone(), Some(stranger), None::<u32>)).unwrap(),
+        ),
+        (
+            "claim as primary name",
+            TransactionType::BnsSetPrimaryName,
+            0,
+            bincode::serialize(&Some(name.clone())).unwrap(),
+        ),
+        (
+            "set records",
+            TransactionType::BnsSetRecords,
+            0,
+            bincode::serialize(&(
+                name.clone(),
+                std::collections::BTreeMap::from([(
+                    "url".to_string(),
+                    Some("https://example.org".to_string()),
+                )]),
+            ))
+            .unwrap(),
+        ),
+        (
+            "set content",
+            TransactionType::BnsSetContent,
+            0,
+            bincode::serialize(&(
+                name.clone(),
+                crate::storage::content_id::ContentId([0x11; 32]),
+            ))
+            .unwrap(),
+        ),
+        (
+            "clear the B.U.D. 3.0 content",
+            TransactionType::BnsSetBud3Content,
+            0,
+            bincode::serialize(&(
+                name.clone(),
+                None::<crate::storage::bud3::content_ref::ContentRef>,
+            ))
+            .unwrap(),
+        ),
+        (
+            "register a subdomain",
+            TransactionType::BnsRegisterSubdomain,
+            0,
+            bincode::serialize(&(name.clone(), "new".to_string(), stranger)).unwrap(),
+        ),
+        (
+            "remove a subdomain",
+            TransactionType::BnsRemoveSubdomain,
+            0,
+            bincode::serialize(&(name.clone(), "app".to_string())).unwrap(),
+        ),
+        (
+            "clear the content of a subdomain",
+            TransactionType::BnsSetSubdomainContent,
+            0,
+            bincode::serialize(&(
+                name.clone(),
+                "app".to_string(),
+                None::<crate::storage::content_id::ContentId>,
+            ))
+            .unwrap(),
+        ),
+        (
+            "set storage to a finalized root",
+            TransactionType::BnsSetStorage,
+            0,
+            bincode::serialize(&(name.clone(), storage_root, storage_domain)).unwrap(),
+        ),
+    ];
+
+    let root_before = state.calculate_state_root();
+    let bns_before = state.bns_registry.root();
+    for (what, tx_type, amount, data) in rows {
+        let mut tx = lifecycle_tx(stranger, amount, 1, 0, tx_type, data);
+        tx.sign(&stranger_key);
+        assert!(
+            Executor::apply_transaction_checked(&mut state, &tx).is_err(),
+            "a stranger could {what}"
+        );
+        assert_eq!(state.get_nonce(&stranger), 0, "nonce moved: {what}");
+        assert_eq!(
+            state.get_balance(&stranger),
+            1_000_000,
+            "balance moved: {what}"
+        );
+        assert_eq!(
+            state.bns_registry.root(),
+            bns_before,
+            "names changed: {what}"
+        );
+        assert_eq!(
+            state.calculate_state_root(),
+            root_before,
+            "state changed: {what}"
+        );
+    }
+    assert_eq!(state.bns_registry.resolve(&name, 2), Some(owner));
+}

@@ -772,6 +772,12 @@ pub trait BudlumApi {
     #[method(name = "bud_bnsGetProof")]
     async fn bns_get_proof(&self, name: String) -> Result<serde_json::Value, ErrorObjectOwned>;
 
+    /// The same proof as `bud_bnsGetProof`, under the short name: the
+    /// record, the proof path, the state root and the block height, or a
+    /// proof that the name is absent.
+    #[method(name = "bud_bnsProof")]
+    async fn bns_proof(&self, name: String) -> Result<serde_json::Value, ErrorObjectOwned>;
+
     /// Prepare a signed `BnsSetAddress` forwarding/target update transaction.
     #[method(name = "bud_bnsPrepareSetAddress")]
     async fn bns_prepare_set_address(
@@ -789,6 +795,19 @@ pub trait BudlumApi {
         caller: String,
         name: Option<String>,
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// The same template as `bud_bnsPrepareSetPrimaryName`, under the short name.
+    #[method(name = "bud_bnsPrepareSetPrimary")]
+    async fn bns_prepare_set_primary(
+        &self,
+        caller: String,
+        name: Option<String>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// The same answer as `bud_bnsReverseResolve`, under the short name: the
+    /// primary name of an address, only when the name resolves back to it.
+    #[method(name = "bud_bnsReverse")]
+    async fn bns_reverse(&self, address: String) -> Result<Option<String>, ErrorObjectOwned>;
 
     /// Read all text/profile/multi-chain records of a live `.bud` name (`null` if unknown/expired).
     #[method(name = "bud_bnsGetRecords")]

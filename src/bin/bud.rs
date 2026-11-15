@@ -675,7 +675,8 @@ enum BnsAction {
         #[arg(long, required = true)]
         name: String,
     },
-    /// Register or update a subdomain `<sub_label>.<parent>` under a live `.bud` name.
+    /// Register a subdomain `<sub_label>.<parent>` under a live `.bud` name.
+    /// A label that exists is refused; remove it first.
     SetSubdomain {
         #[command(flatten)]
         signer: V5Signer,
@@ -694,6 +695,19 @@ enum BnsAction {
         parent: String,
         #[arg(long, required = true)]
         sub: String,
+    },
+    /// Set or clear the content a subdomain serves. Signed by the owner of
+    /// the subdomain, not by the owner of the parent name.
+    SetSubdomainContent {
+        #[command(flatten)]
+        signer: V5Signer,
+        #[arg(long, required = true)]
+        parent: String,
+        #[arg(long, required = true)]
+        sub: String,
+        /// Content id, 32 bytes of hex. Leave it out to clear the content.
+        #[arg(long)]
+        content: Option<String>,
     },
     /// List all subdomains under a live `.bud` parent name.
     ListSubdomains {
@@ -2797,6 +2811,47 @@ fn run_bns_set_subdomain(
     )
 }
 
+fn run_bns_set_subdomain_content(
+    rpc_url: &str,
+    signer: &V5Signer,
+    parent: &str,
+    sub: &str,
+    content: Option<&str>,
+) -> Result<(), String> {
+    let content = match content {
+        None => None,
+        Some(text) => {
+            let bytes = hex::decode(text.strip_prefix("0x").unwrap_or(text))
+                .map_err(|e| format!("--content is not hex: {e}"))?;
+            let id = <[u8; 32]>::try_from(bytes.as_slice())
+                .map_err(|_| "--content must be 32 bytes of hex".to_string())?;
+            Some(budlum_core::storage::content_id::ContentId(id))
+        }
+    };
+    let key = open_wallet(signer)?;
+    // The node refuses a malformed request here, before anything is signed.
+    let _prepared = rpc_call(
+        rpc_url,
+        "bud_bnsPrepareSetSubdomainContent",
+        serde_json::json!([
+            parent,
+            sub,
+            key.address().to_hex(),
+            content.map(|c| hex::encode(c.0))
+        ]),
+    )?;
+    let data = bincode::serialize(&(parent.to_string(), sub.to_string(), content))
+        .map_err(|e| e.to_string())?;
+    send_bns(
+        rpc_url,
+        signer,
+        &key,
+        TransactionType::BnsSetSubdomainContent,
+        0,
+        data,
+    )
+}
+
 fn run_bns_remove_subdomain(
     rpc_url: &str,
     signer: &V5Signer,
@@ -3864,6 +3919,14 @@ fn main() {
                 parent,
                 sub,
             } => run_bns_remove_subdomain(&cli.rpc_url, signer, parent, sub),
+            BnsAction::SetSubdomainContent {
+                signer,
+                parent,
+                sub,
+                content,
+            } => {
+                run_bns_set_subdomain_content(&cli.rpc_url, signer, parent, sub, content.as_deref())
+            }
             BnsAction::ListSubdomains { parent } => run_bns_list_subdomains(&cli.rpc_url, parent),
             BnsAction::SetBud3 {
                 signer,
