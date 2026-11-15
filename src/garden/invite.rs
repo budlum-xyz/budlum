@@ -200,7 +200,7 @@ mod tests {
         let invite = GardenInvite::new(&g, token, vec!["/ip4/1.2.3.4/tcp/1".into()]).unwrap();
         let other = genesis(&token);
         assert!(invite.accepts(&other).is_err());
-        let mut wrong_token = invite.clone();
+        let mut wrong_token = invite;
         wrong_token.token = [4u8; 32];
         let refusal = wrong_token.accepts(&g).unwrap_err();
         assert!(refusal.contains("does not belong"), "{refusal}");

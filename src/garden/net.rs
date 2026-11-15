@@ -203,6 +203,7 @@ pub enum NetCommand {
         channel: request_response::ResponseChannel<Vec<u8>>,
         response: GardenResponse,
     },
+    /// Close every connection to a peer.
     Disconnect(PeerId),
     Shutdown,
 }
@@ -278,7 +279,7 @@ pub async fn start(secret_key: [u8; 32], listen: &str) -> Result<GardenNet, Stri
             ),
         })
         .map_err(|e| format!("garden behaviour cannot start: {e}"))?
-        .with_swarm_config(|cfg| cfg.with_idle_connection_timeout(Duration::from_secs(120)))
+        .with_swarm_config(|cfg| cfg.with_idle_connection_timeout(Duration::from_mins(2)))
         .build();
     swarm
         .listen_on(listen)

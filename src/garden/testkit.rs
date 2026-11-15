@@ -83,10 +83,18 @@ impl Net {
     }
 
     pub(crate) fn block(&mut self, txs: Vec<SignedGardenTx>) -> Result<GardenBlock, String> {
+        self.block_in_round(txs, 0)
+    }
+
+    pub(crate) fn block_in_round(
+        &mut self,
+        txs: Vec<SignedGardenTx>,
+        round: u64,
+    ) -> Result<GardenBlock, String> {
         self.clock += 10;
         let state = &self.ledger.state;
-        let proposer = state.leader(0).ok_or("no leader")?;
-        let (header, _) = state.build_header(&txs, proposer, 0, self.clock)?;
+        let proposer = state.leader(round).ok_or("no leader")?;
+        let (header, _) = state.build_header(&txs, proposer, round, self.clock)?;
         let proposer_signature = self.key(&proposer).sign(&header.hash()).to_vec();
         Ok(GardenBlock {
             header,
