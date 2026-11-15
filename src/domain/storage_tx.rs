@@ -25,7 +25,7 @@ use crate::domain::deal_open::{
 };
 use crate::domain::storage_deal::{
     ChallengeOutcome, DealStatus, OperatorClass, RetrievalChallengeRequest, StorageEconomicsParams,
-    StorageError, StorageRegistry,
+    StorageError, StorageReallocationTicket, StorageRegistry,
 };
 use crate::domain::storage_params::STORAGE_MIN_OPERATOR_BOND;
 use crate::domain::Hash32;
@@ -507,6 +507,58 @@ pub fn accept_reallocation_consent_digest(
     ])
 }
 
+/// Build the repair-acceptance consent digest on the replacement operator side,
+/// after measuring the exact shard bytes the operator will be challenged for.
+///
+/// This is the signing boundary, whereas [`accept_reallocation_consent_digest`]
+/// is the deterministic consensus preimage. Measuring `shard_bytes` against the
+/// ticket's `shard_id`, the registered manifest's listed `shard.size`, and
+/// `accept.shard_size` prevents an operator client from consenting to a
+/// manifest size that disagrees with the real bytes it holds.
+///
+/// WIRING: the operator-side repair consent signer will call this boundary
+/// before signing a `StorageReallocationAccept`; the in-block consensus check
+/// calls `accept_reallocation_consent_digest` directly.
+///
+/// # Errors
+///
+/// A ticket mismatch, malformed manifest, wrong manifest/shard, or a
+/// measured/listed/declared length mismatch.
+pub fn operator_accept_reallocation_consent_digest(
+    chain_id: u64,
+    payer: &Address,
+    nonce: u64,
+    accept: &StorageReallocationAccept,
+    ticket: &StorageReallocationTicket,
+    manifest: &ContentManifest,
+    shard_bytes: &[u8],
+) -> Result<[u8; 32], String> {
+    if ticket.ticket_id != accept.ticket_id {
+        return Err("repair consent ticket does not match the acceptance ticket_id".into());
+    }
+    manifest.validate_untrusted()?;
+    if manifest.manifest_id != ticket.manifest_id {
+        return Err("repair consent manifest does not match the ticket manifest".into());
+    }
+    let measured_id = ContentId::of(shard_bytes);
+    if measured_id != ticket.shard_id {
+        return Err("repair consent bytes do not hash to the ticket shard id".into());
+    }
+    let shard = manifest
+        .shard(&ticket.shard_id)
+        .ok_or_else(|| "repair consent shard is not listed by the manifest".to_string())?;
+    let measured = u64::try_from(shard_bytes.len()).unwrap_or(u64::MAX);
+    if measured != u64::from(shard.size) || accept.shard_size != shard.size {
+        return Err(format!(
+            "repair consent measured {measured} shard bytes, manifest lists {}, acceptance names {}",
+            shard.size, accept.shard_size
+        ));
+    }
+    Ok(accept_reallocation_consent_digest(
+        chain_id, payer, nonce, accept,
+    ))
+}
+
 fn accept_reallocation(
     state: &mut AccountState,
     ctx: &StorageTxContext,
@@ -843,6 +895,10 @@ pub fn open_deal_consent_digest(
 /// operator client from signing a listed size merely because the shard id
 /// matched: hash identity and length must both match before the bond is put at
 /// risk.
+///
+/// WIRING: the operator-side deal consent signer will call this boundary before
+/// signing a `StorageDealOpen`; the in-block consensus check calls
+/// `open_deal_consent_digest` directly.
 ///
 /// # Errors
 ///
@@ -2888,5 +2944,102 @@ mod tests {
             StorageTxError::DealManifestNotOwned { sender: attacker }
         );
         assert_eq!(state.storage_registry.proven_owner_of(&mid), Some(alice));
+    }
+
+    #[test]
+    fn operator_accept_reallocation_consent_digest_validates_measured_shard_bytes() {
+        use crate::domain::storage_deal::{ReallocationCause, ReallocationStatus};
+        use crate::storage::ShardRef;
+
+        let payer = owner();
+        let replacement = Address::from([0x77; 32]);
+        let shard_bytes = vec![0x5Au8; 4096];
+        let shard = ShardRef::from_bytes(0, &shard_bytes);
+        let shard_id = shard.shard_id;
+        let manifest = ContentManifest::from_shards(vec![shard])
+            .unwrap()
+            .with_owner(payer);
+
+        let ticket = StorageReallocationTicket {
+            ticket_id: 42,
+            failed_deal_id: 7,
+            replacement_deal_id: None,
+            domain_id: 1,
+            manifest_id: manifest.manifest_id,
+            shard_id,
+            replica_index: 0,
+            slashed_operator: Address::from([0x88; 32]),
+            opened_epoch: 10,
+            deadline_epoch: 50,
+            status: ReallocationStatus::Pending,
+            expected_holder: None,
+            cause: ReallocationCause::FailedDeal,
+        };
+
+        let accept = StorageReallocationAccept {
+            ticket_id: 42,
+            shard_size: shard_bytes.len() as u32,
+            replacement_operator: replacement,
+            start_epoch: 11,
+            end_epoch: 100,
+            economics: StorageEconomicsParams {
+                operator_bond: STORAGE_MIN_OPERATOR_BOND,
+                fee_per_byte_epoch: 10,
+            },
+            merkle_proof: proof(),
+            storage_root: [0x33; 32],
+            operator_consent: GrantAuthorization {
+                owner_key: [0u8; 2592],
+                signature: Vec::new(),
+            },
+        };
+
+        let digest = operator_accept_reallocation_consent_digest(
+            45262,
+            &payer,
+            5,
+            &accept,
+            &ticket,
+            &manifest,
+            &shard_bytes,
+        )
+        .expect("matching ticket, manifest, and measured bytes must produce digest");
+        assert_eq!(
+            digest,
+            accept_reallocation_consent_digest(45262, &payer, 5, &accept)
+        );
+
+        // Tampered manifest listing a larger shard size than the real bytes must be refused.
+        let mut lied_manifest = manifest.clone();
+        lied_manifest.shards[0].size = 8192;
+        lied_manifest.total_size = 8192;
+        let mut lied_accept = accept.clone();
+        lied_accept.shard_size = 8192;
+        assert!(
+            operator_accept_reallocation_consent_digest(
+                45262,
+                &payer,
+                5,
+                &lied_accept,
+                &ticket,
+                &lied_manifest,
+                &shard_bytes,
+            )
+            .is_err(),
+            "manifest whose listed shard.size disagrees with measured shard_bytes must be refused"
+        );
+
+        // Wrong shard bytes must also be refused.
+        let wrong_bytes = vec![0x99u8; 4096];
+        assert!(operator_accept_reallocation_consent_digest(
+            45262,
+            &payer,
+            5,
+            &accept,
+            &ticket,
+            &manifest,
+            &wrong_bytes,
+        )
+        .is_err());
     }
 }

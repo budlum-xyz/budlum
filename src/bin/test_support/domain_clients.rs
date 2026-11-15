@@ -1,4 +1,7 @@
 //! Fixtures for exercising the domain client signing boundary over HTTP.
+//!
+//! Convenience: shared `#[cfg(test)]` fixture included by `budlum-domain-producer`
+//! and `budlum-domain-reporter` binary test suites.
 
 use budlum_core::core::transaction::Transaction;
 use budlum_core::domain::{
