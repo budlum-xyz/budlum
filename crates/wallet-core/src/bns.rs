@@ -10,7 +10,7 @@
 
 use sha2::{Digest, Sha256};
 
-/// Maximum `extras_preimage` byte size accepted when opening `BDLM_BNS_EXTRAS_V2`.
+/// Maximum `extras_preimage` byte size accepted when opening `BDLM_BNS_EXTRAS_V3`.
 pub const MAX_EXTRAS_PREIMAGE_BYTES: usize = 65_536;
 
 /// Parsed transfer recipient input entered by a wallet user.
@@ -116,7 +116,7 @@ pub struct WalletBnsProof {
     pub content_id: Option<[u8; 32]>,
     pub storage_root: Option<[u8; 32]>,
     pub extras_digest: [u8; 32],
-    /// Optional raw body committed after `b"BDLM_BNS_EXTRAS_V2"`. When supplied,
+    /// Optional raw body committed after `b"BDLM_BNS_EXTRAS_V3"`. When supplied,
     /// `verify_bns_recipient_proof_from_header` verifies the digest against a
     /// trusted header root and extracts the authenticated `record.address`;
     /// when absent, the proof can authenticate `owner` directly.
@@ -208,13 +208,13 @@ fn parse_address_from_extras_preimage(
         return Err("extras_preimage exceeds maximum size".into());
     }
     let mut hasher = Sha256::new();
-    hasher.update(b"BDLM_BNS_EXTRAS_V2");
+    hasher.update(b"BDLM_BNS_EXTRAS_V3");
     hasher.update(preimage);
     let actual: [u8; 32] = hasher.finalize().into();
     if &actual != expected_extras_digest {
         return Err("extras_preimage does not match leaf extras_digest".into());
     }
-    // Layout prefix of BDLM_BNS_EXTRAS_V2:
+    // Layout prefix of BDLM_BNS_EXTRAS_V3:
     //   address:  0u8 | (1u8 || [u8; 32])
     match preimage.first().copied() {
         None => Err("truncated extras_preimage before address tag".into()),
@@ -247,7 +247,7 @@ fn parse_address_from_extras_preimage(
 /// the crate is [`verify_bns_recipient_proof_from_header`], which reads both from a
 /// header the wallet trusts.
 ///
-/// * If `proof.extras_preimage` is `Some(bytes)`, verifies `BDLM_BNS_EXTRAS_V2`
+/// * If `proof.extras_preimage` is `Some(bytes)`, verifies `BDLM_BNS_EXTRAS_V3`
 ///   and extracts the authenticated `record.address` forwarding target (failing
 ///   closed if `record.address` was cleared or zero).
 /// * If `proof.extras_preimage` is `None`, returns the authenticated `owner`
@@ -658,7 +658,7 @@ mod tests {
         buf.extend_from_slice(&0u64.to_le_bytes()); // records = 0
 
         let mut hasher = Sha256::new();
-        hasher.update(b"BDLM_BNS_EXTRAS_V2");
+        hasher.update(b"BDLM_BNS_EXTRAS_V3");
         hasher.update(&buf);
         (buf, hasher.finalize().into())
     }

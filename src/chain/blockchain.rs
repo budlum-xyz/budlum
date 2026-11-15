@@ -601,6 +601,9 @@ impl Blockchain {
                 TransactionType::BnsRemoveSubdomain => {
                     m.bns_remove_subdomain_total.inc();
                 }
+                TransactionType::BnsSetSubdomainContent => {
+                    m.bns_set_subdomain_content_total.inc();
+                }
                 TransactionType::BnsSetStorage => {
                     m.bns_set_storage_total.inc();
                 }
@@ -4282,6 +4285,26 @@ impl Blockchain {
                         }
                     }
                     Err(_) => reasons.push("invalid_bns_remove_subdomain_data".to_string()),
+                }
+            }
+            crate::core::transaction::TransactionType::BnsSetSubdomainContent => {
+                if tx.amount != 0 || tx.to != Address::zero() {
+                    reasons.push("invalid_bns_set_subdomain_content_shape".to_string());
+                }
+                match bincode::deserialize::<(
+                    String,
+                    String,
+                    Option<crate::storage::content_id::ContentId>,
+                )>(&tx.data)
+                {
+                    Ok((parent, sub_label, _)) => {
+                        if !crate::bns::BnsRegistry::is_valid_name(&parent)
+                            || !crate::bns::BnsRegistry::is_valid_sub_label(&sub_label)
+                        {
+                            reasons.push("invalid_bns_subdomain".to_string());
+                        }
+                    }
+                    Err(_) => reasons.push("invalid_bns_set_subdomain_content_data".to_string()),
                 }
             }
             crate::core::transaction::TransactionType::BnsSetBud3Content => {
@@ -12329,7 +12352,7 @@ fn bns_metrics_export_one_counter_per_type_and_the_named_gauges() {
     let chain = Blockchain::new(Arc::new(PoWEngine::new(0)), None, DEFAULT_CHAIN_ID, None)
         .with_metrics(Arc::clone(&metrics));
 
-    let doors: [(TransactionType, &str); 13] = [
+    let doors: [(TransactionType, &str); 14] = [
         (TransactionType::BnsBuyName, "budlum_bns_sales_total"),
         (TransactionType::BnsRenew, "budlum_bns_renewals_total"),
         (TransactionType::BnsTransfer, "budlum_bns_transfers_total"),
@@ -12368,6 +12391,10 @@ fn bns_metrics_export_one_counter_per_type_and_the_named_gauges() {
         (
             TransactionType::BnsRemoveSubdomain,
             "budlum_bns_remove_subdomain_total",
+        ),
+        (
+            TransactionType::BnsSetSubdomainContent,
+            "budlum_bns_set_subdomain_content_total",
         ),
         (
             TransactionType::BnsSetStorage,

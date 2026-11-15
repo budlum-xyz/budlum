@@ -3,8 +3,75 @@ use crate::storage::content_id::ContentId;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-/// B.U.D. Name Service (BNS) - decentralized naming for the Budlum network.
-/// Full_impl per Q10 (`storage_root` + full resolve) + lifecycle integration.
+// B.U.D. Name Service (BNS) - decentralized naming for the Budlum network.
+// Full_impl per Q10 (`storage_root` + full resolve) + lifecycle integration.
+
+/// One subdomain of a `.bud` name.
+///
+/// The parent owner creates and removes it. The subdomain owner sets what it
+/// serves. `address` is where a payment to `<label>.<name>.bud` goes; it
+/// starts as the owner.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SubdomainRecord {
+    pub owner: Address,
+    pub address: Option<Address>,
+    pub content: Option<ContentId>,
+}
+
+impl SubdomainRecord {
+    /// A fresh subdomain: it pays its owner and serves nothing yet.
+    #[must_use]
+    pub const fn owned_by(owner: Address) -> Self {
+        Self {
+            owner,
+            address: Some(owner),
+            content: None,
+        }
+    }
+
+    /// The JSON form every RPC answer and every proof carries.
+    #[must_use]
+    pub fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "owner": format!("0x{}", hex::encode(self.owner.0)),
+            "address": self.address.map(|a| format!("0x{}", hex::encode(a.0))),
+            "content": self.content.map(|c| format!("0x{}", hex::encode(c.0))),
+        })
+    }
+
+    /// Read the JSON form back. A field that is not 32 bytes of hex is an
+    /// error, never a silent `None`: the record feeds a proof digest.
+    ///
+    /// # Errors
+    ///
+    /// Returns the name of the field that is missing or malformed.
+    pub fn from_json(value: &serde_json::Value) -> Result<Self, String> {
+        fn hex32(value: &serde_json::Value, field: &str) -> Result<[u8; 32], String> {
+            let text = value
+                .as_str()
+                .ok_or_else(|| format!("subdomain {field} is not a string"))?;
+            let bytes = hex::decode(text.strip_prefix("0x").unwrap_or(text))
+                .map_err(|_| format!("subdomain {field} is not hex"))?;
+            <[u8; 32]>::try_from(bytes.as_slice())
+                .map_err(|_| format!("subdomain {field} is not 32 bytes"))
+        }
+        fn optional(value: &serde_json::Value, field: &str) -> Result<Option<[u8; 32]>, String> {
+            match value.get(field) {
+                Some(v) if !v.is_null() => hex32(v, field).map(Some),
+                _ => Ok(None),
+            }
+        }
+        let owner = value
+            .get("owner")
+            .ok_or_else(|| "subdomain owner is missing".to_string())
+            .and_then(|v| hex32(v, "owner"))?;
+        Ok(Self {
+            owner: Address::from(owner),
+            address: optional(value, "address")?.map(Address::from),
+            content: optional(value, "content")?.map(ContentId),
+        })
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct NameRecord {
@@ -22,7 +89,7 @@ pub struct NameRecord {
     pub content_id: Option<ContentId>,
     #[serde(default)]
     pub bud3_content: Option<crate::storage::bud3::content_ref::ContentRef>,
-    pub subdomains: std::collections::BTreeMap<String, Address>,
+    pub subdomains: std::collections::BTreeMap<String, SubdomainRecord>,
     #[serde(default)]
     pub records: std::collections::BTreeMap<String, String>,
 }
@@ -113,7 +180,7 @@ pub struct BnsResolved {
     #[serde(default)]
     pub bud3_content: Option<crate::storage::bud3::content_ref::ContentRef>,
     #[serde(default)]
-    pub subdomains: std::collections::BTreeMap<String, Address>,
+    pub subdomains: std::collections::BTreeMap<String, SubdomainRecord>,
     #[serde(default)]
     pub records: std::collections::BTreeMap<String, String>,
     #[serde(default)]
@@ -186,7 +253,7 @@ pub struct BnsBranchExtras {
     pub storage_domain_id: Option<u32>,
     pub storage_root_height: Option<u64>,
     pub bud3_content: Option<crate::storage::bud3::content_ref::ContentRef>,
-    pub subdomains: std::collections::BTreeMap<String, Address>,
+    pub subdomains: std::collections::BTreeMap<String, SubdomainRecord>,
     pub records: std::collections::BTreeMap<String, String>,
 }
 

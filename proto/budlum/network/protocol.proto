@@ -150,6 +150,8 @@ enum ProtoTransactionType {
     BNS_REMOVE_SUBDOMAIN = 77;
     // Bind or clear a verified B.U.D. 3.0 ContentRef on a live .bud name.
     BNS_SET_BUD3_CONTENT = 78;
+    // Set or clear the content a subdomain serves. Signed by the subdomain owner.
+    BNS_SET_SUBDOMAIN_CONTENT = 79;
 }
 
 message ProtoTransaction {

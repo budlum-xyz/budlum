@@ -4284,7 +4284,7 @@ impl BudlumApiServer for RpcServer {
                     "object_commitment": format!("0x{}", hex::encode(cref.object_commitment)),
                     "nft_id": cref.nft_id.map(|n| format!("0x{}", hex::encode(n))),
                 })),
-                "subdomains": resolved.subdomains.iter().map(|(k, v)| (k.clone(), Self::to_0x_hash(v.to_hex()))).collect::<std::collections::BTreeMap<_, _>>(),
+                "subdomains": resolved.subdomains.iter().map(|(k, v)| (k.clone(), v.to_json())).collect::<std::collections::BTreeMap<_, _>>(),
                 "records": resolved.records,
                 "status": resolved.status,
                 "expires_at": resolved.expires_at,
@@ -4550,6 +4550,27 @@ impl BudlumApiServer for RpcServer {
         Ok(addr.map(|a| Self::to_0x_hash(a.to_hex())))
     }
 
+    async fn bns_resolve_subdomain_content(
+        &self,
+        parent_name: String,
+        sub_label: String,
+    ) -> Result<Option<String>, ErrorObjectOwned> {
+        if !crate::bns::BnsRegistry::is_valid_name(&parent_name)
+            || !crate::bns::BnsRegistry::is_valid_sub_label(&sub_label)
+        {
+            return Err(ErrorObjectOwned::owned(
+                -32602,
+                "Invalid BNS parent name or subdomain label",
+                None::<()>,
+            ));
+        }
+        let content = self
+            .chain
+            .bns_resolve_subdomain_content(parent_name, sub_label)
+            .await;
+        Ok(content.map(|c| Self::bytes32_to_0x(c.0)))
+    }
+
     async fn bns_reverse_resolve(
         &self,
         address: String,
@@ -4620,7 +4641,7 @@ impl BudlumApiServer for RpcServer {
                     "nft_id": c.nft_id.map(|n| format!("0x{}", hex::encode(n))),
                 })),
                 "subdomains": serde_json::json!(e.subdomains.iter()
-                    .map(|(label, owner)| (label.clone(), Self::to_0x_hash(owner.to_hex())))
+                    .map(|(label, sub)| (label.clone(), sub.to_json()))
                     .collect::<std::collections::BTreeMap<_, _>>()),
                 "records": e.records,
             })
@@ -5261,10 +5282,8 @@ impl BudlumApiServer for RpcServer {
         }
         match self.chain.bns_list_subdomains(parent_name.clone()).await {
             Some(subs) => {
-                let formatted: std::collections::BTreeMap<String, String> = subs
-                    .into_iter()
-                    .map(|(k, v)| (k, Self::to_0x_hash(v.to_hex())))
-                    .collect();
+                let formatted: std::collections::BTreeMap<String, serde_json::Value> =
+                    subs.into_iter().map(|(k, v)| (k, v.to_json())).collect();
                 Ok(serde_json::json!({
                     "parent": parent_name,
                     "subdomains": formatted,
@@ -5333,6 +5352,87 @@ impl BudlumApiServer for RpcServer {
             "parent": parent_name,
             "sub_label": sub_label,
             "caller": caller,
+            "tx_template": tx,
+        }))
+    }
+
+    async fn bns_prepare_set_subdomain_content(
+        &self,
+        parent_name: String,
+        sub_label: String,
+        caller: String,
+        content_id: Option<String>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        if !crate::bns::BnsRegistry::is_valid_name(&parent_name) {
+            return Err(ErrorObjectOwned::owned(
+                -32602,
+                "Invalid BNS name: expected <label>.bud with 3..=32 lowercase label characters",
+                None::<()>,
+            ));
+        }
+        if !crate::bns::BnsRegistry::is_valid_sub_label(&sub_label) {
+            return Err(ErrorObjectOwned::owned(
+                -32602,
+                "Invalid subdomain label",
+                None::<()>,
+            ));
+        }
+        let clean_caller = caller.strip_prefix("0x").unwrap_or(&caller);
+        let caller_addr = Address::from_hex(clean_caller).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Invalid caller address: {e}"), None::<()>)
+        })?;
+        if caller_addr == Address::zero() {
+            return Err(ErrorObjectOwned::owned(
+                -32602,
+                "Caller address cannot be the zero address",
+                None::<()>,
+            ));
+        }
+        let content = match content_id.as_deref() {
+            None => None,
+            Some(text) => {
+                let bytes = hex::decode(text.strip_prefix("0x").unwrap_or(text))
+                    .ok()
+                    .and_then(|bytes| <[u8; 32]>::try_from(bytes.as_slice()).ok())
+                    .ok_or_else(|| {
+                        ErrorObjectOwned::owned(
+                            -32602,
+                            "Invalid content id: expected 32 bytes of hex",
+                            None::<()>,
+                        )
+                    })?;
+                Some(crate::storage::content_id::ContentId(bytes))
+            }
+        };
+        let data = bincode::serialize(&(parent_name.clone(), sub_label.clone(), content))
+            .map_err(|e| ErrorObjectOwned::owned(-32000, e.to_string(), None::<()>))?;
+        let tx = crate::core::transaction::Transaction {
+            from: caller_addr,
+            to: Address::zero(),
+            amount: 0,
+            fee: 1000,
+            max_fee: 1000,
+            priority_fee: 0,
+            nonce: self.chain.get_nonce(&caller_addr).await,
+            data,
+            timestamp: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis(),
+            hash: String::new(),
+            signature: None,
+            signer_public_key: Vec::new(),
+            authorization: None,
+            chain_id: self.chain.get_chain_id().await,
+            signature_version: crate::core::transaction::SIGNATURE_VERSION_V5,
+            tx_type: crate::core::transaction::TransactionType::BnsSetSubdomainContent,
+        };
+        let tx = self.finish_template(tx).await?;
+        Ok(serde_json::json!({
+            "parent": parent_name,
+            "sub_label": sub_label,
+            "caller": caller,
+            "content_id": content_id,
             "tx_template": tx,
         }))
     }

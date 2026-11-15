@@ -302,8 +302,12 @@ fn decode_extras(
         .get("subdomains")
         .and_then(serde_json::Value::as_object)
     {
-        for (label, owner) in map {
-            subdomains.insert(label.clone(), address_json(owner, "extras.subdomains[]")?);
+        for (label, sub) in map {
+            subdomains.insert(
+                label.clone(),
+                budlum_core::bns::types::SubdomainRecord::from_json(sub)
+                    .map_err(|e| format!("extras.subdomains.{label}: {e}"))?,
+            );
         }
     }
     let mut records = std::collections::BTreeMap::new();
@@ -890,7 +894,11 @@ mod tests {
                         "object_commitment": format!("0x{}", "99".repeat(32)),
                         "nft_id": format!("0x{}", "aa".repeat(32))
                     },
-                    "subdomains": {"shop": format!("0x{}", "77".repeat(32))},
+                    "subdomains": {"shop": {
+                        "owner": format!("0x{}", "77".repeat(32)),
+                        "address": format!("0x{}", "77".repeat(32)),
+                        "content": null,
+                    }},
                     "records": {"addr.eth": "0xabc"}
                 }
             },

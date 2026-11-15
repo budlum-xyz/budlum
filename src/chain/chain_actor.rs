@@ -491,6 +491,11 @@ pub enum ChainCommand {
         label: String,
         response: oneshot::Sender<Option<Address>>,
     },
+    BnsResolveSubdomainContent {
+        parent: String,
+        label: String,
+        response: oneshot::Sender<Option<crate::storage::content_id::ContentId>>,
+    },
     BnsReverseResolve {
         address: Address,
         response: oneshot::Sender<Option<String>>,
@@ -501,7 +506,9 @@ pub enum ChainCommand {
     },
     BnsListSubdomains {
         parent_name: String,
-        response: oneshot::Sender<Option<std::collections::BTreeMap<String, Address>>>,
+        response: oneshot::Sender<
+            Option<std::collections::BTreeMap<String, crate::bns::types::SubdomainRecord>>,
+        >,
     },
     BnsResolveBud3Content {
         name: String,
@@ -2313,6 +2320,24 @@ impl ChainHandle {
         rx.await.unwrap_or(None)
     }
 
+    /// The content a subdomain of a live `.bud` name serves.
+    pub async fn bns_resolve_subdomain_content(
+        &self,
+        parent: String,
+        label: String,
+    ) -> Option<crate::storage::content_id::ContentId> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::BnsResolveSubdomainContent {
+                parent,
+                label,
+                response: tx,
+            })
+            .await;
+        rx.await.unwrap_or(None)
+    }
+
     pub async fn bns_reverse_resolve(&self, address: Address) -> Option<String> {
         let (tx, rx) = oneshot::channel();
         let _ = self
@@ -2340,7 +2365,7 @@ impl ChainHandle {
     pub async fn bns_list_subdomains(
         &self,
         parent_name: String,
-    ) -> Option<std::collections::BTreeMap<String, Address>> {
+    ) -> Option<std::collections::BTreeMap<String, crate::bns::types::SubdomainRecord>> {
         let (tx, rx) = oneshot::channel();
         let _ = self
             .tx
@@ -3965,6 +3990,22 @@ impl ChainActor {
                         &label,
                         self.blockchain.state.epoch_index,
                     ));
+                }
+                ChainCommand::BnsResolveSubdomainContent {
+                    parent,
+                    label,
+                    response,
+                } => {
+                    let _ = response.send(
+                        self.blockchain
+                            .state
+                            .bns_registry
+                            .resolve_subdomain_content(
+                                &parent,
+                                &label,
+                                self.blockchain.state.epoch_index,
+                            ),
+                    );
                 }
                 ChainCommand::BnsReverseResolve { address, response } => {
                     let _ = response.send(
