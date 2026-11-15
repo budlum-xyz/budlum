@@ -173,6 +173,97 @@ fn metabolic_burn_removes_fee_fraction_on_block_apply() {
 }
 
 #[test]
+fn application_contract_fee_is_split_between_recipient_and_producer() {
+    use bud_isa::{Instruction, Opcode};
+
+    let mut state = AccountState::new();
+    state
+        .registry
+        .set_params(crate::registry::RegistryParams::testnet_defaults());
+    let sender = Address::from([0x11u8; 32]);
+    let producer = Address::from([0x33u8; 32]);
+    state.add_balance(&sender, 1_000_000);
+    state
+        .settlement
+        .graft
+        .register(7, b"origin-app".to_vec(), [0x44u8; 32], 0)
+        .unwrap();
+    let graft_id = crate::settlement::graft::graft_id(7, b"origin-app");
+    // An unclaimed application: its share accrues in the keyless mirror.
+    let app = state.settlement.graft.get(&graft_id).unwrap().clone();
+    let application = app.fee_recipient();
+    assert_eq!(application, app.mirror_account);
+
+    let instruction = |opcode, rd, rs1, rs2, imm| {
+        Instruction {
+            opcode,
+            rd,
+            rs1,
+            rs2,
+            imm,
+        }
+        .encode()
+        .to_le_bytes()
+    };
+    let mut bytecode = Vec::new();
+    bytecode.extend_from_slice(&instruction(Opcode::Load, 1, 0, 0, 9));
+    bytecode.extend_from_slice(&instruction(Opcode::Log, 0, 1, 0, 0));
+    bytecode.extend_from_slice(&instruction(Opcode::Halt, 0, 0, 0, 0));
+
+    let fee = 10_000;
+    let mut tx = Transaction::new_contract_call_to(sender, app.mirror_account, fee, 0, bytecode);
+    tx.hash = tx.calculate_hash();
+    Executor::apply_block(&mut state, &[tx], Some(&producer)).unwrap();
+
+    let burn = state.tokenomics.metabolic_burn(fee);
+    let split = state.registry.params().split_application_fee(fee - burn);
+    assert_eq!(state.get_balance(&application), split.application);
+    assert_eq!(state.get_balance(&producer), split.protocol);
+    assert_eq!(
+        state.circulating_supply(),
+        1_000_000 - u128::from(burn),
+        "application and protocol credits must conserve the fee after burn"
+    );
+}
+
+/// A contract call that names an address no Graft application owns pays the
+/// whole post-burn fee to the producer: the sender cannot route a share of
+/// its own fee back to itself by naming an arbitrary recipient.
+#[test]
+fn an_unregistered_application_recipient_earns_no_fee_share() {
+    use bud_isa::{Instruction, Opcode};
+
+    let mut state = AccountState::new();
+    state
+        .registry
+        .set_params(crate::registry::RegistryParams::testnet_defaults());
+    let sender = Address::from([0x11u8; 32]);
+    let named = Address::from([0x55u8; 32]);
+    let producer = Address::from([0x33u8; 32]);
+    state.add_balance(&sender, 1_000_000);
+    let mut bytecode = Vec::new();
+    bytecode.extend_from_slice(
+        &Instruction {
+            opcode: Opcode::Halt,
+            rd: 0,
+            rs1: 0,
+            rs2: 0,
+            imm: 0,
+        }
+        .encode()
+        .to_le_bytes(),
+    );
+    let fee = 10_000;
+    let mut tx = Transaction::new_contract_call_to(sender, named, fee, 0, bytecode);
+    tx.hash = tx.calculate_hash();
+    Executor::apply_block(&mut state, &[tx], Some(&producer)).unwrap();
+
+    let burn = state.tokenomics.metabolic_burn(fee);
+    assert_eq!(state.get_balance(&named), 0);
+    assert_eq!(state.get_balance(&producer), fee - burn);
+}
+
+#[test]
 fn zero_fee_burns_nothing() {
     let params = TokenomicsParams::default();
     assert_eq!(params.metabolic_burn(0), 0);
@@ -487,7 +578,7 @@ fn team_vesting_holds_on_every_value_path_not_only_transfer() {
     );
 }
 
-/// F4 (Constitution §3): NftBoost 4% B.U.D. share accumulates in
+/// F4 (Constitution): NftBoost 4% B.U.D. share accumulates in
 /// `pending_bud_boost_share` for later distribution to storage operators.
 /// REGRESSION LOCK - verifies the executor-side wiring.
 #[test]

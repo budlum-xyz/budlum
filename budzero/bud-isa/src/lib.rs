@@ -140,7 +140,7 @@ impl Default for MainnetActivation {
     /// the examples showing what an internal review can miss. Do not turn this
     /// flag on merely on the strength of this comment.
     ///
-    /// A second open weakness (P16-F02): the node hash of the walk is ONE
+    /// A second open weakness: the node hash of the walk is ONE
     /// round, `7 * (a + c0)^7 + (b + c1)^7`, with no capacity. `x -> x^7` is a
     /// bijection on Goldilocks (`gcd(7, P - 1) = 1`), so the last sibling can
     /// be solved with a seventh root and any root can be reached from any
@@ -321,7 +321,7 @@ impl Instruction {
 mod tests {
     use super::*;
 
-    /// P12-F01: the one-round Poseidon path hash behind VerifyMerkle is
+    /// The one-round Poseidon path hash behind VerifyMerkle is
     /// invertible, so the opcode must stay closed until a full permutation
     /// replaces it. This pins the gate: opening it must be a deliberate edit
     /// that also changes this test.
@@ -619,7 +619,7 @@ mod tests {
         // bud-isa must not depend on bud-vm (it sits below it in the graph), so
         // the count is read from the source rather than imported.
         let src = include_str!("../../bud-vm/src/lib.rs");
-        let marker = "pub const POSEIDON_RC_FULL: [[u64; 8]; ";
+        let marker = "pub const POSEIDON_RC_FULL: [[u64; 12]; ";
         let start = src
             .find(marker)
             .expect("POSEIDON_RC_FULL declaration not found in bud-vm")

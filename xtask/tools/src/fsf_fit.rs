@@ -76,7 +76,7 @@ const PROJECTS: &[ProjectFit] = &[
         boundary: "Protocol ideas are safe; do not import server code without a separate provenance review.",
         budlum_modules: &["src/ai_inference", "docs/ARCHITECTURE.md", "RPC event feeds"],
         adaptation: "Use Activity Streams vocabulary as a compatibility target for AI-output/feed events, so Budlum events can be mirrored without a centralized SaaS dependency.",
-        next_step: "Draft a Budlum event-to-ActivityStreams mapping after CI/Strix on PR #79 is green.",
+        next_step: "Draft a Budlum event-to-ActivityStreams mapping after CI is green on PR #79.",
     },
     ProjectFit {
         name: "Argos Translate",

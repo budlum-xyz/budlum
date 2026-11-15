@@ -7,7 +7,7 @@
 //! | site | order |
 //! |---|---|
 //! | `record_block` on a double sign | `seen_blocks` then `slashing_evidence` |
-//! | `record_block` on a first boundary sighting (P01-F04 parking) | `seen_blocks` then `pending_checkpoints` |
+//! | `record_block` on a first boundary sighting ( parking) | `seen_blocks` then `pending_checkpoints` |
 //! | `serialize_state` | `checkpoints` then `slashing_evidence` |
 //!
 //! Read those three as edges and they form a total order:
@@ -51,10 +51,11 @@ mod model {
     use loom::thread;
     use std::sync::Arc;
 
-    /// The five locks of `PoSEngine`, with the contents left out.
+    /// The six locks of `PoSEngine`, with the contents left out.
     ///
     /// Field order is the lock order, and it is the one the engine uses.
     struct Engine {
+        signed_rounds: RwLock<u32>,
         seen_blocks: RwLock<u32>,
         pending_checkpoints: RwLock<u32>,
         checkpoints: RwLock<u32>,
@@ -65,12 +66,20 @@ mod model {
     impl Engine {
         fn new() -> Self {
             Self {
+                signed_rounds: RwLock::new(0),
                 seen_blocks: RwLock::new(0),
                 pending_checkpoints: RwLock::new(0),
                 checkpoints: RwLock::new(0),
                 slashing_evidence: RwLock::new(0),
                 epoch_seed: RwLock::new(0),
             }
+        }
+
+        /// `try_produce_block` producer guard: `signed_rounds` is taken and
+        /// dropped on its own before any other engine lock is touched.
+        fn sign_round(&self) {
+            let mut rounds = self.signed_rounds.write().unwrap();
+            *rounds += 1;
         }
 
         /// `record_block_header`, double-sign branch: `seen_blocks` is held
@@ -82,7 +91,7 @@ mod model {
             *evidence += 1;
         }
 
-        /// `record_block`, first-sighting branch at a boundary (P01-F04):
+        /// `record_block`, first-sighting branch at a boundary:
         /// `seen_blocks` is held across the parking write, which takes
         /// `pending_checkpoints`. The promotion into `checkpoints` happens
         /// later, with no nesting (see `note_finalized_height`).
@@ -235,10 +244,15 @@ mod model {
                 let engine = Arc::clone(&engine);
                 thread::spawn(move || engine.serialize_state())
             };
+            let four = {
+                let engine = Arc::clone(&engine);
+                thread::spawn(move || engine.sign_round())
+            };
 
             one.join().unwrap();
             two.join().unwrap();
             three.join().unwrap();
+            four.join().unwrap();
         });
     }
 }
@@ -247,7 +261,7 @@ mod model {
 ///
 /// A loom proof is about the model, so it is worth exactly as much as the
 /// model's resemblance to the code. The way that resemblance dies is quiet:
-/// somebody adds a fifth lock, takes it while holding a second, and every
+/// somebody adds a lock, takes it while holding a second, and every
 /// loom test keeps passing because the model never heard about it.
 ///
 /// This reads the engine and fails when the inventory moves. It runs on the
@@ -267,15 +281,16 @@ fn the_model_matches_the_engines_lock_inventory() {
 
     assert_eq!(
         declared.len(),
-        5,
-        "PoSEngine's lock count moved. The loom model in this file covers five \
-         locks in the order seen_blocks, pending_checkpoints, checkpoints, \
-         slashing_evidence, epoch_seed. \
+        6,
+        "PoSEngine's lock count moved. The loom model in this file covers six \
+         locks in the order signed_rounds, seen_blocks, pending_checkpoints, \
+         checkpoints, slashing_evidence, epoch_seed. \
          A lock that is not in the model is a lock no interleaving was checked \
          against, so add it there before adding it here.\nFound: {declared:#?}"
     );
 
     for name in [
+        "signed_rounds",
         "seen_blocks",
         "pending_checkpoints",
         "slashing_evidence",

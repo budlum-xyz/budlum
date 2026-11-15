@@ -93,7 +93,7 @@ impl ZkFinalityEvidence {
                 ),
             });
         }
-        // BLG-0143 (P06-F14): trailing bytes decode to the same value under a
+        // Trailing bytes decode to the same value under a
         // different evidence digest, so one proof could be re-wrapped into
         // many distinct commitments. They are refused, and the decode is
         // bounded by the payload cap. Same wire encoding as
@@ -139,12 +139,12 @@ pub struct ZkVmFinalityAdapter {
     /// verifying a proof under the wrong network is not a weaker guarantee, it
     /// is a statement about a different chain.
     network: String,
-    /// The pinned program (BLG-0134/P06-F05, decision A): a proof of ANY
+    /// The pinned program: a proof of ANY
     /// canonical-set program is not a proof of THIS domain's program. Pinned
     /// at admission; `None` is the closed state and every verification is
     /// refused.
     program_hash: Option<[u8; 32]>,
-    /// The pinned chain id (BLG-0134/P06-F05, decision A): a proof under
+    /// The pinned chain id: a proof under
     /// another chain's id attests another chain's state.
     chain_id: Option<u64>,
     /// Whether the AIR binds `chain_id` to execution rather than only to a
@@ -284,7 +284,7 @@ impl ExternalFinalityAdapter for ZkVmFinalityAdapter {
         )
         .map_err(|e| AdapterError::Crypto { what: describe(&e) })?;
 
-        // BLG-0134 (P06-F05, decision A): the proof must be of THIS domain's
+        // The proof must be of THIS domain's
         // pinned program and chain. Canonical-set membership alone let any
         // canonical program attest anything its inputs named.
         let Some(program_hash) = self.program_hash else {
@@ -561,13 +561,20 @@ mod tests {
             }
             .encode(),
         ];
-        // A path of 64 zero siblings under key 0, so the memory image is the
-        // all-zero default and the root is the chain from the leaf.
-        let leaf = 0xBEEFu64;
-        let root = (0..64).fold(leaf, |cur, _| bud_vm::merkle_poseidon_round(cur, 0));
-        let mut vm = bud_vm::Vm::new(1024);
-        vm.registers[2] = root;
-        vm.registers[3] = leaf;
+        // A path of 64 zero siblings under key 0: the window holds the key, the leaf, the
+        // siblings and the root the walk reaches, and its memory image is what the proof
+        // commits to.
+        let leaf = [0xBEEFu64, 0, 0, 0];
+        let root = (0..64).fold(leaf, |cur, _| bud_vm::merkle_node(cur, [0; 4]));
+        let mut vm = bud_vm::Vm::new(4096);
+        let mut words = vec![0u64];
+        words.extend_from_slice(&leaf);
+        words.extend(std::iter::repeat_n(0u64, 64 * 4));
+        words.extend_from_slice(&root);
+        for (i, word) in words.iter().enumerate() {
+            let at = 256 + i * 8;
+            vm.memory[at..at + 8].copy_from_slice(&word.to_le_bytes());
+        }
         let receipt = vm.run_receipt(&program);
         assert!(receipt.success);
 
@@ -701,9 +708,9 @@ mod tests {
         };
         let canonical = bud_vm::syscall_context::build_syscall_context_check_program()
             .expect("canonical build");
-        // BLG-0134 (P06-F05): the canonical-set check runs before the AIR
-        // chain-id gate; the test-only opt-in exercises the attestation shape
-        // after canonicality while production `new` remains closed below.
+        // The canonical-set check runs before the AIR chain-id gate; the
+        // test-only opt-in exercises the attestation shape after canonicality
+        // while production `new` remains closed below.
         let pinned_hash = bud_proof::canonical_set::program_hash_of(&canonical);
         let prod_adapter = ZkVmFinalityAdapter::new("testnet", Some(pinned_hash), Some(1));
         let adapter = ZkVmFinalityAdapter::new("testnet", Some(pinned_hash), Some(1))
@@ -737,8 +744,9 @@ mod tests {
             if canonical {
                 // Production adapter refuses even a matching self-declared
                 // chain_id because the AIR does not yet bind chain_id to execution.
+                let mut prod_facts = crate::crypto::facts::CryptoFacts::new();
                 let prod_err = prod_adapter
-                    .verify(&evidence, &VerificationPolicy::proven(10))
+                    .verify_observed(&evidence, &VerificationPolicy::proven(10), &mut prod_facts)
                     .unwrap_err();
                 match prod_err {
                     AdapterError::ConsensusRule { rule } => assert!(
@@ -748,7 +756,9 @@ mod tests {
                     other => panic!("expected ConsensusRule refusal, got {other:?}"),
                 }
             }
-            let got = adapter.verify(&evidence, &VerificationPolicy::proven(10));
+            let mut facts = crate::crypto::facts::CryptoFacts::new();
+            let got =
+                adapter.verify_observed(&evidence, &VerificationPolicy::proven(10), &mut facts);
             if canonical {
                 let attestation = got.unwrap_or_else(|e| panic!("row `{name}`: {e:?}"));
                 assert_eq!(attestation.height, 1, "row `{name}`");
@@ -756,7 +766,21 @@ mod tests {
                     attestation.attested_event_root, None,
                     "additive event_digest must not be attested as event_root"
                 );
+                // the ZK adapter shows a hash assumption and nothing else.
+                assert_eq!(
+                    facts.count(crate::crypto::facts::ObservedScheme::Proof(
+                        crate::crypto::facts::AssumptionClass::Hash
+                    )),
+                    1,
+                    "row `{name}`"
+                );
+                assert_eq!(
+                    facts.quantum_class(),
+                    Some(crate::crypto::facts::QuantumClass::Hash),
+                    "row `{name}`"
+                );
             } else {
+                assert!(facts.is_empty(), "row `{name}`: a refusal observes nothing");
                 match got {
                     Err(AdapterError::Crypto { what }) => assert!(
                         what.contains("not in the canonical set") && what.contains(&hex32(&hash)),
@@ -768,7 +792,7 @@ mod tests {
         }
     }
 
-    /// BLG-0143 (P06-F14): trailing bytes decoded to the same value under a
+    /// Trailing bytes decoded to the same value under a
     /// different evidence digest.
     #[test]
     fn trailing_bytes_after_the_evidence_are_refused() {
@@ -823,7 +847,7 @@ mod tests {
         );
     }
 
-    /// BLG-0134 (P06-F05, decision A): an unpinned adapter is closed - a
+    /// An unpinned adapter is closed - a
     /// canonical-set proof attests nothing without the domain's pins.
     #[test]
     fn unpinned_zkvm_admission_is_closed() {
@@ -840,7 +864,7 @@ mod tests {
         );
     }
 
-    /// BLG-0134 (P06-F05, decision A): a proof of a DIFFERENT canonical
+    /// A proof of a DIFFERENT canonical
     /// program than the pinned one is refused, and so is a proof under
     /// another chain id.
     #[test]

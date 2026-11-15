@@ -157,7 +157,7 @@ impl GateSuite {
 
     pub fn all_gates_demo() -> Vec<GateResult> {
         let price = PriceModel::default();
-        // K38: the demo does not panic either - an invalid ratio is marked
+        // The demo does not panic either - an invalid ratio is marked
         // with an infinite cost, which fails the gate. A cost of 0.0 would
         // pass it.
         let cost_json = Self::cost_or_refuse(price.cost_sold(1.143, 17.191));
@@ -185,7 +185,7 @@ impl GateSuite {
 mod tests {
     use super::*;
 
-    /// BLG-0671: a price error must fail the KF gate, not pass it as 0.0.
+    /// A price error must fail the KF gate, not pass it as 0.0.
     #[test]
     fn a_price_error_fails_the_kf_gate() {
         let price = PriceModel::default();

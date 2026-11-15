@@ -3,7 +3,7 @@
 #![forbid(unsafe_code)]
 //! # ai-core - the core types
 //!
-//! **Mirror types** matching the on-chain budlum layer (the K3 decision): only
+//! **Mirror types** matching the on-chain budlum layer: only
 //! the shape is mirrored (32-byte hashes, the kind enums), and permission rules
 //! are never copied - they are queried from the chain.
 

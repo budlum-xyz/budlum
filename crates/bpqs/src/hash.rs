@@ -1,20 +1,22 @@
 //! Hash backend seam. The whole construction is written against `BpqsHash`;
-//! parameter rows never touch a concrete hash directly. Milestone M2 landed
-//! the swap this seam was cut for: the canonical backend is now
-//! [`super::poseidon2::Poseidon2GoldilocksHash`] (Poseidon2 over Goldilocks,
-//! p3 parameters), with the two FIPS-202 members kept as the audit
-//! cross-checks the differential battery compares against.
+//! parameter rows never touch a concrete hash directly. The seam let the
+//! research line carry an algebraic backend next to the FIPS 202 members; the
+//! settled which one is canonical: a
+//! long-lived signature or commitment never rests on Poseidon2.
 //!
 //! ## Backends
 //!
-//! - Canonical: [`super::poseidon2::Poseidon2GoldilocksHash`] -
-//!   Poseidon2-Goldilocks-16 with the BPQS-POSEIDON2-SPONGE-v0 byte binding
-//!   (see the poseidon2 module header for the full binding proof sketch).
-//! - Cross-check 1: [`Sha3_256Hash`] - NIST FIPS 202 fixed-output member,
+//! - Canonical: [`super::shake256::Shake256Hash`] - the FIPS 202 XOF member
+//!   (domain suffix 0x1F, 32-byte read), implemented in-crate on the
+//!   `keccak` permutation because sha3 0.12 ships no SHAKE surface. Exposed as
+//!   [`super::CanonicalHash`].
+//! - Cross-check: [`Sha3_256Hash`] - NIST FIPS 202 fixed-output member,
 //!   present and vetted in-tree since M1.
-//! - Cross-check 2: [`super::shake256::Shake256Hash`] - the FIPS 202
-//!   XOF member (domain suffix 0x1F, 32-byte read), implemented in-crate on
-//!   the `keccak` permutation because sha3 0.12 ships no SHAKE surface.
+//! - Research only: [`super::poseidon2::Poseidon2GoldilocksHash`] -
+//!   Poseidon2-Goldilocks-16 with the BPQS-POSEIDON2-SPONGE-v0 byte binding
+//!   (see the poseidon2 module header for the full binding proof sketch). It
+//!   exists for in-VM verification research and is not used for long-lived
+//!   keys or commitments.
 //!
 //! Research-line usage note: parameter rows with N < 32 truncate the 32-byte
 //! digest under their own domain separation; the truncation argument remains

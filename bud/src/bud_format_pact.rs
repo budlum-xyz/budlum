@@ -11,7 +11,7 @@
 //! Losslessness: a PACT record does not replace the ORIGINAL; it is the integrity anchor of the container.
 //! The generatable class claim permits integrity verification even when a LOSSY transform
 //! (for example a video codec) is used inside the .bud: commitment = H(producer output), and the bytes are
-//! reproducible. In the lossless class commitment = content_id(original) (K3).
+//! reproducible. In the lossless class commitment = content_id(original).
 //!
 //! Code: `#![forbid(unsafe_code)]`, deterministic, panic free.
 
@@ -48,7 +48,7 @@ impl PactMode {
 }
 
 /// The production contract record (I1). About 100 bytes - even if the content is 1 GB.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PactRecord {
     pub mode: PactMode,
     pub producer_id: [u8; 32], // the hash of the deterministic producer function
@@ -98,7 +98,7 @@ impl PactRecord {
         }
     }
 
-    /// For a lossless .bud: commitment = content_id(original) (K3) - exact integrity.
+    /// For a lossless .bud: commitment = content_id(original) - exact integrity.
     pub fn residual_only(original: &[u8], ts: u64) -> Self {
         let cid = crate::bud_format_container::content_id(original);
         PactRecord {
@@ -133,7 +133,7 @@ impl PactRecord {
     /// already exist and are CANONICAL: the same logical record -> the SAME bytes -> no effect on the state
     /// root (section 10.3). Test: `consensus_safe_serialization_roundtrip`.
     /// Production verification (I2 generate_and_verify): do the produced bytes satisfy the commitment?
-    /// In the lossless class (ResidualOnly) commitment = content_id(original) - it must match K3.
+    /// In the lossless class (ResidualOnly) commitment = content_id(original) - it must match.
     pub fn verify_production(&self, produced: &[u8]) -> bool {
         match self.mode {
             PactMode::PureProduction | PactMode::RecipePlusResidual => {
@@ -251,6 +251,115 @@ impl PactRecord {
     }
 }
 
+// ---------------------------------------------------------------------------
+// a PACT record that enters consensus is signed with the
+// user composite suite 0x0001 (ML-DSA-87 + Ed25519). The crate does not carry
+// the composite implementation: the signing and verifying sides are traits, so
+// the node supplies the real suite and a classical-only signer cannot be
+// plugged in by accident (the suite code is part of the signed payload and is
+// checked on both sides).
+
+/// The composite suite of a PACT record.
+/// exposed for: the bud format crate's signed-record surface - the consumers land with the format adoption.
+pub const PACT_SUITE: u16 = 0x0001;
+/// Domain tag of the signed PACT payload.
+/// exposed for: the bud format crate's signed-record surface - the consumers land with the format adoption.
+pub const PACT_SIGN_DOMAIN: &[u8] = b"BDLM_BUD_PACT_SIG_V1";
+
+/// Signs a payload under one composite suite.
+pub trait SuiteSigner {
+    /// The suite code the signature belongs to.
+    fn suite(&self) -> u16;
+    /// The signer's public identity, bound into the payload.
+    fn signer_id(&self) -> [u8; 32];
+    /// The composite signature, `None` when the backend refuses.
+    fn sign(&self, payload: &[u8]) -> Option<Vec<u8>>;
+}
+
+/// Verifies a composite signature under a suite. A verifier accepts only when
+/// every component of the suite verifies.
+pub trait SuiteVerifier {
+    /// Whether `signature` is a valid `suite` signature of `signer_id` over
+    /// `payload`.
+    fn verify(&self, suite: u16, signer_id: &[u8; 32], payload: &[u8], signature: &[u8]) -> bool;
+}
+
+/// Why a signed record was refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SignedRecordError {
+    /// The suite is not the one this record type requires.
+    WrongSuite { got: u16 },
+    /// The signature did not verify.
+    BadSignature,
+    /// The signer refused to sign.
+    SigningFailed,
+}
+
+/// A PACT record with its suite 0x0001 signature.
+#[derive(Debug, Clone, PartialEq, Eq)]
+/// exposed for: the bud format crate's signed-record surface - the consumers land with the format adoption.
+pub struct SignedPact {
+    pub pact: PactRecord,
+    pub signer_id: [u8; 32],
+    pub suite: u16,
+    pub signature: Vec<u8>,
+}
+
+impl SignedPact {
+    /// The bytes that are signed: tag, suite, signer, record hash.
+    #[must_use]
+    pub fn payload(suite: u16, signer_id: &[u8; 32], pact: &PactRecord) -> Vec<u8> {
+        let mut out = Vec::with_capacity(PACT_SIGN_DOMAIN.len() + 2 + 32 + 32);
+        out.extend_from_slice(PACT_SIGN_DOMAIN);
+        out.extend_from_slice(&suite.to_be_bytes());
+        out.extend_from_slice(signer_id);
+        out.extend_from_slice(&pact.record_hash());
+        out
+    }
+
+    /// Sign `pact`; the signer must be a [`PACT_SUITE`] signer.
+    ///
+    /// # Errors
+    ///
+    /// [`SignedRecordError::WrongSuite`] or [`SignedRecordError::SigningFailed`].
+    pub fn sign(pact: PactRecord, signer: &dyn SuiteSigner) -> Result<Self, SignedRecordError> {
+        if signer.suite() != PACT_SUITE {
+            return Err(SignedRecordError::WrongSuite {
+                got: signer.suite(),
+            });
+        }
+        let signer_id = signer.signer_id();
+        let payload = Self::payload(PACT_SUITE, &signer_id, &pact);
+        let signature = signer
+            .sign(&payload)
+            .ok_or(SignedRecordError::SigningFailed)?;
+        Ok(Self {
+            pact,
+            signer_id,
+            suite: PACT_SUITE,
+            signature,
+        })
+    }
+
+    /// Check the suite and the signature.
+    ///
+    /// # Errors
+    ///
+    /// [`SignedRecordError::WrongSuite`] for any suite but 0x0001,
+    /// [`SignedRecordError::BadSignature`] when verification fails.
+    pub fn verify(&self, verifier: &dyn SuiteVerifier) -> Result<(), SignedRecordError> {
+        if self.suite != PACT_SUITE {
+            return Err(SignedRecordError::WrongSuite { got: self.suite });
+        }
+        let payload = Self::payload(self.suite, &self.signer_id, &self.pact);
+        if verifier.verify(self.suite, &self.signer_id, &payload, &self.signature) {
+            Ok(())
+        } else {
+            Err(SignedRecordError::BadSignature)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -332,7 +441,7 @@ mod tests {
 
     #[test]
     fn residual_only_matches_content_id() {
-        // a lossless .bud: commitment = content_id(original) (K3)
+        // a lossless .bud: commitment = content_id(original)
         let original = b"lossless content 12345";
         let pact = PactRecord::residual_only(original, 300);
         assert!(pact.verify_production(original), "content_id matches");
@@ -410,5 +519,98 @@ mod tests {
             }
             let _ = PactRecord::from_blob(&buf[..len]);
         }
+    }
+}
+
+#[cfg(test)]
+mod signed_tests {
+    use super::*;
+
+    /// A test suite: "signature" is a keyed hash, enough to exercise the
+    /// suite-code and payload binding of the wrapper (the real composite
+    /// verification is the node's).
+    struct Toy {
+        suite: u16,
+        id: [u8; 32],
+    }
+
+    fn mac(id: &[u8; 32], payload: &[u8]) -> Vec<u8> {
+        let mut h = Sha3_256::new();
+        h.update(b"toy");
+        h.update(id);
+        h.update(payload);
+        h.finalize().to_vec()
+    }
+
+    impl SuiteSigner for Toy {
+        fn suite(&self) -> u16 {
+            self.suite
+        }
+        fn signer_id(&self) -> [u8; 32] {
+            self.id
+        }
+        fn sign(&self, payload: &[u8]) -> Option<Vec<u8>> {
+            Some(mac(&self.id, payload))
+        }
+    }
+
+    impl SuiteVerifier for Toy {
+        fn verify(
+            &self,
+            _suite: u16,
+            signer_id: &[u8; 32],
+            payload: &[u8],
+            signature: &[u8],
+        ) -> bool {
+            mac(signer_id, payload) == signature
+        }
+    }
+
+    fn pact() -> PactRecord {
+        PactRecord::pure([1u8; 32], [2u8; 32], b"produced", 7)
+    }
+
+    #[test]
+    fn a_pact_is_signed_under_suite_0001_only() {
+        let good = Toy {
+            suite: PACT_SUITE,
+            id: [9u8; 32],
+        };
+        let signed = SignedPact::sign(pact(), &good).expect("suite 0x0001 signs");
+        assert_eq!(signed.suite, 0x0001);
+        assert_eq!(signed.verify(&good), Ok(()));
+        // A validator-suite signer cannot sign a PACT.
+        let other = Toy {
+            suite: 0x0002,
+            id: [9u8; 32],
+        };
+        assert_eq!(
+            SignedPact::sign(pact(), &other),
+            Err(SignedRecordError::WrongSuite { got: 0x0002 })
+        );
+    }
+
+    #[test]
+    fn a_pact_signature_binds_the_record_the_signer_and_the_suite() {
+        let good = Toy {
+            suite: PACT_SUITE,
+            id: [9u8; 32],
+        };
+        let signed = SignedPact::sign(pact(), &good).expect("signs");
+        let mut edited = signed.clone();
+        edited.pact.ts_unix += 1;
+        assert_eq!(edited.verify(&good), Err(SignedRecordError::BadSignature));
+        let mut other_signer = signed.clone();
+        other_signer.signer_id = [8u8; 32];
+        assert_eq!(
+            other_signer.verify(&good),
+            Err(SignedRecordError::BadSignature)
+        );
+        let mut other_suite = signed;
+        other_suite.suite = 0x0002;
+        assert_eq!(
+            other_suite.verify(&good),
+            Err(SignedRecordError::WrongSuite { got: 0x0002 })
+        );
     }
 }

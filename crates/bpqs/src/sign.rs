@@ -89,7 +89,7 @@ pub struct BpqsSigner<P: BpqsParams, H: BpqsHash> {
     /// epoch key this device will ever mint.
     root_seed: [u8; 32],
     public: BpqsPublicKey<P>,
-    /// Signatures minted per epoch (BLG-0041). The WOTS one-time property
+    /// Signatures minted per epoch. The WOTS one-time property
     /// per (epoch, count) is only safe if a count is never reused, and a
     /// caller-held count nothing persists could not promise that. The device
     /// keeps its own counters, and `sign_at_height` takes `&mut self`.
@@ -229,7 +229,7 @@ impl<P: BpqsParams, H: BpqsHash> BpqsSigner<P, H> {
     }
 
     /// Sign `msg` for the epoch of `height`, consuming one slot of the
-    /// epoch's quota (BLG-0041).
+    /// epoch's quota.
     ///
     /// The device counts its own signatures per epoch and refuses the next
     /// mint once `Q_MAX` is reached, so two messages in one epoch can never
@@ -264,7 +264,7 @@ impl<P: BpqsParams, H: BpqsHash> BpqsSigner<P, H> {
         if used >= P::Q_MAX {
             return Err(BpqsError::QuotaExceeded {
                 epoch,
-                // Saturating (BLG-0052): `used + 1` overflowed at u32::MAX and
+                // Saturating: `used + 1` overflowed at u32::MAX and
                 // aborted a build that promised never to panic.
                 attempted: used.saturating_add(1),
             });
@@ -397,7 +397,7 @@ mod sign_tests {
     #[test]
     fn roundtrip_across_epochs() {
         let mut signer = committee();
-        // One mint per epoch: Q_MAX is 1 (BLG-0041), and the device now
+        // One mint per epoch: Q_MAX is 1, and the device now
         // enforces the quota itself.
         for height in [0u64, 8, 16, 24, 32, 40] {
             let sig = signer
@@ -690,7 +690,7 @@ mod tests {
         signer.sign_at_height(0, b"canonical-check").unwrap()
     }
 
-    // BLG-0045: check_canonical is the malleability gate; every refusal arm
+    // Check_canonical is the malleability gate; every refusal arm
     // and the pass case get a test.
     #[test]
     fn check_canonical_accepts_the_unmodified_signature() {

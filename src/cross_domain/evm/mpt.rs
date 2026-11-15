@@ -33,8 +33,8 @@ use sha3::{Digest, Keccak256};
 /// *empty* nibble list (`hp_decode(&[0x00])`), and `nibbles.starts_with(&[])`
 /// is always true, so `remaining` comes back the same length it went in.
 ///
-/// Two such nodes pointing at each other would never terminate. BLG-0124
-/// (P05-F17) corrects the reachability claim: through `verify` a hash cycle
+/// Two such nodes pointing at each other would never terminate.
+/// corrects the reachability claim: through `verify` a hash cycle
 /// is NOT constructible - `node_map` is keyed by keccak of the node bytes,
 /// so a node cannot reference itself without a keccak preimage fixpoint. The
 /// depth bound is still load-bearing as defence-in-depth: a caller that
@@ -164,7 +164,7 @@ pub fn hp_decode(bytes: &[u8]) -> Result<(bool, Vec<u8>), MptError> {
     }
     let is_leaf = (flag_byte & 0b10) != 0;
     let odd = (flag_byte & 0b01) != 0;
-    // BLG-0124 (P05-F17): on an EVEN path the low nibble of the prefix byte
+    // On an EVEN path the low nibble of the prefix byte
     // is the zero pad - a nonzero value is a non-canonical HP encoding.
     if !odd && (first & 0x0f) != 0 {
         return Err(MptError::InvalidHpEncoding);
@@ -271,7 +271,7 @@ fn resolve_ref(item: &Item, node_map: &HashMap<[u8; 32], Vec<u8>>) -> Result<Ite
         }
         Item::String(b) if b.len() < 32 => {
             // An inline node (RLP strictly under 32 bytes) - decode and handle
-            // in place. BLG-0124 (P05-F17): anything 32 bytes or above is a
+            // in place.: anything 32 bytes or above is a
             // hash reference, never an inline node - a longer string used to
             // be decoded as one regardless of size.
             rlp::decode(b).map_err(MptError::from)
@@ -497,7 +497,7 @@ mod tests {
         assert_eq!(keccak256(&ext_bytes), root);
     }
 
-    /// P05-F03: the receipts trie is a plain trie keyed by `rlp(tx_index)`.
+    /// The receipts trie is a plain trie keyed by `rlp(tx_index)`.
     /// Index 0 has key 0x80 (nibbles 8, 0) and index 1 has key 0x01 (nibbles 0, 1).
     /// The shape below is what Ethereum builds for a block with two receipts: a
     /// branch root, one leaf per first nibble. The key is NOT hashed.
@@ -607,7 +607,7 @@ mod tests {
         ];
         let root = [0x42u8; 32];
         for proof in &garbage_sets {
-            // BLG-0126 (P05-F19): every garbage case must be an Err (the
+            // Every garbage case must be an Err (the
             // exact kind varies: MissingNode / InvalidNode / Rlp), not a
             // panic and never a silent success.
             let result = verify(proof, &root, b"key");
