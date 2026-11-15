@@ -55,6 +55,12 @@ const MAX_SEEN: usize = 16_384;
 const MAX_OUTBOX: usize = 2_048;
 /// Most objects kept that no finalized transaction names yet.
 const MAX_UNREFERENCED_OBJECTS: usize = 64;
+/// Most such objects kept for one peer.
+const MAX_UNREFERENCED_PER_PEER: usize = 8;
+/// Longest wait between two dials of an address that does not answer.
+const MAX_DIAL_WAIT: Duration = Duration::from_mins(1);
+/// Most validators dialed in one round.
+const MAX_DIALS_PER_ROUND: usize = 8;
 /// Peers asked at once for one object.
 const FETCH_FANOUT: usize = 4;
 /// How long a node waits for an object before it gives up.
@@ -304,7 +310,14 @@ struct Node {
     last_dial: Instant,
     sync_cursor: usize,
     wanted: BTreeSet<Hash32>,
-    unreferenced: VecDeque<Hash32>,
+    /// Objects no finalized transaction names yet, by the peer that
+    /// deposited them. A peer that deposits too much loses its own.
+    unreferenced: BTreeMap<GardenKey, VecDeque<Hash32>>,
+    /// Validators dialed without an answer: when to dial next, and the
+    /// wait that led there. It doubles with every dial.
+    dials: BTreeMap<GardenKey, (Instant, Duration)>,
+    /// The same record for the invite peers.
+    seed_dials: Option<(Instant, Duration)>,
     fetches: BTreeMap<Hash32, Fetch>,
     fetch_tags: BTreeMap<u64, Hash32>,
     relays: BTreeMap<u64, Relay>,
@@ -529,7 +542,9 @@ pub async fn spawn(
         last_dial: now,
         sync_cursor: 0,
         wanted: BTreeSet::new(),
-        unreferenced: VecDeque::new(),
+        unreferenced: BTreeMap::new(),
+        dials: BTreeMap::new(),
+        seed_dials: None,
         fetches: BTreeMap::new(),
         fetch_tags: BTreeMap::new(),
         relays: BTreeMap::new(),
@@ -813,9 +828,17 @@ impl Node {
         true
     }
 
+    /// Dial the validators this node is not connected to. An address that
+    /// does not answer is dialed again after a wait that doubles each time:
+    /// the address is chosen by whoever joined, and every dial is a socket.
     async fn dial_known(&mut self) {
-        self.last_dial = Instant::now();
+        let now = Instant::now();
+        self.last_dial = now;
+        let first_wait = millis(self.limits().round_ms)
+            .max(Duration::from_secs(1))
+            .saturating_mul(2);
         let connected: BTreeSet<GardenKey> = self.peers.values().copied().collect();
+        let mut absent = BTreeSet::new();
         let mut targets = Vec::new();
         for validator in self.ledger.state.validators.values() {
             if validator.key == self.me
@@ -824,12 +847,37 @@ impl Node {
             {
                 continue;
             }
+            absent.insert(validator.key);
+            let waiting = self
+                .dials
+                .get(&validator.key)
+                .is_some_and(|(next, _)| now < *next);
+            if waiting || targets.len() >= MAX_DIALS_PER_ROUND {
+                continue;
+            }
             if let Ok(address) = validator_dial_address(&validator.address, &validator.key) {
+                let wait = self
+                    .dials
+                    .get(&validator.key)
+                    .map_or(first_wait, |(_, wait)| wait.saturating_mul(2))
+                    .min(MAX_DIAL_WAIT);
+                self.dials.insert(validator.key, (now + wait, wait));
                 targets.push(address);
             }
         }
+        // A validator that connected or left starts over.
+        self.dials.retain(|key, _| absent.contains(key));
         if self.peers.is_empty() {
-            targets.extend(self.seeds.iter().filter_map(|seed| seed.parse().ok()));
+            if self.seed_dials.is_none_or(|(next, _)| now >= next) {
+                let wait = self
+                    .seed_dials
+                    .map_or(first_wait, |(_, wait)| wait.saturating_mul(2))
+                    .min(MAX_DIAL_WAIT);
+                self.seed_dials = Some((now + wait, wait));
+                targets.extend(self.seeds.iter().filter_map(|seed| seed.parse().ok()));
+            }
+        } else {
+            self.seed_dials = None;
         }
         for address in targets {
             let _ = self.net.send(NetCommand::Dial(address)).await;
@@ -992,12 +1040,15 @@ impl Node {
                 }
             }
             GardenRequest::PutObject { bytes } => {
-                let response = match self.store.put(&bytes) {
-                    Ok(content_id) => {
-                        self.note_unreferenced(content_id);
-                        GardenResponse::Ack
-                    }
-                    Err(e) => GardenResponse::Refused(e),
+                let response = match self.peers.get(&peer).copied() {
+                    None => GardenResponse::Refused("show the invite first".into()),
+                    Some(sender) => match self.store.put(&bytes) {
+                        Ok(content_id) => {
+                            self.note_unreferenced(sender, content_id);
+                            GardenResponse::Ack
+                        }
+                        Err(e) => GardenResponse::Refused(e),
+                    },
                 };
                 self.respond(channel, response).await;
             }
@@ -1009,20 +1060,42 @@ impl Node {
         self.next_tag
     }
 
-    /// Track an object no finalized transaction names yet, and drop the
-    /// oldest such object when there are too many.
-    fn note_unreferenced(&mut self, content_id: Hash32) {
-        if self.ledger.state.objects.contains_key(&content_id)
-            || self.unreferenced.contains(&content_id)
-        {
+    /// Track an object no finalized transaction names yet, under the peer
+    /// that deposited it. A peer past its share loses its own oldest
+    /// object. When all peers together hold too many, the peer that holds
+    /// most loses one, and a peer that is no active validator goes first:
+    /// only a validator can publish.
+    fn note_unreferenced(&mut self, sender: GardenKey, content_id: Hash32) {
+        if self.ledger.state.objects.contains_key(&content_id) {
             return;
         }
-        self.unreferenced.push_back(content_id);
-        if self.unreferenced.len() > MAX_UNREFERENCED_OBJECTS {
-            if let Some(old) = self.unreferenced.pop_front() {
-                if !self.ledger.state.objects.contains_key(&old) {
-                    self.store.remove(&old);
-                }
+        let queue = self.unreferenced.entry(sender).or_default();
+        if queue.contains(&content_id) {
+            return;
+        }
+        queue.push_back(content_id);
+        let mut dropped = Vec::new();
+        if queue.len() > MAX_UNREFERENCED_PER_PEER {
+            dropped.extend(queue.pop_front());
+        }
+        let total: usize = self.unreferenced.values().map(VecDeque::len).sum();
+        if total > MAX_UNREFERENCED_OBJECTS {
+            let state = &self.ledger.state;
+            let heaviest = self
+                .unreferenced
+                .iter()
+                .max_by_key(|(key, queue)| (!state.is_active(key), queue.len()))
+                .map(|(key, _)| *key);
+            if let Some(queue) = heaviest.and_then(|key| self.unreferenced.get_mut(&key)) {
+                dropped.extend(queue.pop_front());
+            }
+        }
+        self.unreferenced.retain(|_, queue| !queue.is_empty());
+        for old in dropped {
+            let named = self.ledger.state.objects.contains_key(&old)
+                || self.unreferenced.values().any(|queue| queue.contains(&old));
+            if !named {
+                self.store.remove(&old);
             }
         }
     }
@@ -1451,7 +1524,9 @@ impl Node {
 
         for tx in &commit.block.txs {
             if let GardenTxKind::Publish { content_id, .. } = &tx.tx.kind {
-                self.unreferenced.retain(|id| id != content_id);
+                for queue in self.unreferenced.values_mut() {
+                    queue.retain(|id| id != content_id);
+                }
             }
             if matches!(
                 tx.tx.kind,
@@ -2425,6 +2500,144 @@ mod tests {
         .await;
         assert_eq!(closed, Ok(true), "the stranger held its connection");
         handle.leave().await.unwrap();
+    }
+
+    /// A bare swarm that showed the invite to the host of `invite`.
+    async fn guest(invite: &GardenInvite) -> (GardenNet, KeyPair, PeerId) {
+        let (mut swarm, key, peer) = stranger(invite).await;
+        let me = key.public_key_bytes();
+        let hello = GardenRequest::Hello {
+            chain_id: invite.chain_id,
+            key: me,
+            invite_signature: invite_keypair(&invite.token)
+                .unwrap()
+                .sign(&join_message(invite.chain_id, &me))
+                .to_vec(),
+        };
+        let answer = ask(&mut swarm, peer, hello).await;
+        assert!(
+            matches!(answer, GardenResponse::Welcome { .. }),
+            "{answer:?}"
+        );
+        (swarm, key, peer)
+    }
+
+    /// One peer cannot push the pending content of another peer out of a
+    /// node: content waits there so that it survives its publisher.
+    #[tokio::test]
+    async fn garden_deposits_of_one_peer_do_not_evict_the_deposits_of_another() {
+        let handle = host().await;
+        let invite = handle.invite().await.unwrap();
+        let (mut first, _, peer) = guest(&invite).await;
+        let (mut second, _, _) = guest(&invite).await;
+
+        let kept = b"waits for its block".to_vec();
+        let content_id = crate::storage::content_id::ContentId::of(&kept).0;
+        let put = GardenRequest::PutObject {
+            bytes: kept.clone(),
+        };
+        assert!(matches!(
+            ask(&mut first, peer, put).await,
+            GardenResponse::Ack
+        ));
+        for filler in 0..(MAX_UNREFERENCED_OBJECTS as u32 + 8) {
+            let put = GardenRequest::PutObject {
+                bytes: filler.to_be_bytes().to_vec(),
+            };
+            assert!(matches!(
+                ask(&mut second, peer, put).await,
+                GardenResponse::Ack
+            ));
+        }
+        let get = GardenRequest::GetObject {
+            content_id,
+            relay: false,
+        };
+        match ask(&mut first, peer, get).await {
+            GardenResponse::Object(found) => {
+                assert_eq!(found, Some(kept), "another peer evicted the deposit");
+            }
+            other => panic!("expected the object, got {other:?}"),
+        }
+    }
+
+    /// A validator whose address accepts and never answers is not dialed on
+    /// every round: each dial is a socket, and the address is chosen by
+    /// whoever joined.
+    #[tokio::test]
+    async fn garden_validator_that_never_answers_is_not_dialed_every_round() {
+        let handle = spawn(
+            GardenEntry::Create {
+                title: "Room".into(),
+                limits: GardenLimits {
+                    round_ms: 200,
+                    ..GardenLimits::testnet_default()
+                },
+            },
+            config("host", "/ip4/127.0.0.1/tcp/0"),
+            random_bytes(),
+            None,
+        )
+        .await
+        .unwrap();
+        let invite = handle.invite().await.unwrap();
+        let (mut swarm, key, peer) = guest(&invite).await;
+        let me = key.public_key_bytes();
+
+        // The address this validator announces is a socket that accepts and
+        // says nothing.
+        let silent = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = silent.local_addr().unwrap().port();
+        let accepted = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = accepted.clone();
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((socket, _)) = silent.accept().await {
+                counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                held.push(socket);
+            }
+        });
+        let join = GardenTx {
+            chain_id: invite.chain_id,
+            sender: me,
+            nonce: 0,
+            kind: GardenTxKind::Join {
+                name: "silent".into(),
+                address: format!(
+                    "/ip4/127.0.0.1/tcp/{port}/p2p/{}",
+                    net::peer_id_of(&me).unwrap()
+                ),
+                invite_signature: invite_keypair(&invite.token)
+                    .unwrap()
+                    .sign(&join_message(invite.chain_id, &me))
+                    .to_vec(),
+            },
+        }
+        .sign(&key)
+        .unwrap();
+        let gossip = GardenRequest::Gossip(vec![GardenGossip::Tx(join)]);
+        assert!(matches!(
+            ask(&mut swarm, peer, gossip).await,
+            GardenResponse::Ack
+        ));
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let status = handle.status().await.unwrap();
+                if status["active_validators"] == 2 {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await
+        .expect("the join never became final");
+
+        // The validator goes away. The host dials what it announced.
+        drop(swarm);
+        tokio::time::sleep(Duration::from_secs(9)).await;
+        let dials = accepted.load(std::sync::atomic::Ordering::SeqCst);
+        assert!(dials >= 1, "the host never dialed the validator");
+        assert!(dials <= 3, "the host dialed a silent address {dials} times");
     }
 
     #[tokio::test]
