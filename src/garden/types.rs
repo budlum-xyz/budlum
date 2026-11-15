@@ -148,7 +148,9 @@ pub struct GardenLimits {
     pub suspend_after_ms: u32,
     /// Most bytes one validator publishes over the life of the Garden.
     /// Nothing removes published content while the Garden lives, so this
-    /// times `max_validators` is the most a Garden asks of one disk.
+    /// times `max_validators` is the most a Garden asks of one disk. A node
+    /// keeps bytes for a publication only when they have the size the
+    /// publication declares, so the share bounds the bytes themselves.
     pub max_published_bytes_per_validator: u64,
 }
 
