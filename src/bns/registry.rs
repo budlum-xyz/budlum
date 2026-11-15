@@ -176,10 +176,6 @@ impl BnsRegistry {
     /// 30-day window, at about 100 epochs per day.
     pub const GRACE_PERIOD: u64 = GRACE_PERIOD;
 
-    /// Maximum number of BNS names in the registry.
-    /// At 100K names with subdomains, this bounds state growth to ~50MB.
-    pub const MAX_NAMES: usize = 100_000;
-
     /// Maximum subdomains per name.
     pub const MAX_SUBDOMAINS_PER_NAME: usize = 1_000;
 

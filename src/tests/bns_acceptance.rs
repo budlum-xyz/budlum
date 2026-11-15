@@ -189,3 +189,52 @@ fn bns_grace_window_holds_until_its_last_epoch_and_ends_on_the_next() {
     assert_eq!(reg.resolve("edge.bud", first_after), Some(stranger));
     assert_eq!(reg.names()["edge.bud"].owner, stranger);
 }
+
+/// Every name transaction type has a shape rule at admission. A transaction
+/// that carries an amount where none belongs, or data that does not decode,
+/// is named by the precheck and refused by the pool validation, so it never
+/// waits in the mempool for a block to refuse it.
+#[test]
+fn bns_every_type_has_a_shape_check_at_admission() {
+    use crate::chain::blockchain::Blockchain;
+    use crate::consensus::pow::PoWEngine;
+    use std::sync::Arc;
+
+    let chain = Blockchain::new(Arc::new(PoWEngine::new(0)), None, DEFAULT_CHAIN_ID, None);
+    let key = KeyPair::generate().unwrap();
+    let types = [
+        TransactionType::BnsCreateOffer,
+        TransactionType::BnsCancelOffer,
+        TransactionType::BnsBuyName,
+        TransactionType::BnsRenew,
+        TransactionType::BnsTransfer,
+        TransactionType::BnsSetAddress,
+        TransactionType::BnsSetPrimary,
+        TransactionType::BnsSetRecords,
+        TransactionType::BnsSetContent,
+        TransactionType::BnsRegisterSubdomain,
+        TransactionType::BnsRemoveSubdomain,
+        TransactionType::BnsSetSubdomainContent,
+        TransactionType::BnsSetStorage,
+    ];
+    for tx_type in types {
+        let label = format!("{tx_type:?}");
+        // Data no type decodes, and an amount only a purchase may carry.
+        let bent = tx(&key, 7, 0, tx_type, vec![0xFF]);
+        let answer = chain.tx_precheck(&bent);
+        let reasons: Vec<String> = answer["reasons"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|reason| reason.as_str().map(str::to_string))
+            .collect();
+        assert!(
+            reasons.iter().any(|reason| reason.contains("bns")),
+            "{label} has no shape reason at admission: {reasons:?}"
+        );
+        assert!(
+            chain.state.validate_transaction(&bent).is_err(),
+            "{label} with bent data passed the pool validation"
+        );
+    }
+}
