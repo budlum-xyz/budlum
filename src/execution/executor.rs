@@ -3876,7 +3876,21 @@ impl Executor {
                         let codec_ok = crate::storage::bud3::bof1::codec_is_registered(record.codec)
                             && bud_codec::is_open(record.codec)
                             && crate::storage::bud3::bof1::codec_is_open_on_testnet(record.codec);
-                        let will_dedup = state.bud3_registry.object(&record.commitment).is_some()
+                        let sender_bytes = *tx.from.as_bytes();
+                        let will_dedup = state
+                            .bud3_registry
+                            .object(&record.commitment)
+                            .is_some_and(|e| {
+                                (e.owner == sender_bytes
+                                    && e.record.content_id.kind != ContentIdKind::Public)
+                                    || (e.record.content_id.kind == ContentIdKind::Public
+                                        && e.custody_confirmed
+                                        && e.record.content_id == record.content_id
+                                        && !e.shares.is_empty()
+                                        && e.shares.iter().all(|s| {
+                                            s.status == ShareStatus::Confirmed && !s.lost
+                                        }))
+                            })
                             || (record.content_id.kind == ContentIdKind::Public
                                 && state
                                     .bud3_registry
@@ -3899,6 +3913,38 @@ impl Executor {
                                 &FeeParams::TESTNET_DEFAULT,
                             )
                             .unwrap_or(0)
+                        }
+                    }
+                    StorageTxV3::ReplaceObject {
+                        old_object,
+                        new_record,
+                        new_shares,
+                        ..
+                    } => {
+                        // Match `Bud3Registry::replace_object`: replacement mints a fresh
+                        // `ObjectEndowment` covering `remaining_epochs`, so collect the
+                        // exact storage fee from the sender up front.
+                        let codec_ok =
+                            crate::storage::bud3::bof1::codec_is_registered(new_record.codec)
+                                && bud_codec::is_open(new_record.codec)
+                                && crate::storage::bud3::bof1::codec_is_open_on_testnet(
+                                    new_record.codec,
+                                );
+                        if !codec_ok {
+                            0
+                        } else if let Some(old_entry) = state.bud3_registry.object(old_object) {
+                            let epoch = state.epoch_index;
+                            let expires_at = old_entry.expires_at.max(epoch.saturating_add(1));
+                            let remaining_epochs = expires_at.saturating_sub(epoch).max(1);
+                            let fee_rec = FeeRecord::from_placed_shares(new_record, new_shares);
+                            storage_fee_for_epochs(
+                                fee_rec.user_physical_bytes,
+                                remaining_epochs,
+                                &FeeParams::TESTNET_DEFAULT,
+                            )
+                            .unwrap_or(0)
+                        } else {
+                            0
                         }
                     }
                     StorageTxV3::RenewObject {
@@ -3999,32 +4045,79 @@ impl Executor {
                             }
                         }
                     }
-                    StorageTxV3::RecordRepair { witness, .. } => {
-                        use crate::storage::bud3::repair::RepairWitness;
-                        if let RepairWitness::ValidatorAttestations(atts) = witness {
-                            for att in atts {
-                                let v_addr = Address::from(att.validator);
-                                if state
-                                    .validator_directory
-                                    .get(&v_addr)
-                                    .is_some_and(|r| {
-                                        r.class != crate::validators::ValidatorClass::Full
-                                    })
-                                {
-                                    continue;
-                                }
-                                if let Some(pk) = state
-                                    .get_validator(&v_addr)
-                                    .filter(|v| {
-                                        v.active
-                                            && !v.slashed
-                                            && !v.jailed
-                                            && !v.pq_public_key.is_empty()
-                                    })
-                                    .map(|v| v.pq_public_key.clone())
-                                {
-                                    validator_keys.insert(att.validator, pk);
-                                }
+                    StorageTxV3::RecordRepair {
+                        object,
+                        segment,
+                        new_shares,
+                        ..
+                    } => {
+                        // Collect all active, unslashed, unjailed consensus Full validators
+                        // so `record_repair_with_validators` authenticates both the repairer
+                        // and every Full share recipient (not only attestation signers).
+                        let mut full_candidates = Vec::new();
+                        for (v_addr, v) in &state.validators {
+                            if !v.active || v.slashed || v.jailed {
+                                continue;
+                            }
+                            if state
+                                .validator_directory
+                                .get(v_addr)
+                                .is_some_and(|r| r.class != crate::validators::ValidatorClass::Full)
+                            {
+                                continue;
+                            }
+                            let key = if !v.pq_public_key.is_empty() {
+                                v.pq_public_key.clone()
+                            } else if let Some(rec) = state.validator_directory.get(v_addr) {
+                                rec.operator_key.clone()
+                            } else {
+                                v_addr.as_bytes().to_vec()
+                            };
+                            validator_keys.insert(*v_addr.as_bytes(), key);
+                            full_candidates.push(crate::storage::bud3::placement::Candidate {
+                                validator: *v_addr.as_bytes(),
+                                account: *v_addr.as_bytes(),
+                                class: crate::storage::bud3::placement::Class::Full,
+                                stake: v.stake.max(1),
+                                free_quota_bytes: u64::MAX,
+                                network: None,
+                            });
+                        }
+                        if validator_keys.is_empty() {
+                            return Err(BudlumError::validation(
+                                "storage_v3_refused",
+                                "RecordRepair requires an active consensus Full validator set",
+                            ));
+                        }
+                        // Also check Mobile share recipients are registered active validators
+                        // (so arbitrary non-validator addresses cannot be assigned shares).
+                        for s in new_shares {
+                            let recipient_addr = Address::from(s.validator);
+                            let active_validator = state
+                                .get_validator(&recipient_addr)
+                                .is_some_and(|v| v.active && !v.slashed && !v.jailed)
+                                || state.validator_directory.get(&recipient_addr).is_some();
+                            if !active_validator {
+                                return Err(BudlumError::validation(
+                                    "storage_v3_refused",
+                                    "repair share recipient is not a registered active validator",
+                                ));
+                            }
+                        }
+                        // Enforce deterministic rendezvous repairer assignment
+                        // (handover rotates to the next ranked Full validator
+                        // every `REPAIR_HANDOVER_BLOCKS = 20` blocks).
+                        if let Some(assigned) = crate::storage::bud3::repair::assign_repairer(
+                            object,
+                            *segment,
+                            &full_candidates,
+                            state.current_block_height,
+                        ) {
+                            if *tx.from.as_bytes() != assigned {
+                                return Err(BudlumError::validation(
+                                    "storage_v3_refused",
+                                    "RecordRepair signer is not the assigned rendezvous repairer for this handover slot",
+                                ));
                             }
                         }
                     }
@@ -4044,6 +4137,7 @@ impl Executor {
                 let charged_storage_fee = match applied {
                     Applied::Registered(Registered::Deduplicated(_)) => 0,
                     Applied::Registered(Registered::New(_))
+                    | Applied::Replaced(_)
                     | Applied::Renewed(_)
                     | Applied::PaidFallbackView => pre_storage_fee,
                     _ => 0,

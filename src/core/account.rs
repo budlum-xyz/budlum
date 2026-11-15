@@ -929,6 +929,28 @@ impl AccountState {
         };
         let mut tokenomics = snapshot.tokenomics;
         tokenomics.block_reward = snapshot.block_reward;
+        let bridge_state = snapshot.bridge_state.clone().unwrap_or_default();
+        let message_registry = snapshot.message_registry.clone().unwrap_or_default();
+        // Derive bridge/message roots from the restored registries instead of
+        // copying untrusted root fields from the snapshot file: a doctored
+        // snapshot carrying honest roots and forged registry entries then fails
+        // the startup state-root check instead of silently entering consensus.
+        // Pre-block-1 genesis snapshots carry `[0u8; 32]` with empty registries;
+        // any non-empty registry or non-zero snapshot root always derives from
+        // the restored registry contents.
+        let bridge_root = if bridge_state.root()
+            == crate::cross_domain::BridgeState::default().root()
+            && snapshot.bridge_root == [0u8; 32]
+        {
+            [0u8; 32]
+        } else {
+            bridge_state.root()
+        };
+        let message_root = if message_registry.is_empty() && snapshot.message_root == [0u8; 32] {
+            [0u8; 32]
+        } else {
+            message_registry.root()
+        };
 
         AccountState {
             accounts,
@@ -939,13 +961,13 @@ impl AccountState {
             storage_registry: snapshot.storage_registry.clone().unwrap_or_default(),
             ai_registry: snapshot.ai_registry.clone().unwrap_or_default(),
             note_registry: snapshot.note_registry.clone().unwrap_or_default(),
-            bridge_state: snapshot.bridge_state.clone().unwrap_or_default(),
+            bridge_state,
             poa_onboarding: snapshot.poa_onboarding.clone().unwrap_or_default(),
             // Derived, not restored: recomputed from the records above at the
             // next block close. Restoring it would let a doctored snapshot
             // ship an admitted set its own records do not support.
             poa_admitted: BTreeMap::new(),
-            message_registry: snapshot.message_registry.clone().unwrap_or_default(),
+            message_registry,
             team_vesting,
             // A snapshot taken before the flag existed means what that chain
             // did: the network profile's answer. Absent on a testnet snapshot
@@ -993,8 +1015,8 @@ impl AccountState {
             cached_leaves: Vec::new(),
             cached_keys: Vec::new(),
             cached_tree: Vec::new(),
-            bridge_root: snapshot.bridge_root,
-            message_root: snapshot.message_root,
+            bridge_root,
+            message_root,
             settlement_root: snapshot.settlement_root,
             global_header_summary: snapshot.global_header_summary,
             // Restore permissionless registry + liveness + invalid-vote
@@ -7740,6 +7762,40 @@ mod validator_v7_binding_tests {
             // below the true whole-atom ceiling.
             assert!(state.circulating_supply() >= initial_ceiling_atoms);
         }
+    }
+
+    #[test]
+    fn snapshot_v2_derives_bridge_and_message_roots_from_restored_registries() {
+        use crate::chain::snapshot::{StateSnapshotV2, StateSnapshotV2Params};
+        let mut original = AccountState::new();
+        original.bridge_root = original.bridge_state.root();
+        original.message_root = original.message_registry.root();
+        let mut snap = StateSnapshotV2::from_state(
+            &original,
+            StateSnapshotV2Params {
+                height: 1,
+                block_hash: "00".repeat(32),
+                genesis_hash: "00".repeat(32),
+                chain_id: 1,
+                finalized_height: 0,
+                finalized_hash: "00".repeat(32),
+                finality_certificates: Vec::new(),
+            },
+        );
+        // Tamper the serialized root fields so they disagree with the restored
+        // empty registries.
+        snap.bridge_root = [0xAB; 32];
+        snap.message_root = [0xCD; 32];
+
+        let mut restored = AccountState::from_snapshot_v2(&snap);
+        assert_eq!(restored.bridge_root, restored.bridge_state.root());
+        assert_eq!(restored.message_root, restored.message_registry.root());
+        assert_ne!(restored.bridge_root, [0xAB; 32]);
+        assert_ne!(restored.message_root, [0xCD; 32]);
+        assert_eq!(
+            restored.calculate_state_root(),
+            original.calculate_state_root()
+        );
     }
 }
 

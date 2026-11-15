@@ -765,15 +765,26 @@ fn mobile_duty_tx_lane_is_rate_limited() {
     let window = window_at(now);
 
     let mut pool = Mempool::new(MempoolConfig {
-        // A fee floor the batch must not pay: the lane is free (section 11.6).
+        // A fee floor the batch must not pay: the lane is free (section 11.6)
+        // for registered active validators.
         min_fee: 5,
         duty_block_bytes: 64 * 1024,
         ..MempoolConfig::default()
     });
 
+    // An unregistered account cannot bypass `min_fee` or occupy the free duty
+    // lane merely by sending a duty-shaped transaction.
     let first = duty_ack(&keypair, 0, [1u8; 32]);
     assert_eq!(first.fee, 0);
     assert!(is_duty(&first));
+    assert_eq!(
+        pool.admit_at(first.clone(), now),
+        Err(MempoolError::FeeTooLow)
+    );
+
+    // Once the validator is synced into the active set, its duty batch enters
+    // the free lane.
+    pool.sync_duty_validators([first.from]);
     assert!(pool.admit_at(first, now).is_ok());
 
     // A second batch in the same window is refused, and the refusal says which
@@ -808,7 +819,9 @@ fn mobile_duty_tx_lane_is_rate_limited() {
         duty_block_bytes: 1,
         ..MempoolConfig::default()
     });
-    let refused = tiny.admit_at(duty_ack(&keypair, 0, [5u8; 32]), now);
+    let tiny_tx = duty_ack(&keypair, 0, [5u8; 32]);
+    tiny.sync_duty_validators([tiny_tx.from]);
+    let refused = tiny.admit_at(tiny_tx, now);
     assert!(matches!(
         refused,
         Err(MempoolError::DutyLaneRefused(
@@ -847,6 +860,7 @@ fn duty_lane_budget_is_twenty_percent() {
         duty_block_bytes: cap,
         ..MempoolConfig::default()
     });
+    pool.sync_duty_validators(batches.iter().map(|b| b.from));
     for batch in batches {
         assert!(pool.admit_at(batch, now).is_ok());
     }

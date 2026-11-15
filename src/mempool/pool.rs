@@ -210,6 +210,11 @@ pub struct Mempool {
     /// comes back (re-gossip, a block replay) is not verified twice.
     authority_cache: crate::mempool::authority_cache::AuthorityCache,
 
+    /// Registered active validators permitted to use the zero-fee duty lane.
+    /// Fail-closed (empty by default): an unregistered account cannot bypass
+    /// the fee floor or lock the duty lane by crafting a duty-shaped payload.
+    duty_validators: std::collections::HashSet<Address>,
+
     /// Entries this pool removed while a bundle was being admitted.
     ///
     /// Admission is not free of side effects on other people's transactions: a
@@ -268,6 +273,7 @@ impl Mempool {
             resident_bytes: 0,
             scheme_registry: crate::crypto::scheme::SchemeStatusRegistry::genesis(),
             authority_cache: crate::mempool::authority_cache::AuthorityCache::default(),
+            duty_validators: std::collections::HashSet::new(),
             journal: None,
             lanes: crate::mempool::lanes::MultiLaneMempool::new(1024, 16 * 1024 * 1024),
         }
@@ -318,6 +324,12 @@ impl Mempool {
         }
     }
 
+    /// Adopt the set of active registered validators permitted to submit
+    /// zero-fee batches into the validator duty lane.
+    pub fn sync_duty_validators<I: IntoIterator<Item = Address>>(&mut self, validators: I) {
+        self.duty_validators = validators.into_iter().collect();
+    }
+
     /// The bytes currently held.
     #[must_use]
     pub const fn resident_bytes(&self) -> usize {
@@ -358,15 +370,17 @@ impl Mempool {
             return Err(MempoolError::DuplicateTransaction);
         }
 
-        // The duty lane is free (section 7.3, item 6; section 11.6). A Mobile
-        // validator's batch is admitted below the fee floor, and the lane's
-        // own limits are what bound it instead: one batch per validator per
-        // window, and a byte ceiling on the lane. Every other transaction
-        // still pays, so the floor has not moved for anyone else.
-        let duty = duty_lane::is_duty(&tx).then(|| DutyBatch {
-            window: duty_lane::window_at(now_ms),
-            block_bytes: duty_lane::block_bytes(&tx),
-        });
+        // The duty lane is free (section 7.3, item 6; section 11.6), ONLY for
+        // registered active validators synced via `sync_duty_validators`. An
+        // unregistered account crafting a duty-shaped transaction does not get
+        // free admission and must pay at least `min_fee` like any other sender.
+        let duty =
+            (duty_lane::is_duty(&tx) && self.duty_validators.contains(&tx.from)).then(|| {
+                DutyBatch {
+                    window: duty_lane::window_at(now_ms),
+                    block_bytes: duty_lane::block_bytes(&tx),
+                }
+            });
 
         if duty.is_none() && !is_uol_home_stipend_tx(&tx) && tx.fee < self.config.min_fee {
             return Err(MempoolError::FeeTooLow);

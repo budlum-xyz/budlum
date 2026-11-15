@@ -55,6 +55,10 @@ const DOMAIN_TYPE: &str =
 const AUTHORIZATION_TYPE: &str = "MigrationAuthorization(address contract,uint256 budlumChainId,uint256 sourceBlock,bytes32 stateRoot,bytes32 codeHash)";
 /// Maximum proven storage slots carried in one `ImportEvmStorageChunk`.
 pub const MAX_CHUNK_SLOTS: usize = 4096;
+/// Maximum total proven storage slots that may be staged in one pending EVM migration.
+pub const MAX_STAGED_SLOTS: usize = 65_536;
+/// Maximum concurrent pending EVM migrations staged in consensus state.
+pub const MAX_PENDING_MIGRATIONS: usize = 256;
 
 /// EIP-712 `MigrationAuthorization` signed by the account with deployment authority.
 ///
@@ -158,6 +162,15 @@ pub enum ImportError {
         slots: usize,
         max: usize,
     },
+    TooManyStagedSlots {
+        slots: usize,
+        max: usize,
+    },
+    TooManyPendingMigrations {
+        pending: usize,
+        max: usize,
+    },
+    NotAuthorizedMigrator,
     SlotAbsent([u8; 32]),
     SlotValueMismatch {
         slot: [u8; 32],
@@ -219,6 +232,21 @@ impl std::fmt::Display for ImportError {
             Self::ChunkBlockMismatch => write!(f, "migration: chunk block mismatch"),
             Self::ChunkTooLarge { slots, max } => {
                 write!(f, "migration: {slots} slots exceeds bound {max}")
+            }
+            Self::TooManyStagedSlots { slots, max } => {
+                write!(f, "migration: staged slots {slots} exceeds cap {max}")
+            }
+            Self::TooManyPendingMigrations { pending, max } => {
+                write!(
+                    f,
+                    "migration: {pending} pending migrations reached cap {max}"
+                )
+            }
+            Self::NotAuthorizedMigrator => {
+                write!(
+                    f,
+                    "migration: sender is not the migrator that opened this staged plan"
+                )
             }
             Self::SlotAbsent(slot) => write!(f, "migration: absent slot 0x{}", hex::encode(slot)),
             Self::SlotValueMismatch {
@@ -333,6 +361,8 @@ pub struct MigrationPlan {
     #[serde(with = "crate::core::map_keys")]
     storage: BTreeMap<[u8; 32], [u8; 32]>,
     proof_nodes: u64,
+    #[serde(default)]
+    migrator: Option<Address>,
 }
 
 /// Consensus-level EVM & non-EVM migration transaction variants (`8.12.2` & `8.12.3`).
@@ -458,10 +488,41 @@ pub fn begin_import(
         code: request.code,
         storage: BTreeMap::new(),
         proof_nodes,
+        migrator: None,
     })
 }
 
 impl MigrationPlan {
+    /// Canonical cryptographic commitment covering every staged field so
+    /// pending migrations enter the consensus `execution_root()`.
+    #[must_use]
+    pub fn commitment(&self) -> [u8; 32] {
+        let mut h = sha2::Sha256::new();
+        use sha2::Digest;
+        h.update(b"BDLM_UEL_MIGRATIONS_V1");
+        h.update((self.source.domain.len() as u64).to_le_bytes());
+        h.update(self.source.domain.as_bytes());
+        h.update(self.source.block.to_le_bytes());
+        h.update(self.source.address);
+        h.update(self.account.nonce.to_le_bytes());
+        h.update(self.account.storage_root);
+        h.update(self.account.code_hash);
+        h.update((self.code.len() as u64).to_le_bytes());
+        h.update(&self.code);
+        h.update(self.proof_nodes.to_le_bytes());
+        if let Some(m) = &self.migrator {
+            h.update([1u8]);
+            h.update(m.as_bytes());
+        } else {
+            h.update([0u8]);
+        }
+        h.update((self.storage.len() as u64).to_le_bytes());
+        for (slot, val) in &self.storage {
+            h.update(slot);
+            h.update(val);
+        }
+        h.finalize().into()
+    }
     /// Proven source account metadata.
     #[must_use]
     pub fn account(&self) -> &EvmAccount {
@@ -516,6 +577,12 @@ impl MigrationPlan {
                 }
             }
             staged.insert(entry.slot, entry.value);
+            if staged.len() > MAX_STAGED_SLOTS {
+                return Err(ImportError::TooManyStagedSlots {
+                    slots: staged.len(),
+                    max: MAX_STAGED_SLOTS,
+                });
+            }
             let entry_nodes =
                 u64::try_from(entry.proof_nodes.len()).map_err(|_| MigrationFeeOverflow)?;
             next_nodes = next_nodes
@@ -542,6 +609,7 @@ impl MigrationPlan {
             code,
             storage,
             proof_nodes,
+            migrator: _,
         } = self;
         let proven_code_hash = account_proof::code_hash(&code);
         if proven_code_hash != account.code_hash {
@@ -635,6 +703,12 @@ pub fn apply_migration_tx(
 ) -> Result<MigrationTxOutcome, ImportError> {
     match tx {
         MigrationTx::BeginEvmImport(mut req) => {
+            if state.execution_state.pending_evm_migrations.len() >= MAX_PENDING_MIGRATIONS {
+                return Err(ImportError::TooManyPendingMigrations {
+                    pending: state.execution_state.pending_evm_migrations.len(),
+                    max: MAX_PENDING_MIGRATIONS,
+                });
+            }
             let target = req.authorization.contract;
             let hex_addr = hex::encode(target);
             if state
@@ -646,7 +720,8 @@ pub fn apply_migration_tx(
             }
             let live_occupied = is_evm_address_occupied(state, &state.execution_state, &target)?;
             req.occupied = req.occupied || live_occupied;
-            let plan = begin_import(*req, chain_id)?;
+            let mut plan = begin_import(*req, chain_id)?;
+            plan.migrator = Some(*migrator);
             let actual = plan.source().address;
             let actual_hex = hex::encode(actual);
             if state
@@ -676,6 +751,9 @@ pub fn apply_migration_tx(
                 .pending_evm_migrations
                 .get_mut(&hex_addr)
                 .ok_or(ImportError::NoPendingMigration)?;
+            if plan.migrator.is_some_and(|m| m != *migrator) {
+                return Err(ImportError::NotAuthorizedMigrator);
+            }
             let count = plan.import_chunk(&chunk)?;
             Ok(MigrationTxOutcome::ChunkImported {
                 contract: chunk.contract,
@@ -693,6 +771,9 @@ pub fn apply_migration_tx(
                 .get(&hex_addr)
                 .cloned()
                 .ok_or(ImportError::NoPendingMigration)?;
+            if plan.migrator.is_some_and(|m| m != *migrator) {
+                return Err(ImportError::NotAuthorizedMigrator);
+            }
             let record = plan.finalize(fee_schedule)?;
 
             let acct_rec = EvmAccountRecord {
@@ -1317,5 +1398,65 @@ mod tests {
                 .expect("json");
         assert_eq!(get_imp_resp["result"]["domain"].as_str(), Some("sepolia"));
         assert_eq!(get_imp_resp["result"]["block"].as_u64(), Some(SOURCE_BLOCK));
+    }
+
+    #[test]
+    fn staged_evm_migration_enters_execution_root_and_rejects_other_migrator() {
+        let mut state = AccountState::new();
+        let empty_root = state.execution_state.execution_root();
+        let migrator_a = Address::from([0x11; 32]);
+        let migrator_b = Address::from([0x22; 32]);
+        let contract = [0xABu8; 20];
+        let plan = MigrationPlan {
+            source: ImportSource {
+                domain: "sepolia".to_string(),
+                block: 100,
+                address: contract,
+            },
+            account: EvmAccount {
+                nonce: 1,
+                balance_be: [0u8; 32],
+                storage_root: [0x33; 32],
+                code_hash: [0x44; 32],
+            },
+            code: vec![0x60, 0x00],
+            storage: BTreeMap::new(),
+            proof_nodes: 2,
+            migrator: Some(migrator_a),
+        };
+        state
+            .execution_state
+            .pending_evm_migrations
+            .insert(hex::encode(contract), plan);
+        let staged_root = state.execution_state.execution_root();
+        assert_ne!(
+            staged_root, empty_root,
+            "staged EVM migration plans must enter execution_root()"
+        );
+
+        let chunk = ImportEvmStorageChunk {
+            contract,
+            source_block: 100,
+            slots: Vec::new(),
+        };
+        let err = apply_migration_tx(
+            &mut state,
+            &migrator_b,
+            MigrationTx::ImportEvmStorageChunk(chunk),
+            &MigrationFeeSchedule::TESTNET_DEFAULT,
+            45261,
+        )
+        .unwrap_err();
+        assert_eq!(err, ImportError::NotAuthorizedMigrator);
+
+        let fin_err = apply_migration_tx(
+            &mut state,
+            &migrator_b,
+            MigrationTx::FinalizeEvmImport { contract },
+            &MigrationFeeSchedule::TESTNET_DEFAULT,
+            45261,
+        )
+        .unwrap_err();
+        assert_eq!(fin_err, ImportError::NotAuthorizedMigrator);
     }
 }

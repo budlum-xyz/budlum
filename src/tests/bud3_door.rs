@@ -192,6 +192,14 @@ fn the_epoch_boundary_expires_and_audits() {
         },
     );
     apply(&mut state, &t).unwrap();
+    // Confirm custody so the expired object earns a deletion tombstone.
+    let holder = Address::from([11; 32]);
+    state.add_balance(&holder, 1_000);
+    apply(
+        &mut state,
+        &storage_tx(holder, 0, 1, 0, StorageTxV3::CustodyAck { object: key }),
+    )
+    .unwrap();
     let start = state.epoch_index;
     for _ in 0..3 {
         state.advance_epoch(0, DEFAULT_CHAIN_ID);
@@ -610,6 +618,23 @@ fn bud3_social_delete_crypto_shredding_and_tombstone() {
         ),
     )
     .unwrap();
+    for holder_byte in [60u8, 61] {
+        let holder = Address::from([holder_byte; 32]);
+        state.add_balance(&holder, 1_000);
+        apply(
+            &mut state,
+            &storage_tx(
+                holder,
+                0,
+                1,
+                0,
+                StorageTxV3::CustodyAck {
+                    object: obj_commitment,
+                },
+            ),
+        )
+        .unwrap();
+    }
     let nft_id = [0xB2; 32];
     apply(
         &mut state,
@@ -866,6 +891,19 @@ fn bud3_public_dedup_sealed_isolation_and_dependency_rules() {
         ),
     )
     .unwrap();
+    for holder in [80u8, 81] {
+        apply(
+            &mut state,
+            &storage_tx(
+                Address::from([holder; 32]),
+                1,
+                1,
+                0,
+                StorageTxV3::CustodyAck { object: alice_base },
+            ),
+        )
+        .unwrap();
+    }
     apply(
         &mut state,
         &storage_tx(
@@ -978,6 +1016,9 @@ fn bud3_decline_content_reassigns_and_release_shares_lowers_quota_without_penalt
     for addr in [uploader, holder_a, holder_b, repairer, replacement] {
         state.add_balance(&addr, 20_000);
     }
+    for v_addr in [holder_a, holder_b, repairer, replacement] {
+        state.add_validator(v_addr, 50_000);
+    }
     state
         .bud3_registry
         .set_validator_quota(*holder_b.as_bytes(), 100_000);
@@ -1041,6 +1082,59 @@ fn bud3_decline_content_reassigns_and_release_shares_lowers_quota_without_penalt
     .unwrap();
     assert_eq!(state.get_balance(&holder_a), bal_before - 1);
     assert_eq!(state.bud3_registry.repairs_due(&obj_key), vec![0]);
+
+    // Advance block height to the rendezvous handover slot assigned to `repairer`.
+    let candidates: Vec<_> = [holder_a, holder_b, repairer, replacement]
+        .into_iter()
+        .map(|a| crate::storage::bud3::placement::Candidate {
+            validator: *a.as_bytes(),
+            account: *a.as_bytes(),
+            class: Class::Full,
+            stake: 50_000,
+            free_quota_bytes: u64::MAX,
+            network: None,
+        })
+        .collect();
+    let repair_height = (0u64..8)
+        .map(|slot| slot * crate::storage::bud3::repair::REPAIR_HANDOVER_BLOCKS)
+        .find(|&h| {
+            crate::storage::bud3::repair::assign_repairer(&obj_key, 0, &candidates, h)
+                == Some(*repairer.as_bytes())
+        })
+        .expect("repairer is assigned a handover slot");
+    state.current_block_height = repair_height;
+
+    // An unauthorized non-validator (uploader) cannot submit RecordRepair.
+    let rogue_prep = build_segment_repair(
+        uploader.as_bytes(),
+        0,
+        up.record.object_len,
+        &P,
+        16,
+        &[(*replacement.as_bytes(), Class::Full, 8)],
+        up.segments[0].clone(),
+    )
+    .unwrap();
+    assert!(apply(
+        &mut state,
+        &storage_tx(
+            uploader,
+            1,
+            1,
+            0,
+            StorageTxV3::RecordRepair {
+                object: obj_key,
+                segment: 0,
+                new_shares: rogue_prep.new_shares,
+                new_symbols: rogue_prep.new_symbols,
+                new_root: rogue_prep.new_root,
+                witness: crate::storage::bud3::repair::RepairWitness::ProvenSymbols(
+                    rogue_prep.witness
+                ),
+            },
+        ),
+    )
+    .is_err());
 
     // Repairer reconstructs segment 0 and assigns fresh ESIs (16..24) to `replacement`.
     let prep = build_segment_repair(
@@ -1513,6 +1607,20 @@ fn bud3_e2e_replace_object_preserves_nft_binding_and_slashes_mismatch() {
             symbols: new_up.record.symbols_per_segment,
         },
     )];
+    let proposer_bal_before = state.get_balance(&proposer);
+    let endowment_acct = crate::storage::bud3::fees::custody_endowment_account();
+    let endowment_bal_before = state.get_balance(&endowment_acct);
+    let expected_replace_fee = {
+        let fee_rec =
+            crate::storage::bud3::fees::FeeRecord::from_placed_shares(&new_up.record, &new_shares);
+        crate::storage::bud3::fees::storage_fee_for_epochs(
+            fee_rec.user_physical_bytes,
+            20,
+            &crate::storage::bud3::fees::FeeParams::TESTNET_DEFAULT,
+        )
+        .unwrap()
+    };
+    assert!(expected_replace_fee > 0);
     apply(
         &mut state,
         &storage_tx(
@@ -1530,6 +1638,17 @@ fn bud3_e2e_replace_object_preserves_nft_binding_and_slashes_mismatch() {
         ),
     )
     .unwrap();
+    // ReplaceObject must debit the full replacement storage fee + tx fee from
+    // proposer and credit the Custody Endowment share (no unbacked endowment mint).
+    assert_eq!(
+        state.get_balance(&proposer),
+        proposer_bal_before - 1 - expected_replace_fee
+    );
+    let replace_split = crate::storage::bud3::fees::split_storage_fee(expected_replace_fee);
+    assert_eq!(
+        state.get_balance(&endowment_acct),
+        endowment_bal_before + replace_split.endowment_share
+    );
     assert!(
         state.bud3_registry.object(&old_key).is_some(),
         "old shares stay until replacement custody ack"

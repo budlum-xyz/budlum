@@ -286,18 +286,22 @@ pub fn lock(
     if params.amount == 0 {
         return Err("Bridge transfer amount must be non-zero".into());
     }
+    // Measure the lock-expiry window strictly from the executing Budlum block
+    // height (`height`), never from the caller-chosen `source_height`: the
+    // pending-lock sweep compares `expiry_height` against Budlum height, so
+    // measuring from an attacker-chosen `source_height` would let one lock
+    // carry an unreachable expiry and strand the asset's transfer lane forever.
+    if params.expiry_height <= height {
+        return Err("Bridge transfer expiry must be after the current height".into());
+    }
+    if params.expiry_height > height.saturating_add(MAX_BRIDGE_LOCK_EXPIRY_BLOCKS) {
+        return Err(format!(
+            "Bridge transfer expiry exceeds the protocol window (current height {height}, expiry {}, max window {MAX_BRIDGE_LOCK_EXPIRY_BLOCKS} blocks)",
+            params.expiry_height
+        ));
+    }
     if params.expiry_height <= params.source_height {
         return Err("Bridge transfer expiry must be after source height".into());
-    }
-    if params.expiry_height
-        > params
-            .source_height
-            .saturating_add(MAX_BRIDGE_LOCK_EXPIRY_BLOCKS)
-    {
-        return Err(format!(
-            "Bridge transfer expiry exceeds the protocol window (source height {}, expiry {}, max window {MAX_BRIDGE_LOCK_EXPIRY_BLOCKS} blocks)",
-            params.source_height, params.expiry_height
-        ));
     }
     // The owner is debited, so the balance is checked before the transfer
     // row exists: a refusal after the insert would leave a lock that never
@@ -1490,9 +1494,18 @@ mod tests {
         assert!(lock(&mut state, owner, &max_uint, FEE, 5).is_err());
 
         let at_limit = LockRequest {
-            expiry_height: base.source_height + MAX_BRIDGE_LOCK_EXPIRY_BLOCKS,
-            ..base
+            expiry_height: 5 + MAX_BRIDGE_LOCK_EXPIRY_BLOCKS,
+            ..base.clone()
         };
         assert!(lock(&mut state, owner, &at_limit, FEE, 5).is_ok());
+
+        // A far-future caller-supplied `source_height` cannot extend the
+        // expiry window past `height + MAX_BRIDGE_LOCK_EXPIRY_BLOCKS`.
+        let forged_source = LockRequest {
+            source_height: 10_000_000,
+            expiry_height: 10_000_500,
+            ..base
+        };
+        assert!(lock(&mut state, owner, &forged_source, FEE, 5).is_err());
     }
 }
