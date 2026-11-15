@@ -141,6 +141,11 @@ pub enum StorageTx {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StorageReallocationAccept {
     pub ticket_id: u64,
+    /// Measured bytes the replacement operator agrees to store. The chain
+    /// requires this to equal the registered manifest's entry for the ticket's
+    /// shard, which is the number the escrow is priced on and the challenge
+    /// range is derived from.
+    pub shard_size: u32,
     pub replacement_operator: Address,
     pub start_epoch: u64,
     pub end_epoch: u64,
@@ -491,6 +496,7 @@ pub fn accept_reallocation_consent_digest(
         payer.as_bytes(),
         &nonce.to_le_bytes(),
         &accept.ticket_id.to_le_bytes(),
+        &accept.shard_size.to_le_bytes(),
         accept.replacement_operator.as_bytes(),
         &accept.start_epoch.to_le_bytes(),
         &accept.end_epoch.to_le_bytes(),
@@ -521,6 +527,40 @@ fn accept_reallocation(
             &accept.replacement_operator,
         )
         .map_err(|e| StorageTxError::OperatorConsentRefused(e.to_string()))?;
+    // The signature has to name the length the chain will price and challenge.
+    // The placement comes from the ticket, so the size comes from the
+    // registered manifest entry for the ticket's shard - the same number the
+    // escrow is priced on and the retrieval range is derived from. Without this
+    // an operator can be bound into a repair whose challenge range runs past
+    // the shard its own signature described, and its bond is slashed for an
+    // answer it could not give. The ticket is read here rather than inside the
+    // escrow kernel so the refusal happens before any write is attempted.
+    let (ticket_manifest_id, ticket_shard_id) = state
+        .storage_registry
+        .get_reallocation_ticket(accept.ticket_id)
+        .map(|ticket| (ticket.manifest_id, ticket.shard_id))
+        .ok_or_else(|| {
+            StorageTxError::ReallocationRefused(format!(
+                "unknown reallocation ticket {}",
+                accept.ticket_id
+            ))
+        })?;
+    let listed_size = state
+        .storage_registry
+        .get_manifest(&ticket_manifest_id)
+        .and_then(|manifest| manifest.shard(&ticket_shard_id).map(|shard| shard.size))
+        .ok_or_else(|| {
+            StorageTxError::ReallocationRefused(format!(
+                "manifest {} does not list shard {ticket_shard_id:?}",
+                ticket_manifest_id
+            ))
+        })?;
+    if accept.shard_size != listed_size {
+        return Err(StorageTxError::ReallocationRefused(format!(
+            "consent names {} bytes but the registered shard's entry is {listed_size}",
+            accept.shard_size
+        )));
+    }
     let terms = ReallocationTerms {
         ticket_id: accept.ticket_id,
         replacement_operator: accept.replacement_operator,
@@ -2295,6 +2335,7 @@ mod tests {
         let accept_ctx = ctx(payer);
         let mut accept = StorageReallocationAccept {
             ticket_id,
+            shard_size: m.shards.first().unwrap().size,
             replacement_operator: existing_op,
             start_epoch: 120,
             end_epoch: 200,
@@ -2328,6 +2369,170 @@ mod tests {
             "unexpected error: {err}"
         );
         assert_eq!(state.calculate_state_root(), before_root);
+    }
+
+    #[cfg(feature = "wallet-ml-dsa")]
+    #[test]
+    fn a_repair_acceptance_must_name_the_size_the_manifest_lists() {
+        use crate::crypto::primitives::WalletKeyPair;
+
+        let mut state = AccountState::new();
+        let m = registered(&mut state);
+        let payer = owner();
+        let slashed_op = Address::from([0x71; 32]);
+        let newcomer_wkp = WalletKeyPair::generate();
+        let newcomer = newcomer_wkp.address();
+        let opener = Address::from([0x72; 32]);
+
+        for addr in [payer, slashed_op, newcomer, opener] {
+            state.add_balance(&addr, 50_000_000);
+        }
+
+        let shard_id = m.shards.first().unwrap().shard_id;
+        let listed_size = m.shards.first().unwrap().size;
+        let econ = StorageEconomicsParams {
+            operator_bond: STORAGE_MIN_OPERATOR_BOND,
+            fee_per_byte_epoch: 10_000,
+        };
+        let deal0_id = open_deal_escrowed(
+            &mut state,
+            &DealOpenTerms {
+                domain_id: 42,
+                manifest: &m,
+                shard_id,
+                operator: slashed_op,
+                replica_index: 0,
+                start_epoch: 100,
+                end_epoch: 200,
+                economics: econ.clone(),
+                merkle_proof: Some(proof()),
+                storage_root: Some([0x42; 32]),
+            },
+            payer,
+            100,
+            STORAGE_MIN_OPERATOR_BOND,
+            0,
+        )
+        .unwrap();
+        state.epoch_index = 120;
+        execute_storage_tx(&mut state, &ctx(opener), &open_challenge_tx(deal0_id)).unwrap();
+        let ch_id = only_challenge_id(&state);
+        state.epoch_index = 170;
+        state
+            .storage_registry
+            .finalize_missed_challenge(ch_id, 170)
+            .unwrap();
+        let ticket_id = state
+            .storage_registry
+            .all_reallocation_tickets()
+            .first()
+            .expect("repair ticket opened")
+            .ticket_id;
+
+        let accept_ctx = ctx(payer);
+        let signed = |size: u32| {
+            let mut accept = StorageReallocationAccept {
+                ticket_id,
+                shard_size: size,
+                replacement_operator: newcomer,
+                start_epoch: 120,
+                end_epoch: 200,
+                economics: econ.clone(),
+                merkle_proof: proof(),
+                storage_root: [0x42; 32],
+                operator_consent: GrantAuthorization {
+                    owner_key: newcomer_wkp.public_key_bytes(),
+                    signature: Vec::new(),
+                },
+            };
+            let digest = accept_reallocation_consent_digest(
+                accept_ctx.chain_id,
+                &payer,
+                accept_ctx.nonce,
+                &accept,
+            );
+            accept.operator_consent.signature = newcomer_wkp
+                .sign(crate::crypto::ctx::STORAGE_V2, &digest)
+                .to_vec();
+            accept
+        };
+
+        let before_root = state.calculate_state_root();
+        let err = execute_storage_tx(
+            &mut state,
+            &accept_ctx,
+            &StorageTx::AcceptReallocation(Box::new(signed(listed_size + 1))),
+        )
+        .expect_err("a consent naming a size the manifest does not list must be refused");
+        assert!(
+            matches!(err, StorageTxError::ReallocationRefused(ref msg) if msg.contains("bytes but the registered shard's entry is")),
+            "unexpected error: {err}"
+        );
+        assert_eq!(
+            state.calculate_state_root(),
+            before_root,
+            "the refusal writes nothing"
+        );
+        assert!(
+            state
+                .storage_registry
+                .all_reallocation_tickets()
+                .first()
+                .is_some_and(|t| t.replacement_deal_id.is_none()),
+            "no replacement deal was opened"
+        );
+    }
+
+    #[cfg(feature = "wallet-ml-dsa")]
+    #[test]
+    fn the_repair_consent_digest_commits_the_shard_size() {
+        use crate::crypto::primitives::WalletKeyPair;
+
+        let wkp = WalletKeyPair::generate();
+        let payer = owner();
+        let accept = |size: u32| StorageReallocationAccept {
+            ticket_id: 7,
+            shard_size: size,
+            replacement_operator: wkp.address(),
+            start_epoch: 120,
+            end_epoch: 200,
+            economics: StorageEconomicsParams {
+                operator_bond: STORAGE_MIN_OPERATOR_BOND,
+                fee_per_byte_epoch: 10_000,
+            },
+            merkle_proof: proof(),
+            storage_root: [0x42; 32],
+            operator_consent: GrantAuthorization {
+                owner_key: wkp.public_key_bytes(),
+                signature: Vec::new(),
+            },
+        };
+        let small = accept(4_096);
+        let large = accept(8_192);
+        assert_ne!(
+            accept_reallocation_consent_digest(45262, &payer, 3, &small),
+            accept_reallocation_consent_digest(45262, &payer, 3, &large),
+            "the operator's signature must cover the length it is held to"
+        );
+        let tx_hash = |accept: StorageReallocationAccept| {
+            use crate::core::transaction::{Transaction, TransactionType, DEFAULT_CHAIN_ID};
+            Transaction::new_with_chain_id(
+                payer,
+                Address::zero(),
+                1,
+                1_000,
+                0,
+                Vec::new(),
+                DEFAULT_CHAIN_ID,
+                TransactionType::Storage(StorageTx::AcceptReallocation(Box::new(accept))),
+            )
+            .calculate_hash()
+        };
+        assert_ne!(
+            tx_hash(small),
+            tx_hash(large),
+            "the signed transaction bytes must cover the length too"
+        );
     }
 
     #[test]
