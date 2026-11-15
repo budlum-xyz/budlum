@@ -252,6 +252,8 @@ pub struct Metrics {
     pub bns_register_subdomain_total: IntCounter,
     /// B15: Subdomains removed.
     pub bns_remove_subdomain_total: IntCounter,
+    /// B15: Subdomain content writes applied.
+    pub bns_set_subdomain_content_total: IntCounter,
     /// B15: Storage-pointer writes applied.
     pub bns_set_storage_total: IntCounter,
     /// Minted SocialFi NFTs retained in account state.
@@ -822,6 +824,10 @@ impl Metrics {
             "budlum_bns_remove_subdomain_total",
             "BNS subdomains removed",
         )?;
+        let bns_set_subdomain_content_total = IntCounter::new(
+            "budlum_bns_set_subdomain_content_total",
+            "BNS subdomain content writes applied",
+        )?;
         let bns_set_storage_total = IntCounter::new(
             "budlum_bns_set_storage_total",
             "BNS storage-pointer writes applied",
@@ -1057,6 +1063,7 @@ impl Metrics {
         registry.register(Box::new(bns_set_bud3_content_total.clone()))?;
         registry.register(Box::new(bns_register_subdomain_total.clone()))?;
         registry.register(Box::new(bns_remove_subdomain_total.clone()))?;
+        registry.register(Box::new(bns_set_subdomain_content_total.clone()))?;
         registry.register(Box::new(bns_set_storage_total.clone()))?;
         registry.register(Box::new(nft_rows.clone()))?;
         registry.register(Box::new(vault_folder_rows.clone()))?;
@@ -1209,6 +1216,7 @@ impl Metrics {
             bns_set_bud3_content_total,
             bns_register_subdomain_total,
             bns_remove_subdomain_total,
+            bns_set_subdomain_content_total,
             bns_set_storage_total,
             nft_rows,
             vault_folder_rows,
@@ -1359,6 +1367,7 @@ mod tests {
             "budlum_bns_set_bud3_content_total",
             "budlum_bns_register_subdomain_total",
             "budlum_bns_remove_subdomain_total",
+            "budlum_bns_set_subdomain_content_total",
             "budlum_bns_set_storage_total",
             "budlum_nft_rows",
             "budlum_vault_folder_rows",

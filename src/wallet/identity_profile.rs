@@ -1251,7 +1251,10 @@ mod tests {
         // One subdomain pointed at someone else, with the same number of subdomains.
         let mut swapped_sub = resolved.clone();
         let label = swapped_sub.subdomains.keys().next().cloned().unwrap();
-        swapped_sub.subdomains.insert(label, attacker);
+        swapped_sub.subdomains.insert(
+            label,
+            crate::bns::types::SubdomainRecord::owned_by(attacker),
+        );
         assert_eq!(swapped_sub.subdomains.len(), resolved.subdomains.len());
         assert_eq!(status(swapped_sub), EvidenceStatus::Unverified);
     }

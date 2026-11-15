@@ -2065,3 +2065,203 @@ fn bns_set_storage_refuses_an_unknown_root_a_stranger_and_an_expired_name() {
     assert_eq!(err.code(), "bns_set_storage_failed");
     assert_eq!(state.get_nonce(&alice), 1);
 }
+
+// A subdomain label that exists is never overwritten, and the record it
+// holds is the one the first registration wrote.
+#[test]
+fn bns_register_subdomain_refuses_a_taken_label() {
+    let (alice, bob, carol) = (addr(1), addr(2), addr(3));
+    let mut reg = BnsRegistry::new();
+    reg.register("shop.bud".to_string(), alice, 0, 50).unwrap();
+    reg.register_subdomain("shop.bud", "pay".to_string(), bob, &alice, 1)
+        .unwrap();
+    assert_eq!(
+        reg.register_subdomain("shop.bud", "pay".to_string(), carol, &alice, 1),
+        Err(BnsError::NameTaken)
+    );
+    assert_eq!(reg.subdomain_owner("shop.bud", "pay", 1), Some(bob));
+    assert_eq!(reg.resolve_subdomain("shop.bud", "pay", 1), Some(bob));
+
+    // The parent owner frees the label first; then it can be given again.
+    reg.remove_subdomain("shop.bud", "pay", &alice, 1).unwrap();
+    reg.register_subdomain("shop.bud", "pay".to_string(), carol, &alice, 1)
+        .unwrap();
+    assert_eq!(reg.subdomain_owner("shop.bud", "pay", 1), Some(carol));
+}
+
+// The owner of a subdomain sets what it serves. The parent owner cannot, a
+// content id nobody registered is refused, and an expired parent takes no
+// write. A transfer of the parent clears the subdomain with its content.
+#[test]
+fn bns_set_subdomain_content_belongs_to_the_subdomain_owner() {
+    use crate::storage::bud3::limits::{Bud3Limits, Profile};
+    use crate::storage::bud3::pipeline::prepare_public_upload;
+    use crate::storage::bud3::placement::{Class, Share};
+
+    const PROFILE: Profile = Profile {
+        id: 0,
+        qr_version: 40,
+        symbol_size: 128,
+        fps: 10,
+        k_max: 16,
+    };
+
+    let parent_key = KeyPair::from_seed(&[21u8; 32]).unwrap();
+    let parent_owner = Address::from(parent_key.public_key_bytes());
+    let sub_key = KeyPair::from_seed(&[22u8; 32]).unwrap();
+    let sub_owner = Address::from(sub_key.public_key_bytes());
+    let name = "studio.bud".to_string();
+    let label = "blog".to_string();
+
+    let mut state = AccountState::new();
+    state.epoch_index = 1;
+    state.add_balance(&parent_owner, 10_000);
+    state.add_balance(&sub_owner, 10_000);
+    state
+        .bns_registry
+        .register(name.clone(), parent_owner, 1, 50)
+        .unwrap();
+    state
+        .bns_registry
+        .register_subdomain(&name, label.clone(), sub_owner, &parent_owner, 1)
+        .unwrap();
+
+    let body = b"<html><body>the blog</body></html>".repeat(6);
+    let up = prepare_public_upload(&body, &PROFILE, &Bud3Limits::default(), 8).unwrap();
+    let object = up.record.commitment;
+    let known = crate::storage::content_id::ContentId(up.record.content_id.digest);
+    let holder = [7u8; 32];
+
+    let set = |from: Address,
+               signer: &KeyPair,
+               nonce: u64,
+               content: Option<crate::storage::content_id::ContentId>| {
+        let mut tx = lifecycle_tx(
+            from,
+            0,
+            1,
+            nonce,
+            TransactionType::BnsSetSubdomainContent,
+            bincode::serialize(&(name.clone(), label.clone(), content)).unwrap(),
+        );
+        tx.sign(signer);
+        tx
+    };
+
+    // Nothing is registered under this id yet.
+    let err =
+        Executor::apply_transaction_checked(&mut state, &set(sub_owner, &sub_key, 0, Some(known)))
+            .unwrap_err();
+    assert_eq!(err.code(), "bns_content_unknown");
+    assert_eq!(state.get_nonce(&sub_owner), 0);
+    assert_eq!(state.get_balance(&sub_owner), 10_000);
+
+    state
+        .bud3_registry
+        .register_object(
+            sub_owner.0,
+            up.record,
+            vec![(
+                0,
+                Share {
+                    validator: holder,
+                    class: Class::Full,
+                    first_esi: 0,
+                    symbols: 8,
+                },
+            )],
+            1,
+            50,
+        )
+        .unwrap();
+    state.bud3_registry.ack(&object, &holder).unwrap();
+
+    // The parent owner created the subdomain and still cannot write into it.
+    let err = Executor::apply_transaction_checked(
+        &mut state,
+        &set(parent_owner, &parent_key, 0, Some(known)),
+    )
+    .unwrap_err();
+    assert_eq!(err.code(), "bns_set_subdomain_content_failed");
+    assert_eq!(
+        state
+            .bns_registry
+            .resolve_subdomain_content(&name, &label, 2),
+        None
+    );
+    assert_eq!(state.get_balance(&parent_owner), 10_000);
+
+    // The subdomain owner binds the content, pays the fee and moves its nonce.
+    Executor::apply_transaction_checked(&mut state, &set(sub_owner, &sub_key, 0, Some(known)))
+        .unwrap();
+    assert_eq!(
+        state
+            .bns_registry
+            .resolve_subdomain_content(&name, &label, 2),
+        Some(known)
+    );
+    assert_eq!(state.get_nonce(&sub_owner), 1);
+    assert_eq!(state.get_balance(&sub_owner), 9_999);
+    // The parent name serves nothing of its own because of that.
+    assert_eq!(state.bns_registry.resolve_content(&name, 2), None);
+
+    // A header amount is refused at the door.
+    let mut paid = lifecycle_tx(
+        sub_owner,
+        5,
+        1,
+        1,
+        TransactionType::BnsSetSubdomainContent,
+        bincode::serialize(&(name.clone(), label.clone(), Some(known))).unwrap(),
+    );
+    paid.sign(&sub_key);
+    assert_eq!(
+        Executor::apply_transaction_checked(&mut state, &paid)
+            .unwrap_err()
+            .code(),
+        "bns_invalid_set_subdomain_content"
+    );
+
+    // Clearing names no content, so it needs no lookup.
+    Executor::apply_transaction_checked(&mut state, &set(sub_owner, &sub_key, 1, None)).unwrap();
+    assert_eq!(
+        state
+            .bns_registry
+            .resolve_subdomain_content(&name, &label, 2),
+        None
+    );
+    Executor::apply_transaction_checked(&mut state, &set(sub_owner, &sub_key, 2, Some(known)))
+        .unwrap();
+
+    // Past the term of the parent the subdomain takes no write and serves nothing.
+    let expires_at = state
+        .bns_registry
+        .resolve_full(&name, 2)
+        .unwrap()
+        .expires_at;
+    state.epoch_index = expires_at;
+    let err = Executor::apply_transaction_checked(&mut state, &set(sub_owner, &sub_key, 3, None))
+        .unwrap_err();
+    assert_eq!(err.code(), "bns_set_subdomain_content_failed");
+    assert_eq!(
+        state
+            .bns_registry
+            .resolve_subdomain_content(&name, &label, expires_at),
+        None
+    );
+    assert_eq!(state.get_nonce(&sub_owner), 3);
+
+    // A transfer of the parent clears the subdomain and what it served.
+    state.epoch_index = 2;
+    state
+        .bns_registry
+        .transfer(&name, &parent_owner, sub_owner, 2)
+        .unwrap();
+    assert_eq!(state.bns_registry.subdomain_owner(&name, &label, 2), None);
+    assert_eq!(
+        state
+            .bns_registry
+            .resolve_subdomain_content(&name, &label, 2),
+        None
+    );
+}
