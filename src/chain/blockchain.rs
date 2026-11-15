@@ -3197,9 +3197,8 @@ impl Blockchain {
     /// longer known.
     ///
     /// The fallback this replaces built a snapshot from the *current* state and
-    /// labelled it with the requested epoch:
-    ///
-    ///     .unwrap_or_else(|| self.build_validator_snapshot(epoch))
+    /// labelled it with the requested epoch via
+    /// `.unwrap_or_else(|| self.build_validator_snapshot(epoch))`.
     ///
     /// `build_validator_snapshot_from_state` takes `epoch` only to stamp it on
     /// the result; the members come from `state.get_active_validators()`, which
