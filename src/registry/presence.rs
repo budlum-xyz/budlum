@@ -307,6 +307,8 @@ impl PresenceAggregate {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ValidatorPresenceState {
     pub class: PresenceClass,
+    #[serde(default)]
+    pub bls_public_key: Vec<u8>,
     pub stake_atoms: u64,
     pub last_seen_epoch: u64,
     pub last_seen_window: Option<u64>,
@@ -347,6 +349,7 @@ impl PresenceTracker {
             validator,
             ValidatorPresenceState {
                 class,
+                bls_public_key: Vec::new(),
                 stake_atoms,
                 last_seen_epoch: registered_epoch,
                 last_seen_window: None,
@@ -356,6 +359,16 @@ impl PresenceTracker {
                 slashed_double_sign: false,
             },
         );
+    }
+
+    /// Bind the registered BLS public key a validator signs presence signals with,
+    /// so equivocation slashing checks against local consensus key material and
+    /// never against a caller-supplied key travelling with the evidence.
+    /// Convenience: exposed for validator key registration and consensus hooks.
+    pub fn register_validator_bls_key(&mut self, validator: &Address, bls_public_key: &[u8]) {
+        if let Some(st) = self.validators.get_mut(validator) {
+            st.bls_public_key = bls_public_key.to_vec();
+        }
     }
 
     /// Convenience: exposed for RPC and consensus eligibility queries.
@@ -516,8 +529,22 @@ impl PresenceTracker {
         {
             return Err(PresenceError::InvalidDoubleSignEvidence);
         }
-        verify_presence_signal(&evidence.first, bls_public_key, chain_id)?;
-        verify_presence_signal(&evidence.second, bls_public_key, chain_id)?;
+        // Always authenticate double-sign evidence against the accused
+        // validator's registered BLS key, never a caller-chosen key.
+        let registered_key = {
+            let st = self
+                .validators
+                .get(&evidence.first.validator)
+                .ok_or(PresenceError::UnknownValidator)?;
+            if st.bls_public_key.is_empty() || st.bls_public_key.as_slice() != bls_public_key {
+                return Err(PresenceError::InvalidSignature(
+                    "evidence BLS key does not match registered validator key".to_string(),
+                ));
+            }
+            st.bls_public_key.clone()
+        };
+        verify_presence_signal(&evidence.first, &registered_key, chain_id)?;
+        verify_presence_signal(&evidence.second, &registered_key, chain_id)?;
 
         let st = self
             .validators
@@ -728,7 +755,36 @@ mod tests {
     fn presence_double_sign_is_slashed_one_percent() {
         let mut tracker = PresenceTracker::new(3, 50);
         let (val, sk, pk) = keypair_for(3);
+        let (_attacker, attacker_sk, attacker_pk) = keypair_for(4);
         tracker.register_validator(val, PresenceClass::Mobile, 100_000, 0);
+        tracker.register_validator_bls_key(&val, &pk);
+
+        // An attacker signing equivocating signals under their own BLS key
+        // naming `val` MUST NOT slash `val`.
+        let forged_ev = PresenceDoubleSignEvidence {
+            first: sign_presence_signal(
+                val,
+                CHAIN_ID,
+                42,
+                PresenceClass::Mobile,
+                [1; 32],
+                &attacker_sk,
+            ),
+            second: sign_presence_signal(
+                val,
+                CHAIN_ID,
+                42,
+                PresenceClass::Full,
+                [1; 32],
+                &attacker_sk,
+            ),
+        };
+        assert!(matches!(
+            tracker.slash_double_sign(&forged_ev, &attacker_pk, CHAIN_ID),
+            Err(PresenceError::InvalidSignature(_))
+        ));
+        assert_eq!(tracker.state_of(&val).unwrap().stake_atoms, 100_000);
+        assert!(!tracker.state_of(&val).unwrap().slashed_double_sign);
 
         let mut inbox = PresenceGossipInbox::default();
         let sig_mobile =

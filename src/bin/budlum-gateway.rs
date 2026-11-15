@@ -195,7 +195,14 @@ impl NameProver for RpcProver {
             return Err(format!("{}: rpc error {error}", self.url));
         }
         let result = json.get("result").ok_or("rpc answer has no result")?;
-        decode_proof_result(result)
+        let parsed = decode_proof_result(result)?;
+        if parsed.proof.name != name {
+            return Err(format!(
+                "{}: proof name `{}` does not match requested name `{name}`",
+                self.url, parsed.proof.name
+            ));
+        }
+        Ok(parsed)
     }
 }
 

@@ -2778,11 +2778,24 @@ fn prepare_evm_target(
         ));
     }
     let storage_addr = exec_addr.unwrap_or(code_addr);
+    let is_delegated = exec_addr.is_some();
     if code_addr == &EVM_UNIVERSAL_PRECOMPILE {
+        if is_delegated {
+            return Ok(PreparedTarget::Finished(
+                OutcomeStatus::Revert,
+                b"DELEGATECALL/CALLCODE to universal precompile forbidden".to_vec(),
+            ));
+        }
         let (st, out) = invoke_universal_precompile(caller20, input, is_static, host)?;
         return Ok(PreparedTarget::Finished(st, out));
     }
     if code_addr == &EVM_UOL_PRECOMPILE {
+        if is_delegated {
+            return Ok(PreparedTarget::Finished(
+                OutcomeStatus::Revert,
+                b"DELEGATECALL/CALLCODE to UOL precompile forbidden".to_vec(),
+            ));
+        }
         let (st, out) = invoke_uol_precompile(ctx.height, caller20, input, is_static, host)?;
         return Ok(PreparedTarget::Finished(st, out));
     }
@@ -2791,6 +2804,12 @@ fn prepare_evm_target(
         return Ok(PreparedTarget::Finished(OutcomeStatus::Success, Vec::new()));
     }
     if let Some(ptr) = decode_pointer_bytecode(&code) {
+        if is_delegated {
+            return Ok(PreparedTarget::Finished(
+                OutcomeStatus::Revert,
+                b"DELEGATECALL/CALLCODE to pointer token forbidden".to_vec(),
+            ));
+        }
         let home = EeId(ptr.home_ee);
         let (st, out) = if home == EeId::WASM {
             execute_evm_pointer_to_wasm(&ptr, caller20, input, is_static, gas_limit, host)?
@@ -3569,5 +3588,95 @@ mod tests {
         let (st_bad_asset, _) =
             invoke_uol_precompile(10, &maker, &bad_xfer, false, &mut host).unwrap();
         assert_eq!(st_bad_asset, OutcomeStatus::Revert);
+    }
+
+    #[test]
+    fn delegatecall_and_callcode_into_precompiles_or_pointer_tokens_revert() {
+        use crate::execution::coordinator::assets::{
+            encode_pointer_bytecode, AssetStandard, PointerDescriptor,
+        };
+        let mut mem_host = MemoryHost::new(500_000);
+        let ctx = test_ctx();
+        let attacker = [0x22u8; 20];
+        let victim = [0x11u8; 20];
+
+        // 1) DELEGATECALL / CALLCODE into EVM_UNIVERSAL_PRECOMPILE must revert.
+        let mut host = EvmStackHost::new(&mut mem_host);
+        let prep_univ = prepare_evm_target(
+            &EvmTargetDispatch {
+                ctx: &ctx,
+                code_addr: &EVM_UNIVERSAL_PRECOMPILE,
+                exec_addr: Some(&attacker),
+                caller20: &victim,
+                value_wei: 0,
+                input: &[],
+                is_static: false,
+                gas_limit: 500_000,
+                depth: 1,
+            },
+            &mut host,
+        )
+        .unwrap();
+        assert!(matches!(
+            prep_univ,
+            PreparedTarget::Finished(OutcomeStatus::Revert, _)
+        ));
+
+        // 2) DELEGATECALL / CALLCODE into EVM_UOL_PRECOMPILE must revert.
+        let prep_uol = prepare_evm_target(
+            &EvmTargetDispatch {
+                ctx: &ctx,
+                code_addr: &EVM_UOL_PRECOMPILE,
+                exec_addr: Some(&attacker),
+                caller20: &victim,
+                value_wei: 0,
+                input: &[],
+                is_static: false,
+                gas_limit: 500_000,
+                depth: 1,
+            },
+            &mut host,
+        )
+        .unwrap();
+        assert!(matches!(
+            prep_uol,
+            PreparedTarget::Finished(OutcomeStatus::Revert, _)
+        ));
+
+        // 3) DELEGATECALL / CALLCODE into a pointer token contract must revert.
+        let ptr_addr = [0x33u8; 20];
+        let ptr_code = encode_pointer_bytecode(&PointerDescriptor {
+            asset_id: [0x44u8; 32],
+            home_ee: EeId::WASM.0,
+            home_ref: vec![0x55; 20],
+            standard: AssetStandard::Fungible,
+            decimals: 18,
+            symbol: "TST".to_string(),
+            name: "Test".to_string(),
+        })
+        .unwrap();
+        drop(host);
+        deploy(&mut mem_host, ptr_addr, ptr_code);
+        let mut host = EvmStackHost::new(&mut mem_host);
+
+        let prep_ptr = prepare_evm_target(
+            &EvmTargetDispatch {
+                ctx: &ctx,
+                code_addr: &ptr_addr,
+                exec_addr: Some(&attacker),
+                caller20: &victim,
+                value_wei: 0,
+                input: &[],
+                is_static: false,
+                gas_limit: 500_000,
+                depth: 1,
+            },
+            &mut host,
+        )
+        .unwrap();
+        assert!(matches!(
+            prep_ptr,
+            PreparedTarget::Finished(OutcomeStatus::Revert, _)
+        ));
     }
 }

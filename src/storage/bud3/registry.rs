@@ -132,6 +132,11 @@ pub struct ObjectEntry {
     /// Custody Endowment accounting for this object.
     #[serde(default)]
     pub endowment: ObjectEndowment,
+    /// True once all initial shares of this object have confirmed custody via
+    /// `ack`. Only custody-confirmed objects earn a deletion tombstone so an
+    /// unconfirmed squatter cannot permanently poison a commitment.
+    #[serde(default)]
+    pub custody_confirmed: bool,
 }
 
 /// On-chain record of a paid G8 fallback decode authorization.
@@ -528,8 +533,8 @@ impl Bud3Registry {
         let expires_at = epoch
             .checked_add(lifetime_epochs)
             .ok_or(RegistryError::BadLifetime)?;
-        let key = record.commitment;
-        if self.tombstones.contains_key(&key) {
+        let raw_key = record.commitment;
+        if self.tombstones.contains_key(&raw_key) {
             return Err(RegistryError::Tombstoned);
         }
         let public = record.content_id.kind == ContentIdKind::Public;
@@ -547,23 +552,51 @@ impl Bud3Registry {
                 }
             }
         }
-        if let Some(entry) = self.objects.get(&key) {
-            if entry.record.content_id.kind == ContentIdKind::Public {
-                if !entry.shares.is_empty()
-                    && entry
-                        .shares
-                        .iter()
-                        .all(|s| s.status == ShareStatus::Confirmed && !s.lost)
-                {
-                    return Ok(Registered::Deduplicated(key));
-                }
-                return Err(RegistryError::BadRecord("awaiting custody confirmation"));
+        // Prevent commitment squatting: if another party holds an unconfirmed
+        // entry (or a sealed object) at `raw_key`, admit this claimant under an
+        // owner-scoped object key so a front-runner without the actual content
+        // cannot block the legitimate uploader or hijack custody.
+        let key = if let Some(entry) = self.objects.get(&raw_key) {
+            if entry.record.content_id.kind == ContentIdKind::Public
+                && entry.custody_confirmed
+                && entry.record.content_id == record.content_id
+                && !entry.shares.is_empty()
+                && entry
+                    .shares
+                    .iter()
+                    .all(|s| s.status == ShareStatus::Confirmed && !s.lost)
+            {
+                return Ok(Registered::Deduplicated(raw_key));
             }
             if entry.owner == owner {
-                return Ok(Registered::Deduplicated(key));
+                if entry.record.content_id.kind == ContentIdKind::Public {
+                    return Err(RegistryError::BadRecord("awaiting custody confirmation"));
+                }
+                return Ok(Registered::Deduplicated(raw_key));
             }
-            return Err(RegistryError::NotAuthorized);
-        }
+            let scoped = hash_fields_bytes(&[b"BDLM_BUD3_CLAIMANT_KEY_V1", &raw_key, &owner]);
+            if self.tombstones.contains_key(&scoped) {
+                return Err(RegistryError::Tombstoned);
+            }
+            if let Some(own_entry) = self.objects.get(&scoped) {
+                if own_entry.record.content_id.kind == ContentIdKind::Public {
+                    if own_entry.custody_confirmed
+                        && !own_entry.shares.is_empty()
+                        && own_entry
+                            .shares
+                            .iter()
+                            .all(|s| s.status == ShareStatus::Confirmed && !s.lost)
+                    {
+                        return Ok(Registered::Deduplicated(scoped));
+                    }
+                    return Err(RegistryError::BadRecord("awaiting custody confirmation"));
+                }
+                return Ok(Registered::Deduplicated(scoped));
+            }
+            scoped
+        } else {
+            raw_key
+        };
         check_placement(&record, &shares)?;
         let digest = record.content_id.digest;
         if shares
@@ -592,6 +625,7 @@ impl Bud3Registry {
                 roots,
                 next_esi,
                 endowment,
+                custody_confirmed: false,
             },
         );
         Ok(Registered::New(key))
@@ -775,7 +809,13 @@ impl Bud3Registry {
                 self.nfts.remove(&nft);
             }
             self.base_deps.remove(key);
-            self.tombstones.insert(*key, epoch);
+            // Only custody-confirmed objects earn a permanent deletion
+            // tombstone: an unconfirmed squatter letting a bogus registration
+            // expire or burning its own unacked placeholder cannot lock the
+            // commitment out forever.
+            if obj.custody_confirmed {
+                self.tombstones.insert(*key, epoch);
+            }
         }
     }
 
@@ -1195,6 +1235,7 @@ impl Bud3Registry {
                 roots,
                 next_esi,
                 endowment,
+                custody_confirmed: false,
             },
         );
         if let Some(old) = self.objects.get_mut(old_key) {
@@ -1354,6 +1395,9 @@ impl Bud3Registry {
                     .shares
                     .iter()
                     .all(|s| s.status == ShareStatus::Confirmed && !s.lost);
+            if complete {
+                obj.custody_confirmed = true;
+            }
             let public_digest = (obj.record.content_id.kind == ContentIdKind::Public)
                 .then_some(obj.record.content_id.digest);
             (n, complete, public_digest)
@@ -1853,6 +1897,20 @@ impl Bud3Registry {
             .objects
             .get_mut(key)
             .ok_or(RegistryError::UnknownObject)?;
+        let upload_roots = obj.record.symbol_roots.len();
+        // Refuse overlapping repairs while an earlier repair for this segment
+        // still has pending (unsettled) shares so repairers cannot stack
+        // unpaid symbols onto the object.
+        if obj.shares.iter().any(|s| {
+            s.segment == segment
+                && s.root >= upload_roots
+                && s.status == ShareStatus::Pending
+                && !s.lost
+        }) {
+            return Err(RegistryError::BadRepair(
+                "segment already has an unsettled repair",
+            ));
+        }
         let seg_idx = usize::try_from(segment).map_err(|_| RegistryError::BadRepair("segment"))?;
         let seg_layout = Segmentation::new(obj.record.object_len, &obj.record.profile)
             .ok_or(RegistryError::BadRepair("invalid object profile"))?;
@@ -1872,11 +1930,47 @@ impl Bud3Registry {
         }
         let mut sorted = new_shares.clone();
         sorted.sort_by_key(|s| s.first_esi);
+        let content_digest = obj.record.content_id.digest;
+        let existing_holders: BTreeSet<Address> = obj
+            .shares
+            .iter()
+            .filter(|s| s.segment == segment)
+            .map(|s| s.share.validator)
+            .collect();
+        let mut seen_new_holders = BTreeSet::new();
+        if let Some(rep) = repairer {
+            if !validator_keys.is_empty() && !validator_keys.contains_key(rep) {
+                return Err(RegistryError::BadRepair(
+                    "repairer is not an active consensus Full validator",
+                ));
+            }
+        }
         let mut next = u64::from(first);
         for s in &sorted {
             if s.symbols == 0 || u64::from(s.first_esi) != next {
                 return Err(RegistryError::BadRepair(
                     "new ESIs must be fresh and contiguous",
+                ));
+            }
+            if s.validator == [0u8; 32] {
+                return Err(RegistryError::BadRepair(
+                    "zero address cannot receive repair share",
+                ));
+            }
+            if self.declines.contains(&(content_digest, s.validator)) {
+                return Err(RegistryError::Declined);
+            }
+            if existing_holders.contains(&s.validator) || !seen_new_holders.insert(s.validator) {
+                return Err(RegistryError::BadRepair(
+                    "duplicate or already-holding repair validator",
+                ));
+            }
+            if !validator_keys.is_empty()
+                && s.class == Class::Full
+                && !validator_keys.contains_key(&s.validator)
+            {
+                return Err(RegistryError::BadRepair(
+                    "repair recipient is not an active consensus Full validator",
                 ));
             }
             next += u64::from(s.symbols);
@@ -1893,6 +1987,9 @@ impl Bud3Registry {
             .sum();
         if added < lost {
             return Err(RegistryError::BadRepair("fewer new symbols than lost"));
+        }
+        if added > lost {
+            return Err(RegistryError::BadRepair("more new symbols than lost"));
         }
         let count = u32::try_from(added).map_err(|_| RegistryError::BadRepair("ESI range"))?;
         let symbol_bytes = usize::from(obj.record.profile.symbol_size);
@@ -2590,6 +2687,9 @@ mod tests {
             r.register_object(addr(1), up.record.clone(), shares.clone(), 0, 100),
             Ok(Registered::New(key))
         );
+        for (_, s) in &shares {
+            r.ack(&key, &s.validator).unwrap();
+        }
         r.bind_nft([1; 32], addr(1), &key).unwrap();
         r.bind_nft([2; 32], addr(2), &key).unwrap();
         assert_eq!(r.refcount(&key), 2);
@@ -2720,13 +2820,57 @@ mod tests {
         let mut r = Bud3Registry::default();
         let (up, shares) = upload(b"lease");
         let key = up.record.commitment;
-        r.register_object(addr(1), up.record, shares, 0, 10)
+        r.register_object(addr(1), up.record, shares.clone(), 0, 10)
             .unwrap();
+        for (_, s) in &shares {
+            r.ack(&key, &s.validator).unwrap();
+        }
         assert_eq!(r.renew(&key, 5), Ok(15));
         assert!(r.expire(15).is_empty());
         assert_eq!(r.expire(16), vec![key]);
         assert_eq!(r.tombstone(&key), Some(16));
         assert_eq!(r.renew(&key, 1), Err(RegistryError::UnknownObject));
+    }
+
+    #[test]
+    fn unconfirmed_squatter_cannot_block_real_owner_or_poison_tombstone() {
+        let mut r = Bud3Registry::default();
+        let (up, shares) = upload(b"victim content");
+        let raw_key = up.record.commitment;
+        let squatter = addr(99);
+        let victim = addr(1);
+
+        // Squatter pre-registers the commitment for 1 epoch without ever confirming custody.
+        assert_eq!(
+            r.register_object(squatter, up.record.clone(), shares.clone(), 0, 1),
+            Ok(Registered::New(raw_key))
+        );
+
+        // Victim registering the same commitment while squatter is unconfirmed
+        // succeeds immediately under a claimant-scoped key instead of being blocked.
+        let Registered::New(victim_key) = r
+            .register_object(victim, up.record.clone(), shares.clone(), 0, 100)
+            .expect("victim must not be blocked by unconfirmed squatter")
+        else {
+            panic!("expected fresh claimant-scoped registration for victim");
+        };
+        assert_ne!(victim_key, raw_key);
+
+        // Victim's validators confirm custody; victim wins public_index.
+        for (_, s) in &shares {
+            r.ack(&victim_key, &s.validator).unwrap();
+        }
+        assert_eq!(
+            r.public_object(&up.record.content_id.digest),
+            Some(victim_key)
+        );
+
+        // When squatter's unconfirmed registration expires, it writes NO tombstone
+        // on `raw_key` so the commitment is never poisoned.
+        let expired = r.expire(2);
+        assert_eq!(expired, vec![raw_key]);
+        assert_eq!(r.tombstone(&raw_key), None);
+        assert!(r.object(&victim_key).is_some());
     }
 
     #[test]

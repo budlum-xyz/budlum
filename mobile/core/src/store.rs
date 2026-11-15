@@ -30,11 +30,22 @@ pub struct ShareRecord {
     pub placed: Vec<(u32, [u8; 32])>,
 }
 
+/// Bytes retained per `(u32, [u8; 32])` placement entry (`4 + 32`).
+pub const PLACED_ENTRY_BYTES: u64 = 36;
+/// Upper bound on retained placement entries per share (matches RFC 6330 ceiling + repair margin).
+pub const MAX_PLACED_ENTRIES: usize = 65_536;
+
+/// Retained size in bytes of a symbol plus its placement vector.
+#[must_use]
+pub fn share_retained_bytes(symbol_len: usize, placed_len: usize) -> u64 {
+    (symbol_len as u64).saturating_add((placed_len as u64).saturating_mul(PLACED_ENTRY_BYTES))
+}
+
 impl ShareRecord {
-    /// Stored size of this share.
+    /// Stored size of this share (symbol bytes plus retained placement vector).
     #[must_use]
     pub fn size(&self) -> u64 {
-        self.symbol.len() as u64
+        share_retained_bytes(self.symbol.len(), self.placed.len())
     }
 
     /// Proof context for this share's segment.
@@ -109,7 +120,13 @@ impl ShareStore {
         assigned: AssignedShare,
         quota: u64,
     ) -> Result<ShareRecord, CoreError> {
-        let incoming = assigned.symbol.len() as u64;
+        if assigned.placed.len() > MAX_PLACED_ENTRIES {
+            return Err(CoreError::new(
+                "mobile_placement_too_large",
+                "share placement exceeds maximum retained entry bound",
+            ));
+        }
+        let incoming = share_retained_bytes(assigned.symbol.len(), assigned.placed.len());
         if !fits(self.stored_bytes(), incoming, quota) {
             return Err(CoreError::new(
                 "mobile_quota_exceeded",
@@ -248,5 +265,29 @@ mod tests {
         assert_eq!(store.get(original.id), Some(&original));
         assert_eq!(store.next_id, u64::MAX);
         Ok(())
+    }
+
+    #[test]
+    fn mobile_store_counts_placed_bytes_against_quota_and_caps_entries() {
+        let mut store = ShareStore::new();
+        let symbol = vec![1u8];
+        let mut placed: Vec<(u32, [u8; 32])> = (0..100u32).map(|i| (i, [7; 32])).collect();
+        placed[0] = (0, symbol_leaf(&symbol));
+        // 1-byte symbol + 100 placement entries = 1 + 3600 = 3601 bytes.
+        let assigned = AssignedShare {
+            object: [9; 32],
+            segment: 0,
+            esi: 0,
+            position: 0,
+            placed,
+            symbol,
+        };
+        assert_eq!(
+            store.accept(assigned.clone(), 1_000).err().map(|e| e.code),
+            Some("mobile_quota_exceeded")
+        );
+        let stored = store.accept(assigned, 4_000).unwrap();
+        assert_eq!(stored.size(), 1 + 100 * PLACED_ENTRY_BYTES);
+        assert_eq!(store.stored_bytes(), 1 + 100 * PLACED_ENTRY_BYTES);
     }
 }

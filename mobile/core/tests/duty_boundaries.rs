@@ -106,7 +106,7 @@ fn mobile_failed_admission_does_not_release_existing_shares(
 
 #[test]
 fn mobile_floor_release_keeps_a_valid_user_quota() -> Result<(), Box<dyn std::error::Error>> {
-    let mut core = core(FREE_SPACE_FLOOR_BYTES + 64);
+    let mut core = core(FREE_SPACE_FLOOR_BYTES + 100);
     core.accept_share(assigned(1, 10))?;
     core.set_available_bytes(FREE_SPACE_FLOOR_BYTES - 1);
     assert!(matches!(
@@ -122,7 +122,7 @@ fn mobile_floor_release_keeps_a_valid_user_quota() -> Result<(), Box<dyn std::er
 #[test]
 fn mobile_unknown_object_audit_does_not_fall_back_to_another_object(
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut core = core(FREE_SPACE_FLOOR_BYTES + 128);
+    let mut core = core(FREE_SPACE_FLOOR_BYTES + 256);
     core.accept_share(assigned(1, 10))?;
     core.accept_share(assigned(2, 20))?;
     let error = refusal(core.answer_audit(
@@ -140,7 +140,7 @@ fn mobile_unknown_object_audit_does_not_fall_back_to_another_object(
 
 #[test]
 fn mobile_proof_duty_keeps_the_object_identity() -> Result<(), Box<dyn std::error::Error>> {
-    let mut core = core(FREE_SPACE_FLOOR_BYTES + 128);
+    let mut core = core(FREE_SPACE_FLOOR_BYTES + 256);
     core.accept_share(assigned(1, 10))?;
     core.accept_share(assigned(2, 10))?;
     let audit = Audit {
@@ -157,7 +157,7 @@ fn mobile_proof_duty_keeps_the_object_identity() -> Result<(), Box<dyn std::erro
 #[test]
 fn mobile_core_replay_refusal_preserves_space_and_pending_duties(
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut core = core(FREE_SPACE_FLOOR_BYTES + 128);
+    let mut core = core(FREE_SPACE_FLOOR_BYTES + 256);
     let share = assigned(1, 10);
     core.accept_share(share.clone())?;
     let before = core.status();
@@ -210,10 +210,10 @@ fn mobile_distinct_symbols_of_one_segment_remain_usable() -> Result<(), Box<dyn 
     ];
     first.placed = placed.clone();
     second.placed = placed;
-    let mut core = core(FREE_SPACE_FLOOR_BYTES + 128);
+    let mut core = core(FREE_SPACE_FLOOR_BYTES + 300);
     core.accept_share(first)?;
     core.accept_share(second)?;
-    assert_eq!(core.status().stored_bytes, 128);
+    assert_eq!(core.status().stored_bytes, 2 * (64 + 2 * 36));
     for position in [0, 1] {
         assert!(matches!(
             core.answer_audit(
