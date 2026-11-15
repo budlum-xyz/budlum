@@ -1,0 +1,9 @@
+[package]
+name = "budlum-intent-policy"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.97.1"
+license = "LicenseRef-PolyForm-Shield-1.0.0"
+description = "Bounded offline policy validation for sovereign-domain payment routes"
+
+[dependencies]
