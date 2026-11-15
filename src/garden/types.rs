@@ -42,6 +42,8 @@ pub const MAX_NAME_BYTES: usize = 32;
 const MAX_TITLE_BYTES: usize = 64;
 /// Longest announced network address, in bytes.
 pub const MAX_ADDRESS_BYTES: usize = 256;
+/// Largest share a Garden can give one validator, in bytes.
+const MAX_PUBLISHED_SHARE: u64 = 64 * 1024 * 1024 * 1024;
 /// Longest MIME type of a published object, in bytes.
 pub const MAX_MIME_BYTES: usize = 64;
 /// Longest caption of a published object, in bytes.
@@ -144,7 +146,17 @@ pub struct GardenLimits {
     pub host_timeout_ms: u32,
     /// Silence after which a node proposes to suspend a validator.
     pub suspend_after_ms: u32,
+    /// Most bytes one validator publishes over the life of the Garden.
+    /// Nothing removes published content while the Garden lives, so this
+    /// times `max_validators` is the most a Garden asks of one disk.
+    pub max_published_bytes_per_validator: u64,
 }
+
+/// The least a publication counts against its author's share, in bytes.
+/// TESTNET-DEFAULT. The record the chain keeps for a publication is not
+/// free, so a share is also a ceiling on how many of them one validator
+/// leaves in the state.
+pub const MIN_PUBLICATION_CHARGE: u64 = 4096;
 
 impl GardenLimits {
     pub const fn testnet_default() -> Self {
@@ -157,6 +169,7 @@ impl GardenLimits {
             presence_interval_ms: 1_000,
             host_timeout_ms: 6_000,
             suspend_after_ms: 12_000,
+            max_published_bytes_per_validator: 256 * 1024 * 1024,
         }
     }
 
@@ -191,6 +204,12 @@ impl GardenLimits {
         if self.suspend_after_ms <= self.presence_interval_ms {
             return Err("suspend_after_ms must exceed presence_interval_ms".into());
         }
+        let share = self.max_published_bytes_per_validator;
+        if share < u64::from(self.max_object_bytes) || share > MAX_PUBLISHED_SHARE {
+            return Err(
+                "max_published_bytes_per_validator must be in max_object_bytes..=64 GiB".into(),
+            );
+        }
         Ok(())
     }
 
@@ -204,6 +223,7 @@ impl GardenLimits {
             &self.presence_interval_ms.to_le_bytes(),
             &self.host_timeout_ms.to_le_bytes(),
             &self.suspend_after_ms.to_le_bytes(),
+            &self.max_published_bytes_per_validator.to_le_bytes(),
         ])
     }
 }
