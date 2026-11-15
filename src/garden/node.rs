@@ -15,8 +15,10 @@
 //!    per height, so two blocks never become final at the same height, and
 //!    no block becomes final while the host is away.
 //!
-//! The host has no other power. It cannot finalize a block the others did
-//! not sign, and it proposes only in its own turn.
+//! The host has no other power over blocks. It cannot finalize a block the
+//! others did not sign, and it proposes only in its own turn. In a Garden
+//! founded with host approval it also answers the keys that ask to join,
+//! and it does that with a transaction like any other.
 
 use super::invite::{GardenInvite, MAX_INVITE_PEERS};
 use super::net::{
@@ -27,8 +29,8 @@ use super::settlement::{GardenBudlumLink, GardenDomainView};
 use super::state::{quorum, GardenLedger, GardenObject, GardenState};
 use super::storage::GardenContentStore;
 use super::types::{
-    garden_domain_id, invite_keypair, join_message, status_label, GardenBlock, GardenCommit,
-    GardenContentKind, GardenFounding, GardenGenesis, GardenKey, GardenLimits,
+    garden_domain_id, invite_keypair, join_message, status_label, GardenAdmission, GardenBlock,
+    GardenCommit, GardenContentKind, GardenFounding, GardenGenesis, GardenKey, GardenLimits,
     GardenPlacementTable, GardenPresence, GardenTx, GardenTxKind, GardenValidatorStatus,
     GardenVote, SignedGardenTx,
 };
@@ -76,6 +78,11 @@ const MAX_TIMESTAMP_AHEAD_MS: u64 = 120_000;
 const MAX_UNREFERENCED_OBJECTS: usize = 64;
 /// Most such objects kept for one peer.
 const MAX_UNREFERENCED_PER_PEER: usize = 8;
+/// Most connected peers that have not shown the invite yet. A peer shows it
+/// in its first request, so in a Garden that is left alone this is the few
+/// that connected in the last moments. The connection table is much larger:
+/// the rest of it stays for the peers that did show it.
+const MAX_UNADMITTED: usize = 16;
 /// Longest wait between two dials of an address that does not answer.
 const MAX_DIAL_WAIT: Duration = Duration::from_mins(1);
 /// Most validators dialed in one round.
@@ -145,6 +152,11 @@ enum GardenCommand {
     Trace(Hash32, oneshot::Sender<Result<Value, String>>),
     Feed(usize, oneshot::Sender<Value>),
     Leave(oneshot::Sender<GardenLeaveOutcome>),
+    Admit {
+        target: GardenKey,
+        accept: bool,
+        reply: oneshot::Sender<Result<Value, String>>,
+    },
 }
 
 /// The library handle of a running Garden validator.
@@ -196,6 +208,17 @@ impl GardenHandle {
             bytes,
             mime,
             caption,
+            reply,
+        })
+        .await?
+    }
+
+    /// Answer a key that waits for the host: admit it or turn it away. Only
+    /// the host of a Garden with host approval has anybody to answer.
+    pub async fn admit(&self, target: GardenKey, accept: bool) -> Result<Value, String> {
+        self.ask(|reply| GardenCommand::Admit {
+            target,
+            accept,
             reply,
         })
         .await?
@@ -286,7 +309,7 @@ const fn tx_bytes(tx: &SignedGardenTx) -> usize {
             .len()
             .saturating_add(address.len())
             .saturating_add(invite_signature.len()),
-        GardenTxKind::Leave | GardenTxKind::Suspend { .. } => 0,
+        GardenTxKind::Leave | GardenTxKind::Suspend { .. } | GardenTxKind::Admit { .. } => 0,
         GardenTxKind::Resume { address } => address.len(),
         GardenTxKind::Publish { mime, caption, .. } => mime.len().saturating_add(caption.len()),
     };
@@ -456,6 +479,9 @@ struct Node {
     mempool: BTreeMap<(GardenKey, u64), SignedGardenTx>,
     my_next_nonce: u64,
     proposals: BTreeMap<Hash32, GardenBlock>,
+    /// The round of this node's clock in which it last executed a candidate
+    /// block of each proposer, for the height it is at.
+    candidate_rounds: BTreeMap<GardenKey, u64>,
     votes: BTreeMap<Hash32, BTreeMap<GardenKey, GardenVote>>,
     orphan_votes: VecDeque<GardenVote>,
     my_votes: BTreeSet<Hash32>,
@@ -494,6 +520,9 @@ struct Node {
     relay_tags: BTreeMap<u64, u64>,
     next_tag: u64,
     leaving: Option<Leaving>,
+    /// True once the host turned this node's request away. The node stops
+    /// asking: an answer is not something to be worn down.
+    turned_away: bool,
     stopped: bool,
 }
 
@@ -695,6 +724,7 @@ pub async fn spawn(
         mempool: BTreeMap::new(),
         my_next_nonce,
         proposals: BTreeMap::new(),
+        candidate_rounds: BTreeMap::new(),
         votes: BTreeMap::new(),
         orphan_votes: VecDeque::new(),
         my_votes: BTreeSet::new(),
@@ -724,6 +754,7 @@ pub async fn spawn(
         relay_tags: BTreeMap::new(),
         next_tag: TAG_FIRST_FETCH,
         leaving: None,
+        turned_away: false,
         stopped: false,
     };
     tokio::spawn(node.run(garden_net.events, command_rx));
@@ -1063,8 +1094,11 @@ impl Node {
         let mut absent = BTreeSet::new();
         let mut targets = Vec::new();
         for validator in self.ledger.state.validators.values() {
+            // A key that waits wrote its address without anybody's consent,
+            // so nobody dials it: it dials the others.
             if validator.key == self.me
                 || validator.status == GardenValidatorStatus::Left
+                || validator.status == GardenValidatorStatus::Waiting
                 || connected.contains(&validator.key)
             {
                 continue;
@@ -1117,6 +1151,22 @@ impl Node {
                 if !self.peers.contains_key(&peer) {
                     self.unadmitted.entry(peer).or_insert_with(Instant::now);
                 }
+                // Strangers hold a part of the connection table and no more.
+                // The one that kept silent longest goes when another comes,
+                // so a crowd that shows no invite turns over among itself
+                // and the seats of the validators stay free.
+                while self.unadmitted.len() > MAX_UNADMITTED {
+                    let oldest = self
+                        .unadmitted
+                        .iter()
+                        .min_by_key(|(_, since)| **since)
+                        .map(|(stranger, _)| *stranger);
+                    let Some(stranger) = oldest else {
+                        break;
+                    };
+                    self.unadmitted.remove(&stranger);
+                    let _ = self.net.send(NetCommand::Disconnect(stranger)).await;
+                }
                 let hello = GardenRequest::Hello {
                     chain_id: self.chain_id(),
                     key: self.me,
@@ -1141,6 +1191,26 @@ impl Node {
                 tag,
                 response,
             } => self.on_response(peer, tag, response).await,
+        }
+    }
+
+    /// True when the content of the Garden is for `peer`.
+    ///
+    /// Under direct admission the invite is the whole credential. Under host
+    /// approval the invite only lets a key ask: the bytes are for the keys
+    /// the host seated, so one that waits, or was turned away, reads and
+    /// deposits none. It still follows the blocks, which is how it learns
+    /// the answer.
+    fn is_seated(&self, peer: &PeerId) -> bool {
+        match self.limits().admission {
+            GardenAdmission::Direct => true,
+            GardenAdmission::HostApproval => self.peers.get(peer).is_some_and(|key| {
+                self.ledger
+                    .state
+                    .validators
+                    .get(key)
+                    .is_some_and(|v| v.status != GardenValidatorStatus::Waiting)
+            }),
         }
     }
 
@@ -1220,6 +1290,15 @@ impl Node {
                     take_sync_commits(&self.ledger, from_height, max, MAX_SYNC_RESPONSE_BYTES);
                 self.respond(channel, GardenResponse::Commits(commits))
                     .await;
+            }
+            GardenRequest::GetObject { .. } | GardenRequest::PutObject { .. }
+                if !self.is_seated(&peer) =>
+            {
+                self.respond(
+                    channel,
+                    GardenResponse::Refused("the host has not admitted this key".into()),
+                )
+                .await;
             }
             GardenRequest::GetObject { content_id, relay } => {
                 if let Some(bytes) = self.store.get(&content_id) {
@@ -1315,7 +1394,7 @@ impl Node {
         queue.push_back(content_id);
         let mut dropped = Vec::new();
         if queue.len() > MAX_UNREFERENCED_PER_PEER {
-            dropped.extend(queue.pop_front());
+            dropped.push(self.evict_deposit(sender, sender, content_id));
         }
         let total: usize = self.unreferenced.values().map(VecDeque::len).sum();
         if total > MAX_UNREFERENCED_OBJECTS {
@@ -1325,19 +1404,47 @@ impl Node {
                 .iter()
                 .max_by_key(|(key, queue)| (!state.is_active(key), queue.len()))
                 .map(|(key, _)| *key);
-            if let Some(queue) = heaviest.and_then(|key| self.unreferenced.get_mut(&key)) {
-                dropped.extend(queue.pop_front());
+            if let Some(owner) = heaviest {
+                dropped.push(self.evict_deposit(owner, sender, content_id));
             }
         }
         self.unreferenced.retain(|_, queue| !queue.is_empty());
         for old in dropped {
-            let named = self.holds_published(&old)
-                || self.is_pending_content(&old)
+            // What this node itself is publishing was put here by its own
+            // operator, not by the deposit that named the same bytes.
+            let own = self.has_pending(
+                |pending| matches!(pending, GardenTxKind::Publish { content_id, .. } if *content_id == old),
+            );
+            let named = own
+                || self.holds_published(&old)
                 || self.unreferenced.values().any(|queue| queue.contains(&old));
             if !named {
                 self.store.remove(&old);
             }
         }
+    }
+
+    /// Take one deposit out of the queue of `owner` and return it.
+    ///
+    /// The queues are the only record of bytes no publication accounts for,
+    /// so nothing leaves a queue and stays on the disk. The oldest deposit
+    /// no pending publication names goes. When a pending publication names
+    /// every one of them, the deposit that just `arrived` from `sender` goes
+    /// instead: the ones that stay are still counted, and the count is what
+    /// bounds them.
+    fn evict_deposit(&mut self, owner: GardenKey, sender: GardenKey, arrived: Hash32) -> Hash32 {
+        let free = self.unreferenced.get(&owner).and_then(|queue| {
+            queue
+                .iter()
+                .position(|id| *id != arrived && !self.is_pending_content(id))
+        });
+        if let (Some(index), Some(queue)) = (free, self.unreferenced.get_mut(&owner)) {
+            return queue.remove(index).unwrap_or(arrived);
+        }
+        if let Some(queue) = self.unreferenced.get_mut(&sender) {
+            queue.retain(|id| *id != arrived);
+        }
+        arrived
     }
 
     async fn on_response(
@@ -1572,9 +1679,49 @@ impl Node {
                     self.request_sync(from).await;
                     return;
                 }
-                if self.proposals.len() >= MAX_PROPOSALS
-                    || self.ledger.state.verify_block(&block).is_err()
+                // The header costs one signature and says who leads. What
+                // costs more, executing the block, is rationed after it: one
+                // candidate of one proposer in one round of this node's
+                // clock, and one slot for each proposer. Its block of the
+                // latest round holds the slot, unless that round is one this
+                // node's clock has not reached: a block nobody signs yet
+                // gives way to one that can be signed. A validator that
+                // signs many blocks for one height makes every node execute
+                // one a round and takes nobody's slot but its own.
+                if self.ledger.state.check_header(&block).is_err() {
+                    return;
+                }
+                let proposer = block.header.proposer;
+                let now_round = self.local_round();
+                if self
+                    .candidate_rounds
+                    .get(&proposer)
+                    .is_some_and(|round| *round >= now_round)
                 {
+                    return;
+                }
+                let held: Vec<(Hash32, u64)> = self
+                    .proposals
+                    .iter()
+                    .filter(|(_, held)| held.header.proposer == proposer)
+                    .map(|(held_hash, held)| (*held_hash, held.header.round))
+                    .collect();
+                let reached = now_round.saturating_add(1);
+                if held
+                    .iter()
+                    .any(|(_, round)| *round >= block.header.round && *round <= reached)
+                {
+                    return;
+                }
+                self.candidate_rounds.insert(proposer, now_round);
+                if self.ledger.state.run_block(&block).is_err() {
+                    return;
+                }
+                for (old, _) in held {
+                    self.proposals.remove(&old);
+                    self.votes.remove(&old);
+                }
+                if self.proposals.len() >= MAX_PROPOSALS.max(self.ledger.state.active().len()) {
                     return;
                 }
                 self.proposals.insert(hash, block.clone());
@@ -1619,20 +1766,30 @@ impl Node {
 
     /// True when `tx.tx.sender` is allowed to hold a slot in the pending set.
     ///
-    /// Known validators may pool their transactions; a new key may pool only
-    /// a nonce-0 `Join` carrying a valid invite signature while the Garden
-    /// still has validator capacity and pending joins stay within that cap.
+    /// A key outside the identity record may pool only a `Join` with the
+    /// nonce the chain expects from it and a valid invite signature, while
+    /// the Garden has room for it and pending joins stay within that cap.
+    /// A recorded key may pool what its standing lets it apply: only an
+    /// active validator publishes, and only the host admits. A transaction
+    /// that can never apply would hold a slot, and a publication would
+    /// shield the bytes it names, for as long as its sender liked.
     fn sender_may_pool(&self, tx: &SignedGardenTx) -> bool {
         let state = &self.ledger.state;
         match &tx.tx.kind {
             GardenTxKind::Join {
                 invite_signature, ..
             } => {
-                if state.validators.contains_key(&tx.tx.sender) || tx.tx.nonce != 0 {
+                if state.validators.contains_key(&tx.tx.sender)
+                    || tx.tx.nonce != state.next_nonce(&tx.tx.sender)
+                {
                     return false;
                 }
                 let max_validators = self.limits().max_validators as usize;
-                if state.validators.len() >= max_validators {
+                let room = match self.limits().admission {
+                    GardenAdmission::Direct => state.has_room(),
+                    GardenAdmission::HostApproval => state.waiting() < max_validators,
+                };
+                if !room {
                     return false;
                 }
                 let pending_joins = self
@@ -1650,9 +1807,12 @@ impl Node {
                 )
                 .is_ok()
             }
-            GardenTxKind::Leave | GardenTxKind::Resume { .. } | GardenTxKind::Publish { .. } => {
-                state.validators.contains_key(&tx.tx.sender)
-            }
+            GardenTxKind::Leave | GardenTxKind::Resume { .. } => state
+                .validators
+                .get(&tx.tx.sender)
+                .is_some_and(|v| v.status != GardenValidatorStatus::Waiting),
+            GardenTxKind::Publish { .. } => state.is_active(&tx.tx.sender),
+            GardenTxKind::Admit { .. } => tx.tx.sender == state.host(),
             GardenTxKind::Suspend { .. } => false,
         }
     }
@@ -1777,6 +1937,15 @@ impl Node {
         if reports_heard {
             return;
         }
+        // No validator signs a round its own clock has not reached. The
+        // proposer writes the round into its header, and the leader of a
+        // round is a function of that number, so a block that names a far
+        // round is led by whoever chose the number. One round of slack is
+        // what two clocks that did not start together need. The block is
+        // kept and gets the vote when the round comes.
+        if block.header.round > self.local_round().saturating_add(1) {
+            return;
+        }
         if !self.is_host() {
             if self.my_votes.insert(hash) {
                 let vote = GardenVote::sign(&block.header, &self.key);
@@ -1785,7 +1954,7 @@ impl Node {
             }
             return;
         }
-        if self.host_voted || block.header.round > self.local_round().saturating_add(1) {
+        if self.host_voted {
             return;
         }
         let others = self.votes.get(&hash).map_or(0, |votes| {
@@ -1847,6 +2016,7 @@ impl Node {
             self.held_elsewhere = self.held_elsewhere.max(commit.block.header.height);
         }
         self.proposals.clear();
+        self.candidate_rounds.clear();
         self.votes.clear();
         self.orphan_votes.clear();
         self.my_votes.clear();
@@ -1880,6 +2050,14 @@ impl Node {
                 GardenTxKind::Join { .. } | GardenTxKind::Resume { .. }
             ) {
                 self.last_seen.insert(tx.tx.sender, Instant::now());
+            }
+            if let GardenTxKind::Admit { target, accept } = &tx.tx.kind {
+                // The silence of a key is counted from the block that seats
+                // it, not from the request it sent while it waited.
+                self.last_seen.insert(*target, Instant::now());
+                if *target == self.me && !*accept {
+                    self.turned_away = true;
+                }
             }
         }
         self.unreferenced.retain(|_, queue| !queue.is_empty());
@@ -2052,6 +2230,9 @@ impl Node {
         let record = recorded.map(|v| v.status);
         let kind = match record {
             Some(_) if settled => return,
+            // The request is in the record; the answer is the host's.
+            Some(GardenValidatorStatus::Waiting) => return,
+            None if self.turned_away => return,
             None if self.observed_status() != DomainStatus::Active => return,
             None => GardenTxKind::Join {
                 name: self.name.clone(),
@@ -2129,6 +2310,18 @@ impl Node {
         let hash = block.hash();
         self.proposed_rounds.insert(round);
         self.first_sight(Seen::Block(hash));
+        // One slot for each proposer, this node included: its block of an
+        // earlier round gives way, as it does on every other node.
+        let earlier: Vec<Hash32> = self
+            .proposals
+            .iter()
+            .filter(|(_, held)| held.header.proposer == self.me)
+            .map(|(held_hash, _)| *held_hash)
+            .collect();
+        for old in earlier {
+            self.proposals.remove(&old);
+            self.votes.remove(&old);
+        }
         self.proposals.insert(hash, block.clone());
         self.gossip(&GardenGossip::Proposal(block), None).await;
         self.consider(hash).await;
@@ -2285,7 +2478,42 @@ impl Node {
                 let _ = reply.send(self.feed(limit));
             }
             GardenCommand::Leave(reply) => self.begin_leave(reply).await,
+            GardenCommand::Admit {
+                target,
+                accept,
+                reply,
+            } => {
+                let _ = reply.send(self.answer_request(target, accept).await);
+            }
         }
+    }
+
+    /// The host answers a key that waits. The answer is a transaction, so
+    /// the seat is given or refused in a block and every node sees the same.
+    async fn answer_request(&mut self, target: GardenKey, accept: bool) -> Result<Value, String> {
+        if !self.is_host() {
+            return Err("only the host of a Garden admits a key that waits".into());
+        }
+        let probe = GardenTx {
+            chain_id: self.chain_id(),
+            sender: self.me,
+            nonce: self.ledger.state.next_nonce(&self.me),
+            kind: GardenTxKind::Admit { target, accept },
+        }
+        .sign(&self.key)?;
+        self.ledger.state.check_tx(&probe)?;
+        let answered = self.has_pending(
+            |pending| matches!(pending, GardenTxKind::Admit { target: named, .. } if *named == target),
+        );
+        if answered {
+            return Err("this key is already being answered".into());
+        }
+        let tx_id = self.submit(GardenTxKind::Admit { target, accept }).await?;
+        Ok(json!({
+            "tx_id": hex::encode(tx_id),
+            "key": hex::encode(target),
+            "admitted": accept,
+        }))
     }
 
     fn invite(&self) -> Result<GardenInvite, String> {
@@ -2299,6 +2527,7 @@ impl Node {
             .chain(state.validators.values().filter(|v| v.key != host));
         for validator in ordered {
             if validator.status != GardenValidatorStatus::Left
+                && validator.status != GardenValidatorStatus::Waiting
                 && validator_dial_address(&validator.address, &validator.key).is_ok()
                 && !peers.contains(&validator.address)
             {
@@ -2536,10 +2765,13 @@ impl Node {
                 "host": self.is_host(),
                 "address": self.address,
                 "member": state.validators.get(&self.me).map(|v| v.status.label()),
+                "turned_away": self.turned_away,
                 "leaving": self.leaving.is_some(),
             },
             "validators": validators,
             "active_validators": state.active().len(),
+            "waiting_for_host": state.waiting(),
+            "admission": limits.admission.label(),
             "connected_peers": self.peers.len(),
             "pending_transactions": self.mempool.len(),
             "objects": state.objects.len(),
@@ -4345,6 +4577,442 @@ mod tests {
             pending <= 3,
             "pending joins exceeded max_validators cap (3): {status}"
         );
+        handle.leave().await.unwrap();
+    }
+
+    /// The proposer writes the round into its header and the leader of a
+    /// round is a function of that number. So a validator signs only a round
+    /// its own clock has reached: otherwise whoever picks the number leads.
+    /// The host already kept to this; every other validator signed any round.
+    #[tokio::test]
+    async fn garden_validator_does_not_sign_a_round_its_clock_has_not_reached() {
+        let mut room = LiarRoom::open().await;
+        let liar = room.liar.public_key_bytes();
+        let far_round = (1_000_000..1_000_064)
+            .find(|round| room.ledger.state.leader(*round) == Some(liar))
+            .expect("the liar leads one round in any sixty-four");
+        let far = room.propose(far_round, message(7), now_ms());
+        assert!(
+            room.ledger.state.verify_block(&far).is_ok(),
+            "the block is valid for the state machine, which reads no clock"
+        );
+        // The far block goes first and is kept unsigned. The honest one takes
+        // its slot: a block nobody signs yet gives way to one that can be.
+        let honest = room.propose(room.rounds()[0], message(8), now_ms());
+        room.show(&far).await;
+        room.show(&honest).await;
+        assert!(
+            room.signed_by_witness.contains(&honest.hash()),
+            "the witness was not heard voting at all"
+        );
+        assert!(
+            !room.signed_by_witness.contains(&far.hash()),
+            "the witness signed round {far_round}, which its clock is nowhere near"
+        );
+    }
+
+    /// The queues of deposits are the only record of bytes no publication
+    /// accounts for. A member that names each deposit in a publication that
+    /// can never apply must not get them out of the queue and keep them on
+    /// the disk: what a pending publication names stays counted, and the
+    /// count is what bounds it.
+    #[tokio::test]
+    async fn garden_deposit_named_by_a_pending_publication_stays_counted() {
+        let handle = spawn(
+            GardenEntry::Create {
+                title: "Room".into(),
+                limits: GardenLimits {
+                    round_ms: 5_000,
+                    ..GardenLimits::testnet_default()
+                },
+            },
+            config("host", "/ip4/127.0.0.1/tcp/0"),
+            random_bytes(),
+            None,
+        )
+        .await
+        .unwrap();
+        let invite = handle.invite().await.unwrap();
+        let (mut swarm, key, peer) = guest(&invite).await;
+        let me = key.public_key_bytes();
+        let join = GardenTx {
+            chain_id: invite.chain_id,
+            sender: me,
+            nonce: 0,
+            kind: GardenTxKind::Join {
+                name: "guest".into(),
+                address: String::new(),
+                invite_signature: invite_keypair(&invite.token)
+                    .unwrap()
+                    .sign(&join_message(invite.chain_id, &me))
+                    .to_vec(),
+            },
+        }
+        .sign(&key)
+        .unwrap();
+        let gossip = GardenRequest::Gossip(vec![GardenGossip::Tx(join)]);
+        assert!(matches!(
+            ask(&mut swarm, peer, gossip).await,
+            GardenResponse::Ack
+        ));
+        tokio::time::timeout(Duration::from_secs(20), async {
+            while handle.status().await.unwrap()["active_validators"] != json!(2) {
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .expect("the guest never became a validator");
+
+        // Twice the share of one peer, each deposit named by a publication
+        // whose nonce is past a gap, so it waits in the pool for ever.
+        let parked: Vec<Vec<u8>> = (0..MAX_UNREFERENCED_PER_PEER * 2)
+            .map(|i| format!("parked-{i}").into_bytes())
+            .collect();
+        for (i, bytes) in parked.iter().enumerate() {
+            let publish = GardenTx {
+                chain_id: invite.chain_id,
+                sender: me,
+                nonce: 5 + i as u64,
+                kind: GardenTxKind::Publish {
+                    kind: GardenContentKind::Message,
+                    content_id: crate::storage::content_id::ContentId::of(bytes).0,
+                    size: u32::try_from(bytes.len()).unwrap(),
+                    mime: "text/plain".into(),
+                    caption: String::new(),
+                },
+            }
+            .sign(&key)
+            .unwrap();
+            let gossip = GardenRequest::Gossip(vec![GardenGossip::Tx(publish)]);
+            assert!(matches!(
+                ask(&mut swarm, peer, gossip).await,
+                GardenResponse::Ack
+            ));
+            let put = GardenRequest::PutObject {
+                bytes: bytes.clone(),
+            };
+            assert!(matches!(
+                ask(&mut swarm, peer, put).await,
+                GardenResponse::Ack
+            ));
+        }
+        let status = handle.status().await.unwrap();
+        assert_eq!(
+            status["pending_transactions"],
+            json!(parked.len()),
+            "the publications that name the deposits are not in the pool: {status}"
+        );
+        let mut kept = 0;
+        for bytes in &parked {
+            let get = GardenRequest::GetObject {
+                content_id: crate::storage::content_id::ContentId::of(bytes).0,
+                relay: false,
+            };
+            match ask(&mut swarm, peer, get).await {
+                GardenResponse::Object(found) => kept += usize::from(found.is_some()),
+                other => panic!("expected an object answer, got {other:?}"),
+            }
+        }
+        assert!(
+            kept <= MAX_UNREFERENCED_PER_PEER,
+            "the host keeps {kept} deposits of one peer, past its share of \
+             {MAX_UNREFERENCED_PER_PEER}: naming them in the pool took them out of the count"
+        );
+        handle.leave().await.unwrap();
+    }
+
+    /// Publish `words` as a message of the node behind `handle`.
+    async fn say(handle: &GardenHandle, words: &str) -> Result<Value, String> {
+        handle
+            .publish(
+                GardenContentKind::Message,
+                words.as_bytes().to_vec(),
+                "text/plain".into(),
+                String::new(),
+            )
+            .await
+    }
+
+    /// Wait until `handle` reports `wanted` at `pointer` of its status.
+    async fn status_becomes(handle: &GardenHandle, pointer: &str, wanted: Value) -> Value {
+        tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                let status = handle.status().await.unwrap();
+                if status.pointer(pointer) == Some(&wanted) {
+                    return status;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("{pointer} never became {wanted}"))
+    }
+
+    /// A Garden founded with host approval, between real nodes. The invite
+    /// lets a node ask. It gets a seat, a vote and the content when the host
+    /// says so, and a node the host turns away stops asking.
+    #[tokio::test]
+    async fn garden_host_approval_seats_a_node_only_after_the_host_answers() {
+        let host = spawn(
+            GardenEntry::Create {
+                title: "Room".into(),
+                limits: GardenLimits {
+                    round_ms: 200,
+                    presence_interval_ms: 100,
+                    admission: GardenAdmission::HostApproval,
+                    ..GardenLimits::testnet_default()
+                },
+            },
+            config("host", "/ip4/127.0.0.1/tcp/0"),
+            random_bytes(),
+            None,
+        )
+        .await
+        .unwrap();
+        let invite = host.invite().await.unwrap();
+        let before = say(&host, "said before anybody came").await.unwrap();
+        let content_id: Hash32 = hex::decode(before["content_id"].as_str().unwrap())
+            .unwrap()
+            .try_into()
+            .unwrap();
+        status_becomes(&host, "/objects", json!(1)).await;
+
+        let mut nodes = Vec::new();
+        for name in ["welcome", "unwelcome"] {
+            let node = spawn(
+                GardenEntry::Invite(invite.clone()),
+                config(name, "/ip4/127.0.0.1/tcp/0"),
+                random_bytes(),
+                None,
+            )
+            .await
+            .unwrap();
+            status_becomes(&node, "/me/member", json!("Waiting")).await;
+            nodes.push(node);
+        }
+        let (welcome, unwelcome) = (&nodes[0], &nodes[1]);
+        let status = status_becomes(&host, "/waiting_for_host", json!(2)).await;
+        assert_eq!(status["admission"], json!("host_approval"));
+        assert_eq!(
+            status["active_validators"],
+            json!(1),
+            "a node that only holds the invite is a validator: {status}"
+        );
+        let key_of = |status: &Value| -> GardenKey {
+            hex::decode(status["me"]["key"].as_str().unwrap())
+                .unwrap()
+                .try_into()
+                .unwrap()
+        };
+        let welcome_key = key_of(&welcome.status().await.unwrap());
+        let unwelcome_key = key_of(&unwelcome.status().await.unwrap());
+
+        // A node that waits publishes nothing, reads no content, and does
+        // not answer for the host: not for another key, not for its own.
+        let refusal = say(welcome, "early").await.unwrap_err();
+        assert!(refusal.contains("not an active validator"), "{refusal}");
+        assert!(
+            unwelcome.resolve(content_id).await.is_err(),
+            "a node the host has not admitted read the content of the Garden"
+        );
+        let refusal = unwelcome.admit(unwelcome_key, true).await.unwrap_err();
+        assert!(refusal.contains("only the host"), "{refusal}");
+        // The host goes on alone meanwhile: nobody who waits has a vote.
+        say(&host, "still alone").await.unwrap();
+        status_becomes(&host, "/objects", json!(2)).await;
+
+        let admitted = host.admit(welcome_key, true).await.unwrap();
+        assert_eq!(admitted["admitted"], json!(true));
+        status_becomes(welcome, "/me/member", json!("Active")).await;
+        status_becomes(&host, "/active_validators", json!(2)).await;
+        let turned = host.admit(unwelcome_key, false).await.unwrap();
+        assert_eq!(turned["admitted"], json!(false));
+        status_becomes(unwelcome, "/me/turned_away", json!(true)).await;
+        status_becomes(&host, "/waiting_for_host", json!(0)).await;
+
+        // The seated node reads what was there and is heard: two validators
+        // need two signatures, so its publication is final only with both.
+        assert_eq!(
+            welcome.resolve(content_id).await.unwrap(),
+            b"said before anybody came".to_vec()
+        );
+        say(welcome, "inside").await.unwrap();
+        status_becomes(&host, "/objects", json!(3)).await;
+        status_becomes(welcome, "/objects", json!(3)).await;
+
+        // The node that was turned away holds no seat, reads nothing, and
+        // does not ask again: rounds pass and nobody waits for the host.
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        let status = host.status().await.unwrap();
+        assert_eq!(status["waiting_for_host"], json!(0), "{status}");
+        assert_eq!(
+            status["validators"].as_array().unwrap().len(),
+            2,
+            "{status}"
+        );
+        let outside = unwelcome.status().await.unwrap();
+        assert_eq!(outside["me"]["member"], Value::Null, "{outside}");
+        // A second answer for the same key has nothing to answer.
+        let refusal = host.admit(unwelcome_key, true).await.unwrap_err();
+        assert!(refusal.contains("not waiting"), "{refusal}");
+        for node in nodes {
+            node.leave().await.unwrap();
+        }
+        host.leave().await.unwrap();
+    }
+
+    /// A transaction that can never apply holds a slot in the pool, and a
+    /// publication in the pool shields the bytes it names. So the pool takes
+    /// from a recorded key only what its standing lets it apply.
+    #[tokio::test]
+    async fn garden_transactions_that_cannot_apply_are_not_pooled() {
+        let handle = spawn(
+            GardenEntry::Create {
+                title: "Room".into(),
+                limits: GardenLimits {
+                    round_ms: 5_000,
+                    admission: GardenAdmission::HostApproval,
+                    ..GardenLimits::testnet_default()
+                },
+            },
+            config("host", "/ip4/127.0.0.1/tcp/0"),
+            random_bytes(),
+            None,
+        )
+        .await
+        .unwrap();
+        let invite = handle.invite().await.unwrap();
+        let (mut swarm, key, peer) = guest(&invite).await;
+        let me = key.public_key_bytes();
+        let sign = |nonce: u64, kind: GardenTxKind| {
+            GardenTx {
+                chain_id: invite.chain_id,
+                sender: me,
+                nonce,
+                kind,
+            }
+            .sign(&key)
+            .unwrap()
+        };
+        let join = sign(
+            0,
+            GardenTxKind::Join {
+                name: "guest".into(),
+                address: String::new(),
+                invite_signature: invite_keypair(&invite.token)
+                    .unwrap()
+                    .sign(&join_message(invite.chain_id, &me))
+                    .to_vec(),
+            },
+        );
+        let gossip = GardenRequest::Gossip(vec![GardenGossip::Tx(join)]);
+        assert!(matches!(
+            ask(&mut swarm, peer, gossip).await,
+            GardenResponse::Ack
+        ));
+        status_becomes(&handle, "/waiting_for_host", json!(1)).await;
+        status_becomes(&handle, "/pending_transactions", json!(0)).await;
+
+        // The key waits. It publishes nothing, admits nobody, and neither
+        // transaction is kept to hold a slot or to shield a deposit.
+        let bytes = b"not mine to publish yet".to_vec();
+        let publish = sign(
+            1,
+            GardenTxKind::Publish {
+                kind: GardenContentKind::Message,
+                content_id: crate::storage::content_id::ContentId::of(&bytes).0,
+                size: u32::try_from(bytes.len()).unwrap(),
+                mime: "text/plain".into(),
+                caption: String::new(),
+            },
+        );
+        let admit = sign(
+            1,
+            GardenTxKind::Admit {
+                target: me,
+                accept: true,
+            },
+        );
+        let leave = sign(1, GardenTxKind::Leave);
+        for tx in [publish, admit, leave] {
+            let gossip = GardenRequest::Gossip(vec![GardenGossip::Tx(tx)]);
+            assert!(matches!(
+                ask(&mut swarm, peer, gossip).await,
+                GardenResponse::Ack
+            ));
+        }
+        // Nor does the host take its bytes or give it any: content is for
+        // the seated.
+        let get = GardenRequest::GetObject {
+            content_id: crate::storage::content_id::ContentId::of(&bytes).0,
+            relay: true,
+        };
+        let put = GardenRequest::PutObject { bytes };
+        for request in [put, get] {
+            let answer = refusal(ask(&mut swarm, peer, request).await);
+            assert!(answer.contains("has not admitted"), "{answer}");
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let status = handle.status().await.unwrap();
+        assert_eq!(
+            status["pending_transactions"],
+            json!(0),
+            "the pool holds transactions of a key that only waits: {status}"
+        );
+        assert_eq!(status["active_validators"], json!(1), "{status}");
+        handle.leave().await.unwrap();
+    }
+
+    /// Peers that show no invite hold a bounded part of the connection
+    /// table. When more of them come the one that kept silent longest goes
+    /// at once, not when its grace ends, so a crowd at the door does not
+    /// fill the table a validator needs a seat in.
+    #[tokio::test]
+    async fn garden_peers_without_the_invite_hold_a_bounded_part_of_the_door() {
+        // A long round: the grace of a stranger is two rounds, so nothing
+        // here is dropped because its time ran out.
+        let handle = spawn(
+            GardenEntry::Create {
+                title: "Room".into(),
+                limits: GardenLimits {
+                    round_ms: 20_000,
+                    host_timeout_ms: 40_000,
+                    suspend_after_ms: 40_000,
+                    ..GardenLimits::testnet_default()
+                },
+            },
+            config("host", "/ip4/127.0.0.1/tcp/0"),
+            random_bytes(),
+            None,
+        )
+        .await
+        .unwrap();
+        let invite = handle.invite().await.unwrap();
+        let mut crowd = Vec::new();
+        for _ in 0..(MAX_UNADMITTED + 4) {
+            crowd.push(stranger(&invite).await);
+        }
+        // The four that came first were put out when the last four came.
+        for (index, (swarm, _, peer)) in crowd.iter_mut().enumerate().take(4) {
+            let gone = tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    match swarm.events.recv().await {
+                        Some(NetEvent::Disconnected(left)) if left == *peer => return true,
+                        Some(_) => {}
+                        None => return false,
+                    }
+                }
+            })
+            .await;
+            assert_eq!(
+                gone,
+                Ok(true),
+                "stranger {index} still holds its connection with {} others behind it",
+                MAX_UNADMITTED + 3 - index
+            );
+        }
+        // And a node that holds the invite walks in past the rest.
+        join_as_second(invite).await;
         handle.leave().await.unwrap();
     }
 }

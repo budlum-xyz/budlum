@@ -125,6 +125,50 @@ pub fn garden_domain_id(chain_id: u64) -> DomainId {
     GARDEN_DOMAIN_PREFIX | (u32::from_le_bytes(leading::<4>(&digest)) & !GARDEN_DOMAIN_PREFIX)
 }
 
+/// How a holder of the invite becomes a validator. The host chooses it at
+/// the founding and the genesis names it, so it holds for the whole life of
+/// the Garden.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum GardenAdmission {
+    /// Whoever holds the invite link or QR content joins with it.
+    #[default]
+    Direct,
+    /// Whoever holds the invite asks with it, and waits until the host
+    /// admits the key. The invite alone gives no seat and no vote.
+    HostApproval,
+}
+
+impl GardenAdmission {
+    pub const fn code(self) -> u8 {
+        match self {
+            Self::Direct => 0,
+            Self::HostApproval => 1,
+        }
+    }
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Direct => "direct",
+            Self::HostApproval => "host_approval",
+        }
+    }
+
+    /// Read the label an operator wrote.
+    ///
+    /// # Errors
+    ///
+    /// Refuses every word that is not one of the two labels.
+    pub fn parse(label: &str) -> Result<Self, String> {
+        match label {
+            "direct" => Ok(Self::Direct),
+            "host_approval" => Ok(Self::HostApproval),
+            other => Err(format!(
+                "admission must be \"direct\" or \"host_approval\", not {other:?}"
+            )),
+        }
+    }
+}
+
 /// Limits of one Garden. Every value is TESTNET-DEFAULT.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GardenLimits {
@@ -152,6 +196,8 @@ pub struct GardenLimits {
     /// keeps bytes for a publication only when they have the size the
     /// publication declares, so the share bounds the bytes themselves.
     pub max_published_bytes_per_validator: u64,
+    /// How an invite holder becomes a validator.
+    pub admission: GardenAdmission,
 }
 
 /// The least a publication counts against its author's share, in bytes.
@@ -172,6 +218,7 @@ impl GardenLimits {
             host_timeout_ms: 6_000,
             suspend_after_ms: 12_000,
             max_published_bytes_per_validator: 256 * 1024 * 1024,
+            admission: GardenAdmission::Direct,
         }
     }
 
@@ -226,6 +273,7 @@ impl GardenLimits {
             &self.host_timeout_ms.to_le_bytes(),
             &self.suspend_after_ms.to_le_bytes(),
             &self.max_published_bytes_per_validator.to_le_bytes(),
+            &[self.admission.code()],
         ])
     }
 }
@@ -462,6 +510,9 @@ pub enum GardenValidatorStatus {
     Suspended,
     /// It left on its own.
     Left,
+    /// It asked to join with the invite and the host has not answered. It
+    /// holds no seat, no vote and no share until the host admits it.
+    Waiting,
 }
 
 impl GardenValidatorStatus {
@@ -470,6 +521,7 @@ impl GardenValidatorStatus {
             Self::Active => 0,
             Self::Suspended => 1,
             Self::Left => 2,
+            Self::Waiting => 3,
         }
     }
 
@@ -478,6 +530,7 @@ impl GardenValidatorStatus {
             Self::Active => "Active",
             Self::Suspended => "Suspended",
             Self::Left => "Left",
+            Self::Waiting => "Waiting",
         }
     }
 }
@@ -556,6 +609,9 @@ pub enum GardenTxKind {
         mime: String,
         caption: String,
     },
+    /// The host answers a key that waits: it takes a seat, or it is turned
+    /// away and its request is forgotten.
+    Admit { target: GardenKey, accept: bool },
 }
 
 impl GardenTxKind {
@@ -566,6 +622,7 @@ impl GardenTxKind {
             Self::Resume { .. } => "resume",
             Self::Suspend { .. } => "suspend",
             Self::Publish { kind, .. } => kind.label(),
+            Self::Admit { .. } => "admit",
         }
     }
 
@@ -599,6 +656,9 @@ impl GardenTxKind {
                 mime.as_bytes(),
                 caption.as_bytes(),
             ]),
+            Self::Admit { target, accept } => {
+                hash_fields_bytes(&[&[5u8], target, &[u8::from(*accept)]])
+            }
         }
     }
 }

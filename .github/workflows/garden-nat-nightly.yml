@@ -3,10 +3,11 @@ name: Garden NAT
 # Garden behind address translation that is real: network namespaces, two
 # private networks, two translating routers, the host on the public side.
 # The directive runs NAT simulation at night; the pull request trigger is
-# there so that a change to Garden shows its result before it merges.
+# there so that a change to Garden shows its result before it merges, on
+# whichever of the two long-lived branches the pull request is opened against.
 on:
   pull_request:
-    branches: [main]
+    branches: [main, testnet]
     paths:
       - "src/garden/**"
       - "tests/garden/**"

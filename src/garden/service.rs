@@ -12,7 +12,7 @@ use super::node::{
     random_bytes, spawn, GardenEntry, GardenHandle, GardenLeaveOutcome, GardenNodeConfig,
 };
 use super::settlement::GardenBudlumLink;
-use super::types::{status_label, GardenContentKind, GardenLimits};
+use super::types::{status_label, GardenAdmission, GardenContentKind, GardenLimits};
 use crate::chain::chain_actor::ChainHandle;
 use crate::crypto::primitives::KeyPair;
 use crate::domain::types::Hash32;
@@ -48,6 +48,9 @@ pub struct GardenOptions {
     pub host_timeout_ms: Option<u32>,
     pub suspend_after_ms: Option<u32>,
     pub max_published_bytes_per_validator: Option<u64>,
+    /// How an invite holder becomes a validator: `direct` (default) or
+    /// `host_approval`. Read at the founding only.
+    pub admission: Option<String>,
 }
 
 impl GardenOptions {
@@ -69,6 +72,10 @@ impl GardenOptions {
             max_published_bytes_per_validator: self
                 .max_published_bytes_per_validator
                 .unwrap_or(base.max_published_bytes_per_validator),
+            admission: match &self.admission {
+                Some(label) => GardenAdmission::parse(label)?,
+                None => base.admission,
+            },
         };
         limits.validate()?;
         Ok(limits)
@@ -149,12 +156,17 @@ impl GardenService {
         }
     }
 
-    /// Wait until the validator is in the identity record as active.
+    /// Wait until the validator is in the identity record: as active, or as
+    /// waiting for the host in a Garden founded with host approval.
     async fn wait_until_member(handle: &GardenHandle) -> Result<Value, String> {
         let started = Instant::now();
         loop {
             let status = handle.status().await?;
-            if status.pointer("/me/member").and_then(Value::as_str) == Some("Active") {
+            let member = status.pointer("/me/member").and_then(Value::as_str);
+            // Under host approval the request standing in the record is as
+            // far as the node gets on its own: the answer is the host's and
+            // has no deadline.
+            if member == Some("Active") || member == Some("Waiting") {
                 return Ok(status);
             }
             if started.elapsed() >= ENTER_TIMEOUT {
@@ -408,6 +420,18 @@ impl GardenService {
     pub async fn invite(&self) -> Result<Value, String> {
         let link = self.running().await?.invite().await?.to_link();
         Ok(json!({ "invite": link, "qr": link }))
+    }
+
+    /// Answer a key that waits for the host. `key` is the validator key as
+    /// the status lists it; `accept` seats it or turns it away.
+    ///
+    /// # Errors
+    ///
+    /// Refuses when the node is not running in a Garden or is not its host,
+    /// when the key is malformed, and when the key is not waiting.
+    pub async fn admit(&self, key: String, accept: bool) -> Result<Value, String> {
+        let target = parse_id("key", &key)?;
+        self.running().await?.admit(target, accept).await
     }
 
     /// Publish a message, a post or an image. `encoding` is `utf8` or `hex`.

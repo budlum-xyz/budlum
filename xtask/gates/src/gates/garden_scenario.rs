@@ -26,6 +26,7 @@ pub(crate) const TESTS: &[&str] = &[
     "garden_validator_leaves_and_returns_while_the_garden_runs",
     "garden_rpc_is_refused_on_the_public_listener",
     "garden_validator_share_bounds_what_it_publishes",
+    "garden_host_approval_admits_only_whom_the_host_accepts",
 ];
 
 pub fn run(_root: &Path, log: &Path) -> Result<String, String> {
