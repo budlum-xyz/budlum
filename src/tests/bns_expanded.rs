@@ -1978,3 +1978,90 @@ fn bns_set_content_refuses_unknown_content_and_binds_a_registered_object() {
     assert_eq!(err.code(), "bns_content_unknown");
     assert_eq!(state.bns_registry.resolve_content(&name, 2), Some(known));
 }
+
+// A name points at a storage root only when the chain holds that root as the
+// finalized root of the named domain. The owner check and the expiry check
+// stay in force behind it.
+#[test]
+fn bns_set_storage_refuses_an_unknown_root_a_stranger_and_an_expired_name() {
+    let key = KeyPair::from_seed(&[9u8; 32]).unwrap();
+    let alice = Address::from(key.public_key_bytes());
+    let stranger_key = KeyPair::from_seed(&[10u8; 32]).unwrap();
+    let stranger = Address::from(stranger_key.public_key_bytes());
+    let name = "vault.bud".to_string();
+    let root = [0x5A; 32];
+    let domain = 7u32;
+
+    let mut state = AccountState::new();
+    state.epoch_index = 1;
+    state.add_balance(&alice, 10_000);
+    state.add_balance(&stranger, 10_000);
+    state
+        .bns_registry
+        .register(name.clone(), alice, 1, 50)
+        .unwrap();
+
+    let set_storage = |from: Address, signer: &KeyPair, nonce: u64, root: [u8; 32], domain: u32| {
+        let mut tx = lifecycle_tx(
+            from,
+            0,
+            1,
+            nonce,
+            TransactionType::BnsSetStorage,
+            bincode::serialize(&(name.clone(), root, domain)).unwrap(),
+        );
+        tx.sign(signer);
+        tx
+    };
+
+    // The domain has no finalized root yet.
+    let err =
+        Executor::apply_transaction_checked(&mut state, &set_storage(alice, &key, 0, root, domain))
+            .unwrap_err();
+    assert_eq!(err.code(), "bns_storage_unknown");
+    assert_eq!(state.get_nonce(&alice), 0);
+    assert_eq!(state.get_balance(&alice), 10_000);
+
+    // A finalized root exists, and the transaction names another one.
+    assert!(state.anchor_external_root(domain, root));
+    let err = Executor::apply_transaction_checked(
+        &mut state,
+        &set_storage(alice, &key, 0, [0x5B; 32], domain),
+    )
+    .unwrap_err();
+    assert_eq!(err.code(), "bns_storage_unknown");
+
+    // The right root under the wrong domain is also unknown.
+    let err = Executor::apply_transaction_checked(
+        &mut state,
+        &set_storage(alice, &key, 0, root, domain + 1),
+    )
+    .unwrap_err();
+    assert_eq!(err.code(), "bns_storage_unknown");
+
+    // A stranger cannot bind the finalized root to a name it does not own.
+    let err = Executor::apply_transaction_checked(
+        &mut state,
+        &set_storage(stranger, &stranger_key, 0, root, domain),
+    )
+    .unwrap_err();
+    assert_eq!(err.code(), "bns_set_storage_failed");
+    assert_eq!(state.get_balance(&stranger), 10_000);
+
+    // The owner binds it, pays the fee and advances its nonce.
+    Executor::apply_transaction_checked(&mut state, &set_storage(alice, &key, 0, root, domain))
+        .unwrap();
+    let resolved = state.bns_registry.resolve_full(&name, 2).unwrap();
+    assert_eq!(resolved.storage_root, Some(root));
+    assert_eq!(resolved.storage_domain_id, Some(domain));
+    assert_eq!(state.get_nonce(&alice), 1);
+    assert_eq!(state.get_balance(&alice), 9_999);
+
+    // Past its term the name refuses the write.
+    state.epoch_index = resolved.expires_at;
+    let err =
+        Executor::apply_transaction_checked(&mut state, &set_storage(alice, &key, 1, root, domain))
+            .unwrap_err();
+    assert_eq!(err.code(), "bns_set_storage_failed");
+    assert_eq!(state.get_nonce(&alice), 1);
+}

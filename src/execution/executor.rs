@@ -1771,6 +1771,17 @@ impl Executor {
                 let (name, root, dom_id): (String, [u8; 32], u32) = bincode::deserialize(&tx.data)
                     .map_err(|e| BudlumError::validation("bns_invalid_data", e.to_string()))?;
 
+                // A name may point only at a root this chain holds for the
+                // named domain: the one its last finalized commitment
+                // anchored. A root nobody finalized proves nothing to a
+                // reader, so it is refused here and not stored.
+                if state.external_roots.get(&dom_id) != Some(&root) {
+                    return Err(BudlumError::validation(
+                        "bns_storage_unknown",
+                        format!("domain {dom_id} has no finalized root equal to the one named"),
+                    ));
+                }
+
                 state
                     .bns_registry
                     .set_storage(&name, tx.from, root, dom_id, state.epoch_index)

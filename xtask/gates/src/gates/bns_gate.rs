@@ -30,6 +30,7 @@ pub(crate) const TESTS: &[&str] = &[
     "tests::bns_expanded::bns_root_is_independent_of_insertion_order",
     "tests::bns_expanded::bns_absence_proof_boundaries_must_be_adjacent_positions",
     "tests::bns_expanded::bns_set_content_refuses_unknown_content_and_binds_a_registered_object",
+    "tests::bns_expanded::bns_set_storage_refuses_an_unknown_root_a_stranger_and_an_expired_name",
     "wallet::identity_profile::tests::a_swapped_address_under_a_valid_bns_proof_is_not_verified",
 ];
 
