@@ -4333,9 +4333,9 @@ impl BudlumApiServer for RpcServer {
                 None::<()>,
             ));
         }
-        // Pollen sells the right to read; a name that points at content it
-        // protects answers its reference and never its bytes.
-        let mut pollen_protected = false;
+        // The right to read listed content is sold; a name that points at
+        // such content answers its reference and never its bytes.
+        let mut needs_grant = false;
         let resolved = self.chain.bns_resolve_full(name.clone()).await;
         for cid in resolved
             .as_ref()
@@ -4343,7 +4343,7 @@ impl BudlumApiServer for RpcServer {
             .unwrap_or_default()
         {
             if self.chain.pollen_asset_for_content(cid).await.is_some() {
-                pollen_protected = true;
+                needs_grant = true;
             }
         }
         // The chain actor reads the record and runs it through the
@@ -4353,9 +4353,9 @@ impl BudlumApiServer for RpcServer {
             None => serde_json::Value::Null,
             Some((content, viewed)) => {
                 let (bytes, view_error) = match viewed {
-                    _ if pollen_protected => (
+                    _ if needs_grant => (
                         None,
-                        Some("content is Pollen-protected; an AccessGrant is required".to_string()),
+                        Some("content is listed for sale; an AccessGrant is required".to_string()),
                     ),
                     Ok(bytes) => (Some(format!("0x{}", hex::encode(bytes))), None),
                     Err(reason) => (None, Some(reason)),
