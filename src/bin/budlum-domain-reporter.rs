@@ -20,6 +20,10 @@ use clap::Parser;
 use serde_json::Value;
 use std::path::PathBuf;
 
+#[cfg(test)]
+#[path = "test_support/domain_clients.rs"]
+mod domain_client_test_support;
+
 #[derive(Debug, Parser)]
 #[command(
     name = "budlum-domain-reporter",
@@ -102,6 +106,18 @@ async fn rpc_call(
         .ok_or_else(|| format!("{method}: response has no result"))
 }
 
+/// A client whose TLS stack is ready to use.
+///
+/// reqwest is built against `rustls-tls-webpki-roots-no-provider`, so
+/// `Client::new()` panics unless a process-wide provider is installed first.
+/// The install is idempotent and keeps an existing default, and doing it here
+/// rather than only in `main` covers every entry point - including a test that
+/// calls `run` directly, which is the path a `main`-only install leaves open.
+fn http_client() -> reqwest::Client {
+    budlum_core::crypto::tls::install_default_provider();
+    reqwest::Client::new()
+}
+
 async fn run(cli: Cli) -> Result<(), String> {
     let payload: budlum_core::domain::VerifiedDomainCommitment = serde_json::from_slice(
         &std::fs::read(&cli.payload)
@@ -109,7 +125,7 @@ async fn run(cli: Cli) -> Result<(), String> {
     )
     .map_err(|e| format!("payload is not a VerifiedDomainCommitment: {e}"))?;
     let key = budlum_core::wallet::open_key_file(&cli.key_file, cli.password_file.as_deref())?;
-    let client = reqwest::Client::new();
+    let client = http_client();
     let chain_id = bind_signing_chain_id(
         quantity(
             &rpc_call(&client, &cli.rpc_url, "bud_chainId", serde_json::json!([])).await?,
@@ -179,5 +195,51 @@ mod tests {
         let error = bind_signing_chain_id(45_262, 45_261)
             .expect_err("another network's RPC answer must be refused");
         assert!(error.contains("refusing to sign"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn submission_checks_the_network_before_signing_or_sending() {
+        use super::domain_client_test_support::{rpc, Files};
+        use budlum_core::core::transaction::TransactionType;
+        use budlum_core::settlement::proof_market::ProofMarketTx;
+
+        let files = Files::new();
+        let cli = |url| Cli {
+            rpc_url: url,
+            payload: files.payload.clone(),
+            task_id: format!("0x{}", "11".repeat(32)),
+            key_file: files.key.clone(),
+            password_file: Some(files.password.clone()),
+            signing_chain_id: 45262,
+            fee: 1_000,
+        };
+        let (url, calls, server) = rpc(45260).await;
+        let error = super::run(cli(url))
+            .await
+            .expect_err("a node on another network must not sign");
+        assert!(error.contains("refusing to sign"), "{error}");
+        assert_eq!(*calls.methods.lock().unwrap(), ["bud_chainId"]);
+        assert!(calls.transactions.lock().unwrap().is_empty());
+        server.stop().unwrap();
+
+        let (url, calls, server) = rpc(45262).await;
+        super::run(cli(url))
+            .await
+            .expect("the named network submits");
+        let transactions = calls.transactions.lock().unwrap();
+        assert_eq!(transactions.len(), 1);
+        assert_eq!(transactions[0].chain_id, 45262);
+        // The proof-market door is boxed inside the settlement variant; the
+        // deref is what makes the payload pattern reachable on stable Rust.
+        assert!(matches!(
+            &transactions[0].tx_type,
+            TransactionType::Settlement(SettlementTx::ProofMarket(market))
+                if matches!(market.as_ref(), ProofMarketTx::SubmitReceipt { .. })
+        ));
+        assert!(
+            transactions[0].verify(),
+            "the submitted transaction is signed"
+        );
+        server.stop().unwrap();
     }
 }
