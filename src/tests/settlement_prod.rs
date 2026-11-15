@@ -1137,7 +1137,7 @@ mod settlement_prod_tests {
         let path = path.to_str().unwrap();
 
         let mut harness = BlockHarness::open(path);
-        let asset_id = AssetId(hash_fields_bytes(&[b"stored-bridge-asset"]));
+        let asset_id = AssetId::for_domain(1, b"stored-bridge-asset");
         harness.lock_through_blocks(asset_id, Address::from([0x42; 32]), 100);
         let header = harness.chain.build_global_header(None);
         let expected_bridge_root = header.bridge_state_root;
@@ -1162,7 +1162,7 @@ mod settlement_prod_tests {
 
         let mut harness = BlockHarness::open(path);
         let baseline = harness.chain.build_global_header(None);
-        let asset_id = AssetId(hash_fields_bytes(&[b"bridge-lock-message-root"]));
+        let asset_id = AssetId::for_domain(1, b"bridge-lock-message-root");
         harness.lock_through_blocks(asset_id, Address::from([0x52; 32]), 100);
         let after_lock = harness.chain.build_global_header(None);
         assert_ne!(baseline.message_root, after_lock.message_root);

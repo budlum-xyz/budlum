@@ -15,6 +15,7 @@ use budlum_core::core::address::Address;
 use budlum_core::core::transaction::{Transaction, TransactionType};
 use budlum_core::settlement::domains::SettlementTx;
 use budlum_core::settlement::proof_market::ProofMarketTx;
+use budlum_core::wallet::bind_signing_chain_id;
 use clap::Parser;
 use serde_json::Value;
 use std::path::PathBuf;
@@ -41,6 +42,13 @@ struct Cli {
     /// `BUD_WALLET_PASSWORD`.
     #[arg(long)]
     password_file: Option<PathBuf>,
+    /// The Budlum chain this invocation signs for: `45260` mainnet, `45261`
+    /// testnet, `45262` devnet.
+    ///
+    /// Required and never defaulted. The RPC node's answer is checked against
+    /// this operator-named replay domain before signing.
+    #[arg(long)]
+    signing_chain_id: u64,
     /// Transaction fee in atoms.
     #[arg(long, default_value_t = 1_000)]
     fee: u64,
@@ -102,9 +110,12 @@ async fn run(cli: Cli) -> Result<(), String> {
     .map_err(|e| format!("payload is not a VerifiedDomainCommitment: {e}"))?;
     let key = budlum_core::wallet::open_key_file(&cli.key_file, cli.password_file.as_deref())?;
     let client = reqwest::Client::new();
-    let chain_id = quantity(
-        &rpc_call(&client, &cli.rpc_url, "bud_chainId", serde_json::json!([])).await?,
-        "bud_chainId",
+    let chain_id = bind_signing_chain_id(
+        quantity(
+            &rpc_call(&client, &cli.rpc_url, "bud_chainId", serde_json::json!([])).await?,
+            "bud_chainId",
+        )?,
+        cli.signing_chain_id,
     )?;
     let sender = key.address();
     let nonce = quantity(
@@ -152,5 +163,21 @@ async fn main() -> std::process::ExitCode {
             eprintln!("budlum-domain-reporter: {error}");
             std::process::ExitCode::from(1)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_node_cannot_choose_the_reporters_signing_network() {
+        assert_eq!(
+            bind_signing_chain_id(45_261, 45_261).expect("named network agrees"),
+            45_261
+        );
+        let error = bind_signing_chain_id(45_262, 45_261)
+            .expect_err("another network's RPC answer must be refused");
+        assert!(error.contains("refusing to sign"), "{error}");
     }
 }

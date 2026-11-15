@@ -42,6 +42,27 @@ const LEGACY_KEY_FILE_VERSION: u32 = 1;
 const KDF_NAME: &str = "pbkdf2-hmac-sha256";
 const CIPHER_NAME: &str = "xchacha20poly1305";
 
+/// Accept a node's chain-id answer only when it is the replay domain the
+/// operator named before contacting that node.
+///
+/// A seed controls the same address on every Budlum network. Treating
+/// `bud_chainId` as signing policy therefore lets a substituted RPC endpoint
+/// choose the network on which the resulting signature is valid. Every CLI
+/// signing through an RPC endpoint uses this one comparison.
+///
+/// # Errors
+///
+/// Returns a refusal naming both ids when the node serves another network.
+pub fn bind_signing_chain_id(node_chain_id: u64, requested: u64) -> Result<u64, String> {
+    if node_chain_id != requested {
+        return Err(format!(
+            "the node serves chain id {node_chain_id}, but --signing-chain-id {requested} was \
+             given; refusing to sign for a network you did not name"
+        ));
+    }
+    Ok(requested)
+}
+
 /// Why a wallet operation failed.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum WalletError {
@@ -432,6 +453,13 @@ impl KeyFile {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rpc_chain_id_is_a_claim_not_signing_policy() {
+        assert_eq!(bind_signing_chain_id(45_261, 45_261), Ok(45_261));
+        let error = bind_signing_chain_id(45_260, 45_261).unwrap_err();
+        assert!(error.contains("--signing-chain-id 45261"), "{error}");
+    }
 
     #[test]
     fn hmac_and_pbkdf2_match_their_published_vectors() {

@@ -44,8 +44,8 @@ pub use storage_params::{
     storage_params_bytes, StorageDomainParams, DEFAULT_CHUNK_SIZE, MAX_CHUNK_SIZE, MIN_CHUNK_SIZE,
 };
 pub use storage_tx::{
-    execute_storage_tx, open_deal_consent_digest, StorageDealOpen, StorageTx, StorageTxContext,
-    StorageTxError,
+    execute_storage_tx, open_deal_consent_digest, operator_open_deal_consent_digest,
+    StorageDealOpen, StorageTx, StorageTxContext, StorageTxError,
 };
 pub use types::expected_initial_root;
 pub use types::{

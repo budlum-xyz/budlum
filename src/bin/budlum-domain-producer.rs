@@ -20,6 +20,7 @@
 use budlum_core::core::address::Address;
 use budlum_core::core::transaction::{Transaction, TransactionType};
 use budlum_core::settlement::domains::SettlementTx;
+use budlum_core::wallet::bind_signing_chain_id;
 use clap::Parser;
 use serde_json::Value;
 use std::path::PathBuf;
@@ -62,6 +63,13 @@ struct Cli {
     /// `BUD_WALLET_PASSWORD`.
     #[arg(long)]
     password_file: Option<PathBuf>,
+    /// The Budlum chain this invocation signs for: `45260` mainnet, `45261`
+    /// testnet, `45262` devnet.
+    ///
+    /// Required for submission and never defaulted. The RPC node's answer is
+    /// checked against this operator-named replay domain before signing.
+    #[arg(long, required_unless_present = "write_payload")]
+    signing_chain_id: Option<u64>,
     /// Transaction fee in atoms.
     #[arg(long, default_value_t = 1_000)]
     fee: u64,
@@ -280,9 +288,15 @@ async fn run(cli: Cli) -> Result<(), String> {
         .ok_or_else(|| "--key-file is required to submit".to_string())?;
     let key = budlum_core::wallet::open_key_file(key_file, cli.password_file.as_deref())?;
     let client = reqwest::Client::new();
-    let chain_id = quantity(
-        &rpc_call(&client, &cli.rpc_url, "bud_chainId", serde_json::json!([])).await?,
-        "bud_chainId",
+    let requested_chain_id = cli.signing_chain_id.ok_or_else(|| {
+        "--signing-chain-id is required to submit a domain commitment".to_string()
+    })?;
+    let chain_id = bind_signing_chain_id(
+        quantity(
+            &rpc_call(&client, &cli.rpc_url, "bud_chainId", serde_json::json!([])).await?,
+            "bud_chainId",
+        )?,
+        requested_chain_id,
     )?;
     let sender = key.address();
     let nonce = quantity(
@@ -371,9 +385,21 @@ mod tests {
             key_file: None,
             password_file: None,
             fee: 1_000,
+            signing_chain_id: None,
         };
         let err = read_keys(&cli).expect_err("0644 quorum keys file must be refused");
         let _ = std::fs::remove_file(&path);
         assert!(err.contains("chmod 600"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn a_node_cannot_choose_the_producers_signing_network() {
+        assert_eq!(
+            bind_signing_chain_id(45_261, 45_261).expect("named network agrees"),
+            45_261
+        );
+        let error = bind_signing_chain_id(45_260, 45_261)
+            .expect_err("another network's RPC answer must be refused");
+        assert!(error.contains("refusing to sign"), "{error}");
     }
 }

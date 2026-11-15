@@ -50,6 +50,42 @@ impl AssetId {
     pub fn as_bytes(&self) -> &[u8; 32] {
         &self.0
     }
+
+    /// Derive a public-registration id in `domain`'s namespace.
+    ///
+    /// The first four bytes carry the domain id in little-endian form; the
+    /// remaining 28 bytes commit to the domain-local asset name. This keeps
+    /// the stored id at 32 bytes while making collisions across domains
+    /// impossible by construction.
+    #[must_use]
+    pub fn for_domain(domain: DomainId, local_asset: &[u8]) -> Self {
+        let local = hash_fields_bytes(&[
+            b"BDLM_BRIDGE_ASSET_LOCAL_V1",
+            &domain.to_le_bytes(),
+            local_asset,
+        ]);
+        let mut id = [0u8; 32];
+        id[..4].copy_from_slice(&domain.to_le_bytes());
+        id[4..].copy_from_slice(&local[..28]);
+        Self(id)
+    }
+
+    /// Whether this id belongs to `domain` under the public-registration
+    /// namespace rule.
+    #[must_use]
+    pub fn is_namespaced_for(&self, domain: DomainId) -> bool {
+        self.0[..4] == domain.to_le_bytes()
+    }
+
+    /// Domain encoded by a namespaced id. Legacy ids are still readable in
+    /// existing state; this accessor does not claim they were registered by
+    /// the public door.
+    #[must_use]
+    pub fn namespace_domain(&self) -> DomainId {
+        let mut bytes = [0u8; 4];
+        bytes.copy_from_slice(&self.0[..4]);
+        DomainId::from_le_bytes(bytes)
+    }
 }
 
 impl Default for AssetId {
@@ -251,10 +287,12 @@ const MAX_BURN_EXPIRY_BLOCKS: u64 = 100_000;
 /// `100 / rate` units. At the 1% the call sites used, every transfer of 99 base
 /// units or less was relayed for free:
 ///
-///     amount  1 -> fee 0
-///     amount 50 -> fee 0
-///     amount 99 -> fee 0
-///     amount 100 -> fee 1
+/// ```text
+/// amount  1 -> fee 0
+/// amount 50 -> fee 0
+/// amount 99 -> fee 0
+/// amount 100 -> fee 1
+/// ```
 ///
 /// The relayer still pays external gas for each of those messages, so an
 /// attacker splitting a large bridge into 99-unit pieces moves value across for
