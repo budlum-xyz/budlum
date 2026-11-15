@@ -231,6 +231,10 @@ harness = false
 name = "garden_scenario"
 path = "tests/garden/garden_scenario.rs"
 
+[[test]]
+name = "garden_nat"
+path = "tests/garden/garden_nat.rs"
+
 # `cfg(loom)` is set by RUSTFLAGS in the loom job, not by a Cargo feature, so
 # Cargo does not learn about it on its own and `-D warnings` turns the
 # resulting `unexpected_cfgs` into a build failure for every job that compiles
