@@ -30,6 +30,18 @@ These notes have not passed CI, so the directive's "commit SHA plus CI run numbe
 - The storage manifest registration path validates declared structure but does not require a proof linking every declared shard size and parity root to actual bytes. A signer helper that chooses to inspect bytes cannot alone prove what arbitrary signers inspected. A complete protocol must address confidentiality, proof work, transaction size and historical replay; this is not fixed by geometry alone.
 - The testnet directive index is a work-in-progress in [testnet/index.md](testnet/index.md). The attached directive is not tracked in the captured repository trees. It is not committed here.
 
+## Chronology, 2026-11-15 (afternoon)
+
+Everything in this section was read live, not from the earlier snapshot.
+
+1. **PR #110 moved.** Head `a52933e1` -> `ea384116` (`fix(security): close remaining Strix findings on PR 110`, author `lubosruler`, 14:53Z). The commit implements Graft per-application replay watermarks, authenticated finality hints, storage economics bound to measured bytes, operator-selected signing chain IDs and domain-namespaced bridge asset ids. A new Strix review ran against it at 14:54Z and **failed** with zero check annotations; the findings are inline review comments.
+2. **One finding is new on that head.** Strix `1d0558c0`: a repair acceptance binds a replacement operator to a deal priced and challenged on a shard size its signed consent never names. Traced independently and recorded as [B-0004](findings/repair-acceptance-size.md); a fix is in the working tree, unverified and unpushed.
+3. **Both domain clients crash on every submission.** `reqwest::Client::new()` panics with "No provider set" because the crate builds reqwest against `rustls-tls-webpki-roots-no-provider` and neither binary installs the process provider. Observed failing on `a52933e1`, fixed, observed green, and the fix has been ported to `ea384116` where the bug is still present. [B-0003](findings/domain-client-tls-provider.md).
+4. **PR #165 was closed and archived by the owner** at 14:11Z with no comment (details in the audit-pull-request section above).
+5. **PR #166 opened** for the dependency advisories (`fix/security-advisories-2026-11`, head `727587e1`): `rustix` 1.1.4 -> 1.1.6, `quinn-udp` 0.5.14/0.5.15 -> 0.5.16, `quinn-proto` 0.11.18 -> 0.11.19 in all three lockfiles. `cargo metadata --format-version 1 --locked` passes in each directory; no build, test or CI result exists yet.
+6. **30 remote branches deleted**, 19 of them preserved as `archive/2026-11-15/*` tags first. See [branches.md](branches.md).
+7. **CI is saturated, not idle.** For head `ea384116` GitHub reported 25 workflow runs and 113 check runs: thousands of jobs are queued behind `ubuntu-latest` runner capacity, so a single head takes hours to report. The only required check is `Strix Security Review` (plus resolved conversations), and that check had already completed as a failure, so the queue is not what blocks the merge.
+
 ## Local verification and limitations
 
 - The sandbox reports Debian 13 x86_64. No complete multi-OS testnet scenario has been demonstrated.
