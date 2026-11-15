@@ -158,6 +158,26 @@ pub fn validator_dial_address(address: &str, key: &GardenKey) -> Result<Multiadd
     Ok(parsed)
 }
 
+/// Parse an address a validator other than the host announced.
+///
+/// On top of [`validator_dial_address`] the host of the address is a number,
+/// not a name. Every other validator dials what one validator announced, so
+/// a name would be looked up by each of them, in the network each of them
+/// stands in: one member would choose what the resolvers of the others are
+/// asked. The host of a Garden may announce a name. It is in the invite, and
+/// whoever uses an invite already goes where the host says.
+pub fn member_dial_address(address: &str, key: &GardenKey) -> Result<Multiaddr, String> {
+    use libp2p::multiaddr::Protocol;
+    let parsed = validator_dial_address(address, key)?;
+    if matches!(
+        parsed.iter().next(),
+        Some(Protocol::Dns(_) | Protocol::Dns4(_) | Protocol::Dns6(_))
+    ) {
+        return Err("a validator announces the address it answers at, not a name".into());
+    }
+    Ok(parsed)
+}
+
 /// The codec: one bounded frame per request and per response.
 #[derive(Debug, Clone, Default)]
 struct GardenCodec;

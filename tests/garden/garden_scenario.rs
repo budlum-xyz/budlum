@@ -1159,6 +1159,120 @@ fn garden_validator_share_bounds_what_it_publishes() -> Result<(), String> {
     )
 }
 
+/// A Garden founded with host approval. The invite link or QR content lets a
+/// node ask; it becomes a validator when the host admits it and not before,
+/// and a node the host turns away stays outside.
+#[test]
+fn garden_host_approval_admits_only_whom_the_host_accepts() -> Result<(), String> {
+    let _guard = NETWORK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let host = Node::start("host")?;
+    let created = host.rpc(
+        "bud_gardenCreate",
+        &json!(["Closed Door", "host", {
+            "listen": "/ip4/127.0.0.1/tcp/0",
+            "round_ms": ROUND_MS,
+            "presence_interval_ms": 200,
+            "host_timeout_ms": 1500,
+            "suspend_after_ms": 3000,
+            "admission": "host_approval",
+        }]),
+    )?;
+    let invite = text(&created, "/invite")?;
+    ensure(
+        text(&created, "/garden/admission")? == "host_approval",
+        format!("the Garden does not report its admission mode: {created}"),
+    )?;
+    let unknown = host.rpc(
+        "bud_gardenCreate",
+        &json!(["Other", "host", { "admission": "anyone" }]),
+    );
+    ensure(unknown.is_err(), "an unknown admission mode was accepted")?;
+
+    let welcome = Node::start("welcome")?;
+    let unwelcome = Node::start("unwelcome")?;
+    for node in [&welcome, &unwelcome] {
+        let asked = node.join(&invite, true)?;
+        ensure(
+            text(&asked, "/garden/me/member")? == "Waiting",
+            format!(
+                "[{}] the invite alone gave more than a request: {asked}",
+                node.name
+            ),
+        )?;
+    }
+    let seen = wait_for("two requests waiting for the host", STEP_TIMEOUT, || {
+        let garden = host.garden()?;
+        Ok((number(&garden, "/waiting_for_host")? == 2).then_some(garden))
+    })?;
+    ensure(
+        number(&seen, "/active_validators")? == 1,
+        format!("a node that only holds the invite is a validator: {seen}"),
+    )?;
+    let welcome_key = text(&welcome.garden()?, "/me/key")?;
+    let unwelcome_key = text(&unwelcome.garden()?, "/me/key")?;
+
+    // A node that waits publishes nothing and does not answer for the host.
+    let refusal = welcome
+        .publish_text("message", "early")
+        .err()
+        .ok_or("a node that waits for the host published")?;
+    ensure(refusal.contains("not an active validator"), refusal)?;
+    let refusal = unwelcome
+        .rpc("bud_gardenAdmit", &json!([unwelcome_key, true]))
+        .err()
+        .ok_or("a node that waits admitted itself")?;
+    ensure(refusal.contains("only the host"), refusal)?;
+    // The host goes on alone meanwhile: a key that waits has no vote.
+    let (alone, _) = host.publish_text("message", "before anybody is in")?;
+    host.wait_final(&alone)?;
+
+    let yes = host.rpc("bud_gardenAdmit", &json!([welcome_key, true]))?;
+    host.wait_final(&text(&yes, "/tx_id")?)?;
+    let no = host.rpc("bud_gardenAdmit", &json!([unwelcome_key, false]))?;
+    host.wait_final(&text(&no, "/tx_id")?)?;
+    wait_for("the admitted node to be active", STEP_TIMEOUT, || {
+        let garden = welcome.garden()?;
+        Ok((garden.pointer("/me/member") == Some(&json!("Active"))).then_some(()))
+    })?;
+    wait_for(
+        "the other node to learn it was turned away",
+        STEP_TIMEOUT,
+        || {
+            let garden = unwelcome.garden()?;
+            Ok((garden.pointer("/me/turned_away") == Some(&json!(true))
+                && garden.pointer("/me/member") == Some(&Value::Null))
+            .then_some(()))
+        },
+    )?;
+
+    // The admitted validator is heard: two validators need two signatures.
+    let (inside, content_id) = welcome.publish_text("message", "inside")?;
+    for node in [&host, &welcome] {
+        node.wait_final(&inside)?;
+    }
+    host.rpc("bud_gardenResolve", &json!([content_id]))?;
+    // The node that was turned away has no seat and does not ask again.
+    std::thread::sleep(Duration::from_millis(ROUND_MS * 5));
+    let garden = host.garden()?;
+    let on_record = garden
+        .get("validators")
+        .and_then(Value::as_array)
+        .map_or(0, Vec::len);
+    ensure(
+        number(&garden, "/waiting_for_host")? == 0
+            && number(&garden, "/active_validators")? == 2
+            && on_record == 2,
+        format!("the Garden holds more than the host admitted: {garden}"),
+    )?;
+    let again = host
+        .rpc("bud_gardenAdmit", &json!([unwelcome_key, true]))
+        .err()
+        .ok_or("the host admitted a key that no longer waits")?;
+    ensure(again.contains("not waiting"), again)
+}
+
 /// The Garden surface is an operator surface: the public listener refuses
 /// every `bud_garden*` method, and no method takes a key to act for.
 #[test]
@@ -1175,6 +1289,7 @@ fn garden_rpc_is_refused_on_the_public_listener() -> Result<(), String> {
             json!(["budlum-garden:1?chain=0", "mallory"]),
         ),
         ("bud_gardenLeave", json!([])),
+        ("bud_gardenAdmit", json!(["00", true])),
         ("bud_gardenReturn", json!([])),
         ("bud_gardenStatus", json!([])),
         ("bud_gardenPublish", json!(["message", "hi"])),
