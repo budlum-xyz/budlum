@@ -917,6 +917,21 @@ pub mod uniffi_bindings {
     pub fn binding_capabilities() -> WalletBindingCapabilities {
         WalletBindingCapabilities::current()
     }
+
+    /// Verify a `bud_bnsProof` answer against the headers the host has
+    /// verified, and return what it proves as JSON.
+    ///
+    /// # Errors
+    ///
+    /// Every refusal of [`crate::bns::verify_bns_proof`].
+    /// exposed for: the wallet crate's SDK surface - in-tree readers land with the wallet wiring.
+    pub fn verify_bns_proof(
+        name: &str,
+        proof_json: &str,
+        headers: &crate::bns::BnsHeaderBook,
+    ) -> Result<String, String> {
+        crate::bns::verify_bns_proof(name, proof_json, headers).map(|v| v.to_json())
+    }
 }
 
 #[cfg(feature = "wasm")]
@@ -1002,6 +1017,69 @@ pub mod wasm_bindings {
                 &transfer,
             ))
         }
+    }
+
+    /// The headers a page has verified with its own light client. A `.bud`
+    /// proof is checked against these and nothing else.
+    #[wasm_bindgen]
+    #[derive(Default)]
+    /// exposed for: the wallet crate's SDK surface - in-tree readers land with the wallet wiring.
+    pub struct BrowserHeaderBook {
+        inner: crate::bns::BnsHeaderBook,
+    }
+
+    #[wasm_bindgen]
+    impl BrowserHeaderBook {
+        /// An empty book.
+        #[wasm_bindgen(constructor)]
+        #[must_use]
+        /// exposed for: the wallet crate's SDK surface - in-tree readers land with the wallet wiring.
+        pub fn new() -> Self {
+            Self::default()
+        }
+
+        /// Add a header the page has verified: its height, the `.bud`
+        /// registry root it commits to as 32 bytes of hex, and its epoch.
+        ///
+        /// # Errors
+        ///
+        /// A root that is not 32 bytes of hex.
+        /// exposed for: the wallet crate's SDK surface - in-tree readers land with the wallet wiring.
+        pub fn trust(
+            &mut self,
+            height: u64,
+            bns_root_hex: &str,
+            epoch: u64,
+        ) -> Result<(), JsError> {
+            let clean = bns_root_hex.strip_prefix("0x").unwrap_or(bns_root_hex);
+            let bytes = hex::decode(clean).map_err(|_| JsError::new("root is not hex"))?;
+            let bns_root = <[u8; 32]>::try_from(bytes.as_slice())
+                .map_err(|_| JsError::new("root is not 32 bytes"))?;
+            self.inner.trust(crate::bns::TrustedBnsHeader {
+                height,
+                bns_root,
+                epoch,
+            });
+            Ok(())
+        }
+    }
+
+    /// Verify a `bud_bnsProof` answer against `headers` and return what it
+    /// proves as JSON: `{"held": false, "height"}` or the record of the name.
+    ///
+    /// # Errors
+    ///
+    /// Every refusal of [`crate::bns::verify_bns_proof`].
+    #[wasm_bindgen]
+    /// exposed for: the wallet crate's SDK surface - in-tree readers land with the wallet wiring.
+    pub fn verify_bns_proof(
+        name: &str,
+        proof_json: &str,
+        headers: &BrowserHeaderBook,
+    ) -> Result<String, JsError> {
+        crate::bns::verify_bns_proof(name, proof_json, &headers.inner)
+            .map(|v| v.to_json())
+            .map_err(|e| JsError::new(&e))
     }
 
     /// The `bud_sendRawTransaction` body of a signed transaction.
@@ -2065,6 +2143,50 @@ mod tests {
         assert!(caps.uniffi_feature_compiles);
         assert!(!caps.bindings_are_wired);
         assert!(!caps.exports_seed_material);
+    }
+
+    /// An absence proof over an empty registry, and the root it folds to.
+    #[cfg(any(feature = "uniffi", feature = "wasm"))]
+    fn binding_bns_fixture() -> (String, [u8; 32]) {
+        let meta = [0x33u8; 32];
+        let root = crate::bns::compute_bns_registry_root(&meta, &[0u8; 32]);
+        let proof = format!(
+            r#"{{"name":"free.bud","included":false,"meta_digest":"0x{}","height":7,"entry":null,"absence":{{"siblings":[],"occupant":null}}}}"#,
+            hex::encode(meta)
+        );
+        (proof, root)
+    }
+
+    #[cfg(feature = "uniffi")]
+    #[test]
+    fn binding_uniffi_verifies_a_bns_proof_against_the_host_headers() {
+        let (proof, root) = binding_bns_fixture();
+        let mut book = crate::bns::BnsHeaderBook::new();
+        assert!(uniffi_bindings::verify_bns_proof("free.bud", &proof, &book).is_err());
+        book.trust(crate::bns::TrustedBnsHeader {
+            height: 7,
+            bns_root: root,
+            epoch: 10,
+        });
+        assert_eq!(
+            uniffi_bindings::verify_bns_proof("free.bud", &proof, &book).unwrap(),
+            r#"{"height":7,"held":false}"#
+        );
+        let bent = proof.replace("0x33", "0x34");
+        assert!(uniffi_bindings::verify_bns_proof("free.bud", &bent, &book).is_err());
+    }
+
+    #[cfg(feature = "wasm")]
+    #[test]
+    fn binding_wasm_verifies_a_bns_proof_against_the_page_headers() {
+        let (proof, root) = binding_bns_fixture();
+        let mut book = wasm_bindings::BrowserHeaderBook::new();
+        assert!(book.trust(7, &hex::encode(root), 10).is_ok());
+        let verified = wasm_bindings::verify_bns_proof("free.bud", &proof, &book);
+        assert_eq!(
+            verified.ok().as_deref(),
+            Some(r#"{"height":7,"held":false}"#)
+        );
     }
 
     #[cfg(feature = "wasm")]

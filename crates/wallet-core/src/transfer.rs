@@ -279,7 +279,7 @@ mod tests {
             hasher.finalize().into()
         };
         let leaf = compute_bns_leaf_digest("kaya.bud", &owner, 50, None, None, &extras_digest);
-        let names_root = fold_bns_merkle_branch(leaf, &[sib], &[true]).unwrap();
+        let names_root = fold_bns_merkle_branch("kaya.bud", leaf, &[sib]).unwrap();
         let root = compute_bns_registry_root(&meta, &names_root);
         let proof = WalletBnsProof {
             name: "kaya.bud".to_string(),
@@ -291,7 +291,6 @@ mod tests {
             extras_preimage: None,
             meta_digest: meta,
             siblings: vec![sib],
-            directions: vec![true],
             header_height: 9,
         };
         let headers = OneHeader {

@@ -1,6 +1,7 @@
 pub mod bud3;
 pub mod offers;
 pub mod registry;
+pub mod smt;
 pub mod types;
 
 pub use crate::registry::params::{

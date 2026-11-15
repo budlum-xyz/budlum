@@ -4741,16 +4741,8 @@ impl BudlumApiServer for RpcServer {
                 "extras_digest": format!("0x{}", hex::encode(b.extras_digest)),
                 "leaf": format!("0x{}", hex::encode(b.leaf)),
                 "siblings": b.siblings.iter().map(|s| format!("0x{}", hex::encode(s))).collect::<Vec<_>>(),
-                "directions": b.directions,
-                // The three fields below are what turns a branch into a
-                // checkable claim. Without `leaf_index` and `tree_size` an
-                // absence proof cannot show its boundaries are adjacent, and
-                // without `extras` the disclosed address and records are not
-                // bound to `extras_digest`. Omitting them here would not be a
-                // smaller answer: it would be the old answer, and the old
-                // answer is what the two proof findings were about.
-                "leaf_index": b.leaf_index,
-                "tree_size": b.tree_size,
+                // Without `extras` the disclosed address and records are
+                // not bound to `extras_digest`.
                 "extras": b.extras.as_ref().map(extras_json),
             })
         };
@@ -4767,8 +4759,7 @@ impl BudlumApiServer for RpcServer {
             "height": anchored.height,
             "state_root": anchored.state_root,
             "entry": proof.entry.as_ref().map(branch_json),
-            "predecessor": proof.predecessor.as_ref().map(branch_json),
-            "successor": proof.successor.as_ref().map(branch_json),
+            "absence": proof.absence.as_ref().map(crate::bns::types::absence_to_json),
         }))
     }
 

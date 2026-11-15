@@ -5,7 +5,7 @@ use crate::bns::BnsRegistry;
 #[test]
 fn bns_registry_starts_empty() {
     let reg = BnsRegistry::default();
-    assert!(reg.names.is_empty());
+    assert!(reg.names().is_empty());
 }
 
 #[test]
@@ -13,7 +13,7 @@ fn bns_registry_serde_round_trip() {
     let reg = BnsRegistry::default();
     let json = serde_json::to_string(&reg).expect("serialize");
     let parsed: BnsRegistry = serde_json::from_str(&json).expect("deserialize");
-    assert!(parsed.names.is_empty());
+    assert!(parsed.names().is_empty());
 }
 
 #[test]

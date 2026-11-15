@@ -92,15 +92,27 @@
     while keeping resolution, mutations, and third-party registration fail-closed,
     automatically invalidates stale `Resale` marketplace offers on `transfer` /
     `buy`, and exposes `bud_bnsListNamesByOwner` and `bud bns list --owner`.
-  - **B9 ($O(\log N)$ per-name Merkle state proofs and browser verification):**
-    upgrades `BnsRegistry::root()` (`BDLM_BNS_REGISTRY_V3`) to commit
-    `meta_digest` (`BDLM_BNS_META_V1`) + binary `names_merkle_root`
-    (`BDLM_BNS_LEAF_V1`, `BDLM_BNS_EXTRAS_V3`, `BDLM_BNS_NODE_V1`), adds
-    `prove_name` / `verify_state_proof` (supporting both inclusion and adjacent
-    boundary non-existence proofs), upgrades `budlum-explorer`
-    `BnsInclusionProof::PerName` to produce `Strength::Verified` against
-    `bns_v1` while refusing expired or forged proofs, and exposes
-    `bud_bnsGetProof` and `bud bns proof --name`.
+  - **B9 (sparse Merkle tree, per-name proofs, light-client verification):**
+    `BnsRegistry::root()` (`BDLM_BNS_REGISTRY_V3`) commits `meta_digest`
+    (`BDLM_BNS_META_V1`) and the root of a sparse Merkle tree over the names
+    (`src/bns/smt.rs`). Key: `SHA-256("BDLM_BNS_KEY_V1" || name)`. Value: the
+    record digest (`BDLM_BNS_LEAF_V1`, which commits to `BDLM_BNS_EXTRAS_V3`).
+    Leaf node `BDLM_BNS_SMT_LEAF_V1`, inner node `BDLM_BNS_SMT_NODE_V1`, an
+    empty subtree is 32 zero bytes, and a subtree with one name is that
+    name's leaf. The tree is updated incrementally: a write marks its name
+    and the next read re-hashes only the marked paths. `prove_name` returns
+    the path to the name's leaf, or an absence path that ends in an empty
+    slot or in another name's leaf. `verify_state_proof` checks both.
+    `bud_bnsProof` (alias `bud_bnsGetProof`) returns the record, the path,
+    `state_root` and `height`, and `absence {siblings, occupant}` for a name
+    the registry does not hold. `budlum-wallet-core` has `verify_bns_proof`,
+    which reads that answer, checks it against a header the host trusts
+    (`BnsHeaderBook`) and returns the record or the absence. It is exported
+    with wasm-bindgen (`BrowserHeaderBook`, `verify_bns_proof`) and through
+    the `uniffi_bindings` module. `budlum-explorer`
+    `BnsInclusionProof::PerName` folds the same path. The three
+    implementations pin the same vectors
+    (`bns_proof_vectors_are_the_ones_light_clients_pin`).
   - **B10 (`wallet-core` `.bud` recipient validation and proof-verified transfers):**
     adds `crates/wallet-core/src/bns.rs` (`parse_recipient_input`,
     `WalletBnsProof`, `verify_bns_recipient_proof` authenticating custom
@@ -186,13 +198,16 @@
   - `bud_bnsResolveContent` returns `bytes: null` with a `view_error` on a
     node that holds no symbols of the object: the RPC node has no symbol
     transport of its own. The reference in `content` is always answered.
-  - The name tree is a binary Merkle tree over the sorted names with
-    adjacent-leaf absence proofs. It is not a sparse Merkle tree and is
-    recomputed from the rows, not updated incrementally.
-  - `wallet-core` verifies a recipient proof against a header it trusts
-    (`verify_bns_recipient_proof_from_header`). No entry point takes a root
-    as an argument. It has no `resolve_bns` and no generated mobile or
-    browser bindings for it.
+  - `bns_v1` enters the block `state_root` through one flat hash with the
+    other registries, so the registry root cannot be opened from a header
+    alone. A light client needs the registry root of a height from a source
+    it trusts for that header. `bud_bnsProof` returns `state_root` and
+    `height` so the answer names its header; it does not make the root
+    derivable.
+  - The `uniffi_bindings` module is plain Rust: the crate has no UniFFI
+    dependency and no `.udl`, so Kotlin and Swift code is not generated yet.
+    `bindings_are_wired` stays false for that reason. The wasm-bindgen
+    export is real.
   - The gateway binary reads pinned header roots and epochs from its
     configuration and judges expiry against the pinned epoch, never against
     the epoch a node answer carries. A height with a root and no pinned epoch
@@ -206,15 +221,13 @@ The `bns-gate` list also names the two tests below. Both close a hole where a
 proof was well formed, opened to the header root, and still said something the
 root does not say.
 
-- **Absence proofs carry positions.** `BnsMerkleBranch::leaf_index` and
-  `tree_size` are the leaf's position in the ordered name list and the size of
-  that list. `check_boundary_pair` requires both boundary branches to agree on
-  the size and to be adjacent positions, so "no name sorts between these two"
-  is checked instead of assumed. Order alone was not a proof: every branch in
-  the tree sorts next to some target, so an honest inclusion branch of a live
-  name could be relabelled and served as proof that the target is free. A
-  branch without a position still verifies for inclusion and is refused for
-  non-inclusion.
+- **Absence proofs are paths.** The slot of a name is fixed by its key, so
+  the only path that folds to the root for a held name ends in that name's
+  own leaf. `verify_state_proof` refuses an absence path whose occupied slot
+  is the queried key itself or does not share the queried prefix, and an
+  inclusion proof that also carries an absence path. The path of one name
+  cannot be replayed for another, because each level's side is a bit of the
+  key. `bns_absence_proof_cannot_hide_a_live_name` covers each forgery.
 - **Extras ship their pre-image.** `BnsMerkleBranch::extras` is the
   `BnsBranchExtras` the `extras_digest` commits to: address, both
   domain ids, storage root height, the B.U.D. 3.0 reference, subdomains and
@@ -225,10 +238,10 @@ root does not say.
   prints. Before this, the digest was opaque and the disclosed values were
   whatever the answering node chose.
 
-Known open finding, not fixed here: the digest is over the registry's name
-ordering, so a non-inclusion proof still relies on the prover having read the
-header. Separating "the header root at this epoch" from "the root the prover
-names" is the wallet-side change tracked in PR #126.
+The root a proof is checked against always comes from a header the verifier
+trusts, never from the answer: `verify_bns_proof` and
+`verify_bns_recipient_proof_from_header` in the wallet take a header source,
+and no entry point takes a root as an argument.
 
 ### B14: the network gateway (`budlum.xyz`)
 

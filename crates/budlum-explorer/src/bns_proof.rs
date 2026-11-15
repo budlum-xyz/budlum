@@ -110,14 +110,15 @@ pub enum BnsInclusionProof {
         /// a shortfall, not as a success.
         entries: Vec<RegistryEntry>,
     },
-    /// An $O(\log N)$ per-name Merkle proof against `BnsRegistry::root()`
-    /// (`BDLM_BNS_LEAF_V1` + `BDLM_BNS_NODE_V1` + `BDLM_BNS_REGISTRY_V3`).
+    /// A per-name path in the sparse name tree behind `BnsRegistry::root()`
+    /// (`BDLM_BNS_LEAF_V1`, `BDLM_BNS_KEY_V1`, `BDLM_BNS_SMT_LEAF_V1`,
+    /// `BDLM_BNS_SMT_NODE_V1`, `BDLM_BNS_REGISTRY_V3`). The side at each level
+    /// is a bit of the name's key, so the path carries no directions.
     PerName {
         expires_at: u64,
         extras_digest: [u8; 32],
         meta_digest: [u8; 32],
         siblings: Vec<[u8; 32]>,
-        directions: Vec<bool>,
     },
     /// No proof: an RPC answered, and that is all.
     None,
@@ -175,12 +176,11 @@ pub fn evaluate(
             extras_digest,
             meta_digest,
             siblings,
-            directions,
         } => {
             evidence.push(evaluate_per_name_claim(
                 resolved,
                 (*expires_at, *extras_digest, *meta_digest),
-                (siblings, directions),
+                siblings,
                 expected_bns_root,
                 current_epoch,
             ));
@@ -248,12 +248,11 @@ pub fn evaluate(
 fn evaluate_per_name_claim(
     resolved: &ResolvedName,
     digests: (u64, [u8; 32], [u8; 32]),
-    branch: (&[[u8; 32]], &[bool]),
+    siblings: &[[u8; 32]],
     expected_bns_root: Option<[u8; 32]>,
     current_epoch: u64,
 ) -> Claim {
     let (expires_at, extras_digest, meta_digest) = digests;
-    let (siblings, directions) = branch;
     let leaf = bns_leaf_digest(
         &resolved.name,
         resolved.owner,
@@ -262,11 +261,11 @@ fn evaluate_per_name_claim(
         resolved.storage_root,
         extras_digest,
     );
-    let Some(names_root_candidate) = fold_bns_merkle_branch(leaf, siblings, directions) else {
+    let Some(names_root_candidate) = fold_bns_merkle_branch(&resolved.name, leaf, siblings) else {
         return Claim::new(
             "bns-resolution",
             Strength::Refused,
-            "malformed per-name Merkle proof: sibling and direction vectors disagree or exceed depth",
+            "malformed per-name proof: the path is deeper than the name tree",
         );
     };
     let Some(expected) = expected_bns_root else {
@@ -332,19 +331,33 @@ fn bns_leaf_digest(
     hasher.finalize().into()
 }
 
-fn fold_bns_merkle_branch(
-    leaf: [u8; 32],
-    siblings: &[[u8; 32]],
-    directions: &[bool],
-) -> Option<[u8; 32]> {
-    if siblings.len() != directions.len() || siblings.len() > 32 {
+/// Fold the path of `name` from its record digest up to the names root.
+///
+/// The key is `SHA-256("BDLM_BNS_KEY_V1" || name)`, the leaf node binds the
+/// record digest to that key, and each level puts the running digest on the
+/// side its key bit names (most significant bit first, set is right).
+fn fold_bns_merkle_branch(name: &str, leaf: [u8; 32], siblings: &[[u8; 32]]) -> Option<[u8; 32]> {
+    if siblings.len() > 256 {
         return None;
     }
-    let mut acc = leaf;
-    for (sib, is_right_child) in siblings.iter().zip(directions.iter()) {
+    let mut hasher = Sha256::new();
+    hasher.update(b"BDLM_BNS_KEY_V1");
+    hasher.update(name.as_bytes());
+    let key: [u8; 32] = hasher.finalize().into();
+    let mut hasher = Sha256::new();
+    hasher.update(b"BDLM_BNS_SMT_LEAF_V1");
+    hasher.update(key);
+    hasher.update(leaf);
+    let mut acc: [u8; 32] = hasher.finalize().into();
+    let mut depth = siblings.len();
+    for sib in siblings {
+        depth = depth.checked_sub(1)?;
+        let right = key
+            .get(depth / 8)
+            .is_some_and(|byte| (byte >> (7 - (depth % 8))) & 1 == 1);
         let mut hasher = Sha256::new();
-        hasher.update(b"BDLM_BNS_NODE_V1");
-        if *is_right_child {
+        hasher.update(b"BDLM_BNS_SMT_NODE_V1");
+        if right {
             hasher.update(sib);
             hasher.update(acc);
         } else {
@@ -446,7 +459,7 @@ mod tests {
             r.storage_root,
             extras,
         );
-        let names_root = fold_bns_merkle_branch(leaf, &[sibling], &[false]).unwrap();
+        let names_root = fold_bns_merkle_branch(&r.name, leaf, &[sibling]).unwrap();
         let expected_root = bns_registry_root_from_parts(meta, names_root);
 
         let proof = BnsInclusionProof::PerName {
@@ -454,7 +467,6 @@ mod tests {
             extras_digest: extras,
             meta_digest: meta,
             siblings: vec![sibling],
-            directions: vec![false],
         };
 
         // Without expected_bns_root -> RpcClaimOnly.
@@ -475,6 +487,18 @@ mod tests {
         forged.owner = [0xEE; 32];
         let bad = evaluate(&forged, &proof, Some(expected_root), 10);
         assert_eq!(bad.weakest(), Strength::Refused);
+    }
+
+    /// The numbers the node pins in `bns_proof_vectors_are_the_ones_light_clients_pin`.
+    #[test]
+    fn the_tree_fold_matches_the_node_vector() {
+        let folded =
+            fold_bns_merkle_branch("ayaz.bud", [0x55; 32], &[[0x44; 32], [0x66; 32]]).unwrap();
+        assert_eq!(
+            hex::encode(folded),
+            "d706cddd816bc581463bdb4d6fc3b1fd3e43e9847636f3b7bc88cad8e95d6ed9"
+        );
+        assert!(fold_bns_merkle_branch("ayaz.bud", [0x55; 32], &vec![[0; 32]; 257]).is_none());
     }
 
     #[test]

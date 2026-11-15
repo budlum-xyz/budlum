@@ -477,8 +477,7 @@ mod tests {
         if let Some((content_id, object_commitment)) = content {
             let content = ContentRef::new(content_id, object_commitment, None)
                 .expect("non-zero B.U.D. 3.0 reference");
-            reg.names
-                .get_mut("ayaz.bud")
+            reg.record_mut("ayaz.bud")
                 .expect("registered above")
                 .content = Some(content);
         }
@@ -780,8 +779,7 @@ mod tests {
             None,
         )
         .unwrap();
-        reg.names
-            .get_mut("ayaz.bud")
+        reg.record_mut("ayaz.bud")
             .and_then(|record| record.subdomains.get_mut("shop"))
             .expect("registered above")
             .content = Some(shop_site);
@@ -801,8 +799,7 @@ mod tests {
             nft_id: Some([0x77; 32]),
             ..shop_site
         };
-        reg.names
-            .get_mut("ayaz.bud")
+        reg.record_mut("ayaz.bud")
             .and_then(|record| record.subdomains.get_mut("shop"))
             .expect("registered above")
             .content = Some(sealed);

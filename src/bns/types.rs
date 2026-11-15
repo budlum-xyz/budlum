@@ -260,25 +260,10 @@ pub struct BnsMerkleBranch {
     pub content: Option<ContentRef>,
     pub storage_root: Option<[u8; 32]>,
     pub extras_digest: [u8; 32],
+    /// The record digest: the value the name's slot holds in the tree.
     pub leaf: [u8; 32],
+    /// Sibling digests from the name's leaf node up to the names root.
     pub siblings: Vec<[u8; 32]>,
-    pub directions: Vec<bool>,
-    /// Position of this leaf in the ordered name list the branch was built
-    /// from, and the size of that list.
-    ///
-    /// Absence proofs need both. Without them a verifier can only compare the
-    /// disclosed names lexicographically, and every branch in the tree sorts
-    /// next to *some* target, so an honest inclusion branch of one name can be
-    /// relabelled to prove any other name absent. With the index and the count
-    /// the verifier can require the two boundary branches to be adjacent
-    /// positions, which is what "no name sorts between them" actually means.
-    ///
-    /// Absent means "position unknown": such a branch still verifies for
-    /// inclusion, and is refused for non-inclusion.
-    #[serde(default)]
-    pub leaf_index: Option<u64>,
-    #[serde(default)]
-    pub tree_size: Option<u64>,
     /// The pre-image of `extras_digest`, when the prover ships it.
     ///
     /// `extras_digest` is a commitment, not a disclosure: on its own the leaf
@@ -313,7 +298,73 @@ pub struct BnsBranchExtras {
     pub records: std::collections::BTreeMap<String, String>,
 }
 
-/// Compact per-name inclusion or lexicographic non-existence proof against `BnsRegistry::root()`.
+/// Another name's leaf standing where the queried name would be.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BnsOccupiedSlot {
+    /// The tree key of the name that holds the slot.
+    pub key: [u8; 32],
+    /// The record digest of that name.
+    pub value: [u8; 32],
+}
+
+/// Why a name is not in the registry: its path ends in an empty slot, or in
+/// the leaf of a different name.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BnsAbsenceProof {
+    /// Sibling digests from the end of the path up to the names root.
+    pub siblings: Vec<[u8; 32]>,
+    /// `None` when the path ends in an empty slot.
+    pub occupant: Option<BnsOccupiedSlot>,
+}
+
+/// The wire form of a [`BnsAbsenceProof`].
+#[must_use]
+pub fn absence_to_json(absence: &BnsAbsenceProof) -> serde_json::Value {
+    serde_json::json!({
+        "siblings": absence
+            .siblings
+            .iter()
+            .map(|s| format!("0x{}", hex::encode(s)))
+            .collect::<Vec<_>>(),
+        "occupant": absence.occupant.as_ref().map(|slot| serde_json::json!({
+            "key": format!("0x{}", hex::encode(slot.key)),
+            "value": format!("0x{}", hex::encode(slot.value)),
+        })),
+    })
+}
+
+/// Read the wire form written by [`absence_to_json`].
+///
+/// # Errors
+///
+/// Names the field that is missing or is not 32 bytes of hex.
+pub fn absence_from_json(value: &serde_json::Value) -> Result<BnsAbsenceProof, String> {
+    fn hex32(value: Option<&serde_json::Value>, field: &str) -> Result<[u8; 32], String> {
+        let text = value
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| format!("missing {field}"))?;
+        let bytes = hex::decode(text.strip_prefix("0x").unwrap_or(text))
+            .map_err(|_| format!("{field} is not hex"))?;
+        <[u8; 32]>::try_from(bytes.as_slice()).map_err(|_| format!("{field} is not 32 bytes"))
+    }
+    let siblings = value
+        .get("siblings")
+        .and_then(serde_json::Value::as_array)
+        .ok_or("missing absence.siblings")?
+        .iter()
+        .map(|s| hex32(Some(s), "absence.siblings[]"))
+        .collect::<Result<Vec<_>, _>>()?;
+    let occupant = match value.get("occupant") {
+        Some(slot) if !slot.is_null() => Some(BnsOccupiedSlot {
+            key: hex32(slot.get("key"), "absence.occupant.key")?,
+            value: hex32(slot.get("value"), "absence.occupant.value")?,
+        }),
+        _ => None,
+    };
+    Ok(BnsAbsenceProof { siblings, occupant })
+}
+
+/// Per-name inclusion or absence proof against `BnsRegistry::root()`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BnsStateProof {
     pub name: String,
@@ -323,8 +374,9 @@ pub struct BnsStateProof {
     pub names_count: u64,
     pub epoch: u64,
     pub entry: Option<BnsMerkleBranch>,
-    pub predecessor: Option<BnsMerkleBranch>,
-    pub successor: Option<BnsMerkleBranch>,
+    /// Present exactly when `included` is false.
+    #[serde(default)]
+    pub absence: Option<BnsAbsenceProof>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
