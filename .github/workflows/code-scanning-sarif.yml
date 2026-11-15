@@ -231,15 +231,15 @@ jobs:
           echo "d5f23436f443edb85d8e76906d12f0a86ce0490e7663a9e608efeb7a93f149ef  /tmp/solc" | sha256sum -c -
           mkdir -p "$HOME/.svm/0.8.26"
           install -m 0755 /tmp/solc "$HOME/.svm/0.8.26/solc-0.8.26"
-      - name: Install Aderyn v0.6.8 (sha256 pinned)
+      - name: Install Aderyn v0.6.8 (sha256-verified source)
         run: |
           set -euo pipefail
-          curl -sSfL --retry 5 --retry-all-errors --retry-delay 3 -o /tmp/aderyn.tar.xz \
-            https://github.com/Cyfrin/aderyn/releases/download/aderyn-v0.6.8/aderyn-x86_64-unknown-linux-gnu.tar.xz
-          echo "ffd6ca658962e211a3ac821c646f69c8e14bf1b1001cbfe091bcd4535a691e46  /tmp/aderyn.tar.xz" | sha256sum -c -
-          mkdir -p /tmp/aderyn-bin
-          tar -xJf /tmp/aderyn.tar.xz -C /tmp/aderyn-bin
-          sudo install -m 0755 "$(find /tmp/aderyn-bin -name aderyn -type f | head -1)" /usr/local/bin/aderyn
+          curl -sSfL --retry 5 --retry-all-errors --retry-delay 3 -o /tmp/aderyn-source.tar.gz \
+            https://github.com/Cyfrin/aderyn/releases/download/aderyn-v0.6.8/source.tar.gz
+          echo "2d4afdb52bae30f8488e5d9470a281d284c0b286455b61b474e6c2e7dafe343a  /tmp/aderyn-source.tar.gz" | sha256sum -c -
+          mkdir -p /tmp/aderyn-source
+          tar -xzf /tmp/aderyn-source.tar.gz -C /tmp/aderyn-source --strip-components=1
+          cargo +nightly-2026-07-19 install --locked --path /tmp/aderyn-source/aderyn
           aderyn --version
       - name: Run Aderyn Solidity analysis (SARIF)
         run: aderyn contracts --output aderyn.sarif
