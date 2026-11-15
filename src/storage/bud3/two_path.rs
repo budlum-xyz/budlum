@@ -111,6 +111,16 @@ pub fn extract_object_from_frames(
                 fps: 10,
                 k_max: frame.source_symbols.max(1),
             };
+            // A decoder reserves both the padded segment buffer and the per-symbol
+            // slot table (~24 bytes per source symbol) regardless of how tiny the
+            // arriving frame payload is: charge the meter up front so a stream of
+            // 27-byte frames across distinct segments cannot bypass memory limits.
+            let decoder_overhead = eph
+                .segment_bytes()
+                .saturating_add(u64::from(eph.k_max).saturating_mul(24));
+            meter
+                .charge_bytes(decoder_overhead)
+                .map_err(|e| TwoPathError::Frame(FrameWireError::Budget(e)))?;
             let dec = SegmentDecoder::new(frame.segment, u64::from(frame.segment_len), &eph)?;
             decoders.insert(frame.segment, (frame.segment_len, frame.data.len(), dec));
         }
@@ -322,5 +332,49 @@ mod tests {
 
         let commit_after = video_commitment_from_frames(&frames).unwrap();
         assert_eq!(commit_before, commit_after);
+    }
+
+    #[test]
+    fn frame_wire_rejects_excessive_source_symbols_and_two_path_charges_decoder_buffer() {
+        use super::super::frame::{Bud3Frame, FrameWireError, BUD3_FRAME_MAGIC};
+        use super::super::limits::RFC6330_MAX_SOURCE_SYMBOLS;
+
+        // Craft a wire frame claiming source_symbols = RFC6330_MAX_SOURCE_SYMBOLS + 1.
+        let mut raw = Vec::with_capacity(27);
+        raw.extend_from_slice(&BUD3_FRAME_MAGIC);
+        raw.push(0); // profile 0
+        raw.push(0); // source kind
+        raw.extend_from_slice(&0u64.to_le_bytes()); // segment 0
+        raw.extend_from_slice(&64u32.to_le_bytes()); // segment_len
+        raw.extend_from_slice(&0u32.to_le_bytes()); // esi
+        raw.extend_from_slice(&(RFC6330_MAX_SOURCE_SYMBOLS + 1).to_le_bytes());
+        raw.push(0xAA);
+        let mut wire_meter = Meter::for_object(1 << 20);
+        assert_eq!(
+            Bud3Frame::decode_wire(&raw, &mut wire_meter),
+            Err(FrameWireError::BadGeometry)
+        );
+
+        // Craft distinct-segment frames each advertising k = 10_000 symbols of 2048 bytes (~20 MB/decoder)
+        // with a 1 MB meter: second decoder allocation must hit the meter cap.
+        let mut bogus_frames = Vec::new();
+        for seg in 0..4u64 {
+            let mut f = Vec::with_capacity(26 + 2048);
+            f.extend_from_slice(&BUD3_FRAME_MAGIC);
+            f.push(0);
+            f.push(0);
+            f.extend_from_slice(&seg.to_le_bytes());
+            f.extend_from_slice(&(10_000u32 * 2048).to_le_bytes());
+            f.extend_from_slice(&0u32.to_le_bytes());
+            f.extend_from_slice(&10_000u32.to_le_bytes());
+            f.extend_from_slice(&vec![0x55u8; 2048]);
+            bogus_frames.push(Bud3Frame::decode_wire(&f, &mut wire_meter).unwrap());
+        }
+        let mut meter = Meter::for_object(1 << 20);
+        let err = extract_object_from_frames(&bogus_frames, &mut meter).unwrap_err();
+        assert!(
+            matches!(err, TwoPathError::Frame(FrameWireError::Budget(_))),
+            "expected meter budget error, got {err:?}"
+        );
     }
 }

@@ -1422,17 +1422,35 @@ fn execute_cosmwasm_json(
         }
         let k = kv.get("key").and_then(|v| v.as_str()).unwrap_or_default();
         if k.is_empty()
+            || k.len() > 1_024
             || k.starts_with("cw20:")
             || k.starts_with("cw721:")
             || k.starts_with("sys:")
         {
             return Ok((
                 OutcomeStatus::Revert,
-                b"reserved CosmWasm storage key prefix".to_vec(),
+                b"reserved or oversized CosmWasm storage key".to_vec(),
             ));
         }
         let v = kv.get("value").and_then(|v| v.as_str()).unwrap_or_default();
+        const MAX_WASM_KV_VALUE_BYTES: usize = 64 * 1024;
+        if v.len() > MAX_WASM_KV_VALUE_BYTES {
+            return Ok((
+                OutcomeStatus::Revert,
+                b"CosmWasm storage value exceeds 64 KiB cap".to_vec(),
+            ));
+        }
         let namespaced = format!("kv:{k}");
+        // Meter consensus state growth linearly in key+value byte length so
+        // callers cannot write multi-kilobyte blobs for a flat 20k BGU fee.
+        let byte_cost = (namespaced.len() as u64)
+            .saturating_add(v.len() as u64)
+            .saturating_mul(200);
+        if byte_cost > gas_budget {
+            return Err(String::from("out of gas writing CosmWasm storage"));
+        }
+        host.charge(byte_cost)
+            .map_err(|_| String::from("out of gas writing CosmWasm storage"))?;
         write_store(host, contract, namespaced.as_bytes(), Some(v.as_bytes()))?;
         return Ok((OutcomeStatus::Success, v.as_bytes().to_vec()));
     }
@@ -1826,5 +1844,23 @@ mod creator_gate_tests {
                     .unwrap();
             assert_eq!(st, OutcomeStatus::Revert);
         }
+
+        // Large `put` payloads are charged per byte so a small gas stipend runs
+        // out of gas instead of writing kilobytes for a flat fee.
+        let big_val = "a".repeat(2_048);
+        let put_big = serde_json::json!({"execute": {"put": {"key": "blob", "value": big_val}}});
+        let err = execute_cosmwasm_json(contract, "creator", &put_big, false, 100_000, &mut host);
+        assert!(
+            err.is_err(),
+            "expected out-of-gas error for 2 KiB put under 100k gas"
+        );
+
+        // Oversized values above the 64 KiB cap revert even with ample gas.
+        let huge_val = "b".repeat(65 * 1024);
+        let put_huge = serde_json::json!({"execute": {"put": {"key": "huge", "value": huge_val}}});
+        let (st, _) =
+            execute_cosmwasm_json(contract, "creator", &put_huge, false, 50_000_000, &mut host)
+                .unwrap();
+        assert_eq!(st, OutcomeStatus::Revert);
     }
 }

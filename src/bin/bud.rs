@@ -56,6 +56,22 @@ struct Cli {
     /// sign for the one you mean.
     #[arg(long, global = true)]
     signing_chain_id: Option<u64>,
+    /// Trusted BNS Merkle root (32-byte hex) from a verified block header.
+    ///
+    /// Required by every command that verifies a BNS state proof (`bud bns
+    /// info`, `bud bns resolve --verify-proof`, and sending to a `.bud` name):
+    /// trusting the `bns_root` returned in the RPC proof reply itself would
+    /// let a hostile RPC node forge an entire alternate BNS tree and redirect
+    /// payments to its own address.
+    #[arg(long, global = true)]
+    trusted_bns_root: Option<String>,
+    /// Trusted epoch corresponding to `--trusted-bns-root`.
+    #[arg(long, global = true)]
+    trusted_bns_epoch: Option<u64>,
+    /// Maximum fee in atoms that auto-fee resolution (`bud_estimateGas` /
+    /// `bud_gasPrice`) is allowed to adopt when `--fee` is omitted.
+    #[arg(long, global = true)]
+    max_fee: Option<u64>,
     #[command(subcommand)]
     command: Command,
 }
@@ -1270,15 +1286,88 @@ fn parse_positive_fee(value: &str) -> Result<u64, std::io::Error> {
     Ok(fee)
 }
 
+/// Default upper bound (in atoms) on fees auto-resolved from an untrusted RPC
+/// node when `--fee` is omitted. Prevents a malicious RPC endpoint from quoting
+/// an exorbitant fee that drains the signer's account.
+const DEFAULT_MAX_AUTO_FEE: u64 = 1_000_000;
+
+/// Trusted BNS header anchor supplied out-of-band by the operator / light
+/// client (`--trusted-bns-root` + `--trusted-bns-epoch`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct BnsHeaderAnchor {
+    bns_root: [u8; 32],
+    epoch: u64,
+}
+
+static TRUSTED_BNS_ANCHOR: std::sync::OnceLock<Result<BnsHeaderAnchor, String>> =
+    std::sync::OnceLock::new();
+static MAX_AUTO_FEE_OVERRIDE: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+
+fn set_trusted_bns_anchor(root_hex: Option<&str>, epoch: Option<u64>) {
+    match (root_hex, epoch) {
+        (Some(raw_root), Some(epoch)) => {
+            let parsed = parse_hex32_str(raw_root, "--trusted-bns-root")
+                .map(|bns_root| BnsHeaderAnchor { bns_root, epoch });
+            let _ = TRUSTED_BNS_ANCHOR.set(parsed);
+        }
+        (Some(_), None) | (None, Some(_)) => {
+            let _ = TRUSTED_BNS_ANCHOR.set(Err(
+                "--trusted-bns-root and --trusted-bns-epoch must be provided together".to_string(),
+            ));
+        }
+        (None, None) => {}
+    }
+}
+
+fn parse_hex32_str(raw: &str, label: &str) -> Result<[u8; 32], String> {
+    let trimmed = raw.strip_prefix("0x").unwrap_or(raw);
+    let bytes = hex::decode(trimmed).map_err(|e| format!("invalid hex in {label}: {e}"))?;
+    if bytes.len() != 32 {
+        return Err(format!("{label} must be 32 bytes, got {}", bytes.len()));
+    }
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&bytes);
+    Ok(out)
+}
+
+fn trusted_bns_anchor() -> Result<BnsHeaderAnchor, String> {
+    match TRUSTED_BNS_ANCHOR.get() {
+        Some(Ok(anchor)) => Ok(*anchor),
+        Some(Err(err)) => Err(err.clone()),
+        None => Err(
+            "--trusted-bns-root <hex32> and --trusted-bns-epoch <epoch> are required to verify \
+             BNS proofs: verifying against the RPC node's own bns_root/epoch would let a hostile \
+             node forge a self-consistent tree and redirect .bud payments"
+                .to_string(),
+        ),
+    }
+}
+
+fn set_max_auto_fee(value: Option<u64>) {
+    if let Some(value) = value {
+        let _ = MAX_AUTO_FEE_OVERRIDE.set(value);
+    }
+}
+
+fn effective_max_auto_fee() -> u64 {
+    MAX_AUTO_FEE_OVERRIDE
+        .get()
+        .copied()
+        .unwrap_or(DEFAULT_MAX_AUTO_FEE)
+}
+
 /// Query the node's live fee floor when `--fee` is omitted.
 ///
 /// Tries `bud_estimateGas` first when a draft transaction is available so
 /// proportional transfer cuts and governance escalations are included, then
-/// falls back to `bud_gasPrice` (`Chain::get_base_fee`).
-fn resolve_network_fee(
+/// falls back to `bud_gasPrice` (`Chain::get_base_fee`). Auto-resolved fees
+/// are bounded by `max_auto_fee` (`--max-fee` or [`DEFAULT_MAX_AUTO_FEE`]) and
+/// displayed before signing so an untrusted RPC node cannot drain an account.
+fn resolve_network_fee_with_cap(
     rpc_url: &str,
     explicit_fee: Option<u64>,
     draft: Option<&Transaction>,
+    max_auto_fee: u64,
 ) -> Result<u64, String> {
     if let Some(fee) = explicit_fee {
         if fee == 0 {
@@ -1286,15 +1375,44 @@ fn resolve_network_fee(
         }
         return Ok(fee);
     }
-    if let Some(tx) = draft {
-        if let Ok(est) = rpc_call(rpc_url, "bud_estimateGas", serde_json::json!([tx])) {
-            if let Ok(parsed) = parse_rpc_u64(&est, "bud_estimateGas") {
-                return Ok(parsed);
+    if max_auto_fee == 0 {
+        return Err(String::from("--max-fee must be greater than zero"));
+    }
+    let quoted = if let Some(tx) = draft {
+        match rpc_call(rpc_url, "bud_estimateGas", serde_json::json!([tx]))
+            .and_then(|est| parse_rpc_u64(&est, "bud_estimateGas"))
+        {
+            Ok(parsed) => parsed,
+            Err(_) => {
+                let raw = rpc_call(rpc_url, "bud_gasPrice", serde_json::json!([]))?;
+                parse_rpc_u64(&raw, "bud_gasPrice")?
             }
         }
+    } else {
+        let raw = rpc_call(rpc_url, "bud_gasPrice", serde_json::json!([]))?;
+        parse_rpc_u64(&raw, "bud_gasPrice")?
+    };
+    if quoted == 0 {
+        return Err(String::from(
+            "RPC node quoted a zero fee; pass an explicit --fee instead",
+        ));
     }
-    let raw = rpc_call(rpc_url, "bud_gasPrice", serde_json::json!([]))?;
-    parse_rpc_u64(&raw, "bud_gasPrice")
+    if quoted > max_auto_fee {
+        return Err(format!(
+            "refusing to sign: RPC node quoted fee {quoted} atoms which exceeds auto-fee ceiling \
+             {max_auto_fee} atoms (pass --fee {quoted} or raise --max-fee to confirm)"
+        ));
+    }
+    println!("fee (from node, ceiling {max_auto_fee}): {quoted} atoms");
+    Ok(quoted)
+}
+
+fn resolve_network_fee(
+    rpc_url: &str,
+    explicit_fee: Option<u64>,
+    draft: Option<&Transaction>,
+) -> Result<u64, String> {
+    resolve_network_fee_with_cap(rpc_url, explicit_fee, draft, effective_max_auto_fee())
 }
 
 /// Build an unsigned transfer bound to `chain_id`.
@@ -3165,6 +3283,7 @@ fn is_valid_resolvable_bud_fqdn(name: &str) -> bool {
 fn parse_and_verify_bns_proof_json(
     proof_json: &serde_json::Value,
     expected_name: &str,
+    anchor: &BnsHeaderAnchor,
 ) -> Result<(budlum_core::bns::types::BnsStateProof, Option<Address>), String> {
     let name = proof_json
         .get("name")
@@ -3192,6 +3311,19 @@ fn parse_and_verify_bns_proof_json(
         proof_json.get("bns_root").ok_or("missing proof.bns_root")?,
         "proof.bns_root",
     )?;
+    if bns_root != anchor.bns_root {
+        return Err(format!(
+            "BNS proof root mismatch: expected trusted 0x{}, got 0x{}",
+            hex::encode(anchor.bns_root),
+            hex::encode(bns_root)
+        ));
+    }
+    if epoch != anchor.epoch {
+        return Err(format!(
+            "BNS proof epoch mismatch: expected trusted epoch {}, got {epoch}",
+            anchor.epoch
+        ));
+    }
     let meta_digest = decode_hex32_field(
         proof_json
             .get("meta_digest")
@@ -3218,8 +3350,10 @@ fn parse_and_verify_bns_proof_json(
             _ => None,
         },
     };
+    // Verify strictly against the caller-supplied trusted header anchor, never
+    // against root/epoch fields copied out of the untrusted RPC payload.
     let verified_leaf =
-        budlum_core::bns::BnsRegistry::verify_state_proof(&proof, &bns_root, epoch)?;
+        budlum_core::bns::BnsRegistry::verify_state_proof(&proof, &anchor.bns_root, anchor.epoch)?;
     let owner = verified_leaf.map(|b| b.owner);
     Ok((proof, owner))
 }
@@ -3230,6 +3364,7 @@ fn resolve_bud_recipient_verified(rpc_url: &str, name: &str) -> Result<Address, 
             "invalid .bud recipient `{name}`: expected <label>.bud or <sub>.<label>.bud"
         ));
     }
+    let anchor = trusted_bns_anchor()?;
     let parent = if budlum_core::bns::BnsRegistry::is_valid_name(name) {
         name.to_string()
     } else {
@@ -3243,7 +3378,7 @@ fn resolve_bud_recipient_verified(rpc_url: &str, name: &str) -> Result<Address, 
         p
     };
     let proof_json = rpc_call(rpc_url, "bud_bnsGetProof", serde_json::json!([parent]))?;
-    let (proof, verified_owner) = parse_and_verify_bns_proof_json(&proof_json, &parent)?;
+    let (proof, verified_owner) = parse_and_verify_bns_proof_json(&proof_json, &parent, &anchor)?;
     let owner = verified_owner
         .ok_or_else(|| format!("`{parent}` is not registered in verified BNS state"))?;
     let addr = recipient_from_verified_proof(&proof, owner, name, &parent)?;
@@ -3312,9 +3447,10 @@ fn run_bns_info(rpc_url: &str, name: &str) -> Result<(), String> {
             "invalid BNS name `{name}`: expected <label>.bud with 3..=32 chars"
         ));
     }
+    let anchor = trusted_bns_anchor()?;
     let full = rpc_call(rpc_url, "bud_bnsResolveFull", serde_json::json!([name]))?;
     let proof_json = rpc_call(rpc_url, "bud_bnsGetProof", serde_json::json!([name]))?;
-    let (proof, verified_owner) = parse_and_verify_bns_proof_json(&proof_json, name)?;
+    let (proof, verified_owner) = parse_and_verify_bns_proof_json(&proof_json, name, &anchor)?;
     let summary = serde_json::json!({
         "name": name,
         "resolved": full,
@@ -3690,6 +3826,8 @@ fn run_reward_pool(epoch: u64) -> Result<(), String> {
 fn main() {
     let cli = Cli::parse();
     set_signing_chain_id(cli.signing_chain_id);
+    set_trusted_bns_anchor(cli.trusted_bns_root.as_deref(), cli.trusted_bns_epoch);
+    set_max_auto_fee(cli.max_fee);
     let result = match &cli.command {
         Command::Tx { action } => match action {
             TxAction::Send {
@@ -4530,6 +4668,38 @@ mod tests {
         let draft = build_transfer(Address::zero(), Address::zero(), 100, 0, 0, 45261);
         assert!(resolve_network_fee("http://127.0.0.1:1", Some(0), Some(&draft)).is_err());
     }
+
+    #[test]
+    fn cli_auto_fee_refuses_exorbitant_rpc_quote_above_cap() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock RPC");
+        let addr = listener.local_addr().expect("local addr");
+        let server = std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buf = [0u8; 4096];
+                let _ = stream.read(&mut buf);
+                // Malicious RPC quotes 10_000_000 atoms (10x DEFAULT_MAX_AUTO_FEE).
+                let payload = r#"{"jsonrpc":"2.0","id":1,"result":"0x989680"}"#;
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    payload.len(),
+                    payload
+                );
+                stream.write_all(resp.as_bytes()).expect("write");
+            }
+        });
+        let rpc_url = format!("http://{addr}");
+        let draft = build_transfer(Address::zero(), Address::zero(), 100, 0, 0, 45261);
+        let err = resolve_network_fee_with_cap(&rpc_url, None, Some(&draft), DEFAULT_MAX_AUTO_FEE)
+            .expect_err("exorbitant auto-fee must be refused");
+        assert!(
+            err.contains("exceeds auto-fee ceiling"),
+            "unexpected error: {err}"
+        );
+        server.join().expect("mock RPC thread");
+    }
 }
 
 /// The RPC gate on the client side (RT-002).
@@ -4876,11 +5046,48 @@ mod rpc_auth_tests {
             },
             "absence": serde_json::Value::Null,
         });
-        let (_, verified_owner) = parse_and_verify_bns_proof_json(&proof_json, "ayaz.bud").unwrap();
+        let trusted = BnsHeaderAnchor {
+            bns_root: state.bns_registry.root(),
+            epoch: 6,
+        };
+        let (_, verified_owner) =
+            parse_and_verify_bns_proof_json(&proof_json, "ayaz.bud", &trusted).unwrap();
         assert_eq!(verified_owner, Some(alice));
+
+        // A forged self-consistent BNS tree built by a malicious RPC node for
+        // the same name (pointing to an attacker address) MUST fail against the
+        // caller's trusted header anchor.
+        let mut fake_registry = state.bns_registry.clone();
+        let attacker = Address::from([0x99u8; 32]);
+        fake_registry
+            .transfer("ayaz.bud", &alice, attacker, 6)
+            .unwrap();
+        let fake_proof = fake_registry.prove_name("ayaz.bud", 6);
+        let ft = fake_proof.entry.as_ref().unwrap();
+        let fake_proof_json = serde_json::json!({
+            "name": fake_proof.name,
+            "included": fake_proof.included,
+            "epoch": fake_proof.epoch,
+            "names_count": fake_proof.names_count,
+            "bns_root": format!("0x{}", hex::encode(fake_proof.bns_root)),
+            "meta_digest": format!("0x{}", hex::encode(fake_proof.meta_digest)),
+            "entry": {
+                "name": ft.name,
+                "owner": format!("0x{}", ft.owner.to_hex()),
+                "address": ft.address.map(|a| format!("0x{}", a.to_hex())),
+                "expires_at": ft.expires_at,
+                "content": ft.content.as_ref().map(budlum_core::bns::types::content_ref_to_json),
+                "storage_root": ft.storage_root.map(|s| format!("0x{}", hex::encode(s))),
+                "extras_digest": format!("0x{}", hex::encode(ft.extras_digest)),
+                "leaf": format!("0x{}", hex::encode(ft.leaf)),
+                "siblings": ft.siblings.iter().map(|s| format!("0x{}", hex::encode(s))).collect::<Vec<_>>(),
+            },
+            "absence": serde_json::Value::Null,
+        });
+        assert!(parse_and_verify_bns_proof_json(&fake_proof_json, "ayaz.bud", &trusted).is_err());
 
         let mut forged_json = proof_json;
         forged_json["bns_root"] = serde_json::json!(format!("0x{}", "ee".repeat(32)));
-        assert!(parse_and_verify_bns_proof_json(&forged_json, "ayaz.bud").is_err());
+        assert!(parse_and_verify_bns_proof_json(&forged_json, "ayaz.bud", &trusted).is_err());
     }
 }

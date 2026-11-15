@@ -184,7 +184,8 @@ impl MobileCore {
                 "free space is below 2 GB; the core released shares and will not accept more",
             ));
         }
-        let incoming = assigned.symbol.len() as u64;
+        let incoming =
+            crate::store::share_retained_bytes(assigned.symbol.len(), assigned.placed.len());
         if self
             .available_bytes
             .checked_sub(incoming)
@@ -393,11 +394,16 @@ mod tests {
         else {
             panic!("expected an acknowledgement");
         };
-        assert_eq!(core.status().stored_bytes, 300);
-        let released = core.release_until_quota(100);
+        let first_size = crate::store::share_retained_bytes(100, 1);
+        let second_size = crate::store::share_retained_bytes(200, 1);
+        assert_eq!(core.status().stored_bytes, first_size + second_size);
+        let released = core.release_until_quota(first_size);
         assert_eq!(released, vec![largest]);
-        assert_eq!(core.status().stored_bytes, 100);
-        assert_eq!(core.available_bytes(), FREE_SPACE_FLOOR_BYTES + 900);
-        assert!(core.release_until_quota(100).is_empty());
+        assert_eq!(core.status().stored_bytes, first_size);
+        assert_eq!(
+            core.available_bytes(),
+            FREE_SPACE_FLOOR_BYTES + 1_000 - first_size
+        );
+        assert!(core.release_until_quota(first_size).is_empty());
     }
 }

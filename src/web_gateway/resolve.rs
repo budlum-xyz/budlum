@@ -250,6 +250,15 @@ pub fn resolve_verified<P: NameProver, R: StateRoots + ?Sized>(
     target: &Target,
 ) -> Result<Resolved, GatewayError> {
     let answer = agreed_proof(provers, &target.name)?;
+    // Bind the prover's proof strictly to the requested name: verifying an
+    // unrelated name's valid Merkle branch against the trusted header root
+    // would let a hostile prover serve its own site for any requested `.bud`.
+    if answer.proof.name != target.name {
+        return Err(GatewayError::ProofFailed(format!(
+            "proof name `{}` does not match requested name `{}`",
+            answer.proof.name, target.name
+        )));
+    }
     let root = roots
         .verified_state_root(answer.height)
         .ok_or(GatewayError::UnknownHeight(answer.height))?;
@@ -257,6 +266,12 @@ pub fn resolve_verified<P: NameProver, R: StateRoots + ?Sized>(
         .verified_epoch(answer.height)
         .ok_or(GatewayError::UnknownHeight(answer.height))?;
     let branch = verified_branch(&answer, &root, epoch)?;
+    if branch.name != target.name {
+        return Err(GatewayError::ProofFailed(format!(
+            "verified branch name `{}` does not match requested name `{}`",
+            branch.name, target.name
+        )));
+    }
     if let Some(sub) = &target.sub {
         let extras = branch
             .extras
@@ -937,5 +952,27 @@ mod tests {
         assert_eq!(cache.len(), 1);
         assert!(cache.get(&first).is_none());
         assert!(cache.get(&second).is_some());
+    }
+
+    #[test]
+    fn resolve_rejects_valid_proof_for_different_name() {
+        let cid = ContentId::public(b"attacker site");
+        let reg = registry_with(Some((cid, [0x22; 32])));
+        let proof_for_ayaz = proof_from(&reg, "ayaz.bud", 5, 2);
+        let mut roots_map = BTreeMap::new();
+        roots_map.insert(5, (reg.root(), 2));
+        let roots = Roots(roots_map);
+        let provers = [FakeProver {
+            answer: Ok(proof_for_ayaz),
+        }];
+        let victim = Target {
+            name: "victim.bud".into(),
+            sub: None,
+        };
+        let err = resolve_verified(&provers, &roots, &victim).unwrap_err();
+        assert!(
+            matches!(err, GatewayError::ProofFailed(ref msg) if msg.contains("does not match")),
+            "expected ProofFailed name mismatch, got {err:?}"
+        );
     }
 }

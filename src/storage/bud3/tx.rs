@@ -361,6 +361,10 @@ mod tests {
             Ok(Applied::Acked(1))
         );
         assert_eq!(
+            apply(&mut r, [11; 32], StorageTxV3::CustodyAck { object: key }, 1),
+            Ok(Applied::Acked(1))
+        );
+        assert_eq!(
             apply(
                 &mut r,
                 [2; 32],

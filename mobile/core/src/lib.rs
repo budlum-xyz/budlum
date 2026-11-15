@@ -291,19 +291,20 @@ mod tests {
     fn mobile_core_refuses_share_that_would_cross_free_space_floor() {
         let symbol = vec![0x44; 100];
         let (assigned, _) = placed_symbol(&symbol, 4);
-        let mut core = fixture(FREE_SPACE_FLOOR_BYTES + 99);
+        let retained = crate::store::share_retained_bytes(symbol.len(), assigned.placed.len());
+        let mut core = fixture(FREE_SPACE_FLOOR_BYTES + retained - 1);
         assert_eq!(
             core.accept_share(assigned.clone()).expect_err("floor").code,
             "mobile_free_space_floor"
         );
         assert_eq!(core.status().stored_bytes, 0);
-        assert_eq!(core.available_bytes(), FREE_SPACE_FLOOR_BYTES + 99);
+        assert_eq!(core.available_bytes(), FREE_SPACE_FLOOR_BYTES + retained - 1);
         assert!(core.drain_duties().is_empty());
 
-        core.set_available_bytes(FREE_SPACE_FLOOR_BYTES + 100);
+        core.set_available_bytes(FREE_SPACE_FLOOR_BYTES + retained);
         core.accept_share(assigned).expect("exactly at floor");
         assert_eq!(core.available_bytes(), FREE_SPACE_FLOOR_BYTES);
-        assert_eq!(core.status().stored_bytes, 100);
+        assert_eq!(core.status().stored_bytes, retained);
     }
 
     struct Silent;

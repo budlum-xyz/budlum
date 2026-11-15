@@ -9,7 +9,7 @@
 //! Convenience: exposed for CLI, RPC, SDK, and multi-VM runtime callers.
 
 use super::fountain::{FountainError, SegmentEncoder, Symbol, SymbolKind, MAX_ESI};
-use super::limits::Profile;
+use super::limits::{Profile, RFC6330_MAX_SOURCE_SYMBOLS};
 use super::meter::{Meter, MeterError};
 use super::segment::Segmentation;
 use crate::core::hash::hash_fields_bytes;
@@ -180,7 +180,11 @@ impl Bud3Frame {
         k_buf.copy_from_slice(header.get(22..26).ok_or(FrameWireError::Truncated)?);
         let source_symbols = u32::from_le_bytes(k_buf);
 
-        if segment_len == 0 || source_symbols == 0 {
+        if segment_len == 0
+            || source_symbols == 0
+            || source_symbols > RFC6330_MAX_SOURCE_SYMBOLS
+            || payload.len() > usize::from(u16::MAX)
+        {
             return Err(FrameWireError::BadGeometry);
         }
         if esi > MAX_ESI {

@@ -4507,6 +4507,7 @@ impl Blockchain {
         if reasons.is_empty() {
             let mut probe = self.mempool.clone();
             probe.sync_scheme_registry(&self.state.scheme_registry);
+            probe.sync_duty_validators(self.active_duty_validators());
             if let Err(err) = probe.add_transaction(tx.clone()) {
                 let reason = match err {
                     crate::mempool::pool::MempoolError::PoolFull => "pool_full",
@@ -5605,12 +5606,27 @@ impl Blockchain {
     pub fn mine_pending_transactions(&mut self, miner_address: Address) {
         self.produce_block(miner_address);
     }
+    fn active_duty_validators(&self) -> Vec<Address> {
+        let mut set = std::collections::BTreeSet::new();
+        for (addr, v) in &self.state.validators {
+            if v.active && !v.slashed && !v.jailed {
+                set.insert(*addr);
+            }
+        }
+        for rec in self.state.validator_directory.iter() {
+            set.insert(rec.owner);
+        }
+        set.into_iter().collect()
+    }
+
     pub fn add_transaction(&mut self, transaction: Transaction) -> Result<(), String> {
         self.validate_pool_transaction(&transaction)
             .map_err(|e| format!("Invalid transaction: {e}"))?;
 
         self.mempool
             .sync_scheme_registry(&self.state.scheme_registry);
+        self.mempool
+            .sync_duty_validators(self.active_duty_validators());
         self.mempool
             .add_transaction(transaction.clone())
             .map_err(|e| format!("Mempool error: {e:?}"))?;
@@ -5646,6 +5662,8 @@ impl Blockchain {
         }
         self.mempool
             .sync_scheme_registry(&self.state.scheme_registry);
+        self.mempool
+            .sync_duty_validators(self.active_duty_validators());
         self.mempool.add_transaction_bundle(transactions.clone())?;
         if let Some(ref store) = self.storage {
             for transaction in &transactions {
@@ -6777,6 +6795,8 @@ impl Blockchain {
         self.mempool = crate::mempool::pool::Mempool::new(mempool_config);
         self.mempool
             .sync_scheme_registry(&self.state.scheme_registry);
+        self.mempool
+            .sync_duty_validators(self.active_duty_validators());
         for tx in new_pending {
             let _ = self.mempool.add_transaction(tx);
         }

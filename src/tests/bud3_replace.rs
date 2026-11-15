@@ -653,7 +653,7 @@ fn bud3_object_replacement_is_the_signed_door_path() {
     let proposer = Address::from([FULL_A; 32]);
     let mut state = AccountState::new();
     state.add_balance(&owner, 10_000);
-    state.add_balance(&proposer, 1_000);
+    state.add_balance(&proposer, 10_000);
     for v in [FULL_A, FULL_B, FULL_C] {
         let v_addr = Address::from([v; 32]);
         state.add_validator(v_addr, 100_000);
@@ -716,6 +716,15 @@ fn bud3_object_replacement_is_the_signed_door_path() {
         ),
     )
     .unwrap();
-    assert!(state.bud3_registry.object(&new).is_some());
-    assert_eq!(state.get_balance(&proposer), 999, "only the fee is charged");
+    let new_obj = state
+        .bud3_registry
+        .object(&new)
+        .expect("replacement object registered");
+    let expected_storage_fee = new_obj.endowment.total_deposited + new_obj.endowment.gateway_paid;
+    assert!(expected_storage_fee > 0);
+    assert_eq!(
+        state.get_balance(&proposer),
+        10_000 - 1 - expected_storage_fee,
+        "ReplaceObject charges both the tx fee and the new object's storage fee"
+    );
 }

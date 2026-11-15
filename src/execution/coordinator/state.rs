@@ -409,7 +409,22 @@ impl ExecutionState {
             self.group_root(RootGroup::Utxo),
             self.group_root(RootGroup::Plutus),
         ];
-        fold_execution_root_v1_or_v2_or_v3(v1, expansion, self.group_root(RootGroup::Rv32))
+        let base =
+            fold_execution_root_v1_or_v2_or_v3(v1, expansion, self.group_root(RootGroup::Rv32));
+        if self.pending_evm_migrations.is_empty() {
+            base
+        } else {
+            let mut h = Sha3_256::new();
+            h.update(b"BDLM_UEL_MIGRATIONS_V1");
+            h.update(base);
+            h.update((self.pending_evm_migrations.len() as u64).to_le_bytes());
+            for (contract_hex, plan) in &self.pending_evm_migrations {
+                h.update((contract_hex.len() as u64).to_le_bytes());
+                h.update(contract_hex.as_bytes());
+                h.update(plan.commitment());
+            }
+            h.finalize().into()
+        }
     }
 }
 

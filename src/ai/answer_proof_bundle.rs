@@ -19,6 +19,8 @@ use bud_isa::{Instruction, Opcode};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::crypto::primitives::PqKeyPair;
+
 use super::execution::{field_to_i32, i32_to_field, stark_program_hash_from_words};
 use super::verification_level::{LevelRecord, LevelRefusal, VerificationLevel};
 
@@ -30,6 +32,8 @@ pub const APB_NODE_TAG: &[u8] = b"BDLM_AI_APB_NODE_V1";
 pub const APB_CALCULATOR_TAG: &[u8] = b"BDLM_AI_APB_CALCULATOR_V1";
 /// Domain tag for canonical APB prose commitments.
 pub const APB_PROSE_TAG: &[u8] = b"BDLM_AI_APB_PROSE_V1";
+/// Domain tag for signed chain-side verification-level attestations.
+pub const APB_LEVEL_ATTESTATION_TAG: &[u8] = b"BDLM_AI_APB_LEVEL_ATTESTATION_V1";
 
 /// Markdown code fence tag holding the serialized [`AnswerProofBundle`].
 pub const APB_FENCE_OPEN: &str = "```apb\n";
@@ -53,6 +57,9 @@ pub enum ApbError {
     LevelTransition(LevelRefusal),
     /// The level attestation does not cover this bundle's prose.
     LevelUnbound,
+    /// The level attestation failed cryptographic verification against the
+    /// trusted verifier key.
+    InvalidAttestationSignature,
     /// Markdown container is missing a valid `apb` block or prose disagrees
     /// with `prose_digest`.
     MalformedMarkdown(&'static str),
@@ -379,14 +386,92 @@ pub struct VerifiedSentence {
     pub claim_kind: SentenceClaimKind,
 }
 
-/// Attestation that a verification level was earned on chain, bound to the
-/// prose it certifies.
+/// Cryptographically verified attestation that a verification level was earned
+/// on chain, bound to the prose it certifies.
+///
+/// Fields are private so callers cannot forge an attestation without passing a
+/// valid post-quantum ML-DSA-65 signature under a trusted verifier key through
+/// [`Self::verified`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LevelAttestation {
     /// The level the chain actually recorded for this answer.
-    pub level: VerificationLevel,
+    level: VerificationLevel,
     /// Prose digest the recording was made against.
-    pub prose_digest: [u8; 32],
+    prose_digest: [u8; 32],
+    /// SHA-256 digest of the trusted ML-DSA-65 verifying key that certified
+    /// `(level, prose_digest)`.
+    verifier_key_hash: [u8; 32],
+}
+
+impl LevelAttestation {
+    /// Canonical signing digest committed to by a chain-side verifier for
+    /// `(level, prose_digest)`.
+    /// Convenience: exposed for chain verifiers and SDK signers.
+    #[must_use]
+    pub fn signing_digest(level: VerificationLevel, prose_digest: [u8; 32]) -> [u8; 32] {
+        let level_byte: u8 = match level {
+            VerificationLevel::Receipt => 0,
+            VerificationLevel::CommitteeAgreement => 1,
+            VerificationLevel::ChallengeWindowClosed => 2,
+            VerificationLevel::FullProof => 3,
+        };
+        let mut h = Sha256::new();
+        h.update(APB_LEVEL_ATTESTATION_TAG);
+        h.update([level_byte]);
+        h.update(prose_digest);
+        h.finalize().into()
+    }
+
+    /// Verify a post-quantum ML-DSA-65 signature from `trusted_verifier_key`
+    /// over `(level, prose_digest)` before minting a [`LevelAttestation`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ApbError::InvalidAttestationSignature`] if the key is malformed
+    /// or ML-DSA-65 verification rejects the signature.
+    /// Convenience: exposed for chain verifiers and proof-bundle consumers.
+    pub fn verified(
+        level: VerificationLevel,
+        prose_digest: [u8; 32],
+        trusted_verifier_key: &[u8],
+        signature: &[u8],
+    ) -> Result<Self, ApbError> {
+        let digest = Self::signing_digest(level, prose_digest);
+        PqKeyPair::verify(
+            trusted_verifier_key,
+            crate::crypto::ctx::APB_LEVEL_V1,
+            &digest,
+            signature,
+        )
+        .map_err(|_| ApbError::InvalidAttestationSignature)?;
+        let verifier_key_hash: [u8; 32] = Sha256::digest(trusted_verifier_key).into();
+        Ok(Self {
+            level,
+            prose_digest,
+            verifier_key_hash,
+        })
+    }
+
+    /// Verified level carried by this attestation.
+    /// Convenience: exposed for proof-bundle consumers.
+    #[must_use]
+    pub const fn level(&self) -> VerificationLevel {
+        self.level
+    }
+
+    /// Prose digest bound by this attestation.
+    /// Convenience: exposed for proof-bundle consumers.
+    #[must_use]
+    pub const fn prose_digest(&self) -> [u8; 32] {
+        self.prose_digest
+    }
+
+    /// SHA-256 digest of the trusted verifier key that signed this attestation.
+    /// Convenience: exposed for proof-bundle consumers.
+    #[must_use]
+    pub const fn verifier_key_hash(&self) -> &[u8; 32] {
+        &self.verifier_key_hash
+    }
 }
 
 /// Answer Proof Bundle (`APB`) pairing immutable response prose with
@@ -700,30 +785,51 @@ mod tests {
             VerificationLevel::Receipt
         );
 
-        // A chain-side attestation for this exact prose arrives -> the level
-        // rises to VL-2 -> VL-3, prose text and prose_digest stay identical.
-        let attest = |level: VerificationLevel| LevelAttestation {
-            level,
-            prose_digest: digest_before,
+        // A chain-side post-quantum attestation signed by a trusted verifier for
+        // this exact prose arrives -> the level rises to VL-2 -> VL-3, prose
+        // text and prose_digest stay identical.
+        let verifier_kp = PqKeyPair::generate();
+        let verifier_pk = verifier_kp.public_key_bytes().to_vec();
+        let attest = |level: VerificationLevel, digest: [u8; 32]| {
+            let msg = LevelAttestation::signing_digest(level, digest);
+            let sig = verifier_kp
+                .sign(crate::crypto::ctx::APB_LEVEL_V1, &msg)
+                .expect("pq sign");
+            LevelAttestation::verified(level, digest, &verifier_pk, &sig).unwrap()
         };
+
+        // A forged signature cannot mint an attestation at all.
+        assert_eq!(
+            LevelAttestation::verified(
+                VerificationLevel::FullProof,
+                digest_before,
+                &verifier_pk,
+                &[0u8; 64],
+            ),
+            Err(ApbError::InvalidAttestationSignature)
+        );
+
         bundle
-            .upgrade_level(&attest(VerificationLevel::CommitteeAgreement))
+            .upgrade_level(&attest(
+                VerificationLevel::CommitteeAgreement,
+                digest_before,
+            ))
             .unwrap();
         bundle
-            .upgrade_level(&attest(VerificationLevel::ChallengeWindowClosed))
+            .upgrade_level(&attest(
+                VerificationLevel::ChallengeWindowClosed,
+                digest_before,
+            ))
             .unwrap();
         bundle
-            .upgrade_level(&attest(VerificationLevel::FullProof))
+            .upgrade_level(&attest(VerificationLevel::FullProof, digest_before))
             .unwrap();
         assert_eq!(bundle.prose_body(), prose_before);
         assert_eq!(bundle.prose_digest, digest_before);
 
         // An attestation earned for other prose cannot raise this bundle.
         assert_eq!(
-            bundle.upgrade_level(&LevelAttestation {
-                level: VerificationLevel::FullProof,
-                prose_digest: [0u8; 32],
-            }),
+            bundle.upgrade_level(&attest(VerificationLevel::FullProof, [0u8; 32])),
             Err(ApbError::LevelUnbound)
         );
 

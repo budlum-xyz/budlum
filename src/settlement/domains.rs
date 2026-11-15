@@ -1671,15 +1671,39 @@ pub fn execute_settlement_tx(
     }
 }
 
+fn domain_has_bound_authority(domain: &ConsensusDomain) -> bool {
+    match domain.kind {
+        ConsensusKind::PoW => domain.pow_parameters.is_some(),
+        ConsensusKind::Zk => !domain.zk_program_allowlist.is_empty(),
+        ConsensusKind::PoA
+        | ConsensusKind::PoS
+        | ConsensusKind::Bft
+        | ConsensusKind::StorageAttestation(_)
+        | ConsensusKind::AiInference
+        | ConsensusKind::Custom(_) => domain.validator_set_hash != [0u8; 32],
+    }
+}
+
 fn execute_object_layer_tx(
     state: &mut AccountState,
     ctx: &SettlementTxContext,
     tx: &crate::object_layer::ObjectLayerTx,
 ) -> Result<(), SettlementTxError> {
-    struct IntakeFinality<'a>(&'a crate::domain::DomainCommitmentRegistry);
+    struct IntakeFinality<'a> {
+        domains: &'a crate::domain::ConsensusDomainRegistry,
+        commitments: &'a crate::domain::DomainCommitmentRegistry,
+    }
     impl crate::object_layer::registry::HomeFinality for IntakeFinality<'_> {
         fn event_is_proven(&self, proof: &crate::object_layer::registry::HomeEventProof) -> bool {
             if proof.inclusion.is_empty() || proof.event_id.is_empty() {
+                return false;
+            }
+            // Refuse events from missing, inactive/frozen, or authority-unbound
+            // domains so an unanchored domain cannot forge arrivals or calls.
+            let Some(domain) = self.domains.get(proof.domain) else {
+                return false;
+            };
+            if !domain.is_active() || !domain_has_bound_authority(domain) {
                 return false;
             }
             let Ok((sequence, merkle_proof)) = bincode::deserialize::<(
@@ -1688,10 +1712,16 @@ fn execute_object_layer_tx(
             )>(&proof.inclusion) else {
                 return false;
             };
-            let Some(commitment) = self.0.get(proof.domain, proof.home_height, sequence) else {
+            let Some(commitment) = self
+                .commitments
+                .get(proof.domain, proof.home_height, sequence)
+            else {
                 return false;
             };
-            if commitment.domain_block_hash != proof.home_block_hash
+            if commitment.consensus_kind != domain.kind
+                || (domain.validator_set_hash != [0u8; 32]
+                    && commitment.validator_set_hash != domain.validator_set_hash)
+                || commitment.domain_block_hash != proof.home_block_hash
                 || commitment.event_root == [0u8; 32]
                 || !CommitmentAttestation::for_kind(&commitment.consensus_kind).event_root
             {
@@ -1726,34 +1756,45 @@ fn execute_object_layer_tx(
                 "object_layer_charter_requires_domain_operator".into(),
             ));
         }
+        if !domain_has_bound_authority(dom) {
+            return Err(SettlementTxError::Refused(
+                "object_layer_charter_domain_authority_unbound".into(),
+            ));
+        }
     }
     let domain_registry = state.settlement.domains.clone();
     let commitment_registry = state.settlement.commitments.clone();
-    let finality = IntakeFinality(&commitment_registry);
+    let finality = IntakeFinality {
+        domains: &domain_registry,
+        commitments: &commitment_registry,
+    };
     let domain_active = |id: DomainId| {
         domain_registry
             .get(id)
-            .is_some_and(|d| d.status == DomainStatus::Active)
+            .is_some_and(|d| d.status == DomainStatus::Active && domain_has_bound_authority(d))
     };
     let home_state_root = |id: DomainId| -> Option<Hash32> {
-        let from_commitment = commitment_registry
+        let domain = domain_registry.get(id)?;
+        if !domain.is_active() || !domain_has_bound_authority(domain) {
+            return None;
+        }
+        // Only trust state roots attested by an accepted commitment whose
+        // consensus proof actually binds `state_root` and the domain's bound
+        // authority set, never falling back to `genesis_state_root` or
+        // `last_committed_hash` (a block hash, not a state root).
+        commitment_registry
             .commitments_for_global_block()
             .into_iter()
-            .filter(|c| c.domain_id == id && c.state_root != [0u8; 32])
+            .filter(|c| {
+                c.domain_id == id
+                    && c.state_root != [0u8; 32]
+                    && c.consensus_kind == domain.kind
+                    && CommitmentAttestation::for_kind(&c.consensus_kind).state_root
+                    && (domain.validator_set_hash == [0u8; 32]
+                        || c.validator_set_hash == domain.validator_set_hash)
+            })
             .max_by_key(|c| (c.domain_height, c.sequence))
-            .map(|c| c.state_root);
-        from_commitment.or_else(|| {
-            domain_registry
-                .get(id)
-                .map(|d| {
-                    if d.last_committed_hash != [0u8; 32] {
-                        d.last_committed_hash
-                    } else {
-                        d.genesis_state_root
-                    }
-                })
-                .filter(|h| *h != [0u8; 32])
-        })
+            .map(|c| c.state_root)
     };
     let mut prechecked_stipend_ok = false;
     if let crate::object_layer::ObjectLayerTx::HomeStipendCall {
@@ -4992,5 +5033,54 @@ mod tests {
             .withdraw_role_bond(&prover, role)
             .expect("prover bond withdraws once no assigned task remains");
         assert_eq!(returned, bond);
+    }
+
+    #[test]
+    fn object_layer_refuses_charter_on_domain_with_unbound_authority() {
+        use crate::domain::plugin::default_domain;
+        use crate::object_layer::charter::{CharterStatus, CodeProof, DataPolicy, DomainCharter};
+        use crate::object_layer::family::HomeVmFamily;
+        use crate::object_layer::tx::ObjectLayerTx;
+
+        let mut state = AccountState::new();
+        let mut dom = default_domain(77, ConsensusKind::PoA, 45262, "poa-multisig-v1", 1);
+        dom.validator_set_hash = [0u8; 32];
+        let operator = dom.operator.expect("operator set");
+        state.settlement.domains.register(dom).unwrap();
+
+        let ctx = SettlementTxContext {
+            sender: operator,
+            chain_id: crate::core::chain_config::Network::Testnet
+                .chain_id()
+                .value(),
+            fee: 0,
+            bls: || Box::new(crate::cross_domain::external::intake::PairingBls),
+        };
+        let tx = SettlementTx::ObjectLayer(Box::new(ObjectLayerTx::Charter {
+            domain: 77,
+            charter: DomainCharter {
+                vm_family: HomeVmFamily::Evm,
+                chain_reference: "1".into(),
+                address_prefix: String::new(),
+                endpoint: vec![0x11; 20],
+                endpoint_code_hash: [0x33; 32],
+                verifier: vec![0x22; 20],
+                verifier_code_hash: [0x44; 32],
+                upgrade_notice: 100,
+                silence_window: 100,
+                data_policy: DataPolicy::Public,
+                status: CharterStatus::Active,
+            },
+            proof: CodeProof {
+                endpoint_code_hash: [0x33; 32],
+                verifier_code_hash: [0x44; 32],
+                home_proof: None,
+            },
+        }));
+        let err = execute_settlement_tx(&mut state, &ctx, &tx).unwrap_err();
+        assert!(
+            format!("{err:?}").contains("authority_unbound"),
+            "expected authority_unbound refusal, got {err:?}"
+        );
     }
 }
