@@ -3061,19 +3061,6 @@ fn parse_merkle_branch_json(
     for s in siblings_arr {
         siblings.push(decode_hex32_field(s, "branch.siblings[]")?);
     }
-    let dirs_arr = val
-        .get("directions")
-        .and_then(serde_json::Value::as_array)
-        .ok_or("missing branch.directions")?;
-    let mut directions = Vec::with_capacity(dirs_arr.len());
-    for d in dirs_arr {
-        directions.push(d.as_bool().ok_or("non-bool entry in branch.directions")?);
-    }
-    // Position fields are optional on the wire: a missing one leaves the
-    // branch usable for inclusion and unusable for non-inclusion, which is the
-    // safe reading. A missing field is not an error here.
-    let leaf_index = val.get("leaf_index").and_then(serde_json::Value::as_u64);
-    let tree_size = val.get("tree_size").and_then(serde_json::Value::as_u64);
     // The extras pre-image is what binds `address`, the records, the
     // subdomains and the B.U.D. 3.0 reference to `extras_digest`. Dropping it
     // here would make the client's own verification refuse a branch the
@@ -3093,9 +3080,6 @@ fn parse_merkle_branch_json(
         extras_digest,
         leaf,
         siblings,
-        directions,
-        leaf_index,
-        tree_size,
         extras,
     })
 }
@@ -3210,8 +3194,10 @@ fn parse_and_verify_bns_proof_json(
         names_count,
         epoch,
         entry: parse_opt_branch("entry")?,
-        predecessor: parse_opt_branch("predecessor")?,
-        successor: parse_opt_branch("successor")?,
+        absence: match proof_json.get("absence") {
+            Some(v) if !v.is_null() => Some(budlum_core::bns::types::absence_from_json(v)?),
+            _ => None,
+        },
     };
     let verified_leaf =
         budlum_core::bns::BnsRegistry::verify_state_proof(&proof, &bns_root, epoch)?;
@@ -4138,9 +4124,6 @@ mod tests {
                 extras_digest: [0; 32],
                 leaf: [0; 32],
                 siblings: Vec::new(),
-                directions: Vec::new(),
-                leaf_index: None,
-                tree_size: None,
                 extras: extras.then(|| BnsBranchExtras {
                     address,
                     consensus_domain_id: None,
@@ -4167,8 +4150,7 @@ mod tests {
                     records: std::collections::BTreeMap::new(),
                 }),
             }),
-            predecessor: None,
-            successor: None,
+            absence: None,
         };
         let read = |proof: &BnsStateProof, name: &str| {
             recipient_from_verified_proof(proof, owner, name, "ayaz.bud")
@@ -4829,10 +4811,8 @@ mod rpc_auth_tests {
                 "extras_digest": format!("0x{}", hex::encode(t.extras_digest)),
                 "leaf": format!("0x{}", hex::encode(t.leaf)),
                 "siblings": t.siblings.iter().map(|s| format!("0x{}", hex::encode(s))).collect::<Vec<_>>(),
-                "directions": t.directions,
             },
-            "predecessor": serde_json::Value::Null,
-            "successor": serde_json::Value::Null,
+            "absence": serde_json::Value::Null,
         });
         let (_, verified_owner) = parse_and_verify_bns_proof_json(&proof_json, "ayaz.bud").unwrap();
         assert_eq!(verified_owner, Some(alice));

@@ -201,10 +201,9 @@ impl NameProver for RpcProver {
 
 /// Read a `bud_bnsGetProof` answer into the proof type the module checks.
 ///
-/// The three fields the proof fixes added are read here as they are written by
-/// the node: `leaf_index`, `tree_size` and `extras`. A missing one leaves the
-/// branch usable for inclusion only, which is what the module's own verifier
-/// already refuses for an absence proof.
+/// `extras` and `absence` are read as the node writes them. A branch without
+/// its extras proves only the fields outside the digest, and a non-inclusion
+/// answer without an absence path is refused by the module's verifier.
 fn decode_proof_result(result: &serde_json::Value) -> Result<NameProof, String> {
     use budlum_core::bns::types::{BnsMerkleBranch, BnsStateProof};
     let branch = |value: &serde_json::Value| -> Result<BnsMerkleBranch, String> {
@@ -237,15 +236,6 @@ fn decode_proof_result(result: &serde_json::Value) -> Result<NameProof, String> 
                 .iter()
                 .map(|v| hex32(v.as_str().ok_or("branch.siblings[]")?))
                 .collect::<Result<Vec<_>, _>>()?,
-            directions: value
-                .get("directions")
-                .and_then(serde_json::Value::as_array)
-                .ok_or("branch.directions")?
-                .iter()
-                .map(|v| v.as_bool().ok_or("branch.directions[]"))
-                .collect::<Result<Vec<_>, _>>()?,
-            leaf_index: value.get("leaf_index").and_then(serde_json::Value::as_u64),
-            tree_size: value.get("tree_size").and_then(serde_json::Value::as_u64),
             extras: match value.get("extras") {
                 Some(v) if !v.is_null() => Some(decode_extras(v)?),
                 _ => None,
@@ -276,12 +266,8 @@ fn decode_proof_result(result: &serde_json::Value) -> Result<NameProof, String> 
             Some(v) if !v.is_null() => Some(branch(v)?),
             _ => None,
         },
-        predecessor: match result.get("predecessor") {
-            Some(v) if !v.is_null() => Some(branch(v)?),
-            _ => None,
-        },
-        successor: match result.get("successor") {
-            Some(v) if !v.is_null() => Some(branch(v)?),
+        absence: match result.get("absence") {
+            Some(v) if !v.is_null() => Some(budlum_core::bns::types::absence_from_json(v)?),
             _ => None,
         },
     };
@@ -828,15 +814,14 @@ mod tests {
             "names_count": 2,
             "epoch": 100,
             "entry": null,
-            "predecessor": null,
-            "successor": null,
+            "absence": {"siblings": [], "occupant": null},
         });
         let error = decode_proof_result(&answer).unwrap_err();
         assert!(error.contains("height"), "got {error}");
     }
 
     #[test]
-    fn the_proof_decoder_reads_the_position_and_extras_fields() {
+    fn the_proof_decoder_reads_the_path_and_extras_fields() {
         let answer = serde_json::json!({
             "name": "ayaz.bud",
             "included": true,
@@ -860,10 +845,7 @@ mod tests {
                 "storage_root": null,
                 "extras_digest": format!("0x{}", "55".repeat(32)),
                 "leaf": format!("0x{}", "66".repeat(32)),
-                "siblings": [],
-                "directions": [],
-                "leaf_index": 0,
-                "tree_size": 1,
+                "siblings": [format!("0x{}", "ab".repeat(32))],
                 "extras": {
                     "address": format!("0x{}", "44".repeat(32)),
                     "consensus_domain_id": null,
@@ -877,14 +859,12 @@ mod tests {
                     "records": {"addr.eth": "0xabc"}
                 }
             },
-            "predecessor": null,
-            "successor": null,
+            "absence": null,
         });
         let proof = decode_proof_result(&answer).unwrap();
         assert_eq!(proof.height, 42);
         let entry = proof.proof.entry.expect("entry");
-        assert_eq!(entry.leaf_index, Some(0));
-        assert_eq!(entry.tree_size, Some(1));
+        assert_eq!(entry.siblings, vec![[0xab; 32]]);
         let extras = entry.extras.expect("extras");
         assert_eq!(extras.subdomains.len(), 1);
         assert_eq!(
