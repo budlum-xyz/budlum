@@ -21,7 +21,7 @@ fn hash(label: &[u8]) -> Hash32 {
 }
 
 fn asset(id: u8) -> crate::cross_domain::AssetId {
-    crate::cross_domain::AssetId(hash(&[id]))
+    crate::cross_domain::AssetId::for_domain(1, &[id])
 }
 
 fn owner() -> Address {

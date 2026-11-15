@@ -3184,6 +3184,7 @@ fn encode_storage_tx(tx: &crate::domain::storage_tx::StorageTx, out: &mut Vec<u8
             put_u32(out, open.domain_id);
             put_fixed(out, open.manifest_id.as_bytes());
             put_fixed(out, open.shard_id.as_bytes());
+            put_u32(out, open.shard_size);
             put_fixed(out, open.operator.as_bytes());
             put_u8(out, open.replica_index);
             put_u64(out, open.start_epoch);
