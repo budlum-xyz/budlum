@@ -298,6 +298,8 @@ struct Node {
     my_window: u64,
     started: Instant,
     last_presence: Instant,
+    /// When the last tick began. A long gap means this node stood still.
+    last_tick: Instant,
     last_sync: Instant,
     last_dial: Instant,
     sync_cursor: usize,
@@ -310,6 +312,25 @@ struct Node {
     next_tag: u64,
     leaving: Option<Leaving>,
     stopped: bool,
+}
+
+/// True when a gap of `gap` between two ticks means the node itself stood
+/// still: its process was paused, or its device slept. The bound is half the
+/// suspension window, the same grace the host gives a validator before it
+/// signs a report about it.
+fn stood_still(gap: Duration, limits: &GardenLimits) -> bool {
+    gap >= millis(limits.suspend_after_ms / 2)
+}
+
+/// Start the silence clock of every validator in `others` again at `now`.
+fn forgive_silence(
+    last_seen: &mut BTreeMap<GardenKey, Instant>,
+    others: impl Iterator<Item = GardenKey>,
+    now: Instant,
+) {
+    for key in others {
+        last_seen.insert(key, now);
+    }
 }
 
 /// The display name of `key` in the identity record of `state`.
@@ -503,6 +524,7 @@ pub async fn spawn(
         my_window: now_ms(),
         started: now,
         last_presence: now,
+        last_tick: now,
         last_sync: now,
         last_dial: now,
         sync_cursor: 0,
@@ -1694,6 +1716,26 @@ impl Node {
 
     async fn on_tick(&mut self) {
         let limits = self.limits().clone();
+        // A node that stood still heard nobody for that long, and that says
+        // nothing about the others. Without this a host that wakes up holds
+        // every validator as silent, and the first block it leads reports
+        // them all and leaves the host alone in the electorate. The host's
+        // own clock is not touched: a validator that wakes up waits for the
+        // next presence signal of the host before it counts the host in.
+        let gap = self.last_tick.elapsed();
+        self.last_tick = Instant::now();
+        if stood_still(gap, &limits) {
+            let host = self.ledger.state.host();
+            let me = self.me;
+            let others = self
+                .ledger
+                .state
+                .validators
+                .keys()
+                .copied()
+                .filter(|key| *key != host && *key != me);
+            forgive_silence(&mut self.last_seen, others, self.last_tick);
+        }
         self.drop_strangers().await;
         if self.last_presence.elapsed() >= millis(limits.presence_interval_ms) {
             self.last_presence = Instant::now();
@@ -2261,6 +2303,34 @@ mod tests {
             GardenResponse::Refused(reason) => reason,
             other => panic!("expected a refusal, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn garden_node_that_stood_still_does_not_hold_the_others_as_silent() {
+        let limits = GardenLimits::testnet_default();
+        let window = millis(limits.suspend_after_ms);
+        assert!(!stood_still(millis(limits.presence_interval_ms), &limits));
+        assert!(!stood_still(window / 2 - Duration::from_millis(1), &limits));
+        assert!(stood_still(window / 2, &limits));
+        assert!(stood_still(window * 4, &limits));
+
+        let asleep = Instant::now();
+        let woke = asleep + window * 4;
+        let (heard, never_heard, host) = ([1u8; 32], [2u8; 32], [9u8; 32]);
+        let mut last_seen = BTreeMap::from([(heard, asleep), (host, asleep)]);
+        let silent = |last_seen: &BTreeMap<GardenKey, Instant>, key: &GardenKey| {
+            last_seen
+                .get(key)
+                .is_none_or(|seen| woke.duration_since(*seen) >= window)
+        };
+        assert!(silent(&last_seen, &heard));
+        assert!(silent(&last_seen, &never_heard));
+
+        forgive_silence(&mut last_seen, [heard, never_heard].into_iter(), woke);
+        assert!(!silent(&last_seen, &heard));
+        assert!(!silent(&last_seen, &never_heard));
+        // The host is not in the list, so its clock still shows the silence.
+        assert!(silent(&last_seen, &host));
     }
 
     #[tokio::test]
