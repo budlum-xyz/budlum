@@ -12,12 +12,21 @@ The open-PR snapshot was collected on 2026-11-15. It is a point-in-time inventor
 | [#164](https://github.com/budlum-xyz/budlum/pull/164) | `garden` -> `main` | `d4a76a7521de3e06ac2c582670bacca3e206b3db` | 113 success, 1 failure, 1 neutral, 1 skipped. OSV Scanner is the failure. | 19 | blocked |
 | [#126](https://github.com/budlum-xyz/budlum/pull/126) | `testnet` -> `testnet-quantum` | `ea1440975ad4b82aef2a92b95d43f275727d9e33` | 13 success, 33 skipped, 1 neutral, 86 queued or in progress. | 61 | blocked |
 
-`main` protection requires the Strix Security Review check and resolved conversations. No Strix approval for the current work is established. Existing successful checks are not evidence for an uncommitted fix. The audit branch has no CI run for these notes yet.
+`main` protection requires the Strix Security Review check and resolved conversations. No Strix approval for the current work is established. Existing successful checks are not evidence for an uncommitted fix.
+
+### Audit pull request
+
+This branch is `audit-testnet-2026-11`, head `8414742e99df21ca619683c5e8878166ab8f48d1` and base `95c07fd7`. Its two commits are the plan (`f8dec580`) and this note set (`8414742e`). It was opened as draft [PR #165](https://github.com/budlum-xyz/budlum/pull/165) (`audit-testnet-2026-11` -> `main`). At the 14:0x refresh its head reported 95 check runs, all `queued` (94) or `in_progress` (1), with no failure and no completed Strix run; a queued or in-progress check is neither a pass nor a failure.
+
+**PR #165 was then closed and archived by `lubosruler` at 2026-11-15T14:11:29Z and 14:11:32Z with no comment or review.** The only comment on it is CodeRabbit's automated "draft PR not reviewed" notice. The branch and both commits still exist and remain pushed; the notes continue to be updated there. Nobody in this audit pass has reopened it, force-pushed it, or bypassed a protection rule, and reopening a pull request its owner closed is not a decision this pass makes on its own. Any later review vehicle for these notes starts from the live state, not from this row.
+
+These notes have not passed CI, so the directive's "commit SHA plus CI run number" completion rule is unmet for every item below.
 
 ## Findings and work in progress
 
 - [B-0001: Garden writes the Budlum domain view outside blocks](findings/garden-settlement.md) is open. Its dependency and no-preexisting-account constraint need a compatible design. No two-node regression or fix commit exists.
 - PR #110 has five active master-summary findings: Graft replay capacity, unverified manifest shard sizes, certificate sync-hint authentication, client-selected signing chain IDs, and the bridge asset namespace. The six unresolved inline threads cover the latter three inline subjects. The first and third master-summary findings also sit outside the PR diff and must not be missed merely because no thread is open.
+- [B-0002: Manifest registration never binds declared shard sizes or parity roots to bytes](findings/storage-registration-proof.md) is open. Admission (`register_manifest`) runs `validate_untrusted` only; the single function that compares a manifest with bytes, `verify_object_encoding`, is reachable only from a read-only RPC method. The finding records the constraints any fix must meet (transaction ceiling versus shard size, confidentiality, work budget, activation and replay) and the counterexample tests written for the baseline run.
 - The storage manifest registration path validates declared structure but does not require a proof linking every declared shard size and parity root to actual bytes. A signer helper that chooses to inspect bytes cannot alone prove what arbitrary signers inspected. A complete protocol must address confidentiality, proof work, transaction size and historical replay; this is not fixed by geometry alone.
 - The testnet directive index is a work-in-progress in [testnet/index.md](testnet/index.md). The attached directive is not tracked in the captured repository trees. It is not committed here.
 
