@@ -4,17 +4,21 @@
 //! functions here read no clock and no local file: a block is valid or not
 //! from the previous state and the block alone.
 
+use super::net::validator_dial_address;
 use super::settlement::authority_set_hash;
 use super::types::{
-    is_safe_label, join_message, status_code, GardenBlock, GardenCommit, GardenContentKind,
-    GardenGenesis, GardenHeader, GardenKey, GardenTx, GardenTxKind, GardenValidator,
-    GardenValidatorStatus, GardenVote, SignedGardenTx, MAX_ADDRESS_BYTES, MAX_CAPTION_BYTES,
-    MAX_MIME_BYTES, MAX_NAME_BYTES, MIN_PUBLICATION_CHARGE,
+    is_safe_label, join_message, status_code, verify_garden_execution_chain, GardenBlock,
+    GardenCommit, GardenContentKind, GardenGenesis, GardenHeader, GardenKey, GardenTx,
+    GardenTxKind, GardenValidator, GardenValidatorStatus, GardenVote, SignedGardenTx,
+    MAX_ADDRESS_BYTES, MAX_CAPTION_BYTES, MAX_MIME_BYTES, MAX_NAME_BYTES, MIN_PUBLICATION_CHARGE,
 };
 use crate::core::hash::hash_fields_bytes;
 use crate::crypto::primitives::verify_signature;
 use crate::domain::types::{DomainStatus, Hash32};
 use std::collections::{BTreeMap, BTreeSet};
+
+/// Byte length of an ed25519 signature.
+const SIGNATURE_BYTES: usize = 64;
 
 /// Domain tag for the Garden state root.
 const TAG_GARDEN_STATE: &[u8] = b"BDLM_GARDEN_STATE_V1";
@@ -333,6 +337,76 @@ impl GardenState {
         (txs, dead)
     }
 
+    /// Cheap field and shape checks on one transaction before any hashing or
+    /// signature check runs. Both pending-pool admission and block execution
+    /// call this, so a transaction that can never enter a block is refused
+    /// at the door.
+    pub fn check_tx_shape(&self, signed: &SignedGardenTx) -> Result<(), String> {
+        verify_garden_execution_chain(signed.tx.chain_id)?;
+        if signed.tx.chain_id != self.chain_id() {
+            return Err(format!(
+                "garden transaction is for chain {}, this Garden is chain {}",
+                signed.tx.chain_id,
+                self.chain_id()
+            ));
+        }
+        if signed.signature.len() != SIGNATURE_BYTES {
+            return Err("garden transaction signature is invalid: wrong length".into());
+        }
+        let sender = &signed.tx.sender;
+        match &signed.tx.kind {
+            GardenTxKind::Join {
+                name,
+                address,
+                invite_signature,
+            } => {
+                if !is_safe_label(name, MAX_NAME_BYTES) {
+                    return Err("validator name must be 1..=32 bytes of plain text".into());
+                }
+                if address.len() > MAX_ADDRESS_BYTES {
+                    return Err("validator address is too long".into());
+                }
+                if !address.is_empty() {
+                    validator_dial_address(address, sender)
+                        .map_err(|e| format!("validator address is refused: {e}"))?;
+                }
+                if invite_signature.len() != SIGNATURE_BYTES {
+                    return Err("join request is not signed by the invite".into());
+                }
+            }
+            GardenTxKind::Leave | GardenTxKind::Suspend { .. } => {}
+            GardenTxKind::Resume { address } => {
+                if address.len() > MAX_ADDRESS_BYTES {
+                    return Err("validator address is too long".into());
+                }
+                if !address.is_empty() {
+                    validator_dial_address(address, sender)
+                        .map_err(|e| format!("validator address is refused: {e}"))?;
+                }
+            }
+            GardenTxKind::Publish {
+                size,
+                mime,
+                caption,
+                ..
+            } => {
+                let max_object = self.genesis.limits.max_object_bytes;
+                if *size == 0 || *size > max_object {
+                    return Err(format!(
+                        "object size {size} is outside 1..={max_object} bytes"
+                    ));
+                }
+                if mime.len() > MAX_MIME_BYTES || mime.chars().any(char::is_control) {
+                    return Err("object MIME type is invalid".into());
+                }
+                if caption.len() > MAX_CAPTION_BYTES || caption.chars().any(char::is_control) {
+                    return Err("object caption is invalid".into());
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Check one transaction against this state without changing anything.
     pub fn check_tx(&self, signed: &SignedGardenTx) -> Result<(), String> {
         if self.status == DomainStatus::Retired {
@@ -355,6 +429,7 @@ impl GardenState {
         height: u64,
         leader: Option<&GardenKey>,
     ) -> Result<(), String> {
+        self.check_tx_shape(signed)?;
         signed.verify(self.chain_id())?;
         let sender = signed.tx.sender;
         let expected = self.next_nonce(&sender);
@@ -378,12 +453,6 @@ impl GardenState {
                 }
                 if sender_status.is_some() {
                     return Err("this key already joined; use resume to return".into());
-                }
-                if !is_safe_label(name, MAX_NAME_BYTES) {
-                    return Err("validator name must be 1..=32 bytes of plain text".into());
-                }
-                if address.len() > MAX_ADDRESS_BYTES {
-                    return Err("validator address is too long".into());
                 }
                 if self.validators.len() >= limits.max_validators as usize {
                     return Err(format!(
@@ -440,9 +509,6 @@ impl GardenState {
                 if !away && !moved {
                     return Err("only a validator that is away or has moved can resume".into());
                 }
-                if address.len() > MAX_ADDRESS_BYTES {
-                    return Err("validator address is too long".into());
-                }
                 if self.status == DomainStatus::Frozen && sender != host {
                     return Err("garden is frozen until the host returns".into());
                 }
@@ -491,18 +557,6 @@ impl GardenState {
                 }
                 if sender_status != Some(GardenValidatorStatus::Active) {
                     return Err("only an active validator can publish".into());
-                }
-                if *size == 0 || *size > limits.max_object_bytes {
-                    return Err(format!(
-                        "object size {size} is outside 1..={} bytes",
-                        limits.max_object_bytes
-                    ));
-                }
-                if mime.len() > MAX_MIME_BYTES || mime.chars().any(char::is_control) {
-                    return Err("object MIME type is invalid".into());
-                }
-                if caption.len() > MAX_CAPTION_BYTES || caption.chars().any(char::is_control) {
-                    return Err("object caption is invalid".into());
                 }
                 if self.objects.contains_key(&(*content_id, sender)) {
                     return Err("this validator already published this content".into());
@@ -936,16 +990,20 @@ mod tests {
         let refusal = net.ledger.state.check_tx(&same).unwrap_err();
         assert!(refusal.contains("away or has moved"), "{refusal}");
 
+        let new_address = format!(
+            "/ip4/127.0.0.1/tcp/4001/p2p/{}",
+            super::super::net::peer_id_of(&a).unwrap()
+        );
         let moved = net.tx(
             &a,
             GardenTxKind::Resume {
-                address: "/ip4/127.0.0.1/tcp/4001".into(),
+                address: new_address.clone(),
             },
         );
         net.commit(vec![moved]).unwrap();
         let record = &net.ledger.state.validators[&a];
         assert_eq!(record.status, GardenValidatorStatus::Active);
-        assert_eq!(record.address, "/ip4/127.0.0.1/tcp/4001");
+        assert_eq!(record.address, new_address);
         assert_eq!(net.ledger.state.status, DomainStatus::Active);
     }
 
@@ -1341,5 +1399,69 @@ mod tests {
         net.ledger.append(GardenCommit { block, votes }).unwrap();
         assert_eq!(net.ledger.state.status, DomainStatus::Active);
         assert_eq!(net.ledger.state.active().len(), 2);
+    }
+
+    #[test]
+    fn garden_tx_refuses_an_address_that_is_not_a_valid_dial_address() {
+        let mut net = Net::new();
+        let kp = KeyPair::generate().unwrap();
+        let key = kp.public_key_bytes();
+        let other = KeyPair::generate().unwrap().public_key_bytes();
+        let me_id = super::super::net::peer_id_of(&key).unwrap();
+        let other_id = super::super::net::peer_id_of(&other).unwrap();
+        let invite_signature = invite_keypair(&super::super::testkit::TOKEN)
+            .unwrap()
+            .sign(&join_message(net.ledger.state.chain_id(), &key))
+            .to_vec();
+        net.keys.insert(key, kp);
+
+        let bad_addresses = [
+            format!("/ip4/127.0.0.1/tcp/22/p2p/{me_id}"),
+            format!("/ip4/0.0.0.0/tcp/4001/p2p/{me_id}"),
+            format!("/ip4/127.0.0.1/tcp/4001/ip4/10.0.0.1/tcp/4002/p2p/{me_id}"),
+            "/ip4/127.0.0.1/tcp/4001".to_string(),
+            format!("/ip4/127.0.0.1/tcp/4001/p2p/{other_id}"),
+        ];
+        for address in &bad_addresses {
+            let join = net.tx(
+                &key,
+                GardenTxKind::Join {
+                    name: "alice".into(),
+                    address: address.clone(),
+                    invite_signature: invite_signature.clone(),
+                },
+            );
+            assert!(
+                net.ledger.state.check_tx(&join).is_err(),
+                "Join accepted invalid address {address}"
+            );
+            assert!(
+                net.commit(vec![join]).is_err(),
+                "block executed Join with invalid address {address}"
+            );
+        }
+
+        let good_join = net.tx(
+            &key,
+            GardenTxKind::Join {
+                name: "alice".into(),
+                address: format!("/ip4/127.0.0.1/tcp/4001/p2p/{me_id}"),
+                invite_signature,
+            },
+        );
+        net.commit(vec![good_join]).unwrap();
+
+        for address in &bad_addresses {
+            let resume = net.tx(
+                &key,
+                GardenTxKind::Resume {
+                    address: address.clone(),
+                },
+            );
+            assert!(
+                net.ledger.state.check_tx(&resume).is_err(),
+                "Resume accepted invalid address {address}"
+            );
+        }
     }
 }

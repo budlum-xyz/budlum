@@ -25,7 +25,7 @@ const GARDEN_PROTOCOL: &str = "/budlum/garden/1";
 pub const MAX_REQUEST_BYTES: usize = 18 * 1024 * 1024;
 /// Largest response frame. A response carries at most one object or a batch
 /// of commits.
-const MAX_RESPONSE_BYTES: usize = 18 * 1024 * 1024;
+pub const MAX_RESPONSE_BYTES: usize = 18 * 1024 * 1024;
 /// Concurrent streams per connection.
 const MAX_CONCURRENT_STREAMS: usize = 16;
 /// Most connections a Garden swarm keeps.
@@ -386,15 +386,66 @@ async fn start_with(
                             tracing::debug!(error = %e, "garden dial refused");
                         }
                     }
-                    Some(NetCommand::Send { peer, request, tag }) => match bincode::serialize(&request) {
-                        Ok(bytes) => {
-                            let id = swarm.behaviour_mut().rpc.send_request(&peer, bytes);
-                            tags.insert(id, tag);
+                    Some(NetCommand::Send { peer, request, tag }) => match bincode::serialized_size(&request) {
+                        Ok(size) if size <= MAX_REQUEST_BYTES as u64 => match bincode::serialize(&request) {
+                            Ok(bytes) => {
+                                let id = swarm.behaviour_mut().rpc.send_request(&peer, bytes);
+                                tags.insert(id, tag);
+                            }
+                            Err(e) => {
+                                tracing::warn!(error = %e, "garden request cannot be encoded");
+                                backlog.push_back(NetEvent::Response {
+                                    peer,
+                                    tag,
+                                    response: Err(format!("garden request cannot be encoded: {e}")),
+                                });
+                            }
+                        },
+                        Ok(size) => {
+                            tracing::warn!(
+                                bytes = size,
+                                limit = MAX_REQUEST_BYTES,
+                                "garden request exceeds frame limit"
+                            );
+                            backlog.push_back(NetEvent::Response {
+                                peer,
+                                tag,
+                                response: Err(format!(
+                                    "garden request exceeds {MAX_REQUEST_BYTES} bytes"
+                                )),
+                            });
                         }
-                        Err(e) => tracing::warn!(error = %e, "garden request cannot be encoded"),
+                        Err(e) => {
+                            tracing::warn!(error = %e, "garden request cannot be sized");
+                            backlog.push_back(NetEvent::Response {
+                                peer,
+                                tag,
+                                response: Err(format!("garden request cannot be encoded: {e}")),
+                            });
+                        }
                     },
                     Some(NetCommand::Respond { channel, response }) => {
-                        if let Ok(bytes) = bincode::serialize(&response) {
+                        let bytes = match bincode::serialized_size(&response) {
+                            Ok(size) if size <= MAX_RESPONSE_BYTES as u64 => {
+                                bincode::serialize(&response).ok()
+                            }
+                            Ok(size) => {
+                                tracing::warn!(
+                                    bytes = size,
+                                    limit = MAX_RESPONSE_BYTES,
+                                    "garden response exceeds frame limit"
+                                );
+                                bincode::serialize(&GardenResponse::Refused(format!(
+                                    "garden response exceeds {MAX_RESPONSE_BYTES} bytes"
+                                )))
+                                .ok()
+                            }
+                            Err(e) => {
+                                tracing::warn!(error = %e, "garden response cannot be sized");
+                                None
+                            }
+                        };
+                        if let Some(bytes) = bytes {
                             let _ = swarm.behaviour_mut().rpc.send_response(channel, bytes);
                         }
                     }
