@@ -60,7 +60,7 @@ fn test_multi_validator_permissionless_lifecycle_and_slashing() {
         .expect("the absentee is still a validator");
     assert!(
         jailed.jailed && !jailed.active && !jailed.slashed,
-        "absentee must be in a timed jail (BLG-0087, decision B)"
+        "absentee must be in a timed jail"
     );
 
     // V1 and v2 should remain active and unslashed

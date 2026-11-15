@@ -190,7 +190,6 @@ mod p01_consensus_rounds_tests {
         // has genuinely elapsed, so the pricing gate lets it through and any
         // later refusal is about something else.
         let (parent, block) = fixture(now_ms.saturating_sub(60_000));
-        engine.note_block_seen(&parent.hash, parent.timestamp);
         if let Err(error) = engine.validate_block(&block, &[parent], &state) {
             assert!(
                 !error.0.contains("claimed before it elapsed")
@@ -474,35 +473,39 @@ mod p01_poa_round_pricing_tests {
         (state, address)
     }
 
-    /// The round rule prices a PoA claim identically on every node, and only a
-    /// stamp dated ahead of the sighting can lower the anchor.
+    /// The round rule prices a PoA claim identically on every node.
     ///
-    /// The price used to be read from "when this node saw the parent land".
-    /// That is a value only one node has - its boot time for genesis, its
-    /// restart for a tip loaded from disk - so the same claim cleared the gate
-    /// on the node that committed the parent and was refused on the node that
-    /// joined a second later. A refused claim is a block refused for good: the
-    /// devnet mesh answered it by keeping two chains at height 1. The parent's
-    /// stamp is the value every node holding the block reads the same way.
+    /// The price used to be read off "when this node saw the parent land".
+    /// That is a value only one node has - its boot time for genesis, its load
+    /// instant for a tip restored from disk - so the same claim cleared the
+    /// gate on the node that committed the parent and was refused on the node
+    /// that joined a second later. A refused claim is a block refused for
+    /// good: the devnet mesh answered it by keeping two chains at height 1.
+    /// The parent's stamp is the value every node holding the block reads the
+    /// same way, so it is the only anchor the price may use.
     #[test]
     fn poa_prices_a_round_by_the_shared_stamp_whatever_this_node_saw() {
         let (state, address) = single_authority_state();
         let now_ms = crate::consensus::now_millis();
         let round = 6u64;
 
-        let mut parent = Block::genesis();
+        let fixture = |parent_ts: u128| {
+            let mut parent = Block::genesis();
+            parent.timestamp = parent_ts;
+            parent.hash = parent.calculate_hash();
+            let mut block = Block::new(1, parent.hash.clone(), vec![]);
+            block.timestamp = parent
+                .timestamp
+                .saturating_add(MIN_BLOCK_INTERVAL_MS)
+                .saturating_add(ROUND_TIMEOUT_MS.saturating_mul(u128::from(round)));
+            block.producer = Some(address);
+            block.nonce = round;
+            (parent, block)
+        };
+
         // Within ROUND_LADDER_SPAN_MS (49 s) and past round 6 (19 s): mesh
         // sightings seconds apart agree on the shared parent stamp.
-        parent.timestamp = now_ms.saturating_sub(30_000);
-        parent.hash = parent.calculate_hash();
-        let mut block = Block::new(1, parent.hash.clone(), vec![]);
-        block.timestamp = parent
-            .timestamp
-            .saturating_add(MIN_BLOCK_INTERVAL_MS)
-            .saturating_add(ROUND_TIMEOUT_MS.saturating_mul(u128::from(round)));
-        block.producer = Some(address);
-        block.nonce = round;
-
+        let (parent, block) = fixture(now_ms.saturating_sub(30_000));
         for seen in [Some(parent.timestamp), Some(now_ms), None] {
             let engine = PoAEngine::new(PoAConfig::default(), None);
             if let Some(at) = seen {
@@ -518,23 +521,13 @@ mod p01_poa_round_pricing_tests {
             }
         }
 
-        // A parent dated an hour ahead of this node is priced from the moment
-        // it was seen: the stamp can lower the anchor, never raise it, so the
-        // same round claim buys nothing.
-        let mut future_parent = Block::genesis();
-        future_parent.timestamp = now_ms.saturating_add(3_600_000);
-        future_parent.hash = future_parent.calculate_hash();
-        let mut child = Block::new(1, future_parent.hash.clone(), vec![]);
-        child.timestamp = future_parent
-            .timestamp
-            .saturating_add(MIN_BLOCK_INTERVAL_MS)
-            .saturating_add(ROUND_TIMEOUT_MS.saturating_mul(u128::from(round)));
-        child.producer = Some(address);
-        child.nonce = round;
+        // A parent stamped an hour ahead prices at round 0 here and at every
+        // other node: the stamp anchors the price on every node alike, so the
+        // claim buys nothing until the moment it names has passed.
         let engine = PoAEngine::new(PoAConfig::default(), None);
-        engine.note_block_seen(&future_parent.hash, now_ms);
+        let (parent, block) = fixture(now_ms.saturating_add(3_600_000));
         let error = engine
-            .validate_block(&child, std::slice::from_ref(&future_parent), &state)
+            .validate_block(&block, std::slice::from_ref(&parent), &state)
             .expect_err("a future-dated parent must not buy a PoA round");
         assert!(
             error.0.contains("claimed before it elapsed"),
@@ -542,8 +535,16 @@ mod p01_poa_round_pricing_tests {
         );
     }
 
+    /// A schedule-lagged parent is priced from its stamp on every node.
+    ///
+    /// RT-001 forked an eight-validator network here: the price of a retry round
+    /// was read from the adopting node's own record of when the parent landed,
+    /// so the node that had just committed it refused the peer's block for good
+    /// and the two branches could never merge. Same parent, same block, one
+    /// verdict - and round 16 has demonstrably elapsed for a parent ten minutes
+    /// behind the clock, so the verdict is "not priced out".
     #[test]
-    fn poa_refuses_round_16_on_newly_adopted_stale_parent() {
+    fn poa_prices_round_16_from_the_shared_stamp_whatever_this_node_saw() {
         let (state, address) = single_authority_state();
         let now_ms = crate::consensus::now_millis();
         let round = crate::consensus::MAX_LEADER_ROUNDS;
@@ -560,19 +561,37 @@ mod p01_poa_round_pricing_tests {
         block.producer = Some(address);
         block.nonce = round;
 
-        let engine = PoAEngine::new(PoAConfig::default(), None);
-        engine.note_block_seen(&stale_parent.hash, now_ms);
-        let error = engine
-            .validate_block(&block, &[stale_parent], &state)
-            .expect_err("a newly adopted stale parent must not unlock round 16 in PoA");
+        let mut verdicts = Vec::new();
+        for seen in [Some(now_ms), Some(stale_parent.timestamp), None] {
+            let engine = PoAEngine::new(PoAConfig::default(), None);
+            if let Some(at) = seen {
+                engine.note_block_seen(&stale_parent.hash, at);
+            }
+            let priced =
+                match engine.validate_block(&block, std::slice::from_ref(&stale_parent), &state) {
+                    Ok(()) => false,
+                    Err(error) => error.0.contains("claimed before it elapsed"),
+                };
+            verdicts.push(priced);
+        }
+        assert_eq!(
+            verdicts[0], verdicts[1],
+            "a schedule-lagged parent must be priced from its stamp, not from this \
+             node's adoption time: {verdicts:?}"
+        );
+        assert_eq!(
+            verdicts[0], verdicts[2],
+            "a schedule-lagged parent must be priced from its stamp: {verdicts:?}"
+        );
         assert!(
-            error.0.contains("claimed before it elapsed"),
-            "expected round-pricing refusal on newly adopted stale parent, got: {error:?}"
+            !verdicts[0],
+            "a parent two minutes behind the clock prices round {round} as elapsed"
         );
     }
 
+    /// The PoS half of the same rule: one parent, one block, one verdict.
     #[test]
-    fn pos_refuses_round_16_on_newly_adopted_stale_parent() {
+    fn pos_prices_round_16_from_the_shared_stamp_whatever_this_node_saw() {
         use crate::consensus::pos::{PoSConfig, PoSEngine};
         use crate::crypto::primitives::ValidatorKeys;
 
@@ -617,14 +636,30 @@ mod p01_poa_round_pricing_tests {
         block.vrf_proof = vec![0u8; 64];
         block.sign(&keys.sig_key);
 
-        let engine = PoSEngine::new(PoSConfig::default(), None);
-        engine.note_block_seen(&stale_parent.hash, now_ms);
-        let error = engine
-            .validate_block(&block, &[stale_parent], &state)
-            .expect_err("a newly adopted stale parent must not unlock round 16 in PoS");
+        let mut verdicts = Vec::new();
+        for seen in [Some(now_ms), Some(stale_parent.timestamp), None] {
+            let engine = PoSEngine::new(PoSConfig::default(), None);
+            if let Some(at) = seen {
+                engine.note_block_seen(&stale_parent.hash, at);
+            }
+            let priced =
+                match engine.validate_block(&block, std::slice::from_ref(&stale_parent), &state) {
+                    Ok(()) => false,
+                    Err(error) => error.0.contains("claimed before it elapsed"),
+                };
+            verdicts.push(priced);
+        }
+        assert_eq!(
+            verdicts[0], verdicts[1],
+            "the PoS price must not move with this node's adoption time: {verdicts:?}"
+        );
+        assert_eq!(
+            verdicts[0], verdicts[2],
+            "the PoS price must not move with this node's adoption time: {verdicts:?}"
+        );
         assert!(
-            error.0.contains("claimed before it elapsed"),
-            "expected PoS round-pricing refusal on newly adopted stale parent, got: {error:?}"
+            !verdicts[0],
+            "a parent two minutes behind the clock prices round {round} as elapsed"
         );
     }
 

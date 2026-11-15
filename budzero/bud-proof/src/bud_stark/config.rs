@@ -1,7 +1,7 @@
 use core::marker::PhantomData;
 
 use p3_challenger::{CanObserve, CanSample, FieldChallenger};
-use p3_commit::{Pcs, PolynomialSpace};
+use p3_commit::{Pcs, PolynomialSpace, UnivariateStarkPcs};
 use p3_field::{ExtensionField, Field, PrimeCharacteristicRing};
 
 pub type Val<SC> = <<<SC as StarkGenericConfig>::Pcs as Pcs<
@@ -41,7 +41,7 @@ pub type PcsError<SC> = <<SC as StarkGenericConfig>::Pcs as Pcs<
 
 pub trait StarkGenericConfig: Clone {
     /// The [`Pcs`] implementation used to commit to trace polynomials.
-    type Pcs: Pcs<Self::Challenge, Self::Challenger>;
+    type Pcs: UnivariateStarkPcs<Self::Challenge, Self::Challenger>;
     /// The extension field used for challenges and auxiliary traces.
     type Challenge: ExtensionField<Val<Self>>;
     /// The challenger type used for Fiat-Shamir.
@@ -58,10 +58,10 @@ pub trait StarkGenericConfig: Clone {
     /// public values. It does not carry the FRI parameters, and those are what
     /// decide how much the proof is worth: `num_queries` and `log_blowup` set
     /// the soundness error, and the proof-of-work bits set the grinding cost.
-    /// Measured on the current configuration, `log_blowup = 3`,
-    /// `num_queries = 100` and 16 grinding bits are roughly 316 bits of
-    /// security; `num_queries = 1`, `log_blowup = 1` and no grinding is one
-    /// bit, and produces a proof of the same shape.
+    /// `num_queries = 1`, `log_blowup = 1` and no grinding is one bit of security and
+    /// produces a proof of the same shape as the real configuration. What the
+    /// current set is worth is computed by `stark-soundness` and written to
+    /// `docs/pq/MEASUREMENTS.md`: at least 128 bits provable, without assumption.
     ///
     /// Least Authority's audit of Plonky3 found this exact class: a challenger
     /// that did not absorb the FRI config or the polynomial degree let a
@@ -115,7 +115,7 @@ impl<Pcs, Challenge, Challenger> StarkConfig<Pcs, Challenge, Challenger> {
 
 impl<PcsT, Challenge, Challenger> StarkGenericConfig for StarkConfig<PcsT, Challenge, Challenger>
 where
-    PcsT: Pcs<Challenge, Challenger> + Clone,
+    PcsT: UnivariateStarkPcs<Challenge, Challenger> + Clone,
     Challenge: ExtensionField<<PcsT::Domain as PolynomialSpace>::Val> + Clone,
     Challenger: FieldChallenger<<PcsT::Domain as PolynomialSpace>::Val>
         + CanObserve<PcsT::Commitment>

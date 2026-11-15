@@ -46,7 +46,25 @@ jobs:
         with:
           shared-key: budlum-core
       - name: Install protoc
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
+        run: |
+          set -euo pipefail
+          if ! command -v protoc >/dev/null 2>&1; then
+            case "$(uname -m)" in
+              aarch64|arm64)
+                PROTOC_ZIP=protoc-29.3-linux-aarch_64.zip
+                PROTOC_SHA256=6427349140e01f06e049e707a58709a4f221ae73ab9a0425bc4a00c8d0e1ab32
+                ;;
+              *)
+                PROTOC_ZIP=protoc-29.3-linux-x86_64.zip
+                PROTOC_SHA256=3e866620c5be27664f3d2fa2d656b5f3e09b5152b42f1bedbf427b333e90021a
+                ;;
+            esac
+            curl -sSfL --retry 5 --retry-all-errors --retry-delay 2 -o /tmp/protoc.zip \
+              "https://github.com/protocolbuffers/protobuf/releases/download/v29.3/${PROTOC_ZIP}"
+            echo "${PROTOC_SHA256}  /tmp/protoc.zip" | sha256sum -c -
+            sudo unzip -q -o /tmp/protoc.zip -d /usr/local bin/protoc 'include/*'
+            rm -f /tmp/protoc.zip
+          fi
       # The version was unpinned. extra-tooling.yml pins the same tool to 0.8.0;
       # the same version and the same sha256 are used here too, otherwise two
       # workflows would run different tools under the same name.
@@ -169,7 +187,25 @@ jobs:
         with:
           shared-key: budlum-core
       - name: Install protoc
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
+        run: |
+          set -euo pipefail
+          if ! command -v protoc >/dev/null 2>&1; then
+            case "$(uname -m)" in
+              aarch64|arm64)
+                PROTOC_ZIP=protoc-29.3-linux-aarch_64.zip
+                PROTOC_SHA256=6427349140e01f06e049e707a58709a4f221ae73ab9a0425bc4a00c8d0e1ab32
+                ;;
+              *)
+                PROTOC_ZIP=protoc-29.3-linux-x86_64.zip
+                PROTOC_SHA256=3e866620c5be27664f3d2fa2d656b5f3e09b5152b42f1bedbf427b333e90021a
+                ;;
+            esac
+            curl -sSfL --retry 5 --retry-all-errors --retry-delay 2 -o /tmp/protoc.zip \
+              "https://github.com/protocolbuffers/protobuf/releases/download/v29.3/${PROTOC_ZIP}"
+            echo "${PROTOC_SHA256}  /tmp/protoc.zip" | sha256sum -c -
+            sudo unzip -q -o /tmp/protoc.zip -d /usr/local bin/protoc 'include/*'
+            rm -f /tmp/protoc.zip
+          fi
       - name: cargo install cargo-mutants
         run: cargo install cargo-mutants --locked
       # Canary: a crate is written with a test that deliberately asserts nothing
@@ -322,7 +358,25 @@ jobs:
         with:
           shared-key: budlum-core
       - name: Install protoc
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
+        run: |
+          set -euo pipefail
+          if ! command -v protoc >/dev/null 2>&1; then
+            case "$(uname -m)" in
+              aarch64|arm64)
+                PROTOC_ZIP=protoc-29.3-linux-aarch_64.zip
+                PROTOC_SHA256=6427349140e01f06e049e707a58709a4f221ae73ab9a0425bc4a00c8d0e1ab32
+                ;;
+              *)
+                PROTOC_ZIP=protoc-29.3-linux-x86_64.zip
+                PROTOC_SHA256=3e866620c5be27664f3d2fa2d656b5f3e09b5152b42f1bedbf427b333e90021a
+                ;;
+            esac
+            curl -sSfL --retry 5 --retry-all-errors --retry-delay 2 -o /tmp/protoc.zip \
+              "https://github.com/protocolbuffers/protobuf/releases/download/v29.3/${PROTOC_ZIP}"
+            echo "${PROTOC_SHA256}  /tmp/protoc.zip" | sha256sum -c -
+            sudo unzip -q -o /tmp/protoc.zip -d /usr/local bin/protoc 'include/*'
+            rm -f /tmp/protoc.zip
+          fi
       # Version pinned. An unpinned install made the parse script below the
       # victim of whichever output shape the newest release emitted; the parser
       # still tolerates the list shape, but the pin stops the JSON from being
@@ -411,7 +465,25 @@ jobs:
           # on. The ASan job already keys itself separately; this one did not.
           shared-key: tsan
       - name: Install protoc
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
+        run: |
+          set -euo pipefail
+          if ! command -v protoc >/dev/null 2>&1; then
+            case "$(uname -m)" in
+              aarch64|arm64)
+                PROTOC_ZIP=protoc-29.3-linux-aarch_64.zip
+                PROTOC_SHA256=6427349140e01f06e049e707a58709a4f221ae73ab9a0425bc4a00c8d0e1ab32
+                ;;
+              *)
+                PROTOC_ZIP=protoc-29.3-linux-x86_64.zip
+                PROTOC_SHA256=3e866620c5be27664f3d2fa2d656b5f3e09b5152b42f1bedbf427b333e90021a
+                ;;
+            esac
+            curl -sSfL --retry 5 --retry-all-errors --retry-delay 2 -o /tmp/protoc.zip \
+              "https://github.com/protocolbuffers/protobuf/releases/download/v29.3/${PROTOC_ZIP}"
+            echo "${PROTOC_SHA256}  /tmp/protoc.zip" | sha256sum -c -
+            sudo unzip -q -o /tmp/protoc.zip -d /usr/local bin/protoc 'include/*'
+            rm -f /tmp/protoc.zip
+          fi
       # Canary: a deliberately racing program is written and TSan is expected to
       # catch it. If it does not, the tool is not working and a clean report says
       # nothing. Without the canary a green job would say not that the scan ran,
@@ -487,24 +559,28 @@ jobs:
           EOF
           cat > /tmp/tsan-canary/src/main.rs <<'EOF'
           // Two threads write to the same address without synchronization. If TSan
-          // does not see this the scan is not trustworthy. A start barrier holds
-          // both OS threads until both are live so thread A cannot finish its loop
-          // before `spawn` returns for thread B on a 2-vCPU runner.
+          // does not see this the scan is not trustworthy.
           fn main() {
               let mut value = 0i64;
               let ptr = std::ptr::addr_of_mut!(value) as usize;
               let start = std::sync::Arc::new(std::sync::Barrier::new(2));
-              let start_a = std::sync::Arc::clone(&start);
+              let s1 = std::sync::Arc::clone(&start);
               let a = std::thread::spawn(move || {
-                  start_a.wait();
                   let p = ptr as *mut i64;
-                  for _ in 0..50_000 { unsafe { *p += 1 } }
+                  s1.wait();
+                  for _ in 0..50_000 {
+                      unsafe { *p += 1 }
+                      std::hint::black_box(p);
+                  }
               });
-              let start_b = std::sync::Arc::clone(&start);
+              let s2 = std::sync::Arc::clone(&start);
               let b = std::thread::spawn(move || {
-                  start_b.wait();
                   let p = ptr as *mut i64;
-                  for _ in 0..50_000 { unsafe { *p += 1 } }
+                  s2.wait();
+                  for _ in 0..50_000 {
+                      unsafe { *p += 1 }
+                      std::hint::black_box(p);
+                  }
               });
               a.join().unwrap();
               b.join().unwrap();
@@ -750,7 +826,25 @@ jobs:
         with:
           shared-key: budlum-core
       - name: Install protoc
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
+        run: |
+          set -euo pipefail
+          if ! command -v protoc >/dev/null 2>&1; then
+            case "$(uname -m)" in
+              aarch64|arm64)
+                PROTOC_ZIP=protoc-29.3-linux-aarch_64.zip
+                PROTOC_SHA256=6427349140e01f06e049e707a58709a4f221ae73ab9a0425bc4a00c8d0e1ab32
+                ;;
+              *)
+                PROTOC_ZIP=protoc-29.3-linux-x86_64.zip
+                PROTOC_SHA256=3e866620c5be27664f3d2fa2d656b5f3e09b5152b42f1bedbf427b333e90021a
+                ;;
+            esac
+            curl -sSfL --retry 5 --retry-all-errors --retry-delay 2 -o /tmp/protoc.zip \
+              "https://github.com/protocolbuffers/protobuf/releases/download/v29.3/${PROTOC_ZIP}"
+            echo "${PROTOC_SHA256}  /tmp/protoc.zip" | sha256sum -c -
+            sudo unzip -q -o /tmp/protoc.zip -d /usr/local bin/protoc 'include/*'
+            rm -f /tmp/protoc.zip
+          fi
       # Canary: a model that deliberately takes locks in reverse order is written
       # and loom is expected to find the deadlock. If it does not, the real tests
       # being green would say not that the ordering is correct, but at most that

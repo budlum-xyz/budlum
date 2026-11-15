@@ -20,6 +20,19 @@ identity_file = "./secrets/testnet-node-id.key"
 # to record. mDNS is devnet-only, and a node with no peer source refuses to
 # start (`has_peer_source`): record the peers of your mesh here or pass
 # --bootstrap.
+#
+# Formats. `bud node identity --identity-file
+# <file> --host <ip or name> --port 5001 --seed-domain seeds.<TESTNET_DOMAIN>`
+# prints both for a node:
+#   bootnodes = ["/ip4/203.0.113.7/tcp/5001/p2p/12D3KooW...",
+#                "/dns4/seed1.<TESTNET_DOMAIN>/tcp/5001/p2p/12D3KooW..."]
+#   dns_seeds = ["seeds.<TESTNET_DOMAIN>"]
+# A DNS seed name is resolved through its address records (one A or AAAA
+# record per seed node) and every address is dialled at port 5001:
+#   seeds.<TESTNET_DOMAIN> A 203.0.113.7
+#   seeds.<TESTNET_DOMAIN> A 198.51.100.4
+# The node does not read libp2p `_dnsaddr` TXT records. The real
+# addresses come from the operators (DECISIONS.md, section 10.3).
 bootnodes = []
 dns_seeds = []
 max_peers = 75
@@ -49,6 +62,4 @@ key_file = "./secrets/testnet-validator.key"
 backend = "softhsm"
 
 [features]
-governance = false
-zkvm_contracts = false
 pruning = false

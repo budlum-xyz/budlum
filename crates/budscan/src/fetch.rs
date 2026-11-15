@@ -459,7 +459,7 @@ mod tests {
         assert!(got.evidence.badge().contains(&id.to_string()));
     }
 
-    /// P43-F01: a manifest id is not the `ContentId` of the bytes. Bytes whose
+    /// A manifest id is not the `ContentId` of the bytes. Bytes whose
     /// `ContentId` equals the id (the old, wrong comparison) are refused when no
     /// manifest backs them.
     #[test]

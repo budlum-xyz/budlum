@@ -11,14 +11,14 @@
 //! | variant                                   | ns/perm | cmov | cond. jumps |
 //! | :---------------------------------------- | ------: | ---: | ----------: |
 //! | A. `cmov` crate (SHIPPED)                 |    5714 |   59 |           6 |
-//! | B. masked select (pre-Strix)              |    3796 |   69 |          41 |
+//! | B. masked select (pre-fix)                |    3796 |   69 |          41 |
 //! | D. correction by multiply, no select      |    7789 |   56 |          28 |
 //! | E. correction by mask-AND, no select      |    7745 |   56 |          28 |
 //! | F. A with `#[inline(always)]`             |    5674 |   59 |           6 |
 //!
 //! Reading, and the reason the slow one ships:
 //!
-//! - B is 1.5x faster and is exactly what Strix reported: dropping the
+//! - B is 1.5x faster and is exactly what the review reported: dropping the
 //!   conditional-move backend lets LLVM recover the branch, and the jump
 //!   count goes 6 -> 41. That is the leak, measured, not argued.
 //! - D and E replace the select with arithmetic on a 0/1. Both are WORSE on

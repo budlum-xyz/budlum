@@ -6,7 +6,14 @@ pub const INVALID_BLOCK_PENALTY: i32 = -10;
 pub const INVALID_TX_PENALTY: i32 = -5;
 pub const OVERSIZED_MESSAGE_PENALTY: i32 = -3;
 pub const RATE_LIMIT_PENALTY: i32 = -3;
-pub const TIMEOUT_PENALTY: i32 = -15;
+/// A request this node sent came back unanswered. Below the ban threshold by
+/// design: the ask was this node's own choice, so an unanswerable one costs
+/// the peer its place in the sync order, not an hour of silence.
+const UNANSWERED_REQUEST_PENALTY: i32 = -5;
+const MAX_UNANSWERED_SYNC_STRIKES: u32 = 4;
+/// A batch that does not join this chain: a fork signal, priced like an
+/// unanswered request and, like it, floored above the ban threshold.
+const UNJOINED_BLOCK_PENALTY: i32 = -5;
 pub const SLOW_SYNC_PENALTY: i32 = -5;
 pub const INVALID_HANDSHAKE_PENALTY: i32 = -20;
 pub const GOOD_BEHAVIOR_REWARD: i32 = 1;
@@ -21,7 +28,7 @@ pub const BAN_DURATION: Duration = Duration::from_secs(3600);
 /// table forever and refuse every peer the node has never seen.
 const NEGATIVE_RECORD_TTL: Duration = BAN_DURATION;
 /// After a prune that reclaimed nothing, the table is not scanned again for
-/// this long (P36-F09).
+/// this long.
 const EMPTY_PRUNE_BACKOFF: Duration = Duration::from_secs(1);
 pub const MAX_SCORE: i32 = 100;
 pub const MIN_SCORE: i32 = BAN_THRESHOLD;
@@ -46,6 +53,7 @@ pub struct PeerScore {
     pub vote_tokens: f64,
     pub blob_tokens: f64,
     pub handshaked: bool,
+    pub unanswered_sync_strikes: u32,
 }
 impl Default for PeerScore {
     fn default() -> Self {
@@ -63,6 +71,7 @@ impl Default for PeerScore {
             vote_tokens: 10.0,
             blob_tokens: 5.0,
             handshaked: false,
+            unanswered_sync_strikes: 0,
         }
     }
 }
@@ -117,6 +126,52 @@ impl PeerScore {
         })
     }
 }
+/// Canonical network prefix key for eclipse and outbound-diversity bounds.
+///
+/// IPv4 addresses are grouped by `/24` (`3` octets), IPv6 addresses by `/48`
+/// (`6` octets, the standard regional operator allocation), and IPv4-mapped
+/// IPv6 addresses (`::ffff:a.b.c.d`) collapse into the corresponding IPv4 `/24`
+/// bucket so dual-stack endpoints cannot double their budget.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SubnetKey {
+    Ipv4([u8; 3]),
+    Ipv6([u8; 6]),
+}
+
+impl From<[u8; 3]> for SubnetKey {
+    fn from(prefix: [u8; 3]) -> Self {
+        Self::Ipv4(prefix)
+    }
+}
+
+/// Extract canonical subnet key (`/24` for IPv4 and IPv4-mapped IPv6, `/48` for
+/// IPv6) from a multiaddr for eclipse and outbound-diversity admission.
+///
+/// Loopback addresses (`127.0.0.0/8`, `::1`, `::ffff:127.0.0.0/104`) return
+/// `None` so single-host rehearsals do not trip public subnet ceilings.
+pub(crate) fn peer_subnet_key(addr: &libp2p::Multiaddr) -> Option<SubnetKey> {
+    if let Some(v4) = crate::network::node::ipv4_slash24(addr) {
+        return Some(SubnetKey::Ipv4(v4));
+    }
+    for proto in addr.iter() {
+        if let libp2p::multiaddr::Protocol::Ip6(ip) = proto {
+            if ip.is_loopback() {
+                return None;
+            }
+            if let Some(v4) = ip.to_ipv4_mapped() {
+                if v4.is_loopback() {
+                    return None;
+                }
+                let [a, b, c, _] = v4.octets();
+                return Some(SubnetKey::Ipv4([a, b, c]));
+            }
+            let [b0, b1, b2, b3, b4, b5, ..] = ip.octets();
+            return Some(SubnetKey::Ipv6([b0, b1, b2, b3, b4, b5]));
+        }
+    }
+    None
+}
+
 pub struct PeerManager {
     peers: HashMap<PeerId, PeerScore>,
     /// Tokens refilled per second for general P2P messages.
@@ -124,24 +179,24 @@ pub struct PeerManager {
     pub(crate) msg_refill_rate: f64,
     /// Soft ceiling on tracked peer score entries (memory DoS guard).
     pub(crate) max_tracked_peers: usize,
-    /// H5.1 eclipse protection: max concurrent connections per IPv4 /24.
+    /// H5.1 eclipse protection: max concurrent connections per subnet (`/24` IPv4, `/48` IPv6).
     pub(crate) max_peers_per_subnet: usize,
-    /// Live connection count per IPv4 /24 key (first 3 octets).
-    subnet_counts: HashMap<[u8; 3], usize>,
+    /// Live connection count per subnet key (`/24` IPv4 or `/48` IPv6).
+    subnet_counts: HashMap<SubnetKey, usize>,
     /// Peer → subnet mapping for disconnect accounting.
-    peer_subnets: HashMap<PeerId, [u8; 3]>,
+    peer_subnets: HashMap<PeerId, SubnetKey>,
     /// Live peer set. Libp2p can emit multiple connection events for one peer;
     /// This set makes peer_count and /24 accounting idempotent.
     connected_peers: HashSet<PeerId>,
-    /// H5.2 outbound diversity: max outbound connections per IPv4 /24.
+    /// H5.2 outbound diversity: max outbound connections per subnet.
     pub(crate) max_outbound_per_subnet: usize,
-    /// Outbound connection count per IPv4 /24.
-    outbound_subnet_counts: HashMap<[u8; 3], usize>,
+    /// Outbound connection count per subnet.
+    outbound_subnet_counts: HashMap<SubnetKey, usize>,
     /// Outbound peer → subnet mapping.
-    outbound_peer_subnets: HashMap<PeerId, [u8; 3]>,
+    outbound_peer_subnets: HashMap<PeerId, SubnetKey>,
     /// When the last full-table prune found nothing to reclaim. While the
     /// table stays full of unprunable records, scanning it again on every
-    /// message from an unknown peer is a CPU amplifier (P36-F09).
+    /// message from an unknown peer is a CPU amplifier.
     last_empty_prune: Option<Instant>,
 }
 impl Default for PeerManager {
@@ -211,7 +266,7 @@ impl PeerManager {
 
     /// Returns false if an outbound connection to `subnet` would
     /// Exceed the diversity bound. 0 = unlimited.
-    pub fn can_admit_outbound_subnet(&self, subnet: Option<[u8; 3]>) -> bool {
+    pub fn can_admit_outbound_subnet(&self, subnet: Option<SubnetKey>) -> bool {
         if self.max_outbound_per_subnet == 0 {
             return true;
         }
@@ -223,7 +278,7 @@ impl PeerManager {
 
     /// Record an outbound connection. Returns false if the peer is
     /// Already tracked as outbound or the subnet bound is exceeded.
-    pub fn note_outbound_connected(&mut self, peer_id: PeerId, subnet: Option<[u8; 3]>) -> bool {
+    pub fn note_outbound_connected(&mut self, peer_id: PeerId, subnet: Option<SubnetKey>) -> bool {
         if !self.can_admit_outbound_subnet(subnet) {
             return false;
         }
@@ -253,19 +308,19 @@ impl PeerManager {
     }
 
     /// Returns false if admitting `subnet` would exceed the eclipse bound.
-    pub fn can_admit_subnet(&self, subnet: Option<[u8; 3]>) -> bool {
+    pub fn can_admit_subnet(&self, subnet: Option<SubnetKey>) -> bool {
         let Some(key) = subnet else {
-            return true; // non-IPv4 (relay/circuit) - bound by max_peers only
+            return true; // loopback / relay / circuit - bound by max_peers only
         };
         self.subnet_counts.get(&key).copied().unwrap_or(0) < self.max_peers_per_subnet
     }
 
-    /// Record a live connection under an optional /24 key.
+    /// Record a live connection under an optional subnet key (`/24` IPv4, `/48` IPv6).
     ///
     /// Returns `true` only for the first live connection for `peer_id`.
     /// Libp2p may emit duplicate connection events for the same peer/address;
-    /// Counting those duplicates was causing peer_count drift and /24 overcount.
-    pub fn note_connected(&mut self, peer_id: PeerId, subnet: Option<[u8; 3]>) -> bool {
+    /// Counting those duplicates was causing peer_count drift and subnet overcount.
+    pub fn note_connected(&mut self, peer_id: PeerId, subnet: Option<SubnetKey>) -> bool {
         if !self.connected_peers.insert(peer_id) {
             return false;
         }
@@ -274,6 +329,15 @@ impl PeerManager {
             self.peer_subnets.insert(peer_id, key);
         }
         true
+    }
+
+    /// Whether `peer_id` already holds an established connection in the live
+    /// peer set. Simultaneous inbound/outbound dials to the same peer emit two
+    /// `ConnectionEstablished` events; the second must not re-spend a `/24`
+    /// subnet slot and disconnect the peer we just connected to.
+    #[must_use]
+    pub fn is_connected(&self, peer_id: &PeerId) -> bool {
+        self.connected_peers.contains(peer_id)
     }
 
     /// Drop subnet accounting when a peer disconnects.
@@ -299,7 +363,7 @@ impl PeerManager {
         true
     }
 
-    pub fn subnet_connection_count(&self, subnet: [u8; 3]) -> usize {
+    pub fn subnet_connection_count(&self, subnet: SubnetKey) -> usize {
         self.subnet_counts.get(&subnet).copied().unwrap_or(0)
     }
     /// Score entry for a peer, creating one if the map has room.
@@ -452,6 +516,19 @@ impl PeerManager {
     }
 
     pub fn check_vote_rate_limit(&mut self, peer_id: &PeerId) -> bool {
+        self.check_vote_rate_limit_from(peer_id, true)
+    }
+
+    /// Check per-peer vote rate budget. When `authored_by_peer` is `false`
+    /// (for example a gossipsub relayer forwarding another validator's vote),
+    /// exhaustion still drops the excess traffic and demotes the peer in
+    /// selection order, but floors above `BAN_THRESHOLD` so a flooding third
+    /// party cannot get honest mesh relayers banned.
+    pub(crate) fn check_vote_rate_limit_from(
+        &mut self,
+        peer_id: &PeerId,
+        authored_by_peer: bool,
+    ) -> bool {
         let Some(score) = self.get_or_create(peer_id) else {
             return false;
         };
@@ -460,13 +537,33 @@ impl PeerManager {
             score.vote_tokens -= 1.0;
             true
         } else {
-            score.score = (score.score - 1).max(MIN_SCORE);
+            let floor = if authored_by_peer {
+                MIN_SCORE
+            } else {
+                MIN_SCORE.saturating_add(1)
+            };
+            score.score = (score.score - 1).max(floor);
             score.last_seen = Some(Instant::now());
+            let spent = authored_by_peer && score.score <= BAN_THRESHOLD;
+            if spent {
+                self.ban_peer(peer_id);
+            }
             false
         }
     }
 
     pub fn check_blob_rate_limit(&mut self, peer_id: &PeerId) -> bool {
+        self.check_blob_rate_limit_from(peer_id, true)
+    }
+
+    /// Check per-peer QC/fault-proof blob rate budget. Relayed frames and
+    /// `/sync` pull saturation (`authored_by_peer == false`) enforce the token
+    /// bucket and demote score without auto-banning honest relayers/fetchers.
+    pub(crate) fn check_blob_rate_limit_from(
+        &mut self,
+        peer_id: &PeerId,
+        authored_by_peer: bool,
+    ) -> bool {
         let Some(score) = self.get_or_create(peer_id) else {
             return false;
         };
@@ -475,8 +572,17 @@ impl PeerManager {
             score.blob_tokens -= 1.0;
             true
         } else {
-            score.score = (score.score - 5).max(MIN_SCORE);
+            let floor = if authored_by_peer {
+                MIN_SCORE
+            } else {
+                MIN_SCORE.saturating_add(1)
+            };
+            score.score = (score.score - 5).max(floor);
             score.last_seen = Some(Instant::now());
+            let spent = authored_by_peer && score.score <= BAN_THRESHOLD;
+            if spent {
+                self.ban_peer(peer_id);
+            }
             false
         }
     }
@@ -527,6 +633,17 @@ impl PeerManager {
             return;
         };
         score.valid_contributions += 1;
+        score.score = (score.score + GOOD_BEHAVIOR_REWARD).min(MAX_SCORE);
+        score.last_seen = Some(Instant::now());
+    }
+    /// Reset consecutive unanswered-sync strikes only after the peer actually
+    /// delivers valid sync data that advances or feeds our chain.
+    pub fn report_sync_success(&mut self, peer_id: &PeerId) {
+        let Some(score) = self.get_or_create(peer_id) else {
+            return;
+        };
+        score.valid_contributions += 1;
+        score.unanswered_sync_strikes = 0;
         score.score = (score.score + GOOD_BEHAVIOR_REWARD).min(MAX_SCORE);
         score.last_seen = Some(Instant::now());
     }
@@ -586,6 +703,7 @@ impl PeerManager {
         if let Some(score) = self.peers.get_mut(peer_id) {
             score.banned_until = None;
             score.ban_expires_unix = None;
+            score.unanswered_sync_strikes = 0;
             score.score = 0;
         }
     }
@@ -598,6 +716,7 @@ impl PeerManager {
             if expired_instant || expired_unix {
                 score.banned_until = None;
                 score.ban_expires_unix = None;
+                score.unanswered_sync_strikes = 0;
                 score.score = 0;
             }
         }
@@ -609,16 +728,6 @@ impl PeerManager {
             .map(|(id, _)| *id)
             .collect()
     }
-    pub fn report_timeout(&mut self, peer_id: &PeerId) {
-        let Some(score) = self.get_or_create(peer_id) else {
-            return;
-        };
-        score.score = (score.score + TIMEOUT_PENALTY).max(MIN_SCORE);
-        score.last_seen = Some(Instant::now());
-        if score.score <= BAN_THRESHOLD {
-            self.ban_peer(peer_id);
-        }
-    }
     pub fn report_slow_sync(&mut self, peer_id: &PeerId) {
         let Some(score) = self.get_or_create(peer_id) else {
             return;
@@ -628,6 +737,63 @@ impl PeerManager {
         if score.score <= BAN_THRESHOLD {
             self.ban_peer(peer_id);
         }
+    }
+    /// A request this node sent came back unanswered.
+    ///
+    /// Asking a peer for a header batch or a block range is this node's own
+    /// decision, and the answer can fail for reasons that say nothing about
+    /// the peer: a connection that churned mid-flight, a peer busy importing
+    /// the blocks it already has, a request the transport dropped. The score
+    /// still moves - a peer that never answers sinks in `get_best_peers` and
+    /// stops being chosen as a sync source - but it does not reach the ban
+    /// threshold, because a ban is one hour of silence and a four-validator
+    /// mesh that bans one of its own on a dropped request can no longer reach
+    /// a finality quorum. Refusals that prove malice keep their own paths:
+    /// an invalid block, a forged vote, an oversized message.
+    pub fn report_unanswered_request(&mut self, peer_id: &PeerId) {
+        let Some(score) = self.get_or_create(peer_id) else {
+            return;
+        };
+        score.unanswered_sync_strikes = score.unanswered_sync_strikes.saturating_add(1);
+        score.last_seen = Some(Instant::now());
+        if score.unanswered_sync_strikes >= MAX_UNANSWERED_SYNC_STRIKES {
+            score.score = BAN_THRESHOLD;
+            self.ban_peer(peer_id);
+        } else {
+            score.score = score
+                .score
+                .saturating_add(UNANSWERED_REQUEST_PENALTY)
+                .max(MIN_SCORE.saturating_add(1));
+        }
+    }
+    /// A block or a sync batch that does not continue this chain.
+    ///
+    /// `validate_and_add_block` answers `Previous hash mismatch` for two
+    /// situations that look alike on the wire and are not alike at all: our
+    /// own tip moved between the request and the answer (another arm of the
+    /// node imported a block first), or the peer is serving a fork that does
+    /// not contain our tip. Neither is a malformed block, and neither is proof
+    /// that the sender forged anything: on a mesh where a slot can have more
+    /// than one elected leader, a peer sitting on the winning branch is
+    /// expected to answer with a suffix that does not join the losing one.
+    /// Charging it as an invalid block let a four-validator devnet ban its own
+    /// validators over an ordinary fork and then fail to reach finality.
+    ///
+    /// The score still moves: a peer that answers every round with a batch
+    /// that cannot be joined sinks in `get_best_peers`, so the re-walk this
+    /// node performs asks someone else next time. The floor is one point above
+    /// [`BAN_THRESHOLD`], so this path can demote a peer but never silence it.
+    /// Refusals that do prove malice keep their own paths: a block whose own
+    /// hash does not match its contents, a forged vote, an oversized message.
+    pub fn report_unjoined_block(&mut self, peer_id: &PeerId) {
+        let Some(score) = self.get_or_create(peer_id) else {
+            return;
+        };
+        score.score = score
+            .score
+            .saturating_add(UNJOINED_BLOCK_PENALTY)
+            .max(MIN_SCORE.saturating_add(1));
+        score.last_seen = Some(Instant::now());
     }
     pub fn report_invalid_handshake(&mut self, peer_id: &PeerId) {
         let Some(score) = self.get_or_create(peer_id) else {
@@ -777,6 +943,58 @@ mod tests {
         assert!(manager.is_banned(&peer));
         assert!(manager.get_score(&peer) <= BAN_THRESHOLD);
     }
+    /// A block that does not join this chain demotes the sender but never bans.
+    ///
+    /// This is the devnet failure in one test. A block or a sync answer refused
+    /// with `Previous hash mismatch` is what a peer on another branch of the
+    /// same slot says, and the receiving node used to charge it as an invalid
+    /// block:
+    /// ten such answers (a minute of ordinary fork traffic) banned a validator
+    /// for an hour, and the mesh lost the very node whose block it needed. The
+    /// peer is still demoted, because it must sink below a peer that answers
+    /// usefully, and the score must stop one point above the ban threshold
+    /// however long the fork lasts. Both callers (the gossip block arm and the
+    /// sync `Blocks` arm) use this one report.
+    #[test]
+    fn unjoined_blocks_demote_but_never_ban() {
+        let mut manager = PeerManager::new();
+        let peer = test_peer_id();
+        let useful = test_peer_id();
+        manager.report_good_behavior(&useful);
+        for _ in 0..64 {
+            manager.report_unjoined_block(&peer);
+        }
+        assert!(
+            !manager.is_banned(&peer),
+            "a fork answer must not ban a peer"
+        );
+        let score = manager.get_score(&peer);
+        assert_eq!(
+            score,
+            MIN_SCORE + 1,
+            "the stale-batch score must floor one point above the ban threshold"
+        );
+        assert!(score < manager.get_score(&useful));
+        assert_eq!(
+            manager.get_best_peers(2).last().copied(),
+            Some(peer),
+            "a peer that keeps answering with an unjoinable batch must be asked last"
+        );
+    }
+
+    /// The canary for the test above: the same number of *invalid block*
+    /// reports still bans, so the floor is a property of this one path and not
+    /// of the score arithmetic in general.
+    #[test]
+    fn unjoined_block_floor_is_load_bearing() {
+        let mut manager = PeerManager::new();
+        let peer = test_peer_id();
+        for _ in 0..64 {
+            manager.report_invalid_block(&peer);
+        }
+        assert!(manager.is_banned(&peer));
+    }
+
     #[test]
     fn test_unban_peer() {
         let mut manager = PeerManager::new();
@@ -905,7 +1123,7 @@ mod tests {
         assert!(spent.peers.contains_key(&overflow));
     }
 
-    /// P36-F09: a full table of unprunable records is scanned once, not on
+    /// A full table of unprunable records is scanned once, not on
     /// every message from an unknown peer; the back-off lifts when a scan can
     /// succeed again.
     #[test]
@@ -988,7 +1206,7 @@ mod tests {
     fn eclipse_subnet_bound_rejects_fifth_peer() {
         let mut pm = PeerManager::new();
         pm.set_max_peers_per_subnet(4);
-        let subnet = [10, 0, 0];
+        let subnet = SubnetKey::Ipv4([10, 0, 0]);
         for _ in 0..4 {
             assert!(pm.can_admit_subnet(Some(subnet)));
             let peer = libp2p::identity::Keypair::generate_ed25519()
@@ -1002,14 +1220,14 @@ mod tests {
             "5th peer on same /24 must be rejected"
         );
         // Different subnet still ok
-        assert!(pm.can_admit_subnet(Some([10, 0, 1])));
+        assert!(pm.can_admit_subnet(Some(SubnetKey::Ipv4([10, 0, 1]))));
     }
 
     #[test]
     fn eclipse_disconnect_frees_subnet_slot() {
         let mut pm = PeerManager::new();
         pm.set_max_peers_per_subnet(1);
-        let subnet = [192, 168, 1];
+        let subnet = SubnetKey::Ipv4([192, 168, 1]);
         let peer = libp2p::identity::Keypair::generate_ed25519()
             .public()
             .to_peer_id();
@@ -1025,7 +1243,7 @@ mod tests {
     #[test]
     fn eclipse_peer_accounting_is_idempotent() {
         let mut pm = PeerManager::new();
-        let subnet = [172, 18, 0];
+        let subnet = SubnetKey::Ipv4([172, 18, 0]);
         let peer = libp2p::identity::Keypair::generate_ed25519()
             .public()
             .to_peer_id();
@@ -1047,8 +1265,8 @@ mod tests {
         let mut pm = PeerManager::new();
         pm.set_max_peers_per_subnet(4);
 
-        let subnet_a = [10, 0, 0];
-        let subnet_b = [10, 0, 1];
+        let subnet_a = SubnetKey::Ipv4([10, 0, 0]);
+        let subnet_b = SubnetKey::Ipv4([10, 0, 1]);
 
         // Fill subnet A
         for _ in 0..4 {
@@ -1091,7 +1309,7 @@ mod tests {
         let mut pm = PeerManager::new();
         pm.set_max_peers_per_subnet(4);
 
-        let subnet = [192, 168, 1];
+        let subnet = SubnetKey::Ipv4([192, 168, 1]);
         // Fill the subnet completely
         for _ in 0..4 {
             let peer = libp2p::identity::Keypair::generate_ed25519()
@@ -1102,7 +1320,7 @@ mod tests {
         // New peer on same subnet is rejected - eclipse isolation
         assert!(!pm.can_admit_subnet(Some(subnet)));
         // New peer on different subnet is accepted
-        assert!(pm.can_admit_subnet(Some([192, 168, 2])));
+        assert!(pm.can_admit_subnet(Some(SubnetKey::Ipv4([192, 168, 2]))));
     }
 
     /// Chaos: sybil attack from same /24 subnet is rejected.
@@ -1111,7 +1329,7 @@ mod tests {
         let mut pm = PeerManager::new();
         pm.set_max_peers_per_subnet(4);
 
-        let subnet = [172, 16, 0];
+        let subnet = SubnetKey::Ipv4([172, 16, 0]);
         // Sybil: 4 peers from same subnet
         for _ in 0..4 {
             let peer = libp2p::identity::Keypair::generate_ed25519()
@@ -1170,7 +1388,7 @@ mod tests {
         );
     }
 
-    /// Reputation invariant (§3.4): score must stay within
+    /// Reputation invariant: score must stay within
     /// `[MIN_SCORE, MAX_SCORE]` under any penalty sequence. The
     /// Invalid-block / invalid-tx / oversized-message penalty paths clamp to
     /// `MIN_SCORE` (like `report_bad_behavior`) so `get_score` never
@@ -1214,7 +1432,7 @@ mod tests {
     fn outbound_subnet_diversity_rejects_excess() {
         let mut pm = PeerManager::new();
         pm.max_outbound_per_subnet = 2;
-        let subnet = [10u8, 0, 1];
+        let subnet = SubnetKey::Ipv4([10u8, 0, 1]);
         // First 2 outbound from same subnet: OK.
         let p1 = libp2p::identity::Keypair::generate_ed25519()
             .public()
@@ -1272,7 +1490,10 @@ mod tests {
             }),
             ("report_bad_behavior", |m, p| m.report_bad_behavior(p)),
             ("report_good_behavior", |m, p| m.report_good_behavior(p)),
-            ("report_timeout", |m, p| m.report_timeout(p)),
+            ("report_unanswered_request", |m, p| {
+                m.report_unanswered_request(p)
+            }),
+            ("report_unjoined_block", |m, p| m.report_unjoined_block(p)),
             ("report_slow_sync", |m, p| m.report_slow_sync(p)),
             ("report_invalid_handshake", |m, p| {
                 m.report_invalid_handshake(p)
@@ -1625,6 +1846,119 @@ mod tests {
             manager.tracked_peer_count(),
             4,
             "disconnecting sheds session headroom back to max_tracked_peers while keeping all bans"
+        );
+    }
+
+    #[test]
+    fn simultaneous_dial_to_same_peer_is_recognized_as_already_connected() {
+        let mut manager = PeerManager::new();
+        let peer = test_peer_id();
+        let lo = SubnetKey::Ipv4([127, 0, 0]);
+        assert!(!manager.is_connected(&peer));
+        assert!(manager.note_connected(peer, Some(lo)));
+        assert!(manager.is_connected(&peer));
+        assert!(!manager.note_connected(peer, Some(lo)));
+        assert!(manager.is_connected(&peer));
+        assert!(manager.note_disconnected(&peer));
+        assert!(!manager.is_connected(&peer));
+    }
+
+    #[test]
+    fn ipv6_slash48_and_ipv4_mapped_share_eclipse_ceiling() {
+        let mut pm = PeerManager::new();
+        pm.set_max_peers_per_subnet(2);
+        let v6_a: libp2p::Multiaddr = "/ip6/2001:db8:cafe:1::1/tcp/30333".parse().unwrap();
+        let v6_b: libp2p::Multiaddr = "/ip6/2001:db8:cafe:2::9/tcp/30333".parse().unwrap();
+        let v6_other: libp2p::Multiaddr = "/ip6/2001:db8:beef:1::1/tcp/30333".parse().unwrap();
+        let key_a = peer_subnet_key(&v6_a);
+        let key_b = peer_subnet_key(&v6_b);
+        assert_eq!(key_a, key_b, "two /64s inside the same /48 share one key");
+        assert!(pm.note_connected(test_peer_id(), key_a));
+        assert!(pm.note_connected(test_peer_id(), key_b));
+        assert!(
+            !pm.can_admit_subnet(key_a),
+            "third IPv6 peer from the same /48 must be rejected"
+        );
+        assert!(
+            pm.can_admit_subnet(peer_subnet_key(&v6_other)),
+            "distinct IPv6 /48 remains admissible"
+        );
+
+        let v4: libp2p::Multiaddr = "/ip4/203.0.113.7/tcp/30333".parse().unwrap();
+        let v4_mapped: libp2p::Multiaddr = "/ip6/::ffff:203.0.113.99/tcp/30333".parse().unwrap();
+        assert_eq!(
+            peer_subnet_key(&v4),
+            peer_subnet_key(&v4_mapped),
+            "IPv4-mapped IPv6 must share the IPv4 /24 bucket"
+        );
+        let v6_lo: libp2p::Multiaddr = "/ip6/::1/tcp/30333".parse().unwrap();
+        assert_eq!(peer_subnet_key(&v6_lo), None);
+    }
+
+    #[test]
+    fn relayed_vote_and_blob_rate_exhaustion_demotes_without_banning_relayer() {
+        let mut pm = PeerManager::new();
+        let relay = test_peer_id();
+        let flooder = test_peer_id();
+
+        for _ in 0..300 {
+            let _ = pm.check_vote_rate_limit_from(&relay, false);
+            let _ = pm.check_blob_rate_limit_from(&relay, false);
+        }
+        assert!(
+            !pm.is_banned(&relay),
+            "honest relayer must not be auto-banned when forwarding flooded votes/blobs"
+        );
+        assert_eq!(pm.get_score(&relay), MIN_SCORE + 1);
+
+        for _ in 0..300 {
+            let _ = pm.check_vote_rate_limit_from(&flooder, true);
+        }
+        assert!(
+            pm.is_banned(&flooder),
+            "direct author flooding vote bucket must still be banned"
+        );
+    }
+
+    #[test]
+    fn repeated_unanswered_sync_strikes_ban_after_grace_window() {
+        let mut pm = PeerManager::new();
+        let handshaker = test_peer_id();
+        let flaky = test_peer_id();
+        let staller = test_peer_id();
+
+        pm.report_unanswered_request(&handshaker);
+        pm.report_unanswered_request(&handshaker);
+        assert!(
+            !pm.is_banned(&handshaker),
+            "isolated unanswered sync requests must only demote, not ban"
+        );
+        // Non-sync good behavior (e.g. handshakes or gossip) must NOT clear
+        // unanswered sync strikes.
+        pm.report_good_behavior(&handshaker);
+        pm.report_unanswered_request(&handshaker);
+        pm.report_unanswered_request(&handshaker);
+        assert!(
+            pm.is_banned(&handshaker),
+            "non-sync good behavior must not prevent banning after MAX_UNANSWERED_SYNC_STRIKES"
+        );
+
+        pm.report_unanswered_request(&flaky);
+        pm.report_unanswered_request(&flaky);
+        pm.report_sync_success(&flaky);
+        pm.report_unanswered_request(&flaky);
+        pm.report_unanswered_request(&flaky);
+        assert!(
+            !pm.is_banned(&flaky),
+            "actual sync data delivery must reset consecutive unanswered sync strikes"
+        );
+
+        for _ in 0..MAX_UNANSWERED_SYNC_STRIKES {
+            pm.report_unanswered_request(&staller);
+        }
+        assert!(
+            pm.is_banned(&staller),
+            "peer that persistently leaves sync requests unanswered must be banned"
         );
     }
 }

@@ -60,6 +60,7 @@ mod gates {
     pub mod cargo_vet;
     pub mod chain_id_is_not_hardcoded;
     pub mod ci_workflow_guards;
+    pub mod classical_crypto_is_paired;
     pub mod clippy_extra;
     pub mod coding_audit_samples_the_relationship;
     pub mod consensus_maps_ordered;
@@ -109,9 +110,12 @@ mod gates {
     pub mod named_tests;
     pub mod network_hardening_gate;
     pub mod no_conflict_markers;
+    pub mod no_constant_security_verdicts;
     pub mod no_idle_code;
     pub mod no_new_shell_gates;
     pub mod no_orphan_source_files;
+    pub mod no_out_of_block_consensus_writes;
+    pub mod no_pairing_snark_in_verification_path;
     pub mod no_unicode_dashes;
     pub mod no_upstream_brands;
     pub mod node_classification_gate;
@@ -121,6 +125,10 @@ mod gates {
     pub mod parallel_execution;
     pub mod pinned_downloads;
     pub mod poa_compliance_gate;
+    pub mod pq_claims_are_backed;
+    pub mod pq_core_gate;
+    pub mod pq_ctx_is_bound;
+    pub mod pq_scan;
     pub mod proof_deps_are_exactly_pinned;
     pub mod qr_is_derivative_only;
     pub mod quantum_account;
@@ -135,6 +143,7 @@ mod gates {
     pub mod repair_fires;
     pub mod required_tests;
     pub mod rust_literals;
+    pub mod scheme_is_never_inferred;
     pub mod security_parameters;
     pub mod security_quality_wired;
     pub mod security_scans_can_fail;
@@ -151,6 +160,7 @@ mod gates {
     pub mod suppressions_are_justified;
     pub mod tee_trust_boundary_is_structural;
     pub mod test_modules_can_see_what_they_test;
+    pub mod testnet_runtime_hardening;
     pub mod the_image_builds_what_the_manifest_declares;
     pub mod three_is_recipe_only;
     pub mod threshold_rates;
@@ -209,6 +219,14 @@ const GATES: &[Gate] = &[
         self_test: gates::zkvm_immune_regeneration::self_test,
     },
     Gate {
+        name: "security-quality-tools-are-wired",
+        replaces: None,
+        run: gates::security_quality_wired::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::security_quality_wired::self_test,
+    },
+    Gate {
         name: "quantum-account",
         replaces: None,
         run: gates::quantum_account::run,
@@ -262,6 +280,30 @@ const GATES: &[Gate] = &[
         run: gates::minting_paths_are_counted::run,
         run_args: None,
         self_test: gates::minting_paths_are_counted::self_test,
+        run_log: None,
+    },
+    Gate {
+        name: "no-constant-security-verdicts",
+        replaces: None,
+        run: gates::no_constant_security_verdicts::run,
+        run_args: None,
+        self_test: gates::no_constant_security_verdicts::self_test,
+        run_log: None,
+    },
+    Gate {
+        name: "pq-claims-are-backed",
+        replaces: None,
+        run: gates::pq_claims_are_backed::run,
+        run_args: None,
+        self_test: gates::pq_claims_are_backed::self_test,
+        run_log: None,
+    },
+    Gate {
+        name: "no-pairing-snark-in-verification-path",
+        replaces: None,
+        run: gates::no_pairing_snark_in_verification_path::run,
+        run_args: None,
+        self_test: gates::no_pairing_snark_in_verification_path::self_test,
         run_log: None,
     },
     Gate {
@@ -609,6 +651,14 @@ const GATES: &[Gate] = &[
         self_test: gates::network_hardening_gate::self_test,
     },
     Gate {
+        name: "testnet-runtime-hardening",
+        replaces: None,
+        run: gates::testnet_runtime_hardening::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::testnet_runtime_hardening::self_test,
+    },
+    Gate {
         name: "economy-invariants",
         replaces: Some("check-economy-invariants.sh"),
         run: |_| {
@@ -675,14 +725,6 @@ const GATES: &[Gate] = &[
         run_log: None,
         run_args: None,
         self_test: gates::ci_workflow_guards::self_test,
-    },
-    Gate {
-        name: "security-quality-tools-are-wired",
-        replaces: None,
-        run: gates::security_quality_wired::run,
-        run_log: None,
-        run_args: None,
-        self_test: gates::security_quality_wired::self_test,
     },
     Gate {
         name: "genesis-schema",
@@ -1295,6 +1337,14 @@ const GATES: &[Gate] = &[
         self_test: gates::consensus_state_only_changes_in_blocks::self_test,
     },
     Gate {
+        name: "no-out-of-block-consensus-writes",
+        replaces: None,
+        run: gates::no_out_of_block_consensus_writes::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::no_out_of_block_consensus_writes::self_test,
+    },
+    Gate {
         name: "release-profile-pins",
         replaces: None,
         run: gates::release_profile_pins::run,
@@ -1309,6 +1359,42 @@ const GATES: &[Gate] = &[
         run_log: None,
         run_args: None,
         self_test: gates::one_house_guards::self_test,
+    },
+    Gate {
+        name: "classical-crypto-is-paired",
+        replaces: None,
+        run: gates::classical_crypto_is_paired::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::classical_crypto_is_paired::self_test,
+    },
+    Gate {
+        name: "scheme-is-never-inferred",
+        replaces: None,
+        run: gates::scheme_is_never_inferred::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::scheme_is_never_inferred::self_test,
+    },
+    Gate {
+        name: "pq-ctx-is-bound",
+        replaces: None,
+        run: gates::pq_ctx_is_bound::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::pq_ctx_is_bound::self_test,
+    },
+    Gate {
+        name: "pq-core-gate",
+        replaces: None,
+        run: |_| {
+            Err(String::from(
+                "pq-core-gate reads a cargo test log; pass its path as an argument",
+            ))
+        },
+        run_log: Some(gates::pq_core_gate::run),
+        run_args: None,
+        self_test: gates::pq_core_gate::self_test,
     },
 ];
 

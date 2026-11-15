@@ -2,7 +2,7 @@
 //! `AiDatasetMetadata` in budlum/main `src/ai_inference/mod.rs` (mirror types).
 //!
 //! The permission rules are not copied here; they are queried from the chain
-//! state (K3).
+//! state.
 
 use crate::model::Hash32;
 

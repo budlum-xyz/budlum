@@ -208,7 +208,7 @@ mod tests {
         }
     }
 
-    /// BLG-0615: a symbol that names a block at or above `k` (or at or above
+    /// A symbol that names a block at or above `k` (or at or above
     /// 64) used to give `Some(wrong blocks)`.
     #[test]
     fn lt_decode_refuses_an_index_outside_the_block_range() {

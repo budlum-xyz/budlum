@@ -222,7 +222,7 @@ mod tests {
         );
     }
 
-    /// BLG-0126 (P05-F19): every named refusal is EXERCISED, not just
+    /// Every named refusal is EXERCISED, not just
     /// declared.
     #[test]
     fn claim_refusals_are_exercised() {

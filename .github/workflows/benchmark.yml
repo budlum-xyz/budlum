@@ -32,7 +32,25 @@ jobs:
         with:
           shared-key: budlum-core
       - name: Install protoc
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
+        run: |
+          set -euo pipefail
+          if ! command -v protoc >/dev/null 2>&1; then
+            case "$(uname -m)" in
+              aarch64|arm64)
+                PROTOC_ZIP=protoc-29.3-linux-aarch_64.zip
+                PROTOC_SHA256=6427349140e01f06e049e707a58709a4f221ae73ab9a0425bc4a00c8d0e1ab32
+                ;;
+              *)
+                PROTOC_ZIP=protoc-29.3-linux-x86_64.zip
+                PROTOC_SHA256=3e866620c5be27664f3d2fa2d656b5f3e09b5152b42f1bedbf427b333e90021a
+                ;;
+            esac
+            curl -sSfL --retry 5 --retry-all-errors --retry-delay 2 -o /tmp/protoc.zip \
+              "https://github.com/protocolbuffers/protobuf/releases/download/v29.3/${PROTOC_ZIP}"
+            echo "${PROTOC_SHA256}  /tmp/protoc.zip" | sha256sum -c -
+            sudo unzip -q -o /tmp/protoc.zip -d /usr/local bin/protoc 'include/*'
+            rm -f /tmp/protoc.zip
+          fi
       # The micro benches are plain binaries (`[[bin]] bench_*` in
       # Cargo.toml), not Criterion targets: there is no bench target named
       # `micro` or `single_node`, and with pipefail on that error is now
@@ -62,7 +80,7 @@ jobs:
           (cd budzero && cargo bench --bench canonical_programs --features "" 2>&1) | tee /tmp/bench-budzero-canonical.txt
           (cd budzero && cargo bench --bench proof_baseline 2>&1) | tee /tmp/bench-budzero-baseline.txt
           echo "BudZero bench runs completed."
-      # BLG-1049 (P58-F03, decision B interim): the job is named "Benchmark
+      # The job is named "Benchmark
       # Regression" but had no baseline and no threshold - it could not fail
       # on a regression. The interim gate makes a vacuous run fail: every
       # micro bench must emit its throughput line and every BudZero bench its
