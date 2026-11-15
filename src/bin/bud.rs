@@ -2779,7 +2779,7 @@ fn run_bns_set_primary(
         rpc_url,
         signer,
         &key,
-        TransactionType::BnsSetPrimaryName,
+        TransactionType::BnsSetPrimary,
         0,
         data,
     )
@@ -3238,21 +3238,48 @@ fn resolve_bud_recipient_verified(rpc_url: &str, name: &str) -> Result<Address, 
         p
     };
     let proof_json = rpc_call(rpc_url, "bud_bnsGetProof", serde_json::json!([parent]))?;
-    let (_, verified_owner) = parse_and_verify_bns_proof_json(&proof_json, &parent)?;
-    if verified_owner.is_none() {
-        return Err(format!(
-            "`{parent}` is not registered in verified BNS state"
-        ));
-    }
-    let resolved = rpc_call(rpc_url, "bud_bnsResolve", serde_json::json!([name]))?;
-    let raw = resolved
-        .as_str()
-        .ok_or_else(|| format!("`{name}` has no active forwarding target address"))?;
-    let addr = parse_address(raw.strip_prefix("0x").unwrap_or(raw))?;
+    let (proof, verified_owner) = parse_and_verify_bns_proof_json(&proof_json, &parent)?;
+    let owner = verified_owner
+        .ok_or_else(|| format!("`{parent}` is not registered in verified BNS state"))?;
+    let addr = recipient_from_verified_proof(&proof, owner, name, &parent)?;
     if addr == Address::zero() {
         return Err("resolved BNS recipient cannot be the zero address".into());
     }
     Ok(addr)
+}
+
+/// The address `name` pays, read from the proof that was just verified.
+///
+/// The target comes from the extras the leaf commits to, never from a
+/// second, unproven answer: a node that proved the record honestly could
+/// still name any address in a plain `bud_bnsResolve` reply. A name with an
+/// empty address record resolves to its owner; a subdomain resolves to its
+/// own address or to nothing.
+fn recipient_from_verified_proof(
+    proof: &budlum_core::bns::types::BnsStateProof,
+    owner: Address,
+    name: &str,
+    parent: &str,
+) -> Result<Address, String> {
+    let extras = proof
+        .entry
+        .as_ref()
+        .and_then(|branch| branch.extras.as_ref())
+        .ok_or_else(|| {
+            format!("the proof of `{parent}` discloses no extras, so no address is bound")
+        })?;
+    if name == parent {
+        return Ok(extras.address.unwrap_or(owner));
+    }
+    let label = name
+        .strip_suffix(parent)
+        .and_then(|head| head.strip_suffix('.'))
+        .ok_or_else(|| format!("invalid subdomain recipient `{name}`"))?;
+    extras
+        .subdomains
+        .get(label)
+        .and_then(|sub| sub.address)
+        .ok_or_else(|| format!("`{name}` has no active forwarding target address"))
 }
 
 fn run_bns_resolve(rpc_url: &str, name: &str, verify_proof: bool) -> Result<(), String> {
@@ -4082,6 +4109,81 @@ fn run_cli_conformance(samples: usize) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The recipient of a `.bud` payment is read from the extras the proved
+    /// leaf commits to: the address record, the owner when it is empty, and
+    /// for a subdomain its own address or nothing.
+    #[test]
+    fn a_bud_recipient_is_read_from_the_proved_record_and_falls_back_to_the_owner() {
+        use budlum_core::bns::types::{
+            BnsBranchExtras, BnsMerkleBranch, BnsStateProof, SubdomainRecord,
+        };
+        let owner = Address::from([0x11; 32]);
+        let vault = Address::from([0x22; 32]);
+        let pay = Address::from([0x33; 32]);
+        let proof_with = |address: Option<Address>, extras: bool| BnsStateProof {
+            name: "ayaz.bud".to_string(),
+            included: true,
+            bns_root: [0; 32],
+            meta_digest: [0; 32],
+            names_count: 1,
+            epoch: 1,
+            entry: Some(BnsMerkleBranch {
+                name: "ayaz.bud".to_string(),
+                owner,
+                address,
+                expires_at: 50,
+                content: None,
+                storage_root: None,
+                extras_digest: [0; 32],
+                leaf: [0; 32],
+                siblings: Vec::new(),
+                directions: Vec::new(),
+                leaf_index: None,
+                tree_size: None,
+                extras: extras.then(|| BnsBranchExtras {
+                    address,
+                    consensus_domain_id: None,
+                    storage_domain_id: None,
+                    storage_root_height: None,
+                    subdomains: std::collections::BTreeMap::from([
+                        (
+                            "pay".to_string(),
+                            SubdomainRecord {
+                                owner,
+                                address: Some(pay),
+                                content: None,
+                            },
+                        ),
+                        (
+                            "idle".to_string(),
+                            SubdomainRecord {
+                                owner,
+                                address: None,
+                                content: None,
+                            },
+                        ),
+                    ]),
+                    records: std::collections::BTreeMap::new(),
+                }),
+            }),
+            predecessor: None,
+            successor: None,
+        };
+        let read = |proof: &BnsStateProof, name: &str| {
+            recipient_from_verified_proof(proof, owner, name, "ayaz.bud")
+        };
+        let set = proof_with(Some(vault), true);
+        assert_eq!(read(&set, "ayaz.bud"), Ok(vault));
+        assert_eq!(read(&set, "pay.ayaz.bud"), Ok(pay));
+        assert!(read(&set, "idle.ayaz.bud").is_err());
+        assert!(read(&set, "shop.ayaz.bud").is_err());
+        assert!(read(&set, "pay.kaya.bud").is_err());
+        // An empty address record pays the owner.
+        assert_eq!(read(&proof_with(None, true), "ayaz.bud"), Ok(owner));
+        // No disclosed extras: nothing binds an address, so nothing is paid.
+        assert!(read(&proof_with(Some(vault), false), "ayaz.bud").is_err());
+    }
 
     #[test]
     fn faucet_request_command_requires_origin_and_owned_address() {

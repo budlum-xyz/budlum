@@ -4709,9 +4709,14 @@ impl BudlumApiServer for RpcServer {
                 None::<()>,
             ));
         }
-        let proof = self.chain.bns_prove_name(name).await.ok_or_else(|| {
-            ErrorObjectOwned::owned(-32000, "Failed to query BNS state proof", None::<()>)
-        })?;
+        let anchored = self
+            .chain
+            .bns_prove_name_at_tip(name)
+            .await
+            .ok_or_else(|| {
+                ErrorObjectOwned::owned(-32000, "Failed to query BNS state proof", None::<()>)
+            })?;
+        let proof = anchored.proof;
         let extras_json = |e: &crate::bns::types::BnsBranchExtras| -> serde_json::Value {
             serde_json::json!({
                 "address": e.address.map(|a| Self::to_0x_hash(a.to_hex())),
@@ -4756,6 +4761,11 @@ impl BudlumApiServer for RpcServer {
             "meta_digest": format!("0x{}", hex::encode(proof.meta_digest)),
             "names_count": proof.names_count,
             "epoch": proof.epoch,
+            // The block the registry was read at. A client checks the header
+            // at `height` and takes the registry root from a source it
+            // trusts for that header; it never takes `bns_root` from here.
+            "height": anchored.height,
+            "state_root": anchored.state_root,
             "entry": proof.entry.as_ref().map(branch_json),
             "predecessor": proof.predecessor.as_ref().map(branch_json),
             "successor": proof.successor.as_ref().map(branch_json),
@@ -4892,7 +4902,7 @@ impl BudlumApiServer for RpcServer {
             authorization: None,
             chain_id: self.chain.get_chain_id().await,
             signature_version: crate::core::transaction::SIGNATURE_VERSION_V5,
-            tx_type: crate::core::transaction::TransactionType::BnsSetPrimaryName,
+            tx_type: crate::core::transaction::TransactionType::BnsSetPrimary,
         };
         let tx = self.finish_template(tx).await?;
         Ok(serde_json::json!({

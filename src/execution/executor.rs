@@ -1545,7 +1545,7 @@ impl Executor {
                 })?;
                 sender.nonce = Self::checked_next_nonce(sender.nonce)?;
             }
-            TransactionType::BnsSetPrimaryName => {
+            TransactionType::BnsSetPrimary => {
                 if tx.amount != 0 || tx.to != Address::zero() {
                     return Err(BudlumError::validation(
                         "bns_invalid_set_primary",
