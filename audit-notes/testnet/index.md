@@ -1,0 +1,270 @@
+# Testnet directive index
+
+External source: supplied main directive; SHA-256 `1c10ae7e4f5ce68736924a5d1f27ea073926a93f08e996ae5ec3c75c50a6327d`; 6044 lines. The directive says not to commit the source document. No source attachment is copied here.
+
+This index is incomplete. The source anchors below are an inventory of sections, not evidence that each requirement was interpreted, implemented or tested. Enumerate each requirement and add its separate design before marking an item complete. The audit directive requires work on features the source labels closed as well; activation must not be assumed safe without a protocol design and tests.
+
+## Cross-cutting requirements to trace first
+
+- [ ] G-1: consensus state changes only within blocks; RPC is read-only or submits signed transactions.
+- [ ] G-2: deterministic state and roots across x86_64 and aarch64.
+- [ ] G-3: fixed supply and accounted balance increases.
+- [ ] G-4: refused transactions do not mutate state.
+- [ ] G-5: length-prefixed hash inputs and inventoried domain tags.
+- [ ] G-6: new capabilities are wired through a production path in the same PR.
+- [ ] G-7: disabled testnet capabilities refuse explicitly and have rejection tests.
+- [ ] G-8: domain sovereignty and no critical dependency on a team-operated service.
+- [ ] D-15: validators perform storage duties; reconcile registration, custody, audit and repair.
+- [ ] S-2: no new allow or ignore, disabled gates, baseline inflation, or old pins.
+- [ ] S-3: observe each regression fail before its fix and include red evidence.
+- [ ] KR-21: preserve the two README definition blocks byte for byte and maintain matching structure.
+
+## Feature and launch inventory
+
+- [ ] Storage: B.U.D. 3.0 format, content addressing, encoding, placement, encryption, challenges, repair and obsolete storage removal.
+- [ ] Validators: full and mobile roles, committee finality, presence, handoff, slashing and real Android rehearsal.
+- [ ] Execution: EVM, WASM/CosmWasm, SVM, Move/Aptos and BudZero; native ecosystem tooling and atomic cross-environment calls.
+- [ ] Settlement: finality adapters, domain lifecycle, proof binding, replay stores, bridge asset registration and multi-node replay.
+- [ ] Wallet: key derivation, authentication, signing, storage, RPC and PoA isolation.
+- [ ] Privacy, AI and ecosystem modules: account for the source requirements, state paths, budgets and threat models.
+- [ ] Testnet expansion and source-closed items: write an explicit activation and migration design and test the resulting behavior.
+- [ ] Launch: complete the source testnet launch gates, rehearsals, published measurements, security reviews and documentation.
+- [ ] BudZero verifier: keep the 64-depth VerifyMerkle production path closed in these PRs.
+
+## Source section anchors
+
+Each source section and subsection below is pending item-by-item interpretation and verification. Line ranges may overlap through nesting.
+
+- [ ] Section `0.1`: source lines 51-59.
+- [ ] Section `0.2`: source lines 60-66.
+- [ ] Section `0.3`: source lines 67-74.
+- [ ] Section `0.4`: source lines 75-81.
+- [ ] Section `0.5`: source lines 82-91.
+- [ ] Section `1.1`: source lines 92-101.
+- [ ] Section `1.2`: source lines 102-114.
+- [ ] Section `1.3`: source lines 115-128.
+- [ ] Section `1.4`: source lines 129-136.
+- [ ] Section `1.5`: source lines 137-176.
+- [ ] Section `2.1`: source lines 177-185.
+- [ ] Section `2.2`: source lines 186-267.
+- [ ] Section `2.3`: source lines 268-279.
+- [ ] Section `2.4`: source lines 280-305.
+- [ ] Section `3.1`: source lines 306-318.
+- [ ] Section `3.2`: source lines 319-338.
+- [ ] Section `3.3`: source lines 339-348.
+- [ ] Section `3.4`: source lines 349-360.
+- [ ] Section `3.5`: source lines 361-369.
+- [ ] Section `3.6`: source lines 370-383.
+- [ ] Section `4.1`: source lines 384-417.
+- [ ] Section `4.2`: source lines 418-425.
+- [ ] Section `4.3`: source lines 426-482.
+- [ ] Section `5.1`: source lines 483-491.
+- [ ] Section `5.2`: source lines 492-530.
+- [ ] Section `5.3`: source lines 531-541.
+- [ ] Section `5.4`: source lines 542-563.
+- [ ] Section `5.5`: source lines 564-579.
+- [ ] Section `5.6`: source lines 580-592.
+- [ ] Section `5.7`: source lines 593-607.
+- [ ] Section `6.1`: source lines 608-656.
+- [ ] Section `6.1.1`: source lines 610-622.
+- [ ] Section `6.1.2`: source lines 623-629.
+- [ ] Section `6.1.3`: source lines 630-644.
+- [ ] Section `6.1.4`: source lines 645-656.
+- [ ] Section `6.2`: source lines 657-681.
+- [ ] Section `6.3`: source lines 682-739.
+- [ ] Section `6.3.1`: source lines 684-687.
+- [ ] Section `6.3.2`: source lines 688-717.
+- [ ] Section `6.3.3`: source lines 718-739.
+- [ ] Section `6.4`: source lines 740-793.
+- [ ] Section `6.5`: source lines 794-808.
+- [ ] Section `6.6`: source lines 809-958.
+- [ ] Section `6.6.1`: source lines 811-848.
+- [ ] Section `6.6.2`: source lines 849-863.
+- [ ] Section `6.6.3`: source lines 864-877.
+- [ ] Section `6.6.4`: source lines 878-901.
+- [ ] Section `6.6.5`: source lines 902-937.
+- [ ] Section `6.6.6`: source lines 938-958.
+- [ ] Section `6.7`: source lines 959-968.
+- [ ] Section `6.8`: source lines 969-995.
+- [ ] Section `6.8.1`: source lines 971-979.
+- [ ] Section `6.8.2`: source lines 980-985.
+- [ ] Section `6.8.3`: source lines 986-995.
+- [ ] Section `6.9`: source lines 996-1054.
+- [ ] Section `6.9.1`: source lines 998-1007.
+- [ ] Section `6.9.2`: source lines 1008-1017.
+- [ ] Section `6.9.3`: source lines 1018-1026.
+- [ ] Section `6.9.4`: source lines 1027-1048.
+- [ ] Section `6.9.5`: source lines 1049-1054.
+- [ ] Section `6.10`: source lines 1055-1066.
+- [ ] Section `6.11`: source lines 1067-1095.
+- [ ] Section `6.11.1`: source lines 1069-1074.
+- [ ] Section `6.11.2`: source lines 1075-1085.
+- [ ] Section `6.11.3`: source lines 1086-1095.
+- [ ] Section `6.12`: source lines 1096-1104.
+- [ ] Section `6.13`: source lines 1105-1113.
+- [ ] Section `6.14`: source lines 1114-1125.
+- [ ] Section `6.15`: source lines 1126-1131.
+- [ ] Section `6.16`: source lines 1132-1140.
+- [ ] Section `6.17`: source lines 1141-1149.
+- [ ] Section `6.18`: source lines 1150-1157.
+- [ ] Section `6.19`: source lines 1158-1181.
+- [ ] Section `6.20`: source lines 1182-1193.
+- [ ] Section `6.21`: source lines 1194-1241.
+- [ ] Section `6.21.1`: source lines 1198-1211.
+- [ ] Section `6.21.2`: source lines 1212-1217.
+- [ ] Section `6.21.3`: source lines 1218-1222.
+- [ ] Section `6.21.4`: source lines 1223-1229.
+- [ ] Section `6.21.5`: source lines 1230-1234.
+- [ ] Section `6.21.6`: source lines 1235-1241.
+- [ ] Section `6.22`: source lines 1242-1274.
+- [ ] Section `6.22.1`: source lines 1244-1260.
+- [ ] Section `6.22.2`: source lines 1261-1274.
+- [ ] Section `6.23`: source lines 1275-1324.
+- [ ] Section `7.1`: source lines 1325-1334.
+- [ ] Section `7.2`: source lines 1335-1355.
+- [ ] Section `7.3`: source lines 1356-1378.
+- [ ] Section `7.4`: source lines 1379-1424.
+- [ ] Section `7.4.1`: source lines 1381-1384.
+- [ ] Section `7.4.2`: source lines 1385-1394.
+- [ ] Section `7.4.3`: source lines 1395-1401.
+- [ ] Section `7.4.4`: source lines 1402-1407.
+- [ ] Section `7.4.5`: source lines 1408-1412.
+- [ ] Section `7.4.6`: source lines 1413-1418.
+- [ ] Section `7.4.7`: source lines 1419-1424.
+- [ ] Section `7.5`: source lines 1425-1446.
+- [ ] Section `7.5.1`: source lines 1427-1436.
+- [ ] Section `7.5.2`: source lines 1437-1442.
+- [ ] Section `7.5.3`: source lines 1443-1446.
+- [ ] Section `7.6`: source lines 1447-1462.
+- [ ] Section `7.7`: source lines 1463-1470.
+- [ ] Section `7.8`: source lines 1471-1482.
+- [ ] Section `7.9`: source lines 1483-1577.
+- [ ] Section `7.9.1`: source lines 1485-1492.
+- [ ] Section `7.9.2`: source lines 1493-1499.
+- [ ] Section `7.9.3`: source lines 1500-1519.
+- [ ] Section `7.9.4`: source lines 1520-1529.
+- [ ] Section `7.9.5`: source lines 1530-1536.
+- [ ] Section `7.9.6`: source lines 1537-1543.
+- [ ] Section `7.9.7`: source lines 1544-1550.
+- [ ] Section `7.9.8`: source lines 1551-1557.
+- [ ] Section `7.9.9`: source lines 1558-1565.
+- [ ] Section `7.9.10`: source lines 1566-1571.
+- [ ] Section `7.9.11`: source lines 1572-1577.
+- [ ] Section `7.10`: source lines 1578-1587.
+- [ ] Section `7.11`: source lines 1588-1606.
+- [ ] Section `7.12`: source lines 1607-1632.
+- [ ] Section `8.1`: source lines 1633-1640.
+- [ ] Section `8.2`: source lines 1641-1665.
+- [ ] Section `8.3`: source lines 1666-1749.
+- [ ] Section `8.3.1`: source lines 1668-1689.
+- [ ] Section `8.3.2`: source lines 1690-1699.
+- [ ] Section `8.3.3`: source lines 1700-1730.
+- [ ] Section `8.3.4`: source lines 1731-1737.
+- [ ] Section `8.3.5`: source lines 1738-1749.
+- [ ] Section `8.4`: source lines 1750-1783.
+- [ ] Section `8.4.1`: source lines 1752-1761.
+- [ ] Section `8.4.2`: source lines 1762-1783.
+- [ ] Section `8.5`: source lines 1784-1802.
+- [ ] Section `8.6`: source lines 1803-1848.
+- [ ] Section `8.6.1`: source lines 1805-1818.
+- [ ] Section `8.6.2`: source lines 1819-1841.
+- [ ] Section `8.6.3`: source lines 1842-1848.
+- [ ] Section `8.7`: source lines 1849-1880.
+- [ ] Section `8.7.1`: source lines 1851-1859.
+- [ ] Section `8.7.2`: source lines 1860-1869.
+- [ ] Section `8.7.3`: source lines 1870-1880.
+- [ ] Section `8.8`: source lines 1881-1901.
+- [ ] Section `8.9`: source lines 1902-1921.
+- [ ] Section `8.10`: source lines 1922-1945.
+- [ ] Section `8.11`: source lines 1946-1978.
+- [ ] Section `8.11.1`: source lines 1948-1960.
+- [ ] Section `8.11.2`: source lines 1961-1964.
+- [ ] Section `8.11.3`: source lines 1965-1968.
+- [ ] Section `8.11.4`: source lines 1969-1972.
+- [ ] Section `8.11.5`: source lines 1973-1978.
+- [ ] Section `8.12`: source lines 1979-2005.
+- [ ] Section `8.12.1`: source lines 1981-1984.
+- [ ] Section `8.12.2`: source lines 1985-1996.
+- [ ] Section `8.12.3`: source lines 1997-2005.
+- [ ] Section `8.13`: source lines 2006-2021.
+- [ ] Section `8.14`: source lines 2022-2031.
+- [ ] Section `8.15`: source lines 2032-2041.
+- [ ] Section `8.16`: source lines 2042-2067.
+- [ ] Section `9.1`: source lines 2068-2077.
+- [ ] Section `9.2`: source lines 2078-2094.
+- [ ] Section `9.3`: source lines 2095-2179.
+- [ ] Section `9.3.1`: source lines 2097-2102.
+- [ ] Section `9.3.2`: source lines 2103-2109.
+- [ ] Section `9.3.3`: source lines 2110-2120.
+- [ ] Section `9.3.4`: source lines 2121-2129.
+- [ ] Section `9.3.5`: source lines 2130-2135.
+- [ ] Section `9.3.6`: source lines 2136-2145.
+- [ ] Section `9.3.7`: source lines 2146-2153.
+- [ ] Section `9.3.8`: source lines 2154-2161.
+- [ ] Section `9.3.9`: source lines 2162-2167.
+- [ ] Section `9.3.10`: source lines 2168-2173.
+- [ ] Section `9.3.11`: source lines 2174-2179.
+- [ ] Section `9.4`: source lines 2180-2185.
+- [ ] Section `9.5`: source lines 2186-2193.
+- [ ] Section `9.6`: source lines 2194-2197.
+- [ ] Section `9.7`: source lines 2198-2201.
+- [ ] Section `9.8`: source lines 2202-2216.
+- [ ] Section `10.1`: source lines 2217-2223.
+- [ ] Section `10.2`: source lines 2224-2236.
+- [ ] Section `10.3`: source lines 2237-2256.
+- [ ] Section `10.4`: source lines 2257-2268.
+- [ ] Section `10.5`: source lines 2269-2275.
+- [ ] Section `10.6`: source lines 2276-2288.
+- [ ] Section `10.7`: source lines 2289-2298.
+- [ ] Section `11.1`: source lines 2299-2307.
+- [ ] Section `11.2`: source lines 2308-2320.
+- [ ] Section `11.3`: source lines 2321-2331.
+- [ ] Section `11.4`: source lines 2332-2349.
+- [ ] Section `11.5`: source lines 2350-2362.
+- [ ] Section `11.6`: source lines 2363-2374.
+- [ ] Section `11.7`: source lines 2375-2389.
+- [ ] Section `11.8`: source lines 2390-2397.
+- [ ] Section `11.9`: source lines 2398-2404.
+- [ ] Section `11.10`: source lines 2405-2435.
+- [ ] Section `11.11`: source lines 2436-2450.
+- [ ] Section `12.1`: source lines 2451-2460.
+- [ ] Section `12.2`: source lines 2461-2467.
+- [ ] Section `12.3`: source lines 2468-2474.
+- [ ] Section `12.4`: source lines 2475-2482.
+- [ ] Section `12.5`: source lines 2483-2489.
+- [ ] Section `12.6`: source lines 2490-2495.
+- [ ] Section `12.7`: source lines 2496-2556.
+- [ ] Section `14.1`: source lines 2557-2572.
+- [ ] Section `14.2`: source lines 2573-2584.
+- [ ] Section `14.3`: source lines 2585-2804.
+- [ ] Section `14.4`: source lines 2805-2847.
+- [ ] Section `14.5`: source lines 2848-2874.
+- [ ] Section `14.6`: source lines 2875-2925.
+- [ ] Section `14.7`: source lines 2926-2935.
+- [ ] Section `15.1`: source lines 2936-2948.
+- [ ] Section `15.2`: source lines 2949-2982.
+- [ ] Section `15.3`: source lines 2983-3007.
+- [ ] Section `15.4`: source lines 3008-3019.
+- [ ] Section `15.5`: source lines 3020-3038.
+- [ ] Section `15.6`: source lines 3039-3055.
+- [ ] Section `15.7`: source lines 3056-3130.
+- [ ] Section `15.8`: source lines 3131-4420.
+- [ ] Section `16.1`: source lines 4421-4437.
+- [ ] Section `16.2`: source lines 4438-4461.
+- [ ] Section `16.3`: source lines 4462-4494.
+- [ ] Section `16.4`: source lines 4495-4502.
+- [ ] Section `16.5`: source lines 4503-4513.
+- [ ] Section `17.1`: source lines 4514-4519.
+- [ ] Section `17.2`: source lines 4520-4531.
+- [ ] Section `17.3`: source lines 4532-4542.
+- [ ] Section `17.4`: source lines 4543-4556.
+- [ ] Section `17.5`: source lines 4557-4562.
+- [ ] Section `17.6`: source lines 4563-4667.
+- [ ] Section `20.1`: source lines 4668-4676.
+- [ ] Section `20.2`: source lines 4677-4691.
+- [ ] Section `20.3`: source lines 4692-4704.
+- [ ] Section `20.4`: source lines 4705-4713.
+- [ ] Section `20.5`: source lines 4714-4720.
+- [ ] Section `20.6`: source lines 4721-6044.
+
+Appendices A, B and C are binding source material. Appendix D is research unless promoted by the source decisions. Read and enumerate each appendix separately.
