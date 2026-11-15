@@ -171,8 +171,8 @@
 
 - **Open items (not implemented):**
   - The gateway serves the manifest of the parent name for a subdomain. It
-    does not serve the content a `SubdomainRecord` names. The `bud` CLI has
-    no command for `BnsSetSubdomainContent` yet.
+    does not serve the content a `SubdomainRecord` names. The CLI command is
+    `bud bns set-subdomain-content`.
   - `NameRecord` carries two content fields (`content_id` and
     `bud3_content`). They are not merged into one `ContentRef`. The unused
     `resolver` field is gone, and the extras commitment that lost it is
