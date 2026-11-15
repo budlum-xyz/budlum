@@ -1751,6 +1751,55 @@ impl Executor {
                 })?;
                 sender.nonce = Self::checked_next_nonce(sender.nonce)?;
             }
+            TransactionType::BnsSetSubdomainContent => {
+                if tx.amount != 0 || tx.to != Address::zero() {
+                    return Err(BudlumError::validation(
+                        "bns_invalid_set_subdomain_content",
+                        "BNS set subdomain content carries no header amount or recipient",
+                    ));
+                }
+                if state.spendable_balance(&tx.from) < tx.fee {
+                    return Err(BudlumError::validation(
+                        "bns_vesting_locked",
+                        format!(
+                            "BNS set subdomain content fee exceeds spendable balance: need {}, spendable {}",
+                            tx.fee,
+                            state.spendable_balance(&tx.from)
+                        ),
+                    ));
+                }
+                let (parent, label, content): (
+                    String,
+                    String,
+                    Option<crate::storage::content_id::ContentId>,
+                ) = bincode::deserialize(&tx.data)
+                    .map_err(|e| BudlumError::validation("bns_invalid_data", e.to_string()))?;
+
+                // Same rule as `BnsSetContent`: a record points only at a
+                // public B.U.D. 3.0 object the chain holds complete. Clearing
+                // the content names nothing, so there is nothing to look up.
+                if let Some(cid) = content {
+                    if state.bud3_registry.public_object(&cid.0).is_none() {
+                        return Err(BudlumError::validation(
+                            "bns_content_unknown",
+                            "BNS set subdomain content names content that is not registered",
+                        ));
+                    }
+                }
+
+                state
+                    .bns_registry
+                    .set_subdomain_content(&parent, &label, &tx.from, content, state.epoch_index)
+                    .map_err(|e| {
+                        BudlumError::validation("bns_set_subdomain_content_failed", e.to_string())
+                    })?;
+
+                let sender = state.get_or_create(&tx.from);
+                sender.balance = sender.balance.checked_sub(tx.fee).ok_or_else(|| {
+                    BudlumError::validation("balance_underflow", "balance underflow")
+                })?;
+                sender.nonce = Self::checked_next_nonce(sender.nonce)?;
+            }
             TransactionType::BnsSetStorage => {
                 if tx.amount != 0 || tx.to != Address::zero() {
                     return Err(BudlumError::validation(

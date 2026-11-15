@@ -3052,10 +3052,11 @@ fn parse_branch_extras_json(
     };
     let mut subdomains = std::collections::BTreeMap::new();
     if let Some(map) = val.get("subdomains").and_then(serde_json::Value::as_object) {
-        for (label, owner) in map {
+        for (label, sub) in map {
             subdomains.insert(
                 label.clone(),
-                Address::from(decode_hex32_field(owner, "extras.subdomains[]")?),
+                budlum_core::bns::types::SubdomainRecord::from_json(sub)
+                    .map_err(|e| format!("extras.subdomains.{label}: {e}"))?,
             );
         }
     }

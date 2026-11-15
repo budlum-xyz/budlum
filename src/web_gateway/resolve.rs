@@ -262,9 +262,9 @@ pub fn resolve_verified<P: NameProver, R: StateRoots + ?Sized>(
             .extras
             .as_ref()
             .ok_or_else(|| GatewayError::ProofFailed("branch carries no extras".into()))?;
-        // A subdomain is an owner pointer under the name. It has no content
-        // of its own, so it serves the name's manifest once it is proven to
-        // exist.
+        // The gateway serves the name's manifest for a subdomain that is
+        // proven to exist. A subdomain record can name content of its own;
+        // serving that is not wired here yet.
         if !extras.subdomains.contains_key(sub) {
             return Err(GatewayError::NoSuchSubdomain(sub.clone()));
         }

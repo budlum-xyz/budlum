@@ -2628,6 +2628,31 @@ impl AccountState {
                     return Err("BNS subdomain does not exist".into());
                 }
             }
+            TransactionType::BnsSetSubdomainContent => {
+                if tx.amount != 0 || tx.to != Address::zero() {
+                    return Err(
+                        "BNS set subdomain content requires zero amount and recipient".into(),
+                    );
+                }
+                let (parent, sub_label, _content): (
+                    String,
+                    String,
+                    Option<crate::storage::content_id::ContentId>,
+                ) = bincode::deserialize(&tx.data)
+                    .map_err(|e| format!("Invalid BNS set subdomain content data: {e}"))?;
+                if !crate::bns::BnsRegistry::is_valid_name(&parent)
+                    || !crate::bns::BnsRegistry::is_valid_sub_label(&sub_label)
+                {
+                    return Err("Invalid BNS parent name or subdomain label".into());
+                }
+                let owner = self
+                    .bns_registry
+                    .subdomain_owner(&parent, &sub_label, self.epoch_index)
+                    .ok_or_else(|| "BNS subdomain is unknown or its parent expired".to_string())?;
+                if owner != tx.from {
+                    return Err("BNS set subdomain content requires the subdomain owner".into());
+                }
+            }
             TransactionType::BnsSetStorage => {
                 if tx.amount != 0 || tx.to != Address::zero() {
                     return Err("BNS set storage requires zero amount and recipient".into());

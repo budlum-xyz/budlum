@@ -87,7 +87,7 @@
   - **B9 ($O(\log N)$ per-name Merkle state proofs and browser verification):**
     upgrades `BnsRegistry::root()` (`BDLM_BNS_REGISTRY_V3`) to commit
     `meta_digest` (`BDLM_BNS_META_V1`) + binary `names_merkle_root`
-    (`BDLM_BNS_LEAF_V1`, `BDLM_BNS_EXTRAS_V2`, `BDLM_BNS_NODE_V1`), adds
+    (`BDLM_BNS_LEAF_V1`, `BDLM_BNS_EXTRAS_V3`, `BDLM_BNS_NODE_V1`), adds
     `prove_name` / `verify_state_proof` (supporting both inclusion and adjacent
     boundary non-existence proofs), upgrades `budlum-explorer`
     `BnsInclusionProof::PerName` to produce `Strength::Verified` against
@@ -96,7 +96,7 @@
   - **B10 (`wallet-core` `.bud` recipient validation and proof-verified transfers):**
     adds `crates/wallet-core/src/bns.rs` (`parse_recipient_input`,
     `WalletBnsProof`, `verify_bns_recipient_proof` authenticating custom
-    `record.address` via `BDLM_BNS_EXTRAS_V2` + `BDLM_BNS_LEAF_V1` +
+    `record.address` via `BDLM_BNS_EXTRAS_V3` + `BDLM_BNS_LEAF_V1` +
     `BDLM_BNS_REGISTRY_V3`), `UnsignedTransfer::to_verified_bud_recipient`, and
     transport-free `bud_bns{Resolve,ResolveFull,GetProof,ReverseResolve}` JSON-RPC
     builders/readers in `crates/wallet-core/src/rpc.rs`.
@@ -153,19 +153,30 @@
     `storage_root_height` says when it was bound.
   - **`bud_bnsPrepareSetStorage`:** builds the `BnsSetStorage` template and
     refuses a root that is not 32 bytes.
+  - **Subdomain records:** a subdomain is a `SubdomainRecord { owner,
+    address, content }`. `register_subdomain` refuses a label that exists
+    with `NameTaken`; the parent owner removes it first. `BnsSetSubdomainContent`
+    (wire tag `79`) is signed by the subdomain owner, not the parent owner,
+    sets or clears the content, is refused with `bns_content_unknown` for
+    content that is not a complete public B.U.D. 3.0 object, and is refused
+    once the parent name expired. `bud_bnsResolveSubdomainContent` and
+    `bud_bnsPrepareSetSubdomainContent` expose it. RPC answers and proofs
+    carry each subdomain as `{owner, address, content}`, and the extras
+    commitment that binds all three is `BDLM_BNS_EXTRAS_V3`. A transfer of
+    the parent still clears every subdomain.
   - **Gateway answers:** an expired record whose proof folds to the verified
     root is a 404, a proof that does not fold is a 502, two nodes that answer
     with different heights disagree, and a site policy of `'none'` narrows the
     baseline.
 
 - **Open items (not implemented):**
-  - A subdomain is an owner pointer (`BTreeMap<String, Address>`). There is
-    no `SubdomainRecord`, no `BnsSetSubdomainContent` and no subdomain content
-    RPC, so a subdomain serves the content of its parent name.
+  - The gateway serves the manifest of the parent name for a subdomain. It
+    does not serve the content a `SubdomainRecord` names. The `bud` CLI has
+    no command for `BnsSetSubdomainContent` yet.
   - `NameRecord` carries two content fields (`content_id` and
     `bud3_content`). They are not merged into one `ContentRef`. The unused
     `resolver` field is gone, and the extras commitment that lost it is
-    `BDLM_BNS_EXTRAS_V2`.
+    `BDLM_BNS_EXTRAS_V3`.
   - The name tree is a binary Merkle tree over the sorted names with
     adjacent-leaf absence proofs. It is not a sparse Merkle tree and is
     recomputed from the rows, not updated incrementally.

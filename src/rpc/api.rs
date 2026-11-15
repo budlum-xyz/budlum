@@ -744,6 +744,15 @@ pub trait BudlumApi {
         sub_label: String,
     ) -> Result<Option<String>, ErrorObjectOwned>;
 
+    /// The content id a subdomain serves, or `null` when it has none of its
+    /// own, the label does not exist, or the parent name is expired.
+    #[method(name = "bud_bnsResolveSubdomainContent")]
+    async fn bns_resolve_subdomain_content(
+        &self,
+        parent_name: String,
+        sub_label: String,
+    ) -> Result<Option<String>, ErrorObjectOwned>;
+
     /// Bidirectionally verified reverse `.bud` resolution for an address.
     #[method(name = "bud_bnsReverseResolve")]
     async fn bns_reverse_resolve(
@@ -856,6 +865,17 @@ pub trait BudlumApi {
         parent_name: String,
         sub_label: String,
         caller: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Prepare a `BnsSetSubdomainContent` transaction for the owner of a
+    /// subdomain. `content_id` is 32 bytes of hex; `null` clears the content.
+    #[method(name = "bud_bnsPrepareSetSubdomainContent")]
+    async fn bns_prepare_set_subdomain_content(
+        &self,
+        parent_name: String,
+        sub_label: String,
+        caller: String,
+        content_id: Option<String>,
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
     /// Prepare a transaction to link content (CID) to a name.

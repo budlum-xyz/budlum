@@ -1,5 +1,5 @@
 use crate::bns::types::{
-    BnsError, BnsMerkleBranch, BnsResolved, BnsStateProof, NameRecord, NameStatus,
+    BnsError, BnsMerkleBranch, BnsResolved, BnsStateProof, NameRecord, NameStatus, SubdomainRecord,
 };
 use crate::core::address::Address;
 use crate::registry::params::{
@@ -674,13 +674,17 @@ impl BnsRegistry {
         Some((sub_label, format!("{parent_label}{}", Self::SUFFIX)))
     }
 
-    /// Register or update a subdomain `<sub_label>.<parent_name>` owned by `caller`.
+    /// Register the subdomain `<sub_label>.<parent_name>` for `owner`.
+    ///
+    /// A label that exists is never overwritten: the parent owner removes it
+    /// first, so a subdomain owner cannot lose its record in silence.
     ///
     /// # Errors
     ///
     /// Returns [`BnsError`] if `sub_label` or `parent_name` is invalid, `owner`
-    /// is zero, `caller` is not the parent owner, the parent is expired, or the
-    /// subdomain count cap (`MAX_SUBDOMAINS_PER_NAME`) would be exceeded.
+    /// is zero, `caller` is not the parent owner, the parent is expired, the
+    /// label is taken (`NameTaken`), or the subdomain count cap
+    /// (`MAX_SUBDOMAINS_PER_NAME`) would be exceeded.
     pub fn register_subdomain(
         &mut self,
         parent_name: &str,
@@ -702,13 +706,81 @@ impl BnsRegistry {
         if parent.expires_at <= current_epoch {
             return Err(BnsError::Expired);
         }
-        if !parent.subdomains.contains_key(&sub_label)
-            && parent.subdomains.len() >= Self::MAX_SUBDOMAINS_PER_NAME
-        {
+        if parent.subdomains.contains_key(&sub_label) {
+            return Err(BnsError::NameTaken);
+        }
+        if parent.subdomains.len() >= Self::MAX_SUBDOMAINS_PER_NAME {
             return Err(BnsError::InvalidName);
         }
-        parent.subdomains.insert(sub_label, owner);
+        parent
+            .subdomains
+            .insert(sub_label, SubdomainRecord::owned_by(owner));
         Ok(())
+    }
+
+    /// Set or clear (`None`) the content the subdomain `<sub_label>` of a
+    /// live `parent_name` serves. Only the subdomain owner may do it; the
+    /// parent owner removes a subdomain and does not write into it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BnsError`] if `sub_label` or `parent_name` is invalid or
+    /// unknown, the parent is expired, or `caller` does not own the subdomain.
+    pub fn set_subdomain_content(
+        &mut self,
+        parent_name: &str,
+        sub_label: &str,
+        caller: &Address,
+        content: Option<ContentId>,
+        current_epoch: u64,
+    ) -> Result<(), BnsError> {
+        if !Self::is_valid_sub_label(sub_label) {
+            return Err(BnsError::InvalidName);
+        }
+        let parent = self
+            .names
+            .get_mut(parent_name)
+            .ok_or(BnsError::InvalidName)?;
+        if parent.expires_at <= current_epoch {
+            return Err(BnsError::Expired);
+        }
+        let record = parent
+            .subdomains
+            .get_mut(sub_label)
+            .ok_or(BnsError::InvalidName)?;
+        if &record.owner != caller {
+            return Err(BnsError::NotOwner);
+        }
+        record.content = content;
+        Ok(())
+    }
+
+    /// The owner of the subdomain `<sub_label>` of a live `parent_name`.
+    #[must_use]
+    pub fn subdomain_owner(
+        &self,
+        parent_name: &str,
+        sub_label: &str,
+        current_epoch: u64,
+    ) -> Option<Address> {
+        self.list_subdomains(parent_name, current_epoch)?
+            .get(sub_label)
+            .map(|record| record.owner)
+    }
+
+    /// The content the subdomain `<sub_label>` of a live `parent_name`
+    /// serves. `None` when the parent is unknown or expired, the label does
+    /// not exist, or the subdomain has no content of its own.
+    #[must_use]
+    pub fn resolve_subdomain_content(
+        &self,
+        parent_name: &str,
+        sub_label: &str,
+        current_epoch: u64,
+    ) -> Option<ContentId> {
+        self.list_subdomains(parent_name, current_epoch)?
+            .get(sub_label)
+            .and_then(|record| record.content)
     }
 
     /// Remove an existing subdomain `<sub_label>` from a live `parent_name`
@@ -752,7 +824,7 @@ impl BnsRegistry {
         &self,
         parent_name: &str,
         current_epoch: u64,
-    ) -> Option<BTreeMap<String, Address>> {
+    ) -> Option<BTreeMap<String, SubdomainRecord>> {
         let parent = self.names.get(parent_name)?;
         if parent.expires_at <= current_epoch {
             return None;
@@ -768,7 +840,10 @@ impl BnsRegistry {
     ) -> Option<Address> {
         let parent = self.names.get(parent_name)?;
         if parent.expires_at > current_epoch {
-            parent.subdomains.get(sub_label).cloned()
+            parent
+                .subdomains
+                .get(sub_label)
+                .and_then(|record| record.address)
         } else {
             None
         }
@@ -1225,7 +1300,7 @@ impl BnsRegistry {
         }
     }
 
-    /// The commitment over a disclosed extras pre-image (`BDLM_BNS_EXTRAS_V2`).
+    /// The commitment over a disclosed extras pre-image (`BDLM_BNS_EXTRAS_V3`).
     ///
     /// The encoding is the one the leaf digest already used, so the digest of
     /// `Self::extras_from_record` equals [`Self::record_extras_digest`] field
@@ -1235,7 +1310,7 @@ impl BnsRegistry {
     pub(crate) fn extras_digest(extras: &crate::bns::types::BnsBranchExtras) -> [u8; 32] {
         use sha2::{Digest, Sha256};
         let mut hasher = Sha256::new();
-        hasher.update(b"BDLM_BNS_EXTRAS_V2");
+        hasher.update(b"BDLM_BNS_EXTRAS_V3");
         match extras.address {
             Some(address) => {
                 hasher.update([1u8]);
@@ -1286,10 +1361,24 @@ impl BnsRegistry {
             None => hasher.update([0u8]),
         }
         hasher.update((extras.subdomains.len() as u64).to_le_bytes());
-        for (sub_label, sub_owner) in &extras.subdomains {
+        for (sub_label, sub) in &extras.subdomains {
             hasher.update((sub_label.len() as u64).to_le_bytes());
             hasher.update(sub_label.as_bytes());
-            hasher.update(sub_owner.0);
+            hasher.update(sub.owner.0);
+            match sub.address {
+                Some(address) => {
+                    hasher.update([1u8]);
+                    hasher.update(address.0);
+                }
+                None => hasher.update([0u8]),
+            }
+            match sub.content {
+                Some(content) => {
+                    hasher.update([1u8]);
+                    hasher.update(content.0);
+                }
+                None => hasher.update([0u8]),
+            }
         }
         hasher.update((extras.records.len() as u64).to_le_bytes());
         for (rec_key, rec_val) in &extras.records {
