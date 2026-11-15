@@ -22,6 +22,7 @@ pub(crate) const TESTS: &[&str] = &[
     "garden_step_11_a_new_garden_is_created",
     "garden_is_closed_on_testnet",
     "garden_join_behind_nat",
+    "garden_host_silence_freezes_and_its_return_resumes",
     "garden_rpc_is_refused_on_the_public_listener",
 ];
 

@@ -201,6 +201,21 @@ impl Node {
         Ok(node)
     }
 
+    /// Stop the node process where it stands (`STOP`) or let it go on
+    /// (`CONT`). A stopped process keeps its sockets and its memory and
+    /// answers nobody, which is what a sleeping device looks like.
+    fn signal(&self, name: &str) -> Result<(), String> {
+        let status = Command::new("kill")
+            .arg(format!("-{name}"))
+            .arg(self.child.id().to_string())
+            .status()
+            .map_err(|e| format!("kill did not start: {e}"))?;
+        ensure(
+            status.success(),
+            format!("[{}] kill -{name} failed", self.name),
+        )
+    }
+
     fn log_tail(&self) -> String {
         let log = std::fs::read_to_string(self.dir.path().join("node.log")).unwrap_or_default();
         let lines: Vec<&str> = log.lines().collect();
@@ -946,6 +961,84 @@ fn garden_join_behind_nat() -> Result<(), String> {
         number(&trace, "/finality/needed")? == 3,
         "three validators need three signatures",
     )
+}
+
+/// The host goes silent without a departure block, the way a sleeping device
+/// does. No block says so, and the others still stop: they see the Garden
+/// as Frozen, show it Frozen on Budlum, take no transaction and make no
+/// block, and keep the data readable. When the host answers again the same
+/// chain goes on with every validator still in it.
+#[test]
+fn garden_host_silence_freezes_and_its_return_resumes() -> Result<(), String> {
+    let _guard = NETWORK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let host = Node::start("host")?;
+    let invite = text(&host.create("Quiet Room")?, "/invite")?;
+    let chain_id = chain_id_of(&host.garden()?)?;
+    let first = Node::start("validator-1")?;
+    let second = Node::start("validator-2")?;
+    for node in [&first, &second] {
+        node.join(&invite, true)?;
+    }
+    wait_for("three active validators", STEP_TIMEOUT, || {
+        Ok((number(&second.garden()?, "/active_validators")? == 3).then_some(()))
+    })?;
+    let (before, content_id) = first.publish_text("message", "before the silence")?;
+    for node in [&host, &first, &second] {
+        node.wait_final(&before)?;
+    }
+    for node in [&first, &second] {
+        node.wait_budlum_status(chain_id, "Active")?;
+    }
+
+    host.signal("STOP")?;
+    let silent = (|| {
+        for node in [&first, &second] {
+            let garden = node.wait_status("Frozen")?;
+            let height = number(&garden, "/height")?;
+            node.wait_budlum_status(chain_id, "Frozen")?;
+            let refusal = node
+                .publish_text("message", "into the silent Garden")
+                .err()
+                .ok_or("a Garden without its host accepted a transaction")?;
+            ensure(
+                refusal.contains("frozen"),
+                format!("unexpected refusal: {refusal}"),
+            )?;
+            node.rpc("bud_gardenResolve", &json!([content_id]))?;
+            std::thread::sleep(Duration::from_millis(ROUND_MS * 3));
+            ensure(
+                number(&node.garden()?, "/height")? == height,
+                "a block was made while the host was silent",
+            )?;
+        }
+        // Long enough for the host to hold every validator as silent when
+        // it wakes up, if it counted its own standstill against them.
+        std::thread::sleep(Duration::from_secs(4));
+        Ok::<(), String>(())
+    })();
+    // The host goes on whatever the checks said, so its process can end.
+    host.signal("CONT")?;
+    silent?;
+
+    for node in [&host, &first, &second] {
+        node.wait_status("Active")?;
+    }
+    for node in [&first, &second] {
+        node.wait_budlum_status(chain_id, "Active")?;
+    }
+    let (after, _) = second.publish_text("message", "the host answers again")?;
+    for node in [&host, &first, &second] {
+        node.wait_final(&after)?;
+    }
+    for node in [&host, &first, &second] {
+        ensure(
+            number(&node.garden()?, "/active_validators")? == 3,
+            format!("[{}] a validator was lost to the silence", node.name),
+        )?;
+    }
+    Ok(())
 }
 
 /// The Garden surface is an operator surface: the public listener refuses
