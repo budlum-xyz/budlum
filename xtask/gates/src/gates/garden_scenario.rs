@@ -23,6 +23,7 @@ pub(crate) const TESTS: &[&str] = &[
     "garden_is_closed_on_testnet",
     "garden_join_behind_nat",
     "garden_host_silence_freezes_and_its_return_resumes",
+    "garden_validator_leaves_and_returns_while_the_garden_runs",
     "garden_rpc_is_refused_on_the_public_listener",
 ];
 

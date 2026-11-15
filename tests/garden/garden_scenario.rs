@@ -963,6 +963,76 @@ fn garden_join_behind_nat() -> Result<(), String> {
     )
 }
 
+/// Anyone leaves a running Garden and comes back when they like. The one
+/// who left keeps nothing on disk, the Garden goes on without it, and when
+/// it returns it takes its own seat again and reads what it missed.
+#[test]
+fn garden_validator_leaves_and_returns_while_the_garden_runs() -> Result<(), String> {
+    let _guard = NETWORK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let host = Node::start("host")?;
+    let invite = text(&host.create("Open Door")?, "/invite")?;
+    let first = Node::start("validator-1")?;
+    let second = Node::start("validator-2")?;
+    for node in [&first, &second] {
+        node.join(&invite, true)?;
+    }
+    let active = |wanted: u64| {
+        wait_for(&format!("{wanted} active validators"), STEP_TIMEOUT, || {
+            Ok((number(&host.garden()?, "/active_validators")? == wanted).then_some(()))
+        })
+    };
+    active(3)?;
+    let (before, content_id) = first.publish_text("message", "before the door")?;
+    for node in [&host, &first, &second] {
+        node.wait_final(&before)?;
+    }
+    let seat = text(&second.garden()?, "/me/key")?;
+
+    let left = second.rpc("bud_gardenLeave", &json!([]))?;
+    ensure(
+        left.get("left") == Some(&json!(true)) && left.get("retired") == Some(&json!(false)),
+        format!("unexpected departure: {left}"),
+    )?;
+    let files = second.garden_files();
+    ensure(
+        files.is_empty(),
+        format!("the one who left kept Garden data: {files:?}"),
+    )?;
+    active(2)?;
+    let (during, _) = first.publish_text("message", "while one is out")?;
+    for node in [&host, &first] {
+        node.wait_final(&during)?;
+    }
+
+    let back = second.rpc("bud_gardenReturn", &json!([]))?;
+    ensure(
+        text(&back, "/garden/me/member")? == "Active",
+        "the validator is not active after returning",
+    )?;
+    ensure(
+        text(&back, "/garden/me/key")? == seat,
+        "the validator returned under another key",
+    )?;
+    active(3)?;
+    second.wait_final(&during)?;
+    second.rpc("bud_gardenResolve", &json!([content_id]))?;
+    let (after, _) = second.publish_text("message", "back again")?;
+    for node in [&host, &first, &second] {
+        node.wait_final(&after)?;
+    }
+    let seats = host
+        .garden()?
+        .get("validators")
+        .and_then(Value::as_array)
+        .map_or(0, Vec::len);
+    ensure(
+        seats == 3,
+        format!("returning made a new seat: {seats} validators on record"),
+    )
+}
+
 /// The host goes silent without a departure block, the way a sleeping device
 /// does. No block says so, and the others still stop: they see the Garden
 /// as Frozen, show it Frozen on Budlum, take no transaction and make no
