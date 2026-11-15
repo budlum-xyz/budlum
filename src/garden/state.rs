@@ -1464,4 +1464,166 @@ mod tests {
             );
         }
     }
+
+    /// One step of a random Garden history. The numbers pick a key among the
+    /// keys the history has seen so far, members or not.
+    #[derive(Clone, Debug)]
+    enum Step {
+        Join,
+        Leave(u8),
+        Resume(u8),
+        Publish(u8, u8, u32),
+        Suspend(u8),
+        Repeat,
+    }
+
+    fn step() -> impl proptest::strategy::Strategy<Value = Step> {
+        use proptest::prelude::*;
+        prop_oneof![
+            3 => Just(Step::Join),
+            2 => any::<u8>().prop_map(Step::Leave),
+            2 => any::<u8>().prop_map(Step::Resume),
+            5 => (any::<u8>(), 0u8..6, 0u32..3 * 4096).prop_map(|(who, id, size)| Step::Publish(who, id, size)),
+            2 => any::<u8>().prop_map(Step::Suspend),
+            1 => Just(Step::Repeat),
+        ]
+    }
+
+    /// What holds after every block and after every refusal.
+    fn hold(state: &GardenState) -> Result<(), String> {
+        let host = state.host();
+        let active = state.active();
+        let ensure = |holds: bool, what: &str| {
+            if holds {
+                Ok(())
+            } else {
+                Err(format!(
+                    "{what} (status {:?}, {} active)",
+                    state.status,
+                    active.len()
+                ))
+            }
+        };
+        ensure(
+            state.is_active(&host) == (state.status == DomainStatus::Active),
+            "the Garden runs exactly while the host is active",
+        )?;
+        ensure(
+            active.is_empty() == (state.status == DomainStatus::Retired),
+            "the Garden is retired exactly when nobody is active",
+        )?;
+        ensure(
+            state.validators[&host].status != GardenValidatorStatus::Suspended,
+            "the host is never suspended",
+        )?;
+        ensure(
+            state.leader(0).is_some() == (state.status != DomainStatus::Retired),
+            "a Garden has a leader exactly until it retires",
+        )?;
+        ensure(
+            state.electorate(&[]) == active,
+            "the electorate of an empty block is the active set",
+        )?;
+        let share = state.genesis.limits.max_published_bytes_per_validator;
+        let mut charged: BTreeMap<GardenKey, u64> = BTreeMap::new();
+        for object in state.objects.values() {
+            *charged.entry(object.author).or_insert(0) +=
+                u64::from(object.size).max(MIN_PUBLICATION_CHARGE);
+        }
+        ensure(
+            charged == state.published,
+            "the used share is the sum of what the validator published",
+        )?;
+        ensure(
+            state.published.values().all(|used| *used <= share),
+            "no validator is past its share",
+        )
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(48))]
+
+        /// Random histories of joins, departures, returns, publications,
+        /// absence reports and repeated transactions, valid and not.
+        ///
+        /// A refusal changes nothing (G-4), a block moves the height by one,
+        /// what a transaction check refuses no block accepts, the rules of
+        /// `hold` stand after every step, and a second ledger that reads the
+        /// finalized blocks arrives at the same state.
+        #[test]
+        fn garden_random_history_keeps_its_rules_and_replays_to_the_same_state(
+            steps in proptest::collection::vec(step(), 1..40)
+        ) {
+            use proptest::prelude::*;
+            let mut net = Net::new();
+            net.ledger.state.genesis.limits.max_published_bytes_per_validator =
+                3 * MIN_PUBLICATION_CHARGE;
+            let origin = net.ledger.clone();
+            let mut last: Option<SignedGardenTx> = None;
+            for step in steps {
+                let before = net.ledger.state.clone();
+                let known: Vec<GardenKey> = net.keys.keys().copied().collect();
+                let pick = |index: u8| known[usize::from(index) % known.len()];
+                let tx = match step {
+                    Step::Join => net.join_tx("v").1,
+                    Step::Leave(who) => net.tx(&pick(who), GardenTxKind::Leave),
+                    Step::Resume(who) => net.tx(
+                        &pick(who),
+                        GardenTxKind::Resume { address: String::new() },
+                    ),
+                    Step::Publish(who, id, size) => net.tx(
+                        &pick(who),
+                        GardenTxKind::Publish {
+                            kind: GardenContentKind::Message,
+                            content_id: [id; 32],
+                            size,
+                            mime: "text/plain".into(),
+                            caption: String::new(),
+                        },
+                    ),
+                    Step::Suspend(target) => {
+                        let Some(leader) = before.leader(0) else {
+                            continue;
+                        };
+                        net.tx(&leader, GardenTxKind::Suspend { target: pick(target) })
+                    }
+                    Step::Repeat => {
+                        let Some(tx) = last.clone() else {
+                            continue;
+                        };
+                        tx
+                    }
+                };
+                let is_report = matches!(tx.tx.kind, GardenTxKind::Suspend { .. });
+                let admitted = before.check_tx(&tx);
+                let outcome = net.commit(vec![tx.clone()]);
+                let after = &net.ledger.state;
+                match &outcome {
+                    Ok(()) => {
+                        prop_assert_eq!(after.height, before.height + 1);
+                        prop_assert_eq!(
+                            after.next_nonce(&tx.tx.sender),
+                            before.next_nonce(&tx.tx.sender) + 1
+                        );
+                        prop_assert!(
+                            is_report || admitted.is_ok(),
+                            "a block took what the transaction check refuses: {:?}",
+                            admitted
+                        );
+                        last = Some(tx);
+                    }
+                    Err(_) => prop_assert_eq!(after, &before, "a refusal changed the state"),
+                }
+                if let Err(broken) = hold(after) {
+                    return Err(TestCaseError::fail(broken));
+                }
+            }
+            let mut replay = origin;
+            for commit in &net.ledger.commits {
+                prop_assert!(replay.append(commit.clone()).is_ok());
+            }
+            prop_assert_eq!(&replay.state, &net.ledger.state);
+            prop_assert_eq!(replay.state.state_root(), net.ledger.state.state_root());
+        }
+    }
 }
