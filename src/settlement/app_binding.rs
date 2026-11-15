@@ -676,7 +676,31 @@ impl AppBindingRegistry {
             );
         }
         if self.apps.len() >= MAX_APP_BINDING_APPS {
-            return Err("AppBinding application registry is full".into());
+            // Reclaim the oldest unclaimed, intent-free row so permissionless
+            // unverified registrations cannot permanently saturate the global
+            // registry. Claimed rows, rows carrying claim-replay cursors, and
+            // rows referenced by open intents are never evicted; an evicted
+            // unclaimed row can always be re-registered deterministically with
+            // the same `app_binding_id` and `mirror_account`.
+            let victim_id = self
+                .apps
+                .iter()
+                .filter(|(existing_id, app)| {
+                    app.owner == Address::zero()
+                        && app.claim_expiry == 0
+                        && app.anchored_claim_cursor.is_none()
+                        && app.status == AppBindingStatus::Active
+                        && !self
+                            .intents
+                            .values()
+                            .any(|intent| intent.app_binding_id == **existing_id)
+                })
+                .min_by_key(|(existing_id, app)| (app.registered_at_block, **existing_id))
+                .map(|(existing_id, _)| *existing_id);
+            let Some(victim_id) = victim_id else {
+                return Err("AppBinding application registry is full".into());
+            };
+            self.apps.remove(&victim_id);
         }
         self.apps.insert(
             id,
@@ -3385,5 +3409,45 @@ mod tests {
             stake_after < bond,
             "liveness slash must land on the retained unbonding bond ({stake_after} vs {bond})"
         );
+    }
+
+    #[test]
+    fn full_binding_registry_reclaims_unclaimed_row_and_protects_claimed_or_intent_rows() {
+        let mut reg = AppBindingRegistry::default();
+        for i in 0..MAX_APP_BINDING_APPS {
+            let app = format!("spam-app-{i}").into_bytes();
+            let mut manifest = [0u8; 32];
+            manifest[..8].copy_from_slice(&(i as u64 + 1).to_le_bytes());
+            assert!(
+                reg.register(1, app, manifest, i as u64).unwrap(),
+                "filling slot {i}"
+            );
+        }
+        assert_eq!(reg.apps.len(), MAX_APP_BINDING_APPS);
+
+        // Mark slot 0 as claimed so reclamation must skip it and pick the oldest unclaimed row.
+        let claimed_id = app_binding_id(1, b"spam-app-0");
+        reg.apps.get_mut(&claimed_id).unwrap().owner = Address::from([0x77; 32]);
+
+        let honest_manifest = [0x99; 32];
+        let inserted = reg
+            .register(
+                1,
+                b"honest-app".to_vec(),
+                honest_manifest,
+                MAX_APP_BINDING_APPS as u64 + 1,
+            )
+            .expect("full registry must reclaim an unclaimed row instead of locking permanently");
+        assert!(inserted);
+        assert_eq!(reg.apps.len(), MAX_APP_BINDING_APPS);
+        assert!(
+            reg.apps.contains_key(&claimed_id),
+            "claimed row must never be evicted"
+        );
+        assert!(
+            !reg.apps.contains_key(&app_binding_id(1, b"spam-app-1")),
+            "oldest unclaimed intent-free row should be reclaimed deterministically"
+        );
+        assert!(reg.apps.contains_key(&app_binding_id(1, b"honest-app")));
     }
 }

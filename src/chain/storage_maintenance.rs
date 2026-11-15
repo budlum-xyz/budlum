@@ -164,6 +164,7 @@ pub(crate) fn issue_challenges(
         u64,
         u64,
         u64,
+        u64,
         crate::storage::content_id::ContentId,
         crate::storage::content_id::ContentId,
     )> = state
@@ -176,6 +177,7 @@ pub(crate) fn issue_challenges(
                 d.deal_id,
                 d.deal_start_epoch,
                 d.deal_end_epoch,
+                d.shard_bytes,
                 d.manifest_id,
                 d.shard_id,
             )
@@ -187,7 +189,7 @@ pub(crate) fn issue_challenges(
     const MIN_CHALLENGE_RANGE_BYTES: u64 = 4 * 1024;
     const MAX_CHALLENGE_RANGE_BYTES: u64 = 64 * 1024;
     let mut issued = 0u32;
-    for (deal_id, start_epoch, end_epoch, manifest_id, shard_id) in active {
+    for (deal_id, start_epoch, end_epoch, deal_shard_bytes, manifest_id, shard_id) in active {
         let elapsed = epoch.saturating_sub(start_epoch);
         if elapsed == 0 || elapsed % DEFAULT_CHALLENGE_INTERVAL != 0 {
             continue;
@@ -204,7 +206,7 @@ pub(crate) fn issue_challenges(
         {
             continue;
         }
-        let Some(shard_size) = state
+        let Some(manifest_shard_size) = state
             .storage_registry
             .get_manifest(&manifest_id)
             .and_then(|manifest| manifest.shard(&shard_id))
@@ -213,6 +215,21 @@ pub(crate) fn issue_challenges(
             tracing::warn!("active deal {deal_id} has no registered shard size");
             continue;
         };
+        // Only challenge the byte length the operator actually consented to and
+        // was priced on (`deal.shard_bytes`). Skipping deals with zero consented
+        // bytes (e.g. Generated content or legacy deals without recorded
+        // `shard_bytes`) or a mismatch against the manifest prevents opening an
+        // unanswerable challenge range that would slash an honest operator.
+        if deal_shard_bytes == 0 || deal_shard_bytes != manifest_shard_size {
+            tracing::warn!(
+                deal_id,
+                deal_shard_bytes,
+                manifest_shard_size,
+                "active deal shard_bytes does not match registered manifest shard size; skipping challenge"
+            );
+            continue;
+        }
+        let shard_size = deal_shard_bytes;
         let range_len = if shard_size <= MIN_CHALLENGE_RANGE_BYTES {
             shard_size
         } else {
@@ -655,6 +672,102 @@ fn registry_upkeep(state: &mut AccountState, epoch: u64) {
     if swept > 0 {
         tracing::info!(
             "B.U.D. storage maintenance dropped {swept} settled reallocation tickets at epoch {epoch}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::storage_deal::StorageEconomicsParams;
+    use crate::domain::storage_params::{StorageDomainParams, STORAGE_MIN_OPERATOR_BOND};
+    use crate::storage::{ContentManifest, ShardRef};
+
+    #[test]
+    fn automatic_challenge_refuses_unconsented_or_mismatched_deal_shard_bytes() {
+        let mut state = AccountState::new();
+        let owner = Address::from([0x11; 32]);
+        let operator = Address::from([0x22; 32]);
+        let bytes = vec![0x42u8; 8192];
+        let shard = ShardRef::from_bytes(0, &bytes);
+        let shard_id = shard.shard_id;
+        let manifest = ContentManifest::from_shards(vec![shard])
+            .unwrap()
+            .with_owner(owner);
+        state.storage_registry.register_manifest(&manifest);
+        let envelope = bud_proof::ProofEnvelope {
+            proof_format_version: 1,
+            backend: "test-backend".to_string(),
+            p3_version: "0.6".to_string(),
+            fri_params_id: "test-fri".to_string(),
+            public_inputs_hash: [0x42u8; 32],
+            proof_bytes: vec![0xABu8; 96],
+            degree_bits: 8,
+        };
+        let proof = bincode::serialize(&envelope).expect("envelope");
+        let deal_id = state
+            .storage_registry
+            .open_deal(
+                1,
+                &manifest,
+                shard_id,
+                operator,
+                0,
+                1,
+                500,
+                StorageEconomicsParams {
+                    operator_bond: STORAGE_MIN_OPERATOR_BOND,
+                    fee_per_byte_epoch: 1,
+                },
+                &StorageDomainParams::default(),
+                Some(proof),
+                Some([0x42; 32]),
+            )
+            .unwrap();
+
+        // Simulate a legacy deal deserialized without consented `shard_bytes` (0)
+        // by round-tripping the registry JSON with `shard_bytes` cleared to 0.
+        let mut val = serde_json::to_value(&state.storage_registry).unwrap();
+        val["deals"][deal_id.to_string()]["shard_bytes"] = serde_json::json!(0);
+        state.storage_registry = serde_json::from_value(val.clone()).unwrap();
+
+        let issued_zero = issue_challenges(
+            &mut state,
+            45262,
+            1 + DEFAULT_CHALLENGE_INTERVAL,
+            &[0x99; 32],
+        );
+        assert_eq!(
+            issued_zero, 0,
+            "challenge sweep must not derive a byte range for a deal without consented shard_bytes"
+        );
+
+        // A deal whose consented shard_bytes disagrees with the manifest shard size must also skip.
+        val["deals"][deal_id.to_string()]["shard_bytes"] = serde_json::json!(4096);
+        state.storage_registry = serde_json::from_value(val.clone()).unwrap();
+        let issued_mismatch = issue_challenges(
+            &mut state,
+            45262,
+            1 + DEFAULT_CHALLENGE_INTERVAL,
+            &[0x99; 32],
+        );
+        assert_eq!(
+            issued_mismatch, 0,
+            "challenge sweep must skip a deal whose consented shard_bytes mismatches the manifest"
+        );
+
+        // Once consented shard_bytes matches the manifest shard size, automatic challenging works.
+        val["deals"][deal_id.to_string()]["shard_bytes"] = serde_json::json!(8192);
+        state.storage_registry = serde_json::from_value(val).unwrap();
+        let issued_valid = issue_challenges(
+            &mut state,
+            45262,
+            1 + DEFAULT_CHALLENGE_INTERVAL,
+            &[0x99; 32],
+        );
+        assert_eq!(
+            issued_valid, 1,
+            "valid consented shard_bytes matching manifest must issue a retrieval challenge"
         );
     }
 }

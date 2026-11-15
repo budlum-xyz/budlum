@@ -1400,7 +1400,6 @@ src/domain/storage_deal.rs	fn	validate_merkle_proof_format
 src/domain/storage_deal.rs	fn	validate_shard_membership
 src/domain/storage_deal.rs	struct	StorageChallengeProofContext
 src/domain/storage_deal.rs	struct	StorageChallengeRangeInput
-src/domain/storage_deal.rs	struct	StorageReallocationTicket
 src/domain/storage_params.rs	const	DEFAULT_CHUNK_SIZE
 src/domain/storage_params.rs	const	MAX_CHUNK_SIZE
 src/domain/storage_params.rs	const	MIN_CHUNK_SIZE

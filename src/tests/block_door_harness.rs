@@ -142,9 +142,9 @@ impl BlockHarness {
         ))
     }
 
-    /// Register two domains the sender operates (1, PoW, and 2, PoS) and
-    /// `asset_id` against domain 1, then lock `amount` of the sender's
-    /// balance toward `recipient` on domain 2. Each write is its own block.
+    /// Register two domains the sender operates (101, PoW, and 102, PoS) and
+    /// `asset_id` against domain 101, then lock `amount` of the sender's
+    /// balance toward `recipient` on domain 102. Each write is its own block.
     pub fn lock_through_blocks(
         &mut self,
         asset_id: crate::cross_domain::AssetId,
@@ -152,17 +152,17 @@ impl BlockHarness {
         amount: u64,
     ) {
         use crate::cross_domain::bridge_tx::{BridgeTx, LockRequest};
-        let source = self.operated_domain(1);
-        let target = self.operated_domain_of_kind(2, crate::domain::ConsensusKind::PoS);
+        let source = self.operated_domain(101);
+        let target = self.operated_domain_of_kind(102, crate::domain::ConsensusKind::PoS);
         self.register_domain(source);
         self.register_domain(target);
         self.apply(TransactionType::Bridge(BridgeTx::RegisterAsset {
             asset_id,
-            domain: 1,
+            domain: 101,
         }));
         self.apply(TransactionType::Bridge(BridgeTx::Lock(LockRequest {
-            source_domain: 1,
-            target_domain: 2,
+            source_domain: 101,
+            target_domain: 102,
             source_height: 10,
             event_index: 0,
             asset_id,

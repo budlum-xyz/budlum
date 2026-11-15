@@ -1548,20 +1548,18 @@ pub fn execute_settlement_tx(
             if domain.operator != Some(ctx.sender) {
                 return Err(SettlementTxError::OperatorIsNotSender);
             }
-            // Canonical external-chain anchors (`state.external_roots[1..=4]`)
-            // belong exclusively to genesis bootstrap domains (`register_domain`).
-            // On a network whose genesis seeds no bootstrap domains, ids 1..=4
-            // are unoccupied; refusing a permissionless claim of an
-            // anchor-recognized chain's canonical `(id, domain_chain_id)` pair
-            // prevents the first registrant from capturing that chain's anchor.
-            if let Some(chain) = anchor_recognized_chain(domain.id) {
-                if domain.domain_chain_id == chain.canonical_chain_id() {
-                    return Err(SettlementTxError::Refused(format!(
-                        "domain {} cannot permissionlessly claim canonical external chain {:?}; \
-                         anchor-recognized external chains are seeded by genesis only",
-                        domain.id, chain
-                    )));
-                }
+            // Canonical external-chain domain ids (`ExternalChain::from_domain_id`,
+            // ids 1..=7) are reserved exclusively for genesis bootstrap domains
+            // (`register_domain`). Refusing every permissionless `RegisterDomain`
+            // claiming one of these ids prevents an attacker from squatting an
+            // unseeded canonical slot regardless of the declared `domain_chain_id`.
+            if let Some(chain) = crate::core::transaction::ExternalChain::from_domain_id(domain.id)
+            {
+                return Err(SettlementTxError::Refused(format!(
+                    "domain {} is reserved for canonical external chain {:?}; \
+                     canonical external-chain ids are seeded by genesis only",
+                    domain.id, chain
+                )));
             }
             let balance = state.spendable_balance(&ctx.sender);
             let needed = domain.operator_bond.checked_add(ctx.fee).ok_or_else(|| {
@@ -2648,16 +2646,23 @@ mod tests {
     #[test]
     fn only_the_domain_of_a_chain_may_write_that_chains_anchor() {
         let mut state = AccountState::new();
-        // Id 1 with somebody else's chain id: a domain that took a claimed id.
+        // Id 1 with somebody else's chain id: permissionless registration is
+        // refused because id 1 is reserved for canonical Ethereum, and even if
+        // genesis seeded such a row, its commitment still does not write
+        // Ethereum's external-root anchor.
         let mut impostor = pow(1);
         impostor.domain_chain_id = 45262;
         state.add_balance(&operator(&impostor), MIN_DOMAIN_OPERATOR_BOND + FEE);
-        execute_settlement_tx(
-            &mut state,
-            &ctx(operator(&impostor)),
-            &SettlementTx::RegisterDomain(Box::new(impostor.clone())),
-        )
-        .unwrap();
+        assert!(
+            execute_settlement_tx(
+                &mut state,
+                &ctx(operator(&impostor)),
+                &SettlementTx::RegisterDomain(Box::new(impostor.clone())),
+            )
+            .is_err(),
+            "permissionless registration must not squat reserved canonical domain id 1"
+        );
+        register_domain(&mut state, impostor.clone()).unwrap();
         let block_one = block(1, &"00".repeat(32), 0x71);
         accept_verified_commitment(&mut state, commitment(&impostor, &block_one, 0))
             .expect("the commitment still advances");
@@ -2753,12 +2758,16 @@ mod tests {
             params.min_difficulty_bits = 1;
         }
         state.add_balance(&operator(&impostor), MIN_DOMAIN_OPERATOR_BOND + FEE);
-        execute_settlement_tx(
-            &mut state,
-            &ctx(operator(&impostor)),
-            &SettlementTx::RegisterDomain(Box::new(impostor.clone())),
-        )
-        .expect("registering at an unseeded canonical id is still permissionless");
+        assert!(
+            execute_settlement_tx(
+                &mut state,
+                &ctx(operator(&impostor)),
+                &SettlementTx::RegisterDomain(Box::new(impostor.clone())),
+            )
+            .is_err(),
+            "permissionless registration must refuse reserved unseeded canonical ids (Polygon = 5)"
+        );
+        register_domain(&mut state, impostor.clone()).unwrap();
 
         let block_one = block(1, &"00".repeat(32), 0x5a);
         assert_eq!(
@@ -2774,6 +2783,38 @@ mod tests {
         );
     }
 
+    #[test]
+    fn permissionless_registration_refuses_every_reserved_canonical_domain_id() {
+        use crate::core::transaction::ExternalChain;
+        let reserved = [
+            ExternalChain::Ethereum,
+            ExternalChain::Solana,
+            ExternalChain::Bitcoin,
+            ExternalChain::Avalanche,
+            ExternalChain::Polygon,
+            ExternalChain::Arbitrum,
+            ExternalChain::Optimism,
+        ];
+        for chain in reserved {
+            for declared_chain_id in [chain.canonical_chain_id(), 45_262] {
+                let mut state = AccountState::new();
+                let mut domain = pow(chain.domain_id());
+                domain.domain_chain_id = declared_chain_id;
+                state.add_balance(&operator(&domain), MIN_DOMAIN_OPERATOR_BOND + FEE);
+                let err = execute_settlement_tx(
+                    &mut state,
+                    &ctx(operator(&domain)),
+                    &SettlementTx::RegisterDomain(Box::new(domain)),
+                )
+                .expect_err("reserved canonical external chain domain id must be refused");
+                assert!(
+                    matches!(err, SettlementTxError::Refused(_)),
+                    "expected Refused for {chain:?} (chain_id={declared_chain_id}), got {err:?}"
+                );
+            }
+        }
+    }
+
     /// A PoS certificate is an aggregate of precommits over the checkpoint
     /// hash; it signs no root. The commitment may therefore advance the
     /// domain's height and hash, but no external-root anchor may be written
@@ -2782,7 +2823,7 @@ mod tests {
     #[test]
     fn a_pos_commitment_anchors_no_root_its_certificate_does_not_sign() {
         let mut state = AccountState::new();
-        let mut domain = default_domain(7, ConsensusKind::PoS, 45262, "pos-qc-finality", 1);
+        let mut domain = default_domain(107, ConsensusKind::PoS, 45262, "pos-qc-finality", 1);
         domain.bridge_enabled = false;
         state.add_balance(&operator(&domain), MIN_DOMAIN_OPERATOR_BOND + FEE);
         execute_settlement_tx(
@@ -2803,7 +2844,7 @@ mod tests {
             "the height and hash the certificate binds still advance"
         );
         assert!(
-            !state.external_roots.contains_key(&7),
+            !state.external_roots.contains_key(&107),
             "a root no finality proof attests must not become the domain's anchor"
         );
     }
@@ -2912,8 +2953,8 @@ mod tests {
             CrossDomainMessage, CrossDomainMessageParams, MessageKind,
         };
         let mut state = AccountState::new();
-        let source = pow(1);
-        let target = pow(2);
+        let source = pow(101);
+        let target = pow(102);
         for domain in [&source, &target] {
             state.add_balance(&operator(domain), MIN_DOMAIN_OPERATOR_BOND + FEE);
             execute_settlement_tx(
@@ -2925,8 +2966,8 @@ mod tests {
         }
         let emitter = Address::from([0x51; 32]);
         let message = CrossDomainMessage::new(CrossDomainMessageParams {
-            source_domain: 1,
-            target_domain: 2,
+            source_domain: 101,
+            target_domain: 102,
             source_height: 1,
             event_index: 0,
             nonce: 0,
@@ -2938,7 +2979,7 @@ mod tests {
         })
         .with_source_quantum_class(Some(crate::crypto::facts::QuantumClass::Hash));
         let event = DomainEvent {
-            domain_id: 1,
+            domain_id: 101,
             domain_height: 1,
             event_index: 0,
             kind: DomainEventKind::Custom(b"app".to_vec()),
@@ -2961,7 +3002,7 @@ mod tests {
             .unwrap();
         let delivery = |event: DomainEvent| {
             SettlementTx::DeliverMessage(Box::new(DeliverMessage {
-                domain_id: 1,
+                domain_id: 101,
                 domain_height: 1,
                 sequence: 0,
                 block_hash: committed.domain_block_hash,
@@ -2985,7 +3026,7 @@ mod tests {
     #[test]
     fn a_registration_must_name_the_sender_as_operator() {
         let mut state = AccountState::new();
-        let domain = pow(1);
+        let domain = pow(101);
         let stranger = Address::from([0xEE; 32]);
         state.add_balance(&stranger, MIN_DOMAIN_OPERATOR_BOND + FEE);
         let err = execute_settlement_tx(
@@ -2995,12 +3036,12 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(err, SettlementTxError::OperatorIsNotSender);
-        assert!(state.settlement.domains.get(1).is_none());
+        assert!(state.settlement.domains.get(101).is_none());
     }
 
     #[test]
     fn a_registration_escrows_the_operator_bond_or_changes_nothing() {
-        let domain = pow(1);
+        let domain = pow(101);
         let op = operator(&domain);
 
         let mut short = AccountState::new();
@@ -3024,7 +3065,7 @@ mod tests {
             &SettlementTx::RegisterDomain(Box::new(domain)),
         )
         .unwrap();
-        assert!(funded.settlement.domains.get(1).is_some());
+        assert!(funded.settlement.domains.get(101).is_some());
         // The fee stays for the executor to take; the bond is escrowed.
         assert_eq!(funded.get_balance(&op), FEE);
         assert_eq!(
@@ -3716,7 +3757,7 @@ mod tests {
 
     #[test]
     fn a_registration_cannot_claim_committed_history() {
-        let mut domain = pow(1);
+        let mut domain = pow(101);
         domain.last_committed_height = 5;
         let op = operator(&domain);
         let mut state = AccountState::new();
