@@ -163,8 +163,10 @@ pub struct DwebPassportProfile {
     pub primary_name: Option<String>,
     #[serde(default)]
     pub status: Option<NameStatus>,
+    /// The content reference the name record holds. `content_id` above is
+    /// its content digest as hex.
     #[serde(default)]
-    pub bud3_content: Option<ContentRef>,
+    pub content: Option<ContentRef>,
     #[serde(default)]
     pub records: BTreeMap<String, String>,
     #[serde(default)]
@@ -494,7 +496,7 @@ pub fn build_identity_profile_verified(
             }],
             primary_name: None,
             status: None,
-            bud3_content: None,
+            content: None,
             records: BTreeMap::new(),
             subdomains_count: 0,
             bns_state_root: proof_ctx
@@ -505,7 +507,7 @@ pub fn build_identity_profile_verified(
     };
 
     let owner = resolved.owner;
-    let content_id = resolved.content_id;
+    let content_id = resolved.content.map(|c| ContentId(c.content_id.digest));
     let storage_root = resolved.storage_root;
     let manifest_id = content_id.or(storage_root.map(ContentId));
 
@@ -566,7 +568,7 @@ pub fn build_identity_profile_verified(
             .or_else(|| storage_root.as_ref().map(hex32)),
         warning: bns_warning,
     });
-    if let Some(ref bud3) = resolved.bud3_content {
+    if let Some(ref bud3) = resolved.content {
         evidence.push(EvidenceCard {
             subject: "bud3".into(),
             status: if resolved.is_expired || bns_status != EvidenceStatus::Verified {
@@ -638,7 +640,7 @@ pub fn build_identity_profile_verified(
         evidence,
         primary_name,
         status: Some(resolved.status),
-        bud3_content: resolved.bud3_content,
+        content: resolved.content,
         records: resolved.records,
         subdomains_count,
         bns_state_root: bns_root_hex,
@@ -690,22 +692,22 @@ fn evaluate_bns_evidence(
             Some("Per-name BNS Merkle state proof answers a different name or owner".into()),
         );
     }
-    // The leaf digest binds the content id and the storage root itself, so what this profile
+    // The leaf digest binds the content and the storage root itself, so what this profile
     // prints for them has to be what the root commits to. Checking only the name and the owner
     // let an answering node keep a valid proof and swap the content the profile points at.
-    if leaf.content_id != resolved.content_id || leaf.storage_root != resolved.storage_root {
+    if leaf.content != resolved.content || leaf.storage_root != resolved.storage_root {
         return (
             EvidenceStatus::Unverified,
             root_hex,
             Some(
-                "Per-name BNS Merkle state proof commits to a different content id or storage root than the profile discloses"
+                "Per-name BNS Merkle state proof commits to a different content or storage root than the profile discloses"
                     .into(),
             ),
         );
     }
-    // The proof binds `address`, the records, the subdomains and the B.U.D.
-    // 3.0 reference through its extras pre-image. Without that pre-image the
-    // leaf only fixes the name, owner, expiry, content id and storage root,
+    // The proof binds `address`, the records and the subdomains through its
+    // extras pre-image. Without that pre-image the
+    // leaf only fixes the name, owner, expiry, content and storage root,
     // and the profile would print "Verified" over an address the answering
     // node picked. A proof that cannot show the fields this profile publishes
     // is not evidence for them, and a proof whose pre-image disagrees with the
@@ -723,7 +725,6 @@ fn evaluate_bns_evidence(
     let disclosed_matches = extras.address == resolved.address
         && extras.records == resolved.records
         && extras.subdomains == resolved.subdomains
-        && extras.bud3_content == resolved.bud3_content
         && extras.storage_domain_id == resolved.storage_domain_id;
     if disclosed_matches {
         (EvidenceStatus::Verified, root_hex, None)
@@ -764,8 +765,7 @@ mod tests {
             address: Some(owner),
             storage_root: Some(*manifest_id.as_bytes()),
             storage_domain_id: Some(5),
-            content_id: Some(manifest_id),
-            bud3_content: None,
+            content: None,
             subdomains: Default::default(),
             records: Default::default(),
             status: crate::bns::types::NameStatus::Active,
@@ -875,8 +875,7 @@ mod tests {
             address: Some(owner),
             storage_root: Some(*cid.as_bytes()),
             storage_domain_id: Some(5),
-            content_id: Some(cid),
-            bud3_content: None,
+            content: None,
             subdomains: Default::default(),
             records: Default::default(),
             status: crate::bns::types::NameStatus::Active,
@@ -918,8 +917,7 @@ mod tests {
             address: Some(owner),
             storage_root: Some(*cid.as_bytes()),
             storage_domain_id: Some(3),
-            content_id: Some(cid),
-            bud3_content: None,
+            content: None,
             subdomains: Default::default(),
             records: Default::default(),
             status: crate::bns::types::NameStatus::Active,
@@ -1007,7 +1005,7 @@ mod tests {
             100,
         )
         .unwrap();
-        reg.set_bud3_content("ayaz.bud", &owner, &bud3, Some(bud3_ref), 16)
+        reg.set_content("ayaz.bud", &owner, &bud3, Some(bud3_ref), 16)
             .unwrap();
 
         let resolved = reg.resolve_full("ayaz.bud", 20).unwrap();
@@ -1032,7 +1030,7 @@ mod tests {
         );
         assert_eq!(profile.primary_name.as_deref(), Some("ayaz.bud"));
         assert_eq!(profile.status, Some(NameStatus::Active));
-        assert_eq!(profile.bud3_content, Some(bud3_ref));
+        assert_eq!(profile.content, Some(bud3_ref));
         assert_eq!(profile.social.bio.as_deref(), Some("Budlum core builder"));
         assert_eq!(profile.social.github.as_deref(), Some("ayaz"));
         assert_eq!(
@@ -1200,12 +1198,15 @@ mod tests {
         let mut reg = BnsRegistry::new();
         reg.register("shop.bud".to_string(), owner, 10, 100)
             .unwrap();
-        reg.set_content("shop.bud", &owner, ContentId([0xAB; 32]), 11)
+        let mut bud3 = crate::storage::bud3::registry::Bud3Registry::default();
+        let site = crate::bns::bud3::fixtures::public_object(&mut bud3, owner.0, b"shop site");
+        let other_site = crate::bns::bud3::fixtures::public_object(&mut bud3, owner.0, b"other");
+        reg.set_content("shop.bud", &owner, &bud3, Some(site), 11)
             .unwrap();
         reg.register_subdomain("shop.bud", "pay".to_string(), sub_owner, &owner, 12)
             .unwrap();
         let resolved = reg.resolve_full("shop.bud", 20).unwrap();
-        assert_eq!(resolved.content_id, Some(ContentId([0xAB; 32])));
+        assert_eq!(resolved.content, Some(site));
         assert_eq!(resolved.subdomains.len(), 1);
 
         let honest = reg.prove_name("shop.bud", 20);
@@ -1238,9 +1239,9 @@ mod tests {
         // Control: the disclosure the root commits to is Verified.
         assert_eq!(status(resolved.clone()), EvidenceStatus::Verified);
 
-        // The content id is bound by the leaf itself.
+        // The content is bound by the leaf itself.
         let mut swapped_content = resolved.clone();
-        swapped_content.content_id = Some(ContentId([0xEE; 32]));
+        swapped_content.content = Some(other_site);
         assert_eq!(status(swapped_content), EvidenceStatus::Unverified);
 
         // The storage root is bound by the leaf too.

@@ -34,6 +34,13 @@ pub struct StorageRepairBand {
     pub unrecoverable: Vec<(crate::storage::ContentId, u32, u32)>,
 }
 
+/// What a name serves: the reference its record holds, and the bytes the
+/// B.U.D. 3.0 view rebuilt from it, or the reason it could not.
+pub type BnsContentView = (
+    crate::storage::bud3::content_ref::ContentRef,
+    Result<Vec<u8>, String>,
+);
+
 #[derive(Debug)]
 pub enum ChainCommand {
     GetHeight(oneshot::Sender<u64>),
@@ -484,7 +491,7 @@ pub enum ChainCommand {
     },
     BnsResolveContent {
         name: String,
-        response: oneshot::Sender<Option<crate::storage::content_id::ContentId>>,
+        response: oneshot::Sender<Option<BnsContentView>>,
     },
     BnsResolveSubdomain {
         parent: String,
@@ -494,7 +501,7 @@ pub enum ChainCommand {
     BnsResolveSubdomainContent {
         parent: String,
         label: String,
-        response: oneshot::Sender<Option<crate::storage::content_id::ContentId>>,
+        response: oneshot::Sender<Option<crate::storage::bud3::content_ref::ContentRef>>,
     },
     BnsReverseResolve {
         address: Address,
@@ -509,10 +516,6 @@ pub enum ChainCommand {
         response: oneshot::Sender<
             Option<std::collections::BTreeMap<String, crate::bns::types::SubdomainRecord>>,
         >,
-    },
-    BnsResolveBud3Content {
-        name: String,
-        response: oneshot::Sender<Option<crate::storage::bud3::content_ref::ContentRef>>,
     },
     BnsListNamesByOwner {
         owner: Address,
@@ -2295,10 +2298,8 @@ impl ChainHandle {
         rx.await.unwrap_or(None)
     }
 
-    pub async fn bns_resolve_content(
-        &self,
-        name: String,
-    ) -> Option<crate::storage::content_id::ContentId> {
+    /// The content of a live `.bud` name, read through the B.U.D. 3.0 view.
+    pub async fn bns_resolve_content(&self, name: String) -> Option<BnsContentView> {
         let (tx, rx) = oneshot::channel();
         let _ = self
             .tx
@@ -2325,7 +2326,7 @@ impl ChainHandle {
         &self,
         parent: String,
         label: String,
-    ) -> Option<crate::storage::content_id::ContentId> {
+    ) -> Option<crate::storage::bud3::content_ref::ContentRef> {
         let (tx, rx) = oneshot::channel();
         let _ = self
             .tx
@@ -2373,18 +2374,6 @@ impl ChainHandle {
                 parent_name,
                 response: tx,
             })
-            .await;
-        rx.await.unwrap_or(None)
-    }
-
-    pub async fn bns_resolve_bud3_content(
-        &self,
-        name: String,
-    ) -> Option<crate::storage::bud3::content_ref::ContentRef> {
-        let (tx, rx) = oneshot::channel();
-        let _ = self
-            .tx
-            .send(ChainCommand::BnsResolveBud3Content { name, response: tx })
             .await;
         rx.await.unwrap_or(None)
     }
@@ -3973,12 +3962,24 @@ impl ChainActor {
                     );
                 }
                 ChainCommand::BnsResolveContent { name, response } => {
-                    let _ = response.send(
-                        self.blockchain
-                            .state
-                            .bns_registry
-                            .resolve_content(&name, self.blockchain.state.epoch_index),
-                    );
+                    let state = &self.blockchain.state;
+                    let epoch = state.epoch_index;
+                    let view =
+                        crate::bns::Bud3BnsResolver::binding(&state.bns_registry, &name, epoch)
+                            .map(|binding| {
+                                let content = binding.content_ref;
+                                let bytes = crate::bns::Bud3BnsResolver::resolve_via_bud3_view(
+                                    &state.bns_registry,
+                                    &state.bud3_registry,
+                                    &crate::storage::bud3::view::NoSymbolsHeld,
+                                    &name,
+                                    epoch,
+                                    &crate::bns::bud3::BnsViewAccess::default(),
+                                )
+                                .map_err(|e| e.to_string());
+                                (content, bytes)
+                            });
+                    let _ = response.send(view);
                 }
                 ChainCommand::BnsResolveSubdomain {
                     parent,
@@ -4032,14 +4033,6 @@ impl ChainActor {
                             .state
                             .bns_registry
                             .list_subdomains(&parent_name, self.blockchain.state.epoch_index),
-                    );
-                }
-                ChainCommand::BnsResolveBud3Content { name, response } => {
-                    let _ = response.send(
-                        self.blockchain
-                            .state
-                            .bns_registry
-                            .resolve_bud3_content(&name, self.blockchain.state.epoch_index),
                     );
                 }
                 ChainCommand::BnsListNamesByOwner { owner, response } => {

@@ -2523,9 +2523,11 @@ impl AccountState {
                 if tx.amount != 0 || tx.to != Address::zero() {
                     return Err("BNS set content requires zero amount and recipient".into());
                 }
-                let (name, _cid): (String, crate::storage::content_id::ContentId) =
-                    bincode::deserialize(&tx.data)
-                        .map_err(|e| format!("Invalid BNS set content data: {e}"))?;
+                let (name, cref): (
+                    String,
+                    Option<crate::storage::bud3::content_ref::ContentRef>,
+                ) = bincode::deserialize(&tx.data)
+                    .map_err(|e| format!("Invalid BNS set content data: {e}"))?;
                 if !crate::bns::BnsRegistry::is_valid_name(&name) {
                     return Err("Invalid BNS name".into());
                 }
@@ -2534,30 +2536,6 @@ impl AccountState {
                     .is_live_owned_by(&name, &tx.from, self.epoch_index)
                 {
                     return Err("BNS set content requires a live name owned by the signer".into());
-                }
-            }
-            TransactionType::BnsSetBud3Content => {
-                if tx.amount != 0 || tx.to != Address::zero() {
-                    return Err(
-                        "BNS set B.U.D. 3.0 content requires zero amount and recipient".into(),
-                    );
-                }
-                let (name, cref): (
-                    String,
-                    Option<crate::storage::bud3::content_ref::ContentRef>,
-                ) = bincode::deserialize(&tx.data)
-                    .map_err(|e| format!("Invalid BNS B.U.D. 3.0 content data: {e}"))?;
-                if !crate::bns::BnsRegistry::is_valid_name(&name) {
-                    return Err("Invalid BNS name".into());
-                }
-                if !self
-                    .bns_registry
-                    .is_live_owned_by(&name, &tx.from, self.epoch_index)
-                {
-                    return Err(
-                        "BNS set B.U.D. 3.0 content requires a live name owned by the signer"
-                            .into(),
-                    );
                 }
                 if let Some(cref) = cref {
                     let checked = crate::storage::bud3::content_ref::ContentRef::new(
@@ -2637,7 +2615,7 @@ impl AccountState {
                 let (parent, sub_label, _content): (
                     String,
                     String,
-                    Option<crate::storage::content_id::ContentId>,
+                    Option<crate::storage::bud3::content_ref::ContentRef>,
                 ) = bincode::deserialize(&tx.data)
                     .map_err(|e| format!("Invalid BNS set subdomain content data: {e}"))?;
                 if !crate::bns::BnsRegistry::is_valid_name(&parent)

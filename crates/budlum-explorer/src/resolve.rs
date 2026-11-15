@@ -400,6 +400,7 @@ mod tests {
             owner: [1u8; 32],
             storage_root: None,
             content_id: Some(id),
+            content_binding: Some([0x5C; 32]),
             is_expired: false,
         };
         if proven {
@@ -572,6 +573,7 @@ mod tests {
             owner: [1u8; 32],
             storage_root: None,
             content_id: Some(ContentId([3u8; 32])),
+            content_binding: Some([0x5C; 32]),
             is_expired: true,
         };
         let r = Resolver {
@@ -596,6 +598,7 @@ mod tests {
             owner: [1u8; 32],
             storage_root: Some(id.0),
             content_id: None,
+            content_binding: None,
             is_expired: false,
         };
         let entries = vec![bns_proof::RegistryEntry {

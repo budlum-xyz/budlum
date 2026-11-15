@@ -212,8 +212,6 @@ pub(crate) const METHOD_CLASSES: &[MethodClass] = &[
     row("bud_bnsPrepareSetSubdomainContent", Public, TxSubmit),
     row("bud_bnsPrepareSetContent", Public, TxSubmit),
     row("bud_bnsPrepareSetStorage", Public, TxSubmit),
-    row("bud_bnsGetBud3Content", Public, Read),
-    row("bud_bnsPrepareSetBud3Content", Public, TxSubmit),
     row("bud_bnsPrepareRenew", Public, TxSubmit),
     row("bud_bnsPrepareTransfer", Public, TxSubmit),
     row("bud_socialGetPost", Public, Read),

@@ -244,10 +244,8 @@ pub struct Metrics {
     pub bns_set_primary_name_total: IntCounter,
     /// B15: Text and profile record writes applied.
     pub bns_set_records_total: IntCounter,
-    /// B15: Legacy content-pointer writes applied.
+    /// B15: Content bindings applied.
     pub bns_set_content_total: IntCounter,
-    /// B15: B.U.D. 3.0 content bindings applied.
-    pub bns_set_bud3_content_total: IntCounter,
     /// B15: Subdomains registered.
     pub bns_register_subdomain_total: IntCounter,
     /// B15: Subdomains removed.
@@ -810,11 +808,7 @@ impl Metrics {
         )?;
         let bns_set_content_total = IntCounter::new(
             "budlum_bns_set_content_total",
-            "BNS legacy content-pointer writes applied",
-        )?;
-        let bns_set_bud3_content_total = IntCounter::new(
-            "budlum_bns_set_bud3_content_total",
-            "BNS b.u.d. 3.0 content bindings applied",
+            "BNS content bindings applied",
         )?;
         let bns_register_subdomain_total = IntCounter::new(
             "budlum_bns_register_subdomain_total",
@@ -1060,7 +1054,6 @@ impl Metrics {
         registry.register(Box::new(bns_set_primary_name_total.clone()))?;
         registry.register(Box::new(bns_set_records_total.clone()))?;
         registry.register(Box::new(bns_set_content_total.clone()))?;
-        registry.register(Box::new(bns_set_bud3_content_total.clone()))?;
         registry.register(Box::new(bns_register_subdomain_total.clone()))?;
         registry.register(Box::new(bns_remove_subdomain_total.clone()))?;
         registry.register(Box::new(bns_set_subdomain_content_total.clone()))?;
@@ -1213,7 +1206,6 @@ impl Metrics {
             bns_set_primary_name_total,
             bns_set_records_total,
             bns_set_content_total,
-            bns_set_bud3_content_total,
             bns_register_subdomain_total,
             bns_remove_subdomain_total,
             bns_set_subdomain_content_total,
@@ -1364,7 +1356,6 @@ mod tests {
             "budlum_bns_set_primary_name_total",
             "budlum_bns_set_records_total",
             "budlum_bns_set_content_total",
-            "budlum_bns_set_bud3_content_total",
             "budlum_bns_register_subdomain_total",
             "budlum_bns_remove_subdomain_total",
             "budlum_bns_set_subdomain_content_total",

@@ -260,12 +260,6 @@ const BUDGETS: &[Budget] = &[
         count: 1,
         reason: "a consensus or storage entry point whose arguments are all required and none of which groups into a meaningful struct; bundling them would hide which fields a caller must supply",
     },
-    Budget {
-        file: "src/bin/bud.rs",
-        lint: "clippy::too_many_arguments",
-        count: 1,
-        reason: "a consensus or storage entry point whose arguments are all required and none of which groups into a meaningful struct; bundling them would hide which fields a caller must supply",
-    },
             Budget {
         file: "src/chain/blockchain.rs",
         lint: "clippy::too_many_arguments",
