@@ -282,10 +282,12 @@ const MAX_BURN_EXPIRY_BLOCKS: u64 = 100_000;
 /// `100 / rate` units. At the 1% the call sites used, every transfer of 99 base
 /// units or less was relayed for free:
 ///
-///     amount  1 -> fee 0
-///     amount 50 -> fee 0
-///     amount 99 -> fee 0
-///     amount 100 -> fee 1
+/// ```text
+/// amount  1 -> fee 0
+/// amount 50 -> fee 0
+/// amount 99 -> fee 0
+/// amount 100 -> fee 1
+/// ```
 ///
 /// The relayer still pays external gas for each of those messages, so an
 /// attacker splitting a large bridge into 99-unit pieces moves value across for
