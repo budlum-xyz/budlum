@@ -583,7 +583,7 @@ impl Blockchain {
                 TransactionType::BnsSetAddress => {
                     m.bns_set_address_total.inc();
                 }
-                TransactionType::BnsSetPrimaryName => {
+                TransactionType::BnsSetPrimary => {
                     m.bns_set_primary_name_total.inc();
                 }
                 TransactionType::BnsSetRecords => {
@@ -4227,7 +4227,7 @@ impl Blockchain {
                     Err(_) => reasons.push("invalid_bns_set_address_data".to_string()),
                 }
             }
-            crate::core::transaction::TransactionType::BnsSetPrimaryName => {
+            crate::core::transaction::TransactionType::BnsSetPrimary => {
                 if tx.amount != 0 || tx.to != Address::zero() {
                     reasons.push("invalid_bns_set_primary_shape".to_string());
                 }
@@ -12377,7 +12377,7 @@ fn bns_metrics_export_one_counter_per_type_and_the_named_gauges() {
             "budlum_bns_set_address_total",
         ),
         (
-            TransactionType::BnsSetPrimaryName,
+            TransactionType::BnsSetPrimary,
             "budlum_bns_set_primary_name_total",
         ),
         (

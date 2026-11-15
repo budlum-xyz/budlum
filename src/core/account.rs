@@ -2466,7 +2466,7 @@ impl AccountState {
                     return Err("BNS set address requires a live name owned by the signer".into());
                 }
             }
-            TransactionType::BnsSetPrimaryName => {
+            TransactionType::BnsSetPrimary => {
                 if tx.amount != 0 || tx.to != Address::zero() {
                     return Err("BNS set primary name requires zero amount and recipient".into());
                 }

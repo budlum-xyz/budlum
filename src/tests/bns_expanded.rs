@@ -952,7 +952,7 @@ fn bns_forward_target_address_and_bidirectional_reverse_resolution() {
         0,
         1,
         0,
-        TransactionType::BnsSetPrimaryName,
+        TransactionType::BnsSetPrimary,
         bincode::serialize(&Some("ayaz.bud".to_string())).unwrap(),
     );
     bob_claim.sign(&bob_kp);
@@ -983,7 +983,7 @@ fn bns_forward_target_address_and_bidirectional_reverse_resolution() {
         0,
         1,
         0,
-        TransactionType::BnsSetPrimaryName,
+        TransactionType::BnsSetPrimary,
         bincode::serialize(&Some("ayaz.bud".to_string())).unwrap(),
     );
     vault_primary.sign(&vault_kp);
@@ -2425,7 +2425,7 @@ fn bns_every_door_refuses_a_stranger_and_leaves_the_state_untouched() {
         ),
         (
             "claim as primary name",
-            TransactionType::BnsSetPrimaryName,
+            TransactionType::BnsSetPrimary,
             0,
             bincode::serialize(&Some(name.clone())).unwrap(),
         ),
@@ -2511,4 +2511,48 @@ fn bns_every_door_refuses_a_stranger_and_leaves_the_state_untouched() {
         );
     }
     assert_eq!(state.bns_registry.resolve(&name, 2), Some(owner));
+}
+
+/// `resolve` answers the address record, and the owner when the record is
+/// empty. `resolve_full` answers the same value.
+#[test]
+fn bns_resolve_falls_back_to_the_owner_when_the_address_record_is_empty() {
+    let mut reg = BnsRegistry::new();
+    let owner = addr(0x51);
+    let vault = addr(0x52);
+    reg.register(
+        "fallback.bud".to_string(),
+        owner,
+        1,
+        crate::bns::MIN_DURATION,
+    )
+    .unwrap();
+    assert_eq!(reg.resolve("fallback.bud", 2), Some(owner));
+
+    reg.set_address("fallback.bud", &owner, Some(vault), None, 2)
+        .unwrap();
+    assert_eq!(reg.resolve("fallback.bud", 2), Some(vault));
+    assert_eq!(
+        reg.resolve_full("fallback.bud", 2).unwrap().address,
+        Some(vault)
+    );
+
+    // The owner empties the record: the name resolves to the owner again,
+    // it does not stop resolving.
+    reg.set_address("fallback.bud", &owner, None, None, 3)
+        .unwrap();
+    assert_eq!(reg.names.get("fallback.bud").unwrap().address, None);
+    assert_eq!(reg.resolve("fallback.bud", 3), Some(owner));
+    assert_eq!(
+        reg.resolve_full("fallback.bud", 3).unwrap().address,
+        Some(owner)
+    );
+
+    // A stranger cannot empty it, and an expired name resolves to nothing.
+    assert_eq!(
+        reg.set_address("fallback.bud", &vault, None, None, 3),
+        Err(BnsError::NotOwner)
+    );
+    let lapsed = 1 + crate::bns::MIN_DURATION;
+    assert_eq!(reg.resolve("fallback.bud", lapsed), None);
 }

@@ -143,7 +143,7 @@ enum ProtoTransactionType {
     // Owner-only update of the forwarding/payment target address of a live .bud name.
     BNS_SET_ADDRESS = 74;
     // Set or clear the signer's reverse primary .bud name.
-    BNS_SET_PRIMARY_NAME = 75;
+    BNS_SET_PRIMARY = 75;
     // Atomically set or delete bounded text/profile/multi-chain records on a live .bud name.
     BNS_SET_RECORDS = 76;
     // Remove an existing subdomain under a live .bud parent name owned by the signer.

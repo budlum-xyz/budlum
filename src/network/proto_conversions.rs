@@ -207,8 +207,8 @@ impl From<&Transaction> for pb::ProtoTransaction {
             TransactionType::BnsSetAddress => {
                 (pb::ProtoTransactionType::BnsSetAddress as i32, None)
             }
-            TransactionType::BnsSetPrimaryName => {
-                (pb::ProtoTransactionType::BnsSetPrimaryName as i32, None)
+            TransactionType::BnsSetPrimary => {
+                (pb::ProtoTransactionType::BnsSetPrimary as i32, None)
             }
             TransactionType::BnsSetRecords => {
                 (pb::ProtoTransactionType::BnsSetRecords as i32, None)
@@ -1251,7 +1251,7 @@ impl TryFrom<pb::ProtoTransaction> for Transaction {
             pb::ProtoTransactionType::BnsCancelOffer => TransactionType::BnsCancelOffer,
             pb::ProtoTransactionType::BnsBuyName => TransactionType::BnsBuyName,
             pb::ProtoTransactionType::BnsSetAddress => TransactionType::BnsSetAddress,
-            pb::ProtoTransactionType::BnsSetPrimaryName => TransactionType::BnsSetPrimaryName,
+            pb::ProtoTransactionType::BnsSetPrimary => TransactionType::BnsSetPrimary,
             pb::ProtoTransactionType::BnsSetRecords => TransactionType::BnsSetRecords,
             pb::ProtoTransactionType::BnsRegister => {
                 return Err("BnsRegister is retired; a name is bought through an offer".into())
@@ -3140,7 +3140,7 @@ mod tests {
             TransactionType::BnsCancelOffer,
             TransactionType::BnsBuyName,
             TransactionType::BnsSetAddress,
-            TransactionType::BnsSetPrimaryName,
+            TransactionType::BnsSetPrimary,
             TransactionType::BnsSetRecords,
             TransactionType::BnsSetContent,
             TransactionType::BnsRegisterSubdomain,

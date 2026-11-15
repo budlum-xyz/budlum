@@ -1031,13 +1031,14 @@ impl BnsRegistry {
         })
     }
 
-    /// Resolve a live `<label>.bud` name (to `record.address`) or a live
-    /// two-level `<sub_label>.<label>.bud` subdomain (failing closed if the
-    /// parent `.bud` name is unknown or expired).
+    /// Resolve a live `<label>.bud` name to its address record, or to its
+    /// owner when the record is empty, or a live two-level
+    /// `<sub_label>.<label>.bud` subdomain (failing closed if the parent
+    /// `.bud` name is unknown or expired).
     pub fn resolve(&self, name: &str, current_epoch: u64) -> Option<Address> {
         if let Some(record) = self.names.get(name) {
             return if record.expires_at > current_epoch {
-                record.address
+                Some(record.address.unwrap_or(record.owner))
             } else {
                 None
             };
@@ -1153,7 +1154,13 @@ impl BnsRegistry {
             BnsResolved {
                 name: record.name.clone(),
                 owner: record.owner,
-                address: if expired { None } else { record.address },
+                // The same value `resolve` answers: the address record, or
+                // the owner when the record is empty.
+                address: if expired {
+                    None
+                } else {
+                    Some(record.address.unwrap_or(record.owner))
+                },
                 storage_root: if expired { None } else { record.storage_root },
                 storage_domain_id: if expired {
                     None

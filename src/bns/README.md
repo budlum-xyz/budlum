@@ -47,12 +47,14 @@
     incoming transfers with `BnsError::OwnerNameLimitExceeded`.
   - **B4 (forward target address and bidirectional reverse resolution):**
     separates `resolve_owner` (authorization) from `resolve` (`record.address`
-    forwarding target), adds `BnsSetAddress` (wire tag `74`) and
-    `BnsSetPrimaryName` (wire tag `75`), stores `primary_names` committed into
+    forwarding target, or the owner when that record is empty; `resolve_full`
+    answers the same value), adds `BnsSetAddress` (wire tag `74`) and
+    `BnsSetPrimary` (wire tag `75`), stores `primary_names` committed into
     `BnsRegistry::root()`, enforces two-way live ownership/target verification on
     `reverse_resolve`, clears stale reverse mappings on `transfer` / target
-    rotation, and exposes `bud_bnsReverseResolve`, `bud_bnsPrepareSetAddress`,
-    `bud_bnsPrepareSetPrimaryName`, and `bud bns {set-address,set-primary,reverse}`.
+    rotation, and exposes `bud_bnsReverseResolve` (alias `bud_bnsReverse`),
+    `bud_bnsPrepareSetAddress`, `bud_bnsPrepareSetPrimaryName` (alias
+    `bud_bnsPrepareSetPrimary`), and `bud bns {set-address,set-primary,reverse}`.
   - **B5 (bounded text/profile/multi-chain records and `BDLM_BNS_REGISTRY_V3`):**
     adds `NameRecord::records` (`MAX_RECORDS_PER_NAME = 32`,
     `MAX_RECORD_KEY_LEN = 64`, `MAX_RECORD_VALUE_BYTES = 512`, rejecting
