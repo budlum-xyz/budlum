@@ -1111,6 +1111,54 @@ fn garden_host_silence_freezes_and_its_return_resumes() -> Result<(), String> {
     Ok(())
 }
 
+/// What one validator publishes over the life of a Garden has a ceiling the
+/// host sets at the founding, and an address the others would not dial is
+/// not announced.
+#[test]
+fn garden_validator_share_bounds_what_it_publishes() -> Result<(), String> {
+    let _guard = NETWORK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let node = Node::start("solo")?;
+    let low_port = node.rpc(
+        "bud_gardenCreate",
+        &json!(["Room", "solo", {
+            "listen": "/ip4/0.0.0.0/tcp/0",
+            "announce": "/ip4/127.0.0.1/tcp/22",
+        }]),
+    );
+    let refusal = low_port
+        .err()
+        .ok_or("a Garden was founded on an address nobody would dial")?;
+    ensure(refusal.contains("cannot be announced"), refusal)?;
+
+    node.rpc(
+        "bud_gardenCreate",
+        &json!(["Room", "solo", {
+            "listen": "/ip4/127.0.0.1/tcp/0",
+            "round_ms": ROUND_MS,
+            "max_object_bytes": 4096,
+            "max_published_bytes_per_validator": 8192,
+        }]),
+    )?;
+    for body in ["one", "two"] {
+        let (tx_id, _) = node.publish_text("message", body)?;
+        node.wait_final(&tx_id)?;
+    }
+    let refusal = node
+        .publish_text("message", "three")
+        .err()
+        .ok_or("a validator published past its share")?;
+    ensure(refusal.contains("share"), refusal)?;
+    let garden = node.garden()?;
+    ensure(
+        garden.pointer("/limits/max_published_bytes_per_validator") == Some(&json!(8192))
+            && garden.pointer("/validators/0/published_bytes") == Some(&json!(8192))
+            && garden.pointer("/objects") == Some(&json!(2)),
+        format!("the share is not what the Garden reports: {garden}"),
+    )
+}
+
 /// The Garden surface is an operator surface: the public listener refuses
 /// every `bud_garden*` method, and no method takes a key to act for.
 #[test]

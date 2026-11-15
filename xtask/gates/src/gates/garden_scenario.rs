@@ -25,6 +25,7 @@ pub(crate) const TESTS: &[&str] = &[
     "garden_host_silence_freezes_and_its_return_resumes",
     "garden_validator_leaves_and_returns_while_the_garden_runs",
     "garden_rpc_is_refused_on_the_public_listener",
+    "garden_validator_share_bounds_what_it_publishes",
 ];
 
 pub fn run(_root: &Path, log: &Path) -> Result<String, String> {

@@ -96,21 +96,63 @@ pub fn announced_address(listen: &Multiaddr, key: &GardenKey) -> Result<String, 
     Ok(format!("{listen}/p2p/{}", peer_id_of(key)?))
 }
 
+/// Lowest TCP port a Garden address may name. TESTNET-DEFAULT. The ports
+/// below it belong to the services of a machine, and no Garden node listens
+/// there, so no peer has a reason to send this node to one.
+const MIN_DIAL_PORT: u16 = 1024;
+
+/// Parse an address that somebody else supplied and that this node would
+/// dial, and return it with the peer id it leads to.
+///
+/// The address is one host, one TCP port and one peer id, in that order and
+/// with nothing before, between or after them. The socket a dial opens is
+/// the one the address ends in, so an address that only carries a peer id
+/// somewhere binds nothing. The host is an address one machine answers at:
+/// not the unspecified address, not multicast and not broadcast. Private
+/// and loopback hosts stay: a Garden runs in a home network and on one
+/// machine. What such a dial can do there is open a connection that must
+/// pass the Noise handshake of the named peer id before a byte of the
+/// Garden protocol is sent.
+pub fn dial_address(address: &str) -> Result<(Multiaddr, PeerId), String> {
+    use libp2p::multiaddr::Protocol;
+    let parsed: Multiaddr = address
+        .parse()
+        .map_err(|e| format!("address is not a multiaddr: {e}"))?;
+    let mut parts = parsed.iter();
+    let one_host = match parts.next() {
+        Some(Protocol::Ip4(ip)) => !(ip.is_unspecified() || ip.is_multicast() || ip.is_broadcast()),
+        Some(Protocol::Ip6(ip)) => !(ip.is_unspecified() || ip.is_multicast()),
+        Some(Protocol::Dns(_) | Protocol::Dns4(_) | Protocol::Dns6(_)) => true,
+        _ => false,
+    };
+    if !one_host {
+        return Err("address must start with the host one machine answers at".into());
+    }
+    match parts.next() {
+        Some(Protocol::Tcp(port)) if port >= MIN_DIAL_PORT => {}
+        _ => {
+            return Err(format!(
+                "address must name a TCP port from {MIN_DIAL_PORT} up after the host"
+            ))
+        }
+    }
+    let Some(Protocol::P2p(id)) = parts.next() else {
+        return Err("address must end in the peer id of the validator it leads to".into());
+    };
+    if parts.next().is_some() {
+        return Err("address carries more than a host, a port and a peer id".into());
+    }
+    Ok((parsed, id))
+}
+
 /// Parse an address a validator announced and check that it names `key`.
 ///
 /// A validator can only make its peers dial an address that ends in its own
 /// peer id. The dial then fails the Noise handshake unless the validator
-/// really answers there, so an announced address cannot aim a node at
-/// someone else's service.
+/// really answers there.
 pub fn validator_dial_address(address: &str, key: &GardenKey) -> Result<Multiaddr, String> {
-    let parsed: Multiaddr = address
-        .parse()
-        .map_err(|e| format!("announced address is not a multiaddr: {e}"))?;
-    let expected = peer_id_of(key)?;
-    let names_key = parsed
-        .iter()
-        .any(|part| matches!(part, libp2p::multiaddr::Protocol::P2p(id) if id == expected));
-    if !names_key {
+    let (parsed, id) = dial_address(address)?;
+    if id != peer_id_of(key)? {
         return Err("announced address does not end in the validator's own peer id".into());
     }
     Ok(parsed)
@@ -480,6 +522,36 @@ mod tests {
         .await
         .expect("the dial never connected");
         assert_eq!(connected, b_id);
+    }
+
+    /// What a validator announces is dialed by everybody else, so it is one
+    /// host, one TCP port and the validator's own peer id at the end, and
+    /// nothing else. A peer id anywhere else binds nothing: the socket that
+    /// is dialed is the one the address ends in.
+    #[test]
+    fn garden_dial_address_is_one_host_one_port_and_the_validator_behind_it() {
+        let me = KeyPair::generate().unwrap().public_key_bytes();
+        let id = peer_id_of(&me).unwrap();
+        for good in [
+            format!("/ip4/192.168.1.20/tcp/4001/p2p/{id}"),
+            format!("/ip6/::1/tcp/4001/p2p/{id}"),
+            format!("/dns4/garden.example/tcp/4001/p2p/{id}"),
+        ] {
+            validator_dial_address(&good, &me).unwrap();
+        }
+        for bad in [
+            format!("/p2p/{id}/ip4/10.0.0.9/tcp/6379"),
+            format!("/ip4/10.0.0.9/tcp/4001/p2p/{id}/ip4/10.0.0.9/tcp/6379"),
+            format!("/ip4/10.0.0.9/tcp/22/p2p/{id}"),
+            format!("/ip4/10.0.0.9/tcp/0/p2p/{id}"),
+            format!("/ip4/0.0.0.0/tcp/4001/p2p/{id}"),
+            format!("/ip4/224.0.0.1/tcp/4001/p2p/{id}"),
+            format!("/ip4/255.255.255.255/tcp/4001/p2p/{id}"),
+            format!("/ip6/::/tcp/4001/p2p/{id}"),
+            format!("/ip4/10.0.0.9/udp/4001/p2p/{id}"),
+        ] {
+            assert!(validator_dial_address(&bad, &me).is_err(), "{bad}");
+        }
     }
 
     /// Peers that dial in must not take the slots this node dials out with:

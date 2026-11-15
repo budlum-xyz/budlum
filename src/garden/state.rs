@@ -9,7 +9,7 @@ use super::types::{
     is_safe_label, join_message, status_code, GardenBlock, GardenCommit, GardenContentKind,
     GardenGenesis, GardenHeader, GardenKey, GardenTx, GardenTxKind, GardenValidator,
     GardenValidatorStatus, GardenVote, SignedGardenTx, MAX_ADDRESS_BYTES, MAX_CAPTION_BYTES,
-    MAX_MIME_BYTES, MAX_NAME_BYTES,
+    MAX_MIME_BYTES, MAX_NAME_BYTES, MIN_PUBLICATION_CHARGE,
 };
 use crate::core::hash::hash_fields_bytes;
 use crate::crypto::primitives::verify_signature;
@@ -46,7 +46,13 @@ pub struct GardenState {
     pub last_timestamp_ms: u64,
     pub validators: BTreeMap<GardenKey, GardenValidator>,
     pub nonces: BTreeMap<GardenKey, u64>,
-    pub objects: BTreeMap<Hash32, GardenObject>,
+    /// The publications, by content id and author. The same content may be
+    /// published by several validators; each has its own record, so nobody
+    /// takes the publication of somebody else by naming its content first.
+    pub objects: BTreeMap<(Hash32, GardenKey), GardenObject>,
+    /// What each validator has used of its share, in bytes. It follows from
+    /// `objects`, so the state root does not name it again.
+    pub published: BTreeMap<GardenKey, u64>,
 }
 
 /// The root of the transactions of a block.
@@ -91,6 +97,7 @@ impl GardenState {
             validators,
             nonces: BTreeMap::new(),
             objects: BTreeMap::new(),
+            published: BTreeMap::new(),
             genesis,
         })
     }
@@ -110,6 +117,26 @@ impl GardenState {
             .filter(|v| v.status == GardenValidatorStatus::Active)
             .map(|v| v.key)
             .collect()
+    }
+
+    /// The publications of `content_id`, one for each validator that
+    /// published it.
+    pub fn publications(&self, content_id: &Hash32) -> impl Iterator<Item = &GardenObject> {
+        self.objects
+            .range((*content_id, [0u8; 32])..=(*content_id, [0xffu8; 32]))
+            .map(|(_, object)| object)
+    }
+
+    /// True when a finalized publication names `content_id`.
+    pub fn holds_content(&self, content_id: &Hash32) -> bool {
+        self.publications(content_id).next().is_some()
+    }
+
+    /// The content ids the Garden holds, each one once.
+    pub fn content_ids(&self) -> Vec<Hash32> {
+        let mut ids: Vec<Hash32> = self.objects.keys().map(|(id, _)| *id).collect();
+        ids.dedup();
+        ids
     }
 
     pub fn is_active(&self, key: &GardenKey) -> bool {
@@ -244,7 +271,7 @@ impl GardenState {
                 continue;
             }
             let mut attempt = scratch.clone();
-            match attempt.apply_tx(signed, height) {
+            match attempt.apply_tx(signed, height, None) {
                 Ok(()) => {
                     scratch = attempt;
                     per_sender.insert(signed.tx.sender, used.saturating_add(1));
@@ -299,7 +326,7 @@ impl GardenState {
             let Some(report) = report else {
                 continue;
             };
-            if next.apply_tx(&report, height).is_ok() {
+            if next.apply_tx(&report, height, Some(me)).is_ok() {
                 txs.push(report);
             }
         }
@@ -312,12 +339,22 @@ impl GardenState {
             return Err("garden is retired; it has no next block".into());
         }
         let mut scratch = self.clone();
-        scratch.apply_tx(signed, self.height.saturating_add(1))
+        scratch.apply_tx(signed, self.height.saturating_add(1), None)
     }
 
     /// Apply one transaction. The caller works on a copy, so a refusal leaves
     /// the committed state untouched.
-    fn apply_tx(&mut self, signed: &SignedGardenTx, height: u64) -> Result<(), String> {
+    ///
+    /// `leader` is the proposer of the block the transaction stands in, and
+    /// `None` for a transaction that stands in no block yet. An absence
+    /// report is the leader's own word about the block it builds: it is
+    /// valid in that block only and never as a transaction somebody sent.
+    fn apply_tx(
+        &mut self,
+        signed: &SignedGardenTx,
+        height: u64,
+        leader: Option<&GardenKey>,
+    ) -> Result<(), String> {
         signed.verify(self.chain_id())?;
         let sender = signed.tx.sender;
         let expected = self.next_nonce(&sender);
@@ -424,6 +461,12 @@ impl GardenState {
                 if sender_status != Some(GardenValidatorStatus::Active) {
                     return Err("only an active validator can report an absence".into());
                 }
+                if leader != Some(&sender) {
+                    return Err(
+                        "an absence report counts only from the leader of the block it stands in"
+                            .into(),
+                    );
+                }
                 if *target == host {
                     return Err(
                         "the host is never suspended; its absence freezes the Garden".into(),
@@ -461,11 +504,21 @@ impl GardenState {
                 if caption.len() > MAX_CAPTION_BYTES || caption.chars().any(char::is_control) {
                     return Err("object caption is invalid".into());
                 }
-                if self.objects.contains_key(content_id) {
-                    return Err("this content is already published in the Garden".into());
+                if self.objects.contains_key(&(*content_id, sender)) {
+                    return Err("this validator already published this content".into());
                 }
+                let share = limits.max_published_bytes_per_validator;
+                let used = self.published.get(&sender).copied().unwrap_or(0);
+                let after = used.saturating_add(u64::from(*size).max(MIN_PUBLICATION_CHARGE));
+                if after > share {
+                    return Err(format!(
+                        "this validator used {used} of its share of {share} bytes; \
+                         the publication does not fit"
+                    ));
+                }
+                self.published.insert(sender, after);
                 self.objects.insert(
-                    *content_id,
+                    (*content_id, sender),
                     GardenObject {
                         content_id: *content_id,
                         kind: *kind,
@@ -492,7 +545,7 @@ impl GardenState {
         round: u64,
         timestamp_ms: u64,
     ) -> Result<(GardenHeader, Self), String> {
-        let next = self.execute(txs)?;
+        let next = self.execute(txs, &proposer)?;
         let header = GardenHeader {
             chain_id: self.chain_id(),
             height: self.height.saturating_add(1),
@@ -510,8 +563,9 @@ impl GardenState {
         Ok((header, next))
     }
 
-    /// Run the block-level rules and every transaction on a copy.
-    fn execute(&self, txs: &[SignedGardenTx]) -> Result<Self, String> {
+    /// Run the block-level rules and every transaction on a copy. `leader`
+    /// is the proposer of the block.
+    fn execute(&self, txs: &[SignedGardenTx], leader: &GardenKey) -> Result<Self, String> {
         let limits = &self.genesis.limits;
         match self.status {
             DomainStatus::Retired => return Err("garden is retired; it has no next block".into()),
@@ -554,7 +608,7 @@ impl GardenState {
                     ));
                 }
             }
-            next.apply_tx(signed, height)?;
+            next.apply_tx(signed, height, Some(leader))?;
         }
         if self.electorate(txs).is_empty() {
             return Err("block leaves nobody to finalize it".into());
@@ -838,14 +892,15 @@ mod tests {
         let a = net.join("a");
         let b = net.join("b");
         let host = net.host;
-        let refusal = net
-            .ledger
-            .state
-            .check_tx(&net.tx(&a, GardenTxKind::Suspend { target: host }))
-            .unwrap_err();
+        // The leader of the block is the one that reports.
+        let leader = net.ledger.state.leader(0).unwrap();
+        let (a, b) = if leader == b { (b, a) } else { (a, b) };
+        let name = net.ledger.state.validators[&b].name.clone();
+        let about_host = net.tx(&leader, GardenTxKind::Suspend { target: host });
+        let refusal = net.block(vec![about_host]).unwrap_err();
         assert!(refusal.contains("never suspended"), "{refusal}");
 
-        let suspend = net.tx(&a, GardenTxKind::Suspend { target: b });
+        let suspend = net.tx(&leader, GardenTxKind::Suspend { target: b });
         let block = net.block(vec![suspend]).unwrap();
         assert_eq!(net.ledger.state.electorate(&block.txs), {
             let mut e = vec![host, a];
@@ -856,7 +911,7 @@ mod tests {
         net.ledger.append(GardenCommit { block, votes }).unwrap();
         let record = &net.ledger.state.validators[&b];
         assert_eq!(record.status, GardenValidatorStatus::Suspended);
-        assert_eq!(record.name, "b");
+        assert_eq!(record.name, name);
 
         net.commit(vec![net.tx(
             &b,
@@ -981,6 +1036,134 @@ mod tests {
         block.proposer_signature = net.keys[&wrong].sign(&block.header.hash()).to_vec();
         let refusal = net.ledger.state.verify_block(&block).unwrap_err();
         assert!(refusal.contains("not the leader"), "{refusal}");
+    }
+
+    /// An absence report is the word of the leader of the block it stands
+    /// in. A report of anybody else must not reach a block: the host does
+    /// not sign a block that reports a validator it still hears, so a report
+    /// that every leader picks up again stops the chain for good.
+    #[test]
+    fn garden_absence_report_counts_only_from_the_leader_of_its_block() {
+        let mut net = Net::new();
+        for name in ["a", "b", "c"] {
+            net.join(name);
+        }
+        let state = net.ledger.state.clone();
+        let host = net.host;
+        let leader = state.leader(0).unwrap();
+        let others: Vec<GardenKey> = state
+            .active()
+            .into_iter()
+            .filter(|key| *key != host && *key != leader)
+            .collect();
+        let (member, target) = (others[0], others[1]);
+        let claim = net.tx(&member, GardenTxKind::Suspend { target });
+
+        // Sent as a transaction it is refused, so no pool keeps it.
+        let refusal = state.check_tx(&claim).unwrap_err();
+        assert!(refusal.contains("leader"), "{refusal}");
+        // A leader that finds it in its pool leaves it out and drops it.
+        let post = net.publish(&host, 1);
+        let pool = [post.clone(), claim.clone()];
+        let (chosen, dead) = state.assemble(pool.iter(), &leader, &[], |_| None);
+        assert_eq!(chosen, vec![post.clone()]);
+        assert_eq!(dead, vec![claim.id()]);
+        // A block that carries it anyway is no block.
+        let refusal = net.block(vec![post, claim]).unwrap_err();
+        assert!(refusal.contains("leader"), "{refusal}");
+        // The leader's own report is still one.
+        let own = reports(&net, &leader, &[target]);
+        net.block(own).unwrap();
+    }
+
+    /// Two validators say the same thing. Each has its own publication under
+    /// its own name, whichever comes first, and nobody takes the content of
+    /// somebody else by naming it first.
+    #[test]
+    fn garden_same_content_is_published_by_each_validator_under_its_own_name() {
+        let mut net = Net::new();
+        let a = net.join("a");
+        let b = net.join("b");
+        let first = net.publish(&b, 7);
+        let second = net.publish(&a, 7);
+        net.commit(vec![first.clone()]).unwrap();
+        net.commit(vec![second.clone()]).unwrap();
+        let state = &net.ledger.state;
+        let content = [7u8; 32];
+        assert!(state.holds_content(&content));
+        let mut said: Vec<(GardenKey, Hash32)> = state
+            .publications(&content)
+            .map(|object| (object.author, object.tx_id))
+            .collect();
+        said.sort_unstable();
+        let mut expected = vec![(b, first.id()), (a, second.id())];
+        expected.sort_unstable();
+        assert_eq!(said, expected);
+        assert_eq!(state.content_ids(), vec![content]);
+        // One validator has one publication of one content.
+        let again = net.publish(&a, 7);
+        let refusal = net.ledger.state.check_tx(&again).unwrap_err();
+        assert!(refusal.contains("already published"), "{refusal}");
+    }
+
+    /// One validator cannot fill the disks of the others: what it publishes
+    /// over the life of the Garden has a ceiling.
+    #[test]
+    fn garden_validator_publishes_up_to_its_share_and_no_more() {
+        let mut net = Net::new();
+        // A share of three full objects keeps the test short.
+        let size = net.ledger.state.genesis.limits.max_object_bytes;
+        net.ledger
+            .state
+            .genesis
+            .limits
+            .max_published_bytes_per_validator = 3 * u64::from(size);
+        net.ledger.state.last_hash = net.ledger.state.genesis.hash();
+        let a = net.join("a");
+        let b = net.join("b");
+        let limits = net.ledger.state.genesis.limits.clone();
+        let fits = 3;
+        let post = |net: &Net, sender: &GardenKey, n: u64| {
+            let mut content_id = [0u8; 32];
+            content_id[..8].copy_from_slice(&n.to_le_bytes());
+            net.tx(
+                sender,
+                GardenTxKind::Publish {
+                    kind: GardenContentKind::Image,
+                    content_id,
+                    size,
+                    mime: "image/png".into(),
+                    caption: String::new(),
+                },
+            )
+        };
+        for n in 0..fits {
+            let tx = post(&net, &a, n);
+            net.commit(vec![tx]).unwrap();
+        }
+        let over = post(&net, &a, fits);
+        let refusal = net.ledger.state.check_tx(&over).unwrap_err();
+        assert!(refusal.contains("share"), "{refusal}");
+        // The share is per validator: the next one still publishes.
+        let other = post(&net, &b, fits + 1);
+        net.commit(vec![other]).unwrap();
+        // A small publication counts as the record the chain keeps for it.
+        let before = net.ledger.state.published[&b];
+        let small = net.publish(&b, 9);
+        net.commit(vec![small]).unwrap();
+        assert_eq!(
+            net.ledger.state.published[&b],
+            before + MIN_PUBLICATION_CHARGE
+        );
+
+        let mut bad = limits;
+        bad.max_published_bytes_per_validator = u64::from(size) - 1;
+        assert!(bad.validate().is_err());
+        // The share is part of what an invite commits to.
+        let genesis = net.ledger.state.genesis.clone();
+        let mut other_share = genesis.clone();
+        other_share.limits.max_published_bytes_per_validator += 1;
+        assert_ne!(genesis.hash(), other_share.hash());
     }
 
     /// The reports of `leader` about `targets`, as a proposer writes them.
