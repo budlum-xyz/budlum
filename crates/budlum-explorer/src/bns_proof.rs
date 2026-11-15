@@ -438,7 +438,14 @@ mod tests {
         let extras = [0x42u8; 32];
         let meta = [0x24u8; 32];
         let sibling = [0x77u8; 32];
-        let leaf = bns_leaf_digest(&r.name, r.owner, 25, r.content_binding, r.storage_root, extras);
+        let leaf = bns_leaf_digest(
+            &r.name,
+            r.owner,
+            25,
+            r.content_binding,
+            r.storage_root,
+            extras,
+        );
         let names_root = fold_bns_merkle_branch(leaf, &[sibling], &[false]).unwrap();
         let expected_root = bns_registry_root_from_parts(meta, names_root);
 
