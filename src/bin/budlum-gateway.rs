@@ -43,6 +43,7 @@
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use budlum_core::web_gateway::host::{parse_host, DEFAULT_GATEWAY_SUFFIX};
@@ -107,6 +108,56 @@ struct GatewayConfig {
     /// the client is its rightmost address that is not itself a trusted proxy.
     #[serde(default)]
     trusted_proxies: Vec<std::net::IpAddr>,
+    /// Content fetches that miss the cache, per minute per client address.
+    /// A miss costs a read of the content source, so it has its own budget
+    /// below the request budget.
+    #[serde(default = "default_fill_rate")]
+    fill_per_minute: u32,
+    /// Headers the operator verified: the registry root and the epoch at a
+    /// height. A proof is checked against these and against nothing a node
+    /// answers.
+    #[serde(default)]
+    checkpoints: Vec<Checkpoint>,
+    /// A file of further checkpoints in the same form, re-read whenever it
+    /// changes. The process that follows headers writes it; the gateway
+    /// only reads it.
+    #[serde(default)]
+    checkpoints_file: Option<PathBuf>,
+}
+
+/// One verified header, as the configuration and the checkpoint file carry it.
+#[derive(Debug, Clone, Deserialize)]
+struct Checkpoint {
+    height: u64,
+    /// The registry root at `height`, 32 bytes of hex.
+    root: String,
+    epoch: u64,
+}
+
+/// The checkpoint file: a `checkpoints` list and nothing else.
+#[derive(Debug, Deserialize)]
+struct CheckpointFile {
+    #[serde(default)]
+    checkpoints: Vec<Checkpoint>,
+}
+
+type RootTable = std::collections::BTreeMap<u64, ([u8; 32], u64)>;
+
+/// Read a checkpoint list into a table. A malformed root or a height listed
+/// twice refuses the whole list: half a table is a table nobody checked.
+fn checkpoint_table(list: &[Checkpoint]) -> Result<RootTable, String> {
+    let mut table = RootTable::new();
+    for checkpoint in list {
+        let root = hex32(&checkpoint.root)
+            .map_err(|e| format!("checkpoint {}: {e}", checkpoint.height))?;
+        if table
+            .insert(checkpoint.height, (root, checkpoint.epoch))
+            .is_some()
+        {
+            return Err(format!("checkpoint {} is listed twice", checkpoint.height));
+        }
+    }
+    Ok(table)
 }
 
 fn default_suffix() -> String {
@@ -129,6 +180,51 @@ fn default_resolve_ttl() -> u64 {
     10
 }
 
+fn default_fill_rate() -> u32 {
+    30
+}
+
+/// What the process counts, for the line it logs once a minute.
+#[derive(Default)]
+struct Counters {
+    requests: AtomicU64,
+    served: AtomicU64,
+    not_found: AtomicU64,
+    rate_limited: AtomicU64,
+    /// Answers refused because a proof, a header or a content check failed.
+    refused_upstream: AtomicU64,
+    cache_hits: AtomicU64,
+    cache_fills: AtomicU64,
+}
+
+impl Counters {
+    fn count_status(&self, status: StatusCode) {
+        self.requests.fetch_add(1, Ordering::Relaxed);
+        let bucket = match status {
+            StatusCode::OK => &self.served,
+            StatusCode::NOT_FOUND => &self.not_found,
+            StatusCode::TOO_MANY_REQUESTS => &self.rate_limited,
+            StatusCode::BAD_GATEWAY => &self.refused_upstream,
+            _ => return,
+        };
+        bucket.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn log(&self) {
+        let read = |counter: &AtomicU64| counter.load(Ordering::Relaxed);
+        tracing::info!(
+            requests = read(&self.requests),
+            served = read(&self.served),
+            not_found = read(&self.not_found),
+            rate_limited = read(&self.rate_limited),
+            refused_upstream = read(&self.refused_upstream),
+            cache_hits = read(&self.cache_hits),
+            cache_fills = read(&self.cache_fills),
+            "gateway counters"
+        );
+    }
+}
+
 /// Everything a request handler needs, built once at startup.
 struct GatewayState {
     config: GatewayConfig,
@@ -139,8 +235,10 @@ struct GatewayState {
     blocklist: BlockList,
     identity: http_support::ClientIdentity,
     limiter: std::sync::Mutex<RateLimiter>,
+    fill_limiter: std::sync::Mutex<RateLimiter>,
     cache: std::sync::Mutex<ContentCache>,
     resolved: std::sync::Mutex<std::collections::BTreeMap<String, (u64, CachedResolution)>>,
+    counters: Counters,
 }
 
 /// A resolved name, as the request handler holds it between the proof and the
@@ -397,26 +495,91 @@ fn optional_address(
 
 /// A verified-root source for the gateway process.
 ///
-/// The gateway will not take a root from the answer it is checking. Until the
-/// process runs a light client, this source asks a node for the header and
-/// verifies the header hash chain from a checkpoint the operator pins in the
-/// configuration. An empty set of pinned checkpoints means the process has no
-/// root for any height, and every request answers 502: a gateway with no
-/// verified header is a gateway with nothing to say.
+/// The gateway will not take a root from the answer it is checking. The roots
+/// come from checkpoints the operator pins in the configuration and from an
+/// optional checkpoint file that a header-following process keeps current.
+/// With neither, the process has no root for any height and every request
+/// answers 502: a gateway with no verified header is a gateway with nothing
+/// to say.
 struct PinnedHeaderRoots {
     /// Height to the root and the epoch, both pinned by the operator from a
     /// header they checked. The epoch is pinned next to the root because expiry
     /// can only be judged against a header, never against the answering node.
-    pinned: std::collections::BTreeMap<u64, ([u8; 32], u64)>,
+    pinned: RootTable,
+    /// The followed checkpoint file, if one is configured.
+    followed: Option<FollowedCheckpoints>,
+}
+
+/// A checkpoint file and the table last read from it.
+struct FollowedCheckpoints {
+    path: PathBuf,
+    seen: std::sync::Mutex<(Option<std::time::SystemTime>, RootTable)>,
+}
+
+impl FollowedCheckpoints {
+    fn new(path: PathBuf) -> Self {
+        Self {
+            path,
+            seen: std::sync::Mutex::new((None, RootTable::new())),
+        }
+    }
+
+    /// The checkpoint at `height`, after re-reading the file if it changed.
+    ///
+    /// A file that is missing or does not parse leaves an empty table: the
+    /// heights it used to name are unknown again, which is a 502 and never a
+    /// stale root.
+    fn at(&self, height: u64) -> Option<([u8; 32], u64)> {
+        let modified = std::fs::metadata(&self.path)
+            .and_then(|meta| meta.modified())
+            .ok();
+        let mut seen = match self.seen.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if modified.is_none() {
+            // No file: nothing is followed, and nothing read earlier is kept.
+            *seen = (None, RootTable::new());
+            return None;
+        }
+        if seen.0 != modified {
+            let table = std::fs::read_to_string(&self.path)
+                .map_err(|e| e.to_string())
+                .and_then(|raw| toml::from_str::<CheckpointFile>(&raw).map_err(|e| e.to_string()))
+                .and_then(|file| checkpoint_table(&file.checkpoints));
+            *seen = match table {
+                Ok(table) => (modified, table),
+                Err(reason) => {
+                    tracing::warn!(
+                        path = %self.path.display(),
+                        %reason,
+                        "the checkpoint file was refused; its heights are unknown"
+                    );
+                    (modified, RootTable::new())
+                }
+            };
+        }
+        seen.1.get(&height).copied()
+    }
+}
+
+impl PinnedHeaderRoots {
+    fn at(&self, height: u64) -> Option<([u8; 32], u64)> {
+        // A pinned height is never overridden by the file.
+        if let Some(pinned) = self.pinned.get(&height) {
+            return Some(*pinned);
+        }
+        self.followed.as_ref().and_then(|file| file.at(height))
+    }
 }
 
 impl StateRoots for PinnedHeaderRoots {
     fn verified_state_root(&self, height: u64) -> Option<[u8; 32]> {
-        self.pinned.get(&height).map(|(root, _)| *root)
+        self.at(height).map(|(root, _)| root)
     }
 
     fn verified_epoch(&self, height: u64) -> Option<u64> {
-        self.pinned.get(&height).map(|(_, epoch)| *epoch)
+        self.at(height).map(|(_, epoch)| epoch)
     }
 }
 
@@ -509,10 +672,20 @@ async fn handle(
     state: Arc<GatewayState>,
     peer: SocketAddr,
 ) -> Result<Response<BoxBody>, std::convert::Infallible> {
+    let response = answer(request, &state, peer);
+    state.counters.count_status(response.status());
+    Ok(response)
+}
+
+fn answer(
+    request: Request<hyper::body::Incoming>,
+    state: &GatewayState,
+    peer: SocketAddr,
+) -> Response<BoxBody> {
     let method = request.method().clone();
     if method != hyper::Method::GET && method != hyper::Method::HEAD {
         let response = plain(StatusCode::METHOD_NOT_ALLOWED, "only GET and HEAD");
-        return Ok(response);
+        return response;
     }
     let host = request
         .headers()
@@ -522,7 +695,7 @@ async fn handle(
         .to_string();
     let Some(target) = parse_host(&host, &state.suffix) else {
         let response = plain(StatusCode::NOT_FOUND, "unknown name");
-        return Ok(response);
+        return response;
     };
     if state.blocklist.is_blocked(&target.name) {
         let response = plain(
@@ -530,13 +703,13 @@ async fn handle(
                 .unwrap_or(StatusCode::UNAVAILABLE_FOR_LEGAL_REASONS),
             "blocked on this gateway",
         );
-        return Ok(response);
+        return response;
     }
     // The client is the socket peer, or the address a configured proxy vouches
     // for. A header the client wrote itself is never a source of identity.
     let client = match state.identity.client_ip(peer.ip(), request.headers()) {
         Ok(ip) => ip.to_string(),
-        Err(reason) => return Ok(plain(StatusCode::BAD_REQUEST, reason)),
+        Err(reason) => return plain(StatusCode::BAD_REQUEST, reason),
     };
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -549,16 +722,16 @@ async fn handle(
         };
         if limiter.check(&client, now) == LimitDecision::Refused {
             let response = plain(StatusCode::TOO_MANY_REQUESTS, "too many requests");
-            return Ok(response);
+            return response;
         }
     }
 
     let name = target.name.clone();
-    let resolution = match resolve_name(&state, &name, &target) {
+    let resolution = match resolve_name(state, &name, &target) {
         Ok(resolved) => resolved,
         Err(error) => {
             let response = error_response(&error);
-            return Ok(response);
+            return response;
         }
     };
 
@@ -566,7 +739,7 @@ async fn handle(
         Ok(manifest) => manifest,
         Err(_) => {
             let response = plain(StatusCode::BAD_GATEWAY, "content unavailable");
-            return Ok(response);
+            return response;
         }
     };
     let path = request.uri().path();
@@ -574,7 +747,7 @@ async fn handle(
         Ok(route) => route.clone(),
         Err(error) => {
             let response = error_response(&error);
-            return Ok(response);
+            return response;
         }
     };
 
@@ -587,10 +760,25 @@ async fn handle(
         };
         cache.get(&route.content).map(<[u8]>::to_vec)
     };
+    if cached.is_none() {
+        // A miss reads the content source. It has its own budget, so a client
+        // cannot spend its whole request budget on fills.
+        let mut fills = match state.fill_limiter.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if fills.check(&client, now) == LimitDecision::Refused {
+            return plain(StatusCode::TOO_MANY_REQUESTS, "too many requests");
+        }
+    }
     let bytes = match cached {
-        Some(bytes) => bytes,
+        Some(bytes) => {
+            state.counters.cache_hits.fetch_add(1, Ordering::Relaxed);
+            bytes
+        }
         None => match state.content.fetch(&route.content) {
             Ok(bytes) => {
+                state.counters.cache_fills.fetch_add(1, Ordering::Relaxed);
                 let mut cache = match state.cache.lock() {
                     Ok(guard) => guard,
                     Err(poisoned) => poisoned.into_inner(),
@@ -600,13 +788,13 @@ async fn handle(
                     Err(CacheMiss::DigestMismatch) => {
                         // A source cannot bypass the cache's integrity check
                         // on a miss by supplying mismatched bytes.
-                        return Ok(plain(StatusCode::BAD_GATEWAY, "content unavailable"));
+                        return plain(StatusCode::BAD_GATEWAY, "content unavailable");
                     }
                 }
             }
             Err(_) => {
                 let response = plain(StatusCode::BAD_GATEWAY, "content unavailable");
-                return Ok(response);
+                return response;
             }
         },
     };
@@ -618,7 +806,7 @@ async fn handle(
     if method == hyper::Method::HEAD {
         *response.body_mut() = BoxBody::from(Bytes::new());
     }
-    Ok(response)
+    response
 }
 
 /// Resolve a name, or return the reason it did not resolve.
@@ -724,25 +912,33 @@ fn build_state(config: GatewayConfig) -> Result<GatewayState, String> {
             content_dir.display()
         ));
     }
+    let pinned = checkpoint_table(&config.checkpoints)?;
+    let followed = config
+        .checkpoints_file
+        .clone()
+        .map(FollowedCheckpoints::new);
+    if pinned.is_empty() && followed.is_none() {
+        tracing::warn!(
+            "no checkpoint is configured: every name answers 502 until a verified header is given"
+        );
+    }
     let suffix = config.suffix.clone();
     let rate = config.rate_per_minute;
+    let fill_rate = config.fill_per_minute;
     let cache_max = config.cache_max_bytes;
     Ok(GatewayState {
         config,
         suffix,
         provers,
-        // A gateway with no pinned checkpoint has no verified root and answers
-        // 502. That is the honest state: the light-client wiring is the piece
-        // that turns this into a service.
-        roots: Arc::new(PinnedHeaderRoots {
-            pinned: std::collections::BTreeMap::new(),
-        }),
+        roots: Arc::new(PinnedHeaderRoots { pinned, followed }),
         content: Arc::new(DirectorySource { root: content_dir }),
         blocklist,
         identity,
         limiter: std::sync::Mutex::new(RateLimiter::new(rate, 60)),
+        fill_limiter: std::sync::Mutex::new(RateLimiter::new(fill_rate, 60)),
         cache: std::sync::Mutex::new(ContentCache::new(cache_max)),
         resolved: std::sync::Mutex::new(std::collections::BTreeMap::new()),
+        counters: Counters::default(),
     })
 }
 
@@ -767,6 +963,14 @@ async fn main() -> Result<(), String> {
         cache_dir = %state.config.cache_dir.display(),
         "the content cache is held in memory; nothing is written under cache_dir yet"
     );
+    let counted = Arc::clone(&state);
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(std::time::Duration::from_secs(60));
+        loop {
+            tick.tick().await;
+            counted.counters.log();
+        }
+    });
     let connections = Arc::new(Semaphore::new(http_support::MAX_CONNECTIONS));
     loop {
         let (stream, peer) = match listener.accept().await {
@@ -956,6 +1160,7 @@ mod tests {
         // rather than a page.
         let roots = PinnedHeaderRoots {
             pinned: std::collections::BTreeMap::new(),
+            followed: None,
         };
         assert_eq!(roots.verified_state_root(0), None);
         assert_eq!(roots.verified_state_root(1_000_000), None);
@@ -967,6 +1172,7 @@ mod tests {
     fn a_pinned_checkpoint_gives_the_epoch_next_to_the_root() {
         let roots = PinnedHeaderRoots {
             pinned: std::collections::BTreeMap::from([(7u64, ([0xab; 32], 100u64))]),
+            followed: None,
         };
         assert_eq!(roots.verified_state_root(7), Some([0xab; 32]));
         assert_eq!(roots.verified_epoch(7), Some(100));
@@ -999,6 +1205,9 @@ mod tests {
             resolve_ttl_secs: 10,
             allow_direct: true,
             trusted_proxies: Vec::new(),
+            fill_per_minute: 5,
+            checkpoints: Vec::new(),
+            checkpoints_file: None,
         };
         let refused = build_state(config);
         assert!(refused.is_err(), "the state must be refused");
@@ -1020,6 +1229,9 @@ mod tests {
             resolve_ttl_secs: 10,
             allow_direct: true,
             trusted_proxies: Vec::new(),
+            fill_per_minute: 5,
+            checkpoints: Vec::new(),
+            checkpoints_file: None,
         };
         let refused = build_state(config);
         assert!(refused.is_err(), "the state must be refused");
@@ -1040,6 +1252,9 @@ mod tests {
             resolve_ttl_secs: 10,
             allow_direct,
             trusted_proxies,
+            fill_per_minute: 5,
+            checkpoints: Vec::new(),
+            checkpoints_file: None,
         }
     }
 
@@ -1103,5 +1318,100 @@ mod tests {
         assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
         let response = error_response(&GatewayError::NoSuchSubdomain("shop".into()));
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[test]
+    fn configured_checkpoints_become_the_roots_the_process_checks_against() {
+        let mut config = serving_config(true, Vec::new());
+        config.checkpoints = vec![Checkpoint {
+            height: 7,
+            root: format!("0x{}", "ab".repeat(32)),
+            epoch: 100,
+        }];
+        let state = build_state(config).unwrap();
+        assert_eq!(state.roots.verified_state_root(7), Some([0xab; 32]));
+        assert_eq!(state.roots.verified_epoch(7), Some(100));
+        assert_eq!(state.roots.verified_state_root(8), None);
+
+        // A root that is not 32 bytes, and one height listed twice, stop the
+        // process at startup.
+        let mut short = serving_config(true, Vec::new());
+        short.checkpoints = vec![Checkpoint {
+            height: 7,
+            root: "abcd".into(),
+            epoch: 100,
+        }];
+        assert!(build_state(short).is_err());
+        let mut twice = serving_config(true, Vec::new());
+        let one = Checkpoint {
+            height: 7,
+            root: "ab".repeat(32),
+            epoch: 100,
+        };
+        twice.checkpoints = vec![one.clone(), one];
+        assert!(build_state(twice).is_err());
+    }
+
+    #[test]
+    fn a_followed_checkpoint_file_is_re_read_and_a_bad_file_leaves_no_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("checkpoints.toml");
+        let write = |body: &str, age_secs: u64| {
+            std::fs::write(&path, body).unwrap();
+            // Distinct modification times, whatever the clock resolution is.
+            let stamp = std::time::SystemTime::UNIX_EPOCH
+                + std::time::Duration::from_secs(1_000_000 + age_secs);
+            let file = std::fs::File::options().write(true).open(&path).unwrap();
+            file.set_modified(stamp).unwrap();
+        };
+        let roots = PinnedHeaderRoots {
+            pinned: std::collections::BTreeMap::from([(7u64, ([0xab; 32], 100u64))]),
+            followed: Some(FollowedCheckpoints::new(path.clone())),
+        };
+        // No file yet: only the pinned height is known.
+        assert_eq!(roots.verified_epoch(7), Some(100));
+        assert_eq!(roots.verified_state_root(9), None);
+
+        let entry = |height: u64, byte: &str, epoch: u64| {
+            format!(
+                "[[checkpoints]]\nheight = {height}\nroot = \"{}\"\nepoch = {epoch}\n",
+                byte.repeat(32)
+            )
+        };
+        write(&entry(9, "cd", 120), 1);
+        assert_eq!(roots.verified_state_root(9), Some([0xcd; 32]));
+        assert_eq!(roots.verified_epoch(9), Some(120));
+
+        // The file cannot move a height the operator pinned.
+        write(&(entry(7, "ee", 1) + &entry(11, "ef", 130)), 2);
+        assert_eq!(roots.verified_state_root(7), Some([0xab; 32]));
+        assert_eq!(roots.verified_state_root(11), Some([0xef; 32]));
+        // Height 9 left the file, so it is unknown again.
+        assert_eq!(roots.verified_state_root(9), None);
+
+        write("this is not a checkpoint file", 3);
+        assert_eq!(roots.verified_state_root(11), None);
+        assert_eq!(roots.verified_state_root(7), Some([0xab; 32]));
+    }
+
+    #[test]
+    fn the_counters_sort_answers_by_what_happened() {
+        let counters = Counters::default();
+        for status in [
+            StatusCode::OK,
+            StatusCode::OK,
+            StatusCode::NOT_FOUND,
+            StatusCode::TOO_MANY_REQUESTS,
+            StatusCode::BAD_GATEWAY,
+            StatusCode::METHOD_NOT_ALLOWED,
+        ] {
+            counters.count_status(status);
+        }
+        let read = |counter: &AtomicU64| counter.load(Ordering::Relaxed);
+        assert_eq!(read(&counters.requests), 6);
+        assert_eq!(read(&counters.served), 2);
+        assert_eq!(read(&counters.not_found), 1);
+        assert_eq!(read(&counters.rate_limited), 1);
+        assert_eq!(read(&counters.refused_upstream), 1);
     }
 }

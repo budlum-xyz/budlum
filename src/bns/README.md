@@ -210,11 +210,15 @@
     dependency and no `.udl`, so Kotlin and Swift code is not generated yet.
     `bindings_are_wired` stays false for that reason. The wasm-bindgen
     export is real.
-  - The gateway binary reads pinned header roots and epochs from its
-    configuration and judges expiry against the pinned epoch, never against
-    the epoch a node answer carries. A height with a root and no pinned epoch
-    is unknown. It does not follow headers with the light client. Its content
-    source is a local directory and its content cache is in memory. `serve`
+  - The gateway binary reads verified header roots and epochs from the
+    `[[checkpoints]]` of its configuration and from an optional
+    `checkpoints_file` it re-reads when the file changes. It judges expiry
+    against that epoch, never against the epoch a node answer carries. A
+    height with no checkpoint is unknown and answers 502. The binary does
+    not follow headers itself: another process has to keep the file
+    current. Its content source is a local directory and its content cache
+    is in memory. Cache misses have their own per-client limit
+    (`fill_per_minute`), and the process logs its counters once a minute. `serve`
     and `tls` live in the binary, not in `src/web_gateway/`.
 
 ### Proof hardening (review findings)
