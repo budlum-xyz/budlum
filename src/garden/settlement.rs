@@ -1,7 +1,7 @@
 //! The link between a Garden chain and Budlum.
 //!
-//! A Garden registers as a sovereign PoA domain in Budlum's domain registry
-//! and reports its finality through the existing PoA finality adapter. There
+//! A Garden registers as a sovereign `PoA` domain in Budlum's domain registry
+//! and reports its finality through the existing `PoA` finality adapter. There
 //! is no bridge: the domain is registered with `bridge_enabled = false`, so
 //! nothing of value on Budlum depends on it.
 //!
@@ -55,7 +55,7 @@ fn domain_record(
     }
 }
 
-/// The hash of an authority set, in the form Budlum's PoA adapter derives it.
+/// The hash of an authority set, in the form Budlum's `PoA` adapter derives it.
 pub fn authority_set_hash(chain_id: u64, authorities: &[GardenKey]) -> Result<Hash32, String> {
     // The derivation reads only the domain id of the record it is given.
     let probe = ConsensusDomain {
@@ -86,7 +86,7 @@ pub fn authority_set_hash(chain_id: u64, authorities: &[GardenKey]) -> Result<Ha
 /// Turn a finalized Garden block into the payload Budlum verifies.
 ///
 /// The proof carries the electorate of the block and the votes as they were
-/// signed: a Garden vote is a Budlum PoA commit signature.
+/// signed: a Garden vote is a Budlum `PoA` commit signature.
 fn verified_commitment(
     electorate: &[GardenKey],
     commit: &GardenCommit,
@@ -125,7 +125,7 @@ pub struct GardenBudlumLink {
 }
 
 impl GardenBudlumLink {
-    pub fn new(chain: ChainHandle) -> Self {
+    pub const fn new(chain: ChainHandle) -> Self {
         Self { chain }
     }
 
@@ -144,7 +144,7 @@ impl GardenBudlumLink {
     /// Report one finalized Garden block to Budlum.
     ///
     /// The registered authority set is moved to the electorate of the block
-    /// first, then the commitment goes through Budlum's own PoA verification.
+    /// first, then the commitment goes through Budlum's own `PoA` verification.
     pub async fn report(
         &self,
         operator: GardenKey,
@@ -236,7 +236,7 @@ mod tests {
     }
 
     /// Report the Garden block at `height` the way `GardenBudlumLink::report`
-    /// does it: follow the electorate, then hand over the PoA proof.
+    /// does it: follow the electorate, then hand over the `PoA` proof.
     fn report(chain: &mut Blockchain, net: &Net, height: u64) -> Result<(), String> {
         let (commit, electorate) = net.ledger.commit_at(height).ok_or("no such block")?;
         chain.rotate_bridgeless_poa_authority_set(

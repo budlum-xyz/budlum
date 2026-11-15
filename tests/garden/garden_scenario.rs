@@ -59,7 +59,7 @@ fn pace(port: u16) {
     let wait = {
         let mut last = LAST_CALL
             .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let now = Instant::now();
         let at = last
             .get(&port)
@@ -76,7 +76,7 @@ fn call(port: u16, method: &str, params: &Value) -> Result<Value, String> {
     let body = json!({ "jsonrpc": "2.0", "id": 1, "method": method, "params": params }).to_string();
     let mut stream = TcpStream::connect(("127.0.0.1", port)).map_err(|e| e.to_string())?;
     stream
-        .set_read_timeout(Some(Duration::from_secs(120)))
+        .set_read_timeout(Some(Duration::from_mins(2)))
         .map_err(|e| e.to_string())?;
     let request = format!(
         "POST / HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Type: application/json\r\n\
@@ -194,8 +194,8 @@ impl Node {
             operator_port,
             public_port,
         };
-        wait_for("the operator listener", Duration::from_secs(120), || {
-            node.rpc("bud_gardenStatus", json!([])).map(Some)
+        wait_for("the operator listener", Duration::from_mins(2), || {
+            node.rpc("bud_gardenStatus", &json!([])).map(Some)
         })
         .map_err(|e| format!("{e}\n{}", node.log_tail()))?;
         Ok(node)
@@ -211,12 +211,12 @@ impl Node {
             .unwrap_or_default()
     }
 
-    fn rpc(&self, method: &str, params: Value) -> Result<Value, String> {
-        call(self.operator_port, method, &params).map_err(|e| format!("[{}] {e}", self.name))
+    fn rpc(&self, method: &str, params: &Value) -> Result<Value, String> {
+        call(self.operator_port, method, params).map_err(|e| format!("[{}] {e}", self.name))
     }
 
     fn garden(&self) -> Result<Value, String> {
-        let status = self.rpc("bud_gardenStatus", json!([]))?;
+        let status = self.rpc("bud_gardenStatus", &json!([]))?;
         status
             .get("garden")
             .filter(|garden| !garden.is_null())
@@ -227,7 +227,7 @@ impl Node {
     fn create(&self, title: &str) -> Result<Value, String> {
         self.rpc(
             "bud_gardenCreate",
-            json!([title, self.name, {
+            &json!([title, self.name, {
                 "listen": "/ip4/127.0.0.1/tcp/0",
                 "round_ms": ROUND_MS,
                 "presence_interval_ms": 200,
@@ -243,11 +243,11 @@ impl Node {
         } else {
             json!({ "listen": "/ip4/0.0.0.0/tcp/0" })
         };
-        self.rpc("bud_gardenJoin", json!([invite, self.name, options]))
+        self.rpc("bud_gardenJoin", &json!([invite, self.name, options]))
     }
 
     fn publish_text(&self, kind: &str, body: &str) -> Result<(String, String), String> {
-        let answer = self.rpc("bud_gardenPublish", json!([kind, body]))?;
+        let answer = self.rpc("bud_gardenPublish", &json!([kind, body]))?;
         Ok((text(&answer, "/tx_id")?, text(&answer, "/content_id")?))
     }
 
@@ -257,7 +257,7 @@ impl Node {
             &format!("[{}] finality of {tx_id}", self.name),
             STEP_TIMEOUT,
             || {
-                let trace = self.rpc("bud_gardenTrace", json!([tx_id]))?;
+                let trace = self.rpc("bud_gardenTrace", &json!([tx_id]))?;
                 Ok((text(&trace, "/stage")? == "final").then_some(trace))
             },
         )
@@ -315,9 +315,22 @@ impl Node {
             STEP_TIMEOUT,
             || {
                 let domain = self.budlum_domain(chain_id)?;
-                Ok((text(&domain, "/status")? == wanted).then_some(domain))
+                let status = text(&domain, "/status")?;
+                if status == wanted {
+                    Ok(Some(domain))
+                } else {
+                    Err(format!("Budlum holds the domain as {status}"))
+                }
             },
         )
+        .map_err(|e| {
+            // What the node itself says about its Budlum record, with the
+            // refusal the chain gave it, if any.
+            let own = self
+                .rpc("bud_gardenStatus", &json!([]))
+                .map_or_else(|e| e, |status| status["garden"]["budlum"].to_string());
+            format!("{e}; the node reports {own}")
+        })
     }
 
     /// Files left under this node's Garden content directory.
@@ -397,7 +410,7 @@ fn step_01(host: Node) -> Result<Scenario, String> {
         number(&garden, "/active_validators")? == 1,
         "host is not the only validator",
     )?;
-    let again = text(&host.rpc("bud_gardenInvite", json!([]))?, "/invite")?;
+    let again = text(&host.rpc("bud_gardenInvite", &json!([]))?, "/invite")?;
     ensure(
         again == invite,
         "bud_gardenInvite differs from the creation invite",
@@ -447,14 +460,14 @@ fn step_03(s: &mut Scenario) -> Result<(), String> {
         for tx in [&message_tx, &post_tx, &host_tx] {
             node.wait_final(tx)?;
         }
-        let feed = node.rpc("bud_gardenFeed", json!([10]))?;
+        let feed = node.rpc("bud_gardenFeed", &json!([10]))?;
         ensure(
             number(&feed, "/total")? == 3,
             format!("[{}] feed is not complete", node.name),
         )?;
     }
     let reader = s.validators.get(2).ok_or("no third validator")?;
-    let resolved = reader.rpc("bud_gardenResolve", json!([message_id]))?;
+    let resolved = reader.rpc("bud_gardenResolve", &json!([message_id]))?;
     ensure(
         text(&resolved, "/text")? == "hello from validator one",
         "message text differs on another node",
@@ -469,7 +482,7 @@ fn step_04(s: &mut Scenario) -> Result<(), String> {
     s.image_hex = hex::encode(&image);
     let answer = uploader.rpc(
         "bud_gardenPublish",
-        json!(["image", s.image_hex, "hex", "image/png", "a picture"]),
+        &json!(["image", s.image_hex, "hex", "image/png", "a picture"]),
     )?;
     s.image_id = text(&answer, "/content_id")?;
     let tx = text(&answer, "/tx_id")?;
@@ -477,7 +490,7 @@ fn step_04(s: &mut Scenario) -> Result<(), String> {
         node.wait_final(&tx)?;
     }
     for node in s.validators.iter().skip(1) {
-        let resolved = node.rpc("bud_gardenResolve", json!([s.image_id]))?;
+        let resolved = node.rpc("bud_gardenResolve", &json!([s.image_id]))?;
         ensure(
             text(&resolved, "/content_id")? == s.image_id,
             format!("[{}] content id differs", node.name),
@@ -493,7 +506,7 @@ fn step_04(s: &mut Scenario) -> Result<(), String> {
 
 fn step_05(s: &mut Scenario) -> Result<(), String> {
     let asker = s.validators.get(3).ok_or("no fourth validator")?;
-    let trace = asker.rpc("bud_gardenTrace", json!([s.message_tx]))?;
+    let trace = asker.rpc("bud_gardenTrace", &json!([s.message_tx]))?;
     ensure(text(&trace, "/stage")? == "final", "message is not final")?;
     ensure(
         text(&trace, "/transaction/kind")? == "message",
@@ -525,7 +538,7 @@ fn step_05(s: &mut Scenario) -> Result<(), String> {
         .iter()
         .any(|signer| signer.get("validator").and_then(Value::as_str) == Some(host_key.as_str()));
     ensure(host_signed, "the host is not among the signers")?;
-    let by_content = asker.rpc("bud_gardenTrace", json!([s.image_id]))?;
+    let by_content = asker.rpc("bud_gardenTrace", &json!([s.image_id]))?;
     ensure(
         text(&by_content, "/transaction/kind")? == "image",
         "content id trace failed",
@@ -542,7 +555,7 @@ fn step_06(s: &mut Scenario) -> Result<(), String> {
         node.wait_final(&tx)?;
     }
     let reader = s.validators.last().ok_or("no validator left")?;
-    let resolved = reader.rpc("bud_gardenResolve", json!([s.image_id]))?;
+    let resolved = reader.rpc("bud_gardenResolve", &json!([s.image_id]))?;
     ensure(
         text(&resolved, "/hex")? == s.image_hex,
         "image was lost with its uploader",
@@ -609,7 +622,7 @@ fn step_07(s: &mut Scenario) -> Result<(), String> {
 }
 
 fn step_08(s: &mut Scenario) -> Result<(), String> {
-    let left = s.host.rpc("bud_gardenLeave", json!([]))?;
+    let left = s.host.rpc("bud_gardenLeave", &json!([]))?;
     ensure(
         left.get("retired") == Some(&json!(false)),
         "Garden retired when the host left",
@@ -630,13 +643,13 @@ fn step_08(s: &mut Scenario) -> Result<(), String> {
             refusal.contains("frozen"),
             format!("unexpected refusal: {refusal}"),
         )?;
-        let resolved = node.rpc("bud_gardenResolve", json!([s.image_id]))?;
+        let resolved = node.rpc("bud_gardenResolve", &json!([s.image_id]))?;
         ensure(
             text(&resolved, "/hex")? == s.image_hex,
             "data is not readable while frozen",
         )?;
         ensure(
-            number(&node.rpc("bud_gardenFeed", json!([5]))?, "/total")? >= 4,
+            number(&node.rpc("bud_gardenFeed", &json!([5]))?, "/total")? >= 4,
             "feed is not readable while frozen",
         )?;
         std::thread::sleep(Duration::from_millis(ROUND_MS * 3));
@@ -649,7 +662,7 @@ fn step_08(s: &mut Scenario) -> Result<(), String> {
 }
 
 fn step_09(s: &mut Scenario) -> Result<(), String> {
-    let back = s.host.rpc("bud_gardenReturn", json!([]))?;
+    let back = s.host.rpc("bud_gardenReturn", &json!([]))?;
     ensure(
         text(&back, "/garden/me/member")? == "Active",
         "host is not active after returning",
@@ -663,7 +676,7 @@ fn step_09(s: &mut Scenario) -> Result<(), String> {
     for node in std::iter::once(&s.host).chain(&s.validators) {
         node.wait_final(&tx)?;
     }
-    let resolved = s.host.rpc("bud_gardenResolve", json!([s.image_id]))?;
+    let resolved = s.host.rpc("bud_gardenResolve", &json!([s.image_id]))?;
     ensure(
         text(&resolved, "/hex")? == s.image_hex,
         "returned host cannot read old data",
@@ -672,7 +685,7 @@ fn step_09(s: &mut Scenario) -> Result<(), String> {
 
 fn step_10(s: &mut Scenario) -> Result<(), String> {
     for node in &s.validators {
-        let left = node.rpc("bud_gardenLeave", json!([]))?;
+        let left = node.rpc("bud_gardenLeave", &json!([]))?;
         ensure(
             left.get("left") == Some(&json!(true)),
             "validator did not leave",
@@ -682,7 +695,7 @@ fn step_10(s: &mut Scenario) -> Result<(), String> {
             "Garden retired too early",
         )?;
     }
-    let last = s.host.rpc("bud_gardenLeave", json!([]))?;
+    let last = s.host.rpc("bud_gardenLeave", &json!([]))?;
     ensure(
         last.get("retired") == Some(&json!(true)),
         "last departure did not retire the Garden",
@@ -692,7 +705,7 @@ fn step_10(s: &mut Scenario) -> Result<(), String> {
         // A validator that left may still return, so its record waits as
         // Frozen. Leaving again forgets the Garden for good.
         node.wait_budlum_status(s.chain_id, "Frozen")?;
-        node.rpc("bud_gardenLeave", json!([]))?;
+        node.rpc("bud_gardenLeave", &json!([]))?;
         node.wait_budlum_status(s.chain_id, "Retired")?;
     }
     for node in std::iter::once(&s.host).chain(&s.validators) {
@@ -701,7 +714,7 @@ fn step_10(s: &mut Scenario) -> Result<(), String> {
             files.is_empty(),
             format!("[{}] Garden data left on disk: {files:?}", node.name),
         )?;
-        let status = node.rpc("bud_gardenStatus", json!([]))?;
+        let status = node.rpc("bud_gardenStatus", &json!([]))?;
         ensure(
             status.get("garden") == Some(&Value::Null),
             format!("[{}] node still reports a Garden", node.name),
@@ -747,7 +760,9 @@ const STEPS: usize = 11;
 type Step = fn(&mut Scenario) -> Result<(), String>;
 
 fn run_scenario() -> Vec<Result<(), String>> {
-    let _guard = NETWORK.lock().unwrap_or_else(|poison| poison.into_inner());
+    let _guard = NETWORK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let mut results: Vec<Result<(), String>> = Vec::new();
     let mut scenario = match Node::start("host").and_then(step_01) {
         Ok(scenario) => {
@@ -854,7 +869,9 @@ fn garden_step_11_a_new_garden_is_created() -> Result<(), String> {
 fn garden_is_closed_on_testnet() -> Result<(), String> {
     use budlum_core::core::chain_config::Network;
 
-    let _guard = NETWORK.lock().unwrap_or_else(|poison| poison.into_inner());
+    let _guard = NETWORK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let node = Node::start("closed")?;
     for (network, label) in [
         (Network::Testnet, "closed on Budlum Testnet"),
@@ -867,14 +884,14 @@ fn garden_is_closed_on_testnet() -> Result<(), String> {
             "11".repeat(32),
             "22".repeat(32),
         );
-        let refusal = match node.rpc("bud_gardenJoin", json!([invite, "Mallory"])) {
+        let refusal = match node.rpc("bud_gardenJoin", &json!([invite, "Mallory"])) {
             Ok(answer) => return Err(format!("a primary chain invite was accepted: {answer}")),
             Err(refusal) => refusal,
         };
         ensure(refusal.contains(label), refusal)?;
     }
     ensure(
-        node.rpc("bud_gardenStatus", json!([]))?
+        node.rpc("bud_gardenStatus", &json!([]))?
             .get("garden")
             .is_some_and(Value::is_null),
         "a refused invite left a Garden behind",
@@ -885,7 +902,9 @@ fn garden_is_closed_on_testnet() -> Result<(), String> {
 /// reach each other's content: the host forwards for them.
 #[test]
 fn garden_join_behind_nat() -> Result<(), String> {
-    let _guard = NETWORK.lock().unwrap_or_else(|poison| poison.into_inner());
+    let _guard = NETWORK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let host = Node::start("host")?;
     let invite = text(&host.create("Relay Room")?, "/invite")?;
     let first = Node::start("hidden-1")?;
@@ -904,7 +923,7 @@ fn garden_join_behind_nat() -> Result<(), String> {
         number(&first.garden()?, "/connected_peers")? == 1,
         "a hidden validator has a peer besides the host",
     )?;
-    let fresh = text(&second.rpc("bud_gardenInvite", json!([]))?, "/invite")?;
+    let fresh = text(&second.rpc("bud_gardenInvite", &json!([]))?, "/invite")?;
     ensure(
         fresh.matches("&peer=").count() == 1,
         "the invite lists a validator nobody can dial",
@@ -912,12 +931,12 @@ fn garden_join_behind_nat() -> Result<(), String> {
     let image = hex::encode(image_bytes(50_000));
     let answer = first.rpc(
         "bud_gardenPublish",
-        json!(["image", image, "hex", "image/png"]),
+        &json!(["image", image, "hex", "image/png"]),
     )?;
     let tx = text(&answer, "/tx_id")?;
     let content_id = text(&answer, "/content_id")?;
     second.wait_final(&tx)?;
-    let resolved = second.rpc("bud_gardenResolve", json!([content_id]))?;
+    let resolved = second.rpc("bud_gardenResolve", &json!([content_id]))?;
     ensure(
         text(&resolved, "/hex")? == image,
         "content did not cross the relay",
@@ -933,7 +952,9 @@ fn garden_join_behind_nat() -> Result<(), String> {
 /// every `bud_garden*` method, and no method takes a key to act for.
 #[test]
 fn garden_rpc_is_refused_on_the_public_listener() -> Result<(), String> {
-    let _guard = NETWORK.lock().unwrap_or_else(|poison| poison.into_inner());
+    let _guard = NETWORK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let node = Node::start("solo")?;
     let calls = [
         ("bud_gardenCreate", json!(["Room", "mallory"])),
@@ -965,28 +986,28 @@ fn garden_rpc_is_refused_on_the_public_listener() -> Result<(), String> {
         "bud_gardenResolveContent",
     ] {
         let refusal = node
-            .rpc(removed, json!([]))
+            .rpc(removed, &json!([]))
             .err()
             .ok_or_else(|| format!("{removed} still exists"))?;
         ensure(refusal.contains("-32601"), format!("{removed}: {refusal}"))?;
     }
     // A caller cannot name the key a method acts for: the old signature with
     // a pubkey parameter is not accepted any more.
-    let with_key = node.rpc("bud_gardenLeave", json!([null, "00".repeat(32)]));
+    let with_key = node.rpc("bud_gardenLeave", &json!([null, "00".repeat(32)]));
     ensure(
         with_key.is_err(),
         "bud_gardenLeave accepted a caller-chosen key",
     )?;
     let unknown = node.rpc(
         "bud_gardenCreate",
-        json!(["Room", "solo", { "peer": "10.0.0.1:22" }]),
+        &json!(["Room", "solo", { "peer": "10.0.0.1:22" }]),
     );
     ensure(
         unknown.is_err(),
         "bud_gardenCreate accepted an unknown option",
     )?;
     ensure(
-        node.rpc("bud_gardenStatus", json!([]))?.get("garden") == Some(&Value::Null),
+        node.rpc("bud_gardenStatus", &json!([]))?.get("garden") == Some(&Value::Null),
         "a refused call left a Garden behind",
     )
 }

@@ -48,7 +48,7 @@ pub const MAX_MIME_BYTES: usize = 64;
 pub const MAX_CAPTION_BYTES: usize = 128;
 
 /// An ed25519 public key. It is the validator identity, the libp2p identity
-/// and the Budlum PoA authority address at once.
+/// and the Budlum `PoA` authority address at once.
 pub type GardenKey = [u8; 32];
 
 /// Copy the leading bytes of a digest into a fixed array without indexing.
@@ -73,7 +73,7 @@ impl GardenChainId {
         Self(GARDEN_CHAIN_PREFIX | low)
     }
 
-    fn value(self) -> u64 {
+    const fn value(self) -> u64 {
         self.0
     }
 
@@ -147,7 +147,7 @@ pub struct GardenLimits {
 }
 
 impl GardenLimits {
-    pub fn testnet_default() -> Self {
+    pub const fn testnet_default() -> Self {
         Self {
             max_validators: 32,
             max_object_bytes: 4 * 1024 * 1024,
@@ -173,6 +173,11 @@ impl GardenLimits {
         if self.max_sender_txs_per_block == 0 || self.max_sender_txs_per_block > self.max_block_txs
         {
             return Err("max_sender_txs_per_block must be in 1..=max_block_txs".into());
+        }
+        if self.max_block_txs < self.max_validators {
+            // One block must be able to report every absent validator and
+            // still carry a transaction.
+            return Err("max_block_txs must be at least max_validators".into());
         }
         if !(50..=60_000).contains(&self.round_ms) {
             return Err("round_ms must be in 50..=60000".into());
@@ -291,7 +296,7 @@ impl GardenPlacementTable {
                 )
             })
             .collect();
-        scored.sort();
+        scored.sort_unstable();
         scored
             .into_iter()
             .take(self.holders_for(active.len()))
@@ -426,7 +431,7 @@ impl GardenGenesis {
     }
 }
 
-/// Where a validator stands in the Garden's PoA identity record.
+/// Where a validator stands in the Garden's `PoA` identity record.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum GardenValidatorStatus {
     /// Proposes, executes and votes.
@@ -438,7 +443,7 @@ pub enum GardenValidatorStatus {
 }
 
 impl GardenValidatorStatus {
-    pub fn code(self) -> u8 {
+    pub const fn code(self) -> u8 {
         match self {
             Self::Active => 0,
             Self::Suspended => 1,
@@ -446,7 +451,7 @@ impl GardenValidatorStatus {
         }
     }
 
-    pub fn label(self) -> &'static str {
+    pub const fn label(self) -> &'static str {
         match self {
             Self::Active => "Active",
             Self::Suspended => "Suspended",
@@ -455,7 +460,7 @@ impl GardenValidatorStatus {
     }
 }
 
-/// One entry of the Garden's PoA identity record. There is no stake, no
+/// One entry of the Garden's `PoA` identity record. There is no stake, no
 /// class and no reward field, because the Garden chain has none of them.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GardenValidator {
@@ -477,7 +482,7 @@ pub enum GardenContentKind {
 }
 
 impl GardenContentKind {
-    pub fn code(self) -> u8 {
+    pub const fn code(self) -> u8 {
         match self {
             Self::Message => 0,
             Self::Post => 1,
@@ -485,7 +490,7 @@ impl GardenContentKind {
         }
     }
 
-    pub fn label(self) -> &'static str {
+    pub const fn label(self) -> &'static str {
         match self {
             Self::Message => "message",
             Self::Post => "post",
@@ -652,7 +657,7 @@ pub struct GardenHeader {
     pub state_root: Hash32,
     pub content_root: Hash32,
     /// Hash of the electorate that finalizes this block, in the form
-    /// Budlum's PoA adapter derives it.
+    /// Budlum's `PoA` adapter derives it.
     pub authority_set_hash: Hash32,
     /// Hash of the active set once this block is applied.
     pub next_authority_set_hash: Hash32,
@@ -661,7 +666,7 @@ pub struct GardenHeader {
 }
 
 /// The one-byte code of a domain status inside a hash preimage.
-pub fn status_code(status: DomainStatus) -> u8 {
+pub const fn status_code(status: DomainStatus) -> u8 {
     match status {
         DomainStatus::Active => 0,
         DomainStatus::Frozen => 1,
@@ -670,7 +675,7 @@ pub fn status_code(status: DomainStatus) -> u8 {
 }
 
 /// The label of a domain status in RPC answers.
-pub fn status_label(status: DomainStatus) -> &'static str {
+pub const fn status_label(status: DomainStatus) -> &'static str {
     match status {
         DomainStatus::Active => "Active",
         DomainStatus::Frozen => "Frozen",
@@ -700,7 +705,7 @@ impl GardenHeader {
 
     /// The Budlum domain commitment this header stands for.
     ///
-    /// `finality_proof_hash` is left zero here: the PoA signing message does
+    /// `finality_proof_hash` is left zero here: the `PoA` signing message does
     /// not cover it, and the settlement link fills it in from the proof.
     pub fn commitment(&self) -> DomainCommitment {
         DomainCommitment {
@@ -723,8 +728,8 @@ impl GardenHeader {
 
     /// The message a validator signs to vote for this block.
     ///
-    /// It is Budlum's own PoA commit message for the commitment above, so
-    /// the votes of a Garden block are a PoA finality proof as they stand.
+    /// It is Budlum's own `PoA` commit message for the commitment above, so
+    /// the votes of a Garden block are a `PoA` finality proof as they stand.
     fn vote_message(&self) -> Vec<u8> {
         crate::domain::finality_adapter::poa_commit_signing_message(
             self.chain_id,
@@ -909,7 +914,7 @@ mod tests {
 
         let signed = base.clone().sign(&kp).unwrap();
         signed.verify(chain_id).unwrap();
-        let mut forged = signed.clone();
+        let mut forged = signed;
         forged.tx.nonce = 9;
         assert!(forged.verify(chain_id).is_err());
         assert!(base.sign(&keypair()).is_err());
@@ -1013,7 +1018,7 @@ mod tests {
         let signal = GardenPresence::sign(77, 3, &kp);
         signal.verify(77).unwrap();
         assert!(signal.verify(78).is_err());
-        let mut later = signal.clone();
+        let mut later = signal;
         later.window = 4;
         assert!(later.verify(77).is_err());
     }

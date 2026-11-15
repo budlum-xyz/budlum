@@ -27,7 +27,7 @@ use tokio::sync::Mutex;
 /// and is reached through the peers it dialed.
 const DEFAULT_LISTEN: &str = "/ip4/0.0.0.0/tcp/0";
 /// How long entering a Garden may take.
-const ENTER_TIMEOUT: Duration = Duration::from_secs(60);
+const ENTER_TIMEOUT: Duration = Duration::from_mins(1);
 /// Largest payload a publish request may carry as text, in bytes.
 const MAX_PUBLISH_TEXT_BYTES: usize = 40 * 1024 * 1024;
 
@@ -183,6 +183,12 @@ impl GardenService {
     }
 
     /// Found a Garden. This node becomes its host.
+    ///
+    /// # Errors
+    ///
+    /// Refuses when the node already runs or holds a seat in a Garden, when
+    /// the title, the name or a limit is out of bounds, and when the host
+    /// has no address the others can dial.
     pub async fn create(
         &self,
         title: String,
@@ -212,6 +218,12 @@ impl GardenService {
     }
 
     /// Join a Garden with an invite link or QR content.
+    ///
+    /// # Errors
+    ///
+    /// Refuses when the invite is malformed or names a primary Budlum chain,
+    /// when the node already runs or holds a seat in a Garden, and when no
+    /// validator of the Garden admits the node in time.
     pub async fn join(
         &self,
         invite: String,
@@ -245,6 +257,11 @@ impl GardenService {
     /// Leave the Garden. The node wipes the Garden data from its disk and
     /// keeps what it needs to return. Leaving again while away forgets the
     /// Garden for good.
+    ///
+    /// # Errors
+    ///
+    /// Refuses when the node is in no Garden, and when the validator stopped
+    /// before it could answer.
     pub async fn leave(&self) -> Result<Value, String> {
         let mut slot = self.slot.lock().await;
         match std::mem::replace(&mut *slot, Slot::Empty) {
@@ -284,6 +301,12 @@ impl GardenService {
     }
 
     /// Return to the Garden this node stepped out of.
+    ///
+    /// # Errors
+    ///
+    /// Refuses when the node has no Garden to return to or is already in
+    /// it, and when the Garden does not admit the node in time. The seat is
+    /// kept in the second case, so the node can try again.
     pub async fn rejoin(&self) -> Result<Value, String> {
         let mut slot = self.slot.lock().await;
         match std::mem::replace(&mut *slot, Slot::Empty) {
@@ -325,6 +348,10 @@ impl GardenService {
     }
 
     /// The Garden as this node sees it, and its status on Budlum.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the validator stopped before it could answer.
     pub async fn status(&self) -> Result<Value, String> {
         let mut slot = self.slot.lock().await;
         let stopped = match &*slot {
@@ -369,12 +396,24 @@ impl GardenService {
     }
 
     /// The invite link of the running Garden. It is also the QR content.
+    ///
+    /// # Errors
+    ///
+    /// Refuses when the node is not running in a Garden, and when it has no
+    /// address another node can dial.
     pub async fn invite(&self) -> Result<Value, String> {
         let link = self.running().await?.invite().await?.to_link();
         Ok(json!({ "invite": link, "qr": link }))
     }
 
     /// Publish a message, a post or an image. `encoding` is `utf8` or `hex`.
+    ///
+    /// # Errors
+    ///
+    /// Refuses when the node is not an active validator of a running
+    /// Garden, when the kind, the encoding, the MIME type or the caption is
+    /// invalid, when the object is empty or larger than the Garden allows,
+    /// and when the node holds too many pending transactions.
     pub async fn publish(
         &self,
         kind: String,
@@ -407,6 +446,12 @@ impl GardenService {
     }
 
     /// Resolve an object on this node and verify it against its content id.
+    ///
+    /// # Errors
+    ///
+    /// Refuses when the node is not running in a Garden, when the id is not
+    /// 32 bytes of hex, when the Garden never published the object, and when
+    /// no connected validator serves bytes that match the id.
     pub async fn resolve(&self, content_id: String) -> Result<Value, String> {
         let id = parse_id("content id", &content_id)?;
         let bytes = self.running().await?.resolve(id).await?;
@@ -421,12 +466,22 @@ impl GardenService {
 
     /// The path of a transaction, or of a published object, through the
     /// chain: the transaction, its block and the validators that signed.
+    ///
+    /// # Errors
+    ///
+    /// Refuses when the node is not running in a Garden, when the id is not
+    /// 32 bytes of hex, and when the Garden knows no such transaction or
+    /// object.
     pub async fn trace(&self, id: String) -> Result<Value, String> {
         let id = parse_id("transaction id", &id)?;
         self.running().await?.trace(id).await
     }
 
     /// The newest published objects.
+    ///
+    /// # Errors
+    ///
+    /// Refuses when the node is not running in a Garden.
     pub async fn feed(&self, limit: Option<u32>) -> Result<Value, String> {
         self.running()
             .await?
@@ -744,5 +799,91 @@ mod tests {
         assert_eq!(left["retired"], json!(true));
         let domain = record(chain.get_consensus_domains().await);
         assert_eq!(domain.status, DomainStatus::Retired);
+    }
+
+    async fn wait_frozen_on_chain(service: &GardenService, height: &Value) {
+        let mut last = Value::Null;
+        for _ in 0..200 {
+            last = service.status().await.unwrap();
+            if last.pointer("/garden/chain_status").and_then(Value::as_str) == Some("Frozen")
+                && last.pointer("/garden/height") == Some(height)
+            {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        panic!("the departure block of the host did not arrive: {last}");
+    }
+
+    async fn room_of(names: &[&str]) -> (GardenService, Vec<GardenService>) {
+        let host = GardenService::new(None, None);
+        let created = host
+            .create("Room".into(), "host".into(), options())
+            .await
+            .unwrap();
+        let invite = text(&created, "/invite");
+        let mut guests = Vec::new();
+        for name in names {
+            let guest = GardenService::new(None, None);
+            guest
+                .join(invite.clone(), (*name).into(), options())
+                .await
+                .unwrap();
+            guests.push(guest);
+        }
+        (host, guests)
+    }
+
+    #[tokio::test]
+    async fn garden_host_departure_block_reaches_the_others_before_the_host_closes() {
+        let (host, guests) = room_of(&["a", "b", "c"]).await;
+        // The host signs last, so it is the only holder of the block that
+        // carries its own departure at the moment the block becomes final.
+        let left = host.leave().await.unwrap();
+        assert_eq!(left["retired"], json!(false));
+        for guest in &guests {
+            wait_frozen_on_chain(guest, &left["height"]).await;
+        }
+        for guest in &guests {
+            guest.leave().await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn garden_host_returns_after_validators_left_the_frozen_garden() {
+        let (host, mut guests) = room_of(&["a", "b", "c"]).await;
+        let stays = guests.pop().unwrap();
+
+        // The host steps out, then two of the three others walk away. No
+        // block can record their departure: the Garden is frozen.
+        let left = host.leave().await.unwrap();
+        wait_frozen_on_chain(&stays, &left["height"]).await;
+        for guest in &guests {
+            wait_frozen_on_chain(guest, &left["height"]).await;
+            let left = guest.leave().await.unwrap();
+            assert_eq!(left["retired"], json!(false));
+            assert_eq!(left["can_return"], json!(true));
+        }
+
+        // The host returns to one validator out of three. The Garden runs
+        // again with the two that are there.
+        host.rejoin().await.unwrap();
+        let status = wait_status(&stays, "Active").await;
+        assert_eq!(text(&status, "/garden/chain_status"), "Active");
+        assert_eq!(status.pointer("/garden/active_validators"), Some(&json!(2)));
+        let published = stays
+            .publish("message".into(), "still here".into(), None, None, None)
+            .await
+            .unwrap();
+        wait_final(&host, &text(&published, "/tx_id")).await;
+
+        // One that walked away comes back.
+        let back = guests[0].rejoin().await.unwrap();
+        assert_eq!(text(&back, "/garden/me/member"), "Active");
+
+        guests[0].leave().await.unwrap();
+        stays.leave().await.unwrap();
+        let left = host.leave().await.unwrap();
+        assert_eq!(left["retired"], json!(true));
     }
 }
