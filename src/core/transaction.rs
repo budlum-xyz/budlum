@@ -3219,6 +3219,10 @@ fn encode_storage_tx(tx: &crate::domain::storage_tx::StorageTx, out: &mut Vec<u8
         crate::domain::storage_tx::StorageTx::AcceptReallocation(accept) => {
             put_u8(out, 5);
             put_u64(out, accept.ticket_id);
+            // The declared size is signed with the rest of the body: a relay
+            // that dropped or changed it would present the operator's consent
+            // for a placement length the operator never agreed to.
+            put_u32(out, accept.shard_size);
             put_fixed(out, accept.replacement_operator.as_bytes());
             put_u64(out, accept.start_epoch);
             put_u64(out, accept.end_epoch);
