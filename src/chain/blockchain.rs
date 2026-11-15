@@ -401,14 +401,14 @@ impl Blockchain {
             m.storage_result_rows
                 .set(i64::try_from(self.state.storage_registry.result_count()).unwrap_or(i64::MAX));
             m.bns_name_rows
-                .set(i64::try_from(self.state.bns_registry.names.len()).unwrap_or(i64::MAX));
+                .set(i64::try_from(self.state.bns_registry.names().len()).unwrap_or(i64::MAX));
             // B15: the two gauges the directive names beside the row count.
             let epoch = self.state.epoch_index;
             m.bns_names_in_grace.set(
                 i64::try_from(
                     self.state
                         .bns_registry
-                        .names
+                        .names()
                         .values()
                         .filter(|rec| {
                             epoch >= rec.expires_at

@@ -1,5 +1,7 @@
+use crate::bns::smt;
 use crate::bns::types::{
-    BnsError, BnsMerkleBranch, BnsResolved, BnsStateProof, NameRecord, NameStatus, SubdomainRecord,
+    BnsAbsenceProof, BnsError, BnsMerkleBranch, BnsOccupiedSlot, BnsResolved, BnsStateProof,
+    NameRecord, NameStatus, SubdomainRecord,
 };
 use crate::core::address::Address;
 use crate::registry::params::{
@@ -48,9 +50,82 @@ fn default_reserved_labels() -> BTreeSet<String> {
     RESERVED_LABELS.iter().map(|s| (*s).to_string()).collect()
 }
 
+#[derive(Debug, Clone, Default)]
+struct NameTreeState {
+    built: bool,
+    tree: smt::Tree,
+    stale: BTreeSet<String>,
+}
+
+/// The sparse tree behind the names root, kept in step with the name table.
+///
+/// The tree is derived state. A registry that was just loaded has none, so
+/// the first read builds it in one pass. After that a write only marks its
+/// name, and the next read re-hashes the paths of the marked names. A block
+/// that touches three names hashes three paths, whatever the table size.
+///
+/// The lock is what lets a read through `&self` bring the tree up to date.
+#[derive(Debug, Default)]
+struct NameTree(std::sync::Mutex<NameTreeState>);
+
+impl Clone for NameTree {
+    fn clone(&self) -> Self {
+        let state = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        Self(std::sync::Mutex::new(state.clone()))
+    }
+}
+
+impl NameTree {
+    /// Mark `name` as written. Every write to the name table calls this.
+    fn touch(&mut self, name: &str) {
+        let state = self
+            .0
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.built {
+            state.stale.insert(name.to_string());
+        }
+    }
+
+    /// Bring the tree up to date with `names` and read it.
+    fn read<R>(
+        &self,
+        names: &BTreeMap<String, NameRecord>,
+        read: impl FnOnce(&smt::Tree) -> R,
+    ) -> R {
+        let mut state = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.built {
+            for name in std::mem::take(&mut state.stale) {
+                let key = smt::key_of(&name);
+                match names.get(&name) {
+                    Some(record) => state
+                        .tree
+                        .insert(key, BnsRegistry::record_leaf_digest(record)),
+                    None => state.tree.remove(&key),
+                }
+            }
+        } else {
+            let mut tree = smt::Tree::default();
+            for (name, record) in names {
+                tree.insert(smt::key_of(name), BnsRegistry::record_leaf_digest(record));
+            }
+            state.tree = tree;
+            state.stale.clear();
+            state.built = true;
+        }
+        read(&state.tree)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BnsRegistry {
-    pub names: BTreeMap<String, NameRecord>,
+    names: BTreeMap<String, NameRecord>,
     /// B13: the ceiling this registry enforces. Seeded from
     /// [`crate::registry::params::DEFAULT_MAX_NAMES`] and stored, not read from
     /// the constant, so a snapshot written under a different ceiling still
@@ -75,6 +150,10 @@ pub struct BnsRegistry {
     /// carries the index in memory, and the rebuild on load costs one pass.
     #[serde(skip)]
     pub expired_by_grace_end: BTreeSet<(u64, String)>,
+    /// The sparse tree over `names`. Derived, like the expiry index: it is
+    /// rebuilt on first use after a load and then follows each write.
+    #[serde(skip)]
+    name_tree: NameTree,
     pub base_cost: u64,
     #[serde(default = "default_primary_sellers")]
     pub primary_sellers: BTreeSet<Address>,
@@ -147,6 +226,7 @@ impl BnsRegistry {
             names: BTreeMap::new(),
             max_names: default_max_names(),
             expired_by_grace_end: BTreeSet::new(),
+            name_tree: NameTree::default(),
             base_cost: 100,
             primary_sellers: default_primary_sellers(),
             reserved_labels: default_reserved_labels(),
@@ -161,6 +241,7 @@ impl BnsRegistry {
     /// transfer rewrites `expires_at`, and two rows for one name would let the
     /// reclaim path delete a name that is still live.
     fn insert_record(&mut self, name: String, record: NameRecord) {
+        self.name_tree.touch(&name);
         self.expired_by_grace_end
             .remove(&(grace_end_of(&record), name.clone()));
         self.expired_by_grace_end
@@ -168,9 +249,36 @@ impl BnsRegistry {
         self.names.insert(name, record);
     }
 
+    /// The name table, read-only. Writes go through the registry so the
+    /// tree and the expiry index follow them.
+    #[must_use]
+    pub const fn names(&self) -> &BTreeMap<String, NameRecord> {
+        &self.names
+    }
+
+    /// The one door to a record that is about to be edited. It tells the
+    /// tree first, so no write can reach the table without its path being
+    /// re-hashed. It takes the two fields apart so a caller can keep using
+    /// the rest of the registry while it holds the record.
+    fn slot_mut<'a>(
+        names: &'a mut BTreeMap<String, NameRecord>,
+        tree: &mut NameTree,
+        name: &str,
+    ) -> Option<&'a mut NameRecord> {
+        tree.touch(name);
+        names.get_mut(name)
+    }
+
+    /// A record a test edits in place, with the tree told about the write.
+    #[cfg(test)]
+    pub(crate) fn record_mut(&mut self, name: &str) -> Option<&mut NameRecord> {
+        Self::slot_mut(&mut self.names, &mut self.name_tree, name)
+    }
+
     /// B13: delete `name` and its index row together.
     fn remove_record(&mut self, name: &str) -> Option<NameRecord> {
         let removed = self.names.remove(name)?;
+        self.name_tree.touch(name);
         self.expired_by_grace_end
             .remove(&(grace_end_of(&removed), name.to_string()));
         Some(removed)
@@ -217,6 +325,7 @@ impl BnsRegistry {
                 .is_some_and(|record| grace_end_of(record) == grace_end)
             {
                 self.names.remove(&name);
+                self.name_tree.touch(&name);
                 removed += 1;
             }
             self.expired_by_grace_end.remove(&(grace_end, name));
@@ -551,7 +660,8 @@ impl BnsRegistry {
         if !Self::is_valid_duration(duration) {
             return Err(BnsError::InvalidDuration);
         }
-        let record = self.names.get_mut(name).ok_or(BnsError::InvalidName)?;
+        let record = Self::slot_mut(&mut self.names, &mut self.name_tree, name)
+            .ok_or(BnsError::InvalidName)?;
         if &record.owner != caller {
             return Err(BnsError::NotOwner);
         }
@@ -614,7 +724,8 @@ impl BnsRegistry {
             return Err(BnsError::OwnerNameLimitExceeded);
         }
         let prev_address = existing.address;
-        let record = self.names.get_mut(name).ok_or(BnsError::InvalidName)?;
+        let record = Self::slot_mut(&mut self.names, &mut self.name_tree, name)
+            .ok_or(BnsError::InvalidName)?;
         record.owner = new_owner;
         record.address = Some(new_owner);
         record.consensus_domain_id = None;
@@ -695,9 +806,7 @@ impl BnsRegistry {
         if owner == Address::zero() || !Self::is_valid_sub_label(&sub_label) {
             return Err(BnsError::InvalidName);
         }
-        let parent = self
-            .names
-            .get_mut(parent_name)
+        let parent = Self::slot_mut(&mut self.names, &mut self.name_tree, parent_name)
             .ok_or(BnsError::InvalidName)?;
         if &parent.owner != caller {
             return Err(BnsError::NotOwner);
@@ -741,9 +850,7 @@ impl BnsRegistry {
         if !Self::is_valid_sub_label(sub_label) {
             return Err(BnsBud3Error::Bns(BnsError::InvalidName));
         }
-        let parent = self
-            .names
-            .get_mut(parent_name)
+        let parent = Self::slot_mut(&mut self.names, &mut self.name_tree, parent_name)
             .ok_or(BnsBud3Error::Bns(BnsError::InvalidName))?;
         if parent.expires_at <= current_epoch {
             return Err(BnsBud3Error::Bns(BnsError::Expired));
@@ -819,7 +926,7 @@ impl BnsRegistry {
                 return Err(BnsError::InvalidName);
             }
         }
-        if let Some(parent) = self.names.get_mut(parent_name) {
+        if let Some(parent) = Self::slot_mut(&mut self.names, &mut self.name_tree, parent_name) {
             parent.subdomains.remove(sub_label);
         }
         Ok(())
@@ -893,9 +1000,7 @@ impl BnsRegistry {
             None => None,
             Some(cref) => Some(crate::bns::bud3::checked_content_ref(bud3, cref)?),
         };
-        let record = self
-            .names
-            .get_mut(name)
+        let record = Self::slot_mut(&mut self.names, &mut self.name_tree, name)
             .ok_or(BnsBud3Error::Bns(BnsError::InvalidName))?;
         record.content = validated;
         Ok(())
@@ -942,7 +1047,8 @@ impl BnsRegistry {
             }
             (record.owner, record.address)
         };
-        let record = self.names.get_mut(name).ok_or(BnsError::InvalidName)?;
+        let record = Self::slot_mut(&mut self.names, &mut self.name_tree, name)
+            .ok_or(BnsError::InvalidName)?;
         record.address = target;
         record.consensus_domain_id = if target.is_some() {
             consensus_domain_id
@@ -1131,7 +1237,8 @@ impl BnsRegistry {
         if next.len() > MAX_RECORDS_PER_NAME {
             return Err(BnsError::InvalidRecord);
         }
-        let record = self.names.get_mut(name).ok_or(BnsError::InvalidName)?;
+        let record = Self::slot_mut(&mut self.names, &mut self.name_tree, name)
+            .ok_or(BnsError::InvalidName)?;
         record.records = next;
         Ok(())
     }
@@ -1218,7 +1325,8 @@ impl BnsRegistry {
         storage_domain_id: u32,
         current_epoch: u64,
     ) -> Result<(), BnsError> {
-        let rec = self.names.get_mut(name).ok_or(BnsError::InvalidName)?;
+        let rec = Self::slot_mut(&mut self.names, &mut self.name_tree, name)
+            .ok_or(BnsError::InvalidName)?;
         if rec.owner != caller {
             return Err(BnsError::NotOwner);
         }
@@ -1413,36 +1521,6 @@ impl BnsRegistry {
         )
     }
 
-    fn hash_merkle_pair(left: &[u8; 32], right: &[u8; 32]) -> [u8; 32] {
-        use sha2::{Digest, Sha256};
-        let mut hasher = Sha256::new();
-        hasher.update(b"BDLM_BNS_NODE_V1");
-        hasher.update(left);
-        hasher.update(right);
-        hasher.finalize().into()
-    }
-
-    /// Fold a Merkle branch `(siblings, directions)` from `leaf` up to `names_merkle_root`.
-    #[must_use]
-    fn fold_merkle_branch(
-        leaf: [u8; 32],
-        siblings: &[[u8; 32]],
-        directions: &[bool],
-    ) -> Option<[u8; 32]> {
-        if siblings.len() != directions.len() || siblings.len() > 32 {
-            return None;
-        }
-        let mut acc = leaf;
-        for (sib, is_right_child) in siblings.iter().zip(directions.iter()) {
-            acc = if *is_right_child {
-                Self::hash_merkle_pair(sib, &acc)
-            } else {
-                Self::hash_merkle_pair(&acc, sib)
-            };
-        }
-        Some(acc)
-    }
-
     /// Registry-wide metadata commitment (`BDLM_BNS_META_V1`) covering non-leaf
     /// registry configuration (`base_cost`, `reserved_labels`, `primary_sellers`,
     /// `primary_names`, and `names.len()`).
@@ -1489,251 +1567,65 @@ impl BnsRegistry {
         hasher.finalize().into()
     }
 
-    /// Binary Merkle root over all ordered `NameRecord` leaves (`[0u8; 32]` when empty).
+    /// Root of the sparse tree over the names (`[0u8; 32]` when empty).
+    ///
+    /// Key: `SHA-256("BDLM_BNS_KEY_V1" || name)`. Value: the record digest.
+    /// See [`crate::bns::smt`] for the node rules.
     #[must_use]
     pub fn names_merkle_root(&self) -> [u8; 32] {
-        if self.names.is_empty() {
-            return [0u8; 32];
-        }
-        let mut level: Vec<[u8; 32]> = self.names.values().map(Self::record_leaf_digest).collect();
-        while level.len() > 1 {
-            let mut next = Vec::with_capacity(level.len().div_ceil(2));
-            let mut i = 0;
-            while i < level.len() {
-                let Some(left) = level.get(i) else {
-                    break;
-                };
-                if let Some(right) = level.get(i.saturating_add(1)) {
-                    next.push(Self::hash_merkle_pair(left, right));
-                } else {
-                    next.push(*left);
-                }
-                i += 2;
-            }
-            level = next;
-        }
-        level.first().copied().unwrap_or([0u8; 32])
+        self.name_tree.read(&self.names, smt::Tree::root)
     }
 
-    fn build_branch_at(
-        records: &[&NameRecord],
-        leaves: &[[u8; 32]],
-        target_idx: usize,
-    ) -> Option<BnsMerkleBranch> {
-        let rec = records.get(target_idx).copied()?;
-        let extras_digest = Self::record_extras_digest(rec);
-        let leaf = *leaves.get(target_idx)?;
-        let mut siblings = Vec::new();
-        let mut directions = Vec::new();
-        let mut idx = target_idx;
-        let mut level = leaves.to_vec();
-        while level.len() > 1 {
-            if idx.is_multiple_of(2) {
-                if let Some(sibling) = idx
-                    .checked_add(1)
-                    .and_then(|sibling_idx| level.get(sibling_idx))
-                {
-                    siblings.push(*sibling);
-                    directions.push(false);
-                }
-            } else {
-                let sibling = idx
-                    .checked_sub(1)
-                    .and_then(|sibling_idx| level.get(sibling_idx))?;
-                siblings.push(*sibling);
-                directions.push(true);
-            }
-            let mut next = Vec::with_capacity(level.len().div_ceil(2));
-            let mut i = 0;
-            while i < level.len() {
-                let left = level.get(i)?;
-                if let Some(right) = level.get(i.saturating_add(1)) {
-                    next.push(Self::hash_merkle_pair(left, right));
-                } else {
-                    next.push(*left);
-                }
-                i += 2;
-            }
-            idx /= 2;
-            level = next;
-        }
-        Some(BnsMerkleBranch {
-            name: rec.name.clone(),
-            owner: rec.owner,
-            address: rec.address,
-            expires_at: rec.expires_at,
-            content: rec.content,
-            storage_root: rec.storage_root,
-            extras_digest,
-            leaf,
-            siblings,
-            directions,
-            leaf_index: Some(u64::try_from(target_idx).unwrap_or(u64::MAX)),
-            tree_size: Some(u64::try_from(records.len()).unwrap_or(u64::MAX)),
-            extras: Some(Self::extras_from_record(rec)),
-        })
-    }
-
-    /// The absence rule: `pred` and `succ` are the two leaves flanking the
-    /// target, and no name sorts between them.
-    ///
-    /// Lexicographic order alone is not a proof of absence. Every branch in the
-    /// tree sorts next to some target, and `names_count` is a claimed field the
-    /// leaf never commits to, so an honest inclusion branch of a live name could
-    /// be relabelled and served as proof that the name is unregistered. Two
-    /// things make the claim checkable:
-    ///
-    /// - Both boundary branches carry the size of the list they were built
-    ///   from, and the two must agree. A predecessor from one tree and a
-    ///   successor from another cannot be spliced together.
-    /// - Both carry their leaf position, and the positions must be adjacent.
-    ///   Adjacent positions in the ordered name list are exactly what "nothing
-    ///   sorts between these two names" means, so a prover that skips a live
-    ///   name in the middle has to forge a position it cannot open.
-    ///
-    /// The first and last positions are the two open ends: the first leaf has
-    /// no predecessor and the last has no successor, which is why one boundary
-    /// is allowed when it is that end.
-    fn check_boundary_pair(
-        proof: &BnsStateProof,
-        pred: Option<&BnsMerkleBranch>,
-        succ: Option<&BnsMerkleBranch>,
-    ) -> Result<(), String> {
-        let target = proof.name.as_str();
-        for branch in [pred, succ].into_iter().flatten() {
-            let (Some(index), Some(size)) = (branch.leaf_index, branch.tree_size) else {
-                return Err(
-                    "absence proof branch carries no leaf position; a branch without one cannot show adjacency"
-                        .into(),
-                );
-            };
-            if size != proof.names_count {
-                return Err("absence proof branch was built from a different list size".into());
-            }
-            if index >= size {
-                return Err("absence proof branch leaf position is outside the tree".into());
-            }
-        }
-        match (pred, succ) {
-            (Some(pred), Some(succ)) => {
-                let (Some(pred_index), Some(succ_index)) = (pred.leaf_index, succ.leaf_index)
-                else {
-                    return Err("absence proof boundary branch carries no leaf position".into());
-                };
-                if succ_index != pred_index.saturating_add(1) {
-                    return Err(
-                        "absence proof boundaries are not adjacent, so a name may sort between them"
-                            .into(),
-                    );
-                }
-            }
-            (Some(pred), None) => {
-                let Some(pred_index) = pred.leaf_index else {
-                    return Err("absence proof boundary branch carries no leaf position".into());
-                };
-                if pred_index.saturating_add(1) != proof.names_count {
-                    return Err(
-                        "a predecessor-only absence proof must name the last leaf of the tree"
-                            .into(),
-                    );
-                }
-            }
-            (None, Some(succ)) => {
-                let Some(succ_index) = succ.leaf_index else {
-                    return Err("absence proof boundary branch carries no leaf position".into());
-                };
-                if succ_index != 0 {
-                    return Err(
-                        "a successor-only absence proof must name the first leaf of the tree"
-                            .into(),
-                    );
-                }
-            }
-            (None, None) => {
-                return Err("non-empty registry absence proof requires a boundary branch".into());
-            }
-        }
-        if let Some(pred) = pred {
-            if pred.name.as_str() >= target {
-                return Err("predecessor name is not strictly less than target".into());
-            }
-        }
-        if let Some(succ) = succ {
-            if succ.name.as_str() <= target {
-                return Err("successor name is not strictly greater than target".into());
-            }
-        }
-        Ok(())
-    }
-
-    /// Produce an $O(\log N)$ per-name Merkle state proof (inclusion when `name`
-    /// is present, or adjacent lexicographic boundary proof when `name` is absent).
+    /// Produce the per-name state proof: the path to the name's leaf when
+    /// the name is held, otherwise the path to the empty slot or to the other
+    /// name's leaf that stands where it would be.
     #[must_use]
     pub fn prove_name(&self, name: &str, current_epoch: u64) -> BnsStateProof {
         let meta_digest = self.meta_digest();
-        let records: Vec<&NameRecord> = self.names.values().collect();
-        let leaves: Vec<[u8; 32]> = records
-            .iter()
-            .map(|r| Self::record_leaf_digest(r))
-            .collect();
-        let names_root = if leaves.is_empty() {
-            [0u8; 32]
-        } else {
-            let mut lvl = leaves.clone();
-            while lvl.len() > 1 {
-                let mut next = Vec::with_capacity(lvl.len().div_ceil(2));
-                let mut i = 0;
-                while i < lvl.len() {
-                    let Some(left) = lvl.get(i) else {
-                        break;
-                    };
-                    if let Some(right) = lvl.get(i.saturating_add(1)) {
-                        next.push(Self::hash_merkle_pair(left, right));
-                    } else {
-                        next.push(*left);
-                    }
-                    i += 2;
-                }
-                lvl = next;
-            }
-            lvl.first().copied().unwrap_or([0u8; 32])
+        let key = smt::key_of(name);
+        let (names_root, path) = self
+            .name_tree
+            .read(&self.names, |tree| (tree.root(), tree.prove(&key)));
+        let mut proof = BnsStateProof {
+            name: name.to_string(),
+            included: false,
+            bns_root: Self::root_from_parts(meta_digest, names_root),
+            meta_digest,
+            names_count: self.names.len() as u64,
+            epoch: current_epoch,
+            entry: None,
+            absence: None,
         };
-        let bns_root = Self::root_from_parts(meta_digest, names_root);
-
-        match records.binary_search_by(|r| r.name.as_str().cmp(name)) {
-            Ok(idx) => BnsStateProof {
-                name: name.to_string(),
-                included: true,
-                bns_root,
-                meta_digest,
-                names_count: records.len() as u64,
-                epoch: current_epoch,
-                entry: Self::build_branch_at(&records, &leaves, idx),
-                predecessor: None,
-                successor: None,
-            },
-            Err(insert_idx) => {
-                let predecessor = insert_idx
-                    .checked_sub(1)
-                    .and_then(|p| Self::build_branch_at(&records, &leaves, p));
-                let successor = if insert_idx < records.len() {
-                    Self::build_branch_at(&records, &leaves, insert_idx)
-                } else {
-                    None
-                };
-                BnsStateProof {
-                    name: name.to_string(),
-                    included: false,
-                    bns_root,
-                    meta_digest,
-                    names_count: records.len() as u64,
-                    epoch: current_epoch,
-                    entry: None,
-                    predecessor,
-                    successor,
-                }
+        match (path.terminal, self.names.get(name)) {
+            (smt::Terminal::Leaf(leaf), Some(rec)) => {
+                proof.included = true;
+                proof.entry = Some(BnsMerkleBranch {
+                    name: rec.name.clone(),
+                    owner: rec.owner,
+                    address: rec.address,
+                    expires_at: rec.expires_at,
+                    content: rec.content,
+                    storage_root: rec.storage_root,
+                    extras_digest: Self::record_extras_digest(rec),
+                    leaf,
+                    siblings: path.siblings,
+                    extras: Some(Self::extras_from_record(rec)),
+                });
+            }
+            (smt::Terminal::Other(key, value), _) => {
+                proof.absence = Some(BnsAbsenceProof {
+                    siblings: path.siblings,
+                    occupant: Some(BnsOccupiedSlot { key, value }),
+                });
+            }
+            _ => {
+                proof.absence = Some(BnsAbsenceProof {
+                    siblings: path.siblings,
+                    occupant: None,
+                });
             }
         }
+        proof
     }
 
     /// Verify a [`BnsStateProof`] against `expected_bns_root` at `current_epoch`,
@@ -1742,8 +1634,8 @@ impl BnsRegistry {
     ///
     /// # Errors
     ///
-    /// Returns a human-readable refusal reason if any digest, Merkle path,
-    /// boundary order, or expiry check fails.
+    /// Returns a human-readable refusal reason if any digest, tree path or
+    /// expiry check fails.
     pub fn verify_state_proof<'a>(
         proof: &'a BnsStateProof,
         expected_bns_root: &[u8; 32],
@@ -1780,11 +1672,19 @@ impl BnsRegistry {
             if recomputed_leaf != branch.leaf {
                 return Err("branch leaf digest mismatch".into());
             }
-            Self::fold_merkle_branch(recomputed_leaf, &branch.siblings, &branch.directions)
-                .ok_or_else(|| "malformed Merkle branch".to_string())
+            smt::root_of_path(
+                &smt::key_of(&branch.name),
+                &smt::Path {
+                    terminal: smt::Terminal::Leaf(recomputed_leaf),
+                    siblings: branch.siblings.clone(),
+                },
+            )
         };
 
         if proof.included {
+            if proof.absence.is_some() {
+                return Err("inclusion proof must not carry an absence path".into());
+            }
             let entry = proof
                 .entry
                 .as_ref()
@@ -1804,35 +1704,30 @@ impl BnsRegistry {
             if proof.entry.is_some() {
                 return Err("non-inclusion proof must not carry an entry branch".into());
             }
-            if proof.names_count == 0 {
-                if proof.predecessor.is_some() || proof.successor.is_some() {
-                    return Err("empty registry proof cannot carry boundary branches".into());
-                }
-                if Self::root_from_parts(proof.meta_digest, [0u8; 32]) != *expected_bns_root {
-                    return Err("empty registry root mismatch".into());
-                }
-                return Ok(None);
+            // The path of the queried name must end in an empty slot or in
+            // another name's leaf, and fold to the header root. A held name
+            // has its own leaf at the end of its path, so no such path exists
+            // for it.
+            let absence = proof
+                .absence
+                .as_ref()
+                .ok_or_else(|| "non-inclusion proof carries no absence path".to_string())?;
+            let terminal = absence
+                .occupant
+                .as_ref()
+                .map_or(smt::Terminal::Empty, |slot| {
+                    smt::Terminal::Other(slot.key, slot.value)
+                });
+            let names_root = smt::root_of_path(
+                &smt::key_of(&proof.name),
+                &smt::Path {
+                    terminal,
+                    siblings: absence.siblings.clone(),
+                },
+            )?;
+            if Self::root_from_parts(proof.meta_digest, names_root) != *expected_bns_root {
+                return Err("absence path did not reproduce expected bns_root".into());
             }
-            if proof.predecessor.is_none() && proof.successor.is_none() {
-                return Err("non-empty registry absence proof requires a boundary branch".into());
-            }
-            // Each boundary branch must open to the header root before its
-            // position means anything.
-            if let Some(pred) = &proof.predecessor {
-                let root = check_branch(pred)?;
-                if Self::root_from_parts(proof.meta_digest, root) != *expected_bns_root {
-                    return Err("predecessor branch did not reproduce expected bns_root".into());
-                }
-            }
-            if let Some(succ) = &proof.successor {
-                let root = check_branch(succ)?;
-                if Self::root_from_parts(proof.meta_digest, root) != *expected_bns_root {
-                    return Err("successor branch did not reproduce expected bns_root".into());
-                }
-            }
-            // Order alone proves nothing: a live name can hide between two
-            // honest branches. Only the positions can rule that out.
-            Self::check_boundary_pair(proof, proof.predecessor.as_ref(), proof.successor.as_ref())?;
             Ok(None)
         }
     }

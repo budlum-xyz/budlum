@@ -2361,7 +2361,7 @@ impl AccountState {
                             );
                         }
                         let replacing_same_owner_in_grace =
-                            self.bns_registry.names.get(&offer.name).is_some_and(|r| {
+                            self.bns_registry.names().get(&offer.name).is_some_and(|r| {
                                 r.owner == tx.from
                                     && self.epoch_index
                                         < r.expires_at
@@ -2476,7 +2476,7 @@ impl AccountState {
                     if !crate::bns::BnsRegistry::is_valid_name(name) {
                         return Err("Invalid BNS name".into());
                     }
-                    let Some(record) = self.bns_registry.names.get(name) else {
+                    let Some(record) = self.bns_registry.names().get(name) else {
                         return Err("BNS primary name not found".into());
                     };
                     if record.expires_at <= self.epoch_index {

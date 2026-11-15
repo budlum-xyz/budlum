@@ -315,7 +315,7 @@ fn bns_renew_and_transfer_execute_through_consensus_doors() {
     state.validate_transaction(&renewal).unwrap();
     Executor::apply_transaction_checked(&mut state, &renewal).unwrap();
     assert_eq!(
-        state.bns_registry.names.get(&name).unwrap().expires_at,
+        state.bns_registry.names().get(&name).unwrap().expires_at,
         200,
         "renewal extends from the old expiry"
     );
@@ -789,7 +789,7 @@ fn bns_reserved_labels_rejected_unless_primary_seller_settles() {
     );
     buy_reserved.sign(&buyer_kp);
     Executor::apply_transaction_checked(&mut state, &buy_reserved).unwrap();
-    assert_eq!(state.bns_registry.names["rpc.bud"].owner, buyer);
+    assert_eq!(state.bns_registry.names()["rpc.bud"].owner, buyer);
 }
 
 #[test]
@@ -1416,7 +1416,6 @@ fn bns_per_name_merkle_proofs_verify_inclusion_absence_tampering_and_expiry() {
         .unwrap();
     assert_eq!(verified.owner, bob);
     assert_eq!(verified.content, Some(gamma_site));
-    assert_eq!(verified.siblings.len(), 2);
 
     // 2. Tampering with owner or root fails closed!
     let mut forged = inc.clone();
@@ -1427,11 +1426,10 @@ fn bns_per_name_merkle_proofs_verify_inclusion_absence_tampering_and_expiry() {
     let expired_proof = reg.prove_name("omega.bud", 15);
     assert!(BnsRegistry::verify_state_proof(&expired_proof, &expected_root, 15).is_err());
 
-    // 4. Non-existence proof for `beta.bud` (between `alpha.bud` and `gamma.bud`) verifies!
+    // 4. A name nobody holds proves its absence.
     let abs = reg.prove_name("beta.bud", 5);
     assert!(!abs.included);
-    assert_eq!(abs.predecessor.as_ref().unwrap().name, "alpha.bud");
-    assert_eq!(abs.successor.as_ref().unwrap().name, "gamma.bud");
+    assert!(abs.entry.is_none() && abs.absence.is_some());
     assert!(BnsRegistry::verify_state_proof(&abs, &expected_root, 5)
         .unwrap()
         .is_none());
@@ -1499,84 +1497,183 @@ fn a_bns_branch_cannot_show_extras_the_root_does_not_commit_to() {
     assert!(BnsRegistry::verify_state_proof(&contradicting, &root, 5).is_err());
 }
 
-/// An absence proof must place its boundaries, not merely spell them.
+/// An absence proof is a path, and the path of a held name ends in that name.
 ///
-/// Order alone proves nothing: every branch in the tree sorts next to some
-/// target, and `names_count` is a claimed field that no leaf commits to. Before
-/// the boundary rule, the honest inclusion branch of a live owned name could be
-/// relabelled as the predecessor of a nearby target and served as proof that
-/// the target is free, so a lying node could talk a wallet into treating a
-/// taken name as unclaimed. The positions are the part a prover cannot invent
-/// without opening a branch that says otherwise.
+/// A lying node wants to tell a wallet that a taken name is free. In the
+/// sparse tree the slot of a name is fixed by its key, so the only paths that
+/// fold to the header root for a held name end in its own leaf. Every way of
+/// dressing that up as an absence is refused here, and so is an honest
+/// absence path with one byte changed.
 #[test]
-fn bns_absence_proof_boundaries_must_be_adjacent_positions() {
+fn bns_absence_proof_cannot_hide_a_live_name() {
+    use crate::bns::types::{BnsAbsenceProof, BnsOccupiedSlot};
+
     let mut reg = BnsRegistry::new();
     let alice = Address::from([0xA1; 32]);
     let bob = Address::from([0xB1; 32]);
-    let t0 = 100u64;
-    reg.register("alpha.bud".to_string(), alice, 10, t0)
-        .unwrap();
-    reg.register("gamma.bud".to_string(), bob, 10, t0).unwrap();
-    reg.register("omega.bud".to_string(), bob, 10, t0 + 1)
-        .unwrap();
+    for i in 0..24u8 {
+        let owner = if i % 2 == 0 { alice } else { bob };
+        reg.register(format!("held{i:02}.bud"), owner, 10, 100)
+            .unwrap();
+    }
     let root = reg.root();
 
-    // The honest proof verifies, and it carries the positions it depends on.
-    let honest = reg.prove_name("beta.bud", 5);
-    assert!(!honest.included);
-    assert!(BnsRegistry::verify_state_proof(&honest, &root, 5).is_ok());
-    let pred = honest.predecessor.clone().unwrap();
-    assert_eq!(pred.leaf_index, Some(0));
-    assert_eq!(pred.tree_size, Some(3));
+    // Honest answers, for names that end in an empty slot and for names
+    // that end in another name's leaf. Both kinds must occur and verify.
+    let mut empty_slot = None;
+    let mut occupied_slot = None;
+    for i in 0..200 {
+        let name = format!("free{i}.bud");
+        let proof = reg.prove_name(&name, 5);
+        assert!(!proof.included);
+        assert_eq!(
+            BnsRegistry::verify_state_proof(&proof, &root, 5),
+            Ok(None),
+            "{name}"
+        );
+        match proof.absence.as_ref().and_then(|a| a.occupant.as_ref()) {
+            Some(_) => occupied_slot = Some(proof),
+            None => empty_slot = Some(proof),
+        }
+    }
+    let empty_slot = empty_slot.expect("some free name ends in an empty slot");
+    let occupied_slot = occupied_slot.expect("some free name ends in another name's leaf");
 
-    // The attack: hide `gamma.bud` by dropping the successor and relabelling
-    // the live `alpha.bud` branch as a lone predecessor. It still opens to the
-    // header root, so only the position can refuse it.
-    let mut spliced = honest.clone();
-    spliced.successor = None;
-    assert!(
-        BnsRegistry::verify_state_proof(&spliced, &root, 5).is_err(),
-        "a predecessor-only absence proof must be the end of the tree"
+    // One byte changed anywhere in an absence path is refused.
+    for honest in [&empty_slot, &occupied_slot] {
+        let siblings = honest.absence.as_ref().unwrap().siblings.len();
+        for i in 0..siblings {
+            let mut bent = honest.clone();
+            bent.absence.as_mut().unwrap().siblings[i][0] ^= 1;
+            assert!(BnsRegistry::verify_state_proof(&bent, &root, 5).is_err());
+        }
+        let mut wrong_meta = honest.clone();
+        wrong_meta.meta_digest[0] ^= 1;
+        assert!(BnsRegistry::verify_state_proof(&wrong_meta, &root, 5).is_err());
+        let mut no_path = honest.clone();
+        no_path.absence = None;
+        assert!(BnsRegistry::verify_state_proof(&no_path, &root, 5).is_err());
+    }
+    let mut bent = occupied_slot.clone();
+    bent.absence
+        .as_mut()
+        .unwrap()
+        .occupant
+        .as_mut()
+        .unwrap()
+        .value[0] ^= 1;
+    assert!(BnsRegistry::verify_state_proof(&bent, &root, 5).is_err());
+
+    // The attack. `held03.bud` is live; the node tries to show it free.
+    let live = reg.prove_name("held03.bud", 5);
+    assert!(live.included);
+    let entry = live.entry.clone().unwrap();
+    let as_absent = |absence: BnsAbsenceProof| {
+        let mut forged = live.clone();
+        forged.included = false;
+        forged.entry = None;
+        forged.absence = Some(absence);
+        BnsRegistry::verify_state_proof(&forged, &root, 5).map(|entry| entry.cloned())
+    };
+    // Its own path, called an empty slot.
+    assert!(as_absent(BnsAbsenceProof {
+        siblings: entry.siblings.clone(),
+        occupant: None,
+    })
+    .is_err());
+    // Its own leaf, called another name's leaf.
+    assert!(as_absent(BnsAbsenceProof {
+        siblings: entry.siblings.clone(),
+        occupant: Some(BnsOccupiedSlot {
+            key: crate::bns::smt::key_of("held03.bud"),
+            value: entry.leaf,
+        }),
+    })
+    .is_err());
+    // The honest absence path of a different name, relabelled.
+    let mut relabelled = empty_slot.clone();
+    relabelled.name = "held03.bud".to_string();
+    assert!(BnsRegistry::verify_state_proof(&relabelled, &root, 5).is_err());
+    let mut relabelled = occupied_slot;
+    relabelled.name = "held03.bud".to_string();
+    assert!(BnsRegistry::verify_state_proof(&relabelled, &root, 5).is_err());
+    // An inclusion proof that also carries an absence path says two things.
+    let mut both = live;
+    both.absence = empty_slot.absence;
+    assert!(BnsRegistry::verify_state_proof(&both, &root, 5).is_err());
+}
+
+/// The tree follows every write: after a run of registrations, edits,
+/// transfers of content and expiries, the root the live registry reports is
+/// the root a registry rebuilt from its serialized form reports.
+#[test]
+fn bns_incremental_tree_matches_a_rebuild_after_every_kind_of_write() {
+    let rebuilt_root = |reg: &BnsRegistry| {
+        let bytes = bincode::serialize(reg).unwrap();
+        let mut fresh: BnsRegistry = bincode::deserialize(&bytes).unwrap();
+        fresh.rebuild_expiry_index();
+        fresh.root()
+    };
+    let owner = addr(0x51);
+    let other = addr(0x52);
+    let mut reg = BnsRegistry::new();
+    assert_eq!(reg.root(), rebuilt_root(&reg));
+
+    for i in 0..12u8 {
+        reg.register(format!("step{i:02}.bud"), owner, 1, 100 + u64::from(i))
+            .unwrap();
+        assert_eq!(reg.root(), rebuilt_root(&reg), "after register {i}");
+    }
+    reg.set_address("step03.bud", &owner, Some(other), None, 2)
+        .unwrap();
+    assert_eq!(reg.root(), rebuilt_root(&reg), "after set_address");
+    reg.set_address("step03.bud", &owner, None, None, 2)
+        .unwrap();
+    assert_eq!(reg.root(), rebuilt_root(&reg), "after clearing the address");
+
+    let mut bud3 = crate::storage::bud3::registry::Bud3Registry::default();
+    let site = crate::bns::bud3::fixtures::public_object(&mut bud3, owner.0, b"tree");
+    reg.set_content("step04.bud", &owner, &bud3, Some(site), 2)
+        .unwrap();
+    assert_eq!(reg.root(), rebuilt_root(&reg), "after set_content");
+
+    let before_prune = reg.root();
+    let removed = reg.prune_expired(u64::MAX);
+    assert_eq!(removed, 12);
+    assert_ne!(reg.root(), before_prune);
+    assert_eq!(reg.root(), rebuilt_root(&reg), "after prune");
+    assert_eq!(reg.root(), BnsRegistry::new().root());
+
+    // A clone carries the tree with it and stays in step on its own.
+    let mut copy = reg.clone();
+    copy.register("copy.bud".to_string(), owner, 1, 100)
+        .unwrap();
+    assert_ne!(copy.root(), reg.root());
+    assert_eq!(copy.root(), rebuilt_root(&copy));
+}
+
+/// The numbers a light client pins. The wallet and the explorer fold proofs
+/// with their own copy of these rules; the same vectors sit in their tests.
+#[test]
+fn bns_proof_vectors_are_the_ones_light_clients_pin() {
+    use crate::bns::smt;
+    let key = smt::key_of("ayaz.bud");
+    assert_eq!(
+        hex::encode(key),
+        "9ca1f7a6ebb5956dea6ba6489119df3a518898a9dd46efc6c62e6b1102fec1e7"
     );
-
-    // A prover that reaches for the right names but the wrong positions: an
-    // adjacent-looking pair taken from different indices of the same tree.
-    let mut misplaced = honest.clone();
-    misplaced.successor.as_mut().unwrap().leaf_index = Some(2);
-    assert!(
-        BnsRegistry::verify_state_proof(&misplaced, &root, 5).is_err(),
-        "non-adjacent boundaries leave room for a live name in between"
+    let folded = smt::root_of_path(
+        &key,
+        &smt::Path {
+            terminal: smt::Terminal::Leaf([0x55; 32]),
+            siblings: vec![[0x44; 32], [0x66; 32]],
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        hex::encode(folded),
+        "d706cddd816bc581463bdb4d6fc3b1fd3e43e9847636f3b7bc88cad8e95d6ed9"
     );
-
-    // A branch from a different-sized tree cannot be spliced onto this one.
-    let mut stitched = honest.clone();
-    stitched.successor.as_mut().unwrap().tree_size = Some(4);
-    assert!(
-        BnsRegistry::verify_state_proof(&stitched, &root, 5).is_err(),
-        "both boundaries must come from the list the root commits to"
-    );
-
-    // A branch that carries no position at all is usable for inclusion only.
-    let mut unpositioned = honest.clone();
-    unpositioned.predecessor.as_mut().unwrap().leaf_index = None;
-    assert!(BnsRegistry::verify_state_proof(&unpositioned, &root, 5).is_err());
-
-    // The two open ends of the tree remain provable with one boundary.
-    let first = reg.prove_name("aardvark.bud", 5);
-    assert!(first.predecessor.is_none());
-    assert_eq!(first.successor.as_ref().unwrap().leaf_index, Some(0));
-    assert!(BnsRegistry::verify_state_proof(&first, &root, 5).is_ok());
-
-    let last = reg.prove_name("zeta.bud", 5);
-    assert!(last.successor.is_none());
-    assert_eq!(last.predecessor.as_ref().unwrap().leaf_index, Some(2));
-    assert!(BnsRegistry::verify_state_proof(&last, &root, 5).is_ok());
-
-    // And the boundary count is not a free variable: a proof that claims a
-    // smaller list than the branch was built from is refused.
-    let mut shrunk = honest.clone();
-    shrunk.names_count = 2;
-    assert!(BnsRegistry::verify_state_proof(&shrunk, &root, 5).is_err());
 }
 
 // ---------------------------------------------------------------------------
@@ -1676,7 +1773,12 @@ fn bns_base_cost_change_does_not_touch_existing_registrations() {
         )
         .expect("the primary sale registers the name for the buyer");
 
-    let before = state.bns_registry.names.get("priced.bud").cloned().unwrap();
+    let before = state
+        .bns_registry
+        .names()
+        .get("priced.bud")
+        .cloned()
+        .unwrap();
     let root_before = state.bns_registry.root();
     let old_cost = state.bns_registry.calculate_cost("priced.bud", duration);
 
@@ -1685,7 +1787,12 @@ fn bns_base_cost_change_does_not_touch_existing_registrations() {
         .set_base_cost(1_000)
         .expect("10x up from the genesis 100");
 
-    let after = state.bns_registry.names.get("priced.bud").cloned().unwrap();
+    let after = state
+        .bns_registry
+        .names()
+        .get("priced.bud")
+        .cloned()
+        .unwrap();
     assert_eq!(
         before, after,
         "no field of a registration moves with the price"
@@ -1731,7 +1838,7 @@ fn bns_expiry_index_reclaims_the_earliest_expired_name_without_a_scan() {
         .unwrap();
     reg.register_primary_sale(&seller, "bbb.bud".into(), buyer(2), 0, duration + 100)
         .unwrap();
-    assert_eq!(reg.names.len(), 2);
+    assert_eq!(reg.names().len(), 2);
     assert_eq!(
         reg.expired_by_grace_end.len(),
         2,
@@ -1750,15 +1857,15 @@ fn bns_expiry_index_reclaims_the_earliest_expired_name_without_a_scan() {
     reg.register_primary_sale(&seller, "ccc.bud".into(), buyer(3), later, duration)
         .unwrap();
     assert!(
-        !reg.names.contains_key("aaa.bud"),
+        !reg.names().contains_key("aaa.bud"),
         "the earliest grace end is reclaimed"
     );
     assert!(
-        reg.names.contains_key("bbb.bud"),
+        reg.names().contains_key("bbb.bud"),
         "a later grace end is not"
     );
-    assert!(reg.names.contains_key("ccc.bud"));
-    assert_eq!(reg.names.len(), 2);
+    assert!(reg.names().contains_key("ccc.bud"));
+    assert_eq!(reg.names().len(), 2);
     assert_eq!(
         reg.expired_by_grace_end.len(),
         2,
@@ -1780,14 +1887,14 @@ fn bns_expiry_index_tracks_renewal_prune_and_rebuild() {
     reg.register_primary_sale(&seller, "keep.bud".into(), owner, 0, duration)
         .unwrap();
 
-    let grace_end_before = reg.names["keep.bud"].expires_at + crate::bns::GRACE_PERIOD;
+    let grace_end_before = reg.names()["keep.bud"].expires_at + crate::bns::GRACE_PERIOD;
     assert!(reg
         .expired_by_grace_end
         .contains(&(grace_end_before, "keep.bud".to_string())));
 
     // Renewal moves the row.
     reg.renew("keep.bud", &owner, 0, duration).unwrap();
-    let grace_end_after = reg.names["keep.bud"].expires_at + crate::bns::GRACE_PERIOD;
+    let grace_end_after = reg.names()["keep.bud"].expires_at + crate::bns::GRACE_PERIOD;
     assert!(grace_end_after > grace_end_before);
     assert!(
         !reg.expired_by_grace_end
@@ -1798,11 +1905,11 @@ fn bns_expiry_index_tracks_renewal_prune_and_rebuild() {
 
     // Prune at an epoch inside grace deletes nothing.
     assert_eq!(reg.prune_expired(grace_end_after - 1), 0);
-    assert!(reg.names.contains_key("keep.bud"));
+    assert!(reg.names().contains_key("keep.bud"));
 
     // Prune at the grace end deletes the name and its row together.
     assert_eq!(reg.prune_expired(grace_end_after), 1);
-    assert!(!reg.names.contains_key("keep.bud"));
+    assert!(!reg.names().contains_key("keep.bud"));
     assert!(reg.expired_by_grace_end.is_empty());
 
     // A registry restored from a snapshot has an empty index until rebuilt,
@@ -1872,16 +1979,11 @@ proptest! {
             reg.set_primary_sellers(vec![seller]).unwrap();
             for &i in order {
                 let name = format!("order{i:02}.bud");
-                reg.names.insert(
-                    name.clone(),
-                    crate::bns::NameRecord::try_new(
-                        name,
-                        addr(0xA0 ^ i),
-                        0,
-                        crate::bns::MIN_DURATION,
-                    )
-                    .unwrap(),
-                );
+                if reg.names().contains_key(&name) {
+                    continue;
+                }
+                reg.register(name, addr(0xA0 ^ i), 0, crate::bns::MIN_DURATION)
+                    .unwrap();
             }
             reg.rebuild_expiry_index();
             reg
@@ -2541,7 +2643,7 @@ fn bns_resolve_falls_back_to_the_owner_when_the_address_record_is_empty() {
     // it does not stop resolving.
     reg.set_address("fallback.bud", &owner, None, None, 3)
         .unwrap();
-    assert_eq!(reg.names.get("fallback.bud").unwrap().address, None);
+    assert_eq!(reg.names().get("fallback.bud").unwrap().address, None);
     assert_eq!(reg.resolve("fallback.bud", 3), Some(owner));
     assert_eq!(
         reg.resolve_full("fallback.bud", 3).unwrap().address,
