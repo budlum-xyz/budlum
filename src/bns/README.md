@@ -109,7 +109,9 @@
     which reads that answer, checks it against a header the host trusts
     (`BnsHeaderBook`) and returns the record or the absence. It is exported
     with wasm-bindgen (`BrowserHeaderBook`, `verify_bns_proof`) and through
-    the `uniffi_bindings` module. `budlum-explorer`
+    the `uniffi_bindings` module. `resolve_bns` takes the answers of every
+    configured node, refuses the ones that do not verify and returns the
+    freshest one that does; it has the same two exports. `budlum-explorer`
     `BnsInclusionProof::PerName` folds the same path. The three
     implementations pin the same vectors
     (`bns_proof_vectors_are_the_ones_light_clients_pin`).

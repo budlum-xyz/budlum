@@ -932,6 +932,21 @@ pub mod uniffi_bindings {
     ) -> Result<String, String> {
         crate::bns::verify_bns_proof(name, proof_json, headers).map(|v| v.to_json())
     }
+
+    /// Resolve `name` from the `bud_bnsGetProof` answers of the configured
+    /// nodes, and return what the freshest verified answer proves as JSON.
+    ///
+    /// # Errors
+    ///
+    /// Every refusal of [`crate::bns::resolve_bns`].
+    /// exposed for: the wallet crate's SDK surface - in-tree readers land with the wallet wiring.
+    pub fn resolve_bns(
+        name: &str,
+        answers: &[String],
+        headers: &crate::bns::BnsHeaderBook,
+    ) -> Result<String, String> {
+        crate::bns::resolve_bns(name, answers, headers).map(|v| v.to_json())
+    }
 }
 
 #[cfg(feature = "wasm")]
@@ -1078,6 +1093,25 @@ pub mod wasm_bindings {
         headers: &BrowserHeaderBook,
     ) -> Result<String, JsError> {
         crate::bns::verify_bns_proof(name, proof_json, &headers.inner)
+            .map(|v| v.to_json())
+            .map_err(|e| JsError::new(&e))
+    }
+
+    /// Resolve `name` from the `bud_bnsGetProof` answers the page fetched
+    /// from its configured nodes. Returns the same JSON as
+    /// [`verify_bns_proof`], for the freshest answer that verifies.
+    ///
+    /// # Errors
+    ///
+    /// Every refusal of [`crate::bns::resolve_bns`].
+    #[wasm_bindgen]
+    /// exposed for: the wallet crate's SDK surface - in-tree readers land with the wallet wiring.
+    pub fn resolve_bns(
+        name: &str,
+        answers: Vec<String>,
+        headers: &BrowserHeaderBook,
+    ) -> Result<String, JsError> {
+        crate::bns::resolve_bns(name, &answers, &headers.inner)
             .map(|v| v.to_json())
             .map_err(|e| JsError::new(&e))
     }
@@ -2185,6 +2219,40 @@ mod tests {
         let verified = wasm_bindings::verify_bns_proof("free.bud", &proof, &book);
         assert_eq!(
             verified.ok().as_deref(),
+            Some(r#"{"height":7,"held":false}"#)
+        );
+    }
+
+    #[cfg(feature = "uniffi")]
+    #[test]
+    fn binding_uniffi_resolves_a_name_past_a_node_that_lies() {
+        let (proof, root) = binding_bns_fixture();
+        let mut book = crate::bns::BnsHeaderBook::new();
+        book.trust(crate::bns::TrustedBnsHeader {
+            height: 7,
+            bns_root: root,
+            epoch: 10,
+        });
+        let bent = proof.replace("0x33", "0x34");
+        assert!(
+            uniffi_bindings::resolve_bns("free.bud", std::slice::from_ref(&bent), &book).is_err()
+        );
+        assert_eq!(
+            uniffi_bindings::resolve_bns("free.bud", &[bent, proof], &book).unwrap(),
+            r#"{"height":7,"held":false}"#
+        );
+    }
+
+    #[cfg(feature = "wasm")]
+    #[test]
+    fn binding_wasm_resolves_a_name_past_a_node_that_lies() {
+        let (proof, root) = binding_bns_fixture();
+        let mut book = wasm_bindings::BrowserHeaderBook::new();
+        assert!(book.trust(7, &hex::encode(root), 10).is_ok());
+        let bent = proof.replace("0x33", "0x34");
+        let resolved = wasm_bindings::resolve_bns("free.bud", vec![bent, proof], &book);
+        assert_eq!(
+            resolved.ok().as_deref(),
             Some(r#"{"height":7,"held":false}"#)
         );
     }

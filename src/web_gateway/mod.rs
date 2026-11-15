@@ -43,12 +43,13 @@
 //!   node, a socket or a certificate. The HTTP client and the process entry
 //!   point are the parts that need a live chain, and they hold no rules.
 //!
-//! # What is not here yet
+//! # What is not here
 //!
-//! The server process (`src/bin/budlum-gateway.rs`), the TLS terminator, the
-//! symbol-bundle path for sealed content and the deployment units are not in
-//! this change. They are the parts that need a live certificate, a DNS provider
-//! and a host, and none of them changes an answer below: a gateway that mounts
+//! The server process is `src/bin/budlum-gateway.rs` and its deployment units
+//! are under `ops/gateway`. The process listens on plain HTTP and a terminator
+//! puts TLS in front of it, so certificate issuance is not in this tree. The
+//! symbol-bundle path for sealed content is not written: a sealed object has
+//! no site route. None of this changes an answer below: a gateway that mounts
 //! these modules cannot serve a byte that did not fold to a verified root.
 
 pub mod host;

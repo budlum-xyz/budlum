@@ -16,8 +16,8 @@ fn persistence_move_is_behaviour_neutral() {
 
     let mut harness = BlockHarness::open(path);
     // A fixed block sequence: two domain registrations through blocks.
-    let first = harness.operated_domain(1);
-    let second = harness.operated_domain_of_kind(2, crate::domain::ConsensusKind::PoS);
+    let first = harness.operated_domain(101);
+    let second = harness.operated_domain_of_kind(102, crate::domain::ConsensusKind::PoS);
     harness.register_domain(first);
     harness.register_domain(second);
     let root_before = harness.chain.state.calculate_state_root();
