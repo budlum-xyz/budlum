@@ -182,7 +182,7 @@ budlum-bpqs = { path = "crates/bpqs", optional = true }
 prost-build = "0.14.3"
 
 [dev-dependencies]
-rcgen = { version = "=0.13.2", default-features = false, features = ["crypto", "aws_lc_rs", "pem"] }
+rcgen = { version = "=0.14.10", default-features = false, features = ["crypto", "aws_lc_rs", "pem"] }
 tempfile = "3.10"
 proptest = "1.5"
 tokio = { version = "1", features = ["full"] }
