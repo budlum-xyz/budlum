@@ -247,6 +247,15 @@ pub fn is_unspecified(address: &Multiaddr) -> bool {
 /// Open a swarm with the validator key as its identity and listen on
 /// `listen`.
 pub async fn start(secret_key: [u8; 32], listen: &str) -> Result<GardenNet, String> {
+    start_with(secret_key, listen, MAX_CONNECTIONS).await
+}
+
+/// [`start`] with the number of connections the swarm keeps.
+async fn start_with(
+    secret_key: [u8; 32],
+    listen: &str,
+    max_connections: u32,
+) -> Result<GardenNet, String> {
     let listen: Multiaddr = listen
         .parse()
         .map_err(|e| format!("garden listen address is not a multiaddr: {e}"))?;
@@ -274,8 +283,14 @@ pub async fn start(secret_key: [u8; 32], listen: &str) -> Result<GardenNet, Stri
             ),
             limits: libp2p::connection_limits::Behaviour::new(
                 libp2p::connection_limits::ConnectionLimits::default()
-                    .with_max_established(Some(MAX_CONNECTIONS))
-                    .with_max_established_per_peer(Some(2)),
+                    .with_max_established(Some(max_connections))
+                    // Peers that dial in never take every slot: a third is
+                    // kept for the dials of this node, so a crowd at the
+                    // door cannot cut it off from its own Garden.
+                    .with_max_established_incoming(Some(max_connections * 2 / 3))
+                    .with_max_established_per_peer(Some(2))
+                    .with_max_pending_incoming(Some(max_connections / 2))
+                    .with_max_pending_outgoing(Some(max_connections / 3)),
             ),
         })
         .map_err(|e| format!("garden behaviour cannot start: {e}"))?
@@ -465,6 +480,68 @@ mod tests {
         .await
         .expect("the dial never connected");
         assert_eq!(connected, b_id);
+    }
+
+    /// Peers that dial in must not take the slots this node dials out with:
+    /// a node whose every slot is held by strangers cannot reach its own
+    /// Garden any more.
+    #[tokio::test]
+    async fn garden_inbound_peers_leave_room_for_the_dials_of_this_node() {
+        let a = KeyPair::generate().unwrap();
+        let b = KeyPair::generate().unwrap();
+        let mut net_a = start_with(a.private_key_bytes(), "/ip4/127.0.0.1/tcp/0", 6)
+            .await
+            .unwrap();
+        let net_b = start(b.private_key_bytes(), "/ip4/127.0.0.1/tcp/0")
+            .await
+            .unwrap();
+        let a_address: Multiaddr = announced_address(&net_a.listen, &a.public_key_bytes())
+            .unwrap()
+            .parse()
+            .unwrap();
+        let mut strangers = Vec::new();
+        for _ in 0..6 {
+            let key = KeyPair::generate().unwrap();
+            let net = start(key.private_key_bytes(), "/ip4/127.0.0.1/tcp/0")
+                .await
+                .unwrap();
+            net.commands
+                .send(NetCommand::Dial(a_address.clone()))
+                .await
+                .unwrap();
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            strangers.push(net);
+        }
+        // Let every stranger that gets in get in.
+        let mut inside = 0;
+        while let Ok(Some(event)) =
+            tokio::time::timeout(Duration::from_secs(2), net_a.events.recv()).await
+        {
+            if matches!(event, NetEvent::Connected(_)) {
+                inside += 1;
+            }
+        }
+        assert!(inside >= 3, "only {inside} strangers connected");
+
+        let b_id = peer_id_of(&b.public_key_bytes()).unwrap();
+        let address = announced_address(&net_b.listen, &b.public_key_bytes()).unwrap();
+        net_a
+            .commands
+            .send(NetCommand::Dial(address.parse().unwrap()))
+            .await
+            .unwrap();
+        let reached = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                match net_a.events.recv().await {
+                    Some(NetEvent::Connected(peer)) if peer == b_id => return true,
+                    Some(_) => {}
+                    None => return false,
+                }
+            }
+        })
+        .await;
+        assert_eq!(reached, Ok(true), "inbound peers took every slot");
+        drop(strangers);
     }
 
     #[tokio::test]
