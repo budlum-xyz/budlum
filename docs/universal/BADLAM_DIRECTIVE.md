@@ -2,8 +2,15 @@
 
 Status: active design and first offline implementation, not universal network support.
 PR title: Budlum. Commit messages for this work: Badlam.
-Stack: testnet-quantum -> testnet -> budlum-universal. The garden PR is a sibling, not an ancestor.
-Baseline: testnet 017ddb76. No existing consensus rules are replaced by this plan.
+Stack: testnet-quantum (#110) -> testnet (#126) -> garden (#164) -> budlum.
+Baseline: garden e5d21c49. The PR targets garden, above all three existing PRs.
+No existing consensus rules are replaced by this plan.
+
+Live discovery: garden now targets testnet. The initial draft on testnet is
+superseded by this branch so the actual PR stack matches the requested order.
+A trial merge of garden into the latest testnet-based work exposed 23 conflicted
+files. That trial was aborted without changing either upstream branch. This
+stack does not claim those pre-existing integration conflicts are resolved.
 
 ## Product contract
 
