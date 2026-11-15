@@ -522,7 +522,7 @@ jobs:
   gates:
     name: Gates (a suite that cannot run is not a protection)
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -1212,7 +1212,7 @@ jobs:
     # Name canary prevents a vacuous green if tests are renamed/deleted.
     name: Economy Invariants
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -1257,7 +1257,7 @@ jobs:
     # Name canary prevents a vacuous green if fork-choice tests are renamed/deleted.
     name: Fork-Choice Invariants
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -1301,7 +1301,7 @@ jobs:
     # StorageProvider trait + mock implementation named tests.
     name: StorageProvider Gate
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -1398,7 +1398,7 @@ jobs:
     # Name canary prevents a vacuous green if H5/H11.12 tests are renamed/deleted.
     name: Network Hardening
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

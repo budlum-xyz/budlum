@@ -1884,6 +1884,33 @@ mod rpc_tests {
             .contains("Invalid owner address"));
         let proof_val = server.bns_get_proof("bids.bud".to_string()).await.unwrap();
         assert_eq!(proof_val["included"], false);
+        // The short names answer exactly as the long ones do.
+        let short_proof = server.bns_proof("bids.bud".to_string()).await.unwrap();
+        assert_eq!(short_proof, proof_val);
+        assert!(server
+            .bns_proof("bids".to_string())
+            .await
+            .unwrap_err()
+            .message()
+            .contains("Invalid BNS name"));
+        assert_eq!(server.bns_reverse(buyer.to_hex()).await.unwrap(), None);
+        assert!(server
+            .bns_reverse("0xnot-hex".to_string())
+            .await
+            .unwrap_err()
+            .message()
+            .contains("Invalid address"));
+        let short_primary = server
+            .bns_prepare_set_primary(seller.to_hex(), Some("bids.bud".to_string()))
+            .await
+            .unwrap();
+        assert!(short_primary["tx_template"].is_object());
+        assert!(server
+            .bns_prepare_set_primary(seller.to_hex(), Some("ab.bud".to_string()))
+            .await
+            .unwrap_err()
+            .message()
+            .contains("Invalid BNS name"));
         assert!(server
             .bns_get_proof("bids".to_string())
             .await

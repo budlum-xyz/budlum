@@ -4613,6 +4613,22 @@ impl BudlumApiServer for RpcServer {
         }))
     }
 
+    async fn bns_proof(&self, name: String) -> Result<serde_json::Value, ErrorObjectOwned> {
+        self.bns_get_proof(name).await
+    }
+
+    async fn bns_prepare_set_primary(
+        &self,
+        caller: String,
+        name: Option<String>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        self.bns_prepare_set_primary_name(caller, name).await
+    }
+
+    async fn bns_reverse(&self, address: String) -> Result<Option<String>, ErrorObjectOwned> {
+        self.bns_reverse_resolve(address).await
+    }
+
     async fn bns_get_proof(&self, name: String) -> Result<serde_json::Value, ErrorObjectOwned> {
         if !crate::bns::BnsRegistry::is_valid_name(&name) {
             return Err(ErrorObjectOwned::owned(

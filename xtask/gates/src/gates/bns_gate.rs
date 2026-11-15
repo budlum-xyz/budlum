@@ -33,6 +33,7 @@ pub(crate) const TESTS: &[&str] = &[
     "tests::bns_expanded::bns_set_storage_refuses_an_unknown_root_a_stranger_and_an_expired_name",
     "tests::bns_expanded::bns_register_subdomain_refuses_a_taken_label",
     "tests::bns_expanded::bns_set_subdomain_content_belongs_to_the_subdomain_owner",
+    "tests::bns_expanded::bns_every_door_refuses_a_stranger_and_leaves_the_state_untouched",
     "wallet::identity_profile::tests::a_swapped_address_under_a_valid_bns_proof_is_not_verified",
 ];
 
