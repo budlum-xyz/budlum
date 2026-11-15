@@ -2,9 +2,9 @@ name: Budlum intent policy
 
 on:
   pull_request:
-    branches: [main, testnet-quantum, testnet]
+    branches: [main, testnet-quantum, testnet, garden]
   push:
-    branches: [main, budlum-universal]
+    branches: [main, budlum]
 
 permissions:
   contents: read
