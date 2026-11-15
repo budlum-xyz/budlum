@@ -277,13 +277,13 @@ mod chaos_tests {
         let db_path = db_path.to_str().unwrap();
 
         let mut harness = BlockHarness::open(db_path);
-        let domain = harness.operated_domain(7);
+        let domain = harness.operated_domain(107);
         harness.register_domain(domain);
-        assert!(harness.chain.state.settlement.domains.get(7).is_some());
+        assert!(harness.chain.state.settlement.domains.get(107).is_some());
         let live_root = harness.chain.state.settlement.root();
 
         let harness = harness.restart();
-        assert!(harness.chain.state.settlement.domains.get(7).is_some());
+        assert!(harness.chain.state.settlement.domains.get(107).is_some());
         assert_eq!(harness.chain.state.settlement.root(), live_root);
     }
 

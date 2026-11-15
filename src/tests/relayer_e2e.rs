@@ -130,7 +130,11 @@ fn pending_relay_persists_across_restart() {
     let dir = tempdir().unwrap();
     let db = dir.path().join("pending_restart.db");
     let mut harness = BlockHarness::open(db.to_str().unwrap());
-    harness.lock_through_blocks(asset(1), Address::from([0x42; 32]), 100);
+    harness.lock_through_blocks(
+        AssetId::for_domain(101, &[1]),
+        Address::from([0x42; 32]),
+        100,
+    );
     assert_eq!(harness.chain.pending_relay_count(), 1);
     let relayer_root = harness.chain.state.settlement.relayer.state_root();
 
