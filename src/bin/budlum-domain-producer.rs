@@ -25,6 +25,10 @@ use clap::Parser;
 use serde_json::Value;
 use std::path::PathBuf;
 
+#[cfg(test)]
+#[path = "test_support/domain_clients.rs"]
+mod domain_client_test_support;
+
 #[derive(Debug, Parser)]
 #[command(
     name = "budlum-domain-producer",
@@ -272,6 +276,18 @@ fn load_payload(cli: &Cli) -> Result<budlum_core::domain::VerifiedDomainCommitme
     .map_err(|e| format!("payload is not a VerifiedDomainCommitment: {e}"))
 }
 
+/// A client whose TLS stack is ready to use.
+///
+/// reqwest is built against `rustls-tls-webpki-roots-no-provider`, so
+/// `Client::new()` panics unless a process-wide provider is installed first.
+/// The install is idempotent and keeps an existing default, and doing it here
+/// rather than only in `main` covers every entry point - including a test that
+/// calls `run` directly, which is the path a `main`-only install leaves open.
+fn http_client() -> reqwest::Client {
+    budlum_core::crypto::tls::install_default_provider();
+    reqwest::Client::new()
+}
+
 async fn run(cli: Cli) -> Result<(), String> {
     let payload = load_payload(&cli)?;
     if let Some(path) = &cli.write_payload {
@@ -287,7 +303,7 @@ async fn run(cli: Cli) -> Result<(), String> {
         .as_ref()
         .ok_or_else(|| "--key-file is required to submit".to_string())?;
     let key = budlum_core::wallet::open_key_file(key_file, cli.password_file.as_deref())?;
-    let client = reqwest::Client::new();
+    let client = http_client();
     let requested_chain_id = cli.signing_chain_id.ok_or_else(|| {
         "--signing-chain-id is required to submit a domain commitment".to_string()
     })?;
@@ -401,5 +417,54 @@ mod tests {
         let error = bind_signing_chain_id(45_260, 45_261)
             .expect_err("another network's RPC answer must be refused");
         assert!(error.contains("refusing to sign"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn submission_checks_the_network_before_signing_or_sending() {
+        use super::domain_client_test_support::{rpc, Files};
+        use budlum_core::core::transaction::TransactionType;
+        use budlum_core::settlement::domains::SettlementTx;
+
+        let files = Files::new();
+        let cli = |url| Cli {
+            rpc_url: url,
+            payload: Some(files.payload.clone()),
+            pow_spec: None,
+            bft_spec: None,
+            poa_spec: None,
+            quorum_keys: None,
+            write_payload: None,
+            key_file: Some(files.key.clone()),
+            password_file: Some(files.password.clone()),
+            signing_chain_id: Some(45262),
+            fee: 1_000,
+        };
+        let (url, calls, server) = rpc(45260).await;
+        let error = super::run(cli(url))
+            .await
+            .expect_err("a node on another network must not sign");
+        assert!(error.contains("refusing to sign"), "{error}");
+        assert_eq!(*calls.methods.lock().unwrap(), ["bud_chainId"]);
+        assert!(calls.transactions.lock().unwrap().is_empty());
+        server.stop().unwrap();
+
+        let (url, calls, server) = rpc(45262).await;
+        super::run(cli(url))
+            .await
+            .expect("the named network submits");
+        assert_eq!(
+            *calls.methods.lock().unwrap(),
+            ["bud_chainId", "bud_getNonce", "bud_sendRawTransaction"]
+        );
+        let transactions = calls.transactions.lock().unwrap();
+        assert_eq!(transactions.len(), 1);
+        let tx = &transactions[0];
+        assert_eq!(tx.chain_id, 45262);
+        assert!(matches!(
+            tx.tx_type,
+            TransactionType::Settlement(SettlementTx::SubmitCommitment(_))
+        ));
+        assert!(tx.verify(), "the submitted transaction is signed");
+        server.stop().unwrap();
     }
 }

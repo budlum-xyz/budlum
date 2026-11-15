@@ -57,6 +57,9 @@ impl AssetId {
     /// remaining 28 bytes commit to the domain-local asset name. This keeps
     /// the stored id at 32 bytes while making collisions across domains
     /// impossible by construction.
+    ///
+    /// Convenience: public bridge asset namespace constructor for external and
+    /// CLI callers building domain-namespaced asset ids.
     #[must_use]
     pub fn for_domain(domain: DomainId, local_asset: &[u8]) -> Self {
         let local = hash_fields_bytes(&[
@@ -80,6 +83,9 @@ impl AssetId {
     /// Domain encoded by a namespaced id. Legacy ids are still readable in
     /// existing state; this accessor does not claim they were registered by
     /// the public door.
+    ///
+    /// Convenience: public bridge asset namespace accessor for operators and
+    /// callers inspecting domain-namespaced asset ids.
     #[must_use]
     pub fn namespace_domain(&self) -> DomainId {
         let mut bytes = [0u8; 4];

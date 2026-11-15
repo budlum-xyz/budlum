@@ -3815,7 +3815,13 @@ impl StorageRegistry {
                     manifest_id: input.manifest.manifest_id,
                     shard_id: input.deal.shard_id,
                 })?;
-        let shard_size = u64::from(shard.size);
+        let shard_size = input.deal.shard_bytes;
+        if shard_size == 0 || shard_size != u64::from(shard.size) {
+            return Err(StorageError::InvalidEpochRange {
+                start: 0,
+                end: shard_size,
+            });
+        }
         let range_len = input.requested_len.min(shard_size);
         let range_count = shard_size
             .checked_sub(range_len)
