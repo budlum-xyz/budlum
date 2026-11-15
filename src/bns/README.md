@@ -69,14 +69,20 @@
     header amount/recipient and unlocked spendable fee balance, and exposes
     `bud_bnsListSubdomains`, `bud_bnsPrepareRemoveSubdomain`, and
     `bud bns {set-subdomain,remove-subdomain,list-subdomains}`.
-  - **B7 (native B.U.D. 3.0 `ContentRef` binding in consensus):** adds
-    `NameRecord::bud3_content` (`Option<ContentRef>`) committed into
-    `BnsRegistry::root()`, validates object existence, `ContentId` parity, and
-    sealed NFT requirements against `AccountState::bud3_registry` via
-    `BnsSetBud3Content` (wire tag `78`), clears `bud3_content` on `transfer`,
-    resolves on-chain bindings directly in `Bud3BnsResolver::resolve_via_bud3_view`,
-    and exposes `bud_bnsGetBud3Content`, `bud_bnsPrepareSetBud3Content`, and
-    `bud bns {set-bud3,get-bud3}`.
+  - **B7 (native B.U.D. 3.0 `ContentRef` binding in consensus):** the name
+    record carries one content field, `NameRecord::content`
+    (`Option<ContentRef>`). `BnsSetContent` (wire tag `6`) carries
+    `(name, Option<ContentRef>)`, validates object existence, `ContentId`
+    parity and the NFT bond of sealed content against
+    `AccountState::bud3_registry`, and `transfer` clears the field.
+    `Bud3BnsResolver` holds no table of its own: it reads the record out of
+    chain state, and the `Bud3NameBinding` digest
+    (`BDLM_BUD3_BNS_BINDING_V2`, over name, owner and reference) is what the
+    name leaf commits to. `bud_bnsResolveContent` answers
+    `{name, content, bytes, view_error}` through
+    `Bud3BnsResolver::resolve_via_bud3_view`; `bud_bnsPrepareSetContent`
+    builds the template; the CLI is `bud bns {set-content,get-content}`. Wire
+    tag `78` (`BnsSetBud3Content`) is retired and its decoder refuses it.
   - **B8 (grace-period owner rescue, lifecycle status, and owner enumeration):**
     exports `GRACE_PERIOD = 3_000` in `src/registry/params.rs` and `NameStatus`
     (`Active`, `Grace`, `Expired`), allows the current owner to rescue a name in
@@ -110,7 +116,7 @@
     completes `bud bns` with `resolve [--verify-proof]`, `info`, `offers`,
     `get-offer`, and `publish-site` (packaging single files or static site
     directories into B.U.D. 3.0 via `StorageTxV3::RegisterObject` +
-    `BnsSetBud3Content` + `BnsSetRecords`), and upgrades `bud tx send --to` to
+    `BnsSetContent` + `BnsSetRecords`), and upgrades `bud tx send --to` to
     verify `.bud` recipient Merkle proofs client-side.
 
   - **B12b (governance price door):** `ProposalType::BnsSetBaseCost` and
@@ -142,9 +148,11 @@
     and the gates keep their positive and negative canaries.
 
   - **Content existence at the consensus door:** `BnsSetContent` is refused
-    with `bns_content_unknown` unless the id is a public B.U.D. 3.0 object
-    whose shares are all confirmed. Sealed content binds only through
-    `BnsSetBud3Content`, which checks the NFT grant.
+    with `bns_content_unknown` unless the reference names an object the
+    B.U.D. 3.0 registry holds under the same content id. Sealed content
+    needs an NFT, and an NFT the reference names has to be bound to that
+    object. Share confirmation is not required: `bud bns publish-site`
+    registers and names a site in one block.
   - **Storage root existence at the consensus door:** `BnsSetStorage` is
     refused with `bns_storage_unknown` unless the root equals the finalized
     root the chain holds for the named domain (`AccountState::external_roots`,
@@ -157,8 +165,9 @@
     address, content }`. `register_subdomain` refuses a label that exists
     with `NameTaken`; the parent owner removes it first. `BnsSetSubdomainContent`
     (wire tag `79`) is signed by the subdomain owner, not the parent owner,
-    sets or clears the content, is refused with `bns_content_unknown` for
-    content that is not a complete public B.U.D. 3.0 object, and is refused
+    sets or clears the content (an `Option<ContentRef>`, checked like
+    `BnsSetContent`), is refused with `bns_content_unknown` for content the
+    registry does not hold, and is refused
     once the parent name expired. `bud_bnsResolveSubdomainContent` and
     `bud_bnsPrepareSetSubdomainContent` expose it. RPC answers and proofs
     carry each subdomain as `{owner, address, content}`, and the extras
@@ -167,16 +176,14 @@
   - **Gateway answers:** an expired record whose proof folds to the verified
     root is a 404, a proof that does not fold is a 502, two nodes that answer
     with different heights disagree, and a site policy of `'none'` narrows the
-    baseline.
+    baseline. A subdomain is served from the public content its own
+    `SubdomainRecord` names and never from the parent: with none it is a 404.
+    The CLI command is `bud bns set-subdomain-content`.
 
 - **Open items (not implemented):**
-  - The gateway serves the manifest of the parent name for a subdomain. It
-    does not serve the content a `SubdomainRecord` names. The CLI command is
-    `bud bns set-subdomain-content`.
-  - `NameRecord` carries two content fields (`content_id` and
-    `bud3_content`). They are not merged into one `ContentRef`. The unused
-    `resolver` field is gone, and the extras commitment that lost it is
-    `BDLM_BNS_EXTRAS_V3`.
+  - `bud_bnsResolveContent` returns `bytes: null` with a `view_error` on a
+    node that holds no symbols of the object: the RPC node has no symbol
+    transport of its own. The reference in `content` is always answered.
   - The name tree is a binary Merkle tree over the sorted names with
     adjacent-leaf absence proofs. It is not a sparse Merkle tree and is
     recomputed from the rows, not updated incrementally.

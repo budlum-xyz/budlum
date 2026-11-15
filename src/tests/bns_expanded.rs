@@ -216,18 +216,16 @@ fn test_bns_transfer_clears_previous_owner_pointers() {
         .unwrap();
     reg.register_subdomain("pointers.bud", "app".to_string(), alice, &alice, 0)
         .unwrap();
-    reg.set_content(
-        "pointers.bud",
-        &alice,
-        crate::storage::content_id::ContentId([9u8; 32]),
-        0,
-    )
-    .unwrap();
+    let mut bud3 = crate::storage::bud3::registry::Bud3Registry::default();
+    let site = crate::bns::bud3::fixtures::public_object(&mut bud3, alice.0, b"pointers");
+    reg.set_content("pointers.bud", &alice, &bud3, Some(site), 0)
+        .unwrap();
+    assert_eq!(reg.resolve_content("pointers.bud", 5), Some(site));
 
     reg.transfer("pointers.bud", &alice, bob, 10).unwrap();
     let resolved = reg.resolve_full("pointers.bud", 100).unwrap();
     assert_eq!(resolved.address, Some(bob));
-    assert_eq!(resolved.content_id, None);
+    assert_eq!(resolved.content, None);
     assert_eq!(reg.resolve_subdomain("pointers.bud", "app", 100), None);
 }
 
@@ -245,10 +243,11 @@ fn test_bns_expired_name_refuses_writes() {
         reg.set_content(
             "stale.bud",
             &alice,
-            crate::storage::content_id::ContentId([1u8; 32]),
+            &crate::storage::bud3::registry::Bud3Registry::default(),
+            None,
             100
         ),
-        Err(BnsError::Expired)
+        Err(crate::bns::BnsBud3Error::Bns(BnsError::Expired))
     ));
 }
 
@@ -485,12 +484,15 @@ fn bns_marketplace_primary_resale_cancel_expiry_and_governance() {
 
     // 4. Alice sets content + subdomain, then lists `market.bud` as Resale (#1);
     //    Bob buys it -> ownership moves to Bob, Alice is paid, pointers are cleared!
+    let market_site =
+        crate::bns::bud3::fixtures::public_object(&mut state.bud3_registry, alice.0, b"market");
     state
         .bns_registry
         .set_content(
             "market.bud",
             &alice,
-            crate::storage::content_id::ContentId([0xAB; 32]),
+            &state.bud3_registry,
+            Some(market_site),
             5,
         )
         .unwrap();
@@ -1215,14 +1217,14 @@ fn bns_consensus_bud3_content_ref_validates_against_bud3_registry_and_serves_vie
         net.store_holder_share(holder, obj_key, seg_idx as u64, syms.clone());
     }
 
-    // Before registering the object in `bud3_registry`, `BnsSetBud3Content` fails closed!
+    // Before the object is registered, `BnsSetContent` fails closed.
     let cref = ContentRef::new(cid, obj_key, None).unwrap();
     let mut premature_tx = lifecycle_tx(
         alice,
         0,
         1,
         0,
-        TransactionType::BnsSetBud3Content,
+        TransactionType::BnsSetContent,
         bincode::serialize(&("site.bud".to_string(), Some(cref))).unwrap(),
     );
     premature_tx.sign(&alice_kp);
@@ -1230,10 +1232,10 @@ fn bns_consensus_bud3_content_ref_validates_against_bud3_registry_and_serves_vie
         Executor::apply_transaction_checked(&mut state, &premature_tx)
             .unwrap_err()
             .code(),
-        "bns_set_bud3_content_failed"
+        "bns_content_unknown"
     );
 
-    // Register object in `state.bud3_registry`, then execute `BnsSetBud3Content`.
+    // Register the object, then the same transaction applies.
     state
         .bud3_registry
         .register_object(
@@ -1253,34 +1255,45 @@ fn bns_consensus_bud3_content_ref_validates_against_bud3_registry_and_serves_vie
         )
         .unwrap();
 
+    state.bud3_registry.ack(&obj_key, &holder).unwrap();
     let root_before = state.bns_registry.root();
     Executor::apply_transaction_checked(&mut state, &premature_tx).unwrap();
     assert_ne!(state.bns_registry.root(), root_before);
     assert_eq!(
-        state.bns_registry.resolve_bud3_content("site.bud", 2),
+        state.bns_registry.resolve_content("site.bud", 2),
         Some(cref)
     );
 
-    // `Bud3BnsResolver` reconstructs the exact payload directly from on-chain `NameRecord::bud3_content`!
-    let resolver = Bud3BnsResolver::new();
-    let reconstructed = resolver
-        .resolve_via_bud3_view(
-            &state.bns_registry,
-            &state.bud3_registry,
-            &net,
-            "site.bud",
-            2,
-            &BnsViewAccess::default(),
-        )
-        .unwrap();
+    // The resolver holds no table of its own: it rebuilds the payload from
+    // the record in chain state.
+    let reconstructed = Bud3BnsResolver::resolve_via_bud3_view(
+        &state.bns_registry,
+        &state.bud3_registry,
+        &net,
+        "site.bud",
+        2,
+        &BnsViewAccess::default(),
+    )
+    .unwrap();
     assert_eq!(reconstructed, html);
 
-    // Ownership transfer clears `bud3_content`.
+    // A node that holds no symbols does not answer with unverified bytes.
+    assert!(Bud3BnsResolver::resolve_via_bud3_view(
+        &state.bns_registry,
+        &state.bud3_registry,
+        &crate::storage::bud3::view::NoSymbolsHeld,
+        "site.bud",
+        2,
+        &BnsViewAccess::default(),
+    )
+    .is_err());
+
+    // Ownership transfer clears the content.
     state
         .bns_registry
         .transfer("site.bud", &alice, bob, 3)
         .unwrap();
-    assert_eq!(state.bns_registry.resolve_bud3_content("site.bud", 3), None);
+    assert_eq!(state.bns_registry.resolve_content("site.bud", 3), None);
 }
 
 #[test]
@@ -1380,8 +1393,6 @@ fn bns_grace_period_owner_rescue_resale_invalidation_and_owner_listing() {
 
 #[test]
 fn bns_per_name_merkle_proofs_verify_inclusion_absence_tampering_and_expiry() {
-    use crate::storage::ContentId;
-
     let mut reg = BnsRegistry::new();
     let alice = addr(1);
     let bob = addr(2);
@@ -1390,7 +1401,9 @@ fn bns_per_name_merkle_proofs_verify_inclusion_absence_tampering_and_expiry() {
     reg.register("alpha.bud".to_string(), alice, 1, 50).unwrap();
     reg.register("gamma.bud".to_string(), bob, 1, 50).unwrap();
     reg.register("omega.bud".to_string(), carol, 1, 10).unwrap();
-    reg.set_content("gamma.bud", &bob, ContentId([0xAB; 32]), 2)
+    let mut bud3 = crate::storage::bud3::registry::Bud3Registry::default();
+    let gamma_site = crate::bns::bud3::fixtures::public_object(&mut bud3, bob.0, b"gamma");
+    reg.set_content("gamma.bud", &bob, &bud3, Some(gamma_site), 2)
         .unwrap();
 
     let expected_root = reg.root();
@@ -1402,7 +1415,7 @@ fn bns_per_name_merkle_proofs_verify_inclusion_absence_tampering_and_expiry() {
         .unwrap()
         .unwrap();
     assert_eq!(verified.owner, bob);
-    assert_eq!(verified.content_id, Some(ContentId([0xAB; 32])));
+    assert_eq!(verified.content, Some(gamma_site));
     assert_eq!(verified.siblings.len(), 2);
 
     // 2. Tampering with owner or root fails closed!
@@ -1911,25 +1924,29 @@ fn bns_set_content_refuses_unknown_content_and_binds_a_registered_object() {
 
     let body = b"<html><body>a small site</body></html>".repeat(6);
     let up = prepare_public_upload(&body, &PROFILE, &Bud3Limits::default(), 8).unwrap();
-    let object = up.record.commitment;
-    let known = crate::storage::content_id::ContentId(up.record.content_id.digest);
+    let known = crate::storage::bud3::content_ref::ContentRef::new(
+        up.record.content_id,
+        up.record.commitment,
+        None,
+    )
+    .unwrap();
     let holder = [7u8; 32];
 
-    let set_content = |cid: crate::storage::content_id::ContentId| {
+    let set_content = |nonce: u64, content: crate::storage::bud3::content_ref::ContentRef| {
         let mut tx = lifecycle_tx(
             alice,
             0,
             1,
-            0,
+            nonce,
             TransactionType::BnsSetContent,
-            bincode::serialize(&(name.clone(), cid)).unwrap(),
+            bincode::serialize(&(name.clone(), Some(content))).unwrap(),
         );
         tx.sign(&key);
         tx
     };
 
-    // Nothing is registered yet, so the id names nothing.
-    let err = Executor::apply_transaction_checked(&mut state, &set_content(known)).unwrap_err();
+    // Nothing is registered yet, so the reference names nothing.
+    let err = Executor::apply_transaction_checked(&mut state, &set_content(0, known)).unwrap_err();
     assert_eq!(err.code(), "bns_content_unknown");
     assert_eq!(state.bns_registry.resolve_content(&name, 2), None);
     assert_eq!(state.get_nonce(&alice), 0);
@@ -1953,30 +1970,50 @@ fn bns_set_content_refuses_unknown_content_and_binds_a_registered_object() {
             50,
         )
         .unwrap();
-    // Registered but not yet held: still not content a name can point at.
-    let err = Executor::apply_transaction_checked(&mut state, &set_content(known)).unwrap_err();
-    assert_eq!(err.code(), "bns_content_unknown");
-
-    state.bud3_registry.ack(&object, &holder).unwrap();
-    Executor::apply_transaction_checked(&mut state, &set_content(known)).unwrap();
+    // The object is registered, so the name may point at it. Whether its
+    // shares are confirmed yet is the storage layer's business: a site is
+    // published and named in one block.
+    Executor::apply_transaction_checked(&mut state, &set_content(0, known)).unwrap();
     assert_eq!(state.bns_registry.resolve_content(&name, 2), Some(known));
     assert_eq!(state.get_nonce(&alice), 1);
     assert_eq!(state.get_balance(&alice), 9_999);
 
-    // A different id is still refused once some content exists.
-    let other = crate::storage::content_id::ContentId([0x5A; 32]);
-    let mut tx = lifecycle_tx(
+    // A reference to an object the chain does not hold is still refused.
+    let unknown_object = crate::storage::bud3::content_ref::ContentRef {
+        object_commitment: [0x5A; 32],
+        ..known
+    };
+    let err = Executor::apply_transaction_checked(&mut state, &set_content(1, unknown_object))
+        .unwrap_err();
+    assert_eq!(err.code(), "bns_content_unknown");
+
+    // So is a held object under a content id it does not carry.
+    let wrong_id = crate::storage::bud3::content_ref::ContentRef {
+        content_id: crate::storage::bud3::content_id::ContentId::public(b"not these bytes"),
+        ..known
+    };
+    let err =
+        Executor::apply_transaction_checked(&mut state, &set_content(1, wrong_id)).unwrap_err();
+    assert_eq!(err.code(), "bns_content_unknown");
+    assert_eq!(state.bns_registry.resolve_content(&name, 2), Some(known));
+    assert_eq!(state.get_nonce(&alice), 1);
+
+    // Clearing names nothing, so it needs no lookup.
+    let mut clear = lifecycle_tx(
         alice,
         0,
         1,
         1,
         TransactionType::BnsSetContent,
-        bincode::serialize(&(name.clone(), other)).unwrap(),
+        bincode::serialize(&(
+            name.clone(),
+            None::<crate::storage::bud3::content_ref::ContentRef>,
+        ))
+        .unwrap(),
     );
-    tx.sign(&key);
-    let err = Executor::apply_transaction_checked(&mut state, &tx).unwrap_err();
-    assert_eq!(err.code(), "bns_content_unknown");
-    assert_eq!(state.bns_registry.resolve_content(&name, 2), Some(known));
+    clear.sign(&key);
+    Executor::apply_transaction_checked(&mut state, &clear).unwrap();
+    assert_eq!(state.bns_registry.resolve_content(&name, 2), None);
 }
 
 // A name points at a storage root only when the chain holds that root as the
@@ -2128,14 +2165,18 @@ fn bns_set_subdomain_content_belongs_to_the_subdomain_owner() {
 
     let body = b"<html><body>the blog</body></html>".repeat(6);
     let up = prepare_public_upload(&body, &PROFILE, &Bud3Limits::default(), 8).unwrap();
-    let object = up.record.commitment;
-    let known = crate::storage::content_id::ContentId(up.record.content_id.digest);
+    let known = crate::storage::bud3::content_ref::ContentRef::new(
+        up.record.content_id,
+        up.record.commitment,
+        None,
+    )
+    .unwrap();
     let holder = [7u8; 32];
 
     let set = |from: Address,
                signer: &KeyPair,
                nonce: u64,
-               content: Option<crate::storage::content_id::ContentId>| {
+               content: Option<crate::storage::bud3::content_ref::ContentRef>| {
         let mut tx = lifecycle_tx(
             from,
             0,
@@ -2148,7 +2189,7 @@ fn bns_set_subdomain_content_belongs_to_the_subdomain_owner() {
         tx
     };
 
-    // Nothing is registered under this id yet.
+    // Nothing is registered under this reference yet.
     let err =
         Executor::apply_transaction_checked(&mut state, &set(sub_owner, &sub_key, 0, Some(known)))
             .unwrap_err();
@@ -2174,7 +2215,10 @@ fn bns_set_subdomain_content_belongs_to_the_subdomain_owner() {
             50,
         )
         .unwrap();
-    state.bud3_registry.ack(&object, &holder).unwrap();
+    state
+        .bud3_registry
+        .ack(&known.object_commitment, &holder)
+        .unwrap();
 
     // The parent owner created the subdomain and still cannot write into it.
     let err = Executor::apply_transaction_checked(
@@ -2298,6 +2342,10 @@ fn bns_every_door_refuses_a_stranger_and_leaves_the_state_untouched() {
         .register_subdomain(&name, "app".to_string(), sub_owner, &owner, 1)
         .unwrap();
     assert!(state.anchor_external_root(storage_domain, storage_root));
+    // Content the chain holds, so a refusal below is about the signer and
+    // not about the reference.
+    let site =
+        crate::bns::bud3::fixtures::public_object(&mut state.bud3_registry, stranger.0, b"site");
 
     // The owner lists the name, so there is an offer to cancel and to buy.
     let mut listing = lifecycle_tx(
@@ -2398,15 +2446,11 @@ fn bns_every_door_refuses_a_stranger_and_leaves_the_state_untouched() {
             "set content",
             TransactionType::BnsSetContent,
             0,
-            bincode::serialize(&(
-                name.clone(),
-                crate::storage::content_id::ContentId([0x11; 32]),
-            ))
-            .unwrap(),
+            bincode::serialize(&(name.clone(), Some(site))).unwrap(),
         ),
         (
-            "clear the B.U.D. 3.0 content",
-            TransactionType::BnsSetBud3Content,
+            "clear the content",
+            TransactionType::BnsSetContent,
             0,
             bincode::serialize(&(
                 name.clone(),
@@ -2427,15 +2471,10 @@ fn bns_every_door_refuses_a_stranger_and_leaves_the_state_untouched() {
             bincode::serialize(&(name.clone(), "app".to_string())).unwrap(),
         ),
         (
-            "clear the content of a subdomain",
+            "set the content of a subdomain",
             TransactionType::BnsSetSubdomainContent,
             0,
-            bincode::serialize(&(
-                name.clone(),
-                "app".to_string(),
-                None::<crate::storage::content_id::ContentId>,
-            ))
-            .unwrap(),
+            bincode::serialize(&(name.clone(), "app".to_string(), Some(site))).unwrap(),
         ),
         (
             "set storage to a finalized root",

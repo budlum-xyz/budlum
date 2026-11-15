@@ -113,7 +113,10 @@ pub struct WalletBnsProof {
     pub name: String,
     pub owner: [u8; 32],
     pub expires_at: u64,
-    pub content_id: Option<[u8; 32]>,
+    /// The 32 bytes the leaf commits to for the content of the name: the
+    /// binding digest over the name, the owner and the content reference.
+    /// The node sends it as `content_binding`.
+    pub content_binding: Option<[u8; 32]>,
     pub storage_root: Option<[u8; 32]>,
     pub extras_digest: [u8; 32],
     /// Optional raw body committed after `b"BDLM_BNS_EXTRAS_V3"`. When supplied,
@@ -136,7 +139,7 @@ pub fn compute_bns_leaf_digest(
     name: &str,
     owner: &[u8; 32],
     expires_at: u64,
-    content_id: Option<&[u8; 32]>,
+    content_binding: Option<&[u8; 32]>,
     storage_root: Option<&[u8; 32]>,
     extras_digest: &[u8; 32],
 ) -> [u8; 32] {
@@ -146,7 +149,7 @@ pub fn compute_bns_leaf_digest(
     hasher.update(name.as_bytes());
     hasher.update(owner);
     hasher.update(expires_at.to_le_bytes());
-    match content_id {
+    match content_binding {
         Some(cid) => {
             hasher.update([1u8]);
             hasher.update(cid);
@@ -280,7 +283,7 @@ pub(crate) fn verify_recipient_against_root(
         &proof.name,
         &proof.owner,
         proof.expires_at,
-        proof.content_id.as_ref(),
+        proof.content_binding.as_ref(),
         proof.storage_root.as_ref(),
         &proof.extras_digest,
     );
@@ -460,7 +463,7 @@ mod tests {
             name: "ayaz.bud".to_string(),
             owner,
             expires_at: 50,
-            content_id: None,
+            content_binding: None,
             storage_root: None,
             extras_digest,
             extras_preimage: Some(preimage),
@@ -572,7 +575,7 @@ mod tests {
             name: "ayaz.bud".to_string(),
             owner: genuine.owner,
             expires_at: 50,
-            content_id: None,
+            content_binding: None,
             storage_root: None,
             extras_digest: forged_extras,
             extras_preimage: Some(forged_preimage),
@@ -604,7 +607,7 @@ mod tests {
             &forged.name,
             &forged.owner,
             forged.expires_at,
-            forged.content_id.as_ref(),
+            forged.content_binding.as_ref(),
             forged.storage_root.as_ref(),
             &forged.extras_digest,
         );
@@ -653,7 +656,6 @@ mod tests {
         buf.push(0u8); // consensus_domain_id = None
         buf.push(0u8); // storage_domain_id = None
         buf.push(0u8); // storage_root_height = None
-        buf.push(0u8); // bud3_content = None
         buf.extend_from_slice(&0u64.to_le_bytes()); // subdomains = 0
         buf.extend_from_slice(&0u64.to_le_bytes()); // records = 0
 
@@ -713,7 +715,7 @@ mod tests {
             name: "ayaz.bud".to_string(),
             owner,
             expires_at: 50,
-            content_id: None,
+            content_binding: None,
             storage_root: None,
             extras_digest,
             extras_preimage: Some(preimage),

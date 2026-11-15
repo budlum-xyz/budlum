@@ -558,6 +558,75 @@ enum AppBindingAction {
     },
 }
 
+/// A B.U.D. 3.0 content reference on the command line.
+#[derive(clap::Args, Debug, Clone)]
+struct ContentArgs {
+    /// Object commitment, 32 bytes of hex.
+    #[arg(long)]
+    object: Option<String>,
+    /// Content digest, 32 bytes of hex.
+    #[arg(long)]
+    digest: Option<String>,
+    /// Content length in bytes.
+    #[arg(long)]
+    len: Option<u64>,
+    /// The content is sealed. Sealed content needs `--nft`.
+    #[arg(long, default_value_t = false)]
+    sealed: bool,
+    /// NFT id, 32 bytes of hex.
+    #[arg(long)]
+    nft: Option<String>,
+    /// Clear the content instead of binding one.
+    #[arg(long, default_value_t = false)]
+    clear: bool,
+}
+
+impl ContentArgs {
+    /// The reference the flags name, or `None` for `--clear`.
+    fn to_content_ref(
+        &self,
+    ) -> Result<Option<budlum_core::storage::bud3::content_ref::ContentRef>, String> {
+        use budlum_core::storage::bud3::content_id::{ContentId, ContentIdKind};
+        if self.clear {
+            if self.object.is_some() || self.digest.is_some() || self.len.is_some() {
+                return Err("pass either --object/--digest/--len or --clear, not both".into());
+            }
+            return Ok(None);
+        }
+        let (Some(object), Some(digest), Some(len)) = (&self.object, &self.digest, self.len) else {
+            return Err(
+                "--object <hex>, --digest <hex>, and --len <u64> are required unless --clear is set"
+                    .into(),
+            );
+        };
+        let parse_32 = |raw: &str, label: &str| -> Result<[u8; 32], String> {
+            let bytes = hex::decode(raw.strip_prefix("0x").unwrap_or(raw))
+                .map_err(|e| format!("invalid {label} hex: {e}"))?;
+            <[u8; 32]>::try_from(bytes.as_slice()).map_err(|_| format!("{label} must be 32 bytes"))
+        };
+        let nft_id = match &self.nft {
+            Some(raw) => Some(parse_32(raw, "nft")?),
+            None => None,
+        };
+        let content_id = ContentId {
+            kind: if self.sealed {
+                ContentIdKind::Sealed
+            } else {
+                ContentIdKind::Public
+            },
+            digest: parse_32(digest, "digest")?,
+            len,
+        };
+        budlum_core::storage::bud3::content_ref::ContentRef::new(
+            content_id,
+            parse_32(object, "object")?,
+            nft_id,
+        )
+        .map(Some)
+        .map_err(|e| format!("invalid content reference: {e:?}"))
+    }
+}
+
 #[derive(Subcommand)]
 enum BnsAction {
     /// Batch-publish `Primary` `.bud` marketplace offers from a text file.
@@ -705,36 +774,25 @@ enum BnsAction {
         parent: String,
         #[arg(long, required = true)]
         sub: String,
-        /// Content id, 32 bytes of hex. Leave it out to clear the content.
-        #[arg(long)]
-        content: Option<String>,
+        #[command(flatten)]
+        content: ContentArgs,
     },
     /// List all subdomains under a live `.bud` parent name.
     ListSubdomains {
         #[arg(long, required = true)]
         parent: String,
     },
-    /// Bind or clear (`--clear`) a B.U.D. 3.0 `ContentRef` on a live `.bud` name.
-    SetBud3 {
+    /// Bind or clear (`--clear`) the content a live `.bud` name serves.
+    SetContent {
         #[command(flatten)]
         signer: V5Signer,
         #[arg(long, required = true)]
         name: String,
-        #[arg(long)]
-        object: Option<String>,
-        #[arg(long)]
-        digest: Option<String>,
-        #[arg(long)]
-        len: Option<u64>,
-        #[arg(long, default_value_t = false)]
-        sealed: bool,
-        #[arg(long)]
-        nft: Option<String>,
-        #[arg(long, default_value_t = false)]
-        clear: bool,
+        #[command(flatten)]
+        content: ContentArgs,
     },
-    /// Inspect the live B.U.D. 3.0 `ContentRef` bound to a `.bud` name.
-    GetBud3 {
+    /// Read what a live `.bud` name serves, through the B.U.D. 3.0 view.
+    GetContent {
         #[arg(long, required = true)]
         name: String,
     },
@@ -2816,18 +2874,9 @@ fn run_bns_set_subdomain_content(
     signer: &V5Signer,
     parent: &str,
     sub: &str,
-    content: Option<&str>,
+    content: &ContentArgs,
 ) -> Result<(), String> {
-    let content = match content {
-        None => None,
-        Some(text) => {
-            let bytes = hex::decode(text.strip_prefix("0x").unwrap_or(text))
-                .map_err(|e| format!("--content is not hex: {e}"))?;
-            let id = <[u8; 32]>::try_from(bytes.as_slice())
-                .map_err(|_| "--content must be 32 bytes of hex".to_string())?;
-            Some(budlum_core::storage::content_id::ContentId(id))
-        }
-    };
+    let content = content.to_content_ref()?;
     let key = open_wallet(signer)?;
     // The node refuses a malformed request here, before anything is signed.
     let _prepared = rpc_call(
@@ -2837,7 +2886,9 @@ fn run_bns_set_subdomain_content(
             parent,
             sub,
             key.address().to_hex(),
-            content.map(|c| hex::encode(c.0))
+            content
+                .as_ref()
+                .map(budlum_core::bns::types::content_ref_to_json)
         ]),
     )?;
     let data = bincode::serialize(&(parent.to_string(), sub.to_string(), content))
@@ -2889,88 +2940,39 @@ fn run_bns_list_subdomains(rpc_url: &str, parent: &str) -> Result<(), String> {
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
-fn run_bns_set_bud3(
+fn run_bns_set_content(
     rpc_url: &str,
     signer: &V5Signer,
     name: &str,
-    object: Option<&str>,
-    digest: Option<&str>,
-    len: Option<u64>,
-    sealed: bool,
-    nft: Option<&str>,
-    clear: bool,
+    content: &ContentArgs,
 ) -> Result<(), String> {
-    if clear && object.is_some() {
-        return Err("pass either --object/--digest/--len or --clear, not both".into());
-    }
-    if !clear && (object.is_none() || digest.is_none() || len.is_none()) {
-        return Err(
-            "--object <hex>, --digest <hex>, and --len <u64> are required unless --clear is set"
-                .into(),
-        );
-    }
+    let content = content.to_content_ref()?;
     let key = open_wallet(signer)?;
-    let parse_32 = |raw: &str, label: &str| -> Result<[u8; 32], String> {
-        let clean = raw.strip_prefix("0x").unwrap_or(raw);
-        let bytes = hex::decode(clean).map_err(|e| format!("invalid {label} hex: {e}"))?;
-        if bytes.len() != 32 {
-            return Err(format!("{label} must be 32 bytes"));
-        }
-        let mut arr = [0u8; 32];
-        arr.copy_from_slice(&bytes);
-        Ok(arr)
-    };
-    let cref = if clear {
-        None
-    } else {
-        let obj_key = parse_32(object.unwrap_or_default(), "object")?;
-        let dig = parse_32(digest.unwrap_or_default(), "digest")?;
-        let nft_id = match nft {
-            Some(raw) => Some(parse_32(raw, "nft")?),
-            None => None,
-        };
-        let kind = if sealed {
-            budlum_core::storage::bud3::content_id::ContentIdKind::Sealed
-        } else {
-            budlum_core::storage::bud3::content_id::ContentIdKind::Public
-        };
-        let cid = budlum_core::storage::bud3::content_id::ContentId {
-            kind,
-            digest: dig,
-            len: len.unwrap_or_default(),
-        };
-        Some(
-            budlum_core::storage::bud3::content_ref::ContentRef::new(cid, obj_key, nft_id)
-                .map_err(|e| format!("invalid ContentRef: {e:?}"))?,
-        )
-    };
+    // The node refuses a malformed request here, before anything is signed.
     let _prepared = rpc_call(
         rpc_url,
-        "bud_bnsPrepareSetBud3Content",
+        "bud_bnsPrepareSetContent",
         serde_json::json!([
             name,
             key.address().to_hex(),
-            object,
-            digest,
-            len,
-            sealed,
-            nft
+            content
+                .as_ref()
+                .map(budlum_core::bns::types::content_ref_to_json)
         ]),
     )?;
-    let data = bincode::serialize(&(name.to_string(), cref)).map_err(|e| e.to_string())?;
+    let data = bincode::serialize(&(name.to_string(), content)).map_err(|e| e.to_string())?;
     send_bns(
         rpc_url,
         signer,
         &key,
-        TransactionType::BnsSetBud3Content,
+        TransactionType::BnsSetContent,
         0,
         data,
     )
 }
 
-fn run_bns_get_bud3(rpc_url: &str, name: &str) -> Result<(), String> {
-    let ans = rpc_call(rpc_url, "bud_bnsGetBud3Content", serde_json::json!([name]))?;
+fn run_bns_get_content(rpc_url: &str, name: &str) -> Result<(), String> {
+    let ans = rpc_call(rpc_url, "bud_bnsResolveContent", serde_json::json!([name]))?;
     println!(
         "{}",
         serde_json::to_string_pretty(&ans).map_err(|e| e.to_string())?
@@ -3034,11 +3036,11 @@ fn parse_merkle_branch_json(
         .get("expires_at")
         .and_then(serde_json::Value::as_u64)
         .ok_or("missing branch.expires_at")?;
-    let content_id = match val.get("content_id") {
-        Some(v) if !v.is_null() => Some(budlum_core::storage::ContentId(decode_hex32_field(
-            v,
-            "branch.content_id",
-        )?)),
+    let content = match val.get("content") {
+        Some(v) if !v.is_null() => Some(
+            budlum_core::bns::types::content_ref_from_json(v)
+                .map_err(|e| format!("branch.content: {e}"))?,
+        ),
         _ => None,
     };
     let storage_root = match val.get("storage_root") {
@@ -3086,7 +3088,7 @@ fn parse_merkle_branch_json(
         owner,
         address,
         expires_at,
-        content_id,
+        content,
         storage_root,
         extras_digest,
         leaf,
@@ -3137,54 +3139,9 @@ fn parse_branch_extras_json(
         storage_root_height: val
             .get("storage_root_height")
             .and_then(serde_json::Value::as_u64),
-        // The B.U.D. 3.0 reference carries a kind byte, a digest, a length, an
-        // object commitment and an optional NFT id; a partial reference would
-        // fold to a different digest, so it is either read whole or not at all.
-        bud3_content: match val.get("bud3_content") {
-            Some(v) if !v.is_null() => Some(parse_bud3_ref_json(v)?),
-            _ => None,
-        },
         subdomains,
         records,
     })
-}
-
-fn parse_bud3_ref_json(
-    val: &serde_json::Value,
-) -> Result<budlum_core::storage::bud3::content_ref::ContentRef, String> {
-    use budlum_core::storage::bud3::content_id::{ContentId, ContentIdKind};
-    let kind = match val
-        .get("kind")
-        .and_then(serde_json::Value::as_str)
-        .ok_or("missing extras.bud3_content.kind")?
-    {
-        "public" => ContentIdKind::Public,
-        "sealed" => ContentIdKind::Sealed,
-        other => return Err(format!("unknown extras.bud3_content.kind `{other}`")),
-    };
-    let content_id = ContentId {
-        kind,
-        digest: decode_hex32_field(
-            val.get("digest")
-                .ok_or("missing extras.bud3_content.digest")?,
-            "extras.bud3_content.digest",
-        )?,
-        len: val
-            .get("len")
-            .and_then(serde_json::Value::as_u64)
-            .ok_or("missing extras.bud3_content.len")?,
-    };
-    let object_commitment = decode_hex32_field(
-        val.get("object_commitment")
-            .ok_or("missing extras.bud3_content.object_commitment")?,
-        "extras.bud3_content.object_commitment",
-    )?;
-    let nft_id = match val.get("nft_id") {
-        Some(v) if !v.is_null() => Some(decode_hex32_field(v, "extras.bud3_content.nft_id")?),
-        _ => None,
-    };
-    budlum_core::storage::bud3::content_ref::ContentRef::new(content_id, object_commitment, nft_id)
-        .map_err(|e| format!("invalid extras.bud3_content: {e:?}"))
 }
 
 fn is_valid_resolvable_bud_fqdn(name: &str) -> bool {
@@ -3530,14 +3487,14 @@ fn prepare_publish_site_payloads(
         shares,
         lifetime_epochs,
     };
-    let set_bud3_data =
+    let set_content_data =
         bincode::serialize(&(name.to_string(), Some(cref))).map_err(|e| e.to_string())?;
     let mut rec_updates: std::collections::BTreeMap<String, Option<String>> =
         std::collections::BTreeMap::new();
     rec_updates.insert("content.mime".to_string(), Some(mime.to_string()));
     let set_records_data =
         bincode::serialize(&(name.to_string(), rec_updates)).map_err(|e| e.to_string())?;
-    Ok((storage_tx, cref, set_bud3_data, set_records_data))
+    Ok((storage_tx, cref, set_content_data, set_records_data))
 }
 
 fn run_bns_publish_site(
@@ -3554,7 +3511,7 @@ fn run_bns_publish_site(
         Some(raw) => parse_address(raw.strip_prefix("0x").unwrap_or(raw))?.0,
         None => key.address().0,
     };
-    let (storage_tx, cref, set_bud3_data, set_records_data) =
+    let (storage_tx, cref, set_content_data, set_records_data) =
         prepare_publish_site_payloads(name, &payload, &mime, lifetime_epochs, custody_validator)?;
     let nonce_val = rpc_call(
         rpc_url,
@@ -3572,8 +3529,8 @@ fn run_bns_publish_site(
     send_v5(rpc_url, &key, tx1, Some(start_nonce))?;
 
     // 2. Bind `ContentRef` to `<label>.bud` (`nonce + 1`).
-    let mut tx2 = v5_template(TransactionType::BnsSetBud3Content, 0, signer.fee);
-    tx2.data = set_bud3_data;
+    let mut tx2 = v5_template(TransactionType::BnsSetContent, 0, signer.fee);
+    tx2.data = set_content_data;
     send_v5(rpc_url, &key, tx2, Some(start_nonce + 1))?;
 
     // 3. Record canonical `content.mime` in V3 records (`nonce + 2`).
@@ -3924,31 +3881,14 @@ fn main() {
                 parent,
                 sub,
                 content,
-            } => {
-                run_bns_set_subdomain_content(&cli.rpc_url, signer, parent, sub, content.as_deref())
-            }
+            } => run_bns_set_subdomain_content(&cli.rpc_url, signer, parent, sub, content),
             BnsAction::ListSubdomains { parent } => run_bns_list_subdomains(&cli.rpc_url, parent),
-            BnsAction::SetBud3 {
+            BnsAction::SetContent {
                 signer,
                 name,
-                object,
-                digest,
-                len,
-                sealed,
-                nft,
-                clear,
-            } => run_bns_set_bud3(
-                &cli.rpc_url,
-                signer,
-                name,
-                object.as_deref(),
-                digest.as_deref(),
-                *len,
-                *sealed,
-                nft.as_deref(),
-                *clear,
-            ),
-            BnsAction::GetBud3 { name } => run_bns_get_bud3(&cli.rpc_url, name),
+                content,
+            } => run_bns_set_content(&cli.rpc_url, signer, name, content),
+            BnsAction::GetContent { name } => run_bns_get_content(&cli.rpc_url, name),
             BnsAction::List { owner } => run_bns_list_by_owner(&cli.rpc_url, owner),
             BnsAction::Proof { name } => run_bns_proof(&cli.rpc_url, name),
             BnsAction::Resolve { name, verify_proof } => {
@@ -4056,9 +3996,6 @@ fn run_cli_conformance(samples: usize) -> Result<(), String> {
     // Verify stateful platform registries & B.U.D. 3.0 subsystems on testnet (45261).
     let qa_reg = budlum_core::account_abstraction::registry::QuantumAccountRegistry::new();
     let _qa_ok = qa_reg.is_registered(&[0u8; 32]);
-
-    let bns_res = budlum_core::bns::bud3::Bud3BnsResolver::new();
-    let _bns_none = bns_res.binding("example.bud");
 
     let dm_reg = budlum_core::data_market::DataMarketRegistry::new();
     let _dm_none = dm_reg.listing(&[0u8; 32]);
@@ -4664,7 +4601,7 @@ mod rpc_auth_tests {
 
         // Acquire `ayaz.bud` via real Primary marketplace (`BnsCreateOffer` + `BnsBuyName`),
         // then execute the 3 prepared site-publish transactions (`StorageV3::RegisterObject`,
-        // `BnsSetBud3Content`, `BnsSetRecords`) through `Executor::apply_transaction_checked`!
+        // `BnsSetContent`, `BnsSetRecords`) through `Executor::apply_transaction_checked`!
         let seller_kp = KeyPair::generate().unwrap();
         let seller = Address::from(seller_kp.public_key_bytes());
         let kp = KeyPair::generate().unwrap();
@@ -4710,7 +4647,7 @@ mod rpc_auth_tests {
         buy_tx.sign(&kp);
         Executor::apply_transaction_checked(&mut state, &buy_tx).unwrap();
 
-        let (storage_tx, cref, set_bud3_data, set_records_data) =
+        let (storage_tx, cref, set_content_data, set_records_data) =
             prepare_publish_site_payloads("ayaz.bud", &file_bytes, &file_mime, 100, alice.0)
                 .unwrap();
 
@@ -4734,9 +4671,9 @@ mod rpc_auth_tests {
             0,
             1_000,
             2,
-            set_bud3_data,
+            set_content_data,
             45261,
-            TransactionType::BnsSetBud3Content,
+            TransactionType::BnsSetContent,
         );
         tx2.max_fee = 1_000;
         tx2.sign(&kp);
@@ -4757,7 +4694,7 @@ mod rpc_auth_tests {
         Executor::apply_transaction_checked(&mut state, &tx3).unwrap();
 
         assert_eq!(
-            state.bns_registry.resolve_bud3_content("ayaz.bud", 6),
+            state.bns_registry.resolve_content("ayaz.bud", 6),
             Some(cref)
         );
         assert_eq!(
@@ -4785,7 +4722,7 @@ mod rpc_auth_tests {
                 "owner": format!("0x{}", t.owner.to_hex()),
                 "address": t.address.map(|a| format!("0x{}", a.to_hex())),
                 "expires_at": t.expires_at,
-                "content_id": t.content_id.map(|c| format!("0x{}", hex::encode(c.0))),
+                "content": t.content.as_ref().map(budlum_core::bns::types::content_ref_to_json),
                 "storage_root": t.storage_root.map(|s| format!("0x{}", hex::encode(s))),
                 "extras_digest": format!("0x{}", hex::encode(t.extras_digest)),
                 "leaf": format!("0x{}", hex::encode(t.leaf)),

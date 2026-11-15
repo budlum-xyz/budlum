@@ -198,6 +198,20 @@ pub(crate) fn check_transaction_features(
 }
 
 impl Executor {
+    /// The refusal code of a content write. A reference the object registry
+    /// does not back is `bns_content_unknown`; a name the signer may not
+    /// write is `refused`.
+    fn bns_content_refusal(error: crate::bns::BnsBud3Error, refused: &'static str) -> BudlumError {
+        use crate::bns::BnsBud3Error;
+        let code = match error {
+            BnsBud3Error::UnknownObject
+            | BnsBud3Error::ContentIdMismatch
+            | BnsBud3Error::InvalidContentRef(_) => "bns_content_unknown",
+            _ => refused,
+        };
+        BudlumError::validation(code, error.to_string())
+    }
+
     fn checked_next_nonce(nonce: u64) -> BudlumResult<u64> {
         nonce.checked_add(1).ok_or_else(|| {
             BudlumError::validation(
@@ -1617,68 +1631,23 @@ impl Executor {
                         ),
                     ));
                 }
-                let (name, cid): (String, crate::storage::content_id::ContentId) =
-                    bincode::deserialize(&tx.data)
-                        .map_err(|e| BudlumError::validation("bns_invalid_data", e.to_string()))?;
-
-                // The record may only point at a public B.U.D. 3.0 object the
-                // chain holds complete. Sealed content has no public row and
-                // binds through `BnsSetBud3Content`, which checks the NFT grant.
-                if state.bud3_registry.public_object(&cid.0).is_none() {
-                    return Err(BudlumError::validation(
-                        "bns_content_unknown",
-                        "BNS set content names content that is not registered",
-                    ));
-                }
-
-                state
-                    .bns_registry
-                    .set_content(&name, &tx.from, cid, state.epoch_index)
-                    .map_err(|e| {
-                        BudlumError::validation("bns_set_content_failed", e.to_string())
-                    })?;
-
-                let sender = state.get_or_create(&tx.from);
-                sender.balance = sender.balance.checked_sub(tx.fee).ok_or_else(|| {
-                    BudlumError::validation("balance_underflow", "balance underflow")
-                })?;
-                sender.nonce = Self::checked_next_nonce(sender.nonce)?;
-            }
-            TransactionType::BnsSetBud3Content => {
-                if tx.amount != 0 || tx.to != Address::zero() {
-                    return Err(BudlumError::validation(
-                        "bns_invalid_set_bud3_content",
-                        "BNS set B.U.D. 3.0 content carries no header amount or recipient",
-                    ));
-                }
-                if state.spendable_balance(&tx.from) < tx.fee {
-                    return Err(BudlumError::validation(
-                        "bns_vesting_locked",
-                        format!(
-                            "BNS set B.U.D. 3.0 content fee exceeds spendable balance: need {}, spendable {}",
-                            tx.fee,
-                            state.spendable_balance(&tx.from)
-                        ),
-                    ));
-                }
                 let (name, cref): (
                     String,
                     Option<crate::storage::bud3::content_ref::ContentRef>,
                 ) = bincode::deserialize(&tx.data)
                     .map_err(|e| BudlumError::validation("bns_invalid_data", e.to_string()))?;
 
-                state
-                    .bns_registry
-                    .set_bud3_content(
-                        &name,
-                        &tx.from,
-                        &state.bud3_registry,
-                        cref,
-                        state.epoch_index,
-                    )
-                    .map_err(|e| {
-                        BudlumError::validation("bns_set_bud3_content_failed", e.to_string())
-                    })?;
+                // The record may only point at a B.U.D. 3.0 object the chain
+                // holds, under the content id the object carries. Clearing
+                // names nothing, so there is nothing to look up.
+                crate::bns::Bud3BnsResolver::set_bud3_content(
+                    &mut state.bns_registry,
+                    &state.bud3_registry,
+                    (&name, &tx.from),
+                    cref,
+                    state.epoch_index,
+                )
+                .map_err(|e| Self::bns_content_refusal(e, "bns_set_content_failed"))?;
 
                 let sender = state.get_or_create(&tx.from);
                 sender.balance = sender.balance.checked_sub(tx.fee).ok_or_else(|| {
@@ -1771,27 +1740,24 @@ impl Executor {
                 let (parent, label, content): (
                     String,
                     String,
-                    Option<crate::storage::content_id::ContentId>,
+                    Option<crate::storage::bud3::content_ref::ContentRef>,
                 ) = bincode::deserialize(&tx.data)
                     .map_err(|e| BudlumError::validation("bns_invalid_data", e.to_string()))?;
 
                 // Same rule as `BnsSetContent`: a record points only at a
-                // public B.U.D. 3.0 object the chain holds complete. Clearing
-                // the content names nothing, so there is nothing to look up.
-                if let Some(cid) = content {
-                    if state.bud3_registry.public_object(&cid.0).is_none() {
-                        return Err(BudlumError::validation(
-                            "bns_content_unknown",
-                            "BNS set subdomain content names content that is not registered",
-                        ));
-                    }
-                }
-
+                // B.U.D. 3.0 object the chain holds.
                 state
                     .bns_registry
-                    .set_subdomain_content(&parent, &label, &tx.from, content, state.epoch_index)
+                    .set_subdomain_content(
+                        &parent,
+                        &label,
+                        &tx.from,
+                        &state.bud3_registry,
+                        content,
+                        state.epoch_index,
+                    )
                     .map_err(|e| {
-                        BudlumError::validation("bns_set_subdomain_content_failed", e.to_string())
+                        Self::bns_content_refusal(e, "bns_set_subdomain_content_failed")
                     })?;
 
                 let sender = state.get_or_create(&tx.from);

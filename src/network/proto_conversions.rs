@@ -216,9 +216,6 @@ impl From<&Transaction> for pb::ProtoTransaction {
             TransactionType::BnsSetContent => {
                 (pb::ProtoTransactionType::BnsSetContent as i32, None)
             }
-            TransactionType::BnsSetBud3Content => {
-                (pb::ProtoTransactionType::BnsSetBud3Content as i32, None)
-            }
             TransactionType::BnsRegisterSubdomain => {
                 (pb::ProtoTransactionType::BnsRegisterSubdomain as i32, None)
             }
@@ -1260,7 +1257,11 @@ impl TryFrom<pb::ProtoTransaction> for Transaction {
                 return Err("BnsRegister is retired; a name is bought through an offer".into())
             }
             pb::ProtoTransactionType::BnsSetContent => TransactionType::BnsSetContent,
-            pb::ProtoTransactionType::BnsSetBud3Content => TransactionType::BnsSetBud3Content,
+            pb::ProtoTransactionType::BnsSetBud3Content => {
+                return Err(
+                    "BnsSetBud3Content is retired; BnsSetContent carries the reference".into(),
+                )
+            }
             pb::ProtoTransactionType::BnsRegisterSubdomain => TransactionType::BnsRegisterSubdomain,
             pb::ProtoTransactionType::BnsRemoveSubdomain => TransactionType::BnsRemoveSubdomain,
             pb::ProtoTransactionType::BnsSetSubdomainContent => {
@@ -3142,7 +3143,6 @@ mod tests {
             TransactionType::BnsSetPrimaryName,
             TransactionType::BnsSetRecords,
             TransactionType::BnsSetContent,
-            TransactionType::BnsSetBud3Content,
             TransactionType::BnsRegisterSubdomain,
             TransactionType::BnsRemoveSubdomain,
             TransactionType::BnsSetSubdomainContent,

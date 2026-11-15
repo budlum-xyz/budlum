@@ -7,7 +7,7 @@ use crate::registry::params::{
     MAX_NAMES_PER_OWNER, MAX_RECORDS_PER_NAME, MAX_RECORD_KEY_LEN, MAX_RECORD_VALUE_BYTES,
     MIN_BNS_BASE_COST, MIN_DURATION, RESERVED_LABELS,
 };
-use crate::storage::content_id::ContentId;
+use crate::storage::bud3::content_ref::ContentRef;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -621,8 +621,7 @@ impl BnsRegistry {
         record.storage_root = None;
         record.storage_domain_id = None;
         record.storage_root_height = None;
-        record.content_id = None;
-        record.bud3_content = None;
+        record.content = None;
         record.subdomains.clear();
         record.records.clear();
         if current_owner != new_owner
@@ -724,34 +723,42 @@ impl BnsRegistry {
     ///
     /// # Errors
     ///
-    /// Returns [`BnsError`] if `sub_label` or `parent_name` is invalid or
-    /// unknown, the parent is expired, or `caller` does not own the subdomain.
+    /// Returns [`crate::bns::bud3::BnsBud3Error`] if `sub_label` or
+    /// `parent_name` is invalid or unknown, the parent is expired, `caller`
+    /// does not own the subdomain, or `content` fails the object registry
+    /// check.
     pub fn set_subdomain_content(
         &mut self,
         parent_name: &str,
         sub_label: &str,
         caller: &Address,
-        content: Option<ContentId>,
+        bud3: &crate::storage::bud3::registry::Bud3Registry,
+        content: Option<ContentRef>,
         current_epoch: u64,
-    ) -> Result<(), BnsError> {
+    ) -> Result<(), crate::bns::bud3::BnsBud3Error> {
+        use crate::bns::bud3::BnsBud3Error;
+
         if !Self::is_valid_sub_label(sub_label) {
-            return Err(BnsError::InvalidName);
+            return Err(BnsBud3Error::Bns(BnsError::InvalidName));
         }
         let parent = self
             .names
             .get_mut(parent_name)
-            .ok_or(BnsError::InvalidName)?;
+            .ok_or(BnsBud3Error::Bns(BnsError::InvalidName))?;
         if parent.expires_at <= current_epoch {
-            return Err(BnsError::Expired);
+            return Err(BnsBud3Error::Bns(BnsError::Expired));
         }
         let record = parent
             .subdomains
             .get_mut(sub_label)
-            .ok_or(BnsError::InvalidName)?;
+            .ok_or(BnsBud3Error::Bns(BnsError::InvalidName))?;
         if &record.owner != caller {
-            return Err(BnsError::NotOwner);
+            return Err(BnsBud3Error::Bns(BnsError::NotOwner));
         }
-        record.content = content;
+        record.content = match content {
+            None => None,
+            Some(cref) => Some(crate::bns::bud3::checked_content_ref(bud3, cref)?),
+        };
         Ok(())
     }
 
@@ -777,7 +784,7 @@ impl BnsRegistry {
         parent_name: &str,
         sub_label: &str,
         current_epoch: u64,
-    ) -> Option<ContentId> {
+    ) -> Option<ContentRef> {
         self.list_subdomains(parent_name, current_epoch)?
             .get(sub_label)
             .and_then(|record| record.content)
@@ -849,58 +856,23 @@ impl BnsRegistry {
         }
     }
 
-    /// Performs the requested operation.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the operation fails.
-    pub fn set_content(
-        &mut self,
-        name: &str,
-        owner: &Address,
-        cid: ContentId,
-        current_epoch: u64,
-    ) -> Result<(), BnsError> {
-        let record = self.names.get_mut(name).ok_or(BnsError::InvalidName)?;
-        if &record.owner != owner {
-            return Err(BnsError::NotOwner);
-        }
-        if record.expires_at <= current_epoch {
-            return Err(BnsError::Expired);
-        }
-        record.content_id = Some(cid);
-        Ok(())
-    }
-
-    pub fn resolve_content(&self, name: &str, current_epoch: u64) -> Option<ContentId> {
-        self.names.get(name).and_then(|record| {
-            if record.expires_at > current_epoch {
-                record.content_id
-            } else {
-                None
-            }
-        })
-    }
-
-    /// Bind or clear (`None`) a verified B.U.D. 3.0 [`ContentRef`](crate::storage::bud3::content_ref::ContentRef) on a live `.bud`
-    /// name owned by `caller`, checking object existence and `ContentId` parity in
-    /// `bud3_registry`.
+    /// Bind or clear (`None`) the content a live name serves. The caller
+    /// must own the name; the reference must name an object the chain holds,
+    /// with the same content id.
     ///
     /// # Errors
     ///
     /// Returns [`crate::bns::bud3::BnsBud3Error`] if `name` is invalid, expired,
-    /// not owned by `caller`, or `content_ref` fails `Bud3Registry` verification.
-    pub fn set_bud3_content(
+    /// not owned by `caller`, or `content` fails the object registry check.
+    pub fn set_content(
         &mut self,
         name: &str,
         caller: &Address,
         bud3: &crate::storage::bud3::registry::Bud3Registry,
-        content_ref: Option<crate::storage::bud3::content_ref::ContentRef>,
+        content: Option<ContentRef>,
         current_epoch: u64,
     ) -> Result<(), crate::bns::bud3::BnsBud3Error> {
         use crate::bns::bud3::BnsBud3Error;
-        use crate::storage::bud3::content_id::ContentIdKind;
-        use crate::storage::bud3::content_ref::ContentRef;
 
         if !Self::is_valid_name(name) {
             return Err(BnsBud3Error::Bns(BnsError::InvalidName));
@@ -917,42 +889,24 @@ impl BnsRegistry {
                 return Err(BnsBud3Error::Bns(BnsError::Expired));
             }
         }
-        let validated = match content_ref {
+        let validated = match content {
             None => None,
-            Some(cref) => {
-                let checked = ContentRef::new(cref.content_id, cref.object_commitment, cref.nft_id)
-                    .map_err(BnsBud3Error::InvalidContentRef)?;
-                let obj = bud3
-                    .object(&checked.object_commitment)
-                    .ok_or(BnsBud3Error::UnknownObject)?;
-                if obj.record.content_id != checked.content_id {
-                    return Err(BnsBud3Error::ContentIdMismatch);
-                }
-                if checked.content_id.kind == ContentIdKind::Sealed && checked.nft_id.is_none() {
-                    return Err(BnsBud3Error::SealedRequiresNftGrant);
-                }
-                Some(checked)
-            }
+            Some(cref) => Some(crate::bns::bud3::checked_content_ref(bud3, cref)?),
         };
         let record = self
             .names
             .get_mut(name)
             .ok_or(BnsBud3Error::Bns(BnsError::InvalidName))?;
-        record.bud3_content = validated;
+        record.content = validated;
         Ok(())
     }
 
-    /// Resolve the live B.U.D. 3.0 [`ContentRef`](crate::storage::bud3::content_ref::ContentRef) bound to `name` (`None` if
-    /// unbound, unknown, or expired).
+    /// The content a live name serves (`None` if unbound, unknown, or expired).
     #[must_use]
-    pub fn resolve_bud3_content(
-        &self,
-        name: &str,
-        current_epoch: u64,
-    ) -> Option<crate::storage::bud3::content_ref::ContentRef> {
+    pub fn resolve_content(&self, name: &str, current_epoch: u64) -> Option<ContentRef> {
         self.names.get(name).and_then(|record| {
             if record.expires_at > current_epoch {
-                record.bud3_content
+                record.content
             } else {
                 None
             }
@@ -1206,8 +1160,7 @@ impl BnsRegistry {
                 } else {
                     record.storage_domain_id
                 },
-                content_id: if expired { None } else { record.content_id },
-                bud3_content: if expired { None } else { record.bud3_content },
+                content: if expired { None } else { record.content },
                 subdomains: if expired {
                     BTreeMap::new()
                 } else {
@@ -1294,7 +1247,6 @@ impl BnsRegistry {
             consensus_domain_id: record.consensus_domain_id,
             storage_domain_id: record.storage_domain_id,
             storage_root_height: record.storage_root_height,
-            bud3_content: record.bud3_content,
             subdomains: record.subdomains.clone(),
             records: record.records.clone(),
         }
@@ -1339,27 +1291,6 @@ impl BnsRegistry {
             }
             None => hasher.update([0u8]),
         }
-        match extras.bud3_content {
-            Some(cref) => {
-                hasher.update([1u8]);
-                let kind_byte = match cref.content_id.kind {
-                    crate::storage::bud3::content_id::ContentIdKind::Public => 0u8,
-                    crate::storage::bud3::content_id::ContentIdKind::Sealed => 1u8,
-                };
-                hasher.update([kind_byte]);
-                hasher.update(cref.content_id.digest);
-                hasher.update(cref.content_id.len.to_le_bytes());
-                hasher.update(cref.object_commitment);
-                match cref.nft_id {
-                    Some(nft) => {
-                        hasher.update([1u8]);
-                        hasher.update(nft);
-                    }
-                    None => hasher.update([0u8]),
-                }
-            }
-            None => hasher.update([0u8]),
-        }
         hasher.update((extras.subdomains.len() as u64).to_le_bytes());
         for (sub_label, sub) in &extras.subdomains {
             hasher.update((sub_label.len() as u64).to_le_bytes());
@@ -1372,10 +1303,27 @@ impl BnsRegistry {
                 }
                 None => hasher.update([0u8]),
             }
+            // The label and the owner are hashed just above, and the leaf
+            // that carries this digest names the parent, so the reference
+            // is bound to one subdomain of one name.
             match sub.content {
-                Some(content) => {
+                Some(cref) => {
                     hasher.update([1u8]);
-                    hasher.update(content.0);
+                    let kind_byte = match cref.content_id.kind {
+                        crate::storage::bud3::content_id::ContentIdKind::Public => 0u8,
+                        crate::storage::bud3::content_id::ContentIdKind::Sealed => 1u8,
+                    };
+                    hasher.update([kind_byte]);
+                    hasher.update(cref.content_id.digest);
+                    hasher.update(cref.content_id.len.to_le_bytes());
+                    hasher.update(cref.object_commitment);
+                    match cref.nft_id {
+                        Some(nft) => {
+                            hasher.update([1u8]);
+                            hasher.update(nft);
+                        }
+                        None => hasher.update([0u8]),
+                    }
                 }
                 None => hasher.update([0u8]),
             }
@@ -1390,13 +1338,32 @@ impl BnsRegistry {
         hasher.finalize().into()
     }
 
+    /// The commitment a leaf carries for the content of its name: the
+    /// [`Bud3NameBinding`](crate::bns::bud3::Bud3NameBinding) digest over
+    /// the name, the owner and the reference.
+    #[must_use]
+    pub fn content_binding(
+        name: &str,
+        owner: &Address,
+        content: Option<ContentRef>,
+    ) -> Option<[u8; 32]> {
+        content.map(|content_ref| {
+            crate::bns::bud3::Bud3NameBinding {
+                name: name.to_string(),
+                owner: *owner,
+                content_ref,
+            }
+            .digest()
+        })
+    }
+
     /// Canonical per-name Merkle leaf digest (`BDLM_BNS_LEAF_V1`).
     #[must_use]
     fn compute_leaf_digest(
         name: &str,
         owner: &Address,
         expires_at: u64,
-        content_id: Option<ContentId>,
+        content: Option<ContentRef>,
         storage_root: Option<[u8; 32]>,
         extras_digest: [u8; 32],
     ) -> [u8; 32] {
@@ -1407,10 +1374,10 @@ impl BnsRegistry {
         hasher.update(name.as_bytes());
         hasher.update(owner.0);
         hasher.update(expires_at.to_le_bytes());
-        match content_id {
-            Some(cid) => {
+        match Self::content_binding(name, owner, content) {
+            Some(digest) => {
                 hasher.update([1u8]);
-                hasher.update(cid.0);
+                hasher.update(digest);
             }
             None => hasher.update([0u8]),
         }
@@ -1433,7 +1400,7 @@ impl BnsRegistry {
             &record.name,
             &record.owner,
             record.expires_at,
-            record.content_id,
+            record.content,
             record.storage_root,
             extras,
         )
@@ -1588,7 +1555,7 @@ impl BnsRegistry {
             owner: rec.owner,
             address: rec.address,
             expires_at: rec.expires_at,
-            content_id: rec.content_id,
+            content: rec.content,
             storage_root: rec.storage_root,
             extras_digest,
             leaf,
@@ -1779,8 +1746,8 @@ impl BnsRegistry {
             return Err("proof bns_root does not match expected header bns_root".into());
         }
         let check_branch = |branch: &BnsMerkleBranch| -> Result<[u8; 32], String> {
-            // The extras digest is a commitment; `address`, the records, the
-            // subdomains and the B.U.D. 3.0 reference only mean something if
+            // The extras digest is a commitment; `address`, the records and
+            // the subdomains only mean something if
             // the pre-image behind it is the one the header root commits to.
             // A branch that discloses its extras is checked here, so every
             // field it shows is bound to the root. A branch that withholds them
@@ -1799,7 +1766,7 @@ impl BnsRegistry {
                 &branch.name,
                 &branch.owner,
                 branch.expires_at,
-                branch.content_id,
+                branch.content,
                 branch.storage_root,
                 branch.extras_digest,
             );
@@ -1918,7 +1885,7 @@ mod tests {
         assert!(!live.is_expired);
         let gone = reg.resolve_full("alice.bud", 50).unwrap();
         assert!(gone.is_expired);
-        assert!(gone.content_id.is_none() && gone.address.is_none());
+        assert!(gone.content.is_none() && gone.address.is_none());
     }
 
     #[test]
@@ -1927,9 +1894,15 @@ mod tests {
         let owner = Address::from([1u8; 32]);
         reg.register("alice.bud".into(), owner, 1, 10).unwrap();
         let root_before = reg.root();
-        reg.set_content("alice.bud", &owner, ContentId([0x55; 32]), 1)
+        let mut bud3 = crate::storage::bud3::registry::Bud3Registry::default();
+        let content = crate::bns::bud3::fixtures::public_object(&mut bud3, owner.0, b"alice");
+        reg.set_content("alice.bud", &owner, &bud3, Some(content), 1)
             .unwrap();
-        assert_ne!(root_before, reg.root());
+        let root_bound = reg.root();
+        assert_ne!(root_before, root_bound);
+        reg.set_content("alice.bud", &owner, &bud3, None, 1)
+            .unwrap();
+        assert_eq!(root_before, reg.root());
     }
 
     /// The root is injective over name and label boundaries: two records
@@ -1976,20 +1949,75 @@ mod tests {
 
     #[test]
     fn bns_resolves_bud3_content() {
+        use crate::bns::bud3::BnsBud3Error;
+
         let owner = Address::from([0x31; 32]);
         let stranger = Address::from([0x32; 32]);
-        let bud3_cid = crate::storage::bud3::content_id::ContentId::public(b"site-index-html");
-        let cid = ContentId(bud3_cid.digest);
+        let mut bud3 = crate::storage::bud3::registry::Bud3Registry::default();
+        let content =
+            crate::bns::bud3::fixtures::public_object(&mut bud3, owner.0, b"site-index-html");
 
         let mut reg = BnsRegistry::new();
         reg.register("portal.bud".into(), owner, 1, 10).unwrap();
         assert_eq!(
-            reg.set_content("portal.bud", &stranger, cid, 2),
-            Err(BnsError::NotOwner)
+            reg.set_content("portal.bud", &stranger, &bud3, Some(content), 2),
+            Err(BnsBud3Error::Bns(BnsError::NotOwner))
         );
-        reg.set_content("portal.bud", &owner, cid, 2).unwrap();
-        assert_eq!(reg.resolve_content("portal.bud", 5), Some(cid));
+        // A reference to an object the chain does not hold is refused.
+        let unknown = ContentRef {
+            object_commitment: [0xEE; 32],
+            ..content
+        };
+        assert_eq!(
+            reg.set_content("portal.bud", &owner, &bud3, Some(unknown), 2),
+            Err(BnsBud3Error::UnknownObject)
+        );
+        // So is a reference whose content id is not the one of the object.
+        let wrong_id = ContentRef {
+            content_id: crate::storage::bud3::content_id::ContentId::public(b"other bytes"),
+            ..content
+        };
+        assert_eq!(
+            reg.set_content("portal.bud", &owner, &bud3, Some(wrong_id), 2),
+            Err(BnsBud3Error::ContentIdMismatch)
+        );
+        assert_eq!(reg.resolve_content("portal.bud", 5), None);
+
+        reg.set_content("portal.bud", &owner, &bud3, Some(content), 2)
+            .unwrap();
+        assert_eq!(reg.resolve_content("portal.bud", 5), Some(content));
         assert_eq!(reg.resolve_content("portal.bud", 11), None);
+    }
+
+    /// The proof discloses the content, and the leaf commits to it. A proof
+    /// whose content was swapped after the fact does not verify.
+    #[test]
+    fn bns_proof_binds_the_content_of_the_name() {
+        let owner = Address::from([0x35; 32]);
+        let mut bud3 = crate::storage::bud3::registry::Bud3Registry::default();
+        let content = crate::bns::bud3::fixtures::public_object(&mut bud3, owner.0, b"first site");
+        let other = crate::bns::bud3::fixtures::public_object(&mut bud3, owner.0, b"second site");
+
+        let mut reg = BnsRegistry::new();
+        reg.register("portal.bud".into(), owner, 1, 10).unwrap();
+        reg.set_content("portal.bud", &owner, &bud3, Some(content), 2)
+            .unwrap();
+        let root = reg.root();
+        let proof = reg.prove_name("portal.bud", 2);
+        assert_eq!(proof.entry.as_ref().and_then(|e| e.content), Some(content));
+        assert!(BnsRegistry::verify_state_proof(&proof, &root, 2).is_ok());
+
+        let mut swapped = proof.clone();
+        if let Some(entry) = swapped.entry.as_mut() {
+            entry.content = Some(other);
+        }
+        assert!(BnsRegistry::verify_state_proof(&swapped, &root, 2).is_err());
+
+        let mut dropped = proof;
+        if let Some(entry) = dropped.entry.as_mut() {
+            entry.content = None;
+        }
+        assert!(BnsRegistry::verify_state_proof(&dropped, &root, 2).is_err());
     }
 
     #[test]

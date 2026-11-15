@@ -1,10 +1,66 @@
 use crate::core::address::Address;
-use crate::storage::content_id::ContentId;
+use crate::storage::bud3::content_ref::ContentRef;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
 // B.U.D. Name Service (BNS) - decentralized naming for the Budlum network.
 // Full_impl per Q10 (`storage_root` + full resolve) + lifecycle integration.
+
+/// The JSON form of a content reference. Every RPC answer and every proof
+/// uses this one shape: `{kind, digest, len, object_commitment, nft_id}`.
+#[must_use]
+pub fn content_ref_to_json(content: &ContentRef) -> serde_json::Value {
+    use crate::storage::bud3::content_id::ContentIdKind;
+    serde_json::json!({
+        "kind": match content.content_id.kind {
+            ContentIdKind::Public => "public",
+            ContentIdKind::Sealed => "sealed",
+        },
+        "digest": format!("0x{}", hex::encode(content.content_id.digest)),
+        "len": content.content_id.len,
+        "object_commitment": format!("0x{}", hex::encode(content.object_commitment)),
+        "nft_id": content.nft_id.map(|n| format!("0x{}", hex::encode(n))),
+    })
+}
+
+/// Read the JSON form of a content reference back.
+///
+/// # Errors
+///
+/// Returns the name of the field that is missing or malformed. A malformed
+/// field is never read as absent: the reference feeds a proof digest.
+pub fn content_ref_from_json(value: &serde_json::Value) -> Result<ContentRef, String> {
+    use crate::storage::bud3::content_id::{ContentId, ContentIdKind};
+    fn hex32(value: Option<&serde_json::Value>, field: &str) -> Result<[u8; 32], String> {
+        let text = value
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| format!("content {field} is missing or not a string"))?;
+        let bytes = hex::decode(text.strip_prefix("0x").unwrap_or(text))
+            .map_err(|_| format!("content {field} is not hex"))?;
+        <[u8; 32]>::try_from(bytes.as_slice())
+            .map_err(|_| format!("content {field} is not 32 bytes"))
+    }
+    let kind = match value.get("kind").and_then(serde_json::Value::as_str) {
+        Some("public") => ContentIdKind::Public,
+        Some("sealed") => ContentIdKind::Sealed,
+        _ => return Err("content kind is missing or invalid".into()),
+    };
+    let content_id = ContentId {
+        kind,
+        digest: hex32(value.get("digest"), "digest")?,
+        len: value
+            .get("len")
+            .and_then(serde_json::Value::as_u64)
+            .ok_or("content len is missing or invalid")?,
+    };
+    let object_commitment = hex32(value.get("object_commitment"), "object_commitment")?;
+    let nft_id = match value.get("nft_id") {
+        Some(v) if !v.is_null() => Some(hex32(Some(v), "nft_id")?),
+        _ => None,
+    };
+    ContentRef::new(content_id, object_commitment, nft_id)
+        .map_err(|e| format!("invalid content reference: {e:?}"))
+}
 
 /// One subdomain of a `.bud` name.
 ///
@@ -15,7 +71,7 @@ use std::fmt;
 pub struct SubdomainRecord {
     pub owner: Address,
     pub address: Option<Address>,
-    pub content: Option<ContentId>,
+    pub content: Option<ContentRef>,
 }
 
 impl SubdomainRecord {
@@ -35,7 +91,7 @@ impl SubdomainRecord {
         serde_json::json!({
             "owner": format!("0x{}", hex::encode(self.owner.0)),
             "address": self.address.map(|a| format!("0x{}", hex::encode(a.0))),
-            "content": self.content.map(|c| format!("0x{}", hex::encode(c.0))),
+            "content": self.content.as_ref().map(content_ref_to_json),
         })
     }
 
@@ -68,7 +124,10 @@ impl SubdomainRecord {
         Ok(Self {
             owner: Address::from(owner),
             address: optional(value, "address")?.map(Address::from),
-            content: optional(value, "content")?.map(ContentId),
+            content: match value.get("content") {
+                Some(v) if !v.is_null() => Some(content_ref_from_json(v)?),
+                _ => None,
+            },
         })
     }
 }
@@ -86,9 +145,8 @@ pub struct NameRecord {
     pub storage_domain_id: Option<u32>,
     pub storage_root_height: Option<u64>,
 
-    pub content_id: Option<ContentId>,
-    #[serde(default)]
-    pub bud3_content: Option<crate::storage::bud3::content_ref::ContentRef>,
+    /// What the name serves: one B.U.D. 3.0 content reference, or nothing.
+    pub content: Option<ContentRef>,
     pub subdomains: std::collections::BTreeMap<String, SubdomainRecord>,
     #[serde(default)]
     pub records: std::collections::BTreeMap<String, String>,
@@ -127,8 +185,7 @@ impl NameRecord {
             storage_root: None,
             storage_domain_id: None,
             storage_root_height: None,
-            content_id: None,
-            bud3_content: None,
+            content: None,
             subdomains: std::collections::BTreeMap::new(),
             records: std::collections::BTreeMap::new(),
         }
@@ -176,9 +233,7 @@ pub struct BnsResolved {
     pub address: Option<Address>,
     pub storage_root: Option<[u8; 32]>,
     pub storage_domain_id: Option<u32>,
-    pub content_id: Option<ContentId>,
-    #[serde(default)]
-    pub bud3_content: Option<crate::storage::bud3::content_ref::ContentRef>,
+    pub content: Option<ContentRef>,
     #[serde(default)]
     pub subdomains: std::collections::BTreeMap<String, SubdomainRecord>,
     #[serde(default)]
@@ -199,7 +254,10 @@ pub struct BnsMerkleBranch {
     pub owner: Address,
     pub address: Option<Address>,
     pub expires_at: u64,
-    pub content_id: Option<ContentId>,
+    /// The content the name serves. The leaf commits to it through the
+    /// binding digest over `(name, owner, content)`, so a verifier that
+    /// folds this branch to the header root has checked this field.
+    pub content: Option<ContentRef>,
     pub storage_root: Option<[u8; 32]>,
     pub extras_digest: [u8; 32],
     pub leaf: [u8; 32],
@@ -224,8 +282,7 @@ pub struct BnsMerkleBranch {
     /// The pre-image of `extras_digest`, when the prover ships it.
     ///
     /// `extras_digest` is a commitment, not a disclosure: on its own the leaf
-    /// binds `address`, the records, the subdomains and the B.U.D. 3.0
-    /// reference, but a verifier that only sees the 32 opaque bytes cannot tell
+    /// binds `address`, the records and the subdomains, but a verifier that only sees the 32 opaque bytes cannot tell
     /// what they commit to. The branch already discloses `address` next to the
     /// digest, so before this field those disclosed values were whatever the
     /// answering node chose, and an identity profile that trusted them could
@@ -252,7 +309,6 @@ pub struct BnsBranchExtras {
     pub consensus_domain_id: Option<u32>,
     pub storage_domain_id: Option<u32>,
     pub storage_root_height: Option<u64>,
-    pub bud3_content: Option<crate::storage::bud3::content_ref::ContentRef>,
     pub subdomains: std::collections::BTreeMap<String, SubdomainRecord>,
     pub records: std::collections::BTreeMap<String, String>,
 }

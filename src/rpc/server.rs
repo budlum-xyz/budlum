@@ -1050,6 +1050,41 @@ impl RpcServer {
         })
     }
 
+    /// Read the content argument of a BNS prepare call: `null` clears, an
+    /// object in the proof shape binds.
+    fn parse_bns_content(
+        content: Option<&serde_json::Value>,
+    ) -> Result<Option<crate::storage::bud3::content_ref::ContentRef>, ErrorObjectOwned> {
+        match content {
+            None => Ok(None),
+            Some(value) if value.is_null() => Ok(None),
+            Some(value) => {
+                let content = crate::bns::types::content_ref_from_json(value)
+                    .map_err(|e| ErrorObjectOwned::owned(-32602, e, None::<()>))?;
+                if content.content_id.kind
+                    == crate::storage::bud3::content_id::ContentIdKind::Sealed
+                    && content.nft_id.is_none()
+                {
+                    return Err(ErrorObjectOwned::owned(
+                        -32602,
+                        "Sealed content requires nft_id",
+                        None::<()>,
+                    ));
+                }
+                Ok(Some(content))
+            }
+        }
+    }
+
+    /// The 32 bytes a name leaf commits to for its content, as hex.
+    fn bns_content_binding_json(
+        name: &str,
+        owner: &Address,
+        content: Option<crate::storage::bud3::content_ref::ContentRef>,
+    ) -> Option<String> {
+        crate::bns::BnsRegistry::content_binding(name, owner, content).map(Self::bytes32_to_0x)
+    }
+
     fn bytes32_to_0x(bytes: [u8; 32]) -> String {
         format!("0x{}", hex::encode(bytes))
     }
@@ -4273,17 +4308,8 @@ impl BudlumApiServer for RpcServer {
                 "address": resolved.address.map(|a| Self::to_0x_hash(a.to_hex())),
                 "storage_root": resolved.storage_root.map(|r| format!("0x{}", hex::encode(r))),
                 "storage_domain_id": resolved.storage_domain_id,
-                "content_id": resolved.content_id.map(|c| format!("0x{}", hex::encode(c.0))),
-                "bud3_content": resolved.bud3_content.map(|cref| serde_json::json!({
-                    "kind": match cref.content_id.kind {
-                        crate::storage::bud3::content_id::ContentIdKind::Public => "public",
-                        crate::storage::bud3::content_id::ContentIdKind::Sealed => "sealed",
-                    },
-                    "content_digest": format!("0x{}", hex::encode(cref.content_id.digest)),
-                    "content_len": cref.content_id.len,
-                    "object_commitment": format!("0x{}", hex::encode(cref.object_commitment)),
-                    "nft_id": cref.nft_id.map(|n| format!("0x{}", hex::encode(n))),
-                })),
+                "content": resolved.content.as_ref().map(crate::bns::types::content_ref_to_json),
+                "content_binding": Self::bns_content_binding_json(&resolved.name, &resolved.owner, resolved.content),
                 "subdomains": resolved.subdomains.iter().map(|(k, v)| (k.clone(), v.to_json())).collect::<std::collections::BTreeMap<_, _>>(),
                 "records": resolved.records,
                 "status": resolved.status,
@@ -4296,9 +4322,35 @@ impl BudlumApiServer for RpcServer {
         }
     }
 
-    async fn bns_resolve_content(&self, name: String) -> Result<Option<String>, ErrorObjectOwned> {
-        let cid = self.chain.bns_resolve_content(name).await;
-        Ok(cid.map(|c| format!("0x{}", hex::encode(c.0))))
+    async fn bns_resolve_content(
+        &self,
+        name: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        if !crate::bns::BnsRegistry::is_valid_name(&name) {
+            return Err(ErrorObjectOwned::owned(
+                -32602,
+                "Invalid BNS name: expected <label>.bud with 3..=32 lowercase label characters",
+                None::<()>,
+            ));
+        }
+        // The chain actor reads the record and runs it through the
+        // B.U.D. 3.0 view. `bytes` is null when this node cannot rebuild the
+        // object from the symbols it can reach; `view_error` says why.
+        Ok(match self.chain.bns_resolve_content(name.clone()).await {
+            None => serde_json::Value::Null,
+            Some((content, viewed)) => {
+                let (bytes, view_error) = match viewed {
+                    Ok(bytes) => (Some(format!("0x{}", hex::encode(bytes))), None),
+                    Err(reason) => (None, Some(reason)),
+                };
+                serde_json::json!({
+                    "name": name,
+                    "content": crate::bns::types::content_ref_to_json(&content),
+                    "bytes": bytes,
+                    "view_error": view_error,
+                })
+            }
+        })
     }
 
     async fn identity_resolve(&self, did: String) -> Result<serde_json::Value, ErrorObjectOwned> {
@@ -4554,7 +4606,7 @@ impl BudlumApiServer for RpcServer {
         &self,
         parent_name: String,
         sub_label: String,
-    ) -> Result<Option<String>, ErrorObjectOwned> {
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
         if !crate::bns::BnsRegistry::is_valid_name(&parent_name)
             || !crate::bns::BnsRegistry::is_valid_sub_label(&sub_label)
         {
@@ -4568,7 +4620,10 @@ impl BudlumApiServer for RpcServer {
             .chain
             .bns_resolve_subdomain_content(parent_name, sub_label)
             .await;
-        Ok(content.map(|c| Self::bytes32_to_0x(c.0)))
+        Ok(content.as_ref().map_or(
+            serde_json::Value::Null,
+            crate::bns::types::content_ref_to_json,
+        ))
     }
 
     async fn bns_reverse_resolve(
@@ -4646,16 +4701,6 @@ impl BudlumApiServer for RpcServer {
                 "consensus_domain_id": e.consensus_domain_id,
                 "storage_domain_id": e.storage_domain_id,
                 "storage_root_height": e.storage_root_height,
-                "bud3_content": e.bud3_content.as_ref().map(|c| serde_json::json!({
-                    "kind": match c.content_id.kind {
-                        crate::storage::bud3::content_id::ContentIdKind::Public => "public",
-                        crate::storage::bud3::content_id::ContentIdKind::Sealed => "sealed",
-                    },
-                    "digest": format!("0x{}", hex::encode(c.content_id.digest)),
-                    "len": c.content_id.len,
-                    "object_commitment": format!("0x{}", hex::encode(c.object_commitment)),
-                    "nft_id": c.nft_id.map(|n| format!("0x{}", hex::encode(n))),
-                })),
                 "subdomains": serde_json::json!(e.subdomains.iter()
                     .map(|(label, sub)| (label.clone(), sub.to_json()))
                     .collect::<std::collections::BTreeMap<_, _>>()),
@@ -4668,7 +4713,8 @@ impl BudlumApiServer for RpcServer {
                 "owner": Self::to_0x_hash(b.owner.to_hex()),
                 "address": b.address.map(|a| Self::to_0x_hash(a.to_hex())),
                 "expires_at": b.expires_at,
-                "content_id": b.content_id.map(|c| format!("0x{}", hex::encode(c.0))),
+                "content": b.content.as_ref().map(crate::bns::types::content_ref_to_json),
+                "content_binding": Self::bns_content_binding_json(&b.name, &b.owner, b.content),
                 "storage_root": b.storage_root.map(|r| format!("0x{}", hex::encode(r))),
                 "extras_digest": format!("0x{}", hex::encode(b.extras_digest)),
                 "leaf": format!("0x{}", hex::encode(b.leaf)),
@@ -5377,7 +5423,7 @@ impl BudlumApiServer for RpcServer {
         parent_name: String,
         sub_label: String,
         caller: String,
-        content_id: Option<String>,
+        content: Option<serde_json::Value>,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
         if !crate::bns::BnsRegistry::is_valid_name(&parent_name) {
             return Err(ErrorObjectOwned::owned(
@@ -5404,22 +5450,7 @@ impl BudlumApiServer for RpcServer {
                 None::<()>,
             ));
         }
-        let content = match content_id.as_deref() {
-            None => None,
-            Some(text) => {
-                let bytes = hex::decode(text.strip_prefix("0x").unwrap_or(text))
-                    .ok()
-                    .and_then(|bytes| <[u8; 32]>::try_from(bytes.as_slice()).ok())
-                    .ok_or_else(|| {
-                        ErrorObjectOwned::owned(
-                            -32602,
-                            "Invalid content id: expected 32 bytes of hex",
-                            None::<()>,
-                        )
-                    })?;
-                Some(crate::storage::content_id::ContentId(bytes))
-            }
-        };
+        let content = Self::parse_bns_content(content.as_ref())?;
         let data = bincode::serialize(&(parent_name.clone(), sub_label.clone(), content))
             .map_err(|e| ErrorObjectOwned::owned(-32000, e.to_string(), None::<()>))?;
         let tx = crate::core::transaction::Transaction {
@@ -5448,47 +5479,16 @@ impl BudlumApiServer for RpcServer {
             "parent": parent_name,
             "sub_label": sub_label,
             "caller": caller,
-            "content_id": content_id,
+            "content": content.as_ref().map(crate::bns::types::content_ref_to_json),
             "tx_template": tx,
         }))
     }
 
-    async fn bns_get_bud3_content(
-        &self,
-        name: String,
-    ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        if !crate::bns::BnsRegistry::is_valid_name(&name) {
-            return Err(ErrorObjectOwned::owned(
-                -32602,
-                "Invalid BNS name: expected <label>.bud with 3..=32 lowercase label characters",
-                None::<()>,
-            ));
-        }
-        match self.chain.bns_resolve_bud3_content(name.clone()).await {
-            Some(cref) => Ok(serde_json::json!({
-                "name": name,
-                "kind": match cref.content_id.kind {
-                    crate::storage::bud3::content_id::ContentIdKind::Public => "public",
-                    crate::storage::bud3::content_id::ContentIdKind::Sealed => "sealed",
-                },
-                "content_digest": format!("0x{}", hex::encode(cref.content_id.digest)),
-                "content_len": cref.content_id.len,
-                "object_commitment": format!("0x{}", hex::encode(cref.object_commitment)),
-                "nft_id": cref.nft_id.map(|n| format!("0x{}", hex::encode(n))),
-            })),
-            None => Ok(serde_json::Value::Null),
-        }
-    }
-
-    async fn bns_prepare_set_bud3_content(
+    async fn bns_prepare_set_content(
         &self,
         name: String,
         owner: String,
-        object_commitment: Option<String>,
-        content_digest: Option<String>,
-        content_len: Option<u64>,
-        sealed: Option<bool>,
-        nft_id: Option<String>,
+        content: Option<serde_json::Value>,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
         if !crate::bns::BnsRegistry::is_valid_name(&name) {
             return Err(ErrorObjectOwned::owned(
@@ -5508,73 +5508,10 @@ impl BudlumApiServer for RpcServer {
                 None::<()>,
             ));
         }
-        let parse_32 = |raw: &str, label: &str| -> Result<[u8; 32], ErrorObjectOwned> {
-            let clean = raw.strip_prefix("0x").unwrap_or(raw);
-            let bytes = hex::decode(clean).map_err(|e| {
-                ErrorObjectOwned::owned(-32602, format!("Invalid {label} hex: {e}"), None::<()>)
-            })?;
-            if bytes.len() != 32 {
-                return Err(ErrorObjectOwned::owned(
-                    -32602,
-                    format!("{label} must be 32 bytes"),
-                    None::<()>,
-                ));
-            }
-            let mut arr = [0u8; 32];
-            arr.copy_from_slice(&bytes);
-            Ok(arr)
-        };
-        let cref = match object_commitment {
-            None => None,
-            Some(ref obj_hex) => {
-                let obj_key = parse_32(obj_hex, "object_commitment")?;
-                let digest_hex = content_digest.as_deref().ok_or_else(|| {
-                    ErrorObjectOwned::owned(
-                        -32602,
-                        "content_digest is required when object_commitment is set",
-                        None::<()>,
-                    )
-                })?;
-                let digest = parse_32(digest_hex, "content_digest")?;
-                let len = content_len.ok_or_else(|| {
-                    ErrorObjectOwned::owned(
-                        -32602,
-                        "content_len is required when object_commitment is set",
-                        None::<()>,
-                    )
-                })?;
-                let is_sealed = sealed.unwrap_or(false);
-                let parsed_nft = match nft_id.as_deref() {
-                    Some(raw) => Some(parse_32(raw, "nft_id")?),
-                    None => None,
-                };
-                if is_sealed && parsed_nft.is_none() {
-                    return Err(ErrorObjectOwned::owned(
-                        -32602,
-                        "Sealed B.U.D. 3.0 content requires nft_id",
-                        None::<()>,
-                    ));
-                }
-                let kind = if is_sealed {
-                    crate::storage::bud3::content_id::ContentIdKind::Sealed
-                } else {
-                    crate::storage::bud3::content_id::ContentIdKind::Public
-                };
-                let cid = crate::storage::bud3::content_id::ContentId { kind, digest, len };
-                let checked =
-                    crate::storage::bud3::content_ref::ContentRef::new(cid, obj_key, parsed_nft)
-                        .map_err(|e| {
-                            ErrorObjectOwned::owned(
-                                -32602,
-                                format!("Invalid B.U.D. 3.0 ContentRef: {e:?}"),
-                                None::<()>,
-                            )
-                        })?;
-                Some(checked)
-            }
-        };
-        let data = bincode::serialize(&(name.clone(), cref))
+        let content = Self::parse_bns_content(content.as_ref())?;
+        let data = bincode::serialize(&(name.clone(), content))
             .map_err(|e| ErrorObjectOwned::owned(-32000, e.to_string(), None::<()>))?;
+
         let tx = crate::core::transaction::Transaction {
             from: owner_addr,
             to: Address::zero(),
@@ -5594,78 +5531,13 @@ impl BudlumApiServer for RpcServer {
             authorization: None,
             chain_id: self.chain.get_chain_id().await,
             signature_version: crate::core::transaction::SIGNATURE_VERSION_V5,
-            tx_type: crate::core::transaction::TransactionType::BnsSetBud3Content,
-        };
-        let tx = self.finish_template(tx).await?;
-        Ok(serde_json::json!({
-            "name": name,
-            "owner": owner,
-            "tx_template": tx,
-        }))
-    }
-
-    async fn bns_prepare_set_content(
-        &self,
-        name: String,
-        owner: String,
-        cid: String,
-    ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        if !crate::bns::BnsRegistry::is_valid_name(&name) {
-            return Err(ErrorObjectOwned::owned(
-                -32602,
-                "Invalid BNS name: expected <label>.bud with 3..=32 lowercase label characters",
-                None::<()>,
-            ));
-        }
-        let clean_owner = owner.strip_prefix("0x").unwrap_or(&owner);
-        let owner_addr = Address::from_hex(clean_owner).map_err(|e| {
-            ErrorObjectOwned::owned(-32602, format!("Invalid owner address: {e}"), None::<()>)
-        })?;
-
-        let clean_cid = cid.strip_prefix("0x").unwrap_or(&cid);
-        let cid_bytes = hex::decode(clean_cid).map_err(|e| {
-            ErrorObjectOwned::owned(-32602, format!("Invalid CID hex: {e}"), None::<()>)
-        })?;
-        if cid_bytes.len() != 32 {
-            return Err(ErrorObjectOwned::owned(
-                -32602,
-                "CID must be 32 bytes",
-                None::<()>,
-            ));
-        }
-        let mut cid_arr = [0u8; 32];
-        cid_arr.copy_from_slice(&cid_bytes);
-        let cid_obj = crate::storage::content_id::ContentId(cid_arr);
-
-        let data = bincode::serialize(&(name.clone(), cid_obj))
-            .map_err(|e| ErrorObjectOwned::owned(-32000, e.to_string(), None::<()>))?;
-
-        let tx = crate::core::transaction::Transaction {
-            from: owner_addr,
-            to: Address::zero(),
-            amount: 0,
-            fee: 500,
-            max_fee: 500,
-            priority_fee: 0,
-            nonce: self.chain.get_nonce(&owner_addr).await,
-            data,
-            timestamp: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_millis(),
-            hash: String::new(),
-            signature: None,
-            signer_public_key: Vec::new(),
-            authorization: None,
-            chain_id: self.chain.get_chain_id().await,
-            signature_version: crate::core::transaction::SIGNATURE_VERSION_V5,
             tx_type: crate::core::transaction::TransactionType::BnsSetContent,
         };
         let tx = self.finish_template(tx).await?;
         Ok(serde_json::json!({
             "name": name,
             "owner": owner,
-            "cid": cid,
+            "content": content.as_ref().map(crate::bns::types::content_ref_to_json),
             "tx_template": tx,
         }))
     }
@@ -6629,7 +6501,8 @@ impl BudlumApiServer for RpcServer {
                 reverse_primary_name,
             };
             let manifest_id = resolved.as_ref().and_then(|r| {
-                r.content_id
+                r.content
+                    .map(|c| crate::storage::ContentId(c.content_id.digest))
                     .or(r.storage_root.map(crate::storage::ContentId))
             });
             let manifest = if let Some(id) = manifest_id {
@@ -6691,7 +6564,8 @@ impl BudlumApiServer for RpcServer {
                 reverse_primary_name,
             };
             let manifest_id = resolved.as_ref().and_then(|r| {
-                r.content_id
+                r.content
+                    .map(|c| crate::storage::ContentId(c.content_id.digest))
                     .or(r.storage_root.map(crate::storage::ContentId))
             });
             let manifest = if let Some(id) = manifest_id {

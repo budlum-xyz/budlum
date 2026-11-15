@@ -11,7 +11,7 @@
 //! numbers and nulls. `flat_object` reads exactly that shape and refuses
 //! anything nested, so no JSON library enters this crate.
 
-use crate::bns_proof::{BnsInclusionProof, ResolvedName};
+use crate::bns_proof::{content_binding, BnsInclusionProof, NameContent, ResolvedName};
 use crate::content_id::ContentId;
 use crate::resolve::NameResolver;
 use std::collections::BTreeMap;
@@ -136,13 +136,39 @@ pub fn resolution_from_indexer(text: &str) -> Result<ResolvedName, String> {
         _ => return Err("the answer names no name".into()),
     };
     let owner = hex32(object.get("owner"))?.ok_or("the answer names no owner")?;
-    let content_id = hex32(object.get("content_id"))?.map(ContentId);
+    // The content reference arrives flat: `content_digest`, `content_len`,
+    // `content_object`, `content_sealed` and `content_nft`. The binding the
+    // leaf commits to is computed here from all of them, never read from the
+    // answer, so a proof that verifies has proven the digest the page is
+    // fetched by.
+    let content = match hex32(object.get("content_digest"))? {
+        None => None,
+        Some(digest) => {
+            let len = match object.get("content_len") {
+                Some(FlatValue::Num(n)) => n
+                    .parse::<u64>()
+                    .map_err(|_| "content_len is not a length".to_string())?,
+                _ => return Err("the content names no length".into()),
+            };
+            Some(NameContent {
+                sealed: matches!(object.get("content_sealed"), Some(FlatValue::Bool(true))),
+                digest,
+                len,
+                object_commitment: hex32(object.get("content_object"))?
+                    .ok_or("the content names no object")?,
+                nft_id: hex32(object.get("content_nft"))?,
+            })
+        }
+    };
+    let content_id = content.map(|c| ContentId(c.digest));
+    let content_binding = content.map(|c| content_binding(&name, owner, &c));
     let is_expired = matches!(object.get("is_expired"), Some(FlatValue::Bool(true)));
     Ok(ResolvedName {
         name,
         owner,
         storage_root: hex32(object.get("storage_root"))?,
         content_id,
+        content_binding,
         is_expired,
     })
 }
@@ -183,7 +209,7 @@ impl<F: Fn(&str) -> Result<String, String>> NameResolver for IndexerResolver<F> 
 mod tests {
     use super::*;
 
-    const ANSWER: &str = r#"{"name":"ayaz.bud","owner":"0x0101010101010101010101010101010101010101010101010101010101010101","address":null,"storage_root":null,"storage_domain_id":null,"content_id":"0x0202020202020202020202020202020202020202020202020202020202020202","is_expired":false}"#;
+    const ANSWER: &str = r#"{"name":"ayaz.bud","owner":"0x0101010101010101010101010101010101010101010101010101010101010101","address":null,"storage_root":null,"storage_domain_id":null,"content_digest":"0x0202020202020202020202020202020202020202020202020202020202020202","content_len":1024,"content_object":"0x0303030303030303030303030303030303030303030303030303030303030303","content_sealed":false,"content_nft":null,"is_expired":false}"#;
 
     #[test]
     fn an_indexer_answer_becomes_an_unproven_resolution() {
@@ -195,6 +221,10 @@ mod tests {
         assert_eq!(answer.name, "ayaz.bud");
         assert_eq!(answer.owner, [1u8; 32]);
         assert_eq!(answer.content_id, Some(ContentId([2u8; 32])));
+        assert_eq!(
+            answer.content_binding.map(hex::encode).as_deref(),
+            Some("1f64b4ce979f1864d4ab5d6784d32094a6085e6adef0fcd5410fc0261516560c")
+        );
         assert!(!answer.is_expired);
         assert_eq!(proof, BnsInclusionProof::None);
     }

@@ -52,7 +52,7 @@ use budlum_core::web_gateway::policy::{
     IMMUTABLE_CACHE, RESOLUTION_CACHE,
 };
 use budlum_core::web_gateway::resolve::{
-    content_ref_of, resolve_verified, route_of, CacheMiss, ContentCache, ContentSource,
+    resolve_verified, route_of, served_content_of, CacheMiss, ContentCache, ContentSource,
     GatewayError, NameProof, NameProver, StateRoots,
 };
 use hyper::body::Bytes;
@@ -220,7 +220,13 @@ fn decode_proof_result(result: &serde_json::Value) -> Result<NameProof, String> 
                 .get("expires_at")
                 .and_then(serde_json::Value::as_u64)
                 .ok_or("branch.expires_at")?,
-            content_id: optional_hex32(value, "content_id")?.map(budlum_core::storage::ContentId),
+            content: match value.get("content") {
+                Some(v) if !v.is_null() => Some(
+                    budlum_core::bns::types::content_ref_from_json(v)
+                        .map_err(|e| format!("branch.content: {e}"))?,
+                ),
+                _ => None,
+            },
             storage_root: optional_hex32(value, "storage_root")?,
             extras_digest: hex32_field(value, "extras_digest")?,
             leaf: hex32_field(value, "leaf")?,
@@ -335,40 +341,9 @@ fn decode_extras(
         storage_root_height: value
             .get("storage_root_height")
             .and_then(serde_json::Value::as_u64),
-        // The RPC encodes this reference as {kind, digest, len,
-        // object_commitment, nft_id}, not a serde ContentRef. Dropping a
-        // non-null value here changes the committed extras and would make
-        // every real B.U.D. 3.0 site fail proof verification.
-        bud3_content: match value.get("bud3_content") {
-            Some(v) if !v.is_null() => Some(decode_bud3_ref(v)?),
-            _ => None,
-        },
         subdomains,
         records,
     })
-}
-
-fn decode_bud3_ref(
-    value: &serde_json::Value,
-) -> Result<budlum_core::storage::bud3::content_ref::ContentRef, String> {
-    use budlum_core::storage::bud3::content_id::{ContentId, ContentIdKind};
-    let kind = match value.get("kind").and_then(serde_json::Value::as_str) {
-        Some("public") => ContentIdKind::Public,
-        Some("sealed") => ContentIdKind::Sealed,
-        _ => return Err("extras.bud3_content.kind is missing or invalid".into()),
-    };
-    let content_id = ContentId {
-        kind,
-        digest: hex32_field(value, "digest")?,
-        len: value
-            .get("len")
-            .and_then(serde_json::Value::as_u64)
-            .ok_or("extras.bud3_content.len is missing or invalid")?,
-    };
-    let commitment = hex32_field(value, "object_commitment")?;
-    let nft_id = optional_hex32(value, "nft_id")?;
-    budlum_core::storage::bud3::content_ref::ContentRef::new(content_id, commitment, nft_id)
-        .map_err(|e| format!("invalid extras.bud3_content: {e:?}"))
 }
 
 fn hex32(raw: &str) -> Result<[u8; 32], String> {
@@ -680,7 +655,8 @@ fn resolve_name(
         }
     }
     let proved = resolve_verified(&state.provers, state.roots.as_ref(), target)?;
-    let content = content_ref_of(&proved.branch).ok_or(GatewayError::NoContent)?;
+    let content =
+        served_content_of(&proved.branch, target.sub.as_deref()).ok_or(GatewayError::NoContent)?;
     let resolved = CachedResolution {
         content,
         height: proved.height,
@@ -874,7 +850,13 @@ mod tests {
                 "owner": format!("0x{}", "33".repeat(32)),
                 "address": format!("0x{}", "44".repeat(32)),
                 "expires_at": 200,
-                "content_id": null,
+                "content": {
+                    "kind": "public",
+                    "digest": format!("0x{}", "88".repeat(32)),
+                    "len": 42,
+                    "object_commitment": format!("0x{}", "99".repeat(32)),
+                    "nft_id": format!("0x{}", "aa".repeat(32))
+                },
                 "storage_root": null,
                 "extras_digest": format!("0x{}", "55".repeat(32)),
                 "leaf": format!("0x{}", "66".repeat(32)),
@@ -887,13 +869,6 @@ mod tests {
                     "consensus_domain_id": null,
                     "storage_domain_id": null,
                     "storage_root_height": null,
-                    "bud3_content": {
-                        "kind": "public",
-                        "digest": format!("0x{}", "88".repeat(32)),
-                        "len": 42,
-                        "object_commitment": format!("0x{}", "99".repeat(32)),
-                        "nft_id": format!("0x{}", "aa".repeat(32))
-                    },
                     "subdomains": {"shop": {
                         "owner": format!("0x{}", "77".repeat(32)),
                         "address": format!("0x{}", "77".repeat(32)),
@@ -916,7 +891,7 @@ mod tests {
             extras.records.get("addr.eth").map(String::as_str),
             Some("0xabc")
         );
-        let bud3 = extras.bud3_content.expect("RPC B.U.D. 3.0 reference");
+        let bud3 = entry.content.expect("RPC content reference");
         assert_eq!(
             bud3.content_id.kind,
             budlum_core::storage::bud3::content_id::ContentIdKind::Public
@@ -937,13 +912,13 @@ mod tests {
             "nft_id": null
         });
         ref_json["len"] = serde_json::json!("42");
-        assert!(decode_bud3_ref(&ref_json).is_err());
+        assert!(budlum_core::bns::types::content_ref_from_json(&ref_json).is_err());
         ref_json["len"] = serde_json::json!(42);
         ref_json["object_commitment"] = serde_json::json!(format!("0x{}", "00".repeat(32)));
-        assert!(decode_bud3_ref(&ref_json).is_err());
+        assert!(budlum_core::bns::types::content_ref_from_json(&ref_json).is_err());
         ref_json["object_commitment"] = serde_json::json!(format!("0x{}", "99".repeat(32)));
         ref_json["kind"] = serde_json::json!("unknown");
-        assert!(decode_bud3_ref(&ref_json).is_err());
+        assert!(budlum_core::bns::types::content_ref_from_json(&ref_json).is_err());
     }
 
     #[test]

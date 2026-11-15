@@ -262,9 +262,8 @@ pub fn resolve_verified<P: NameProver, R: StateRoots + ?Sized>(
             .extras
             .as_ref()
             .ok_or_else(|| GatewayError::ProofFailed("branch carries no extras".into()))?;
-        // The gateway serves the name's manifest for a subdomain that is
-        // proven to exist. A subdomain record can name content of its own;
-        // serving that is not wired here yet.
+        // A subdomain that is not proven to exist is a 404. What a proven
+        // one serves is read by `served_content_of`.
         if !extras.subdomains.contains_key(sub) {
             return Err(GatewayError::NoSuchSubdomain(sub.clone()));
         }
@@ -275,16 +274,38 @@ pub fn resolve_verified<P: NameProver, R: StateRoots + ?Sized>(
     })
 }
 
-/// The proved B.U.D. 3.0 `ContentRef` a name record points at.
+/// The proved content reference a name record points at.
 ///
-/// The legacy `content_id` and `storage_root` fields are unrelated to the
-/// B.U.D. 3.0 identifier and object commitment. `set_bud3_content` writes
-/// only `bud3_content`; requiring those legacy fields would make a valid,
-/// independently verified B.U.D. 3.0 site look empty. A public gateway
-/// serves only public content and validates the complete reference again.
+/// The leaf commits to `content`, so a branch that folded to a verified
+/// header root has already bound it. `storage_root` is a separate field and
+/// is not a site. A public gateway serves only public content and validates
+/// the complete reference again.
 #[must_use]
-pub fn content_ref_of(branch: &BnsMerkleBranch) -> Option<ContentRef> {
-    let content = branch.extras.as_ref()?.bud3_content?;
+fn content_ref_of(branch: &BnsMerkleBranch) -> Option<ContentRef> {
+    public_only(branch.content?)
+}
+
+/// The proved content reference of the subdomain `label` of the name the
+/// branch proves. `None` when the branch ships no extras, the label does
+/// not exist, or the subdomain has no public content of its own. A
+/// subdomain never falls back to the content of its parent: the two have
+/// different owners.
+#[must_use]
+fn subdomain_content_ref_of(branch: &BnsMerkleBranch, label: &str) -> Option<ContentRef> {
+    public_only(branch.extras.as_ref()?.subdomains.get(label)?.content?)
+}
+
+/// What the gateway serves for a request: the content of the subdomain when
+/// one was asked for, the content of the name otherwise.
+#[must_use]
+pub fn served_content_of(branch: &BnsMerkleBranch, sub: Option<&str>) -> Option<ContentRef> {
+    match sub {
+        Some(label) => subdomain_content_ref_of(branch, label),
+        None => content_ref_of(branch),
+    }
+}
+
+fn public_only(content: ContentRef) -> Option<ContentRef> {
     if content.content_id.kind != crate::storage::bud3::content_id::ContentIdKind::Public {
         return None;
     }
@@ -454,14 +475,12 @@ mod tests {
         reg.register("ayaz.bud".to_string(), owner, 10, 100)
             .unwrap();
         if let Some((content_id, object_commitment)) = content {
-            let bud3_content = ContentRef::new(content_id, object_commitment, None)
+            let content = ContentRef::new(content_id, object_commitment, None)
                 .expect("non-zero B.U.D. 3.0 reference");
-            // B.U.D. 3.0 registration writes this field, not the unrelated
-            // legacy `content_id` and `storage_root` fields.
             reg.names
                 .get_mut("ayaz.bud")
                 .expect("registered above")
-                .bud3_content = Some(bud3_content);
+                .content = Some(content);
         }
         reg
     }
@@ -720,6 +739,76 @@ mod tests {
         );
     }
 
+    /// A subdomain serves its own content and nothing else. The parent and
+    /// the subdomain have different owners, so neither stands in for the
+    /// other.
+    #[test]
+    fn a_subdomain_serves_its_own_content_and_never_the_parent() {
+        let parent_site = ContentId {
+            kind: ContentIdKind::Public,
+            digest: [0x22; 32],
+            len: 4,
+        };
+        let mut reg = registry_with(Some((parent_site, [0x33; 32])));
+        let owner = Address::from([0x11; 32]);
+        let sub_owner = Address::from([0x12; 32]);
+        reg.register_subdomain("ayaz.bud", "shop".to_string(), sub_owner, &owner, 50)
+            .unwrap();
+
+        let branch_of = |reg: &BnsRegistry| {
+            let proof = reg.prove_name("ayaz.bud", 60);
+            BnsRegistry::verify_state_proof(&proof, &reg.root(), 60)
+                .unwrap()
+                .unwrap()
+                .clone()
+        };
+
+        // The subdomain has no content yet: the parent site is not served.
+        let branch = branch_of(&reg);
+        assert!(served_content_of(&branch, None).is_some());
+        assert_eq!(served_content_of(&branch, Some("shop")), None);
+        assert_eq!(served_content_of(&branch, Some("blog")), None);
+
+        // With content of its own the subdomain serves exactly that.
+        let shop_site = ContentRef::new(
+            ContentId {
+                kind: ContentIdKind::Public,
+                digest: [0x55; 32],
+                len: 9,
+            },
+            [0x66; 32],
+            None,
+        )
+        .unwrap();
+        reg.names
+            .get_mut("ayaz.bud")
+            .and_then(|record| record.subdomains.get_mut("shop"))
+            .expect("registered above")
+            .content = Some(shop_site);
+        let branch = branch_of(&reg);
+        assert_eq!(served_content_of(&branch, Some("shop")), Some(shop_site));
+        assert_eq!(
+            served_content_of(&branch, None).map(|c| c.object_commitment),
+            Some([0x33; 32])
+        );
+
+        // Sealed content is not served by a public gateway.
+        let sealed = ContentRef {
+            content_id: ContentId {
+                kind: ContentIdKind::Sealed,
+                ..shop_site.content_id
+            },
+            nft_id: Some([0x77; 32]),
+            ..shop_site
+        };
+        reg.names
+            .get_mut("ayaz.bud")
+            .and_then(|record| record.subdomains.get_mut("shop"))
+            .expect("registered above")
+            .content = Some(sealed);
+        assert_eq!(served_content_of(&branch_of(&reg), Some("shop")), None);
+    }
+
     #[test]
     fn only_a_proven_public_bud3_reference_resolves_even_without_legacy_fields() {
         let mut reg = registry_with(None);
@@ -729,15 +818,8 @@ mod tests {
             .unwrap();
         assert_eq!(content_ref_of(branch), None);
 
-        // Legacy fields alone cannot manufacture a B.U.D. 3.0 reference.
+        // A storage root alone is not a site.
         let owner = Address::from([0x11; 32]);
-        reg.set_content(
-            "ayaz.bud",
-            &owner,
-            crate::storage::content_id::ContentId::of(b"legacy content"),
-            101,
-        )
-        .unwrap();
         reg.set_storage("ayaz.bud", owner, [0x44; 32], 0, 101)
             .unwrap();
         let proof = reg.prove_name("ayaz.bud", 100);
@@ -746,8 +828,8 @@ mod tests {
             .unwrap();
         assert_eq!(content_ref_of(branch), None);
 
-        // A B.U.D. 3.0-only record is a complete site reference, without
-        // populating either legacy field (as the production setter does).
+        // A record with content is a complete site reference, with no
+        // storage root.
         let reg = registry_with(Some((
             ContentId {
                 kind: ContentIdKind::Public,
@@ -760,7 +842,6 @@ mod tests {
         let branch = BnsRegistry::verify_state_proof(&proof, &reg.root(), 100)
             .unwrap()
             .unwrap();
-        assert_eq!(branch.content_id, None);
         assert_eq!(branch.storage_root, None);
         let content = content_ref_of(branch).expect("authenticated B.U.D. 3.0 reference");
         assert_eq!(content.content_id.digest, [0x22; 32]);
