@@ -4333,6 +4333,19 @@ impl BudlumApiServer for RpcServer {
                 None::<()>,
             ));
         }
+        // Pollen sells the right to read; a name that points at content it
+        // protects answers its reference and never its bytes.
+        let mut pollen_protected = false;
+        let resolved = self.chain.bns_resolve_full(name.clone()).await;
+        for cid in resolved
+            .as_ref()
+            .map(crate::storage::content_gateway::pollen_guard_ids)
+            .unwrap_or_default()
+        {
+            if self.chain.pollen_asset_for_content(cid).await.is_some() {
+                pollen_protected = true;
+            }
+        }
         // The chain actor reads the record and runs it through the
         // B.U.D. 3.0 view. `bytes` is null when this node cannot rebuild the
         // object from the symbols it can reach; `view_error` says why.
@@ -4340,6 +4353,10 @@ impl BudlumApiServer for RpcServer {
             None => serde_json::Value::Null,
             Some((content, viewed)) => {
                 let (bytes, view_error) = match viewed {
+                    _ if pollen_protected => (
+                        None,
+                        Some("content is Pollen-protected; an AccessGrant is required".to_string()),
+                    ),
                     Ok(bytes) => (Some(format!("0x{}", hex::encode(bytes))), None),
                     Err(reason) => (None, Some(reason)),
                 };
