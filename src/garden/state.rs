@@ -563,7 +563,13 @@ impl GardenState {
                 }
                 let share = limits.max_published_bytes_per_validator;
                 let used = self.published.get(&sender).copied().unwrap_or(0);
-                let after = used.saturating_add(u64::from(*size).max(MIN_PUBLICATION_CHARGE));
+                // The declared size is not a proof of the stored object's size.
+                // Reserve a whole object slot so even an understated publication
+                // cannot pin more bytes than its author's lifetime share.
+                let charge = u64::from(limits.max_object_bytes).max(MIN_PUBLICATION_CHARGE);
+                let after = used
+                    .checked_add(charge)
+                    .ok_or("publication share accounting overflow")?;
                 if after > share {
                     return Err(format!(
                         "this validator used {used} of its share of {share} bytes; \
@@ -1205,13 +1211,13 @@ mod tests {
         // The share is per validator: the next one still publishes.
         let other = post(&net, &b, fits + 1);
         net.commit(vec![other]).unwrap();
-        // A small publication counts as the record the chain keeps for it.
+        // Even a small declared publication reserves a full object slot.
         let before = net.ledger.state.published[&b];
         let small = net.publish(&b, 9);
         net.commit(vec![small]).unwrap();
         assert_eq!(
             net.ledger.state.published[&b],
-            before + MIN_PUBLICATION_CHARGE
+            before + u64::from(size).max(MIN_PUBLICATION_CHARGE)
         );
 
         let mut bad = limits;
@@ -1222,6 +1228,48 @@ mod tests {
         let mut other_share = genesis.clone();
         other_share.limits.max_published_bytes_per_validator += 1;
         assert_ne!(genesis.hash(), other_share.hash());
+    }
+
+    /// Strix PR #164: a declared size is not authenticated storage usage.
+    #[test]
+    fn garden_understated_publication_cannot_bypass_disk_share() {
+        for declared_size in [1, 4095, 4096] {
+            let mut net = Net::new();
+            let object_bytes = net.ledger.state.genesis.limits.max_object_bytes;
+            let charge = u64::from(object_bytes).max(MIN_PUBLICATION_CHARGE);
+            net.ledger
+                .state
+                .genesis
+                .limits
+                .max_published_bytes_per_validator = charge;
+            net.ledger.state.last_hash = net.ledger.state.genesis.hash();
+            let author = net.join("author");
+            let post = |net: &Net, id| {
+                net.tx(
+                    &author,
+                    GardenTxKind::Publish {
+                        kind: GardenContentKind::Message,
+                        content_id: [id; 32],
+                        size: declared_size,
+                        mime: "text/plain".into(),
+                        caption: String::new(),
+                    },
+                )
+            };
+            let first = post(&net, 1);
+            net.commit(vec![first]).unwrap();
+            assert_eq!(net.ledger.state.published[&author], charge);
+            let before = net.ledger.state.clone();
+            let excess = post(&net, 2);
+            assert!(net
+                .ledger
+                .state
+                .check_tx(&excess)
+                .unwrap_err()
+                .contains("share"));
+            assert!(net.commit(vec![excess]).unwrap_err().contains("share"));
+            assert_eq!(net.ledger.state, before);
+        }
     }
 
     /// The reports of `leader` about `targets`, as a proposer writes them.
@@ -1528,7 +1576,7 @@ mod tests {
         let mut charged: BTreeMap<GardenKey, u64> = BTreeMap::new();
         for object in state.objects.values() {
             *charged.entry(object.author).or_insert(0) +=
-                u64::from(object.size).max(MIN_PUBLICATION_CHARGE);
+                u64::from(state.genesis.limits.max_object_bytes).max(MIN_PUBLICATION_CHARGE);
         }
         ensure(
             charged == state.published,
@@ -1557,7 +1605,8 @@ mod tests {
             use proptest::prelude::*;
             let mut net = Net::new();
             net.ledger.state.genesis.limits.max_published_bytes_per_validator =
-                3 * MIN_PUBLICATION_CHARGE;
+                3 * u64::from(net.ledger.state.genesis.limits.max_object_bytes)
+                    .max(MIN_PUBLICATION_CHARGE);
             let origin = net.ledger.clone();
             let mut last: Option<SignedGardenTx> = None;
             for step in steps {
