@@ -21,6 +21,7 @@ use budlum_core::core::address::Address;
 use budlum_core::core::transaction::{Transaction, TransactionType};
 use budlum_core::crypto::primitives::KeyPair;
 use budlum_core::project_manifest::{ProjectManifest, ProofFixtureStatus};
+use budlum_core::wallet::bind_signing_chain_id as chain_id_binding;
 use clap::{Parser, Subcommand};
 use std::io::{Read, Write};
 use std::net::TcpStream;
@@ -219,6 +220,38 @@ enum Command {
     Project {
         #[command(subcommand)]
         action: ProjectAction,
+    },
+    /// Print the namespaced id a domain operator registers a bridge asset
+    /// under.
+    BridgeAssetId {
+        /// The declaring domain.
+        #[arg(long, required = true)]
+        domain: u32,
+        /// The asset's identifier inside that domain (hex).
+        #[arg(long, required = true)]
+        local_asset: String,
+    },
+    /// Print the digest a storage operator signs to accept a deal, after
+    /// measuring the shard bytes it will be challenged for.
+    DealConsentDigest {
+        /// The chain the deal opens on.
+        #[arg(long, required = true)]
+        chain_id: u64,
+        /// The account that pays for the deal (hex).
+        #[arg(long, required = true)]
+        payer: String,
+        /// The payer's account nonce the deal transaction will carry.
+        #[arg(long, required = true)]
+        nonce: u64,
+        /// JSON file holding the deal body.
+        #[arg(long, required = true)]
+        deal: std::path::PathBuf,
+        /// JSON file holding the content manifest the deal names.
+        #[arg(long, required = true)]
+        manifest: std::path::PathBuf,
+        /// File holding the exact shard bytes.
+        #[arg(long, required = true)]
+        shard: std::path::PathBuf,
     },
     /// Print and check one epoch's 40 / 50 / 10 security-pool split.
     RewardPool {
@@ -1200,20 +1233,6 @@ fn set_signing_chain_id(value: Option<u64>) {
     if let Some(value) = value {
         let _ = SIGNING_CHAIN_ID.set(value);
     }
-}
-
-/// Whether the node's answer is the chain the operator named.
-///
-/// Split out so it can be tested without a node: the whole point is that this
-/// comparison, and not the node's answer, decides the replay domain.
-fn chain_id_binding(node_chain_id: u64, requested: u64) -> Result<u64, String> {
-    if node_chain_id != requested {
-        return Err(format!(
-            "the node serves chain id {node_chain_id}, but --signing-chain-id {requested} was \
-             given; refusing to sign for a network you did not name"
-        ));
-    }
-    Ok(requested)
 }
 
 /// The node's `bud_chainId`, taken only if it is the chain `--signing-chain-id`
@@ -3611,6 +3630,37 @@ fn run_node_identity(
 /// Network Security Pool split. The command names and checks the three
 /// interfaces the storage-fee path reads, so a split that stops conserving
 /// the budget is refused here rather than discovered in a payout.
+fn run_bridge_asset_id(domain: u32, local_asset: &str) -> Result<(), String> {
+    let local = hex_bytes(local_asset, "--local-asset")?;
+    let id = budlum_core::cross_domain::AssetId::for_domain(domain, &local);
+    println!("bridge asset id: 0x{}", hex::encode(id.0));
+    Ok(())
+}
+
+fn run_deal_consent_digest(
+    chain_id: u64,
+    payer: &str,
+    nonce: u64,
+    deal: &std::path::Path,
+    manifest: &std::path::Path,
+    shard: &std::path::Path,
+) -> Result<(), String> {
+    let read = |path: &std::path::Path| {
+        std::fs::read(path).map_err(|e| format!("cannot read {}: {e}", path.display()))
+    };
+    let payer = parse_address(payer.strip_prefix("0x").unwrap_or(payer))?;
+    let digest = budlum_core::domain::operator_open_deal_consent_digest(
+        chain_id,
+        &payer,
+        nonce,
+        &read(deal)?,
+        &read(manifest)?,
+        &read(shard)?,
+    )?;
+    println!("deal consent digest: 0x{}", hex::encode(digest));
+    Ok(())
+}
+
 fn run_reward_pool(epoch: u64) -> Result<(), String> {
     use budlum_core::tokenomics::reward_pool::{
         split_epoch_budget, storage_share, storage_share_for, RewardPoolSchedule, RewardPoolSplit,
@@ -3963,6 +4013,18 @@ fn main() {
                 proof_hash,
             } => run_project_bind_proof(name, source_hash, fixture, proof_hash),
         },
+        Command::BridgeAssetId {
+            domain,
+            local_asset,
+        } => run_bridge_asset_id(*domain, local_asset),
+        Command::DealConsentDigest {
+            chain_id,
+            payer,
+            nonce,
+            deal,
+            manifest,
+            shard,
+        } => run_deal_consent_digest(*chain_id, payer, *nonce, deal, manifest, shard),
         Command::RewardPool { epoch } => run_reward_pool(*epoch),
     };
     if let Err(e) = result {

@@ -56,7 +56,11 @@ pub const MAX_APP_BINDING_OPEN_INTENTS: usize = 10_000;
 pub const MAX_BINDING_INTENTS_PER_SENDER: usize = 16;
 /// Bids one intent may hold.
 pub const MAX_APP_BINDING_BIDS_PER_INTENT: usize = 16;
-/// Claim messages remembered for replay protection.
+/// Legacy claim messages retained from the pre-watermark replay registry.
+///
+/// New claims do not add rows: each application now carries a constant-size
+/// freshness watermark. The bound remains public so migration and regression
+/// tests can reproduce a chain whose old set had reached its ceiling.
 pub const MAX_APP_BINDING_USED_MESSAGES: usize = 100_000;
 /// The farthest deadline an intent may name, in blocks from now.
 pub const MAX_APP_BINDING_INTENT_HORIZON_BLOCKS: u64 = 100_000;
@@ -72,6 +76,20 @@ pub enum AppBindingStatus {
     Retired,
 }
 
+/// Position of the newest anchored ownership claim accepted for an
+/// application. Domain event positions are totally ordered within one domain;
+/// accepting only a later position makes every older event a replay without a
+/// global, attacker-fillable message-id set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct AppBindingClaimCursor {
+    pub source_height: u64,
+    pub event_index: u32,
+}
+
+const fn u64_is_zero(value: &u64) -> bool {
+    *value == 0
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AppBindingApp {
     pub app_binding_id: [u8; 32],
@@ -84,6 +102,18 @@ pub struct AppBindingApp {
     pub mirror_account: Address,
     pub status: AppBindingStatus,
     pub registered_at_block: u64,
+    /// Latest deadline accepted from this application's own EOA key. A new
+    /// signature must increase it, so one application consumes one scalar no
+    /// matter how often it rotates its owner.
+    ///
+    /// The field is omitted while zero: pre-watermark rows therefore keep
+    /// their exact bincode commitment as well as their JSON shape.
+    #[serde(default, skip_serializing_if = "u64_is_zero")]
+    pub claim_expiry: u64,
+    /// Newest anchored claim event. `None` is omitted for the same
+    /// commitment-preserving migration rule as `claim_expiry`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anchored_claim_cursor: Option<AppBindingClaimCursor>,
 }
 
 impl AppBindingApp {
@@ -295,7 +325,9 @@ pub struct AppBindingRegistry {
     pub intent_count: u64,
     /// The `app_binding` executor of each domain, set by the domain's operator.
     pub executors: BTreeMap<u32, Vec<u8>>,
-    /// Claim message ids already used: an anchored claim works once.
+    /// Replay ids written before per-application claim watermarks. Read during
+    /// migration so an old proof remains spent; never appended to by new
+    /// claims, so reaching the legacy ceiling cannot freeze another app.
     pub used_messages: BTreeSet<[u8; 32]>,
 }
 
@@ -657,6 +689,8 @@ impl AppBindingRegistry {
                 mirror_account: mirror_account(id),
                 status: AppBindingStatus::Active,
                 registered_at_block: block,
+                claim_expiry: 0,
+                anchored_claim_cursor: None,
             },
         );
         Ok(true)
@@ -722,38 +756,29 @@ fn refused(reason: impl Into<String>) -> SettlementTxError {
     SettlementTxError::Refused(reason.into())
 }
 
-/// Record `payout` as the owner of `app` (each proof works once, keyed by
-/// `proof_id`) and move what accrued in the mirror account to it.
+/// Record `payout` as the owner of `app` and move what accrued in the mirror
+/// account to it. Replay/freshness is checked by the claim variant before this
+/// state transition: signature and anchored claims have different monotonic
+/// watermarks, and neither needs an unbounded global set.
 fn apply_claim(
     state: &mut AccountState,
     app: &AppBindingApp,
     app_binding_id: &[u8; 32],
     payout: Address,
-    proof_id: [u8; 32],
 ) -> Result<(), SettlementTxError> {
-    // Preflight all fallible balance arithmetic before changing the owner or
-    // consuming a one-use proof. Otherwise a payout overflow leaves the claim
-    // recorded even though the transaction was refused (G-4).
+    // Everything that accrued while nobody owned the application moves to
+    // its owner now. Prove the credit fits before changing either account or
+    // the owner row, so a direct caller also gets an atomic refusal.
     let swept = state.get_balance(&app.mirror_account);
-    if swept > 0 && payout != app.mirror_account {
+    if swept > 0 {
         state
             .get_balance(&payout)
             .checked_add(swept)
-            .ok_or_else(|| refused("app-binding payout would overflow"))?;
+            .ok_or_else(|| refused("AppBinding payout would overflow"))?;
     }
-    let registry = &mut state.settlement.app_binding;
-    if registry.used_messages.contains(&proof_id) {
-        return Err(refused("AppBinding claim proof has already been used"));
-    }
-    if registry.used_messages.len() >= MAX_APP_BINDING_USED_MESSAGES {
-        return Err(refused("AppBinding claim replay set is full"));
-    }
-    registry.used_messages.insert(proof_id);
-    if let Some(row) = registry.apps.get_mut(app_binding_id) {
+    if let Some(row) = state.settlement.app_binding.apps.get_mut(app_binding_id) {
         row.owner = payout;
     }
-    // Everything that accrued while nobody owned the application moves to
-    // its owner now.
     if swept > 0 {
         let mirror = state.get_or_create(&app.mirror_account);
         mirror.balance = 0;
@@ -925,7 +950,37 @@ pub fn execute_app_binding_tx(
                 ));
             }
             let message_id = message.message_id;
-            apply_claim(state, &app, app_binding_id, *payout, message_id)
+            let cursor = AppBindingClaimCursor {
+                source_height: message.source_height,
+                event_index: message.event_index,
+            };
+            // Migration bridge: old message ids remain authoritative forever,
+            // including after the first watermark-era claim. Looking up a
+            // bounded legacy row cannot recreate the old capacity DoS; writing
+            // new rows was the unbounded operation. Checking only while the
+            // cursor was `None` would let an old, later-positioned proof replay
+            // after one lower fresh event initialized the cursor.
+            if state
+                .settlement
+                .app_binding
+                .used_messages
+                .contains(&message_id)
+            {
+                return Err(refused("AppBinding claim proof has already been used"));
+            }
+            if app
+                .anchored_claim_cursor
+                .is_some_and(|previous| cursor <= previous)
+            {
+                return Err(refused(
+                    "the AppBinding claim event is not newer than the last accepted event",
+                ));
+            }
+            apply_claim(state, &app, app_binding_id, *payout)?;
+            if let Some(row) = state.settlement.app_binding.apps.get_mut(app_binding_id) {
+                row.anchored_claim_cursor = Some(cursor);
+            }
+            Ok(())
         }
         AppBindingTx::ClaimBySignature {
             app_binding_id,
@@ -963,6 +1018,11 @@ pub fn execute_app_binding_tx(
             {
                 return Err(refused("the remote app binding's domain is not Active"));
             }
+            if *valid_until_block <= app.claim_expiry {
+                return Err(refused(
+                    "the AppBinding claim signature is not newer than the last accepted signature",
+                ));
+            }
             let eoa: [u8; 20] = app
                 .origin_app
                 .as_slice()
@@ -974,6 +1034,12 @@ pub fn execute_app_binding_tx(
                 *payout,
                 *valid_until_block,
             ));
+            // Legacy digests stay spent even after a watermark-era signature
+            // initializes `claim_expiry`; otherwise a consumed signature with
+            // a later deadline could replay immediately afterwards.
+            if state.settlement.app_binding.used_messages.contains(&digest) {
+                return Err(refused("AppBinding claim proof has already been used"));
+            }
             let signer = crate::crypto::secp256k1_recover::recover_address(&digest, signature)
                 .map_err(|e| refused(e.to_string()))?;
             if signer != eoa {
@@ -981,7 +1047,11 @@ pub fn execute_app_binding_tx(
                     "the AppBinding claim signature is not the application's key",
                 ));
             }
-            apply_claim(state, &app, app_binding_id, *payout, digest)
+            apply_claim(state, &app, app_binding_id, *payout)?;
+            if let Some(row) = state.settlement.app_binding.apps.get_mut(app_binding_id) {
+                row.claim_expiry = *valid_until_block;
+            }
+            Ok(())
         }
         AppBindingTx::Pay {
             app_binding_id,
@@ -1594,19 +1664,21 @@ mod tests {
         Box::new(result)
     }
 
-    fn message(
+    fn message_at(
         sender: Address,
         recipient: Address,
         payload_hash: [u8; 32],
         kind: &[u8],
         correlation: [u8; 32],
+        source_height: u64,
+        event_index: u32,
     ) -> CrossDomainMessage {
         CrossDomainMessage::new_correlated(
             CrossDomainMessageParams {
                 source_domain: DOMAIN,
                 target_domain: 1,
-                source_height: 3,
-                event_index: 0,
+                source_height,
+                event_index,
                 nonce: 0,
                 sender,
                 recipient,
@@ -1616,6 +1688,16 @@ mod tests {
             },
             correlation,
         )
+    }
+
+    fn message(
+        sender: Address,
+        recipient: Address,
+        payload_hash: [u8; 32],
+        kind: &[u8],
+        correlation: [u8; 32],
+    ) -> CrossDomainMessage {
+        message_at(sender, recipient, payload_hash, kind, correlation, 3, 0)
     }
 
     #[test]
@@ -1747,7 +1829,7 @@ mod tests {
     }
 
     #[test]
-    fn rejected_binding_claim_does_not_consume_proof_or_change_owner() {
+    fn rejected_binding_claim_does_not_change_owner_or_balances() {
         let mut state = state_with_domain(Address::from([0x01; 32]));
         let origin = vec![0xAB; 20];
         let id = calc_binding_id(DOMAIN, &origin);
@@ -1758,18 +1840,12 @@ mod tests {
             .unwrap();
         let app = state.settlement.app_binding.get(&id).unwrap().clone();
         let payout = Address::from([0x77; 32]);
-        let proof_id = [0x92; 32];
         state.add_balance(&app.mirror_account, 1);
         state.add_balance(&payout, u64::MAX);
         let before = state.settlement.app_binding.root();
 
-        assert!(apply_claim(&mut state, &app, &id, payout, proof_id).is_err());
+        assert!(apply_claim(&mut state, &app, &id, payout).is_err());
         assert_eq!(state.settlement.app_binding.root(), before);
-        assert!(!state
-            .settlement
-            .app_binding
-            .used_messages
-            .contains(&proof_id));
         assert_eq!(
             state.settlement.app_binding.get(&id).unwrap().owner,
             Address::zero()
@@ -1842,12 +1918,64 @@ mod tests {
             id,
         );
         let evidence = anchored(&mut state, genuine);
-        execute_app_binding_tx(&mut state, &ctx(user), &claim(evidence.clone())).unwrap();
+        for nonce in 0..MAX_APP_BINDING_USED_MESSAGES as u64 {
+            let mut legacy_id = [0u8; 32];
+            legacy_id[..8].copy_from_slice(&nonce.to_le_bytes());
+            state.settlement.app_binding.used_messages.insert(legacy_id);
+        }
+        let legacy_rows = state.settlement.app_binding.used_messages.len();
+        execute_app_binding_tx(&mut state, &ctx(user), &claim(evidence.clone()))
+            .expect("a full legacy replay set cannot block a fresh anchored claim");
+        assert_eq!(
+            state.settlement.app_binding.used_messages.len(),
+            legacy_rows,
+            "anchored freshness is constant-size on the application row"
+        );
         assert_eq!(state.settlement.app_binding.get(&id).unwrap().owner, payout);
         assert_eq!(state.get_balance(&payout), 300);
         assert_eq!(state.get_balance(&mirror_account(id)), 0);
         // The same event works once.
         assert!(execute_app_binding_tx(&mut state, &ctx(user), &claim(evidence)).is_err());
+
+        // A pre-watermark proof stays spent even when its event position is
+        // later than the first fresh claim. Checking the old set only while
+        // the cursor was absent would accept this replay after cursor (3, 0)
+        // had been initialized above.
+        let replayed_payout = Address::from([0x44; 32]);
+        let legacy_replay = message_at(
+            origin_emitter(&origin),
+            replayed_payout,
+            claim_payload_hash(id, replayed_payout),
+            APP_BINDING_CLAIM_KIND,
+            id,
+            4,
+            0,
+        );
+        let legacy_replay_id = legacy_replay.message_id;
+        let legacy_replay_evidence = anchored(&mut state, legacy_replay);
+        assert!(state
+            .settlement
+            .app_binding
+            .used_messages
+            .pop_first()
+            .is_some());
+        state
+            .settlement
+            .app_binding
+            .used_messages
+            .insert(legacy_replay_id);
+        assert_eq!(
+            state.settlement.app_binding.used_messages.len(),
+            legacy_rows
+        );
+        let replay = AppBindingTx::Claim {
+            app_binding_id: id,
+            payout: replayed_payout,
+            evidence: legacy_replay_evidence,
+        };
+        assert!(execute_app_binding_tx(&mut state, &ctx(user), &replay).is_err());
+        assert_eq!(state.settlement.app_binding.get(&id).unwrap().owner, payout);
+
         // Later payments go straight to the owner.
         execute_app_binding_tx(&mut state, &ctx(user), &pay).unwrap();
         assert_eq!(state.get_balance(&payout), 600);
@@ -2268,6 +2396,63 @@ mod tests {
         );
     }
 
+    /// Adding the two replay watermarks is a consensus-state migration, not a
+    /// reason to rewrite every existing AppBinding commitment. Default fields are
+    /// omitted, so a pre-watermark application has the exact bincode bytes it
+    /// had before this release; JSON snapshots without the fields restore both
+    /// defaults explicitly.
+    #[test]
+    fn pre_watermark_app_binding_rows_keep_their_commitment_and_restore_defaults() {
+        #[derive(Serialize)]
+        struct LegacyAppBindingApp {
+            app_binding_id: [u8; 32],
+            owner: Address,
+            domain_key: u32,
+            origin_app: Vec<u8>,
+            manifest_hash: [u8; 32],
+            mirror_account: Address,
+            status: AppBindingStatus,
+            registered_at_block: u64,
+        }
+
+        let id = app_binding_id(DOMAIN, &[0xAB; 20]);
+        let current = AppBindingApp {
+            app_binding_id: id,
+            owner: Address::from([0x22; 32]),
+            domain_key: DOMAIN,
+            origin_app: vec![0xAB; 20],
+            manifest_hash: [0x33; 32],
+            mirror_account: mirror_account(id),
+            status: AppBindingStatus::Active,
+            registered_at_block: 7,
+            claim_expiry: 0,
+            anchored_claim_cursor: None,
+        };
+        let legacy = LegacyAppBindingApp {
+            app_binding_id: current.app_binding_id,
+            owner: current.owner,
+            domain_key: current.domain_key,
+            origin_app: current.origin_app.clone(),
+            manifest_hash: current.manifest_hash,
+            mirror_account: current.mirror_account,
+            status: current.status,
+            registered_at_block: current.registered_at_block,
+        };
+        assert_eq!(
+            bincode::serialize(&current).unwrap(),
+            bincode::serialize(&legacy).unwrap(),
+            "an untouched row must keep the pre-migration state commitment"
+        );
+
+        let mut json = serde_json::to_value(&current).unwrap();
+        let object = json.as_object_mut().unwrap();
+        assert!(!object.contains_key("claim_expiry"));
+        assert!(!object.contains_key("anchored_claim_cursor"));
+        let restored: AppBindingApp = serde_json::from_value(json).unwrap();
+        assert_eq!(restored.claim_expiry, 0);
+        assert_eq!(restored.anchored_claim_cursor, None);
+    }
+
     /// An externally owned application claims with its own key. The
     /// signature was made with Foundry's `cast wallet sign` over
     /// `eoa_claim_hash(45262, app_id, [0x33; 32], 100)` by the key of
@@ -2306,7 +2491,44 @@ mod tests {
             valid_until_block: 100,
             signature: hex::decode(SIGNATURE).unwrap(),
         };
-        run_binding_tx(&mut state, &ctx(registrant), &claim).expect("the key claims");
+        let legacy_digest = crate::crypto::secp256k1_recover::eip191_digest(&eoa_claim_hash(
+            crate::core::transaction::DEFAULT_CHAIN_ID,
+            id,
+            Address::from([0x33; 32]),
+            100,
+        ));
+        state
+            .settlement
+            .app_binding
+            .used_messages
+            .insert(legacy_digest);
+        assert!(
+            execute_app_binding_tx(&mut state, &ctx(registrant), &claim).is_err(),
+            "a signature consumed before migration must remain consumed"
+        );
+        state
+            .settlement
+            .app_binding
+            .used_messages
+            .remove(&legacy_digest);
+
+        // A signature claim is freshness-bound by its own deadline. It must
+        // not depend on the global anchored-evidence replay set, because one
+        // application can otherwise fill that set and stop every other
+        // application's first claim or later owner rotation.
+        for nonce in 0..MAX_APP_BINDING_USED_MESSAGES as u64 {
+            let mut proof_id = [0u8; 32];
+            proof_id[..8].copy_from_slice(&nonce.to_le_bytes());
+            state.settlement.app_binding.used_messages.insert(proof_id);
+        }
+        let replay_rows = state.settlement.app_binding.used_messages.len();
+        execute_app_binding_tx(&mut state, &ctx(registrant), &claim)
+            .expect("a full anchored replay set cannot block a signature claim");
+        assert_eq!(
+            state.settlement.app_binding.used_messages.len(),
+            replay_rows,
+            "signature claims must not consume anchored replay rows"
+        );
         assert_eq!(
             state.settlement.app_binding.get(&id).unwrap().owner,
             Address::from([0x33; 32])

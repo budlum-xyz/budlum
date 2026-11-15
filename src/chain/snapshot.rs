@@ -605,7 +605,14 @@ pub const MIN_SUPPORTED_STATE_SNAPSHOT_SCHEMA_VERSION: u32 = 2;
 /// next epoch boundary. At 11 and below the field cannot affect the digest,
 /// and a snapshot without it restores the network profile's answer - what the
 /// chain did before the flag existed.
-pub const CURRENT_STATE_SNAPSHOT_SCHEMA_VERSION: u32 = 14;
+///
+/// Schema 15 adds the per-application claim freshness watermarks. Their
+/// zero/`None` defaults are omitted from bincode commitments, so an older
+/// snapshot remains byte-exact and migrates without rewriting its state root.
+/// Once a claim writes either watermark, the snapshot must identify itself as
+/// schema 15: an older binary must skip it as future state rather than ignore
+/// the fields and restore replayable ownership claims.
+pub const CURRENT_STATE_SNAPSHOT_SCHEMA_VERSION: u32 = 15;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StateSnapshotV2MigrationReport {
@@ -1281,8 +1288,31 @@ impl StateSnapshotV2 {
         self.bud3_registry.is_some()
     }
 
+    /// Fields introduced by a schema must not be smuggled into an older
+    /// version whose readers are allowed to ignore them. Older rows
+    /// legitimately restore zero/`None`; any written watermark requires the
+    /// schema-15 gate that makes older binaries skip the snapshot.
+    fn fields_match_schema(&self) -> bool {
+        if self.schema_version < 15 {
+            let carries_app_binding_watermark =
+                self.settlement.as_ref().is_some_and(|settlement| {
+                    settlement
+                        .app_binding
+                        .apps
+                        .values()
+                        .any(|app| app.claim_expiry != 0 || app.anchored_claim_cursor.is_some())
+                });
+            if carries_app_binding_watermark {
+                return false;
+            }
+        }
+        true
+    }
+
     pub fn verify(&self) -> bool {
-        self.bud3_payload_is_bound() && self.snapshot_hash == self.calculate_hash()
+        self.bud3_payload_is_bound()
+            && self.fields_match_schema()
+            && self.snapshot_hash == self.calculate_hash()
     }
 
     /// C4: manifest authenticity verification (`RFC_GAP1` section 7.1, Task-1).
@@ -1407,7 +1437,9 @@ impl StateSnapshotV2 {
                 ),
             );
         } else {
-            notes.push("snapshot already at current schema-5".to_string());
+            notes.push(format!(
+                "snapshot already at current schema-{CURRENT_STATE_SNAPSHOT_SCHEMA_VERSION}"
+            ));
         }
 
         Ok(StateSnapshotV2MigrationReport {
@@ -1730,6 +1762,78 @@ mod tests {
         let path2 = std::path::Path::new("snapshot_9.json");
         assert_eq!(get_snapshot_height(path1).unwrap(), 100);
         assert_eq!(get_snapshot_height(path2).unwrap(), 9);
+    }
+
+    #[test]
+    fn app_binding_watermarks_require_snapshot_schema_fifteen() {
+        let mut account_state = AccountState::new();
+        let id = crate::settlement::app_binding::app_binding_id(7, b"legacy-app");
+        account_state.settlement.app_binding.apps.insert(
+            id,
+            crate::settlement::app_binding::AppBindingApp {
+                app_binding_id: id,
+                owner: Address::zero(),
+                domain_key: 7,
+                origin_app: b"legacy-app".to_vec(),
+                manifest_hash: [3u8; 32],
+                mirror_account: crate::settlement::app_binding::mirror_account(id),
+                status: crate::settlement::app_binding::AppBindingStatus::Active,
+                registered_at_block: 1,
+                claim_expiry: 0,
+                anchored_claim_cursor: None,
+            },
+        );
+        let mut snapshot = StateSnapshotV2::from_state(
+            &account_state,
+            StateSnapshotV2Params {
+                height: 7,
+                block_hash: "block".into(),
+                genesis_hash: "genesis".into(),
+                chain_id: 45_262,
+                finalized_height: 0,
+                finalized_hash: "genesis".into(),
+                finality_certificates: vec![],
+            },
+        );
+        snapshot.schema_version = 14;
+        snapshot.reseal_after_manual_edit();
+        assert!(
+            snapshot.verify(),
+            "default watermarks preserve a schema-14 snapshot commitment"
+        );
+
+        snapshot
+            .settlement
+            .as_mut()
+            .unwrap()
+            .app_binding
+            .apps
+            .get_mut(&id)
+            .unwrap()
+            .claim_expiry = 99;
+        snapshot.reseal_after_manual_edit();
+        assert!(
+            !snapshot.verify(),
+            "a written watermark must not hide behind schema 14"
+        );
+        snapshot.schema_version = 15;
+        snapshot.reseal_after_manual_edit();
+        assert!(snapshot.verify());
+
+        let restored = StateSnapshotV2::from_bytes(&snapshot.to_bytes()).unwrap();
+        assert_eq!(
+            restored
+                .settlement
+                .as_ref()
+                .unwrap()
+                .app_binding
+                .apps
+                .get(&id)
+                .unwrap()
+                .claim_expiry,
+            99
+        );
+        assert!(restored.verify());
     }
 
     #[test]
@@ -2207,7 +2311,10 @@ mod tests {
     #[test]
     fn bud3_schema14_digest_binds_registry_and_refuses_legacy_unbound_state() {
         let mut snapshot = StateSnapshotV2::from_state(&AccountState::new(), legacy_params(1));
-        assert_eq!(snapshot.schema_version, 14);
+        assert_eq!(
+            snapshot.schema_version,
+            CURRENT_STATE_SNAPSHOT_SCHEMA_VERSION
+        );
         assert!(snapshot.verify());
         let old_hash = snapshot.snapshot_hash.clone();
         snapshot
@@ -2248,7 +2355,10 @@ mod tests {
         assert!(legacy.verify());
         let migrated = StateSnapshotV2::from_bytes(&legacy.to_bytes())
             .expect("historical empty registry carries no unauthenticated B.U.D. data");
-        assert_eq!(migrated.schema_version, 14);
+        assert_eq!(
+            migrated.schema_version,
+            CURRENT_STATE_SNAPSHOT_SCHEMA_VERSION
+        );
         assert!(migrated.verify());
     }
 
