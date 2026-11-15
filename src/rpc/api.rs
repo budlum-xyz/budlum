@@ -1323,6 +1323,16 @@ pub trait BudlumApi {
         options: Option<crate::garden::GardenOptions>,
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
+    /// Answer a key that waits to join this node's Garden: `accept` seats
+    /// it, otherwise it is turned away. Only the host of a Garden founded
+    /// with `"admission": "host_approval"` has anybody to answer.
+    #[method(name = "bud_gardenAdmit")]
+    async fn garden_admit(
+        &self,
+        key: String,
+        accept: bool,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
     /// Leave this node's Garden and wipe its data from this node.
     #[method(name = "bud_gardenLeave")]
     async fn garden_leave(&self) -> Result<serde_json::Value, ErrorObjectOwned>;

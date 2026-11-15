@@ -6649,6 +6649,18 @@ impl BudlumApiServer for RpcServer {
             .map_err(Self::garden_refusal)
     }
 
+    async fn garden_admit(
+        &self,
+        key: String,
+        accept: bool,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        self.require_operator("bud_gardenAdmit")?;
+        self.garden
+            .admit(key, accept)
+            .await
+            .map_err(Self::garden_refusal)
+    }
+
     async fn garden_leave(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
         self.require_operator("bud_gardenLeave")?;
         self.garden.leave().await.map_err(Self::garden_refusal)

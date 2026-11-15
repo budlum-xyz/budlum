@@ -4,11 +4,11 @@
 //! functions here read no clock and no local file: a block is valid or not
 //! from the previous state and the block alone.
 
-use super::net::validator_dial_address;
+use super::net::{member_dial_address, validator_dial_address};
 use super::settlement::authority_set_hash;
 use super::types::{
-    is_safe_label, join_message, status_code, verify_garden_execution_chain, GardenBlock,
-    GardenCommit, GardenContentKind, GardenGenesis, GardenHeader, GardenKey, GardenTx,
+    is_safe_label, join_message, status_code, verify_garden_execution_chain, GardenAdmission,
+    GardenBlock, GardenCommit, GardenContentKind, GardenGenesis, GardenHeader, GardenKey, GardenTx,
     GardenTxKind, GardenValidator, GardenValidatorStatus, GardenVote, SignedGardenTx,
     MAX_ADDRESS_BYTES, MAX_CAPTION_BYTES, MAX_MIME_BYTES, MAX_NAME_BYTES, MIN_PUBLICATION_CHARGE,
 };
@@ -160,6 +160,81 @@ impl GardenState {
         let mut ids: Vec<Hash32> = self.objects.keys().map(|(id, _)| *id).collect();
         ids.dedup();
         ids
+    }
+
+    /// The keys that asked to join and wait for the host.
+    pub fn waiting(&self) -> usize {
+        self.validators
+            .values()
+            .filter(|v| v.status == GardenValidatorStatus::Waiting)
+            .count()
+    }
+
+    /// The seats taken: every recorded key but the ones that wait. A key
+    /// that left keeps its seat, because it may return and because what it
+    /// published still counts against the disk of every holder.
+    fn seats(&self) -> usize {
+        self.validators.len().saturating_sub(self.waiting())
+    }
+
+    /// The key whose seat a newcomer takes when every seat is taken: one
+    /// that left and never published. It holds nothing the Garden keeps, so
+    /// removing its record costs it one thing: it returns with the invite
+    /// like a new key, not with `Resume`. The host is never chosen, and
+    /// every node picks the same key: the earliest to have joined.
+    fn vacant_seat(&self) -> Option<GardenKey> {
+        let host = self.host();
+        self.validators
+            .values()
+            .filter(|v| {
+                v.status == GardenValidatorStatus::Left
+                    && v.key != host
+                    && self.published.get(&v.key).copied().unwrap_or(0) == 0
+            })
+            .min_by_key(|v| (v.joined_height, v.key))
+            .map(|v| v.key)
+    }
+
+    /// True when one more key can take a seat.
+    pub fn has_room(&self) -> bool {
+        self.seats() < self.genesis.limits.max_validators as usize || self.vacant_seat().is_some()
+    }
+
+    /// Take one seat, freeing a vacant one when all are taken.
+    fn take_seat(&mut self) -> Result<(), String> {
+        let most = self.genesis.limits.max_validators;
+        if self.seats() < most as usize {
+            return Ok(());
+        }
+        match self.vacant_seat() {
+            Some(key) => {
+                self.validators.remove(&key);
+                Ok(())
+            }
+            None => Err(format!("garden is full: at most {most} validators")),
+        }
+    }
+
+    /// Carry out the host's answer to a key that waits. The one refusal, a
+    /// Garden with no seat left, comes before anything is changed.
+    fn answer_waiting(
+        &mut self,
+        target: &GardenKey,
+        accept: bool,
+        height: u64,
+    ) -> Result<(), String> {
+        if accept {
+            self.take_seat()?;
+            if let Some(v) = self.validators.get_mut(target) {
+                v.status = GardenValidatorStatus::Active;
+                v.joined_height = height;
+            }
+            return Ok(());
+        }
+        // The nonce of the key stays, so the request it signed cannot be
+        // replayed; it may ask again with a new one.
+        self.validators.remove(target);
+        Ok(())
     }
 
     pub fn is_active(&self, key: &GardenKey) -> bool {
@@ -359,6 +434,18 @@ impl GardenState {
         (txs, dead)
     }
 
+    /// Check the address `sender` announces. Every other validator dials it.
+    fn check_announced(&self, address: &str, sender: &GardenKey) -> Result<(), String> {
+        let checked = if *sender == self.host() {
+            validator_dial_address(address, sender)
+        } else {
+            member_dial_address(address, sender)
+        };
+        checked
+            .map(|_| ())
+            .map_err(|e| format!("validator address is refused: {e}"))
+    }
+
     /// Cheap field and shape checks on one transaction before any hashing or
     /// signature check runs. Both pending-pool admission and block execution
     /// call this, so a transaction that can never enter a block is refused
@@ -389,21 +476,19 @@ impl GardenState {
                     return Err("validator address is too long".into());
                 }
                 if !address.is_empty() {
-                    validator_dial_address(address, sender)
-                        .map_err(|e| format!("validator address is refused: {e}"))?;
+                    self.check_announced(address, sender)?;
                 }
                 if invite_signature.len() != SIGNATURE_BYTES {
                     return Err("join request is not signed by the invite".into());
                 }
             }
-            GardenTxKind::Leave | GardenTxKind::Suspend { .. } => {}
+            GardenTxKind::Leave | GardenTxKind::Suspend { .. } | GardenTxKind::Admit { .. } => {}
             GardenTxKind::Resume { address } => {
                 if address.len() > MAX_ADDRESS_BYTES {
                     return Err("validator address is too long".into());
                 }
                 if !address.is_empty() {
-                    validator_dial_address(address, sender)
-                        .map_err(|e| format!("validator address is refused: {e}"))?;
+                    self.check_announced(address, sender)?;
                 }
             }
             GardenTxKind::Publish {
@@ -473,14 +558,11 @@ impl GardenState {
                 if self.status != DomainStatus::Active {
                     return Err("garden is not running; nobody can join now".into());
                 }
+                if sender_status == Some(GardenValidatorStatus::Waiting) {
+                    return Err("this key already asked to join; the host has not answered".into());
+                }
                 if sender_status.is_some() {
                     return Err("this key already joined; use resume to return".into());
-                }
-                if self.validators.len() >= limits.max_validators as usize {
-                    return Err(format!(
-                        "garden is full: at most {} validators",
-                        limits.max_validators
-                    ));
                 }
                 verify_signature(
                     &join_message(self.chain_id(), &sender),
@@ -488,16 +570,51 @@ impl GardenState {
                     &self.genesis.invite_key,
                 )
                 .map_err(|_| "join request is not signed by the invite".to_string())?;
+                // The invite is a secret every member holds and can pass on.
+                // Under direct admission holding it is enough. Under host
+                // approval it only lets a key ask: the key waits without a
+                // seat, a vote or a share until the host answers.
+                let status = match limits.admission {
+                    GardenAdmission::Direct => {
+                        self.take_seat()?;
+                        GardenValidatorStatus::Active
+                    }
+                    GardenAdmission::HostApproval => {
+                        if self.waiting() >= limits.max_validators as usize {
+                            return Err(format!(
+                                "garden has {} requests waiting for the host; ask again later",
+                                limits.max_validators
+                            ));
+                        }
+                        GardenValidatorStatus::Waiting
+                    }
+                };
                 self.validators.insert(
                     sender,
                     GardenValidator {
                         key: sender,
                         name: name.clone(),
                         address: address.clone(),
-                        status: GardenValidatorStatus::Active,
+                        status,
                         joined_height: height,
                     },
                 );
+            }
+            GardenTxKind::Admit { target, accept } => {
+                if self.status != DomainStatus::Active {
+                    return Err("garden is not running; nobody can be admitted now".into());
+                }
+                if sender != host {
+                    return Err("only the host admits a key that waits".into());
+                }
+                let waits = self
+                    .validators
+                    .get(target)
+                    .is_some_and(|v| v.status == GardenValidatorStatus::Waiting);
+                if !waits {
+                    return Err("this key is not waiting to be admitted".into());
+                }
+                self.answer_waiting(target, *accept, height)?;
             }
             GardenTxKind::Leave => {
                 if !matches!(
@@ -717,6 +834,10 @@ impl GardenState {
 
     /// Verify a proposed block against this state and return the state it
     /// leads to. Nothing is changed when the block is refused.
+    ///
+    /// A node runs the two halves apart, with its budget for candidate
+    /// blocks between them, so the two together are what the tests call.
+    #[cfg(test)]
     pub fn verify_block(&self, block: &GardenBlock) -> Result<Self, String> {
         self.check_header(block)?;
         self.run_block(block)
@@ -726,7 +847,7 @@ impl GardenState {
     /// extends this chain, and the leader of its round signed it. Whatever
     /// costs more runs after this, so only the validator that leads a round
     /// can make a node do that work.
-    fn check_header(&self, block: &GardenBlock) -> Result<(), String> {
+    pub fn check_header(&self, block: &GardenBlock) -> Result<(), String> {
         let header = &block.header;
         if header.chain_id != self.chain_id() {
             return Err("block is for another Garden".into());
@@ -762,7 +883,7 @@ impl GardenState {
 
     /// Execute a block whose header passed [`Self::check_header`] and return
     /// the state it leads to.
-    fn run_block(&self, block: &GardenBlock) -> Result<Self, String> {
+    pub fn run_block(&self, block: &GardenBlock) -> Result<Self, String> {
         let header = &block.header;
         let (expected, mut next) = self.build_header(
             &block.txs,
@@ -1752,6 +1873,330 @@ mod tests {
         }
     }
 
+    /// Every validator dials the address one validator announced. A name
+    /// would be looked up by each of them where it stands, so a member
+    /// announces a number. The host may announce a name: it is in the invite.
+    #[test]
+    fn garden_member_does_not_announce_a_name_the_others_would_look_up() {
+        let mut net = Net::new();
+        let kp = KeyPair::generate().unwrap();
+        let key = kp.public_key_bytes();
+        let me_id = super::super::net::peer_id_of(&key).unwrap();
+        let host_id = super::super::net::peer_id_of(&net.host).unwrap();
+        let invite_signature = invite_keypair(&super::super::testkit::TOKEN)
+            .unwrap()
+            .sign(&join_message(net.ledger.state.chain_id(), &key))
+            .to_vec();
+        net.keys.insert(key, kp);
+        for name in ["dns", "dns4", "dns6"] {
+            let join = net.tx(
+                &key,
+                GardenTxKind::Join {
+                    name: "alice".into(),
+                    address: format!("/{name}/intranet.example/tcp/8080/p2p/{me_id}"),
+                    invite_signature: invite_signature.clone(),
+                },
+            );
+            let refusal = net.ledger.state.check_tx(&join).unwrap_err();
+            assert!(refusal.contains("not a name"), "{refusal}");
+            assert!(net.commit(vec![join]).is_err());
+        }
+        let join = net.tx(
+            &key,
+            GardenTxKind::Join {
+                name: "alice".into(),
+                address: format!("/ip4/192.168.1.7/tcp/4001/p2p/{me_id}"),
+                invite_signature,
+            },
+        );
+        net.commit(vec![join]).unwrap();
+        let moved = net.tx(
+            &key,
+            GardenTxKind::Resume {
+                address: format!("/dns4/intranet.example/tcp/8080/p2p/{me_id}"),
+            },
+        );
+        let refusal = net.ledger.state.check_tx(&moved).unwrap_err();
+        assert!(refusal.contains("not a name"), "{refusal}");
+        // The host says where it is by name when it likes.
+        let host = net.host;
+        let host_moved = net.tx(
+            &host,
+            GardenTxKind::Resume {
+                address: format!("/dns4/garden.example/tcp/4001/p2p/{host_id}"),
+            },
+        );
+        net.ledger.state.check_tx(&host_moved).unwrap();
+    }
+
+    /// A Garden in memory founded with the given admission and seat count.
+    fn founded(admission: GardenAdmission, max_validators: u32) -> Net {
+        let mut net = Net::new();
+        let limits = GardenLimits {
+            max_validators,
+            admission,
+            ..GardenLimits::default()
+        };
+        limits.validate().unwrap();
+        net.ledger.state.genesis.limits = limits;
+        net.ledger.state.last_hash = net.ledger.state.genesis.hash();
+        net
+    }
+
+    fn admit(net: &Net, sender: &GardenKey, target: GardenKey, accept: bool) -> SignedGardenTx {
+        net.tx(sender, GardenTxKind::Admit { target, accept })
+    }
+
+    #[test]
+    fn garden_admission_mode_is_part_of_the_genesis() {
+        let direct = founded(GardenAdmission::Direct, 8).ledger.state.genesis;
+        let mut approval = direct.clone();
+        approval.limits.admission = GardenAdmission::HostApproval;
+        assert_ne!(
+            direct.hash(),
+            approval.hash(),
+            "two Gardens that differ in who may enter have one genesis hash"
+        );
+        assert_eq!(
+            GardenAdmission::parse("host_approval"),
+            Ok(GardenAdmission::HostApproval)
+        );
+        assert_eq!(
+            GardenAdmission::parse("direct"),
+            Ok(GardenAdmission::Direct)
+        );
+        assert!(GardenAdmission::parse("open").is_err());
+        assert_eq!(GardenLimits::default().admission, GardenAdmission::Direct);
+    }
+
+    #[test]
+    fn garden_direct_admission_seats_an_invite_holder_at_once() {
+        let mut net = founded(GardenAdmission::Direct, 8);
+        let a = net.join("a");
+        assert!(net.ledger.state.is_active(&a));
+        assert_eq!(net.ledger.state.waiting(), 0);
+        // Nobody waits under direct admission, so the host has no answer to give.
+        let b = KeyPair::generate().unwrap().public_key_bytes();
+        for target in [a, b] {
+            let host = net.host;
+            let refusal = net
+                .ledger
+                .state
+                .check_tx(&admit(&net, &host, target, true))
+                .unwrap_err();
+            assert!(refusal.contains("not waiting"), "{refusal}");
+        }
+    }
+
+    #[test]
+    fn garden_host_approval_keeps_an_invite_holder_waiting_until_the_host_admits() {
+        let mut net = founded(GardenAdmission::HostApproval, 8);
+        let host = net.host;
+        let (member, join) = net.join_tx("member");
+        net.commit(vec![join]).unwrap();
+        net.commit(vec![admit(&net, &host, member, true)]).unwrap();
+        assert!(net.ledger.state.is_active(&member));
+
+        // A key that holds the invite asks, and waits.
+        let (asker, join) = net.join_tx("asker");
+        net.commit(vec![join.clone()]).unwrap();
+        let state = &net.ledger.state;
+        assert_eq!(
+            state.validators[&asker].status,
+            GardenValidatorStatus::Waiting
+        );
+        assert_eq!(state.waiting(), 1);
+        assert!(!state.active().contains(&asker), "a waiting key is active");
+        assert!(
+            !state.electorate(&[]).contains(&asker),
+            "a waiting key has a vote"
+        );
+        for round in 0..8 {
+            assert_ne!(state.leader(round), Some(asker), "a waiting key leads");
+        }
+        // It holds no share, cannot ask twice and cannot return as if it had been in.
+        let refusal = state.check_tx(&net.publish(&asker, 9)).unwrap_err();
+        assert!(refusal.contains("only an active validator"), "{refusal}");
+        let again = net.tx(&asker, join.tx.kind);
+        let refusal = state.check_tx(&again).unwrap_err();
+        assert!(refusal.contains("already asked"), "{refusal}");
+        let resume = net.tx(
+            &asker,
+            GardenTxKind::Resume {
+                address: String::new(),
+            },
+        );
+        assert!(state.check_tx(&resume).is_err(), "a waiting key resumed");
+        assert!(
+            state
+                .check_tx(&net.tx(&asker, GardenTxKind::Leave))
+                .is_err(),
+            "a waiting key left a Garden it never entered"
+        );
+
+        // A member is not the host: holding a seat does not give the answer away.
+        let refusal = state
+            .check_tx(&admit(&net, &member, asker, true))
+            .unwrap_err();
+        assert!(refusal.contains("only the host"), "{refusal}");
+        // Nor does the key that waits admit itself.
+        let refusal = state
+            .check_tx(&admit(&net, &asker, asker, true))
+            .unwrap_err();
+        assert!(refusal.contains("only the host"), "{refusal}");
+
+        net.commit(vec![admit(&net, &host, asker, true)]).unwrap();
+        let state = &net.ledger.state;
+        assert!(state.is_active(&asker));
+        assert_eq!(state.validators[&asker].joined_height, state.height);
+        assert!(state.electorate(&[]).contains(&asker));
+        assert_eq!(state.waiting(), 0);
+        // The answer was given once.
+        let refusal = state
+            .check_tx(&admit(&net, &host, asker, true))
+            .unwrap_err();
+        assert!(refusal.contains("not waiting"), "{refusal}");
+    }
+
+    #[test]
+    fn garden_host_turns_a_waiting_key_away_and_its_request_is_not_replayed() {
+        let mut net = founded(GardenAdmission::HostApproval, 8);
+        let host = net.host;
+        let (asker, join) = net.join_tx("asker");
+        net.commit(vec![join.clone()]).unwrap();
+        net.commit(vec![admit(&net, &host, asker, false)]).unwrap();
+        let state = &net.ledger.state;
+        assert!(
+            !state.validators.contains_key(&asker),
+            "a key the host turned away stays in the identity record"
+        );
+        assert_eq!(state.waiting(), 0);
+        // The request the key signed is spent: nobody puts it back for it.
+        let refusal = state.check_tx(&join).unwrap_err();
+        assert!(refusal.contains("nonce"), "{refusal}");
+        assert!(
+            net.commit(vec![join.clone()]).is_err(),
+            "a block replayed a request the host refused"
+        );
+        // The key itself may ask again, with a request it signs anew.
+        let again = net.tx(&asker, join.tx.kind);
+        net.commit(vec![again]).unwrap();
+        assert_eq!(
+            net.ledger.state.validators[&asker].status,
+            GardenValidatorStatus::Waiting
+        );
+    }
+
+    #[test]
+    fn garden_waiting_requests_are_bounded_and_take_no_seat() {
+        let mut net = founded(GardenAdmission::HostApproval, 2);
+        let host = net.host;
+        let (a, join_a) = net.join_tx("a");
+        let (b, join_b) = net.join_tx("b");
+        net.commit(vec![join_a, join_b]).unwrap();
+        assert_eq!(net.ledger.state.waiting(), 2);
+        assert_eq!(net.ledger.state.seats(), 1, "a waiting key holds a seat");
+        // The list of requests has an end: an invite holder cannot grow the state with keys.
+        let (_, join_c) = net.join_tx("c");
+        let refusal = net.ledger.state.check_tx(&join_c).unwrap_err();
+        assert!(refusal.contains("waiting for the host"), "{refusal}");
+        assert!(net.commit(vec![join_c]).is_err());
+
+        net.commit(vec![admit(&net, &host, a, true)]).unwrap();
+        assert_eq!(net.ledger.state.seats(), 2);
+        // Two seats, two validators: the host cannot admit past the limit it founded with.
+        let refusal = net
+            .ledger
+            .state
+            .check_tx(&admit(&net, &host, b, true))
+            .unwrap_err();
+        assert!(refusal.contains("garden is full"), "{refusal}");
+        net.commit(vec![admit(&net, &host, b, false)]).unwrap();
+        assert_eq!(net.ledger.state.waiting(), 0);
+    }
+
+    #[test]
+    fn garden_admission_needs_a_running_garden() {
+        let mut net = founded(GardenAdmission::HostApproval, 8);
+        let host = net.host;
+        let (member, join) = net.join_tx("member");
+        net.commit(vec![join]).unwrap();
+        net.commit(vec![admit(&net, &host, member, true)]).unwrap();
+        let (asker, join) = net.join_tx("asker");
+        net.commit(vec![join]).unwrap();
+        net.commit(vec![net.tx(&host, GardenTxKind::Leave)])
+            .unwrap();
+        assert_eq!(net.ledger.state.status, DomainStatus::Frozen);
+        let refusal = net
+            .ledger
+            .state
+            .check_tx(&admit(&net, &host, asker, true))
+            .unwrap_err();
+        assert!(refusal.contains("not running"), "{refusal}");
+    }
+
+    #[test]
+    fn garden_seat_of_a_key_that_left_and_published_nothing_goes_to_a_newcomer() {
+        let mut net = founded(GardenAdmission::Direct, 3);
+        let a = net.join("a");
+        let b = net.join("b");
+        let (_, late) = net.join_tx("late");
+        let refusal = net.ledger.state.check_tx(&late).unwrap_err();
+        assert!(refusal.contains("garden is full"), "{refusal}");
+
+        // `a` comes and goes without publishing. Its seat is not spent for good.
+        net.commit(vec![net.tx(&a, GardenTxKind::Leave)]).unwrap();
+        assert_eq!(net.ledger.state.vacant_seat(), Some(a));
+        assert!(net.ledger.state.has_room());
+        let (c, join_c) = net.join_tx("c");
+        net.commit(vec![join_c]).unwrap();
+        let state = &net.ledger.state;
+        assert!(state.is_active(&c));
+        assert!(
+            !state.validators.contains_key(&a),
+            "the key whose seat was taken is still recorded"
+        );
+        assert_eq!(state.seats(), 3);
+        assert!(state.is_active(&b));
+        // `a` held nothing; it comes back the way it first came, when there is room.
+        let resume = net.tx(
+            &a,
+            GardenTxKind::Resume {
+                address: String::new(),
+            },
+        );
+        assert!(state.check_tx(&resume).is_err());
+        assert_eq!(
+            state.next_nonce(&a),
+            2,
+            "the nonce of a removed key was reset"
+        );
+    }
+
+    #[test]
+    fn garden_seat_of_a_key_that_published_is_kept_when_it_leaves() {
+        let mut net = founded(GardenAdmission::Direct, 3);
+        let a = net.join("a");
+        let _b = net.join("b");
+        net.commit(vec![net.publish(&a, 7)]).unwrap();
+        net.commit(vec![net.tx(&a, GardenTxKind::Leave)]).unwrap();
+        // What `a` published still lies on the disks, and the share times the
+        // seats is the most a Garden asks of one disk. So the seat stays taken.
+        assert_eq!(net.ledger.state.vacant_seat(), None);
+        assert!(!net.ledger.state.has_room());
+        let (_, late) = net.join_tx("late");
+        let refusal = net.ledger.state.check_tx(&late).unwrap_err();
+        assert!(refusal.contains("garden is full"), "{refusal}");
+        // The host that left is never the one removed.
+        let mut frozen = founded(GardenAdmission::Direct, 3);
+        let _ = frozen.join("x");
+        frozen
+            .commit(vec![frozen.tx(&frozen.host, GardenTxKind::Leave)])
+            .unwrap();
+        assert_eq!(frozen.ledger.state.status, DomainStatus::Frozen);
+        assert_eq!(frozen.ledger.state.vacant_seat(), None);
+    }
+
     /// One step of a random Garden history. The numbers pick a key among the
     /// keys the history has seen so far, members or not.
     #[derive(Clone, Debug)]
@@ -1762,6 +2207,8 @@ mod tests {
         Publish(u8, u8, u32),
         Suspend(u8),
         Repeat,
+        /// The host answers the picked key; an odd second number admits.
+        Admit(u8, u8),
     }
 
     fn step() -> impl proptest::strategy::Strategy<Value = Step> {
@@ -1773,6 +2220,7 @@ mod tests {
             5 => (any::<u8>(), 0u8..6, 0u32..3 * 4096).prop_map(|(who, id, size)| Step::Publish(who, id, size)),
             2 => any::<u8>().prop_map(Step::Suspend),
             1 => Just(Step::Repeat),
+            3 => (any::<u8>(), any::<u8>()).prop_map(|(who, answer)| Step::Admit(who, answer)),
         ]
     }
 
@@ -1824,6 +2272,27 @@ mod tests {
         ensure(
             state.published.values().all(|used| *used <= share),
             "no validator is past its share",
+        )?;
+        let most = state.genesis.limits.max_validators as usize;
+        ensure(
+            state.seats() <= most,
+            "no more seats are taken than the Garden was founded with",
+        )?;
+        ensure(
+            state.waiting() <= most,
+            "the list of keys that wait for the host has an end",
+        )?;
+        ensure(
+            state.genesis.limits.admission == GardenAdmission::HostApproval || state.waiting() == 0,
+            "nobody waits in a Garden with direct admission",
+        )?;
+        ensure(
+            state
+                .validators
+                .values()
+                .filter(|v| v.status == GardenValidatorStatus::Waiting)
+                .all(|v| !state.published.contains_key(&v.key) && v.key != host),
+            "a key that waits has published nothing and is not the host",
         )
     }
 
@@ -1839,12 +2308,20 @@ mod tests {
         /// finalized blocks arrives at the same state.
         #[test]
         fn garden_random_history_keeps_its_rules_and_replays_to_the_same_state(
-            steps in proptest::collection::vec(step(), 1..40)
+            steps in proptest::collection::vec(step(), 1..40),
+            approval in proptest::bool::ANY,
+            seats in 2u32..6,
         ) {
             use proptest::prelude::*;
             let mut net = Net::new();
             net.ledger.state.genesis.limits.max_published_bytes_per_validator =
                 3 * MIN_PUBLICATION_CHARGE;
+            // Few seats, so a history fills them and the rules about a full
+            // Garden are met; both admission modes, so a history waits too.
+            net.ledger.state.genesis.limits.max_validators = seats;
+            if approval {
+                net.ledger.state.genesis.limits.admission = GardenAdmission::HostApproval;
+            }
             let origin = net.ledger.clone();
             let mut last: Option<SignedGardenTx> = None;
             for step in steps {
@@ -1880,6 +2357,10 @@ mod tests {
                         };
                         tx
                     }
+                    Step::Admit(who, answer) => net.tx(
+                        &before.host(),
+                        GardenTxKind::Admit { target: pick(who), accept: answer % 2 == 1 },
+                    ),
                 };
                 let is_report = matches!(tx.tx.kind, GardenTxKind::Suspend { .. });
                 let admitted = before.check_tx(&tx);
@@ -1897,6 +2378,28 @@ mod tests {
                             "a block took what the transaction check refuses: {:?}",
                             admitted
                         );
+                        // A record leaves the table in two ways only: the
+                        // host turned a waiting key away, or a newcomer took
+                        // the seat of a key that left and published nothing.
+                        for (key, gone) in &before.validators {
+                            if after.validators.contains_key(key) {
+                                continue;
+                            }
+                            let turned_away = gone.status == GardenValidatorStatus::Waiting
+                                && matches!(
+                                    &tx.tx.kind,
+                                    GardenTxKind::Admit { target, accept: false } if target == key
+                                );
+                            let seat_taken = gone.status == GardenValidatorStatus::Left
+                                && !before.published.contains_key(key)
+                                && before.seats() == before.genesis.limits.max_validators as usize;
+                            prop_assert!(
+                                turned_away || seat_taken,
+                                "a record was removed that still held something: {:?}",
+                                gone
+                            );
+                            prop_assert_eq!(after.next_nonce(key), before.next_nonce(key));
+                        }
                         last = Some(tx);
                     }
                     Err(_) => prop_assert_eq!(after, &before, "a refusal changed the state"),
