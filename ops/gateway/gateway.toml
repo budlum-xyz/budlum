@@ -50,3 +50,20 @@ trusted_proxies = ["127.0.0.1"]
 
 # How long a resolved name is cached. A record can move, so this is short.
 resolve_ttl_secs = 10
+
+# Content fetches that miss the cache, per minute, per client address.
+fill_per_minute = 30
+
+# Verified headers. A proof is checked against the registry root and the epoch
+# listed here and against nothing a node answers. With no checkpoint, every
+# name answers 502.
+#
+# [[checkpoints]]
+# height = 0
+# root = "0000000000000000000000000000000000000000000000000000000000000000"
+# epoch = 0
+
+# A file of further `[[checkpoints]]` entries, re-read whenever it changes. The
+# process that follows headers writes it. A file that does not parse leaves
+# its heights unknown.
+# checkpoints_file = "/var/lib/budlum-gateway/checkpoints.toml"
