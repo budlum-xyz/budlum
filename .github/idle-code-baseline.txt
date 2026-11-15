@@ -1101,7 +1101,6 @@ src/bin/budlum-relayer.rs	struct	BudlumBurnEvent
 src/bin/budlum-relayer.rs	struct	BudlumClient
 src/bin/budlum-relayer.rs	struct	EthClient
 src/bin/budlum-relayer.rs	struct	EthDepositEvent
-src/bns/registry.rs	const	MAX_NAMES
 src/bns/registry.rs	const	MAX_SUBDOMAINS_PER_NAME
 src/bns/types.rs	fn	with_address
 src/bns/types.rs	fn	with_storage

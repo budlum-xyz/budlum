@@ -22,8 +22,12 @@ fn bns_grace_period_is_3000() {
 }
 
 #[test]
-fn bns_max_names_is_100k() {
-    assert_eq!(BnsRegistry::MAX_NAMES, 100_000);
+fn bns_max_names_starts_at_the_registry_parameter() {
+    assert_eq!(crate::registry::params::DEFAULT_MAX_NAMES, 1_000_000);
+    assert_eq!(
+        BnsRegistry::default().max_names,
+        crate::registry::params::DEFAULT_MAX_NAMES
+    );
 }
 
 #[test]

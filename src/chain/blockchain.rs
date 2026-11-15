@@ -4342,6 +4342,35 @@ impl Blockchain {
                     Err(_) => reasons.push("invalid_bns_content_data".to_string()),
                 }
             }
+            crate::core::transaction::TransactionType::BnsRegisterSubdomain => {
+                if tx.amount != 0 || tx.to != Address::zero() {
+                    reasons.push("invalid_bns_register_subdomain_shape".to_string());
+                }
+                match bincode::deserialize::<(String, String, Address)>(&tx.data) {
+                    Ok((parent, sub_label, sub_owner)) => {
+                        if !crate::bns::BnsRegistry::is_valid_name(&parent)
+                            || !crate::bns::BnsRegistry::is_valid_sub_label(&sub_label)
+                            || sub_owner == Address::zero()
+                        {
+                            reasons.push("invalid_bns_subdomain".to_string());
+                        }
+                    }
+                    Err(_) => reasons.push("invalid_bns_register_subdomain_data".to_string()),
+                }
+            }
+            crate::core::transaction::TransactionType::BnsSetStorage => {
+                if tx.amount != 0 || tx.to != Address::zero() {
+                    reasons.push("invalid_bns_set_storage_shape".to_string());
+                }
+                match bincode::deserialize::<(String, [u8; 32], u32)>(&tx.data) {
+                    Ok((name, _, _)) => {
+                        if !crate::bns::BnsRegistry::is_valid_name(&name) {
+                            reasons.push("invalid_bns_name".to_string());
+                        }
+                    }
+                    Err(_) => reasons.push("invalid_bns_set_storage_data".to_string()),
+                }
+            }
             crate::core::transaction::TransactionType::RegisterConsensusKeys(ref registration) => {
                 if tx.amount != 0 || tx.to != Address::zero() || !tx.data.is_empty() {
                     reasons.push("invalid_consensus_key_registration_shape".to_string());

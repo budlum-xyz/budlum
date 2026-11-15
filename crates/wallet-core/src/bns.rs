@@ -872,6 +872,51 @@ pub fn verify_bns_proof<S: HeaderSource + ?Sized>(
     })
 }
 
+/// Resolve `name` from the answers of the nodes the wallet is configured
+/// with.
+///
+/// The host sends the `bud_bnsGetProof` body to each of its nodes and hands
+/// every answer in. Each answer is checked with [`verify_bns_proof`] against
+/// the headers the wallet trusts, so a node that lies is refused and cannot
+/// change the result. Among the answers that verify, the one anchored at the
+/// highest header is returned.
+///
+/// # Errors
+///
+/// No answers, or no answer that verifies. The error names the refusal of
+/// each node.
+/// exposed for: the wallet crate's SDK surface - browser and mobile hosts call these directly.
+pub fn resolve_bns<S: HeaderSource + ?Sized>(
+    name: &str,
+    answers: &[String],
+    headers: &S,
+) -> Result<VerifiedBnsName, String> {
+    if answers.is_empty() {
+        return Err("no node answered".into());
+    }
+    let mut best: Option<VerifiedBnsName> = None;
+    let mut refusals = Vec::new();
+    for (node, answer) in answers.iter().enumerate() {
+        match verify_bns_proof(name, answer, headers) {
+            Ok(verified) => {
+                if best
+                    .as_ref()
+                    .is_none_or(|held| verified.height > held.height)
+                {
+                    best = Some(verified);
+                }
+            }
+            Err(reason) => refusals.push(format!("node {node}: {reason}")),
+        }
+    }
+    best.ok_or_else(|| {
+        format!(
+            "no node gave a proof that verifies: {}",
+            refusals.join("; ")
+        )
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1520,5 +1565,41 @@ mod tests {
         let mut unanchored = answer;
         unanchored.as_object_mut().unwrap().remove("height");
         assert!(verify_bns_proof("ayaz.bud", &unanchored.to_string(), &book(root)).is_err());
+    }
+
+    #[test]
+    fn resolve_bns_takes_the_freshest_answer_that_verifies_and_ignores_liars() {
+        let meta = [0x33u8; 32];
+        let root = compute_bns_registry_root(&meta, &[0u8; 32]);
+        let proof_at = |height: u64| {
+            format!(
+                r#"{{"name":"free.bud","included":false,"meta_digest":"0x{}","height":{height},"entry":null,"absence":{{"siblings":[],"occupant":null}}}}"#,
+                hex::encode(meta)
+            )
+        };
+        let mut book = BnsHeaderBook::new();
+        for height in [7, 9] {
+            book.trust(TrustedBnsHeader {
+                height,
+                bns_root: root,
+                epoch: 10,
+            });
+        }
+        let liar = proof_at(9).replace("0x33", "0x34");
+
+        assert!(resolve_bns("free.bud", &[], &book).is_err());
+        let refused = resolve_bns("free.bud", &[liar.clone(), "not json".into()], &book)
+            .expect_err("no honest node answered");
+        assert!(
+            refused.contains("node 0") && refused.contains("node 1"),
+            "{refused}"
+        );
+
+        let resolved = resolve_bns("free.bud", &[liar, proof_at(7), proof_at(9)], &book)
+            .expect("two honest nodes answered");
+        assert_eq!(resolved.height, 9);
+        assert!(resolved.record.is_none());
+        // The answer of a node is never taken for another name.
+        assert!(resolve_bns("other.bud", &[proof_at(9)], &book).is_err());
     }
 }
