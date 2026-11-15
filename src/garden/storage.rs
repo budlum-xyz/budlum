@@ -92,6 +92,20 @@ impl GardenContentStore {
         }
     }
 
+    /// The byte length of a stored object, without reading it.
+    pub fn stored_len(&self, content_id: &Hash32) -> Option<u64> {
+        match self.path_of(content_id) {
+            Some(path) => fs::metadata(path)
+                .ok()
+                .filter(fs::Metadata::is_file)
+                .map(|meta| meta.len()),
+            None => self
+                .memory
+                .get(content_id)
+                .and_then(|bytes| u64::try_from(bytes.len()).ok()),
+        }
+    }
+
     /// Drop one object, when this node no longer holds it.
     pub fn remove(&mut self, content_id: &Hash32) {
         match self.path_of(content_id) {
@@ -130,6 +144,8 @@ mod tests {
         assert_eq!(id, ContentId::of(b"hello garden").0);
         assert_eq!(store.get(&id).unwrap(), b"hello garden");
         assert!(store.contains(&id));
+        assert_eq!(store.stored_len(&id), Some(12));
+        assert_eq!(store.stored_len(&[0u8; 32]), None);
         assert!(store.put(&[0u8; 2048]).is_err());
         assert!(store.put(&[]).is_err());
     }

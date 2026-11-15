@@ -20,6 +20,16 @@ use std::collections::{BTreeMap, BTreeSet};
 /// Byte length of an ed25519 signature.
 const SIGNATURE_BYTES: usize = 64;
 
+/// The most one block may move the chain clock forward: one year.
+/// TESTNET-DEFAULT. This state machine reads no clock, so it cannot tell a
+/// true timestamp from a false one. It can keep one block from using up the
+/// range: a block at the far end would leave no later timestamp, and with it
+/// no later block. The bound is wide, so a Garden that stood frozen for
+/// months still gets the true time on its next block. Whether a timestamp is
+/// true is asked where a clock is at hand: a node does not vote for a block
+/// dated ahead of its own clock.
+const MAX_BLOCK_TIMESTAMP_STEP_MS: u64 = 365 * 24 * 60 * 60 * 1000;
+
 /// Domain tag for the Garden state root.
 const TAG_GARDEN_STATE: &[u8] = b"BDLM_GARDEN_STATE_V1";
 /// Domain tag for the Garden content root.
@@ -136,6 +146,15 @@ impl GardenState {
         self.publications(content_id).next().is_some()
     }
 
+    /// True when a finalized publication of `content_id` declares `len`
+    /// bytes. A publication is charged by the size it declares, and this
+    /// state machine never sees the bytes. So bytes of the declared size are
+    /// the only bytes its author was charged for.
+    pub fn accounts_for(&self, content_id: &Hash32, len: u64) -> bool {
+        self.publications(content_id)
+            .any(|object| u64::from(object.size) == len)
+    }
+
     /// The content ids the Garden holds, each one once.
     pub fn content_ids(&self) -> Vec<Hash32> {
         let mut ids: Vec<Hash32> = self.objects.keys().map(|(id, _)| *id).collect();
@@ -196,8 +215,11 @@ impl GardenState {
         set.into_iter().collect()
     }
 
-    /// The state root. It covers the status and every table.
-    pub fn state_root(&self) -> Hash32 {
+    /// The state root. It covers the status and every table, the
+    /// publication table through `content_root`, the content root of this
+    /// state. A header names both roots, and the table is hashed once for
+    /// the two.
+    fn state_root_over(&self, content_root: &Hash32) -> Hash32 {
         let mut validators = Vec::new();
         for v in self.validators.values() {
             validators.extend_from_slice(&hash_fields_bytes(&[
@@ -221,7 +243,7 @@ impl GardenState {
             &validators,
             &(self.nonces.len() as u64).to_le_bytes(),
             &nonces,
-            &self.content_root(),
+            content_root,
         ])
     }
 
@@ -563,13 +585,15 @@ impl GardenState {
                 }
                 let share = limits.max_published_bytes_per_validator;
                 let used = self.published.get(&sender).copied().unwrap_or(0);
-                // The declared size is not a proof of the stored object's size.
-                // Reserve a whole object slot so even an understated publication
-                // cannot pin more bytes than its author's lifetime share.
-                let charge = u64::from(limits.max_object_bytes).max(MIN_PUBLICATION_CHARGE);
-                let after = used
-                    .checked_add(charge)
-                    .ok_or("publication share accounting overflow")?;
+                // A publication is charged the size it declares. The chain
+                // never sees the bytes, and it does not have to: a node keeps
+                // bytes for a publication only when they have the declared
+                // size (`accounts_for`), so an understated size buys no
+                // storage. Charging a whole object for every publication
+                // would bound the same thing, and leave a validator
+                // `share / max_object_bytes` messages for the life of the
+                // Garden.
+                let after = used.saturating_add(u64::from(*size).max(MIN_PUBLICATION_CHARGE));
                 if after > share {
                     return Err(format!(
                         "this validator used {used} of its share of {share} bytes; \
@@ -606,16 +630,21 @@ impl GardenState {
         timestamp_ms: u64,
     ) -> Result<(GardenHeader, Self), String> {
         let next = self.execute(txs, &proposer)?;
+        let content_root = next.content_root();
         let header = GardenHeader {
             chain_id: self.chain_id(),
             height: self.height.saturating_add(1),
             round,
             parent_hash: self.last_hash,
             proposer,
-            timestamp_ms: timestamp_ms.max(self.last_timestamp_ms.saturating_add(1)),
+            timestamp_ms: timestamp_ms.clamp(
+                self.last_timestamp_ms.saturating_add(1),
+                self.last_timestamp_ms
+                    .saturating_add(MAX_BLOCK_TIMESTAMP_STEP_MS),
+            ),
             tx_root: tx_root(txs),
-            state_root: next.state_root(),
-            content_root: next.content_root(),
+            state_root: next.state_root_over(&content_root),
+            content_root,
             authority_set_hash: authority_set_hash(self.chain_id(), &self.electorate(txs))?,
             next_authority_set_hash: authority_set_hash(self.chain_id(), &next.active())?,
             status_after: next.status,
@@ -658,7 +687,17 @@ impl GardenState {
             // own. Counting it would cap how many validators one block can
             // release, and a block that releases too few never gathers its
             // votes. A block still reports each validator at most once.
-            if !matches!(signed.tx.kind, GardenTxKind::Suspend { .. }) {
+            if let GardenTxKind::Suspend { target } = &signed.tx.kind {
+                // A report says a validator of the last block went silent.
+                // One this block admits or brings back has given no silence
+                // to report, and no voter can have heard it yet, so every
+                // voter would sign the report.
+                if !self.is_active(target) {
+                    return Err(
+                        "an absence report names a validator of this block, not of the last".into(),
+                    );
+                }
+            } else {
                 let count = per_sender.entry(signed.tx.sender).or_insert(0);
                 *count = count.saturating_add(1);
                 if *count > limits.max_sender_txs_per_block {
@@ -679,6 +718,15 @@ impl GardenState {
     /// Verify a proposed block against this state and return the state it
     /// leads to. Nothing is changed when the block is refused.
     pub fn verify_block(&self, block: &GardenBlock) -> Result<Self, String> {
+        self.check_header(block)?;
+        self.run_block(block)
+    }
+
+    /// The part of block verification that costs one signature: the block
+    /// extends this chain, and the leader of its round signed it. Whatever
+    /// costs more runs after this, so only the validator that leads a round
+    /// can make a node do that work.
+    fn check_header(&self, block: &GardenBlock) -> Result<(), String> {
         let header = &block.header;
         if header.chain_id != self.chain_id() {
             return Err("block is for another Garden".into());
@@ -696,11 +744,26 @@ impl GardenState {
         if header.timestamp_ms <= self.last_timestamp_ms {
             return Err("block timestamp does not advance".into());
         }
+        let latest = self
+            .last_timestamp_ms
+            .saturating_add(MAX_BLOCK_TIMESTAMP_STEP_MS);
+        if header.timestamp_ms > latest {
+            return Err(format!(
+                "block timestamp {} is past {latest}, the furthest one block moves the clock",
+                header.timestamp_ms
+            ));
+        }
         if self.leader(header.round) != Some(header.proposer) {
             return Err("block proposer is not the leader of its round".into());
         }
         verify_signature(&header.hash(), &block.proposer_signature, &header.proposer)
-            .map_err(|_| "block proposer signature is invalid".to_string())?;
+            .map_err(|_| "block proposer signature is invalid".to_string())
+    }
+
+    /// Execute a block whose header passed [`Self::check_header`] and return
+    /// the state it leads to.
+    fn run_block(&self, block: &GardenBlock) -> Result<Self, String> {
+        let header = &block.header;
         let (expected, mut next) = self.build_header(
             &block.txs,
             header.proposer,
@@ -720,10 +783,23 @@ impl GardenState {
     /// electorate signed it, and the host is among the signers.
     fn verify_votes(&self, block: &GardenBlock, votes: &[GardenVote]) -> Result<(), String> {
         let electorate: BTreeSet<GardenKey> = self.electorate(&block.txs).into_iter().collect();
+        // A block takes one vote from each validator, so a longer list
+        // decides nothing. The list comes from the wire and every vote costs
+        // a signature check: it is refused before the first one.
+        if votes.len() > electorate.len() {
+            return Err(format!(
+                "commit carries {} votes for an electorate of {}",
+                votes.len(),
+                electorate.len()
+            ));
+        }
         let mut signers = BTreeSet::new();
         for vote in votes {
             if !electorate.contains(&vote.voter) {
                 return Err("vote from outside the electorate".into());
+            }
+            if signers.contains(&vote.voter) {
+                return Err("commit carries more than one vote of a validator".into());
             }
             vote.verify(&block.header)?;
             signers.insert(vote.voter);
@@ -742,10 +818,15 @@ impl GardenState {
     }
 
     /// Verify a finalized block and return the state after it.
+    ///
+    /// The votes are counted before the block is executed. Executing a block
+    /// costs far more than checking its votes, and one validator can write
+    /// a block; the votes of the host and of two thirds are what one
+    /// validator cannot write.
     pub fn apply_commit(&self, commit: &GardenCommit) -> Result<Self, String> {
-        let next = self.verify_block(&commit.block)?;
+        self.check_header(&commit.block)?;
         self.verify_votes(&commit.block, &commit.votes)?;
-        Ok(next)
+        self.run_block(&commit.block)
     }
 }
 
@@ -1211,13 +1292,13 @@ mod tests {
         // The share is per validator: the next one still publishes.
         let other = post(&net, &b, fits + 1);
         net.commit(vec![other]).unwrap();
-        // Even a small declared publication reserves a full object slot.
+        // A small publication counts as the record the chain keeps for it.
         let before = net.ledger.state.published[&b];
         let small = net.publish(&b, 9);
         net.commit(vec![small]).unwrap();
         assert_eq!(
             net.ledger.state.published[&b],
-            before + u64::from(size).max(MIN_PUBLICATION_CHARGE)
+            before + MIN_PUBLICATION_CHARGE
         );
 
         let mut bad = limits;
@@ -1230,46 +1311,24 @@ mod tests {
         assert_ne!(genesis.hash(), other_share.hash());
     }
 
-    /// Strix PR #164: a declared size is not authenticated storage usage.
+    /// A message is charged as a message. With the size of a whole object
+    /// charged for each publication, the share would be used up after
+    /// `share / max_object_bytes` messages, whatever their size.
     #[test]
-    fn garden_understated_publication_cannot_bypass_disk_share() {
-        for declared_size in [1, 4095, 4096] {
-            let mut net = Net::new();
-            let object_bytes = net.ledger.state.genesis.limits.max_object_bytes;
-            let charge = u64::from(object_bytes).max(MIN_PUBLICATION_CHARGE);
-            net.ledger
-                .state
-                .genesis
-                .limits
-                .max_published_bytes_per_validator = charge;
-            net.ledger.state.last_hash = net.ledger.state.genesis.hash();
-            let author = net.join("author");
-            let post = |net: &Net, id| {
-                net.tx(
-                    &author,
-                    GardenTxKind::Publish {
-                        kind: GardenContentKind::Message,
-                        content_id: [id; 32],
-                        size: declared_size,
-                        mime: "text/plain".into(),
-                        caption: String::new(),
-                    },
-                )
-            };
-            let first = post(&net, 1);
-            net.commit(vec![first]).unwrap();
-            assert_eq!(net.ledger.state.published[&author], charge);
-            let before = net.ledger.state.clone();
-            let excess = post(&net, 2);
-            assert!(net
-                .ledger
-                .state
-                .check_tx(&excess)
-                .unwrap_err()
-                .contains("share"));
-            assert!(net.commit(vec![excess]).unwrap_err().contains("share"));
-            assert_eq!(net.ledger.state, before);
+    fn garden_small_publications_are_charged_by_their_size_not_as_whole_objects() {
+        let mut net = Net::new();
+        let host = net.host;
+        let limits = net.ledger.state.genesis.limits.clone();
+        let whole_objects =
+            limits.max_published_bytes_per_validator / u64::from(limits.max_object_bytes);
+        let messages = u8::try_from(whole_objects + 1).unwrap();
+        for id in 1..=messages {
+            net.commit(vec![net.publish(&host, id)]).unwrap();
         }
+        assert_eq!(
+            net.ledger.state.published[&host],
+            u64::from(messages) * MIN_PUBLICATION_CHARGE
+        );
     }
 
     /// The reports of `leader` about `targets`, as a proposer writes them.
@@ -1450,6 +1509,186 @@ mod tests {
     }
 
     #[test]
+    fn garden_block_timestamp_cannot_use_up_the_clock() {
+        let mut net = Net::new();
+        net.join("a");
+        let state = net.ledger.state.clone();
+        let leader = state.leader(0).unwrap();
+        let txs = vec![net.publish(&leader, 1)];
+        let latest = state.last_timestamp_ms + MAX_BLOCK_TIMESTAMP_STEP_MS;
+
+        // A proposer that asks for the far end gets the bound instead.
+        let (header, _) = state.build_header(&txs, leader, 0, u64::MAX).unwrap();
+        assert_eq!(header.timestamp_ms, latest);
+
+        // A header written by hand past the bound is refused. One at the
+        // bound is not.
+        let block_of = |header: GardenHeader| GardenBlock {
+            proposer_signature: net.key(&leader).sign(&header.hash()).to_vec(),
+            header,
+            txs: txs.clone(),
+        };
+        for past in [latest + 1, u64::MAX] {
+            let mut far = header.clone();
+            far.timestamp_ms = past;
+            let refusal = state.verify_block(&block_of(far)).unwrap_err();
+            assert!(refusal.contains("timestamp"), "{refusal}");
+        }
+        let block = block_of(header);
+        let after = state.verify_block(&block).unwrap();
+        assert_eq!(after.last_timestamp_ms, latest);
+
+        // The chain is not at its end after such a block: the next proposer
+        // still finds a timestamp.
+        let votes = net.votes(&block, &state.electorate(&block.txs));
+        net.ledger.append(GardenCommit { block, votes }).unwrap();
+        let next = net.ledger.state.leader(0).unwrap();
+        let more = vec![net.publish(&next, 2)];
+        let (header, _) = net.ledger.state.build_header(&more, next, 0, 0).unwrap();
+        assert_eq!(header.timestamp_ms, latest + 1);
+    }
+
+    /// A report says a validator of the last block went silent. A validator
+    /// the block itself admits or brings back has given no silence to report,
+    /// and no voter heard it yet, so every voter would sign the report.
+    #[test]
+    fn garden_absence_report_cannot_target_a_validator_the_same_block_seats() {
+        let mut net = Net::new();
+        let host = net.host;
+        let (newcomer, join) = net.join_tx("v");
+        let report = reports(&net, &host, &[newcomer]);
+        let refusal = net
+            .block(vec![join.clone(), report[0].clone()])
+            .unwrap_err();
+        assert!(refusal.contains("not of the last"), "{refusal}");
+        // The join alone is still a block, and the report is one after it.
+        net.commit(vec![join]).unwrap();
+        net.join("w");
+        let leader = net.ledger.state.leader(0).unwrap();
+        let target = net
+            .ledger
+            .state
+            .active()
+            .into_iter()
+            .find(|key| *key != host && *key != leader)
+            .unwrap();
+        let report = reports(&net, &leader, &[target]);
+        let block = net.block(report).unwrap();
+        let votes = net.votes(&block, &net.ledger.state.electorate(&block.txs));
+        net.ledger.append(GardenCommit { block, votes }).unwrap();
+        assert!(!net.ledger.state.is_active(&target));
+
+        // The same holds for a validator that returns in the block.
+        let leader = net.ledger.state.leader(0).unwrap();
+        let back = net.tx(
+            &target,
+            GardenTxKind::Resume {
+                address: String::new(),
+            },
+        );
+        let report = reports(&net, &leader, &[target]);
+        let refusal = net
+            .block(vec![back.clone(), report[0].clone()])
+            .unwrap_err();
+        assert!(refusal.contains("not of the last"), "{refusal}");
+        net.commit(vec![back]).unwrap();
+        assert!(net.ledger.state.is_active(&target));
+    }
+
+    /// The vote list of a commit comes from the wire. A block takes one vote
+    /// from each validator, so a longer list or a repeated voter is refused
+    /// before a signature is checked.
+    #[test]
+    fn garden_commit_takes_one_vote_from_each_validator() {
+        let mut net = Net::new();
+        let host = net.host;
+        let guests: Vec<GardenKey> = ["a", "b", "c"].iter().map(|name| net.join(name)).collect();
+        let state = net.ledger.state.clone();
+        let block = net.block(vec![net.publish(&host, 1)]).unwrap();
+        assert_eq!(state.electorate(&block.txs).len(), 4);
+
+        let mut voters = vec![host];
+        voters.extend(&guests);
+        let honest = net.votes(&block, &voters);
+        state
+            .apply_commit(&GardenCommit {
+                block: block.clone(),
+                votes: honest.clone(),
+            })
+            .unwrap();
+
+        // One more vote than there are validators.
+        let mut padded = honest.clone();
+        padded.push(honest[0].clone());
+        let refusal = state
+            .apply_commit(&GardenCommit {
+                block: block.clone(),
+                votes: padded,
+            })
+            .unwrap_err();
+        assert!(
+            refusal.contains("5 votes for an electorate of 4"),
+            "{refusal}"
+        );
+
+        // A list of the right length that counts one validator twice. The
+        // signers are still a quorum, so only the repeat can refuse it.
+        let mut repeated = net.votes(&block, &[host, host, guests[0], guests[1]]);
+        let refusal = state
+            .apply_commit(&GardenCommit {
+                block: block.clone(),
+                votes: repeated.clone(),
+            })
+            .unwrap_err();
+        assert!(refusal.contains("more than one vote"), "{refusal}");
+
+        // The count is taken before any signature: a list that is too long
+        // and carries no valid signature at all is refused for its length.
+        for vote in &mut repeated {
+            vote.signature = vec![0u8; 64];
+        }
+        repeated.push(repeated[0].clone());
+        let refusal = state
+            .apply_commit(&GardenCommit {
+                block,
+                votes: repeated,
+            })
+            .unwrap_err();
+        assert!(refusal.contains("votes for an electorate of"), "{refusal}");
+    }
+
+    /// A commit is executed only after its votes are counted. Executing a
+    /// block is the expensive part, and one validator can write a block: the
+    /// votes of the host and of two thirds are what one validator cannot.
+    #[test]
+    fn garden_commit_without_its_votes_is_refused_before_the_block_is_executed() {
+        let mut net = Net::new();
+        let host = net.host;
+        net.join("a");
+        let state = net.ledger.state.clone();
+        let mut block = net.block(vec![net.publish(&host, 1)]).unwrap();
+        // A block its proposer signed, with a state root no execution gives.
+        block.header.state_root = [9u8; 32];
+        block.proposer_signature = net
+            .key(&block.header.proposer)
+            .sign(&block.header.hash())
+            .to_vec();
+        let refusal = state
+            .apply_commit(&GardenCommit {
+                block: block.clone(),
+                votes: Vec::new(),
+            })
+            .unwrap_err();
+        assert!(refusal.contains("not signed by the host"), "{refusal}");
+        // With the votes it is executed, and refused for what it is.
+        let votes = net.votes(&block, &state.electorate(&block.txs));
+        let refusal = state
+            .apply_commit(&GardenCommit { block, votes })
+            .unwrap_err();
+        assert!(refusal.contains("does not match"), "{refusal}");
+    }
+
+    #[test]
     fn garden_tx_refuses_an_address_that_is_not_a_valid_dial_address() {
         let mut net = Net::new();
         let kp = KeyPair::generate().unwrap();
@@ -1576,7 +1815,7 @@ mod tests {
         let mut charged: BTreeMap<GardenKey, u64> = BTreeMap::new();
         for object in state.objects.values() {
             *charged.entry(object.author).or_insert(0) +=
-                u64::from(state.genesis.limits.max_object_bytes).max(MIN_PUBLICATION_CHARGE);
+                u64::from(object.size).max(MIN_PUBLICATION_CHARGE);
         }
         ensure(
             charged == state.published,
@@ -1605,8 +1844,7 @@ mod tests {
             use proptest::prelude::*;
             let mut net = Net::new();
             net.ledger.state.genesis.limits.max_published_bytes_per_validator =
-                3 * u64::from(net.ledger.state.genesis.limits.max_object_bytes)
-                    .max(MIN_PUBLICATION_CHARGE);
+                3 * MIN_PUBLICATION_CHARGE;
             let origin = net.ledger.clone();
             let mut last: Option<SignedGardenTx> = None;
             for step in steps {
@@ -1672,7 +1910,10 @@ mod tests {
                 prop_assert!(replay.append(commit.clone()).is_ok());
             }
             prop_assert_eq!(&replay.state, &net.ledger.state);
-            prop_assert_eq!(replay.state.state_root(), net.ledger.state.state_root());
+            prop_assert_eq!(
+                replay.state.state_root_over(&replay.state.content_root()),
+                net.ledger.state.state_root_over(&net.ledger.state.content_root())
+            );
         }
     }
 }

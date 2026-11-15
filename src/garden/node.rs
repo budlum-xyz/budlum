@@ -68,6 +68,10 @@ const MAX_GOSSIP_BATCH_BYTES: usize = 4 * 1024 * 1024;
 /// Target byte ceiling for one `GetCommits` response, leaving headroom
 /// below `MAX_RESPONSE_BYTES`.
 const MAX_SYNC_RESPONSE_BYTES: usize = net::MAX_RESPONSE_BYTES - 1024 * 1024;
+/// How far ahead of this node's clock a block may be dated and still get its
+/// vote: two minutes. TESTNET-DEFAULT. It covers the clocks of two phones
+/// that were never set against each other, and no more.
+const MAX_TIMESTAMP_AHEAD_MS: u64 = 120_000;
 /// Most objects kept that no finalized transaction names yet.
 const MAX_UNREFERENCED_OBJECTS: usize = 64;
 /// Most such objects kept for one peer.
@@ -472,6 +476,10 @@ struct Node {
     last_dial: Instant,
     sync_cursor: usize,
     wanted: BTreeSet<Hash32>,
+    /// The true size of published content this node fetched and did not
+    /// keep, because no publication declares that size. It has one entry
+    /// for a finalized publication at most.
+    measured: BTreeMap<Hash32, u64>,
     /// Objects no finalized transaction names yet, by the peer that
     /// deposited them. A peer that deposits too much loses its own.
     unreferenced: BTreeMap<GardenKey, VecDeque<Hash32>>,
@@ -706,6 +714,7 @@ pub async fn spawn(
         last_dial: now,
         sync_cursor: 0,
         wanted: BTreeSet::new(),
+        measured: BTreeMap::new(),
         unreferenced: BTreeMap::new(),
         dials: BTreeMap::new(),
         seed_dials: None,
@@ -1281,13 +1290,22 @@ impl Node {
         })
     }
 
-    /// Track an object no finalized transaction names yet, under the peer
-    /// that deposited it. A peer past its share loses its own oldest
+    /// True when this node holds `content_id` for a finalized publication:
+    /// the bytes it holds have the size a publication declares. Bytes of
+    /// another size were never charged to anybody, whatever names them.
+    fn holds_published(&self, content_id: &Hash32) -> bool {
+        self.store
+            .stored_len(content_id)
+            .is_some_and(|len| self.ledger.state.accounts_for(content_id, len))
+    }
+
+    /// Track an object no finalized publication accounts for yet, under the
+    /// peer that deposited it. A peer past its share loses its own oldest
     /// object. When all peers together hold too many, the peer that holds
     /// most loses one, and a peer that is no active validator goes first:
     /// only a validator can publish.
     fn note_unreferenced(&mut self, sender: GardenKey, content_id: Hash32) {
-        if self.ledger.state.holds_content(&content_id) {
+        if self.holds_published(&content_id) {
             return;
         }
         let queue = self.unreferenced.entry(sender).or_default();
@@ -1313,7 +1331,7 @@ impl Node {
         }
         self.unreferenced.retain(|_, queue| !queue.is_empty());
         for old in dropped {
-            let named = self.ledger.state.holds_content(&old)
+            let named = self.holds_published(&old)
                 || self.is_pending_content(&old)
                 || self.unreferenced.values().any(|queue| queue.contains(&old));
             if !named {
@@ -1414,13 +1432,31 @@ impl Node {
         let valid = bytes.filter(|b| crate::storage::content_id::ContentId::of(b).0 == content_id);
         match valid {
             Some(bytes) => {
-                if let Some(fetch) = self.fetches.remove(&content_id) {
-                    if fetch.keep && self.store.put_verified(&content_id, &bytes).is_ok() {
-                        self.wanted.remove(&content_id);
-                    }
+                let len = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+                let paid = self.ledger.state.accounts_for(&content_id, len);
+                let Some(fetch) = self.fetches.remove(&content_id) else {
+                    return;
+                };
+                if !paid {
+                    // These are the bytes of this id, and no publication
+                    // declares their size. No peer has other bytes for it,
+                    // so the size is noted and the object is not asked for
+                    // again until a publication accounts for it.
+                    self.wanted.remove(&content_id);
+                    self.measured.insert(content_id, len);
                     for waiter in fetch.waiters {
-                        let _ = waiter.send(Ok(bytes.clone()));
+                        let _ = waiter.send(Err(
+                            "this content does not have the size its publication declares".into(),
+                        ));
                     }
+                    return;
+                }
+                self.measured.remove(&content_id);
+                if fetch.keep && self.store.put_verified(&content_id, &bytes).is_ok() {
+                    self.wanted.remove(&content_id);
+                }
+                for waiter in fetch.waiters {
+                    let _ = waiter.send(Ok(bytes.clone()));
                 }
             }
             None if fetch.outstanding == 0 => {
@@ -1721,6 +1757,14 @@ impl Node {
         if !electorate.contains(&self.me) || self.stopped {
             return;
         }
+        // No validator signs a block dated ahead of its own clock. The state
+        // machine reads no clock, so the timestamp is what the leader wrote,
+        // and every later block must be dated after it. The host signs every
+        // block: one leader cannot move the chain to a time nobody reached.
+        // The block is kept, and it gets the vote once the clock is there.
+        if block.header.timestamp_ms > now_ms().saturating_add(MAX_TIMESTAMP_AHEAD_MS) {
+            return;
+        }
         // No validator signs away a validator it still hears. A report is
         // the word of one leader, and the validators a block reports have no
         // vote on it, so every vote that is cast says the same thing as the
@@ -1818,6 +1862,15 @@ impl Node {
 
         for tx in &commit.block.txs {
             if let GardenTxKind::Publish { content_id, .. } = &tx.tx.kind {
+                // A deposit stops being one when a publication accounts for
+                // its bytes. A publication that declares another size was
+                // charged for that size, not for these bytes: they stay a
+                // deposit, and the next deposits of the same peer push them
+                // out. Otherwise the share would bound what a validator
+                // declares, not what it leaves on the disks of the others.
+                if self.store.contains(content_id) && !self.holds_published(content_id) {
+                    continue;
+                }
                 for queue in self.unreferenced.values_mut() {
                     queue.retain(|id| id != content_id);
                 }
@@ -1870,6 +1923,13 @@ impl Node {
     }
 
     fn want_if_holder(&mut self, content_id: Hash32) {
+        let unpaid = self
+            .measured
+            .get(&content_id)
+            .is_some_and(|len| !self.ledger.state.accounts_for(&content_id, *len));
+        if unpaid {
+            return;
+        }
         if self.holders(&content_id).contains(&self.me) && !self.store.contains(&content_id) {
             self.wanted.insert(content_id);
         }
@@ -1969,9 +2029,20 @@ impl Node {
             .any(|(_, tx)| wanted(&tx.tx.kind))
     }
 
+    /// True when the chain holds this node as suspended: the others
+    /// reported it absent, and it never signed a departure.
+    fn reported_absent(&self) -> bool {
+        self.ledger
+            .state
+            .validators
+            .get(&self.me)
+            .is_some_and(|v| v.status == GardenValidatorStatus::Suspended)
+    }
+
     /// Enter or re-enter the identity record when this node is not active.
     async fn ensure_membership(&mut self) {
-        if self.leaving.is_some() {
+        // A retired Garden has no next block to enter with.
+        if self.leaving.is_some() || self.ledger.state.status == DomainStatus::Retired {
             return;
         }
         let recorded = self.ledger.state.validators.get(&self.me);
@@ -2150,9 +2221,17 @@ impl Node {
         for hash in hashes {
             self.consider(hash).await;
         }
-        if self.ledger.state.status == DomainStatus::Retired && self.leaving.is_none() {
+        if self.ledger.state.status == DomainStatus::Retired
+            && self.leaving.is_none()
+            && !self.reported_absent()
+        {
             // The Garden ended while this node was not part of the last
             // block. Nothing is left to follow, so the node wipes and stops.
+            // A node that was reported absent is the exception: it signed
+            // no departure, and a report is the word of the validators that
+            // stayed, in the end of the host alone. Their word does not
+            // clear its disk. It keeps what it holds, readable, until its
+            // own departure.
             let (reply, _) = oneshot::channel();
             self.leaving = Some(Leaving {
                 deadline: Instant::now(),
@@ -2977,71 +3056,174 @@ mod tests {
         join_as_second(invite).await;
     }
 
-    /// A report is the word of one leader. The votes are the word of the
-    /// others, and the validators a block reports have no vote on it. So a
-    /// validator that still hears a reported validator does not sign: with
-    /// its vote the leader would set the quorum of its own block.
-    #[tokio::test]
-    async fn garden_validator_does_not_sign_away_a_validator_it_still_hears() {
-        let mut limits = GardenLimits::testnet_default();
-        limits.round_ms = 200;
-        limits.presence_interval_ms = 100;
-        let handle = spawn(
-            GardenEntry::Create {
-                title: "Room".into(),
-                limits,
-            },
-            config("host", "/ip4/127.0.0.1/tcp/0"),
-            random_bytes(),
-            None,
-        )
-        .await
-        .unwrap();
-        let invite = handle.invite().await.unwrap();
-        // The test holds the key of one validator, so it can speak as a
-        // leader that reports a validator everybody hears.
-        let liar_secret = random_bytes();
-        let liar = KeyPair::from_seed(&liar_secret).unwrap();
-        let mut guests = Vec::new();
-        for (name, secret) in [
-            ("target", random_bytes()),
-            ("witness", random_bytes()),
-            ("liar", liar_secret),
-        ] {
-            let guest = spawn(
-                GardenEntry::Invite(invite.clone()),
-                config(name, "/ip4/127.0.0.1/tcp/0"),
-                secret,
+    /// A Garden of four that the test can lie to. The test holds the key of
+    /// one validator, so it speaks as a leader, and it is a peer of another
+    /// validator, the witness, so it hears what the witness signs.
+    struct LiarRoom {
+        _nodes: Vec<GardenHandle>,
+        swarm: GardenNet,
+        peer: PeerId,
+        ledger: GardenLedger,
+        liar: KeyPair,
+        target: GardenKey,
+        witness: GardenKey,
+        signed_by_witness: Vec<Hash32>,
+    }
+
+    impl LiarRoom {
+        async fn open() -> Self {
+            let mut limits = GardenLimits::testnet_default();
+            limits.round_ms = 200;
+            limits.presence_interval_ms = 100;
+            let handle = spawn(
+                GardenEntry::Create {
+                    title: "Room".into(),
+                    limits,
+                },
+                config("host", "/ip4/127.0.0.1/tcp/0"),
+                random_bytes(),
                 None,
             )
             .await
             .unwrap();
-            guests.push(guest);
-        }
-        tokio::time::timeout(Duration::from_secs(60), async {
-            loop {
-                let mut settled = true;
-                for node in guests.iter().chain([&handle]) {
-                    let status = node.status().await.unwrap();
-                    settled &= status["active_validators"] == 4
-                        && status["pending_transactions"] == 0
-                        && status["connected_peers"].as_u64() >= Some(3);
-                }
-                if settled {
-                    return;
-                }
-                tokio::time::sleep(Duration::from_millis(100)).await;
+            let invite = handle.invite().await.unwrap();
+            let liar_secret = random_bytes();
+            let liar = KeyPair::from_seed(&liar_secret).unwrap();
+            let mut nodes = Vec::new();
+            for (name, secret) in [
+                ("target", random_bytes()),
+                ("witness", random_bytes()),
+                ("liar", liar_secret),
+            ] {
+                let guest = spawn(
+                    GardenEntry::Invite(invite.clone()),
+                    config(name, "/ip4/127.0.0.1/tcp/0"),
+                    secret,
+                    None,
+                )
+                .await
+                .unwrap();
+                nodes.push(guest);
             }
-        })
-        .await
-        .expect("the four validators never settled");
+            nodes.push(handle);
+            tokio::time::timeout(Duration::from_secs(60), async {
+                loop {
+                    let mut settled = true;
+                    for node in &nodes {
+                        let status = node.status().await.unwrap();
+                        settled &= status["active_validators"] == 4
+                            && status["pending_transactions"] == 0
+                            && status["connected_peers"].as_u64() >= Some(3);
+                    }
+                    if settled {
+                        return;
+                    }
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+            })
+            .await
+            .expect("the four validators never settled");
 
-        // A peer of the witness that holds the invite and the chain. What
-        // the witness signs it says to every peer, so it is heard here.
-        let mut to_witness = invite.clone();
-        let address = guests[1].status().await.unwrap()["me"]["address"].clone();
-        to_witness.peers = vec![address.as_str().unwrap().to_string()];
-        let (mut swarm, peer_key, peer) = stranger(&to_witness).await;
+            // A peer of the witness that holds the invite and the chain. What
+            // the witness signs it says to every peer, so it is heard here.
+            let mut to_witness = invite.clone();
+            let address = nodes[1].status().await.unwrap()["me"]["address"].clone();
+            to_witness.peers = vec![address.as_str().unwrap().to_string()];
+            let (swarm, peer, ledger) = peer_with_the_chain(&to_witness).await;
+            let key_of = |name: &str| {
+                let named = ledger.state.validators.values().find(|v| v.name == name);
+                named.unwrap().key
+            };
+            let (target, witness) = (key_of("target"), key_of("witness"));
+            Self {
+                _nodes: nodes,
+                swarm,
+                peer,
+                ledger,
+                liar,
+                target,
+                witness,
+                signed_by_witness: Vec::new(),
+            }
+        }
+
+        /// The first rounds of the next height that the liar leads.
+        fn rounds(&self) -> Vec<u64> {
+            let liar = self.liar.public_key_bytes();
+            (0..64)
+                .filter(|round| self.ledger.state.leader(*round) == Some(liar))
+                .take(2)
+                .collect()
+        }
+
+        /// A block of the liar with one transaction of its own.
+        fn propose(&self, round: u64, kind: GardenTxKind, timestamp_ms: u64) -> GardenBlock {
+            let state = &self.ledger.state;
+            let liar = self.liar.public_key_bytes();
+            let tx = GardenTx {
+                chain_id: state.chain_id(),
+                sender: liar,
+                nonce: state.next_nonce(&liar),
+                kind,
+            }
+            .sign(&self.liar)
+            .unwrap();
+            let txs = vec![tx];
+            let (header, _) = state.build_header(&txs, liar, round, timestamp_ms).unwrap();
+            let proposer_signature = self.liar.sign(&header.hash()).to_vec();
+            GardenBlock {
+                header,
+                txs,
+                proposer_signature,
+            }
+        }
+
+        /// Show `block` to the witness and note what the witness signs in
+        /// the three seconds after it.
+        async fn show(&mut self, block: &GardenBlock) {
+            let gossip = GardenRequest::Gossip(vec![GardenGossip::Proposal(block.clone())]);
+            self.swarm
+                .commands
+                .send(NetCommand::Send {
+                    peer: self.peer,
+                    request: gossip,
+                    tag: 78,
+                })
+                .await
+                .unwrap();
+            let until = tokio::time::Instant::now() + Duration::from_secs(3);
+            while let Ok(Some(event)) =
+                tokio::time::timeout_at(until, self.swarm.events.recv()).await
+            {
+                let NetEvent::Request {
+                    request, channel, ..
+                } = event
+                else {
+                    continue;
+                };
+                if let GardenRequest::Gossip(items) = request {
+                    for item in items {
+                        if let GardenGossip::Vote(vote) = item {
+                            if vote.voter == self.witness {
+                                self.signed_by_witness.push(vote.block_hash);
+                            }
+                        }
+                    }
+                }
+                let response = GardenResponse::Ack;
+                self.swarm
+                    .commands
+                    .send(NetCommand::Respond { channel, response })
+                    .await
+                    .unwrap();
+            }
+        }
+    }
+
+    /// A bare swarm that showed the invite to the first peer of `invite` and
+    /// read its whole chain.
+    async fn peer_with_the_chain(invite: &GardenInvite) -> (GardenNet, PeerId, GardenLedger) {
+        let (mut swarm, peer_key, peer) = stranger(invite).await;
         let me = peer_key.public_key_bytes();
         let hello = GardenRequest::Hello {
             chain_id: invite.chain_id,
@@ -3052,7 +3234,7 @@ mod tests {
                 .to_vec(),
         };
         let GardenResponse::Welcome { genesis, .. } = ask(&mut swarm, peer, hello).await else {
-            panic!("the witness did not welcome a holder of the invite");
+            panic!("the peer did not welcome a holder of the invite");
         };
         let mut ledger = GardenLedger::new(*genesis).unwrap();
         loop {
@@ -3061,7 +3243,7 @@ mod tests {
                 max: MAX_SYNC_COMMITS,
             };
             let GardenResponse::Commits(commits) = ask(&mut swarm, peer, request).await else {
-                panic!("the witness did not serve its chain");
+                panic!("the peer did not serve its chain");
             };
             if commits.is_empty() {
                 break;
@@ -3070,93 +3252,409 @@ mod tests {
                 ledger.append(commit).unwrap();
             }
         }
-        let state = &ledger.state;
-        let key_of = |name: &str| {
-            let named = state.validators.values().find(|v| v.name == name);
-            named.unwrap().key
-        };
-        let (target, witness) = (key_of("target"), key_of("witness"));
-        let liar_key = liar.public_key_bytes();
-        let rounds: Vec<u64> = (0..64)
-            .filter(|round| state.leader(*round) == Some(liar_key))
-            .take(2)
-            .collect();
-        let propose = |round: u64, kind: GardenTxKind| {
-            let tx = GardenTx {
-                chain_id: state.chain_id(),
-                sender: liar_key,
-                nonce: state.next_nonce(&liar_key),
+        (swarm, peer, ledger)
+    }
+
+    fn message(id: u8) -> GardenTxKind {
+        GardenTxKind::Publish {
+            kind: GardenContentKind::Message,
+            content_id: [id; 32],
+            size: 5,
+            mime: "text/plain".into(),
+            caption: String::new(),
+        }
+    }
+
+    /// A report is the word of one leader. The votes are the word of the
+    /// others, and the validators a block reports have no vote on it. So a
+    /// validator that still hears a reported validator does not sign: with
+    /// its vote the leader would set the quorum of its own block.
+    #[tokio::test]
+    async fn garden_validator_does_not_sign_away_a_validator_it_still_hears() {
+        let mut room = LiarRoom::open().await;
+        let rounds = room.rounds();
+        let target = room.target;
+        let false_report = room.propose(rounds[0], GardenTxKind::Suspend { target }, now_ms());
+        let honest = room.propose(rounds[1], message(7), now_ms());
+        room.show(&false_report).await;
+        room.show(&honest).await;
+        // The honest block shows that the witness votes and is heard here.
+        assert!(
+            room.signed_by_witness.contains(&honest.hash()),
+            "the witness was not heard voting at all"
+        );
+        assert!(
+            !room.signed_by_witness.contains(&false_report.hash()),
+            "the witness signed a block that reports a validator it hears"
+        );
+    }
+
+    /// The state machine reads no clock, so the timestamp of a block is what
+    /// its leader wrote. A vote is cast by a node that has a clock: it does
+    /// not sign a block dated ahead of it. The host signs every block, so
+    /// one leader cannot move the chain clock to a time nobody has reached.
+    #[tokio::test]
+    async fn garden_validator_does_not_sign_a_block_dated_ahead_of_its_clock() {
+        let mut room = LiarRoom::open().await;
+        let rounds = room.rounds();
+        let ahead = now_ms() + MAX_TIMESTAMP_AHEAD_MS + 60_000;
+        let early = room.propose(rounds[0], message(7), ahead);
+        assert_eq!(early.header.timestamp_ms, ahead);
+        let honest = room.propose(rounds[1], message(8), now_ms());
+        room.show(&early).await;
+        room.show(&honest).await;
+        assert!(
+            room.signed_by_witness.contains(&honest.hash()),
+            "the witness was not heard voting at all"
+        );
+        assert!(
+            !room.signed_by_witness.contains(&early.hash()),
+            "the witness signed a block dated ahead of its clock"
+        );
+    }
+
+    /// A publication is charged by the size it declares, and the state
+    /// machine never sees the bytes. So a node keeps bytes for a publication
+    /// only when they have the declared size. Bytes of another size that a
+    /// peer deposited stay what they were before the publication: a deposit
+    /// that the next deposits of the same peer push out. Bytes of another
+    /// size that the node fetched as a holder are not kept at all.
+    #[tokio::test]
+    async fn garden_publication_that_understates_its_size_does_not_keep_its_bytes() {
+        let handle = spawn(
+            GardenEntry::Create {
+                title: "Room".into(),
+                limits: GardenLimits {
+                    round_ms: 200,
+                    suspend_after_ms: 600_000,
+                    ..GardenLimits::testnet_default()
+                },
+            },
+            config("host", "/ip4/127.0.0.1/tcp/0"),
+            random_bytes(),
+            None,
+        )
+        .await
+        .unwrap();
+        let invite = handle.invite().await.unwrap();
+        let (mut swarm, key, peer) = guest(&invite).await;
+        let me = key.public_key_bytes();
+        let sign = |nonce: u64, kind: GardenTxKind| {
+            GardenTx {
+                chain_id: invite.chain_id,
+                sender: me,
+                nonce,
                 kind,
             }
-            .sign(&liar)
-            .unwrap();
-            let txs = vec![tx];
-            let (header, _) = state.build_header(&txs, liar_key, round, now_ms()).unwrap();
-            let proposer_signature = liar.sign(&header.hash()).to_vec();
-            GardenBlock {
-                header,
-                txs,
-                proposer_signature,
-            }
+            .sign(&key)
+            .unwrap()
         };
-        let false_report = propose(rounds[0], GardenTxKind::Suspend { target });
-        let honest = propose(
-            rounds[1],
-            GardenTxKind::Publish {
-                kind: GardenContentKind::Message,
-                content_id: [7u8; 32],
-                size: 5,
-                mime: "text/plain".into(),
-                caption: String::new(),
+        let join = sign(
+            0,
+            GardenTxKind::Join {
+                name: "guest".into(),
+                address: String::new(),
+                invite_signature: invite_keypair(&invite.token)
+                    .unwrap()
+                    .sign(&join_message(invite.chain_id, &me))
+                    .to_vec(),
             },
         );
+        let said = ask(
+            &mut swarm,
+            peer,
+            GardenRequest::Gossip(vec![GardenGossip::Tx(join)]),
+        )
+        .await;
+        assert!(matches!(said, GardenResponse::Ack), "{said:?}");
+        let mut joined = false;
+        for _ in 0..200 {
+            if handle.status().await.unwrap()["active_validators"] == json!(2) {
+                joined = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        assert!(joined, "guest did not join in time");
 
-        let mut signed_by_witness = Vec::new();
-        for block in [&false_report, &honest] {
-            let gossip = GardenRequest::Gossip(vec![GardenGossip::Proposal(block.clone())]);
+        // Two deposits, then one publication for each. The first says its
+        // bytes are one byte long; the second says the truth.
+        let heavy = vec![7u8; 10_000];
+        let fair = vec![9u8; 10_000];
+        // A third publication understates its size too, and nobody deposits
+        // its bytes: the host asks for them as a holder.
+        let pulled = vec![5u8; 10_000];
+        let id_of = |bytes: &[u8]| crate::storage::content_id::ContentId::of(bytes).0;
+        for bytes in [&heavy, &fair] {
+            let put = GardenRequest::PutObject {
+                bytes: bytes.clone(),
+            };
+            assert!(matches!(
+                ask(&mut swarm, peer, put).await,
+                GardenResponse::Ack
+            ));
+        }
+        let publish = |nonce: u64, bytes: &[u8], size: u32| {
+            sign(
+                nonce,
+                GardenTxKind::Publish {
+                    kind: GardenContentKind::Message,
+                    content_id: id_of(bytes),
+                    size,
+                    mime: "text/plain".into(),
+                    caption: String::new(),
+                },
+            )
+        };
+        let txs = vec![
+            GardenGossip::Tx(publish(1, &heavy, 1)),
+            GardenGossip::Tx(publish(2, &fair, 10_000)),
+            GardenGossip::Tx(publish(3, &pulled, 1)),
+        ];
+        swarm
+            .commands
+            .send(NetCommand::Send {
+                peer,
+                request: GardenRequest::Gossip(txs),
+                tag: 78,
+            })
+            .await
+            .unwrap();
+        // The guest is a validator: the host finalizes nothing without its
+        // vote, so the test votes for what the host proposes. It also serves
+        // the bytes nobody deposited when the host asks for them.
+        let until = tokio::time::Instant::now() + Duration::from_secs(60);
+        loop {
+            let status = handle.status().await.unwrap();
+            if status["objects"] == json!(3) && status["objects_wanted_here"] == json!(0) {
+                break;
+            }
+            let wait = tokio::time::Instant::now() + Duration::from_millis(100);
+            let Ok(Some(event)) = tokio::time::timeout_at(wait, swarm.events.recv()).await else {
+                assert!(
+                    tokio::time::Instant::now() < until,
+                    "the publications were not finalized and settled: {status}"
+                );
+                continue;
+            };
+            let NetEvent::Request {
+                request, channel, ..
+            } = event
+            else {
+                continue;
+            };
+            let (response, votes) = match request {
+                GardenRequest::GetObject { content_id, .. } => {
+                    let found = (content_id == id_of(&pulled)).then(|| pulled.clone());
+                    (GardenResponse::Object(found), Vec::new())
+                }
+                GardenRequest::Gossip(items) => {
+                    let votes: Vec<GardenVote> = items
+                        .into_iter()
+                        .filter_map(|item| match item {
+                            GardenGossip::Proposal(block) => {
+                                Some(GardenVote::sign(&block.header, &key))
+                            }
+                            _ => None,
+                        })
+                        .collect();
+                    (GardenResponse::Ack, votes)
+                }
+                _ => (GardenResponse::Ack, Vec::new()),
+            };
             swarm
                 .commands
-                .send(NetCommand::Send {
-                    peer,
-                    request: gossip,
-                    tag: 78,
-                })
+                .send(NetCommand::Respond { channel, response })
                 .await
                 .unwrap();
-            let until = tokio::time::Instant::now() + Duration::from_secs(3);
-            while let Ok(Some(event)) = tokio::time::timeout_at(until, swarm.events.recv()).await {
-                let NetEvent::Request {
-                    request, channel, ..
-                } = event
-                else {
-                    continue;
-                };
-                if let GardenRequest::Gossip(items) = request {
-                    for item in items {
-                        if let GardenGossip::Vote(vote) = item {
-                            if vote.voter == witness {
-                                signed_by_witness.push(vote.block_hash);
-                            }
-                        }
-                    }
-                }
-                let response = GardenResponse::Ack;
+            for vote in votes {
                 swarm
                     .commands
-                    .send(NetCommand::Respond { channel, response })
+                    .send(NetCommand::Send {
+                        peer,
+                        request: GardenRequest::Gossip(vec![GardenGossip::Vote(vote)]),
+                        tag: 79,
+                    })
                     .await
                     .unwrap();
             }
         }
-        // The honest block shows that the witness votes and is heard here.
+
+        // The peer goes on depositing. Its oldest deposits make room.
+        for filler in 0..(MAX_UNREFERENCED_PER_PEER + 2) {
+            let put = GardenRequest::PutObject {
+                bytes: format!("filler-{filler}").into_bytes(),
+            };
+            assert!(matches!(
+                ask(&mut swarm, peer, put).await,
+                GardenResponse::Ack
+            ));
+        }
+        let mut held = Vec::new();
+        for bytes in [&heavy, &fair, &pulled] {
+            let get = GardenRequest::GetObject {
+                content_id: id_of(bytes),
+                relay: false,
+            };
+            match ask(&mut swarm, peer, get).await {
+                GardenResponse::Object(found) => held.push(found.is_some()),
+                other => panic!("expected an object answer, got {other:?}"),
+            }
+        }
         assert!(
-            signed_by_witness.contains(&honest.hash()),
-            "the witness was not heard voting at all"
+            held[1],
+            "the host dropped bytes of the size their publication declares"
         );
         assert!(
-            !signed_by_witness.contains(&false_report.hash()),
-            "the witness signed a block that reports a validator it hears"
+            !held[0],
+            "the host keeps 10000 deposited bytes for a publication that was charged for one"
         );
+        assert!(
+            !held[2],
+            "the host fetched and keeps 10000 bytes for a publication that was charged for one"
+        );
+        handle.leave().await.unwrap();
+    }
+
+    /// A validator that was reported absent never signed a departure. When
+    /// the others end the Garden, that takes nothing from it: it keeps what
+    /// it holds, readable, until it leaves itself. Every block needs only
+    /// the host once the others are reported, so without this the host could
+    /// delete the Garden from the disk of a validator that is still there.
+    #[tokio::test]
+    async fn garden_end_does_not_wipe_a_validator_that_never_left() {
+        let host_secret = random_bytes();
+        let host_key = KeyPair::from_seed(&host_secret).unwrap();
+        let limits = GardenLimits {
+            round_ms: 200,
+            presence_interval_ms: 100,
+            suspend_after_ms: 600_000,
+            ..GardenLimits::testnet_default()
+        };
+        let host = spawn(
+            GardenEntry::Create {
+                title: "Room".into(),
+                limits,
+            },
+            config("host", "/ip4/127.0.0.1/tcp/0"),
+            host_secret,
+            None,
+        )
+        .await
+        .unwrap();
+        let invite = host.invite().await.unwrap();
+        let stays = spawn(
+            GardenEntry::Invite(invite.clone()),
+            config("stays", "/ip4/127.0.0.1/tcp/0"),
+            random_bytes(),
+            None,
+        )
+        .await
+        .unwrap();
+        let kept = b"mine until I leave".to_vec();
+        let content_id = crate::storage::content_id::ContentId::of(&kept).0;
+        tokio::time::timeout(Duration::from_secs(60), async {
+            let mut published = false;
+            loop {
+                let status = stays.status().await.unwrap();
+                if !published && status["me"]["member"] == json!("Active") {
+                    let message = GardenContentKind::Message;
+                    let said = stays
+                        .publish(message, kept.clone(), "text/plain".into(), String::new())
+                        .await;
+                    published = said.is_ok();
+                }
+                if status["objects"] == json!(1) && status["pending_transactions"] == json!(0) {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await
+        .expect("the publication was not finalized");
+
+        // The test speaks with the key of the host to the validator that
+        // stays: one block reports it absent, the next one is the host's
+        // own departure. The host is the whole electorate of both.
+        let mut to_stays = invite.clone();
+        let address = stays.status().await.unwrap()["me"]["address"].clone();
+        to_stays.peers = vec![address.as_str().unwrap().to_string()];
+        let (swarm, peer, mut ledger) = peer_with_the_chain(&to_stays).await;
+        let host_id = host_key.public_key_bytes();
+        let target = ledger
+            .state
+            .validators
+            .values()
+            .find(|v| v.name == "stays")
+            .unwrap()
+            .key;
+        let mut commits = Vec::new();
+        for kind in [GardenTxKind::Suspend { target }, GardenTxKind::Leave] {
+            let state = &ledger.state;
+            let round = (0..8)
+                .find(|round| state.leader(*round) == Some(host_id))
+                .unwrap();
+            let tx = GardenTx {
+                chain_id: state.chain_id(),
+                sender: host_id,
+                nonce: state.next_nonce(&host_id),
+                kind,
+            }
+            .sign(&host_key)
+            .unwrap();
+            let txs = vec![tx];
+            let (header, _) = state.build_header(&txs, host_id, round, now_ms()).unwrap();
+            let commit = GardenCommit {
+                votes: vec![GardenVote::sign(&header, &host_key)],
+                block: GardenBlock {
+                    proposer_signature: host_key.sign(&header.hash()).to_vec(),
+                    header,
+                    txs,
+                },
+            };
+            ledger.append(commit.clone()).unwrap();
+            commits.push(GardenGossip::Commit(commit));
+        }
+        assert_eq!(ledger.state.status, DomainStatus::Retired);
+        swarm
+            .commands
+            .send(NetCommand::Send {
+                peer,
+                request: GardenRequest::Gossip(commits),
+                tag: 78,
+            })
+            .await
+            .unwrap();
+
+        // The Garden is over on the chain of the validator that stays, and
+        // the validator is still there with its content.
+        let mut seen = None;
+        for _ in 0..100 {
+            match stays.status().await {
+                Ok(status) if status["chain_status"] == json!("Retired") => {
+                    seen = Some(status);
+                    break;
+                }
+                Ok(_) => tokio::time::sleep(Duration::from_millis(50)).await,
+                Err(_) => break,
+            }
+        }
+        let status = seen.expect("the node stopped when the others ended the Garden");
+        assert_eq!(status["me"]["member"], json!("Suspended"));
+        // Several rounds later nothing has changed.
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        assert_eq!(
+            stays.resolve(content_id).await,
+            Ok(kept),
+            "the end of the Garden took the content from a validator that never left"
+        );
+        assert_eq!(
+            stays.status().await.unwrap()["pending_transactions"],
+            json!(0)
+        );
+        // Its own departure is what clears its disk.
+        let left = stays.leave().await.unwrap();
+        assert!(left.retired);
     }
 
     /// One peer cannot push the pending content of another peer out of a
