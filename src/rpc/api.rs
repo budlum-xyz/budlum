@@ -794,7 +794,7 @@ pub trait BudlumApi {
         consensus_domain_id: Option<u32>,
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
-    /// Prepare a signed `BnsSetPrimaryName` reverse-name claim/clear transaction.
+    /// Prepare a signed `BnsSetPrimary` reverse-name claim/clear transaction.
     #[method(name = "bud_bnsPrepareSetPrimaryName")]
     async fn bns_prepare_set_primary_name(
         &self,

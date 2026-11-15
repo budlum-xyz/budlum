@@ -41,6 +41,16 @@ pub type BnsContentView = (
     Result<Vec<u8>, String>,
 );
 
+/// A name proof and the block it was read at.
+#[derive(Debug, Clone)]
+pub struct BnsAnchoredProof {
+    pub proof: crate::bns::types::BnsStateProof,
+    /// The height of the tip block the registry state belongs to.
+    pub height: u64,
+    /// The state root in that block's header.
+    pub state_root: String,
+}
+
 #[derive(Debug)]
 pub enum ChainCommand {
     GetHeight(oneshot::Sender<u64>),
@@ -524,6 +534,10 @@ pub enum ChainCommand {
     BnsProveName {
         name: String,
         response: oneshot::Sender<crate::bns::types::BnsStateProof>,
+    },
+    BnsProveNameAtTip {
+        name: String,
+        response: oneshot::Sender<BnsAnchoredProof>,
     },
     IdentityResolve {
         subject: Address,
@@ -2393,6 +2407,18 @@ impl ChainHandle {
         rx.await.unwrap_or_default()
     }
 
+    /// The proof of `name` together with the block it was read at: the
+    /// height and the state root of the tip. A light client checks the
+    /// header at that height before it trusts the root the proof folds to.
+    pub async fn bns_prove_name_at_tip(&self, name: String) -> Option<BnsAnchoredProof> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::BnsProveNameAtTip { name, response: tx })
+            .await;
+        rx.await.ok()
+    }
+
     pub async fn bns_prove_name(&self, name: String) -> Option<crate::bns::types::BnsStateProof> {
         let (tx, rx) = oneshot::channel();
         let _ = self
@@ -4042,6 +4068,18 @@ impl ChainActor {
                             .bns_registry
                             .list_names_by_owner(&owner, self.blockchain.state.epoch_index),
                     );
+                }
+                ChainCommand::BnsProveNameAtTip { name, response } => {
+                    let tip = self.blockchain.last_block();
+                    let _ = response.send(BnsAnchoredProof {
+                        proof: self
+                            .blockchain
+                            .state
+                            .bns_registry
+                            .prove_name(&name, self.blockchain.state.epoch_index),
+                        height: tip.index,
+                        state_root: tip.state_root.clone(),
+                    });
                 }
                 ChainCommand::BnsProveName { name, response } => {
                     let _ = response.send(

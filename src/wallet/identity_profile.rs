@@ -722,7 +722,9 @@ fn evaluate_bns_evidence(
             ),
         );
     };
-    let disclosed_matches = extras.address == resolved.address
+    // A name with an empty address record resolves to its owner, and the
+    // owner is bound by the leaf itself.
+    let disclosed_matches = Some(extras.address.unwrap_or(leaf.owner)) == resolved.address
         && extras.records == resolved.records
         && extras.subdomains == resolved.subdomains
         && extras.storage_domain_id == resolved.storage_domain_id;
