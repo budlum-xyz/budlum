@@ -15,6 +15,7 @@
 //! * `peer` lists the host address first, then the validators that offered
 //!   to relay. A joiner needs no account and no setup: the line is enough.
 
+use super::net::dial_address;
 use super::types::{verify_garden_execution_chain, GardenGenesis};
 use crate::domain::types::Hash32;
 
@@ -74,8 +75,13 @@ impl GardenInvite {
                 "invite must carry 1..={MAX_INVITE_PEERS} peer addresses"
             ));
         }
-        if !self.peers.iter().all(|peer| is_plain_peer(peer)) {
-            return Err("invite carries a peer address that is not a plain multiaddr".into());
+        for peer in &self.peers {
+            if !is_plain_peer(peer) {
+                return Err("invite carries a peer address that is not a plain multiaddr".into());
+            }
+            // A node dials these before it knows anything else about the
+            // Garden, so each one names the validator it leads to.
+            dial_address(peer).map_err(|e| format!("invite peer {peer} is refused: {e}"))?;
         }
         Ok(())
     }
@@ -158,6 +164,13 @@ mod tests {
     use super::*;
     use crate::crypto::primitives::KeyPair;
 
+    /// A peer address the way a validator announces it.
+    fn peer(host: &str, port: u16) -> String {
+        let key = KeyPair::generate().unwrap().public_key_bytes();
+        let id = super::super::net::peer_id_of(&key).unwrap();
+        format!("{host}/tcp/{port}/p2p/{id}")
+    }
+
     fn genesis(token: &Hash32) -> GardenGenesis {
         GardenGenesis::new(
             GardenFounding {
@@ -182,8 +195,8 @@ mod tests {
             &g,
             token,
             vec![
-                "/ip4/127.0.0.1/tcp/4001".into(),
-                "/dns4/relay.example/tcp/4002".into(),
+                peer("/ip4/127.0.0.1", 4001),
+                peer("/dns4/relay.example", 4002),
             ],
         )
         .unwrap();
@@ -197,7 +210,7 @@ mod tests {
     fn garden_invite_refuses_a_swapped_genesis_and_a_wrong_token() {
         let token = [3u8; 32];
         let g = genesis(&token);
-        let invite = GardenInvite::new(&g, token, vec!["/ip4/1.2.3.4/tcp/1".into()]).unwrap();
+        let invite = GardenInvite::new(&g, token, vec![peer("/ip4/1.2.3.4", 4001)]).unwrap();
         let other = genesis(&token);
         assert!(invite.accepts(&other).is_err());
         let mut wrong_token = invite;
@@ -206,20 +219,33 @@ mod tests {
         assert!(refusal.contains("does not belong"), "{refusal}");
     }
 
+    /// A peer of an invite is dialed before anything else is known, so it
+    /// names the validator it leads to. A bare host and port is refused.
+    #[test]
+    fn garden_invite_peer_names_the_validator_it_leads_to() {
+        let token = [3u8; 32];
+        let g = genesis(&token);
+        for bare in ["/ip4/10.0.0.9/tcp/6379", "/dns4/internal.example/tcp/8080"] {
+            let refusal = GardenInvite::new(&g, token, vec![bare.into()]).unwrap_err();
+            assert!(refusal.contains("peer id"), "{refusal}");
+        }
+    }
+
     #[test]
     fn garden_invite_parser_is_bounded_and_strict() {
         let token = [3u8; 32];
         let g = genesis(&token);
-        let link = GardenInvite::new(&g, token, vec!["/ip4/1.2.3.4/tcp/1".into()])
+        let link = GardenInvite::new(&g, token, vec![peer("/ip4/1.2.3.4", 4001)])
             .unwrap()
             .to_link();
         assert!(GardenInvite::parse(&format!("{link}&extra=1")).is_err());
         assert!(GardenInvite::parse(&format!("{link}&token={}", hex::encode([9u8; 32]))).is_err());
         assert!(GardenInvite::parse(&link.replace("budlum-garden:1?", "http://")).is_err());
-        assert!(GardenInvite::parse(&format!("{link}&peer=/ip4/1.1.1.1/tcp/1?x")).is_err());
+        let more = peer("/ip4/1.1.1.1", 4001);
+        GardenInvite::parse(&format!("{link}&peer={more}")).unwrap();
+        assert!(GardenInvite::parse(&format!("{link}&peer={more}?x")).is_err());
         assert!(
-            GardenInvite::parse(&format!("{link}{}", "&peer=/ip4/1.1.1.1/tcp/1".repeat(8)))
-                .is_err()
+            GardenInvite::parse(&format!("{link}{}", format!("&peer={more}").repeat(8))).is_err()
         );
         assert!(GardenInvite::parse(&"x".repeat(MAX_INVITE_BYTES + 1)).is_err());
         let no_peer = link.split("&peer=").next().unwrap().to_string();

@@ -47,6 +47,7 @@ pub struct GardenOptions {
     pub presence_interval_ms: Option<u32>,
     pub host_timeout_ms: Option<u32>,
     pub suspend_after_ms: Option<u32>,
+    pub max_published_bytes_per_validator: Option<u64>,
 }
 
 impl GardenOptions {
@@ -65,6 +66,9 @@ impl GardenOptions {
                 .unwrap_or(base.presence_interval_ms),
             host_timeout_ms: self.host_timeout_ms.unwrap_or(base.host_timeout_ms),
             suspend_after_ms: self.suspend_after_ms.unwrap_or(base.suspend_after_ms),
+            max_published_bytes_per_validator: self
+                .max_published_bytes_per_validator
+                .unwrap_or(base.max_published_bytes_per_validator),
         };
         limits.validate()?;
         Ok(limits)

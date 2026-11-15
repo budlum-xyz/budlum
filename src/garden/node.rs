@@ -415,6 +415,17 @@ pub async fn spawn(
         }
     };
 
+    if !address.is_empty() {
+        // The others dial this address under the same rule this node dials
+        // theirs, so an address they would pass over is refused here.
+        if let Err(e) = validator_dial_address(&address, &me) {
+            let _ = garden_net.commands.send(NetCommand::Shutdown).await;
+            return Err(format!(
+                "the address {address} cannot be announced to the Garden: {e}"
+            ));
+        }
+    }
+
     let mut peers = BTreeMap::new();
     let (ledger, token, seeds) = match entry {
         GardenEntry::Create { title, limits } => {
@@ -450,20 +461,11 @@ pub async fn spawn(
             (GardenLedger::new(genesis)?, token, Vec::new())
         }
         GardenEntry::Invite(invite) => {
-            let outcome = tokio::time::timeout(
-                BOOTSTRAP_TIMEOUT,
-                bootstrap(&mut garden_net, &invite, &key, &mut peers),
-            )
-            .await;
-            match outcome {
-                Ok(Ok(ledger)) => (ledger, invite.token, invite.peers.clone()),
-                Ok(Err(e)) => {
+            match bootstrap(&mut garden_net, &invite, &key, &mut peers).await {
+                Ok(ledger) => (ledger, invite.token, invite.peers.clone()),
+                Err(e) => {
                     let _ = garden_net.commands.send(NetCommand::Shutdown).await;
                     return Err(e);
-                }
-                Err(_) => {
-                    let _ = garden_net.commands.send(NetCommand::Shutdown).await;
-                    return Err("no validator of this Garden answered the invite".into());
                 }
             }
         }
@@ -559,6 +561,12 @@ pub async fn spawn(
 
 /// Fetch and verify the genesis and the finalized chain from the peers an
 /// invite names.
+///
+/// Every validator stands in the invites the others hand out, so what one
+/// peer answers is the answer of that peer and not of the Garden. A peer
+/// that refuses, shows another genesis or serves a chain that does not
+/// verify is passed over, and the join ends without a chain only when every
+/// peer of the invite was passed over or the time is up.
 async fn bootstrap(
     garden_net: &mut GardenNet,
     invite: &GardenInvite,
@@ -574,24 +582,46 @@ async fn bootstrap(
             .sign(&join_message(invite.chain_id, &me))
             .to_vec(),
     };
-    let mut dialed = 0usize;
+    let mut named: BTreeSet<PeerId> = BTreeSet::new();
     for peer in &invite.peers {
-        if let Ok(address) = peer.parse() {
+        if let Ok((address, id)) = net::dial_address(peer) {
             let _ = garden_net.commands.send(NetCommand::Dial(address)).await;
-            dialed += 1;
+            named.insert(id);
         }
     }
-    if dialed == 0 {
+    if named.is_empty() {
         return Err("invite carries no dialable peer address".into());
     }
+    let deadline = tokio::time::Instant::now() + BOOTSTRAP_TIMEOUT;
+    let mut genesis: Option<GardenGenesis> = None;
     let mut ledger: Option<GardenLedger> = None;
     let mut source: Option<PeerId> = None;
+    // The peers that were passed over, each with its reason.
+    let mut passed: BTreeMap<PeerId, String> = BTreeMap::new();
     loop {
-        let event = garden_net
-            .events
-            .recv()
-            .await
-            .ok_or_else(|| "garden swarm stopped while joining".to_string())?;
+        if source.is_none() {
+            // Take the chain from a peer that welcomed this node and was
+            // not passed over yet.
+            let next = peers
+                .keys()
+                .find(|peer| !passed.contains_key(peer))
+                .copied();
+            if let (Some(peer), Some(genesis)) = (next, genesis.as_ref()) {
+                ledger = Some(GardenLedger::new(genesis.clone())?);
+                source = Some(peer);
+                ask_commits(garden_net, peer, 1).await;
+            } else if named.iter().all(|peer| passed.contains_key(peer)) {
+                return Err(nobody_admitted(&passed));
+            }
+        }
+        let event = match tokio::time::timeout_at(deadline, garden_net.events.recv()).await {
+            Ok(Some(event)) => event,
+            Ok(None) => return Err("garden swarm stopped while joining".into()),
+            Err(_) if passed.is_empty() => {
+                return Err("no validator of this Garden answered the invite".into());
+            }
+            Err(_) => return Err(nobody_admitted(&passed)),
+        };
         match event {
             NetEvent::Connected(peer) => {
                 let _ = garden_net
@@ -605,6 +635,10 @@ async fn bootstrap(
             }
             NetEvent::Disconnected(peer) => {
                 peers.remove(&peer);
+                if source == Some(peer) {
+                    passed.insert(peer, "it went away before the chain arrived".into());
+                    source = None;
+                }
             }
             NetEvent::Request { channel, .. } => {
                 let _ = garden_net
@@ -621,12 +655,15 @@ async fn bootstrap(
                 response,
             } => match response {
                 Ok(GardenResponse::Welcome {
-                    genesis,
+                    genesis: shown,
                     key: peer_key,
                     invite_signature,
                     ..
                 }) => {
-                    invite.accepts(&genesis)?;
+                    if let Err(reason) = invite.accepts(&shown) {
+                        passed.insert(peer, reason);
+                        continue;
+                    }
                     if peer_id_of(&peer_key)? != peer
                         || verify_signature(
                             &join_message(invite.chain_id, &peer_key),
@@ -635,27 +672,14 @@ async fn bootstrap(
                         )
                         .is_err()
                     {
+                        passed.insert(peer, "it does not hold the invite".into());
                         continue;
                     }
                     peers.insert(peer, peer_key);
-                    if ledger.is_none() {
-                        ledger = Some(GardenLedger::new(*genesis)?);
-                        source = Some(peer);
-                        let _ = garden_net
-                            .commands
-                            .send(NetCommand::Send {
-                                peer,
-                                request: GardenRequest::GetCommits {
-                                    from_height: 1,
-                                    max: MAX_SYNC_COMMITS,
-                                },
-                                tag: TAG_SYNC,
-                            })
-                            .await;
-                    }
+                    genesis.get_or_insert(*shown);
                 }
                 Ok(GardenResponse::Refused(reason)) => {
-                    return Err(format!("a Garden validator refused the invite: {reason}"));
+                    passed.insert(peer, reason);
                 }
                 _ => {}
             },
@@ -667,31 +691,59 @@ async fn bootstrap(
                 let Some(chain) = ledger.as_mut() else {
                     continue;
                 };
-                let commits = match response {
-                    Ok(GardenResponse::Commits(commits)) => commits,
-                    _ => return Err("the Garden chain could not be fetched".into()),
+                let taken = match response {
+                    Ok(GardenResponse::Commits(commits)) => {
+                        let done = commits.is_empty();
+                        commits
+                            .into_iter()
+                            .try_for_each(|commit| chain.append(commit))
+                            .map(|()| done)
+                    }
+                    _ => Err("it did not serve the chain".into()),
                 };
-                if commits.is_empty() {
-                    return ledger.ok_or_else(|| "the Garden chain could not be fetched".into());
+                match taken {
+                    Ok(true) => {
+                        return ledger.ok_or_else(|| "the Garden chain could not be fetched".into())
+                    }
+                    Ok(false) => {
+                        let from = chain.state.height.saturating_add(1);
+                        ask_commits(garden_net, peer, from).await;
+                    }
+                    Err(reason) => {
+                        // What it served is thrown away with it.
+                        passed.insert(peer, reason);
+                        ledger = None;
+                        source = None;
+                    }
                 }
-                for commit in commits {
-                    chain.append(commit)?;
-                }
-                let _ = garden_net
-                    .commands
-                    .send(NetCommand::Send {
-                        peer,
-                        request: GardenRequest::GetCommits {
-                            from_height: chain.state.height.saturating_add(1),
-                            max: MAX_SYNC_COMMITS,
-                        },
-                        tag: TAG_SYNC,
-                    })
-                    .await;
             }
             NetEvent::Response { .. } => {}
         }
     }
+}
+
+async fn ask_commits(garden_net: &GardenNet, peer: PeerId, from_height: u64) {
+    let _ = garden_net
+        .commands
+        .send(NetCommand::Send {
+            peer,
+            request: GardenRequest::GetCommits {
+                from_height,
+                max: MAX_SYNC_COMMITS,
+            },
+            tag: TAG_SYNC,
+        })
+        .await;
+}
+
+/// The refusal of a join that every peer of the invite turned down.
+fn nobody_admitted(passed: &BTreeMap<PeerId, String>) -> String {
+    let reasons: BTreeSet<&str> = passed.values().map(String::as_str).collect();
+    let reasons: Vec<&str> = reasons.into_iter().collect();
+    format!(
+        "no validator in the invite admitted this node: {}",
+        reasons.join("; ")
+    )
 }
 
 impl Node {
@@ -874,7 +926,12 @@ impl Node {
                     .map_or(first_wait, |(_, wait)| wait.saturating_mul(2))
                     .min(MAX_DIAL_WAIT);
                 self.seed_dials = Some((now + wait, wait));
-                targets.extend(self.seeds.iter().filter_map(|seed| seed.parse().ok()));
+                targets.extend(
+                    self.seeds
+                        .iter()
+                        .filter_map(|seed| net::dial_address(seed).ok())
+                        .map(|(address, _)| address),
+                );
             }
         } else {
             self.seed_dials = None;
@@ -1066,7 +1123,7 @@ impl Node {
     /// most loses one, and a peer that is no active validator goes first:
     /// only a validator can publish.
     fn note_unreferenced(&mut self, sender: GardenKey, content_id: Hash32) {
-        if self.ledger.state.objects.contains_key(&content_id) {
+        if self.ledger.state.holds_content(&content_id) {
             return;
         }
         let queue = self.unreferenced.entry(sender).or_default();
@@ -1092,7 +1149,7 @@ impl Node {
         }
         self.unreferenced.retain(|_, queue| !queue.is_empty());
         for old in dropped {
-            let named = self.ledger.state.objects.contains_key(&old)
+            let named = self.ledger.state.holds_content(&old)
                 || self.unreferenced.values().any(|queue| queue.contains(&old));
             if !named {
                 self.store.remove(&old);
@@ -1224,14 +1281,19 @@ impl Node {
     /// then anyone.
     fn fetch_targets(&self, content_id: &Hash32) -> Vec<PeerId> {
         let holders = self.holders(content_id);
-        let author = self.ledger.state.objects.get(content_id).map(|o| o.author);
+        let authors: BTreeSet<GardenKey> = self
+            .ledger
+            .state
+            .publications(content_id)
+            .map(|object| object.author)
+            .collect();
         let mut ranked: Vec<(u8, PeerId)> = self
             .peers
             .iter()
             .map(|(peer, key)| {
                 let rank = if holders.contains(key) {
                     0
-                } else if Some(*key) == author {
+                } else if authors.contains(key) {
                     1
                 } else {
                     2
@@ -1358,6 +1420,12 @@ impl Node {
         {
             return false;
         }
+        // An absence report is written by the leader into its own block and
+        // counts nowhere else, so one that waits in a pool can only hold the
+        // nonce of its sender.
+        if matches!(tx.tx.kind, GardenTxKind::Suspend { .. }) {
+            return false;
+        }
         let per_sender = (self.limits().max_sender_txs_per_block as usize).saturating_mul(4);
         let held = self
             .mempool
@@ -1431,6 +1499,18 @@ impl Node {
         if !electorate.contains(&self.me) || self.stopped {
             return;
         }
+        // No validator signs away a validator it still hears. A report is
+        // the word of one leader, and the validators a block reports have no
+        // vote on it, so every vote that is cast says the same thing as the
+        // report. The wait is half the window: whoever reports waited the
+        // whole of it, and the clocks of two nodes do not start together.
+        let grace = millis(self.limits().suspend_after_ms / 2);
+        let reports_heard = block.txs.iter().any(|tx| {
+            matches!(&tx.tx.kind, GardenTxKind::Suspend { target } if !self.silent_for(target, grace))
+        });
+        if reports_heard {
+            return;
+        }
         if !self.is_host() {
             if self.my_votes.insert(hash) {
                 let vote = GardenVote::sign(&block.header, &self.key);
@@ -1440,14 +1520,6 @@ impl Node {
             return;
         }
         if self.host_voted || block.header.round > self.local_round().saturating_add(1) {
-            return;
-        }
-        // The host does not sign away a validator it still hears from.
-        let grace = millis(self.limits().suspend_after_ms / 2);
-        let suspends_live = block.txs.iter().any(|tx| {
-            matches!(&tx.tx.kind, GardenTxKind::Suspend { target } if !self.silent_for(target, grace))
-        });
-        if suspends_live {
             return;
         }
         let others = self.votes.get(&hash).map_or(0, |votes| {
@@ -1542,8 +1614,7 @@ impl Node {
                 }
             }
         } else {
-            let ids: Vec<Hash32> = self.ledger.state.objects.keys().copied().collect();
-            for id in ids {
+            for id in self.ledger.state.content_ids() {
                 self.want_if_holder(id);
             }
         }
@@ -1897,7 +1968,7 @@ impl Node {
                 Some(bytes) => {
                     let _ = reply.send(Ok(bytes));
                 }
-                None if !self.ledger.state.objects.contains_key(&content_id) => {
+                None if !self.ledger.state.holds_content(&content_id) => {
                     let _ = reply.send(Err("this content is not published in the Garden".into()));
                 }
                 None => {
@@ -2017,7 +2088,11 @@ impl Node {
 
     fn trace(&self, tx_id: &Hash32) -> Result<Value, String> {
         let state = &self.ledger.state;
-        let by_content = state.objects.get(tx_id).map(|object| object.tx_id);
+        // A content id stands for its first publication.
+        let by_content = state
+            .publications(tx_id)
+            .min_by_key(|object| (object.height, object.author))
+            .map(|object| object.tx_id);
         let tx_id = by_content.as_ref().unwrap_or(tx_id);
         let Some((height, index)) = self.ledger.locate(tx_id) else {
             let pending = self.mempool.values().any(|tx| tx.id() == *tx_id);
@@ -2123,6 +2198,7 @@ impl Node {
                     "present": !self.silent_for(&v.key, presence_limit),
                     "connected": v.key == self.me || connected.contains(&v.key),
                     "joined_height": v.joined_height,
+                    "published_bytes": state.published.get(&v.key).copied().unwrap_or(0),
                 })
             })
             .collect();
@@ -2165,6 +2241,7 @@ impl Node {
                 "presence_interval_ms": limits.presence_interval_ms,
                 "host_timeout_ms": limits.host_timeout_ms,
                 "suspend_after_ms": limits.suspend_after_ms,
+                "max_published_bytes_per_validator": limits.max_published_bytes_per_validator,
             },
             "budlum": budlum,
         })
@@ -2424,6 +2501,23 @@ mod tests {
         .unwrap();
         assert!(refusal.contains("can dial"), "{refusal}");
 
+        // An address the others would pass over is not announced either.
+        let mut low_port = config("host", "/ip4/0.0.0.0/tcp/0");
+        low_port.announce = Some("/ip4/127.0.0.1/tcp/22".into());
+        let refusal = spawn(
+            GardenEntry::Create {
+                title: "Room".into(),
+                limits: GardenLimits::testnet_default(),
+            },
+            low_port,
+            random_bytes(),
+            None,
+        )
+        .await
+        .err()
+        .unwrap();
+        assert!(refusal.contains("cannot be announced"), "{refusal}");
+
         let mut announced = config("host", "/ip4/0.0.0.0/tcp/0");
         announced.announce = Some("/ip4/127.0.0.1/tcp/4001".into());
         let handle = spawn(
@@ -2522,6 +2616,316 @@ mod tests {
         (swarm, key, peer)
     }
 
+    /// The address of a door in front of `address`: whoever dials it reaches
+    /// the same validator, but only after a wait. A peer behind it answers
+    /// later than every other peer of an invite.
+    async fn slow_door(address: &str) -> String {
+        use libp2p::multiaddr::Protocol;
+        let parsed: libp2p::Multiaddr = address.parse().unwrap();
+        let mut port = 0;
+        let mut id = None;
+        for part in &parsed {
+            match part {
+                Protocol::Tcp(tcp) => port = tcp,
+                Protocol::P2p(peer) => id = Some(peer),
+                _ => {}
+            }
+        }
+        let door = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let door_port = door.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            while let Ok((mut inbound, _)) = door.accept().await {
+                tokio::spawn(async move {
+                    tokio::time::sleep(Duration::from_millis(700)).await;
+                    let target = ("127.0.0.1", port);
+                    if let Ok(mut outbound) = tokio::net::TcpStream::connect(target).await {
+                        let _ = tokio::io::copy_bidirectional(&mut inbound, &mut outbound).await;
+                    }
+                });
+            }
+        });
+        format!("/ip4/127.0.0.1/tcp/{door_port}/p2p/{}", id.unwrap())
+    }
+
+    /// A peer that answers every greeting with `greeting` and refuses
+    /// everything else. Returns the address it announces.
+    async fn crooked_peer(
+        greeting: impl Fn(&GardenKey) -> GardenResponse + Send + 'static,
+    ) -> String {
+        let secret = random_bytes();
+        let key = KeyPair::from_seed(&secret).unwrap().public_key_bytes();
+        let mut swarm = net::start(secret, "/ip4/127.0.0.1/tcp/0").await.unwrap();
+        let address = net::announced_address(&swarm.listen, &key).unwrap();
+        tokio::spawn(async move {
+            while let Some(event) = swarm.events.recv().await {
+                if let NetEvent::Request {
+                    request, channel, ..
+                } = event
+                {
+                    let response = match request {
+                        GardenRequest::Hello { .. } => greeting(&key),
+                        _ => GardenResponse::Refused("nothing is served here".into()),
+                    };
+                    let _ = swarm
+                        .commands
+                        .send(NetCommand::Respond { channel, response })
+                        .await;
+                }
+            }
+        });
+        address
+    }
+
+    /// Join with `invite` and wait until the Garden counts two validators.
+    async fn join_as_second(invite: GardenInvite) {
+        let guest = spawn(
+            GardenEntry::Invite(invite),
+            config("guest", "/ip4/127.0.0.1/tcp/0"),
+            random_bytes(),
+            None,
+        )
+        .await
+        .expect("one peer of the invite ended the join");
+        tokio::time::timeout(Duration::from_secs(20), async {
+            loop {
+                if guest.status().await.unwrap()["active_validators"] == 2 {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await
+        .expect("the guest never became a validator");
+    }
+
+    /// One peer of the invite refuses. The join goes on with the next one:
+    /// every validator stands in the invites the others hand out, so a
+    /// single refusal must not be the answer of the Garden.
+    #[tokio::test]
+    async fn garden_join_goes_on_when_one_invite_peer_refuses() {
+        let handle = host().await;
+        let mut invite = handle.invite().await.unwrap();
+        let refuser =
+            crooked_peer(|_| GardenResponse::Refused("no room for more peers".into())).await;
+        // The host answers after the refusal.
+        invite.peers = vec![refuser, slow_door(&invite.peers[0]).await];
+        join_as_second(invite).await;
+    }
+
+    /// One peer of the invite welcomes the node and then serves no chain.
+    /// The join takes the chain from the next peer.
+    #[tokio::test]
+    async fn garden_join_goes_on_when_one_invite_peer_serves_no_chain() {
+        let handle = host().await;
+        let mut invite = handle.invite().await.unwrap();
+        // The genesis, the way any holder of the invite learns it.
+        let (mut probe, probe_key, peer) = stranger(&invite).await;
+        let me = probe_key.public_key_bytes();
+        let invite_key = invite_keypair(&invite.token).unwrap();
+        let hello = GardenRequest::Hello {
+            chain_id: invite.chain_id,
+            key: me,
+            invite_signature: invite_key
+                .sign(&join_message(invite.chain_id, &me))
+                .to_vec(),
+        };
+        let GardenResponse::Welcome { genesis, .. } = ask(&mut probe, peer, hello).await else {
+            panic!("the host did not welcome a holder of the invite");
+        };
+        let chain_id = invite.chain_id;
+        let empty = crooked_peer(move |key| GardenResponse::Welcome {
+            genesis: genesis.clone(),
+            height: 0,
+            key: *key,
+            invite_signature: invite_key.sign(&join_message(chain_id, key)).to_vec(),
+        })
+        .await;
+        invite.peers = vec![empty, slow_door(&invite.peers[0]).await];
+        join_as_second(invite).await;
+    }
+
+    /// A report is the word of one leader. The votes are the word of the
+    /// others, and the validators a block reports have no vote on it. So a
+    /// validator that still hears a reported validator does not sign: with
+    /// its vote the leader would set the quorum of its own block.
+    #[tokio::test]
+    async fn garden_validator_does_not_sign_away_a_validator_it_still_hears() {
+        let mut limits = GardenLimits::testnet_default();
+        limits.round_ms = 200;
+        limits.presence_interval_ms = 100;
+        let handle = spawn(
+            GardenEntry::Create {
+                title: "Room".into(),
+                limits,
+            },
+            config("host", "/ip4/127.0.0.1/tcp/0"),
+            random_bytes(),
+            None,
+        )
+        .await
+        .unwrap();
+        let invite = handle.invite().await.unwrap();
+        // The test holds the key of one validator, so it can speak as a
+        // leader that reports a validator everybody hears.
+        let liar_secret = random_bytes();
+        let liar = KeyPair::from_seed(&liar_secret).unwrap();
+        let mut guests = Vec::new();
+        for (name, secret) in [
+            ("target", random_bytes()),
+            ("witness", random_bytes()),
+            ("liar", liar_secret),
+        ] {
+            let guest = spawn(
+                GardenEntry::Invite(invite.clone()),
+                config(name, "/ip4/127.0.0.1/tcp/0"),
+                secret,
+                None,
+            )
+            .await
+            .unwrap();
+            guests.push(guest);
+        }
+        tokio::time::timeout(Duration::from_secs(60), async {
+            loop {
+                let mut settled = true;
+                for node in guests.iter().chain([&handle]) {
+                    let status = node.status().await.unwrap();
+                    settled &= status["active_validators"] == 4
+                        && status["pending_transactions"] == 0
+                        && status["connected_peers"].as_u64() >= Some(3);
+                }
+                if settled {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await
+        .expect("the four validators never settled");
+
+        // A peer of the witness that holds the invite and the chain. What
+        // the witness signs it says to every peer, so it is heard here.
+        let mut to_witness = invite.clone();
+        let address = guests[1].status().await.unwrap()["me"]["address"].clone();
+        to_witness.peers = vec![address.as_str().unwrap().to_string()];
+        let (mut swarm, peer_key, peer) = stranger(&to_witness).await;
+        let me = peer_key.public_key_bytes();
+        let hello = GardenRequest::Hello {
+            chain_id: invite.chain_id,
+            key: me,
+            invite_signature: invite_keypair(&invite.token)
+                .unwrap()
+                .sign(&join_message(invite.chain_id, &me))
+                .to_vec(),
+        };
+        let GardenResponse::Welcome { genesis, .. } = ask(&mut swarm, peer, hello).await else {
+            panic!("the witness did not welcome a holder of the invite");
+        };
+        let mut ledger = GardenLedger::new(*genesis).unwrap();
+        loop {
+            let request = GardenRequest::GetCommits {
+                from_height: ledger.state.height + 1,
+                max: MAX_SYNC_COMMITS,
+            };
+            let GardenResponse::Commits(commits) = ask(&mut swarm, peer, request).await else {
+                panic!("the witness did not serve its chain");
+            };
+            if commits.is_empty() {
+                break;
+            }
+            for commit in commits {
+                ledger.append(commit).unwrap();
+            }
+        }
+        let state = &ledger.state;
+        let key_of = |name: &str| {
+            let named = state.validators.values().find(|v| v.name == name);
+            named.unwrap().key
+        };
+        let (target, witness) = (key_of("target"), key_of("witness"));
+        let liar_key = liar.public_key_bytes();
+        let rounds: Vec<u64> = (0..64)
+            .filter(|round| state.leader(*round) == Some(liar_key))
+            .take(2)
+            .collect();
+        let propose = |round: u64, kind: GardenTxKind| {
+            let tx = GardenTx {
+                chain_id: state.chain_id(),
+                sender: liar_key,
+                nonce: state.next_nonce(&liar_key),
+                kind,
+            }
+            .sign(&liar)
+            .unwrap();
+            let txs = vec![tx];
+            let (header, _) = state.build_header(&txs, liar_key, round, now_ms()).unwrap();
+            let proposer_signature = liar.sign(&header.hash()).to_vec();
+            GardenBlock {
+                header,
+                txs,
+                proposer_signature,
+            }
+        };
+        let false_report = propose(rounds[0], GardenTxKind::Suspend { target });
+        let honest = propose(
+            rounds[1],
+            GardenTxKind::Publish {
+                kind: GardenContentKind::Message,
+                content_id: [7u8; 32],
+                size: 5,
+                mime: "text/plain".into(),
+                caption: String::new(),
+            },
+        );
+
+        let mut signed_by_witness = Vec::new();
+        for block in [&false_report, &honest] {
+            let gossip = GardenRequest::Gossip(vec![GardenGossip::Proposal(block.clone())]);
+            swarm
+                .commands
+                .send(NetCommand::Send {
+                    peer,
+                    request: gossip,
+                    tag: 78,
+                })
+                .await
+                .unwrap();
+            let until = tokio::time::Instant::now() + Duration::from_secs(3);
+            while let Ok(Some(event)) = tokio::time::timeout_at(until, swarm.events.recv()).await {
+                let NetEvent::Request {
+                    request, channel, ..
+                } = event
+                else {
+                    continue;
+                };
+                if let GardenRequest::Gossip(items) = request {
+                    for item in items {
+                        if let GardenGossip::Vote(vote) = item {
+                            if vote.voter == witness {
+                                signed_by_witness.push(vote.block_hash);
+                            }
+                        }
+                    }
+                }
+                let response = GardenResponse::Ack;
+                swarm
+                    .commands
+                    .send(NetCommand::Respond { channel, response })
+                    .await
+                    .unwrap();
+            }
+        }
+        // The honest block shows that the witness votes and is heard here.
+        assert!(
+            signed_by_witness.contains(&honest.hash()),
+            "the witness was not heard voting at all"
+        );
+        assert!(
+            !signed_by_witness.contains(&false_report.hash()),
+            "the witness signed a block that reports a validator it hears"
+        );
+    }
+
     /// One peer cannot push the pending content of another peer out of a
     /// node: content waits there so that it survives its publisher.
     #[tokio::test]
@@ -2559,6 +2963,47 @@ mod tests {
             }
             other => panic!("expected the object, got {other:?}"),
         }
+    }
+
+    /// An absence report is the leader's own line in its own block. One that
+    /// arrives as gossip is not kept: it could never be applied, and while
+    /// the Garden does not run it would wait in the pool and be passed on.
+    #[tokio::test]
+    async fn garden_absence_report_from_the_network_is_not_pooled() {
+        let handle = spawn(
+            GardenEntry::Create {
+                title: "Room".into(),
+                limits: GardenLimits {
+                    round_ms: 5_000,
+                    ..GardenLimits::testnet_default()
+                },
+            },
+            config("host", "/ip4/127.0.0.1/tcp/0"),
+            random_bytes(),
+            None,
+        )
+        .await
+        .unwrap();
+        let invite = handle.invite().await.unwrap();
+        let (mut swarm, key, peer) = guest(&invite).await;
+        let report = GardenTx {
+            chain_id: invite.chain_id,
+            sender: key.public_key_bytes(),
+            nonce: 0,
+            kind: GardenTxKind::Suspend { target: [7u8; 32] },
+        }
+        .sign(&key)
+        .unwrap();
+        let gossip = GardenRequest::Gossip(vec![GardenGossip::Tx(report)]);
+        assert!(matches!(
+            ask(&mut swarm, peer, gossip).await,
+            GardenResponse::Ack
+        ));
+        let status = handle.status().await.unwrap();
+        assert_eq!(
+            status["pending_transactions"], 0,
+            "an absence report from the network waits in the pool"
+        );
     }
 
     /// A validator whose address accepts and never answers is not dialed on
