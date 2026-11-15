@@ -1598,11 +1598,11 @@ mod rpc_tests {
         );
         assert!(
             server
-                .bns_resolve_content("nothing-here".to_string())
+                .bns_resolve_content("nothing.bud".to_string())
                 .await
                 .unwrap()
-                .is_none(),
-            "an absent name carries no content id"
+                .is_null(),
+            "an absent name carries no content"
         );
         assert!(
             server
@@ -1833,39 +1833,68 @@ mod rpc_tests {
             .message()
             .contains("Invalid subdomain label"));
         assert!(server
-            .bns_get_bud3_content("bids.bud".to_string())
+            .bns_resolve_content("bids.bud".to_string())
             .await
             .unwrap()
             .is_null());
         assert!(server
-            .bns_get_bud3_content("bids".to_string())
+            .bns_resolve_content("bids".to_string())
             .await
             .unwrap_err()
             .message()
             .contains("Invalid BNS name"));
         let hex32 = format!("0x{}", "11".repeat(32));
-        let prepared_bud3 = server
-            .bns_prepare_set_bud3_content(
+        let reference = |kind: &str| {
+            serde_json::json!({
+                "kind": kind,
+                "digest": hex32,
+                "len": 1024,
+                "object_commitment": hex32,
+                "nft_id": null,
+            })
+        };
+        let prepared_content = server
+            .bns_prepare_set_content(
                 "bids.bud".to_string(),
                 seller.to_hex(),
-                Some(hex32.clone()),
-                Some(hex32.clone()),
-                Some(1024),
-                Some(false),
-                None,
+                Some(reference("public")),
             )
             .await
             .unwrap();
-        assert!(prepared_bud3["tx_template"].is_object());
+        assert!(prepared_content["tx_template"].is_object());
+        assert_eq!(prepared_content["content"]["len"], 1024);
+        // `null` clears, and is a template too.
+        let cleared = server
+            .bns_prepare_set_content("bids.bud".to_string(), seller.to_hex(), None)
+            .await
+            .unwrap();
+        assert!(cleared["content"].is_null());
         assert!(server
-            .bns_prepare_set_bud3_content(
+            .bns_prepare_set_content(
                 "bids.bud".to_string(),
                 seller.to_hex(),
-                Some(hex32.clone()),
-                Some(hex32),
-                Some(1024),
-                Some(true),
-                None,
+                Some(reference("sealed")),
+            )
+            .await
+            .unwrap_err()
+            .message()
+            .contains("requires nft_id"));
+        assert!(server
+            .bns_prepare_set_content(
+                "bids.bud".to_string(),
+                seller.to_hex(),
+                Some(serde_json::json!({"kind": "public", "digest": "0x11"})),
+            )
+            .await
+            .unwrap_err()
+            .message()
+            .contains("content digest"));
+        assert!(server
+            .bns_prepare_set_subdomain_content(
+                "bids.bud".to_string(),
+                "shop".to_string(),
+                seller.to_hex(),
+                Some(reference("sealed")),
             )
             .await
             .unwrap_err()

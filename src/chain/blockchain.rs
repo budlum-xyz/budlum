@@ -592,9 +592,6 @@ impl Blockchain {
                 TransactionType::BnsSetContent => {
                     m.bns_set_content_total.inc();
                 }
-                TransactionType::BnsSetBud3Content => {
-                    m.bns_set_bud3_content_total.inc();
-                }
                 TransactionType::BnsRegisterSubdomain => {
                     m.bns_register_subdomain_total.inc();
                 }
@@ -4294,22 +4291,33 @@ impl Blockchain {
                 match bincode::deserialize::<(
                     String,
                     String,
-                    Option<crate::storage::content_id::ContentId>,
+                    Option<crate::storage::bud3::content_ref::ContentRef>,
                 )>(&tx.data)
                 {
-                    Ok((parent, sub_label, _)) => {
+                    Ok((parent, sub_label, content)) => {
                         if !crate::bns::BnsRegistry::is_valid_name(&parent)
                             || !crate::bns::BnsRegistry::is_valid_sub_label(&sub_label)
                         {
                             reasons.push("invalid_bns_subdomain".to_string());
                         }
+                        if let Some(cref) = content {
+                            if crate::storage::bud3::content_ref::ContentRef::new(
+                                cref.content_id,
+                                cref.object_commitment,
+                                cref.nft_id,
+                            )
+                            .is_err()
+                            {
+                                reasons.push("invalid_bns_content_ref".to_string());
+                            }
+                        }
                     }
                     Err(_) => reasons.push("invalid_bns_set_subdomain_content_data".to_string()),
                 }
             }
-            crate::core::transaction::TransactionType::BnsSetBud3Content => {
+            crate::core::transaction::TransactionType::BnsSetContent => {
                 if tx.amount != 0 || tx.to != Address::zero() {
-                    reasons.push("invalid_bns_bud3_content_shape".to_string());
+                    reasons.push("invalid_bns_content_shape".to_string());
                 }
                 match bincode::deserialize::<(
                     String,
@@ -4328,11 +4336,11 @@ impl Blockchain {
                             )
                             .is_err()
                             {
-                                reasons.push("invalid_bns_bud3_content_ref".to_string());
+                                reasons.push("invalid_bns_content_ref".to_string());
                             }
                         }
                     }
-                    Err(_) => reasons.push("invalid_bns_bud3_content_data".to_string()),
+                    Err(_) => reasons.push("invalid_bns_content_data".to_string()),
                 }
             }
             crate::core::transaction::TransactionType::RegisterConsensusKeys(ref registration) => {
@@ -12352,7 +12360,7 @@ fn bns_metrics_export_one_counter_per_type_and_the_named_gauges() {
     let chain = Blockchain::new(Arc::new(PoWEngine::new(0)), None, DEFAULT_CHAIN_ID, None)
         .with_metrics(Arc::clone(&metrics));
 
-    let doors: [(TransactionType, &str); 14] = [
+    let doors: [(TransactionType, &str); 13] = [
         (TransactionType::BnsBuyName, "budlum_bns_sales_total"),
         (TransactionType::BnsRenew, "budlum_bns_renewals_total"),
         (TransactionType::BnsTransfer, "budlum_bns_transfers_total"),
@@ -12379,10 +12387,6 @@ fn bns_metrics_export_one_counter_per_type_and_the_named_gauges() {
         (
             TransactionType::BnsSetContent,
             "budlum_bns_set_content_total",
-        ),
-        (
-            TransactionType::BnsSetBud3Content,
-            "budlum_bns_set_bud3_content_total",
         ),
         (
             TransactionType::BnsRegisterSubdomain,

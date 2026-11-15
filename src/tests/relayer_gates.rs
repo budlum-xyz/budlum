@@ -6,7 +6,7 @@
 // - RelayerResult now carries bincode(MerkleProof) plus a result-fact leaf and a root
 //   anchoring (the executor::TransactionType::RelayerResult arm).
 // - BudlumxyzRegisterApp now carries the BUDLUMXYZ_REGISTER_MIN_FEE requirement.
-// - The BnsRegister fee check (H1, executor) is sealed as a regression.
+// - The BnsBuyName exact-price check (H1, executor) is sealed as a regression.
 
 use crate::core::account::AccountState;
 use crate::core::address::Address;

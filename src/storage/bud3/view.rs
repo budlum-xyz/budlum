@@ -78,6 +78,25 @@ impl MemorySymbolNetwork {
     }
 }
 
+/// The symbol source of a node that holds no symbols and has no symbol
+/// transport attached. Every read comes back empty, so a view through it
+/// fails with a missing-symbols error and never returns unverified bytes.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct NoSymbolsHeld;
+
+impl NetworkSymbolSource for NoSymbolsHeld {
+    fn fetch_holder_symbols(
+        &self,
+        _holder: &Address,
+        _object: &ObjectKey,
+        _segment: u64,
+        _first_esi: u32,
+        _count: u32,
+    ) -> Vec<Symbol> {
+        Vec::new()
+    }
+}
+
 impl NetworkSymbolSource for MemorySymbolNetwork {
     fn fetch_holder_symbols(
         &self,

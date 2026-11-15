@@ -109,16 +109,15 @@ async fn test_state_bit_identical_after_reload() {
 /// that an in-memory mutation survives a restart, which is not a property this
 /// system has or should have.
 ///
-/// BNS state does persist, by both routes that exist: `BnsRegister` is a
-/// transaction the executor applies (`executor.rs:496`, mutating
-/// `state.bns_registry`), so replay reconstructs it; and `bns_registry` is
-/// carried in the schema-4 snapshot and covered by its digest
-/// (`snapshot.rs:661`, `769`).
+/// BNS state does persist, by both routes that exist: a name enters the
+/// registry through `BnsCreateOffer` and `BnsBuyName`, transactions the
+/// executor applies to `state.bns_registry`, so replay reconstructs it; and
+/// `bns_registry` is carried in the snapshot and covered by its digest.
 ///
-/// This version drives the real path: fund an account at genesis, register a
-/// name with a signed `BnsRegister` transaction, produce the block, drop the
-/// chain, reopen it against the same database and ask the rebuilt registry to
-/// resolve the name.
+/// This version drives the real path: fund the accounts at genesis, open a
+/// Primary offer and buy the name with signed transactions, produce the
+/// block, drop the chain, reopen it against the same database and ask the
+/// rebuilt registry to resolve the name.
 #[tokio::test]
 async fn a_bns_name_registered_by_transaction_survives_a_restart() {
     let dir = tempdir().unwrap();

@@ -57,8 +57,41 @@ pub struct ResolvedName {
     /// The 32-byte owner address.
     pub owner: [u8; 32],
     pub storage_root: Option<[u8; 32]>,
+    /// The digest of the content the name serves.
     pub content_id: Option<ContentId>,
+    /// The 32 bytes the name leaf commits to for that content
+    /// ([`content_binding`]). `content_id` is proven only through them.
+    pub content_binding: Option<[u8; 32]>,
     pub is_expired: bool,
+}
+
+/// The content reference a name carries, as the registry binds it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NameContent {
+    pub sealed: bool,
+    pub digest: [u8; 32],
+    pub len: u64,
+    pub object_commitment: [u8; 32],
+    pub nft_id: Option<[u8; 32]>,
+}
+
+/// The commitment the name leaf carries for its content
+/// (`BDLM_BUD3_BNS_BINDING_V2`), matching `Bud3NameBinding::digest` in
+/// `budlum-core`. It covers the name and the owner, so a reference lifted
+/// from one name does not verify under another.
+#[must_use]
+pub fn content_binding(name: &str, owner: [u8; 32], content: &NameContent) -> [u8; 32] {
+    crate::content_id::hash_fields_bytes(&[
+        b"BDLM_BUD3_BNS_BINDING_V2",
+        name.as_bytes(),
+        &owner,
+        &[u8::from(content.sealed)],
+        &content.digest,
+        &content.len.to_le_bytes(),
+        &content.object_commitment,
+        &[u8::from(content.nft_id.is_some())],
+        &content.nft_id.unwrap_or([0u8; 32]),
+    ])
 }
 
 /// Proof that a resolution belongs to the registry.
@@ -225,7 +258,7 @@ fn evaluate_per_name_claim(
         &resolved.name,
         resolved.owner,
         expires_at,
-        resolved.content_id,
+        resolved.content_binding,
         resolved.storage_root,
         extras_digest,
     );
@@ -271,7 +304,7 @@ fn bns_leaf_digest(
     name: &str,
     owner: [u8; 32],
     expires_at: u64,
-    content_id: Option<ContentId>,
+    content_binding: Option<[u8; 32]>,
     storage_root: Option<[u8; 32]>,
     extras_digest: [u8; 32],
 ) -> [u8; 32] {
@@ -281,10 +314,10 @@ fn bns_leaf_digest(
     hasher.update(name.as_bytes());
     hasher.update(owner);
     hasher.update(expires_at.to_le_bytes());
-    match content_id {
-        Some(cid) => {
+    match content_binding {
+        Some(binding) => {
             hasher.update([1u8]);
-            hasher.update(cid.0);
+            hasher.update(binding);
         }
         None => hasher.update([0u8]),
     }
@@ -378,6 +411,7 @@ mod tests {
             owner: [1u8; 32],
             storage_root: Some([9u8; 32]),
             content_id: Some(ContentId([9u8; 32])),
+            content_binding: Some([0x5C; 32]),
             is_expired: false,
         }
     }
@@ -404,7 +438,7 @@ mod tests {
         let extras = [0x42u8; 32];
         let meta = [0x24u8; 32];
         let sibling = [0x77u8; 32];
-        let leaf = bns_leaf_digest(&r.name, r.owner, 25, r.content_id, r.storage_root, extras);
+        let leaf = bns_leaf_digest(&r.name, r.owner, 25, r.content_binding, r.storage_root, extras);
         let names_root = fold_bns_merkle_branch(leaf, &[sibling], &[false]).unwrap();
         let expected_root = bns_registry_root_from_parts(meta, names_root);
 
@@ -551,5 +585,30 @@ mod tests {
         assert!(e.badge().contains("has expired"), "{}", e.badge());
         let live = evaluate(&resolved(), &proof, Some(root), 9);
         assert_eq!(live.weakest(), Strength::Verified);
+    }
+
+    // The same bytes `Bud3NameBinding::digest` yields in `budlum-core` for
+    // this name, owner and reference; the vector is pinned on both sides.
+    #[test]
+    fn the_content_binding_matches_the_registry_vector() {
+        let content = NameContent {
+            sealed: false,
+            digest: [2u8; 32],
+            len: 1024,
+            object_commitment: [3u8; 32],
+            nft_id: None,
+        };
+        assert_eq!(
+            hex::encode(content_binding("ayaz.bud", [1u8; 32], &content)),
+            "1f64b4ce979f1864d4ab5d6784d32094a6085e6adef0fcd5410fc0261516560c"
+        );
+        assert_ne!(
+            content_binding("ayaz.bud", [1u8; 32], &content),
+            content_binding("other.bud", [1u8; 32], &content)
+        );
+        assert_ne!(
+            content_binding("ayaz.bud", [1u8; 32], &content),
+            content_binding("ayaz.bud", [4u8; 32], &content)
+        );
     }
 }

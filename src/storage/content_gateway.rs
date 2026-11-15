@@ -234,7 +234,7 @@ impl BudGateway {
     /// Primary entry point for D-Web resolution.
     /// Name: "ayaz.bud" → Returns raw bytes (HTML/Media).
     pub async fn fetch_name_content(&self, name: &str) -> Result<Vec<u8>, String> {
-        // 1. Resolve Name → BnsResolved (storage_root + content_id)
+        // 1. Resolve Name → BnsResolved (storage_root + content)
         let resolved = self
             .chain
             .bns_resolve_full(name.to_string())
@@ -327,8 +327,10 @@ impl BudGateway {
         Err(format!(
             "Content {}:{} not available in local storage, local B.U.D. store, or remote P2P peers.",
             hex::encode(&storage_root[..8]),
-            resolved
-                .content_id.map_or_else(|| "none".to_string(), |c| hex::encode(&c.as_bytes()[..4]))
+            resolved.content.map_or_else(
+                || "none".to_string(),
+                |c| hex::encode(c.content_id.digest.get(..4).unwrap_or_default())
+            )
         ))
     }
 
@@ -400,17 +402,23 @@ impl BudGateway {
 
 /// Every content identity a name record points at. The Pollen guard in the
 /// RPC handlers must check all of them: the gateway serves `storage_root`
-/// while `content_id` is the other identity, and a record may hold two
-/// different values. Checking only one lets the owner pick the unprotected one.
+/// while `content` is the other identity, and a record may hold different
+/// values. Checking only one lets the owner pick the unprotected one. The
+/// content reference contributes both of its names: the content digest and
+/// the object commitment.
 pub fn pollen_guard_ids(resolved: &crate::bns::types::BnsResolved) -> Vec<ContentId> {
-    let mut ids = Vec::with_capacity(2);
-    if let Some(root) = resolved.storage_root {
-        ids.push(ContentId(root));
-    }
-    if let Some(cid) = resolved.content_id {
-        if !ids.contains(&cid) {
-            ids.push(cid);
+    let mut ids = Vec::with_capacity(3);
+    let mut push = |id: ContentId| {
+        if !ids.contains(&id) {
+            ids.push(id);
         }
+    };
+    if let Some(root) = resolved.storage_root {
+        push(ContentId(root));
+    }
+    if let Some(content) = resolved.content {
+        push(ContentId(content.content_id.digest));
+        push(ContentId(content.object_commitment));
     }
     ids
 }
@@ -421,9 +429,27 @@ mod tests {
     use crate::storage::generated::{ContentSource, GeneratedSpec, GeneratorId};
     use crate::storage::ContentManifest;
 
+    /// A content reference whose digest is `digest` and whose object
+    /// commitment is `commitment`.
+    fn content_ref(
+        digest: [u8; 32],
+        commitment: [u8; 32],
+    ) -> crate::storage::bud3::content_ref::ContentRef {
+        crate::storage::bud3::content_ref::ContentRef::new(
+            crate::storage::bud3::content_id::ContentId {
+                kind: crate::storage::bud3::content_id::ContentIdKind::Public,
+                digest,
+                len: 11,
+            },
+            commitment,
+            None,
+        )
+        .unwrap()
+    }
+
     fn resolved_with(
         root: Option<[u8; 32]>,
-        content_id: Option<ContentId>,
+        content: Option<crate::storage::bud3::content_ref::ContentRef>,
     ) -> crate::bns::types::BnsResolved {
         crate::bns::types::BnsResolved {
             name: "a.bud".to_string(),
@@ -431,8 +457,7 @@ mod tests {
             address: None,
             storage_root: root,
             storage_domain_id: None,
-            content_id,
-            bud3_content: None,
+            content,
             subdomains: Default::default(),
             records: Default::default(),
             status: crate::bns::types::NameStatus::Active,
@@ -445,14 +470,22 @@ mod tests {
     #[test]
     fn pollen_guard_covers_the_served_storage_root() {
         // Storage_root is what the gateway serves; the guard must see it
-        // even when content_id points elsewhere.
+        // even when the content points elsewhere.
         let protected = [7u8; 32];
-        let other = ContentId::of(b"unprotected");
+        let other = content_ref([8u8; 32], [9u8; 32]);
         let ids = pollen_guard_ids(&resolved_with(Some(protected), Some(other)));
-        assert!(ids.contains(&ContentId(protected)));
-        assert!(ids.contains(&other));
-        assert_eq!(ids.len(), 2);
-        let same = pollen_guard_ids(&resolved_with(Some(protected), Some(ContentId(protected))));
+        assert_eq!(
+            ids,
+            vec![
+                ContentId(protected),
+                ContentId([8u8; 32]),
+                ContentId([9u8; 32])
+            ]
+        );
+        let same = pollen_guard_ids(&resolved_with(
+            Some(protected),
+            Some(content_ref(protected, protected)),
+        ));
         assert_eq!(same, vec![ContentId(protected)]);
         assert!(pollen_guard_ids(&resolved_with(None, None)).is_empty());
     }
@@ -708,8 +741,7 @@ mod tests {
             address: None,
             storage_root: Some([1u8; 32]),
             storage_domain_id: None,
-            content_id: Some(ContentId([2u8; 32])),
-            bud3_content: None,
+            content: Some(content_ref([2u8; 32], [3u8; 32])),
             subdomains: Default::default(),
             records: Default::default(),
             status: crate::bns::types::NameStatus::Active,
@@ -720,9 +752,10 @@ mod tests {
         let ids = pollen_guard_ids(&resolved);
         assert!(ids.contains(&ContentId([1u8; 32])));
         assert!(ids.contains(&ContentId([2u8; 32])));
+        assert!(ids.contains(&ContentId([3u8; 32])));
 
         let only_root = crate::bns::types::BnsResolved {
-            content_id: None,
+            content: None,
             ..resolved.clone()
         };
         assert_eq!(pollen_guard_ids(&only_root), vec![ContentId([1u8; 32])]);

@@ -285,7 +285,7 @@ mod tests {
             name: "kaya.bud".to_string(),
             owner,
             expires_at: 50,
-            content_id: None,
+            content_binding: None,
             storage_root: None,
             extras_digest,
             extras_preimage: None,

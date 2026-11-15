@@ -732,9 +732,15 @@ pub trait BudlumApi {
     #[method(name = "bud_bnsResolveFull")]
     async fn bns_resolve_full(&self, name: String) -> Result<serde_json::Value, ErrorObjectOwned>;
 
-    /// Resolve a name to a B.U.D. Content ID (CID).
+    /// What a live name serves, read through the B.U.D. 3.0 view. `null`
+    /// when the name has no content. Otherwise `content` is the reference
+    /// the record holds, `bytes` the rebuilt object, and `view_error` the
+    /// reason when this node could not rebuild it.
     #[method(name = "bud_bnsResolveContent")]
-    async fn bns_resolve_content(&self, name: String) -> Result<Option<String>, ErrorObjectOwned>;
+    async fn bns_resolve_content(
+        &self,
+        name: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
     /// Resolve a subdomain (e.g. photos.ayaz.bud).
     #[method(name = "bud_bnsResolveSubdomain")]
@@ -744,14 +750,14 @@ pub trait BudlumApi {
         sub_label: String,
     ) -> Result<Option<String>, ErrorObjectOwned>;
 
-    /// The content id a subdomain serves, or `null` when it has none of its
-    /// own, the label does not exist, or the parent name is expired.
+    /// The content reference a subdomain holds, or `null` when it has none
+    /// of its own, the label does not exist, or the parent name is expired.
     #[method(name = "bud_bnsResolveSubdomainContent")]
     async fn bns_resolve_subdomain_content(
         &self,
         parent_name: String,
         sub_label: String,
-    ) -> Result<Option<String>, ErrorObjectOwned>;
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
     /// Bidirectionally verified reverse `.bud` resolution for an address.
     #[method(name = "bud_bnsReverseResolve")]
@@ -887,23 +893,27 @@ pub trait BudlumApi {
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
     /// Prepare a `BnsSetSubdomainContent` transaction for the owner of a
-    /// subdomain. `content_id` is 32 bytes of hex; `null` clears the content.
+    /// subdomain. `content` is a reference in the proof shape
+    /// (`kind`, `digest`, `len`, `object_commitment`, `nft_id`); `null`
+    /// clears the content.
     #[method(name = "bud_bnsPrepareSetSubdomainContent")]
     async fn bns_prepare_set_subdomain_content(
         &self,
         parent_name: String,
         sub_label: String,
         caller: String,
-        content_id: Option<String>,
+        content: Option<serde_json::Value>,
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
-    /// Prepare a transaction to link content (CID) to a name.
+    /// Prepare a `BnsSetContent` transaction for the owner of a name.
+    /// `content` is a reference in the proof shape (`kind`, `digest`, `len`,
+    /// `object_commitment`, `nft_id`); `null` clears the content.
     #[method(name = "bud_bnsPrepareSetContent")]
     async fn bns_prepare_set_content(
         &self,
         name: String,
         owner: String,
-        cid: String,
+        content: Option<serde_json::Value>,
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
     /// Prepare a transaction that binds a storage root and its domain to a name.
@@ -914,27 +924,6 @@ pub trait BudlumApi {
         owner: String,
         storage_root: String,
         storage_domain_id: u32,
-    ) -> Result<serde_json::Value, ErrorObjectOwned>;
-
-    /// Resolve the live B.U.D. 3.0 `ContentRef` bound to a `.bud` name (`null` if unbound/expired).
-    #[method(name = "bud_bnsGetBud3Content")]
-    async fn bns_get_bud3_content(
-        &self,
-        name: String,
-    ) -> Result<serde_json::Value, ErrorObjectOwned>;
-
-    /// Prepare a signed `BnsSetBud3Content` transaction binding or clearing (`object_commitment = null`)
-    /// a B.U.D. 3.0 `ContentRef` on a live `.bud` name.
-    #[method(name = "bud_bnsPrepareSetBud3Content")]
-    async fn bns_prepare_set_bud3_content(
-        &self,
-        name: String,
-        owner: String,
-        object_commitment: Option<String>,
-        content_digest: Option<String>,
-        content_len: Option<u64>,
-        sealed: Option<bool>,
-        nft_id: Option<String>,
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
     /// Prepare a signed renewal transaction. The caller must be the current
