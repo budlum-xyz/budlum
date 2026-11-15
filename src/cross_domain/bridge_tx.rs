@@ -952,6 +952,17 @@ pub fn execute_bridge_tx(
             if operator != Some(ctx.sender) {
                 return Err(BridgeTxError::NotTheOperator(*domain));
             }
+            // Public registrations live in a domain namespace. Existing
+            // legacy rows remain readable, but no operator can occupy the id
+            // another domain will need: the first four bytes unambiguously
+            // name the declaring domain.
+            if !asset_id.is_namespaced_for(*domain) {
+                return Err(refused(format!(
+                    "a bridge asset id must be namespaced by its declaring domain: \
+                     the id names domain {}, the transaction declares domain {domain}",
+                    asset_id.namespace_domain()
+                )));
+            }
             register_asset(state, *asset_id, *domain).map_err(refused)
         }
         BridgeTx::Lock(request) => {
@@ -1082,7 +1093,7 @@ mod tests {
         let (mut state, operator) = bridged();
         let stranger = Address::from([0xEE; 32]);
         let tx = BridgeTx::RegisterAsset {
-            asset_id: AssetId([0xB6; 32]),
+            asset_id: AssetId::for_domain(1, b"operator-owned asset"),
             domain: 1,
         };
         assert_eq!(
@@ -1091,6 +1102,41 @@ mod tests {
         );
         let root_before = state.bridge_state.root();
         execute_bridge_tx(&mut state, &ctx(operator), &tx).unwrap();
+        assert_ne!(state.bridge_state.root(), root_before);
+    }
+
+    #[test]
+    fn one_domain_cannot_squat_another_domains_asset_namespace() {
+        let (mut state, domain_one_operator) = bridged();
+        let domain_two_operator = state
+            .settlement
+            .domains
+            .get(2)
+            .and_then(|domain| domain.operator)
+            .expect("domain two has an operator");
+        let domain_two_asset = AssetId::for_domain(2, b"canonical-local-asset");
+        assert_eq!(domain_two_asset.namespace_domain(), 2);
+        assert!(!domain_two_asset.is_namespaced_for(1));
+
+        let claim_for_one = BridgeTx::RegisterAsset {
+            asset_id: domain_two_asset,
+            domain: 1,
+        };
+        let root_before = state.bridge_state.root();
+        let error = execute_bridge_tx(&mut state, &ctx(domain_one_operator), &claim_for_one)
+            .expect_err("domain one must not occupy domain two's namespace");
+        assert!(error.to_string().contains("namespaced"), "{error}");
+        assert_eq!(state.bridge_state.root(), root_before);
+
+        execute_bridge_tx(
+            &mut state,
+            &ctx(domain_two_operator),
+            &BridgeTx::RegisterAsset {
+                asset_id: domain_two_asset,
+                domain: 2,
+            },
+        )
+        .expect("the namespace owner can register its id");
         assert_ne!(state.bridge_state.root(), root_before);
     }
 

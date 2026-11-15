@@ -490,7 +490,8 @@ mod open_deal {
     use crate::domain::storage_deal::{StorageEconomicsParams, FEE_RATE_SCALE};
     use crate::domain::storage_params::STORAGE_MIN_OPERATOR_BOND;
     use crate::domain::{
-        open_deal_consent_digest, StorageDealOpen, MISSED_CHALLENGE_COOLDOWN_SECS,
+        open_deal_consent_digest, operator_open_deal_consent_digest, StorageDealOpen,
+        MISSED_CHALLENGE_COOLDOWN_SECS,
     };
     use crate::storage::GrantAuthorization;
 
@@ -542,6 +543,7 @@ mod open_deal {
             domain_id: 42,
             manifest_id: m.manifest_id,
             shard_id: m.shards[0].shard_id,
+            shard_size: m.shards[0].size,
             operator: op.address(),
             replica_index: 0,
             start_epoch: 0,
@@ -640,6 +642,40 @@ mod open_deal {
     }
 
     #[test]
+    fn operator_signing_helper_measures_the_shard_before_risking_the_bond() {
+        let (_, m, op) = world();
+        let body = unsigned_body(&m, &op);
+        let first_shard = &b"open a deal in block payload"[..8];
+        let manifest_json = serde_json::to_vec(&m).expect("manifest json");
+        let body_json = serde_json::to_vec(&body).expect("deal json");
+        assert_eq!(
+            operator_open_deal_consent_digest(
+                DEFAULT_CHAIN_ID,
+                &payer(),
+                0,
+                &body_json,
+                &manifest_json,
+                first_shard,
+            )
+            .expect("the measured shard agrees"),
+            open_deal_consent_digest(DEFAULT_CHAIN_ID, &payer(), 0, &body)
+        );
+
+        let mut relabelled = body;
+        relabelled.shard_size = relabelled.shard_size.saturating_add(1);
+        let error = operator_open_deal_consent_digest(
+            DEFAULT_CHAIN_ID,
+            &payer(),
+            0,
+            &serde_json::to_vec(&relabelled).expect("deal json"),
+            &manifest_json,
+            first_shard,
+        )
+        .expect_err("a signer must not attest a size its bytes do not satisfy");
+        assert!(error.contains("measured"), "{error}");
+    }
+
+    #[test]
     fn a_consent_signed_for_another_digest_is_refused() {
         let (mut state, m, op) = world();
         let mut body = unsigned_body(&m, &op);
@@ -651,6 +687,19 @@ mod open_deal {
         let err = apply_without_write(&mut state, &op.address(), open_tx(body, DEFAULT_CHAIN_ID))
             .unwrap_err();
         assert!(err.contains("consent"), "got {err}");
+        assert_eq!(state.storage_registry.deals_iter().count(), 0);
+    }
+
+    #[test]
+    fn an_operator_cannot_consent_to_a_size_other_than_the_registered_shard() {
+        let (mut state, m, op) = world();
+        let mut body = unsigned_body(&m, &op);
+        body.shard_size = body.shard_size.saturating_add(1);
+        body.operator_consent = consent(&op, DEFAULT_CHAIN_ID, &payer(), 0, &body);
+
+        let err = apply_without_write(&mut state, &op.address(), open_tx(body, DEFAULT_CHAIN_ID))
+            .expect_err("even a valid signature cannot relabel the challenge range");
+        assert!(err.contains("registered manifest lists"), "got {err}");
         assert_eq!(state.storage_registry.deals_iter().count(), 0);
     }
 
@@ -849,6 +898,9 @@ mod open_deal {
         let mut v = base.clone();
         v.shard_id = ContentId([2u8; 32]);
         variants.push(("shard_id", v));
+        let mut v = base.clone();
+        v.shard_size = v.shard_size.saturating_add(1);
+        variants.push(("shard_size", v));
         let mut v = base.clone();
         v.operator = addr(3);
         variants.push(("operator", v));

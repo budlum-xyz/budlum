@@ -258,6 +258,8 @@ pub mod handover_mechanics;
 pub mod cross_domain_nonce_extended;
 
 #[cfg(test)]
+pub mod bns_acceptance;
+#[cfg(test)]
 pub mod bns_safety;
 
 #[cfg(test)]

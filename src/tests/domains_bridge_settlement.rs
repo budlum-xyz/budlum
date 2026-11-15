@@ -482,7 +482,7 @@ fn bridge_e2e_lock_mint_burn_unlock() {
             .expect("register domain");
     }
 
-    let asset = AssetId([0x77; 32]);
+    let asset = AssetId::for_domain(1, &[0x77; 32]);
     let relayer = addr(0x43);
     let owner = addr(0x44);
     let recipient = addr(0x45);
