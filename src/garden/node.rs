@@ -44,6 +44,13 @@ use tokio::sync::{mpsc, oneshot};
 
 /// Most pending transactions a node keeps.
 const MAX_MEMPOOL: usize = 4096;
+/// Most bytes one pending transaction may take. Every field of a valid
+/// transaction is bounded, so anything larger can never enter a block and
+/// is refused before hashing, verification or storage.
+const MAX_TX_BYTES: usize = 1024;
+/// Most bytes the pending transaction set may hold together, whatever the
+/// item count.
+const MAX_MEMPOOL_BYTES: usize = 2 * 1024 * 1024;
 /// Most proposals a node keeps for one height.
 const MAX_PROPOSALS: usize = 32;
 /// Most votes kept while their block has not arrived.
@@ -53,6 +60,14 @@ const MAX_SEEN: usize = 16_384;
 /// Most gossip items that wait for one peer. Past it the oldest is dropped:
 /// finalized blocks come back through sync and presence is sent again.
 const MAX_OUTBOX: usize = 2_048;
+/// Most bytes that may wait in one peer's gossip outbox.
+const MAX_OUTBOX_BYTES: usize = 8 * 1024 * 1024;
+/// Target byte ceiling for one outbound gossip batch, well below
+/// `MAX_REQUEST_BYTES`.
+const MAX_GOSSIP_BATCH_BYTES: usize = 4 * 1024 * 1024;
+/// Target byte ceiling for one `GetCommits` response, leaving headroom
+/// below `MAX_RESPONSE_BYTES`.
+const MAX_SYNC_RESPONSE_BYTES: usize = net::MAX_RESPONSE_BYTES - 1024 * 1024;
 /// Most objects kept that no finalized transaction names yet.
 const MAX_UNREFERENCED_OBJECTS: usize = 64;
 /// Most such objects kept for one peer.
@@ -251,6 +266,153 @@ const fn final_height(item: &GardenGossip) -> Option<u64> {
         GardenGossip::Commit(commit) => Some(commit.block.header.height),
         _ => None,
     }
+}
+
+/// Estimated memory and wire weight of one signed transaction, in bytes.
+///
+/// Only the signature, name, address, invite signature, MIME type and caption
+/// can grow; every other field is fixed size.
+const fn tx_bytes(tx: &SignedGardenTx) -> usize {
+    let grown = match &tx.tx.kind {
+        GardenTxKind::Join {
+            name,
+            address,
+            invite_signature,
+        } => name
+            .len()
+            .saturating_add(address.len())
+            .saturating_add(invite_signature.len()),
+        GardenTxKind::Leave | GardenTxKind::Suspend { .. } => 0,
+        GardenTxKind::Resume { address } => address.len(),
+        GardenTxKind::Publish { mime, caption, .. } => mime.len().saturating_add(caption.len()),
+    };
+    grown.saturating_add(tx.signature.len()).saturating_add(256)
+}
+
+/// Estimated weight of one proposed block, in bytes.
+fn block_bytes(block: &GardenBlock) -> usize {
+    let txs: usize = block.txs.iter().map(tx_bytes).sum();
+    block
+        .proposer_signature
+        .len()
+        .saturating_add(512)
+        .saturating_add(txs)
+}
+
+/// Estimated weight of one finalized commit, in bytes.
+fn commit_bytes(commit: &GardenCommit) -> usize {
+    let votes: usize = commit
+        .votes
+        .iter()
+        .map(|vote| vote.signature.len().saturating_add(128))
+        .sum();
+    block_bytes(&commit.block).saturating_add(votes)
+}
+
+/// Estimated weight of one gossip item, in bytes.
+fn gossip_bytes(item: &GardenGossip) -> usize {
+    match item {
+        GardenGossip::Tx(tx) => tx_bytes(tx),
+        GardenGossip::Proposal(block) => block_bytes(block),
+        GardenGossip::Vote(vote) => vote.signature.len().saturating_add(128),
+        GardenGossip::Commit(commit) => commit_bytes(commit),
+        GardenGossip::Presence(signal) => signal.signature.len().saturating_add(96),
+    }
+}
+
+/// Append `item` to a peer's gossip outbox while enforcing both item-count and
+/// byte budgets. Oldest entries are dropped first to make room.
+fn queue_gossip_item(
+    queue: &mut VecDeque<GardenGossip>,
+    item: GardenGossip,
+    max_items: usize,
+    max_bytes: usize,
+) {
+    let item_bytes = gossip_bytes(&item);
+    if max_items == 0 || item_bytes > max_bytes || item_bytes > net::MAX_REQUEST_BYTES {
+        return;
+    }
+    let mut queued_bytes: usize = queue.iter().map(gossip_bytes).sum();
+    while queue.len() >= max_items
+        || (!queue.is_empty() && queued_bytes.saturating_add(item_bytes) > max_bytes)
+    {
+        let Some(dropped) = queue.pop_front() else {
+            break;
+        };
+        queued_bytes = queued_bytes.saturating_sub(gossip_bytes(&dropped));
+    }
+    queue.push_back(item);
+}
+
+/// Drain the next outbound gossip batch from `queue` without crossing either
+/// `max_items`, `max_bytes`, or the wire request frame limit.
+fn drain_gossip_batch(
+    queue: &mut VecDeque<GardenGossip>,
+    max_items: usize,
+    max_bytes: usize,
+) -> Vec<GardenGossip> {
+    const FRAME_OVERHEAD: u64 = 64;
+    let mut batch = Vec::new();
+    let mut batch_bytes = 0usize;
+    let mut wire_bytes = FRAME_OVERHEAD;
+    while batch.len() < max_items {
+        let Some(front) = queue.front() else {
+            break;
+        };
+        let next_bytes = gossip_bytes(front);
+        let Ok(next_wire) = bincode::serialized_size(front) else {
+            let _ = queue.pop_front();
+            continue;
+        };
+        let fits_budget = batch_bytes.saturating_add(next_bytes) <= max_bytes;
+        let fits_wire = wire_bytes.saturating_add(next_wire) <= net::MAX_REQUEST_BYTES as u64;
+        if !batch.is_empty() && (!fits_budget || !fits_wire) {
+            break;
+        }
+        let Some(item) = queue.pop_front() else {
+            break;
+        };
+        batch.push(item);
+        batch_bytes = batch_bytes.saturating_add(next_bytes);
+        wire_bytes = wire_bytes.saturating_add(next_wire);
+    }
+    batch
+}
+
+/// Collect finalized commits from `from_height` up to `max` items without
+/// crossing `max_bytes` or the wire response frame limit. At least one commit
+/// is returned when `from_height` exists, so sync always makes progress.
+fn take_sync_commits(
+    ledger: &GardenLedger,
+    from_height: u64,
+    max: u32,
+    max_bytes: usize,
+) -> Vec<GardenCommit> {
+    const FRAME_OVERHEAD: u64 = 64;
+    let cap = max.min(MAX_SYNC_COMMITS) as usize;
+    let mut commits = Vec::new();
+    let mut total_bytes = 0usize;
+    let mut wire_bytes = FRAME_OVERHEAD;
+    let mut height = from_height.max(1);
+    while commits.len() < cap {
+        let Some((commit, _)) = ledger.commit_at(height) else {
+            break;
+        };
+        let size = commit_bytes(commit);
+        let Ok(next_wire) = bincode::serialized_size(commit) else {
+            break;
+        };
+        let fits_budget = total_bytes.saturating_add(size) <= max_bytes;
+        let fits_wire = wire_bytes.saturating_add(next_wire) <= net::MAX_RESPONSE_BYTES as u64;
+        if !commits.is_empty() && (!fits_budget || !fits_wire) {
+            break;
+        }
+        commits.push(commit.clone());
+        total_bytes = total_bytes.saturating_add(size);
+        wire_bytes = wire_bytes.saturating_add(next_wire);
+        height = height.saturating_add(1);
+    }
+    commits
 }
 
 struct Leaving {
@@ -832,6 +994,9 @@ impl Node {
     /// Queue `item` for every peer but `except`. Each peer gets one gossip
     /// request at a time; what arrives meanwhile leaves in the next batch.
     async fn gossip(&mut self, item: &GardenGossip, except: Option<PeerId>) {
+        if gossip_bytes(item) > MAX_OUTBOX_BYTES {
+            return;
+        }
         let targets: Vec<PeerId> = self
             .peers
             .keys()
@@ -840,10 +1005,7 @@ impl Node {
             .collect();
         for peer in targets {
             let queue = self.outbox.entry(peer).or_default();
-            if queue.len() >= MAX_OUTBOX {
-                queue.pop_front();
-            }
-            queue.push_back(item.clone());
+            queue_gossip_item(queue, item.clone(), MAX_OUTBOX, MAX_OUTBOX_BYTES);
             self.flush(peer).await;
         }
     }
@@ -855,11 +1017,10 @@ impl Node {
         let Some(queue) = self.outbox.get_mut(&peer) else {
             return;
         };
-        let take = queue.len().min(MAX_GOSSIP_BATCH);
-        if take == 0 {
+        let batch = drain_gossip_batch(queue, MAX_GOSSIP_BATCH, MAX_GOSSIP_BATCH_BYTES);
+        if batch.is_empty() {
             return;
         }
-        let batch: Vec<GardenGossip> = queue.drain(..take).collect();
         let carried = batch.iter().filter_map(final_height).max().unwrap_or(0);
         self.gossip_in_flight.insert(peer, carried);
         self.send(peer, GardenRequest::Gossip(batch), TAG_GOSSIP)
@@ -1046,15 +1207,8 @@ impl Node {
                 }
             }
             GardenRequest::GetCommits { from_height, max } => {
-                let mut commits = Vec::new();
-                let mut height = from_height.max(1);
-                while commits.len() < max.min(MAX_SYNC_COMMITS) as usize {
-                    match self.ledger.commit_at(height) {
-                        Some((commit, _)) => commits.push(commit.clone()),
-                        None => break,
-                    }
-                    height = height.saturating_add(1);
-                }
+                let commits =
+                    take_sync_commits(&self.ledger, from_height, max, MAX_SYNC_RESPONSE_BYTES);
                 self.respond(channel, GardenResponse::Commits(commits))
                     .await;
             }
@@ -1117,6 +1271,16 @@ impl Node {
         self.next_tag
     }
 
+    /// True when any pending publication in the mempool names `content_id`.
+    fn is_pending_content(&self, content_id: &Hash32) -> bool {
+        self.mempool.values().any(|tx| {
+            matches!(
+                &tx.tx.kind,
+                GardenTxKind::Publish { content_id: id, .. } if id == content_id
+            )
+        })
+    }
+
     /// Track an object no finalized transaction names yet, under the peer
     /// that deposited it. A peer past its share loses its own oldest
     /// object. When all peers together hold too many, the peer that holds
@@ -1150,6 +1314,7 @@ impl Node {
         self.unreferenced.retain(|_, queue| !queue.is_empty());
         for old in dropped {
             let named = self.ledger.state.holds_content(&old)
+                || self.is_pending_content(&old)
                 || self.unreferenced.values().any(|queue| queue.contains(&old));
             if !named {
                 self.store.remove(&old);
@@ -1354,7 +1519,11 @@ impl Node {
     async fn on_gossip(&mut self, item: GardenGossip, from: Option<PeerId>) {
         match item {
             GardenGossip::Tx(tx) => {
-                if self.first_sight(Seen::Tx(tx.id())) && self.admit_tx(tx.clone()) {
+                if tx_bytes(&tx) <= MAX_TX_BYTES
+                    && self.ledger.state.check_tx_shape(&tx).is_ok()
+                    && self.first_sight(Seen::Tx(tx.id()))
+                    && self.admit_tx(tx.clone())
+                {
                     self.gossip(&GardenGossip::Tx(tx), from).await;
                 }
             }
@@ -1412,18 +1581,65 @@ impl Node {
         }
     }
 
-    /// Put a transaction in the pending set. False when it is refused.
-    fn admit_tx(&mut self, tx: SignedGardenTx) -> bool {
-        if tx.verify(self.chain_id()).is_err()
-            || tx.tx.nonce < self.ledger.state.next_nonce(&tx.tx.sender)
-            || self.mempool.len() >= MAX_MEMPOOL
-        {
+    /// True when `tx.tx.sender` is allowed to hold a slot in the pending set.
+    ///
+    /// Known validators may pool their transactions; a new key may pool only
+    /// a nonce-0 `Join` carrying a valid invite signature while the Garden
+    /// still has validator capacity and pending joins stay within that cap.
+    fn sender_may_pool(&self, tx: &SignedGardenTx) -> bool {
+        let state = &self.ledger.state;
+        match &tx.tx.kind {
+            GardenTxKind::Join {
+                invite_signature, ..
+            } => {
+                if state.validators.contains_key(&tx.tx.sender) || tx.tx.nonce != 0 {
+                    return false;
+                }
+                let max_validators = self.limits().max_validators as usize;
+                if state.validators.len() >= max_validators {
+                    return false;
+                }
+                let pending_joins = self
+                    .mempool
+                    .values()
+                    .filter(|queued| matches!(queued.tx.kind, GardenTxKind::Join { .. }))
+                    .count();
+                if pending_joins >= max_validators {
+                    return false;
+                }
+                verify_signature(
+                    &join_message(self.chain_id(), &tx.tx.sender),
+                    invite_signature,
+                    &state.genesis.invite_key,
+                )
+                .is_ok()
+            }
+            GardenTxKind::Leave | GardenTxKind::Resume { .. } | GardenTxKind::Publish { .. } => {
+                state.validators.contains_key(&tx.tx.sender)
+            }
+            GardenTxKind::Suspend { .. } => false,
+        }
+    }
+
+    /// True when `tx` meets every pool bound and may enter `self.mempool`.
+    fn can_admit_tx(&self, tx: &SignedGardenTx) -> bool {
+        let size = tx_bytes(tx);
+        if size > MAX_TX_BYTES || self.ledger.state.check_tx_shape(tx).is_err() {
             return false;
         }
         // An absence report is written by the leader into its own block and
         // counts nowhere else, so one that waits in a pool can only hold the
         // nonce of its sender.
-        if matches!(tx.tx.kind, GardenTxKind::Suspend { .. }) {
+        if matches!(tx.tx.kind, GardenTxKind::Suspend { .. }) || !self.sender_may_pool(tx) {
+            return false;
+        }
+        if tx.tx.nonce < self.ledger.state.next_nonce(&tx.tx.sender)
+            || self.mempool.len() >= MAX_MEMPOOL
+        {
+            return false;
+        }
+        let held_bytes: usize = self.mempool.values().map(tx_bytes).sum();
+        if held_bytes.saturating_add(size) > MAX_MEMPOOL_BYTES {
             return false;
         }
         let per_sender = (self.limits().max_sender_txs_per_block as usize).saturating_mul(4);
@@ -1432,9 +1648,15 @@ impl Node {
             .range((tx.tx.sender, 0)..=(tx.tx.sender, u64::MAX))
             .count();
         let slot = (tx.tx.sender, tx.tx.nonce);
-        if held >= per_sender || self.mempool.contains_key(&slot) {
+        held < per_sender && !self.mempool.contains_key(&slot) && tx.verify(self.chain_id()).is_ok()
+    }
+
+    /// Put a transaction in the pending set. False when it is refused.
+    fn admit_tx(&mut self, tx: SignedGardenTx) -> bool {
+        if !self.can_admit_tx(&tx) {
             return false;
         }
+        let slot = (tx.tx.sender, tx.tx.nonce);
         self.mempool.insert(slot, tx);
         if self.pending_since.is_none() {
             self.pending_since = Some(Instant::now());
@@ -1607,6 +1829,7 @@ impl Node {
                 self.last_seen.insert(tx.tx.sender, Instant::now());
             }
         }
+        self.unreferenced.retain(|_, queue| !queue.is_empty());
         if active_before == self.ledger.state.active() {
             for tx in &commit.block.txs {
                 if let GardenTxKind::Publish { content_id, .. } = &tx.tx.kind {
@@ -2056,6 +2279,16 @@ impl Node {
         });
         if duplicate {
             return Err("this content is already waiting to be published".into());
+        }
+        let candidate = GardenTx {
+            chain_id: self.chain_id(),
+            sender: self.me,
+            nonce: self.my_next_nonce,
+            kind: tx_kind.clone(),
+        }
+        .sign(&self.key)?;
+        if !self.can_admit_tx(&candidate) {
+            return Err("this node has too many pending transactions".into());
         }
         self.store.put(&bytes)?;
         // Hand the bytes to the validators that will hold them before the
@@ -3193,6 +3426,427 @@ mod tests {
         let status = handle.status().await.unwrap();
         assert_eq!(status["active_validators"], json!(1));
         assert_eq!(status["height"], json!(0));
+        handle.leave().await.unwrap();
+    }
+
+    /// Oversized transactions, transactions from unknown senders and joins
+    /// without a valid invite signature are refused at admission instead of
+    /// entering the pending set.
+    #[tokio::test]
+    async fn garden_oversized_and_unknown_sender_transactions_are_not_pooled() {
+        let handle = spawn(
+            GardenEntry::Create {
+                title: "Room".into(),
+                limits: GardenLimits {
+                    round_ms: 5_000,
+                    ..GardenLimits::testnet_default()
+                },
+            },
+            config("host", "/ip4/127.0.0.1/tcp/0"),
+            random_bytes(),
+            None,
+        )
+        .await
+        .unwrap();
+        let invite = handle.invite().await.unwrap();
+        let (mut swarm, key, peer) = guest(&invite).await;
+
+        // First join cleanly so `key` is a real validator and the Garden has
+        // two validators (quorum = 2), keeping later transactions pending
+        // while `swarm` does not vote.
+        let join = GardenTx {
+            chain_id: invite.chain_id,
+            sender: key.public_key_bytes(),
+            nonce: 0,
+            kind: GardenTxKind::Join {
+                name: "guest".into(),
+                address: String::new(),
+                invite_signature: invite_keypair(&invite.token)
+                    .unwrap()
+                    .sign(&join_message(invite.chain_id, &key.public_key_bytes()))
+                    .to_vec(),
+            },
+        }
+        .sign(&key)
+        .unwrap();
+        assert!(matches!(
+            ask(
+                &mut swarm,
+                peer,
+                GardenRequest::Gossip(vec![GardenGossip::Tx(join)])
+            )
+            .await,
+            GardenResponse::Ack
+        ));
+        let mut joined = false;
+        for _ in 0..100 {
+            if handle.status().await.unwrap()["active_validators"] == json!(2) {
+                joined = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        assert!(joined, "guest did not join in time");
+
+        // 1. An active validator sends a Publish with a 64 KiB caption.
+        let oversized = GardenTx {
+            chain_id: invite.chain_id,
+            sender: key.public_key_bytes(),
+            nonce: 1,
+            kind: GardenTxKind::Publish {
+                kind: GardenContentKind::Message,
+                content_id: [0x11; 32],
+                size: 8,
+                mime: "text/plain".into(),
+                caption: "a".repeat(65_536),
+            },
+        }
+        .sign(&key)
+        .unwrap();
+
+        // 2. An unknown throwaway key sends a Publish transaction.
+        let throwaway = KeyPair::generate().unwrap();
+        let unknown_publish = GardenTx {
+            chain_id: invite.chain_id,
+            sender: throwaway.public_key_bytes(),
+            nonce: 0,
+            kind: GardenTxKind::Publish {
+                kind: GardenContentKind::Message,
+                content_id: [0x22; 32],
+                size: 8,
+                mime: "text/plain".into(),
+                caption: String::new(),
+            },
+        }
+        .sign(&throwaway)
+        .unwrap();
+
+        // 3. A Join with a forged invite signature.
+        let forged_joiner = KeyPair::generate().unwrap();
+        let forged_join = GardenTx {
+            chain_id: invite.chain_id,
+            sender: forged_joiner.public_key_bytes(),
+            nonce: 0,
+            kind: GardenTxKind::Join {
+                name: "mallory".into(),
+                address: String::new(),
+                invite_signature: invite_keypair(&[0x99; 32])
+                    .unwrap()
+                    .sign(&join_message(
+                        invite.chain_id,
+                        &forged_joiner.public_key_bytes(),
+                    ))
+                    .to_vec(),
+            },
+        }
+        .sign(&forged_joiner)
+        .unwrap();
+
+        let batch = GardenRequest::Gossip(vec![
+            GardenGossip::Tx(oversized),
+            GardenGossip::Tx(unknown_publish),
+            GardenGossip::Tx(forged_join),
+        ]);
+        assert!(matches!(
+            ask(&mut swarm, peer, batch).await,
+            GardenResponse::Ack
+        ));
+        let status = handle.status().await.unwrap();
+        assert_eq!(
+            status["pending_transactions"],
+            json!(0),
+            "oversized or unauthorized transactions entered the pending set: {status}"
+        );
+        handle.leave().await.unwrap();
+    }
+
+    /// A peer depositing the same bytes as a validator's pending local
+    /// publication and then filling its own unreferenced quota must not
+    /// delete the validator's pending object from disk.
+    #[tokio::test]
+    async fn garden_peer_deposits_do_not_evict_a_pending_local_publication() {
+        let handle = spawn(
+            GardenEntry::Create {
+                title: "Room".into(),
+                limits: GardenLimits {
+                    round_ms: 5_000,
+                    ..GardenLimits::testnet_default()
+                },
+            },
+            config("host", "/ip4/127.0.0.1/tcp/0"),
+            random_bytes(),
+            None,
+        )
+        .await
+        .unwrap();
+        let invite = handle.invite().await.unwrap();
+        let (mut swarm, key, peer) = guest(&invite).await;
+
+        let join = GardenTx {
+            chain_id: invite.chain_id,
+            sender: key.public_key_bytes(),
+            nonce: 0,
+            kind: GardenTxKind::Join {
+                name: "guest".into(),
+                address: String::new(),
+                invite_signature: invite_keypair(&invite.token)
+                    .unwrap()
+                    .sign(&join_message(invite.chain_id, &key.public_key_bytes()))
+                    .to_vec(),
+            },
+        }
+        .sign(&key)
+        .unwrap();
+        assert!(matches!(
+            ask(
+                &mut swarm,
+                peer,
+                GardenRequest::Gossip(vec![GardenGossip::Tx(join)])
+            )
+            .await,
+            GardenResponse::Ack
+        ));
+        let mut joined = false;
+        for _ in 0..100 {
+            if handle.status().await.unwrap()["active_validators"] == json!(2) {
+                joined = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        assert!(joined, "guest did not join in time");
+
+        // The host publishes locally; with two validators and no second vote,
+        // the publication stays pending in the host's mempool.
+        let kept = b"pending local host post".to_vec();
+        let content_id = crate::storage::content_id::ContentId::of(&kept).0;
+        handle
+            .publish(
+                GardenContentKind::Message,
+                kept.clone(),
+                "text/plain".into(),
+                String::new(),
+            )
+            .await
+            .unwrap();
+
+        // The peer deposits the exact same bytes and then fills its own
+        // unreferenced quota to evict them.
+        assert!(matches!(
+            ask(
+                &mut swarm,
+                peer,
+                GardenRequest::PutObject {
+                    bytes: kept.clone()
+                }
+            )
+            .await,
+            GardenResponse::Ack
+        ));
+        for filler in 0..(MAX_UNREFERENCED_PER_PEER + 2) {
+            let put = GardenRequest::PutObject {
+                bytes: format!("filler-{filler}").into_bytes(),
+            };
+            assert!(matches!(
+                ask(&mut swarm, peer, put).await,
+                GardenResponse::Ack
+            ));
+        }
+
+        let get = GardenRequest::GetObject {
+            content_id,
+            relay: false,
+        };
+        match ask(&mut swarm, peer, get).await {
+            GardenResponse::Object(found) => {
+                assert_eq!(
+                    found,
+                    Some(kept),
+                    "peer deposit eviction removed the host's pending local publication"
+                );
+            }
+            other => panic!("expected the object, got {other:?}"),
+        }
+        handle.leave().await.unwrap();
+    }
+
+    /// Per-peer outboxes and outbound gossip batches are bounded by bytes in
+    /// addition to item counts, so a slow peer never pins unbounded memory
+    /// and no batch crosses the frame limit.
+    #[test]
+    fn garden_outbox_and_gossip_batch_enforce_byte_budgets() {
+        let mut net = super::super::testkit::Net::new();
+        let a = net.join("a");
+        let items: Vec<GardenGossip> = (0..6u8)
+            .map(|n| {
+                let tx = GardenTx {
+                    chain_id: net.ledger.state.chain_id(),
+                    sender: a,
+                    nonce: u64::from(n),
+                    kind: GardenTxKind::Publish {
+                        kind: GardenContentKind::Message,
+                        content_id: [n; 32],
+                        size: 16,
+                        mime: "text/plain".into(),
+                        caption: "x".repeat(128),
+                    },
+                }
+                .sign(net.key(&a))
+                .unwrap();
+                GardenGossip::Tx(tx)
+            })
+            .collect();
+        let one = gossip_bytes(&items[0]);
+        assert!(one <= MAX_TX_BYTES);
+
+        // Outbox byte budget evicts oldest entries when bytes would exceed
+        // the limit even though item count is far below MAX_OUTBOX.
+        let mut queue = VecDeque::new();
+        for item in &items {
+            queue_gossip_item(&mut queue, item.clone(), MAX_OUTBOX, one * 3);
+        }
+        assert_eq!(queue.len(), 3);
+        let queued_bytes: usize = queue.iter().map(gossip_bytes).sum();
+        assert!(queued_bytes <= one * 3);
+
+        // Outbound batch draining splits strictly by byte budget and leaves
+        // remaining items queued for the next flush.
+        let first = drain_gossip_batch(&mut queue, MAX_GOSSIP_BATCH, one * 2);
+        assert_eq!(first.len(), 2);
+        assert_eq!(queue.len(), 1);
+        let second = drain_gossip_batch(&mut queue, MAX_GOSSIP_BATCH, one * 2);
+        assert_eq!(second.len(), 1);
+        assert!(queue.is_empty());
+    }
+
+    /// `GetCommits` stops before crossing its response byte budget and always
+    /// advances by at least one commit so sync never stalls on large blocks.
+    #[test]
+    fn garden_sync_commits_respect_the_response_byte_budget() {
+        let mut net = super::super::testkit::Net::new();
+        let a = net.join("a");
+        for n in 1..=5u8 {
+            net.commit(vec![net.publish(&a, n)]).unwrap();
+        }
+        let total = net.ledger.state.height;
+        assert_eq!(total, 6);
+        let one_size = commit_bytes(net.ledger.commit_at(2).unwrap().0);
+
+        // Budget fits two commits at a time; iterating `from_height` recovers
+        // the entire chain in order without skipping or exceeding the cap.
+        let mut collected = Vec::new();
+        let mut from = 1u64;
+        while from <= total {
+            let chunk = take_sync_commits(&net.ledger, from, MAX_SYNC_COMMITS, one_size * 2);
+            assert!(!chunk.is_empty());
+            assert!(chunk.len() <= 2);
+            from = chunk.last().unwrap().block.header.height + 1;
+            collected.extend(chunk);
+        }
+        assert_eq!(collected.len(), usize::try_from(total).unwrap());
+        for (idx, commit) in collected.iter().enumerate() {
+            assert_eq!(commit.block.header.height, u64::try_from(idx + 1).unwrap());
+        }
+
+        // Even when a single commit is larger than the target budget, sync
+        // still returns that one commit so forward progress never stalls.
+        let single = take_sync_commits(&net.ledger, 1, MAX_SYNC_COMMITS, 1);
+        assert_eq!(single.len(), 1);
+        assert_eq!(single[0].block.header.height, 1);
+    }
+
+    /// One invite holder cannot flood the pending set with unbounded
+    /// throwaway `Join` transactions past the Garden's validator cap.
+    #[tokio::test]
+    async fn garden_pending_joins_are_bounded_by_validator_capacity() {
+        let handle = spawn(
+            GardenEntry::Create {
+                title: "Small".into(),
+                limits: GardenLimits {
+                    max_validators: 3,
+                    max_block_txs: 8,
+                    max_sender_txs_per_block: 4,
+                    round_ms: 5_000,
+                    ..GardenLimits::testnet_default()
+                },
+            },
+            config("host", "/ip4/127.0.0.1/tcp/0"),
+            random_bytes(),
+            None,
+        )
+        .await
+        .unwrap();
+        let invite = handle.invite().await.unwrap();
+        let (mut swarm, key, peer) = guest(&invite).await;
+
+        // First guest joins cleanly so quorum becomes 2 and later joins stay
+        // pending while `swarm` does not vote.
+        let first_join = GardenTx {
+            chain_id: invite.chain_id,
+            sender: key.public_key_bytes(),
+            nonce: 0,
+            kind: GardenTxKind::Join {
+                name: "guest".into(),
+                address: String::new(),
+                invite_signature: invite_keypair(&invite.token)
+                    .unwrap()
+                    .sign(&join_message(invite.chain_id, &key.public_key_bytes()))
+                    .to_vec(),
+            },
+        }
+        .sign(&key)
+        .unwrap();
+        assert!(matches!(
+            ask(
+                &mut swarm,
+                peer,
+                GardenRequest::Gossip(vec![GardenGossip::Tx(first_join)])
+            )
+            .await,
+            GardenResponse::Ack
+        ));
+        let mut joined = false;
+        for _ in 0..100 {
+            if handle.status().await.unwrap()["active_validators"] == json!(2) {
+                joined = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        assert!(joined, "guest did not join in time");
+
+        let invite_key = invite_keypair(&invite.token).unwrap();
+        let flood: Vec<GardenGossip> = (0..12)
+            .map(|idx| {
+                let kp = KeyPair::generate().unwrap();
+                let sender = kp.public_key_bytes();
+                let tx = GardenTx {
+                    chain_id: invite.chain_id,
+                    sender,
+                    nonce: 0,
+                    kind: GardenTxKind::Join {
+                        name: format!("bot-{idx}"),
+                        address: String::new(),
+                        invite_signature: invite_key
+                            .sign(&join_message(invite.chain_id, &sender))
+                            .to_vec(),
+                    },
+                }
+                .sign(&kp)
+                .unwrap();
+                GardenGossip::Tx(tx)
+            })
+            .collect();
+        assert!(matches!(
+            ask(&mut swarm, peer, GardenRequest::Gossip(flood)).await,
+            GardenResponse::Ack
+        ));
+        let status = handle.status().await.unwrap();
+        let pending = status["pending_transactions"].as_u64().unwrap();
+        assert!(
+            pending <= 3,
+            "pending joins exceeded max_validators cap (3): {status}"
+        );
         handle.leave().await.unwrap();
     }
 }
