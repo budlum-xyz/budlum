@@ -145,6 +145,12 @@
     with `bns_content_unknown` unless the id is a public B.U.D. 3.0 object
     whose shares are all confirmed. Sealed content binds only through
     `BnsSetBud3Content`, which checks the NFT grant.
+  - **Storage root existence at the consensus door:** `BnsSetStorage` is
+    refused with `bns_storage_unknown` unless the root equals the finalized
+    root the chain holds for the named domain (`AccountState::external_roots`,
+    written only by a finalized domain commitment). The chain keeps one root
+    per domain, the latest. A name bound to an older root keeps it, and
+    `storage_root_height` says when it was bound.
   - **`bud_bnsPrepareSetStorage`:** builds the `BnsSetStorage` template and
     refuses a root that is not 32 bytes.
   - **Gateway answers:** an expired record whose proof folds to the verified
@@ -153,9 +159,6 @@
     baseline.
 
 - **Open items (not implemented):**
-  - `BnsSetStorage` does not look the root up anywhere, because the chain
-    holds no per-domain storage root table. There is no `bns_storage_unknown`
-    refusal.
   - A subdomain is an owner pointer (`BTreeMap<String, Address>`). There is
     no `SubdomainRecord`, no `BnsSetSubdomainContent` and no subdomain content
     RPC, so a subdomain serves the content of its parent name.
