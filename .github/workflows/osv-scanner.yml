@@ -93,52 +93,12 @@ jobs:
           fi
           echo "Canary caught -> the OSV alarm works."
 
-      # fuzz/Cargo.lock ve crates/wallet-core/Cargo.lock buraya sonradan eklendi.
-      # The repository has four lockfiles and the scan read two of them. The fuzz
-      # lock carries the same 23 git packages as the root lock plus its own
-      # carries; wallet-core carries BIP39 and SLIP-0010 key derivation,
-      # so one of the two unscanned trees was the tree that produces keys directly.
-      # libfuzzer chain. The fuzz runner executes on the CI machine and on developer
-      # machines, and the wallet code sees the user's seed; neither is "just a test".
-      # is not.
-      #
-      # crates/budlum-explorer/Cargo.lock was added for the same reason, and the "was every
-      # lockfile scanned" step below caught exactly this: because budlum-explorer is its own
-      # workspace it does not enter the root lock, and before being added to the
-      # list by hand it was out of scope. The gate worked.
+      # Discover lockfiles once per invocation rather than maintaining two lists.
+      # The helper fails closed on an empty tree or scanner/setup errors.
+      - name: Test OSV scan coverage and failure handling
+        run: python3 .github/scripts/test_osv_scan.py
       - name: Generate OSV SARIF report
-        run: |
-          set -uo pipefail
-          set +e
-          osv-scanner scan source \
-            --format=sarif \
-            --output=osv-scanner.sarif \
-            --config=osv-scanner.toml \
-            --lockfile=Cargo.lock \
-            --lockfile=bud/Cargo.lock \
-            --lockfile=budzero/Cargo.lock \
-            --lockfile=crates/ai-inference/Cargo.lock \
-            --lockfile=crates/bpqs/Cargo.lock \
-            --lockfile=crates/bud-codec/Cargo.lock \
-            --lockfile=crates/budlum-explorer/Cargo.lock \
-            --lockfile=crates/budlum-types/Cargo.lock \
-            --lockfile=crates/note-packing/Cargo.lock \
-            --lockfile=crates/uel-abi/Cargo.lock \
-            --lockfile=crates/wallet-core/Cargo.lock \
-            --lockfile=fuzz/Cargo.lock \
-            --lockfile=kani/Cargo.lock \
-            --lockfile=mobile/core/Cargo.lock \
-            --lockfile=mobile/ffi/Cargo.lock \
-            --lockfile=mobile/tools/log-analyzer/Cargo.lock \
-            --lockfile=xtask/gates/Cargo.lock \
-            --lockfile=xtask/release/Cargo.lock \
-            --lockfile=xtask/tools/Cargo.lock
-          status=$?
-          set -e
-          if [ "$status" -gt 1 ] || [ ! -s osv-scanner.sarif ]; then
-            echo "::error::osv-scanner failed with status $status without producing SARIF"
-            exit 1
-          fi
+        run: python3 .github/scripts/osv_scan.py report
       - name: Upload OSV SARIF (Security tab)
         if: always()
         uses: github/codeql-action/upload-sarif@1fc58d04a4d4374f921bdac573c3811c240f9c26 # v4.39.2
@@ -146,46 +106,4 @@ jobs:
           sarif_file: osv-scanner.sarif
           category: osv-scanner
       - name: Scan - every lockfile in the repository (a finding = fail)
-        run: |
-          set -euo pipefail
-          osv-scanner scan source \
-            --config=osv-scanner.toml \
-            --lockfile=Cargo.lock \
-            --lockfile=bud/Cargo.lock \
-            --lockfile=budzero/Cargo.lock \
-            --lockfile=crates/ai-inference/Cargo.lock \
-            --lockfile=crates/bpqs/Cargo.lock \
-            --lockfile=crates/bud-codec/Cargo.lock \
-            --lockfile=crates/budlum-explorer/Cargo.lock \
-            --lockfile=crates/budlum-types/Cargo.lock \
-            --lockfile=crates/note-packing/Cargo.lock \
-            --lockfile=crates/uel-abi/Cargo.lock \
-            --lockfile=crates/wallet-core/Cargo.lock \
-            --lockfile=fuzz/Cargo.lock \
-            --lockfile=kani/Cargo.lock \
-            --lockfile=mobile/core/Cargo.lock \
-            --lockfile=mobile/ffi/Cargo.lock \
-            --lockfile=mobile/tools/log-analyzer/Cargo.lock \
-            --lockfile=xtask/gates/Cargo.lock \
-            --lockfile=xtask/release/Cargo.lock \
-            --lockfile=xtask/tools/Cargo.lock
-
-      # So the list above never shrinks: every Cargo.lock in the repository must
-      # be scanned. If a new sub-crate is added and its lock silently stays out
-      # of scope, this step goes red.
-      - name: Was every lockfile scanned
-        run: |
-          set -euo pipefail
-          missing=0
-          while IFS= read -r lock; do
-            rel="${lock#./}"
-            if ! grep -q -- "--lockfile=${rel}" .github/workflows/osv-scanner.yml; then
-              echo "TARANMIYOR: ${rel}"
-              missing=1
-            fi
-          done < <(find . -name Cargo.lock -not -path './target/*' -not -path '*/target/*')
-          if [ "$missing" -ne 0 ]; then
-            echo "The lockfiles above are outside the OSV scan."
-            exit 1
-          fi
-          echo "Every Cargo.lock in the repository is in the OSV scan."
+        run: python3 .github/scripts/osv_scan.py gate
