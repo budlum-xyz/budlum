@@ -127,16 +127,11 @@ enum GardenCommand {
 pub struct GardenHandle {
     commands: mpsc::Sender<GardenCommand>,
     chain_id: u64,
-    key: GardenKey,
 }
 
 impl GardenHandle {
-    pub fn chain_id(&self) -> u64 {
+    pub const fn chain_id(&self) -> u64 {
         self.chain_id
-    }
-
-    pub fn key(&self) -> GardenKey {
-        self.key
     }
 
     async fn ask<T>(
@@ -244,9 +239,20 @@ struct Relay {
     content_id: Hash32,
 }
 
+/// The height of the final block a gossip item carries.
+const fn final_height(item: &GardenGossip) -> Option<u64> {
+    match item {
+        GardenGossip::Commit(commit) => Some(commit.block.header.height),
+        _ => None,
+    }
+}
+
 struct Leaving {
     deadline: Instant,
     tx_id: Option<Hash32>,
+    /// The height of the block that carries this node's departure, once it
+    /// is final here. The node stays until that block left its outboxes.
+    sealed: Option<u64>,
     reply: oneshot::Sender<GardenLeaveOutcome>,
 }
 
@@ -266,8 +272,15 @@ struct Node {
     budlum_status: Option<DomainStatus>,
     budlum_error: Option<String>,
     peers: BTreeMap<PeerId, GardenKey>,
+    /// Connected peers that have not shown the invite, and since when.
+    unadmitted: BTreeMap<PeerId, Instant>,
     outbox: BTreeMap<PeerId, VecDeque<GardenGossip>>,
-    gossip_in_flight: BTreeSet<PeerId>,
+    /// The peers with a gossip request in flight, and the height of the
+    /// highest final block that request carries (0 when it carries none).
+    gossip_in_flight: BTreeMap<PeerId, u64>,
+    /// The highest final block another validator is known to hold: it came
+    /// from a peer, or a peer acknowledged it.
+    held_elsewhere: u64,
     mempool: BTreeMap<(GardenKey, u64), SignedGardenTx>,
     my_next_nonce: u64,
     proposals: BTreeMap<Hash32, GardenBlock>,
@@ -451,6 +464,8 @@ pub async fn spawn(
     let (commands, command_rx) = mpsc::channel(256);
     let now = Instant::now();
     let my_next_nonce = ledger.state.next_nonce(&me);
+    // What this node starts with came from the validators it synced from.
+    let held_elsewhere = ledger.state.height;
     let node = Node {
         key,
         me,
@@ -467,8 +482,10 @@ pub async fn spawn(
         budlum_status,
         budlum_error: None,
         peers,
+        unadmitted: BTreeMap::new(),
         outbox: BTreeMap::new(),
-        gossip_in_flight: BTreeSet::new(),
+        gossip_in_flight: BTreeMap::new(),
+        held_elsewhere,
         mempool: BTreeMap::new(),
         my_next_nonce,
         proposals: BTreeMap::new(),
@@ -500,11 +517,7 @@ pub async fn spawn(
         stopped: false,
     };
     tokio::spawn(node.run(garden_net.events, command_rx));
-    Ok(GardenHandle {
-        commands,
-        chain_id,
-        key: me,
-    })
+    Ok(GardenHandle { commands, chain_id })
 }
 
 /// Fetch and verify the genesis and the finalized chain from the peers an
@@ -673,7 +686,7 @@ impl Node {
         }
     }
 
-    fn limits(&self) -> &GardenLimits {
+    const fn limits(&self) -> &GardenLimits {
         &self.ledger.state.genesis.limits
     }
 
@@ -747,7 +760,7 @@ impl Node {
     }
 
     async fn flush(&mut self, peer: PeerId) {
-        if self.gossip_in_flight.contains(&peer) {
+        if self.gossip_in_flight.contains_key(&peer) {
             return;
         }
         let Some(queue) = self.outbox.get_mut(&peer) else {
@@ -758,7 +771,8 @@ impl Node {
             return;
         }
         let batch: Vec<GardenGossip> = queue.drain(..take).collect();
-        self.gossip_in_flight.insert(peer);
+        let carried = batch.iter().filter_map(final_height).max().unwrap_or(0);
+        self.gossip_in_flight.insert(peer, carried);
         self.send(peer, GardenRequest::Gossip(batch), TAG_GOSSIP)
             .await;
     }
@@ -803,6 +817,9 @@ impl Node {
     async fn on_net(&mut self, event: NetEvent) {
         match event {
             NetEvent::Connected(peer) => {
+                if !self.peers.contains_key(&peer) {
+                    self.unadmitted.entry(peer).or_insert_with(Instant::now);
+                }
                 let hello = GardenRequest::Hello {
                     chain_id: self.chain_id(),
                     key: self.me,
@@ -812,8 +829,10 @@ impl Node {
             }
             NetEvent::Disconnected(peer) => {
                 self.peers.remove(&peer);
+                self.unadmitted.remove(&peer);
                 self.outbox.remove(&peer);
                 self.gossip_in_flight.remove(&peer);
+                self.finish_when_delivered().await;
             }
             NetEvent::Request {
                 peer,
@@ -863,6 +882,7 @@ impl Node {
                 GardenResponse::Refused("this validator has no room for more peers".into())
             } else {
                 self.peers.insert(peer, *key);
+                self.unadmitted.remove(&peer);
                 GardenResponse::Welcome {
                     genesis: Box::new(self.ledger.state.genesis.clone()),
                     height: self.ledger.state.height,
@@ -874,6 +894,7 @@ impl Node {
             return;
         }
         if !self.peers.contains_key(&peer) {
+            self.unadmitted.entry(peer).or_insert_with(Instant::now);
             self.respond(
                 channel,
                 GardenResponse::Refused("show the invite first".into()),
@@ -993,12 +1014,17 @@ impl Node {
         match tag {
             TAG_IGNORE => {}
             TAG_GOSSIP => {
-                self.gossip_in_flight.remove(&peer);
+                let carried = self.gossip_in_flight.remove(&peer).unwrap_or(0);
+                if response.is_ok() && carried > self.held_elsewhere {
+                    self.held_elsewhere = carried;
+                    self.report_to_budlum().await;
+                }
                 if self.peers.contains_key(&peer) {
                     self.flush(peer).await;
                 } else {
                     self.outbox.remove(&peer);
                 }
+                self.finish_when_delivered().await;
             }
             TAG_HELLO => {
                 if let Ok(GardenResponse::Welcome {
@@ -1012,6 +1038,7 @@ impl Node {
                         && self.holds_invite(peer, &key, &invite_signature)
                     {
                         self.peers.insert(peer, key);
+                        self.unadmitted.remove(&peer);
                     }
                 }
             }
@@ -1383,6 +1410,9 @@ impl Node {
             return false;
         }
         self.first_sight(Seen::Commit(commit.block.hash()));
+        if from.is_some() {
+            self.held_elsewhere = self.held_elsewhere.max(commit.block.header.height);
+        }
         self.proposals.clear();
         self.votes.clear();
         self.orphan_votes.clear();
@@ -1427,14 +1457,24 @@ impl Node {
         }
         self.report_to_budlum().await;
 
-        let left = self
+        let height = self.ledger.state.height;
+        let round = millis(self.limits().round_ms);
+        let departed = self
             .leaving
             .as_ref()
             .and_then(|leaving| leaving.tx_id)
             .is_some_and(|tx_id| self.ledger.locate(&tx_id).is_some());
-        if left {
-            self.finish_leave().await;
+        if let Some(leaving) = self.leaving.as_mut().filter(|_| departed) {
+            if leaving.sealed.is_none() {
+                // The block is final here. It may be final nowhere else yet:
+                // the host signs last, so the host alone holds the block of
+                // its own departure until a peer has it.
+                leaving.sealed = Some(height);
+                leaving.deadline =
+                    Instant::now() + round.saturating_mul(4).max(Duration::from_secs(2));
+            }
         }
+        self.finish_when_delivered().await;
         true
     }
 
@@ -1452,6 +1492,17 @@ impl Node {
         };
         let chain_id = self.chain_id();
         while self.reported < self.ledger.state.height {
+            let next = self.reported.saturating_add(1);
+            let alone = self
+                .ledger
+                .commit_at(next)
+                .is_some_and(|(_, electorate)| electorate.iter().all(|key| *key == self.me));
+            if next > self.held_elsewhere && !alone {
+                // Only this node holds the block. If it stops now the Garden
+                // goes on from the block before, and Budlum would have seen
+                // a block the Garden never had.
+                break;
+            }
             if self.budlum_status == Some(DomainStatus::Frozen) {
                 match link
                     .move_domain(chain_id, self.me, DomainStatus::Active)
@@ -1459,12 +1510,11 @@ impl Node {
                 {
                     Ok(()) => self.budlum_status = Some(DomainStatus::Active),
                     Err(e) => {
-                        self.budlum_error = Some(e);
+                        self.budlum_failed(e);
                         return;
                     }
                 }
             }
-            let next = self.reported.saturating_add(1);
             let Some((commit, electorate)) = self.ledger.commit_at(next) else {
                 return;
             };
@@ -1474,7 +1524,7 @@ impl Node {
                     self.budlum_error = None;
                 }
                 Err(e) => {
-                    self.budlum_error = Some(e);
+                    self.budlum_failed(e);
                     return;
                 }
             }
@@ -1486,9 +1536,21 @@ impl Node {
         if self.budlum_status.is_some_and(|status| status != observed) {
             match link.move_domain(chain_id, self.me, observed).await {
                 Ok(()) => self.budlum_status = Some(observed),
-                Err(e) => self.budlum_error = Some(e),
+                Err(e) => self.budlum_failed(e),
             }
         }
+    }
+
+    /// Keep what the Budlum chain refused, and say it once in the log.
+    fn budlum_failed(&mut self, error: String) {
+        if self.budlum_error.as_deref() != Some(error.as_str()) {
+            tracing::warn!(
+                chain_id = %format!("{:016x}", self.chain_id()),
+                %error,
+                "garden: the Budlum chain refused a report"
+            );
+        }
+        self.budlum_error = Some(error);
     }
 
     /// Sign one of this node's own transactions and spread it.
@@ -1579,44 +1641,20 @@ impl Node {
                     .filter(|((sender, _), _)| *sender != host),
             )
             .map(|(_, tx)| tx);
-        let (mut txs, dead) = state.select_txs(pool);
+        // The leader reports the validators whose presence signal stopped.
+        let limit = millis(self.limits().suspend_after_ms);
+        let absent: Vec<GardenKey> = state
+            .active()
+            .into_iter()
+            .filter(|key| *key != host && self.silent_for(key, limit))
+            .collect();
+        let (txs, dead) = state.assemble(pool, &self.me, &absent, |tx| tx.sign(&self.key).ok());
         self.mempool.retain(|_, tx| !dead.contains(&tx.id()));
         if txs.is_empty() {
             if self.mempool.is_empty() {
                 self.pending_since = None;
             }
             return;
-        }
-        // The leader reports the validators whose presence signal stopped.
-        if state.status == DomainStatus::Active {
-            let limit = millis(self.limits().suspend_after_ms);
-            let own = txs.iter().filter(|tx| tx.tx.sender == self.me).count();
-            let mut nonce = state
-                .next_nonce(&self.me)
-                .saturating_add(u64::try_from(own).unwrap_or(u64::MAX));
-            let room = (self.limits().max_sender_txs_per_block as usize).saturating_sub(own);
-            let absent: Vec<GardenKey> = state
-                .active()
-                .into_iter()
-                .filter(|key| *key != host && self.silent_for(key, limit))
-                .take(room)
-                .collect();
-            for target in absent {
-                if txs.len() >= self.limits().max_block_txs as usize {
-                    break;
-                }
-                let report = GardenTx {
-                    chain_id: self.chain_id(),
-                    sender: self.me,
-                    nonce,
-                    kind: GardenTxKind::Suspend { target },
-                }
-                .sign(&self.key);
-                if let Ok(report) = report {
-                    txs.push(report);
-                    nonce = nonce.saturating_add(1);
-                }
-            }
         }
         let Ok((header, _)) = state.build_header(&txs, self.me, round, now_ms()) else {
             return;
@@ -1634,8 +1672,29 @@ impl Node {
         self.consider(hash).await;
     }
 
+    /// Close the connections of peers that did not show the invite in time.
+    /// A refusal reaches the peer first: the grace is far longer than one
+    /// answer takes. Without this a peer that holds no invite keeps one of
+    /// the connection slots for as long as it keeps talking.
+    async fn drop_strangers(&mut self) {
+        let grace = millis(self.limits().round_ms)
+            .saturating_mul(2)
+            .max(Duration::from_secs(2));
+        let overdue: Vec<PeerId> = self
+            .unadmitted
+            .iter()
+            .filter(|(peer, since)| !self.peers.contains_key(peer) && since.elapsed() >= grace)
+            .map(|(peer, _)| *peer)
+            .collect();
+        for peer in overdue {
+            self.unadmitted.remove(&peer);
+            let _ = self.net.send(NetCommand::Disconnect(peer)).await;
+        }
+    }
+
     async fn on_tick(&mut self) {
         let limits = self.limits().clone();
+        self.drop_strangers().await;
         if self.last_presence.elapsed() >= millis(limits.presence_interval_ms) {
             self.last_presence = Instant::now();
             self.my_window = self.my_window.saturating_add(1);
@@ -1687,6 +1746,7 @@ impl Node {
             self.leaving = Some(Leaving {
                 deadline: Instant::now(),
                 tx_id: None,
+                sealed: None,
                 reply,
             });
         }
@@ -2009,6 +2069,7 @@ impl Node {
         let mut leaving = Leaving {
             deadline: Instant::now(),
             tx_id: None,
+            sealed: None,
             reply,
         };
         if can_finalize {
@@ -2057,6 +2118,23 @@ impl Node {
         }
     }
 
+    /// Finish a departure whose block is final, once that block is on no
+    /// outbox any more: every connected peer acknowledged it, or is gone.
+    async fn finish_when_delivered(&mut self) {
+        let Some(height) = self.leaving.as_ref().and_then(|leaving| leaving.sealed) else {
+            return;
+        };
+        let in_flight = self.gossip_in_flight.values().any(|h| *h >= height);
+        let queued = self
+            .outbox
+            .values()
+            .flatten()
+            .any(|item| final_height(item).is_some_and(|h| h >= height));
+        if !in_flight && !queued {
+            self.finish_leave().await;
+        }
+    }
+
     /// End this node's part: settle the Budlum record, wipe the content and
     /// close the swarm.
     async fn finish_leave(&mut self) {
@@ -2077,7 +2155,7 @@ impl Node {
                 tracing::warn!(error = %e, "garden domain status could not be settled");
             }
         }
-        let invite = self.invite().unwrap_or(GardenInvite {
+        let invite = self.invite().unwrap_or_else(|_| GardenInvite {
             chain_id,
             genesis_hash: self.ledger.state.genesis.hash(),
             token: self.token,
@@ -2220,6 +2298,62 @@ mod tests {
             .first()
             .unwrap()
             .starts_with("/ip4/127.0.0.1/tcp/4001/p2p/"));
+        handle.leave().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn garden_peer_without_the_invite_does_not_keep_its_connection() {
+        let handle = spawn(
+            GardenEntry::Create {
+                title: "Room".into(),
+                limits: GardenLimits {
+                    round_ms: 200,
+                    ..GardenLimits::testnet_default()
+                },
+            },
+            config("host", "/ip4/127.0.0.1/tcp/0"),
+            random_bytes(),
+            None,
+        )
+        .await
+        .unwrap();
+        let invite = handle.invite().await.unwrap();
+        let (mut swarm, _, peer) = stranger(&invite).await;
+        // The stranger keeps the connection busy, so no idle timer closes
+        // it. Only the host can end it.
+        let closed = tokio::time::timeout(Duration::from_secs(12), async {
+            let mut pause = tokio::time::interval(Duration::from_millis(250));
+            loop {
+                tokio::select! {
+                    event = swarm.events.recv() => match event {
+                        Some(NetEvent::Disconnected(gone)) if gone == peer => return true,
+                        Some(NetEvent::Request { channel, .. }) => {
+                            let _ = swarm
+                                .commands
+                                .send(NetCommand::Respond {
+                                    channel,
+                                    response: GardenResponse::Refused("test peer".into()),
+                                })
+                                .await;
+                        }
+                        Some(_) => {}
+                        None => return false,
+                    },
+                    _ = pause.tick() => {
+                        let _ = swarm
+                            .commands
+                            .send(NetCommand::Send {
+                                peer,
+                                request: GardenRequest::Gossip(Vec::new()),
+                                tag: 78,
+                            })
+                            .await;
+                    }
+                }
+            }
+        })
+        .await;
+        assert_eq!(closed, Ok(true), "the stranger held its connection");
         handle.leave().await.unwrap();
     }
 
