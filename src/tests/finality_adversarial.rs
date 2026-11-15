@@ -1621,6 +1621,12 @@ impl PqPrecommitHarness {
             .validator_snapshot
             .clone();
         assert_eq!(snapshot.validators.len(), 4);
+        // This harness jumps straight to checkpoint 10 instead of applying
+        // the epoch-boundary block that persists the validator snapshot in a
+        // real chain. Record the exact round snapshot explicitly so changing
+        // the alarm cannot make the test depend on the current-set fallback.
+        node.validator_snapshots
+            .insert(snapshot.epoch, snapshot.clone());
         Ok(Self {
             node,
             keys,
@@ -1679,6 +1685,70 @@ impl PqPrecommitHarness {
         vote.auth_sig = sign_bls(&bls.secret_key, &vote.auth_signing_message());
         Ok(vote)
     }
+}
+
+#[test]
+fn a_forged_certificate_cannot_buy_sync_work_before_signature_verification() -> Result<(), String> {
+    let mut harness = PqPrecommitHarness::new()?;
+    // The harness records a validator snapshot for checkpoint 10 but has only
+    // genesis in its local chain. Before the fix, block availability won this
+    // race and returned the innocent sync-hint string without touching the
+    // invalid aggregate signature.
+    assert!(harness.node.chain.get(harness.height as usize).is_none());
+    let cert = crate::chain::finality::FinalityCert {
+        epoch: harness.snapshot.epoch,
+        checkpoint_height: harness.height,
+        checkpoint_hash: harness.hash.clone(),
+        chain_id: harness.node.chain_id,
+        agg_sig_bls: vec![0u8; 48],
+        bitmap: vec![0b0000_0111],
+        set_hash: harness.snapshot.set_hash.clone(),
+    };
+    let error = harness
+        .node
+        .handle_finality_cert(cert)
+        .expect_err("a forged certificate must fail authentication");
+    assert!(
+        !error.contains("We don't have block"),
+        "an unauthenticated certificate became a sync hint: {error}"
+    );
+    assert!(
+        harness.node.pending_finality_certs.is_empty(),
+        "a forged certificate must not enter a deferred queue"
+    );
+    Ok(())
+}
+
+#[test]
+fn quantum_alarm_requires_qc_authentication_before_a_sync_hint() -> Result<(), String> {
+    let mut harness = PqPrecommitHarness::new()?;
+    harness.node.state.settlement.quantum.force_solved(
+        crate::security::quantum_canary::CanaryId::EccK1,
+        crate::security::quantum_canary::CanaryClaim {
+            commit_height: 1,
+            claimer: harness.keys[0].0,
+            accepted_height: 2,
+        },
+    );
+    let cert = crate::chain::finality::FinalityCert {
+        epoch: harness.snapshot.epoch,
+        checkpoint_height: harness.height,
+        checkpoint_hash: harness.hash.clone(),
+        chain_id: harness.node.chain_id,
+        agg_sig_bls: vec![0u8; 48],
+        bitmap: vec![0b0000_0111],
+        set_hash: harness.snapshot.set_hash.clone(),
+    };
+    let error = harness
+        .node
+        .handle_finality_cert(cert)
+        .expect_err("the alarm path has no QC to authenticate the hint");
+    assert!(error.contains("Missing verified QC blob"), "{error}");
+    assert!(
+        !error.contains("We don't have block"),
+        "an unauthenticated alarm-mode certificate became a sync hint: {error}"
+    );
+    Ok(())
 }
 
 #[test]

@@ -553,7 +553,14 @@ pub const MIN_SUPPORTED_STATE_SNAPSHOT_SCHEMA_VERSION: u32 = 2;
 /// next epoch boundary. At 11 and below the field cannot affect the digest,
 /// and a snapshot without it restores the network profile's answer - what the
 /// chain did before the flag existed.
-pub const CURRENT_STATE_SNAPSHOT_SCHEMA_VERSION: u32 = 12;
+///
+/// Schema 13 adds the per-application Graft claim freshness watermarks. Their
+/// zero/`None` defaults are omitted from bincode commitments, so a schema-12
+/// snapshot remains byte-exact and migrates without rewriting its state root.
+/// Once a claim writes either watermark, the snapshot must identify itself as
+/// schema 13: an older binary must skip it as future state rather than ignore
+/// the fields and restore replayable ownership claims.
+pub const CURRENT_STATE_SNAPSHOT_SCHEMA_VERSION: u32 = 13;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StateSnapshotV2MigrationReport {
@@ -1193,8 +1200,28 @@ impl StateSnapshotV2 {
         hex::encode(self.calculate_digest())
     }
 
+    /// Fields introduced by a schema must not be smuggled into an older
+    /// version whose readers are allowed to ignore them. Schema-12 Graft rows
+    /// legitimately restore zero/`None`; any written watermark requires the
+    /// schema-13 gate that makes older binaries skip the snapshot.
+    fn fields_match_schema(&self) -> bool {
+        if self.schema_version < 13 {
+            let carries_graft_watermark = self.settlement.as_ref().is_some_and(|settlement| {
+                settlement
+                    .graft
+                    .apps
+                    .values()
+                    .any(|app| app.claim_expiry != 0 || app.anchored_claim_cursor.is_some())
+            });
+            if carries_graft_watermark {
+                return false;
+            }
+        }
+        true
+    }
+
     pub fn verify(&self) -> bool {
-        self.snapshot_hash == self.calculate_hash()
+        self.fields_match_schema() && self.snapshot_hash == self.calculate_hash()
     }
 
     /// C4: manifest authenticity verification (RFC_GAP1 section 7.1, Task-1).
@@ -1302,7 +1329,9 @@ impl StateSnapshotV2 {
                 ),
             );
         } else {
-            notes.push("snapshot already at current schema-5".to_string());
+            notes.push(format!(
+                "snapshot already at current schema-{CURRENT_STATE_SNAPSHOT_SCHEMA_VERSION}"
+            ));
         }
 
         Ok(StateSnapshotV2MigrationReport {
@@ -1619,6 +1648,78 @@ mod tests {
         let path2 = std::path::Path::new("snapshot_9.json");
         assert_eq!(get_snapshot_height(path1).unwrap(), 100);
         assert_eq!(get_snapshot_height(path2).unwrap(), 9);
+    }
+
+    #[test]
+    fn graft_watermarks_require_snapshot_schema_thirteen() {
+        let mut account_state = AccountState::new();
+        let id = crate::settlement::graft::graft_id(7, b"legacy-app");
+        account_state.settlement.graft.apps.insert(
+            id,
+            crate::settlement::graft::GraftApp {
+                graft_id: id,
+                owner: Address::zero(),
+                domain_key: 7,
+                origin_app: b"legacy-app".to_vec(),
+                manifest_hash: [3u8; 32],
+                mirror_account: crate::settlement::graft::mirror_account(id),
+                status: crate::settlement::graft::GraftStatus::Active,
+                registered_at_block: 1,
+                claim_expiry: 0,
+                anchored_claim_cursor: None,
+            },
+        );
+        let mut snapshot = StateSnapshotV2::from_state(
+            &account_state,
+            StateSnapshotV2Params {
+                height: 7,
+                block_hash: "block".into(),
+                genesis_hash: "genesis".into(),
+                chain_id: 45_262,
+                finalized_height: 0,
+                finalized_hash: "genesis".into(),
+                finality_certificates: vec![],
+            },
+        );
+        snapshot.schema_version = 12;
+        snapshot.reseal_after_manual_edit();
+        assert!(
+            snapshot.verify(),
+            "default watermarks preserve a schema-12 snapshot commitment"
+        );
+
+        snapshot
+            .settlement
+            .as_mut()
+            .unwrap()
+            .graft
+            .apps
+            .get_mut(&id)
+            .unwrap()
+            .claim_expiry = 99;
+        snapshot.reseal_after_manual_edit();
+        assert!(
+            !snapshot.verify(),
+            "a written watermark must not hide behind schema 12"
+        );
+        snapshot.schema_version = 13;
+        snapshot.reseal_after_manual_edit();
+        assert!(snapshot.verify());
+
+        let restored = StateSnapshotV2::from_bytes(&snapshot.to_bytes()).unwrap();
+        assert_eq!(
+            restored
+                .settlement
+                .as_ref()
+                .unwrap()
+                .graft
+                .apps
+                .get(&id)
+                .unwrap()
+                .claim_expiry,
+            99
+        );
+        assert!(restored.verify());
     }
 
     #[test]

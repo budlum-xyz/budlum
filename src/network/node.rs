@@ -1216,17 +1216,25 @@ impl Node {
     /// Does a finality-certificate refusal say this node lacks the block,
     /// rather than that the peer lied?
     ///
-    /// Two refusals belong here: the checkpoint block is not in this node's
-    /// chain yet, and this node holds a different block at that height (a
-    /// sibling fork). Both are conditions this node can fix by syncing, so
-    /// neither may be counted against the peer - a ban silences the peer that
-    /// would have carried this node across the fork.
+    /// Two authenticated refusals belong here: the checkpoint block is not in
+    /// this node's chain yet, and this node holds a different block at that
+    /// height (a sibling fork). `Blockchain::handle_finality_cert` verifies the
+    /// active signature/QC before either string can be returned, so only a
+    /// genuine certificate may buy sync work through this classification.
     fn finality_cert_names_a_block_we_lack(error: &str) -> bool {
         let block_missing = error.contains("We don't have block at height");
         let sibling_fork =
             error.contains("Certificate hash") && error.contains("mismatch with our block hash");
-        let missing_epoch_set = error.contains("no validator set recorded for epoch");
-        block_missing || sibling_fork || missing_epoch_set
+        block_missing || sibling_fork
+    }
+
+    /// A locally-pruned validator snapshot makes immediate authentication
+    /// impossible. Such a certificate is neither credited nor punished, and
+    /// crucially does not open a sync round: ordinary authenticated block and
+    /// handshake announcements remain the way to synchronize, so an
+    /// unverifiable epoch hint buys no locator work.
+    fn finality_cert_missing_validator_set(error: &str) -> bool {
+        error.contains("no validator set recorded for epoch")
     }
 
     fn request_finality_cert(&mut self, peer: PeerId, checkpoint_height: u64) {
@@ -1358,6 +1366,11 @@ impl Node {
                     self.peer_manager_lock().report_bad_behavior(&peer);
                     return;
                 }
+                if checkpoint_height <= self.chain.get_finalized_height().await {
+                    // A requested response may race local finality. It is now
+                    // stale, not useful work and not reputation credit.
+                    return;
+                }
                 let qc_checkpoint_hash = checkpoint_hash.clone();
                 let cert = crate::chain::finality::FinalityCert {
                     epoch,
@@ -1391,6 +1404,11 @@ impl Node {
                         if e.contains("mismatch with our block hash") {
                             self.trigger_fork_sync(peer).await;
                         }
+                    }
+                    Err(e) if Self::finality_cert_missing_validator_set(&e) => {
+                        warn!(
+                            "Synced FinalityCert from {peer} names a validator epoch this node no longer retains; ignoring without sync credit"
+                        );
                     }
                     Err(e) => {
                         warn!("Synced FinalityCert from {peer} rejected: {e}");
@@ -5136,6 +5154,23 @@ impl Node {
                                             set_hash,
                                         };
 
+                                        // A certificate at or below our
+                                        // finalized height cannot advance
+                                        // state. Do not feed it to the `Ok`
+                                        // branch below, where an otherwise
+                                        // unverified no-op would earn peer
+                                        // reputation indefinitely.
+                                        if checkpoint_height
+                                            <= self.chain.get_finalized_height().await
+                                        {
+                                            self.report_gossip(
+                                                &id,
+                                                &peer_id,
+                                                gossipsub::MessageAcceptance::Ignore,
+                                            );
+                                            continue;
+                                        }
+
                                         let qc_checkpoint_hash = cert.checkpoint_hash.clone();
                                         match self.chain.handle_finality_cert(cert).await {
                                             Ok(_) => {
@@ -5151,6 +5186,11 @@ impl Node {
                                                         "Missing verified QC blob for FinalityCert from {peer_id}; requesting over /sync for epoch={epoch}, height={checkpoint_height}"
                                                     );
                                                     self.request_qc_blob(peer_id, epoch, checkpoint_height, qc_checkpoint_hash);
+                                                    self.report_gossip(&id, &peer_id, gossipsub::MessageAcceptance::Ignore);
+                                                } else if Self::finality_cert_missing_validator_set(&e) {
+                                                    warn!(
+                                                        "FinalityCert from {peer_id} names a validator epoch this node no longer retains; ignoring without opening a sync round"
+                                                    );
                                                     self.report_gossip(&id, &peer_id, gossipsub::MessageAcceptance::Ignore);
                                                 } else if Self::finality_cert_names_a_block_we_lack(&e) {
                                                     // A certificate for a checkpoint this node
@@ -6892,8 +6932,12 @@ mod sync_handler_order_tests {
         assert!(!super::Node::finality_cert_names_a_block_we_lack(
             "Validator set hash mismatch"
         ));
-        assert!(super::Node::finality_cert_names_a_block_we_lack(
-            "Finality cert rejected: no validator set recorded for epoch 1"
+        let missing_set = "Finality cert rejected: no validator set recorded for epoch 1";
+        assert!(!super::Node::finality_cert_names_a_block_we_lack(
+            missing_set
+        ));
+        assert!(super::Node::finality_cert_missing_validator_set(
+            missing_set
         ));
     }
 

@@ -171,6 +171,10 @@ pub struct StorageDealOpen {
     pub domain_id: u32,
     pub manifest_id: ContentId,
     pub shard_id: ContentId,
+    /// Measured bytes the operator agrees to store. The chain requires this
+    /// to equal the registered shard entry; the operator-side signer requires
+    /// it to equal the bytes whose content id it measured.
+    pub shard_size: u32,
     pub operator: Address,
     pub replica_index: u8,
     pub start_epoch: u64,
@@ -772,13 +776,14 @@ pub fn open_deal_consent_digest(
     open: &StorageDealOpen,
 ) -> [u8; 32] {
     hash_fields_bytes(&[
-        b"BDLM_STORAGE_OPEN_DEAL_TX_V1",
+        b"BDLM_STORAGE_OPEN_DEAL_TX_V2",
         &chain_id.to_le_bytes(),
         payer.as_bytes(),
         &nonce.to_le_bytes(),
         &open.domain_id.to_le_bytes(),
         open.manifest_id.as_bytes(),
         open.shard_id.as_bytes(),
+        &open.shard_size.to_le_bytes(),
         open.operator.as_bytes(),
         &[open.replica_index],
         &open.start_epoch.to_le_bytes(),
@@ -788,6 +793,48 @@ pub fn open_deal_consent_digest(
         &open.merkle_proof,
         &open.storage_root,
     ])
+}
+
+/// Build the deal consent digest on the operator side, after measuring the
+/// exact shard bytes that the operator will be challenged for.
+///
+/// This is the signing boundary, whereas [`open_deal_consent_digest`] is the
+/// deterministic consensus preimage. Keeping the byte check here prevents an
+/// operator client from signing a listed size merely because the shard id
+/// matched: hash identity and length must both match before the bond is put at
+/// risk.
+///
+/// # Errors
+///
+/// A malformed manifest, another manifest/shard, or a measured/listed length
+/// mismatch.
+pub fn operator_open_deal_consent_digest(
+    chain_id: u64,
+    payer: &Address,
+    nonce: u64,
+    open: &StorageDealOpen,
+    manifest: &ContentManifest,
+    shard_bytes: &[u8],
+) -> Result<[u8; 32], String> {
+    manifest.validate_untrusted()?;
+    if manifest.manifest_id != open.manifest_id {
+        return Err("deal consent manifest does not match the supplied manifest".into());
+    }
+    let measured_id = ContentId::of(shard_bytes);
+    if measured_id != open.shard_id {
+        return Err("deal consent bytes do not hash to the requested shard id".into());
+    }
+    let shard = manifest
+        .shard(&open.shard_id)
+        .ok_or_else(|| "deal consent shard is not listed by the manifest".to_string())?;
+    let measured = u64::try_from(shard_bytes.len()).unwrap_or(u64::MAX);
+    if measured != u64::from(shard.size) || open.shard_size != shard.size {
+        return Err(format!(
+            "deal consent measured {measured} shard bytes, manifest lists {}, transaction names {}",
+            shard.size, open.shard_size
+        ));
+    }
+    Ok(open_deal_consent_digest(chain_id, payer, nonce, open))
 }
 
 fn open_deal(
@@ -827,6 +874,16 @@ fn open_deal(
         if canonical_owner != ctx.sender {
             return Err(StorageTxError::DealManifestNotOwned { sender: ctx.sender });
         }
+    }
+    let listed_size = manifest
+        .shard(&open.shard_id)
+        .map(|shard| shard.size)
+        .ok_or_else(|| StorageTxError::DealRefused("Shard is not in manifest".into()))?;
+    if open.shard_size != listed_size {
+        return Err(StorageTxError::DealRefused(format!(
+            "operator consent names {} shard bytes but the registered manifest lists {listed_size}",
+            open.shard_size
+        )));
     }
     let digest = open_deal_consent_digest(ctx.chain_id, &ctx.sender, ctx.nonce, open);
     // The chain's live scheme statuses, not the genesis defaults (see
@@ -2568,6 +2625,7 @@ mod tests {
         let alice_manifest = manifest_owned_by(alice);
         let mid = alice_manifest.manifest_id;
         let shard_id = alice_manifest.shards[0].shard_id;
+        let shard_size = alice_manifest.shards[0].size;
 
         execute_storage_tx(
             &mut state,
@@ -2598,6 +2656,7 @@ mod tests {
             domain_id: 42,
             manifest_id: mid,
             shard_id,
+            shard_size,
             operator: attacker,
             replica_index: 1,
             start_epoch: 10,

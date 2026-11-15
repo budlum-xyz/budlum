@@ -18,6 +18,7 @@ use budlum_core::core::address::Address;
 use budlum_core::core::transaction::{Transaction, TransactionType};
 use budlum_core::crypto::primitives::KeyPair;
 use budlum_core::developer_os::{DeveloperOsManifest, ProofFixtureStatus};
+use budlum_core::wallet::bind_signing_chain_id as chain_id_binding;
 use clap::{Parser, Subcommand};
 use std::io::{Read, Write};
 use std::net::TcpStream;
@@ -907,20 +908,6 @@ fn set_signing_chain_id(value: Option<u64>) {
     if let Some(value) = value {
         let _ = SIGNING_CHAIN_ID.set(value);
     }
-}
-
-/// Whether the node's answer is the chain the operator named.
-///
-/// Split out so it can be tested without a node: the whole point is that this
-/// comparison, and not the node's answer, decides the replay domain.
-fn chain_id_binding(node_chain_id: u64, requested: u64) -> Result<u64, String> {
-    if node_chain_id != requested {
-        return Err(format!(
-            "the node serves chain id {node_chain_id}, but --signing-chain-id {requested} was \
-             given; refusing to sign for a network you did not name"
-        ));
-    }
-    Ok(requested)
 }
 
 /// The node's `bud_chainId`, taken only if it is the chain `--signing-chain-id`
