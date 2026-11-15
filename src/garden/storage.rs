@@ -16,7 +16,7 @@
 
 use crate::domain::types::Hash32;
 use crate::storage::content_id::ContentId;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -118,6 +118,36 @@ impl GardenContentStore {
         }
     }
 
+    /// Remove every stored object whose content id is not in `keep`.
+    /// Called on startup so orphaned files left from earlier runs cannot
+    /// linger unaccounted on disk.
+    pub(crate) fn prune_unaccounted(&mut self, keep: &BTreeSet<Hash32>) -> usize {
+        let mut removed = 0usize;
+        let before = self.memory.len();
+        self.memory.retain(|id, _| keep.contains(id));
+        removed = removed.saturating_add(before.saturating_sub(self.memory.len()));
+        if let Some(root) = &self.root {
+            if let Ok(entries) = fs::read_dir(root) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if !path.is_file() {
+                        continue;
+                    }
+                    let known = path
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .and_then(|s| hex::decode(s).ok())
+                        .and_then(|bytes| Hash32::try_from(bytes.as_slice()).ok())
+                        .is_some_and(|id| keep.contains(&id));
+                    if !known && fs::remove_file(&path).is_ok() {
+                        removed = removed.saturating_add(1);
+                    }
+                }
+            }
+        }
+        removed
+    }
+
     /// Delete every object and the directory itself.
     pub fn wipe(&mut self) -> Result<(), String> {
         self.memory.clear();
@@ -179,5 +209,20 @@ mod tests {
         store.wipe().unwrap();
         assert!(!root.exists());
         assert!(store.get(&id).is_none());
+    }
+
+    #[test]
+    fn garden_store_prunes_unaccounted_files_on_startup() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("garden");
+        let mut store = GardenContentStore::open(Some(&root), 1024).unwrap();
+        let kept = store.put(b"published").unwrap();
+        let orphan = store.put(b"unaccounted").unwrap();
+        let mut keep = BTreeSet::new();
+        keep.insert(kept);
+        let removed = store.prune_unaccounted(&keep);
+        assert_eq!(removed, 1);
+        assert!(store.contains(&kept));
+        assert!(!store.contains(&orphan));
     }
 }

@@ -16,13 +16,18 @@ use libp2p::swarm::dial_opts::DialOpts;
 use libp2p::swarm::{NetworkBehaviour, SwarmEvent};
 use libp2p::{identity, noise, request_response, tcp, yamux, Multiaddr, PeerId, StreamProtocol};
 use serde::{Deserialize, Serialize};
-use std::time::Duration;
+use std::collections::{BTreeMap, HashSet, VecDeque};
+use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 
 /// The one protocol a Garden swarm speaks.
 const GARDEN_PROTOCOL: &str = "/budlum/garden/1";
 /// Largest request frame. A request carries at most one block or one object.
 pub const MAX_REQUEST_BYTES: usize = 18 * 1024 * 1024;
+/// Largest request frame accepted from a peer before it has passed `Hello`.
+const MAX_UNADMITTED_REQUEST_BYTES: usize = 1024;
+/// Maximum unauthenticated greetings accepted per second across all strangers.
+const MAX_UNADMITTED_HELLOS_PER_SEC: usize = 32;
 /// Largest response frame. A response carries at most one object or a batch
 /// of commits.
 pub const MAX_RESPONSE_BYTES: usize = 18 * 1024 * 1024;
@@ -207,7 +212,30 @@ impl request_response::Codec for GardenCodec {
     where
         T: AsyncRead + Unpin + Send,
     {
-        read_bounded(io, MAX_REQUEST_BYTES).await
+        // Peek the 4-byte bincode enum variant tag of GardenRequest so small
+        // control requests (notably Hello, GetGenesis, GetCommits, GetObject)
+        // never allocate up to MAX_REQUEST_BYTES before reaching the swarm.
+        let mut tag = [0u8; 4];
+        io.read_exact(&mut tag).await?;
+        let variant = u32::from_le_bytes(tag);
+        let limit = match variant {
+            0 => MAX_UNADMITTED_REQUEST_BYTES, // Hello
+            2 => 64,                           // GetCommits
+            3 => 128,                          // GetObject
+            1 | 4 => MAX_REQUEST_BYTES,        // Gossip | PutObject
+            _ => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "unknown garden request variant",
+                ));
+            }
+        };
+        let rest_limit = limit.saturating_sub(tag.len());
+        let mut rest = read_bounded(io, rest_limit).await?;
+        let mut buf = Vec::with_capacity(tag.len() + rest.len());
+        buf.extend_from_slice(&tag);
+        buf.append(&mut rest);
+        Ok(buf)
     }
 
     async fn read_response<T>(&mut self, _: &Self::Protocol, io: &mut T) -> std::io::Result<Vec<u8>>
@@ -254,6 +282,8 @@ struct GardenBehaviour {
 #[derive(Debug)]
 pub enum NetCommand {
     Dial(Multiaddr),
+    /// Mark a peer as admitted after it proved possession of the invite.
+    Admit(PeerId),
     /// Send a request. The response comes back as [`NetEvent::Response`]
     /// carrying the same `tag`.
     Send {
@@ -275,6 +305,10 @@ pub enum NetCommand {
 pub enum NetEvent {
     Connected(PeerId),
     Disconnected(PeerId),
+    DialFailed {
+        peer: PeerId,
+        wrong_peer_id: bool,
+    },
     Request {
         peer: PeerId,
         request: GardenRequest,
@@ -351,12 +385,12 @@ async fn start_with(
                     // door cannot cut it off from its own Garden.
                     .with_max_established_incoming(Some(max_connections * 2 / 3))
                     .with_max_established_per_peer(Some(2))
-                    .with_max_pending_incoming(Some(max_connections / 2))
+                    .with_max_pending_incoming(Some((max_connections / 6).max(4)))
                     .with_max_pending_outgoing(Some(max_connections / 3)),
             ),
         })
         .map_err(|e| format!("garden behaviour cannot start: {e}"))?
-        .with_swarm_config(|cfg| cfg.with_idle_connection_timeout(Duration::from_mins(2)))
+        .with_swarm_config(|cfg| cfg.with_idle_connection_timeout(Duration::from_secs(60)))
         .build();
     swarm
         .listen_on(listen)
@@ -373,13 +407,18 @@ async fn start_with(
 
     let (command_tx, mut command_rx) = mpsc::channel::<NetCommand>(1024);
     let (event_tx, event_rx) = mpsc::channel::<NetEvent>(1024);
+    let max_unadmitted_in = (max_connections as usize / 6).max(4);
     tokio::spawn(async move {
-        let mut tags = std::collections::BTreeMap::new();
+        let mut tags = BTreeMap::new();
+        let mut admitted: HashSet<PeerId> = HashSet::new();
+        let mut unadmitted_in: VecDeque<PeerId> = VecDeque::new();
+        let mut hello_window_start = Instant::now();
+        let mut hello_window_count: usize = 0;
         // Events wait here, not in a blocking send: the task keeps taking
         // commands while the validator is busy, so the two channels can
         // never wait on each other. A full backlog stops the swarm from
         // being read, which pushes back on the remote side.
-        let mut backlog: std::collections::VecDeque<NetEvent> = std::collections::VecDeque::new();
+        let mut backlog: VecDeque<NetEvent> = VecDeque::new();
         loop {
             tokio::select! {
                 permit = event_tx.reserve(), if !backlog.is_empty() => match permit {
@@ -397,14 +436,30 @@ async fn start_with(
                         // binds it on every interface, and that bind fails
                         // for good once any other program holds the port
                         // on one of them. A Garden punches no holes, so
-                        // the source port carries nothing.
-                        let dial = DialOpts::unknown_peer_id()
-                            .address(address)
-                            .allocate_new_port()
-                            .build();
+                        // the source port carries nothing. Bind the dial to
+                        // the expected peer id when present so Noise rejects
+                        // any mismatched remote immediately.
+                        let target_peer = address.iter().find_map(|part| match part {
+                            libp2p::multiaddr::Protocol::P2p(id) => Some(id),
+                            _ => None,
+                        });
+                        let dial = match target_peer {
+                            Some(peer_id) => DialOpts::peer_id(peer_id)
+                                .addresses(vec![address])
+                                .allocate_new_port()
+                                .build(),
+                            None => DialOpts::unknown_peer_id()
+                                .address(address)
+                                .allocate_new_port()
+                                .build(),
+                        };
                         if let Err(e) = swarm.dial(dial) {
                             tracing::debug!(error = %e, "garden dial refused");
                         }
+                    }
+                    Some(NetCommand::Admit(peer)) => {
+                        admitted.insert(peer);
+                        unadmitted_in.retain(|p| *p != peer);
                     }
                     Some(NetCommand::Send { peer, request, tag }) => match bincode::serialized_size(&request) {
                         Ok(size) if size <= MAX_REQUEST_BYTES as u64 => match bincode::serialize(&request) {
@@ -470,28 +525,94 @@ async fn start_with(
                         }
                     }
                     Some(NetCommand::Disconnect(peer)) => {
+                        admitted.remove(&peer);
+                        unadmitted_in.retain(|p| *p != peer);
                         let _ = swarm.disconnect_peer_id(peer);
                     }
                 },
                 event = swarm.select_next_some(), if backlog.len() < EVENT_BACKLOG => {
                     let out = match event {
-                        SwarmEvent::ConnectionEstablished { peer_id, num_established, .. }
-                            if num_established.get() == 1 => Some(NetEvent::Connected(peer_id)),
+                        SwarmEvent::ConnectionEstablished { peer_id, endpoint, num_established, .. } => {
+                            if endpoint.is_listener() && !admitted.contains(&peer_id) {
+                                unadmitted_in.retain(|p| *p != peer_id);
+                                unadmitted_in.push_back(peer_id);
+                                while unadmitted_in.len() > max_unadmitted_in {
+                                    if let Some(oldest) = unadmitted_in.pop_front() {
+                                        let _ = swarm.disconnect_peer_id(oldest);
+                                    }
+                                }
+                            }
+                            (num_established.get() == 1).then_some(NetEvent::Connected(peer_id))
+                        }
                         SwarmEvent::ConnectionClosed { peer_id, num_established: 0, .. } => {
+                            admitted.remove(&peer_id);
+                            unadmitted_in.retain(|p| *p != peer_id);
                             Some(NetEvent::Disconnected(peer_id))
+                        }
+                        SwarmEvent::OutgoingConnectionError { peer_id: Some(peer), error, .. } => {
+                            let wrong_peer_id = matches!(
+                                error,
+                                libp2p::swarm::DialError::WrongPeerId { .. }
+                            );
+                            Some(NetEvent::DialFailed { peer, wrong_peer_id })
                         }
                         SwarmEvent::Behaviour(GardenBehaviourEvent::Rpc(
                             request_response::Event::Message { peer, message, .. },
                         )) => match message {
                             request_response::Message::Request { request, channel, .. } => {
-                                match bincode::deserialize::<GardenRequest>(&request) {
-                                    Ok(request) => Some(NetEvent::Request { peer, request, channel }),
-                                    Err(_) => {
-                                        let refusal = GardenResponse::Refused("malformed request".into());
+                                if unadmitted_in.contains(&peer) && !admitted.contains(&peer) {
+                                    if request.len() > MAX_UNADMITTED_REQUEST_BYTES {
+                                        let refusal = GardenResponse::Refused("show the invite first".into());
                                         if let Ok(bytes) = bincode::serialize(&refusal) {
                                             let _ = swarm.behaviour_mut().rpc.send_response(channel, bytes);
                                         }
                                         None
+                                    } else {
+                                        if hello_window_start.elapsed() >= Duration::from_secs(1) {
+                                            hello_window_start = Instant::now();
+                                            hello_window_count = 0;
+                                        }
+                                        hello_window_count = hello_window_count.saturating_add(1);
+                                        if hello_window_count > MAX_UNADMITTED_HELLOS_PER_SEC {
+                                            let refusal = GardenResponse::Refused("too many greetings".into());
+                                            if let Ok(bytes) = bincode::serialize(&refusal) {
+                                                let _ = swarm.behaviour_mut().rpc.send_response(channel, bytes);
+                                            }
+                                            unadmitted_in.retain(|p| *p != peer);
+                                            let _ = swarm.disconnect_peer_id(peer);
+                                            None
+                                        } else {
+                                            match bincode::deserialize::<GardenRequest>(&request) {
+                                                Ok(request @ GardenRequest::Hello { .. }) => {
+                                                    Some(NetEvent::Request { peer, request, channel })
+                                                }
+                                                Ok(_) => {
+                                                    let refusal = GardenResponse::Refused("show the invite first".into());
+                                                    if let Ok(bytes) = bincode::serialize(&refusal) {
+                                                        let _ = swarm.behaviour_mut().rpc.send_response(channel, bytes);
+                                                    }
+                                                    None
+                                                }
+                                                Err(_) => {
+                                                    let refusal = GardenResponse::Refused("malformed request".into());
+                                                    if let Ok(bytes) = bincode::serialize(&refusal) {
+                                                        let _ = swarm.behaviour_mut().rpc.send_response(channel, bytes);
+                                                    }
+                                                    None
+                                                }
+                                            }
+                                        }
+                                    }
+                                } else {
+                                    match bincode::deserialize::<GardenRequest>(&request) {
+                                        Ok(request) => Some(NetEvent::Request { peer, request, channel }),
+                                        Err(_) => {
+                                            let refusal = GardenResponse::Refused("malformed request".into());
+                                            if let Ok(bytes) = bincode::serialize(&refusal) {
+                                                let _ = swarm.behaviour_mut().rpc.send_response(channel, bytes);
+                                            }
+                                            None
+                                        }
                                     }
                                 }
                             }
@@ -697,6 +818,7 @@ mod tests {
         let mut net_b = start(b.private_key_bytes(), "/ip4/127.0.0.1/tcp/0")
             .await
             .unwrap();
+        let a_id = peer_id_of(&a.public_key_bytes()).unwrap();
         let b_id = peer_id_of(&b.public_key_bytes()).unwrap();
         let address = announced_address(&net_b.listen, &b.public_key_bytes()).unwrap();
         net_a
@@ -707,6 +829,13 @@ mod tests {
         loop {
             if let Some(NetEvent::Connected(peer)) = net_a.events.recv().await {
                 assert_eq!(peer, b_id);
+                break;
+            }
+        }
+        loop {
+            if let Some(NetEvent::Connected(peer)) = net_b.events.recv().await {
+                assert_eq!(peer, a_id);
+                net_b.commands.send(NetCommand::Admit(a_id)).await.unwrap();
                 break;
             }
         }
@@ -752,5 +881,25 @@ mod tests {
                 break;
             }
         }
+    }
+
+    #[test]
+    fn garden_codec_bounds_hello_frames_below_max_request_bytes() {
+        use futures::executor::block_on;
+        use futures::io::Cursor;
+        use libp2p::request_response::Codec;
+        let proto = StreamProtocol::new(GARDEN_PROTOCOL);
+        let mut codec = GardenCodec;
+        // Variant 0 (Hello) larger than MAX_UNADMITTED_REQUEST_BYTES is refused.
+        let mut oversized = vec![0u8; MAX_UNADMITTED_REQUEST_BYTES + 64];
+        if let Some(prefix) = oversized.get_mut(..4) {
+            prefix.copy_from_slice(&0u32.to_le_bytes());
+        }
+        let mut cursor = Cursor::new(oversized);
+        assert!(block_on(codec.read_request(&proto, &mut cursor)).is_err());
+
+        // Unknown variant tag is also refused immediately.
+        let mut unknown = Cursor::new(99u32.to_le_bytes().to_vec());
+        assert!(block_on(codec.read_request(&proto, &mut unknown)).is_err());
     }
 }

@@ -57,6 +57,24 @@ const MAX_MEMPOOL_BYTES: usize = 2 * 1024 * 1024;
 const MAX_PROPOSALS: usize = 32;
 /// Most votes kept while their block has not arrived.
 const MAX_ORPHAN_VOTES: usize = 256;
+/// Most orphan votes one validator may hold at one height.
+const MAX_ORPHAN_VOTES_PER_VOTER: usize = 4;
+/// Most unjoined invite holders admitted concurrently into `peers`.
+const MAX_UNJOINED_PEERS: usize = 4;
+/// Maximum gossip items accepted from one peer per second.
+const MAX_GOSSIP_ITEMS_PER_PEER_PER_SEC: usize = 128;
+/// Sliding window for per-peer `GetObject` rate limiting.
+const OBJECT_RATE_WINDOW: Duration = Duration::from_secs(10);
+/// Maximum `GetObject` requests accepted from one peer per window.
+const MAX_OBJECT_REQS_PER_WINDOW: usize = 32;
+/// Maximum consecutive failed dials to one announced address before stopping.
+const MAX_DIAL_FAILURES: u8 = 4;
+/// Maximum `(validator, address)` dial records kept across leaves and returns.
+const MAX_DIAL_RECORDS: usize = 512;
+/// Retry interval for dialing invite peers during bootstrap.
+const BOOTSTRAP_RETRY_INTERVAL: Duration = Duration::from_millis(500);
+/// Expected byte length of an Ed25519 signature on a vote.
+const VOTE_SIGNATURE_BYTES: usize = 64;
 /// Most gossip ids remembered to forward each item once.
 const MAX_SEEN: usize = 16_384;
 /// Most gossip items that wait for one peer. Past it the oldest is dropped:
@@ -509,9 +527,22 @@ struct Node {
     /// Objects no finalized transaction names yet, by the peer that
     /// deposited them. A peer that deposits too much loses its own.
     unreferenced: BTreeMap<GardenKey, VecDeque<Hash32>>,
-    /// Validators dialed without an answer: when to dial next, and the
-    /// wait that led there. It doubles with every dial.
-    dials: BTreeMap<GardenKey, (Instant, Duration)>,
+    /// Validators that have authenticated over a live connection.
+    verified_peers: BTreeSet<GardenKey>,
+    /// `(validator, announced_address)` pairs whose dial failed with a wrong
+    /// peer id or exhausted retries; never dialed again until the validator
+    /// announces a different address.
+    rejected_addresses: BTreeSet<(GardenKey, String)>,
+    /// Consecutive dial failures per `(validator, announced_address)`, kept
+    /// across leaves and returns.
+    dial_failures: BTreeMap<(GardenKey, String), u8>,
+    /// `(validator, address)` backoff records: when to dial next, and the
+    /// wait that led there. Kept across leaves and returns.
+    dials: BTreeMap<(GardenKey, String), (Instant, Duration)>,
+    /// Per-peer sliding window for inbound gossip items.
+    gossip_budget: BTreeMap<PeerId, (Instant, usize)>,
+    /// Per-peer sliding window for inbound `GetObject` requests and served bytes.
+    object_budget: BTreeMap<PeerId, (Instant, usize, u64)>,
     /// The same record for the invite peers.
     seed_dials: Option<(Instant, Duration)>,
     fetches: BTreeMap<Hash32, Fetch>,
@@ -676,7 +707,15 @@ pub async fn spawn(
         .content_dir
         .as_ref()
         .map(|dir| dir.join(format!("{chain_id:016x}")));
-    let store = GardenContentStore::open(content_dir.as_deref(), limits.max_object_bytes as usize)?;
+    let mut store =
+        GardenContentStore::open(content_dir.as_deref(), limits.max_object_bytes as usize)?;
+    let published_ids: BTreeSet<Hash32> = ledger
+        .state
+        .objects
+        .values()
+        .map(|obj| obj.content_id)
+        .collect();
+    store.prune_unaccounted(&published_ids);
     let invite_signature = invite_keypair(&token)?
         .sign(&join_message(chain_id, &me))
         .to_vec();
@@ -701,6 +740,10 @@ pub async fn spawn(
     let my_next_nonce = ledger.state.next_nonce(&me);
     // What this node starts with came from the validators it synced from.
     let held_elsewhere = ledger.state.height;
+    let verified_peers: BTreeSet<GardenKey> = peers.values().copied().collect();
+    for peer in peers.keys().copied() {
+        let _ = garden_net.commands.send(NetCommand::Admit(peer)).await;
+    }
     let node = Node {
         key,
         me,
@@ -746,7 +789,12 @@ pub async fn spawn(
         wanted: BTreeSet::new(),
         measured: BTreeMap::new(),
         unreferenced: BTreeMap::new(),
+        verified_peers,
+        rejected_addresses: BTreeSet::new(),
+        dial_failures: BTreeMap::new(),
         dials: BTreeMap::new(),
+        gossip_budget: BTreeMap::new(),
+        object_budget: BTreeMap::new(),
         seed_dials: None,
         fetches: BTreeMap::new(),
         fetch_tags: BTreeMap::new(),
@@ -785,16 +833,22 @@ async fn bootstrap(
             .to_vec(),
     };
     let mut named: BTreeSet<PeerId> = BTreeSet::new();
+    let mut dial_targets: Vec<(libp2p::Multiaddr, PeerId)> = Vec::new();
     for peer in &invite.peers {
         if let Ok((address, id)) = net::dial_address(peer) {
-            let _ = garden_net.commands.send(NetCommand::Dial(address)).await;
+            let _ = garden_net
+                .commands
+                .send(NetCommand::Dial(address.clone()))
+                .await;
             named.insert(id);
+            dial_targets.push((address, id));
         }
     }
     if named.is_empty() {
         return Err("invite carries no dialable peer address".into());
     }
     let deadline = tokio::time::Instant::now() + BOOTSTRAP_TIMEOUT;
+    let mut next_retry = tokio::time::Instant::now() + BOOTSTRAP_RETRY_INTERVAL;
     let mut genesis: Option<GardenGenesis> = None;
     let mut ledger: Option<GardenLedger> = None;
     let mut source: Option<PeerId> = None;
@@ -816,13 +870,29 @@ async fn bootstrap(
                 return Err(nobody_admitted(&passed));
             }
         }
-        let event = match tokio::time::timeout_at(deadline, garden_net.events.recv()).await {
+        let wake = deadline.min(next_retry);
+        let event = match tokio::time::timeout_at(wake, garden_net.events.recv()).await {
             Ok(Some(event)) => event,
             Ok(None) => return Err("garden swarm stopped while joining".into()),
-            Err(_) if passed.is_empty() => {
-                return Err("no validator of this Garden answered the invite".into());
+            Err(_) => {
+                let now = tokio::time::Instant::now();
+                if now >= deadline {
+                    if passed.is_empty() {
+                        return Err("no validator of this Garden answered the invite".into());
+                    }
+                    return Err(nobody_admitted(&passed));
+                }
+                next_retry = now + BOOTSTRAP_RETRY_INTERVAL;
+                for (address, id) in &dial_targets {
+                    if !peers.contains_key(id) && !passed.contains_key(id) {
+                        let _ = garden_net
+                            .commands
+                            .send(NetCommand::Dial(address.clone()))
+                            .await;
+                    }
+                }
+                continue;
             }
-            Err(_) => return Err(nobody_admitted(&passed)),
         };
         match event {
             NetEvent::Connected(peer) => {
@@ -840,6 +910,17 @@ async fn bootstrap(
                 if source == Some(peer) {
                     passed.insert(peer, "it went away before the chain arrived".into());
                     source = None;
+                }
+            }
+            NetEvent::DialFailed {
+                peer,
+                wrong_peer_id,
+            } => {
+                if wrong_peer_id {
+                    passed.insert(
+                        peer,
+                        "the peer at this address did not match its peer id".into(),
+                    );
                 }
             }
             NetEvent::Request { channel, .. } => {
@@ -878,6 +959,7 @@ async fn bootstrap(
                         continue;
                     }
                     peers.insert(peer, peer_key);
+                    let _ = garden_net.commands.send(NetCommand::Admit(peer)).await;
                     genesis.get_or_insert(*shown);
                 }
                 Ok(GardenResponse::Refused(reason)) => {
@@ -1091,7 +1173,6 @@ impl Node {
             .max(Duration::from_secs(1))
             .saturating_mul(2);
         let connected: BTreeSet<GardenKey> = self.peers.values().copied().collect();
-        let mut absent = BTreeSet::new();
         let mut targets = Vec::new();
         for validator in self.ledger.state.validators.values() {
             // A key that waits wrote its address without anybody's consent,
@@ -1103,10 +1184,13 @@ impl Node {
             {
                 continue;
             }
-            absent.insert(validator.key);
+            let addr_key = (validator.key, validator.address.clone());
+            if self.rejected_addresses.contains(&addr_key) {
+                continue;
+            }
             let waiting = self
                 .dials
-                .get(&validator.key)
+                .get(&addr_key)
                 .is_some_and(|(next, _)| now < *next);
             if waiting || targets.len() >= MAX_DIALS_PER_ROUND {
                 continue;
@@ -1114,15 +1198,23 @@ impl Node {
             if let Ok(address) = validator_dial_address(&validator.address, &validator.key) {
                 let wait = self
                     .dials
-                    .get(&validator.key)
+                    .get(&addr_key)
                     .map_or(first_wait, |(_, wait)| wait.saturating_mul(2))
                     .min(MAX_DIAL_WAIT);
-                self.dials.insert(validator.key, (now + wait, wait));
+                if self.dials.len() >= MAX_DIAL_RECORDS && !self.dials.contains_key(&addr_key) {
+                    if let Some(oldest) = self
+                        .dials
+                        .iter()
+                        .min_by_key(|(_, (next, _))| *next)
+                        .map(|(k, _)| k.clone())
+                    {
+                        self.dials.remove(&oldest);
+                    }
+                }
+                self.dials.insert(addr_key, (now + wait, wait));
                 targets.push(address);
             }
         }
-        // A validator that connected or left starts over.
-        self.dials.retain(|key, _| absent.contains(key));
         if self.peers.is_empty() {
             if self.seed_dials.is_none_or(|(next, _)| now >= next) {
                 let wait = self
@@ -1179,7 +1271,41 @@ impl Node {
                 self.unadmitted.remove(&peer);
                 self.outbox.remove(&peer);
                 self.gossip_in_flight.remove(&peer);
+                self.gossip_budget.remove(&peer);
+                self.object_budget.remove(&peer);
                 self.finish_when_delivered().await;
+            }
+            NetEvent::DialFailed {
+                peer,
+                wrong_peer_id,
+            } => {
+                let matched = self
+                    .ledger
+                    .state
+                    .validators
+                    .values()
+                    .find(|v| peer_id_of(&v.key).is_ok_and(|id| id == peer))
+                    .map(|v| (v.key, v.address.clone()));
+                if let Some(addr_key) = matched {
+                    if !addr_key.1.is_empty() {
+                        if wrong_peer_id {
+                            self.rejected_addresses.insert(addr_key);
+                        } else {
+                            if self.dial_failures.len() >= MAX_DIAL_RECORDS
+                                && !self.dial_failures.contains_key(&addr_key)
+                            {
+                                if let Some(first) = self.dial_failures.keys().next().cloned() {
+                                    self.dial_failures.remove(&first);
+                                }
+                            }
+                            let count = self.dial_failures.entry(addr_key.clone()).or_insert(0);
+                            *count = count.saturating_add(1);
+                            if *count >= MAX_DIAL_FAILURES {
+                                self.rejected_addresses.insert(addr_key);
+                            }
+                        }
+                    }
+                }
             }
             NetEvent::Request {
                 peer,
@@ -1237,19 +1363,52 @@ impl Node {
             invite_signature,
         } = &request
         {
-            let room = self.peers.len()
-                < (self.limits().max_validators as usize)
-                    .saturating_mul(2)
-                    .saturating_add(8);
+            let peer_cap = (self.limits().max_validators as usize)
+                .saturating_mul(2)
+                .saturating_add(8);
+            let known_validator = self.ledger.state.validators.contains_key(key);
+            let unjoined_count = self
+                .peers
+                .values()
+                .filter(|k| !self.ledger.state.validators.contains_key(*k))
+                .count();
+            let already = self.peers.contains_key(&peer);
+            let mut admit = false;
             let response = if *chain_id != self.chain_id() {
                 GardenResponse::Refused("this node runs another Garden".into())
             } else if !self.holds_invite(peer, key, invite_signature) {
                 GardenResponse::Refused("the invite does not match this Garden".into())
-            } else if !room && !self.peers.contains_key(&peer) {
-                GardenResponse::Refused("this validator has no room for more peers".into())
+            } else if !already && !known_validator && unjoined_count >= MAX_UNJOINED_PEERS {
+                GardenResponse::Refused("this validator has no room for more unjoined peers".into())
+            } else if !already && self.peers.len() >= peer_cap {
+                if known_validator {
+                    let victim = self
+                        .peers
+                        .iter()
+                        .find(|(_, k)| !self.ledger.state.validators.contains_key(*k))
+                        .map(|(p, _)| *p);
+                    if let Some(victim) = victim {
+                        self.peers.remove(&victim);
+                        self.outbox.remove(&victim);
+                        self.gossip_in_flight.remove(&victim);
+                        self.gossip_budget.remove(&victim);
+                        self.object_budget.remove(&victim);
+                        let _ = self.net.send(NetCommand::Disconnect(victim)).await;
+                        admit = true;
+                        GardenResponse::Welcome {
+                            genesis: Box::new(self.ledger.state.genesis.clone()),
+                            height: self.ledger.state.height,
+                            key: self.me,
+                            invite_signature: self.invite_signature.clone(),
+                        }
+                    } else {
+                        GardenResponse::Refused("this validator has no room for more peers".into())
+                    }
+                } else {
+                    GardenResponse::Refused("this validator has no room for more peers".into())
+                }
             } else {
-                self.peers.insert(peer, *key);
-                self.unadmitted.remove(&peer);
+                admit = true;
                 GardenResponse::Welcome {
                     genesis: Box::new(self.ledger.state.genesis.clone()),
                     height: self.ledger.state.height,
@@ -1257,6 +1416,14 @@ impl Node {
                     invite_signature: self.invite_signature.clone(),
                 }
             };
+            if admit {
+                self.peers.insert(peer, *key);
+                self.unadmitted.remove(&peer);
+                self.verified_peers.insert(*key);
+                self.dial_failures.retain(|(k, _), _| k != key);
+                self.dials.retain(|(k, _), _| k != key);
+                let _ = self.net.send(NetCommand::Admit(peer)).await;
+            }
             self.respond(channel, response).await;
             return;
         }
@@ -1280,6 +1447,20 @@ impl Node {
                     .await;
                     return;
                 }
+                let now = Instant::now();
+                let entry = self.gossip_budget.entry(peer).or_insert((now, 0));
+                if now.duration_since(entry.0) >= Duration::from_secs(1) {
+                    *entry = (now, 0);
+                }
+                if entry.1.saturating_add(items.len()) > MAX_GOSSIP_ITEMS_PER_PEER_PER_SEC {
+                    self.respond(
+                        channel,
+                        GardenResponse::Refused("gossip rate limit exceeded".into()),
+                    )
+                    .await;
+                    return;
+                }
+                entry.1 = entry.1.saturating_add(items.len());
                 self.respond(channel, GardenResponse::Ack).await;
                 for item in items {
                     self.on_gossip(item, Some(peer)).await;
@@ -1301,7 +1482,28 @@ impl Node {
                 .await;
             }
             GardenRequest::GetObject { content_id, relay } => {
+                let now = Instant::now();
+                let max_bytes = u64::from(self.limits().max_object_bytes)
+                    .saturating_mul(4)
+                    .max(4 * 1024 * 1024);
+                let budget = self.object_budget.entry(peer).or_insert((now, 0, 0));
+                if now.duration_since(budget.0) >= OBJECT_RATE_WINDOW {
+                    *budget = (now, 0, 0);
+                }
+                if budget.1 >= MAX_OBJECT_REQS_PER_WINDOW || budget.2 >= max_bytes {
+                    self.respond(
+                        channel,
+                        GardenResponse::Refused("object request rate limit exceeded".into()),
+                    )
+                    .await;
+                    return;
+                }
+                budget.1 = budget.1.saturating_add(1);
                 if let Some(bytes) = self.store.get(&content_id) {
+                    let len = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+                    if let Some(entry) = self.object_budget.get_mut(&peer) {
+                        entry.2 = entry.2.saturating_add(len);
+                    }
                     self.respond(channel, GardenResponse::Object(Some(bytes)))
                         .await;
                     return;
@@ -1481,6 +1683,10 @@ impl Node {
                     {
                         self.peers.insert(peer, key);
                         self.unadmitted.remove(&peer);
+                        self.verified_peers.insert(key);
+                        self.dial_failures.retain(|(k, _), _| *k != key);
+                        self.dials.retain(|(k, _), _| *k != key);
+                        let _ = self.net.send(NetCommand::Admit(peer)).await;
                     }
                 }
             }
@@ -1511,13 +1717,29 @@ impl Node {
         }
     }
 
+    /// True when `bytes` is within the Garden's object size limit, matches an
+    /// accounted publication size for `content_id`, and hashes to `content_id`.
+    fn object_is_valid(&self, content_id: &Hash32, bytes: &[u8]) -> bool {
+        let max_len = self.limits().max_object_bytes as usize;
+        if bytes.is_empty() || bytes.len() > max_len {
+            return false;
+        }
+        let Ok(len) = u64::try_from(bytes.len()) else {
+            return false;
+        };
+        self.ledger.state.accounts_for(content_id, len)
+            && crate::storage::content_id::ContentId::of(bytes).0 == *content_id
+    }
+
     async fn on_relay_answer(&mut self, job: u64, bytes: Option<Vec<u8>>) {
+        let Some(content_id) = self.relays.get(&job).map(|r| r.content_id) else {
+            return;
+        };
+        let valid = bytes.filter(|b| self.object_is_valid(&content_id, b));
         let Some(relay) = self.relays.get_mut(&job) else {
             return;
         };
         relay.outstanding = relay.outstanding.saturating_sub(1);
-        let valid =
-            bytes.filter(|b| crate::storage::content_id::ContentId::of(b).0 == relay.content_id);
         let answer = match (valid, relay.outstanding) {
             (Some(bytes), _) => relay.channel.take().map(|c| (c, Some(bytes))),
             (None, 0) => relay.channel.take().map(|c| (c, None)),
@@ -1532,11 +1754,16 @@ impl Node {
     }
 
     fn on_fetch_answer(&mut self, content_id: Hash32, bytes: Option<Vec<u8>>) {
+        let max_len = self.limits().max_object_bytes as usize;
         let Some(fetch) = self.fetches.get_mut(&content_id) else {
             return;
         };
         fetch.outstanding = fetch.outstanding.saturating_sub(1);
-        let valid = bytes.filter(|b| crate::storage::content_id::ContentId::of(b).0 == content_id);
+        let valid = bytes.filter(|b| {
+            !b.is_empty()
+                && b.len() <= max_len
+                && crate::storage::content_id::ContentId::of(b).0 == content_id
+        });
         match valid {
             Some(bytes) => {
                 let len = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
@@ -1861,16 +2088,28 @@ impl Node {
     }
 
     async fn on_vote(&mut self, vote: GardenVote, from: Option<PeerId>) {
-        if vote.chain_id != self.chain_id()
+        if vote.signature.len() != VOTE_SIGNATURE_BYTES
+            || vote.chain_id != self.chain_id()
             || vote.height != self.ledger.state.height.saturating_add(1)
         {
             return;
         }
         let Some(block) = self.proposals.get(&vote.block_hash) else {
-            if self.ledger.state.validators.contains_key(&vote.voter) {
-                self.orphan_votes.push_back(vote);
-                if self.orphan_votes.len() > MAX_ORPHAN_VOTES {
-                    self.orphan_votes.pop_front();
+            if self.ledger.state.is_active(&vote.voter) {
+                let dup = self
+                    .orphan_votes
+                    .iter()
+                    .any(|v| v.block_hash == vote.block_hash && v.voter == vote.voter);
+                let per_voter = self
+                    .orphan_votes
+                    .iter()
+                    .filter(|v| v.voter == vote.voter)
+                    .count();
+                if !dup && per_voter < MAX_ORPHAN_VOTES_PER_VOTER {
+                    self.orphan_votes.push_back(vote);
+                    if self.orphan_votes.len() > MAX_ORPHAN_VOTES {
+                        self.orphan_votes.pop_front();
+                    }
                 }
             }
             return;
@@ -2526,8 +2765,16 @@ impl Node {
             .into_iter()
             .chain(state.validators.values().filter(|v| v.key != host));
         for validator in ordered {
+            let verified = validator.key == host
+                || validator.key == self.me
+                || self.verified_peers.contains(&validator.key);
+            let rejected = self
+                .rejected_addresses
+                .contains(&(validator.key, validator.address.clone()));
             if validator.status != GardenValidatorStatus::Left
                 && validator.status != GardenValidatorStatus::Waiting
+                && verified
+                && !rejected
                 && validator_dial_address(&validator.address, &validator.key).is_ok()
                 && !peers.contains(&validator.address)
             {
@@ -5013,6 +5260,110 @@ mod tests {
         }
         // And a node that holds the invite walks in past the rest.
         join_as_second(invite).await;
+        handle.leave().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn garden_unjoined_invite_holders_are_capped_separately_from_validators() {
+        let handle = spawn(
+            GardenEntry::Create {
+                title: "Room".into(),
+                limits: GardenLimits {
+                    round_ms: 5_000,
+                    ..GardenLimits::testnet_default()
+                },
+            },
+            config("host", "/ip4/127.0.0.1/tcp/0"),
+            random_bytes(),
+            None,
+        )
+        .await
+        .unwrap();
+        let invite = handle.invite().await.unwrap();
+        let mut held = Vec::new();
+        for _ in 0..MAX_UNJOINED_PEERS {
+            held.push(guest(&invite).await);
+        }
+        let (mut extra, key, peer) = stranger(&invite).await;
+        let me = key.public_key_bytes();
+        let hello = GardenRequest::Hello {
+            chain_id: invite.chain_id,
+            key: me,
+            invite_signature: invite_keypair(&invite.token)
+                .unwrap()
+                .sign(&join_message(invite.chain_id, &me))
+                .to_vec(),
+        };
+        match ask(&mut extra, peer, hello).await {
+            GardenResponse::Refused(reason) => {
+                assert!(reason.contains("unjoined"), "{reason}");
+            }
+            other => panic!("expected unjoined refusal, got {other:?}"),
+        }
+        drop(held);
+        handle.leave().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn garden_gossip_and_object_requests_enforce_per_peer_rate_budgets() {
+        let handle = spawn(
+            GardenEntry::Create {
+                title: "Room".into(),
+                limits: GardenLimits {
+                    round_ms: 5_000,
+                    ..GardenLimits::testnet_default()
+                },
+            },
+            config("host", "/ip4/127.0.0.1/tcp/0"),
+            random_bytes(),
+            None,
+        )
+        .await
+        .unwrap();
+        let invite = handle.invite().await.unwrap();
+        let (mut swarm, key, peer) = guest(&invite).await;
+
+        let mut refused_obj = false;
+        for i in 0..(MAX_OBJECT_REQS_PER_WINDOW + 4) {
+            let id = [u8::try_from(i % 255).unwrap_or(0); 32];
+            if let GardenResponse::Refused(reason) = ask(
+                &mut swarm,
+                peer,
+                GardenRequest::GetObject {
+                    content_id: id,
+                    relay: false,
+                },
+            )
+            .await
+            {
+                if reason.contains("rate limit") {
+                    refused_obj = true;
+                    break;
+                }
+            }
+        }
+        assert!(refused_obj, "expected GetObject rate limit refusal");
+
+        let vote = GardenVote {
+            chain_id: invite.chain_id,
+            height: 1,
+            block_hash: [1u8; 32],
+            voter: key.public_key_bytes(),
+            signature: vec![0u8; 64],
+        };
+        let mut refused_gossip = false;
+        for _ in 0..4 {
+            let batch = vec![GardenGossip::Vote(vote.clone()); MAX_GOSSIP_BATCH];
+            if let GardenResponse::Refused(reason) =
+                ask(&mut swarm, peer, GardenRequest::Gossip(batch)).await
+            {
+                if reason.contains("rate limit") {
+                    refused_gossip = true;
+                    break;
+                }
+            }
+        }
+        assert!(refused_gossip, "expected Gossip rate limit refusal");
         handle.leave().await.unwrap();
     }
 }
