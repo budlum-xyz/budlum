@@ -15,7 +15,7 @@ publish = false
 # width of its dependency set, and syn is the de-facto standard, pure-Rust,
 # widely-audited parser.
 [dependencies]
-syn = { version = "2", features = ["full", "visit", "printing", "derive", "parsing"] }
+syn = { version = "3", features = ["full", "visit", "printing", "derive", "parsing"] }
 quote = "1"
 serde_json = "1"
 tempfile = "3"
