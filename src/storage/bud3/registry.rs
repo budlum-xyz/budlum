@@ -41,7 +41,7 @@ use super::repair::{
     repair_attestation_digest, RepairWitness, MAX_REPAIR_WITNESS_SYMBOLS, MIN_REPAIR_ATTESTATIONS,
 };
 use super::segment::Segmentation;
-use super::view::{PaidViewReceipt, MIN_PAID_VIEW_FEE_ATOMS};
+use super::view::{PaidViewReceipt, MIN_PAID_VIEW_FEE_ATOMS, PAID_VIEW_RETENTION_EPOCHS};
 use crate::core::hash::hash_fields_bytes;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -51,6 +51,8 @@ pub const FULL_MISSES_TO_LOSS: u64 = 2;
 pub const MOBILE_MISSES_TO_LOSS: u64 = 3;
 /// Maximum number of bound NFT references tracked on a single B.U.D. 3.0 object.
 pub const MAX_OBJECT_REFERENCES: usize = 4096;
+/// Maximum concurrent unpruned paid-view receipts tracked for one object.
+const MAX_PAID_VIEWS_PER_OBJECT: usize = 1024;
 
 /// The state-root tag. V2 commits every serialized field and exact index.
 pub const REGISTRY_TAG: &[u8] = b"BDLM_BUD3_REGISTRY_V2";
@@ -455,11 +457,14 @@ fn check_placement(record: &ObjectRecord, shares: &[(u64, Share)]) -> Result<(),
         if u64::from(record.symbols_per_segment) < k + 2 {
             return Err(RegistryError::BadPlacement("fewer than k + 2 symbols"));
         }
-        let mut ranges: Vec<(u32, u32)> = shares
-            .iter()
-            .filter(|(s, _)| *s == index)
-            .map(|(_, sh)| (sh.first_esi, sh.symbols))
-            .collect();
+        let mut ranges: Vec<(u32, u32)> = Vec::new();
+        let mut distinct_validators = BTreeSet::new();
+        for (s, sh) in shares {
+            if *s == index {
+                distinct_validators.insert(sh.validator);
+                ranges.push((sh.first_esi, sh.symbols));
+            }
+        }
         ranges.sort_unstable();
         let mut next = 0u64;
         let mut covered = 0u64;
@@ -475,6 +480,11 @@ fn check_placement(record: &ObjectRecord, shares: &[(u64, Share)]) -> Result<(),
                 return Err(RegistryError::BadPlacement("ESI past the coded symbols"));
             }
             covered += u64::from(n);
+        }
+        if distinct_validators.len() < 2 {
+            return Err(RegistryError::BadPlacement(
+                "each segment requires at least two distinct validators",
+            ));
         }
         if covered < k + 2 {
             return Err(RegistryError::BadPlacement("shares hold fewer than k + 2"));
@@ -667,6 +677,16 @@ impl Bud3Registry {
         if self.tombstones.contains_key(&object) {
             return Err(RegistryError::Tombstoned);
         }
+        let object_receipts = self
+            .paid_views
+            .values()
+            .filter(|rec| rec.object == object)
+            .count();
+        if object_receipts >= MAX_PAID_VIEWS_PER_OBJECT {
+            return Err(RegistryError::InvalidPaidView(
+                "paid view receipt limit reached for object",
+            ));
+        }
         let obj = self
             .objects
             .get_mut(&object)
@@ -693,7 +713,9 @@ impl Bud3Registry {
     #[must_use]
     pub fn verify_paid_view(&self, receipt: &PaidViewReceipt) -> bool {
         self.paid_views.get(&receipt.receipt_id).is_some_and(|rec| {
-            rec.payer == receipt.payer
+            self.objects.contains_key(&rec.object)
+                && !self.tombstones.contains_key(&rec.object)
+                && rec.payer == receipt.payer
                 && rec.object == receipt.object
                 && rec.amount_atoms >= receipt.fee_paid_atoms
                 && rec.amount_atoms >= MIN_PAID_VIEW_FEE_ATOMS
@@ -734,6 +756,10 @@ impl Bud3Registry {
 
     /// `BindNft`: one more reference to a live object.
     ///
+    /// `nft_owner` is the chain-resolved owner of `nft` from the NFT registry.
+    /// Binding is refused unless `nft_owner == Some(holder)` so no account can
+    /// squat an unowned or third-party NFT id.
+    ///
     /// # Errors
     ///
     /// [`RegistryError::UnknownObject`], [`RegistryError::Tombstoned`],
@@ -742,8 +768,12 @@ impl Bud3Registry {
         &mut self,
         nft: NftId,
         holder: Address,
+        nft_owner: Option<Address>,
         key: &ObjectKey,
     ) -> Result<(), RegistryError> {
+        if nft_owner != Some(holder) {
+            return Err(RegistryError::NotAuthorized);
+        }
         if self.nfts.contains_key(&nft) {
             return Err(RegistryError::NftAlreadyBound);
         }
@@ -814,6 +844,7 @@ impl Bud3Registry {
                 self.nfts.remove(&nft);
             }
             self.base_deps.remove(key);
+            self.paid_views.retain(|_, rec| rec.object != *key);
             // Only custody-confirmed objects earn a permanent deletion
             // tombstone: an unconfirmed squatter letting a bogus registration
             // expire or burning its own unacked placeholder cannot lock the
@@ -1278,7 +1309,7 @@ impl Bud3Registry {
             .objects
             .iter()
             .filter(|(k, o)| {
-                o.expires_at < epoch && !self.replacements.get(*k).is_some_and(|r| !r.finalized)
+                o.expires_at < epoch && self.replacements.get(*k).is_none_or(|r| r.finalized)
             })
             .map(|(k, _)| *k)
             .collect();
@@ -1288,6 +1319,23 @@ impl Bud3Registry {
         // until every new share is acknowledged.
         for k in &due {
             self.delete(k, epoch);
+        }
+        // A paid view receipt authorizes one decode and is otherwise dead
+        // weight in the state root and the snapshot. Drop the ones past the
+        // retention window, and the ones whose object is gone, so the map is
+        // bounded by the window and the live objects instead of by every
+        // receipt ever paid.
+        let stale_paid_views: Vec<[u8; 32]> = self
+            .paid_views
+            .iter()
+            .filter(|(_, rec)| {
+                rec.paid_at_epoch.saturating_add(PAID_VIEW_RETENTION_EPOCHS) < epoch
+                    || !self.objects.contains_key(&rec.object)
+            })
+            .map(|(receipt_id, _)| *receipt_id)
+            .collect();
+        for receipt_id in stale_paid_views {
+            self.paid_views.remove(&receipt_id);
         }
         due
     }
@@ -1874,7 +1922,7 @@ impl Bud3Registry {
     /// Verify and record a segment repair using either Merkle-proven live symbols
     /// or `MIN_REPAIR_ATTESTATIONS` independent active Full validator signatures.
     ///
-    /// Convenience: called by [`super::tx::apply_with_validators`] with the
+    /// Convenience: called by `super::tx::apply_with_validators_and_nft_owner` with the
     /// consensus active Full validator key directory and by direct registry callers.
     ///
     /// # Errors
@@ -1933,7 +1981,7 @@ impl Bud3Registry {
         if first < k_u32 {
             return Err(RegistryError::BadRepair("repair ESIs must exceed k"));
         }
-        let mut sorted = new_shares.clone();
+        let mut sorted = new_shares;
         sorted.sort_by_key(|s| s.first_esi);
         let content_digest = obj.record.content_id.digest;
         let existing_holders: BTreeSet<Address> = obj
@@ -2636,8 +2684,10 @@ mod tests {
 
         let mut alice = registry.clone();
         let mut bob = registry.clone();
-        alice.bind_nft([9; 32], addr(1), &key).unwrap();
-        bob.bind_nft([9; 32], addr(8), &key).unwrap();
+        alice
+            .bind_nft([9; 32], addr(1), Some(addr(1)), &key)
+            .unwrap();
+        bob.bind_nft([9; 32], addr(8), Some(addr(8)), &key).unwrap();
         assert_ne!(alice.state_root(), bob.state_root());
         assert!(alice.burn_reference(&[9; 32], &addr(1), 1).is_ok());
         assert_eq!(
@@ -2674,7 +2724,9 @@ mod tests {
         registry
             .register_object(addr(1), upload.record, shares, 0, 10)
             .unwrap();
-        registry.bind_nft([9; 32], addr(7), &key).unwrap();
+        registry
+            .bind_nft([9; 32], addr(7), Some(addr(7)), &key)
+            .unwrap();
         registry.ack(&key, &addr(10)).unwrap();
 
         let snapshot = serde_json::to_vec(&registry).unwrap();
@@ -2695,11 +2747,11 @@ mod tests {
         for (_, s) in &shares {
             r.ack(&key, &s.validator).unwrap();
         }
-        r.bind_nft([1; 32], addr(1), &key).unwrap();
-        r.bind_nft([2; 32], addr(2), &key).unwrap();
+        r.bind_nft([1; 32], addr(1), Some(addr(1)), &key).unwrap();
+        r.bind_nft([2; 32], addr(2), Some(addr(2)), &key).unwrap();
         assert_eq!(r.refcount(&key), 2);
         assert_eq!(
-            r.bind_nft([2; 32], addr(2), &key),
+            r.bind_nft([2; 32], addr(2), Some(addr(2)), &key),
             Err(RegistryError::NftAlreadyBound)
         );
         assert_eq!(
@@ -2718,7 +2770,7 @@ mod tests {
         assert!(r.object(&key).is_some());
         assert_eq!(r.tombstone(&key), None);
         // The owner deleting the last reference does delete the object.
-        r.bind_nft([3; 32], addr(1), &key).unwrap();
+        r.bind_nft([3; 32], addr(1), Some(addr(1)), &key).unwrap();
         assert_eq!(r.burn_reference(&[2; 32], &addr(2), 6), Ok(false));
         assert_eq!(r.burn_reference(&[3; 32], &addr(1), 6), Ok(true));
         assert!(r.object(&key).is_none());
@@ -2729,7 +2781,7 @@ mod tests {
             Err(RegistryError::Tombstoned)
         );
         assert_eq!(
-            r.bind_nft([3; 32], addr(1), &key),
+            r.bind_nft([3; 32], addr(1), Some(addr(1)), &key),
             Err(RegistryError::Tombstoned)
         );
     }
@@ -3289,10 +3341,11 @@ mod tests {
         r.register_object(owner, sealed_up.record, sealed_shares, 0, 10)
             .unwrap();
         assert_eq!(
-            r.bind_nft([0x77; 32], attacker, &sealed_key),
+            r.bind_nft([0x77; 32], attacker, Some(attacker), &sealed_key),
             Err(RegistryError::NotAuthorized)
         );
-        r.bind_nft([0x77; 32], owner, &sealed_key).unwrap();
+        r.bind_nft([0x77; 32], owner, Some(owner), &sealed_key)
+            .unwrap();
 
         // IssueViewGrant refuses non-holder signers and mismatched grant tags.
         let grantee = HpkeKeyPair::from_seed(&[0x55u8; 32]).unwrap();
@@ -3341,6 +3394,138 @@ mod tests {
             r.public_object(&pub_up.record.content_id.digest),
             Some(first_key),
             "existing confirmed public_index entry must not be overwritten"
+        );
+    }
+
+    #[test]
+    fn bind_nft_refuses_unverified_and_third_party_nft_owners() {
+        let mut r = Bud3Registry::default();
+        let (up, shares) = upload(b"nft ownership guard");
+        let key = up.record.commitment;
+        r.register_object(addr(1), up.record, shares, 0, 50)
+            .unwrap();
+
+        let root_before = r.state_root();
+        let nft_id = [0x44; 32];
+        assert_eq!(
+            r.bind_nft(nft_id, addr(2), None, &key),
+            Err(RegistryError::NotAuthorized),
+            "unresolvable NFT id must be refused"
+        );
+        assert_eq!(
+            r.bind_nft(nft_id, addr(2), Some(addr(1)), &key),
+            Err(RegistryError::NotAuthorized),
+            "non-owner cannot squat another holder's NFT id"
+        );
+        assert_eq!(r.state_root(), root_before);
+
+        r.bind_nft(nft_id, addr(1), Some(addr(1)), &key).unwrap();
+        assert_eq!(r.refcount(&key), 1);
+    }
+
+    #[test]
+    fn paid_view_receipts_expire_and_drop_with_their_object() {
+        let mut r = Bud3Registry::default();
+        let (up, shares) = upload(b"paid view pruning");
+        let key = up.record.commitment;
+        let lifetime = PAID_VIEW_RETENTION_EPOCHS
+            .saturating_mul(2)
+            .saturating_add(10);
+        r.register_object(addr(1), up.record, shares, 1, lifetime)
+            .unwrap();
+
+        let receipt_id = [0xA1; 32];
+        let receipt = PaidViewReceipt {
+            payer: addr(2),
+            object: key,
+            receipt_id,
+            fee_paid_atoms: MIN_PAID_VIEW_FEE_ATOMS,
+        };
+        r.record_paid_view(addr(2), key, receipt_id, MIN_PAID_VIEW_FEE_ATOMS, 5)
+            .unwrap();
+        assert!(r.verify_paid_view(&receipt));
+
+        // Still valid at the retention boundary.
+        r.expire(5 + PAID_VIEW_RETENTION_EPOCHS);
+        assert!(r.verify_paid_view(&receipt));
+
+        // Pruned once past PAID_VIEW_RETENTION_EPOCHS.
+        let root_with_receipt = r.state_root();
+        r.expire(6 + PAID_VIEW_RETENTION_EPOCHS);
+        assert!(!r.verify_paid_view(&receipt));
+        assert!(r.paid_views.is_empty());
+        assert_ne!(r.state_root(), root_with_receipt);
+
+        // Receipts for a deleted object are dropped immediately on deletion.
+        let second_id = [0xA2; 32];
+        let second = PaidViewReceipt {
+            payer: addr(3),
+            object: key,
+            receipt_id: second_id,
+            fee_paid_atoms: MIN_PAID_VIEW_FEE_ATOMS,
+        };
+        r.record_paid_view(
+            addr(3),
+            key,
+            second_id,
+            MIN_PAID_VIEW_FEE_ATOMS,
+            7 + PAID_VIEW_RETENTION_EPOCHS,
+        )
+        .unwrap();
+        assert!(r.verify_paid_view(&second));
+        r.expire(1 + lifetime + 1);
+        assert!(r.object(&key).is_none());
+        assert!(!r.verify_paid_view(&second));
+        assert!(r.paid_views.is_empty());
+    }
+
+    #[test]
+    fn single_validator_placement_is_refused_and_cannot_self_certify_custody() {
+        let mut r = Bud3Registry::default();
+        let (up, _) = upload(b"single validator cannot self certify custody");
+        let syms = up.record.symbols_per_segment;
+        let single = vec![(
+            0,
+            Share {
+                validator: addr(9),
+                class: Class::Full,
+                first_esi: 0,
+                symbols: syms,
+            },
+        )];
+        assert_eq!(
+            r.register_object(addr(1), up.record.clone(), single, 0, 10),
+            Err(RegistryError::BadPlacement(
+                "each segment requires at least two distinct validators",
+            ))
+        );
+        // Splitting the same validator into two shares still fails the distinct-validator rule.
+        let half = syms / 2;
+        let duplicate_same_validator = vec![
+            (
+                0,
+                Share {
+                    validator: addr(9),
+                    class: Class::Full,
+                    first_esi: 0,
+                    symbols: half,
+                },
+            ),
+            (
+                0,
+                Share {
+                    validator: addr(9),
+                    class: Class::Full,
+                    first_esi: half,
+                    symbols: syms - half,
+                },
+            ),
+        ];
+        assert_eq!(
+            r.register_object(addr(1), up.record, duplicate_same_validator, 0, 10),
+            Err(RegistryError::BadPlacement(
+                "each segment requires at least two distinct validators",
+            ))
         );
     }
 }

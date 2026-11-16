@@ -4193,12 +4193,20 @@ impl Executor {
                     // Derive proposer stake from consensus validator state, never trusting caller input.
                     *proposer_stake = state.get_validator(&tx.from).map_or(0, |v| v.stake);
                 }
-                let applied = crate::storage::bud3::tx::apply_with_validators(
+                let verified_nft_owner = match &verified_storage_tx {
+                    StorageTxV3::BindNft { nft, .. } => state
+                        .nft_registry
+                        .signer_owns_bud3_nft_id(&tx.from, nft)
+                        .then_some(*tx.from.as_bytes()),
+                    _ => None,
+                };
+                let applied = crate::storage::bud3::tx::apply_with_validators_and_nft_owner(
                     &mut state.bud3_registry,
                     *tx.from.as_bytes(),
                     verified_storage_tx,
                     epoch,
                     &validator_keys,
+                    verified_nft_owner,
                 )
                 .map_err(|e| BudlumError::validation("storage_v3_refused", format!("{e:?}")))?;
 

@@ -559,7 +559,7 @@ fn frames_of_two_aggregators_merge_into_one_valid_frame() {
     let (_, frame_b) = ticked(&mut txs, 0xA2, 10, 2);
 
     assert_eq!(first.on_frame(frame_b.clone()), Ok(true));
-    assert_eq!(first.on_frame(frame_b.clone()), Ok(false));
+    assert_eq!(first.on_frame(frame_b), Ok(false));
     let outcome = first.on_tick(&txs, &registry());
     assert_eq!(outcome.publish.len(), 1);
     let merged = &outcome.publish[0];
@@ -576,7 +576,7 @@ fn frames_of_two_aggregators_merge_into_one_valid_frame() {
         BTreeSet::from([Address::from([0xA1; 32]), Address::from([0xA2; 32])])
     );
     // Frames that share a claim do not merge, and nothing is merged twice.
-    assert_eq!(first.on_frame(frame_a.clone()), Ok(false));
+    assert_eq!(first.on_frame(frame_a), Ok(false));
     let outcome = first.on_tick(&txs, &registry());
     assert!(outcome.publish.is_empty());
     assert_eq!(first.frame_count(), 3);
@@ -1081,7 +1081,7 @@ fn a_native_proof_with_extra_objects_or_another_domain_is_refused() {
     // The first object says it was made for another domain. The domain sits
     // after the proof header (12 bytes), the object length (4) and the kind,
     // scheme and transaction hash of the envelope (35).
-    let mut elsewhere = frame.clone();
+    let mut elsewhere = frame;
     elsewhere.proof[12 + 4 + 35 + 3] ^= 1;
     assert_eq!(
         backend().verify(&elsewhere, DOMAIN),

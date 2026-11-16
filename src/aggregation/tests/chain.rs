@@ -289,7 +289,7 @@ fn a_chain_that_reorganizes_onto_a_block_with_a_frame_checks_it_and_agrees() {
 #[test]
 fn a_candidate_chain_whose_frame_proof_is_wrong_is_refused() {
     let (left, mut right, _, _) = frame_block();
-    let mut candidate = left.chain.clone();
+    let mut candidate = left.chain;
     let last = candidate.last_mut().expect("tip");
     let frame = last.claim_frame.as_mut().expect("frame");
     let at = frame.proof.len() - 1;
@@ -357,7 +357,7 @@ fn a_block_whose_transaction_claims_another_digest_is_refused() {
     let (_, mut right, block, tx) = frame_block();
 
     // Changing the claim without resealing changes the witness root.
-    let mut loose = block.clone();
+    let mut loose = block;
     for t in &mut loose.transactions {
         if t.hash == tx.hash {
             t.auth_claim = Some([7; 32]);

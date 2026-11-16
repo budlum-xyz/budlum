@@ -110,7 +110,7 @@ fn an_object_from_a_peer_is_taken_once_and_a_bad_one_blames_the_peer() {
     let bytes = envelope.encode();
 
     // A forged signature: the pool verifies the object itself.
-    let mut forged = envelope.clone();
+    let mut forged = envelope;
     let last = forged.payload.len() - 1;
     forged.payload[last] ^= 0x01;
     let refusal = node
@@ -131,7 +131,7 @@ fn an_object_from_a_peer_is_taken_once_and_a_bad_one_blames_the_peer() {
     assert!(refusal.blames_peer());
 
     // The transaction with its witness still on it.
-    let refusal = node.receive_object(&bytes, tx.clone()).unwrap_err();
+    let refusal = node.receive_object(&bytes, tx).unwrap_err();
     assert_eq!(refusal, ObjectRefusal::NotTheClaimedForm);
 
     // Bytes that are no envelope.

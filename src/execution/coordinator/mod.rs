@@ -71,6 +71,15 @@ pub enum UelAction {
     Call { target: Vec<u8>, input: Vec<u8> },
 }
 
+/// ML-DSA-87 sender authentication bound to a [`UelTx`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct UelTxAuth {
+    /// Sender's NIST FIPS 204 ML-DSA-87 public key deriving `UelTx::sender`.
+    pub public_key: Vec<u8>,
+    /// ML-DSA-87 signature over [`UelTx::signing_message`] under `BDLM/UEL_TX/V1`.
+    pub signature: Vec<u8>,
+}
+
 /// Canonical UEL transaction envelope executed by [`ExecutionCoordinator`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UelTx {
@@ -83,6 +92,152 @@ pub struct UelTx {
     pub gas_limit_bgu: u64,
     pub max_fee_per_bgu_attos: u128,
     pub max_priority_fee_per_bgu_attos: u128,
+    pub auth: UelTxAuth,
+}
+
+impl UelTx {
+    /// Deterministic domain-separated digest authenticated by [`Self::auth`].
+    #[must_use]
+    pub fn signing_message(&self, chain_id: u64) -> [u8; 32] {
+        use sha2::{Digest, Sha256};
+
+        let mut h = Sha256::new();
+        h.update(b"BDLM_UEL_TX_V1");
+        h.update(chain_id.to_le_bytes());
+        h.update(self.tx_hash);
+        h.update(self.sender.as_bytes());
+        h.update(self.nonce.to_le_bytes());
+        h.update([self.ee.0]);
+        match &self.action {
+            UelAction::Deploy { code, salt } => {
+                h.update([0u8]);
+                h.update((code.len() as u64).to_le_bytes());
+                h.update(code);
+                h.update(salt);
+            }
+            UelAction::Call { target, input } => {
+                h.update([1u8]);
+                h.update((target.len() as u64).to_le_bytes());
+                h.update(target);
+                h.update((input.len() as u64).to_le_bytes());
+                h.update(input);
+            }
+        }
+        h.update(self.value_attos.to_le_bytes());
+        h.update(self.gas_limit_bgu.to_le_bytes());
+        h.update(self.max_fee_per_bgu_attos.to_le_bytes());
+        h.update(self.max_priority_fee_per_bgu_attos.to_le_bytes());
+        h.finalize().into()
+    }
+
+    /// Sign this UEL transaction envelope with the sender's ML-DSA-87 seed and
+    /// derive `self.sender` from the resulting public key.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if key derivation or ML-DSA-87 signing fails.
+    pub fn sign_with_ml_dsa_87_seed(
+        &mut self,
+        chain_id: u64,
+        seed: &[u8; 32],
+    ) -> Result<(), String> {
+        let public_key =
+            crate::crypto::pq::ml_dsa_public_key(crate::crypto::scheme::SchemeId::ML_DSA_87, seed)
+                .map_err(|e| format!("UEL ML-DSA-87 public key derivation failed: {e}"))?;
+        let derived =
+            crate::crypto::primitives::wallet_address_from_ml_dsa_87_public_key(&public_key)
+                .map_err(|e| format!("UEL sender address derivation failed: {e}"))?;
+        self.sender = derived;
+        let digest = self.signing_message(chain_id);
+        let signature = crate::crypto::pq::ml_dsa_sign(
+            crate::crypto::scheme::SchemeId::ML_DSA_87,
+            seed,
+            &digest,
+            crate::crypto::ctx::UEL_TX_V1,
+            &[0u8; 32],
+        )
+        .map_err(|e| format!("UEL ML-DSA-87 signing failed: {e}"))?;
+        self.auth = UelTxAuth {
+            public_key,
+            signature,
+        };
+        Ok(())
+    }
+
+    /// Derive the ML-DSA-87 sender address for `seed`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if key derivation fails.
+    pub fn signer_address_from_seed(seed: &[u8; 32]) -> Result<Address, String> {
+        let public_key =
+            crate::crypto::pq::ml_dsa_public_key(crate::crypto::scheme::SchemeId::ML_DSA_87, seed)
+                .map_err(|e| format!("UEL ML-DSA-87 public key derivation failed: {e}"))?;
+        crate::crypto::primitives::wallet_address_from_ml_dsa_87_public_key(&public_key)
+            .map_err(|e| format!("UEL sender address derivation failed: {e}"))
+    }
+
+    /// Consume `self`, sign it with `seed` for `chain_id`, and return the
+    /// authenticated envelope.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if key derivation or ML-DSA-87 signing fails.
+    pub fn signed_with_seed(mut self, chain_id: u64, seed: &[u8; 32]) -> Result<Self, String> {
+        self.sign_with_ml_dsa_87_seed(chain_id, seed)?;
+        Ok(self)
+    }
+
+    /// Verify that `self.auth` carries a valid ML-DSA-87 signature whose public
+    /// key derives `self.sender` and binds every transaction field plus `chain_id`.
+    ///
+    /// # Errors
+    ///
+    /// Returns a deterministic rejection reason when authentication is missing,
+    /// belongs to another address, or fails ML-DSA-87 verification.
+    pub fn verify_sender_auth(&self, chain_id: u64) -> Result<(), String> {
+        if self.auth.public_key.is_empty() || self.auth.signature.is_empty() {
+            return Err(String::from("UEL transaction missing sender signature"));
+        }
+        let derived = crate::crypto::primitives::wallet_address_from_ml_dsa_87_public_key(
+            &self.auth.public_key,
+        )
+        .map_err(|e| format!("invalid UEL sender public key: {e}"))?;
+        if derived != self.sender {
+            return Err(String::from(
+                "UEL sender public key does not match transaction sender",
+            ));
+        }
+        let digest = self.signing_message(chain_id);
+        crate::crypto::pq::verify(
+            crate::crypto::scheme::SchemeId::ML_DSA_87,
+            &self.auth.public_key,
+            &digest,
+            crate::crypto::ctx::UEL_TX_V1,
+            &self.auth.signature,
+        )
+        .map_err(|e| format!("invalid UEL sender signature: {e}"))
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn test_uel_signer(tag: u8) -> ([u8; 32], Address) {
+    let seed = [tag; 32];
+    let pk =
+        crate::crypto::pq::ml_dsa_public_key(crate::crypto::scheme::SchemeId::ML_DSA_87, &seed)
+            .expect("test ML-DSA-87 pk");
+    let addr = crate::crypto::primitives::wallet_address_from_ml_dsa_87_public_key(&pk)
+        .expect("test ML-DSA-87 addr");
+    (seed, addr)
+}
+
+#[cfg(test)]
+impl UelTx {
+    pub(crate) fn signed(mut self, chain_id: u64, seed: &[u8; 32]) -> Self {
+        self.sign_with_ml_dsa_87_seed(chain_id, seed)
+            .expect("sign test UelTx");
+        self
+    }
 }
 
 /// Deterministic terminal status of one UEL transaction receipt.
@@ -624,6 +779,8 @@ impl ExecutionCoordinator {
         let mut receipts = Vec::with_capacity(txs.len());
 
         for tx in txs {
+            tx.verify_sender_auth(ctx.chain_id)
+                .map_err(AttemptError::Deterministic)?;
             if tx.gas_limit_bgu == 0 {
                 return Err(AttemptError::Deterministic(String::from(
                     "gas_limit_bgu must be positive",

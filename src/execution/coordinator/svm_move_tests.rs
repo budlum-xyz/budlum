@@ -52,7 +52,7 @@ fn svm_jit_is_disabled() {
 
 #[test]
 fn svm_spl_token_and_vote_stake_refusal_and_universal_cpi() {
-    let alice = Address::from([0x71; 32]);
+    let (alice_seed, alice) = super::test_uel_signer(0x71);
     let bob = Address::from([0x72; 32]);
     let proposer = Address::from([0x73; 32]);
     let mut state = funded(&[alice, bob, proposer]);
@@ -105,7 +105,9 @@ fn svm_spl_token_and_vote_stake_refusal_and_universal_cpi() {
                     gas_limit_bgu: 200_000,
                     max_fee_per_bgu_attos: MIN_UEL_BASE_FEE_ATTOS * 2,
                     max_priority_fee_per_bgu_attos: 100,
-                },
+                    auth: super::UelTxAuth::default(),
+                }
+                .signed(sample_ctx().chain_id, &alice_seed),
                 UelTx {
                     tx_hash: [0x62; 32],
                     sender: alice,
@@ -119,7 +121,9 @@ fn svm_spl_token_and_vote_stake_refusal_and_universal_cpi() {
                     gas_limit_bgu: 200_000,
                     max_fee_per_bgu_attos: MIN_UEL_BASE_FEE_ATTOS * 2,
                     max_priority_fee_per_bgu_attos: 100,
-                },
+                    auth: super::UelTxAuth::default(),
+                }
+                .signed(sample_ctx().chain_id, &alice_seed),
                 UelTx {
                     tx_hash: [0x63; 32],
                     sender: alice,
@@ -133,7 +137,9 @@ fn svm_spl_token_and_vote_stake_refusal_and_universal_cpi() {
                     gas_limit_bgu: 200_000,
                     max_fee_per_bgu_attos: MIN_UEL_BASE_FEE_ATTOS * 2,
                     max_priority_fee_per_bgu_attos: 100,
-                },
+                    auth: super::UelTxAuth::default(),
+                }
+                .signed(sample_ctx().chain_id, &alice_seed),
             ],
         )
         .expect("spl block");
@@ -165,7 +171,9 @@ fn svm_spl_token_and_vote_stake_refusal_and_universal_cpi() {
                     gas_limit_bgu: 100_000,
                     max_fee_per_bgu_attos: MIN_UEL_BASE_FEE_ATTOS * 2,
                     max_priority_fee_per_bgu_attos: 100,
-                }],
+                    auth: super::UelTxAuth::default(),
+                }
+                .signed(sample_ctx().chain_id, &alice_seed)],
             )
             .expect("forbidden prog block");
         assert_eq!(r[0].status, UelReceiptStatus::Revert);
@@ -191,7 +199,9 @@ fn svm_spl_token_and_vote_stake_refusal_and_universal_cpi() {
                 gas_limit_bgu: 200_000,
                 max_fee_per_bgu_attos: MIN_UEL_BASE_FEE_ATTOS * 2,
                 max_priority_fee_per_bgu_attos: 100,
-            }],
+                auth: super::UelTxAuth::default(),
+            }
+            .signed(sample_ctx().chain_id, &alice_seed)],
         )
         .expect("deploy wasm");
     let wasm_contract = dep[0].output.clone();
@@ -236,7 +246,9 @@ fn svm_spl_token_and_vote_stake_refusal_and_universal_cpi() {
                     gas_limit_bgu: 150_000,
                     max_fee_per_bgu_attos: MIN_UEL_BASE_FEE_ATTOS * 2,
                     max_priority_fee_per_bgu_attos: 100,
-                },
+                    auth: super::UelTxAuth::default(),
+                }
+                .signed(sample_ctx().chain_id, &alice_seed),
                 UelTx {
                     tx_hash: [0x67; 32],
                     sender: alice,
@@ -250,7 +262,9 @@ fn svm_spl_token_and_vote_stake_refusal_and_universal_cpi() {
                     gas_limit_bgu: 300_000,
                     max_fee_per_bgu_attos: MIN_UEL_BASE_FEE_ATTOS * 2,
                     max_priority_fee_per_bgu_attos: 100,
-                },
+                    auth: super::UelTxAuth::default(),
+                }
+                .signed(sample_ctx().chain_id, &alice_seed),
             ],
         )
         .expect("svm universal cpi");
@@ -277,7 +291,7 @@ fn move_sequential_randomness_staking_refusal_and_universal_call() {
     })
     .is_err());
 
-    let alice = Address::from([0x81; 32]);
+    let (alice_seed, alice) = super::test_uel_signer(0x81);
     let proposer = Address::from([0x82; 32]);
     let mut state = funded(&[alice, proposer]);
     let mut coord = ExecutionCoordinator::new();
@@ -303,7 +317,9 @@ fn move_sequential_randomness_staking_refusal_and_universal_call() {
                 gas_limit_bgu: 200_000,
                 max_fee_per_bgu_attos: MIN_UEL_BASE_FEE_ATTOS * 2,
                 max_priority_fee_per_bgu_attos: 100,
-            }],
+                auth: super::UelTxAuth::default(),
+            }
+            .signed(sample_ctx().chain_id, &alice_seed)],
         )
         .expect("deploy move module");
     assert_eq!(dep[0].status, UelReceiptStatus::Success);
@@ -334,7 +350,9 @@ fn move_sequential_randomness_staking_refusal_and_universal_call() {
                     gas_limit_bgu: 200_000,
                     max_fee_per_bgu_attos: MIN_UEL_BASE_FEE_ATTOS * 2,
                     max_priority_fee_per_bgu_attos: 100,
-                }],
+                    auth: super::UelTxAuth::default(),
+                }
+                .signed(sample_ctx().chain_id, &alice_seed)],
             )
             .expect("call forbidden move module");
         assert_eq!(rec[0].status, UelReceiptStatus::Revert);
@@ -365,7 +383,9 @@ fn move_sequential_randomness_staking_refusal_and_universal_call() {
                 gas_limit_bgu: 200_000,
                 max_fee_per_bgu_attos: MIN_UEL_BASE_FEE_ATTOS * 2,
                 max_priority_fee_per_bgu_attos: 100,
-            }],
+                auth: super::UelTxAuth::default(),
+            }
+            .signed(sample_ctx().chain_id, &alice_seed)],
         )
         .expect("randomness");
     assert_eq!(r1[0].status, UelReceiptStatus::Success);
@@ -391,7 +411,9 @@ fn move_sequential_randomness_staking_refusal_and_universal_call() {
                 gas_limit_bgu: 200_000,
                 max_fee_per_bgu_attos: MIN_UEL_BASE_FEE_ATTOS * 2,
                 max_priority_fee_per_bgu_attos: 100,
-            }],
+                auth: super::UelTxAuth::default(),
+            }
+            .signed(sample_ctx().chain_id, &alice_seed)],
         )
         .expect("deploy wasm");
     let wasm_target = wdep[0].output.clone();
@@ -427,7 +449,9 @@ fn move_sequential_randomness_staking_refusal_and_universal_call() {
                 gas_limit_bgu: 300_000,
                 max_fee_per_bgu_attos: MIN_UEL_BASE_FEE_ATTOS * 2,
                 max_priority_fee_per_bgu_attos: 100,
-            }],
+                auth: super::UelTxAuth::default(),
+            }
+            .signed(sample_ctx().chain_id, &alice_seed)],
         )
         .expect("move universal call");
     assert_eq!(r_ucall[0].status, UelReceiptStatus::Success);
@@ -476,8 +500,8 @@ fn the_spl_mint_address_matches_the_known_answers() {
 /// first, block the real issuer for good and record a third party as an issuer.
 #[test]
 fn an_svm_mint_belongs_to_the_account_that_initializes_it() {
-    let alice = Address::from([0x71; 32]);
-    let mallory = Address::from([0x74; 32]);
+    let (alice_seed, alice) = super::test_uel_signer(0x71);
+    let (mallory_seed, mallory) = super::test_uel_signer(0x74);
     let proposer = Address::from([0x73; 32]);
     let mut state = funded(&[alice, mallory, proposer]);
     let mut coord = ExecutionCoordinator::new();
@@ -493,19 +517,23 @@ fn an_svm_mint_belongs_to_the_account_that_initializes_it() {
         })
         .expect("json")
     };
-    let tx = |hash: u8, sender: Address, nonce: u64, input: Vec<u8>| UelTx {
-        tx_hash: [hash; 32],
-        sender,
-        nonce,
-        ee: EeId::SVM,
-        action: UelAction::Call {
-            target: SVM_SPL_TOKEN_PROGRAM_ID.to_vec(),
-            input,
-        },
-        value_attos: 0,
-        gas_limit_bgu: 200_000,
-        max_fee_per_bgu_attos: MIN_UEL_BASE_FEE_ATTOS * 2,
-        max_priority_fee_per_bgu_attos: 100,
+    let tx = |hash: u8, sender: Address, signer_seed: &[u8; 32], nonce: u64, input: Vec<u8>| {
+        UelTx {
+            tx_hash: [hash; 32],
+            sender,
+            nonce,
+            ee: EeId::SVM,
+            action: UelAction::Call {
+                target: SVM_SPL_TOKEN_PROGRAM_ID.to_vec(),
+                input,
+            },
+            value_attos: 0,
+            gas_limit_bgu: 200_000,
+            max_fee_per_bgu_attos: MIN_UEL_BASE_FEE_ATTOS * 2,
+            max_priority_fee_per_bgu_attos: 100,
+            auth: super::UelTxAuth::default(),
+        }
+        .signed(sample_ctx().chain_id, signer_seed)
     };
 
     // Mallory goes first with the seed Alice is about to use, and names Alice as an issuer.
@@ -515,9 +543,9 @@ fn an_svm_mint_belongs_to_the_account_that_initializes_it() {
             sample_ctx(),
             proposer,
             &[
-                tx(0x81, mallory, 0, init(seed, mallory_svm)),
-                tx(0x82, mallory, 1, init([0x23; 32], alice_svm)),
-                tx(0x83, alice, 0, init(seed, alice_svm)),
+                tx(0x81, mallory, &mallory_seed, 0, init(seed, mallory_svm)),
+                tx(0x82, mallory, &mallory_seed, 1, init([0x23; 32], alice_svm)),
+                tx(0x83, alice, &alice_seed, 0, init(seed, alice_svm)),
             ],
         )
         .expect("mint block");
@@ -548,7 +576,7 @@ fn an_svm_mint_belongs_to_the_account_that_initializes_it() {
             &mut coord,
             sample_ctx(),
             proposer,
-            &[tx(0x84, alice, 1, init(seed, alice_svm))],
+            &[tx(0x84, alice, &alice_seed, 1, init(seed, alice_svm))],
         )
         .expect("second block");
     assert_eq!(again[0].status, UelReceiptStatus::Revert);
