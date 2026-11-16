@@ -2291,7 +2291,7 @@ impl BudlumApiServer for RpcServer {
     }
 
     async fn get_domain_commitments(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
-        let commitments = self.chain.get_domain_commitments().await;
+        let commitments = cap_list_response(self.chain.get_domain_commitments().await);
         Ok(serde_json::Value::Array(
             commitments
                 .into_iter()
