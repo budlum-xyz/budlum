@@ -136,24 +136,37 @@ mod tests {
 
         let mut reg = Bud3Registry::default();
         let holder = [21u8; 32];
+        let holder2 = [22u8; 32];
         reg.register_object(
             [1; 32],
             up.record,
-            vec![(
-                0,
-                Share {
-                    validator: holder,
-                    class: Class::Full,
-                    first_esi: 0,
-                    symbols: 6,
-                },
-            )],
+            vec![
+                (
+                    0,
+                    Share {
+                        validator: holder,
+                        class: Class::Full,
+                        first_esi: 0,
+                        symbols: 3,
+                    },
+                ),
+                (
+                    0,
+                    Share {
+                        validator: holder2,
+                        class: Class::Full,
+                        first_esi: 3,
+                        symbols: 3,
+                    },
+                ),
+            ],
             0,
             10,
         )
         .unwrap();
         let mut net = MemorySymbolNetwork::default();
-        net.store_holder_share(holder, key, 0, up.segments[0].clone());
+        net.store_holder_share(holder, key, 0, up.segments[0][..3].to_vec());
+        net.store_holder_share(holder2, key, 0, up.segments[0][3..].to_vec());
 
         let bundle = Bud3ContentGateway::fetch_symbol_bundle(&reg, &cref, &net).unwrap();
         assert_eq!(

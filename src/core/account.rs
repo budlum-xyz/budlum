@@ -1242,6 +1242,16 @@ impl AccountState {
         // refused redelegation leaves no half-moved position behind.
         self.registry
             .move_delegation(*delegator, *from, *to, amount)?;
+        // Trim the source validator's snapshotted governance vote weight on open
+        // proposals down to its remaining aggregate stake, so redelegated stake
+        // cannot stay counted on the source validator while also leaving it.
+        for proposal in &mut self.governance.proposals {
+            if proposal.status == crate::core::governance::ProposalStatus::Active {
+                let snapshot = proposal.vote_weight_of(from);
+                proposal
+                    .reduce_vote_weight(from, snapshot.saturating_sub(snapshot.min(source_stake)));
+            }
+        }
         if let Some(entry) = self.validators.get_mut(from) {
             entry.stake = source_stake;
         }
@@ -1299,12 +1309,18 @@ impl AccountState {
             amount,
             self.epoch_index,
         )?;
-        // Trim snapshotted governance vote weight on open proposals just like
-        // self-unstake does, so withdrawing delegated stake cannot leave a
-        // validator voting with exited stake.
+        // Trim snapshotted governance vote weight on open proposals down to the
+        // stake the validator still holds. Delegated stake can arrive after the
+        // vote snapshot and exit again; clamping to `snapshot.min(new_stake)`
+        // ensures a post-vote delegation exit cannot erase vote weight it was
+        // never part of, while pre-vote exits still trim the shortfall.
         for proposal in &mut self.governance.proposals {
             if proposal.status == crate::core::governance::ProposalStatus::Active {
-                proposal.reduce_vote_weight(validator, amount);
+                let snapshot = proposal.vote_weight_of(validator);
+                proposal.reduce_vote_weight(
+                    validator,
+                    snapshot.saturating_sub(snapshot.min(new_stake)),
+                );
             }
         }
         if let Some(entry) = self.validators.get_mut(validator) {
@@ -7982,6 +7998,85 @@ mod validator_v7_binding_tests {
             "delegation exit must trim the validator's snapshotted governance vote weight"
         );
         assert_eq!(p.votes_for, 1_000);
+    }
+
+    #[test]
+    fn post_vote_delegation_unbonding_preserves_snapshotted_vote_weight() {
+        use crate::core::governance::{Proposal, ProposalType};
+        let mut state = AccountState::new();
+        let validator = Address::from([0xC3; 32]);
+        let late_delegator = Address::from([0xC4; 32]);
+        state.add_validator(validator, 1_000);
+        state.add_balance(&late_delegator, 5_000);
+
+        let mut proposal = Proposal::new(2, validator, ProposalType::ChangeBaseFee(25), 0, 10);
+        proposal.add_vote(validator, 1_000, true, 0).unwrap();
+        state.governance.proposals.push(proposal);
+
+        // Delegation arrives after the vote snapshot and immediately unbonds.
+        state
+            .delegate_to_validator(&late_delegator, &validator, 3_000)
+            .expect("late delegate");
+        assert_eq!(state.get_validator(&validator).unwrap().stake, 4_000);
+        state
+            .begin_delegation_unbonding(&late_delegator, &validator, 3_000)
+            .expect("late unbond");
+
+        let p = state.governance.proposals.first().unwrap();
+        assert_eq!(
+            p.vote_weight_of(&validator),
+            1_000,
+            "post-vote delegation exit must not erase snapshotted vote weight"
+        );
+        assert_eq!(p.votes_for, 1_000);
+    }
+
+    #[test]
+    fn redelegation_trims_source_validator_governance_vote_weight_without_erasing_post_vote_stake()
+    {
+        use crate::core::governance::{Proposal, ProposalType};
+        let mut state = AccountState::new();
+        let src = Address::from([0xC5; 32]);
+        let dst = Address::from([0xC6; 32]);
+        let pre_del = Address::from([0xC7; 32]);
+        let post_del = Address::from([0xC8; 32]);
+        state.add_validator(src, 1_000);
+        state.add_validator(dst, 1_000);
+        state.add_balance(&pre_del, 5_000);
+        state.add_balance(&post_del, 5_000);
+
+        state
+            .delegate_to_validator(&pre_del, &src, 2_000)
+            .expect("pre-vote delegate");
+        assert_eq!(state.get_validator(&src).unwrap().stake, 3_000);
+
+        let mut proposal = Proposal::new(3, src, ProposalType::ChangeBaseFee(30), 0, 10);
+        proposal.add_vote(src, 3_000, true, 0).unwrap();
+        state.governance.proposals.push(proposal);
+
+        // Post-vote delegation redelegating out leaves the 3_000 snapshot intact.
+        state
+            .delegate_to_validator(&post_del, &src, 4_000)
+            .expect("post-vote delegate");
+        state
+            .redelegate_to_validator(&post_del, &src, &dst, 4_000)
+            .expect("post-vote redelegate");
+        assert_eq!(
+            state.governance.proposals[0].vote_weight_of(&src),
+            3_000,
+            "post-vote redelegation must not erase snapshotted vote weight"
+        );
+
+        // Pre-vote delegation redelegating out trims source vote weight down to remaining 1_000.
+        state
+            .redelegate_to_validator(&pre_del, &src, &dst, 2_000)
+            .expect("pre-vote redelegate");
+        assert_eq!(
+            state.governance.proposals[0].vote_weight_of(&src),
+            1_000,
+            "pre-vote redelegation must trim source validator vote weight to remaining stake"
+        );
+        assert_eq!(state.governance.proposals[0].votes_for, 1_000);
     }
 }
 

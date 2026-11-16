@@ -57,17 +57,31 @@ fn register_object(
     let key = upload.record.commitment;
     let segments = upload.segments.len() as u64;
     let symbols = u64::from(upload.record.symbols_per_segment);
+    let total_syms = u32::try_from(symbols).expect("symbols per segment fits u32");
+    let mut second_holder = holder.0;
+    second_holder[0] = second_holder[0].wrapping_add(100);
     let shares = (0..segments)
-        .map(|segment| {
-            (
-                segment,
-                Share {
-                    validator: holder.0,
-                    class,
-                    first_esi: 0,
-                    symbols: u32::try_from(symbols).expect("symbols per segment fits u32"),
-                },
-            )
+        .flat_map(|segment| {
+            [
+                (
+                    segment,
+                    Share {
+                        validator: holder.0,
+                        class,
+                        first_esi: 0,
+                        symbols: 1,
+                    },
+                ),
+                (
+                    segment,
+                    Share {
+                        validator: second_holder,
+                        class,
+                        first_esi: 1,
+                        symbols: total_syms - 1,
+                    },
+                ),
+            ]
         })
         .collect();
     // `epoch`, then how many epochs the object is paid for. The second

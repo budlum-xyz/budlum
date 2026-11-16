@@ -435,7 +435,7 @@ impl ObjectPool {
     }
 
     /// The tick over `items` failed to prove. An object that failed
-    /// [`MAX_PROVE_FAILURES`] ticks in a row is dropped.
+    /// `MAX_PROVE_FAILURES` ticks in a row is dropped.
     pub fn mark_failed(&mut self, items: &[PoolItem]) {
         for item in items {
             let object_id = item.envelope.object_id();

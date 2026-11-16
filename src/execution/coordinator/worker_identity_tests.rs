@@ -155,7 +155,7 @@ struct Outcome {
 
 fn run_lie(worker_ee: EeId, act: Act, recorder_ee: EeId) -> Outcome {
     let seen = Arc::new(Mutex::new(Vec::new()));
-    let sender = Address::from([0x91u8; 32]);
+    let (sender_seed, sender) = super::test_uel_signer(0x91);
     let proposer = Address::from([0x92u8; 32]);
     let mut state = AccountState::new();
     state.credit_account(&sender, 500);
@@ -198,7 +198,9 @@ fn run_lie(worker_ee: EeId, act: Act, recorder_ee: EeId) -> Outcome {
                 gas_limit_bgu: 50_000,
                 max_fee_per_bgu_attos: MIN_UEL_BASE_FEE_ATTOS * 2,
                 max_priority_fee_per_bgu_attos: 0,
-            }],
+                auth: super::UelTxAuth::default(),
+            }
+            .signed(ctx.chain_id, &sender_seed)],
         )
         .expect("the block executes");
     let receipt = receipts.first().expect("one receipt");
