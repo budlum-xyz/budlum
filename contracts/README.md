@@ -13,7 +13,11 @@ The `Solidity` workflow compiles every file with a pinned solc and runs
 `contracts test` with a pinned Foundry. The tests carry their own cheat-code
 interface (`test/Harness.sol`); the tree has no Solidity dependency.
 
-No contract has an owner, a pause switch or an upgrade path.
+No contract has an upgrade path or a pause switch. `AppBindingExecutor` has one
+immutable deployment authority: the domain operator uses it only to mirror a
+finalized Budlum award into an exact, one-use origin-call permit. It cannot
+replace a permit, execute it, or redirect its result unless it is itself the
+awarded origin account recorded by that permit.
 
 | Contract | Purpose | Budlum side |
 |---|---|---|
