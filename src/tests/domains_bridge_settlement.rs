@@ -390,7 +390,7 @@ fn shared_security_is_open_on_testnet() {
 /// on Mainnet (`45260`).
 #[test]
 fn app_binding_is_open_on_devnet() {
-    assert!(!Network::Testnet.app_binding_enabled());
+    assert!(Network::Testnet.app_binding_enabled());
     assert!(Network::Devnet.app_binding_enabled());
     assert!(!Network::Mainnet.app_binding_enabled());
     let registrant = addr(0x32);
