@@ -282,6 +282,17 @@ jobs:
               exit 1
             }
           done
+      # Aggregation phase 1 exit: a real node built with the native backend
+      # runs a devnet whose genesis turns the layer on, takes signed
+      # ML-DSA-87 transfers over JSON-RPC and carries them as claims. The
+      # feature is not a default one, so nothing else in this job builds or
+      # runs this test. The grep refuses a run that matched no test.
+      - name: Aggregation devnet (native backend, real node)
+        if: always() && steps.rust.outcome == 'success'
+        run: |
+          set -euo pipefail
+          cargo test --locked --features agg-native-backend --test agg_devnet -- --nocapture 2>&1 | tee /tmp/agg-devnet.log
+          grep -Eq 'a_devnet_with_the_native_backend_builds_blocks_without_signature_bytes \.\.\. ok' /tmp/agg-devnet.log
   budlum-bpqs:
     # Crates/bpqs was a package no workflow tested - the
     # fuzz target and a cargo-hack check were not a test gate. The research
@@ -2621,6 +2632,18 @@ jobs:
       # printed MB/s always describe an equal-output path.
       - name: Erasure parity rows rayon vs serial throughput
         run: cargo bench --bench erasure_rows
+      # Aggregation Phase 0 baseline: post-quantum witness bytes and verify
+      # time per scheme and per block of 100 and 1000 transfers. The harness
+      # exits 2 without numbers if a signature it made does not verify or a
+      # length differs from the scheme table.
+      - name: Aggregation baseline (witness share of a block)
+        run: cargo bench --bench agg_baseline
+      # Aggregation Phase 2 measurement: the reference programs (verify_sig,
+      # AggTick) run on the virtual machine; steps per stage and per tick of
+      # 1 and 16 objects. The harness exits 2 without numbers when a run
+      # stops or publishes another tick_pi than the node computes.
+      - name: Aggregation tick steps (reference programs on the VM)
+        run: cargo bench --bench agg_tick_steps
 
   docker-security:
     # Dockerfile static lint (hadolint) + repo fs trivy scan.

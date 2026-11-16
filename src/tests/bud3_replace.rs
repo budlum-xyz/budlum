@@ -23,7 +23,7 @@ use crate::storage::bud3::pipeline::{prepare_public_upload, ObjectRecord};
 use crate::storage::bud3::placement::{Class, Share};
 use crate::storage::bud3::registry::{Bud3Query, Bud3Registry, ObjectKey, RegistryError};
 use crate::storage::bud3::replace::{sign_replace_attestation, ReplaceAttestation, ReplaceError};
-use crate::storage::bud3::tx::{apply_with_validators, Applied, StorageTxV3};
+use crate::storage::bud3::tx::{apply_with_validators_and_nft_owner, Applied, StorageTxV3};
 use std::collections::BTreeMap;
 
 const P: Profile = Profile {
@@ -104,12 +104,13 @@ fn apply(
     tx: StorageTxV3,
     epoch: u64,
 ) -> Result<Applied, RegistryError> {
-    apply_with_validators(
+    apply_with_validators_and_nft_owner(
         registry,
         signer,
         tx,
         (crate::core::transaction::DEFAULT_CHAIN_ID, epoch),
         &validator_keys(),
+        None,
     )
 }
 
@@ -210,14 +211,16 @@ fn bud3_object_replacement_keeps_the_content_id_and_moves_the_references() {
     let new = new_record.commitment;
     let _shares = placement(1);
     assert!(matches!(
-        apply(
+        crate::storage::bud3::tx::apply_with_validators_and_nft_owner(
             &mut r,
             addr(OWNER),
             StorageTxV3::BindNft {
                 nft: [7; 32],
                 object: old,
             },
-            0,
+            (crate::core::transaction::DEFAULT_CHAIN_ID, 0),
+            &BTreeMap::new(),
+            Some(addr(OWNER)),
         ),
         Ok(Applied::Bound)
     ));

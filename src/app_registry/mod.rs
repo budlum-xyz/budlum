@@ -156,15 +156,27 @@ mod tests {
         let up = prepare_public_upload(&[0xAB; 256], &profile, &Bud3Limits::default(), 4).unwrap();
         let cid = up.record.content_id;
         let key = up.record.commitment;
-        let shares = vec![(
-            0,
-            Share {
-                validator: [0x99; 32],
-                class: Class::Full,
-                first_esi: 0,
-                symbols: up.record.symbols_per_segment,
-            },
-        )];
+        let half = up.record.symbols_per_segment / 2;
+        let shares = vec![
+            (
+                0,
+                Share {
+                    validator: [0x99; 32],
+                    class: Class::Full,
+                    first_esi: 0,
+                    symbols: half,
+                },
+            ),
+            (
+                0,
+                Share {
+                    validator: [0x9A; 32],
+                    class: Class::Full,
+                    first_esi: half,
+                    symbols: up.record.symbols_per_segment - half,
+                },
+            ),
+        ];
         bud3.register_object(*owner.as_bytes(), up.record, shares, 0, 50)
             .unwrap();
 

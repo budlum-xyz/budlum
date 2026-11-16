@@ -310,6 +310,27 @@ mod tests {
                  either the list or the publisher drifted"
             );
         }
+        // The aggregation topics are named once, scored in a loop of their
+        // own right after, and joined from the same list.
+        let list = NODE_RS
+            .find("const AGGREGATION_TOPICS: [&str; 2] = [")
+            .expect("the aggregation topic list must exist");
+        let names = &NODE_RS[list..(list + 200).min(NODE_RS.len())];
+        assert!(names.contains("TOPIC_AGG_OBJECT") && names.contains("TOPIC_AGG_FRAME"));
+        let scored = NODE_RS[at..]
+            .find("for topic in AGGREGATION_TOPICS {")
+            .map(|offset| at + offset)
+            .expect("the aggregation topics must be scored");
+        let window = &NODE_RS[scored..(scored + 250).min(NODE_RS.len())];
+        assert!(
+            window.contains("score_params.topics.insert"),
+            "the aggregation topic loop must register each topic with the scorer"
+        );
+        assert_eq!(
+            NODE_RS.matches("for topic in AGGREGATION_TOPICS {").count(),
+            2,
+            "the aggregation topics are scored at build time and joined on request"
+        );
     }
 
     /// A sync request leaves this node over `/sync`, never over gossip.

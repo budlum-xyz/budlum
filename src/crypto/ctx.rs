@@ -100,6 +100,9 @@ pub const ADOPT_FOREIGN_V1: &[u8] = b"BDLM/ADOPT_FOREIGN/V1";
 /// AI answer proof bundle verification-level attestation signature.
 pub const APB_LEVEL_V1: &[u8] = b"BDLM/APB_LEVEL/V1";
 
+/// Universal Execution Layer transaction envelope (`UelTx`).
+pub const UEL_TX_V1: &[u8] = b"BDLM/UEL_TX/V1";
+
 /// table, in the order of section 6.5.
 pub const TABLE: &[&[u8]] = &[
     TX_V7,
@@ -139,6 +142,7 @@ pub const EXTRAS: &[&[u8]] = &[
     VALIDATOR_V1,
     ADOPT_FOREIGN_V1,
     APB_LEVEL_V1,
+    UEL_TX_V1,
 ];
 
 /// Whether `ctx` is a registered context string.

@@ -112,9 +112,12 @@ pub fn build_wallet_context(
         evidence: vec![
             AtlasEvidenceCard {
                 subject: "account".into(),
-                status: AtlasEvidenceStatus::Verified,
+                status: AtlasEvidenceStatus::PendingProof,
                 source: "AccountState balance/nonce".into(),
-                warning: None,
+                warning: Some(
+                    "Balance and nonce are read from this node's AccountState without an attached state proof"
+                        .into(),
+                ),
             },
             AtlasEvidenceCard {
                 subject: "pollen_lineage".into(),
@@ -549,6 +552,13 @@ mod tests {
         assert_eq!(ctx.pollen.assets_owned, 1);
         assert_eq!(ctx.pollen.grants_issued, 1);
         assert_eq!(ctx.pollen.grants_received, 0);
+        let account_card = ctx
+            .evidence
+            .iter()
+            .find(|card| card.subject == "account")
+            .unwrap();
+        assert_eq!(format!("{:?}", account_card.status), "PendingProof");
+        assert!(account_card.warning.is_some());
         let json = serde_json::to_string(&ctx).unwrap();
         assert!(!json.contains("plaintext"));
         assert!(!json.contains("private_key"));

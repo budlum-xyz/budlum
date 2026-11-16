@@ -818,14 +818,32 @@ mod tests {
                 .find(|domain| u64::from(domain.id) == domain_id)
                 .unwrap()
         };
-        let domain = record(chain.get_consensus_domains().await);
+        // Public consensus-domain and commitment reads must not expose
+        // node-local Garden records.
+        assert!(
+            chain
+                .get_consensus_domains()
+                .await
+                .into_iter()
+                .all(|domain| u64::from(domain.id) != domain_id),
+            "public get_consensus_domains must not disclose node-local Gardens"
+        );
+        assert!(
+            chain
+                .get_domain_commitments()
+                .await
+                .into_iter()
+                .all(|c| u64::from(c.domain_id) != domain_id),
+            "public get_domain_commitments must not disclose node-local Garden commitments"
+        );
+        let domain = record(chain.get_consensus_domains_with_garden().await);
         assert_eq!(domain.status, DomainStatus::Active);
         assert_eq!(domain.last_committed_height, 1);
         assert!(!domain.bridge_enabled);
 
         let left = service.leave().await.unwrap();
         assert_eq!(left["retired"], json!(true));
-        let domain = record(chain.get_consensus_domains().await);
+        let domain = record(chain.get_consensus_domains_with_garden().await);
         assert_eq!(domain.status, DomainStatus::Retired);
     }
 

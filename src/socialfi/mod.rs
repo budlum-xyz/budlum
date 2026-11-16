@@ -203,6 +203,27 @@ impl NftRegistry {
     pub fn get_nft(&self, id: u64) -> Option<&Nft> {
         self.nfts.get(&id)
     }
+
+    /// Return whether `signer` currently owns a live SocialFi NFT whose
+    /// derived 32-byte B.U.D. 3.0 id matches `bud3_nft_id`.
+    ///
+    /// Bounded by `MAX_NFTS_PER_OWNER` because lookup scans only `signer`'s
+    /// ownership list and confirms live ownership in `self.nfts`.
+    #[must_use]
+    pub(crate) fn signer_owns_bud3_nft_id(
+        &self,
+        signer: &Address,
+        bud3_nft_id: &crate::storage::bud3::registry::NftId,
+    ) -> bool {
+        self.ownership.get(signer).is_some_and(|ids| {
+            ids.iter().any(|id| {
+                self.nfts.get(id).is_some_and(|nft| {
+                    nft.owner == *signer
+                        && crate::socialfi::nft_folders::derive_bud3_nft_id(*id) == *bud3_nft_id
+                })
+            })
+        })
+    }
 }
 
 impl NftRegistry {

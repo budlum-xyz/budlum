@@ -183,12 +183,11 @@ fn application_contract_fee_is_split_between_recipient_and_producer() {
     let sender = Address::from([0x11u8; 32]);
     let producer = Address::from([0x33u8; 32]);
     state.add_balance(&sender, 1_000_000);
-    const ORIGIN_DOMAIN_ID: u32 = 8;
     let mut origin_domain = crate::domain::plugin::default_domain(
-        ORIGIN_DOMAIN_ID,
-        crate::domain::ConsensusKind::PoS,
+        7,
+        crate::domain::ConsensusKind::PoA,
         45262,
-        "pos-qc-finality",
+        "poa-authority-quorum",
         1,
     );
     origin_domain.operator = Some(sender);
@@ -197,10 +196,9 @@ fn application_contract_fee_is_split_between_recipient_and_producer() {
     state
         .settlement
         .app_binding
-        .register(ORIGIN_DOMAIN_ID, b"origin-app".to_vec(), [0x44u8; 32], 0)
+        .register(7, b"origin-app".to_vec(), [0x44u8; 32], 0)
         .unwrap();
-    let app_binding_id =
-        crate::settlement::app_binding::app_binding_id(ORIGIN_DOMAIN_ID, b"origin-app");
+    let app_binding_id = crate::settlement::app_binding::app_binding_id(7, b"origin-app");
     // An unclaimed application: its share accrues in the keyless mirror.
     let app = state
         .settlement
@@ -229,6 +227,9 @@ fn application_contract_fee_is_split_between_recipient_and_producer() {
 
     let fee = 10_000;
     let mut tx = Transaction::new_contract_call_to(sender, app.mirror_account, fee, 0, bytecode);
+    tx.chain_id = crate::core::chain_config::Network::Testnet
+        .chain_id()
+        .value();
     tx.hash = tx.calculate_hash();
     Executor::apply_block(&mut state, &[tx], Some(&producer)).unwrap();
 
@@ -638,6 +639,8 @@ fn f4_boost_share_accumulates_in_pending_bud_boost_share() {
             nft_id,
             amount: boost_amount,
         },
+        auth_claim: None,
+        claim_refs: Vec::new(),
     };
 
     Executor::apply_transaction_checked(&mut state, &tx).unwrap();
