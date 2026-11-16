@@ -129,8 +129,13 @@ fn state_update_is_retired_for_every_sender() {
 /// disposable copy and publishes it only on success, so a transaction that
 /// fails halfway cannot leave partial writes in the selection prefix.
 /// Source-level lock (the failing-halfway fixture needs a bespoke executor
-/// arm). The residual gap, that `Executor` has no nonce or signature check of
-/// its own, is still open.
+/// arm). The nonce gap this comment used to call open is closed:
+/// `apply_block_candidate_checked` runs `check_block_transaction_nonce`
+/// before every transaction, and that check demands exact equality with the
+/// account nonce (`invalid_nonce`). The signature side stays where it was,
+/// in the admission gate, because a pruned witness is trusted by the
+/// validators that finalized the segment and the state root still checks the
+/// execution.
 #[test]
 fn producer_executes_on_a_disposable_candidate_state() {
     let src = production_part(include_str!("../chain/blockchain.rs"));
@@ -149,6 +154,34 @@ fn producer_executes_on_a_disposable_candidate_state() {
         !body.contains("Executor::apply_transaction_checked(&mut temp_state"),
         "the producer must never execute straight on the selection prefix"
     );
+}
+
+/// The nonce the block path enforces is exact, not a floor: a block that
+/// carries a transaction out of order is refused before any arm runs. The
+/// finding that started this class assumed the executor applied whatever
+/// nonce it was handed.
+#[test]
+fn a_block_transaction_must_carry_the_exact_account_nonce() {
+    use crate::core::account::AccountState;
+    use crate::execution::executor::Executor;
+    let mut state = AccountState::new();
+    let who = Address::from([0x31; 32]);
+    state.add_balance(&who, 1_000_000);
+    let mut tx = crate::core::transaction::Transaction::new_with_chain_id(
+        who,
+        Address::from([0x32; 32]),
+        1,
+        1,
+        0,
+        Vec::new(),
+        45261,
+        crate::core::transaction::TransactionType::Transfer,
+    );
+    tx.nonce = 7;
+    let error = Executor::check_block_transaction_nonce(&state, &tx).unwrap_err();
+    assert!(error.to_string().contains("invalid_nonce"), "{error}");
+    tx.nonce = 0;
+    assert!(Executor::check_block_transaction_nonce(&state, &tx).is_ok());
 }
 
 /// A bond adds to an existing role stake (no override), and the
