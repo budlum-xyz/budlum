@@ -1309,15 +1309,32 @@ fn scenario_bns(backend: &Backend<'_>, wallets: &Wallets) -> Result<String, Stri
 fn scenario_app_binding(backend: &Backend<'_>, wallets: &Wallets) -> Result<String, String> {
     const DOMAIN: &str = "4242";
     const ORIGIN: &str = "00000000000000000000000000000000000000aa";
+    // AppBinding deliberately refuses an arbitrary PoW domain as a trust
+    // anchor: its operator chooses the difficulty floor and could self-mine a
+    // root that authorizes a claim. The old rehearsal registered exactly that
+    // unsafe shape, so the Register transaction was correctly refused in block
+    // execution and both native and Compose jobs waited 120 s for a row that
+    // could never exist. Register an explicit PoA authority set instead. The
+    // same three ceremony validators that already secure this rehearsal are
+    // committed into the domain's validator_set_hash by the CLI.
+    let authority1 = backend.validator_address(1)?;
+    let authority2 = backend.validator_address(2)?;
+    let authority3 = backend.validator_address(3)?;
     backend.bud(&[
         "domain",
-        "register-pow",
+        "register-poa",
         "--key-file",
         &wallets.alice_file,
         "--id",
         DOMAIN,
         "--chain-id",
         "4242",
+        "--authority",
+        &authority1,
+        "--authority",
+        &authority2,
+        "--authority",
+        &authority3,
     ])?;
     wait_for(60, || {
         call("bud_getDomainInfo", &format!("[{DOMAIN}]"))
@@ -1326,7 +1343,7 @@ fn scenario_app_binding(backend: &Backend<'_>, wallets: &Wallets) -> Result<Stri
             .filter(|registered| **registered == crate::json::Value::Bool(true))
             .map(|_| ())
     })
-    .ok_or("the PoW domain did not register within 120 s")?;
+    .ok_or("the PoA domain did not register within 120 s")?;
     let ids = backend.bud(&[
         "app-binding",
         "id",
