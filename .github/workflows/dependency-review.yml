@@ -10,7 +10,7 @@ name: Dependency Review (PR security gate)
 # Enable Dependency graph in repository settings for this check.
 on:
   pull_request:
-    branches: [main, consensus-of-consensuses, testnet-quantum, testnet]
+    branches: [main, consensus-of-consensuses, testnet-quantum, testnet, garden]
 
 # Salt-okur.
 concurrency:

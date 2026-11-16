@@ -406,7 +406,7 @@ pub(crate) fn finalize_missed_challenges(
 
     let mut finalized = 0u32;
     let mut total_slashed = 0u64;
-    for (challenge_id, deal_id) in pending {
+    for (challenge_id, deal_id) in pending.iter().copied() {
         let operator = state
             .storage_registry
             .get_deal(deal_id)
@@ -442,13 +442,34 @@ pub(crate) fn finalize_missed_challenges(
             )?;
         }
         if let Some((opener, bond)) = opener_refund {
-            state
-                .try_add_balance(&opener, bond)
-                .map_err(|error| format!("opener bond refund overflow for {opener}: {error}"))?;
+            refund_opener_bond(state, opener, bond)?;
         }
         finalized += 1;
     }
+    // A slashed deal leaves its other open challenges unanswerable: they are
+    // closed without a second slash and their opener bonds come back. This is
+    // one walk of the challenge registry for the whole block. Doing it per
+    // collapsed challenge made the block cost the product of the missed and
+    // the stored challenges.
+    let superseded_deals: std::collections::BTreeSet<u64> =
+        pending.iter().map(|(_, deal_id)| *deal_id).collect();
+    let (closed, bond_refunds) = state
+        .storage_registry
+        .close_superseded_challenges_for_slashed_deals(&superseded_deals, epoch);
+    for (opener, bond) in bond_refunds {
+        refund_opener_bond(state, opener, bond)?;
+    }
+    finalized = finalized.saturating_add(closed);
     Ok((finalized, total_slashed))
+}
+
+/// Return to `opener` the bond `open_challenge` debited from it. The one
+/// place a challenge bond comes back in the missed-challenge settlement,
+/// for the challenge that carried the slash and for its closed siblings.
+fn refund_opener_bond(state: &mut AccountState, opener: Address, bond: u64) -> Result<(), String> {
+    state
+        .try_add_balance(&opener, bond)
+        .map_err(|error| format!("opener bond refund overflow for {opener}: {error}"))
 }
 
 /// Return the operator bond of every deal that reached its end epoch

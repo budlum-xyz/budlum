@@ -2821,6 +2821,12 @@ fn prepare_evm_target(
         return Ok(PreparedTarget::Finished(st, out));
     }
     if let Some(spec) = decode_std_evm_token_code(&code) {
+        if exec_addr.is_some() {
+            return Ok(PreparedTarget::Finished(
+                OutcomeStatus::Revert,
+                b"DELEGATECALL/CALLCODE to standard token runtime is forbidden".to_vec(),
+            ));
+        }
         let (st, out) =
             execute_std_evm_token(&spec, storage_addr, caller20, input, is_static, host)?;
         return Ok(PreparedTarget::Finished(st, out));
@@ -3678,5 +3684,80 @@ mod tests {
             prep_ptr,
             PreparedTarget::Finished(OutcomeStatus::Revert, _)
         ));
+    }
+
+    /// A standard token runtime keeps its balances under its own address. A
+    /// DELEGATECALL or CALLCODE would run it over the caller's storage, so both
+    /// are refused. An ordinary CALL still reaches the token.
+    #[test]
+    fn delegatecall_and_callcode_into_standard_token_runtime_revert_and_call_runs() {
+        use crate::execution::coordinator::assets::AssetStandard;
+        let mut mem_host = MemoryHost::new(500_000);
+        let ctx = test_ctx();
+        let attacker = [0x22u8; 20];
+        let victim = [0x11u8; 20];
+        let token = [0x66u8; 20];
+        let code = encode_std_evm_token_code(&StdEvmTokenSpec {
+            standard: AssetStandard::Fungible,
+            name: "Test".to_string(),
+            symbol: "TST".to_string(),
+            decimals: 18,
+            initial_holder: victim,
+            initial_supply_or_token_id: 1_000,
+            base_uri: String::new(),
+        })
+        .unwrap();
+        deploy(&mut mem_host, token, code);
+        let mut host = EvmStackHost::new(&mut mem_host);
+        let total_supply = solidity_selector("totalSupply()");
+
+        let delegated = prepare_evm_target(
+            &EvmTargetDispatch {
+                ctx: &ctx,
+                code_addr: &token,
+                exec_addr: Some(&attacker),
+                caller20: &victim,
+                value_wei: 0,
+                input: &total_supply,
+                is_static: false,
+                gas_limit: 500_000,
+                depth: 1,
+            },
+            &mut host,
+        )
+        .unwrap();
+        let PreparedTarget::Finished(status, out) = delegated else {
+            panic!("a standard token never runs as bytecode");
+        };
+        assert_eq!(status, OutcomeStatus::Revert);
+        assert_eq!(
+            out,
+            b"DELEGATECALL/CALLCODE to standard token runtime is forbidden".to_vec()
+        );
+
+        let called = prepare_evm_target(
+            &EvmTargetDispatch {
+                ctx: &ctx,
+                code_addr: &token,
+                exec_addr: None,
+                caller20: &victim,
+                value_wei: 0,
+                input: &total_supply,
+                is_static: true,
+                gas_limit: 500_000,
+                depth: 1,
+            },
+            &mut host,
+        )
+        .unwrap();
+        let PreparedTarget::Finished(status, out) = called else {
+            panic!("a standard token never runs as bytecode");
+        };
+        assert_ne!(
+            out,
+            b"DELEGATECALL/CALLCODE to standard token runtime is forbidden".to_vec(),
+            "an ordinary CALL is not refused by the delegated-call guard"
+        );
+        assert_eq!(status, OutcomeStatus::Success, "totalSupply answers");
     }
 }

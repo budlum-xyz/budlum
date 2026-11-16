@@ -183,13 +183,17 @@ pub fn apply(
         registry,
         signer,
         tx,
-        epoch,
+        (crate::core::transaction::DEFAULT_CHAIN_ID, epoch),
         &std::collections::BTreeMap::new(),
     )
 }
 
-/// Apply one transaction signed by `signer` at `epoch`, supplying the active
-/// consensus ML-DSA-65 validator key directory for `ReplaceObject` attestations.
+/// Apply one transaction signed by `signer` at `epoch` on `chain_id`,
+/// supplying the active consensus ML-DSA-65 validator key directory.
+///
+/// `RecordRepair` and `ReplaceObject` attestations are verified against the
+/// digest for `chain_id`: a quorum signed for one network is refused on any
+/// other network that shares the same validators and object keys.
 ///
 /// # Errors
 ///
@@ -198,7 +202,7 @@ pub fn apply_with_validators(
     registry: &mut Bud3Registry,
     signer: Address,
     tx: StorageTxV3,
-    epoch: u64,
+    (chain_id, epoch): (u64, u64),
     validator_keys: &std::collections::BTreeMap<Address, Vec<u8>>,
 ) -> Result<Applied, RegistryError> {
     match tx {
@@ -240,7 +244,7 @@ pub fn apply_with_validators(
                     },
                     Some(&signer),
                     validator_keys,
-                    epoch,
+                    (chain_id, epoch),
                 )
                 .map(|()| Applied::Repaired)
         }
@@ -294,7 +298,7 @@ pub fn apply_with_validators(
                 new_record,
                 new_shares,
                 &attestations,
-                (epoch, validator_keys),
+                (chain_id, epoch, validator_keys),
             )
             .map(Applied::Replaced),
         StorageTxV3::PayFallbackView {
