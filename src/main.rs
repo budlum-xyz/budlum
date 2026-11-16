@@ -424,6 +424,7 @@ async fn main() {
             // the template, so what the chain pays is readable in the file it
             // was launched from (testnet item 8).
             reward_pool: network_defaults.reward_pool,
+            aggregation: network_defaults.aggregation,
             bns_primary_sellers: network_defaults.bns_primary_sellers,
             bns_reserved_labels: network_defaults.bns_reserved_labels,
         };
@@ -2045,6 +2046,35 @@ async fn main() {
     // backlog), and `mine` under PoW (difficulty from the CLI flag; smoke runs
     // difficulty=0). Broadcast goes over the gossipsub "blocks" channel, and
     // peers run the same deterministic commit path.
+    // The aggregation side of the node. It runs when the genesis turned the
+    // layer on and the node has an address to prove for: the producer
+    // address, which is also where the aggregator share of the claim fees
+    // goes. A node without one neither proves nor carries objects.
+    if let Some(aggregator) = cli_producer_address {
+        if let Some(tick_ms) = chain.enable_aggregator(aggregator).await {
+            client.enable_aggregation().await;
+            let chain_a = chain.clone();
+            let client_a = client.clone();
+            let tick_ms = tick_ms.max(100);
+            tracing::info!("Aggregator active for {aggregator}, tick {tick_ms} ms");
+            tokio::spawn(async move {
+                let mut tick = tokio::time::interval(std::time::Duration::from_millis(tick_ms));
+                tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                loop {
+                    tick.tick().await;
+                    for frame in chain_a.aggregation_tick().await {
+                        client_a
+                            .broadcast(
+                                budlum_core::network::protocol::TOPIC_AGG_FRAME.to_string(),
+                                NetworkMessage::AggFrame(frame),
+                            )
+                            .await;
+                    }
+                }
+            });
+        }
+    }
+
     if daemon_producer_loop_runs(consensus_type) {
         if let Some(producer) = cli_producer_address {
             let chain_p = chain.clone();

@@ -1,5 +1,6 @@
 //! Convenience: exposed for CLI, RPC, SDK, and multi-VM runtime callers.
 
+use crate::aggregation::fees::ClaimSettlement;
 use crate::core::account::AccountState;
 use crate::core::address::Address;
 use crate::core::chain_config::privacy_transfers_enabled;
@@ -4775,12 +4776,36 @@ impl Executor {
         transactions: &[Transaction],
         block_producer: Option<&Address>,
     ) -> BudlumResult<()> {
+        Self::apply_block_candidate_with_claims(
+            state,
+            transactions,
+            block_producer,
+            &ClaimSettlement::default(),
+        )
+    }
+
+    /// Apply the transactions of a block whose claim fees are `claims`
+    /// (aggregation layer, directive section 7).
+    ///
+    /// A transaction whose fee does not cover the claims it pays for fails:
+    /// it is not executed and pays nothing. The claim fee of every other
+    /// paying transaction is taken out of its fee before the fee is burned
+    /// and split, and goes to the aggregators and the block producer.
+    pub(crate) fn apply_block_candidate_with_claims(
+        state: &mut AccountState,
+        transactions: &[Transaction],
+        block_producer: Option<&Address>,
+        claims: &ClaimSettlement,
+    ) -> BudlumResult<()> {
         Self::check_block_contract_gas(transactions)?;
-        for tx in transactions {
+        for (at, tx) in transactions.iter().enumerate() {
+            if claims.failed.get(at).copied().unwrap_or(false) {
+                continue;
+            }
             Self::check_block_transaction_nonce(state, tx)?;
             Self::apply_transaction_checked(state, tx)?;
         }
-        Self::finalize_block_checked(state, transactions, block_producer)
+        Self::finalize_block_with_claims(state, transactions, block_producer, claims)
     }
 
     pub(crate) fn finalize_block_checked(
@@ -4788,6 +4813,59 @@ impl Executor {
         transactions: &[Transaction],
         block_producer: Option<&Address>,
     ) -> BudlumResult<()> {
+        Self::finalize_block_with_claims(
+            state,
+            transactions,
+            block_producer,
+            &ClaimSettlement::default(),
+        )
+    }
+
+    /// Pay the claim fees of a block: every aggregator its share, the block
+    /// producer the rest. Without a producer the rest is destroyed, as the
+    /// transaction fees of such a block are.
+    fn pay_claim_fees(
+        state: &mut AccountState,
+        block_producer: Option<&Address>,
+        claims: &ClaimSettlement,
+    ) -> BudlumResult<()> {
+        for (aggregator, amount) in &claims.payout.aggregators {
+            if *amount > 0 {
+                state
+                    .try_add_balance(aggregator, *amount)
+                    .map_err(|e| BudlumError::validation("aggregator_fee_overflow", &e))?;
+            }
+        }
+        if claims.payout.producer > 0 {
+            match block_producer {
+                Some(producer) => state
+                    .try_add_balance(producer, claims.payout.producer)
+                    .map_err(|e| BudlumError::validation("producer_fee_overflow", &e))?,
+                None => state.record_destroyed(u128::from(claims.payout.producer)),
+            }
+        }
+        Ok(())
+    }
+
+    fn finalize_block_with_claims(
+        state: &mut AccountState,
+        transactions: &[Transaction],
+        block_producer: Option<&Address>,
+        claims: &ClaimSettlement,
+    ) -> BudlumResult<()> {
+        // What is left of the fee of the transaction at `at` once its claim
+        // fees are taken out; `None` for a transaction that failed and paid
+        // nothing.
+        let protocol_fee = |at: usize, tx: &Transaction| -> BudlumResult<Option<u64>> {
+            if claims.failed.get(at).copied().unwrap_or(false) {
+                return Ok(None);
+            }
+            let claim_fee = claims.charged.get(at).copied().unwrap_or(0);
+            tx.fee.checked_sub(claim_fee).map(Some).ok_or_else(|| {
+                BudlumError::validation("claim_fee_underflow", "claim fee above the fee")
+            })
+        };
+        Self::pay_claim_fees(state, block_producer, claims)?;
         if let Some(producer) = block_producer {
             // Economic policy (2026-07-25): validators earn the protocol
             // portion of the flat transaction fee, less the configured
@@ -4800,9 +4878,12 @@ impl Executor {
             // credits plus the burn conserve the sender's fee exactly.
             // `tokenomics.block_reward` is retained for snapshot/wire
             // compatibility but MUST NOT mint supply.
-            for tx in transactions {
-                let burn = state.tokenomics.metabolic_burn(tx.fee);
-                let distributable_fee = tx.fee.checked_sub(burn).ok_or_else(|| {
+            for (at, tx) in transactions.iter().enumerate() {
+                let Some(fee) = protocol_fee(at, tx)? else {
+                    continue;
+                };
+                let burn = state.tokenomics.metabolic_burn(fee);
+                let distributable_fee = fee.checked_sub(burn).ok_or_else(|| {
                     BudlumError::validation("fee_underflow", "fee below metabolic burn")
                 })?;
                 // The burn leaves supply: record it, or it reopens mint
@@ -4841,9 +4922,13 @@ impl Executor {
         } else {
             // With no producer to credit, every fee the transactions paid is
             // destroyed.
-            let destroyed = transactions
+            let mut fees = Vec::with_capacity(transactions.len());
+            for (at, tx) in transactions.iter().enumerate() {
+                fees.push(protocol_fee(at, tx)?.unwrap_or(0));
+            }
+            let destroyed = fees
                 .iter()
-                .try_fold(0u128, |acc, tx| acc.checked_add(u128::from(tx.fee)))
+                .try_fold(0u128, |acc, fee| acc.checked_add(u128::from(*fee)))
                 .ok_or_else(|| {
                     BudlumError::validation(
                         "burned_supply_overflow",

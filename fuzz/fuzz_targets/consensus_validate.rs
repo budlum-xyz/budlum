@@ -91,6 +91,7 @@ fuzz_target!(|data: &[u8]| {
         producer_public_key,
         witness_root,
         seat_participation: None,
+        frame_hash: None,
     };
 
     // Header encoding is deterministic and its hash survives a round trip.
