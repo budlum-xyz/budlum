@@ -298,7 +298,10 @@ mod tests {
             "mobile_free_space_floor"
         );
         assert_eq!(core.status().stored_bytes, 0);
-        assert_eq!(core.available_bytes(), FREE_SPACE_FLOOR_BYTES + retained - 1);
+        assert_eq!(
+            core.available_bytes(),
+            FREE_SPACE_FLOOR_BYTES + retained - 1
+        );
         assert!(core.drain_duties().is_empty());
 
         core.set_available_bytes(FREE_SPACE_FLOOR_BYTES + retained);
