@@ -943,4 +943,237 @@ mod tests {
             "missed challenge settlement must conserve committed + burned supply"
         );
     }
+
+    /// A funded chain with one active deal at epoch 100 (term 100..250) whose
+    /// operator bond is `min_operator_bond`. Returns the chain, the deal id and
+    /// the operator.
+    fn chain_with_one_slashable_deal() -> (Blockchain, u64, Address) {
+        let consensus = Arc::new(PoWEngine::new(0));
+        let mut blockchain = Blockchain::new(consensus, None, 45261, None);
+
+        let operator = Address::from([0x51u8; 32]);
+        let payer = Address::from([0x52u8; 32]);
+        blockchain.state.add_balance(&operator, 10_000_000);
+        blockchain.state.add_balance(&payer, 10_000_000);
+        blockchain.state.epoch_index = 100;
+        blockchain.state.current_block_unix_secs = 1_000_000;
+
+        let payload = vec![0x5Au8; 262_144];
+        let mut manifest = ContentManifest::from_bytes_sliced(&payload, 262_144).unwrap();
+        manifest.owner = payer;
+        let shard_id = manifest.shards[0].shard_id;
+        let params = StorageDomainParams::default();
+        let shard_bytes = u64::from(manifest.shard(&shard_id).expect("shard").size);
+        let economics = StorageEconomicsParams {
+            operator_bond: params.min_operator_bond,
+            fee_per_byte_epoch: 10 * (FEE_RATE_SCALE as u64) / shard_bytes,
+        };
+        let proof = {
+            let envelope = bud_proof::ProofEnvelope {
+                proof_format_version: 1,
+                backend: "test-backend".to_string(),
+                p3_version: "0.6".to_string(),
+                fri_params_id: "test-fri".to_string(),
+                public_inputs_hash: [0x42u8; 32],
+                proof_bytes: vec![0xABu8; 96],
+                degree_bits: 8,
+            };
+            bincode::serialize(&envelope).unwrap()
+        };
+        let deal_id = blockchain
+            .open_deal_through_shared_escrow(
+                &DealOpenTerms {
+                    domain_id: 42,
+                    manifest: &manifest,
+                    shard_id,
+                    operator,
+                    replica_index: 0,
+                    start_epoch: 100,
+                    end_epoch: 250,
+                    economics,
+                    merkle_proof: Some(proof),
+                    storage_root: Some([0x42u8; 32]),
+                },
+                payer,
+                &params,
+            )
+            .unwrap();
+        (blockchain, deal_id, operator)
+    }
+
+    /// Open a bonded challenge on `deal_id` at `epoch` and return its id.
+    fn open_bonded_challenge(
+        blockchain: &mut Blockchain,
+        deal_id: u64,
+        opener: Address,
+        epoch: u64,
+        deadline_epoch: u64,
+        bond: u64,
+    ) -> u64 {
+        use crate::domain::storage_tx::{self, StorageTx, StorageTxContext};
+        let before: std::collections::BTreeSet<u64> = blockchain
+            .state
+            .storage_registry
+            .all_challenges()
+            .iter()
+            .map(|c| c.challenge_id)
+            .collect();
+        blockchain.state.epoch_index = epoch;
+        storage_tx::execute_storage_tx(
+            &mut blockchain.state,
+            &StorageTxContext {
+                sender: opener,
+                nonce: 0,
+                chain_id: 45261,
+                fee: 0,
+            },
+            &StorageTx::OpenChallenge {
+                deal_id,
+                range_len: 4096,
+                deadline_epoch,
+                opener_bond: bond,
+            },
+        )
+        .expect("open bonded challenge");
+        blockchain
+            .state
+            .storage_registry
+            .all_challenges()
+            .iter()
+            .map(|c| c.challenge_id)
+            .find(|id| !before.contains(id))
+            .expect("a new challenge row")
+    }
+
+    /// One missed challenge slashes the deal once. Every other open challenge
+    /// on that deal can no longer be answered, so the same block closes it
+    /// with no second slash and returns its opener bond, whether it was due in
+    /// that block or not.
+    #[test]
+    fn slashed_deal_closes_every_sibling_challenge_once_and_refunds_each_opener() {
+        use crate::domain::storage_deal::{ChallengeOutcome, DealStatus};
+
+        let (mut blockchain, deal_id, operator) = chain_with_one_slashable_deal();
+        let operator_bond = StorageDomainParams::default().min_operator_bond;
+        let bond = 75_000u64;
+        let openers = [
+            Address::from([0x61u8; 32]),
+            Address::from([0x62u8; 32]),
+            Address::from([0x63u8; 32]),
+        ];
+        for opener in &openers {
+            blockchain.state.add_balance(opener, 2_000_000);
+        }
+        // Due together with the first one, due later, and not due for a while.
+        let first = open_bonded_challenge(&mut blockchain, deal_id, openers[0], 100, 110, bond);
+        let due = open_bonded_challenge(&mut blockchain, deal_id, openers[1], 104, 114, bond);
+        let later = open_bonded_challenge(&mut blockchain, deal_id, openers[2], 108, 200, bond);
+        for opener in &openers {
+            assert_eq!(blockchain.state.get_balance(opener), 2_000_000 - bond);
+        }
+        let operator_before = blockchain.state.get_balance(&operator);
+
+        blockchain.state.epoch_index = 120;
+        // Measured at the epoch the block runs in, with all three opener bonds
+        // still held by their challenges.
+        let supply_before = blockchain
+            .state
+            .total_bud_committed()
+            .saturating_add(u128::from(blockchain.state.burned_total));
+        let (finalized, slashed) = crate::chain::storage_maintenance::finalize_missed_challenges(
+            &mut blockchain.state,
+            120,
+        )
+        .expect("finalize");
+        assert_eq!(finalized, 3, "the missed challenge and both siblings close");
+        assert_eq!(slashed, operator_bond, "the deal is slashed exactly once");
+
+        let registry = &blockchain.state.storage_registry;
+        assert_eq!(
+            registry.get_deal(deal_id).unwrap().status,
+            DealStatus::Slashed
+        );
+        let slashing: Vec<u64> = [first, due, later]
+            .iter()
+            .map(|id| {
+                let result = registry.get_result(*id).expect("every sibling is resolved");
+                assert_eq!(result.outcome, ChallengeOutcome::Missed);
+                assert_eq!(result.finalized_epoch, 120);
+                result.slashed_bond
+            })
+            .collect();
+        assert_eq!(
+            slashing.iter().filter(|amount| **amount > 0).count(),
+            1,
+            "one row carries the slash, the siblings carry none: {slashing:?}"
+        );
+        assert_eq!(slashing.iter().sum::<u64>(), operator_bond);
+        for opener in &openers {
+            assert_eq!(
+                blockchain.state.get_balance(opener),
+                2_000_000,
+                "every opener gets its bond back"
+            );
+        }
+        assert!(
+            blockchain.state.get_balance(&operator) <= operator_before,
+            "the operator gains nothing from the sibling closures"
+        );
+        assert_eq!(
+            blockchain
+                .state
+                .total_bud_committed()
+                .saturating_add(u128::from(blockchain.state.burned_total)),
+            supply_before,
+            "closing siblings conserves committed + burned supply"
+        );
+
+        // A later block finds nothing left: no second slash, no second refund.
+        blockchain.state.epoch_index = 201;
+        let again = crate::chain::storage_maintenance::finalize_missed_challenges(
+            &mut blockchain.state,
+            201,
+        )
+        .expect("finalize again");
+        assert_eq!(again, (0, 0));
+        for opener in &openers {
+            assert_eq!(blockchain.state.get_balance(opener), 2_000_000);
+        }
+    }
+
+    /// The sibling sweep is one walk for the whole block: a set that names
+    /// only deals that are not slashed closes nothing, and a set that names
+    /// several slashed deals closes all of them in a single call.
+    #[test]
+    fn sibling_sweep_takes_a_set_of_deals_and_skips_the_ones_not_slashed() {
+        let (mut blockchain, deal_id, _operator) = chain_with_one_slashable_deal();
+        let opener = Address::from([0x64u8; 32]);
+        blockchain.state.add_balance(&opener, 2_000_000);
+        let bond = 75_000u64;
+        let first = open_bonded_challenge(&mut blockchain, deal_id, opener, 100, 110, bond);
+        let second = open_bonded_challenge(&mut blockchain, deal_id, opener, 104, 200, bond);
+
+        let deals = std::collections::BTreeSet::from([deal_id, deal_id + 1_000]);
+        let registry = &mut blockchain.state.storage_registry;
+        assert_eq!(
+            registry.close_superseded_challenges_for_slashed_deals(&deals, 105),
+            (0, Vec::new()),
+            "an active deal keeps its open challenges"
+        );
+        assert!(registry.get_result(first).is_none());
+        assert!(registry.get_result(second).is_none());
+
+        registry
+            .finalize_missed_challenge(first, 111)
+            .expect("the first challenge is missed");
+        let (closed, refunds) = registry.close_superseded_challenges_for_slashed_deals(&deals, 111);
+        assert_eq!(closed, 1);
+        assert_eq!(refunds, vec![(opener, bond)]);
+        assert_eq!(registry.get_result(second).unwrap().slashed_bond, 0);
+        assert_eq!(
+            registry.close_superseded_challenges_for_slashed_deals(&deals, 112),
+            (0, Vec::new()),
+            "a second sweep finds nothing"
+        );
+    }
 }

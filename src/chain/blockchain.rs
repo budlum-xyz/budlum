@@ -5924,17 +5924,11 @@ impl Blockchain {
     pub fn mine_pending_transactions(&mut self, miner_address: Address) {
         self.produce_block(miner_address);
     }
-    fn active_duty_validators(&self) -> Vec<Address> {
-        let mut set = std::collections::BTreeSet::new();
-        for (addr, v) in &self.state.validators {
-            if v.active && !v.slashed && !v.jailed {
-                set.insert(*addr);
-            }
-        }
-        for rec in self.state.validator_directory.iter() {
-            set.insert(rec.owner);
-        }
-        set.into_iter().collect()
+    /// The signers every admission door hands the pool's duty lane. One
+    /// authority, [`AccountState::duty_lane_signers`], so no door can install
+    /// a wider set than another.
+    fn active_duty_validators(&self) -> std::collections::BTreeSet<Address> {
+        self.state.duty_lane_signers()
     }
 
     pub fn add_transaction(&mut self, transaction: Transaction) -> Result<(), String> {

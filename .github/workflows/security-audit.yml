@@ -24,7 +24,7 @@ name: Security Audit
 
 on:
   pull_request:
-    branches: [main, consensus-of-consensuses, testnet-quantum, testnet]
+    branches: [main, consensus-of-consensuses, testnet-quantum, testnet, garden]
   push:
     branches: [main]
   schedule:

@@ -104,7 +104,13 @@ fn apply(
     tx: StorageTxV3,
     epoch: u64,
 ) -> Result<Applied, RegistryError> {
-    apply_with_validators(registry, signer, tx, epoch, &validator_keys())
+    apply_with_validators(
+        registry,
+        signer,
+        tx,
+        (crate::core::transaction::DEFAULT_CHAIN_ID, epoch),
+        &validator_keys(),
+    )
 }
 
 /// Three distinct placement-group ML-DSA-65 attestations over `(old, new_record)`.

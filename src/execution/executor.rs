@@ -4129,7 +4129,7 @@ impl Executor {
                     &mut state.bud3_registry,
                     *tx.from.as_bytes(),
                     storage_tx.as_ref().clone(),
-                    epoch,
+                    (tx.chain_id, epoch),
                     &validator_keys,
                 )
                 .map_err(|e| BudlumError::validation("storage_v3_refused", format!("{e:?}")))?;

@@ -1831,6 +1831,46 @@ impl AccountState {
         Ok(withdrawn)
     }
 
+    /// The accounts whose duty batches the pool's free lane admits.
+    ///
+    /// The lane is free because a validator's bond stands behind it, so the
+    /// set is the validators that still have one and may still do duty:
+    ///
+    /// - a consensus validator that is active, unslashed and unjailed;
+    /// - a directory record of a seat class (Full) on that same test of its
+    ///   consensus entry, and out when it has none;
+    /// - a directory record of a class without a seat (a phone) while its own
+    ///   bond is above zero and its owner is neither slashed nor jailed.
+    ///
+    /// A record stays in the directory after a penalty, for resume and
+    /// unbonding. Listing every record owner therefore kept a slashed, jailed
+    /// or unbonded owner in the free lane.
+    #[must_use]
+    pub fn duty_lane_signers(&self) -> std::collections::BTreeSet<Address> {
+        let mut signers = std::collections::BTreeSet::new();
+        for (address, validator) in &self.validators {
+            if validator.active && !validator.slashed && !validator.jailed {
+                signers.insert(*address);
+            }
+        }
+        for record in self.validator_directory.iter() {
+            let consensus = self.validators.get(&record.owner);
+            if consensus.is_some_and(|validator| validator.slashed || validator.jailed) {
+                signers.remove(&record.owner);
+                continue;
+            }
+            let admitted = if record.class.holds_seat() {
+                consensus.is_some_and(|validator| validator.active)
+            } else {
+                record.stake > 0
+            };
+            if admitted {
+                signers.insert(record.owner);
+            }
+        }
+        signers
+    }
+
     /// Run one epoch's liveness check on the state-level
     /// `LivenessTracker`. Returns the validators newly **suspended** this
     /// Epoch (V-4: absence suspends, it never slashes). `participated` is

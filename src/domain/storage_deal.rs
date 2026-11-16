@@ -4490,6 +4490,69 @@ impl StorageRegistry {
         Ok(result)
     }
 
+    /// Resolve the remaining open sibling challenges of one deal that has
+    /// already moved to `DealStatus::Slashed`, without slashing the operator
+    /// again. Returns the `(opener, opener_bond)` pairs to refund.
+    pub fn close_superseded_challenges_for_slashed_deal(
+        &mut self,
+        deal_id: u64,
+        finalized_epoch: u64,
+    ) -> Vec<(Address, u64)> {
+        self.close_superseded_challenges_for_slashed_deals(
+            &std::collections::BTreeSet::from([deal_id]),
+            finalized_epoch,
+        )
+        .1
+    }
+
+    /// Resolve the remaining open sibling challenges of every deal in
+    /// `deal_ids` that is `DealStatus::Slashed`, in one walk of the challenge
+    /// registry. A deal in the set that is not slashed is left alone. Returns
+    /// the number of challenges closed and the `(opener, opener_bond)` pairs to
+    /// refund.
+    pub fn close_superseded_challenges_for_slashed_deals(
+        &mut self,
+        deal_ids: &std::collections::BTreeSet<u64>,
+        finalized_epoch: u64,
+    ) -> (u32, Vec<(Address, u64)>) {
+        let slashed: std::collections::BTreeSet<u64> = deal_ids
+            .iter()
+            .copied()
+            .filter(|deal_id| {
+                self.deals
+                    .get(deal_id)
+                    .is_some_and(|deal| deal.status == DealStatus::Slashed)
+            })
+            .collect();
+        if slashed.is_empty() {
+            return (0, Vec::new());
+        }
+        let open_siblings: Vec<(u64, u64, Address, u64)> = self
+            .challenges
+            .values()
+            .filter(|c| slashed.contains(&c.deal_id) && !self.results.contains_key(&c.challenge_id))
+            .map(|c| (c.challenge_id, c.deal_id, c.opener, c.opener_bond))
+            .collect();
+        let closed = u32::try_from(open_siblings.len()).unwrap_or(u32::MAX);
+        let mut refunds = Vec::new();
+        for (sibling_id, deal_id, opener, bond) in open_siblings {
+            self.results.insert(
+                sibling_id,
+                ChallengeResult {
+                    challenge_id: sibling_id,
+                    deal_id,
+                    outcome: ChallengeOutcome::Missed,
+                    finalized_epoch,
+                    slashed_bond: 0,
+                },
+            );
+            if bond > 0 && opener != Address::zero() {
+                refunds.push((opener, bond));
+            }
+        }
+        (closed, refunds)
+    }
+
     /// Performs the requested operation.
     ///
     /// # Errors

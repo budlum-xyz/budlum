@@ -137,7 +137,7 @@ allow-git = []
 # as an artifact. The job came back green and not a single advisory name appeared
 # in the log.
 #
-# Somut bedeli: RUSTSEC-2024-0380 (`pqcrypto-dilithium` - `pqcrypto-mldsa`
+# Concrete cost: RUSTSEC-2024-0380 (`pqcrypto-dilithium` - `pqcrypto-mldsa`
 # was superseded by) sits on the mainnet default PQ signature path. The decision
 # was made and is recorded with its reason in `osv-scanner.toml`; even so
 # it never appeared on the cargo audit side in any run. Of the two tools scanning the
