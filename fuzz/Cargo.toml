@@ -207,3 +207,17 @@ path = "fuzz_targets/bud3_qr_frame_decode.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "agg_claim_frame_decode"
+path = "fuzz_targets/agg_claim_frame_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "agg_envelope_decode"
+path = "fuzz_targets/agg_envelope_decode.rs"
+test = false
+doc = false
+bench = false

@@ -64,6 +64,11 @@ jobs:
           # one a camera feeds: a declared drop length, a digest and a nested
           # decoder, all over untrusted bytes.
           - bud3_qr_frame_decode
+          # The aggregation layer: a claim frame arrives from any peer and in
+          # every block body, an envelope from any peer. Both parsers read
+          # lengths from a header before anything else.
+          - agg_claim_frame_decode
+          - agg_envelope_decode
           # The header segment check decides which headers a finality
           # certificate may name, and a peer supplies the segment.
           - light_client_header_chain
