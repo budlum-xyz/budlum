@@ -1,4 +1,4 @@
-//! Keccak-f[1600] and the sponge, as `BudISA` code.
+//! `Keccak-f[1600]` and the sponge, as `BudISA` code.
 //!
 //! The machine has field arithmetic and a bitwise AND, no XOR, no shift and
 //! no rotation. A lane of the state is kept as two 32 bit limbs, low limb
@@ -11,7 +11,7 @@
 //!   division by a power of two, and joins the pieces again.
 //!
 //! Byte strings live in memory one byte per cell. [`Keccak::absorb`] packs
-//! four of them into a limb and [`emit_squeeze`] splits a limb back into
+//! four of them into a limb and [`Keccak::emit_squeeze`] splits a limb back into
 //! four bytes, so every value the sponge hands out is a byte by
 //! construction.
 //!
@@ -20,7 +20,7 @@
 
 use super::asm::{Asm, Label, Reg, R, ZERO};
 
-/// The round constants of Keccak-f[1600] (FIPS 202, section 3.2.5).
+/// The round constants of `Keccak-f[1600]` (FIPS 202, section 3.2.5).
 const ROUND_CONSTANTS: [u64; 24] = [
     0x0000_0000_0000_0001,
     0x0000_0000_0000_8082,
@@ -165,7 +165,7 @@ impl Keccak {
         }
     }
 
-    /// Call Keccak-f[1600] on the state.
+    /// Call `Keccak-f[1600]` on the state.
     pub fn permute(&self, asm: &mut Asm) {
         asm.call(self.permute);
     }
@@ -196,7 +196,7 @@ impl Keccak {
     /// Hash the `len` byte cells at `message`: pad them in place (the
     /// cells after the message, up to the end of its last block, are
     /// overwritten), clear the state and absorb every block. The output is
-    /// then read with [`emit_squeeze`]. Returns the padded length.
+    /// then read with [`Self::emit_squeeze`]. Returns the padded length.
     pub fn emit_hash(
         &self,
         asm: &mut Asm,
