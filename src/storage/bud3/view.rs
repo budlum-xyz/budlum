@@ -28,6 +28,13 @@ use std::collections::BTreeMap;
 /// (`0.0001 BUD` = `100` base units at `10^6` scale, Section 6.5 G8).
 pub const MIN_PAID_VIEW_FEE_ATOMS: u64 = 100;
 
+/// Epochs a paid view receipt stays in consensus state after payment.
+///
+/// A receipt authorizes one decode; one that was never presented inside this
+/// window is dropped by `Bud3Registry::expire` instead of being folded into the
+/// state root, kept in the snapshot and hashed again on every block forever.
+pub const PAID_VIEW_RETENTION_EPOCHS: u64 = 30 * super::fees::DEFAULT_EPOCHS_PER_DAY;
+
 /// Maximum concurrent reveal sessions held in memory on one node.
 pub const MAX_REVEAL_SESSIONS: usize = 128;
 

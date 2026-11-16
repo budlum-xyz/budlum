@@ -344,7 +344,7 @@ mod tests {
             20,
         )
         .unwrap();
-        bud3.bind_nft(nft_id, alice.0, &key).unwrap();
+        bud3.bind_nft(nft_id, alice.0, Some(alice.0), &key).unwrap();
 
         let cref = ContentRef::new(cid, key, Some(nft_id)).unwrap();
         Bud3BnsResolver::set_bud3_content(&mut bns, &bud3, ("portal.bud", &alice), Some(cref), 2)

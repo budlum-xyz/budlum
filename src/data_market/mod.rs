@@ -376,7 +376,8 @@ mod tests {
         )
         .expect("register");
         let nft_id = [0x99u8; 32];
-        bud3.bind_nft(nft_id, seller.0, &obj_key).expect("bind nft");
+        bud3.bind_nft(nft_id, seller.0, Some(seller.0), &obj_key)
+            .expect("bind nft");
 
         let mut market = DataMarketRegistry::new();
         assert_eq!(
@@ -419,7 +420,7 @@ mod tests {
         // burned, even while the object survives under a different NFT.
         let mut stale_bud3 = bud3.clone();
         stale_bud3
-            .bind_nft([0x98; 32], seller.0, &obj_key)
+            .bind_nft([0x98; 32], seller.0, Some(seller.0), &obj_key)
             .expect("keep object alive under another NFT");
         assert!(!stale_bud3
             .burn_reference(&nft_id, &seller.0, 2)
