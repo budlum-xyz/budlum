@@ -435,6 +435,22 @@ enum DomainAction {
         #[arg(long, default_value_t = 6)]
         min_confirmations: u64,
     },
+    /// Register a BFT domain (quorum-commit finality) with the wallet as
+    /// its operator. Unlike PoW, a BFT domain can serve as an AppBinding
+    /// origin: the permissionless-PoW anchor gate does not apply to it.
+    RegisterBft {
+        #[command(flatten)]
+        signer: V5Signer,
+        /// The domain id to claim (not a canonical external-chain id 1..=7).
+        #[arg(long, required = true)]
+        id: u32,
+        /// The domain's own chain id.
+        #[arg(long, required = true)]
+        chain_id: u64,
+        /// Confirmations the quorum must carry.
+        #[arg(long, default_value_t = 1)]
+        min_confirmations: u64,
+    },
     /// Run an adapter's admission self-test offline: the golden sample must
     /// verify and every fault probe must be refused. Exits non-zero when
     /// the adapter would not be admitted.
@@ -2066,6 +2082,30 @@ fn run_domain_register_pow(
         budlum_core::domain::ConsensusKind::PoW,
         chain_id,
         budlum_core::domain::POW_HEADER_CHAIN_ADAPTER,
+        min_confirmations,
+    );
+    domain.operator = Some(key.address());
+    let tx_type = TransactionType::Settlement(
+        budlum_core::settlement::domains::SettlementTx::RegisterDomain(Box::new(domain)),
+    );
+    send_v5(rpc_url, &key, v5_template(tx_type, 0, signer.fee), None)
+}
+
+/// `bud domain register-bft`: a BFT domain with the quorum-commit adapter,
+/// the wallet as operator.
+fn run_domain_register_bft(
+    rpc_url: &str,
+    signer: &V5Signer,
+    id: u32,
+    chain_id: u64,
+    min_confirmations: u64,
+) -> Result<(), String> {
+    let key = open_wallet(signer)?;
+    let mut domain = budlum_core::domain::plugin::default_domain(
+        id,
+        budlum_core::domain::ConsensusKind::Bft,
+        chain_id,
+        "bft-quorum-commit",
         min_confirmations,
     );
     domain.operator = Some(key.address());
@@ -3993,6 +4033,12 @@ fn main() {
                 chain_id,
                 min_confirmations,
             } => run_domain_register_pow(&cli.rpc_url, signer, *id, *chain_id, *min_confirmations),
+            DomainAction::RegisterBft {
+                signer,
+                id,
+                chain_id,
+                min_confirmations,
+            } => run_domain_register_bft(&cli.rpc_url, signer, *id, *chain_id, *min_confirmations),
             DomainAction::Selftest {
                 adapter,
                 network,
