@@ -74,8 +74,15 @@ const TRANSFER_JUSTIFICATIONS: &[(&str, usize, &str)] = &[
     ),
     (
         "src/execution/executor.rs",
-        4,
-        "one in `pay_agreeing_verifiers` (the requester's escrowed AI request \
+        6,
+        "two in `pay_claim_fees`: the aggregator share and the producer share \
+         of the claim fees of a block. `ClaimSettlement` charges each claim \
+         fee to the transaction that pays for the claim, and \
+         `finalize_block_with_claims` takes exactly that amount out of the \
+         fee the sender already paid before the burn and the fee split see \
+         it, so the two credits equal what was withheld and create no \
+         supply; a sender who cannot cover its claims is not executed and \
+         is charged nothing. One in `pay_agreeing_verifiers` (the requester's escrowed AI request \
          fee `max_fee`, already debited when the request opened, split across \
          the agreeing verifiers without creating supply), one bridge unlock \
          inside a RelayerResult (the owner's burned share is returned; the \
