@@ -11,8 +11,12 @@
 use super::hash::{h, TAG_CLAIM_ROOT};
 use crate::domain::types::Hash32;
 
-const LEAF: [u8; 1] = [0x00];
-const NODE: [u8; 1] = [0x01];
+/// The byte a leaf preimage carries after the tag.
+pub(super) const LEAF_PREFIX: u8 = 0x00;
+/// The byte an inner node preimage carries after the tag.
+pub(super) const NODE_PREFIX: u8 = 0x01;
+const LEAF: [u8; 1] = [LEAF_PREFIX];
+const NODE: [u8; 1] = [NODE_PREFIX];
 
 /// Why a root could not be computed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
