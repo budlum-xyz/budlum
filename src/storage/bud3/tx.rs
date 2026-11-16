@@ -179,31 +179,36 @@ pub fn apply(
     tx: StorageTxV3,
     epoch: u64,
 ) -> Result<Applied, RegistryError> {
-    apply_with_validators(
+    apply_with_validators_and_nft_owner(
         registry,
         signer,
         tx,
         (crate::core::transaction::DEFAULT_CHAIN_ID, epoch),
         &std::collections::BTreeMap::new(),
+        None,
     )
 }
 
 /// Apply one transaction signed by `signer` at `epoch` on `chain_id`,
-/// supplying the active consensus ML-DSA-65 validator key directory.
+/// supplying the active consensus ML-DSA-65 validator key directory and, for
+/// `BindNft`, the chain-verified owner of the referenced NFT id.
 ///
 /// `RecordRepair` and `ReplaceObject` attestations are verified against the
 /// digest for `chain_id`: a quorum signed for one network is refused on any
-/// other network that shares the same validators and object keys.
+/// other network that shares the same validators and object keys. Callers
+/// without access to `AccountState::nft_registry` pass `None`, so `BindNft`
+/// fails closed instead of recording an unverified caller-chosen id.
 ///
 /// # Errors
 ///
 /// The [`RegistryError`] of the refused step; the registry is unchanged.
-pub fn apply_with_validators(
+pub(crate) fn apply_with_validators_and_nft_owner(
     registry: &mut Bud3Registry,
     signer: Address,
     tx: StorageTxV3,
     (chain_id, epoch): (u64, u64),
     validator_keys: &std::collections::BTreeMap<Address, Vec<u8>>,
+    verified_nft_owner: Option<Address>,
 ) -> Result<Applied, RegistryError> {
     match tx {
         StorageTxV3::RegisterObject {
@@ -249,7 +254,7 @@ pub fn apply_with_validators(
                 .map(|()| Applied::Repaired)
         }
         StorageTxV3::BindNft { nft, object } => registry
-            .bind_nft(nft, signer, &object)
+            .bind_nft(nft, signer, verified_nft_owner, &object)
             .map(|()| Applied::Bound),
         StorageTxV3::BurnReference { nft } => registry
             .burn_reference(&nft, &signer, epoch)
@@ -368,6 +373,8 @@ mod tests {
             apply(&mut r, [11; 32], StorageTxV3::CustodyAck { object: key }, 1),
             Ok(Applied::Acked(1))
         );
+        let empty_keys = std::collections::BTreeMap::new();
+        // Direct `apply` carries no verified NFT owner and must fail closed.
         assert_eq!(
             apply(
                 &mut r,
@@ -377,6 +384,20 @@ mod tests {
                     object: key
                 },
                 1
+            ),
+            Err(RegistryError::NotAuthorized)
+        );
+        assert_eq!(
+            apply_with_validators_and_nft_owner(
+                &mut r,
+                [2; 32],
+                StorageTxV3::BindNft {
+                    nft: [7; 32],
+                    object: key
+                },
+                (crate::core::transaction::DEFAULT_CHAIN_ID, 1),
+                &empty_keys,
+                Some([2; 32]),
             ),
             Ok(Applied::Bound)
         );
@@ -414,14 +435,16 @@ mod tests {
         );
         assert_eq!(r.state_root(), before, "a refusal writes nothing");
         assert_eq!(
-            apply(
+            apply_with_validators_and_nft_owner(
                 &mut r,
                 [1; 32],
                 StorageTxV3::BindNft {
                     nft: [8; 32],
                     object: key
                 },
-                3
+                (crate::core::transaction::DEFAULT_CHAIN_ID, 3),
+                &empty_keys,
+                Some([1; 32]),
             ),
             Ok(Applied::Bound)
         );
@@ -577,5 +600,83 @@ mod tests {
         // boundary explicitly: an ACK alone is not a completed repair.
         assert_eq!(r.settle_repairs(), 1);
         assert!(r.repairs_due(&key).is_empty());
+    }
+
+    #[test]
+    fn bind_nft_requires_live_socialfi_nft_ownership() {
+        let mut nfts = crate::socialfi::NftRegistry::new();
+        let alice = crate::core::address::Address([0x11; 32]);
+        let bob = crate::core::address::Address([0x22; 32]);
+        let minted_id = nfts
+            .mint(
+                alice,
+                crate::storage::content_id::ContentId([0xAA; 32]),
+                1,
+                None,
+            )
+            .unwrap();
+        let derived = crate::socialfi::derive_bud3_nft_id(minted_id);
+        let unminted = crate::socialfi::derive_bud3_nft_id(999);
+
+        assert!(nfts.signer_owns_bud3_nft_id(&alice, &derived));
+        assert!(!nfts.signer_owns_bud3_nft_id(&bob, &derived));
+        assert!(!nfts.signer_owns_bud3_nft_id(&alice, &unminted));
+
+        let mut r = Bud3Registry::default();
+        let (tx, key) = register_tx();
+        apply(&mut r, alice.0, tx, 0).unwrap();
+
+        let keys = std::collections::BTreeMap::new();
+        let bob_owner = nfts
+            .signer_owns_bud3_nft_id(&bob, &derived)
+            .then_some(bob.0);
+        assert_eq!(
+            apply_with_validators_and_nft_owner(
+                &mut r,
+                bob.0,
+                StorageTxV3::BindNft {
+                    nft: derived,
+                    object: key,
+                },
+                (crate::core::transaction::DEFAULT_CHAIN_ID, 1),
+                &keys,
+                bob_owner,
+            ),
+            Err(RegistryError::NotAuthorized)
+        );
+        let unminted_owner = nfts
+            .signer_owns_bud3_nft_id(&alice, &unminted)
+            .then_some(alice.0);
+        assert_eq!(
+            apply_with_validators_and_nft_owner(
+                &mut r,
+                alice.0,
+                StorageTxV3::BindNft {
+                    nft: unminted,
+                    object: key,
+                },
+                (crate::core::transaction::DEFAULT_CHAIN_ID, 1),
+                &keys,
+                unminted_owner,
+            ),
+            Err(RegistryError::NotAuthorized)
+        );
+        let alice_owner = nfts
+            .signer_owns_bud3_nft_id(&alice, &derived)
+            .then_some(alice.0);
+        assert_eq!(
+            apply_with_validators_and_nft_owner(
+                &mut r,
+                alice.0,
+                StorageTxV3::BindNft {
+                    nft: derived,
+                    object: key,
+                },
+                (crate::core::transaction::DEFAULT_CHAIN_ID, 1),
+                &keys,
+                alice_owner,
+            ),
+            Ok(Applied::Bound)
+        );
     }
 }

@@ -174,6 +174,7 @@ mod tests {
             shards_root: None,
             witness_root: None,
             seat_participation: None,
+            frame_hash: None,
         };
         let enc = encode_block_header(&header);
         assert!(!enc.is_empty());

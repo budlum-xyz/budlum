@@ -700,8 +700,24 @@ impl MigrationPlan {
     }
 }
 
+/// Returns `true` when the derived native account has recorded active chain
+/// ownership (a non-zero nonce or a validator registration). Passive native
+/// dust transfers from third parties do not occupy a migration target.
+pub(crate) fn is_native_contract_account_occupied(
+    account_state: &AccountState,
+    bud_addr: &Address,
+) -> bool {
+    account_state.get_nonce(bud_addr) > 0
+        || account_state.validators.contains_key(bud_addr)
+        || account_state.validator_directory.get(bud_addr).is_some()
+}
+
 /// Returns `true` when `addr20` is occupied in UEL EVM state, collides with a native alias
-/// or precompile, or already carries native balance (`8.12.2 item 6`).
+/// or precompile, or its derived native account has active chain state (`8.12.2 item 6`).
+///
+/// Unsolicited native dust balance parked on the derived contract account does
+/// not count as occupancy, so a third party cannot permanently grief a contract's
+/// migration by sending 1 attoBUD to its deterministic address beforehand.
 ///
 /// # Errors
 ///
@@ -725,7 +741,7 @@ pub fn is_evm_address_occupied(
         return Ok(true);
     }
     let bud_addr = derive_contract_account(EeId::EVM, addr20);
-    if account_state.get_attos_balance(&bud_addr) > 0 {
+    if is_native_contract_account_occupied(account_state, &bud_addr) {
         return Ok(true);
     }
     Ok(false)
@@ -1575,7 +1591,7 @@ mod tests {
         let mut state = AccountState::new();
         let mut coord = ExecutionCoordinator::new();
         let migrator = Address::from([0x81u8; 32]);
-        let caller = Address::from([0x82u8; 32]);
+        let (caller_seed, caller) = crate::execution::coordinator::test_uel_signer(0x82);
         let proposer = Address::from([0x83u8; 32]);
         state.credit_account(&migrator, 100);
         state.credit_account(&caller, 100);
@@ -1668,7 +1684,9 @@ mod tests {
                     gas_limit_bgu: 200_000,
                     max_fee_per_bgu_attos: MIN_UEL_BASE_FEE_ATTOS * 2,
                     max_priority_fee_per_bgu_attos: 0,
-                }],
+                    auth: crate::execution::coordinator::UelTxAuth::default(),
+                }
+                .signed(CHAIN_ID, &caller_seed)],
             )
             .expect("execute migrated contract in EvmEe");
         assert_eq!(recs[0].status, UelReceiptStatus::Success);
@@ -1792,5 +1810,76 @@ mod tests {
             .prune_expired_pending_evm_migrations(state.epoch_index);
         assert_eq!(pruned, 1);
         assert!(state.execution_state.pending_evm_migrations.is_empty());
+    }
+
+    #[test]
+    fn dust_native_balance_does_not_block_migration_while_real_occupancy_does() {
+        let mut state = AccountState::new();
+        let mut coord = ExecutionCoordinator::new();
+        let migrator = Address::from([0x85u8; 32]);
+        state.credit_account(&migrator, 100);
+
+        let slot0 = [0u8; 32];
+        let code = sample_code();
+        let (req, _) = request_with_code(code, slot0, 0xCAFE);
+        let contract = req.authorization.contract;
+        let derived_evm_bud =
+            crate::execution::coordinator::alias::derive_contract_account(EeId::EVM, &contract);
+
+        // Unsolicited dust on the derived Budlum address must NOT count as native occupancy.
+        state.credit_account(&derived_evm_bud, 1);
+        assert!(state.get_attos_balance(&derived_evm_bud) > 0);
+        assert!(
+            !is_native_contract_account_occupied(&state, &derived_evm_bud),
+            "unsolicited dust balance alone must not mark a derived contract address occupied"
+        );
+
+        anchor_source_root(
+            &mut state,
+            SOURCE_DOMAIN_ID,
+            SOURCE_CHAIN_ID,
+            req.state_root,
+        );
+        coord
+            .apply_evm_migration(
+                &mut state,
+                &migrator,
+                MigrationTx::BeginEvmImport(Box::new(req.clone())),
+                &MigrationFeeSchedule::TESTNET_DEFAULT,
+                CHAIN_ID,
+            )
+            .expect("dust balance must not grief EVM BeginEvmImport");
+
+        // Now verify real native occupancy (nonce > 0) DOES block migration on a fresh state.
+        let mut occupied_state = AccountState::new();
+        occupied_state.credit_account(&migrator, 100);
+        occupied_state.accounts.insert(
+            derived_evm_bud,
+            crate::core::account::Account {
+                public_key: derived_evm_bud,
+                balance: 0,
+                nonce: 1,
+                frac_attos: 0,
+            },
+        );
+        assert!(is_native_contract_account_occupied(
+            &occupied_state,
+            &derived_evm_bud
+        ));
+        anchor_source_root(
+            &mut occupied_state,
+            SOURCE_DOMAIN_ID,
+            SOURCE_CHAIN_ID,
+            req.state_root,
+        );
+        let err = apply_migration_tx(
+            &mut occupied_state,
+            &migrator,
+            MigrationTx::BeginEvmImport(Box::new(req)),
+            &MigrationFeeSchedule::TESTNET_DEFAULT,
+            CHAIN_ID,
+        )
+        .expect_err("account with nonzero nonce must still refuse migration");
+        assert_eq!(err, ImportError::AddressOccupied);
     }
 }

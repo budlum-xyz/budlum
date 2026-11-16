@@ -691,6 +691,16 @@ pub(crate) fn enforce_classical_message_intake(
     Ok(())
 }
 
+/// Who vouches for the sender of a transaction that is being validated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TxAuthority {
+    /// The transaction carries its own witness; it is verified here.
+    Inline,
+    /// The claim that stands for the witness was checked by the caller: the
+    /// claim frame of the block, or the object behind the claim.
+    ClaimChecked,
+}
+
 impl AccountState {
     pub fn new() -> Self {
         AccountState {
@@ -1232,6 +1242,16 @@ impl AccountState {
         // refused redelegation leaves no half-moved position behind.
         self.registry
             .move_delegation(*delegator, *from, *to, amount)?;
+        // Trim the source validator's snapshotted governance vote weight on open
+        // proposals down to its remaining aggregate stake, so redelegated stake
+        // cannot stay counted on the source validator while also leaving it.
+        for proposal in &mut self.governance.proposals {
+            if proposal.status == crate::core::governance::ProposalStatus::Active {
+                let snapshot = proposal.vote_weight_of(from);
+                proposal
+                    .reduce_vote_weight(from, snapshot.saturating_sub(snapshot.min(source_stake)));
+            }
+        }
         if let Some(entry) = self.validators.get_mut(from) {
             entry.stake = source_stake;
         }
@@ -1289,12 +1309,18 @@ impl AccountState {
             amount,
             self.epoch_index,
         )?;
-        // Trim snapshotted governance vote weight on open proposals just like
-        // self-unstake does, so withdrawing delegated stake cannot leave a
-        // validator voting with exited stake.
+        // Trim snapshotted governance vote weight on open proposals down to the
+        // stake the validator still holds. Delegated stake can arrive after the
+        // vote snapshot and exit again; clamping to `snapshot.min(new_stake)`
+        // ensures a post-vote delegation exit cannot erase vote weight it was
+        // never part of, while pre-vote exits still trim the shortfall.
         for proposal in &mut self.governance.proposals {
             if proposal.status == crate::core::governance::ProposalStatus::Active {
-                proposal.reduce_vote_weight(validator, amount);
+                let snapshot = proposal.vote_weight_of(validator);
+                proposal.reduce_vote_weight(
+                    validator,
+                    snapshot.saturating_sub(snapshot.min(new_stake)),
+                );
             }
         }
         if let Some(entry) = self.validators.get_mut(validator) {
@@ -1855,9 +1881,15 @@ impl AccountState {
     /// or unbonded owner in the free lane.
     #[must_use]
     pub fn duty_lane_signers(&self) -> std::collections::BTreeSet<Address> {
+        let floor = self.registry.params().min_stake;
+        let mobile_floor = (floor / 100).max(1);
         let mut signers = std::collections::BTreeSet::new();
         for (address, validator) in &self.validators {
-            if validator.active && !validator.slashed && !validator.jailed {
+            if validator.active
+                && !validator.slashed
+                && !validator.jailed
+                && validator.stake >= floor
+            {
                 signers.insert(*address);
             }
         }
@@ -1868,9 +1900,9 @@ impl AccountState {
                 continue;
             }
             let admitted = if record.class.holds_seat() {
-                consensus.is_some_and(|validator| validator.active)
+                consensus.is_some_and(|validator| validator.active && validator.stake >= floor)
             } else {
-                record.stake > 0
+                record.stake >= mobile_floor
             };
             if admitted {
                 signers.insert(record.owner);
@@ -2067,6 +2099,7 @@ impl AccountState {
             tx,
             self.get_nonce(&tx.from),
             self.spendable_balance(&tx.from),
+            TxAuthority::Inline,
         )
     }
 
@@ -2147,15 +2180,36 @@ impl AccountState {
         }
     }
 
+    /// Validate a claimed transaction of a block whose claim frame was
+    /// checked: the frame proves that the signature behind the claim was
+    /// verified, so the transaction carries none. Everything else (nonce,
+    /// balance, fee, type) is checked exactly as for any transaction.
+    ///
+    /// Only a caller that holds that proof may use this: block validation
+    /// after `aggregation::chain::check_block` accepted the block, or the
+    /// object pool after it verified the object of the transaction.
+    pub fn validate_claimed_transaction(&self, tx: &Transaction) -> Result<(), String> {
+        self.validate_transaction_with_context(
+            tx,
+            self.get_nonce(&tx.from),
+            self.spendable_balance(&tx.from),
+            TxAuthority::ClaimChecked,
+        )
+    }
+
     /// Validate a transaction against the account state: nonce, spendable
     /// balance, fee and type. A zero-address sender is only admissible as the
     /// canonical genesis transaction (security audit, HIGH, CWE-306);
     /// any other zero-address transaction fails here.
+    ///
+    /// `authority` says who vouches for the sender: the witness the
+    /// transaction carries, or a claim frame the caller already checked.
     pub fn validate_transaction_with_context(
         &self,
         tx: &Transaction,
         expected_nonce: u64,
         spendable_balance: u64,
+        authority: TxAuthority,
     ) -> Result<(), String> {
         if tx.from == Address::zero() {
             if tx.verify_in(&self.scheme_registry) {
@@ -2236,8 +2290,20 @@ impl AccountState {
                 spendable_balance, total_cost, tx.amount, tx.fee
             ));
         }
-        if !tx.verify_in(&self.scheme_registry) {
-            return Err("Invalid signature".into());
+        // A claimed transaction has no signature to verify here; its caller
+        // checked the frame that stands for it. Every other transaction
+        // carries its own authority.
+        match authority {
+            TxAuthority::ClaimChecked => {
+                if !tx.claimed_shape_is_canonical() {
+                    return Err("claimed transaction carries a witness or a wrong id".into());
+                }
+            }
+            TxAuthority::Inline => {
+                if !tx.verify_in(&self.scheme_registry) {
+                    return Err("Invalid signature".into());
+                }
+            }
         }
         self.check_validator_v7_binding(tx)?;
 
@@ -3583,6 +3649,7 @@ impl AccountState {
         }
         registry.expire(epoch);
         registry.close_windows(epoch);
+        registry.retire_unacknowledged_repairs(epoch);
         registry.settle_repairs();
         let seed = crate::core::hash::hash_fields_bytes(&[
             b"BDLM_BUD3_AUDIT_SEED_V1",
@@ -3686,11 +3753,13 @@ impl AccountState {
         }
 
         // ResumeValidator requests whose epoch has come lift the suspension
-        // (section 7.8.7); the validator re-enters the active set. Absence
-        // itself never slashed (V-4).
+        // (section 7.8.7); the validator re-enters the active set only if its
+        // stake still satisfies the minimum bond floor. Absence itself never
+        // slashed (V-4).
+        let min_stake = self.registry.params().min_stake;
         for resumed in self.liveness.activate_due_resumes(self.epoch_index) {
             if let Some(v) = self.validators.get_mut(&resumed) {
-                if !v.slashed && !v.jailed {
+                if !v.slashed && !v.jailed && v.stake >= min_stake {
                     v.active = true;
                 }
             }
@@ -5721,7 +5790,7 @@ mod tests {
         // transaction must be rejected rather than bypassed.
         let tx = Transaction::new(Address::zero(), Address::zero(), 0, Vec::new());
         let err = state
-            .validate_transaction_with_context(&tx, 0, 0)
+            .validate_transaction_with_context(&tx, 0, 0, TxAuthority::Inline)
             .unwrap_err();
         assert!(
             err.contains("zero-address sender is only valid for the canonical genesis transaction"),
@@ -7978,6 +8047,85 @@ mod validator_v7_binding_tests {
             "delegation exit must trim the validator's snapshotted governance vote weight"
         );
         assert_eq!(p.votes_for, 1_000);
+    }
+
+    #[test]
+    fn post_vote_delegation_unbonding_preserves_snapshotted_vote_weight() {
+        use crate::core::governance::{Proposal, ProposalType};
+        let mut state = AccountState::new();
+        let validator = Address::from([0xC3; 32]);
+        let late_delegator = Address::from([0xC4; 32]);
+        state.add_validator(validator, 1_000);
+        state.add_balance(&late_delegator, 5_000);
+
+        let mut proposal = Proposal::new(2, validator, ProposalType::ChangeBaseFee(25), 0, 10);
+        proposal.add_vote(validator, 1_000, true, 0).unwrap();
+        state.governance.proposals.push(proposal);
+
+        // Delegation arrives after the vote snapshot and immediately unbonds.
+        state
+            .delegate_to_validator(&late_delegator, &validator, 3_000)
+            .expect("late delegate");
+        assert_eq!(state.get_validator(&validator).unwrap().stake, 4_000);
+        state
+            .begin_delegation_unbonding(&late_delegator, &validator, 3_000)
+            .expect("late unbond");
+
+        let p = state.governance.proposals.first().unwrap();
+        assert_eq!(
+            p.vote_weight_of(&validator),
+            1_000,
+            "post-vote delegation exit must not erase snapshotted vote weight"
+        );
+        assert_eq!(p.votes_for, 1_000);
+    }
+
+    #[test]
+    fn redelegation_trims_source_validator_governance_vote_weight_without_erasing_post_vote_stake()
+    {
+        use crate::core::governance::{Proposal, ProposalType};
+        let mut state = AccountState::new();
+        let src = Address::from([0xC5; 32]);
+        let dst = Address::from([0xC6; 32]);
+        let pre_del = Address::from([0xC7; 32]);
+        let post_del = Address::from([0xC8; 32]);
+        state.add_validator(src, 1_000);
+        state.add_validator(dst, 1_000);
+        state.add_balance(&pre_del, 5_000);
+        state.add_balance(&post_del, 5_000);
+
+        state
+            .delegate_to_validator(&pre_del, &src, 2_000)
+            .expect("pre-vote delegate");
+        assert_eq!(state.get_validator(&src).unwrap().stake, 3_000);
+
+        let mut proposal = Proposal::new(3, src, ProposalType::ChangeBaseFee(30), 0, 10);
+        proposal.add_vote(src, 3_000, true, 0).unwrap();
+        state.governance.proposals.push(proposal);
+
+        // Post-vote delegation redelegating out leaves the 3_000 snapshot intact.
+        state
+            .delegate_to_validator(&post_del, &src, 4_000)
+            .expect("post-vote delegate");
+        state
+            .redelegate_to_validator(&post_del, &src, &dst, 4_000)
+            .expect("post-vote redelegate");
+        assert_eq!(
+            state.governance.proposals[0].vote_weight_of(&src),
+            3_000,
+            "post-vote redelegation must not erase snapshotted vote weight"
+        );
+
+        // Pre-vote delegation redelegating out trims source vote weight down to remaining 1_000.
+        state
+            .redelegate_to_validator(&pre_del, &src, &dst, 2_000)
+            .expect("pre-vote redelegate");
+        assert_eq!(
+            state.governance.proposals[0].vote_weight_of(&src),
+            1_000,
+            "pre-vote redelegation must trim source validator vote weight to remaining stake"
+        );
+        assert_eq!(state.governance.proposals[0].votes_for, 1_000);
     }
 }
 

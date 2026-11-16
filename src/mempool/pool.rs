@@ -581,28 +581,27 @@ impl Mempool {
                     },
                 ));
             }
-            let sender_cap = self.duty_lane_sender_cap();
-            let sender_bytes = self
-                .duty_lane_bytes_for(&tx.from)
-                .saturating_sub(replaced)
-                .saturating_add(batch.block_bytes);
-            if sender_bytes > sender_cap {
-                return Err(MempoolError::DutyLaneRefused(DutyRefusal::LaneBytesFull {
-                    lane_bytes: sender_bytes,
-                    cap: sender_cap,
-                }));
-            }
             if lane_bytes > cap {
                 // The ceiling is shared, so it must not be whoever came first
-                // that keeps it. A signer that would hold less of the lane
-                // than the heaviest signer does takes the room from that one.
-                let signer_bytes = self
-                    .duty_lane_bytes_of(&tx.from)
+                // that keeps it. A signer that would hold fewer batches and
+                // fewer bytes than a multi-batch hoarder takes an excess batch
+                // from that hoarder without ever deleting another validator's
+                // single live duty batch.
+                let (held_batches, held_bytes) = self.duty_lane_holding_of(&tx.from);
+                let signer_bytes = held_bytes
                     .saturating_sub(replaced)
                     .saturating_add(batch.block_bytes);
-                let Some(victims) =
-                    self.evict_duty_from_heavier_signers(&tx.from, signer_bytes, lane_bytes - cap)
-                else {
+                let newcomer_batches = if replaced > 0 {
+                    held_batches.max(1)
+                } else {
+                    held_batches.saturating_add(1)
+                };
+                let Some(victims) = self.evict_duty_from_heavier_signers(
+                    &tx.from,
+                    signer_bytes,
+                    newcomer_batches,
+                    lane_bytes - cap,
+                ) else {
                     return Err(MempoolError::DutyLaneRefused(DutyRefusal::LaneBytesFull {
                         lane_bytes,
                         cap,
@@ -966,33 +965,34 @@ impl Mempool {
             .sum()
     }
 
-    /// The bytes of the duty lane one signer holds, over the block measure.
-    fn duty_lane_bytes_of(&self, signer: &Address) -> usize {
-        self.by_sender.get(signer).map_or(0, |nonces| {
+    /// The count and bytes of duty-lane batches one signer holds, over the block measure.
+    fn duty_lane_holding_of(&self, signer: &Address) -> (usize, usize) {
+        self.by_sender.get(signer).map_or((0, 0), |nonces| {
             nonces
                 .values()
                 .filter_map(|hash| self.transactions.get(hash))
                 .filter_map(|entry| entry.duty)
-                .map(|batch| batch.block_bytes)
-                .sum()
+                .fold((0usize, 0usize), |(count, bytes), batch| {
+                    (
+                        count.saturating_add(1),
+                        bytes.saturating_add(batch.block_bytes),
+                    )
+                })
         })
     }
 
     /// Free `needed` bytes of a full duty lane for a batch of `signer`, which
-    /// would hold `signer_bytes` of the lane once admitted.
+    /// would hold `newcomer_batches` batches and `signer_bytes` bytes once admitted.
     ///
-    /// The lane's ceiling is one number for every validator, so without this
-    /// it belongs to whoever filled it first: a validator that parks batches
-    /// no block will take (a nonce it has not reached, for example) holds the
-    /// lane until they expire and every other validator's batch is refused.
-    /// The room is therefore taken from the signer holding the most lane
-    /// bytes, for as long as that signer holds strictly more than the incoming
-    /// one would. A signer can only displace one that is heavier than itself,
-    /// so the lane converges on equal shares instead of on arrival order.
+    /// Room may only be reclaimed from another signer that holds BOTH strictly
+    /// more batches (`holding.batches.len() > newcomer_batches`, which also
+    /// guarantees `holding.batches.len() >= 2` so no validator's single live
+    /// duty batch is ever deleted) AND strictly more lane bytes
+    /// (`holding.bytes > signer_bytes`).
     ///
-    /// The choice is deterministic: the heaviest signer, ties on the smallest
-    /// address, and that signer's highest nonce first, because removing the
-    /// last batch of a sender strands nothing queued behind it.
+    /// The choice is deterministic: the heaviest qualifying signer, ties on the
+    /// smallest address, and that signer's highest nonce first, because removing
+    /// the last batch of a sender strands nothing queued behind it.
     ///
     /// Returns `None` without having removed anything when the bytes cannot
     /// be freed under that rule. The removed entries are returned so the
@@ -1001,6 +1001,7 @@ impl Mempool {
         &mut self,
         signer: &Address,
         signer_bytes: usize,
+        newcomer_batches: usize,
         needed: usize,
     ) -> Option<Vec<PendingTx>> {
         /// The lane batches one signer holds: their bytes, and each batch
@@ -1028,15 +1029,17 @@ impl Mempool {
         let mut freed = 0usize;
         while freed < needed {
             // `max_by_key` keeps the last maximum, and the map is in address
-            // order, so the reversed walk leaves the smallest address.
-            let (heaviest, bytes) = held
+            // order, so the reversed walk leaves the smallest address. Only
+            // signers holding strictly more batches (at least 2, never a single
+            // live batch) AND strictly more bytes than the newcomer may yield.
+            let (heaviest, _) = held
                 .iter()
                 .rev()
+                .filter(|(_, holding)| {
+                    holding.batches.len() > newcomer_batches && holding.bytes > signer_bytes
+                })
                 .max_by_key(|(_, holding)| holding.bytes)
                 .map(|(address, holding)| (*address, holding.bytes))?;
-            if bytes <= signer_bytes {
-                return None;
-            }
             let holding = held.get_mut(&heaviest)?;
             let (_, (hash, batch_bytes)) = holding.batches.pop_last()?;
             holding.bytes = holding.bytes.saturating_sub(batch_bytes);
@@ -1053,16 +1056,6 @@ impl Mempool {
         )
     }
 
-    /// The duty-lane bytes currently held by one validator, over the block measure.
-    fn duty_lane_bytes_for(&self, sender: &Address) -> usize {
-        self.transactions
-            .values()
-            .filter(|entry| entry.tx.from == *sender)
-            .filter_map(|entry| entry.duty)
-            .map(|batch| batch.block_bytes)
-            .sum()
-    }
-
     /// The bytes the lane may hold in the pool.
     ///
     /// Derived from the block share rather than configured beside it: the pool
@@ -1072,13 +1065,6 @@ impl Mempool {
         self.config
             .duty_block_bytes
             .saturating_mul(DUTY_LANE_POOL_BLOCKS)
-    }
-
-    /// Maximum duty-lane bytes any single validator may occupy in the pool, so
-    /// one validator cannot fill the shared lane and block every other validator.
-    fn duty_lane_sender_cap(&self) -> usize {
-        let divisor = self.duty_validators.len().clamp(4, 32);
-        self.duty_lane_cap() / divisor
     }
 
     /// Drop the lowest-fee transaction to make room, if the incoming one

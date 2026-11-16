@@ -545,12 +545,12 @@ fn review_2_random_cross_ee_bud_conservation_holds() {
         let mut state = AccountState::new();
         let mut coord = ExecutionCoordinator::new();
         let proposer = Address::from([0xFEu8; 32]);
-        let users = [
-            Address::from([0x01u8; 32]),
-            Address::from([0x02u8; 32]),
-            Address::from([0x03u8; 32]),
-            Address::from([0x04u8; 32]),
-        ];
+        let (seed0, user0) = super::test_uel_signer(0x01);
+        let (seed1, user1) = super::test_uel_signer(0x02);
+        let (seed2, user2) = super::test_uel_signer(0x03);
+        let (seed3, user3) = super::test_uel_signer(0x04);
+        let user_seeds = [seed0, seed1, seed2, seed3];
+        let users = [user0, user1, user2, user3];
         for u in &users {
             state.credit_account(u, 1_000);
         }
@@ -597,10 +597,11 @@ fn review_2_random_cross_ee_bud_conservation_holds() {
         for (h, (u_idx, ee, code, salt)) in deploys.into_iter().enumerate() {
             let mut tx_hash = [0u8; 32];
             tx_hash[0] = (h + 1) as u8;
+            let ctx_h = test_block_ctx((h + 1) as u64);
             let recs = state
                 .execute_uel_block(
                     &mut coord,
-                    test_block_ctx((h + 1) as u64),
+                    ctx_h,
                     proposer,
                     &[UelTx {
                         tx_hash,
@@ -612,7 +613,9 @@ fn review_2_random_cross_ee_bud_conservation_holds() {
                         gas_limit_bgu: 400_000,
                         max_fee_per_bgu_attos: MIN_UEL_BASE_FEE_ATTOS * 4,
                         max_priority_fee_per_bgu_attos: 25,
-                    }],
+                        auth: super::UelTxAuth::default(),
+                    }
+                    .signed(ctx_h.chain_id, &user_seeds[u_idx])],
                 )
                 .expect("deploy block");
             nonces[u_idx] += 1;
@@ -697,9 +700,10 @@ fn review_2_random_cross_ee_bud_conservation_holds() {
             let mut tx_hash = [0u8; 32];
             tx_hash[0] = 0x80;
             tx_hash[1..9].copy_from_slice(&step.to_le_bytes());
+            let ctx_step = test_block_ctx(10 + step);
             let _ = state.execute_uel_block(
                 &mut coord,
-                test_block_ctx(10 + step),
+                ctx_step,
                 proposer,
                 &[UelTx {
                     tx_hash,
@@ -711,7 +715,9 @@ fn review_2_random_cross_ee_bud_conservation_holds() {
                     gas_limit_bgu,
                     max_fee_per_bgu_attos: MIN_UEL_BASE_FEE_ATTOS * 8,
                     max_priority_fee_per_bgu_attos: 10,
-                }],
+                    auth: super::UelTxAuth::default(),
+                }
+                .signed(ctx_step.chain_id, &user_seeds[u_idx])],
             );
             nonces[u_idx] += 1;
 
@@ -781,7 +787,7 @@ impl ExecutionEnvironment for FaultingWorkerEe {
 #[test]
 fn review_2_risk_matrix_r01_r08_r18_r21_and_rpc_isolation() {
     let mut state = AccountState::new();
-    let sender = Address::from([0x91u8; 32]);
+    let (sender_seed, sender) = super::test_uel_signer(0x91);
     let proposer = Address::from([0x92u8; 32]);
     state.credit_account(&sender, 500);
     let supply_before = total_supply_invariant_attos(&state);
@@ -789,10 +795,11 @@ fn review_2_risk_matrix_r01_r08_r18_r21_and_rpc_isolation() {
     // R-01 / Y-6: Worker fault produces deterministic Fault receipt without halting node.
     let mut coord = ExecutionCoordinator::new();
     coord.register_worker(WorkerEndpoint::in_process(|| Box::new(FaultingWorkerEe)));
+    let ctx1 = test_block_ctx(1);
     let fault_recs = state
         .execute_uel_block(
             &mut coord,
-            test_block_ctx(1),
+            ctx1,
             proposer,
             &[UelTx {
                 tx_hash: [0xF1u8; 32],
@@ -807,7 +814,9 @@ fn review_2_risk_matrix_r01_r08_r18_r21_and_rpc_isolation() {
                 gas_limit_bgu: 50_000,
                 max_fee_per_bgu_attos: MIN_UEL_BASE_FEE_ATTOS * 2,
                 max_priority_fee_per_bgu_attos: 0,
-            }],
+                auth: super::UelTxAuth::default(),
+            }
+            .signed(ctx1.chain_id, &sender_seed)],
         )
         .expect("faulting EE must not panic coordinator");
     assert!(matches!(
@@ -827,10 +836,11 @@ fn review_2_risk_matrix_r01_r08_r18_r21_and_rpc_isolation() {
     state.execution_state.set_deploy_enabled(EeId::MOVE, false);
     let mut move_code = Vec::from(MOVE_BINARY_MAGIC);
     move_code.extend_from_slice(b"frozen_mod");
+    let ctx2 = test_block_ctx(2);
     let frozen_rec = state
         .execute_uel_block(
             &mut normal_coord,
-            test_block_ctx(2),
+            ctx2,
             proposer,
             &[UelTx {
                 tx_hash: [0xF2u8; 32],
@@ -845,7 +855,9 @@ fn review_2_risk_matrix_r01_r08_r18_r21_and_rpc_isolation() {
                 gas_limit_bgu: 200_000,
                 max_fee_per_bgu_attos: MIN_UEL_BASE_FEE_ATTOS * 2,
                 max_priority_fee_per_bgu_attos: 0,
-            }],
+                auth: super::UelTxAuth::default(),
+            }
+            .signed(ctx2.chain_id, &sender_seed)],
         )
         .expect("frozen EE deploy returns deterministic refusal receipt");
     assert_eq!(frozen_rec[0].status, UelReceiptStatus::DeployFrozen);
@@ -900,8 +912,8 @@ fn review_2_risk_matrix_r01_r08_r18_r21_and_rpc_isolation() {
 #[test]
 fn batch3_bridge_auth_and_evm_value_deploy_and_checkpoint_isolation() {
     let mut state = AccountState::new();
-    let alice = Address::from([0x21u8; 32]);
-    let bob = Address::from([0x22u8; 32]);
+    let (alice_seed, alice) = super::test_uel_signer(0x21);
+    let (bob_seed, bob) = super::test_uel_signer(0x22);
     let proposer = Address::from([0x23u8; 32]);
     state.credit_account(&alice, 1_000);
     state.credit_account(&bob, 1_000);
@@ -909,6 +921,7 @@ fn batch3_bridge_auth_and_evm_value_deploy_and_checkpoint_isolation() {
 
     // 1. EVM Deploy with value_attos funds the exact 20-byte contract address returned in output.
     // Runtime bytecode: STOP (`0x00`).
+    let ctx1 = test_block_ctx(1);
     let deploy_evm = UelTx {
         tx_hash: [0xC1u8; 32],
         sender: alice,
@@ -922,9 +935,11 @@ fn batch3_bridge_auth_and_evm_value_deploy_and_checkpoint_isolation() {
         gas_limit_bgu: 250_000,
         max_fee_per_bgu_attos: MIN_UEL_BASE_FEE_ATTOS * 2,
         max_priority_fee_per_bgu_attos: 0,
-    };
+        auth: super::UelTxAuth::default(),
+    }
+    .signed(ctx1.chain_id, &alice_seed);
     let r_ev = state
-        .execute_uel_block(&mut coord, test_block_ctx(1), proposer, &[deploy_evm])
+        .execute_uel_block(&mut coord, ctx1, proposer, &[deploy_evm])
         .expect("evm value deploy");
     assert_eq!(r_ev[0].status, UelReceiptStatus::Success);
     assert_eq!(r_ev[0].output.len(), 20);
@@ -936,6 +951,7 @@ fn batch3_bridge_auth_and_evm_value_deploy_and_checkpoint_isolation() {
     assert_eq!(state.get_attos_balance(&c_addr), 5_000);
 
     // Non-20-byte target on a value-bearing EVM call is refused deterministically.
+    let ctx2 = test_block_ctx(2);
     let bad_val_call = UelTx {
         tx_hash: [0xC2u8; 32],
         sender: alice,
@@ -949,9 +965,11 @@ fn batch3_bridge_auth_and_evm_value_deploy_and_checkpoint_isolation() {
         gas_limit_bgu: 250_000,
         max_fee_per_bgu_attos: MIN_UEL_BASE_FEE_ATTOS * 2,
         max_priority_fee_per_bgu_attos: 0,
-    };
+        auth: super::UelTxAuth::default(),
+    }
+    .signed(ctx2.chain_id, &alice_seed);
     assert!(state
-        .execute_uel_block(&mut coord, test_block_ctx(2), proposer, &[bad_val_call])
+        .execute_uel_block(&mut coord, ctx2, proposer, &[bad_val_call])
         .is_err());
 
     // 2. WASM `budlum_msg` and BudZero `0x40` / storage writes enforce creator/owner checks.
@@ -959,10 +977,11 @@ fn batch3_bridge_auth_and_evm_value_deploy_and_checkpoint_isolation() {
         &["instantiate", "execute", "query"],
         &[],
     );
+    let ctx3 = test_block_ctx(3);
     let r_w = state
         .execute_uel_block(
             &mut coord,
-            test_block_ctx(3),
+            ctx3,
             proposer,
             &[UelTx {
                 tx_hash: [0xC3u8; 32],
@@ -977,7 +996,9 @@ fn batch3_bridge_auth_and_evm_value_deploy_and_checkpoint_isolation() {
                 gas_limit_bgu: 300_000,
                 max_fee_per_bgu_attos: MIN_UEL_BASE_FEE_ATTOS * 2,
                 max_priority_fee_per_bgu_attos: 0,
-            }],
+                auth: super::UelTxAuth::default(),
+            }
+            .signed(ctx3.chain_id, &alice_seed)],
         )
         .expect("wasm deploy");
     assert_eq!(r_w[0].status, UelReceiptStatus::Success);
@@ -996,10 +1017,11 @@ fn batch3_bridge_auth_and_evm_value_deploy_and_checkpoint_isolation() {
             }
         }
     });
+    let ctx4 = test_block_ctx(4);
     let r_w_att = state
         .execute_uel_block(
             &mut coord,
-            test_block_ctx(4),
+            ctx4,
             proposer,
             &[UelTx {
                 tx_hash: [0xC4u8; 32],
@@ -1014,7 +1036,9 @@ fn batch3_bridge_auth_and_evm_value_deploy_and_checkpoint_isolation() {
                 gas_limit_bgu: 250_000,
                 max_fee_per_bgu_attos: MIN_UEL_BASE_FEE_ATTOS * 2,
                 max_priority_fee_per_bgu_attos: 0,
-            }],
+                auth: super::UelTxAuth::default(),
+            }
+            .signed(ctx4.chain_id, &bob_seed)],
         )
         .expect("wasm attacker call");
     assert_eq!(r_w_att[0].status, UelReceiptStatus::Revert);
@@ -1030,10 +1054,11 @@ fn batch3_bridge_auth_and_evm_value_deploy_and_checkpoint_isolation() {
     .iter()
     .flat_map(|i| i.try_encode().expect("encode").to_le_bytes())
     .collect();
+    let ctx5 = test_block_ctx(5);
     let r_bz = state
         .execute_uel_block(
             &mut coord,
-            test_block_ctx(5),
+            ctx5,
             proposer,
             &[UelTx {
                 tx_hash: [0xC5u8; 32],
@@ -1048,7 +1073,9 @@ fn batch3_bridge_auth_and_evm_value_deploy_and_checkpoint_isolation() {
                 gas_limit_bgu: 200_000,
                 max_fee_per_bgu_attos: MIN_UEL_BASE_FEE_ATTOS * 2,
                 max_priority_fee_per_bgu_attos: 0,
-            }],
+                auth: super::UelTxAuth::default(),
+            }
+            .signed(ctx5.chain_id, &alice_seed)],
         )
         .expect("bz deploy");
     assert_eq!(r_bz[0].status, UelReceiptStatus::Success);
@@ -1056,10 +1083,11 @@ fn batch3_bridge_auth_and_evm_value_deploy_and_checkpoint_isolation() {
 
     let mut bz_0x40 = vec![super::BUDZERO_SYSCALL_UNIVERSAL_CALL, EeId::EVM.0, 20, 0];
     bz_0x40.extend_from_slice(&r_ev[0].output);
+    let ctx6 = test_block_ctx(6);
     let r_bz_att = state
         .execute_uel_block(
             &mut coord,
-            test_block_ctx(6),
+            ctx6,
             proposer,
             &[UelTx {
                 tx_hash: [0xC6u8; 32],
@@ -1074,7 +1102,9 @@ fn batch3_bridge_auth_and_evm_value_deploy_and_checkpoint_isolation() {
                 gas_limit_bgu: 200_000,
                 max_fee_per_bgu_attos: MIN_UEL_BASE_FEE_ATTOS * 2,
                 max_priority_fee_per_bgu_attos: 0,
-            }],
+                auth: super::UelTxAuth::default(),
+            }
+            .signed(ctx6.chain_id, &bob_seed)],
         )
         .expect("bz attacker call");
     assert_eq!(r_bz_att[0].status, UelReceiptStatus::Revert);

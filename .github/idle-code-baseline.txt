@@ -1003,7 +1003,6 @@ src/account_abstraction/private_transfer_auth.rs	fn	verify_commitment
 src/account_abstraction/private_transfer_auth.rs	fn	verify_nullifier
 src/account_abstraction/private_transfer_auth.rs	struct	PrivateTransferAuth
 src/account_abstraction/private_transfer_auth.rs	struct	PrivateTransferGates
-src/account_abstraction/quantum_account.rs	const	ADDRESS_DOMAIN_V2
 src/account_abstraction/quantum_account.rs	const	BUD_MAGIC
 src/account_abstraction/quantum_account.rs	const	MIN_SEED_ENTROPY_BYTES
 src/account_abstraction/quantum_account.rs	const	RECOVERY_DOMAIN_V3
@@ -1267,7 +1266,6 @@ src/core/governance.rs	fn	active_proposals
 src/core/governance.rs	fn	cancel_proposal
 src/core/governance.rs	fn	is_governance_parameter_whitelisted
 src/core/governance.rs	fn	validate_governance_parameter_update
-src/core/governance.rs	fn	vote_weight_of
 src/core/hash.rs	fn	hash_fields
 src/core/transaction.rs	const	SIGNATURE_VERSION_V6
 src/core/transaction.rs	fn	estimate_gas_with_schedule

@@ -767,6 +767,15 @@ pub struct StorageRegistry {
     results: BTreeMap<u64, ChallengeResult>,
     #[serde(default)]
     reallocations: BTreeMap<u64, StorageReallocationTicket>,
+    /// Derived O(log R) index mapping `failed_deal_id -> ticket_id` for
+    /// `ReallocationCause::FailedDeal` tickets so block-end slash/expiry
+    /// settlement avoids scanning the full reallocation map per deal.
+    #[serde(skip)]
+    failed_deal_reallocations: BTreeMap<u64, u64>,
+    /// Tracks whether `failed_deal_reallocations` has been populated from
+    /// `reallocations` after deserialization.
+    #[serde(skip)]
+    failed_deal_reallocations_synced: bool,
     #[serde(default)]
     #[serde(with = "crate::core::map_keys")]
     pub manifests: BTreeMap<ContentId, ContentManifest>,
@@ -4371,6 +4380,22 @@ impl StorageRegistry {
         (program, expected_inputs)
     }
 
+    /// Rebuild the derived `failed_deal_id -> ticket_id` index at most once
+    /// after deserialization so subsequent lookups are O(log R).
+    fn ensure_failed_deal_reallocations(&mut self) {
+        if self.failed_deal_reallocations_synced {
+            return;
+        }
+        self.failed_deal_reallocations.clear();
+        for (&ticket_id, ticket) in &self.reallocations {
+            if ticket.cause == ReallocationCause::FailedDeal {
+                self.failed_deal_reallocations
+                    .insert(ticket.failed_deal_id, ticket_id);
+            }
+        }
+        self.failed_deal_reallocations_synced = true;
+    }
+
     /// Opens the repair ticket for the slot a slashed deal leaves empty, once per
     /// failed deal, and returns its id.
     ///
@@ -4379,12 +4404,9 @@ impl StorageRegistry {
     /// the deal and opened nothing, and the free-slot sweep only reopens
     /// `Expired` slots, so that replica was never replaced.
     fn open_slash_reallocation(&mut self, deal_id: u64, now_epoch: u64) -> Option<u64> {
+        self.ensure_failed_deal_reallocations();
         let deal = self.deals.get(&deal_id)?;
-        if self
-            .reallocations
-            .values()
-            .any(|ticket| ticket.names_failed_deal(deal_id))
-        {
+        if self.failed_deal_reallocations.contains_key(&deal_id) {
             return None;
         }
         let ticket_id = self.next_reallocation_id;
@@ -4407,6 +4429,7 @@ impl StorageRegistry {
             cause: ReallocationCause::FailedDeal,
         };
         self.reallocations.insert(ticket_id, ticket);
+        self.failed_deal_reallocations.insert(deal_id, ticket_id);
         Some(ticket_id)
     }
 
@@ -4432,39 +4455,6 @@ impl StorageRegistry {
             .collect()
     }
 
-    /// Close every other unresolved challenge on `deal_id` with
-    /// [`ChallengeOutcome::DealSlashed`] and `slashed_bond = 0` so slashing a
-    /// deal never strands sibling challenges or their opener bonds.
-    fn resolve_sibling_challenges_on_slash(
-        &mut self,
-        deal_id: u64,
-        trigger_challenge_id: u64,
-        epoch: u64,
-    ) {
-        let sibling_ids: Vec<u64> = self
-            .challenges
-            .values()
-            .filter(|c| {
-                c.deal_id == deal_id
-                    && c.challenge_id != trigger_challenge_id
-                    && !self.results.contains_key(&c.challenge_id)
-            })
-            .map(|c| c.challenge_id)
-            .collect();
-        for sib_id in sibling_ids {
-            self.results.insert(
-                sib_id,
-                ChallengeResult {
-                    challenge_id: sib_id,
-                    deal_id,
-                    outcome: ChallengeOutcome::DealSlashed,
-                    finalized_epoch: epoch,
-                    slashed_bond: 0,
-                },
-            );
-        }
-    }
-
     /// Slashes the deal behind a mismatched answer and opens its repair ticket.
     fn slash_for_mismatched_answer(
         &mut self,
@@ -4479,7 +4469,6 @@ impl StorageRegistry {
         let slashed_bond = deal.economics.operator_bond;
         deal.status = DealStatus::Slashed;
         self.open_slash_reallocation(deal_id, response_epoch);
-        self.resolve_sibling_challenges_on_slash(deal_id, challenge_id, response_epoch);
         Ok(ChallengeResult {
             challenge_id,
             deal_id,
@@ -4537,7 +4526,6 @@ impl StorageRegistry {
             slash_amount
         };
         self.open_slash_reallocation(deal_id, now_epoch);
-        self.resolve_sibling_challenges_on_slash(deal_id, challenge_id, now_epoch);
 
         let result = ChallengeResult {
             challenge_id,
@@ -4792,12 +4780,9 @@ impl StorageRegistry {
     /// Returns the ticket id, or `None` when a ticket for this deal already
     /// exists, which is what makes the sweep safe to run every block.
     pub fn open_expiry_reallocation(&mut self, deal_id: u64, now_epoch: u64) -> Option<u64> {
+        self.ensure_failed_deal_reallocations();
         let deal = self.deals.get(&deal_id)?;
-        if self
-            .reallocations
-            .values()
-            .any(|ticket| ticket.names_failed_deal(deal_id))
-        {
+        if self.failed_deal_reallocations.contains_key(&deal_id) {
             return None;
         }
         let ticket_id = self.next_reallocation_id;
@@ -4823,6 +4808,7 @@ impl StorageRegistry {
             cause: ReallocationCause::FailedDeal,
         };
         self.reallocations.insert(ticket_id, ticket);
+        self.failed_deal_reallocations.insert(deal_id, ticket_id);
         Some(ticket_id)
     }
 
@@ -5024,8 +5010,17 @@ impl StorageRegistry {
                     .reallocations
                     .get(&ticket_id)
                     .is_some_and(|t| t.status == ReallocationStatus::ActiveReplacement);
-                if settled && self.reallocations.remove(&ticket_id).is_some() {
-                    dropped += 1;
+                if settled {
+                    if let Some(removed) = self.reallocations.remove(&ticket_id) {
+                        if removed.cause == ReallocationCause::FailedDeal
+                            && self.failed_deal_reallocations.get(&removed.failed_deal_id)
+                                == Some(&ticket_id)
+                        {
+                            self.failed_deal_reallocations
+                                .remove(&removed.failed_deal_id);
+                        }
+                        dropped += 1;
+                    }
                 }
             }
         }
@@ -8373,6 +8368,30 @@ mod tests {
         let ticket = reg.all_reallocation_tickets()[0];
         assert_eq!(ticket.cause, ReallocationCause::FailedDeal);
         assert_eq!(ticket.failed_deal_id, deal_id);
+    }
+
+    #[test]
+    fn failed_deal_reallocation_index_survives_serde_roundtrip_and_sweep() {
+        let m = good_manifest();
+        let mut reg = StorageRegistry::new();
+        let (deal_id, _) = open_one(&mut reg, &m);
+        let challenge_id = reg
+            .open_challenge(deal_id, 0, 4, 110, 120, opener(), 50)
+            .unwrap();
+        reg.finalize_missed_challenge(challenge_id, 150).unwrap();
+        assert_eq!(reg.open_slash_reallocation(deal_id, 151), None);
+
+        // Simulate snapshot deserialization where the derived index starts empty.
+        let bytes = bincode::serialize(&reg).expect("serialize");
+        let mut restored: StorageRegistry = bincode::deserialize(&bytes).expect("deserialize");
+        assert!(!restored.failed_deal_reallocations_synced);
+        assert_eq!(
+            restored.open_slash_reallocation(deal_id, 152),
+            None,
+            "rebuilt derived index must still deduplicate the failed deal"
+        );
+        assert!(restored.failed_deal_reallocations_synced);
+        assert_eq!(restored.all_reallocation_tickets().len(), 1);
     }
 
     /// A deal is slashed once. `answer_challenge` refuses a deal that has left

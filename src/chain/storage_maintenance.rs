@@ -404,6 +404,40 @@ pub(crate) fn finalize_missed_challenges(
         .map(|c| (c.challenge_id, c.deal_id))
         .collect();
 
+    let superseded_deals: std::collections::BTreeSet<u64> =
+        pending.iter().map(|(_, deal_id)| *deal_id).collect();
+    if !superseded_deals.is_empty() {
+        // Preflight every opener bond refund (primary due challenges plus any
+        // open siblings on deals that will be slashed) in one O(C) scan before
+        // mutating balances or registry state.
+        let mut refund_totals: std::collections::BTreeMap<Address, u64> =
+            std::collections::BTreeMap::new();
+        for challenge in state.storage_registry.all_challenges() {
+            if !superseded_deals.contains(&challenge.deal_id)
+                || state
+                    .storage_registry
+                    .get_result(challenge.challenge_id)
+                    .is_some()
+                || challenge.opener == Address::zero()
+                || challenge.opener_bond == 0
+            {
+                continue;
+            }
+            let entry = refund_totals.entry(challenge.opener).or_insert(0);
+            *entry = entry.checked_add(challenge.opener_bond).ok_or_else(|| {
+                format!(
+                    "sibling opener bond refund overflow for {}",
+                    challenge.opener
+                )
+            })?;
+        }
+        for (&opener, &bond) in &refund_totals {
+            if state.get_balance(&opener).checked_add(bond).is_none() {
+                return Err(format!("opener bond refund overflow for {opener}"));
+            }
+        }
+    }
+
     let mut finalized = 0u32;
     let mut total_slashed = 0u64;
     for (challenge_id, deal_id) in pending.iter().copied() {
@@ -419,25 +453,6 @@ pub(crate) fn finalize_missed_challenges(
             .get_challenge(challenge_id)
             .map(|challenge| (challenge.opener, challenge.opener_bond))
             .filter(|(opener, bond)| *bond > 0 && *opener != Address::zero());
-        let sibling_refunds = state
-            .storage_registry
-            .open_sibling_opener_refunds(deal_id, challenge_id);
-        let mut refund_totals: std::collections::BTreeMap<Address, u64> =
-            std::collections::BTreeMap::new();
-        if let Some((opener, bond)) = opener_refund {
-            refund_totals.insert(opener, bond);
-        }
-        for &(sib_opener, sib_bond) in &sibling_refunds {
-            let entry = refund_totals.entry(sib_opener).or_insert(0);
-            *entry = entry
-                .checked_add(sib_bond)
-                .ok_or_else(|| format!("sibling opener bond refund overflow for {sib_opener}"))?;
-        }
-        for (&opener, &bond) in &refund_totals {
-            if state.get_balance(&opener).checked_add(bond).is_none() {
-                return Err(format!("opener bond refund overflow for {opener}"));
-            }
-        }
         let Ok(result) = state
             .storage_registry
             .finalize_missed_challenge(challenge_id, epoch)
@@ -454,13 +469,6 @@ pub(crate) fn finalize_missed_challenges(
                 result.slashed_bond,
                 "missed challenge",
             )?;
-            for (sib_opener, sib_bond) in sibling_refunds {
-                state
-                    .try_add_balance(&sib_opener, sib_bond)
-                    .map_err(|error| {
-                        format!("sibling opener bond refund overflow for {sib_opener}: {error}")
-                    })?;
-            }
         }
         if let Some((opener, bond)) = opener_refund {
             refund_opener_bond(state, opener, bond)?;
@@ -472,8 +480,6 @@ pub(crate) fn finalize_missed_challenges(
     // one walk of the challenge registry for the whole block. Doing it per
     // collapsed challenge made the block cost the product of the missed and
     // the stored challenges.
-    let superseded_deals: std::collections::BTreeSet<u64> =
-        pending.iter().map(|(_, deal_id)| *deal_id).collect();
     let (closed, bond_refunds) = state
         .storage_registry
         .close_superseded_challenges_for_slashed_deals(&superseded_deals, epoch);
@@ -879,7 +885,7 @@ mod tests {
         let _ = accrue_operator_rewards(&mut state, 25);
         let total_before = state.total_bud_committed() + u128::from(state.burned_total);
         let (finalized, slashed) = finalize_missed_challenges(&mut state, 25).expect("finalize");
-        assert_eq!(finalized, 1);
+        assert_eq!(finalized, 2);
         assert_eq!(slashed, STORAGE_MIN_OPERATOR_BOND);
         assert_eq!(
             state.storage_registry.get_deal(deal_id).unwrap().status,
@@ -893,7 +899,7 @@ mod tests {
             .storage_registry
             .get_result(c2)
             .expect("sibling challenge must be resolved on slash");
-        assert_eq!(c2_res.outcome, ChallengeOutcome::DealSlashed);
+        assert_eq!(c2_res.outcome, ChallengeOutcome::Missed);
         assert_eq!(c2_res.slashed_bond, 0);
         assert_eq!(state.get_balance(&opener_a), bond);
         assert_eq!(
