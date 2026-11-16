@@ -362,15 +362,26 @@ mod tests {
         bud3.register_object(
             seller.0,
             up.record,
-            vec![(
-                0,
-                Share {
-                    validator: [3u8; 32],
-                    class: Class::Full,
-                    first_esi: 0,
-                    symbols: 8,
-                },
-            )],
+            vec![
+                (
+                    0,
+                    Share {
+                        validator: [3u8; 32],
+                        class: Class::Full,
+                        first_esi: 0,
+                        symbols: 4,
+                    },
+                ),
+                (
+                    0,
+                    Share {
+                        validator: [4u8; 32],
+                        class: Class::Full,
+                        first_esi: 4,
+                        symbols: 4,
+                    },
+                ),
+            ],
             1,
             40,
         )

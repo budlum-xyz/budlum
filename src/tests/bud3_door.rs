@@ -38,6 +38,19 @@ fn apply(state: &mut AccountState, t: &Transaction) -> Result<(), String> {
     Executor::apply_transaction_checked(state, t).map_err(|e| e.code().to_string())
 }
 
+fn mint_bud3_nft(state: &mut AccountState, owner: Address, key: [u8; 32]) -> [u8; 32] {
+    let id = state
+        .nft_registry
+        .mint(
+            owner,
+            crate::storage::content_id::ContentId(key),
+            state.epoch_index,
+            None,
+        )
+        .expect("mint nft");
+    crate::socialfi::nft_folders::derive_bud3_nft_id(id)
+}
+
 #[test]
 fn register_bind_and_view_through_the_executor() {
     let uploader = Address::from([1u8; 32]);
@@ -113,6 +126,7 @@ fn register_bind_and_view_through_the_executor() {
         &storage_tx(holder, 0, 1, 0, StorageTxV3::CustodyAck { object: key }),
     )
     .unwrap();
+    let bound_nft = mint_bud3_nft(&mut state, uploader, key);
     apply(
         &mut state,
         &storage_tx(
@@ -121,7 +135,7 @@ fn register_bind_and_view_through_the_executor() {
             1,
             0,
             StorageTxV3::BindNft {
-                nft: [7; 32],
+                nft: bound_nft,
                 object: key,
             },
         ),
@@ -173,17 +187,29 @@ fn the_epoch_boundary_expires_and_audits() {
     let mut state = AccountState::new();
     state.add_balance(&uploader, 10_000);
     state.add_validator(Address::from([11u8; 32]), 50_000);
+    state.add_validator(Address::from([12u8; 32]), 50_000);
     let up = prepare_public_upload(b"short lease", &P, &Bud3Limits::default(), 6).unwrap();
     let key = up.record.commitment;
-    let shares = vec![(
-        0,
-        Share {
-            validator: [11; 32],
-            class: Class::Full,
-            first_esi: 0,
-            symbols: 6,
-        },
-    )];
+    let shares = vec![
+        (
+            0,
+            Share {
+                validator: [11; 32],
+                class: Class::Full,
+                first_esi: 0,
+                symbols: 3,
+            },
+        ),
+        (
+            0,
+            Share {
+                validator: [12; 32],
+                class: Class::Full,
+                first_esi: 3,
+                symbols: 3,
+            },
+        ),
+    ];
     let t = storage_tx(
         uploader,
         0,
@@ -196,14 +222,16 @@ fn the_epoch_boundary_expires_and_audits() {
         },
     );
     apply(&mut state, &t).unwrap();
-    // Confirm custody so the expired object earns a deletion tombstone.
-    let holder = Address::from([11; 32]);
-    state.add_balance(&holder, 1_000);
-    apply(
-        &mut state,
-        &storage_tx(holder, 0, 1, 0, StorageTxV3::CustodyAck { object: key }),
-    )
-    .unwrap();
+    // Confirm custody from both validators so the expired object earns a deletion tombstone.
+    for id in [11u8, 12] {
+        let holder = Address::from([id; 32]);
+        state.add_balance(&holder, 1_000);
+        apply(
+            &mut state,
+            &storage_tx(holder, 0, 1, 0, StorageTxV3::CustodyAck { object: key }),
+        )
+        .unwrap();
+    }
     let start = state.epoch_index;
     for _ in 0..3 {
         state.advance_epoch(0, DEFAULT_CHAIN_ID);
@@ -448,7 +476,7 @@ fn bud3_sealed_grant_issue_revoke_and_not_served() {
     )
     .unwrap();
 
-    let nft_id = [0xA1; 32];
+    let nft_id = mint_bud3_nft(&mut state, owner, obj_commitment);
     apply(
         &mut state,
         &storage_tx(
@@ -651,7 +679,7 @@ fn bud3_social_delete_crypto_shredding_and_tombstone() {
         )
         .unwrap();
     }
-    let nft_id = [0xB2; 32];
+    let nft_id = mint_bud3_nft(&mut state, owner, obj_commitment);
     apply(
         &mut state,
         &storage_tx(
@@ -818,6 +846,8 @@ fn bud3_public_dedup_sealed_isolation_and_dependency_rules() {
         bob_before - 1,
         "deduplicated registration pays only the tx fee"
     );
+    let alice_nft = mint_bud3_nft(&mut state, alice, pub_key);
+    let bob_nft = mint_bud3_nft(&mut state, bob, pub_key);
     apply(
         &mut state,
         &storage_tx(
@@ -826,7 +856,7 @@ fn bud3_public_dedup_sealed_isolation_and_dependency_rules() {
             1,
             0,
             StorageTxV3::BindNft {
-                nft: [1; 32],
+                nft: alice_nft,
                 object: pub_key,
             },
         ),
@@ -840,7 +870,7 @@ fn bud3_public_dedup_sealed_isolation_and_dependency_rules() {
             1,
             0,
             StorageTxV3::BindNft {
-                nft: [2; 32],
+                nft: bob_nft,
                 object: pub_key,
             },
         ),
@@ -852,7 +882,7 @@ fn bud3_public_dedup_sealed_isolation_and_dependency_rules() {
     // another account's sole remaining reference, and Alice's last burn tombstones.
     apply(
         &mut state,
-        &storage_tx(bob, 2, 1, 0, StorageTxV3::BurnReference { nft: [2; 32] }),
+        &storage_tx(bob, 2, 1, 0, StorageTxV3::BurnReference { nft: bob_nft }),
     )
     .unwrap();
     assert_eq!(state.bud3_registry.refcount(&pub_key), 1);
@@ -860,7 +890,7 @@ fn bud3_public_dedup_sealed_isolation_and_dependency_rules() {
 
     assert!(apply(
         &mut state,
-        &storage_tx(bob, 3, 1, 0, StorageTxV3::BurnReference { nft: [1; 32] }),
+        &storage_tx(bob, 3, 1, 0, StorageTxV3::BurnReference { nft: alice_nft }),
     )
     .is_err());
     assert_eq!(state.bud3_registry.refcount(&pub_key), 1);
@@ -868,7 +898,13 @@ fn bud3_public_dedup_sealed_isolation_and_dependency_rules() {
     assert!(!state.bud3_registry.is_tombstoned(&pub_key));
     apply(
         &mut state,
-        &storage_tx(alice, 2, 1, 0, StorageTxV3::BurnReference { nft: [1; 32] }),
+        &storage_tx(
+            alice,
+            2,
+            1,
+            0,
+            StorageTxV3::BurnReference { nft: alice_nft },
+        ),
     )
     .unwrap();
     assert!(state.bud3_registry.is_tombstoned(&pub_key));
@@ -971,6 +1007,7 @@ fn bud3_public_dedup_sealed_isolation_and_dependency_rules() {
         ),
     )
     .unwrap();
+    let base_nft = mint_bud3_nft(&mut state, alice, alice_base);
     apply(
         &mut state,
         &storage_tx(
@@ -979,7 +1016,7 @@ fn bud3_public_dedup_sealed_isolation_and_dependency_rules() {
             1,
             0,
             StorageTxV3::BindNft {
-                nft: [0xD1; 32],
+                nft: base_nft,
                 object: alice_base,
             },
         ),
@@ -993,13 +1030,7 @@ fn bud3_public_dedup_sealed_isolation_and_dependency_rules() {
     assert!(
         apply(
             &mut state,
-            &storage_tx(
-                alice,
-                6,
-                1,
-                0,
-                StorageTxV3::BurnReference { nft: [0xD1; 32] }
-            ),
+            &storage_tx(alice, 6, 1, 0, StorageTxV3::BurnReference { nft: base_nft }),
         )
         .is_err(),
         "base object with live dependent must refuse deletion"
@@ -1009,13 +1040,7 @@ fn bud3_public_dedup_sealed_isolation_and_dependency_rules() {
         .detach_dependency(&delta_key, &alice_base, 0);
     apply(
         &mut state,
-        &storage_tx(
-            alice,
-            6,
-            1,
-            0,
-            StorageTxV3::BurnReference { nft: [0xD1; 32] },
-        ),
+        &storage_tx(alice, 6, 1, 0, StorageTxV3::BurnReference { nft: base_nft }),
     )
     .unwrap();
     assert!(state.bud3_registry.is_tombstoned(&alice_base));
@@ -1575,7 +1600,7 @@ fn bud3_e2e_replace_object_preserves_nft_binding_and_slashes_mismatch() {
             ]
         })
         .collect();
-    let nft = [0x99u8; 32];
+    let nft = mint_bud3_nft(&mut state, alice, old_key);
     apply(
         &mut state,
         &storage_tx(
@@ -1623,15 +1648,27 @@ fn bud3_e2e_replace_object_preserves_nft_binding_and_slashes_mismatch() {
         .into_iter()
         .map(|id| sign_replace_attestation([id; 32], &[id; 32], &old_key, &new_up.record).unwrap())
         .collect();
-    let new_shares = vec![(
-        0,
-        Share {
-            validator: [201; 32],
-            class: Class::Full,
-            first_esi: 0,
-            symbols: new_up.record.symbols_per_segment,
-        },
-    )];
+    let half_new = new_up.record.symbols_per_segment / 2;
+    let new_shares = vec![
+        (
+            0,
+            Share {
+                validator: [201; 32],
+                class: Class::Full,
+                first_esi: 0,
+                symbols: half_new,
+            },
+        ),
+        (
+            0,
+            Share {
+                validator: [202; 32],
+                class: Class::Full,
+                first_esi: half_new,
+                symbols: new_up.record.symbols_per_segment - half_new,
+            },
+        ),
+    ];
     let proposer_bal_before = state.get_balance(&proposer);
     let endowment_acct = crate::storage::bud3::fees::custody_endowment_account();
     let endowment_bal_before = state.get_balance(&endowment_acct);
@@ -1683,6 +1720,19 @@ fn bud3_e2e_replace_object_preserves_nft_binding_and_slashes_mismatch() {
         &storage_tx(
             proposer,
             1,
+            1,
+            0,
+            StorageTxV3::CustodyAck { object: new_key },
+        ),
+    )
+    .unwrap();
+    let second_holder = Address::from([202u8; 32]);
+    state.add_balance(&second_holder, 1_000);
+    apply(
+        &mut state,
+        &storage_tx(
+            second_holder,
+            0,
             1,
             0,
             StorageTxV3::CustodyAck { object: new_key },
@@ -1818,9 +1868,15 @@ fn testnet_sealed_field_native_remote_view_and_blind_compute_stays_closed() {
         inclusion_path: path,
         predicate_proof: None,
     };
-    let refused = remote_view
+    remote_view
         .verify_for_chain(&checkpoint, &acct_state.state_root_body(), testnet_chain)
-        .expect_err("the remote state view is closed on testnet");
+        .expect("the remote state view is enabled on testnet");
+    let mainnet_chain = crate::core::chain_config::Network::Mainnet
+        .chain_id()
+        .value();
+    let refused = remote_view
+        .verify_for_chain(&checkpoint, &acct_state.state_root_body(), mainnet_chain)
+        .expect_err("the remote state view stays closed on mainnet");
     assert!(
         refused.to_string().contains("app binding disabled"),
         "got {refused}"
@@ -1951,11 +2007,14 @@ fn non_validator_share_holder_and_custody_ack_are_refused() {
     let uploader = Address::from([0xD1; 32]);
     let sockpuppet = Address::from([0xD2; 32]);
     let validator = Address::from([0xD3; 32]);
+    let validator2 = Address::from([0xD4; 32]);
     let mut state = AccountState::new();
     state.add_balance(&uploader, 50_000);
     state.add_balance(&sockpuppet, 10_000);
     state.add_balance(&validator, 10_000);
+    state.add_balance(&validator2, 10_000);
     state.add_validator(validator, 50_000);
+    state.add_validator(validator2, 50_000);
 
     let up = prepare_public_upload(
         b"custody must come from consensus validators",
@@ -1965,15 +2024,26 @@ fn non_validator_share_holder_and_custody_ack_are_refused() {
     )
     .unwrap();
     let key = up.record.commitment;
-    let fake_shares = vec![(
-        0,
-        Share {
-            validator: *sockpuppet.as_bytes(),
-            class: Class::Full,
-            first_esi: 0,
-            symbols: 6,
-        },
-    )];
+    let fake_shares = vec![
+        (
+            0,
+            Share {
+                validator: *sockpuppet.as_bytes(),
+                class: Class::Full,
+                first_esi: 0,
+                symbols: 3,
+            },
+        ),
+        (
+            0,
+            Share {
+                validator: *validator.as_bytes(),
+                class: Class::Full,
+                first_esi: 3,
+                symbols: 3,
+            },
+        ),
+    ];
     let root_before = state.calculate_state_root();
     assert!(
         apply(
@@ -1995,8 +2065,8 @@ fn non_validator_share_holder_and_custody_ack_are_refused() {
     );
     assert_eq!(state.calculate_state_root(), root_before);
 
-    // Valid validator placement succeeds, and a non-validator CustodyAck is refused.
-    let valid_shares = vec![(
+    // A single active validator holding all symbols of a segment cannot self-certify custody.
+    let solo_shares = vec![(
         0,
         Share {
             validator: *validator.as_bytes(),
@@ -2005,6 +2075,47 @@ fn non_validator_share_holder_and_custody_ack_are_refused() {
             symbols: 6,
         },
     )];
+    assert!(
+        apply(
+            &mut state,
+            &storage_tx(
+                uploader,
+                0,
+                1,
+                0,
+                StorageTxV3::RegisterObject {
+                    record: up.record.clone(),
+                    shares: solo_shares,
+                    lifetime_epochs: 10,
+                },
+            ),
+        )
+        .is_err(),
+        "single-validator placement must be refused"
+    );
+    assert_eq!(state.calculate_state_root(), root_before);
+
+    // Two distinct active validators succeed, and a non-validator CustodyAck is refused.
+    let valid_shares = vec![
+        (
+            0,
+            Share {
+                validator: *validator.as_bytes(),
+                class: Class::Full,
+                first_esi: 0,
+                symbols: 3,
+            },
+        ),
+        (
+            0,
+            Share {
+                validator: *validator2.as_bytes(),
+                class: Class::Full,
+                first_esi: 3,
+                symbols: 3,
+            },
+        ),
+    ];
     apply(
         &mut state,
         &storage_tx(
@@ -2019,7 +2130,7 @@ fn non_validator_share_holder_and_custody_ack_are_refused() {
             },
         ),
     )
-    .expect("active validator placement succeeds");
+    .expect("two distinct active validators placement succeeds");
     assert!(
         apply(
             &mut state,
@@ -2028,4 +2139,115 @@ fn non_validator_share_holder_and_custody_ack_are_refused() {
         .is_err(),
         "non-validator CustodyAck must be refused"
     );
+}
+
+#[test]
+fn bind_nft_through_executor_requires_minted_nft_ownership() {
+    let uploader = Address::from([0xE1; 32]);
+    let owner = Address::from([0xE2; 32]);
+    let squatter = Address::from([0xE3; 32]);
+    let mut state = AccountState::new();
+    for acct in [uploader, owner, squatter] {
+        state.add_balance(&acct, 50_000);
+    }
+    state.add_validator(Address::from([0xE4; 32]), 50_000);
+    state.add_validator(Address::from([0xE5; 32]), 50_000);
+
+    let up = prepare_public_upload(
+        b"nft ownership must be verified before BindNft",
+        &P,
+        &Bud3Limits::default(),
+        6,
+    )
+    .unwrap();
+    let key = up.record.commitment;
+    let shares = vec![
+        (
+            0,
+            Share {
+                validator: [0xE4; 32],
+                class: Class::Full,
+                first_esi: 0,
+                symbols: 3,
+            },
+        ),
+        (
+            0,
+            Share {
+                validator: [0xE5; 32],
+                class: Class::Full,
+                first_esi: 3,
+                symbols: 3,
+            },
+        ),
+    ];
+    apply(
+        &mut state,
+        &storage_tx(
+            uploader,
+            0,
+            1,
+            0,
+            StorageTxV3::RegisterObject {
+                record: up.record,
+                shares,
+                lifetime_epochs: 20,
+            },
+        ),
+    )
+    .unwrap();
+
+    // Unminted caller-chosen NFT id is refused.
+    assert!(
+        apply(
+            &mut state,
+            &storage_tx(
+                squatter,
+                0,
+                1,
+                0,
+                StorageTxV3::BindNft {
+                    nft: [0xFA; 32],
+                    object: key,
+                },
+            ),
+        )
+        .is_err(),
+        "unminted NFT id must be refused"
+    );
+
+    // Minted NFT owned by `owner` cannot be squatted by `squatter`, but binds for `owner`.
+    let owner_nft = mint_bud3_nft(&mut state, owner, key);
+    assert!(
+        apply(
+            &mut state,
+            &storage_tx(
+                squatter,
+                0,
+                1,
+                0,
+                StorageTxV3::BindNft {
+                    nft: owner_nft,
+                    object: key,
+                },
+            ),
+        )
+        .is_err(),
+        "non-owner must not squat another account's minted NFT"
+    );
+    apply(
+        &mut state,
+        &storage_tx(
+            owner,
+            0,
+            1,
+            0,
+            StorageTxV3::BindNft {
+                nft: owner_nft,
+                object: key,
+            },
+        ),
+    )
+    .expect("verified NFT owner binds cleanly");
+    assert_eq!(state.bud3_registry.refcount(&key), 1);
 }

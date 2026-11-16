@@ -528,7 +528,7 @@ pub fn build_identity_profile_verified(
     let owner = resolved.owner;
     let content_id = resolved.content.map(|c| ContentId(c.content_id.digest));
     let storage_root = resolved.storage_root;
-    let manifest_id = content_id.or(storage_root.map(ContentId));
+    let manifest_id = content_id.or_else(|| storage_root.map(ContentId));
 
     let assets_owned = data_assets
         .iter()
@@ -577,7 +577,7 @@ pub fn build_identity_profile_verified(
 
     let (bns_status, bns_root_hex, bns_warning) = evaluate_bns_evidence(&resolved, proof_ctx);
     let verified_bns_root = if bns_status == EvidenceStatus::Verified {
-        bns_root_hex.clone()
+        bns_root_hex
     } else {
         None
     };
@@ -1056,15 +1056,26 @@ mod tests {
         bud3.register_object(
             owner.0,
             up.record,
-            vec![(
-                0,
-                Share {
-                    validator: [7u8; 32],
-                    class: Class::Full,
-                    first_esi: 0,
-                    symbols: 8,
-                },
-            )],
+            vec![
+                (
+                    0,
+                    Share {
+                        validator: [7u8; 32],
+                        class: Class::Full,
+                        first_esi: 0,
+                        symbols: 4,
+                    },
+                ),
+                (
+                    0,
+                    Share {
+                        validator: [8u8; 32],
+                        class: Class::Full,
+                        first_esi: 4,
+                        symbols: 4,
+                    },
+                ),
+            ],
             15,
             100,
         )

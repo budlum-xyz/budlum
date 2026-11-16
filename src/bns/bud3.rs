@@ -274,20 +274,32 @@ pub(crate) mod fixtures {
         bud3.register_object(
             owner,
             up.record,
-            vec![(
-                0,
-                Share {
-                    validator: [1u8; 32],
-                    class: Class::Full,
-                    first_esi: 0,
-                    symbols: 8,
-                },
-            )],
+            vec![
+                (
+                    0,
+                    Share {
+                        validator: [1u8; 32],
+                        class: Class::Full,
+                        first_esi: 0,
+                        symbols: 4,
+                    },
+                ),
+                (
+                    0,
+                    Share {
+                        validator: [2u8; 32],
+                        class: Class::Full,
+                        first_esi: 4,
+                        symbols: 4,
+                    },
+                ),
+            ],
             1,
             20,
         )
         .unwrap();
         bud3.ack(&commitment, &[1u8; 32]).unwrap();
+        bud3.ack(&commitment, &[2u8; 32]).unwrap();
         ContentRef::new(content_id, commitment, None).unwrap()
     }
 }
@@ -322,24 +334,37 @@ mod tests {
         let cid = up.record.content_id;
         let nft_id = [0x44; 32];
         let holder = [1u8; 32];
+        let holder2 = [2u8; 32];
 
         let mut net = MemorySymbolNetwork::default();
         for (seg_idx, syms) in up.segments.iter().enumerate() {
-            net.store_holder_share(holder, key, seg_idx as u64, syms.clone());
+            net.store_holder_share(holder, key, seg_idx as u64, syms[..4].to_vec());
+            net.store_holder_share(holder2, key, seg_idx as u64, syms[4..].to_vec());
         }
 
         bud3.register_object(
             alice.0,
             up.record,
-            vec![(
-                0,
-                Share {
-                    validator: holder,
-                    class: Class::Full,
-                    first_esi: 0,
-                    symbols: 8,
-                },
-            )],
+            vec![
+                (
+                    0,
+                    Share {
+                        validator: holder,
+                        class: Class::Full,
+                        first_esi: 0,
+                        symbols: 4,
+                    },
+                ),
+                (
+                    0,
+                    Share {
+                        validator: holder2,
+                        class: Class::Full,
+                        first_esi: 4,
+                        symbols: 4,
+                    },
+                ),
+            ],
             1,
             20,
         )

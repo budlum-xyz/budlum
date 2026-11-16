@@ -798,21 +798,33 @@ mod tests {
             reg.register_object(
                 [1; 32],
                 prepared.record.clone(),
-                vec![(
-                    0,
-                    Share {
-                        validator: [10; 32],
-                        class: Class::Full,
-                        first_esi: 0,
-                        symbols: 20,
-                    }
-                )],
+                vec![
+                    (
+                        0,
+                        Share {
+                            validator: [10; 32],
+                            class: Class::Full,
+                            first_esi: 0,
+                            symbols: 10,
+                        },
+                    ),
+                    (
+                        0,
+                        Share {
+                            validator: [11; 32],
+                            class: Class::Full,
+                            first_esi: 10,
+                            symbols: 10,
+                        },
+                    ),
+                ],
                 0,
                 20,
             ),
             Ok(Registered::New(key))
         );
         reg.ack(&key, &[10; 32]).unwrap();
+        reg.ack(&key, &[11; 32]).unwrap();
 
         let mut mgr = UploadSessionManager::new(Bud3Limits::default());
         let sid = mgr

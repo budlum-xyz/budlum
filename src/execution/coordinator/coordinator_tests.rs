@@ -166,7 +166,7 @@ fn sample_ctx() -> BlockContext {
     }
 }
 
-fn make_call_tx(sender: Address, nonce: u64, ee: EeId, input: Vec<u8>) -> UelTx {
+fn make_call_tx(sender: Address, seed: &[u8; 32], nonce: u64, ee: EeId, input: Vec<u8>) -> UelTx {
     let mut tx_hash = [0u8; 32];
     tx_hash[0] = ee.0;
     tx_hash[1..9].copy_from_slice(&nonce.to_le_bytes());
@@ -183,12 +183,14 @@ fn make_call_tx(sender: Address, nonce: u64, ee: EeId, input: Vec<u8>) -> UelTx 
         gas_limit_bgu: 50_000,
         max_fee_per_bgu_attos: MIN_UEL_BASE_FEE_ATTOS * 2,
         max_priority_fee_per_bgu_attos: 100,
+        auth: UelTxAuth::default(),
     }
+    .signed(sample_ctx().chain_id, seed)
 }
 
 #[test]
 fn uel_worker_panic_yields_fault_receipt() {
-    let sender = Address::from([0x11; 32]);
+    let (sender_seed, sender) = test_uel_signer(0x11);
     let proposer = Address::from([0x99; 32]);
     let mut state = funded_state(&[sender, proposer]);
     let mut coord = ExecutionCoordinator::new();
@@ -219,10 +221,10 @@ fn uel_worker_panic_yields_fault_receipt() {
         }));
     }
 
-    let panic_tx = make_call_tx(sender, 0, EeId::EVM, vec![0x02]);
+    let panic_tx = make_call_tx(sender, &sender_seed, 0, EeId::EVM, vec![0x02]);
     let mut ok_input = vec![0x00];
     ok_input.extend_from_slice(b"slotok-after-panic");
-    let next_tx = make_call_tx(sender, 1, EeId::EVM, ok_input);
+    let next_tx = make_call_tx(sender, &sender_seed, 1, EeId::EVM, ok_input);
 
     let receipts = state
         .execute_uel_block(&mut coord, sample_ctx(), proposer, &[panic_tx, next_tx])
@@ -254,7 +256,7 @@ fn uel_worker_panic_yields_fault_receipt() {
 
 #[test]
 fn uel_worker_death_does_not_commit() {
-    let sender = Address::from([0x21; 32]);
+    let (sender_seed, sender) = test_uel_signer(0x21);
     let proposer = Address::from([0x22; 32]);
     let mut state = funded_state(&[sender, proposer]);
     let root_before = state.calculate_state_root();
@@ -288,7 +290,7 @@ fn uel_worker_death_does_not_commit() {
 
     let mut input = vec![0x00];
     input.extend_from_slice(b"key1val1");
-    let tx = make_call_tx(sender, 0, EeId::EVM, input);
+    let tx = make_call_tx(sender, &sender_seed, 0, EeId::EVM, input);
     let err = state
         .execute_uel_block(
             &mut coord_dead,
@@ -353,7 +355,7 @@ fn uel_worker_death_does_not_commit() {
 
 #[test]
 fn coordinator_overlay_rolls_back_frame() {
-    let sender = Address::from([0x31; 32]);
+    let (sender_seed, sender) = test_uel_signer(0x31);
     let evm_contract = Address::from([0xAB; 32]);
     let proposer = Address::from([0x32; 32]);
     let mut state = funded_state(&[sender, evm_contract, proposer]);
@@ -372,7 +374,13 @@ fn coordinator_overlay_rolls_back_frame() {
     }));
 
     let evm_bal_before = state.get_attos_balance(&evm_contract);
-    let tx1 = make_call_tx(sender, 0, EeId::EVM, vec![0x03, EeId::WASM.0, 0x00, 0x01]);
+    let tx1 = make_call_tx(
+        sender,
+        &sender_seed,
+        0,
+        EeId::EVM,
+        vec![0x03, EeId::WASM.0, 0x00, 0x01],
+    );
     let r1 = state
         .execute_uel_block(&mut coord, sample_ctx(), proposer, &[tx1])
         .expect("block 1");
@@ -396,7 +404,7 @@ fn coordinator_overlay_rolls_back_frame() {
 
     let mut tx2_input = vec![0x03, EeId::WASM.0, 0xFF, 0x00];
     tx2_input.extend_from_slice(b"wkeywval");
-    let tx2 = make_call_tx(sender, 1, EeId::EVM, tx2_input);
+    let tx2 = make_call_tx(sender, &sender_seed, 1, EeId::EVM, tx2_input);
     let r2 = state
         .execute_uel_block(&mut coord, sample_ctx(), proposer, &[tx2])
         .expect("block 2");
@@ -413,7 +421,7 @@ fn coordinator_overlay_rolls_back_frame() {
 
 #[test]
 fn uel_reentrancy_forbidden() {
-    let sender = Address::from([0x41; 32]);
+    let (sender_seed, sender) = test_uel_signer(0x41);
     let evm_contract = Address::from([0xAB; 32]);
     let wasm_contract = Address::from([0xCC; 32]);
     let proposer = Address::from([0x42; 32]);
@@ -433,7 +441,7 @@ fn uel_reentrancy_forbidden() {
     }));
 
     let chain_input = vec![0x03, EeId::WASM.0, 0x00, 0x03, EeId::EVM.0, 0x00, 0x00];
-    let tx = make_call_tx(sender, 0, EeId::EVM, chain_input);
+    let tx = make_call_tx(sender, &sender_seed, 0, EeId::EVM, chain_input);
     let receipts = state
         .execute_uel_block(&mut coord, sample_ctx(), proposer, &[tx])
         .expect("block");
@@ -519,7 +527,7 @@ fn uel_cross_arch_roots_equal() {
 
 #[test]
 fn ee_feature_flag_freezes_new_deploys() {
-    let sender = Address::from([0x61; 32]);
+    let (sender_seed, sender) = test_uel_signer(0x61);
     let proposer = Address::from([0x62; 32]);
     let mut state = funded_state(&[sender, proposer]);
     let mut coord = ExecutionCoordinator::new();
@@ -543,7 +551,9 @@ fn ee_feature_flag_freezes_new_deploys() {
         gas_limit_bgu: 50_000,
         max_fee_per_bgu_attos: MIN_UEL_BASE_FEE_ATTOS * 2,
         max_priority_fee_per_bgu_attos: 0,
-    };
+        auth: UelTxAuth::default(),
+    }
+    .signed(sample_ctx().chain_id, &sender_seed);
     let r1 = state
         .execute_uel_block(&mut coord, sample_ctx(), proposer, &[deploy1])
         .expect("deploy 1");
@@ -565,7 +575,9 @@ fn ee_feature_flag_freezes_new_deploys() {
         gas_limit_bgu: 50_000,
         max_fee_per_bgu_attos: MIN_UEL_BASE_FEE_ATTOS * 2,
         max_priority_fee_per_bgu_attos: 0,
-    };
+        auth: UelTxAuth::default(),
+    }
+    .signed(sample_ctx().chain_id, &sender_seed);
     let mut call_input = vec![0x00];
     call_input.extend_from_slice(b"livekept");
     let existing_call = UelTx {
@@ -581,7 +593,9 @@ fn ee_feature_flag_freezes_new_deploys() {
         gas_limit_bgu: 50_000,
         max_fee_per_bgu_attos: MIN_UEL_BASE_FEE_ATTOS * 2,
         max_priority_fee_per_bgu_attos: 0,
-    };
+        auth: UelTxAuth::default(),
+    }
+    .signed(sample_ctx().chain_id, &sender_seed);
     let r2 = state
         .execute_uel_block(
             &mut coord,
@@ -610,7 +624,7 @@ fn uel_alias_collision_refused() {
 
 #[test]
 fn budzero_stateful_storage_persists_across_blocks() {
-    let sender = Address::from([0x81; 32]);
+    let (sender_seed, sender) = test_uel_signer(0x81);
     let proposer = Address::from([0x82; 32]);
     let mut state = funded_state(&[sender, proposer]);
     let mut coord = ExecutionCoordinator::new();
@@ -656,7 +670,9 @@ fn budzero_stateful_storage_persists_across_blocks() {
         gas_limit_bgu: 200_000,
         max_fee_per_bgu_attos: MIN_UEL_BASE_FEE_ATTOS * 2,
         max_priority_fee_per_bgu_attos: 0,
-    };
+        auth: UelTxAuth::default(),
+    }
+    .signed(sample_ctx().chain_id, &sender_seed);
     let r1 = state
         .execute_uel_block(&mut coord, sample_ctx(), proposer, &[deploy])
         .expect("deploy budzero contract");
@@ -679,7 +695,9 @@ fn budzero_stateful_storage_persists_across_blocks() {
         gas_limit_bgu: 500_000,
         max_fee_per_bgu_attos: MIN_UEL_BASE_FEE_ATTOS * 2,
         max_priority_fee_per_bgu_attos: 0,
-    };
+        auth: UelTxAuth::default(),
+    }
+    .signed(sample_ctx().chain_id, &sender_seed);
     let r2 = state
         .execute_uel_block(&mut coord, sample_ctx(), proposer, &[call_tx])
         .expect("call budzero contract");
@@ -702,8 +720,8 @@ fn budzero_stateful_storage_persists_across_blocks() {
 /// untouched.
 #[test]
 fn a_non_owner_cannot_write_the_storage_of_a_budzero_contract() {
-    let owner = Address::from([0x83; 32]);
-    let stranger = Address::from([0x84; 32]);
+    let (owner_seed, owner) = test_uel_signer(0x83);
+    let (stranger_seed, stranger) = test_uel_signer(0x84);
     let proposer = Address::from([0x82; 32]);
     let mut state = funded_state(&[owner, stranger, proposer]);
     let mut coord = ExecutionCoordinator::new();
@@ -748,7 +766,9 @@ fn a_non_owner_cannot_write_the_storage_of_a_budzero_contract() {
         gas_limit_bgu: 200_000,
         max_fee_per_bgu_attos: MIN_UEL_BASE_FEE_ATTOS * 2,
         max_priority_fee_per_bgu_attos: 0,
-    };
+        auth: UelTxAuth::default(),
+    }
+    .signed(sample_ctx().chain_id, &owner_seed);
     let deployed = state
         .execute_uel_block(&mut coord, sample_ctx(), proposer, &[deploy])
         .expect("deploy budzero contract");
@@ -760,7 +780,7 @@ fn a_non_owner_cannot_write_the_storage_of_a_budzero_contract() {
     let slot = [0x45u8; 32];
     let mut full_key = contract.0.to_vec();
     full_key.extend_from_slice(&slot);
-    let write = |hash: u8, sender: Address, nonce: u64, value: &[u8]| {
+    let write = |hash: u8, sender: Address, seed: &[u8; 32], nonce: u64, value: &[u8]| {
         let mut input = slot.to_vec();
         input.extend_from_slice(value);
         UelTx {
@@ -776,7 +796,9 @@ fn a_non_owner_cannot_write_the_storage_of_a_budzero_contract() {
             gas_limit_bgu: 500_000,
             max_fee_per_bgu_attos: MIN_UEL_BASE_FEE_ATTOS * 2,
             max_priority_fee_per_bgu_attos: 0,
+            auth: UelTxAuth::default(),
         }
+        .signed(sample_ctx().chain_id, seed)
     };
 
     // The stranger's write is refused and leaves the slot as it was.
@@ -785,7 +807,13 @@ fn a_non_owner_cannot_write_the_storage_of_a_budzero_contract() {
             &mut coord,
             sample_ctx(),
             proposer,
-            &[write(0xB6, stranger, 0, b"stranger-wrote-this")],
+            &[write(
+                0xB6,
+                stranger,
+                &stranger_seed,
+                0,
+                b"stranger-wrote-this",
+            )],
         )
         .expect("stranger block");
     assert_eq!(refused[0].status, UelReceiptStatus::Revert);
@@ -807,7 +835,7 @@ fn a_non_owner_cannot_write_the_storage_of_a_budzero_contract() {
             &mut coord,
             sample_ctx(),
             proposer,
-            &[write(0xB7, owner, 1, b"owner-wrote-this")],
+            &[write(0xB7, owner, &owner_seed, 1, b"owner-wrote-this")],
         )
         .expect("owner block");
     assert_eq!(accepted[0].status, UelReceiptStatus::Success);
@@ -872,7 +900,7 @@ fn host_bridge_refuses_cross_ee_namespace_write_and_static_write() {
 
 #[test]
 fn expansion_ee_all_twelve_environments_execute_on_testnet() {
-    let sender = Address::from([0x77; 32]);
+    let (sender_seed, sender) = test_uel_signer(0x77);
     let proposer = Address::from([0x78; 32]);
     let mut state = funded_state(&[sender, proposer]);
     let mut coord = ExecutionCoordinator::new();
@@ -917,7 +945,9 @@ fn expansion_ee_all_twelve_environments_execute_on_testnet() {
                     gas_limit_bgu: 200_000,
                     max_fee_per_bgu_attos: MIN_UEL_BASE_FEE_ATTOS * 2,
                     max_priority_fee_per_bgu_attos: 100,
-                }],
+                    auth: UelTxAuth::default(),
+                }
+                .signed(ctx.chain_id, &sender_seed)],
             )
             .expect("expansion deploy");
         nonce += 1;
@@ -942,7 +972,9 @@ fn expansion_ee_all_twelve_environments_execute_on_testnet() {
                     gas_limit_bgu: 200_000,
                     max_fee_per_bgu_attos: MIN_UEL_BASE_FEE_ATTOS * 2,
                     max_priority_fee_per_bgu_attos: 100,
-                }],
+                    auth: UelTxAuth::default(),
+                }
+                .signed(ctx.chain_id, &sender_seed)],
             )
             .expect("expansion call");
         nonce += 1;
@@ -961,4 +993,86 @@ fn expansion_ee_all_twelve_environments_execute_on_testnet() {
             &state.execution_state.execution_root()
         ));
     }
+}
+
+#[test]
+fn unsigned_or_forged_uel_tx_is_refused_without_state_change() {
+    let (alice_seed, alice) = test_uel_signer(0xA1);
+    let (bob_seed, _bob) = test_uel_signer(0xB2);
+    let proposer = Address::from([0xC3; 32]);
+    let mut state = funded_state(&[alice, proposer]);
+    let mut coord = ExecutionCoordinator::new();
+    coord.register_worker(WorkerEndpoint::in_process(|| {
+        Box::new(CanonicalTestEe {
+            ee: EeId::EVM,
+            ns: "ee/evm/storage",
+        })
+    }));
+
+    let state_root_before = state.calculate_state_root();
+    let exec_root_before = state.execution_state.execution_root();
+    let bal_before = state.get_attos_balance(&alice);
+
+    // 1. Unsigned UelTx (default empty auth) must fail.
+    let unsigned = UelTx {
+        tx_hash: [0xE1; 32],
+        sender: alice,
+        nonce: 0,
+        ee: EeId::EVM,
+        action: UelAction::Call {
+            target: vec![0xAB; 32],
+            input: vec![0x00, 1, 2, 3, 4],
+        },
+        value_attos: 0,
+        gas_limit_bgu: 50_000,
+        max_fee_per_bgu_attos: MIN_UEL_BASE_FEE_ATTOS * 2,
+        max_priority_fee_per_bgu_attos: 0,
+        auth: UelTxAuth::default(),
+    };
+    assert!(state
+        .execute_uel_block(
+            &mut coord,
+            sample_ctx(),
+            proposer,
+            std::slice::from_ref(&unsigned),
+        )
+        .is_err());
+
+    // 2. Signed by Bob while claiming Alice as sender must fail.
+    let mut wrong_signer = unsigned.clone();
+    wrong_signer
+        .sign_with_ml_dsa_87_seed(sample_ctx().chain_id, &bob_seed)
+        .expect("sign");
+    assert!(state
+        .execute_uel_block(&mut coord, sample_ctx(), proposer, &[wrong_signer])
+        .is_err());
+
+    // 3. Signed for a different chain_id must fail.
+    let wrong_chain = unsigned
+        .clone()
+        .signed(sample_ctx().chain_id + 1, &alice_seed);
+    assert!(state
+        .execute_uel_block(&mut coord, sample_ctx(), proposer, &[wrong_chain])
+        .is_err());
+
+    // 4. Tampering with payload after signing must fail.
+    let mut tampered = unsigned.clone().signed(sample_ctx().chain_id, &alice_seed);
+    tampered.value_attos = 1;
+    assert!(state
+        .execute_uel_block(&mut coord, sample_ctx(), proposer, &[tampered])
+        .is_err());
+
+    // Zero state mutation across all four rejected transactions.
+    assert_eq!(state.calculate_state_root(), state_root_before);
+    assert_eq!(state.execution_state.execution_root(), exec_root_before);
+    assert_eq!(state.get_attos_balance(&alice), bal_before);
+    assert_eq!(state.get_nonce(&alice), 0);
+
+    // Control: properly signed by Alice for sample_ctx().chain_id succeeds.
+    let valid = unsigned.signed(sample_ctx().chain_id, &alice_seed);
+    let receipts = state
+        .execute_uel_block(&mut coord, sample_ctx(), proposer, &[valid])
+        .expect("valid ML-DSA-87 signed UelTx must succeed");
+    assert_eq!(receipts[0].status, UelReceiptStatus::Success);
+    assert_eq!(state.get_nonce(&alice), 1);
 }

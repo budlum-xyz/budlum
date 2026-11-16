@@ -159,7 +159,7 @@ const fn backend_available() -> bool {
 
 /// Whether the account of a transaction signs with a scheme this layer
 /// claims. Phase 1: ML-DSA-87, which is a V5 transaction.
-fn is_claimable(tx: &Transaction) -> bool {
+const fn is_claimable(tx: &Transaction) -> bool {
     tx.signature_version == SIGNATURE_VERSION_V5 && tx.authorization.is_none()
 }
 
@@ -237,10 +237,11 @@ fn tx_claims<'a>(views: &[TxView], block: &'a Block) -> Vec<TxClaims<'a>> {
         .collect()
 }
 
-/// The backend of a chain: the native one in a test or devnet build, none
-/// in a production build until the STARK backend lands (phase 3). Without a
-/// backend nothing is proven and no frame verifies, which is why
-/// [`validate_params`] refuses `On` there.
+/// The backend of a chain: native in test or devnet builds, none in production.
+///
+/// Production builds stay without a backend until the STARK backend lands
+/// (phase 3). Without a backend nothing is proven and no frame verifies, which
+/// is why [`validate_params`] refuses `On` there.
 #[derive(Debug, Clone)]
 pub struct ChainBackend {
     params: AggParams,
@@ -318,10 +319,11 @@ fn params_commitment(params: &AggParams, domain: DomainId) -> Hash32 {
     ])
 }
 
-/// What the genesis block of a chain carries in its `frame_hash` slot: the
-/// commitment to the consensus parameters when the layer is on, nothing
-/// otherwise. A chain that never turns the layer on keeps the genesis hash
-/// it always had.
+/// The genesis `frame_hash` commitment when the aggregation layer is enabled.
+///
+/// Returns the consensus parameter commitment when `params.mode == AggMode::On`,
+/// and `None` otherwise so chains that keep aggregation off preserve their
+/// original genesis hash.
 #[must_use]
 pub fn genesis_commitment(params: &AggParams, chain_id: u64) -> Option<Hash32> {
     if params.mode != AggMode::On {
@@ -342,9 +344,9 @@ pub fn validate_params(params: &AggParams, chain_id: u64) -> Result<(), String> 
             params.agg_share_bps
         ));
     }
-    if params.max_claims_per_block > WIRE_FRAME_LIMITS.max_claims
-        || params.max_proof_bytes > WIRE_FRAME_LIMITS.max_proof_bytes
-    {
+    let claims_exceed_wire = params.max_claims_per_block > WIRE_FRAME_LIMITS.max_claims;
+    let proof_exceeds_wire = params.max_proof_bytes > WIRE_FRAME_LIMITS.max_proof_bytes;
+    if claims_exceed_wire || proof_exceeds_wire {
         return Err(format!(
             "aggregation: block limits ({} claims, {} proof bytes) are over what the wire carries \
              ({} claims, {} proof bytes)",
