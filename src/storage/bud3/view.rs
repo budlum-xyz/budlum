@@ -1,6 +1,7 @@
-//! B.U.D. 3.0 view flow (G1-G8), network-backed reveal sessions (`bud_storageOpenReveal`,
-//! `bud_storageRevealFrames`, `bud_storageCloseReveal`), and paid public G8 fallback
-//! decoding (Section 6.5).
+//! B.U.D. 3.0 view flow, network reveal sessions, and paid fallback decoding.
+//!
+//! Covers G1-G8 views (`bud_storageOpenReveal`, `bud_storageRevealFrames`,
+//! `bud_storageCloseReveal`) and paid public G8 fallback decoding (Section 6.5).
 //! exposed for `Bud3RpcService`, `Bud3ContentGateway`, and BNS/SocialFi viewers.
 //!
 //! Security invariants enforced here:
@@ -27,6 +28,13 @@ use std::collections::BTreeMap;
 /// Minimum fee in BUD base units required for G8 validator fallback decoding
 /// (`0.0001 BUD` = `100` base units at `10^6` scale, Section 6.5 G8).
 pub const MIN_PAID_VIEW_FEE_ATOMS: u64 = 100;
+
+/// Epochs a paid view receipt stays in consensus state after payment.
+///
+/// A receipt authorizes one decode; one that was never presented inside this
+/// window is dropped by `Bud3Registry::expire` instead of being folded into the
+/// state root, kept in the snapshot and hashed again on every block forever.
+pub const PAID_VIEW_RETENTION_EPOCHS: u64 = 30 * super::fees::DEFAULT_EPOCHS_PER_DAY;
 
 /// Maximum concurrent reveal sessions held in memory on one node.
 pub const MAX_REVEAL_SESSIONS: usize = 128;
@@ -78,9 +86,10 @@ impl MemorySymbolNetwork {
     }
 }
 
-/// The symbol source of a node that holds no symbols and has no symbol
-/// transport attached. Every read comes back empty, so a view through it
-/// fails with a missing-symbols error and never returns unverified bytes.
+/// Symbol source of a node that holds no symbols and has no symbol transport.
+///
+/// Every read comes back empty, so a view through it fails with a
+/// missing-symbols error and never returns unverified bytes.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct NoSymbolsHeld;
 
@@ -505,15 +514,26 @@ mod tests {
         reg.register_object(
             [1; 32],
             sealed_up.record,
-            vec![(
-                0,
-                Share {
-                    validator: full_h,
-                    class: Class::Full,
-                    first_esi: 0,
-                    symbols: 8,
-                },
-            )],
+            vec![
+                (
+                    0,
+                    Share {
+                        validator: full_h,
+                        class: Class::Full,
+                        first_esi: 0,
+                        symbols: 4,
+                    },
+                ),
+                (
+                    0,
+                    Share {
+                        validator: mob_h,
+                        class: Class::Mobile,
+                        first_esi: 4,
+                        symbols: 4,
+                    },
+                ),
+            ],
             0,
             20,
         )

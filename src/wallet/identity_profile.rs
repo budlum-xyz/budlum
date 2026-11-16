@@ -85,6 +85,12 @@ impl EvidenceCard {
         if let Some(root) = &self.root {
             validate_label("EvidenceCard root", root)?;
         }
+        if self.status == EvidenceStatus::Verified && self.root.is_none() {
+            return Err(format!(
+                "EvidenceCard '{}' cannot claim Verified without a commitment root",
+                self.subject
+            ));
+        }
         Ok(())
     }
 }
@@ -175,6 +181,16 @@ pub struct DwebPassportProfile {
     pub bns_state_root: Option<String>,
     #[serde(default)]
     pub social: IdentitySocialSummary,
+    /// Raw BNS Merkle state proof carried so a caller with its own trusted
+    /// finalized header root can verify the record locally.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bns_proof: Option<BnsStateProof>,
+    /// Block height at which the answering node read `bns_proof`, when reported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed_height: Option<u64>,
+    /// State root reported by the answering node at `observed_height`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed_state_root: Option<String>,
 }
 
 impl DwebPassportProfile {
@@ -503,13 +519,16 @@ pub fn build_identity_profile_verified(
                 .and_then(|ctx| ctx.expected_bns_root.as_ref())
                 .map(hex32),
             social: IdentitySocialSummary::default(),
+            bns_proof: proof_ctx.and_then(|ctx| ctx.bns_proof.clone()),
+            observed_height: None,
+            observed_state_root: None,
         };
     };
 
     let owner = resolved.owner;
     let content_id = resolved.content.map(|c| ContentId(c.content_id.digest));
     let storage_root = resolved.storage_root;
-    let manifest_id = content_id.or(storage_root.map(ContentId));
+    let manifest_id = content_id.or_else(|| storage_root.map(ContentId));
 
     let assets_owned = data_assets
         .iter()
@@ -557,15 +576,18 @@ pub fn build_identity_profile_verified(
     });
 
     let (bns_status, bns_root_hex, bns_warning) = evaluate_bns_evidence(&resolved, proof_ctx);
+    let verified_bns_root = if bns_status == EvidenceStatus::Verified {
+        bns_root_hex
+    } else {
+        None
+    };
 
     let mut evidence = Vec::new();
     evidence.push(EvidenceCard {
         subject: "bns".into(),
         status: bns_status.clone(),
         source: "BNS registry".into(),
-        root: bns_root_hex
-            .clone()
-            .or_else(|| storage_root.as_ref().map(hex32)),
+        root: verified_bns_root.clone(),
         warning: bns_warning,
     });
     if let Some(ref bud3) = resolved.content {
@@ -583,16 +605,33 @@ pub fn build_identity_profile_verified(
                 .then(|| "B.U.D. 3.0 reference belongs to an expired .bud record".into()),
         });
     }
+    // Serving bytes is not proof: the name has to be proven, and the bytes
+    // have to be the manifest the profile's commitment names.
+    let manifest_root_matches = match (&manifest_summary, &manifest) {
+        (Some(summary), Some(m)) => content_hex(&m.manifest_id) == summary.manifest_id,
+        _ => false,
+    };
     evidence.push(EvidenceCard {
         subject: "manifest".into(),
         status: match (&manifest_summary, &manifest) {
-            (Some(_), Some(_)) => EvidenceStatus::Verified,
-            (Some(_), None) => EvidenceStatus::Pending,
+            (Some(_), Some(_))
+                if bns_status == EvidenceStatus::Verified && manifest_root_matches =>
+            {
+                EvidenceStatus::Verified
+            }
+            (Some(_), _) => EvidenceStatus::Pending,
             (None, _) => EvidenceStatus::Unavailable,
         },
         source: "B.U.D. manifest registry".into(),
         root: manifest_summary.as_ref().map(|m| m.manifest_id.clone()),
-        warning: if manifest_summary.is_some() && manifest.is_none() {
+        warning: if manifest.is_some() && !manifest_root_matches {
+            Some(
+                "Manifest bytes served by this node do not match the commitment this profile publishes"
+                    .into(),
+            )
+        } else if manifest.is_some() && bns_status != EvidenceStatus::Verified {
+            Some("Manifest bytes are available but the name's BNS evidence is not verified".into())
+        } else if manifest_summary.is_some() && manifest.is_none() {
             Some(
                 "Manifest commitment exists but full manifest bytes are not available in this node"
                     .into(),
@@ -601,13 +640,22 @@ pub fn build_identity_profile_verified(
             None
         },
     });
+    // These counts are read from this node's data-market indexes and no proof
+    // for them exists, so the card may not say `Verified`: at best it is a
+    // pending claim on a name whose own evidence is proven, and unverified
+    // outright when it is not.
+    let card_status = if bns_status == EvidenceStatus::Verified {
+        EvidenceStatus::Pending
+    } else {
+        EvidenceStatus::Unverified
+    };
     evidence.push(EvidenceCard {
         subject: "pollen".into(),
-        status: EvidenceStatus::Verified,
-        source: "data-market registry root".into(),
+        status: card_status,
+        source: "data-market registry indexes".into(),
         root: None,
         warning: Some(
-            "Counts are registry-derived; individual data bytes are never exposed by this endpoint"
+            "Counts are derived from this node's registry indexes; they carry no data-market proof and are not verified"
                 .into(),
         ),
     });
@@ -643,8 +691,11 @@ pub fn build_identity_profile_verified(
         content: resolved.content,
         records: resolved.records,
         subdomains_count,
-        bns_state_root: bns_root_hex,
+        bns_state_root: verified_bns_root,
         social,
+        bns_proof: proof_ctx.and_then(|ctx| ctx.bns_proof.clone()),
+        observed_height: None,
+        observed_state_root: None,
     }
 }
 
@@ -664,10 +715,21 @@ fn evaluate_bns_evidence(
         return (EvidenceStatus::Unverified, root, Some(msg.into()));
     }
     let Some(ctx) = proof_ctx else {
-        return (EvidenceStatus::Verified, None, None);
+        return (
+            EvidenceStatus::Unverified,
+            None,
+            Some(
+                "Profile was built without a proof context, so nothing binds the disclosed fields"
+                    .into(),
+            ),
+        );
     };
     let Some(expected_root) = ctx.expected_bns_root else {
-        return (EvidenceStatus::Verified, None, None);
+        return (
+            EvidenceStatus::Unverified,
+            None,
+            Some("No trusted BNS root anchor was supplied, so the name record is unproven".into()),
+        );
     };
     let root_hex = Some(hex32(&expected_root));
     let Some(ref proof) = ctx.bns_proof else {
@@ -994,15 +1056,26 @@ mod tests {
         bud3.register_object(
             owner.0,
             up.record,
-            vec![(
-                0,
-                Share {
-                    validator: [7u8; 32],
-                    class: Class::Full,
-                    first_esi: 0,
-                    symbols: 8,
-                },
-            )],
+            vec![
+                (
+                    0,
+                    Share {
+                        validator: [7u8; 32],
+                        class: Class::Full,
+                        first_esi: 0,
+                        symbols: 4,
+                    },
+                ),
+                (
+                    0,
+                    Share {
+                        validator: [8u8; 32],
+                        class: Class::Full,
+                        first_esi: 4,
+                        symbols: 4,
+                    },
+                ),
+            ],
             15,
             100,
         )
@@ -1260,5 +1333,175 @@ mod tests {
         );
         assert_eq!(swapped_sub.subdomains.len(), resolved.subdomains.len());
         assert_eq!(status(swapped_sub), EvidenceStatus::Unverified);
+    }
+
+    #[test]
+    fn unanchored_passport_profile_fails_closed_and_cards_require_roots() {
+        let owner = addr(0x31);
+        let mut reg = BnsRegistry::new();
+        reg.register("anchor.bud".to_string(), owner, 10, 100)
+            .unwrap();
+        let matching_manifest =
+            ContentManifest::from_shards(vec![crate::storage::manifest::ShardRef::from_bytes(
+                0,
+                b"anchored-manifest",
+            )])
+            .unwrap();
+        let wrong_manifest =
+            ContentManifest::from_shards(vec![crate::storage::manifest::ShardRef::from_bytes(
+                0,
+                b"other-manifest",
+            )])
+            .unwrap();
+        reg.set_storage(
+            "anchor.bud",
+            owner,
+            *matching_manifest.manifest_id.as_bytes(),
+            5,
+            11,
+        )
+        .unwrap();
+        let resolved = reg.resolve_full("anchor.bud", 20).unwrap();
+        let proof = reg.prove_name("anchor.bud", 20);
+        let bns_root = reg.root();
+
+        // Context-free profile fails closed.
+        let bare = build_passport_profile(
+            "anchor.bud".into(),
+            Some(resolved.clone()),
+            Some(matching_manifest.clone()),
+            &[],
+            &[],
+            &[],
+        );
+        assert_eq!(
+            bare.evidence
+                .iter()
+                .find(|c| c.subject == "bns")
+                .unwrap()
+                .status,
+            EvidenceStatus::Unverified
+        );
+        assert_eq!(
+            bare.evidence
+                .iter()
+                .find(|c| c.subject == "manifest")
+                .unwrap()
+                .status,
+            EvidenceStatus::Pending
+        );
+        assert_eq!(
+            bare.evidence
+                .iter()
+                .find(|c| c.source == "data-market registry indexes")
+                .unwrap()
+                .status,
+            EvidenceStatus::Unverified
+        );
+        assert!(bare.bns_state_root.is_none());
+
+        // Proof returned without an independently supplied trusted root stays Unverified.
+        let self_reported_ctx = IdentityProofContext {
+            bns_proof: Some(proof.clone()),
+            expected_bns_root: None,
+            current_epoch: 20,
+            reverse_primary_name: None,
+        };
+        let unanchored = build_identity_profile_verified(
+            "anchor.bud".into(),
+            Some(resolved.clone()),
+            Some(matching_manifest.clone()),
+            &[],
+            &[],
+            &[],
+            Some(&self_reported_ctx),
+        );
+        assert_eq!(
+            unanchored
+                .evidence
+                .iter()
+                .find(|c| c.subject == "bns")
+                .unwrap()
+                .status,
+            EvidenceStatus::Unverified
+        );
+        assert!(unanchored.bns_state_root.is_none());
+        assert!(unanchored.bns_proof.is_some());
+
+        // Independently anchored proof verifies BNS and matching manifest; the unrooted count card stays Pending.
+        let anchored_ctx = IdentityProofContext {
+            bns_proof: Some(proof),
+            expected_bns_root: Some(bns_root),
+            current_epoch: 20,
+            reverse_primary_name: None,
+        };
+        let verified = build_identity_profile_verified(
+            "anchor.bud".into(),
+            Some(resolved.clone()),
+            Some(matching_manifest),
+            &[],
+            &[],
+            &[],
+            Some(&anchored_ctx),
+        );
+        assert!(verified.validate_public().is_ok());
+        assert_eq!(
+            verified
+                .evidence
+                .iter()
+                .find(|c| c.subject == "bns")
+                .unwrap()
+                .status,
+            EvidenceStatus::Verified
+        );
+        assert_eq!(
+            verified
+                .evidence
+                .iter()
+                .find(|c| c.subject == "manifest")
+                .unwrap()
+                .status,
+            EvidenceStatus::Verified
+        );
+        assert_eq!(
+            verified
+                .evidence
+                .iter()
+                .find(|c| c.source == "data-market registry indexes")
+                .unwrap()
+                .status,
+            EvidenceStatus::Pending
+        );
+
+        // Mismatched manifest bytes under a verified name are refused Verified status.
+        let mismatched = build_identity_profile_verified(
+            "anchor.bud".into(),
+            Some(resolved),
+            Some(wrong_manifest),
+            &[],
+            &[],
+            &[],
+            Some(&anchored_ctx),
+        );
+        let manifest_card = mismatched
+            .evidence
+            .iter()
+            .find(|c| c.subject == "manifest")
+            .unwrap();
+        assert_eq!(manifest_card.status, EvidenceStatus::Pending);
+        assert!(manifest_card
+            .warning
+            .as_deref()
+            .is_some_and(|w| w.contains("do not match")));
+
+        // No card may validate as Verified without a commitment root.
+        let bogus_card = EvidenceCard {
+            subject: "unrooted".into(),
+            status: EvidenceStatus::Verified,
+            source: "data-market registry indexes".into(),
+            root: None,
+            warning: None,
+        };
+        assert!(bogus_card.validate().is_err());
     }
 }

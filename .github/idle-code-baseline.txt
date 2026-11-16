@@ -1267,7 +1267,6 @@ src/core/governance.rs	fn	active_proposals
 src/core/governance.rs	fn	cancel_proposal
 src/core/governance.rs	fn	is_governance_parameter_whitelisted
 src/core/governance.rs	fn	validate_governance_parameter_update
-src/core/governance.rs	fn	vote_weight_of
 src/core/hash.rs	fn	hash_fields
 src/core/transaction.rs	const	SIGNATURE_VERSION_V6
 src/core/transaction.rs	fn	estimate_gas_with_schedule
@@ -1343,6 +1342,7 @@ src/project_manifest.rs	struct	ProofFixture
 src/project_manifest.rs	struct	RelayerPolicyFixture
 src/project_manifest.rs	type	DeveloperProjectId
 src/domain/commitment_registry.rs	fn	get_by_block_hash
+src/domain/finality_adapter.rs	fn	poa_commit_signing_message
 src/domain/finality_adapter.rs	fn	required_signatures
 src/domain/fork_choice.rs	enum	DomainFinalityStatus
 src/domain/fork_choice.rs	enum	DomainLifecycleStatus
@@ -1359,6 +1359,7 @@ src/domain/plugin_registry.rs	fn	domain_ids
 src/domain/plugin_registry.rs	struct	PluginReplacement
 src/domain/registry.rs	const	MAX_REGISTERED_DOMAINS
 src/domain/registry.rs	fn	domain_leaf_hash
+src/domain/registry.rs	fn	set_status
 src/domain/sovereign.rs	const	MAX_AUDIT_EXPORT_SPAN_BLOCKS
 src/domain/sovereign.rs	const	MAX_SOVEREIGN_DOMAIN_TEMPLATES
 src/domain/sovereign.rs	enum	DomainLifecycleState
