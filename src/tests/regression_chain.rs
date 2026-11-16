@@ -139,7 +139,7 @@ fn state_update_is_retired_for_every_sender() {
 #[test]
 fn producer_executes_on_a_disposable_candidate_state() {
     let src = production_part(include_str!("../chain/blockchain.rs"));
-    let body = window(src, "fn collect_block_transactions(", 5130);
+    let body = window(src, "fn collect_block_transactions(", 5600);
     let clone_at = body
         .find("let mut candidate_state = temp_state.clone();")
         .expect("candidate copy");
@@ -401,7 +401,7 @@ fn actor_commands_do_not_mutate_state_between_blocks() {
 #[test]
 fn missed_challenge_settles_through_one_slash_path() {
     let m = production_part(include_str!("../chain/storage_maintenance.rs"));
-    let body = window(m, "pub(crate) fn finalize_missed_challenges(", 1800);
+    let body = window(m, "pub(crate) fn finalize_missed_challenges(", 2600);
     assert!(body.contains("apply_bond_slash("));
     assert!(body.matches("apply_bond_slash(").count() >= 1);
     for file in [

@@ -636,6 +636,8 @@ fn f4_boost_share_accumulates_in_pending_bud_boost_share() {
             nft_id,
             amount: boost_amount,
         },
+        auth_claim: None,
+        claim_refs: Vec::new(),
     };
 
     Executor::apply_transaction_checked(&mut state, &tx).unwrap();
