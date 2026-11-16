@@ -557,6 +557,9 @@ pub enum ChallengeOutcome {
     Mismatched,
     /// Deadline elapsed without a response. Operator bond slashed.
     Missed,
+    /// Another challenge already slashed the deal while this challenge was
+    /// still open. Opener bond returned with zero additional operator slash.
+    DealSlashed,
 }
 
 /// A finalized challenge with its outcome and the slash amount (if any)
@@ -4407,6 +4410,61 @@ impl StorageRegistry {
         Some(ticket_id)
     }
 
+    /// Return every bonded unresolved sibling challenge on `deal_id` other than
+    /// `exclude_challenge_id` so the chain layer can preflight and refund every
+    /// sibling opener's bond when the deal is slashed.
+    #[must_use]
+    pub fn open_sibling_opener_refunds(
+        &self,
+        deal_id: u64,
+        exclude_challenge_id: u64,
+    ) -> Vec<(Address, u64)> {
+        self.challenges
+            .values()
+            .filter(|c| {
+                c.deal_id == deal_id
+                    && c.challenge_id != exclude_challenge_id
+                    && !self.results.contains_key(&c.challenge_id)
+                    && c.opener != Address::zero()
+                    && c.opener_bond > 0
+            })
+            .map(|c| (c.opener, c.opener_bond))
+            .collect()
+    }
+
+    /// Close every other unresolved challenge on `deal_id` with
+    /// [`ChallengeOutcome::DealSlashed`] and `slashed_bond = 0` so slashing a
+    /// deal never strands sibling challenges or their opener bonds.
+    fn resolve_sibling_challenges_on_slash(
+        &mut self,
+        deal_id: u64,
+        trigger_challenge_id: u64,
+        epoch: u64,
+    ) {
+        let sibling_ids: Vec<u64> = self
+            .challenges
+            .values()
+            .filter(|c| {
+                c.deal_id == deal_id
+                    && c.challenge_id != trigger_challenge_id
+                    && !self.results.contains_key(&c.challenge_id)
+            })
+            .map(|c| c.challenge_id)
+            .collect();
+        for sib_id in sibling_ids {
+            self.results.insert(
+                sib_id,
+                ChallengeResult {
+                    challenge_id: sib_id,
+                    deal_id,
+                    outcome: ChallengeOutcome::DealSlashed,
+                    finalized_epoch: epoch,
+                    slashed_bond: 0,
+                },
+            );
+        }
+    }
+
     /// Slashes the deal behind a mismatched answer and opens its repair ticket.
     fn slash_for_mismatched_answer(
         &mut self,
@@ -4421,6 +4479,7 @@ impl StorageRegistry {
         let slashed_bond = deal.economics.operator_bond;
         deal.status = DealStatus::Slashed;
         self.open_slash_reallocation(deal_id, response_epoch);
+        self.resolve_sibling_challenges_on_slash(deal_id, challenge_id, response_epoch);
         Ok(ChallengeResult {
             challenge_id,
             deal_id,
@@ -4478,6 +4537,7 @@ impl StorageRegistry {
             slash_amount
         };
         self.open_slash_reallocation(deal_id, now_epoch);
+        self.resolve_sibling_challenges_on_slash(deal_id, challenge_id, now_epoch);
 
         let result = ChallengeResult {
             challenge_id,

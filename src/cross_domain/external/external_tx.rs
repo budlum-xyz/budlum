@@ -486,6 +486,16 @@ mod tests {
         let mut state = AccountState::new();
         let poster = addr(9);
         state.add_balance(&poster, bond() * 4);
+        if let AdapterSpec::EthereumSync {
+            network,
+            committee: Some(committee),
+        } = spec()
+        {
+            state
+                .settlement
+                .external_intake
+                .pin_ethereum_committee(network, committee);
+        }
         let tx = ExternalDomainTx::Register(Box::new(request(poster)));
         execute_external_domain_tx(&mut state, &ctx(poster), &tx).expect("registers");
         let key = *state
@@ -582,6 +592,16 @@ mod tests {
         let mut state = AccountState::new();
         let poster = addr(9);
         state.add_balance(&poster, bond() * 4);
+        if let AdapterSpec::EthereumSync {
+            network,
+            committee: Some(committee),
+        } = spec()
+        {
+            state
+                .settlement
+                .external_intake
+                .pin_ethereum_committee(network, committee);
+        }
         let mut bad = request(poster);
         // A golden sample with no signers cannot verify: admission refuses.
         bad.golden.payload[layout::PARTICIPATION_BITS].copy_from_slice(&[0x00; 64]);

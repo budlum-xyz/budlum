@@ -1,6 +1,7 @@
 use crate::chain::blockchain::Blockchain;
 use crate::consensus::pow::PoWEngine;
 use crate::core::address::Address;
+use crate::core::transaction::ExternalChain;
 
 use crate::cross_domain::DomainEventTree;
 use crate::domain::finality_adapter::leading_zero_bits;
@@ -192,7 +193,14 @@ fn pow_fixture(
 ) {
     let mut chain = Blockchain::new(Arc::new(PoWEngine::new(0)), None, 45262, None);
 
-    let mut source = default_domain(41, ConsensusKind::PoW, 41_001, POW_HEADER_CHAIN_ADAPTER, 3);
+    let bitcoin = ExternalChain::Bitcoin;
+    let mut source = default_domain(
+        bitcoin.domain_id(),
+        ConsensusKind::PoW,
+        bitcoin.canonical_chain_id(),
+        POW_HEADER_CHAIN_ADAPTER,
+        3,
+    );
     source.operator = Some(address(41));
     source.bridge_enabled = true;
     source.pow_parameters = Some(PoWDomainParameters {

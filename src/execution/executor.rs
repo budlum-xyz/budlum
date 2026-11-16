@@ -525,18 +525,20 @@ impl Executor {
 
                 let min_stake = crate::core::chain_config::Network::from_chain_id(tx.chain_id)
                     .map_or(1, |network| network.min_stake());
+                let liveness_suspended = state.liveness.is_suspended(&tx.from);
                 let validator = state.get_validator_mut(&tx.from);
 
                 if let Some(v) = validator {
                     v.stake = v.stake.checked_add(stake_amount).ok_or_else(|| {
                         BudlumError::validation("stake_overflow", "stake overflow")
                     })?;
-                    // `!v.jailed` is not decoration: a liveness-fault jail is
-                    // a timed ban that the admission gates read through
-                    // `is_eligible`, and `active` must not report a banned
-                    // validator as available. Left out, one 1-unit top-up
-                    // rewrote `active` while the term was still running.
-                    v.active = v.stake >= min_stake && v.is_consensus_ready() && !v.jailed;
+                    // `!v.jailed && !liveness_suspended` is not decoration:
+                    // neither a timed jail nor a V-4 liveness suspension can
+                    // be lifted silently by a 1-unit stake top-up.
+                    v.active = v.stake >= min_stake
+                        && v.is_consensus_ready()
+                        && !v.jailed
+                        && !liveness_suspended;
                     if !v.active {
                         tracing::warn!(
                             validator = %tx.from,
@@ -552,7 +554,10 @@ impl Executor {
                     // registry; plain `add_validator` auto-registers.
                     state.add_validator_with_floor(tx.from, stake_amount, min_stake);
                     if let Some(v) = state.get_validator_mut(&tx.from) {
-                        v.active = v.stake >= min_stake && v.is_consensus_ready() && !v.jailed;
+                        v.active = v.stake >= min_stake
+                            && v.is_consensus_ready()
+                            && !v.jailed
+                            && !liveness_suspended;
                         if !v.active {
                             tracing::warn!(
                                 validator = %tx.from,
@@ -703,6 +708,7 @@ impl Executor {
 
                 let min_stake = crate::core::chain_config::Network::from_chain_id(tx.chain_id)
                     .map_or(1, |network| network.min_stake());
+                let liveness_suspended = state.liveness.is_suspended(&tx.from);
                 let validator = state.get_validator_mut(&tx.from).ok_or_else(|| {
                     BudlumError::validation(
                         "validator_not_bonded",
@@ -719,12 +725,13 @@ impl Executor {
                 validator.bls_public_key = registration.bls_public_key.clone();
                 validator.pop_signature = registration.pop_signature.clone();
                 validator.pq_public_key = registration.pq_public_key.clone();
-                // Same jail rule as the stake paths: registering consensus
-                // keys does not lift a liveness-fault term early.
+                // Same jail and suspension rule as the stake paths: registering
+                // consensus keys does not lift a jail or a V-4 suspension early.
                 validator.active = validator.stake >= min_stake
                     && validator.is_consensus_ready()
                     && validator.verify_pop_is_valid(tx.chain_id)
-                    && !validator.jailed;
+                    && !validator.jailed
+                    && !liveness_suspended;
 
                 let sender = state.get_or_create(&tx.from);
                 sender.balance = sender.balance.checked_sub(tx.fee).ok_or_else(|| {
@@ -4021,25 +4028,80 @@ impl Executor {
 
                 let mut validator_keys = std::collections::BTreeMap::new();
                 match storage_tx.as_ref() {
-                    StorageTxV3::ReplaceObject { attestations, .. } => {
+                    StorageTxV3::RegisterObject { shares, .. } => {
+                        if shares.is_empty() {
+                            return Err(BudlumError::validation(
+                                "storage_v3_refused",
+                                "RegisterObject requires at least one consensus validator share holder",
+                            ));
+                        }
+                        for (_, share) in shares {
+                            let holder = Address::from(share.validator);
+                            let active_validator = state
+                                .get_validator(&holder)
+                                .is_some_and(|v| v.active && !v.slashed && !v.jailed);
+                            if !active_validator {
+                                return Err(BudlumError::validation(
+                                    "storage_v3_refused",
+                                    "RegisterObject share holder is not an active consensus validator",
+                                ));
+                            }
+                        }
+                    }
+                    StorageTxV3::CustodyAck { .. } => {
+                        let active_validator = state
+                            .get_validator(&tx.from)
+                            .is_some_and(|v| v.active && !v.slashed && !v.jailed);
+                        if !active_validator {
+                            return Err(BudlumError::validation(
+                                "storage_v3_refused",
+                                "CustodyAck signer is not an active consensus validator",
+                            ));
+                        }
+                    }
+                    StorageTxV3::ReplaceObject {
+                        attestations,
+                        new_shares,
+                        ..
+                    } => {
+                        for (_, share) in new_shares {
+                            let holder = Address::from(share.validator);
+                            let active_validator = state
+                                .get_validator(&holder)
+                                .is_some_and(|v| v.active && !v.slashed && !v.jailed);
+                            if !active_validator {
+                                return Err(BudlumError::validation(
+                                    "storage_v3_refused",
+                                    "ReplaceObject share holder is not an active consensus validator",
+                                ));
+                            }
+                        }
                         for att in attestations {
                             let v_addr = Address::from(att.validator);
-                            let key_opt = state
-                                .get_validator(&v_addr)
-                                .filter(|v| {
-                                    v.active
-                                        && !v.slashed
-                                        && !v.jailed
-                                        && !v.pq_public_key.is_empty()
-                                })
-                                .map(|v| v.pq_public_key.clone())
-                                .or_else(|| {
-                                    state
-                                        .validator_directory
-                                        .get(&v_addr)
-                                        .filter(|r| !r.operator_key.is_empty())
-                                        .map(|r| r.operator_key.clone())
-                                });
+                            // Never fall back to `validator_directory` when a validator is
+                            // present in consensus state but slashed, jailed, or inactive.
+                            let key_opt = match state.get_validator(&v_addr) {
+                                Some(v) => {
+                                    if v.active && !v.slashed && !v.jailed {
+                                        if v.pq_public_key.is_empty() {
+                                            state
+                                                .validator_directory
+                                                .get(&v_addr)
+                                                .filter(|r| !r.operator_key.is_empty())
+                                                .map(|r| r.operator_key.clone())
+                                        } else {
+                                            Some(v.pq_public_key.clone())
+                                        }
+                                    } else {
+                                        None
+                                    }
+                                }
+                                None => state
+                                    .validator_directory
+                                    .get(&v_addr)
+                                    .filter(|r| !r.operator_key.is_empty())
+                                    .map(|r| r.operator_key.clone()),
+                            };
                             if let Some(pk) = key_opt {
                                 validator_keys.insert(att.validator, pk);
                             }
@@ -4090,13 +4152,13 @@ impl Executor {
                             ));
                         }
                         // Also check Mobile share recipients are registered active validators
-                        // (so arbitrary non-validator addresses cannot be assigned shares).
+                        // (never fall back to `validator_directory` for a slashed/jailed/inactive validator).
                         for s in new_shares {
                             let recipient_addr = Address::from(s.validator);
-                            let active_validator = state
-                                .get_validator(&recipient_addr)
-                                .is_some_and(|v| v.active && !v.slashed && !v.jailed)
-                                || state.validator_directory.get(&recipient_addr).is_some();
+                            let active_validator = match state.get_validator(&recipient_addr) {
+                                Some(v) => v.active && !v.slashed && !v.jailed,
+                                None => state.validator_directory.get(&recipient_addr).is_some(),
+                            };
                             if !active_validator {
                                 return Err(BudlumError::validation(
                                     "storage_v3_refused",
@@ -4125,10 +4187,15 @@ impl Executor {
                 }
 
                 let epoch = state.epoch_index;
+                let mut verified_storage_tx = storage_tx.as_ref().clone();
+                if let StorageTxV3::ReplaceObject { proposer_stake, .. } = &mut verified_storage_tx {
+                    // Derive proposer stake from consensus validator state, never trusting caller input.
+                    *proposer_stake = state.get_validator(&tx.from).map_or(0, |v| v.stake);
+                }
                 let applied = crate::storage::bud3::tx::apply_with_validators(
                     &mut state.bud3_registry,
                     *tx.from.as_bytes(),
-                    storage_tx.as_ref().clone(),
+                    verified_storage_tx,
                     (tx.chain_id, epoch),
                     &validator_keys,
                 )
@@ -6046,5 +6113,52 @@ mod tests {
             })
             .expect_err("proof-required AI stays closed until the opening gates pass");
         assert!(err.contains("not accepted until full AI STARK verification is live"));
+    }
+
+    #[test]
+    fn suspended_validator_cannot_lift_suspension_via_stake_or_key_registration() {
+        use crate::core::transaction::{Transaction, TransactionType, DEFAULT_CHAIN_ID};
+        use crate::registry::RegistryParams;
+
+        let mut state = AccountState::new();
+        let validator = Address::from([0xE1; 32]);
+        let min_stake = crate::core::chain_config::Network::from_chain_id(DEFAULT_CHAIN_ID)
+            .map_or(1, |n| n.min_stake());
+        state.add_balance(&validator, min_stake.saturating_add(500_000));
+        state.add_validator(validator, min_stake);
+        if let Some(v) = state.get_validator_mut(&validator) {
+            v.vrf_public_key = vec![0xAA; 32];
+            v.bls_public_key = vec![0xBB; 48];
+            v.pq_public_key = vec![0xCC; 64];
+            v.pop_signature = vec![0xDD; 96];
+            assert!(v.is_consensus_ready());
+        }
+        let params = RegistryParams::default();
+        for epoch in 1..=params.liveness_max_missed_epochs {
+            let _ = state
+                .liveness
+                .record_epoch(epoch, &[validator], |_| false, &params);
+        }
+        assert!(state.liveness.is_suspended(&validator));
+        if let Some(v) = state.get_validator_mut(&validator) {
+            v.active = false;
+        }
+        let stake_tx = Transaction::new_with_chain_id(
+            validator,
+            Address::zero(),
+            1,
+            10,
+            0,
+            Vec::new(),
+            DEFAULT_CHAIN_ID,
+            TransactionType::Stake,
+        );
+        Executor::apply_transaction_checked(&mut state, &stake_tx)
+            .expect("stake top-up succeeds without lifting liveness suspension");
+        assert!(
+            !state.get_validator(&validator).unwrap().active,
+            "1-unit Stake top-up must never lift a V-4 liveness suspension"
+        );
+        assert!(state.liveness.is_suspended(&validator));
     }
 }

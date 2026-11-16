@@ -166,11 +166,88 @@ pub fn compute_ics23_leaf_hash(leaf_prefix: &[u8], key: &[u8], value: &[u8]) -> 
     Sha256::digest(&preimage).into()
 }
 
+/// Maximum ICS-23 inner or leaf prefix/suffix length in bytes.
+pub const MAX_ICS23_PREFIX_BYTES: usize = 128;
+/// Maximum ICS-23 proven key length in bytes.
+pub const MAX_ICS23_KEY_BYTES: usize = 512;
+/// Maximum ICS-23 proven value length in bytes.
+pub const MAX_ICS23_VALUE_BYTES: usize = 64 * 1024;
+/// Maximum Move resource value size in bytes for migration (`8.12.3`).
+pub const MAX_MOVE_RESOURCE_BYTES: usize = 64 * 1024;
+/// Maximum Move module name or resource type tag length in bytes.
+pub const MAX_MOVE_IDENT_BYTES: usize = 256;
+/// `CosmWasm` `x/wasm` store prefix for contract metadata (`ContractKeyPrefix`).
+pub const WASM_CONTRACT_INFO_PREFIX: u8 = 0x02;
+/// `CosmWasm` `x/wasm` store prefix for contract storage (`ContractStorePrefix`).
+pub const WASM_CONTRACT_STORE_PREFIX: u8 = 0x03;
+
+/// Canonical ICS-23 key for `CosmWasm` contract metadata under `x/wasm`.
+#[must_use]
+pub fn wasm_contract_info_proof_key(contract_address: &str) -> Vec<u8> {
+    let mut out = Vec::with_capacity(1 + contract_address.len());
+    out.push(WASM_CONTRACT_INFO_PREFIX);
+    out.extend_from_slice(contract_address.as_bytes());
+    out
+}
+
+/// Canonical ICS-23 key for one contract-scoped `CosmWasm` storage entry under `x/wasm`.
+#[must_use]
+pub fn wasm_storage_proof_key(contract_address: &str, local_key: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(2 + contract_address.len() + local_key.len());
+    out.push(WASM_CONTRACT_STORE_PREFIX);
+    out.extend_from_slice(contract_address.as_bytes());
+    out.push(b':');
+    out.extend_from_slice(local_key);
+    out
+}
+
+/// Canonical SHA-256 commitment over every `CosmWasm` storage entry in a migration request.
+#[must_use]
+pub fn wasm_storage_entries_hash(entries: &[Ics23ExistenceProof]) -> [u8; 32] {
+    let mut h = Sha256::new();
+    h.update(b"BDLM_WASM_MIGRATION_STORAGE_V1");
+    h.update((entries.len() as u64).to_le_bytes());
+    for entry in entries {
+        h.update((entry.key.len() as u64).to_le_bytes());
+        h.update(&entry.key);
+        let val_hash: [u8; 32] = Sha256::digest(&entry.value).into();
+        h.update((entry.value.len() as u64).to_le_bytes());
+        h.update(val_hash);
+    }
+    h.finalize().into()
+}
+
+/// Canonical SHA3-256 commitment over every Move module/resource entry in a migration request.
+#[must_use]
+pub fn move_entries_hash(entries: &[MoveStateProofEntry]) -> [u8; 32] {
+    let mut h = Sha3_256::new();
+    h.update(b"BDLM_MOVE_MIGRATION_ENTRIES_V1");
+    h.update((entries.len() as u64).to_le_bytes());
+    for entry in entries {
+        let (kind_tag, ident): (u8, &str) = match &entry.kind {
+            MoveMigrationEntryKind::Module(name) => (0u8, name.as_str()),
+            MoveMigrationEntryKind::Resource(tag) => (1u8, tag.as_str()),
+        };
+        h.update([kind_tag]);
+        h.update((ident.len() as u64).to_le_bytes());
+        h.update(ident.as_bytes());
+        let val_hash: [u8; 32] = Sha3_256::digest(&entry.bytes).into();
+        h.update((entry.bytes.len() as u64).to_le_bytes());
+        h.update(val_hash);
+    }
+    h.finalize().into()
+}
+
 /// Verifies an [`Ics23ExistenceProof`] against `expected_root` and returns the node count.
+///
+/// Enforces IAVL/ICS-23 leaf vs. inner domain separation (`leaf_prefix[0] == 0x00`,
+/// non-empty `inner.prefix` with `inner.prefix[0] != 0x00`) and strict length
+/// bounds on every proof field to prevent inner-node-as-leaf forgery and
+/// memory-exhaustion attacks.
 ///
 /// # Errors
 ///
-/// Returns [`ImportError`] when the path exceeds bounds or the reconstructed root mismatches.
+/// Returns [`ImportError`] when any bound or domain tag is invalid or the reconstructed root mismatches.
 pub fn verify_ics23_existence(
     proof: &Ics23ExistenceProof,
     expected_root: &[u8; 32],
@@ -180,8 +257,30 @@ pub fn verify_ics23_existence(
             "ICS-23 proof depth exceeds bound",
         )));
     }
+    if proof.leaf_prefix.is_empty()
+        || proof.leaf_prefix[0] != 0x00
+        || proof.leaf_prefix.len() > MAX_ICS23_PREFIX_BYTES
+    {
+        return Err(ImportError::StateError(String::from(
+            "ICS-23 leaf_prefix must start with 0x00 and fit within bound",
+        )));
+    }
+    if proof.key.len() > MAX_ICS23_KEY_BYTES || proof.value.len() > MAX_ICS23_VALUE_BYTES {
+        return Err(ImportError::StateError(String::from(
+            "ICS-23 proof key or value exceeds bound",
+        )));
+    }
     let mut current = compute_ics23_leaf_hash(&proof.leaf_prefix, &proof.key, &proof.value);
     for inner in &proof.path {
+        if inner.prefix.is_empty()
+            || inner.prefix[0] == 0x00
+            || inner.prefix.len() > MAX_ICS23_PREFIX_BYTES
+            || inner.suffix.len() > MAX_ICS23_PREFIX_BYTES
+        {
+            return Err(ImportError::StateError(String::from(
+                "ICS-23 inner op prefix/suffix invalid or exceeds bound",
+            )));
+        }
         let mut buf = Vec::with_capacity(inner.prefix.len() + 32 + inner.suffix.len());
         buf.extend_from_slice(&inner.prefix);
         buf.extend_from_slice(&current);
@@ -202,23 +301,30 @@ pub fn verify_ics23_existence(
 }
 
 /// Computes the domain-separated signing digest for a `8.12.3` WASM migration.
+///
+/// Commits to `label` and `storage_entries_hash` so a mempool front-runner
+/// cannot strip or alter migrated storage entries while reusing the creator's
+/// signature.
 #[must_use]
 pub fn wasm_migration_digest(
-    budlum_chain_id: u64,
-    source_domain_id: u32,
-    source_block: u64,
+    source: (u64, u32, u64),
     contract_address: &str,
     code_hash: &[u8; 32],
     state_root: &[u8; 32],
+    label: &str,
+    storage_entries_hash: &[u8; 32],
 ) -> [u8; 32] {
+    let (budlum_chain_id, source_domain_id, source_block) = source;
     hash_fields_bytes(&[
-        b"BDLM_WASM_MIGRATION_V1",
+        b"BDLM_WASM_MIGRATION_V2",
         &budlum_chain_id.to_le_bytes(),
         &source_domain_id.to_le_bytes(),
         &source_block.to_le_bytes(),
         contract_address.as_bytes(),
         code_hash,
         state_root,
+        label.as_bytes(),
+        storage_entries_hash,
     ])
 }
 
@@ -287,6 +393,9 @@ pub fn fold_sha256_merkle(leaf: [u8; 32], index: usize, siblings: &[[u8; 32]]) -
 }
 
 /// Computes the domain-separated signing digest for a `8.12.3` Move migration.
+///
+/// Commits to `entries_hash` so a mempool front-runner cannot strip or alter
+/// migrated Move modules/resources while reusing the account owner's signature.
 #[must_use]
 pub fn move_migration_digest(
     budlum_chain_id: u64,
@@ -294,14 +403,16 @@ pub fn move_migration_digest(
     source_version: u64,
     account: &[u8; 32],
     state_root: &[u8; 32],
+    entries_hash: &[u8; 32],
 ) -> [u8; 32] {
     hash_fields_bytes(&[
-        b"BDLM_MOVE_MIGRATION_V1",
+        b"BDLM_MOVE_MIGRATION_V2",
         &budlum_chain_id.to_le_bytes(),
         &source_domain_id.to_le_bytes(),
         &source_version.to_le_bytes(),
         account,
         state_root,
+        entries_hash,
     ])
 }
 
@@ -337,19 +448,29 @@ pub fn fold_sha3_merkle(leaf: [u8; 32], index: usize, siblings: &[[u8; 32]]) -> 
     cur
 }
 
-/// The source root must be one this chain anchored for the source domain.
+/// The source root must be anchored by an active canonical recognized chain
+/// domain whose registered chain id matches the chain's canonical id.
 ///
-/// A request carries its own root. A proof checked against that root only shows
-/// the request agrees with itself, so anyone could fabricate a source state for
-/// any address and install it. The consensus-owned anchor is the one root the
-/// migrator cannot choose.
+/// A request carries its own root, and permissionless domains outside the
+/// canonical recognized chain set can anchor registrant-chosen roots. Resolving
+/// both canonical membership and `DomainStatus::Active` ensures neither a
+/// permissionless registrant nor a frozen/retired domain can vouch for a root.
 fn require_attested_root(
     state: &AccountState,
     domain: u32,
     root: &[u8; 32],
 ) -> Result<(), ImportError> {
+    let chain = crate::settlement::domains::anchor_recognized_chain(domain)
+        .ok_or(ImportError::SourceNotAttested { domain })?;
+    let active_canonical = state
+        .settlement
+        .domains
+        .get(domain)
+        .is_some_and(|registered| {
+            registered.is_active() && registered.domain_chain_id == chain.canonical_chain_id()
+        });
     match state.external_roots.get(&domain) {
-        Some(anchored) if anchored == root => Ok(()),
+        Some(anchored) if active_canonical && anchored == root => Ok(()),
         _ => Err(ImportError::SourceNotAttested { domain }),
     }
 }
@@ -426,13 +547,14 @@ pub(crate) fn apply_wasm_migration(
 
     validate_cosmwasm_bytecode(&req.wasm_code).map_err(ImportError::StateError)?;
     let code_hash: [u8; 32] = Sha256::digest(&req.wasm_code).into();
+    let storage_hash = wasm_storage_entries_hash(&req.storage_entries);
     let digest = wasm_migration_digest(
-        req.budlum_chain_id,
-        req.source_domain_id,
-        req.source_block,
+        (req.budlum_chain_id, req.source_domain_id, req.source_block),
         &req.contract_address,
         &code_hash,
         &req.state_root,
+        &req.label,
+        &storage_hash,
     );
     verify_cosmos_secp256k1_migration_sig(
         &digest,
@@ -442,10 +564,11 @@ pub(crate) fn apply_wasm_migration(
     )
     .map_err(ImportError::StateError)?;
 
-    let mut total_nodes = verify_ics23_existence(&req.contract_info_proof, &req.state_root)?;
-    if req.contract_info_proof.key != req.contract_address.as_bytes() {
+    let expected_info_key = wasm_contract_info_proof_key(&req.contract_address);
+    if req.contract_info_proof.key != expected_info_key {
         return Err(ImportError::ContractMismatch);
     }
+    let mut total_nodes = verify_ics23_existence(&req.contract_info_proof, &req.state_root)?;
     let proven_info: serde_json::Value = serde_json::from_slice(&req.contract_info_proof.value)
         .map_err(|e| ImportError::StateError(format!("invalid CosmWasm contract info: {e}")))?;
     if proven_info.get("code_hash").and_then(|v| v.as_str())
@@ -455,15 +578,28 @@ pub(crate) fn apply_wasm_migration(
         return Err(ImportError::CodeHashMismatch);
     }
 
+    let storage_prefix = wasm_storage_proof_key(&req.contract_address, b"");
     let mut seen_keys = BTreeSet::new();
+    let mut local_entries: Vec<(&[u8], &[u8])> = Vec::with_capacity(req.storage_entries.len());
     for entry in &req.storage_entries {
-        if !seen_keys.insert(entry.key.as_slice()) {
+        let Some(local_key) = entry.key.strip_prefix(storage_prefix.as_slice()) else {
+            return Err(ImportError::StateError(String::from(
+                "WASM storage proof key is not scoped to the migrating contract",
+            )));
+        };
+        if local_key.is_empty() {
+            return Err(ImportError::StateError(String::from(
+                "WASM storage proof carries an empty contract-local key",
+            )));
+        }
+        if !seen_keys.insert(local_key) {
             return Err(ImportError::StateError(String::from(
                 "duplicate WASM migration storage key",
             )));
         }
         let nodes = verify_ics23_existence(entry, &req.state_root)?;
         total_nodes = total_nodes.saturating_add(nodes);
+        local_entries.push((local_key, entry.value.as_slice()));
     }
 
     let contract_bytes = req.contract_address.as_bytes().to_vec();
@@ -505,14 +641,14 @@ pub(crate) fn apply_wasm_migration(
         .execution_state
         .write(NS_WASM_CONTRACT, &contract_bytes, Some(&meta_bytes))
         .map_err(ImportError::StateError)?;
-    for entry in &req.storage_entries {
-        let sk = wasm_store_key(&contract_bytes, &entry.key);
+    for (local_key, value) in &local_entries {
+        let sk = wasm_store_key(&contract_bytes, local_key);
         state
             .execution_state
-            .write(NS_WASM_STORE, &sk, Some(&entry.value))
+            .write(NS_WASM_STORE, &sk, Some(value))
             .map_err(ImportError::StateError)?;
     }
-    Ok((code_hash, contract_bytes, req.storage_entries.len(), fee))
+    Ok((code_hash, contract_bytes, local_entries.len(), fee))
 }
 
 pub(crate) fn apply_svm_migration(
@@ -630,6 +766,25 @@ pub(crate) fn apply_svm_migration(
     Ok((req.pubkey, data_len, fee))
 }
 
+/// Returns `true` when `addr_str` is a canonical or zero-padded hex encoding
+/// of the Aptos framework address `0x1` (case-insensitive `0x`/`0X`).
+fn is_framework_address_hex(addr_str: &str) -> bool {
+    let trimmed = addr_str.trim();
+    let Some(hex_body) = trimmed
+        .strip_prefix("0x")
+        .or_else(|| trimmed.strip_prefix("0X"))
+    else {
+        return false;
+    };
+    if hex_body.is_empty()
+        || hex_body.len() > 64
+        || !hex_body.bytes().all(|b| b.is_ascii_hexdigit())
+    {
+        return false;
+    }
+    hex_body.trim_start_matches('0') == "1"
+}
+
 fn is_forbidden_move_entry(account: &[u8; 32], kind: &MoveMigrationEntryKind) -> bool {
     let mut framework = [0u8; 32];
     framework[31] = 1;
@@ -639,13 +794,52 @@ fn is_forbidden_move_entry(account: &[u8; 32], kind: &MoveMigrationEntryKind) ->
             if !mod_prefix_is_framework {
                 return false;
             }
-            let full = format!("0x1::{name}");
+            let full = format!("0x1::{}", name.trim());
             FORBIDDEN_MOVE_MODULES.contains(&full.as_str())
         }
         MoveMigrationEntryKind::Resource(tag) => {
-            FORBIDDEN_MOVE_MODULES.iter().any(|m| tag.starts_with(m))
+            let mut parts = tag.split("::");
+            let Some(addr_part) = parts.next() else {
+                return false;
+            };
+            let Some(mod_part) = parts.next() else {
+                return false;
+            };
+            if !is_framework_address_hex(addr_part) {
+                return false;
+            }
+            let full = format!("0x1::{}", mod_part.trim());
+            FORBIDDEN_MOVE_MODULES.contains(&full.as_str())
         }
     }
+}
+
+fn state_key_move_migrated(account: &[u8; 32]) -> Vec<u8> {
+    [b"migrated:".as_slice(), account.as_slice()].concat()
+}
+
+fn is_move_account_occupied(
+    exec_state: &crate::execution::coordinator::state::ExecutionState,
+    account: &[u8; 32],
+) -> Result<bool, ImportError> {
+    if exec_state
+        .read(NS_MOVE_STATE, &state_key_move_migrated(account))
+        .map_err(ImportError::StateError)?
+        .is_some()
+    {
+        return Ok(true);
+    }
+    let mod_prefix = [b"mod:".as_slice(), account.as_slice(), b":".as_slice()].concat();
+    if exec_state
+        .has_key_with_prefix(NS_MOVE_STATE, &mod_prefix)
+        .map_err(ImportError::StateError)?
+    {
+        return Ok(true);
+    }
+    let res_prefix = [b"res:".as_slice(), account.as_slice(), b":".as_slice()].concat();
+    exec_state
+        .has_key_with_prefix(NS_MOVE_STATE, &res_prefix)
+        .map_err(ImportError::StateError)
 }
 
 pub(crate) fn apply_move_migration(
@@ -674,6 +868,9 @@ pub(crate) fn apply_move_migration(
     {
         return Err(ImportError::AddressOccupied);
     }
+    if is_move_account_occupied(&state.execution_state, &req.account)? {
+        return Err(ImportError::AddressOccupied);
+    }
     let bud_addr = derive_contract_account(EeId::MOVE, &req.account);
     if state.get_attos_balance(&bud_addr) > 0 {
         return Err(ImportError::AddressOccupied);
@@ -684,12 +881,14 @@ pub(crate) fn apply_move_migration(
         .as_slice()
         .try_into()
         .map_err(|_| ImportError::StateError(String::from("Aptos signature != 64 bytes")))?;
+    let entries_hash = move_entries_hash(&req.entries);
     let digest = move_migration_digest(
         req.budlum_chain_id,
         req.source_domain_id,
         req.source_version,
         &req.account,
         &req.state_root,
+        &entries_hash,
     );
     verify_aptos_migration_sig(&digest, &req.signer_pubkey, &sig64, &req.account)
         .map_err(ImportError::StateError)?;
@@ -713,6 +912,7 @@ pub(crate) fn apply_move_migration(
         let state_key = match &entry.kind {
             MoveMigrationEntryKind::Module(name) => {
                 if name.is_empty()
+                    || name.len() > MAX_MOVE_IDENT_BYTES
                     || entry.bytes.len() > MAX_MOVE_BUNDLE_BYTES
                     || entry.bytes.get(..4) != Some(&MOVE_BINARY_MAGIC)
                 {
@@ -723,9 +923,13 @@ pub(crate) fn apply_move_migration(
                 state_key_module(&req.account, name)
             }
             MoveMigrationEntryKind::Resource(tag) => {
-                if tag.is_empty() || entry.bytes.is_empty() {
+                if tag.is_empty()
+                    || tag.len() > MAX_MOVE_IDENT_BYTES
+                    || entry.bytes.is_empty()
+                    || entry.bytes.len() > MAX_MOVE_RESOURCE_BYTES
+                {
                     return Err(ImportError::StateError(String::from(
-                        "empty Move resource tag or payload",
+                        "invalid Move resource tag or payload size",
                     )));
                 }
                 state_key_resource(&req.account, tag)
@@ -774,5 +978,15 @@ pub(crate) fn apply_move_migration(
             .write(NS_MOVE_STATE, k, Some(v))
             .map_err(ImportError::StateError)?;
     }
+    // Persist a permanent migration marker so later resource/module deletion can never reopen
+    // this account for a second migration.
+    state
+        .execution_state
+        .write(
+            NS_MOVE_STATE,
+            &state_key_move_migrated(&req.account),
+            Some(&req.source_version.to_le_bytes()),
+        )
+        .map_err(ImportError::StateError)?;
     Ok((req.account, writes.len(), fee))
 }
