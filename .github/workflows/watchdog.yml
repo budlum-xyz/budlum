@@ -21,7 +21,7 @@ name: Watchdog
 
 on:
   schedule:
-    - cron: "0 */6 * * *"
+    - cron: "37 5,11,17,23 * * *" # every six hours, offset from battery starts
   workflow_dispatch:
 
 concurrency:

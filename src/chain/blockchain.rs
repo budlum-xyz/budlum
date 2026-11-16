@@ -182,6 +182,15 @@ pub struct Blockchain {
     /// finalized prefix, never from this field, so losing it on restart only
     /// costs one record and the handover skips that pair.
     last_seat_participation: Option<crate::validators::committee::SeatParticipation>,
+    /// The claim frame of the next block this node produces, with the
+    /// transactions that use its claims. Set by the aggregator of the node,
+    /// taken by `produce_block`.
+    pending_block_frame: Option<(crate::aggregation::frame::ClaimFrame, Vec<Transaction>)>,
+    /// The aggregation side of this node: the object pool, the frames and
+    /// the claimed transactions that wait for a block. `None` until
+    /// `enable_aggregator` is called on a chain with the layer on. Node
+    /// local, never part of the state.
+    agg_node: Option<crate::aggregation::node::AggNode>,
     /// Votes that reached this node before it had a round - or a prevote
     /// quorum - to put them in. A peer votes the moment it holds the
     /// checkpoint, which can be earlier than this node's own aggregator
@@ -765,6 +774,16 @@ impl Blockchain {
             #[cfg(test)]
             panic!("Genesis PQ scheme mismatch: {e}");
         }
+        // The aggregation parameters decide which blocks are valid. A chain
+        // that turns the layer on in a build with no backend, or on the main
+        // network, would refuse every block that uses it: stop here instead.
+        if let Err(e) = resolved_genesis_config.validate_aggregation() {
+            error!("CRITICAL ERROR: {e}");
+            #[cfg(not(test))]
+            std::process::exit(1);
+            #[cfg(test)]
+            panic!("Genesis aggregation parameters refused: {e}");
+        }
         // Same treatment for the token distribution: a genesis whose
         // allocations do not sum to the fixed supply seeds no distribution
         // at all, and a chain built on it would look healthy while every
@@ -1089,6 +1108,7 @@ impl Blockchain {
         }
 
         let mut init_reorg_anchors: Vec<(usize, String, AccountState)> = Vec::new();
+        let aggregation = resolved_genesis_config.aggregation_or_default();
         for (position, block) in chain_vec.iter().enumerate().skip(start_index) {
             let preceding = match Self::checked_replay_prefix(&chain_vec, position) {
                 Ok(prefix) => prefix,
@@ -1100,7 +1120,7 @@ impl Blockchain {
                     panic!("Corrupted persisted chain: {error}");
                 }
             };
-            state = match Self::apply_block_effects(&state, block, preceding) {
+            state = match Self::apply_block_effects(&state, block, preceding, &aggregation) {
                 Ok(mut next_state) => {
                     // Startup replay must reconstruct exactly the same state
                     // as `produce_block` committed. `apply_block_effects`
@@ -1263,6 +1283,8 @@ impl Blockchain {
             local_invalid_votes: crate::registry::InvalidVoteTracker::new(),
             finality_aggregator: None,
             last_seat_participation: None,
+            pending_block_frame: None,
+            agg_node: None,
             early_finality_votes: EarlyFinalityVotes::default(),
             metrics: None,
             anchor_emission: AnchorEmission::default(),
@@ -4271,10 +4293,17 @@ impl Blockchain {
         }
         crate::execution::executor::check_transaction_features(self.chain_id, &tx.tx_type)
             .map_err(|error| error.message().to_string())?;
+        // A transaction the block rules of the aggregation layer would refuse
+        // must not wait here: the block built from it would be invalid.
+        crate::aggregation::chain::check_pool_transaction(&self.aggregation_params(), tx)?;
 
         let (expected_nonce, spendable_balance) = self.projected_sender_state(tx);
-        self.state
-            .validate_transaction_with_context(tx, expected_nonce, spendable_balance)
+        self.state.validate_transaction_with_context(
+            tx,
+            expected_nonce,
+            spendable_balance,
+            crate::core::account::TxAuthority::Inline,
+        )
     }
 
     pub fn tx_precheck(&self, tx: &Transaction) -> serde_json::Value {
@@ -4866,14 +4895,295 @@ impl Blockchain {
         })
     }
 
+    /// Run the aggregation side of this node, proving for `aggregator`:
+    /// from here on a signed quantum-safe transaction handed to
+    /// `add_transaction` goes to the object pool instead of being refused,
+    /// and the block producer carries the frames the pool yields.
+    ///
+    /// Returns the tick interval in milliseconds when the node runs it, and
+    /// `None` otherwise: only a chain whose genesis turned the layer on has
+    /// an aggregation side.
+    pub fn enable_aggregator(&mut self, aggregator: Address) -> Option<u64> {
+        let params = self.aggregation_params();
+        self.agg_node = crate::aggregation::node::AggNode::new(
+            &params,
+            self.chain_id,
+            aggregator,
+            &self.state.scheme_registry,
+        );
+        self.agg_node.as_ref().map(|_| params.tick_ms)
+    }
+
+    /// An object arrived with the transaction it authorizes: from a peer on
+    /// `agg/object`, or from `add_transaction` for a transaction signed
+    /// here. Returns whether the pair is new to this node.
+    ///
+    /// The transaction is checked against the state as the next one of its
+    /// sender, behind the claimed transactions that already wait; the pool
+    /// then verifies the object itself. Nothing is kept on a refusal.
+    ///
+    /// # Errors
+    ///
+    /// The refusal, which also says whether the sender is to blame.
+    fn submit_object(
+        &mut self,
+        envelope: crate::aggregation::envelope::Envelope,
+        tx: Transaction,
+    ) -> Result<bool, crate::aggregation::node::ObjectRefusal> {
+        use crate::aggregation::node::ObjectRefusal;
+        let Some(node) = self.agg_node.as_ref() else {
+            return Err(ObjectRefusal::NoAggregator);
+        };
+        node.check_form(&envelope, &tx)?;
+        if tx.chain_id != self.chain_id {
+            return Err(ObjectRefusal::Transaction(format!(
+                "Invalid Chain ID: expected {}, got {}",
+                self.chain_id, tx.chain_id
+            )));
+        }
+        crate::execution::executor::check_transaction_features(self.chain_id, &tx.tx_type)
+            .map_err(|error| ObjectRefusal::Transaction(error.message().to_string()))?;
+        if node.holds(&tx.signing_hash()) {
+            return Ok(false);
+        }
+        let (expected_nonce, reserved) = node.projected(&tx.from, self.state.get_nonce(&tx.from));
+        let spendable = self
+            .state
+            .spendable_balance(&tx.from)
+            .saturating_sub(reserved);
+        // Read-only, and ahead of the proof it names: the pool verifies the
+        // object right below, and nothing is kept unless that passes.
+        self.state
+            .validate_transaction_with_context(
+                &tx,
+                expected_nonce,
+                spendable,
+                crate::core::account::TxAuthority::ClaimChecked,
+            )
+            .map_err(ObjectRefusal::Transaction)?;
+        match self.agg_node.as_mut() {
+            Some(node) => node.admit(envelope, tx, &self.state.scheme_registry),
+            None => Err(ObjectRefusal::NoAggregator),
+        }
+    }
+
+    /// The wire form of `submit_object`: the envelope as it arrived on
+    /// `agg/object`.
+    ///
+    /// # Errors
+    ///
+    /// The refusal, which also says whether the sender is to blame.
+    pub fn receive_object(
+        &mut self,
+        envelope: &[u8],
+        tx: Transaction,
+    ) -> Result<bool, crate::aggregation::node::ObjectRefusal> {
+        let envelope = crate::aggregation::chain::decode_gossip_object(envelope)
+            .map_err(crate::aggregation::node::ObjectRefusal::Malformed)?;
+        self.submit_object(envelope, tx)
+    }
+
+    /// A frame arrived on `agg/frame`. It is decoded under the wire limits
+    /// and verified; returns whether it is new to this node.
+    ///
+    /// # Errors
+    ///
+    /// Why the frame was dropped. A node without an aggregation side takes
+    /// no frame.
+    pub fn receive_frame(&mut self, frame: &[u8]) -> Result<bool, String> {
+        let Some(node) = self.agg_node.as_mut() else {
+            return Err("this node runs no aggregator".into());
+        };
+        let frame = crate::aggregation::chain::decode_gossip_frame(frame)?;
+        node.on_frame(frame).map_err(|e| e.to_string())
+    }
+
+    /// One tick of the aggregator of this node: the encoded frames to
+    /// publish on `agg/frame`. Empty without an aggregation side.
+    pub fn aggregation_tick(&mut self) -> Vec<Vec<u8>> {
+        let Some(node) = self.agg_node.as_mut() else {
+            return Vec::new();
+        };
+        let outcome = node.on_tick(&self.state.scheme_registry);
+        if let Some(error) = outcome.error {
+            warn!("Aggregation tick skipped: {error}");
+        }
+        outcome
+            .publish
+            .iter()
+            .map(crate::aggregation::frame::ClaimFrame::encode)
+            .collect()
+    }
+
+    /// Ask the aggregation side for the frame of the next block (block
+    /// producer, steps 1 to 4). A transaction of the frame that cannot run
+    /// on the state is forgotten and the pool is asked again: frames that
+    /// need it are passed over from then on, so one stale transaction costs
+    /// the claims of its frame and not every block after it.
+    fn stage_block_frame(&mut self) {
+        /// Rounds of asking again before the block goes without a frame.
+        const ROUNDS: usize = 8;
+        if self.pending_block_frame.is_some() {
+            return;
+        }
+        for _ in 0..ROUNDS {
+            let Some((frame, transactions)) =
+                self.agg_node.as_ref().and_then(|node| node.block_input())
+            else {
+                return;
+            };
+            let mut probe = self.state.clone();
+            match Self::frame_transactions(&mut probe, &transactions) {
+                Ok(_) => {
+                    if let Err(error) = self.set_block_frame(frame, transactions) {
+                        warn!("Block frame not staged: {error}");
+                    }
+                    return;
+                }
+                Err(stale) => {
+                    if let Some(node) = self.agg_node.as_mut() {
+                        node.drop_transaction(&stale);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Tell the aggregation side about the blocks from `from` on, after
+    /// they were committed: their frames are done and the claimed
+    /// transactions they spent leave the store.
+    fn aggregation_after_commit(&mut self, from: usize) {
+        let Some(node) = self.agg_node.as_mut() else {
+            return;
+        };
+        let state = &self.state;
+        for block in self.chain.iter().skip(from) {
+            node.on_block(block, |tx| tx.nonce < state.get_nonce(&tx.from));
+        }
+    }
+
+    /// Hand the producer the frame of its next block and the transactions
+    /// that use its claims (block producer, aggregation directive 6.4, steps
+    /// 3 to 5). The frame was verified by the aggregator that built it; the
+    /// block built from it is checked again in full before it is committed.
+    ///
+    /// The frame waits for one block. If the block cannot carry it (a
+    /// transaction no longer valid, a rule broken), the frame is dropped and
+    /// the block is built without it.
+    ///
+    /// WIRING: `stage_block_frame` is the production caller, with the frame
+    /// the aggregation side of the node chose; the tests of the layer hand
+    /// in frames of their own to reach the block rules.
+    ///
+    /// # Errors
+    ///
+    /// When the layer is not on, or a transaction of the list uses no claim.
+    pub(crate) fn set_block_frame(
+        &mut self,
+        frame: crate::aggregation::frame::ClaimFrame,
+        transactions: Vec<Transaction>,
+    ) -> Result<(), String> {
+        if self.aggregation_params().mode != crate::aggregation::params::AggMode::On {
+            return Err("aggregation is not on: no block carries a frame".into());
+        }
+        if let Some(tx) = transactions.iter().find(|tx| !tx.uses_claims()) {
+            return Err(format!(
+                "transaction {} uses no claim and does not belong to a frame",
+                tx.hash
+            ));
+        }
+        self.pending_block_frame = Some((frame, transactions));
+        Ok(())
+    }
+
+    /// The transactions of the pending block frame that are valid on top of
+    /// `state`, in order, applied to it. When one of them is not, `state`
+    /// is untouched and the error is the signing hash of that transaction:
+    /// the frame cannot go into this block.
+    fn frame_transactions(
+        state: &mut AccountState,
+        transactions: &[Transaction],
+    ) -> Result<Vec<Transaction>, [u8; 32]> {
+        let mut candidate = state.clone();
+        for tx in transactions {
+            let checked = if tx.is_claimed() {
+                candidate.validate_claimed_transaction(tx)
+            } else {
+                candidate.validate_transaction(tx)
+            };
+            if let Err(error) = checked {
+                warn!(
+                    "Block frame dropped: transaction {} refused: {error}",
+                    tx.hash
+                );
+                return Err(tx.signing_hash());
+            }
+            if let Err(error) = Executor::apply_transaction_checked(&mut candidate, tx) {
+                warn!(
+                    "Block frame dropped: transaction {} failed: {error}",
+                    tx.hash
+                );
+                return Err(tx.signing_hash());
+            }
+        }
+        *state = candidate;
+        Ok(transactions.to_vec())
+    }
+
+    /// The JSON bytes one transaction takes in a block, separator included:
+    /// the measure the block size limit of consensus uses.
+    fn transaction_block_bytes(tx: &Transaction) -> usize {
+        serde_json::to_vec(tx).map_or(usize::MAX, |bytes| bytes.len().saturating_add(1))
+    }
+
+    /// The transaction byte budget of a block: the block size limit less
+    /// the allowances for the header and for slashing evidence, the same
+    /// two `collect_block_transactions` holds back.
+    const fn block_transaction_budget() -> usize {
+        crate::consensus::MAX_BLOCK_SIZE
+            .saturating_sub(4096)
+            .saturating_sub(crate::consensus::MAX_SLASHING_EVIDENCE_BYTES + 1024)
+    }
+
+    /// Put the transactions of the block frame into the block that is being
+    /// built on `state`: the transactions, and the block bytes they and the
+    /// frame take together. `None`, with `state` untouched, when the frame
+    /// cannot be carried: there is none, one of its transactions is no
+    /// longer valid, or the frame (`frame_bytes` of JSON) and its
+    /// transactions do not fit a block. The frame is part of what the block
+    /// size limit counts, so a block that carried it anyway would be
+    /// refused by its own validation.
+    fn frame_into_block(
+        state: &mut AccountState,
+        frame_transactions: &[Transaction],
+        frame_bytes: usize,
+    ) -> Option<(Vec<Transaction>, usize)> {
+        if frame_transactions.is_empty() {
+            return None;
+        }
+        let bytes = frame_transactions.iter().fold(frame_bytes, |acc, tx| {
+            acc.saturating_add(Self::transaction_block_bytes(tx))
+        });
+        if bytes > Self::block_transaction_budget() {
+            warn!("Block frame dropped: it does not fit a block next to its transactions");
+            return None;
+        }
+        Self::frame_transactions(state, frame_transactions)
+            .ok()
+            .map(|taken| (taken, bytes))
+    }
+
     fn collect_block_transactions(
         &self,
         block_timestamp_ms: u128,
         previous_hash: &str,
-    ) -> Vec<Transaction> {
+        frame_transactions: &[Transaction],
+        frame_bytes: usize,
+    ) -> (Vec<Transaction>, bool) {
         let pending_txs = self
             .mempool
             .get_sorted_transactions(crate::consensus::MAX_TRANSACTIONS_PER_BLOCK);
+        let aggregation = self.aggregation_params();
         let mut valid_txs = Vec::new();
         let mut temp_state = self.state.clone();
         let set_block_context = |s: &mut crate::core::account::AccountState| {
@@ -4883,6 +5193,16 @@ impl Blockchain {
         };
         set_block_context(&mut temp_state);
         let mut included = std::collections::HashSet::new();
+        // The transactions of the block frame go first: the frame is only
+        // worth carrying if every one of them is in the block.
+        let framed = Self::frame_into_block(&mut temp_state, frame_transactions, frame_bytes);
+        let frame_taken = framed.is_some();
+        let mut block_bytes: usize = 0;
+        if let Some((taken, bytes)) = framed {
+            included.extend(taken.iter().map(|tx| tx.hash.clone()));
+            valid_txs = taken;
+            block_bytes = bytes;
+        }
         let mut progress = true;
         let mut contract_calls: u64 = 0;
         // The count cap above is not the binding limit: `validate_block_size`
@@ -4907,7 +5227,6 @@ impl Blockchain {
         let tx_byte_budget = crate::consensus::MAX_BLOCK_SIZE
             .saturating_sub(BLOCK_HEADER_JSON_ALLOWANCE)
             .saturating_sub(BLOCK_EVIDENCE_JSON_ALLOWANCE);
-        let mut block_bytes: usize = 0;
 
         while progress && valid_txs.len() < crate::consensus::MAX_TRANSACTIONS_PER_BLOCK {
             progress = false;
@@ -4919,6 +5238,11 @@ impl Blockchain {
                     continue;
                 }
                 if temp_state.validate_transaction(tx).is_err() {
+                    continue;
+                }
+                // A block built here carries no claim frame, so it may hold
+                // only what the aggregation rules allow without one.
+                if crate::aggregation::chain::check_pool_transaction(&aggregation, tx).is_err() {
                     continue;
                 }
                 // The producer keeps to the block's contract gas budget, so
@@ -4962,7 +5286,7 @@ impl Blockchain {
             }
         }
 
-        valid_txs
+        (valid_txs, frame_taken)
     }
 
     fn adjust_base_fee(state: &mut AccountState, tx_count: usize) {
@@ -5374,26 +5698,37 @@ impl Blockchain {
         base_state: &AccountState,
         block: &Block,
         preceding_chain: &[Block],
+        aggregation: &crate::aggregation::params::AggParams,
     ) -> Result<AccountState, String> {
-        Self::apply_block_effects_with_unfreezes(base_state, block, preceding_chain)
+        Self::apply_block_effects_with_unfreezes(base_state, block, preceding_chain, aggregation)
             .map(|(state, _)| state)
+    }
+
+    /// The aggregation parameters of this chain, fixed by its genesis.
+    fn aggregation_params(&self) -> crate::aggregation::params::AggParams {
+        self.genesis_config.aggregation_or_default()
     }
 
     fn apply_block_effects_with_unfreezes(
         base_state: &AccountState,
         block: &Block,
         preceding_chain: &[Block],
+        aggregation: &crate::aggregation::params::AggParams,
     ) -> Result<(AccountState, Vec<DomainId>), String> {
+        // The claim fees of the block: who pays, which transaction fails and
+        // who is paid. Empty for a block without a claim frame.
+        let claim_fees = crate::aggregation::chain::settlement_of(aggregation, block)?;
         let burn_cids = Self::collect_nft_burn_cids_from_state(base_state, block);
         let mut next_state = base_state.clone();
         next_state.current_block_height = block.index;
         next_state.current_block_unix_secs = Self::block_timestamp_secs(block.timestamp);
         next_state.current_block_entropy =
             Self::block_context_entropy(&block.previous_hash, &block.vrf_output);
-        Executor::apply_block_candidate_checked(
+        Executor::apply_block_candidate_with_claims(
             &mut next_state,
             &block.transactions,
             block.producer.as_ref(),
+            &claim_fees,
         )
         .map_err(|e| format!("Failed to apply block: {e}"))?;
         Self::apply_filiz_reveal(&mut next_state, block)?;
@@ -5614,8 +5949,93 @@ impl Blockchain {
             .last()
             .map_or_else(|| "0".repeat(64), |block| block.hash.clone());
         let block_timestamp = self.planned_block_timestamp(index);
-        let valid_txs = self.collect_block_transactions(block_timestamp, &previous_hash);
+        self.stage_block_frame();
+        // The frame waits for this block only: taken here, used or dropped.
+        // A frame one of whose transactions cannot pay for its claims is
+        // dropped: that transaction would fail in the block, and the claims
+        // it was to pay for would earn nothing.
+        let pending_frame = self
+            .pending_block_frame
+            .take()
+            .filter(|(frame, transactions)| {
+                let mut probe = Block::new_with_chain_id(
+                    index,
+                    previous_hash.clone(),
+                    transactions.clone(),
+                    self.chain_id,
+                );
+                probe.claim_frame = Some(frame.clone());
+                match crate::aggregation::chain::settlement_of(&self.aggregation_params(), &probe) {
+                    Ok(fees) if !fees.failed.contains(&true) => true,
+                    Ok(_) => {
+                        tracing::warn!(
+                            "Block frame dropped: a transaction cannot pay for its claims"
+                        );
+                        false
+                    }
+                    Err(error) => {
+                        tracing::warn!("Block frame dropped: {error}");
+                        false
+                    }
+                }
+            });
+        let frame_txs = pending_frame
+            .as_ref()
+            .map_or(&[][..], |(_, transactions)| transactions.as_slice());
+        let frame_bytes = pending_frame.as_ref().map_or(0, |(frame, _)| {
+            crate::aggregation::chain::frame_block_bytes(frame)
+        });
+        let (valid_txs, frame_taken) = self.collect_block_transactions(
+            block_timestamp,
+            &previous_hash,
+            frame_txs,
+            frame_bytes,
+        );
         let mut block = Block::new_with_chain_id(index, previous_hash, valid_txs, self.chain_id);
+        if let (false, Some((frame, _))) = (frame_taken, pending_frame.as_ref()) {
+            // The block goes without the frame. As it is, the frame cannot
+            // be carried: the aggregation side forgets it and offers the
+            // smaller frames over the same claims from the next block on.
+            if let Some(node) = self.agg_node.as_mut() {
+                node.drop_frame(frame);
+            }
+        }
+        if let (true, Some((frame, _))) = (frame_taken, pending_frame) {
+            // Block producer step 5: the frame goes into the body and its
+            // hash into the header. A frame whose hash cannot be taken or
+            // that breaks a block rule would make the block invalid for
+            // every validator, this node included: stop here.
+            let hashed = crate::aggregation::chain::claim_domain(self.chain_id)
+                .ok_or_else(|| "the chain has no claim domain".to_string())
+                .and_then(|domain| frame.hash(domain).map_err(|e| e.to_string()));
+            match hashed {
+                Ok(frame_hash) => {
+                    block.frame_hash = Some(frame_hash);
+                    block.claim_frame = Some(frame);
+                }
+                Err(error) => {
+                    tracing::warn!("Block frame refused, no block built: {error}");
+                    if let Some(node) = self.agg_node.as_mut() {
+                        node.drop_frame(&frame);
+                    }
+                    return None;
+                }
+            }
+            if let Err(error) = crate::aggregation::chain::check_block(
+                &self.aggregation_params(),
+                &self.state.scheme_registry,
+                &block,
+            ) {
+                tracing::warn!("Block frame refused, no block built: {error}");
+                // This slot is lost; the frame must not cost the next one.
+                if let (Some(node), Some(frame)) =
+                    (self.agg_node.as_mut(), block.claim_frame.as_ref())
+                {
+                    node.drop_frame(frame);
+                }
+                return None;
+            }
+        }
         block.witness_root = Some(block.calculate_witness_root());
         // One byte budget for every consensus payload this block carries on
         // top of its transactions. `collect_block_transactions` reserves a
@@ -5638,6 +6058,12 @@ impl Blockchain {
             crate::registry::invalid_vote::MAX_SPAM_REPORT_JSON_BYTES;
         let mut remaining_json_bytes = crate::consensus::MAX_BLOCK_SIZE
             .saturating_sub(BLOCK_HEADER_JSON_ALLOWANCE)
+            .saturating_sub(
+                block
+                    .claim_frame
+                    .as_ref()
+                    .map_or(0, crate::aggregation::chain::frame_block_bytes),
+            )
             .saturating_sub(
                 serde_json::to_vec(&block.transactions).map_or(usize::MAX, |b| b.len()),
             );
@@ -5771,14 +6197,18 @@ impl Blockchain {
         let nft_burn_cids = Self::collect_nft_burn_cids_from_state(&self.state, &block);
 
         let ai_outcomes_before = self.state.ai_registry.outcomes.len();
-        let (mut committed_state, unfrozen_domains) =
-            match Self::apply_block_effects_with_unfreezes(&self.state, &block, &self.chain) {
-                Ok(res) => res,
-                Err(error) => {
-                    tracing::warn!("Local block effects failed: {error}");
-                    return None;
-                }
-            };
+        let (mut committed_state, unfrozen_domains) = match Self::apply_block_effects_with_unfreezes(
+            &self.state,
+            &block,
+            &self.chain,
+            &self.aggregation_params(),
+        ) {
+            Ok(res) => res,
+            Err(error) => {
+                tracing::warn!("Local block effects failed: {error}");
+                return None;
+            }
+        };
 
         // The block carried slashing evidence and the state move above
         // applied it (same-chain only, exactly what apply_system_effects
@@ -5872,6 +6302,7 @@ impl Blockchain {
         // Made the producer's `liveness` root unreproducible by replay.
 
         self.chain.push(block.clone());
+        self.aggregation_after_commit(self.chain.len().saturating_sub(1));
         self.maybe_record_reorg_anchor(block.index as usize, &block.hash, &block.state_root);
         self.consensus
             .note_block_seen(&block.hash, crate::consensus::now_millis());
@@ -5945,6 +6376,19 @@ impl Blockchain {
     }
 
     pub fn add_transaction(&mut self, transaction: Transaction) -> Result<(), String> {
+        // With the aggregation side running, a signed quantum-safe
+        // transaction is an object: its signature goes to the pool and the
+        // transaction waits there, without it, for a frame.
+        if self.agg_node.is_some() {
+            if let Some((claimed, envelope)) =
+                crate::aggregation::chain::claim_signature(&transaction)
+            {
+                return self
+                    .submit_object(envelope, claimed)
+                    .map(|_| ())
+                    .map_err(|e| format!("Invalid transaction: {e}"));
+            }
+        }
         self.validate_pool_transaction(&transaction)
             .map_err(|e| format!("Invalid transaction: {e}"))?;
 
@@ -6353,6 +6797,14 @@ impl Blockchain {
             ));
         }
 
+        // The claims of the block (aggregation layer): the ten block rules
+        // while the layer is on, and no use of the layer at all while it is
+        // not. A claimed transaction below is accepted only because this
+        // check passed: the frame proves its signature was verified.
+        let aggregation = self.aggregation_params();
+        crate::aggregation::chain::check_block(&aggregation, &self.state.scheme_registry, &block)?;
+        let claim_fees = crate::aggregation::chain::settlement_of(&aggregation, &block)?;
+
         if block.index > 0 && block.state_root.is_empty() {
             return Err("Block missing state_root".into());
         }
@@ -6381,10 +6833,20 @@ impl Blockchain {
             if block.index > 0 && tx.from == Address::zero() {
                 return Err(format!("Invalid transaction at index {i}: 'genesis' transactions only allowed in genesis block"));
             }
+            // A transaction whose fee does not cover its claims fails: it is
+            // not executed and pays nothing (aggregation layer, fee rule 3).
+            if claim_fees.failed.get(i).copied().unwrap_or(false) {
+                continue;
+            }
             // A pruned witness was verified by the validators that finalized
             // the segment; the state root below still checks the execution.
             if block.index > 0 && !witness_pruned {
-                if let Err(e) = temp_state.validate_transaction(tx) {
+                let checked = if tx.is_claimed() {
+                    temp_state.validate_claimed_transaction(tx)
+                } else {
+                    temp_state.validate_transaction(tx)
+                };
+                if let Err(e) = checked {
                     return Err(format!("Invalid transaction at index {i}: {e}"));
                 }
             }
@@ -6397,8 +6859,12 @@ impl Blockchain {
         let nft_burn_cids = Self::collect_nft_burn_cids_from_state(&self.state, &block);
 
         let ai_outcomes_before = self.state.ai_registry.outcomes.len();
-        let (mut commit_state, unfrozen_domains) =
-            Self::apply_block_effects_with_unfreezes(&self.state, &block, &self.chain)?;
+        let (mut commit_state, unfrozen_domains) = Self::apply_block_effects_with_unfreezes(
+            &self.state,
+            &block,
+            &self.chain,
+            &aggregation,
+        )?;
 
         if let Some(ref m) = self.metrics {
             if let Some(evidences) = &block.slashing_evidence {
@@ -6488,6 +6954,7 @@ impl Blockchain {
         let committed_state_root = block.state_root.clone();
         self.emit_applied_tx_metrics(&block.transactions, ai_outcomes_before);
         self.chain.push(block);
+        self.aggregation_after_commit(self.chain.len().saturating_sub(1));
         self.maybe_record_reorg_anchor(
             committed_index as usize,
             &committed_hash,
@@ -6622,6 +7089,7 @@ impl Blockchain {
     }
 
     fn validate_candidate_chain(&self, chain: &[Block]) -> Result<AccountState, String> {
+        let aggregation = self.aggregation_params();
         let genesis = chain
             .first()
             .ok_or_else(|| "Candidate chain is empty".to_string())?;
@@ -6706,6 +7174,11 @@ impl Blockchain {
                 })?;
             Self::check_block_slashing_evidence(block)
                 .map_err(|e| format!("Candidate block {} refused: {e}", block.index))?;
+            // The claims of the candidate block, exactly as on the tip path.
+            crate::aggregation::chain::check_block(&aggregation, &state.scheme_registry, block)
+                .map_err(|e| format!("Candidate block {} refused: {e}", block.index))?;
+            let claim_fees = crate::aggregation::chain::settlement_of(&aggregation, block)
+                .map_err(|e| format!("Candidate block {} refused: {e}", block.index))?;
 
             let mut projected = state.clone();
             projected.current_block_height = block.index;
@@ -6719,15 +7192,21 @@ impl Blockchain {
                         tx_index, block.index
                     ));
                 }
+                if claim_fees.failed.get(tx_index).copied().unwrap_or(false) {
+                    continue;
+                }
                 if !witness_pruned {
-                    projected
-                        .validate_transaction(transaction)
-                        .map_err(|error| {
-                            format!(
-                                "Candidate transaction {} at block {} is invalid: {}",
-                                tx_index, block.index, error
-                            )
-                        })?;
+                    let checked = if transaction.is_claimed() {
+                        projected.validate_claimed_transaction(transaction)
+                    } else {
+                        projected.validate_transaction(transaction)
+                    };
+                    checked.map_err(|error| {
+                        format!(
+                            "Candidate transaction {} at block {} is invalid: {}",
+                            tx_index, block.index, error
+                        )
+                    })?;
                 }
                 Executor::apply_transaction_checked(&mut projected, transaction).map_err(
                     |error| {
@@ -6739,7 +7218,8 @@ impl Blockchain {
                 )?;
             }
 
-            let mut next_state = Self::apply_block_effects(&state, block, &chain[..index])?;
+            let mut next_state =
+                Self::apply_block_effects(&state, block, &chain[..index], &aggregation)?;
             // The roots are derived from the chain prefix, as on the live path.
             Self::apply_block_end_roots(&mut next_state, block, &chain[..index], self.chain_id);
             if next_state.calculate_state_root() != block.state_root {
@@ -7001,6 +7481,7 @@ impl Blockchain {
         self.reorg_anchors.retain(|(idx, _, _)| *idx < fork_point);
         self.chain = new_chain;
         self.state = new_state;
+        self.aggregation_after_commit(fork_point);
         if let Some(tip) = self.chain.last().cloned() {
             self.maybe_record_reorg_anchor(tip.index as usize, &tip.hash, &tip.state_root);
         }
@@ -7189,8 +7670,12 @@ impl Blockchain {
             ),
         );
         for block in &chain[fork_point..] {
-            current_state =
-                Self::apply_block_effects(&current_state, block, &chain[..block.index as usize])?;
+            current_state = Self::apply_block_effects(
+                &current_state,
+                block,
+                &chain[..block.index as usize],
+                &self.aggregation_params(),
+            )?;
             Self::apply_block_end_roots(
                 &mut current_state,
                 block,
@@ -7242,8 +7727,13 @@ impl Blockchain {
         state.execution_domain = domain;
 
         for (index, block) in chain.iter().enumerate().skip(1) {
-            let mut next_state = Self::apply_block_effects(&state, block, &chain[..index])
-                .map_err(|e| format!("Failed to rebuild state at block {}: {}", block.index, e))?;
+            let mut next_state = Self::apply_block_effects(
+                &state,
+                block,
+                &chain[..index],
+                &genesis_config.aggregation_or_default(),
+            )
+            .map_err(|e| format!("Failed to rebuild state at block {}: {}", block.index, e))?;
             Self::apply_block_end_roots(
                 &mut next_state,
                 block,
@@ -9962,6 +10452,8 @@ impl Clone for Blockchain {
             local_invalid_votes: self.local_invalid_votes.clone(),
             finality_aggregator: None,
             last_seat_participation: None,
+            pending_block_frame: None,
+            agg_node: None,
             early_finality_votes: EarlyFinalityVotes::default(),
             metrics: self.metrics.clone(),
             anchor_emission: self.anchor_emission.clone(),
@@ -10569,9 +11061,11 @@ mod tests {
         block_b.vrf_output = vec![2u8; 32];
 
         let mut state_a =
-            Blockchain::apply_block_effects(&base, &block_a, &[]).expect("block a applies");
+            Blockchain::apply_block_effects(&base, &block_a, &[], &Default::default())
+                .expect("block a applies");
         let mut state_b =
-            Blockchain::apply_block_effects(&base, &block_b, &[]).expect("block b applies");
+            Blockchain::apply_block_effects(&base, &block_b, &[], &Default::default())
+                .expect("block b applies");
 
         let expected = crate::core::hash::hash_fields_bytes(&[
             b"BDLM_BLOCK_CONTEXT_ENTROPY_V1",
@@ -10660,7 +11154,8 @@ mod tests {
             let mut states = Vec::new();
             let mut state = base.clone();
             for block in &blocks {
-                state = Blockchain::apply_block_effects(&state, block, &[]).expect("block applies");
+                state = Blockchain::apply_block_effects(&state, block, &[], &Default::default())
+                    .expect("block applies");
                 states.push(state.clone());
             }
             states
@@ -11531,7 +12026,7 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_millis();
-        let collected = bc.collect_block_transactions(now_ms, &previous_hash);
+        let (collected, _) = bc.collect_block_transactions(now_ms, &previous_hash, &[], 0);
         assert_eq!(
             collected.len(),
             1,
@@ -12124,8 +12619,13 @@ mod tests {
             b.timestamp = ts;
             b.producer = Some(authority);
             b.nonce = nonce;
-            let (mut commit_state, _) =
-                Blockchain::apply_block_effects_with_unfreezes(state, &b, chain).unwrap();
+            let (mut commit_state, _) = Blockchain::apply_block_effects_with_unfreezes(
+                state,
+                &b,
+                chain,
+                &Default::default(),
+            )
+            .unwrap();
             Blockchain::apply_block_end_roots(&mut commit_state, &b, chain, 45262);
             b.state_root = commit_state.calculate_state_root();
             b.sign(&authority_keys);
