@@ -18,7 +18,7 @@ name: Churn Nightly
 
 on:
   schedule:
-    - cron: "11 3 * * *"
+    - cron: "11 12 * * *" # daily 12:11 UTC, outside the long scheduled sweeps
   workflow_dispatch:
   # Heavy battery. It runs on pull requests to `main` (the PR that merges the
   # stack), on the schedule and on demand. A stacked pull request skips the job

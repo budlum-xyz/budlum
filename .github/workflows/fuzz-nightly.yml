@@ -1,15 +1,18 @@
-name: Fuzz Nightly
+name: Fuzz Weekly Full Sweep
 
-# Long fuzz runs. Every night at 03:17 UTC each target is fuzzed for 4 hours;
+# Long fuzz runs. Every Sunday at 00:17 UTC each target is fuzzed for 4 hours;
 # each target runs in its own matrix job (the GitHub job ceiling is 6 hours, so
 # 5x4h in a single job is impossible and the matrix is mandatory).
 # The corpus is cached on every run and restored on the next (a growing corpus =
 # deepening coverage). If a crash is found it is uploaded as an artifact and the
-# job FAILS.
+# job FAILS. The former daily matrix consumed roughly 50 runner-hours per run
+# before the last target expansion and held four of the shared runners nearly
+# continuously. Weekly keeps every target and the full four-hour budget while
+# leaving capacity for pull-request gates.
 
 on:
   schedule:
-    - cron: "17 3 * * *"
+    - cron: "17 0 * * 0"
   workflow_dispatch:
 
 concurrency:

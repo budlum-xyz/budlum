@@ -1,15 +1,15 @@
-# Nightly mutation check of the AIR rules.
+# Weekly mutation check of the AIR rules.
 #
 # Each AIR rule must be noticed by at least one test: a mutant that changes a
 # rule and leaves the tests green means a constraint nobody checks. This runs
-# on a schedule and by hand only. It never runs on a pull request, so it never
-# blocks one.
+# on a staggered weekly schedule and by hand only. It never runs on a pull
+# request, so it never blocks one.
 
-name: AIR Mutants Nightly
+name: AIR Mutants Weekly
 
 on:
   schedule:
-    - cron: "15 2 * * *"   # nightly, 02:15 UTC
+    - cron: "15 0 * * 6"   # Saturday 00:15 UTC; isolated from the deep fuzz sweep
   workflow_dispatch:
 
 concurrency:
