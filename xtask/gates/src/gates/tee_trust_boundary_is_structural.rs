@@ -193,7 +193,7 @@ fn has_rejecting_guard(body: &str, needle: &str) -> bool {
                                     }
                                 }
                                 // Hardening kept from the
-                                // bulgular branch: a closure/nested-fn decoy
+                                // the findings branch: a closure/nested-fn decoy
                                 // (`||`, `| `, `fn `) or a nested conditional
                                 // (a `return Err` appearing after a nested
                                 // `if` opener) must not satisfy the

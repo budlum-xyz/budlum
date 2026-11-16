@@ -1,8 +1,7 @@
-//! B.U.D. (Broad Universal Database) - Storage ConsensusDomain parameters
-//!.
+//! B.U.D. (Broad Universal Database) - Storage `ConsensusDomain` parameters.
 //!
 //! Vision reference: the B.U.D. decentralised storage vision,
-//! §8.1. The vision proposes `ConsensusKind::StorageAttestation(StorageDomainParams)`
+//! The vision proposes `ConsensusKind::StorageAttestation(StorageDomainParams)`
 //! As a NEW enum variant (not a `Custom("...")` string) so the type system
 //! Forces every consumer to handle the storage parameters explicitly.
 //!
@@ -20,7 +19,7 @@
 
 use serde::{Deserialize, Serialize};
 
-/// Default chunk size, per vision §8.2 (256 KiB). Kept as a constant, the
+/// Default chunk size, per vision (256 KiB). Kept as a constant, the
 /// Per-domain `chunk_size` parameter can override it on registration.
 pub const DEFAULT_CHUNK_SIZE: u32 = 262_144;
 
@@ -33,6 +32,12 @@ pub const MAX_CHUNK_SIZE: u32 = 16 * 1024 * 1024; // 16 MiB
 /// Hard lower bound to prevent nonsense "1 byte" domains.
 pub const MIN_CHUNK_SIZE: u32 = 1024; // 1 KiB
 
+/// Convenience: hard upper bound on committed chunks per operator under a domain.
+pub const MAX_COMMITTED_CHUNKS_PER_OPERATOR: u64 = 1_000_000_000;
+
+/// Convenience: hard upper bound on blocks between storage challenges (~30 days).
+pub const MAX_STORAGE_CHALLENGE_INTERVAL: u64 = 2_592_000;
+
 /// Minimum operator bond for a storage deal opened in a block.
 ///
 /// A block carries no domain parameters, so the in-block path uses this
@@ -44,7 +49,7 @@ pub const STORAGE_MIN_OPERATOR_BOND: u64 = 1_000_000;
 
 /// Per-domain parameters for a `StorageAttestation` domain.
 ///
-/// The vision document calls these `StorageDomainParams` in §8.1. We follow
+/// The vision document calls these `StorageDomainParams` in We follow
 /// The same name. All numeric fields are bounded to prevent resource
 /// Exhaustion (an operator cannot register a domain with `challenge_interval`
 /// = 0 and force the chain to issue a challenge every block).
@@ -54,7 +59,7 @@ pub struct StorageDomainParams {
     /// Domain. Bounded by [`MIN_CHUNK_SIZE`] / [`MAX_CHUNK_SIZE`].
     pub chunk_size: u32,
     /// Maximum number of committed chunks a single operator can hold under
-    /// This domain. Prevents an operator from DoS'ing on-chain state with
+    /// This domain. Prevents an operator from `DoS`'ing on-chain state with
     /// Millions of trivial commitments.
     pub max_committed_chunks: u64,
     /// Number of blocks between consecutive challenges issued to each
@@ -71,6 +76,10 @@ pub struct StorageDomainParams {
 impl StorageDomainParams {
     /// Validate the parameters at registration time. Returns the first
     /// Violation found (fail-fast, matches `PoWDomainParameters::validate`).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn validate(&self) -> Result<(), String> {
         if self.chunk_size < MIN_CHUNK_SIZE || self.chunk_size > MAX_CHUNK_SIZE {
             return Err(format!(
@@ -78,14 +87,29 @@ impl StorageDomainParams {
                 self.chunk_size, MIN_CHUNK_SIZE, MAX_CHUNK_SIZE
             ));
         }
-        if self.max_committed_chunks == 0 {
-            return Err("StorageDomainParams.max_committed_chunks must be > 0".into());
+        if self.max_committed_chunks == 0
+            || self.max_committed_chunks > MAX_COMMITTED_CHUNKS_PER_OPERATOR
+        {
+            return Err(format!(
+                "StorageDomainParams.max_committed_chunks {} out of range [1, {}]",
+                self.max_committed_chunks, MAX_COMMITTED_CHUNKS_PER_OPERATOR
+            ));
         }
-        if self.challenge_interval == 0 {
-            return Err("StorageDomainParams.challenge_interval must be > 0".into());
+        if self.challenge_interval == 0 || self.challenge_interval > MAX_STORAGE_CHALLENGE_INTERVAL
+        {
+            return Err(format!(
+                "StorageDomainParams.challenge_interval {} out of range [1, {}]",
+                self.challenge_interval, MAX_STORAGE_CHALLENGE_INTERVAL
+            ));
         }
-        if self.min_operator_bond == 0 {
-            return Err("StorageDomainParams.min_operator_bond must be > 0".into());
+        if self.min_operator_bond == 0
+            || self.min_operator_bond > crate::tokenomics::BUD_TOTAL_SUPPLY
+        {
+            return Err(format!(
+                "StorageDomainParams.min_operator_bond {} out of range [1, {}]",
+                self.min_operator_bond,
+                crate::tokenomics::BUD_TOTAL_SUPPLY
+            ));
         }
         Ok(())
     }
@@ -107,7 +131,7 @@ impl Default for StorageDomainParams {
 /// Used to (a) feed the domain's `config_hash` so two registrations with the
 /// Same parameters produce the same `config_hash` (so node operators can
 /// Cross-check), and (b) embed in `GlobalBlockHeader.StorageRoot` aggregation
-/// (vision §8.4).
+/// (vision).
 ///
 /// Field order is fixed and domain-tagged so it is unambiguous in the
 /// Presence of a future enum-variant addition.
@@ -198,5 +222,20 @@ mod tests {
             storage_params_bytes(&good_params()),
             storage_params_bytes(&p2)
         );
+    }
+
+    #[test]
+    fn storage_domain_params_reject_u64_max_ceilings() {
+        let mut chunks_overflow = good_params();
+        chunks_overflow.max_committed_chunks = u64::MAX;
+        assert!(chunks_overflow.validate().is_err());
+
+        let mut interval_overflow = good_params();
+        interval_overflow.challenge_interval = u64::MAX;
+        assert!(interval_overflow.validate().is_err());
+
+        let mut bond_overflow = good_params();
+        bond_overflow.min_operator_bond = u64::MAX;
+        assert!(bond_overflow.validate().is_err());
     }
 }

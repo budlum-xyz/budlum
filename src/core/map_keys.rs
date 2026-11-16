@@ -3,7 +3,7 @@
 //! `serde_json` refuses to write a map whose key is not a string or an
 //! integer: `BTreeMap<[u8; 32], _>` fails with "key must be a string" at the
 //! first non-empty entry. The V2 state snapshot is JSON, and it carries the
-//! bridge, AI, storage, PoA and cross-domain registries, so the first bridge
+//! bridge, AI, storage, `PoA` and cross-domain registries, so the first bridge
 //! transfer on a chain made every later snapshot write fail. The failure was
 //! logged at `warn!` and nothing else noticed.
 //!
@@ -32,6 +32,9 @@
 //! | `(AiRequestId, [u8; 32])` | `"<request hex>:<hash hex>"` |
 //! | `(ContentId, ContentId)` | `"<content hex>:<shard hex>"` |
 //! | `ProofClaimKey` | `"<domain>:<target height>"` |
+//! | `IpAddr` | canonical IPv4/IPv6 string |
+//! | `([u8; 32], u64)` | `"<hash hex>:<index>"` |
+//! | `bud3::ContentId` | `"<public|sealed>:<digest hex>:<len>"` |
 //!
 //! The parser is strict: wrong length, non-hex characters, a missing tuple
 //! part or a duplicate key is a deserialisation error, never a silent skip.
@@ -73,6 +76,10 @@ pub trait MapKey: Sized + Ord {
     /// The JSON key for this value.
     fn to_key_string(&self) -> String;
     /// Parse a key written by [`MapKey::to_key_string`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     fn from_key_string(s: &str) -> Result<Self, String>;
 }
 
@@ -132,6 +139,26 @@ impl MapKey for [u8; 32] {
     }
     fn from_key_string(s: &str) -> Result<Self, String> {
         parse_hex32(s)
+    }
+}
+
+impl MapKey for std::net::IpAddr {
+    fn to_key_string(&self) -> String {
+        self.to_string()
+    }
+    fn from_key_string(s: &str) -> Result<Self, String> {
+        s.parse::<std::net::IpAddr>()
+            .map_err(|e| format!("invalid IP map key `{s}`: {e}"))
+    }
+}
+
+impl MapKey for ([u8; 32], u64) {
+    fn to_key_string(&self) -> String {
+        format!("{}:{}", hex::encode(self.0), self.1)
+    }
+    fn from_key_string(s: &str) -> Result<Self, String> {
+        let [hash, idx] = parts::<2>(s)?;
+        Ok((parse_hex32(hash)?, parse_uint(idx, "index")?))
     }
 }
 
@@ -212,8 +239,44 @@ impl MapKey for (ContentId, ContentId) {
     }
 }
 
+impl MapKey for (Address, ContentId) {
+    fn to_key_string(&self) -> String {
+        format!("{}:{}", self.0.to_hex(), hex::encode(self.1 .0))
+    }
+    fn from_key_string(s: &str) -> Result<Self, String> {
+        let [address, content] = parts::<2>(s)?;
+        Ok((
+            Address(parse_hex32(address)?),
+            ContentId(parse_hex32(content)?),
+        ))
+    }
+}
+
+impl MapKey for (ContentId, ContentId, Address) {
+    fn to_key_string(&self) -> String {
+        format!(
+            "{}:{}:{}",
+            hex::encode(self.0 .0),
+            hex::encode(self.1 .0),
+            self.2.to_hex()
+        )
+    }
+    fn from_key_string(s: &str) -> Result<Self, String> {
+        let [manifest, shard, address] = parts::<3>(s)?;
+        Ok((
+            ContentId(parse_hex32(manifest)?),
+            ContentId(parse_hex32(shard)?),
+            Address(parse_hex32(address)?),
+        ))
+    }
+}
+
 /// `#[serde(with)]` half: string keys for JSON, the derived layout for
 /// binary formats.
+///
+/// # Errors
+///
+/// Returns an error if the operation fails.
 pub fn serialize<S, Key, Value>(
     map: &BTreeMap<Key, Value>,
     serializer: S,
@@ -266,6 +329,10 @@ where
 }
 
 /// `#[serde(with)]` half: the inverse of [`serialize`].
+///
+/// # Errors
+///
+/// Returns an error if the operation fails.
 pub fn deserialize<'de, D, Key, Value>(deserializer: D) -> Result<BTreeMap<Key, Value>, D::Error>
 where
     D: Deserializer<'de>,
@@ -278,7 +345,7 @@ where
         let entries = Vec::<(Key, Value)>::deserialize(deserializer)?;
         // The serializer writes a BTreeMap in key order, so a stored row is
         // strictly ascending. Accepting anything else would let two byte
-        // strings decode to one map (P20-F13); the JSON path already rejects
+        // strings decode to one map; the JSON path already rejects
         // duplicates.
         if entries.windows(2).any(|pair| pair[0].0 >= pair[1].0) {
             return Err(de::Error::custom(

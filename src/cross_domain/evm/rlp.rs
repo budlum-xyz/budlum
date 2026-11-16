@@ -53,7 +53,7 @@ pub enum RlpError {
     /// Trailing bytes left unconsumed after decoding, which is an injection
     /// surface.
     TrailingBytes,
-    /// The item budget was exceeded (BLG-0123): one input byte can become
+    /// The item budget was exceeded: one input byte can become
     /// one heap-allocated item, so the total is bounded.
     TooManyItems,
     /// The list nesting depth was exceeded, a DoS guard; RLP can technically nest
@@ -80,34 +80,76 @@ impl std::error::Error for RlpError {}
 /// endlessly nested lists.
 const MAX_DEPTH: usize = 32;
 
-/// Most items one `decode` call will build (BLG-0123/P05-F16). Orders of
+/// Most items one `decode` call will build. Orders of
 /// magnitude past any honest header or proof and still finite.
 const MAX_ITEMS: usize = 100_000;
 
 /// Encodes an RLP `Item` canonically.
+///
+/// Two passes: the first measures every list's payload once,
+/// bottom-up; the second writes each byte once, top-down. The old shape
+/// encoded every list into a scratch buffer and copied it into its parent,
+/// so a byte at depth `D` was copied `D` times: `O(D * N)` work and
+/// allocation for an input of `N` bytes.
 pub fn encode(item: &Item) -> Vec<u8> {
-    let mut out = Vec::new();
-    encode_into(item, &mut out);
+    let mut list_payloads = Vec::new();
+    let total = measure(item, &mut list_payloads);
+    let mut out = Vec::with_capacity(total);
+    let mut next = 0usize;
+    write(item, &list_payloads, &mut next, &mut out);
     out
 }
 
-fn encode_into(item: &Item, out: &mut Vec<u8>) {
+/// The length of a length prefix for `len` bytes of payload.
+fn prefix_len(len: usize) -> usize {
+    if len < 56 {
+        1
+    } else {
+        1 + trim_leading_zeros(len).len()
+    }
+}
+
+/// The encoded length of `item`. Each list's payload length is stored in
+/// `list_payloads` in pre-order, so `write` can read them back in the same
+/// order without measuring again.
+fn measure(item: &Item, list_payloads: &mut Vec<usize>) -> usize {
+    match item {
+        Item::String(bytes) => {
+            if bytes.len() == 1 && bytes.first().is_some_and(|b| *b < 0x80) {
+                1
+            } else {
+                prefix_len(bytes.len()) + bytes.len()
+            }
+        }
+        Item::List(items) => {
+            let slot = list_payloads.len();
+            list_payloads.push(0);
+            let payload: usize = items.iter().map(|c| measure(c, list_payloads)).sum();
+            if let Some(entry) = list_payloads.get_mut(slot) {
+                *entry = payload;
+            }
+            prefix_len(payload) + payload
+        }
+    }
+}
+
+fn write(item: &Item, list_payloads: &[usize], next: &mut usize, out: &mut Vec<u8>) {
     match item {
         Item::String(bytes) => encode_string(bytes, out),
         Item::List(items) => {
-            let mut payload = Vec::new();
+            let payload = list_payloads.get(*next).copied().unwrap_or(0);
+            *next += 1;
+            encode_length(payload, 0xc0, out);
             for child in items {
-                encode_into(child, &mut payload);
+                write(child, list_payloads, next, out);
             }
-            encode_length(payload.len(), 0xc0, out);
-            out.extend_from_slice(&payload);
         }
     }
 }
 
 fn encode_string(bytes: &[u8], out: &mut Vec<u8>) {
     if bytes.len() == 1 && bytes[0] < 0x80 {
-        // Kural 1: tek byte < 0x80 → byte kendisi.
+        // Rule 1: a single byte < 0x80 encodes as itself.
         out.push(bytes[0]);
     } else {
         encode_length(bytes.len(), 0x80, out);
@@ -162,7 +204,7 @@ fn decode_at<'a>(
     if depth > MAX_DEPTH {
         return Err(RlpError::NestingTooDeep);
     }
-    // BLG-0123 (P05-F16): every item costs a heap Vec, so one input byte
+    // Every item costs a heap Vec, so one input byte
     // could become one item. The budget bounds the amplification no matter
     // what the caller's byte limit is.
     if *budget == 0 {
@@ -182,7 +224,7 @@ fn decode_at<'a>(
     if first <= 0xb7 {
         let len = (first - 0x80) as usize;
         let payload = take_exact(&input[1..], len)?;
-        // BLG-0122 (P05-F15): a single byte below 0x80 has a one-byte
+        // A single byte below 0x80 has a one-byte
         // form; the 0x81-prefixed spelling is non-canonical and refused,
         // exactly as the module doc promises.
         if len == 1 && payload[0] < 0x80 {
@@ -270,8 +312,20 @@ fn decode_list_items(
 // leading zero.
 // ---------------------------------------------------------------------------
 
+/// Encodes a `u64` as minimal big-endian bytes (empty for `0`, no RLP string prefix).
+///
+/// Use this inside [`Item::String`] when constructing RLP lists (e.g. legacy
+/// transaction fields or `CREATE` nonces) so values `>= 128` are encoded once by
+/// [`encode`] rather than double-RLP-prefixed.
+#[must_use]
+pub fn encode_uint_bytes(n: u64) -> Vec<u8> {
+    trim_leading_zeros_u64(n)
+}
+
 /// Encodes a `u64` as an RLP integer; zero becomes the empty string, 0x80.
-pub fn encode_uint(n: u64) -> Vec<u8> {
+#[cfg(test)]
+#[must_use]
+fn encode_uint(n: u64) -> Vec<u8> {
     let bytes = trim_leading_zeros_u64(n);
     encode(&Item::String(bytes))
 }
@@ -294,7 +348,7 @@ pub fn decode_uint(item: &Item) -> Result<u64, RlpError> {
     };
     if !bytes.is_empty() && bytes[0] == 0 {
         return Err(RlpError::NonCanonical); // leading-zero integer encoding,
-                                            // including the bare 0x00 spelling of zero (BLG-0122/P05-F15):
+                                            // including the bare 0x00 spelling of zero:
                                             // canonical zero is the empty string, checked below.
     }
     if bytes.is_empty() {
@@ -513,7 +567,7 @@ mod tests {
         assert_eq!(back.decode().unwrap(), item);
     }
 
-    /// BLG-0122 (P05-F15): non-canonical forms are refused exactly as the
+    /// Non-canonical forms are refused exactly as the
     /// module doc promises.
     #[test]
     fn non_canonical_forms_are_refused() {
@@ -529,8 +583,51 @@ mod tests {
         assert_eq!(decode_uint(&empty), Ok(0));
     }
 
-    /// BLG-0123 (P05-F16): the item budget bounds the decode, whatever the
+    /// The item budget bounds the decode, whatever the
     /// caller's byte limit is.
+    #[test]
+    fn encode_matches_the_nested_copy_encoder_and_is_linear() {
+        // The reference: the old encoder, kept here as the oracle.
+        fn naive(item: &Item, out: &mut Vec<u8>) {
+            match item {
+                Item::String(bytes) => encode_string(bytes, out),
+                Item::List(items) => {
+                    let mut payload = Vec::new();
+                    for child in items {
+                        naive(child, &mut payload);
+                    }
+                    encode_length(payload.len(), 0xc0, out);
+                    out.extend_from_slice(&payload);
+                }
+            }
+        }
+        let mut deep = Item::String(vec![0xaa; 300]);
+        for i in 0..200 {
+            deep = Item::List(vec![
+                Item::String(vec![i as u8]),
+                deep,
+                Item::String(Vec::new()),
+            ]);
+        }
+        let samples = [
+            Item::String(Vec::new()),
+            Item::String(vec![0x7f]),
+            Item::String(vec![0x80]),
+            Item::String(vec![1; 56]),
+            Item::List(Vec::new()),
+            Item::List(vec![Item::String(vec![2; 60]); 3]),
+            deep,
+        ];
+        for item in &samples {
+            let mut want = Vec::new();
+            naive(item, &mut want);
+            let got = encode(item);
+            assert_eq!(got, want);
+            // One allocation of the exact size: no scratch buffers.
+            assert_eq!(got.capacity(), got.len());
+        }
+    }
+
     #[test]
     fn decode_refuses_an_item_flood() {
         // A long flat list of one-byte items: each byte becomes an item,
@@ -543,7 +640,7 @@ mod tests {
         assert!(matches!(decode(&enc), Err(RlpError::TooManyItems)));
     }
 
-    /// BLG-0126 (P05-F19): a nested list past MAX_DEPTH is refused, not
+    /// A nested list past MAX_DEPTH is refused, not
     /// recursed into.
     #[test]
     fn neg_nesting_too_deep_rejected() {
@@ -555,5 +652,31 @@ mod tests {
             enc = next;
         }
         assert_eq!(decode(&enc), Err(RlpError::NestingTooDeep));
+    }
+
+    #[test]
+    fn non_canonical_single_byte_and_overlong_lengths_refused() {
+        assert_eq!(decode(&[0x81, 0x00]), Err(RlpError::NonCanonical));
+        assert_eq!(decode(&[0x81, 0x7f]), Err(RlpError::NonCanonical));
+        assert_eq!(decode(&[0xb8, 0x00]), Err(RlpError::NonCanonical));
+        let mut short_as_long = vec![0xb8, 55];
+        short_as_long.extend_from_slice(&[0xaa; 55]);
+        assert_eq!(decode(&short_as_long), Err(RlpError::NonCanonical));
+        let mut leading_zero = vec![0xb9, 0x00, 56];
+        leading_zero.extend_from_slice(&[0xaa; 56]);
+        assert_eq!(decode(&leading_zero), Err(RlpError::NonCanonical));
+    }
+
+    #[test]
+    fn encode_uint_bytes_avoids_double_prefix_for_large_integers() {
+        assert_eq!(encode_uint_bytes(0), Vec::<u8>::new());
+        assert_eq!(encode_uint_bytes(1), vec![0x01]);
+        assert_eq!(encode_uint_bytes(127), vec![0x7f]);
+        assert_eq!(encode_uint_bytes(128), vec![0x80]);
+        assert_eq!(encode_uint_bytes(45_261), vec![0xb0, 0xcd]);
+        // Wrapping encode_uint_bytes in Item::String matches standalone encode_uint.
+        for n in [0u64, 1, 127, 128, 255, 45_261, u64::MAX] {
+            assert_eq!(encode(&Item::String(encode_uint_bytes(n))), encode_uint(n));
+        }
     }
 }

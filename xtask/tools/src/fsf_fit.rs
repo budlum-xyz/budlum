@@ -76,7 +76,7 @@ const PROJECTS: &[ProjectFit] = &[
         boundary: "Protocol ideas are safe; do not import server code without a separate provenance review.",
         budlum_modules: &["src/ai_inference", "docs/ARCHITECTURE.md", "RPC event feeds"],
         adaptation: "Use Activity Streams vocabulary as a compatibility target for AI-output/feed events, so Budlum events can be mirrored without a centralized SaaS dependency.",
-        next_step: "Draft a Budlum event-to-ActivityStreams mapping after CI/Strix on PR #79 is green.",
+        next_step: "Draft a Budlum event-to-ActivityStreams mapping once the bridge schema is stable.",
     },
     ProjectFit {
         name: "Argos Translate",
@@ -85,7 +85,7 @@ const PROJECTS: &[ProjectFit] = &[
         boundary: "Permissive enough for optional tooling; keep model assets out of consensus/runtime commits.",
         budlum_modules: &["docs", "wallet UX", "Lubot / assistant surface", "i18n pipeline"],
         adaptation: "Treat as an offline translation-provider shape for deterministic doc/UI localization. Budlum code should define a provider trait and golden translation fixtures, not call a hosted API.",
-        next_step: "Create an i18n provider seam only if UI/doc localization becomes part of this PR line.",
+        next_step: "Create an i18n provider seam only if UI/doc localization enters scope.",
     },
     ProjectFit {
         name: "Fairseq",
@@ -103,7 +103,7 @@ const PROJECTS: &[ProjectFit] = &[
         boundary: "Use via optional process/service boundary; avoid adding STT crates to the node binary.",
         budlum_modules: &["assistant ingestion", "accessibility", "off-chain AI workspace"],
         adaptation: "Model a local speech-to-text adapter for accessibility and assistant ingestion. Consensus data must carry transcripts and provenance, not raw model-side effects.",
-        next_step: "Keep as off-chain roadmap item; no runtime dependency in PR #79.",
+        next_step: "Keep as an off-chain roadmap item; no runtime dependency.",
     },
     ProjectFit {
         name: "GNUnet",
@@ -139,7 +139,7 @@ const PROJECTS: &[ProjectFit] = &[
         boundary: "Process-boundary or clean-room gate only; no GPL source copy.",
         budlum_modules: &["xtask/gates", ".github/workflows", "supply-chain policy"],
         adaptation: "Budlum already has cargo-vet, deny, OSV, grype and license gates. The useful adaptation is a curated import-boundary matrix so GPL/AGPL projects cannot be silently vendored.",
-        next_step: "This file is that clean-room adaptation; wire it to CI only after PR #79 stabilizes.",
+        next_step: "This file is that clean-room adaptation; wire it to CI once the schema stabilizes.",
     },
     ProjectFit {
         name: "Monero Core",
@@ -157,7 +157,7 @@ const PROJECTS: &[ProjectFit] = &[
         boundary: "Prefer sidecar/proxy compatibility and SOCKS tests over vendored anonymity-network code.",
         budlum_modules: &["src/network", "devnet", "operator privacy", "RPC exposure"],
         adaptation: "Define network egress/proxy seams so nodes and operator tools can run behind Tor/I2P without browser-style leaks.",
-        next_step: "Add proxy-seam tests only when network PR scope opens; avoid expanding PR #79 further.",
+        next_step: "Add proxy-seam tests only when the network seam opens.",
     },
 ];
 

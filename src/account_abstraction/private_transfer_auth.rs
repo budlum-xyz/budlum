@@ -60,7 +60,7 @@
 //! reduced to one source.
 
 use crate::crypto::primitives::{
-    verify_ml_dsa_87_signature, ML_DSA_87_PUBLIC_KEY_LEN, ML_DSA_87_SIGNATURE_LEN,
+    verify_ml_dsa_87_signature_in, ML_DSA_87_PUBLIC_KEY_LEN, ML_DSA_87_SIGNATURE_LEN,
 };
 use sha3::{Digest, Sha3_256};
 use std::collections::BTreeSet;
@@ -87,18 +87,15 @@ impl core::fmt::Display for PrivateTransferError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::NullifierAlreadySpent => {
-                write!(f, "KQ-WALLET-PRIVATE: nullifier was already spent")
+                write!(f, "wallet private: nullifier was already spent")
             }
             Self::CommitmentMismatch => write!(
                 f,
-                "KQ-WALLET-PRIVATE: commitment does not match the declared transfer"
+                "wallet private: commitment does not match the declared transfer"
             ),
-            Self::ZeroAmount => write!(f, "KQ-WALLET-PRIVATE: amount is zero"),
+            Self::ZeroAmount => write!(f, "wallet private: amount is zero"),
             Self::InvalidAuthorization => {
-                write!(
-                    f,
-                    "KQ-WALLET-PRIVATE: authorization signature does not verify"
-                )
+                write!(f, "wallet private: authorization signature does not verify")
             }
         }
     }
@@ -177,13 +174,31 @@ impl PrivateTransferAuth {
     ///
     /// [`PrivateTransferError::InvalidAuthorization`].
     pub fn verify_auth_sig(&self) -> Result<(), PrivateTransferError> {
+        self.verify_auth_sig_in(&crate::crypto::scheme::SchemeStatusRegistry::genesis())
+    }
+
+    /// [`Self::verify_auth_sig`] under the scheme statuses of a chain.
+    ///
+    /// # Errors
+    ///
+    /// [`PrivateTransferError::InvalidAuthorization`].
+    pub fn verify_auth_sig_in(
+        &self,
+        registry: &crate::crypto::scheme::SchemeStatusRegistry,
+    ) -> Result<(), PrivateTransferError> {
         let payload = authorization_payload(&self.commitment, &self.nullifier, self.amount);
-        verify_ml_dsa_87_signature(&payload, &self.authorization_sig, &self.spender_key)
-            .map_err(|_| PrivateTransferError::InvalidAuthorization)
+        verify_ml_dsa_87_signature_in(
+            registry,
+            crate::crypto::ctx::PRIVATE_TRANSFER_V1,
+            &payload,
+            &self.authorization_sig,
+            &self.spender_key,
+        )
+        .map_err(|_| PrivateTransferError::InvalidAuthorization)
     }
 }
 
-/// The KQ-* gate surface: the single entry point a production path should call.
+/// The gate surface: the single entry point a production path should call.
 pub struct PrivateTransferGates;
 
 impl PrivateTransferGates {
@@ -218,7 +233,7 @@ mod tests {
         let commitment = transfer_commitment(&nullifier, amount, blinding);
         let payload = authorization_payload(&commitment, &nullifier, amount);
         PrivateTransferAuth {
-            authorization_sig: kp.sign(&payload),
+            authorization_sig: kp.sign(crate::crypto::ctx::PRIVATE_TRANSFER_V1, &payload),
             spender_key: kp.public_key_bytes(),
             nullifier,
             commitment,

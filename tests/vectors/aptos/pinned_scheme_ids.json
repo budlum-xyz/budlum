@@ -1,0 +1,10 @@
+{
+  "source": "https://api.github.com/repos/aptos-labs/aptos-core/contents/types/src/transaction/authenticator.rs",
+  "commit": "81d89f428fe8e4b69d53b4916993e9a930afc37c",
+  "fetched_utc": "2026-11-06",
+  "enum": "Scheme",
+  "scheme_ids": [0, 1, 2, 3, 4, 5, 250, 251, 252, 253, 254, 255],
+  "reserved_alias_scheme_byte": 189,
+  "reserved_byte_is_used": false,
+  "note": "Directive 8.4.2 rule 2. The Move alias is SHA3-256(address32 || 0xBD). A framework change requires repeating this verification for the new commit."
+}

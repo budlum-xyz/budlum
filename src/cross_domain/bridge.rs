@@ -20,6 +20,11 @@ use std::collections::BTreeMap;
 pub struct AssetId(#[serde(with = "asset_id_serde")] pub [u8; 32]);
 
 impl AssetId {
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn from_hex(s: &str) -> Result<Self, String> {
         let s = s.strip_prefix("0x").unwrap_or(s);
         if s == "0" {
@@ -44,6 +49,48 @@ impl AssetId {
     }
     pub fn as_bytes(&self) -> &[u8; 32] {
         &self.0
+    }
+
+    /// Derive a public-registration id in `domain`'s namespace.
+    ///
+    /// The first four bytes carry the domain id in little-endian form; the
+    /// remaining 28 bytes commit to the domain-local asset name. This keeps
+    /// the stored id at 32 bytes while making collisions across domains
+    /// impossible by construction.
+    ///
+    /// Convenience: public bridge asset namespace constructor for external and
+    /// CLI callers building domain-namespaced asset ids.
+    #[must_use]
+    pub fn for_domain(domain: DomainId, local_asset: &[u8]) -> Self {
+        let local = hash_fields_bytes(&[
+            b"BDLM_BRIDGE_ASSET_LOCAL_V1",
+            &domain.to_le_bytes(),
+            local_asset,
+        ]);
+        let mut id = [0u8; 32];
+        id[..4].copy_from_slice(&domain.to_le_bytes());
+        id[4..].copy_from_slice(&local[..28]);
+        Self(id)
+    }
+
+    /// Whether this id belongs to `domain` under the public-registration
+    /// namespace rule.
+    #[must_use]
+    pub fn is_namespaced_for(&self, domain: DomainId) -> bool {
+        self.0[..4] == domain.to_le_bytes()
+    }
+
+    /// Domain encoded by a namespaced id. Legacy ids are still readable in
+    /// existing state; this accessor does not claim they were registered by
+    /// the public door.
+    ///
+    /// Convenience: public bridge asset namespace accessor for operators and
+    /// callers inspecting domain-namespaced asset ids.
+    #[must_use]
+    pub fn namespace_domain(&self) -> DomainId {
+        let mut bytes = [0u8; 4];
+        bytes.copy_from_slice(&self.0[..4]);
+        DomainId::from_le_bytes(bytes)
     }
 }
 
@@ -127,13 +174,13 @@ pub struct BridgeTransfer {
     pub amount: Bud,
     pub status: BridgeStatus,
     pub source_event_hash: Hash32,
-    /// (security audit §3) height at which this lock expires.
+    /// (security audit) height at which this lock expires.
     /// `BridgeState::sweep_expired_locks(current_height)` returns
     /// `Locked` transfers to `Active` once `current_height >= expiry_height`,
-    /// Preventing permanent DoS via a forgotten/abandoned lock.
+    /// Preventing permanent `DoS` via a forgotten/abandoned lock.
     #[serde(default)]
     pub expiry_height: u64,
-    /// BLG-0116 (P05-F09): the Ethereum destination declared AT the burn
+    /// The Ethereum destination declared AT the burn
     /// and folded into the burn payload. A claim that names a different
     /// recipient is refused - `recipient_eth` used to be a free parameter
     /// the burn never saw.
@@ -184,7 +231,7 @@ pub struct BridgeState {
     #[serde(with = "crate::core::map_keys")]
     transfers: BTreeMap<MessageId, BridgeTransfer>,
     /// Expiry queue: expiry_height -> [message_id]
-    /// Fix O(N) sweep DoS by indexing by height.
+    /// Fix O(N) sweep `DoS` by indexing by height.
     expiry_queue: BTreeMap<u64, Vec<MessageId>>,
     pub replay: ReplayNonceStore,
     /// Settled queue: the height a transfer reached a terminal status
@@ -246,10 +293,12 @@ const MAX_BURN_EXPIRY_BLOCKS: u64 = 100_000;
 /// `100 / rate` units. At the 1% the call sites used, every transfer of 99 base
 /// units or less was relayed for free:
 ///
-///     amount  1 -> fee 0
-///     amount 50 -> fee 0
-///     amount 99 -> fee 0
-///     amount 100 -> fee 1
+/// ```text
+/// amount  1 -> fee 0
+/// amount 50 -> fee 0
+/// amount 99 -> fee 0
+/// amount 100 -> fee 1
+/// ```
 ///
 /// The relayer still pays external gas for each of those messages, so an
 /// attacker splitting a large bridge into 99-unit pieces moves value across for
@@ -376,6 +425,7 @@ impl BridgeState {
             .push(message_id);
     }
 
+    /// WIRING: cross-domain surface - the relayer/bridge doors that read it land with their wiring.
     pub fn register_asset(
         &mut self,
         asset_id: AssetId,
@@ -391,7 +441,7 @@ impl BridgeState {
 
     #[expect(
         clippy::too_many_arguments,
-        reason = "BLG-0128 (P05-F21): lock's arguments ARE the transfer's parameter set (route, indices, parties, amount, expiry) - a struct would mirror them one-for-one"
+        reason = ": lock's arguments ARE the transfer's parameter set (route, indices, parties, amount, expiry) - a struct would mirror them one-for-one"
     )]
     pub fn lock(
         &mut self,
@@ -405,7 +455,7 @@ impl BridgeState {
         amount: u64,
         expiry_height: u64,
     ) -> Result<(BridgeTransfer, DomainEvent), BridgeError> {
-        // BLG-0120 (P05-F13): every lock has a real expiry. Zero meant
+        // Every lock has a real expiry. Zero meant
         // "never expires" - a row that can neither be swept nor outlived,
         // and a relayer could order a later lock first and leave the
         // earlier one waiting on a deadline it does not have. The
@@ -495,6 +545,10 @@ impl BridgeState {
     /// carries a different root. The mark itself never needs pruning: one
     /// row per direction and sender bounds the store by the number of
     /// distinct bridging senders, not by traffic.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn mint(
         &mut self,
         message: &CrossDomainMessage,
@@ -503,7 +557,7 @@ impl BridgeState {
         if !message.verify_id() {
             return Err(BridgeError("Invalid cross-domain message id".into()));
         }
-        // BLG-0126 (P05-F19): an expired message cannot be minted. The
+        // An expired message cannot be minted. The
         // boundary is strict - the expiry block itself is still live.
         if message.expiry_height > 0 && current_height > message.expiry_height {
             return Err(BridgeError(format!(
@@ -595,6 +649,11 @@ impl BridgeState {
         total
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn burn(
         &mut self,
         message_id: MessageId,
@@ -605,6 +664,11 @@ impl BridgeState {
             .map(|_| ())
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn burn_with_event(
         &mut self,
         message_id: MessageId,
@@ -647,7 +711,7 @@ impl BridgeState {
         let recipient = transfer.recipient;
 
         let nonce = self.replay.next_nonce(domain, source_domain, recipient);
-        // BLG-0116 (P05-F09): the burn payload commits the Ethereum
+        // The burn payload commits the Ethereum
         // destination the burner declares here.
         let payload_hash = bridge_burn_payload_hash(asset_id, amount, &recipient_eth);
         let message = CrossDomainMessage::new_correlated(
@@ -712,6 +776,10 @@ impl BridgeState {
     /// `settled_height` is the block this unlock lands in; the row becomes
     /// history at that height and is dropped by the sweep
     /// `SETTLED_RETENTION_BLOCKS` later.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn unlock(
         &mut self,
         message_id: MessageId,
@@ -870,6 +938,10 @@ impl BridgeState {
     /// Record positive evidence that an off-chain release claim was built for
     /// a burned transfer, refusing claims past the burn's expiry height so
     /// off-chain release and local expiry refund are mutually exclusive.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn record_claim_issued(
         &mut self,
         message_id: &MessageId,
@@ -896,15 +968,15 @@ impl BridgeState {
     /// (security audit §3) sweep all `Locked` transfers whose
     /// `expiry_height` is below `current_height`, returning their
     /// `asset_id` back to `Active` so a forgotten/abandoned lock can
-    /// Never permanently DoS the bridge. Returns the (asset_id, amount)
+    /// Never permanently `DoS` the bridge. Returns the (`asset_id`, amount)
     /// List of released locks for the caller's audit log.
     ///
     /// Idempotent: transfers already past `expiry_height` stay `Active`
     /// Once released; subsequent calls are no-ops.
-    /// Undo the last `lock` of `message_id` (BLG-0117/P05-F10): removes the
+    /// Undo the last `lock` of `message_id`: removes the
     /// row and restores the asset's location. The replay nonce is left
     /// advanced on purpose - a skipped nonce is harmless, an un-consumed one
-    /// would allow an id collision. Replaces "clone the whole BridgeState
+    /// would allow an id collision. Replaces "clone the whole `BridgeState`
     /// and restore it" as the rollback of a refused registration.
     pub fn unwind_lock(&mut self, message_id: &MessageId, source_domain: DomainId) {
         if let Some(transfer) = self.transfers.remove(message_id) {
@@ -922,7 +994,7 @@ impl BridgeState {
         }
     }
 
-    /// Undo the last `burn` of `message_id` (BLG-0117/P05-F10): restores the
+    /// Undo the last `burn` of `message_id`: restores the
     /// pre-burn status, the asset's location and the lock expiry the burn
     /// overwrote, drops the burn's sweep entry and clears the declared
     /// Ethereum destination, so the root is the one from before the burn.
@@ -970,6 +1042,10 @@ impl BridgeState {
     /// Fee-aware sweep used by consensus block execution: expired `Locked` rows
     /// refund gross `t.amount` to `t.owner`, while expired `Burned` rows revert
     /// to `Minted` and refund the exact net-of-fee burned units to `t.recipient`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn sweep_expired_locks_with_fee(
         &mut self,
         current_height: u64,
@@ -1094,7 +1170,7 @@ pub fn bridge_payload_hash(asset_id: AssetId, amount: u64) -> Hash32 {
     ])
 }
 
-/// The burn's payload hash (BLG-0116/P05-F09): like
+/// The burn's payload hash: like
 /// [`bridge_payload_hash`] but folding the Ethereum destination, so the
 /// burn commits where the unlock on the other side must land.
 #[must_use]
@@ -1682,9 +1758,9 @@ mod bridge_fee_split {
         // picks the entry point. This test reads the two call sites rather
         // than the behaviour, because the defect was structural: the logic
         // was correct wherever it existed, and absent where it did not.
-        let chain = include_str!("../chain/blockchain.rs");
+        let chain = include_str!("bridge_tx.rs");
         let executor = include_str!("../execution/executor.rs");
-        for (name, src) in [("blockchain.rs", chain), ("executor.rs", executor)] {
+        for (name, src) in [("bridge_tx.rs", chain), ("executor.rs", executor)] {
             assert!(
                 src.contains("check_burn_matches_lock_domain"),
                 "{name} unlocks a bridge transfer without calling the shared domain rule"
@@ -1697,7 +1773,7 @@ mod bridge_fee_split {
         );
     }
 
-    /// P05-F02: a burn whose message expires unrelayed must not strand the row.
+    /// A burn whose message expires unrelayed must not strand the row.
     #[test]
     fn an_unrelayed_burn_returns_to_minted_after_its_expiry() {
         let mut bridge = BridgeState::new();
@@ -1856,7 +1932,7 @@ mod bridge_fee_split {
             .unwrap();
     }
 
-    /// BLG-0120 (P05-F13): the state machine refuses a lock with no expiry
+    /// The state machine refuses a lock with no expiry
     /// and a lock whose expiry has already passed at its source height.
     #[test]
     fn lock_requires_a_real_expiry() {
@@ -1875,7 +1951,7 @@ mod bridge_fee_split {
         assert!(past.is_err());
     }
 
-    /// BLG-0116 (P05-F09): the burn commits the Ethereum destination and
+    /// The burn commits the Ethereum destination and
     /// nothing can claim a different one.
     #[test]
     fn burn_commits_the_ethereum_destination() {
@@ -1898,7 +1974,7 @@ mod bridge_fee_split {
         );
     }
 
-    /// BLG-0126 (P05-F19): a message minted after its expiry is refused,
+    /// A message minted after its expiry is refused,
     /// and the refusal is at the strict boundary.
     #[test]
     fn neg_mint_after_expiry_rejected() {
@@ -1929,7 +2005,7 @@ mod bridge_fee_split {
         );
     }
 
-    /// BLG-0126 (P05-F19): out-of-order nonces are refused by the replay
+    /// Out-of-order nonces are refused by the replay
     /// high-water - the later message cannot settle first and lock the
     /// earlier one out silently.
     #[test]
@@ -1967,7 +2043,7 @@ mod bridge_fee_split {
         );
     }
 
-    /// BLG-0126 (P05-F19): the full cycle conserves the amount - one lock
+    /// The full cycle conserves the amount - one lock
     /// becomes one mint becomes one burn becomes one unlock, and never two
     /// live rows of the same value.
     #[test]

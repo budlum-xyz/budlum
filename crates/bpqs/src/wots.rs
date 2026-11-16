@@ -24,11 +24,13 @@ use crate::hash::BpqsHash;
 use crate::params::BpqsParams;
 
 fn lane<P: BpqsParams>(x: &[u8; 32]) -> [u8; 32] {
-    debug_assert!(
-        x[P::N..].iter().all(|b| *b == 0),
-        "lanes are canonically padded"
-    );
-    *x
+    // Canonicalize to the meaningful `P::N`-byte prefix without panicking in
+    // debug builds when untrusted or fuzzed segments carry non-zero tail bytes
+    //. `sign::verify_at_height` rejects non-canonical padding up
+    // front in both debug and release builds via `check_canonical`.
+    let mut out = [0u8; 32];
+    out[..P::N].copy_from_slice(&x[..P::N]);
+    out
 }
 
 /// Expand the per-epoch seed into the `P::LEN` secret chain roots (the epoch
@@ -49,7 +51,7 @@ pub fn epoch_secret_chains<H: BpqsHash, P: BpqsParams>(epoch_seed: &[u8; 32]) ->
 }
 
 /// One step of a chain: hash the lane's meaningful prefix with the chain id
-/// and the step's absolute position (P02-F19).
+/// and the step's absolute position.
 ///
 /// The step index is bound so a digest computed for position `k` can never
 /// be replayed as position `j`: the chain is a position-indexed sequence,

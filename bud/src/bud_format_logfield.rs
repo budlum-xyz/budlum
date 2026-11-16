@@ -1,6 +1,6 @@
 //! B.U.D. 2.0 - Field-Aware Template Columnisation for LOGs (2026-08-16)
 //!
-//! The logsentinel-parser pattern (K88-3) synthesised with ideas.md F21/F53: in
+//! The logsentinel-parser pattern (3) synthesised with ideas.md F21/F53: in
 //! KNOWN log formats (nginx access, syslog) lines are parsed field by field, and
 //! fields such as ip/status/size go into separate columns. Because the field
 //! types are known, numeric fields are turned into BINARY (the Parquet idea),
@@ -430,7 +430,7 @@ mod tests {
 
     #[test]
     fn roundtrip_lossless() {
-        // K38: encode -> decode = the original (lossless)
+        // Encode -> decode = the original (lossless)
         let log = sample_log(500);
         let col = LogFieldColumnar::encode(&log).expect("field-aware encode");
         assert_eq!(col.lines, 500);
@@ -465,7 +465,7 @@ mod tests {
         assert!(LogFieldColumnar::encode(b"").is_none());
     }
 
-    /// BLG-0606: a crafted file of newline bytes is refused by the count, and
+    /// A crafted file of newline bytes is refused by the count, and
     /// a good first line followed by empty lines is refused at the first one.
     #[test]
     fn newline_flood_is_refused_without_a_line_table() {

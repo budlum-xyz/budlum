@@ -1,6 +1,8 @@
+//! Convenience: exposed for BudZero zkVM prover, compiler, and verifier callers.
+
 use p3_air::symbolic::SymbolicAirBuilder;
 use p3_air::Air;
-use p3_commit::Pcs;
+use p3_commit::{Pcs, UnivariateStarkPcs};
 use p3_matrix::Matrix;
 use tracing::debug_span;
 
@@ -22,6 +24,19 @@ pub struct PreprocessedVerifierKey<SC: StarkGenericConfig> {
     pub commitment: crate::bud_stark::Com<SC>,
 }
 
+/// The largest `degree_bits` a preprocessed setup is built for: the envelope bound
+/// (`2^24` rows) the node accepts, far above the `2^22` rows the largest legal
+/// trace needs. Above it the setup is refused rather than attempted.
+pub const MAX_SETUP_DEGREE_BITS: usize = 24;
+
+/// Commits the AIR's preprocessed columns for a trace of `2^degree_bits` rows.
+///
+/// Returns `None` when there is nothing to set up (no preprocessed columns) and also
+/// when the request cannot be honoured: a `degree_bits` above
+/// [`MAX_SETUP_DEGREE_BITS`] (so no shift can overflow and no allocation follows a
+/// number a peer chose), or a preprocessed height that is not `2^degree_bits`. Those
+/// were a shift overflow and an `assert_eq!`; on a node built with `panic = "abort"`
+/// each was a way to stop it.
 pub fn setup_preprocessed<SC, A>(
     config: &SC,
     air: &A,
@@ -31,6 +46,9 @@ where
     SC: StarkGenericConfig,
     A: Air<SymbolicAirBuilder<Val<SC>>> + for<'a> Air<ProverConstraintFolder<'a, SC>>,
 {
+    if degree_bits > MAX_SETUP_DEGREE_BITS {
+        return None;
+    }
     let pcs = config.pcs();
     let is_zk = config.is_zk() as usize;
 
@@ -44,15 +62,16 @@ where
         return None;
     }
 
-    assert_eq!(
-        preprocessed.height(),
-        init_degree,
-        "preprocessed trace height must equal trace degree"
-    );
+    if preprocessed.height() != init_degree {
+        return None;
+    }
 
     let trace_domain = pcs.natural_domain_for_degree(degree);
-    let (commitment, prover_data) = debug_span!("commit to preprocessed trace")
-        .in_scope(|| pcs.commit_preprocessing([(trace_domain, preprocessed)]));
+    #[allow(clippy::expect_used)]
+    let (commitment, prover_data) = debug_span!("commit to preprocessed trace").in_scope(|| {
+        pcs.commit_preprocessing([(trace_domain, preprocessed)])
+            .expect("preprocessed trace fits FRI input bounds")
+    });
 
     let degree_bits = degree_bits + is_zk;
     let prover_data = PreprocessedProverData {

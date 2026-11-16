@@ -73,6 +73,10 @@ impl ValidatorSetSnapshot {
     }
 
     /// Validates that `set_hash` and `total_stake` match the computed values from `validators`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn validate_metadata(&self) -> Result<(), String> {
         let computed_hash = Self::compute_hash(&self.validators);
         if self.set_hash != computed_hash {
@@ -122,10 +126,10 @@ impl ValidatorSetSnapshot {
             + 1
     }
 
-    /// Hybrid finality requires both stake quorum and validator-count quorum.
-    /// This prevents a highly concentrated stake minority of identities from
-    /// Finalizing alone. Count quorum is ceil(2n/3): three validators require
-    /// Two signers, four validators require three.
+    /// The signer-count threshold of the post-quantum light-client fallback
+    /// (`verify_pq_checkpoint`), ceil(2n/3). The BLS finality path no longer
+    /// uses it: that quorum is counted in committee seats (section 7.4.3).
+    /// This threshold migrates to seats with the quantum-alarm rename.
     pub fn quorum_count(&self) -> usize {
         self.validators
             .len()
@@ -154,7 +158,7 @@ pub struct Prevote {
     pub chain_id: u64,
     pub voter_id: Address,
     pub sig_bls: Vec<u8>,
-    /// BLG-0083 (P04-F01): an authentication signature over
+    /// An authentication signature over
     /// [`Prevote::auth_signing_message`] under the voter's registered key.
     /// A vote without a valid `auth_sig` is dropped WITHOUT counting an
     /// invalid-vote tick against anyone: garbage cannot be attributed to a
@@ -174,10 +178,21 @@ pub struct Precommit {
     pub chain_id: u64,
     pub voter_id: Address,
     pub sig_bls: Vec<u8>,
-    /// BLG-0083 (P04-F01): the vote-authentication signature; see
+    /// The vote-authentication signature; see
     /// [`Prevote::auth_sig`].
     #[serde(default)]
     pub auth_sig: Vec<u8>,
+    /// The validator's ML-DSA attestation of this checkpoint, over
+    /// [`crate::consensus::qc::pq_signing_message`].
+    ///
+    /// It is the post-quantum half of finality: the QC blob a certificate is
+    /// finalized against is assembled from exactly these, one entry per
+    /// signer. A precommit without one still counts for the BLS half, but the
+    /// checkpoint's blob is then short this signer and no certificate for it
+    /// can be applied - which is why the signing path always attaches one
+    /// when the node holds a PQ key.
+    #[serde(default)]
+    pub pq_sig: Vec<u8>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -193,6 +208,14 @@ pub struct FinalityCert {
     pub agg_sig_bls: Vec<u8>,
     pub bitmap: Vec<u8>,
     pub set_hash: String,
+    /// The seat table version the signers' seats were counted under (section
+    /// 7.4.4): the finalized checkpoint height the table derives from. A
+    /// checkpoint whose seats have moved carries the height of the block that
+    /// moved them, so a verifier knows it needs that table and not the epoch's
+    /// base one. `#[serde(default)]` reads an older certificate as version 0,
+    /// which the base-table path refuses rather than miscounts.
+    #[serde(default)]
+    pub seat_table_version: u64,
 }
 
 /// Build the domain-separated, length-framed preimage signed by a validator's
@@ -231,6 +254,7 @@ pub fn vote_message_epoch(vote_msg: &[u8]) -> Option<u64> {
 /// chain id sits directly before the epoch in the preimage, so the two readers
 /// walk the same prefix through `vote_preimage_after_chain_id` and cannot drift
 /// apart.
+/// WIRING: unwired - no caller in this tree yet; kept as a declared surface, and nothing depends on it until one arrives.
 pub fn vote_message_chain_id(vote_msg: &[u8]) -> Option<u64> {
     let scheme = BLS_SCHEME_RFC9380_V1.as_bytes();
     let rest = vote_msg
@@ -283,7 +307,7 @@ impl Prevote {
         msg
     }
 
-    /// BLG-0083 (P04-F01): the message the voter authenticates with their
+    /// The message the voter authenticates with their
     /// registered key. Domain-separated from the vote message so one
     /// signature cannot serve as the other.
     ///
@@ -304,7 +328,7 @@ impl Precommit {
         )
     }
 
-    /// BLG-0083 (P04-F01): the vote-authentication message; shares the exact
+    /// The vote-authentication message; shares the exact
     /// length-framed V3 encoding with [`Prevote::auth_signing_message`].
     pub fn auth_signing_message(&self) -> Vec<u8> {
         vote_auth_signing_message(&self.signing_message(), &self.sig_bls)
@@ -334,7 +358,7 @@ fn hash32_from_hex(s: &str) -> Option<crate::domain::Hash32> {
     Some(out)
 }
 
-/// The settlement finality window (F-7): the hashes of a chain's
+/// The settlement finality window: the hashes of a chain's
 /// checkpoint blocks that are buried at least the finality horizon
 /// ([`crate::cross_domain::nonce::FINALITY_PRUNE_DEPTH`]) deep and no
 /// deeper than the settled-row retention
@@ -388,7 +412,7 @@ pub fn checkpoint_signing_message(chain_id: u64, epoch: u64, height: u64, hash: 
     msg
 }
 
-/// Proof-of-possession input from the IETF BLS PoP ciphersuite: the canonical
+/// Proof-of-possession input from the IETF BLS `PoP` ciphersuite: the canonical
 /// Serialized public key. Chain/address binding is provided separately by the
 /// Validator's signed `RegisterConsensusKeys` transaction.
 pub fn pop_signing_message(chain_id: u64, address: &Address, bls_pk: &[u8]) -> Vec<u8> {
@@ -489,6 +513,11 @@ pub fn sign_bls_pop(sk: &Scalar, msg: &[u8]) -> Vec<u8> {
     sig.to_compressed().to_vec()
 }
 
+/// Performs the requested operation.
+///
+/// # Errors
+///
+/// Returns an error if the operation fails.
 pub fn verify_bls_sig(pk: &[u8], msg: &[u8], sig: &[u8]) -> Result<(), String> {
     let pk_bytes: [u8; 96] = pk
         .try_into()
@@ -508,7 +537,7 @@ pub fn verify_bls_sig(pk: &[u8], msg: &[u8], sig: &[u8]) -> Result<(), String> {
         return Err("Invalid BLS public key encoding".to_string());
     }
 
-    // (security audit §5) enforce that the public key is
+    // (security audit) enforce that the public key is
     // Actually in the correct prime-order subgroup. Without this
     // Check an attacker can supply a small-subgroup point as the
     // Public key, which makes the pairing produce values in a
@@ -553,6 +582,24 @@ pub fn verify_bls_sig(pk: &[u8], msg: &[u8], sig: &[u8]) -> Result<(), String> {
     Ok(())
 }
 
+pub fn verify_bls_pop_bytes(
+    owner: &Address,
+    bls_public_key: &[u8],
+    pop_signature: &[u8],
+    chain_id: u64,
+) -> bool {
+    verify_pop(
+        &ValidatorEntry {
+            address: *owner,
+            stake: 0,
+            bls_public_key: bls_public_key.to_vec(),
+            pop_signature: pop_signature.to_vec(),
+            pq_public_key: Vec::new(),
+        },
+        chain_id,
+    )
+}
+
 pub fn verify_pop(entry: &ValidatorEntry, chain_id: u64) -> bool {
     if entry.bls_public_key.is_empty() || entry.pop_signature.is_empty() {
         return false;
@@ -566,7 +613,7 @@ pub fn verify_pop(entry: &ValidatorEntry, chain_id: u64) -> bool {
     let Some(pk_affine) = G2Affine::from_compressed_unchecked(&pk_bytes).into_option() else {
         return false;
     };
-    // (security audit §5) subgroup check on the PoP
+    // (security audit) subgroup check on the PoP
     // Public key (see `verify_bls_sig` for the full rationale).
     let is_on_curve: bool = pk_affine.is_torsion_free().into();
     if !is_on_curve || !bool::from(pk_affine.is_on_curve()) || bool::from(pk_affine.is_identity()) {
@@ -581,7 +628,7 @@ pub fn verify_pop(entry: &ValidatorEntry, chain_id: u64) -> bool {
     let Some(sig_affine) = G1Affine::from_compressed_unchecked(&sig_bytes).into_option() else {
         return false;
     };
-    // (security audit §5) subgroup check on the PoP
+    // (security audit) subgroup check on the PoP
     // Signature (see `verify_bls_sig` for the full rationale).
     let is_on_curve: bool = sig_affine.is_torsion_free().into();
     if !is_on_curve || !bool::from(sig_affine.is_on_curve()) || bool::from(sig_affine.is_identity())
@@ -641,11 +688,15 @@ pub struct FinalityAggregator {
     /// aggregator without a snapshot used to skip membership and BLS checks
     /// and could still emit consensus-verified equivocation reports.
     pub validator_snapshot: ValidatorSetSnapshot,
+    /// The seat table this round counts quorum against (section 7.4). Derived
+    /// once from the snapshot, so every vote is weighed in seats, not in raw
+    /// stake or a validator head count.
+    pub committee: crate::validators::committee::CommitteeTable,
     pub prevote_quorum_reached: bool,
     pub precommit_quorum_reached: bool,
     /// Equivocation (double-sign) evidence detected while ingesting votes.
     ///
-    ///: when a validly-signed vote conflicts with one we already
+    /// when a validly-signed vote conflicts with one we already
     /// Recorded from the same voter, we package both into a canonical
     /// [`SlashingReport`] here. The `Blockchain` drains this after each
     /// `add_prevote`/`add_precommit` and routes it through the SAME
@@ -663,10 +714,39 @@ pub struct FinalityAggregator {
 
 impl FinalityAggregator {
     pub fn new(
+        chain_id: u64,
         epoch: u64,
         checkpoint_height: u64,
         checkpoint_hash: String,
         validator_snapshot: ValidatorSetSnapshot,
+    ) -> Self {
+        // The seat table is a pure function of the snapshot and the epoch, so
+        // every node that holds this snapshot derives the same committee and
+        // weighs the same quorum (section 7.4.2, V-3).
+        let committee = crate::validators::committee::CommitteeTable::for_snapshot(
+            &validator_snapshot,
+            0,
+            chain_id,
+        );
+        Self::with_committee(
+            epoch,
+            checkpoint_height,
+            checkpoint_hash,
+            validator_snapshot,
+            committee,
+        )
+    }
+
+    /// Start a round under a seat table the caller already derived, so Instant
+    /// Seat Handover (section 7.5) is reflected in the quorum. The live path
+    /// uses this; [`Self::new`] derives the base table for callers that hold
+    /// only a snapshot.
+    pub fn with_committee(
+        epoch: u64,
+        checkpoint_height: u64,
+        checkpoint_hash: String,
+        validator_snapshot: ValidatorSetSnapshot,
+        committee: crate::validators::committee::CommitteeTable,
     ) -> Self {
         FinalityAggregator {
             epoch,
@@ -675,6 +755,7 @@ impl FinalityAggregator {
             prevotes: HashMap::new(),
             precommits: HashMap::new(),
             validator_snapshot,
+            committee,
             prevote_quorum_reached: false,
             precommit_quorum_reached: false,
             detected_equivocations: Vec::new(),
@@ -691,6 +772,11 @@ impl FinalityAggregator {
         std::mem::take(&mut self.detected_equivocations)
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn add_prevote(&mut self, vote: Prevote) -> Result<(), String> {
         if vote.epoch != self.epoch {
             return Err("Prevote epoch mismatch".into());
@@ -736,6 +822,11 @@ impl FinalityAggregator {
         Ok(())
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn add_precommit(&mut self, vote: Precommit) -> Result<(), String> {
         if vote.epoch != self.epoch {
             return Err("Precommit epoch mismatch".into());
@@ -759,6 +850,12 @@ impl FinalityAggregator {
             &vote.sig_bls,
         )
         .map_err(|e| format!("Invalid precommit signature: {e}"))?;
+        // A registered PQ signer cannot downgrade its vote to BLS-only. Reject
+        // before deduplication or equivocation bookkeeping so a stripped copy
+        // cannot occupy the authentic precommit's slot (PR110-C4510256171).
+        if !entry.pq_public_key.is_empty() && vote.pq_sig.is_empty() {
+            return Err("Missing PQ attestation in precommit".into());
+        }
 
         // Equivocation detection .
         self.detect_precommit_equivocation(&vote);
@@ -845,7 +942,7 @@ impl FinalityAggregator {
             voter,
             crate::registry::evidence::SlashingProof::DoubleSign {
                 height: self.checkpoint_height,
-                // BLG-0196 (P10-F06): the kind and the epoch travel with the
+                // The kind and the epoch travel with the
                 // evidence so any third party can rebuild the signed root and
                 // re-open both signatures; a report that stands only on the
                 // local ConsensusVerified label is not a proof.
@@ -862,35 +959,31 @@ impl FinalityAggregator {
     }
 
     fn check_prevote_quorum(&mut self) {
-        let snapshot = &self.validator_snapshot;
-        let mut voted_stake: u128 = 0;
-        let mut voted_count: usize = 0;
-        for validator in self
+        let covered = self.committee.covered_seats(self.prevotes.keys());
+        let voted_stake: u128 = self
             .prevotes
             .keys()
-            .filter_map(|addr| snapshot.find_validator(addr))
+            .filter_map(|addr| self.validator_snapshot.find_validator(addr))
+            .map(|validator| u128::from(validator.stake))
+            .sum();
+        if covered >= self.committee.quorum_seats()
+            && voted_stake >= self.validator_snapshot.quorum_stake()
         {
-            voted_stake += u128::from(validator.stake);
-            voted_count += 1;
-        }
-        if voted_stake >= snapshot.quorum_stake() && voted_count >= snapshot.quorum_count() {
             self.prevote_quorum_reached = true;
         }
     }
 
     fn check_precommit_quorum(&mut self) {
-        let snapshot = &self.validator_snapshot;
-        let mut voted_stake: u128 = 0;
-        let mut voted_count: usize = 0;
-        for validator in self
+        let covered = self.committee.covered_seats(self.precommits.keys());
+        let voted_stake: u128 = self
             .precommits
             .keys()
-            .filter_map(|addr| snapshot.find_validator(addr))
+            .filter_map(|addr| self.validator_snapshot.find_validator(addr))
+            .map(|validator| u128::from(validator.stake))
+            .sum();
+        if covered >= self.committee.quorum_seats()
+            && voted_stake >= self.validator_snapshot.quorum_stake()
         {
-            voted_stake += u128::from(validator.stake);
-            voted_count += 1;
-        }
-        if voted_stake >= snapshot.quorum_stake() && voted_count >= snapshot.quorum_count() {
             self.precommit_quorum_reached = true;
         }
     }
@@ -941,7 +1034,61 @@ impl FinalityAggregator {
             agg_sig_bls: G1Affine::from(agg_sig).to_compressed().to_vec(),
             bitmap,
             set_hash: snapshot.set_hash.clone(),
+            seat_table_version: self.committee.version,
         })
+    }
+
+    /// The QC blob for this round, assembled from the PQ attestations its
+    /// precommits carried.
+    ///
+    /// This is the producer the certificate path was missing. Every entry is
+    /// keyed by the *snapshot's* index and address for the signer - never by
+    /// anything off the wire - so the blob is a claim this aggregator can make
+    /// about its own round. Entries are ordered by validator index, so two
+    /// aggregators that saw the same set of attestations build the same blob.
+    ///
+    /// `None` when the attesting signers cover fewer seats than the committee
+    /// quorum: a blob below quorum cannot be imported (`import_qc_blob` refuses
+    /// it), so handing one back would only move the failure one call further
+    /// out with a worse message.
+    pub fn try_produce_qc_blob(&self) -> Option<crate::consensus::qc::QcBlob> {
+        let snapshot = &self.validator_snapshot;
+        let mut entries: Vec<crate::consensus::qc::PqSignatureEntry> = self
+            .precommits
+            .iter()
+            .filter_map(|(address, precommit)| {
+                if precommit.pq_sig.is_empty() {
+                    return None;
+                }
+                let index = u32::try_from(snapshot.validator_index(address)?).ok()?;
+                Some(crate::consensus::qc::PqSignatureEntry {
+                    validator_index: index,
+                    validator_address: address.to_string(),
+                    pq_signature: precommit.pq_sig.clone(),
+                })
+            })
+            .collect();
+        entries.sort_by_key(|entry| entry.validator_index);
+        // The PQ blob clears the same seat quorum as the BLS certificate, so a
+        // certificate this round produces always has a matching QC blob.
+        let covered: usize = entries
+            .iter()
+            .filter_map(|entry| {
+                snapshot
+                    .validators
+                    .get(usize::try_from(entry.validator_index).unwrap_or(usize::MAX))
+            })
+            .map(|validator| self.committee.seats_of(&validator.address).len())
+            .sum();
+        if covered < self.committee.quorum_seats() {
+            return None;
+        }
+        Some(crate::consensus::qc::QcBlob::new(
+            self.epoch,
+            self.checkpoint_height,
+            self.checkpoint_hash.clone(),
+            entries,
+        ))
     }
 
     pub fn get_state(&self) -> AggregatorState {
@@ -959,7 +1106,33 @@ impl FinalityAggregator {
 }
 
 impl FinalityCert {
+    /// Verify against the epoch's base seat table. A certificate whose seats
+    /// were counted under a handed-over table is refused here: this path holds
+    /// only a snapshot and cannot derive that table. A caller that holds the
+    /// chain uses [`Self::verify_with_committee`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn verify(&self, snapshot: &ValidatorSetSnapshot) -> Result<(), String> {
+        let committee =
+            crate::validators::committee::CommitteeTable::for_snapshot(snapshot, 0, self.chain_id);
+        self.verify_with_committee(snapshot, &committee)
+    }
+
+    /// Verify against the seat table the round actually counted under, so a
+    /// certificate produced after an Instant Seat Handover verifies (section
+    /// 7.5). The table's version must be the one the certificate names.
+    ///
+    /// # Errors
+    ///
+    /// A binding mismatch, a table version that is not the certificate's, a
+    /// seat quorum that is not met, or a BLS aggregate that does not verify.
+    pub fn verify_with_committee(
+        &self,
+        snapshot: &ValidatorSetSnapshot,
+        committee: &crate::validators::committee::CommitteeTable,
+    ) -> Result<(), String> {
         if self
             .epoch
             .checked_sub(BLS_RFC9380_ACTIVATION_EPOCH)
@@ -998,15 +1171,13 @@ impl FinalityCert {
             }
         }
 
-        let mut voted_stake: u128 = 0;
-        let mut voted_count: usize = 0;
         let mut signers_pks = Vec::new();
+        let mut signer_addresses: Vec<Address> = Vec::new();
         for (idx, validator) in snapshot.validators.iter().enumerate() {
             let byte_idx = idx / 8;
             let bit_idx = idx % 8;
             if (self.bitmap[byte_idx] & (1 << bit_idx)) != 0 {
-                voted_stake += u128::from(validator.stake);
-                voted_count += 1;
+                signer_addresses.push(validator.address);
 
                 let pk_bytes: [u8; 96] =
                     validator
@@ -1021,7 +1192,7 @@ impl FinalityCert {
                     .ok_or_else(|| {
                         format!("Invalid BLS public key encoding for {}", validator.address)
                     })?;
-                // (security audit §5) subgroup check on
+                // (security audit) subgroup check on
                 // Every bitmap-claimed signer (see `verify_bls_sig`
                 // For the full rationale). Without this, a
                 // Malicious snapshot could insert a small-subgroup
@@ -1039,23 +1210,40 @@ impl FinalityCert {
             }
         }
 
-        if voted_stake < snapshot.quorum_stake() {
+        // The quorum is counted in seats, exactly as the aggregator that
+        // produced this certificate counted it (section 7.4.3). The table must
+        // be the one the certificate names: counting a handed-over round
+        // against the base table would credit the wrong validators.
+        if committee.epoch != self.epoch {
             return Err(format!(
-                "Insufficient quorum: {} < {} (need {}/{})",
-                voted_stake,
-                snapshot.quorum_stake(),
-                FINALITY_QUORUM_NUMERATOR,
-                FINALITY_QUORUM_DENOMINATOR
+                "Certificate epoch {} does not match seat table epoch {}",
+                self.epoch, committee.epoch
             ));
         }
-
-        if voted_count < snapshot.quorum_count() {
+        if self.seat_table_version != committee.version {
             return Err(format!(
-                "Insufficient signer count quorum: {} < {} (need {}/{})",
-                voted_count,
-                snapshot.quorum_count(),
-                FINALITY_QUORUM_NUMERATOR,
-                FINALITY_QUORUM_DENOMINATOR
+                "Certificate names seat table version {}, the verifier holds {}",
+                self.seat_table_version, committee.version
+            ));
+        }
+        let covered = committee.covered_seats(signer_addresses.iter());
+        if covered < committee.quorum_seats() {
+            return Err(format!(
+                "Insufficient seat quorum: {} < {} seats",
+                covered,
+                committee.quorum_seats()
+            ));
+        }
+        let voted_stake: u128 = signer_addresses
+            .iter()
+            .filter_map(|address| snapshot.find_validator(address))
+            .map(|validator| u128::from(validator.stake))
+            .sum();
+        if voted_stake < snapshot.quorum_stake() {
+            return Err(format!(
+                "Insufficient stake quorum: {} < {}",
+                voted_stake,
+                snapshot.quorum_stake()
             ));
         }
 
@@ -1143,6 +1331,22 @@ impl FinalityCert {
 
 #[cfg(test)]
 mod tests {
+    use crate::core::block::DEFAULT_CHAIN_ID;
+
+    /// The bytes the Mikoriza slasher (`contracts/mikoriza/BudlumSlasher.sol`)
+    /// verifies must be the bytes this node signs. The Solidity test
+    /// `test_the_slasher_signs_the_rust_checkpoint_message` asserts the same
+    /// literal, so a change to the domain, the scheme name or the field order
+    /// on either side fails the other side's test instead of silently
+    /// stranding every restaked operator.
+    #[test]
+    fn the_checkpoint_preimage_is_the_one_the_slasher_golden_vector_pins() {
+        let message = checkpoint_signing_message(45_261, 3, 40, "ab");
+        assert_eq!(
+            hex::encode(&message),
+            "4255444c554d5f505245434f4d4d49545f5632424c535f5349475f424c53313233383147315f584d443a5348412d3235365f535357555f524f5f504f505fcdb0000000000000030000000000000028000000000000006162"
+        );
+    }
     use super::*;
 
     fn make_test_key(seed: u8) -> (Scalar, Vec<u8>, Vec<u8>) {
@@ -1331,7 +1535,8 @@ mod tests {
     #[test]
     fn test_aggregator_prevote_flow() {
         let (snap, sks) = make_snapshot_with_keys(4, 1000);
-        let mut agg = FinalityAggregator::new(1, 10, "cp_hash".into(), snap.clone());
+        let mut agg =
+            FinalityAggregator::new(DEFAULT_CHAIN_ID, 1, 10, "cp_hash".into(), snap.clone());
 
         for i in 0..3 {
             let vote = signed_prevote(&snap, &sks, i, 1, 10, "cp_hash");
@@ -1343,7 +1548,8 @@ mod tests {
     #[test]
     fn test_aggregator_rejects_duplicate() {
         let (snap, sks) = make_snapshot_with_keys(4, 1000);
-        let mut agg = FinalityAggregator::new(1, 10, "cp_hash".into(), snap.clone());
+        let mut agg =
+            FinalityAggregator::new(DEFAULT_CHAIN_ID, 1, 10, "cp_hash".into(), snap.clone());
 
         let vote = signed_prevote(&snap, &sks, 0, 1, 10, "cp_hash");
         agg.add_prevote(vote.clone()).unwrap();
@@ -1353,7 +1559,8 @@ mod tests {
     #[test]
     fn test_aggregator_rejects_wrong_epoch() {
         let (snap, sks) = make_snapshot_with_keys(4, 1000);
-        let mut agg = FinalityAggregator::new(1, 10, "cp_hash".into(), snap.clone());
+        let mut agg =
+            FinalityAggregator::new(DEFAULT_CHAIN_ID, 1, 10, "cp_hash".into(), snap.clone());
 
         // Wrong epoch: rejected before signature check.
         let vote = signed_prevote(&snap, &sks, 0, 99, 10, "cp_hash");
@@ -1365,7 +1572,8 @@ mod tests {
         // (Option A) a garbage signature is rejected AT INGEST and
         // Never enters the aggregate.
         let (snap, _) = make_snapshot_with_keys(4, 1000);
-        let mut agg = FinalityAggregator::new(1, 10, "cp_hash".into(), snap.clone());
+        let mut agg =
+            FinalityAggregator::new(DEFAULT_CHAIN_ID, 1, 10, "cp_hash".into(), snap.clone());
 
         let vote = Prevote {
             chain_id: crate::core::transaction::DEFAULT_CHAIN_ID,
@@ -1386,7 +1594,8 @@ mod tests {
     #[test]
     fn test_precommit_requires_prevote_quorum() {
         let (snap, sks) = make_snapshot_with_keys(4, 1000);
-        let mut agg = FinalityAggregator::new(1, 10, "cp_hash".into(), snap.clone());
+        let mut agg =
+            FinalityAggregator::new(DEFAULT_CHAIN_ID, 1, 10, "cp_hash".into(), snap.clone());
 
         // No prevote quorum yet: rejected before signature check.
         let pc = Precommit {
@@ -1405,6 +1614,7 @@ mod tests {
                 ),
             ),
             auth_sig: Vec::new(),
+            pq_sig: Vec::new(),
         };
         assert!(agg.add_precommit(pc).is_err());
     }
@@ -1412,7 +1622,8 @@ mod tests {
     #[test]
     fn test_full_finality_flow() {
         let (snap, sks) = make_snapshot_with_keys(4, 1000);
-        let mut agg = FinalityAggregator::new(1, 10, "cp_hash".into(), snap.clone());
+        let mut agg =
+            FinalityAggregator::new(DEFAULT_CHAIN_ID, 1, 10, "cp_hash".into(), snap.clone());
 
         for i in 0..3 {
             let vote = signed_prevote(&snap, &sks, i, 1, 10, "cp_hash");
@@ -1430,6 +1641,7 @@ mod tests {
                 voter_id: snap.validators[i].address,
                 sig_bls: vec![],
                 auth_sig: Vec::new(),
+                pq_sig: Vec::new(),
             };
 
             let sig_bytes = sign_msg(*sk, &pc.signing_message());
@@ -1451,8 +1663,15 @@ mod tests {
         assert_eq!(cert.checkpoint_hash, "cp_hash");
         assert_eq!(cert.set_hash, snap.set_hash);
         assert_eq!(cert.signer_count(4), 3);
+        assert_eq!(cert.seat_table_version, 0, "the base table is version zero");
 
         assert!(cert.verify(&snap).is_ok());
+        let mut handed_over = agg.committee.clone();
+        handed_over.version = 20;
+        let err = cert
+            .verify_with_committee(&snap, &handed_over)
+            .expect_err("a base certificate must not be recounted after a handover");
+        assert!(err.contains("seat table version"), "got: {err}");
 
         // The same signers with a padded bitmap or an out-of-range bit are a
         // different byte string for the same checkpoint; refused as
@@ -1526,6 +1745,7 @@ mod tests {
             voter_id: snap.validators[0].address,
             sig_bls: vec![],
             auth_sig: Vec::new(),
+            pq_sig: Vec::new(),
         };
         let sig_bytes = sign_msg(sks[0], &pc.signing_message());
 
@@ -1537,46 +1757,25 @@ mod tests {
             agg_sig_bls: sig_bytes,
             bitmap: vec![0b0000_0001],
             set_hash: snap.set_hash.clone(),
+            seat_table_version: 0,
         };
         let result = cert.verify(&snap);
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("Insufficient quorum"));
+        assert!(result.unwrap_err().contains("Insufficient seat quorum"));
     }
 
-    /// The bounded harness in `kani/src/lib.rs` proves facts about
-    /// `bitmap_voted_stake`, a copy of the walk in `FinalityCert::verify`.
-    /// This test holds the copy and production in step: for every bitmap over
-    /// a four validator set it compares the copy's sum with the stake that
-    /// `verify` reports, including stakes that overflow a `u64` when added.
+    /// Every signer bitmap is weighed through the same committee table by the
+    /// certificate verifier. Stake totals no longer decide the BLS quorum.
     #[test]
-    fn bitmap_stake_accounting_matches_the_kani_mirror() {
-        // Mirrors `kani/src/lib.rs::bitmap_voted_stake`, kept literal on purpose.
-        fn kani_mirror(stakes: &[u64; 4], n: usize, bitmap: &[u8; 1]) -> u128 {
-            let mut voted_stake: u128 = 0;
-            let mut idx = 0;
-            while idx < n {
-                let byte_idx = idx / 8;
-                let bit_idx = idx % 8;
-                if byte_idx < bitmap.len() && (bitmap[byte_idx] & (1 << bit_idx)) != 0 {
-                    voted_stake += u128::from(stakes[idx]);
-                }
-                idx += 1;
-            }
-            voted_stake
-        }
+    fn bitmap_seat_accounting_matches_the_committee() {
+        let (snap, _) = make_snapshot_with_keys(4, 1000);
+        let committee = crate::validators::committee::CommitteeTable::for_snapshot(
+            &snap,
+            0,
+            crate::core::transaction::DEFAULT_CHAIN_ID,
+        );
 
-        let stakes = [u64::MAX, u64::MAX - 7, 5, 1];
-        let (base, _) = make_snapshot_with_keys(4, 1);
-        let validators: Vec<ValidatorEntry> = base
-            .validators
-            .iter()
-            .zip(stakes)
-            .map(|(v, stake)| ValidatorEntry { stake, ..v.clone() })
-            .collect();
-        let snap = ValidatorSetSnapshot::new(1, validators);
-        let quorum = snap.quorum_stake();
-
-        for bits in 1u8..16 {
+        for bits in 0u8..16 {
             let cert = FinalityCert {
                 chain_id: crate::core::transaction::DEFAULT_CHAIN_ID,
                 epoch: 1,
@@ -1585,27 +1784,35 @@ mod tests {
                 agg_sig_bls: vec![0u8; 48],
                 bitmap: vec![bits],
                 set_hash: snap.set_hash.clone(),
+                seat_table_version: 0,
             };
-            let mirrored = kani_mirror(&stakes, 4, &[bits]);
+            let signers: Vec<Address> = snap
+                .validators
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| bits & (1 << index) != 0)
+                .map(|(_, validator)| validator.address)
+                .collect();
+            let covered = committee.covered_seats(signers.iter());
             let err = cert
                 .verify(&snap)
                 .expect_err("an unsigned certificate never verifies");
-            if mirrored < quorum {
+            if covered < committee.quorum_seats() {
                 assert!(
-                    err.starts_with(&format!("Insufficient quorum: {mirrored} <")),
-                    "bitmap {bits:#06b}: verify reported {err}, the mirror sums {mirrored}"
+                    err.starts_with(&format!("Insufficient seat quorum: {covered} <")),
+                    "bitmap {bits:#06b}: verify reported {err}, the committee covers {covered}"
                 );
             } else {
                 assert!(
-                    !err.starts_with("Insufficient quorum"),
-                    "bitmap {bits:#06b}: the mirror reaches quorum but verify said {err}"
+                    !err.starts_with("Insufficient seat quorum"),
+                    "bitmap {bits:#06b}: the committee reaches quorum but verify said {err}"
                 );
             }
         }
     }
 
     #[test]
-    fn finality_cert_requires_validator_count_quorum_even_with_large_stake() {
+    fn finality_cert_counts_seats_rather_than_stake_or_validator_count() {
         let mut sks = Vec::new();
         let stakes = [4_000u64, 1, 1, 1];
         let validators: Vec<ValidatorEntry> = stakes
@@ -1643,6 +1850,7 @@ mod tests {
             voter_id: snap.validators[0].address,
             sig_bls: vec![],
             auth_sig: Vec::new(),
+            pq_sig: Vec::new(),
         };
         let sig_bytes = sign_msg(sks[0], &pc.signing_message());
         let cert = FinalityCert {
@@ -1653,15 +1861,53 @@ mod tests {
             agg_sig_bls: sig_bytes,
             bitmap: vec![0b0000_0001],
             set_hash: snap.set_hash.clone(),
+            seat_table_version: 0,
         };
 
+        let committee = crate::validators::committee::CommitteeTable::for_snapshot(
+            &snap,
+            0,
+            crate::core::transaction::DEFAULT_CHAIN_ID,
+        );
+        assert_eq!(committee.covered_seats([&snap.validators[0].address]), 4);
+        assert!(committee.quorum_seats() > 4);
         let err = cert
             .verify(&snap)
-            .expect_err("count quorum must be enforced");
-        assert!(
-            err.contains("Insufficient signer count quorum"),
-            "got: {err}"
-        );
+            .expect_err("a stake-majority holder still has only its capped seats");
+        assert!(err.contains("Insufficient seat quorum"), "got: {err}");
+
+        // The three one-unit validators hold twelve of sixteen seats, yet
+        // dual-quorum finality requires BOTH seat quorum and stake quorum.
+        let mut agg =
+            FinalityAggregator::new(DEFAULT_CHAIN_ID, 1, 10, "cp_hash".into(), snap.clone());
+        for i in 1..4 {
+            agg.add_prevote(signed_prevote(&snap, &sks, i, 1, 10, "cp_hash"))
+                .unwrap();
+        }
+        assert!(!agg.prevote_quorum_reached);
+        agg.add_prevote(signed_prevote(&snap, &sks, 0, 1, 10, "cp_hash"))
+            .unwrap();
+        assert!(agg.prevote_quorum_reached);
+        for (v_info, sk_tuple) in snap.validators.iter().zip(sks.iter()).take(4) {
+            let pc = Precommit {
+                chain_id: crate::core::transaction::DEFAULT_CHAIN_ID,
+                epoch: 1,
+                checkpoint_height: 10,
+                checkpoint_hash: "cp_hash".into(),
+                voter_id: v_info.address,
+                sig_bls: vec![],
+                auth_sig: Vec::new(),
+                pq_sig: Vec::new(),
+            };
+            let mut signed = pc.clone();
+            signed.sig_bls = sign_msg(*sk_tuple, &pc.signing_message());
+            agg.add_precommit(signed).unwrap();
+        }
+        let cert = agg
+            .try_produce_cert()
+            .expect("both seat quorum and stake quorum are satisfied");
+        cert.verify(&snap)
+            .expect("both seat and stake quorums verify");
     }
 
     #[test]
@@ -1675,13 +1921,14 @@ mod tests {
             agg_sig_bls: vec![1; 48],
             bitmap: vec![0b0000_1111],
             set_hash: "wrong_hash".into(),
+            seat_table_version: 0,
         };
         let result = cert.verify(&snap);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("set hash mismatch"));
     }
 
-    /// A genuine on-curve small-subgroup G2 encoding (BLG-0200 / P10-F10).
+    /// A genuine on-curve small-subgroup G2 encoding.
     ///
     /// Perturbs the payload bytes of the canonical generator encoding until
     /// one decodes to a curve point that is NOT in the prime-order subgroup.
@@ -1713,7 +1960,7 @@ mod tests {
         panic!("payload perturbations produced no on-curve non-torsion-free G2 point")
     }
 
-    /// (security audit §5) `verify_bls_sig` must reject
+    /// (security audit) `verify_bls_sig` must reject
     /// Public keys and signatures that are not in the prime-order
     /// Subgroup. Without the subgroup check an attacker can supply
     /// A small-subgroup point as the public key, which makes the
@@ -1754,7 +2001,7 @@ mod tests {
             "valid pubkey+sig must pass the new subgroup check"
         );
 
-        // BLG-0200 (P10-F10): the case the check exists for - a small-subgroup
+        // The case the check exists for - a small-subgroup
         // point that DECODES. A pairing with it collapses to a subgroup that
         // verifies against any message, so the gate must reject it by name.
         let attack_pk = small_subgroup_g2_encoding();
@@ -1766,7 +2013,7 @@ mod tests {
         );
     }
 
-    /// (security audit §5) `verify_pop` must reject PoP
+    /// (security audit) `verify_pop` must reject PoP
     /// Entries whose public key is not in the prime-order
     /// Subgroup. The same subgroup check that protects
     /// `verify_bls_sig` must protect `verify_pop`, otherwise a
@@ -1802,7 +2049,7 @@ mod tests {
             "verify_pop must reject identity key/signature encodings"
         );
 
-        // BLG-0200 (P10-F10): the case the gate exists for. Both encodings
+        // The case the gate exists for. Both encodings
         // below decode to valid points, so a rejection can only come from the
         // torsion check - exactly the branch that stops a validator from
         // registering a small-subgroup key and farming trivially-passing
@@ -1885,6 +2132,7 @@ mod tests {
             voter_id: voter,
             sig_bls: Vec::new(),
             auth_sig: Vec::new(),
+            pq_sig: Vec::new(),
         };
         assert_ne!(
             precommit(45260).signing_message(),
@@ -1960,6 +2208,7 @@ mod tests {
             voter_id,
             sig_bls: pc_sig.clone(),
             auth_sig: sign_bls(&sk, &vote_auth_signing_message(&pc_msg, &pc_sig)),
+            pq_sig: Vec::new(),
         };
         for split in 1..hash.len() {
             let mut shifted_sig = hash.as_bytes()[split..].to_vec();

@@ -1,18 +1,21 @@
 //! B.U.D. Content Store - content-addressed storage layer.
 //!
 //! Implements the `ContentStore` trait for storing and retrieving
-//! Content chunks by their `ContentId`. The primary implementation
-//! Is `MemoryContentStore` (in-memory, suitable for testing and
-//! Devnet). A disk-backed implementation (`SledContentStore`) is
-//! Planned for mainnet.
+//! content chunks by their `ContentId`. `MemoryContentStore` remains the
+//! bounded test backend; `FileContentStore` is the durable backend used by a
+//! node. Both implementations verify the content address, enforce the same
+//! chunk and byte limits, and expose the same Bitswap surface.
 //!
-//! # Data Sovereignty Rule (plan §0.5)
+//! # Data Sovereignty Rule
 //!
 //! Any node can independently compute `ContentId` from raw chunk
-//! Bytes. No "Budlum Inc. indexer" or centralized service is
-//! Required. The store is fully permissionless.
+//! bytes. No "Budlum Inc. indexer" or centralized service is
+//! required. The store is fully permissionless.
 
 use std::collections::{BTreeMap, VecDeque};
+use std::fs::{self, File};
+use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
 /// A content identifier - 32-byte hash of the chunk data.
@@ -99,6 +102,9 @@ pub trait ContentStore: Send + Sync {
     /// Total number of chunks stored.
     fn len(&self) -> usize;
 
+    /// Total bytes of chunk data stored.
+    fn bytes(&self) -> usize;
+
     /// Whether the store is empty.
     fn is_empty(&self) -> bool {
         self.len() == 0
@@ -126,8 +132,7 @@ struct StoreState {
 /// In-memory content store.
 ///
 /// Suitable for testing, devnet, and short-lived nodes. Data is lost
-/// On process exit. For persistent storage, use `SledContentStore`
-/// (planned for a future commit).
+/// on process exit. Production nodes use [`FileContentStore`] instead.
 ///
 /// Thread-safe via `RwLock`. Read operations (`get`, `has`) acquire
 /// A shared lock; writes (`put`) acquire an exclusive lock.
@@ -136,6 +141,7 @@ struct StoreState {
 /// `MAX_CHUNK_BYTES` is refused, and when either bound is reached the
 /// oldest inserted chunks are evicted first.
 #[derive(Clone)]
+/// exposed for: the proof/VM crate's test-and-tooling surface - production readers land with the prover wiring.
 pub struct MemoryContentStore {
     inner: Arc<RwLock<StoreState>>,
     /// Maximum number of chunks to store.
@@ -164,6 +170,7 @@ impl MemoryContentStore {
 
     /// Create a store with default capacity (10,000 chunks, at most 2.5 GiB
     /// of data: 256 KiB per chunk on average).
+    /// exposed for: the proof/VM crate's test-and-tooling surface - production readers land with the prover wiring.
     pub fn with_default_capacity() -> Self {
         Self::new(10_000)
     }
@@ -289,6 +296,322 @@ impl ContentStore for MemoryContentStore {
             .read()
             .map(|state| state.chunks.len())
             .unwrap_or(0)
+    }
+
+    fn bytes(&self) -> usize {
+        self.inner.read().map(|state| state.bytes).unwrap_or(0)
+    }
+}
+
+/// The on-disk index is rebuilt from the content files at startup. Keeping
+/// only sizes in memory avoids a second metadata database and makes a copied
+/// store self-describing: a file named by a CID is the complete record.
+#[derive(Default)]
+struct PersistentState {
+    chunks: BTreeMap<ContentId, usize>,
+    bytes: usize,
+}
+
+/// A content-addressed store backed by one file per chunk.
+///
+/// The directory is deliberately boring: each file name is the lower-case
+/// hexadecimal CID and its contents are the bytes that CID names. Writes go
+/// through a temporary file and a rename, so a process stop cannot expose a
+/// partially written chunk. On startup the index is rebuilt and every stored
+/// file is subject to the same capacity limits as the memory backend.
+///
+/// The store never evicts: its chunks may back active storage deals. When
+/// the budget is reached it refuses new chunks until the operator deletes
+/// some.
+#[derive(Clone)]
+pub struct FileContentStore {
+    root: Arc<PathBuf>,
+    inner: Arc<RwLock<PersistentState>>,
+    max_capacity: usize,
+    max_bytes: usize,
+}
+
+impl FileContentStore {
+    /// Open or create a durable content store.
+    ///
+    /// # Errors
+    ///
+    /// Refuses an unreadable directory, an unexpected entry, an invalid CID
+    /// file name, a file larger than the protocol limit, or a store that
+    /// cannot be indexed.
+    pub fn open<P: AsRef<Path>>(
+        path: P,
+        max_capacity: usize,
+        max_bytes: usize,
+    ) -> Result<Self, StoreError> {
+        let root = path.as_ref().to_path_buf();
+        fs::create_dir_all(&root)
+            .map_err(|error| StoreError::Internal(format!("create content store: {error}")))?;
+
+        let mut state = PersistentState::default();
+        let entries = fs::read_dir(&root)
+            .map_err(|error| StoreError::Internal(format!("read content store: {error}")))?;
+        for entry in entries {
+            let entry = entry.map_err(|error| {
+                StoreError::Internal(format!("read content store entry: {error}"))
+            })?;
+            let entry_path = entry.path();
+            let file_type = entry.file_type().map_err(|error| {
+                StoreError::Internal(format!("inspect content store entry: {error}"))
+            })?;
+            if !file_type.is_file() {
+                return Err(StoreError::Internal(format!(
+                    "content store contains a non-file entry: {}",
+                    entry_path.display()
+                )));
+            }
+
+            let name = entry.file_name().into_string().map_err(|_| {
+                StoreError::Internal("content store contains a non-UTF-8 file name".into())
+            })?;
+            // A crash between writing and renaming leaves only a temporary
+            // file. It is not content and is safe to discard on the next open.
+            if name.starts_with('.') && name.ends_with(".tmp") {
+                fs::remove_file(&entry_path).map_err(|error| {
+                    StoreError::Internal(format!("remove stale content temp file: {error}"))
+                })?;
+                continue;
+            }
+            let id = parse_content_id(&name).ok_or_else(|| {
+                StoreError::Internal(format!(
+                    "content store entry has an invalid CID file name: {name}"
+                ))
+            })?;
+            if id.to_hex() != name {
+                return Err(StoreError::Internal(format!(
+                    "content store CID file name is not canonical lowercase hex: {name}"
+                )));
+            }
+            let length = entry
+                .metadata()
+                .map_err(|error| {
+                    StoreError::Internal(format!("inspect stored content {name}: {error}"))
+                })?
+                .len();
+            let length = usize::try_from(length).map_err(|_| {
+                StoreError::Internal(format!("stored content {name} is too large to index"))
+            })?;
+            if length > MAX_CHUNK_BYTES {
+                return Err(StoreError::TooLarge {
+                    len: length,
+                    max: MAX_CHUNK_BYTES,
+                });
+            }
+            if state.chunks.insert(id, length).is_some() {
+                return Err(StoreError::Internal(format!(
+                    "duplicate content CID while indexing: {name}"
+                )));
+            }
+            state.bytes = state
+                .bytes
+                .checked_add(length)
+                .ok_or_else(|| StoreError::Internal("content store byte count overflow".into()))?;
+        }
+
+        // A store above its budget (the budget was lowered) keeps every
+        // chunk: they may back active storage deals. It refuses new chunks
+        // until deletions bring it under the budget again.
+        Ok(Self {
+            root: Arc::new(root),
+            inner: Arc::new(RwLock::new(state)),
+            max_capacity,
+            max_bytes,
+        })
+    }
+
+    /// Open a durable store with the same default budget as the memory
+    /// backend: 10,000 chunks and 2.5 GiB of content.
+    pub fn with_default_capacity_at<P: AsRef<Path>>(path: P) -> Result<Self, StoreError> {
+        Self::open(
+            path,
+            10_000,
+            10_000usize.saturating_mul(DEFAULT_CHUNK_BYTES),
+        )
+    }
+
+    fn path_for(&self, id: &ContentId) -> PathBuf {
+        self.root.join(id.to_hex())
+    }
+
+    fn chunk_limit(&self) -> usize {
+        if self.max_capacity == 0 {
+            0
+        } else {
+            MAX_CHUNK_BYTES.min(self.max_bytes)
+        }
+    }
+
+    fn remove_indexed(
+        &self,
+        state: &mut PersistentState,
+        id: &ContentId,
+    ) -> Result<bool, StoreError> {
+        let Some(length) = state.chunks.remove(id) else {
+            return Ok(false);
+        };
+        let path = self.path_for(id);
+        match fs::remove_file(&path) {
+            Ok(()) => {
+                state.bytes = state.bytes.saturating_sub(length);
+                Ok(true)
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                state.bytes = state.bytes.saturating_sub(length);
+                Ok(true)
+            }
+            Err(error) => {
+                // Put the index row back when deletion did not happen. The
+                // caller can retry without believing the bytes disappeared.
+                state.chunks.insert(*id, length);
+                Err(StoreError::Internal(format!(
+                    "remove stored content {}: {error}",
+                    id.to_hex()
+                )))
+            }
+        }
+    }
+
+    /// Whether `length` more bytes in a new chunk would break the budget.
+    fn would_exceed(&self, state: &PersistentState, id: &ContentId, length: usize) -> bool {
+        let old = state.chunks.get(id).copied();
+        let chunks = state.chunks.len() + usize::from(old.is_none());
+        let bytes = state
+            .bytes
+            .saturating_sub(old.unwrap_or(0))
+            .saturating_add(length);
+        chunks > self.max_capacity || bytes > self.max_bytes
+    }
+}
+
+fn parse_content_id(name: &str) -> Option<ContentId> {
+    if name.len() != 64 {
+        return None;
+    }
+    let bytes = hex::decode(name).ok()?;
+    let mut id = [0u8; 32];
+    id.copy_from_slice(&bytes);
+    Some(ContentId(id))
+}
+
+impl ContentStore for FileContentStore {
+    fn put(&self, id: ContentId, data: Vec<u8>) -> Result<(), StoreError> {
+        let computed = ContentId::of(&data);
+        if computed != id {
+            return Err(StoreError::IntegrityMismatch {
+                expected: id,
+                actual: computed,
+            });
+        }
+        let limit = self.chunk_limit();
+        if data.len() > limit {
+            return Err(StoreError::TooLarge {
+                len: data.len(),
+                max: limit,
+            });
+        }
+
+        let mut state = self
+            .inner
+            .write()
+            .map_err(|error| StoreError::Internal(error.to_string()))?;
+        // A full store refuses rather than evicts: the chunks it holds may
+        // back active storage deals, and dropping one would make its operator
+        // fail the next challenge. The node operator frees space by deleting.
+        if self.would_exceed(&state, &id, data.len()) {
+            return Err(StoreError::Internal(format!(
+                "content store full: {} chunks, {} bytes; budget {} chunks, {} bytes",
+                state.chunks.len(),
+                state.bytes,
+                self.max_capacity,
+                self.max_bytes
+            )));
+        }
+        let target = self.path_for(&id);
+        let temporary = self.root.join(format!(".{}.tmp", id.to_hex()));
+        let mut file = File::create(&temporary)
+            .map_err(|error| StoreError::Internal(format!("create content temp file: {error}")))?;
+        if let Err(error) = file.write_all(&data).and_then(|_| file.sync_all()) {
+            let _ = fs::remove_file(&temporary);
+            return Err(StoreError::Internal(format!(
+                "write content temp file: {error}"
+            )));
+        }
+        drop(file);
+        if let Err(error) = fs::rename(&temporary, &target) {
+            let _ = fs::remove_file(&temporary);
+            return Err(StoreError::Internal(format!(
+                "commit content file: {error}"
+            )));
+        }
+
+        let old_length = state.chunks.insert(id, data.len());
+        state.bytes = state
+            .bytes
+            .saturating_sub(old_length.unwrap_or(0))
+            .saturating_add(data.len());
+        Ok(())
+    }
+
+    fn get(&self, id: &ContentId) -> Result<Vec<u8>, StoreError> {
+        let path = self.path_for(id);
+        let data = fs::read(&path).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                StoreError::NotFound(*id)
+            } else {
+                StoreError::Internal(format!("read stored content {}: {error}", id.to_hex()))
+            }
+        })?;
+        let actual = ContentId::of(&data);
+        if actual != *id {
+            return Err(StoreError::IntegrityMismatch {
+                expected: *id,
+                actual,
+            });
+        }
+        Ok(data)
+    }
+
+    fn delete(&self, id: &ContentId) -> Result<(), StoreError> {
+        let mut state = self
+            .inner
+            .write()
+            .map_err(|error| StoreError::Internal(error.to_string()))?;
+        if self.remove_indexed(&mut state, id)? {
+            tracing::info!(cid = %id, "content physically deleted from store");
+            Ok(())
+        } else {
+            Err(StoreError::NotFound(*id))
+        }
+    }
+
+    fn has(&self, id: &ContentId) -> bool {
+        self.inner
+            .read()
+            .map(|state| state.chunks.contains_key(id) && self.path_for(id).is_file())
+            .unwrap_or(false)
+    }
+
+    fn list_cids(&self) -> Vec<ContentId> {
+        self.inner
+            .read()
+            .map(|state| state.chunks.keys().copied().collect())
+            .unwrap_or_default()
+    }
+
+    fn len(&self) -> usize {
+        self.inner
+            .read()
+            .map(|state| state.chunks.len())
+            .unwrap_or(0)
+    }
+
+    fn bytes(&self) -> usize {
+        self.inner.read().map(|state| state.bytes).unwrap_or(0)
     }
 }
 
@@ -478,5 +801,77 @@ mod tests {
         for (data, want) in &cases {
             assert_eq!(ContentId::of(data).to_hex(), *want, "len {}", data.len());
         }
+    }
+
+    fn scratch_store_path(label: &str) -> PathBuf {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "bud-node-content-{label}-{}-{stamp}",
+            std::process::id()
+        ))
+    }
+
+    #[test]
+    fn file_store_survives_reopen() {
+        let path = scratch_store_path("reopen");
+        let data = b"durable B.U.D. content".to_vec();
+        let id = ContentId::of(&data);
+        {
+            let store = FileContentStore::open(&path, 4, 1024).unwrap();
+            store.put(id, data.clone()).unwrap();
+            assert_eq!(store.get(&id).unwrap(), data);
+        }
+        let reopened = FileContentStore::open(&path, 4, 1024).unwrap();
+        assert!(reopened.has(&id));
+        assert_eq!(reopened.list_cids(), vec![id]);
+        assert_eq!(reopened.get(&id).unwrap(), data);
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn file_store_refuses_corrupt_bytes_after_reopen() {
+        let path = scratch_store_path("integrity");
+        let data = b"original".to_vec();
+        let id = ContentId::of(&data);
+        let store = FileContentStore::open(&path, 4, 1024).unwrap();
+        store.put(id, data).unwrap();
+        std::fs::write(path.join(id.to_hex()), b"tampered").unwrap();
+        let reopened = FileContentStore::open(&path, 4, 1024).unwrap();
+        assert!(matches!(
+            reopened.get(&id),
+            Err(StoreError::IntegrityMismatch { expected, .. }) if expected == id
+        ));
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn a_full_file_store_refuses_instead_of_evicting() {
+        let path = scratch_store_path("full");
+        let entries: Vec<(ContentId, Vec<u8>)> = (0..3)
+            .map(|index| {
+                let data = format!("persistent chunk {index}").into_bytes();
+                (ContentId::of(&data), data)
+            })
+            .collect();
+        let store = FileContentStore::open(&path, 2, 1024).unwrap();
+        store.put(entries[0].0, entries[0].1.clone()).unwrap();
+        store.put(entries[1].0, entries[1].1.clone()).unwrap();
+        // The third chunk would break the budget: refused, nothing evicted.
+        assert!(store.put(entries[2].0, entries[2].1.clone()).is_err());
+        assert_eq!(store.len(), 2);
+        // Writing a chunk the store already holds is not growth.
+        store.put(entries[1].0, entries[1].1.clone()).unwrap();
+        drop(store);
+        // A lowered budget at reopen keeps every chunk and refuses new ones.
+        let reopened = FileContentStore::open(&path, 1, 1024).unwrap();
+        assert_eq!(reopened.len(), 2);
+        assert!(reopened.put(entries[2].0, entries[2].1.clone()).is_err());
+        reopened.delete(&entries[0].0).unwrap();
+        reopened.delete(&entries[1].0).unwrap();
+        reopened.put(entries[2].0, entries[2].1.clone()).unwrap();
+        std::fs::remove_dir_all(path).unwrap();
     }
 }

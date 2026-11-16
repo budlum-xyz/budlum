@@ -133,6 +133,7 @@ mod poa_authority_binding {
             pow_parameters: None,
             zk_program_allowlist: Vec::new(),
             plugin_code_hash: None,
+            genesis_state_root: [0u8; 32],
         }
     }
 
@@ -349,6 +350,7 @@ mod poa_authority_binding {
             agg_sig_bls: vec![],
             bitmap: vec![],
             set_hash: snapshot.set_hash.clone(),
+            seat_table_version: 0,
         };
         match crate::domain::finality_adapter::PoSFinalityAdapter
             .verify_finality(

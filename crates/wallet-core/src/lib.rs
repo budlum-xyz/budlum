@@ -27,9 +27,9 @@
 //! ```rust
 //! use budlum_wallet_core::{Wallet, WalletPrivacyConfig, ML_DSA_87_SIGNATURE_LEN};
 //!
-//! // Fixed entropy: reproducible, and never a real wallet.
-//! let mut wallet = Wallet::from_entropy(&[1u8; 16]).unwrap();
-//! assert_eq!(wallet.mnemonic().split_whitespace().count(), 12);
+//! // Fixed 256-bit entropy: reproducible, and never a real wallet.
+//! let mut wallet = Wallet::from_entropy(&[1u8; 32]).unwrap();
+//! assert_eq!(wallet.mnemonic().split_whitespace().count(), 24);
 //! assert_eq!(wallet.address_hex().len(), 64);
 //!
 //! // Signing is what the wallet is for; the relayer it is handed to is not
@@ -47,10 +47,27 @@
 //! - `tee_enabled`: execution-time confidentiality - **fail-closed** without a
 //!   Linked SGX/Nitro runtime (no silent plaintext fallback).
 
+#[cfg(test)]
+mod api_surface_tests;
 mod bip39_wordlist;
+/// `.bud` recipient validation and Merkle state-proof verification.
+pub mod bns;
+/// Wallet-side blinded consent confirmation screen, Padme buckets, and Shamir escrow.
+pub mod consent_screen;
+/// The cryptographic core shared with the node: scheme registry, FIPS 204 and
+/// FIPS 205 context strings, the dual-verifier facade and the composite
+/// signature. The files are the node's own (`src/crypto`), mounted by path.
+pub mod crypto;
 mod privacy_crypto;
 mod privacy_transfer;
+/// JSON-RPC bodies and answers for the node's public listener.
+#[cfg(feature = "rpc")]
+pub mod rpc;
 mod tee;
+/// V5 transfers the node accepts, and the V7 composite transfer.
+pub mod transfer;
+/// The V3 wallet: 24 words, SHAKE256 branches, Address V3.
+pub mod wallet_v3;
 
 pub use privacy_crypto::{
     address_to_recipient_tag, field_from_hash, hash_from_field, is_packed, poseidon4_hash,
@@ -65,9 +82,8 @@ pub use tee::{
     UnavailableTeeQuoteVerifier, UnavailableTeeRuntime,
 };
 
-use ml_dsa::{
-    EncodedSignature, KeyInit, MlDsa87, Signature, Signer, SigningKey, Verifier, VerifyingKey,
-};
+use crypto::scheme::SchemeId;
+use ml_dsa::{MlDsa87, SigningKey, VerifyingKey};
 use sha2::{Digest, Sha256};
 use sha3::Sha3_256;
 use zeroize::Zeroize;
@@ -120,7 +136,7 @@ impl std::fmt::Display for WalletError {
                 write!(f, "invalid entropy size: {n} bytes (expected 16 or 32)")
             }
             WalletError::InvalidWordCount(n) => {
-                write!(f, "invalid mnemonic word count: {n} (expected 12 or 24)")
+                write!(f, "invalid mnemonic word count: {n} (expected 24)")
             }
             WalletError::InvalidSeed => write!(f, "invalid seed"),
             WalletError::InvalidMultisigPolicy(m) => write!(f, "invalid multisig policy: {m}"),
@@ -192,9 +208,27 @@ pub fn entropy_to_mnemonic(entropy: &[u8]) -> Result<String, WalletError> {
     Ok(words.join(" "))
 }
 
+/// Normalize a BIP39 mnemonic with Unicode NFKD, ASCII lowercasing, and
+/// canonical single-space word separation.
+/// exposed for: the wallet crate's SDK and V3 surfaces.
+#[must_use]
+pub fn normalize_mnemonic_nfkd(mnemonic: &str) -> zeroize::Zeroizing<String> {
+    use unicode_normalization::UnicodeNormalization;
+    let mut decomposed: zeroize::Zeroizing<String> =
+        zeroize::Zeroizing::new(mnemonic.nfkd().collect());
+    let canonical = decomposed
+        .split_whitespace()
+        .map(str::to_ascii_lowercase)
+        .collect::<Vec<_>>()
+        .join(" ");
+    decomposed.zeroize();
+    zeroize::Zeroizing::new(canonical)
+}
+
 /// BIP39 mnemonic → entropy (reverse: checksum validation + entropy extraction).
 pub fn mnemonic_to_entropy(mnemonic: &str) -> Result<Vec<u8>, WalletError> {
-    let words: Vec<&str> = mnemonic.split_whitespace().collect();
+    let normalized = normalize_mnemonic_nfkd(mnemonic);
+    let words: Vec<&str> = normalized.split_whitespace().collect();
     if words.len() != 12 && words.len() != 24 {
         return Err(WalletError::InvalidMnemonic(format!(
             "expected 12 or 24 words, got {}",
@@ -273,71 +307,8 @@ fn verifying_key_bytes(sk: &SigningKey<MlDsa87>) -> PublicKeyBytes {
     out
 }
 
-/// Randomness source for one hedged signature: serves exactly the
-/// CSPRNG-filled 32-byte block FIPS 204 `rnd` consumes, word by word.
-/// Implementing `TryRng` by hand keeps rand_core a traits-only dependency
-/// (no getrandom feature), so the wasm build is untouched.
-#[cfg(feature = "production")]
-struct HedgedRnd {
-    bytes: [u8; 32],
-    pos: usize,
-}
-
-/// The 32-byte block ran out before the signer was satisfied.
-#[derive(Debug, Clone, Copy)]
-#[cfg(feature = "production")]
-struct HedgedRndExhausted;
-
-#[cfg(feature = "production")]
-impl core::fmt::Display for HedgedRndExhausted {
-    // Note: no `<'_>` here on purpose - the repo's binding-claims gate reads
-    // this file with a quote-parity scanner, and a lifetime apostrophe in code
-    // shifts that parity. Eliding the lifetime keeps the file gate-readable.
-    fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
-        f.write_str("hedged signing randomness exhausted")
-    }
-}
-
-#[cfg(feature = "production")]
-impl std::error::Error for HedgedRndExhausted {}
-
-#[cfg(feature = "production")]
-impl HedgedRnd {
-    fn take(&mut self, dst: &mut [u8]) -> Result<(), HedgedRndExhausted> {
-        let end = self.pos.checked_add(dst.len()).ok_or(HedgedRndExhausted)?;
-        let src = self.bytes.get(self.pos..end).ok_or(HedgedRndExhausted)?;
-        dst.copy_from_slice(src);
-        self.pos = end;
-        Ok(())
-    }
-}
-
-#[cfg(feature = "production")]
-impl rand_core::TryCryptoRng for HedgedRnd {}
-
-#[cfg(feature = "production")]
-impl rand_core::TryRng for HedgedRnd {
-    type Error = HedgedRndExhausted;
-
-    fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
-        let mut b = [0u8; 4];
-        self.take(&mut b)?;
-        Ok(u32::from_le_bytes(b))
-    }
-
-    fn try_next_u64(&mut self) -> Result<u64, Self::Error> {
-        let mut b = [0u8; 8];
-        self.take(&mut b)?;
-        Ok(u64::from_le_bytes(b))
-    }
-
-    fn try_fill_bytes(&mut self, dst: &mut [u8]) -> Result<(), Self::Error> {
-        self.take(dst)
-    }
-}
-
-/// Sign a message with an ML-DSA-87 signing key and return the 4627-byte
-/// encoded signature.
+/// Sign a message with an ML-DSA-87 signing key under the FIPS 204 context
+/// `ctx` and return the 4627-byte encoded signature.
 ///
 /// Hedged per FIPS 204 3.6.1 when the `production` CSPRNG is available: a
 /// fresh `rnd` per signature keeps repeated signatures of one message from
@@ -346,67 +317,64 @@ impl rand_core::TryRng for HedgedRnd {
 /// on any read path changes. Without `production` (fixed-entropy builds and
 /// tests) the deterministic variant is kept, mirroring this crate's
 /// fail-closed entropy policy for key generation.
-fn sign_message(sk: &SigningKey<MlDsa87>, message: &[u8]) -> SignatureBytes {
+///
+/// An unusable context (empty or over 255 bytes) is a programming error:
+/// the result is an all-zero array, which no verifier accepts, never a
+/// context-free signature.
+fn sign_message(sk: &SigningKey<MlDsa87>, ctx: &[u8], message: &[u8]) -> SignatureBytes {
+    // The deterministic variant is the FIPS 204 approved
+    // default; the hedge is defense-in-depth against side channels. A platform
+    // whose CSPRNG fails keeps producing VALID, FIPS-conformant signatures,
+    // just without the extra masking; non-production builds always take this
+    // route (`deterministic_fallback_signatures_verify_and_are_stable`).
     #[cfg(feature = "production")]
-    let hedged: Option<Signature<MlDsa87>> = {
-        let mut rnd_bytes = [0u8; 32];
-        match getrandom::getrandom(&mut rnd_bytes) {
-            Ok(()) => sk
-                .expanded_key()
-                .sign_randomized(
-                    message,
-                    b"",
-                    &mut HedgedRnd {
-                        bytes: rnd_bytes,
-                        pos: 0,
-                    },
-                )
-                .ok(),
-            Err(_) => None,
+    let rnd = {
+        let mut block = zeroize::Zeroizing::new([0u8; 32]);
+        if getrandom::getrandom(block.as_mut_slice()).is_err() {
+            block.fill(0);
         }
+        block
     };
-    // BLG-0278 (P17-F12): the fallback is now a named decision, not a
-    // silent one. ML-DSA's DETERMINISTIC mode is the FIPS 204 approved default;
-    // the hedge is defense-in-depth against side channels on platforms that
-    // expose one. So a platform whose CSPRNG fails keeps producing VALID,
-    // FIPS-conformant signatures - just without the extra masking. What must
-    // not happen is the operator believing hedging is active when it never
-    // runs: that belief is tested below (`deterministic_fallback_signatures_
-    // verify` pins the fallback path's correctness), and the feature gate
-    // means non-production builds always take this exact path, so the tested
-    // code is the shipped code for the fallback.
-    #[cfg(feature = "production")]
-    let sig: Signature<MlDsa87> = hedged.unwrap_or_else(|| deterministic_fallback(sk, message));
     #[cfg(not(feature = "production"))]
-    let sig: Signature<MlDsa87> = deterministic_fallback(sk, message);
-    let enc: EncodedSignature<MlDsa87> = sig.encode();
+    let rnd = zeroize::Zeroizing::new([0u8; 32]);
+    let seed_slice: &[u8] = sk.as_seed().as_ref();
     let mut out = [0u8; ML_DSA_87_SIGNATURE_LEN];
-    out.copy_from_slice(enc.as_ref());
+    let signed = <&[u8; ML_DSA_87_SEED_LEN]>::try_from(seed_slice)
+        .map_err(|_| crypto::pq::PqError::Signing)
+        .and_then(|seed| crypto::pq::ml_dsa_sign(SchemeId::ML_DSA_87, seed, message, ctx, &rnd));
+    if let Ok(sig) = signed {
+        if sig.len() == out.len() {
+            out.copy_from_slice(&sig);
+        }
+    }
     out
 }
 
-/// The explicit deterministic path (BLG-0278/P17-F12). Exists so the
-/// fallback has a name in the call graph and a target for the pinning test.
-fn deterministic_fallback(sk: &SigningKey<MlDsa87>, message: &[u8]) -> Signature<MlDsa87> {
-    sk.sign(message)
-}
-
-/// Verify an ML-DSA-87 signature against a 2592-byte public key.
+/// Verify an ML-DSA-87 signature against a 2592-byte public key under the
+/// FIPS 204 context `ctx`, through the dual-verifier facade: RustCrypto
+/// `ml-dsa` and `libcrux-ml-dsa` must both accept.
 ///
 /// Returns `false` on any malformed input rather than returning an error: the
 /// multisig and social-recovery paths treat an invalid signature as "this
 /// approval does not count" and the caller's threshold logic does the rest.
 fn verify_signature(
     public_key: &PublicKeyBytes,
+    ctx: &[u8],
     message: &[u8],
     signature: &SignatureBytes,
 ) -> bool {
-    let vk = VerifyingKey::<MlDsa87>::new(public_key.into());
-    let Ok(sig) = Signature::<MlDsa87>::try_from(signature.as_slice()) else {
-        return false;
-    };
-    vk.verify(message, &sig).is_ok()
+    crypto::pq::verify(SchemeId::ML_DSA_87, public_key, message, ctx, signature).is_ok()
 }
+
+/// Context of a multisig approval: the node verifies V6 owner signatures under it.
+/// exposed for: the wallet crate's SDK surface - in-tree readers land with the wallet wiring.
+pub const MULTISIG_CTX: &[u8] = crypto::ctx::TX_V6;
+/// Context of a social-recovery guardian approval.
+/// exposed for: the wallet crate's SDK surface - in-tree readers land with the wallet wiring.
+pub const RECOVERY_CTX: &[u8] = crypto::ctx::IDENTITY_V2;
+/// Context of a private-transfer spend authorization.
+/// exposed for: the wallet crate's SDK surface - in-tree readers land with the wallet wiring.
+pub const PRIVATE_TRANSFER_CTX: &[u8] = crypto::ctx::PRIVATE_TRANSFER_V1;
 
 /// Guardian-based social recovery policy.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -560,7 +528,12 @@ impl SocialRecoveryPolicy {
             if seen.contains(&approval.public_key) {
                 continue;
             }
-            if verify_signature(&approval.public_key, recovery_digest, &approval.signature) {
+            if verify_signature(
+                &approval.public_key,
+                RECOVERY_CTX,
+                recovery_digest,
+                &approval.signature,
+            ) {
                 seen.push(approval.public_key);
             }
         }
@@ -639,6 +612,12 @@ pub struct Wallet {
     /// and can make the second one unspendable, so a counter may only be used
     /// once even though the caller picks it.
     next_blinding_counter: u64,
+    /// Note commitments this wallet actually prepared to receive (or produced as
+    /// change) and has not yet spent. Checking `derive_spend_secret` alone is
+    /// circular whenever the caller also builds the witness via
+    /// `note_input_from_receive`, so `build_private_transfer` only signs for a
+    /// commitment recorded here.
+    received_note_commitments: std::sync::Mutex<std::collections::BTreeSet<u64>>,
 }
 
 // Zeroize sensitive material on drop.
@@ -688,7 +667,7 @@ pub struct WalletPrivacyConfig {
 }
 
 impl std::fmt::Debug for WalletPrivacyConfig {
-    /// BLG-0280 (P17-F14): the derived Debug printed `view_key` in the
+    /// The derived Debug printed `view_key` in the
     /// clear. The whole point of the key is that it stays off chain and off
     /// logs - one `{config:?}` in an error path or a test panic message put
     /// the selective-disclosure secret into whatever captured it. The redacted
@@ -912,8 +891,10 @@ impl WalletBindingCapabilities {
             stub_version: WALLET_BINDING_STUB_VERSION.to_string(),
             uniffi_feature_compiles: true,
             wasm_feature_compiles: true,
-            // No `.udl`, no `#[wasm_bindgen]` export. Flipping this without
-            // one is what the gate is there to catch.
+            // The browser surface is wired (`wasm_bindings::BrowserWallet`);
+            // the mobile one is not: no `.udl` and no UniFFI export yet. The
+            // flag claims both, so it stays false until UniFFI lands, and
+            // the gate refuses it true before then.
             bindings_are_wired: false,
             exports_seed_material: false,
         }
@@ -936,15 +917,238 @@ pub mod uniffi_bindings {
     pub fn binding_capabilities() -> WalletBindingCapabilities {
         WalletBindingCapabilities::current()
     }
+
+    /// Verify a `bud_bnsProof` answer against the headers the host has
+    /// verified, and return what it proves as JSON.
+    ///
+    /// # Errors
+    ///
+    /// Every refusal of [`crate::bns::verify_bns_proof`].
+    /// exposed for: the wallet crate's SDK surface - in-tree readers land with the wallet wiring.
+    pub fn verify_bns_proof(
+        name: &str,
+        proof_json: &str,
+        headers: &crate::bns::BnsHeaderBook,
+    ) -> Result<String, String> {
+        crate::bns::verify_bns_proof(name, proof_json, headers).map(|v| v.to_json())
+    }
+
+    /// Resolve `name` from the `bud_bnsGetProof` answers of the configured
+    /// nodes, and return what the freshest verified answer proves as JSON.
+    ///
+    /// # Errors
+    ///
+    /// Every refusal of [`crate::bns::resolve_bns`].
+    /// exposed for: the wallet crate's SDK surface - in-tree readers land with the wallet wiring.
+    pub fn resolve_bns(
+        name: &str,
+        answers: &[String],
+        headers: &crate::bns::BnsHeaderBook,
+    ) -> Result<String, String> {
+        crate::bns::resolve_bns(name, answers, headers).map(|v| v.to_json())
+    }
 }
 
 #[cfg(feature = "wasm")]
 pub mod wasm_bindings {
     use super::WalletBindingCapabilities;
+    use wasm_bindgen::prelude::*;
 
     #[must_use]
     pub fn binding_capabilities() -> WalletBindingCapabilities {
         WalletBindingCapabilities::current()
+    }
+
+    /// A V5 wallet opened in a browser from its 24 words (
+    ///). The words stay inside the wasm instance; only the address and
+    /// signed transactions leave it.
+    #[wasm_bindgen]
+    /// exposed for: the wallet crate's SDK surface - in-tree readers land with the wallet wiring.
+    pub struct BrowserWallet {
+        inner: super::Wallet,
+    }
+
+    #[wasm_bindgen]
+    impl BrowserWallet {
+        /// Open a wallet from a 24-word mnemonic. 12-word phrases are refused
+        ///.
+        ///
+        /// # Errors
+        ///
+        /// Another word count, an unknown word or a bad checksum.
+        #[wasm_bindgen(constructor)]
+        pub fn new(mnemonic: &str) -> Result<BrowserWallet, JsError> {
+            let normalized = super::normalize_mnemonic_nfkd(mnemonic);
+            let words = normalized.split_whitespace().count();
+            if words != 24 {
+                return Err(JsError::new(&format!(
+                    "a mnemonic has 24 words; this one has {words}"
+                )));
+            }
+            super::Wallet::from_mnemonic(&normalized)
+                .map(|inner| Self { inner })
+                .map_err(|e| JsError::new(&format!("{e:?}")))
+        }
+
+        /// The wallet's address, 64 hex characters.
+        #[must_use]
+        pub fn address(&self) -> String {
+            hex::encode(self.inner.address())
+        }
+
+        /// Sign a V5 transfer and return the JSON `bud_sendRawTransaction`
+        /// takes (wrap it with `send_raw_transaction_body`).
+        ///
+        /// # Errors
+        ///
+        /// A recipient that is not 32 bytes of hex.
+        /// exposed for: the wallet crate's SDK surface - in-tree readers land with the wallet wiring.
+        pub fn sign_transfer(
+            &self,
+            to_hex: &str,
+            amount: u64,
+            fee: u64,
+            nonce: u64,
+            chain_id: u64,
+            timestamp_ms: u64,
+        ) -> Result<String, JsError> {
+            let to = hex::decode(to_hex.trim_start_matches("0x"))
+                .ok()
+                .and_then(|bytes| <[u8; 32]>::try_from(bytes.as_slice()).ok())
+                .ok_or_else(|| JsError::new("the recipient is not 32 bytes of hex"))?;
+            let transfer = super::transfer::UnsignedTransfer {
+                from: self.inner.address(),
+                to,
+                amount,
+                fee,
+                max_fee: fee,
+                priority_fee: 0,
+                nonce,
+                timestamp_ms: u128::from(timestamp_ms),
+                chain_id,
+            };
+            Ok(super::transfer::signed_transfer_json(
+                &self.inner,
+                &transfer,
+            ))
+        }
+    }
+
+    /// The headers a page has verified with its own light client. A `.bud`
+    /// proof is checked against these and nothing else.
+    #[wasm_bindgen]
+    #[derive(Default)]
+    /// exposed for: the wallet crate's SDK surface - in-tree readers land with the wallet wiring.
+    pub struct BrowserHeaderBook {
+        inner: crate::bns::BnsHeaderBook,
+    }
+
+    #[wasm_bindgen]
+    impl BrowserHeaderBook {
+        /// An empty book.
+        #[wasm_bindgen(constructor)]
+        #[must_use]
+        /// exposed for: the wallet crate's SDK surface - in-tree readers land with the wallet wiring.
+        pub fn new() -> Self {
+            Self::default()
+        }
+
+        /// Add a header the page has verified: its height, the `.bud`
+        /// registry root it commits to as 32 bytes of hex, and its epoch.
+        ///
+        /// # Errors
+        ///
+        /// A root that is not 32 bytes of hex.
+        /// exposed for: the wallet crate's SDK surface - in-tree readers land with the wallet wiring.
+        pub fn trust(
+            &mut self,
+            height: u64,
+            bns_root_hex: &str,
+            epoch: u64,
+        ) -> Result<(), JsError> {
+            let clean = bns_root_hex.strip_prefix("0x").unwrap_or(bns_root_hex);
+            let bytes = hex::decode(clean).map_err(|_| JsError::new("root is not hex"))?;
+            let bns_root = <[u8; 32]>::try_from(bytes.as_slice())
+                .map_err(|_| JsError::new("root is not 32 bytes"))?;
+            self.inner.trust(crate::bns::TrustedBnsHeader {
+                height,
+                bns_root,
+                epoch,
+            });
+            Ok(())
+        }
+    }
+
+    /// Verify a `bud_bnsProof` answer against `headers` and return what it
+    /// proves as JSON: `{"held": false, "height"}` or the record of the name.
+    ///
+    /// # Errors
+    ///
+    /// Every refusal of [`crate::bns::verify_bns_proof`].
+    #[wasm_bindgen]
+    /// exposed for: the wallet crate's SDK surface - in-tree readers land with the wallet wiring.
+    pub fn verify_bns_proof(
+        name: &str,
+        proof_json: &str,
+        headers: &BrowserHeaderBook,
+    ) -> Result<String, JsError> {
+        crate::bns::verify_bns_proof(name, proof_json, &headers.inner)
+            .map(|v| v.to_json())
+            .map_err(|e| JsError::new(&e))
+    }
+
+    /// Resolve `name` from the `bud_bnsGetProof` answers the page fetched
+    /// from its configured nodes. Returns the same JSON as
+    /// [`verify_bns_proof`], for the freshest answer that verifies.
+    ///
+    /// # Errors
+    ///
+    /// Every refusal of [`crate::bns::resolve_bns`].
+    #[wasm_bindgen]
+    /// exposed for: the wallet crate's SDK surface - in-tree readers land with the wallet wiring.
+    pub fn resolve_bns(
+        name: &str,
+        answers: Vec<String>,
+        headers: &BrowserHeaderBook,
+    ) -> Result<String, JsError> {
+        crate::bns::resolve_bns(name, &answers, &headers.inner)
+            .map(|v| v.to_json())
+            .map_err(|e| JsError::new(&e))
+    }
+
+    /// The `bud_sendRawTransaction` body of a signed transaction.
+    #[wasm_bindgen]
+    #[must_use]
+    /// exposed for: the wallet crate's SDK surface - in-tree readers land with the wallet wiring.
+    pub fn send_raw_transaction_body(signed_json: &str) -> String {
+        super::rpc::send_raw_transaction(signed_json)
+    }
+
+    /// The `bud_getNonce` body of an address.
+    #[wasm_bindgen]
+    #[must_use]
+    /// exposed for: the wallet crate's SDK surface - in-tree readers land with the wallet wiring.
+    pub fn get_nonce_body(address_hex: &str) -> String {
+        super::rpc::get_nonce(address_hex)
+    }
+
+    /// The `bud_chainId` body.
+    #[wasm_bindgen]
+    #[must_use]
+    /// exposed for: the wallet crate's SDK surface - in-tree readers land with the wallet wiring.
+    pub fn chain_id_body() -> String {
+        super::rpc::chain_id()
+    }
+
+    /// The number in a node answer (`0x` quantity or decimal).
+    ///
+    /// # Errors
+    ///
+    /// The node's error, or a result that is not a number.
+    #[wasm_bindgen]
+    /// exposed for: the wallet crate's SDK surface - in-tree readers land with the wallet wiring.
+    pub fn quantity_result(answer: &str) -> Result<u64, JsError> {
+        super::rpc::quantity_result(answer).map_err(|e| JsError::new(&e))
     }
 }
 
@@ -1004,7 +1208,12 @@ impl MultisigPolicy {
             if seen.contains(&approval.public_key) {
                 continue;
             }
-            if verify_signature(&approval.public_key, message, &approval.signature) {
+            if verify_signature(
+                &approval.public_key,
+                MULTISIG_CTX,
+                message,
+                &approval.signature,
+            ) {
                 seen.push(approval.public_key);
             }
         }
@@ -1019,10 +1228,14 @@ impl Wallet {
         self.mnemonic.zeroize();
         self.seed.zeroize();
         self.privacy.view_key.zeroize();
+        if let Ok(mut notes) = self.received_note_commitments.lock() {
+            notes.clear();
+        }
     }
     /// Create a new wallet (random entropy -> mnemonic -> seed -> keypair).
     ///
-    /// `word_count`: 12 (128-bit entropy) or 24 (256-bit entropy).
+    /// `word_count`: 24 (256-bit entropy). Twelve-word (128-bit) seeds are
+    /// refused fail-closed.
     ///
     /// **Production safety:** this function only works when the `production` feature
     /// is enabled. Without it `Wallet::generate` returns
@@ -1030,7 +1243,6 @@ impl Wallet {
     /// environment. Use `from_entropy` for test/dev environments.
     pub fn generate(word_count: usize) -> Result<Self, WalletError> {
         let entropy_len = match word_count {
-            12 => 16, // 128 bit
             24 => 32, // 256 bit
             _ => return Err(WalletError::InvalidWordCount(word_count)),
         };
@@ -1071,7 +1283,7 @@ impl Wallet {
     /// Use `Wallet::generate` for production wallet generation
     /// (production feature + getrandom CSPRNG gerektirir).
     pub fn from_entropy(entropy: &[u8]) -> Result<Self, WalletError> {
-        if entropy.len() != 16 && entropy.len() != 32 {
+        if entropy.len() != 32 {
             return Err(WalletError::InvalidEntropy(entropy.len()));
         }
 
@@ -1100,13 +1312,20 @@ impl Wallet {
             privacy: WalletPrivacyConfig::default(),
             trusted_tee_measurement: None,
             next_blinding_counter: 0,
+            received_note_commitments: std::sync::Mutex::new(std::collections::BTreeSet::new()),
         })
     }
 
-    /// Restore a wallet from a mnemonic (with BIP39 checksum verification).
+    /// Restore a wallet from a 24-word mnemonic (NFKD-normalized, with BIP39
+    /// checksum verification; 12-word seeds are refused per).
     pub fn from_mnemonic(mnemonic: &str) -> Result<Self, WalletError> {
+        let normalized = normalize_mnemonic_nfkd(mnemonic);
+        let word_count = normalized.split_whitespace().count();
+        if word_count != 24 {
+            return Err(WalletError::InvalidWordCount(word_count));
+        }
         // BIP39 reverse: mnemonic -> entropy (with checksum verification)
-        let mut entropy = mnemonic_to_entropy(mnemonic)?;
+        let mut entropy = mnemonic_to_entropy(&normalized)?;
 
         let mut hasher = Sha3_256::new();
         hasher.update(b"BUDLUM_MLDSA87_SEED_V1");
@@ -1121,12 +1340,13 @@ impl Wallet {
         let signing_key = signing_key_from_seed(&seed);
 
         Ok(Self {
-            mnemonic: mnemonic.to_string(),
+            mnemonic: normalized.as_str().to_owned(),
             seed,
             signing_key,
             privacy: WalletPrivacyConfig::default(),
             trusted_tee_measurement: None,
             next_blinding_counter: 0,
+            received_note_commitments: std::sync::Mutex::new(std::collections::BTreeSet::new()),
         })
     }
 
@@ -1177,15 +1397,35 @@ impl Wallet {
         }
     }
 
-    /// Mesaj imzala (ML-DSA-87, 4627 byte FIPS 204 encoded signature).
+    /// Sign a user transaction message (ML-DSA-87, 4627 byte FIPS 204 encoded
+    /// signature) under the V5 transaction context.
     #[must_use]
     pub fn sign(&self, message: &[u8]) -> SignatureBytes {
-        sign_message(&self.signing_key, message)
+        sign_message(&self.signing_key, crypto::ctx::TX_V5, message)
     }
 
-    /// Verify a signature (static helper - without building a wallet).
+    /// Sign under an explicit FIPS 204 context from [`crypto::ctx`].
+    #[must_use]
+    /// exposed for: the wallet crate's SDK surface - in-tree readers land with the wallet wiring.
+    pub fn sign_for(&self, ctx: &[u8], message: &[u8]) -> SignatureBytes {
+        sign_message(&self.signing_key, ctx, message)
+    }
+
+    /// Verify a user transaction signature (static helper - without building
+    /// a wallet).
     pub fn verify(public_key: &PublicKeyBytes, message: &[u8], signature: &SignatureBytes) -> bool {
-        verify_signature(public_key, message, signature)
+        verify_signature(public_key, crypto::ctx::TX_V5, message, signature)
+    }
+
+    /// Verify under an explicit FIPS 204 context from [`crypto::ctx`].
+    /// exposed for: the wallet crate's SDK surface - in-tree readers land with the wallet wiring.
+    pub fn verify_for(
+        public_key: &PublicKeyBytes,
+        ctx: &[u8],
+        message: &[u8],
+        signature: &SignatureBytes,
+    ) -> bool {
+        verify_signature(public_key, ctx, message, signature)
     }
 
     /// Seed (32-byte ML-DSA-87 xi). Not part of the public API: the raw
@@ -1330,11 +1570,14 @@ impl Wallet {
             // Bind the exact sealed bytes to a quote: an untrusted runtime
             // cannot predict SHA-256(sealed) in advance, so replacing the
             // sealed payload breaks the report data the quote is bound to.
-            let seal_digest: [u8; 32] = {
+            let (msg_digest, seal_digest): ([u8; 32], [u8; 32]) = {
                 use sha3::{Digest, Sha3_256};
+                let msg_digest: [u8; 32] = Sha3_256::digest(message).into();
                 let mut h = Sha3_256::new();
+                h.update(b"BUDLUM_TEE_SEAL_BIND_V1");
+                h.update(msg_digest);
                 h.update(&sealed);
-                h.finalize().into()
+                (msg_digest, h.finalize().into())
             };
             let quote = runtime.quote(seal_digest)?;
             // The wallet's root of trust is the verifier it owns, which
@@ -1365,9 +1608,12 @@ impl Wallet {
                     "TEE attestation does not bind the sealed intent digest".into(),
                 ));
             }
-            // Sign the sealed bytes plus the attestation measurement so the
-            // signature commits to the enclave that sealed them.
-            let mut to_sign = Vec::with_capacity(sealed.len() + 32);
+            // Bind the caller's plaintext digest, sealed envelope, and enclave
+            // measurement into the signed payload so a faulty `seal_private_intent`
+            // implementation cannot substitute another intent's ciphertext.
+            let mut to_sign = Vec::with_capacity(25 + 32 + sealed.len() + 32);
+            to_sign.extend_from_slice(b"BUDLUM_TEE_INTENT_BIND_V1");
+            to_sign.extend_from_slice(&msg_digest);
             to_sign.extend_from_slice(&sealed);
             to_sign.extend_from_slice(&attestation.measurement);
             Ok(self.sign(&to_sign))
@@ -1382,7 +1628,7 @@ impl Wallet {
     /// [`TeeRuntime`] and refuses to return plaintext witnesses without it.
     /// Build a private-transfer intent.
     ///
-    /// BLG-0275 (P17-F09): `chain_id` and `sender_nonce` come from the caller
+    /// `chain_id` and `sender_nonce` come from the caller
     /// (the network the relayer will submit to, the account nonce at signing
     /// time) and are bound into the authorization signature; they are not
     /// wallet state, and silently assuming either was how V1 became
@@ -1424,6 +1670,30 @@ impl Wallet {
                 "input note recipient tag does not match this wallet's address".into(),
             ));
         }
+        let input_commitment = req.input.commitment();
+        let expected_secret_bytes = derive_spend_secret(&self.seed, input_commitment).to_le_bytes();
+        let caller_secret_bytes = req.input.spend_secret.to_le_bytes();
+        let mut secret_diff = 0u8;
+        for (&lhs, &rhs) in caller_secret_bytes.iter().zip(expected_secret_bytes.iter()) {
+            secret_diff |= lhs ^ rhs;
+        }
+        if secret_diff != 0 {
+            return Err(WalletError::InvalidPrivateTransfer(
+                "input note spend_secret does not match wallet seed derivation".into(),
+            ));
+        }
+        let known_note = self
+            .received_note_commitments
+            .lock()
+            .map_err(|_| {
+                WalletError::InvalidPrivateTransfer("wallet note tracker lock poisoned".into())
+            })?
+            .contains(&input_commitment);
+        if !known_note {
+            return Err(WalletError::InvalidPrivateTransfer(
+                "input note commitment was never prepared or received by this wallet".into(),
+            ));
+        }
         let change = req.input.amount - req.send_amount;
         if change > 0 && req.change_recipient_tag != Some(wallet_tag) {
             return Err(WalletError::InvalidPrivateTransfer(
@@ -1461,7 +1731,7 @@ impl Wallet {
             )));
         }
         let digest = privacy_transfer::public_digest(&nullifiers, &output_commitments);
-        // BLG-0275 (P17-F09): the signature covers the binding message, not
+        // The signature covers the binding message, not
         // the bare digest; construct the intent first and sign the exact helper
         // relayers and verifiers call so producer and verifier cannot diverge.
         let mut intent = PrivateTransferIntent {
@@ -1478,14 +1748,22 @@ impl Wallet {
             authorization_sig: [0u8; ML_DSA_87_SIGNATURE_LEN],
         };
         let auth_msg = privacy_transfer::intent_authorization_message(&intent);
-        intent.authorization_sig = self.sign(&auth_msg);
+        intent.authorization_sig = self.sign_for(PRIVATE_TRANSFER_CTX, &auth_msg);
+        if let Ok(mut notes) = self.received_note_commitments.lock() {
+            notes.remove(&input_commitment);
+            if change > 0 {
+                if let Some(change_output) = intent.outputs.get(1) {
+                    notes.insert(change_output.commitment());
+                }
+            }
+        }
 
         Ok(intent)
     }
 
     /// The smallest blinding counter this wallet will still hand out.
     ///
-    /// P17-F06: the counter lives in memory only, and `from_mnemonic` and
+    /// The counter lives in memory only, and `from_mnemonic` and
     /// `from_entropy` start it at 0. A caller that restores a wallet must
     /// persist this value and give it back through
     /// [`Self::resume_blinding_counter`], or the first restored note reuses a
@@ -1547,6 +1825,12 @@ impl Wallet {
         let tag = address_to_recipient_tag(&self.address());
         // privacy_commit(amount, blinding, recipient_tag)
         let commitment = privacy_commit(amount, blinding, tag);
+        self.received_note_commitments
+            .lock()
+            .map_err(|_| {
+                WalletError::InvalidPrivateTransfer("wallet note tracker lock poisoned".into())
+            })?
+            .insert(commitment);
         Ok((blinding, commitment, hash_from_field(commitment)))
     }
 
@@ -1563,6 +1847,18 @@ impl Wallet {
         let tag = address_to_recipient_tag(&self.address());
         // privacy_commit(amount, blinding, recipient_tag)
         let commitment = privacy_commit(amount, blinding, tag);
+        let known_note = self
+            .received_note_commitments
+            .lock()
+            .map_err(|_| {
+                WalletError::InvalidPrivateTransfer("wallet note tracker lock poisoned".into())
+            })?
+            .contains(&commitment);
+        if !known_note {
+            return Err(WalletError::InvalidPrivateTransfer(
+                "note commitment was never prepared or received by this wallet".into(),
+            ));
+        }
         let spend_secret = derive_spend_secret(&self.seed, commitment);
         Ok(PrivateNoteInput {
             amount,
@@ -1576,8 +1872,9 @@ impl Wallet {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::wallet_v3::WalletV3;
 
-    /// BLG-0281 (P17-F15): rotation is counter-indexed, so the property the
+    /// Rotation is counter-indexed, so the property the
     /// design depends on must be pinned: same (seed, counter) -> same key no
     /// matter what key the wallet currently holds, distinct counters ->
     /// distinct keys. The derivation is deliberately NOT chained through the
@@ -1612,7 +1909,7 @@ mod tests {
         let _ = &mut other_wallet;
     }
 
-    /// BLG-0278 (P17-F12): the deterministic fallback must be a working
+    /// The deterministic fallback must be a working
     /// signer, not a half-path. In non-production builds every signature
     /// takes this exact route, so this test pins what the fallback produces:
     /// verify-able under the wallet's key, and deterministic (same message,
@@ -1622,7 +1919,7 @@ mod tests {
     #[cfg(not(feature = "production"))]
     #[test]
     fn deterministic_fallback_signatures_verify_and_are_stable() {
-        let w = Wallet::from_entropy(&[0x77u8; 16]).unwrap();
+        let w = Wallet::from_entropy(&[0x77u8; 32]).unwrap();
         let msg = b"private transfer authorization";
         let a = w.sign(msg);
         let b = w.sign(msg);
@@ -1634,10 +1931,22 @@ mod tests {
     }
 
     #[test]
-    fn generate_12_word_wallet() {
-        let wallet = Wallet::from_entropy(&[0x42u8; 16]).expect("12-word wallet must succeed");
+    fn generate_12_word_wallet_is_refused() {
+        assert!(matches!(
+            Wallet::from_entropy(&[0x42u8; 16]),
+            Err(WalletError::InvalidEntropy(16))
+        ));
+        assert!(matches!(
+            Wallet::generate(12),
+            Err(WalletError::InvalidWordCount(12))
+        ));
+    }
+
+    #[test]
+    fn generate_24_word_wallet() {
+        let wallet = Wallet::from_entropy(&[0x42u8; 32]).expect("24-word wallet must succeed");
         let words: Vec<&str> = wallet.mnemonic().split_whitespace().collect();
-        assert_eq!(words.len(), 12, "must have 12 words");
+        assert_eq!(words.len(), 24, "must have 24 words");
         assert_eq!(wallet.address().len(), 32, "address must be 32 bytes");
         assert_eq!(
             wallet.public_key().len(),
@@ -1646,17 +1955,10 @@ mod tests {
         );
     }
 
-    #[test]
-    fn generate_24_word_wallet() {
-        let wallet = Wallet::from_entropy(&[0x42u8; 32]).expect("24-word wallet must succeed");
-        let words: Vec<&str> = wallet.mnemonic().split_whitespace().collect();
-        assert_eq!(words.len(), 24, "must have 24 words");
-    }
-
-    /// P17-F06: a restored wallet resumes the saved counter and never goes back.
+    /// A restored wallet resumes the saved counter and never goes back.
     #[test]
     fn a_resumed_blinding_counter_blocks_reuse_and_only_moves_forward() {
-        let mut wallet = Wallet::from_entropy(&[0x42u8; 16]).unwrap();
+        let mut wallet = Wallet::from_entropy(&[0x42u8; 32]).unwrap();
         wallet.set_note_privacy_enabled(true);
         wallet.resume_blinding_counter(5);
         assert_eq!(wallet.next_blinding_counter(), 5);
@@ -1683,7 +1985,7 @@ mod tests {
 
     #[test]
     fn sign_and_verify_roundtrip() {
-        let wallet = Wallet::from_entropy(&[0x42u8; 16]).unwrap();
+        let wallet = Wallet::from_entropy(&[0x42u8; 32]).unwrap();
         let msg = b"hello budlum";
         let sig = wallet.sign(msg);
         let pubkey = wallet.public_key();
@@ -1692,7 +1994,7 @@ mod tests {
 
     #[test]
     fn verify_rejects_wrong_message() {
-        let wallet = Wallet::from_entropy(&[0x42u8; 16]).unwrap();
+        let wallet = Wallet::from_entropy(&[0x42u8; 32]).unwrap();
         let sig = wallet.sign(b"original message");
         let pubkey = wallet.public_key();
         assert!(
@@ -1704,7 +2006,7 @@ mod tests {
     #[test]
     fn restore_from_mnemonic() {
         // Generate a valid mnemonic from entropy, then restore from it
-        let wallet = Wallet::from_entropy(&[0x42u8; 16]).unwrap();
+        let wallet = Wallet::from_entropy(&[0x42u8; 32]).unwrap();
         let mnemonic = wallet.mnemonic().to_string();
         let restored = Wallet::from_mnemonic(&mnemonic).expect("restore must succeed");
         assert_eq!(restored.mnemonic(), mnemonic);
@@ -1718,8 +2020,8 @@ mod tests {
 
     #[test]
     fn different_mnemonics_different_addresses() {
-        let w1 = Wallet::from_entropy(&[1u8; 16]).unwrap();
-        let w2 = Wallet::from_entropy(&[2u8; 16]).unwrap();
+        let w1 = Wallet::from_entropy(&[1u8; 32]).unwrap();
+        let w2 = Wallet::from_entropy(&[2u8; 32]).unwrap();
         assert_ne!(
             w1.address(),
             w2.address(),
@@ -1738,15 +2040,23 @@ mod tests {
 
     #[test]
     fn from_entropy_valid_sizes() {
-        assert!(Wallet::from_entropy(&[0u8; 16]).is_ok(), "16 bytes OK");
+        assert!(
+            matches!(
+                Wallet::from_entropy(&[0u8; 16]),
+                Err(WalletError::InvalidEntropy(16))
+            ),
+            "16 bytes refused per "
+        );
         assert!(Wallet::from_entropy(&[0u8; 32]).is_ok(), "32 bytes OK");
     }
 
     #[test]
     fn entropy_size_preserves_mnemonic_word_count() {
-        let short = Wallet::from_entropy(&[0u8; 16]).unwrap();
+        assert!(matches!(
+            Wallet::from_entropy(&[0u8; 16]),
+            Err(WalletError::InvalidEntropy(16))
+        ));
         let long = Wallet::from_entropy(&[0u8; 32]).unwrap();
-        assert_eq!(short.mnemonic().split_whitespace().count(), 12);
         assert_eq!(long.mnemonic().split_whitespace().count(), 24);
     }
 
@@ -1756,7 +2066,7 @@ mod tests {
     #[test]
     fn wallet_generate_rejects_placeholder_entropy_in_production() {
         // Without --features production, Wallet::generate must fail-closed
-        let result = Wallet::generate(12);
+        let result = Wallet::generate(24);
         #[cfg(not(feature = "production"))]
         {
             assert!(
@@ -1787,7 +2097,7 @@ mod tests {
     #[test]
     fn mnemonic_checksum_validation_rejects_invalid() {
         // Valid 12-word mnemonic from from_entropy (deterministic)
-        let wallet = Wallet::from_entropy(&[0x42u8; 16]).unwrap();
+        let wallet = Wallet::from_entropy(&[0x42u8; 32]).unwrap();
         let valid_mnemonic = wallet.mnemonic().to_string();
 
         // Tampered mnemonic (last word changed) must fail checksum
@@ -1869,6 +2179,84 @@ mod tests {
         assert!(!caps.exports_seed_material);
     }
 
+    /// An absence proof over an empty registry, and the root it folds to.
+    #[cfg(any(feature = "uniffi", feature = "wasm"))]
+    fn binding_bns_fixture() -> (String, [u8; 32]) {
+        let meta = [0x33u8; 32];
+        let root = crate::bns::compute_bns_registry_root(&meta, &[0u8; 32]);
+        let proof = format!(
+            r#"{{"name":"free.bud","included":false,"meta_digest":"0x{}","height":7,"entry":null,"absence":{{"siblings":[],"occupant":null}}}}"#,
+            hex::encode(meta)
+        );
+        (proof, root)
+    }
+
+    #[cfg(feature = "uniffi")]
+    #[test]
+    fn binding_uniffi_verifies_a_bns_proof_against_the_host_headers() {
+        let (proof, root) = binding_bns_fixture();
+        let mut book = crate::bns::BnsHeaderBook::new();
+        assert!(uniffi_bindings::verify_bns_proof("free.bud", &proof, &book).is_err());
+        book.trust(crate::bns::TrustedBnsHeader {
+            height: 7,
+            bns_root: root,
+            epoch: 10,
+        });
+        assert_eq!(
+            uniffi_bindings::verify_bns_proof("free.bud", &proof, &book).unwrap(),
+            r#"{"height":7,"held":false}"#
+        );
+        let bent = proof.replace("0x33", "0x34");
+        assert!(uniffi_bindings::verify_bns_proof("free.bud", &bent, &book).is_err());
+    }
+
+    #[cfg(feature = "wasm")]
+    #[test]
+    fn binding_wasm_verifies_a_bns_proof_against_the_page_headers() {
+        let (proof, root) = binding_bns_fixture();
+        let mut book = wasm_bindings::BrowserHeaderBook::new();
+        assert!(book.trust(7, &hex::encode(root), 10).is_ok());
+        let verified = wasm_bindings::verify_bns_proof("free.bud", &proof, &book);
+        assert_eq!(
+            verified.ok().as_deref(),
+            Some(r#"{"height":7,"held":false}"#)
+        );
+    }
+
+    #[cfg(feature = "uniffi")]
+    #[test]
+    fn binding_uniffi_resolves_a_name_past_a_node_that_lies() {
+        let (proof, root) = binding_bns_fixture();
+        let mut book = crate::bns::BnsHeaderBook::new();
+        book.trust(crate::bns::TrustedBnsHeader {
+            height: 7,
+            bns_root: root,
+            epoch: 10,
+        });
+        let bent = proof.replace("0x33", "0x34");
+        assert!(
+            uniffi_bindings::resolve_bns("free.bud", std::slice::from_ref(&bent), &book).is_err()
+        );
+        assert_eq!(
+            uniffi_bindings::resolve_bns("free.bud", &[bent, proof], &book).unwrap(),
+            r#"{"height":7,"held":false}"#
+        );
+    }
+
+    #[cfg(feature = "wasm")]
+    #[test]
+    fn binding_wasm_resolves_a_name_past_a_node_that_lies() {
+        let (proof, root) = binding_bns_fixture();
+        let mut book = wasm_bindings::BrowserHeaderBook::new();
+        assert!(book.trust(7, &hex::encode(root), 10).is_ok());
+        let bent = proof.replace("0x33", "0x34");
+        let resolved = wasm_bindings::resolve_bns("free.bud", vec![bent, proof], &book);
+        assert_eq!(
+            resolved.ok().as_deref(),
+            Some(r#"{"height":7,"held":false}"#)
+        );
+    }
+
     #[cfg(feature = "wasm")]
     #[test]
     fn binding_wasm_feature_stub_exports_capabilities() {
@@ -1880,7 +2268,7 @@ mod tests {
 
     #[test]
     fn address_is_deterministic() {
-        let entropy = [0x42u8; 16];
+        let entropy = [0x42u8; 32];
         let w1 = Wallet::from_entropy(&entropy).unwrap();
         let w2 = Wallet::from_entropy(&entropy).unwrap();
         assert_eq!(
@@ -1907,8 +2295,8 @@ mod tests {
 
     #[test]
     fn multisig_policy_validates_threshold() {
-        let w1 = Wallet::from_entropy(&[1u8; 16]).unwrap();
-        let w2 = Wallet::from_entropy(&[2u8; 16]).unwrap();
+        let w1 = Wallet::from_entropy(&[1u8; 32]).unwrap();
+        let w2 = Wallet::from_entropy(&[2u8; 32]).unwrap();
         let policy = MultisigPolicy::new(vec![w1.public_key(), w2.public_key()], 2).unwrap();
         assert_eq!(policy.owner_count(), 2);
         assert!(MultisigPolicy::new(vec![w1.public_key()], 0).is_err());
@@ -1917,9 +2305,9 @@ mod tests {
 
     #[test]
     fn multisig_requires_distinct_valid_owner_signatures() {
-        let w1 = Wallet::from_entropy(&[1u8; 16]).unwrap();
-        let w2 = Wallet::from_entropy(&[2u8; 16]).unwrap();
-        let w3 = Wallet::from_entropy(&[3u8; 16]).unwrap();
+        let w1 = Wallet::from_entropy(&[1u8; 32]).unwrap();
+        let w2 = Wallet::from_entropy(&[2u8; 32]).unwrap();
+        let w3 = Wallet::from_entropy(&[3u8; 32]).unwrap();
         let msg = b"budlum multisig proposal digest";
         let policy =
             MultisigPolicy::new(vec![w1.public_key(), w2.public_key(), w3.public_key()], 2)
@@ -1927,18 +2315,18 @@ mod tests {
 
         let one = [MultisigApproval {
             public_key: w1.public_key(),
-            signature: w1.sign(msg),
+            signature: w1.sign_for(MULTISIG_CTX, msg),
         }];
         assert!(!policy.verify_threshold(msg, &one));
 
         let duplicate = [
             MultisigApproval {
                 public_key: w1.public_key(),
-                signature: w1.sign(msg),
+                signature: w1.sign_for(MULTISIG_CTX, msg),
             },
             MultisigApproval {
                 public_key: w1.public_key(),
-                signature: w1.sign(msg),
+                signature: w1.sign_for(MULTISIG_CTX, msg),
             },
         ];
         assert!(!policy.verify_threshold(msg, &duplicate));
@@ -1946,11 +2334,11 @@ mod tests {
         let quorum = [
             MultisigApproval {
                 public_key: w1.public_key(),
-                signature: w1.sign(msg),
+                signature: w1.sign_for(MULTISIG_CTX, msg),
             },
             MultisigApproval {
                 public_key: w2.public_key(),
-                signature: w2.sign(msg),
+                signature: w2.sign_for(MULTISIG_CTX, msg),
             },
         ];
         assert!(policy.verify_threshold(msg, &quorum));
@@ -1958,19 +2346,19 @@ mod tests {
 
     #[test]
     fn multisig_rejects_wrong_message_or_non_owner() {
-        let w1 = Wallet::from_entropy(&[1u8; 16]).unwrap();
-        let w2 = Wallet::from_entropy(&[2u8; 16]).unwrap();
-        let outsider = Wallet::from_entropy(&[9u8; 16]).unwrap();
+        let w1 = Wallet::from_entropy(&[1u8; 32]).unwrap();
+        let w2 = Wallet::from_entropy(&[2u8; 32]).unwrap();
+        let outsider = Wallet::from_entropy(&[9u8; 32]).unwrap();
         let policy = MultisigPolicy::new(vec![w1.public_key(), w2.public_key()], 2).unwrap();
         let msg = b"proposal";
         let approvals = [
             MultisigApproval {
                 public_key: w1.public_key(),
-                signature: w1.sign(b"different"),
+                signature: w1.sign_for(MULTISIG_CTX, b"different"),
             },
             MultisigApproval {
                 public_key: outsider.public_key(),
-                signature: outsider.sign(msg),
+                signature: outsider.sign_for(MULTISIG_CTX, msg),
             },
         ];
         assert!(!policy.verify_threshold(msg, &approvals));
@@ -1987,7 +2375,7 @@ mod tests {
             .filter(|(idx, _)| (mask & (1usize << idx)) != 0)
             .map(|(_, wallet)| MultisigApproval {
                 public_key: wallet.public_key(),
-                signature: wallet.sign(message),
+                signature: wallet.sign_for(MULTISIG_CTX, message),
             })
             .collect()
     }
@@ -1995,7 +2383,7 @@ mod tests {
     #[test]
     fn multisig_accepts_all_two_of_three_combinations() {
         let wallets = (0u8..3)
-            .map(|i| Wallet::from_entropy(&[10u8 + i; 16]).unwrap())
+            .map(|i| Wallet::from_entropy(&[10u8 + i; 32]).unwrap())
             .collect::<Vec<_>>();
         let policy =
             MultisigPolicy::new(wallets.iter().map(Wallet::public_key).collect(), 2).unwrap();
@@ -2014,7 +2402,7 @@ mod tests {
     #[test]
     fn multisig_enforces_three_of_five_combinations() {
         let wallets = (0u8..5)
-            .map(|i| Wallet::from_entropy(&[20u8 + i; 16]).unwrap())
+            .map(|i| Wallet::from_entropy(&[20u8 + i; 32]).unwrap())
             .collect::<Vec<_>>();
         let policy =
             MultisigPolicy::new(wallets.iter().map(Wallet::public_key).collect(), 3).unwrap();
@@ -2032,8 +2420,8 @@ mod tests {
 
     #[test]
     fn social_recovery_policy_validates_threshold_and_timelock() {
-        let g1 = Wallet::from_entropy(&[1u8; 16]).unwrap();
-        let g2 = Wallet::from_entropy(&[2u8; 16]).unwrap();
+        let g1 = Wallet::from_entropy(&[1u8; 32]).unwrap();
+        let g2 = Wallet::from_entropy(&[2u8; 32]).unwrap();
         let policy =
             SocialRecoveryPolicy::new(vec![g1.public_key(), g2.public_key()], 2, 100).unwrap();
         assert_eq!(policy.threshold, 2);
@@ -2044,9 +2432,9 @@ mod tests {
 
     #[test]
     fn social_recovery_requires_distinct_guardian_signatures() {
-        let g1 = Wallet::from_entropy(&[1u8; 16]).unwrap();
-        let g2 = Wallet::from_entropy(&[2u8; 16]).unwrap();
-        let g3 = Wallet::from_entropy(&[3u8; 16]).unwrap();
+        let g1 = Wallet::from_entropy(&[1u8; 32]).unwrap();
+        let g2 = Wallet::from_entropy(&[2u8; 32]).unwrap();
+        let g3 = Wallet::from_entropy(&[3u8; 32]).unwrap();
         let digest = b"recover wallet to new key";
         let policy = SocialRecoveryPolicy::new(
             vec![g1.public_key(), g2.public_key(), g3.public_key()],
@@ -2057,22 +2445,22 @@ mod tests {
         let duplicate = [
             GuardianApproval {
                 public_key: g1.public_key(),
-                signature: g1.sign(digest),
+                signature: g1.sign_for(RECOVERY_CTX, digest),
             },
             GuardianApproval {
                 public_key: g1.public_key(),
-                signature: g1.sign(digest),
+                signature: g1.sign_for(RECOVERY_CTX, digest),
             },
         ];
         assert!(!policy.verify_recovery_threshold(digest, &duplicate));
         let quorum = [
             GuardianApproval {
                 public_key: g1.public_key(),
-                signature: g1.sign(digest),
+                signature: g1.sign_for(RECOVERY_CTX, digest),
             },
             GuardianApproval {
                 public_key: g2.public_key(),
-                signature: g2.sign(digest),
+                signature: g2.sign_for(RECOVERY_CTX, digest),
             },
         ];
         assert!(policy.verify_recovery_threshold(digest, &quorum));
@@ -2080,20 +2468,20 @@ mod tests {
 
     #[test]
     fn social_recovery_rejects_non_guardian_or_wrong_digest() {
-        let g1 = Wallet::from_entropy(&[1u8; 16]).unwrap();
-        let g2 = Wallet::from_entropy(&[2u8; 16]).unwrap();
-        let outsider = Wallet::from_entropy(&[9u8; 16]).unwrap();
+        let g1 = Wallet::from_entropy(&[1u8; 32]).unwrap();
+        let g2 = Wallet::from_entropy(&[2u8; 32]).unwrap();
+        let outsider = Wallet::from_entropy(&[9u8; 32]).unwrap();
         let digest = b"recover";
         let policy =
             SocialRecoveryPolicy::new(vec![g1.public_key(), g2.public_key()], 2, 100).unwrap();
         let approvals = [
             GuardianApproval {
                 public_key: g1.public_key(),
-                signature: g1.sign(b"wrong"),
+                signature: g1.sign_for(RECOVERY_CTX, b"wrong"),
             },
             GuardianApproval {
                 public_key: outsider.public_key(),
-                signature: outsider.sign(digest),
+                signature: outsider.sign_for(RECOVERY_CTX, digest),
             },
         ];
         assert!(!policy.verify_recovery_threshold(digest, &approvals));
@@ -2101,12 +2489,12 @@ mod tests {
 
     #[test]
     fn social_recovery_rotates_compromised_guardian() {
-        let g1 = Wallet::from_entropy(&[1u8; 16]).unwrap();
-        let g2 = Wallet::from_entropy(&[2u8; 16]).unwrap();
-        let g3 = Wallet::from_entropy(&[3u8; 16]).unwrap();
-        let replacement = Wallet::from_entropy(&[4u8; 16]).unwrap();
-        let owner = Wallet::from_entropy(&[7u8; 16]).unwrap();
-        let new_owner = Wallet::from_entropy(&[8u8; 16]).unwrap();
+        let g1 = Wallet::from_entropy(&[1u8; 32]).unwrap();
+        let g2 = Wallet::from_entropy(&[2u8; 32]).unwrap();
+        let g3 = Wallet::from_entropy(&[3u8; 32]).unwrap();
+        let replacement = Wallet::from_entropy(&[4u8; 32]).unwrap();
+        let owner = Wallet::from_entropy(&[7u8; 32]).unwrap();
+        let new_owner = Wallet::from_entropy(&[8u8; 32]).unwrap();
         let policy = SocialRecoveryPolicy::new(
             vec![g1.public_key(), g2.public_key(), g3.public_key()],
             2,
@@ -2133,21 +2521,21 @@ mod tests {
         let compromised_quorum = [
             GuardianApproval {
                 public_key: g1.public_key(),
-                signature: g1.sign(&digest),
+                signature: g1.sign_for(RECOVERY_CTX, &digest),
             },
             GuardianApproval {
                 public_key: g2.public_key(),
-                signature: g2.sign(&digest),
+                signature: g2.sign_for(RECOVERY_CTX, &digest),
             },
         ];
         let rotated_quorum = [
             GuardianApproval {
                 public_key: replacement.public_key(),
-                signature: replacement.sign(&digest),
+                signature: replacement.sign_for(RECOVERY_CTX, &digest),
             },
             GuardianApproval {
                 public_key: g2.public_key(),
-                signature: g2.sign(&digest),
+                signature: g2.sign_for(RECOVERY_CTX, &digest),
             },
         ];
         assert!(!proposal.verify_guardian_approvals(&rotated, &compromised_quorum));
@@ -2156,10 +2544,10 @@ mod tests {
 
     #[test]
     fn social_recovery_removal_preserves_threshold_safety() {
-        let g1 = Wallet::from_entropy(&[1u8; 16]).unwrap();
-        let g2 = Wallet::from_entropy(&[2u8; 16]).unwrap();
-        let g3 = Wallet::from_entropy(&[3u8; 16]).unwrap();
-        let unknown = Wallet::from_entropy(&[9u8; 16]).unwrap();
+        let g1 = Wallet::from_entropy(&[1u8; 32]).unwrap();
+        let g2 = Wallet::from_entropy(&[2u8; 32]).unwrap();
+        let g3 = Wallet::from_entropy(&[3u8; 32]).unwrap();
+        let unknown = Wallet::from_entropy(&[9u8; 32]).unwrap();
         let policy = SocialRecoveryPolicy::new(
             vec![g1.public_key(), g2.public_key(), g3.public_key()],
             2,
@@ -2178,9 +2566,9 @@ mod tests {
 
     #[test]
     fn recovery_proposal_sets_timelock_and_addresses() {
-        let owner = Wallet::from_entropy(&[7u8; 16]).unwrap();
-        let new_owner = Wallet::from_entropy(&[8u8; 16]).unwrap();
-        let guardian = Wallet::from_entropy(&[1u8; 16]).unwrap();
+        let owner = Wallet::from_entropy(&[7u8; 32]).unwrap();
+        let new_owner = Wallet::from_entropy(&[8u8; 32]).unwrap();
+        let guardian = Wallet::from_entropy(&[1u8; 32]).unwrap();
         let policy = SocialRecoveryPolicy::new(vec![guardian.public_key()], 1, 100).unwrap();
         let proposal = RecoveryProposal::new(
             owner.public_key(),
@@ -2202,10 +2590,10 @@ mod tests {
 
     #[test]
     fn recovery_proposal_digest_binds_target_and_timelock() {
-        let owner = Wallet::from_entropy(&[7u8; 16]).unwrap();
-        let new_owner = Wallet::from_entropy(&[8u8; 16]).unwrap();
-        let other_new_owner = Wallet::from_entropy(&[9u8; 16]).unwrap();
-        let guardian = Wallet::from_entropy(&[1u8; 16]).unwrap();
+        let owner = Wallet::from_entropy(&[7u8; 32]).unwrap();
+        let new_owner = Wallet::from_entropy(&[8u8; 32]).unwrap();
+        let other_new_owner = Wallet::from_entropy(&[9u8; 32]).unwrap();
+        let guardian = Wallet::from_entropy(&[1u8; 32]).unwrap();
         let policy = SocialRecoveryPolicy::new(vec![guardian.public_key()], 1, 100).unwrap();
         let proposal = RecoveryProposal::new(
             owner.public_key(),
@@ -2234,11 +2622,11 @@ mod tests {
 
     #[test]
     fn recovery_proposal_requires_quorum_and_timelock() {
-        let owner = Wallet::from_entropy(&[7u8; 16]).unwrap();
-        let new_owner = Wallet::from_entropy(&[8u8; 16]).unwrap();
-        let g1 = Wallet::from_entropy(&[1u8; 16]).unwrap();
-        let g2 = Wallet::from_entropy(&[2u8; 16]).unwrap();
-        let g3 = Wallet::from_entropy(&[3u8; 16]).unwrap();
+        let owner = Wallet::from_entropy(&[7u8; 32]).unwrap();
+        let new_owner = Wallet::from_entropy(&[8u8; 32]).unwrap();
+        let g1 = Wallet::from_entropy(&[1u8; 32]).unwrap();
+        let g2 = Wallet::from_entropy(&[2u8; 32]).unwrap();
+        let g3 = Wallet::from_entropy(&[3u8; 32]).unwrap();
         let policy = SocialRecoveryPolicy::new(
             vec![g1.public_key(), g2.public_key(), g3.public_key()],
             2,
@@ -2257,26 +2645,26 @@ mod tests {
         let digest = proposal.digest();
         let one = [GuardianApproval {
             public_key: g1.public_key(),
-            signature: g1.sign(&digest),
+            signature: g1.sign_for(RECOVERY_CTX, &digest),
         }];
         let quorum = [
             GuardianApproval {
                 public_key: g1.public_key(),
-                signature: g1.sign(&digest),
+                signature: g1.sign_for(RECOVERY_CTX, &digest),
             },
             GuardianApproval {
                 public_key: g2.public_key(),
-                signature: g2.sign(&digest),
+                signature: g2.sign_for(RECOVERY_CTX, &digest),
             },
         ];
         let wrong_digest = [
             GuardianApproval {
                 public_key: g1.public_key(),
-                signature: g1.sign(b"wrong recovery digest"),
+                signature: g1.sign_for(RECOVERY_CTX, b"wrong recovery digest"),
             },
             GuardianApproval {
                 public_key: g2.public_key(),
-                signature: g2.sign(&digest),
+                signature: g2.sign_for(RECOVERY_CTX, &digest),
             },
         ];
 
@@ -2299,9 +2687,9 @@ mod tests {
 
     #[test]
     fn recovery_proposal_rejects_same_owner_or_overflow() {
-        let owner = Wallet::from_entropy(&[7u8; 16]).unwrap();
-        let new_owner = Wallet::from_entropy(&[8u8; 16]).unwrap();
-        let guardian = Wallet::from_entropy(&[1u8; 16]).unwrap();
+        let owner = Wallet::from_entropy(&[7u8; 32]).unwrap();
+        let new_owner = Wallet::from_entropy(&[8u8; 32]).unwrap();
+        let guardian = Wallet::from_entropy(&[1u8; 32]).unwrap();
         let policy = SocialRecoveryPolicy::new(vec![guardian.public_key()], 1, 100).unwrap();
         assert!(RecoveryProposal::new(
             owner.public_key(),
@@ -2409,7 +2797,7 @@ mod tests {
 
     #[test]
     fn d2_wallet_defaults_privacy_off() {
-        let w = Wallet::from_entropy(&[0x11u8; 16]).unwrap();
+        let w = Wallet::from_entropy(&[0x11u8; 32]).unwrap();
         assert!(!w.privacy_config().is_note_privacy_active());
         assert!(!w.privacy_config().is_privacy_active());
         assert_eq!(w.tee_backend_kind(), TeeBackendKind::None);
@@ -2417,7 +2805,7 @@ mod tests {
 
     #[test]
     fn d2_wallet_private_transfer_requires_note_privacy() {
-        let w = Wallet::from_entropy(&[0x22u8; 16]).unwrap();
+        let w = Wallet::from_entropy(&[0x22u8; 32]).unwrap();
         let inp = PrivateNoteInput {
             amount: 100,
             recipient_tag: 1,
@@ -2437,7 +2825,7 @@ mod tests {
         assert!(matches!(err, WalletError::NotePrivacyDisabled));
     }
 
-    /// BLG-0280 (P17-F14): the derived Debug printed the note opening, and a
+    /// The derived Debug printed the note opening, and a
     /// wallet formats witnesses into error and test output. Redacting only
     /// `spend_secret` left `amount`, `blinding` and `recipient_tag` - the three
     /// field elements `privacy_commit` exists to hide - readable, and both the
@@ -2445,7 +2833,7 @@ mod tests {
     /// formatted value takes to the terminal.
     #[test]
     fn a_formatted_transfer_never_prints_the_note_opening() {
-        let w = Wallet::from_entropy(&[0x44u8; 16]).unwrap();
+        let _w = Wallet::from_entropy(&[0x44u8; 32]).unwrap();
         let inp = PrivateNoteInput {
             amount: 987_654_321,
             recipient_tag: 112_233_445_566,
@@ -2495,7 +2883,7 @@ mod tests {
     /// that refuses a counter it already handed out.
     #[test]
     fn the_final_blinding_counter_cannot_be_reused_after_overflow() {
-        let mut w = Wallet::from_entropy(&[0x34u8; 16]).unwrap();
+        let mut w = Wallet::from_entropy(&[0x34u8; 32]).unwrap();
         w.set_note_privacy_enabled(true);
         let err = w.prepare_receive_note(100, u64::MAX).unwrap_err();
         assert!(matches!(err, WalletError::InvalidPrivateTransfer(_)));
@@ -2508,7 +2896,7 @@ mod tests {
 
     #[test]
     fn a_reused_blinding_counter_is_refused() {
-        let mut w = Wallet::from_entropy(&[0x33u8; 16]).unwrap();
+        let mut w = Wallet::from_entropy(&[0x33u8; 32]).unwrap();
         w.set_privacy_config(WalletPrivacyConfig::note_privacy_only(true));
         let first = w.prepare_receive_note(100, 7).unwrap();
         let err = w.prepare_receive_note(100, 7).unwrap_err();
@@ -2527,7 +2915,7 @@ mod tests {
 
     #[test]
     fn d2_wallet_private_transfer_1in_1out_signs() {
-        let mut w = Wallet::from_entropy(&[0x33u8; 16]).unwrap();
+        let mut w = Wallet::from_entropy(&[0x33u8; 32]).unwrap();
         w.set_privacy_config(WalletPrivacyConfig::note_privacy_only(true));
         let (blinding, _c, _) = w.prepare_receive_note(100, 0).unwrap();
         let input = w.note_input_from_receive(100, blinding).unwrap();
@@ -2545,18 +2933,20 @@ mod tests {
         assert_eq!(intent.sum_in, 100);
         assert_eq!(intent.nullifiers.len(), 1);
         assert_eq!(intent.output_commitments.len(), 1);
-        assert!(Wallet::verify(
+        assert!(Wallet::verify_for(
             &w.public_key(),
+            PRIVATE_TRANSFER_CTX,
             &privacy_transfer::intent_authorization_message(&intent),
             &intent.authorization_sig
         ));
-        // BLG-0275: the same signature on another chain (or another nonce)
+        // The same signature on another chain (or another nonce)
         // must not verify - the replay V1 allowed.
         let mut foreign = intent.clone();
         foreign.chain_id = 1;
         assert!(
-            !Wallet::verify(
+            !Wallet::verify_for(
                 &w.public_key(),
+                PRIVATE_TRANSFER_CTX,
                 &privacy_transfer::intent_authorization_message(&foreign),
                 &foreign.authorization_sig
             ),
@@ -2565,8 +2955,9 @@ mod tests {
         let mut reused = intent.clone();
         reused.sender_nonce = 4;
         assert!(
-            !Wallet::verify(
+            !Wallet::verify_for(
                 &w.public_key(),
+                PRIVATE_TRANSFER_CTX,
                 &privacy_transfer::intent_authorization_message(&reused),
                 &reused.authorization_sig
             ),
@@ -2576,7 +2967,7 @@ mod tests {
 
     #[test]
     fn d2_wallet_private_transfer_with_change() {
-        let mut w = Wallet::from_entropy(&[0x44u8; 16]).unwrap();
+        let mut w = Wallet::from_entropy(&[0x44u8; 32]).unwrap();
         w.set_note_privacy_enabled(true);
         let (blinding, _, _) = w.prepare_receive_note(100, 0).unwrap();
         let input = w.note_input_from_receive(100, blinding).unwrap();
@@ -2599,7 +2990,7 @@ mod tests {
 
     #[test]
     fn d2_wallet_change_cannot_be_redirected_by_a_foreign_tag() {
-        let mut w = Wallet::from_entropy(&[0x45u8; 16]).unwrap();
+        let mut w = Wallet::from_entropy(&[0x45u8; 32]).unwrap();
         w.set_note_privacy_enabled(true);
         let (blinding, _, _) = w.prepare_receive_note(100, 0).unwrap();
         let input = w.note_input_from_receive(100, blinding).unwrap();
@@ -2619,7 +3010,7 @@ mod tests {
 
     #[test]
     fn d2_wallet_tee_enabled_fail_closed_without_runtime() {
-        let mut w = Wallet::from_entropy(&[0x55u8; 16]).unwrap();
+        let mut w = Wallet::from_entropy(&[0x55u8; 32]).unwrap();
         w.set_privacy_config(WalletPrivacyConfig::from_user_opt_in(true));
         assert!(w.privacy_config().tee_enabled);
         let rt = w.default_tee_runtime();
@@ -2644,20 +3035,113 @@ mod tests {
 
     #[test]
     fn d2_wallet_tee_ready_mock_allows_sign() {
+        use sha3::{Digest, Sha3_256};
         let rt = crate::tee::mock::MockTeeRuntime::new(TeeBackendKind::ClientSgx);
         let verifier = crate::tee::mock::MockQuoteVerifier::default();
-        let mut w = Wallet::from_entropy(&[0x66u8; 16]).unwrap();
+        let mut w = Wallet::from_entropy(&[0x66u8; 32]).unwrap();
         w.set_tee_enabled(true);
         // Enrol the measurement the mock attests with; without this the
         // wallet would refuse any attestation, self-attested or not.
         w.set_trusted_tee_measurement(crate::tee::mock::MOCK_MEASUREMENT);
         let sig = w.sign_with_privacy(b"hello", &rt, &verifier).unwrap();
-        // Signature is over sealed bytes + measurement, not raw message.
+        // Signature binds caller message digest + sealed bytes + measurement.
         assert!(!Wallet::verify(&w.public_key(), b"hello", &sig));
         let sealed = rt.seal_private_intent(b"hello").unwrap();
-        let mut to_sign = sealed.clone();
+        let msg_digest: [u8; 32] = Sha3_256::digest(b"hello").into();
+        let mut to_sign = Vec::new();
+        to_sign.extend_from_slice(b"BUDLUM_TEE_INTENT_BIND_V1");
+        to_sign.extend_from_slice(&msg_digest);
+        to_sign.extend_from_slice(&sealed);
         to_sign.extend_from_slice(&crate::tee::mock::MOCK_MEASUREMENT);
         assert!(Wallet::verify(&w.public_key(), &to_sign, &sig));
+
+        // A signature produced for `"hello"` never verifies under `"other"` even
+        // if an untrusted runtime replayed the same sealed ciphertext.
+        let mut substituted = Vec::new();
+        let other_digest: [u8; 32] = Sha3_256::digest(b"other").into();
+        substituted.extend_from_slice(b"BUDLUM_TEE_INTENT_BIND_V1");
+        substituted.extend_from_slice(&other_digest);
+        substituted.extend_from_slice(&sealed);
+        substituted.extend_from_slice(&crate::tee::mock::MOCK_MEASUREMENT);
+        assert!(!Wallet::verify(&w.public_key(), &substituted, &sig));
+    }
+
+    #[test]
+    fn d2_wallet_rejects_forged_spend_secret_and_bad_blindings() {
+        // 32 bytes: this test is about the private-transfer refusals below,
+        // not about entropy size, and a 16-byte seed is refused by design
+        // (`generate_12_word_wallet_is_refused`).
+        let mut w = Wallet::from_entropy(&[0x67u8; 32]).unwrap();
+        w.set_note_privacy_enabled(true);
+        let (blinding, _, _) = w.prepare_receive_note(100, 0).unwrap();
+        let mut bad_secret_input = w.note_input_from_receive(100, blinding).unwrap();
+        bad_secret_input.spend_secret ^= 1;
+        let err = w
+            .build_private_transfer(
+                PrivateTransferRequest {
+                    input: bad_secret_input,
+                    to: [0x11u8; 32],
+                    send_amount: 100,
+                    output_blinding: 7,
+                    change_recipient_tag: None,
+                    change_blinding: None,
+                },
+                &w.default_tee_runtime(),
+                45262,
+                0,
+            )
+            .unwrap_err();
+        assert!(matches!(err, WalletError::InvalidPrivateTransfer(_)));
+
+        let input = w.note_input_from_receive(100, blinding).unwrap();
+        let unreceived_witness_err = w.note_input_from_receive(100, 777).unwrap_err();
+        assert!(matches!(
+            unreceived_witness_err,
+            WalletError::InvalidPrivateTransfer(_)
+        ));
+        let forged_unreceived = PrivateNoteInput {
+            amount: 100,
+            recipient_tag: input.recipient_tag,
+            blinding: 777,
+            spend_secret: derive_spend_secret(
+                &w.seed,
+                privacy_commit(100, 777, input.recipient_tag),
+            ),
+        };
+        let forged_err = w
+            .build_private_transfer(
+                PrivateTransferRequest {
+                    input: forged_unreceived,
+                    to: [0x11u8; 32],
+                    send_amount: 100,
+                    output_blinding: 9,
+                    change_recipient_tag: None,
+                    change_blinding: None,
+                },
+                &w.default_tee_runtime(),
+                45262,
+                0,
+            )
+            .unwrap_err();
+        assert!(matches!(forged_err, WalletError::InvalidPrivateTransfer(_)));
+        for bad_out in [0u64, budlum_note_packing::GOLDILOCKS_P, blinding] {
+            let err = w
+                .build_private_transfer(
+                    PrivateTransferRequest {
+                        input: input.clone(),
+                        to: [0x11u8; 32],
+                        send_amount: 100,
+                        output_blinding: bad_out,
+                        change_recipient_tag: None,
+                        change_blinding: None,
+                    },
+                    &w.default_tee_runtime(),
+                    45262,
+                    0,
+                )
+                .unwrap_err();
+            assert!(matches!(err, WalletError::InvalidPrivateTransfer(_)));
+        }
     }
 
     #[test]
@@ -2668,7 +3152,7 @@ mod tests {
         // follow-up work).
         let rt = crate::tee::mock::MockTeeRuntime::new(TeeBackendKind::ClientSgx);
         let verifier = crate::tee::mock::MockQuoteVerifier::default();
-        let mut w = Wallet::from_entropy(&[0x6Au8; 16]).unwrap();
+        let mut w = Wallet::from_entropy(&[0x6Au8; 32]).unwrap();
         w.set_tee_enabled(true);
         let err = w.sign_with_privacy(b"hello", &rt, &verifier).unwrap_err();
         assert!(matches!(err, WalletError::TeeUnavailable(_)));
@@ -2684,7 +3168,7 @@ mod tests {
         let verifier = crate::tee::mock::MockQuoteVerifier {
             recognized_measurements: vec![foreign],
         };
-        let mut w = Wallet::from_entropy(&[0x6Bu8; 16]).unwrap();
+        let mut w = Wallet::from_entropy(&[0x6Bu8; 32]).unwrap();
         w.set_tee_enabled(true);
         w.set_trusted_tee_measurement(crate::tee::mock::MOCK_MEASUREMENT);
         let err = w.sign_with_privacy(b"hello", &rt, &verifier).unwrap_err();
@@ -2698,7 +3182,7 @@ mod tests {
         // user did not opt into must not satisfy it.
         let rt = crate::tee::mock::MockTeeRuntime::new(TeeBackendKind::ServerNitro);
         let verifier = crate::tee::mock::MockQuoteVerifier::default();
-        let mut w = Wallet::from_entropy(&[0x6Cu8; 16]).unwrap();
+        let mut w = Wallet::from_entropy(&[0x6Cu8; 32]).unwrap();
         w.set_tee_enabled(true);
         w.set_trusted_tee_measurement(crate::tee::mock::MOCK_MEASUREMENT);
         let err = w.sign_with_privacy(b"hello", &rt, &verifier).unwrap_err();
@@ -2736,7 +3220,7 @@ mod tests {
                 Ok(fake)
             }
         }
-        let mut w = Wallet::from_entropy(&[0x6Du8; 16]).unwrap();
+        let mut w = Wallet::from_entropy(&[0x6Du8; 32]).unwrap();
         w.set_tee_enabled(true);
         w.set_trusted_tee_measurement(crate::tee::mock::MOCK_MEASUREMENT);
         let err = w
@@ -2747,7 +3231,7 @@ mod tests {
 
     #[test]
     fn d2_wallet_view_key_bound_to_seed() {
-        let mut w = Wallet::from_entropy(&[0x77u8; 16]).unwrap();
+        let mut w = Wallet::from_entropy(&[0x77u8; 32]).unwrap();
         let vk = w.ensure_view_key();
         let again = w.ensure_view_key();
         assert_eq!(vk, again);
@@ -2757,7 +3241,7 @@ mod tests {
 
     #[test]
     fn d2_wallet_overspend_rejected() {
-        let mut w = Wallet::from_entropy(&[0x88u8; 16]).unwrap();
+        let mut w = Wallet::from_entropy(&[0x88u8; 32]).unwrap();
         w.set_note_privacy_enabled(true);
         let (blinding, _, _) = w.prepare_receive_note(50, 0).unwrap();
         let input = w.note_input_from_receive(50, blinding).unwrap();
@@ -2773,5 +3257,100 @@ mod tests {
             .build_private_transfer(req, &w.default_tee_runtime(), 45262, 0)
             .unwrap_err();
         assert!(matches!(err, WalletError::InvalidPrivateTransfer(_)));
+    }
+
+    #[test]
+    fn wallet_refuses_12_word_seed() {
+        let twelve = entropy_to_mnemonic(&[0x33u8; 16]).expect("12-word test phrase");
+        assert_eq!(twelve.split_whitespace().count(), 12);
+        assert!(matches!(
+            Wallet::from_mnemonic(&twelve),
+            Err(WalletError::InvalidWordCount(12))
+        ));
+        assert!(matches!(
+            Wallet::generate(12),
+            Err(WalletError::InvalidWordCount(12))
+        ));
+        assert!(matches!(
+            Wallet::from_entropy(&[0x33u8; 16]),
+            Err(WalletError::InvalidEntropy(16))
+        ));
+        assert!(matches!(
+            WalletV3::from_mnemonic(&twelve, ""),
+            Err(WalletError::InvalidWordCount(12))
+        ));
+    }
+
+    #[test]
+    fn wallet_mnemonic_is_nfkd_normalised() {
+        let canonical = Wallet::from_entropy(&[0u8; 32]).expect("24-word wallet");
+        let compat = canonical
+            .mnemonic()
+            .replacen("abandon", "\u{FF41}Bandon", 4)
+            .replace(' ', "\u{3000}");
+        let restored = Wallet::from_mnemonic(&compat).expect("NFKD mnemonic must restore");
+        assert_eq!(restored.mnemonic(), canonical.mnemonic());
+        assert_eq!(restored.address(), canonical.address());
+
+        let v3_canonical =
+            WalletV3::from_mnemonic(canonical.mnemonic(), "resum\u{00e9}").expect("v3 canonical");
+        let v3_decomposed =
+            WalletV3::from_mnemonic(&compat, "resum\u{0065}\u{0301}").expect("v3 NFKD");
+        assert_eq!(
+            v3_canonical.account(0, 0).unwrap().address,
+            v3_decomposed.account(0, 0).unwrap().address
+        );
+    }
+
+    #[test]
+    fn wallet_refuses_12_word_and_normalizes_nfkd() {
+        wallet_refuses_12_word_seed();
+        wallet_mnemonic_is_nfkd_normalised();
+        assert!(Wallet::from_mnemonic(
+            "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn wallet_poseidon_recipient_tag_and_recovery_replay_guards() {
+        // Recipient tag keeps full Goldilocks field width (> u32::MAX), never
+        // truncated to i32.
+        let mut high_addr = [0u8; 32];
+        high_addr[..8].copy_from_slice(&0x0123_4567_89AB_CDEFu64.to_le_bytes());
+        let tag = crate::privacy_crypto::address_to_recipient_tag(&high_addr);
+        assert!(tag > u64::from(u32::MAX));
+
+        // Social recovery proposal binds chain_id and account_nonce so cross-chain
+        // and A-B-A replays are rejected.
+        let owner = Wallet::from_entropy(&[0x71u8; 32]).unwrap();
+        let new_owner = Wallet::from_entropy(&[0x72u8; 32]).unwrap();
+        let g1 = Wallet::from_entropy(&[0x73u8; 32]).unwrap();
+        let g2 = Wallet::from_entropy(&[0x74u8; 32]).unwrap();
+        let policy =
+            SocialRecoveryPolicy::new(vec![g1.public_key(), g2.public_key()], 2, 10).unwrap();
+        let prop = RecoveryProposal::new(
+            owner.public_key(),
+            new_owner.public_key(),
+            &policy,
+            100,
+            45261,
+            5,
+        )
+        .unwrap();
+        let digest = prop.digest();
+        let approvals = [
+            GuardianApproval {
+                public_key: g1.public_key(),
+                signature: g1.sign_for(RECOVERY_CTX, &digest),
+            },
+            GuardianApproval {
+                public_key: g2.public_key(),
+                signature: g2.sign_for(RECOVERY_CTX, &digest),
+            },
+        ];
+        assert!(prop.is_executable(&policy, &approvals, 110, 45261, 5));
+        assert!(!prop.is_executable(&policy, &approvals, 110, 45260, 5));
+        assert!(!prop.is_executable(&policy, &approvals, 110, 45261, 6));
     }
 }

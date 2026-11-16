@@ -50,7 +50,7 @@
 - [40. SocialFi NFT lifecycle](#40-socialfi-nft-lifecycle)
 - [41. budlumxyz app registry](#41-budlumxyz-app-registry)
 - [42. Mempool internals](#42-mempool-internals)
-- [43. Developer OS / SDK architecture](#43-developer-os--sdk-architecture)
+- [43. Project Manifest / SDK architecture](#43-project-manifest--sdk-architecture)
 - [44. Gateway: Atlas + Passport evidence](#44-gateway-atlas--passport-evidence)
 - [45. Settlement commitment tree](#45-settlement-commitment-tree)
 - [46. Prover market: proof verification](#46-prover-market-proof-verification)
@@ -588,9 +588,24 @@ flowchart TD
     ZkVerify --> Global
     PoaVerify --> Global
     Global --> DomainSep[BDLM_GLOBAL_BLOCK_V2 domain separation]
-    Global --> Seal[seal_global_header operator-only RPC]
+    Checkpoint[finality checkpoint block] --> Build[apply_block_end_roots builds the header in block]
+    Build --> Global
+    Global --> Summary[global_header_summary in the state root]
+    Global --> Reads[bud_getGlobalHeader / bud_getGlobalHeaderProof]
   end
 ```
+
+The global header is a consensus object. The
+transition of every finality checkpoint block builds it from the state at the
+end of that block, so every node derives the same bytes; the state root
+commits its hash as `global_header_summary`, and the checkpoint's finality
+certificate covers the block that commits it. The header carries no state
+root and no block hash, so nothing it folds depends on it. Operators read
+headers and root proofs with `bud_getGlobalHeader` and
+`bud_getGlobalHeaderProof`; `bud_sealGlobalHeader` is refused. A light client
+walks trust anchor, finality certificate, block, global header, root:
+`budlum-light` checks the last step with a header opening from the export
+(`global_headers`, `--require-global-headers`).
 
 ## 18. Registry: complete stake + slash + unbond state machine
 
@@ -862,7 +877,7 @@ flowchart TD
 
   subgraph sg46[Fee market -EIP-1559]
 
-    BaseFee[block N-1 base_fee] --> Adjust[±12.5% based on gas usage]
+    BaseFee[block base_fee] --> Adjust[±12.5% based on gas usage]
     Adjust --> NewBase[block N base_fee]
     Tx2[Transaction] --> Effective["effective_fee = min max_fee base_fee+priority"]
     Effective --> Burn2[base_fee portion burned]
@@ -1264,7 +1279,7 @@ flowchart LR
 
 ```mermaid
 flowchart LR
-  Block[Block N-1 base_fee] --> Calc[next_base_fee calculation]
+  Block[Block base_fee] --> Calc[next_base_fee calculation]
   Calc --> Adjustment[±12.5% adjustment based on gas usage]
   Adjustment --> BaseFee[Block N base_fee]
   Tx[Transaction] --> Bid["FeeBid: max_fee + max_priority_fee"]
@@ -1371,11 +1386,11 @@ flowchart TD
   Select --> Expire[Stale tx removed after N blocks]
 ```
 
-## 43. Developer OS / SDK architecture
+## 43. Project Manifest / SDK architecture
 
 ```mermaid
 flowchart LR
-  Manifest[DeveloperOsManifest deterministic] --> Project["Project ID + labels"]
+  Manifest[ProjectManifest deterministic] --> Project["Project ID + labels"]
   Project --> DevNet[Local devnet topology]
   Project --> BudL[BudL package fixtures]
   Project --> Proof[Proof fixtures]
@@ -1841,10 +1856,11 @@ by zk until its operator explicitly supplies a program list.
 
 The inverse default - "empty list means open to everyone" - looks convenient and
 is catastrophic: every newly created domain, and every legacy record migrating
-through bincode, would be born silent. The storage migration path
-(`LegacyConsensusDomainV1` → `ConsensusDomain`) therefore writes `Vec::new()`
-explicitly: the old record had no such field, so which programs it permitted is
-**unknown**, and unknown permission is not permission.
+through bincode, would be born silent. A domain registers through the
+`SettlementTx::RegisterDomain` transaction with the list it carries, and the
+operator changes it only through `SettlementTx::SetZkProgram`, in block.
+Which programs a domain permits is never inferred: an unknown permission is
+not permission.
 
 ```mermaid
 flowchart TD
@@ -2003,7 +2019,7 @@ Keccak/SHA3 hasher with program words; it currently finds **7 sites**.
 
 ## 58. Permission at the browser boundary: CORS is not a refusal, it is a delivery decision
 
-For a client running inside a browser, such as Budscan, the node's RPC surface is
+For a client running inside a browser, such as Budlum Explorer, the node's RPC surface is
 determined not only by what the server returns but by whether the browser
 delivers that response to JavaScript. These are two separate decisions and each
 must have its own counterpart in the code.
@@ -2028,7 +2044,7 @@ not carry the authority its name implies.
 
 ```mermaid
 flowchart TD
-  B["Browser: fetch from Budscan"] --> Pre{"Custom header? preflight needed"}
+  B["Browser: fetch from Budlum Explorer"] --> Pre{"Custom header? preflight needed"}
   Pre -->|"yes"| OPT["OPTIONS preflight, no x-api-key"]
   OPT --> Auth1{"before: authentication runs first"}
   Auth1 -->|"401"| Dead["Real request never sent"]
@@ -2170,7 +2186,7 @@ this transformation add to storage?**
 The answer: nothing. `RenderFormat::QrStream` is not a storage format, it is a
 **transport representation**. Frames are produced on demand and no intermediate
 product is stored. The persistent form of the content is still what the manifest
-says - the recipe for recipe-bearing content (§59), the bytes for organic content.
+says - the recipe for recipe-bearing content, the bytes for organic content.
 A derived representation ADDS storage in no regime; the test measures that
 property directly.
 
@@ -2227,7 +2243,7 @@ wrong guess stays on the screen.
   deterministic; the channel is not. Round-trip under a lossy re-encode cannot be
   assumed without measuring it on the target channel.
 - **It does not zero storage for organic content.** Changing representation does
-  not change information theory (§59).
+  not change information theory.
 
 ## 61. Identity limits who, transport limits what it costs: two questions before listening
 
@@ -2292,7 +2308,7 @@ state?* Leaves are ordered by the account map's iteration order, the tree is
 cached and updated incrementally over dirty accounts. Block production and
 validation read this. This root does not change; changing it forks the chain.
 
-**The proving root** (`storage::merkle_trie`) asks: *how do you prove it?* The
+**The proving root** (`persistence::state_trie`) asks: *how do you prove it?* The
 consensus root cannot answer that question, and the reason is not an omission but
 its structure:
 
@@ -2588,7 +2604,7 @@ flowchart TD
 The principle: **a check living inside one caller is not a rule, it is a habit.**
 Callers get added; a rule with only one home is open to the next caller forgetting it.
 
-This is the same shape seen in the DAO grant ceiling (§53) and in the two roots: a
+This is the same shape seen in the DAO grant ceiling and in the two roots: a
 check present on one path, absent on the other. When the same shape appears three
 times, the shape is not a coincidence.
 
@@ -2609,7 +2625,7 @@ right; it was simply **at the wrong layer**. As shared checks move under
 
 ## 66. Derived content: a dependent recipe gets no discount
 
-The source regime (§59) could say three things: the bytes are stored (`Stored`),
+The source regime could say three things: the bytes are stored (`Stored`),
 they are born from a recipe (`Generated`), or a prefix is stored and the rest is
 generated (`Hybrid`). A fourth class existed and could not be expressed:
 **content that is a region of an object the chain already holds.**
@@ -2903,7 +2919,7 @@ bytes with `generate_content`, rehashes them with `ContentManifest::from_bytes_s
 compares the identity. If it does not hold, the request is refused.
 
 This is not an internal consistency check but the proof that what the gateway serves is the
-**requested thing**. The same question as Budscan's fifth step: are the fetched bytes the
+**requested thing**. The same question as Budlum Explorer's fifth step: are the fetched bytes the
 requested bytes.
 
 ### Three outcomes, three meanings
@@ -3627,7 +3643,7 @@ the case this exists to make visible. The compiler found the three call sites th
 compile `e.kind()`; a bare `io::Error` would have let all three keep compiling while quietly reclassifying an oversized
 file as a clean first boot.
 
-This is the same shape as the mempool ceiling (§81) and the score table (§82): a quantity that is small in every real
+This is the same shape as the mempool ceiling and the score table: a quantity that is small in every real
 run is still unbounded until something states the bound.
 
 ## 84. Where a guarantee lives

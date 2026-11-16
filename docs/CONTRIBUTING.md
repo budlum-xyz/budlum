@@ -2,7 +2,7 @@
 
 Thanks for helping improve Budlum Core.
 
-Budlum is an experimental Rust Layer-1 blockchain core focused on modular consensus, deterministic execution, ZKVM-native contracts, privacy research, and future AI-assisted execution tooling. Contributions are welcome, especially from builders who enjoy protocol internals and clean systems code.
+Budlum is an experimental Rust core for a consensus-of-consensuses: modular consensus, deterministic execution, ZKVM-native contracts, privacy research, and future AI-assisted execution tooling. Contributions are welcome, especially from builders who enjoy protocol internals and clean systems code.
 
 If you find the project useful, please also consider starring and forking the repo. It helps the project reach more protocol researchers and chain builders.
 
@@ -78,7 +78,7 @@ between a reader and another step's answer. Measured on 2026-09-11 - moving `For
 last made `budlum`'s `Test` step run and report, which is the point of the job, and
 the same job then showed the rule is not finished once: `Clippy` also fails, also
 sits ahead of `Test`, and re-masked it. So in the `budlum` job the lint steps come
-after the build/test/doc verdicts, and `Format` after them; in `budzero` and `budscan`
+after the build/test/doc verdicts, and `Format` after them; in `budzero` and `budlum-explorer`
 `Format` is still last. Keep both orders when editing any job: verdicts first, then
 analysis, then style, whatever is red today.
 
@@ -89,12 +89,14 @@ cargo test --lib --verbose                      # CI: Test (root lib tests)
 ```
 
 The pedantic/nursery surface is a ratchet, not a wall: it is measured by
-`ops/scripts/clippy-extra-report.py` against `.github/clippy-extra-baseline.txt` and
+`cargo run -q --release --manifest-path xtask/tools/Cargo.toml -- clippy-extra-report <clippy.json>`
+against `.github/clippy-extra-baseline.txt` and
 only refuses growth.
 
 A workflow edit cannot be tried locally, so it is checked two other ways. Step bodies
 are extracted and executed (see the third rule below), and the reachability of every step
-is computed by `python3 ops/scripts/check-step-reachability.py`: it reports a guard that
+is computed by `cargo run --release --manifest-path xtask/tools/Cargo.toml -- step-reachability`:
+it reports a guard that
 references a `steps.<id>` no step declares, or declares later, and
 `--fail 'budlum:Test'` prints which steps still run when that step is red. Run it after
 touching any job's `if:` lines - a mistyped id skips every step behind it and leaves the
@@ -147,8 +149,9 @@ starts certifying a fiction.
 
 ### The mirrored lubot series
 
-`repo-lubot/` ships lubot work as an applicable patch series against
-`ayazkussan/lubot` `main`. Its generator ships with it:
+`repo-lubot/` is not carried in this tree: the lubot series lives with lubot, not here.
+Where a checkout has it, it ships lubot work as an applicable patch series against
+`ayazkussan/lubot` `main`, and its generator ships with it:
 
 ```bash
 SERIES_DIR=repo-lubot/patches LUBOT_REPO=<clone at the base> \

@@ -1,58 +1,30 @@
-#[cfg(all(feature = "pq-dilithium", feature = "pq-ml-dsa"))]
-compile_error!("pq-dilithium and pq-ml-dsa are mutually exclusive validator backends");
+//! Convenience: exposed for CLI, RPC, SDK, and multi-VM runtime callers.
 
-use bls12_381::{G2Affine, G2Projective, Scalar};
+#[cfg(feature = "pq-ml-dsa")]
+use super::ctx;
+#[cfg(any(feature = "pq-ml-dsa", feature = "wallet-ml-dsa"))]
+use super::{pq, scheme::SchemeId};
+use bls12_381::{G1Affine, G2Affine, G2Projective, Scalar};
 use ed25519_dalek::{
     Signature, Signer, SigningKey, VerifyingKey, SECRET_KEY_LENGTH, SIGNATURE_LENGTH,
 };
-#[cfg(feature = "pq-dilithium")]
-use pqcrypto_dilithium::dilithium5;
-#[cfg(feature = "pq-dilithium")]
-use pqcrypto_traits::sign::{
-    DetachedSignature as PqDetachedSignatureTrait, PublicKey as PqPublicKeyTrait,
-    SecretKey as PqSecretKeyTrait,
-};
 use rand::Rng;
 use sha3::{Digest, Sha3_256};
-use std::io::{Read, Write};
+use std::io::Read;
 use std::path::Path;
+use zeroize::Zeroizing;
 /// Write secret key bytes so that a crash never leaves a short or empty key file.
 ///
 /// The bytes go to a new sibling file made with `create_new` and mode `0o600`, are
 /// flushed to disk, and then replace the target with an atomic rename. The mode of a
 /// file that already existed is therefore never kept: the new file always has `0o600`.
+///
+/// The mechanics live in [`super::key_file::write_atomic_owner_only`] so every
+/// key-shaped writer in the tree shares one definition (one shared definition); this
+/// wrapper only maps the I/O error into [`CryptoError`].
 fn write_key_file(path: &Path, bytes: &[u8]) -> Result<(), CryptoError> {
-    let io_err = |e: std::io::Error| CryptoError::Io(e.to_string());
-    let mut tmp_name = path
-        .file_name()
-        .ok_or_else(|| CryptoError::Io("key path has no file name".into()))?
-        .to_os_string();
-    tmp_name.push(".tmp");
-    let tmp_path = path.with_file_name(tmp_name);
-    match std::fs::remove_file(&tmp_path) {
-        Ok(()) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => return Err(io_err(e)),
-    }
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let result = options
-        .open(&tmp_path)
-        .map_err(io_err)
-        .and_then(|mut file| {
-            file.write_all(bytes).map_err(io_err)?;
-            file.sync_all().map_err(io_err)?;
-            std::fs::rename(&tmp_path, path).map_err(io_err)
-        });
-    if result.is_err() {
-        let _ = std::fs::remove_file(&tmp_path);
-    }
-    result
+    super::key_file::write_atomic_owner_only(path, bytes)
+        .map_err(|e| CryptoError::Io(e.to_string()))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -131,11 +103,33 @@ impl Drop for BlsKeypair {
 }
 
 impl BlsKeypair {
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn generate() -> Result<Self, CryptoError> {
         use rand::Rng;
         let mut seed = [0u8; 64];
         rand::rng().fill_bytes(&mut seed);
-        let sk = Scalar::from_bytes_wide(&seed);
+        Self::from_seed(&seed)
+    }
+
+    /// Derive a key pair from a 64-byte seed. A seed that reduces to the
+    /// zero scalar (the all-zero seed, or any multiple of the group order) is
+    /// refused: its public key is the identity point, which signs
+    /// every message and aggregates into any set without changing it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
+    pub fn from_seed(seed: &[u8; 64]) -> Result<Self, CryptoError> {
+        let sk = Scalar::from_bytes_wide(seed);
+        if sk == Scalar::zero() {
+            return Err(CryptoError::InvalidKey(
+                "Refusing a BLS seed that reduces to the zero scalar".into(),
+            ));
+        }
         let pk = G2Affine::from(G2Projective::generator() * sk);
         let pk_compressed = pk.to_compressed().to_vec();
         Ok(BlsKeypair {
@@ -144,22 +138,17 @@ impl BlsKeypair {
         })
     }
 
-    pub fn from_seed(seed: &[u8; 64]) -> Self {
-        let sk = Scalar::from_bytes_wide(seed);
-        let pk = G2Affine::from(G2Projective::generator() * sk);
-        let pk_compressed = pk.to_compressed().to_vec();
-        BlsKeypair {
-            secret_key: sk,
-            public_key: pk_compressed,
-        }
-    }
-
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut bytes = self.secret_key.to_bytes().to_vec();
         bytes.extend_from_slice(&self.public_key);
         bytes
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, CryptoError> {
         // Validate G2 encoding AND that pk matches sk. F10: the length is
         // exact - trailing garbage is not silently ignored - and the zero
@@ -185,9 +174,7 @@ impl BlsKeypair {
 
         let mut pk_bytes = [0u8; 96];
         pk_bytes.copy_from_slice(&bytes[32..128]);
-        let pk_affine = G2Affine::from_compressed(&pk_bytes);
-        let _pk_checked: G2Affine = Option::from(pk_affine)
-            .ok_or_else(|| CryptoError::InvalidKey("Invalid BLS public key encoding".into()))?;
+        Self::validate_bls_public_key(&pk_bytes)?;
 
         let expected = G2Affine::from(G2Projective::generator() * sk);
         if expected.to_compressed() != pk_bytes {
@@ -202,23 +189,70 @@ impl BlsKeypair {
         })
     }
 
+    fn validate_bls_public_key(public_key: &[u8]) -> Result<(), CryptoError> {
+        let pk_bytes: [u8; 96] = public_key
+            .try_into()
+            .map_err(|_| CryptoError::InvalidKey("Invalid BLS public key length".into()))?;
+        let pk_affine = G2Affine::from_compressed_unchecked(&pk_bytes)
+            .into_option()
+            .ok_or_else(|| CryptoError::InvalidKey("Invalid BLS public key encoding".into()))?;
+        if !bool::from(pk_affine.is_on_curve()) {
+            return Err(CryptoError::InvalidKey(
+                "Invalid BLS public key encoding".into(),
+            ));
+        }
+        if !bool::from(pk_affine.is_torsion_free()) || bool::from(pk_affine.is_identity()) {
+            return Err(CryptoError::InvalidKey(
+                "BLS public key is identity or outside the prime-order subgroup".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn validate_bls_signature(sig: &[u8]) -> Result<(), CryptoError> {
+        let sig_bytes: [u8; 48] = sig
+            .try_into()
+            .map_err(|_| CryptoError::Verification("Invalid BLS signature length".into()))?;
+        let sig_affine = G1Affine::from_compressed_unchecked(&sig_bytes)
+            .into_option()
+            .ok_or_else(|| CryptoError::Verification("Invalid BLS signature encoding".into()))?;
+        if !bool::from(sig_affine.is_on_curve()) {
+            return Err(CryptoError::Verification(
+                "Invalid BLS signature encoding".into(),
+            ));
+        }
+        if !bool::from(sig_affine.is_torsion_free()) || bool::from(sig_affine.is_identity()) {
+            return Err(CryptoError::Verification(
+                "BLS signature is identity or outside the prime-order subgroup".into(),
+            ));
+        }
+        Ok(())
+    }
+
     /// Generate the canonical proof of possession for this public key,
     /// bound to the chain id and account address it will be registered
-    /// under (R11: a PoP over only the key replays across chains).
+    /// under (R11: a `PoP` over only the key replays across chains).
     pub fn generate_pop(&self, chain_id: u64, address: &crate::core::address::Address) -> Vec<u8> {
         let msg = crate::chain::finality::pop_signing_message(chain_id, address, &self.public_key);
         crate::chain::finality::sign_bls_pop(&self.secret_key, &msg)
     }
 
-    /// Verify the canonical PoP without a validator registration wrapper.
-    /// The PoP must be bound to the given chain id and address (R11): a
-    /// PoP produced for another chain or account is rejected.
+    /// Verify the canonical `PoP` without a validator registration wrapper.
+    /// The `PoP` must be bound to the given chain id and address (R11): a
+    /// `PoP` produced for another chain or account is rejected.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn verify_pop(
         public_key: &[u8],
         pop: &[u8],
         chain_id: u64,
         address: &crate::core::address::Address,
     ) -> Result<(), CryptoError> {
+        Self::validate_bls_public_key(public_key)
+            .map_err(|e| CryptoError::Verification(e.to_string()))?;
+        Self::validate_bls_signature(pop)?;
         let entry = crate::chain::finality::ValidatorEntry {
             address: *address,
             stake: 0,
@@ -244,174 +278,87 @@ pub struct ValidatorKeys {
     pub bls_key: Option<BlsKeypair>,
 }
 
+/// The validator ML-DSA-65 key pair (suite 0x0002 post-quantum half).
+///
+/// The secret is the 32-byte FIPS 204 seed and it is wiped on drop.
 #[derive(Clone)]
 pub struct PqKeyPair {
     public_key: Vec<u8>,
-    secret_key: Vec<u8>,
+    secret_key: Zeroizing<Vec<u8>>,
 }
+
+// The secret half is `Zeroizing`, so dropping the key pair wipes the seed.
+impl zeroize::ZeroizeOnDrop for PqKeyPair {}
 
 /// Wire identifier of the post-quantum signature scheme this binary speaks.
 ///
-/// The PQ backend is selected at compile time, but the public key it produces
-/// is consensus data: it is folded into the consensus-key registration digest
-/// and its length is enforced by `validate_public_key` on the validation path.
-/// Dilithium5 keys are 2592 bytes, ML-DSA-65 keys are 1952. A node built with
-/// one backend therefore *rejects* validator registrations produced by the
-/// other - not as a signature failure, but as a malformed key.
-///
-/// That is a network split with no error message pointing at its cause, so the
-/// scheme is named here, pinned in genesis, and checked at startup rather than
-/// left implicit in whichever `--features` flag an operator happened to use.
-pub const PQ_SCHEME_ID: &str = pq_scheme_id();
+/// The public key it produces is consensus data: it is folded into the
+/// consensus-key registration digest and its length is enforced by
+/// `validate_public_key` on the validation path. The name is derived from the
+/// scheme registry, not typed here, and genesis pins
+/// it and checks it at startup so a mismatch is an explained refusal rather
+/// than a network split with no error message pointing at its cause.
+pub const PQ_SCHEME_ID: &str = super::scheme::PQ_SCHEME_NAME;
 
-#[cfg(feature = "pq-dilithium")]
-const fn pq_scheme_id() -> &'static str {
-    "dilithium5"
-}
-
-#[cfg(feature = "pq-ml-dsa")]
-const fn pq_scheme_id() -> &'static str {
-    "ml-dsa-65"
-}
-
-#[cfg(not(any(feature = "pq-dilithium", feature = "pq-ml-dsa")))]
-const fn pq_scheme_id() -> &'static str {
-    "none"
-}
-
-/// Public key length this build accepts, in bytes.
+/// Public key length this build accepts, in bytes, read from the registry.
 ///
 /// Exposed so the genesis check can explain a mismatch in terms an operator
-/// can act on ("this build wants 2592-byte keys, the chain uses 1952") instead
+/// can act on ("this build wants 1952-byte keys, the chain uses 2592") instead
 /// of only reporting that a key failed to parse.
 pub const fn pq_public_key_len() -> usize {
-    #[cfg(feature = "pq-dilithium")]
-    {
-        2592
-    }
-    #[cfg(feature = "pq-ml-dsa")]
-    {
-        1952
-    }
-    #[cfg(not(any(feature = "pq-dilithium", feature = "pq-ml-dsa")))]
-    {
-        0
-    }
-}
-
-#[cfg(feature = "pq-dilithium")]
-impl PqKeyPair {
-    pub fn generate() -> Self {
-        let (public_key, secret_key) = dilithium5::keypair();
-        PqKeyPair {
-            public_key: public_key.as_bytes().to_vec(),
-            secret_key: secret_key.as_bytes().to_vec(),
-        }
-    }
-
-    pub fn from_bytes(public_key: &[u8], secret_key: &[u8]) -> Result<Self, CryptoError> {
-        if public_key.len() != dilithium5::public_key_bytes() {
-            return Err(CryptoError::InvalidKey(format!(
-                "Invalid Dilithium public key length: expected {}, got {}",
-                dilithium5::public_key_bytes(),
-                public_key.len()
-            )));
-        }
-        if secret_key.len() != dilithium5::secret_key_bytes() {
-            return Err(CryptoError::InvalidKey(format!(
-                "Invalid Dilithium secret key length: expected {}, got {}",
-                dilithium5::secret_key_bytes(),
-                secret_key.len()
-            )));
-        }
-        let kp = Self {
-            public_key: public_key.to_vec(),
-            secret_key: secret_key.to_vec(),
-        };
-        // F10: the halves must pair. A public key that does not match the
-        // secret half would announce one identity and sign with another, so
-        // a fixed probe is signed and verified at parse time.
-        const PAIRING_PROBE: &[u8] = b"BUDLUM_KEYFILE_PAIRING_PROBE_V1";
-        let probe = kp
-            .sign(PAIRING_PROBE)
-            .map_err(|e| CryptoError::InvalidKey(e.to_string()))?;
-        Self::verify(public_key, PAIRING_PROBE, &probe).map_err(|_| {
-            CryptoError::InvalidKey("PQ public and secret halves do not match".into())
-        })?;
-        Ok(kp)
-    }
-
-    pub fn public_key_bytes(&self) -> &[u8] {
-        &self.public_key
-    }
-
-    pub fn sign(&self, message: &[u8]) -> Result<Vec<u8>, CryptoError> {
-        let secret_key = dilithium5::SecretKey::from_bytes(&self.secret_key)
-            .map_err(|e| CryptoError::Signing(e.to_string()))?;
-        Ok(dilithium5::detached_sign(message, &secret_key)
-            .as_bytes()
-            .to_vec())
-    }
-
-    pub fn validate_public_key(public_key: &[u8]) -> Result<(), CryptoError> {
-        dilithium5::PublicKey::from_bytes(public_key)
-            .map(|_| ())
-            .map_err(|error| CryptoError::InvalidKey(error.to_string()))
-    }
-
-    pub fn verify(public_key: &[u8], message: &[u8], signature: &[u8]) -> Result<(), CryptoError> {
-        let public_key = dilithium5::PublicKey::from_bytes(public_key)
-            .map_err(|e| CryptoError::Verification(e.to_string()))?;
-        let signature = dilithium5::DetachedSignature::from_bytes(signature)
-            .map_err(|e| CryptoError::Verification(e.to_string()))?;
-        dilithium5::verify_detached_signature(&signature, message, &public_key)
-            .map_err(|e| CryptoError::Verification(e.to_string()))
+    match super::scheme::SchemeId::ML_DSA_65.info() {
+        Some(info) => match info.public_key_len {
+            Some(len) => len,
+            None => 0,
+        },
+        None => 0,
     }
 }
 
 #[cfg(feature = "pq-ml-dsa")]
 impl PqKeyPair {
     pub fn generate() -> Self {
-        use ml_dsa::{self, Generate, Keypair};
-        let sk = ml_dsa::SigningKey::<ml_dsa::MlDsa65>::generate();
-        let vk = sk.verifying_key();
+        let mut seed = Zeroizing::new([0u8; pq::ML_DSA_SEED_LEN]);
+        rand::rng().fill_bytes(seed.as_mut_slice());
+        // A fixed-length seed and a listed scheme: the derivation cannot fail.
+        let public_key = pq::ml_dsa_public_key(SchemeId::ML_DSA_65, &seed).unwrap_or_default();
         PqKeyPair {
-            public_key: {
-                let binding = vk.encode();
-                let enc: &[u8] = binding.as_ref();
-                enc.to_vec()
-            },
-            secret_key: {
-                let binding = sk.to_seed();
-                let seed: &[u8] = binding.as_ref();
-                seed.to_vec()
-            },
+            public_key,
+            secret_key: Zeroizing::new(seed.to_vec()),
         }
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn from_bytes(public_key: &[u8], secret_key: &[u8]) -> Result<Self, CryptoError> {
-        if public_key.len() != 1952 {
+        if public_key.len() != pq_public_key_len() {
             return Err(CryptoError::InvalidKey(format!(
-                "Invalid ML-DSA public key length: expected 1952, got {}",
+                "Invalid ML-DSA public key length: expected {}, got {}",
+                pq_public_key_len(),
                 public_key.len()
             )));
         }
-        if secret_key.len() != 32 {
+        if secret_key.len() != pq::ML_DSA_SEED_LEN {
             return Err(CryptoError::InvalidKey(format!(
-                "Invalid ML-DSA seed length: expected 32, got {}",
+                "Invalid ML-DSA seed length: expected {}, got {}",
+                pq::ML_DSA_SEED_LEN,
                 secret_key.len()
             )));
         }
         let kp = Self {
             public_key: public_key.to_vec(),
-            secret_key: secret_key.to_vec(),
+            secret_key: Zeroizing::new(secret_key.to_vec()),
         };
-        // F10: the halves must pair; see the dilithium impl above.
+        // F10: the halves must pair. A probe signature under the key file
+        // context must verify against the announced public key.
         const PAIRING_PROBE: &[u8] = b"BUDLUM_KEYFILE_PAIRING_PROBE_V1";
         let probe = kp
-            .sign(PAIRING_PROBE)
+            .sign(ctx::KEY_BINDING_V1, PAIRING_PROBE)
             .map_err(|e| CryptoError::InvalidKey(e.to_string()))?;
-        Self::verify(public_key, PAIRING_PROBE, &probe).map_err(|_| {
+        Self::verify(public_key, ctx::KEY_BINDING_V1, PAIRING_PROBE, &probe).map_err(|_| {
             CryptoError::InvalidKey("PQ public and secret halves do not match".into())
         })?;
         Ok(kp)
@@ -421,57 +368,94 @@ impl PqKeyPair {
         &self.public_key
     }
 
-    pub fn sign(&self, message: &[u8]) -> Result<Vec<u8>, CryptoError> {
-        let seed = ml_dsa::Seed::try_from(self.secret_key.as_slice())
+    /// Sign `message` under the FIPS 204 context `ctx`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
+    pub fn sign(&self, ctx: &[u8], message: &[u8]) -> Result<Vec<u8>, CryptoError> {
+        let seed: &[u8; pq::ML_DSA_SEED_LEN] = self
+            .secret_key
+            .as_slice()
+            .try_into()
             .map_err(|_| CryptoError::Signing("Invalid ML-DSA seed".to_string()))?;
-        let sk = ml_dsa::SigningKey::<ml_dsa::MlDsa65>::from_seed(&seed);
         // FIPS 204 3.6.1 hedged variant: a fresh `rnd` per signature keeps
         // repeated signatures of one message from repeating intermediate
         // values (fault-injection and side-channel defence). Verifiers
         // accept hedged and deterministic signatures alike, so the wire and
         // every read path stay unchanged.
-        let sig = sk
-            .expanded_key()
-            .sign_randomized(message, b"", &mut rand::rng())
-            .map_err(|_| CryptoError::Signing("OS rng failed for hedged signing".to_string()))?;
-        let binding = sig.encode();
-        let enc: &[u8] = binding.as_ref();
-        Ok(enc.to_vec())
+        let mut rnd = Zeroizing::new([0u8; 32]);
+        rand::rng().fill_bytes(rnd.as_mut_slice());
+        pq::ml_dsa_sign(SchemeId::ML_DSA_65, seed, message, ctx, &rnd)
+            .map_err(|e| CryptoError::Signing(e.to_string()))
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn validate_public_key(public_key: &[u8]) -> Result<(), CryptoError> {
-        let encoded = ml_dsa::EncodedVerifyingKey::<ml_dsa::MlDsa65>::try_from(public_key)
-            .map_err(|_| CryptoError::InvalidKey("Invalid ML-DSA public key".to_string()))?;
-        let _ = ml_dsa::VerifyingKey::<ml_dsa::MlDsa65>::decode(&encoded);
-        Ok(())
+        pq::validate_public_key(SchemeId::ML_DSA_65, public_key)
+            .map_err(|_| CryptoError::InvalidKey("Invalid ML-DSA public key".to_string()))
     }
 
-    pub fn verify(public_key: &[u8], message: &[u8], signature: &[u8]) -> Result<(), CryptoError> {
-        let enc_vk = ml_dsa::EncodedVerifyingKey::<ml_dsa::MlDsa65>::try_from(public_key)
-            .map_err(|_| CryptoError::Verification("Invalid ML-DSA public key".to_string()))?;
-        let vk = ml_dsa::VerifyingKey::<ml_dsa::MlDsa65>::decode(&enc_vk);
-        let enc_sig = ml_dsa::EncodedSignature::<ml_dsa::MlDsa65>::try_from(signature)
-            .map_err(|_| CryptoError::Verification("Invalid ML-DSA signature".to_string()))?;
-        let sig = ml_dsa::Signature::<ml_dsa::MlDsa65>::decode(&enc_sig).ok_or_else(|| {
-            CryptoError::Verification("Invalid ML-DSA signature decode".to_string())
-        })?;
-        if !vk.verify_with_context(message, &[], &sig) {
-            return Err(CryptoError::Verification(
-                "ML-DSA signature verification failed".to_string(),
-            ));
-        }
-        Ok(())
+    /// Verify through the dual-verifier facade under the
+    /// statuses of a fresh genesis. A chain reads its own registry through
+    /// [`Self::verify_in`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
+    pub fn verify(
+        public_key: &[u8],
+        ctx: &[u8],
+        message: &[u8],
+        signature: &[u8],
+    ) -> Result<(), CryptoError> {
+        Self::verify_in(
+            &super::scheme::SchemeStatusRegistry::genesis(),
+            public_key,
+            ctx,
+            message,
+            signature,
+        )
+    }
+
+    /// Verify through the dual-verifier facade under the scheme statuses of a
+    /// chain: a family the registry deprecated past use or disabled
+    /// stops verifying here in the same block on every node.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
+    pub fn verify_in(
+        registry: &super::scheme::SchemeStatusRegistry,
+        public_key: &[u8],
+        ctx: &[u8],
+        message: &[u8],
+        signature: &[u8],
+    ) -> Result<(), CryptoError> {
+        pq::verify_in(
+            registry,
+            SchemeId::ML_DSA_65,
+            public_key,
+            message,
+            ctx,
+            signature,
+        )
+        .map_err(|e| CryptoError::Verification(format!("ML-DSA-65: {e}")))
     }
 }
 
-/// Stub implementation for when no PQ backend feature is enabled.
+/// Stub implementation for when the `pq-ml-dsa` feature is off.
 /// `cargo-hack` tests all feature combinations including `--no-default-features`.
-/// These stubs prevent compilation errors; real PQ operations require one of
-/// `pq-dilithium` or `pq-ml-dsa` features.
-#[cfg(not(any(feature = "pq-dilithium", feature = "pq-ml-dsa")))]
+/// These stubs prevent compilation errors; real validator PQ operations
+/// require the `pq-ml-dsa` feature.
+#[cfg(not(feature = "pq-ml-dsa"))]
 impl PqKeyPair {
     pub fn generate() -> Self {
-        panic!("PQ backend not available: enable `pq-dilithium` or `pq-ml-dsa` feature")
+        panic!("PQ backend not available: enable the `pq-ml-dsa` feature")
     }
 
     pub fn from_bytes(_public_key: &[u8], _secret_key: &[u8]) -> Result<Self, CryptoError> {
@@ -481,8 +465,7 @@ impl PqKeyPair {
         // backend could hold what looks like a validated PQ key and only
         // discover otherwise when it tried to sign or verify.
         Err(CryptoError::InvalidKey(
-            "PQ key loading not available: enable `pq-dilithium` or `pq-ml-dsa` feature"
-                .to_string(),
+            "PQ key loading not available: enable the `pq-ml-dsa` feature".to_string(),
         ))
     }
 
@@ -490,31 +473,52 @@ impl PqKeyPair {
         &self.public_key
     }
 
-    pub fn sign(&self, _message: &[u8]) -> Result<Vec<u8>, CryptoError> {
+    pub fn sign(&self, _ctx: &[u8], _message: &[u8]) -> Result<Vec<u8>, CryptoError> {
         Err(CryptoError::Signing(
-            "PQ signing not available: enable `pq-dilithium` or `pq-ml-dsa` feature".to_string(),
+            "PQ signing not available: enable the `pq-ml-dsa` feature".to_string(),
         ))
     }
 
     pub fn validate_public_key(_public_key: &[u8]) -> Result<(), CryptoError> {
         Err(CryptoError::InvalidKey(
-            "PQ validation not available: enable `pq-dilithium` or `pq-ml-dsa` feature".to_string(),
+            "PQ validation not available: enable the `pq-ml-dsa` feature".to_string(),
         ))
     }
 
     pub fn verify(
         _public_key: &[u8],
+        _ctx: &[u8],
         _message: &[u8],
         _signature: &[u8],
     ) -> Result<(), CryptoError> {
         Err(CryptoError::Verification(
-            "PQ verification not available: enable `pq-dilithium` or `pq-ml-dsa` feature"
-                .to_string(),
+            "PQ verification not available: enable the `pq-ml-dsa` feature".to_string(),
+        ))
+    }
+
+    /// The registry-aware verifier the consensus paths call. Present here for
+    /// the same reason the others are: `cargo-hack` builds every feature
+    /// combination, and a chain path that compiles with the feature on must
+    /// still compile - and fail closed - with it off.
+    pub fn verify_in(
+        _registry: &super::scheme::SchemeStatusRegistry,
+        _public_key: &[u8],
+        _ctx: &[u8],
+        _message: &[u8],
+        _signature: &[u8],
+    ) -> Result<(), CryptoError> {
+        Err(CryptoError::Verification(
+            "PQ verification not available: enable the `pq-ml-dsa` feature".to_string(),
         ))
     }
 }
 
 impl ValidatorKeys {
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn generate() -> Result<Self, CryptoError> {
         let sig_key = KeyPair::generate()?;
         let mut csprng = rand_core::OsRng;
@@ -528,18 +532,81 @@ impl ValidatorKeys {
             bls_key,
         })
     }
+    /// The validator's account address, derived from its signing key.
+    #[must_use]
+    pub fn address(&self) -> crate::core::address::Address {
+        crate::core::address::Address::from(self.sig_key.public_key_bytes())
+    }
+
+    /// The validator suite (`0x0002`) composite key of this key set: its
+    /// ML-DSA-65 seed and its Ed25519 signing seed. It signs V7
+    /// validator transactions, whose sender stays the Ed25519 address.
+    ///
+    /// # Errors
+    ///
+    /// [`CryptoError::InvalidKey`] when the key set holds no PQ key.
+    pub fn composite_keypair(
+        &self,
+    ) -> Result<crate::crypto::composite::CompositeKeypair, CryptoError> {
+        let pq = self
+            .pq_key
+            .as_ref()
+            .ok_or_else(|| CryptoError::InvalidKey("the key set holds no PQ key".into()))?;
+        crate::crypto::composite::CompositeKeypair::from_seeds(
+            super::scheme::SuiteId::VALIDATOR,
+            &pq.secret_key,
+            self.sig_key.signing_key.as_bytes(),
+        )
+        .map_err(|e| CryptoError::InvalidKey(e.to_string()))
+    }
+
+    /// The public consensus-key registration of these keys on `chain_id`:
+    /// the VRF key, the BLS key with its proof of possession bound to the
+    /// chain and the validator's address, and the PQ key. It is what an
+    /// operator hands the genesis ceremony and what `RegisterConsensusKeys`
+    /// carries; it holds no secret.
+    ///
+    /// # Errors
+    ///
+    /// [`CryptoError::InvalidKey`] when the key set has no BLS or no PQ key.
+    pub fn consensus_key_registration(
+        &self,
+        chain_id: u64,
+    ) -> Result<crate::core::transaction::ConsensusKeyRegistration, CryptoError> {
+        let bls = self
+            .bls_key
+            .as_ref()
+            .ok_or_else(|| CryptoError::InvalidKey("the key set holds no BLS key".into()))?;
+        let pq = self
+            .pq_key
+            .as_ref()
+            .ok_or_else(|| CryptoError::InvalidKey("the key set holds no PQ key".into()))?;
+        let address = self.address();
+        Ok(crate::core::transaction::ConsensusKeyRegistration {
+            scheme_id: crate::chain::finality::BLS_SCHEME_RFC9380_V1.to_string(),
+            vrf_public_key: self.vrf_key.public.to_bytes().to_vec(),
+            bls_public_key: bls.public_key.clone(),
+            pop_signature: bls.generate_pop(chain_id, &address),
+            pq_public_key: pq.public_key_bytes().to_vec(),
+        })
+    }
+
     /// Persist validator key material to disk.
     ///
     /// # Security
     /// Contents are **plaintext** (sig + VRF + optional PQ + BLS).
     /// File mode is `0o600` on Unix, but there is no password/KDF/AEAD.
     /// **Do not use on mainnet** - `validate_strict_rules` rejects this path.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn save<P: AsRef<Path>>(&self, path: P) -> Result<(), CryptoError> {
         tracing::warn!(
             "ValidatorKeys::save writes plaintext key material to {}; mainnet forbids this path",
             path.as_ref().display()
         );
-        let mut bytes = self.sig_key.signing_key.as_bytes().to_vec();
+        let mut bytes = Zeroizing::new(self.sig_key.signing_key.as_bytes().to_vec());
         bytes.extend_from_slice(&self.vrf_key.to_bytes());
         if let Some(pq_key) = &self.pq_key {
             bytes.extend_from_slice(pq_key.public_key_bytes());
@@ -548,13 +615,25 @@ impl ValidatorKeys {
         if let Some(bls_key) = &self.bls_key {
             bytes.extend_from_slice(&bls_key.to_bytes());
         }
+        // The plaintext key buffer is wiped on both success and error.
         write_key_file(path.as_ref(), &bytes)?;
-        // F11: the plaintext key buffer does not outlive the write.
-        bytes.fill(0);
         Ok(())
     }
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn load<P: AsRef<Path>>(path: P) -> Result<Self, CryptoError> {
-        let bytes = std::fs::read(path.as_ref()).map_err(|e| CryptoError::Io(e.to_string()))?;
+        // the write side is owner-only, so the read side refuses a file
+        // that is not. Without this the narrow mode only protects keys this
+        // build wrote; a key copied in with `cp` kept the umask's `0o644` and
+        // the node loaded it without a word.
+        super::key_file::require_owner_only(path.as_ref())
+            .map_err(|e| CryptoError::Io(e.to_string()))?;
+        let bytes = Zeroizing::new(
+            std::fs::read(path.as_ref()).map_err(|e| CryptoError::Io(e.to_string()))?,
+        );
         if bytes.len() < 128 {
             return Err(CryptoError::InvalidKey("Key file too short".into()));
         }
@@ -562,39 +641,29 @@ impl ValidatorKeys {
         let vrf_key = SchnorrkelKeypair::from_bytes(&bytes[32..128])
             .map_err(|e| CryptoError::InvalidKey(e.to_string()))?;
 
-        // `cursor` is only advanced by the PQ branches below; with every PQ
+        // `cursor` is only advanced by the PQ branch below; with the PQ
         // feature off nothing writes to it, so the `mut` is conditional too.
-        #[cfg(any(feature = "pq-dilithium", feature = "pq-ml-dsa"))]
-        let mut cursor = 128;
-        #[cfg(not(any(feature = "pq-dilithium", feature = "pq-ml-dsa")))]
-        let cursor = 128;
-        #[cfg(feature = "pq-dilithium")]
-        let pq_key = if bytes.len() > cursor
-            && bytes.len()
-                >= cursor + dilithium5::public_key_bytes() + dilithium5::secret_key_bytes()
-        {
-            let pq_pk_end = cursor + dilithium5::public_key_bytes();
-            let pq_sk_end = pq_pk_end + dilithium5::secret_key_bytes();
-            let pk =
-                PqKeyPair::from_bytes(&bytes[cursor..pq_pk_end], &bytes[pq_pk_end..pq_sk_end])?;
-            cursor = pq_sk_end;
-            Some(pk)
-        } else {
-            None
-        };
         #[cfg(feature = "pq-ml-dsa")]
-        let pq_key = if bytes.len() > cursor && bytes.len() >= cursor + 1952 + 32 {
-            let pq_pk_end = cursor + 1952;
-            let pq_sk_end = pq_pk_end + 32;
-            let pk =
-                PqKeyPair::from_bytes(&bytes[cursor..pq_pk_end], &bytes[pq_pk_end..pq_sk_end])?;
-            cursor = pq_sk_end;
-            Some(pk)
-        } else {
-            None
+        let mut cursor = 128;
+        #[cfg(not(feature = "pq-ml-dsa"))]
+        let cursor = 128;
+        #[cfg(feature = "pq-ml-dsa")]
+        let pq_key = {
+            let pq_pk_len = pq_public_key_len();
+            let pq_sk_len = pq::ML_DSA_SEED_LEN;
+            if bytes.len() > cursor && bytes.len() >= cursor + pq_pk_len + pq_sk_len {
+                let pq_pk_end = cursor + pq_pk_len;
+                let pq_sk_end = pq_pk_end + pq_sk_len;
+                let pk =
+                    PqKeyPair::from_bytes(&bytes[cursor..pq_pk_end], &bytes[pq_pk_end..pq_sk_end])?;
+                cursor = pq_sk_end;
+                Some(pk)
+            } else {
+                None
+            }
         };
 
-        #[cfg(not(any(feature = "pq-dilithium", feature = "pq-ml-dsa")))]
+        #[cfg(not(feature = "pq-ml-dsa"))]
         let pq_key: Option<PqKeyPair> = None;
 
         // F10: the tail after the optional PQ block is either absent or
@@ -640,10 +709,10 @@ impl ValidatorKeys {
 
 impl KeyPair {
     pub fn generate() -> Result<Self, CryptoError> {
-        let mut seed = [0u8; SECRET_KEY_LENGTH];
-        rand::rng().fill_bytes(&mut seed);
+        let mut seed = Zeroizing::new([0u8; SECRET_KEY_LENGTH]);
+        rand::rng().fill_bytes(seed.as_mut_slice());
         let signing_key = SigningKey::from_bytes(&seed);
-        // (security audit §7) never `println!` keypair
+        // (security audit) never `println!` keypair
         // Material. The public key being written to stdout is a
         // Soft info leak (operator's terminal scrollback, CI logs,
         // Process accounting) - under default settings, every
@@ -671,21 +740,25 @@ impl KeyPair {
                 bytes.len()
             )));
         }
-        let mut seed = [0u8; SECRET_KEY_LENGTH];
+        let mut seed = Zeroizing::new([0u8; SECRET_KEY_LENGTH]);
         seed.copy_from_slice(bytes);
         Self::from_seed(&seed)
     }
     pub fn load<P: AsRef<Path>>(path: P) -> Result<Self, CryptoError> {
+        // , the same rule as `ValidatorKeys::load`: the read side and
+        // the write side agree on what a key file may look like.
+        super::key_file::require_owner_only(path.as_ref())
+            .map_err(|e| CryptoError::Io(e.to_string()))?;
         let mut file =
             std::fs::File::open(path.as_ref()).map_err(|e| CryptoError::Io(e.to_string()))?;
-        let mut bytes = Vec::new();
+        let mut bytes = Zeroizing::new(Vec::new());
         file.read_to_end(&mut bytes)
             .map_err(|e| CryptoError::Io(e.to_string()))?;
         Self::from_bytes(&bytes)
     }
     pub fn save<P: AsRef<Path>>(&self, path: P) -> Result<(), CryptoError> {
         write_key_file(path.as_ref(), self.signing_key.as_bytes())?;
-        // (security audit §7) the file path of a
+        // (security audit) the file path of a
         // Freshly-saved keypair is a sensitive secret, an
         // Attacker reading process stdout learns exactly where
         // To look on disk. The same `tracing::debug!` rationale as
@@ -766,66 +839,21 @@ pub const PQ_DILITHIUM5_SIGNATURE_LEN: usize = 4595;
 /// the `pq-ml-dsa` feature).
 pub const PQ_ML_DSA_65_SIGNATURE_LEN: usize = 3309;
 
-/// The PQ signature scheme a signature length identifies.
-///
-/// The three accepted signature lengths (Dilithium5, ML-DSA-65, ML-DSA-87)
-/// are pairwise distinct, so a single length classifies a PQ signature
-/// unambiguously. This is the bounded logic around signature verification
-/// that the Kani mirror in `kani/src/lib.rs` model-checks
-/// (`pq_signature_classification_round_trips`,
-/// `pq_signature_acceptability_agrees_with_classification`); the raw
-/// signature arithmetic stays behind the PQ backend crates.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PqSignatureClass {
-    Dilithium5,
-    MlDsa65,
-    MlDsa87,
-    Unknown,
-}
-
-/// Classify a PQ signature length. Total: every length maps to a variant,
-/// never a panic. When a scheme is named, the length is exactly that scheme's
-/// constant (proved by the Kani round-trip harness).
-#[must_use]
-pub fn classify_pq_signature_len(len: usize) -> PqSignatureClass {
-    if len == PQ_DILITHIUM5_SIGNATURE_LEN {
-        PqSignatureClass::Dilithium5
-    } else if len == PQ_ML_DSA_65_SIGNATURE_LEN {
-        PqSignatureClass::MlDsa65
-    } else if len == ML_DSA_87_SIGNATURE_LEN {
-        PqSignatureClass::MlDsa87
-    } else {
-        PqSignatureClass::Unknown
-    }
-}
-
-/// Whether a signature length is acceptable for an expected scheme.
-///
-/// `Unknown` accepts nothing. The Kani harness
-/// `pq_signature_acceptability_agrees_with_classification` proves this never
-/// disagrees with [`classify_pq_signature_len`].
-#[must_use]
-#[cfg(test)]
-pub fn pq_signature_len_acceptable(len: usize, expected: PqSignatureClass) -> bool {
-    match expected {
-        PqSignatureClass::Dilithium5 => len == PQ_DILITHIUM5_SIGNATURE_LEN,
-        PqSignatureClass::MlDsa65 => len == PQ_ML_DSA_65_SIGNATURE_LEN,
-        PqSignatureClass::MlDsa87 => len == ML_DSA_87_SIGNATURE_LEN,
-        PqSignatureClass::Unknown => false,
-    }
-}
-
 /// V5 user keypair backed by FIPS 204 ML-DSA-87.
 ///
 /// This type is for user-visible transaction signing. It is intentionally
-/// separate from validator [`KeyPair`]: validators can run with either
-/// Dilithium5 or ML-DSA-65 per the binary's PQ feature flag, but V5 wallets
-/// are pinned to ML-DSA-87 (NIST Category 5).
+/// separate from validator [`KeyPair`]: validators use ML-DSA-65, while user
+/// wallets are pinned to ML-DSA-87 (NIST Category 5).
 #[cfg(feature = "wallet-ml-dsa")]
 #[derive(Clone)]
 pub struct WalletKeyPair {
     signing_key: ml_dsa::SigningKey<ml_dsa::MlDsa87>,
 }
+
+// The drop below replaces the key, and the inner `ml_dsa::SigningKey` wipes
+// itself on drop (the `zeroize` feature of `ml-dsa`).
+#[cfg(feature = "wallet-ml-dsa")]
+impl zeroize::ZeroizeOnDrop for WalletKeyPair {}
 
 /// F11: overwrite the wallet signing key when the pair is dropped.
 #[cfg(feature = "wallet-ml-dsa")]
@@ -839,11 +867,23 @@ impl Drop for WalletKeyPair {
 impl WalletKeyPair {
     pub fn generate() -> Self {
         use ml_dsa::signature::Keypair;
-        // FIPS 204 uses 32 bytes of seed xi as input to KeyGen_internal.
-        let mut seed = [0u8; 32];
-        rand_core::RngCore::fill_bytes(&mut rand_core::OsRng, &mut seed);
-        let signing_key = ml_dsa::SigningKey::<ml_dsa::MlDsa87>::from_seed((&seed).into());
+        // FIPS 204 uses 32 bytes of seed xi as input to KeyGen_internal. The
+        // seed buffer is wiped on drop.
+        let mut seed = Zeroizing::new([0u8; 32]);
+        rand_core::RngCore::fill_bytes(&mut rand_core::OsRng, seed.as_mut_slice());
+        let signing_key = ml_dsa::SigningKey::<ml_dsa::MlDsa87>::from_seed((&*seed).into());
         let _ = signing_key.verifying_key();
+        Self { signing_key }
+    }
+
+    /// Rebuild the keypair from its 32-byte FIPS 204 seed (`xi`), the form a
+    /// key file holds. The same seed always yields the same key, so a
+    /// service that signs with a long-lived address (the testnet faucet)
+    /// reloads it from disk instead of keeping key material in memory
+    /// between runs.
+    #[must_use]
+    pub fn from_seed(seed: &[u8; 32]) -> Self {
+        let signing_key = ml_dsa::SigningKey::<ml_dsa::MlDsa87>::from_seed(seed.into());
         Self { signing_key }
     }
 
@@ -869,35 +909,61 @@ impl WalletKeyPair {
             .expect("Valid ML-DSA-87 public key must yield a valid address")
     }
 
-    pub fn sign(&self, message: &[u8]) -> [u8; ML_DSA_87_SIGNATURE_LEN] {
-        // Hedged per FIPS 204 3.6.1 (see the validator path above). The only
-        // error branch is a dead OS rng - the same failure class generate()
-        // already treats as fatal; as a last resort the deterministic
-        // variant still produces a valid signature rather than stranding
-        // the caller mid-transaction.
-        let sig = self
-            .signing_key
-            .expanded_key()
-            .sign_randomized(message, b"", &mut rand::rng())
-            .unwrap_or_else(|_| {
-                // P02-F20: the deterministic fallback stays (a dead OS rng
-                // must not strand a transaction mid-flight), but it is no
-                // longer silent. Hedged signing is the FIPS 204 posture and
-                // losing it is an incident, not a quiet detail.
-                tracing::error!(
-                    "Wallet ML-DSA randomized signing failed (OS rng unavailable);                      fell back to deterministic signing"
-                );
-                use ml_dsa::signature::Signer as _;
-                self.signing_key.sign(message)
-            });
-        let enc = sig.encode();
+    /// Sign `message` under the FIPS 204 context `ctx`.
+    ///
+    /// Hedged per FIPS 204 3.6.1: fresh randomness per signature keeps repeated
+    /// signatures of one message from repeating intermediate values
+    /// (fault-injection and side-channel defence). A dead OS rng must not
+    /// strand a transaction mid-flight, so the deterministic variant (also
+    /// FIPS 204 approved) takes over, and losing the hedge is an incident, not
+    /// a quiet detail: it is logged at error level.
+    ///
+    /// The one other failure is an unusable context (empty or longer than 255
+    /// bytes), a programming error at the call site since every context is a
+    /// constant from `crypto::ctx`. It is never papered over with a
+    /// context-free signature: the result is an all-zero array, which no
+    /// verifier accepts, and the error is logged.
+    pub fn sign(&self, ctx: &[u8], message: &[u8]) -> [u8; ML_DSA_87_SIGNATURE_LEN] {
+        let mut rnd = Zeroizing::new([0u8; 32]);
+        if rand_core::RngCore::try_fill_bytes(&mut rand_core::OsRng, rnd.as_mut_slice()).is_err() {
+            tracing::error!(
+                "Wallet ML-DSA randomized signing failed (OS rng unavailable); fell back to deterministic signing"
+            );
+            rnd.fill(0);
+        }
+        let seed_slice: &[u8] = self.signing_key.as_seed().as_ref();
+        let signed = <&[u8; pq::ML_DSA_SEED_LEN]>::try_from(seed_slice)
+            .map_err(|_| pq::PqError::Signing)
+            .and_then(|seed| pq::ml_dsa_sign(SchemeId::ML_DSA_87, seed, message, ctx, &rnd));
         let mut out = [0u8; ML_DSA_87_SIGNATURE_LEN];
-        out.copy_from_slice(enc.as_ref());
+        match signed {
+            Ok(sig) if sig.len() == out.len() => out.copy_from_slice(&sig),
+            Ok(_) => tracing::error!("Wallet ML-DSA-87 signature has an unexpected length"),
+            Err(e) => tracing::error!("Wallet ML-DSA-87 signing refused: {e}"),
+        }
         out
     }
 
-    pub fn verify(public_key: &[u8], message: &[u8], signature: &[u8]) -> Result<(), CryptoError> {
-        verify_ml_dsa_87_signature(message, signature, public_key)
+    /// Reads the statuses of a fresh genesis. A chain reads its own registry
+    /// through [`Self::verify_in`].
+    pub fn verify(
+        public_key: &[u8],
+        ctx: &[u8],
+        message: &[u8],
+        signature: &[u8],
+    ) -> Result<(), CryptoError> {
+        verify_ml_dsa_87_signature(ctx, message, signature, public_key)
+    }
+
+    /// Verify under the scheme statuses of a chain.
+    pub fn verify_in(
+        registry: &super::scheme::SchemeStatusRegistry,
+        public_key: &[u8],
+        ctx: &[u8],
+        message: &[u8],
+        signature: &[u8],
+    ) -> Result<(), CryptoError> {
+        verify_ml_dsa_87_signature_in(registry, ctx, message, signature, public_key)
     }
 }
 
@@ -923,39 +989,52 @@ pub fn wallet_address_from_ml_dsa_87_public_key(
 }
 
 #[cfg(feature = "wallet-ml-dsa")]
-/// Verify a user transaction signature as FIPS 204 ML-DSA-87.
+/// Verify an ML-DSA-87 signature under the FIPS 204 context `ctx`.
 ///
 /// The signature must be exactly 4627 bytes and the public key exactly 2592
-/// bytes. This path is intentionally separate from validator PQ signatures:
-/// validators may use either Dilithium5 or ML-DSA-65 depending on the binary,
-/// but user wallets are pinned to ML-DSA-87 for Category 5 security.
+/// bytes. The check runs through the dual-verifier facade (`crypto::pq`,
+/// RustCrypto `ml-dsa` and `libcrux-ml-dsa` must both accept. This path
+/// is intentionally separate from validator PQ signatures (ML-DSA-65): user
+/// wallets are pinned to ML-DSA-87 for Category 5 security.
+///
+/// This form reads the statuses of a fresh genesis: every path that decides on
+/// behalf of a chain calls [`verify_ml_dsa_87_signature_in`] with the
+/// chain-state registry.
 pub fn verify_ml_dsa_87_signature(
+    ctx: &[u8],
     message: &[u8],
     signature: &[u8],
     public_key: &[u8],
 ) -> Result<(), CryptoError> {
-    use ml_dsa::signature::Verifier as _;
-    if signature.len() != ML_DSA_87_SIGNATURE_LEN {
-        return Err(CryptoError::Verification(format!(
-            "invalid ML-DSA-87 signature length: expected {ML_DSA_87_SIGNATURE_LEN}, got {}",
-            signature.len()
-        )));
-    }
-    if public_key.len() != ML_DSA_87_PUBLIC_KEY_LEN {
-        return Err(CryptoError::Verification(format!(
-            "invalid ML-DSA-87 public key length: expected {ML_DSA_87_PUBLIC_KEY_LEN}, got {}",
-            public_key.len()
-        )));
-    }
-    let enc_vk = ml_dsa::EncodedVerifyingKey::<ml_dsa::MlDsa87>::try_from(public_key)
-        .map_err(|_| CryptoError::Verification("invalid ML-DSA-87 public key".to_string()))?;
-    let vk = ml_dsa::VerifyingKey::<ml_dsa::MlDsa87>::decode(&enc_vk);
-    let enc_sig = ml_dsa::EncodedSignature::<ml_dsa::MlDsa87>::try_from(signature)
-        .map_err(|_| CryptoError::Verification("invalid ML-DSA-87 signature".to_string()))?;
-    let sig = ml_dsa::Signature::<ml_dsa::MlDsa87>::decode(&enc_sig)
-        .ok_or_else(|| CryptoError::Verification("invalid ML-DSA-87 signature".to_string()))?;
-    vk.verify(message, &sig)
-        .map_err(|e| CryptoError::Verification(e.to_string()))
+    verify_ml_dsa_87_signature_in(
+        &super::scheme::SchemeStatusRegistry::genesis(),
+        ctx,
+        message,
+        signature,
+        public_key,
+    )
+}
+
+#[cfg(feature = "wallet-ml-dsa")]
+/// [`verify_ml_dsa_87_signature`] under the scheme statuses of a chain.
+/// A family the registry marks
+/// `Disabled` or not yet `Active` is refused before any key is decoded.
+pub fn verify_ml_dsa_87_signature_in(
+    registry: &super::scheme::SchemeStatusRegistry,
+    ctx: &[u8],
+    message: &[u8],
+    signature: &[u8],
+    public_key: &[u8],
+) -> Result<(), CryptoError> {
+    pq::verify_in(
+        registry,
+        SchemeId::ML_DSA_87,
+        public_key,
+        message,
+        ctx,
+        signature,
+    )
+    .map_err(|e| CryptoError::Verification(format!("ML-DSA-87: {e}")))
 }
 
 pub fn hash_message(message: &[u8]) -> [u8; 32] {
@@ -976,7 +1055,9 @@ pub fn wallet_address_from_ml_dsa_87_public_key(
 }
 
 #[cfg(not(feature = "wallet-ml-dsa"))]
-pub fn verify_ml_dsa_87_signature(
+pub fn verify_ml_dsa_87_signature_in(
+    _registry: &super::scheme::SchemeStatusRegistry,
+    _ctx: &[u8],
     _message: &[u8],
     _signature: &[u8],
     _public_key: &[u8],
@@ -985,11 +1066,34 @@ pub fn verify_ml_dsa_87_signature(
         "wallet ML-DSA-87 support is not compiled in (enable wallet-ml-dsa)".into(),
     ))
 }
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn zero_seed_is_refused() {
+        // The all-zero seed and a seed equal to the group order both reduce
+        // to the zero scalar, whose public key is the identity point.
+        assert!(super::BlsKeypair::from_seed(&[0u8; 64]).is_err());
+        let order_le = {
+            // r = 0x73eda753299d7d483339d80809a1d80553bda402fffe5bfeffffffff00000001
+            let be =
+                hex::decode("73eda753299d7d483339d80809a1d80553bda402fffe5bfeffffffff00000001")
+                    .unwrap();
+            let mut le = [0u8; 64];
+            for (i, b) in be.iter().rev().enumerate() {
+                le[i] = *b;
+            }
+            le
+        };
+        assert!(super::BlsKeypair::from_seed(&order_le).is_err());
+        let mut one = [0u8; 64];
+        one[0] = 1;
+        assert!(super::BlsKeypair::from_seed(&one).is_ok());
+    }
+
     use super::*;
 
-    // ---- BLG-0046 (F10): key-file parsing is exact. ----
+    // ---- (F10): key-file parsing is exact. ----
 
     #[test]
     fn bls_from_bytes_refuses_a_zero_scalar() {
@@ -1009,6 +1113,57 @@ mod tests {
         assert!(BlsKeypair::from_bytes(&short).is_err());
     }
 
+    /// The reader refuses a validator key file that group or others
+    /// can read. The writer has always produced `0o600`; the reader used to
+    /// accept anything, so a key copied in by `cp` (mode from the umask) was
+    /// loaded as if it had been saved here.
+    #[cfg(unix)]
+    #[test]
+    fn a_world_readable_validator_key_file_is_refused() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("vk.bin");
+        ValidatorKeys::generate().unwrap().save(&path).unwrap();
+        crate::crypto::key_file::require_owner_only(&path).expect("a saved file is owner-only");
+
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let res = ValidatorKeys::load(&path);
+        assert!(res.is_err());
+        let err = res.err().expect("0o644 must be refused");
+        let message = err.to_string();
+        assert!(message.contains("chmod 600"), "{message}");
+        assert!(message.contains("644"), "{message}");
+
+        // Narrowing the file is the whole remedy: the same bytes then load.
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        ValidatorKeys::load(&path).expect("0o600 loads");
+    }
+
+    /// `KeyPair::load` is the second reader and carries the same rule,
+    /// so `main.rs` cannot keep one key file loadable and the other not.
+    #[cfg(unix)]
+    #[test]
+    fn a_world_readable_keypair_file_is_refused() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("kp.bin");
+        let kp = KeyPair::generate().unwrap();
+        kp.save(&path).unwrap();
+        crate::crypto::key_file::require_owner_only(&path).expect("a saved file is owner-only");
+
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o604)).unwrap();
+        let res = KeyPair::load(&path);
+        assert!(res.is_err());
+        let err = res.err().expect("0o604 must be refused");
+        assert!(err.to_string().contains("chmod 600"), "{err}");
+
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(
+            KeyPair::load(&path).unwrap().private_key_bytes(),
+            kp.private_key_bytes()
+        );
+    }
+
     #[test]
     fn validator_key_file_partial_bls_tail_is_refused() {
         let dir = tempfile::tempdir().unwrap();
@@ -1017,11 +1172,24 @@ mod tests {
         keys.save(&path).unwrap();
         let mut bytes = std::fs::read(&path).unwrap();
         bytes.push(0x7f);
+        // Seeded narrow on purpose: this test is about the BLS tail, and a
+        // plain `fs::write` would hand the reader a wide mode and stop at the
+        // permission refusal, proving nothing about the tail.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::write(&path, &bytes).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        #[cfg(not(unix))]
         std::fs::write(&path, &bytes).unwrap();
+        // The tail is refused, and it must be refused for the tail: an
+        // assertion that only says `is_err` would also pass if the reader
+        // stopped at the length check and never reached the BLS parse.
         assert!(ValidatorKeys::load(&path).is_err());
     }
 
-    #[cfg(any(feature = "pq-dilithium", feature = "pq-ml-dsa"))]
+    #[cfg(feature = "pq-ml-dsa")]
     #[test]
     fn pq_from_bytes_refuses_mismatched_halves() {
         let a = PqKeyPair::generate();
@@ -1047,6 +1215,60 @@ mod tests {
         );
         let names: Vec<_> = std::fs::read_dir(dir.path()).unwrap().collect();
         assert_eq!(names.len(), 1, "no temp file may remain");
+    }
+
+    ///  lock: rewriting a key file must not keep the wide mode of the
+    /// file it replaced. The lock covers the validator key file too, not only
+    /// the account key pair: it carries the BLS and PQ secrets as well, and one
+    /// saver that kept the old mode would leave the whole suite group readable.
+    #[cfg(unix)]
+    #[test]
+    fn validator_key_save_resets_a_wide_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("validator_key.bin");
+        std::fs::write(&path, b"world readable before").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o666)).unwrap();
+        let keys = super::ValidatorKeys::generate().unwrap();
+        keys.save(&path).unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o600,
+            "a rewrite kept the mode of the file it replaced"
+        );
+        let left: Vec<_> = std::fs::read_dir(dir.path()).unwrap().collect();
+        assert_eq!(left.len(), 1, "a temp key file was left behind");
+        assert!(
+            super::ValidatorKeys::load(&path).is_ok(),
+            "the rewritten file must still load"
+        );
+    }
+
+    ///  lock, key material half. A BLS pair is refused when its secret
+    /// half is the zero scalar, when its public half is the identity point, and
+    /// when the two halves do not belong together. The identity point is a real
+    /// encoding (`0xc0`), so the refusal cannot rest on a failed decode.
+    #[test]
+    fn zero_and_identity_bls_material_is_refused() {
+        let identity = bls12_381::G2Affine::identity().to_compressed();
+        // A file holding a zero secret and the identity point: both halves are
+        // bad on their own, and the pairing check is the second net.
+        let mut zero_pair = vec![0u8; 32];
+        zero_pair.extend_from_slice(&identity);
+        assert!(super::BlsKeypair::from_bytes(&zero_pair).is_err());
+        // A real secret paired with the identity point: the encoding decodes,
+        // so only the pairing check can refuse it.
+        let kp = super::BlsKeypair::generate().expect("bls key");
+        let mut forged = kp.secret_key.to_bytes().to_vec();
+        forged.extend_from_slice(&identity);
+        assert!(
+            super::BlsKeypair::from_bytes(&forged).is_err(),
+            "an identity public key must not pass the pairing check"
+        );
+        // A genuine pair survives the round trip, so the refusals above are
+        // not a broken reader.
+        let round = super::BlsKeypair::from_bytes(&kp.to_bytes()).expect("round trip");
+        assert_eq!(round.public_key, kp.public_key);
     }
 
     #[test]
@@ -1101,7 +1323,7 @@ mod tests {
     }
     #[test]
     fn test_save_and_load() {
-        // BLG-0053 (F17): a fixed /tmp path is shared between parallel test
+        // (F17): a fixed /tmp path is shared between parallel test
         // processes; every run gets its own tempdir now.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test_budlum_key");
@@ -1134,10 +1356,10 @@ fn stdout_has_64_hex_run(stdout: &[u8]) -> bool {
     false
 }
 
-/// (security audit §7) the public-key hex must NOT be printed to stdout by
+/// (security audit) the public-key hex must NOT be printed to stdout by
 /// `KeyPair::generate`.
 ///
-/// BLG-0053 (F17): the old test claimed to capture stdout but never did. The
+/// (F17): the old test claimed to capture stdout but never did. The
 /// check now runs `generate` inside a child process whose raw stdout is
 /// fully captured, so any printed 64-hex public key is observable. A canary
 /// test proves the detector itself works (red-green).
@@ -1193,6 +1415,94 @@ fn keypair_generate_does_not_leak_public_key_via_println() {
                 "the stdout detector must see a printed public key (canary)"
             );
         }
+    }
+}
+
+/// A BLS key pair whose secret is zero has the identity point as its
+/// public key, and that point verifies every signature and aggregates into any
+/// set without changing it. Both constructors must refuse it.
+///
+/// `from_seed` already did; `from_bytes` refused only the all-zero *bytes*,
+/// which is a weaker test than "reduces to the zero scalar". The cases below
+/// cover the seed path, the byte path and the pairing check that catches a
+/// mismatched public half.
+///
+/// Canary: drop the `sk == Scalar::zero()` guard in `from_seed` and the
+/// all-zero seed produces a key pair instead of an error.
+#[cfg(test)]
+mod bls_integrity_tests {
+    use crate::crypto::primitives::BlsKeypair;
+
+    #[test]
+    fn a_zero_scalar_seed_is_refused() {
+        assert!(
+            BlsKeypair::from_seed(&[0u8; 64]).is_err(),
+            "the all-zero seed reduces to the zero scalar"
+        );
+        // A seed equal to the group order is the same scalar as zero with
+        // different bytes, and `zero_seed_is_refused` covers that reduction.
+        // The point here is the seed that is zero in every byte.
+        let mut one = [0u8; 64];
+        one[0] = 1;
+        assert!(
+            BlsKeypair::from_seed(&one).is_ok(),
+            "the refusal must be about the zero scalar, not a ban on seeds"
+        );
+    }
+
+    #[test]
+    fn a_zero_secret_key_file_is_refused() {
+        // 32 zero bytes of secret, then a well-formed public half: the old
+        // shape refused this only because the public half could not be the
+        // identity point, not because it looked at the scalar.
+        let good = BlsKeypair::generate().expect("bls key");
+        let mut bytes = good.to_bytes();
+        bytes[..32].fill(0);
+        let err = BlsKeypair::from_bytes(&bytes)
+            .err()
+            .expect("a zero secret is refused");
+        assert!(
+            format!("{err}").contains("zero"),
+            "the refusal must name the zero scalar: {err}"
+        );
+        // A short file is a different refusal, and it must not be the same one.
+        assert!(BlsKeypair::from_bytes(&bytes[..127]).is_err());
+    }
+
+    #[test]
+    fn a_public_half_that_does_not_match_the_secret_is_refused() {
+        let a = BlsKeypair::generate().expect("bls a");
+        let b = BlsKeypair::generate().expect("bls b");
+        let mut bytes = a.to_bytes();
+        // Splice b's public half onto a's secret half.
+        bytes[32..].copy_from_slice(&b.public_key);
+        let res = BlsKeypair::from_bytes(&bytes);
+        assert!(res.is_err());
+        let err = res.err().expect("a mismatched half is refused");
+        assert!(
+            format!("{err}").contains("does not match"),
+            "the refusal must name the mismatch: {err}"
+        );
+    }
+
+    /// The other half of the finding: the verifier refuses a signature that is
+    /// the identity point, so an "aggregate" of zero signatures cannot be
+    /// presented as a quorum.
+    #[test]
+    fn an_identity_signature_is_refused_by_the_verifier() {
+        let key = BlsKeypair::generate().expect("bls key");
+        let message = b"identity signature probe";
+        let good = crate::chain::finality::sign_bls(&key.secret_key, message);
+        crate::chain::finality::verify_bls_sig(&key.public_key, message, &good)
+            .expect("the honest signature verifies");
+
+        // The compressed encoding of the G1 identity point: the compression
+        // flag with an all-zero x, which is how the crate spells `O`.
+        let mut identity = [0u8; 48];
+        identity[0] = 0xc0;
+        let err = crate::chain::finality::verify_bls_sig(&key.public_key, message, &identity)
+            .expect_err("an identity signature must not verify");
+        assert!(err.contains("identity"), "{err}");
     }
 }
 
@@ -1265,70 +1575,212 @@ fn test_bls_proof_of_possession() {
     ));
 }
 
-/// The PQ length classification stays in step with the Kani mirror.
-///
-/// `kani/src/lib.rs` model-checks the classifier on the whole `usize` domain
-/// (`pq_signature_classification_round_trips` and the acceptability
-/// agreement). This test holds the constants this crate exports and the Kani
-/// mirror's literal copy of them together, exactly like
-/// `bond_arithmetic_matches_the_kani_mirror` holds `penalty_for` in step.
+#[cfg(test)]
 #[test]
-fn pq_signature_classification_matches_the_kani_mirror() {
-    use crate::crypto::primitives::{
-        classify_pq_signature_len, pq_signature_len_acceptable, PqSignatureClass,
-        ML_DSA_87_SIGNATURE_LEN, PQ_DILITHIUM5_SIGNATURE_LEN, PQ_ML_DSA_65_SIGNATURE_LEN,
-    };
+fn key_file_rewrite_is_atomic_and_owner_only() {
+    let dir = std::env::temp_dir().join(format!(
+        "budlum-key-rewrite-{}-{}",
+        std::process::id(),
+        rand::random::<u64>()
+    ));
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+    let key_path = dir.join("validator.key");
 
-    // The Kani mirror constants, verbatim.
-    const KANI_PQ_SIG_LEN_DILITHIUM5: usize = 4595;
-    const KANI_PQ_SIG_LEN_ML_DSA_65: usize = 3309;
-    const KANI_PQ_SIG_LEN_ML_DSA_87: usize = 4627;
-
-    assert_eq!(PQ_DILITHIUM5_SIGNATURE_LEN, KANI_PQ_SIG_LEN_DILITHIUM5);
-    assert_eq!(PQ_ML_DSA_65_SIGNATURE_LEN, KANI_PQ_SIG_LEN_ML_DSA_65);
-    assert_eq!(ML_DSA_87_SIGNATURE_LEN, KANI_PQ_SIG_LEN_ML_DSA_87);
-
-    // The Kani mirror classifier, verbatim.
-    fn kani_classify(len: usize) -> PqSignatureClass {
-        if len == KANI_PQ_SIG_LEN_DILITHIUM5 {
-            PqSignatureClass::Dilithium5
-        } else if len == KANI_PQ_SIG_LEN_ML_DSA_65 {
-            PqSignatureClass::MlDsa65
-        } else if len == KANI_PQ_SIG_LEN_ML_DSA_87 {
-            PqSignatureClass::MlDsa87
-        } else {
-            PqSignatureClass::Unknown
-        }
+    // Pre-create with wide permissions; rewriting must replace via atomic rename with 0600.
+    std::fs::write(&key_path, b"stale").expect("seed file");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o644))
+            .expect("widen permissions");
     }
 
-    // Sweep a wide length range so the two classifiers cannot drift apart on
-    // the lengths that matter (the Kani proof covers the rest symbolically).
-    for len in 0..=5000usize {
+    let kp = KeyPair::generate().expect("generate ed25519 key");
+    kp.save(&key_path).expect("save keypair");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&key_path)
+            .expect("stat rewritten key")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600, "rewritten key file must be mode 0600");
+    }
+    let loaded = KeyPair::load(&key_path).expect("load keypair");
+    assert_eq!(loaded.public_key_bytes(), kp.public_key_bytes());
+    assert!(!dir.join("validator.key.tmp").exists());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[cfg(test)]
+#[test]
+fn bls_rejects_zero_scalar_and_identity_points() {
+    use crate::core::address::Address;
+    use crate::core::transaction::DEFAULT_CHAIN_ID;
+
+    assert!(BlsKeypair::from_seed(&[0u8; 64]).is_err());
+
+    let valid = BlsKeypair::generate().expect("generate bls keypair");
+    let id_g2 = G2Affine::identity().to_compressed();
+    let mut zero_sk_with_identity_pk = Vec::with_capacity(128);
+    zero_sk_with_identity_pk.extend_from_slice(&[0u8; 32]);
+    zero_sk_with_identity_pk.extend_from_slice(&id_g2);
+    assert!(BlsKeypair::from_bytes(&zero_sk_with_identity_pk).is_err());
+
+    let mut nonzero_sk_with_identity_pk = valid.to_bytes();
+    nonzero_sk_with_identity_pk[32..128].copy_from_slice(&id_g2);
+    assert!(BlsKeypair::from_bytes(&nonzero_sk_with_identity_pk).is_err());
+
+    let addr = Address::from([7u8; 32]);
+    let pop = valid.generate_pop(DEFAULT_CHAIN_ID, &addr);
+    let id_g1 = G1Affine::identity().to_compressed();
+    assert!(BlsKeypair::verify_pop(&id_g2, &pop, DEFAULT_CHAIN_ID, &addr).is_err());
+    assert!(BlsKeypair::verify_pop(&valid.public_key, &id_g1, DEFAULT_CHAIN_ID, &addr).is_err());
+}
+
+/// The ML-DSA surface carries a registered FIPS 204 context string and
+/// an explicit scheme identity.
+///
+/// Two halves, and both are load-bearing:
+///
+/// * **Context.** A signature made for one surface must not verify on another
+///   even when the payload bytes are identical. FIPS 204 section 5.2 puts the
+///   context inside the signed message, so the separation is cryptographic, not
+///   a convention. An empty context is refused outright.
+/// * **Scheme identity.** The 1952-byte ML-DSA-65 key and the 2592-byte
+///   ML-DSA-87 key must not be interchangeable: the registry names the scheme,
+///   its length and its status, and a chain reads that registry rather than
+///   trusting a length.
+///
+/// Canary: pass `ctx::BLOCK_V6` where `ctx::TX_V7` is expected, or accept an
+/// empty context, and the corresponding assertion below fails.
+#[cfg(all(test, feature = "pq-ml-dsa"))]
+mod pq_identity_tests {
+    use crate::crypto::{ctx, pq, primitives::PqKeyPair, scheme::SchemeId};
+
+    const MESSAGE: &[u8] = b"identity probe";
+
+    fn keypair() -> PqKeyPair {
+        let Ok(pk) = pq::ml_dsa_public_key(SchemeId::ML_DSA_65, &[7u8; 32]) else {
+            panic!("public key");
+        };
+        let Ok(kp) = PqKeyPair::from_bytes(&pk, &[7u8; 32]) else {
+            panic!("a paired ML-DSA-65 key");
+        };
+        kp
+    }
+
+    #[test]
+    fn a_context_is_part_of_the_signature() {
+        let key = keypair();
+        let tx = key.sign(ctx::TX_V7, MESSAGE).expect("sign under TX_V7");
+        PqKeyPair::verify(key.public_key_bytes(), ctx::TX_V7, MESSAGE, &tx)
+            .expect("the same context verifies");
+
+        // The same signature under another registered context, over the same
+        // bytes, is a different message to FIPS 204.
+        for other in [ctx::BLOCK_V6, ctx::QC_V2, ctx::KEY_BINDING_V1] {
+            assert!(
+                PqKeyPair::verify(key.public_key_bytes(), other, MESSAGE, &tx).is_err(),
+                "a TX_V7 signature must not verify under {}",
+                String::from_utf8_lossy(other)
+            );
+        }
+        // And under a different payload in the right context, for completeness.
+        assert!(PqKeyPair::verify(key.public_key_bytes(), ctx::TX_V7, b"other", &tx).is_err());
+    }
+
+    #[test]
+    fn an_empty_context_is_refused_on_both_sides() {
+        let key = keypair();
+        let err = key
+            .sign(b"", MESSAGE)
+            .expect_err("signing with no context is refused");
+        assert!(format!("{err}").contains("context"), "{err}");
+
+        let signed = key.sign(ctx::TX_V7, MESSAGE).expect("sign");
+        let err = PqKeyPair::verify(key.public_key_bytes(), b"", MESSAGE, &signed)
+            .expect_err("verifying with no context is refused");
+        assert!(format!("{err}").contains("context"), "{err}");
+    }
+
+    #[test]
+    fn the_scheme_identity_names_its_length_and_status() {
+        let info = SchemeId::ML_DSA_65
+            .info()
+            .expect("a registered scheme has an entry");
+        assert_eq!(info.public_key_len, Some(1952));
         assert_eq!(
-            classify_pq_signature_len(len),
-            kani_classify(len),
-            "classifier disagreement at length {len}"
+            SchemeId::ML_DSA_87.info().expect("entry").public_key_len,
+            Some(2592)
+        );
+        assert_eq!(crate::crypto::primitives::PQ_SCHEME_ID, "ml-dsa-65");
+        assert_eq!(
+            crate::crypto::primitives::pq_public_key_len(),
+            1952,
+            "this build's key length comes from the registry, not a literal"
+        );
+
+        // A key of the other scheme's length is refused, so the two are not
+        // interchangeable by length alone.
+        let wrong = vec![0u8; 2592];
+        assert!(PqKeyPair::validate_public_key(&wrong).is_err());
+        let right = pq::ml_dsa_public_key(SchemeId::ML_DSA_65, &[1u8; 32]).expect("key");
+        PqKeyPair::validate_public_key(&right).expect("a 1952-byte key is this build's scheme");
+    }
+
+    #[test]
+    fn the_registry_decides_whether_a_scheme_verifies() {
+        // A chain reads its own registry. A scheme whose status is not
+        // `verifiable` must be refused even with a valid signature, which is
+        // how a chain that never launched ML-DSA-65 keeps rejecting it.
+        let key = keypair();
+        let signature = key.sign(ctx::TX_V7, MESSAGE).expect("sign");
+        let genesis = crate::crypto::scheme::SchemeStatusRegistry::genesis();
+        assert!(
+            genesis.scheme_verifies(SchemeId::ML_DSA_65),
+            "the genesis registry verifies this build's scheme"
+        );
+        // A registry that has disabled the scheme refuses the same valid
+        // signature, and the refusal names the scheme rather than a length.
+        // The entry list is fixed-width and counted, so "not verifiable" is a
+        // status byte rather than a missing row.
+        let (mut schemes, suites) = genesis.entries();
+        let index = schemes
+            .iter()
+            .position(|(id, _)| *id == SchemeId::ML_DSA_65.0)
+            .expect("the genesis registry lists this build's scheme");
+        schemes[index].1 = crate::crypto::scheme::SchemeStatus::Disabled.to_byte();
+        let disabled = crate::crypto::scheme::SchemeStatusRegistry::from_entries(&schemes, &suites)
+            .expect("the entry list keeps its shape");
+        let err = PqKeyPair::verify_in(
+            &disabled,
+            key.public_key_bytes(),
+            ctx::TX_V7,
+            MESSAGE,
+            &signature,
+        )
+        .expect_err("a scheme the chain disabled is refused");
+        let text = format!("{err}").to_lowercase();
+        assert!(
+            text.contains("not verifiable") || text.contains("scheme"),
+            "{err}"
         );
     }
 
-    // The acceptance check agrees with the classifier at every length.
-    for len in 0..=5000usize {
-        for class in [
-            PqSignatureClass::Dilithium5,
-            PqSignatureClass::MlDsa65,
-            PqSignatureClass::MlDsa87,
-            PqSignatureClass::Unknown,
-        ] {
-            // `Unknown` accepts nothing, so acceptability implies the
-            // classifier names the same (known) scheme; the reverse holds for
-            // known schemes. This is exactly the one-way implication the Kani
-            // harness `pq_signature_acceptability_agrees_with_classification`
-            // proves, kept total here by the `Unknown` guard.
-            let expected = class != PqSignatureClass::Unknown && kani_classify(len) == class;
-            assert_eq!(
-                pq_signature_len_acceptable(len, class),
-                expected,
-                "acceptability disagreement at length {len}, class {class:?}"
+    #[test]
+    fn every_registered_context_is_non_empty_and_within_the_cap() {
+        assert!(!ctx::TABLE.is_empty(), "the table must not be empty");
+        for entry in ctx::TABLE {
+            assert!(
+                !entry.is_empty(),
+                "an empty context would be refused anyway"
+            );
+            assert!(
+                entry.len() <= ctx::MAX_CONTEXT_LEN,
+                "{} exceeds the FIPS 204 cap",
+                String::from_utf8_lossy(entry)
             );
         }
     }

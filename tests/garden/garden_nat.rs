@@ -211,6 +211,8 @@ impl Node {
         let child = Command::new("sudo")
             .args(["-n", "ip", "netns", "exec", ns, "env"])
             .arg("BUDLUM_RPC_AUTH_REQUIRED=0")
+            .arg("BUDLUM_APTOS_LISTENER=none")
+            .arg("BUDLUM_SOLANA_LISTENER=none")
             .arg(env!("CARGO_BIN_EXE_budlum-core"))
             .arg("--network=devnet")
             .arg(format!("--db-path={}", dir.path().join("db").display()))
@@ -276,10 +278,10 @@ impl Node {
         .map_err(|e| format!("[{}] {method}: {e}", self.name))?;
         let answer: Value = serde_json::from_str(&answer)
             .map_err(|e| format!("[{}] {method}: {e} in {answer:?}", self.name))?;
-        match answer.get("error") {
-            Some(error) => Err(format!("[{}] {method}: {error}", self.name)),
-            None => Ok(answer.get("result").cloned().unwrap_or(Value::Null)),
-        }
+        answer.get("error").map_or_else(
+            || Ok(answer.get("result").cloned().unwrap_or(Value::Null)),
+            |error| Err(format!("[{}] {method}: {error}", self.name)),
+        )
     }
 
     fn garden(&self) -> Result<Value, String> {
@@ -294,7 +296,12 @@ impl Node {
     /// Wait until this node sees `tx_id` in a finalized block.
     fn wait_final(&self, tx_id: &str) -> Result<Value, String> {
         wait_for(&format!("[{}] finality of {tx_id}", self.name), || {
-            self.rpc("bud_gardenTrace", &json!([tx_id])).map(Some)
+            let trace = self.rpc("bud_gardenTrace", &json!([tx_id]))?;
+            if text(&trace, "/stage")? == "final" {
+                Ok(Some(trace))
+            } else {
+                Ok(None)
+            }
         })
     }
 }

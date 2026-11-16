@@ -19,12 +19,12 @@ pub struct RealCompressor;
 /// `zstd_compress`: real zstd compression at a level (the unsafe lives in the
 /// crate, not in our code).
 /// `zstd_decompress_safe`: decompression with a CEILING on both the frame
-/// content size and the output size (K25 bomb protection).
+/// content size and the output size ( bomb protection).
 pub fn zstd_compress(data: &[u8], level: i32) -> Option<Vec<u8>> {
     zstd::encode_all(data, level).ok()
 }
 
-pub const ZSTD_MAX_DECOMPRESSED: u64 = 4 * 1024 * 1024 * 1024; // 4 GiB (the K25 ceiling)
+pub const ZSTD_MAX_DECOMPRESSED: u64 = 4 * 1024 * 1024 * 1024; // 4 GiB (the ceiling)
 
 pub fn zstd_decompress_safe(bytes: &[u8], max_out: u64) -> Option<Vec<u8>> {
     use std::io::Read;
@@ -81,7 +81,7 @@ impl RealBench {
     /// Verified ratios: REPRODUCIBLE with `cargo run --release --bin measure_ratios -- --seed 7`
     /// (a deterministic corpus of 50k JSON / 60k CSV / 80k LOG). The
     /// 8.48x/5.51x/7.68x values written in the old table came from a different
-    /// (non-reproducible) corpus - as K19 honesty requires, they were replaced
+    /// (non-reproducible) corpus - as honesty requires, they were replaced
     /// with the verified values (EK13).
     pub fn measured_ratios() -> Vec<(&'static str, f64)> {
         vec![
@@ -137,7 +137,7 @@ mod tests {
 
     #[test]
     fn measured_ratios_documented() {
-        // Every ratio is > 1.0 (real compression) and consistent with the ceiling (K19)
+        // Every ratio is > 1.0 (real compression) and consistent with the ceiling
         for (name, r) in RealBench::measured_ratios() {
             assert!(r > 1.0, "{name} ratio must be > 1");
             assert!(
@@ -174,7 +174,7 @@ mod tests {
     }
     #[test]
     fn zstd_decompress_bomb_guards() {
-        // K25: a fake zstd frame (a very large content size) -> None, no panic
+        // A fake zstd frame (a very large content size) -> None, no panic
         // zstd frame header: magic + frame header; it claims a content size
         // above 2^32
         let fake = [

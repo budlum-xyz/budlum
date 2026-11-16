@@ -21,7 +21,7 @@ use crate::consensus::pow::PoWEngine;
 use crate::core::address::Address;
 use crate::core::transaction::{Transaction, TransactionType};
 use crate::crypto::primitives::KeyPair;
-use crate::storage::db::Storage;
+use crate::persistence::db::Storage;
 use crate::storage::manifest::ContentManifest;
 use std::sync::Arc;
 use tempfile::tempdir;
@@ -49,6 +49,9 @@ async fn nft_burn_prunes_matching_storage_manifest_on_produce() {
     manifest.owner = alice;
     let cid = manifest.manifest_id;
     bc.state.storage_registry.register_manifest(&manifest);
+    bc.state
+        .storage_registry
+        .record_test_custody_for_manifest(&manifest, alice);
     assert!(
         bc.state.storage_registry.has_claim(&cid, &alice),
         "the registered owner holds the claim the prune checks"

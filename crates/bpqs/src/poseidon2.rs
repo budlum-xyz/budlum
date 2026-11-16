@@ -1,5 +1,8 @@
-//! Canonical hash backend: Poseidon2 over Goldilocks, width 16 (the "p3
-//! parameters" named in the 2026-09-19 decision record). This module is a
+//! Research hash backend: Poseidon2 over Goldilocks, width 16 (the "p3
+//! parameters" named in the 2026-09-19 decision record). It is not the
+//! canonical backend: since the canonical backend for long-lived
+//! use is SHAKE-256, and this one serves in-VM verification research only.
+//! This module is a
 //! straightline, allocation-free port of the reference permutation so the
 //! auditor reads one file instead of a dependency stack.
 //!
@@ -400,6 +403,12 @@ fn m_internal(state: &mut [u64; WIDTH]) {
 /// drive the raw permutation against reference vectors directly,
 /// not only through the hash backend built on it here.
 pub fn permute16(state: &mut [u64; WIDTH]) {
+    for elem in state.iter_mut() {
+        // Every u64 satisfies u64::MAX < 2 * GOLDILOCKS_P, so one constant-time
+        // conditional subtract maps non-canonical inputs (>= GOLDILOCKS_P) to
+        // their canonical Goldilocks residue before `fe_add` assumes `< p`.
+        *elem = fe_sub_p(*elem);
+    }
     m_external(state);
     for rc in RC_EXT_INIT.iter() {
         for (i, elem) in state.iter_mut().enumerate() {
@@ -442,13 +451,14 @@ fn sponge_digest(frame: &[u8]) -> [u8; 32] {
     out
 }
 
-/// The canonical backend of the research line: Poseidon2-Goldilocks-16
-/// behind the [`super::hash::BpqsHash`] seam. The 2026-09-19 decision made
-/// this the primary; SHA3-256 and SHAKE-256 stay as the audit cross-checks.
+/// The research backend: Poseidon2-Goldilocks-16 behind the
+/// [`super::hash::BpqsHash`] seam. The 2026-09-19 decision made it the
+/// primary; moved the canonical label to SHAKE-256, because an
+/// algebraic hash is never the hash of a long-lived signature or commitment.
+/// It stays for in-VM verification research only.
 ///
-/// WIRING: exposed for whoever instantiates the scheme with the
-/// canonical backend; in-tree the KAT corpus and the seam's users in
-/// this crate are what pin it.
+/// WIRING: exposed for research instantiations of the scheme; in-tree the KAT
+/// corpus and the seam's users in this crate are what pin it.
 pub struct Poseidon2GoldilocksHash;
 
 impl super::hash::BpqsHash for Poseidon2GoldilocksHash {
@@ -694,5 +704,23 @@ mod poseidon2_tests {
             a,
             crate::hash::Sha3_256Hash::digest32(b"DOM-A", &[b"payload"]),
         );
+    }
+
+    #[test]
+    fn permute16_canonicalizes_non_canonical_lanes() {
+        let mut unreduced = [0u64; WIDTH];
+        unreduced[0] = GOLDILOCKS_P;
+        unreduced[1] = GOLDILOCKS_P + 7;
+        unreduced[2] = u64::MAX;
+
+        let mut canonical = [0u64; WIDTH];
+        canonical[0] = 0;
+        canonical[1] = 7;
+        canonical[2] = u64::MAX - GOLDILOCKS_P;
+
+        permute16(&mut unreduced);
+        permute16(&mut canonical);
+        assert_eq!(unreduced, canonical);
+        assert!(unreduced.iter().all(|&x| x < GOLDILOCKS_P));
     }
 }

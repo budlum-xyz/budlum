@@ -163,24 +163,20 @@ fn below_floor_ai_bond_is_atomic() {
 #[test]
 fn mainnet_ai_bond_rejects_devnet_sized_principal() {
     let mut state = AccountState::new();
+    state.registry.set_params(crate::registry::RegistryParams {
+        min_stake: crate::core::chain_config::Network::Mainnet.min_stake(),
+        ..crate::registry::RegistryParams::default()
+    });
     let operator = Address::from([0x23; 32]);
     let amount = crate::core::chain_config::Network::Devnet.min_stake();
-    let required = crate::core::chain_config::Network::Mainnet.min_stake();
+    let required = state.required_ai_bond(DEFAULT_CHAIN_ID);
     let fee = state.base_fee.max(1);
     assert!(amount < required);
     state.add_balance(&operator, amount + fee);
 
-    let tx = Transaction::new_ai_operator_bond(
-        operator,
-        amount,
-        fee,
-        0,
-        crate::core::chain_config::Network::Mainnet
-            .chain_id()
-            .value(),
-    );
+    let tx = Transaction::new_ai_operator_bond(operator, amount, fee, 0, DEFAULT_CHAIN_ID);
     let err = Executor::apply_transaction(&mut state, &tx)
-        .expect_err("mainnet must reject a devnet-sized AI inference layer bond");
+        .expect_err("mainnet validator floor must reject a devnet-sized AI inference layer bond");
 
     assert!(err.contains("network validator floor"));
     assert_eq!(state.get_balance(&operator), amount + fee);
@@ -864,7 +860,7 @@ fn a_request_whose_own_clock_lies_is_refused_at_submission() {
 
 #[test]
 fn prune_refunds_escrow_of_never_reclaimed_request() {
-    // BLG-0467 / P32-F01: an unfinalized request whose requester never sent
+    // An unfinalized request whose requester never sent
     // AiFeeReclaim used to be deleted by prune_expired with its escrowed
     // max_fee: the fee was neither returned, burned, nor paid. Prune now
     // hands the refund to the caller (the chain actor credits it).

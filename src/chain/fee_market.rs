@@ -4,7 +4,7 @@
 //! The active protocol is flat fee minus metabolic burn. These EIP-1559 helpers
 //! Are retained for a future versioned migration and must not mutate balances.
 //!
-//! BLG-0178 (P08-F12): the off-path status is the point of this header - a
+//! The off-path status is the point of this header - a
 //! reader must not take these helpers for the fee mechanism that runs. The
 //! module is tracked in idle-code-baseline.txt; it earns its keep only when
 //! a versioned migration wires it, and until then nothing calls it.
@@ -108,6 +108,10 @@ pub fn next_base_fee(parent_base_fee: u64, parent_gas_used: u64, params: FeeMark
 /// A bid that cannot cover the block base fee is rejected. This is the key
 /// Semantic difference from `min(max_fee, base_fee)`, which would silently accept
 /// Underpriced transactions and weaken the base-fee mechanism.
+///
+/// # Errors
+///
+/// Returns an error if the operation fails.
 pub fn effective_fee(bid: FeeBid, block_base_fee: u64) -> Result<EffectiveFee, FeeError> {
     if bid.max_fee < block_base_fee {
         return Err(FeeError::MaxFeeBelowBaseFee {

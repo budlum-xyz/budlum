@@ -7,6 +7,7 @@
 //! Are deliberately aligned with the existing consensus constants (see the
 //! `Default` impl) so introducing the registry does not change current
 //! Economic behaviour.
+//! Convenience: exposed for CLI, RPC, SDK, and multi-VM runtime callers.
 
 use crate::chain::fee_market::PPM_DENOMINATOR;
 use crate::core::chain_config::FIXED_POINT_SCALE;
@@ -27,6 +28,60 @@ use serde::{Deserialize, Serialize};
 /// gives the two slashing sites one place to read it from without touching a
 /// consensus-critical layout.
 pub const LIVENESS_JAIL_EPOCHS: u64 = 7;
+
+/// Reserved `.bud` labels and `budlum.xyz` infrastructure subdomains.
+///
+/// Shared between BNS consensus validation and the HTTP gateway: none of these
+/// labels may be registered directly or resolved through BNS on the gateway,
+/// and only authorized `BNS_PRIMARY_SELLERS` may list them as `Primary` offers.
+pub const RESERVED_LABELS: &[&str] = &[
+    "bud",
+    "www",
+    "app",
+    "api",
+    "rpc",
+    "docs",
+    "mail",
+    "explorer",
+    "faucet",
+    "status",
+    "testnet",
+    "mainnet",
+    "devnet",
+    "seed",
+    "seed-1",
+    "root",
+    "admin",
+    "bns",
+    "budlum",
+    "validator",
+    "node",
+    "gateway",
+];
+
+/// Minimum `.bud` registration or renewal duration in epochs (rejects 1-epoch squatting).
+pub const MIN_DURATION: u64 = 10;
+
+/// Maximum `.bud` registration or post-renewal remaining duration in epochs
+/// (10 years at ~100 epochs/day).
+pub const MAX_DURATION: u64 = 365_000;
+
+/// Renewal grace period in epochs (~30 days at ~100 epochs/day) during which
+/// resolution and mutations fail closed, third-party registration is blocked,
+/// and only the existing owner may rescue the `.bud` name via `BnsRenew`.
+pub const GRACE_PERIOD: u64 = 3_000;
+
+/// Maximum live or grace-period `.bud` names a single address may hold at once.
+pub const MAX_NAMES_PER_OWNER: usize = 64;
+
+/// Maximum key-value text/profile/multi-chain records stored on one `.bud` name.
+pub const MAX_RECORDS_PER_NAME: usize = 32;
+
+/// Maximum ASCII byte length of a `.bud` record key (e.g. `avatar`, `com.github`, `addr.eth`).
+pub const MAX_RECORD_KEY_LEN: usize = 64;
+
+/// Maximum UTF-8 byte length of a `.bud` record value.
+pub const MAX_RECORD_VALUE_BYTES: usize = 512;
 
 /// Economic / timing parameters that gate participation and slashing.
 ///
@@ -105,18 +160,9 @@ pub struct RegistryParams {
     /// True, which made a passed proposal fail at execution with "governance
     /// Parameter is not whitelisted".
     pub max_invalid_votes_per_epoch: u64,
-    /// Whether the live epoch-close hook actually slashes validators for
-    /// Liveness (downtime) faults.
-    ///
-    /// DEFAULT: `false` (observe-only). Turning liveness slashing on is a
-    /// Deliberate, hard-to-reverse economic action: the underlying `slash`
-    /// Jails a validator on ANY offence, so even a light (1%) liveness penalty
-    /// Fully jails the offender. Per decision ("observe first,
-    /// Validate on live/testnet, then activate"), this stays OFF until
-    /// governance explicitly enables it - the mechanism is fully wired and
-    /// tested, but never auto-activates. Governance-settable: in
-    /// `GOVERNANCE_PARAMETER_WHITELIST`, applied by
-    /// `apply_registry_parameter_update` from the strings `true` / `false`.
+    /// Deprecated compatibility flag. Absence is suspension-only under V-4;
+    /// setting this never enables liveness slashing. It remains in the
+    /// snapshot/governance schema so historical parameter updates decode.
     pub liveness_slashing_enabled: bool,
     /// Relayer's cut of an inbound bridge transfer, in parts-per-million of the
     /// arriving amount.
@@ -167,6 +213,55 @@ pub struct RegistryParams {
     /// the two are not interchangeable: one is compensation for work done, the
     /// other is revenue.
     pub bridge_fee_ppm: u64,
+    /// Share of an application's eligible protocol fee, in parts-per-million.
+    ///
+    /// The remainder stays on the existing protocol path. A zero value keeps
+    /// the application share disabled until a network profile explicitly opts
+    /// in. The testnet profile uses 400,000 ppm (40 percent). Governance can
+    /// change it as the application fee policy evolves.
+    pub app_fee_share_ppm: u64,
+    /// Fixed fee charged in addition to the base transaction fee when an
+    /// account registers an AppBinding application. A non-zero fee keeps application
+    /// identity rows from being a free state-growth vector; the testnet
+    /// profile uses one base unit.
+    pub app_binding_registration_fee: u64,
+    /// Number of blocks used when an AppBinding intent leaves its deadline at zero.
+    /// The testnet profile fixes this default at 600 blocks; an explicit
+    /// deadline can still be chosen by the intent owner within policy.
+    pub app_binding_default_intent_deadline_blocks: u64,
+    /// Highest commission a validator may take from its delegators' rewards,
+    /// in parts-per-million. TESTNET-DEFAULT: 200,000 (20 percent).
+    pub max_validator_commission_ppm: u64,
+    /// Largest commission change a validator may make in one epoch, in
+    /// parts-per-million. TESTNET-DEFAULT: 10,000 (one point).
+    pub max_commission_change_ppm_per_epoch: u64,
+    /// Epochs an undelegated amount stays locked, and slashable, before it
+    /// can be withdrawn. TESTNET-DEFAULT: 100 epochs.
+    pub delegation_unbonding_epochs: u64,
+    /// Smallest amount a *new* delegation position may hold, in base units.
+    ///
+    /// The delegation fee is flat, so without a floor a funded account can
+    /// create positions one base unit at a time. Every node then pays the
+    /// enlarged per-block and per-epoch work those positions cause for the
+    /// life of the chain, while the attacker recovers its principal by
+    /// undelegating. TESTNET-DEFAULT: 100 base units.
+    pub min_delegation_amount: u64,
+    /// Largest number of active delegation positions one validator may carry.
+    ///
+    /// The global `MAX_DELEGATIONS` ceiling bounds the whole table; this one
+    /// bounds the slice a single validator's stake operations, epoch close and
+    /// slash have to walk, so one popular validator cannot turn every block
+    /// that touches it into a scan of the entire delegation table.
+    /// TESTNET-DEFAULT: 1,000 positions.
+    pub max_delegations_per_validator: u64,
+}
+
+/// Deterministic split of an eligible protocol fee between an application and
+/// the existing protocol destination.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ApplicationFeeSplit {
+    pub application: u64,
+    pub protocol: u64,
 }
 
 impl RegistryParams {
@@ -228,6 +323,40 @@ impl RegistryParams {
         base_fee.saturating_add(self.proportional_fee(amount, self.transfer_fee_ppm))
     }
 
+    /// Split an eligible protocol fee without losing or creating a unit.
+    ///
+    /// The application share is rounded down and the existing protocol path
+    /// receives the remainder. This makes the conservation rule explicit even
+    /// for dust fees and avoids a second rounding decision at each caller.
+    #[must_use]
+    pub fn split_application_fee(&self, fee: u64) -> ApplicationFeeSplit {
+        let application = u64::try_from(
+            u128::from(fee).saturating_mul(u128::from(self.app_fee_share_ppm))
+                / u128::from(PPM_DENOMINATOR),
+        )
+        .unwrap_or(u64::MAX);
+        ApplicationFeeSplit {
+            application,
+            protocol: fee.saturating_sub(application),
+        }
+    }
+
+    /// Testnet economic profile from and defaults.
+    ///
+    /// Production and development chains retain [`Default::default`] until
+    /// their own genesis decision supplies rates. These values are committed
+    /// into the testnet genesis state, not applied as a node-local override.
+    #[must_use]
+    pub fn testnet_defaults() -> Self {
+        Self {
+            transfer_fee_ppm: 200,
+            swap_fee_ppm: 400,
+            bridge_fee_ppm: 800,
+            app_fee_share_ppm: 400_000,
+            ..Self::default()
+        }
+    }
+
     /// Protocol-level bounds for governance-tunable registry params.
     /// Prevents extreme values (e.g. zero unbonding, >100% slash ratios).
     ///
@@ -243,7 +372,7 @@ impl RegistryParams {
         if self.min_stake < 100 {
             return Err("min_stake must be at least 100".into());
         }
-        // BLG-0101 (P04-F19): ceilings on the amount fields a proposal can
+        // Ceilings on the amount fields a proposal can
         // set. 10^18 is orders of magnitude past any honest value in base
         // units and still refuses u64::MAX - a governance proposal must not
         // be able to price every account out of existence or mint a fee
@@ -258,8 +387,61 @@ impl RegistryParams {
         if self.ai_model_register_fee > MAX_PARAM_AMOUNT {
             return Err("ai_model_register_fee exceeds the maximum parameter amount".into());
         }
+        if self.app_binding_registration_fee > MAX_PARAM_AMOUNT {
+            return Err("app_binding_registration_fee exceeds the maximum parameter amount".into());
+        }
+        if self.slashing_report_fee > MAX_PARAM_AMOUNT {
+            return Err("slashing_report_fee exceeds the maximum parameter amount".into());
+        }
+        if self.proof_submission_fee > MAX_PARAM_AMOUNT {
+            return Err("proof_submission_fee exceeds the maximum parameter amount".into());
+        }
+        if self.prover_reward > MAX_PARAM_AMOUNT {
+            return Err("prover_reward exceeds the maximum parameter amount".into());
+        }
+        if self.liveness_max_missed_epochs == 0 || self.liveness_max_missed_epochs > 100_000 {
+            return Err("liveness_max_missed_epochs must be between 1 and 100,000".into());
+        }
+        if self.app_binding_default_intent_deadline_blocks == 0
+            || self.app_binding_default_intent_deadline_blocks > 100_000
+        {
+            return Err(
+                "app_binding_default_intent_deadline_blocks must be between 1 and 100,000".into(),
+            );
+        }
+        if self.delegation_unbonding_epochs == 0 || self.delegation_unbonding_epochs > 100_000 {
+            return Err("delegation_unbonding_epochs must be between 1 and 100,000".into());
+        }
+        // A zero floor is the flood the field exists to stop, and a floor
+        // above the maximum parameter amount would price delegation out of
+        // existence rather than bound it.
+        if self.min_delegation_amount == 0 || self.min_delegation_amount > MAX_PARAM_AMOUNT {
+            return Err(format!(
+                "min_delegation_amount must be between 1 and {MAX_PARAM_AMOUNT}"
+            ));
+        }
+        let per_validator_ceiling = crate::registry::permissionless::MAX_DELEGATIONS as u64;
+        if self.max_delegations_per_validator == 0
+            || self.max_delegations_per_validator > per_validator_ceiling
+        {
+            return Err(format!(
+                "max_delegations_per_validator must be between 1 and {per_validator_ceiling}"
+            ));
+        }
+        if self.max_commission_change_ppm_per_epoch > self.max_validator_commission_ppm {
+            return Err(
+                "max_commission_change_ppm_per_epoch cannot exceed max_validator_commission_ppm"
+                    .into(),
+            );
+        }
         if self.unbonding_epochs == 0 || self.unbonding_epochs > 100_000 {
             return Err("unbonding_epochs must be between 1 and 100,000".into());
+        }
+        if self.double_sign_slash_ratio_fixed == 0 {
+            return Err("double_sign_slash_ratio_fixed must be > 0".into());
+        }
+        if self.malicious_slash_ratio_fixed == 0 {
+            return Err("malicious_slash_ratio_fixed must be > 0".into());
         }
         if self.double_sign_slash_ratio_fixed > FIXED_POINT_SCALE {
             return Err("double_sign_slash_ratio_fixed cannot exceed FIXED_POINT_SCALE".into());
@@ -284,6 +466,11 @@ impl RegistryParams {
             ("transfer_fee_ppm", self.transfer_fee_ppm),
             ("swap_fee_ppm", self.swap_fee_ppm),
             ("bridge_fee_ppm", self.bridge_fee_ppm),
+            ("app_fee_share_ppm", self.app_fee_share_ppm),
+            (
+                "max_validator_commission_ppm",
+                self.max_validator_commission_ppm,
+            ),
         ] {
             if rate >= PPM_DENOMINATOR {
                 return Err(format!("{name} must be below 100%"));
@@ -364,9 +551,64 @@ impl Default for RegistryParams {
             transfer_fee_ppm: 0,
             swap_fee_ppm: 0,
             bridge_fee_ppm: 0,
+            // Application revenue sharing is profile-controlled. Keeping the
+            // generic default at zero avoids silently repricing non-testnet
+            // chains; testnet genesis opts into explicitly.
+            app_fee_share_ppm: 0,
+            // One base unit makes AppBinding registration cheap for real apps while
+            // ensuring an unbounded registration flood is not free.
+            app_binding_registration_fee: 1,
+            // Ten-minute-at-testnet-slot-scale default from the AppBinding profile.
+            app_binding_default_intent_deadline_blocks: 600,
+            // TESTNET-DEFAULT. The self-bond floor is `min_stake`.
+            max_validator_commission_ppm: 200_000,
+            max_commission_change_ppm_per_epoch: 10_000,
+            delegation_unbonding_epochs: 100,
+            // TESTNET-DEFAULT: a hundred base units. Small enough that an
+            // honest delegator is unaffected, large enough that splitting a
+            // position into dust costs more in fees than it gains in
+            // amplified work.
+            min_delegation_amount: 100,
+            // TESTNET-DEFAULT. With the global ceiling at 100,000 positions,
+            // this bounds what one validator's slice can ever cost a block.
+            max_delegations_per_validator: 1_000,
         }
     }
 }
+
+/// B12: the floor a governance `BnsSetBaseCost` action may set.
+///
+/// A base cost of zero sells every `.bud` name for nothing, and the renewal
+/// fee is the only BNS revenue that is burned, so a zero is a subsidy with no
+/// way back (each governance step is bounded).
+pub const MIN_BNS_BASE_COST: u64 = 1;
+
+/// B12: the ceiling a governance `BnsSetBaseCost` action may set.
+///
+/// The 3-character tier pays 100x this value per epoch, so the ceiling keeps
+/// the most expensive name inside what a `MAX_DURATION` registration can pay
+/// without saturating: `MIN_BNS_BASE_COST` through this value is the whole
+/// range, and both ends are checked before any state is written.
+pub const MAX_BNS_BASE_COST: u64 = 1_000_000;
+
+/// B12: the largest factor one `BnsSetBaseCost` action may move the price by.
+///
+/// Governance is not a rubber stamp: a single vote may not multiply the price
+/// by more than this (or divide it by more than this), so a compromised or
+/// mistaken proposal cannot reprice the whole namespace in one step. Ten is the
+/// directive's bound; a larger move needs a second proposal, which is a second
+/// chance to see it.
+pub const BNS_BASE_COST_MAX_STEP_FACTOR: u64 = 10;
+
+/// B13: the default ceiling on how many `.bud` names the registry holds.
+///
+/// A parameter rather than a constant inside [`crate::bns::BnsRegistry`] because
+/// the number is a capacity decision, not a rule: 100K names with subdomains
+/// bounded state growth to roughly 50MB, and the ceiling that appears in a
+/// snapshot must be readable by operators who tune it. The registry keeps the
+/// genesis value in its own field so an old snapshot still deserializes to the
+/// ceiling it was written with.
+pub const DEFAULT_MAX_NAMES: usize = 1_000_000;
 
 #[cfg(test)]
 mod tests {
@@ -382,8 +624,15 @@ mod tests {
     fn registry_params_serialized_shape_is_pinned() {
         let encoded =
             bincode::serialize(&RegistryParams::default()).expect("RegistryParams is serializable");
-        // 16 u64 fields + 1 bool. bincode writes u64 as 8 bytes, bool as 1.
-        // (BLG-0102/P04-F20: the comment said 15; the pin has counted 16.)
+        // 24 u64 fields + 1 bool. bincode writes u64 as 8 bytes, bool as 1.
+        // (the comment said 15; the pin now counts 24.)
+        //
+        // The count moved from 22 when the two delegation bounds
+        // (`min_delegation_amount`, `max_delegations_per_validator`) were
+        // added: the entry-side half of the delegation-flood finding. Both are
+        // economic values, so they belong in `RegistryParams` rather than in
+        // constants, and the shape change is the deliberate one the note above
+        // describes.
         //
         // The count moved from 12 when the three proportional rates were
         // added: a state-format change the `# Adding a field` note describes,
@@ -404,7 +653,7 @@ mod tests {
         // would never fail, so it would not be a pin at all.
         assert_eq!(
             encoded.len(),
-            16 * 8 + 1,
+            24 * 8 + 1,
             "RegistryParams changed shape: old snapshots can no longer be \
              deserialized and the state root moves. See the type's docs."
         );
@@ -422,13 +671,13 @@ mod tests {
             bincode::serialize(&RegistryParams::default()).expect("RegistryParams is serializable");
         assert_ne!(
             encoded.len(),
-            17 * 8 + 1,
-            "a seventeenth u64 field would have to update the pin above, \
+            23 * 8 + 1,
+            "a twenty-third u64 field would have to update the pin above, \
              which is the signal that snapshot compatibility broke"
         );
         assert_ne!(
             encoded.len(),
-            15 * 8 + 1,
+            21 * 8 + 1,
             "removing a field is equally a state-format change"
         );
     }
@@ -601,6 +850,42 @@ mod tests {
         }
     }
 
+    #[test]
+    fn testnet_defaults_apply_the_published_fee_profile() {
+        let p = RegistryParams::testnet_defaults();
+        assert_eq!(p.transfer_fee_ppm, 200);
+        assert_eq!(p.swap_fee_ppm, 400);
+        assert_eq!(p.bridge_fee_ppm, 800);
+        assert_eq!(p.app_fee_share_ppm, 400_000);
+        assert_eq!(p.app_binding_registration_fee, 1);
+        assert_eq!(p.app_binding_default_intent_deadline_blocks, 600);
+        assert!(p.validate().is_ok());
+    }
+
+    #[test]
+    fn application_fee_split_conserves_value_at_the_testnet_share() {
+        let p = RegistryParams::testnet_defaults();
+        let split = p.split_application_fee(1_000);
+        assert_eq!(split.application, 400);
+        assert_eq!(split.protocol, 600);
+        assert_eq!(split.application + split.protocol, 1_000);
+
+        let dust = p.split_application_fee(1);
+        assert_eq!(dust.application, 0);
+        assert_eq!(dust.protocol, 1);
+    }
+
+    #[test]
+    fn application_fee_share_cannot_reach_or_exceed_one_hundred_percent() {
+        for rate in [PPM_DENOMINATOR, PPM_DENOMINATOR + 1] {
+            let p = RegistryParams {
+                app_fee_share_ppm: rate,
+                ..RegistryParams::default()
+            };
+            assert!(p.validate().is_err(), "invalid application rate: {rate}");
+        }
+    }
+
     /// The floor is what stops the split. A pure percentage rounds to zero
     /// below `PPM_DENOMINATOR / rate` units, so without it an attacker moves a
     /// large amount as many small ones and pays nothing.
@@ -755,7 +1040,7 @@ mod tests {
         assert!(!RegistryParams::default().liveness_slashing_enabled);
     }
 
-    /// BLG-0101 (P04-F19): the amount fields a proposal can set are
+    /// The amount fields a proposal can set are
     /// bounded above - governance must not be able to price every account
     /// out of existence.
     #[test]
@@ -777,5 +1062,37 @@ mod tests {
         assert!(p.validate().is_err());
         // The documented defaults still validate.
         assert!(RegistryParams::default().validate().is_ok());
+    }
+
+    #[test]
+    fn zero_malicious_slash_and_unbounded_fee_params_rejected() {
+        for bad in [
+            RegistryParams {
+                double_sign_slash_ratio_fixed: 0,
+                ..RegistryParams::default()
+            },
+            RegistryParams {
+                malicious_slash_ratio_fixed: 0,
+                ..RegistryParams::default()
+            },
+            RegistryParams {
+                slashing_report_fee: u64::MAX,
+                ..RegistryParams::default()
+            },
+            RegistryParams {
+                proof_submission_fee: u64::MAX,
+                ..RegistryParams::default()
+            },
+            RegistryParams {
+                prover_reward: u64::MAX,
+                ..RegistryParams::default()
+            },
+            RegistryParams {
+                liveness_max_missed_epochs: 0,
+                ..RegistryParams::default()
+            },
+        ] {
+            assert!(bad.validate().is_err());
+        }
     }
 }

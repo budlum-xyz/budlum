@@ -312,6 +312,10 @@ impl Codegen {
                         self.generate_stmt(s, &mut else_scope, storage);
                     }
                 }
+                // A `let` in a branch is invisible after it (child scope), so
+                // its register is free again: the then branch starts where
+                // the else branch started, and nothing leaks past the `if`.
+                self.next_reg = saved_reg;
                 let jump_to_end_idx = self.instructions.len();
                 self.emit(Opcode::Jmp, 0, 0, 0, 0);
 
@@ -321,6 +325,7 @@ impl Codegen {
                     self.generate_stmt(s, &mut then_scope, storage);
                 }
                 let end_idx = self.instructions.len();
+                self.next_reg = saved_reg;
 
                 self.patch_jump(
                     jump_to_then_idx,
@@ -355,6 +360,8 @@ impl Codegen {
                 );
 
                 let end_idx = self.instructions.len();
+                // The body's `let`s end with the body.
+                self.next_reg = saved_reg;
                 self.patch_jump(
                     jump_to_body_idx,
                     (body_start_idx as i32) - (jump_to_body_idx as i32),
@@ -926,17 +933,16 @@ impl Codegen {
                     self.emit(Opcode::Syscall, res, 0, 0, 2);
                     res
                 } else if name == "verify_merkle_proof" {
-                    let r_root = self.generate_expr(&args[0], scope, storage);
-                    let r_leaf = self.generate_expr(&args[1], scope, storage);
-
-                    // The VM's VerifyMerkle opcode takes
-                    // The path *address* as an immediate (`imm`). The path
+                    // The VM's VerifyMerkle opcode takes only the address of the
+                    // path window, as an immediate (`imm`); `rs1` and `rs2` are not
+                    // read.
+                    // The path
                     // Address must therefore be a compile-time constant
                     // That fits in a signed 32-bit offset.
                     // Reject dynamic expressions and out-of-range literals
                     // Explicitly instead of silently truncating a register
                     // Number (the old `r_path as i32` bug).
-                    let path_addr = match &args[2] {
+                    let path_addr = match &args[0] {
                         Expr::Int(v) => *v,
                         _ => {
                             if self.error.is_none() {
@@ -958,12 +964,12 @@ impl Codegen {
                     }
 
                     if Opcode::VerifyMerkle.requires_mainnet_activation() {
-                        tracing::warn!(
-                            "verify_merkle_proof emits VerifyMerkle, which is not active on mainnet; the program is refused there until the opcode is activated"
+                        tracing::debug!(
+                            "verify_merkle_proof emits VerifyMerkle (requires MainnetActivation; active under default profile)"
                         );
                     }
                     let res = self.alloc_reg();
-                    self.emit(Opcode::VerifyMerkle, res, r_root, r_leaf, path_addr as i32);
+                    self.emit(Opcode::VerifyMerkle, res, 0, 0, path_addr as i32);
                     res
                 } else {
                     let saved_next_reg = self.next_reg;

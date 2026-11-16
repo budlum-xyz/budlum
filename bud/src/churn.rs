@@ -8,7 +8,7 @@ pub struct QuadRing {
 }
 
 impl QuadRing {
-    /// A panic-free constructor: `None` when n is below 4 (K38 - a public API
+    /// A panic-free constructor: `None` when n is below 4 (a public API
     /// does not panic).
     pub fn new(n: usize) -> Option<Self> {
         if n < 4 {
