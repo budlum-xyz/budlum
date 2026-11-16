@@ -8,7 +8,7 @@ For each row, locate the current production path and file:line, choose or cite a
 |---|---|---|---|---|---|---|
 | BLG-001 | Section 14.3, L2591 | Critical | WP-12 | Unknown / unverified | Not recorded | Not collected |
 | BLG-002 | Section 14.3, L2592 | High | WP-16 | Unknown / unverified | Not recorded | Not collected |
-| BLG-003 | Section 14.3, L2593 | High | WP-16 | Unknown / unverified | Not recorded | Not collected |
+| BLG-003 | Section 14.3, L2593 | High | WP-16 | Fixed in tree. Issuance is checked as one total: allocations, distribution, validator stake and the reward pool, with the stake and pool required to fit inside the ecosystem share. | tests::regression_chain::genesis_issuance_is_checked_as_one_total | src/chain/genesis.rs:481 |
 | BLG-004 | Section 14.3, L2594 | Medium | WP-61 | Unknown / unverified | Not recorded | Not collected |
 | BLG-005 | Section 14.3, L2595 | Medium | WP-16 | Unknown / unverified | Not recorded | Not collected |
 | BLG-006 | Section 14.3, L2596 | Medium | WP-16 | Unknown / unverified | Not recorded | Not collected |
@@ -58,7 +58,7 @@ For each row, locate the current production path and file:line, choose or cite a
 | BLG-050 | Section 14.3, L2640 | Critical | WP-44 | Unknown / unverified | Not recorded | Not collected |
 | BLG-051 | Section 14.3, L2641 | High | WP-44 | Unknown / unverified | Not recorded | Not collected |
 | BLG-052 | Section 14.3, L2642 | Medium | WP-44 | Unknown / unverified | Not recorded | Not collected |
-| BLG-053 | Section 14.3, L2643 | High | WP-44 | Unknown / unverified | Not recorded | Not collected |
+| BLG-053 | Section 14.3, L2643 | High | WP-44 | Fixed in tree. A task cannot be completed twice: the receipt check and the retired-id set both refuse it. | settlement::proof_market tests | src/settlement/proof_market.rs:1032 |
 | BLG-054 | Section 14.3, L2644 | Critical | WP-44 | Unknown / unverified | Not recorded | Not collected |
 | BLG-055 | Section 14.3, L2645 | Critical | WP-44 | Unknown / unverified | Not recorded | Not collected |
 | BLG-056 | Section 14.3, L2646 | High | WP-44 | Fixed in tree. The bridge enforces `require_slashable` for every external domain it admits. | cross_domain::external::domain_bridge::tests::require_slashable_is_enforced_at_the_bridge | src/cross_domain/external/domain_bridge.rs:163 |
@@ -209,7 +209,7 @@ For each row, locate the current production path and file:line, choose or cite a
 | BLG-201 | Section 14.3, L2791 | High | WP-45 | Unknown / unverified | Not recorded | Not collected |
 | BLG-202 | Section 14.3, L2792 | Critical | WP-17 | Unknown / unverified | Not recorded | Not collected |
 | BLG-203 | Section 14.3, L2793 | Critical | WP-12 | Fixed in tree. The proof length, element width, zero root and high index bits are all refused. | consensus::qc tests (green in the lib run that carries this row) | src/consensus/qc.rs:691 |
-| BLG-204 | Section 14.3, L2794 | High | WP-44 | Unknown / unverified | Not recorded | Not collected |
+| BLG-204 | Section 14.3, L2794 | High | WP-44 | Fixed in tree. The reward is escrowed before the task exists, the deadline span is bounded, and the payout total is computed before the receipt changes state. | settlement::proof_market tests | src/settlement/proof_market.rs:1055,1160 |
 | BLG-205 | Section 14.3, L2795 | Critical | WP-15, WP-44 | Fixed in tree. `readmit` demands an admitted, golden-verified report whose every test passed and whose adapter version matches the record. | cross_domain::external::registry tests: readmit_reopens_a_faulted_domain_but_is_not_an_edit | src/cross_domain/external/registry.rs:355 |
 | BLG-206 | Section 14.3, L2796 | Critical | WP-12 | Unknown / unverified | Not recorded | Not collected |
 | BLG-207 | Section 14.3, L2797 | Critical | WP-12 | Unknown / unverified | Not recorded | Not collected |
