@@ -12,9 +12,9 @@ use serde::{Deserialize, Serialize};
 
 pub const MAX_PROOF_MARKET_ACTIVE_TASKS: usize = 10_000;
 pub const MAX_PROOF_MARKET_PENDING_RECEIPTS: usize = 10_000;
-/// Maximum live-window retired task IDs tracked per creator before
-/// epoch-expiry pruning clears expired entries. Partitioning retirements by
-/// creator ensures one spammer cannot lock other creators out of the market.
+/// Maximum retired task IDs tracked per creator within one epoch. The boundary
+/// clears the set because task IDs commit to `created_epoch`; partitioning also
+/// ensures one spammer cannot lock other creators out before that boundary.
 const MAX_RETIRED_TASK_IDS_PER_CREATOR: usize = 256;
 
 fn is_zero_u64(v: &u64) -> bool {
@@ -93,8 +93,9 @@ pub fn pul_proof_is_warranted(archive_witness_bytes: u64, pul_full_bytes: u64) -
 
 /// A signed proof-market operation carried by the settlement transaction door.
 ///
-/// Funding, task creation, assignment, receipt payment and expiry refunds are
-/// consensus writes. ZK and non-ZK receipt operations run their state-rooted
+/// Funding, unassigned-escrow withdrawal, task creation, assignment, receipt
+/// payment and expiry refunds are consensus writes. ZK and non-ZK receipt
+/// operations run their state-rooted
 /// verifier before creating a receipt; a transaction carrying metadata that
 /// merely looks like a proof is not enough.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -133,6 +134,9 @@ pub enum ProofMarketTx {
     /// Return an assigned or pending task's escrowed reward after its deadline.
     /// The creator is rooted in the task, never supplied by the refund caller.
     RefundExpired { task_id: [u8; 32] },
+    /// Return unassigned escrow to its owner. Appended to preserve every
+    /// existing bincode enum discriminant.
+    WithdrawEscrow { amount: u64 },
 }
 
 /// Equality by the serialized transaction payload. Some proof payloads carry
@@ -742,29 +746,33 @@ pub struct ProofMarketState {
     pub total_rewards_paid: u64,
     /// Total number of completed tasks.
     pub total_tasks_completed: u64,
-    /// Task IDs that have completed or expired (legacy global set kept for
-    /// snapshot and wire compatibility; new retirements are recorded in
-    /// `retired_tasks_by_creator` so one creator cannot exhaust a global cap).
+    /// Task IDs that completed or expired under the legacy global layout.
+    ///
+    /// The field stays in the snapshot shape for compatibility. New
+    /// retirements use `retired_tasks_by_creator`, and this legacy set is
+    /// cleared at the next epoch boundary: a task ID commits to
+    /// `created_epoch`, so a later epoch cannot derive it again.
     #[serde(default)]
     pub retired_task_ids: std::collections::BTreeSet<[u8; 32]>,
     /// Per-creator retired task IDs mapped to their `deadline_epoch`.
     ///
-    /// Partitioning retirements per creator prevents one creator's completed,
-    /// failed, or expired tasks from blocking unrelated creators, while still
-    /// rejecting replay of any retired task within its deadline window. Once
-    /// `close_epoch` advances `last_closed_epoch` past a retired task's
-    /// deadline, its entry is pruned and `add_task` rejects any task whose
-    /// `deadline_epoch < last_closed_epoch`.
+    /// Partitioning retirements prevents one creator from blocking another
+    /// during an epoch. `close_epoch` clears all entries at the boundary: every
+    /// admitted ID commits to that epoch's `created_epoch`, so a task admitted
+    /// in the next epoch cannot derive an older ID. The mapped deadline keeps
+    /// the snapshot shape introduced with this field stable.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub retired_tasks_by_creator: std::collections::BTreeMap<Address, Vec<([u8; 32], u64)>>,
-    /// Highest epoch closed on a non-empty proof market. Used to reject replay
-    /// of expired tasks after their per-creator retirement entries are pruned.
+    /// Highest epoch closed on a non-empty proof market. It prevents a direct
+    /// state caller from reopening work for an epoch the market already closed.
     #[serde(default, skip_serializing_if = "is_zero_u64")]
     pub last_closed_epoch: u64,
-    /// The escrow. A creator's reward is locked here at
-    /// `add_task`, released to the prover by `pay_receipt`, and refunded to
-    /// the creator when the task expires. Without escrow the market promised
-    /// rewards it never held and `pay_receipt` moved no money at all.
+    /// Unassigned creator escrow.
+    ///
+    /// `add_task` moves a reward out of this map and into the rooted task;
+    /// completion moves it into the receipt, while expiry returns it to the
+    /// creator account. Only the balance still in this map is withdrawable, so
+    /// a live task's reserved reward cannot be reclaimed.
     #[serde(default)]
     pub escrowed: std::collections::BTreeMap<Address, u64>,
 }
@@ -846,16 +854,23 @@ impl ProofMarketState {
                 })
     }
 
-    fn prune_retired_before(&mut self, current_epoch: u64) {
-        if self.is_empty() {
+    fn advance_retirement_epoch(&mut self, current_epoch: u64) {
+        if self.is_empty() || current_epoch <= self.last_closed_epoch {
             return;
         }
-        self.last_closed_epoch = self.last_closed_epoch.max(current_epoch);
-        let cutoff = self.last_closed_epoch;
-        self.retired_tasks_by_creator.retain(|_, tasks| {
-            tasks.retain(|(_, deadline)| *deadline >= cutoff);
-            !tasks.is_empty()
-        });
+        self.last_closed_epoch = current_epoch;
+        // Every accepted task ID commits to `created_epoch`, and `add_task`
+        // accepts only the chain's live epoch. Once the boundary advances, an
+        // old ID cannot be re-derived; active tasks and unpaid receipts retain
+        // their IDs in their own bounded collections. Clearing both layouts
+        // keeps lifetime usage from becoming a permanent admission denylist.
+        //
+        // Do not clear on a repeated close of the same epoch. Work can retire
+        // after that epoch's boundary call; clearing it on a second call would
+        // let the exact task be admitted and paid again while `created_epoch`
+        // still matches the live epoch.
+        self.retired_task_ids.clear();
+        self.retired_tasks_by_creator.clear();
     }
 
     /// Credit a creator's escrow. The caller debits the account
@@ -881,6 +896,31 @@ impl ProofMarketState {
         self.escrowed.get(creator).copied().unwrap_or(0)
     }
 
+    /// Release escrow that is not reserved by an active task.
+    ///
+    /// Task rewards leave this map when `add_task` succeeds, so every atom
+    /// left here is unassigned and may be recovered by its owner. Refusals are
+    /// decided before mutation, allowing the settlement door to preflight the
+    /// account credit and keep the transfer atomic.
+    pub fn withdraw_escrow(&mut self, creator: Address, amount: u64) -> Result<u64, String> {
+        if amount == 0 {
+            return Err("ProofMarketState escrow withdrawal must be positive".into());
+        }
+        let balance = self.escrow_balance(&creator);
+        if balance < amount {
+            return Err(format!(
+                "ProofMarketState escrow for creator holds {balance}, withdrawal needs {amount}"
+            ));
+        }
+        let remaining = balance - amount;
+        if remaining == 0 {
+            self.escrowed.remove(&creator);
+        } else {
+            self.escrowed.insert(creator, remaining);
+        }
+        Ok(amount)
+    }
+
     /// Close out an epoch: expire what ran out of time, drop what has been
     /// paid, and hold the whole thing under its memory ceiling.
     ///
@@ -899,14 +939,26 @@ impl ProofMarketState {
         // has to refuse to drop.
         let expired = self.prune_expired(current_epoch);
         let receipts_pruned = self.prune_paid_receipts();
-        self.prune_retired_before(current_epoch);
         self.enforce_max_sizes(current_epoch);
+        self.advance_retirement_epoch(current_epoch);
         (expired, receipts_pruned)
     }
 
-    /// Adds a new task.
-    pub fn add_task(&mut self, task: ProofTask) -> Result<(), String> {
+    /// Adds a new task for the chain's live epoch.
+    pub fn add_task(&mut self, task: ProofTask, current_epoch: u64) -> Result<(), String> {
         task.validate_shape()?;
+        if task.created_epoch != current_epoch {
+            return Err(format!(
+                "ProofMarketState task created_epoch {} does not match current epoch {current_epoch}",
+                task.created_epoch
+            ));
+        }
+        if current_epoch < self.last_closed_epoch {
+            return Err(format!(
+                "ProofMarketState epoch {current_epoch} was already closed at {}",
+                self.last_closed_epoch
+            ));
+        }
         // Only a pending task may enter. An assigned one would skip the
         // `min_prover_stake` check that `assign` makes, and a completed or
         // expired one has no place in the active list: refuse it loudly
@@ -937,8 +989,10 @@ impl ProofMarketState {
         {
             return Err("ProofMarketState task already completed".into());
         }
-        // The ID is retired forever once used, even after the
-        // receipt is paid and pruned.
+        // A retired ID remains unavailable for its live retention window even
+        // after a receipt is paid and pruned. The task's `created_epoch` and
+        // the current-epoch check above make an earlier epoch's ID impossible
+        // to re-derive once its retirement entry is pruned.
         if self.is_task_retired(&task.creator, &task.task_id) {
             return Err("ProofMarketState task already retired".into());
         }
@@ -961,7 +1015,12 @@ impl ProofMarketState {
                 task.reward
             ));
         }
-        self.escrowed.insert(task.creator, escrow - task.reward);
+        let remaining = escrow - task.reward;
+        if remaining == 0 {
+            self.escrowed.remove(&task.creator);
+        } else {
+            self.escrowed.insert(task.creator, remaining);
+        }
         self.active_tasks.push(task);
         Ok(())
     }
@@ -1093,11 +1152,9 @@ impl ProofMarketState {
         }
         // The task reward is already reserved outside `escrowed` by
         // `add_task`; refunding it to the account must not also put it back in
-        // the market balance, or the same BUD would be counted twice.
-        if !self.escrowed.contains_key(&task.creator) {
-            return Err("ProofMarketState task escrow is missing".into());
-        }
-
+        // the market balance, or the same BUD would be counted twice. The
+        // creator may already have withdrawn every unassigned atom, so no
+        // escrow-map row is required here.
         self.active_tasks.remove(index);
         self.record_retired_task(task.creator, task_id, task.deadline_epoch);
         Ok((task.creator, task.reward))
@@ -1124,51 +1181,42 @@ impl ProofMarketState {
             return Err("ProofMarketState task is not assigned".into());
         }
         // The task reward is held by the task itself after `add_task`; do not
-        // also restore it to `escrowed` when returning it to the account.
-        if !self.escrowed.contains_key(&task.creator) {
-            return Err("ProofMarketState task escrow is missing".into());
-        }
-
+        // also restore it to `escrowed` when returning it to the account. A
+        // withdrawn unassigned balance may leave no escrow-map row.
         self.active_tasks.remove(index);
         self.record_retired_task(task.creator, task_id, task.deadline_epoch);
         Ok((task.creator, task.reward))
-    }
-
-    /// Refunds every active task whose deadline has passed, returning the
-    /// account credits for the caller. The block-level epoch transition uses
-    /// this instead of leaving an internal escrow balance stranded.
-    pub fn refund_expired_tasks(&mut self, current_epoch: u64) -> Vec<(Address, u64)> {
-        let expired_ids: Vec<[u8; 32]> = self
-            .active_tasks
-            .iter()
-            .filter(|task| task.is_active() && task.deadline_epoch < current_epoch)
-            .map(|task| task.task_id)
-            .collect();
-        expired_ids
-            .into_iter()
-            .filter_map(|task_id| self.refund_expired(task_id, current_epoch).ok())
-            .collect()
     }
 
     /// Clears out expired tasks.
     pub fn prune_expired(&mut self, current_epoch: u64) -> usize {
         let before = self.active_tasks.len();
         let mut retired = Vec::new();
-        self.active_tasks.retain(|t| {
-            let keep = t.deadline_epoch >= current_epoch || !t.is_active();
-            if !keep {
-                retired.push((t.task_id, t.creator, t.reward, t.deadline_epoch));
+        let mut escrow_after = self.escrowed.clone();
+        self.active_tasks.retain(|task| {
+            if task.deadline_epoch >= current_epoch || !task.is_active() {
+                return true;
             }
-            keep
+
+            // Expiry moves the reserved reward back into unassigned escrow.
+            // Decide that credit before removing the task: saturating here
+            // would erase value, while dropping the task before a checked
+            // failure would leave the reward represented nowhere.
+            let balance = escrow_after.get(&task.creator).copied().unwrap_or(0);
+            let Some(refunded) = balance.checked_add(task.reward) else {
+                return true;
+            };
+            escrow_after.insert(task.creator, refunded);
+            retired.push((task.task_id, task.creator, task.reward, task.deadline_epoch));
+            false
         });
-        // An expired task's fields must not open a fresh task.
-        // And its escrow goes back to the creator - the job never
-        // happened, so the money must not stay locked in the market.
-        for (id, creator, reward, deadline_epoch) in retired {
+        self.escrowed = escrow_after;
+        // An expired task's fields must not open a fresh task. `add_task` may
+        // have consumed the creator's entire unassigned balance and removed
+        // its zero row; the checked map above re-creates that row without
+        // risking a silent supply loss.
+        for (id, creator, _reward, deadline_epoch) in retired {
             self.record_retired_task(creator, id, deadline_epoch);
-            if let Some(balance) = self.escrowed.get_mut(&creator) {
-                *balance = balance.saturating_add(reward);
-            }
         }
         before - self.active_tasks.len()
     }
@@ -1531,18 +1579,21 @@ mod tests {
     fn add_task_takes_pending_tasks_only() {
         let mut market = ProofMarketState::new();
         let assigned = assigned_task();
-        assert!(market.add_task(assigned).unwrap_err().contains("pending"));
+        assert!(market
+            .add_task(assigned, 10)
+            .unwrap_err()
+            .contains("pending"));
         let mut done = assigned_task();
         done.complete().unwrap();
-        assert!(market.add_task(done).is_err());
+        assert!(market.add_task(done, 10).is_err());
         let mut expired = task_with(task_kind(), test_address(1), 10, 100, 5_000);
         expired.expire().unwrap();
-        assert!(market.add_task(expired).is_err());
+        assert!(market.add_task(expired, 10).is_err());
         assert!(market.is_empty());
         let pending = task_with(task_kind(), test_address(1), 10, 100, 5_000);
         // A task is escrowed before it can be listed.
         market.fund_escrow(test_address(1), 5_000).unwrap();
-        market.add_task(pending).unwrap();
+        market.add_task(pending, 10).unwrap();
         assert_eq!(market.active_tasks.len(), 1);
         assert_eq!(market.escrow_balance(&test_address(1)), 0);
     }
@@ -1558,7 +1609,7 @@ mod tests {
         let receipt = ProofReceipt::new(task_id, test_address(2), 20, [5u8; 32], 1_000);
         market.complete_task(task_id, receipt, |_| Ok(())).unwrap();
         assert!(market
-            .add_task(again)
+            .add_task(again, 1)
             .unwrap_err()
             .contains("already completed"));
         assert!(market.active_tasks.is_empty());
@@ -2003,7 +2054,7 @@ mod tests {
         let task = sample_task();
         let id = task.task_id;
         market.fund_escrow(task.creator, task.reward).unwrap();
-        market.add_task(task.clone()).unwrap();
+        market.add_task(task.clone(), task.created_epoch).unwrap();
         market.active_tasks[0]
             .assign(Address::from([9u8; 32]), 1, 1)
             .unwrap();
@@ -2012,8 +2063,85 @@ mod tests {
         market.pay_receipt(0).unwrap();
         market.prune_paid_receipts();
         // The receipt is gone from every list; the ID must still be refused.
-        let err = market.add_task(task).unwrap_err();
+        let epoch = task.created_epoch;
+        let err = market.add_task(task, epoch).unwrap_err();
         assert!(err.contains("retired"), "got: {err}");
+    }
+
+    #[test]
+    fn retired_ids_are_epoch_scoped_and_cannot_freeze_future_task_creation() {
+        let mut market = ProofMarketState::new();
+        for nonce in 0..MAX_PROOF_MARKET_PENDING_RECEIPTS as u64 {
+            let mut id = [0u8; 32];
+            id[..8].copy_from_slice(&nonce.to_le_bytes());
+            market.retired_task_ids.insert(id);
+        }
+        assert_eq!(
+            market.retired_task_ids.len(),
+            MAX_PROOF_MARKET_PENDING_RECEIPTS
+        );
+
+        market.close_epoch(2);
+        assert!(
+            market.retired_task_ids.is_empty(),
+            "an earlier epoch's lifetime usage must not freeze the market"
+        );
+
+        let stale = sample_task();
+        let closed_epoch_task = stale.clone();
+        market.fund_escrow(stale.creator, stale.reward).unwrap();
+        let error = market
+            .add_task(stale, 2)
+            .expect_err("a caller cannot replay an old created_epoch after pruning");
+        assert!(error.contains("current epoch"), "{error}");
+        let error = market
+            .add_task(closed_epoch_task, 1)
+            .expect_err("a direct state caller cannot reopen a closed epoch");
+        assert!(error.contains("already closed"), "{error}");
+
+        let fresh = task_with(task_kind(), test_address(1), 2, 10, 5);
+        market.add_task(fresh, 2).expect("the new epoch is open");
+    }
+
+    #[test]
+    fn a_repeated_close_cannot_clear_retirements_from_the_live_epoch() {
+        let mut market = ProofMarketState::new();
+        let creator = test_address(1);
+        let prover = test_address(2);
+
+        // AccountState advances the epoch before closing the market. Model the
+        // first boundary close, then retire work submitted during that epoch.
+        market.fund_escrow(creator, 2).unwrap();
+        market.close_epoch(2);
+        let task = task_with(task_kind(), creator, 2, 10, 1);
+        market.add_task(task.clone(), 2).unwrap();
+        market.assign_task(task.task_id, prover, 0, 2).unwrap();
+        market
+            .fail_task(task.task_id, "invalid proof".into())
+            .unwrap();
+        assert!(market.is_task_retired(&creator, &task.task_id));
+
+        // An accidental second close for the same epoch must not create an
+        // exact-task replay window after the active row has disappeared.
+        market.close_epoch(2);
+        assert!(market.is_task_retired(&creator, &task.task_id));
+        let error = market
+            .add_task(task.clone(), 2)
+            .expect_err("same-epoch retirement must survive a repeated close");
+        assert!(error.contains("retired"), "{error}");
+
+        // The next real boundary may clear the entry. The old ID still cannot
+        // be admitted because it commits to the preceding created_epoch.
+        market.close_epoch(3);
+        assert!(!market.is_task_retired(&creator, &task.task_id));
+        let error = market
+            .add_task(task, 3)
+            .expect_err("a pruned prior-epoch ID must not be re-derived");
+        assert!(error.contains("current epoch"), "{error}");
+        let fresh = task_with(task_kind(), creator, 3, 11, 1);
+        market
+            .add_task(fresh, 3)
+            .expect("fresh work remains admissible after the real boundary");
     }
 
     #[test]
@@ -2022,7 +2150,8 @@ mod tests {
         let task = sample_task();
         let id = task.task_id;
         market.fund_escrow(task.creator, task.reward).unwrap();
-        market.add_task(task).unwrap();
+        let epoch = task.created_epoch;
+        market.add_task(task, epoch).unwrap();
         market.active_tasks[0]
             .assign(Address::from([9u8; 32]), 1, 1)
             .unwrap();
@@ -2038,7 +2167,8 @@ mod tests {
     fn a_task_without_escrow_is_refused() {
         let mut market = ProofMarketState::new();
         let task = sample_task();
-        let err = market.add_task(task).unwrap_err();
+        let epoch = task.created_epoch;
+        let err = market.add_task(task, epoch).unwrap_err();
         assert!(err.contains("escrow"), "got: {err}");
         assert!(market.active_tasks.is_empty());
     }
@@ -2049,7 +2179,8 @@ mod tests {
         let creator = test_address(3);
         let task = task_with(task_kind(), creator, 1, 5, 500);
         market.fund_escrow(creator, 500).unwrap();
-        market.add_task(task).unwrap();
+        let epoch = task.created_epoch;
+        market.add_task(task, epoch).unwrap();
         assert_eq!(market.escrow_balance(&creator), 0);
         let (expired, _) = market.close_epoch(6);
         assert_eq!(expired, 1);
@@ -2057,7 +2188,46 @@ mod tests {
     }
 
     #[test]
+    fn expiry_never_saturates_escrow_or_drops_the_reserved_reward() {
+        let mut market = ProofMarketState::new();
+        let creator = test_address(3);
+        let task = task_with(task_kind(), creator, 1, 5, 1);
+
+        // Model a malformed/legacy state in which both the creator's escrow
+        // slot and a live task already hold value beyond the normal supply-cap
+        // invariant. Pruning must preserve the rooted task rather than
+        // saturating the escrow credit and silently burning one atom.
+        market.escrowed.insert(creator, u64::MAX);
+        market.active_tasks.push(task.clone());
+        assert_eq!(market.prune_expired(6), 0);
+        assert_eq!(market.escrow_balance(&creator), u64::MAX);
+        assert_eq!(market.active_tasks, vec![task]);
+    }
+
+    #[test]
+    fn unassigned_escrow_can_be_withdrawn_without_touching_reserved_rewards() {
+        let mut market = ProofMarketState::new();
+        let creator = test_address(3);
+        market.fund_escrow(creator, 700).unwrap();
+        let task = task_with(task_kind(), creator, 1, 5, 500);
+        market.add_task(task.clone(), 1).unwrap();
+        assert_eq!(market.escrow_balance(&creator), 200);
+
+        assert!(market.withdraw_escrow(creator, 201).is_err());
+        assert_eq!(market.escrow_balance(&creator), 200);
+        assert_eq!(market.withdraw_escrow(creator, 200).unwrap(), 200);
+        assert_eq!(market.escrow_balance(&creator), 0);
+        assert!(!market.escrowed.contains_key(&creator));
+        assert!(market.withdraw_escrow(creator, 0).is_err());
+
+        let (refunded_creator, reward) = market.refund_expired(task.task_id, 6).unwrap();
+        assert_eq!(refunded_creator, creator);
+        assert_eq!(reward, 500, "the task's reserved reward remains intact");
+    }
+
+    #[test]
     fn escrow_balances_are_committed_in_proof_market_root() {
+        let empty_root = ProofMarketState::new().root();
         let mut a = ProofMarketState::new();
         let mut b = ProofMarketState::new();
         let mut c = ProofMarketState::new();
@@ -2074,6 +2244,51 @@ mod tests {
             c.root(),
             "identical balances under different creators must produce distinct roots"
         );
+        a.withdraw_escrow(test_address(1), 500).unwrap();
+        assert_eq!(
+            a.root(),
+            empty_root,
+            "a full withdrawal removes the zero row from the committed state"
+        );
+    }
+
+    #[test]
+    fn withdrawal_preserves_old_wire_tags_and_round_trips() {
+        let fund = bincode::serialize(&ProofMarketTx::FundEscrow { amount: 9 }).unwrap();
+        let refund =
+            bincode::serialize(&ProofMarketTx::RefundExpired { task_id: [3u8; 32] }).unwrap();
+        let withdraw = bincode::serialize(&ProofMarketTx::WithdrawEscrow { amount: 11 }).unwrap();
+        assert_eq!(u32::from_le_bytes(fund[..4].try_into().unwrap()), 0);
+        assert_eq!(u32::from_le_bytes(refund[..4].try_into().unwrap()), 6);
+        assert_eq!(
+            u32::from_le_bytes(withdraw[..4].try_into().unwrap()),
+            7,
+            "the new operation is appended rather than renumbering old consensus wire tags"
+        );
+        let decoded: ProofMarketTx = bincode::deserialize(&withdraw).unwrap();
+        assert!(matches!(
+            decoded,
+            ProofMarketTx::WithdrawEscrow { amount: 11 }
+        ));
+        let json = serde_json::to_string(&decoded).unwrap();
+        let restored: ProofMarketTx = serde_json::from_str(&json).unwrap();
+        assert!(matches!(
+            restored,
+            ProofMarketTx::WithdrawEscrow { amount: 11 }
+        ));
+    }
+
+    #[test]
+    fn epoch_scoped_retirement_and_escrow_survive_state_serialization() {
+        let mut market = ProofMarketState::new();
+        market.retired_task_ids.insert([4u8; 32]);
+        market.fund_escrow(test_address(5), 123).unwrap();
+        let root = market.root();
+        let encoded = serde_json::to_vec(&market).unwrap();
+        let restored: ProofMarketState = serde_json::from_slice(&encoded).unwrap();
+        assert_eq!(restored.root(), root);
+        assert!(restored.retired_task_ids.contains(&[4u8; 32]));
+        assert_eq!(restored.escrow_balance(&test_address(5)), 123);
     }
 
     #[test]
@@ -2090,10 +2305,10 @@ mod tests {
         }
 
         // An honest creator must still be able to open and retire tasks.
-        let honest_task = task_with(task_kind(), honest, 10, 20, 100);
+        let honest_task = task_with(task_kind(), honest, 1, 20, 100);
         market.fund_escrow(honest, 100).unwrap();
         market
-            .add_task(honest_task)
+            .add_task(honest_task, 1)
             .expect("legacy or other-creator retirements must never block an honest creator");
 
         // Even when spammer retires tasks up to its own per-creator cap within
@@ -2107,7 +2322,7 @@ mod tests {
             if first_spammer_task.is_none() {
                 first_spammer_task = Some(task.clone());
             }
-            market.add_task(task).unwrap();
+            market.add_task(task, 1).unwrap();
             market.assign_task(tid, prover, 0, 2).unwrap();
             market
                 .fail_task(tid, "spammer induced failure".into())
@@ -2115,14 +2330,14 @@ mod tests {
         }
         let spammer_overflow = task_with(task_kind(), spammer, 1, 900, 1);
         assert!(
-            market.add_task(spammer_overflow).is_err(),
+            market.add_task(spammer_overflow, 1).is_err(),
             "spammer past its per-creator retirement ceiling must be refused"
         );
 
-        let second_honest = task_with(task_kind(), honest, 30, 40, 100);
+        let second_honest = task_with(task_kind(), honest, 1, 40, 100);
         market.fund_escrow(honest, 100).unwrap();
         market
-            .add_task(second_honest)
+            .add_task(second_honest, 1)
             .expect("spammer saturation must not affect honest creator");
 
         // JSON snapshot round-trip must succeed with per-creator retired entries populated.
@@ -2131,21 +2346,22 @@ mod tests {
             serde_json::from_str(&json).expect("proof market must deserialize from JSON");
         assert_eq!(roundtripped.root(), market.root());
 
-        // Once epochs advance past those retired deadlines, close_epoch prunes
-        // the expired entries while still refusing replay of expired tasks.
-        let _ = market.close_epoch(1_000);
+        // The very next boundary clears retirement entries even though their
+        // deadlines are still far in the future. Replays remain impossible
+        // because a newly admitted task must commit to the live epoch.
+        let _ = market.close_epoch(2);
         assert!(
             market.retired_tasks_by_creator.is_empty(),
-            "expired retired entries must be pruned on close_epoch"
+            "the prior epoch's retirements must clear at the boundary"
         );
         market.fund_escrow(spammer, 10).unwrap();
         assert!(
-            market.add_task(first_spammer_task.unwrap()).is_err(),
-            "replaying a pruned expired task must still be refused"
+            market.add_task(first_spammer_task.unwrap(), 2).is_err(),
+            "replaying a pruned prior-epoch task must still be refused"
         );
-        let fresh_after_prune = task_with(task_kind(), spammer, 1_000, 1_010, 1);
+        let fresh_after_prune = task_with(task_kind(), spammer, 2, 12, 1);
         market
-            .add_task(fresh_after_prune)
-            .expect("creator can submit fresh tasks again once expired retirements prune");
+            .add_task(fresh_after_prune, 2)
+            .expect("creator can submit fresh tasks again in the new epoch");
     }
 }

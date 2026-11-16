@@ -1946,7 +1946,7 @@ fn execute_proof_market_tx(
             );
             state
                 .proof_market
-                .add_task(task)
+                .add_task(task, state.epoch_index)
                 .map_err(SettlementTxError::Refused)
         }
         ProofMarketTx::AssignTask { task_id } => {
@@ -2292,6 +2292,31 @@ fn execute_proof_market_tx(
                 .balance
                 .checked_add(refunded)
                 .ok_or_else(|| SettlementTxError::Refused("proof-market refund overflow".into()))?;
+            Ok(())
+        }
+        ProofMarketTx::WithdrawEscrow { amount } => {
+            if *amount == 0 {
+                return Err(SettlementTxError::Refused(
+                    "proof-market escrow withdrawal must be positive".into(),
+                ));
+            }
+            if state
+                .get_balance(&ctx.sender)
+                .checked_add(*amount)
+                .is_none()
+            {
+                return Err(SettlementTxError::Refused(
+                    "proof-market escrow withdrawal would overflow balance".into(),
+                ));
+            }
+            let withdrawn = state
+                .proof_market
+                .withdraw_escrow(ctx.sender, *amount)
+                .map_err(SettlementTxError::Refused)?;
+            let account = state.get_or_create(&ctx.sender);
+            account.balance = account.balance.checked_add(withdrawn).ok_or_else(|| {
+                SettlementTxError::Refused("proof-market escrow withdrawal overflow".into())
+            })?;
             Ok(())
         }
     }
@@ -2859,6 +2884,36 @@ mod tests {
         assert_eq!(state.get_balance(&creator), FEE + 1_000);
         assert_eq!(state.proof_market.escrow_balance(&creator), 1_000);
         assert!(state.proof_market.active_tasks.is_empty());
+
+        let before = state.get_balance(&creator);
+        let overdraw =
+            SettlementTx::ProofMarket(Box::new(ProofMarketTx::WithdrawEscrow { amount: 1_001 }));
+        assert!(execute_settlement_tx(&mut state, &ctx(creator), &overdraw).is_err());
+        assert_eq!(state.get_balance(&creator), before);
+        assert_eq!(state.proof_market.escrow_balance(&creator), 1_000);
+
+        let withdraw =
+            SettlementTx::ProofMarket(Box::new(ProofMarketTx::WithdrawEscrow { amount: 1_000 }));
+        execute_settlement_tx(&mut state, &ctx(creator), &withdraw).unwrap();
+        assert_eq!(state.get_balance(&creator), before + 1_000);
+        assert_eq!(state.proof_market.escrow_balance(&creator), 0);
+    }
+
+    #[test]
+    fn proof_market_withdrawal_overflow_is_atomic() {
+        let creator = Address::from([0x36; 32]);
+        let mut state = AccountState::new();
+        state.get_or_create(&creator).balance = u64::MAX;
+        state.proof_market.fund_escrow(creator, 1).unwrap();
+        let root = state.proof_market.root();
+
+        let withdraw =
+            SettlementTx::ProofMarket(Box::new(ProofMarketTx::WithdrawEscrow { amount: 1 }));
+        let error = execute_settlement_tx(&mut state, &ctx(creator), &withdraw).unwrap_err();
+        assert!(matches!(error, SettlementTxError::Refused(reason) if reason.contains("overflow")));
+        assert_eq!(state.get_balance(&creator), u64::MAX);
+        assert_eq!(state.proof_market.escrow_balance(&creator), 1);
+        assert_eq!(state.proof_market.root(), root);
     }
 
     #[test]

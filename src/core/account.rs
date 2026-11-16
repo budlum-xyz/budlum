@@ -2702,9 +2702,43 @@ impl AccountState {
         // credit, because this is the deterministic account-state transition
         // every node runs at the same epoch boundary. A creator can also use
         // the RefundExpired settlement door between boundaries.
-        let expired_refunds = self.proof_market.refund_expired_tasks(self.epoch_index);
-        for (creator, amount) in &expired_refunds {
-            self.add_balance(creator, *amount);
+        // Credit only refunds that fit in the creator account. Defensive
+        // replay of restored state must not assume the supply-cap invariant is
+        // intact: saturating a full account after removing the task would
+        // silently destroy the reserved reward. Any refund that cannot fit
+        // remains active for `close_epoch`
+        // below, whose checked pruning moves it into withdrawable market
+        // escrow instead. If neither destination can represent the value, the
+        // task remains rooted rather than losing funds.
+        let expired_task_ids: Vec<[u8; 32]> = self
+            .proof_market
+            .active_tasks
+            .iter()
+            .filter(|task| task.is_active() && task.deadline_epoch < self.epoch_index)
+            .map(|task| task.task_id)
+            .collect();
+        for task_id in expired_task_ids {
+            let Some((creator, reward)) = self
+                .proof_market
+                .active_tasks
+                .iter()
+                .find(|task| task.task_id == task_id)
+                .map(|task| (task.creator, task.reward))
+            else {
+                continue;
+            };
+            if self.get_balance(&creator).checked_add(reward).is_none() {
+                continue;
+            }
+            if let Ok((rooted_creator, refunded)) =
+                self.proof_market.refund_expired(task_id, self.epoch_index)
+            {
+                debug_assert_eq!(rooted_creator, creator);
+                debug_assert_eq!(refunded, reward);
+                // The checked preflight above and this single-threaded state
+                // transition make the saturating branch unreachable.
+                self.add_balance(&rooted_creator, refunded);
+            }
         }
         // Swept before the timed burn below so an epoch that both expires
         // tasks and burns reserve leaves the market consistent with the root
@@ -4802,6 +4836,75 @@ mod tests {
         let kept = state.get_validator(&validator).unwrap();
         assert!(kept.slashed);
         assert!(!kept.active);
+    }
+
+    fn expiring_proof_task(
+        creator: Address,
+        reward: u64,
+    ) -> crate::settlement::proof_market::ProofTask {
+        crate::settlement::proof_market::ProofTask::new(
+            crate::settlement::proof_market::ProofTaskKind::DomainCommitment {
+                domain_id: 1,
+                domain_height: 1,
+                sequence: 1,
+            },
+            creator,
+            0,
+            1,
+            reward,
+            [7u8; 32],
+            0,
+        )
+    }
+
+    #[test]
+    fn proof_market_epoch_refund_conserves_account_and_locked_supply() {
+        let creator = test_addr_from_byte(31);
+        let mut state = AccountState::new();
+        state.get_or_create(&creator).balance = 500;
+        state.proof_market.fund_escrow(creator, 500).unwrap();
+        state
+            .proof_market
+            .add_task(expiring_proof_task(creator, 500), 0)
+            .unwrap();
+        let committed_before =
+            u128::from(state.get_balance(&creator)) + state.proof_market.total_locked_supply();
+        assert_eq!(committed_before, 1_000);
+
+        state.advance_epoch(0, crate::core::transaction::DEFAULT_CHAIN_ID);
+        assert_eq!(state.proof_market.active_tasks.len(), 1);
+        state.advance_epoch(0, crate::core::transaction::DEFAULT_CHAIN_ID);
+
+        assert!(state.proof_market.active_tasks.is_empty());
+        assert_eq!(state.proof_market.total_locked_supply(), 0);
+        assert_eq!(state.get_balance(&creator), 1_000);
+        let committed_after =
+            u128::from(state.get_balance(&creator)) + state.proof_market.total_locked_supply();
+        assert_eq!(committed_after, committed_before);
+    }
+
+    #[test]
+    fn proof_market_epoch_refund_uses_escrow_when_account_credit_would_overflow() {
+        let creator = test_addr_from_byte(32);
+        let mut state = AccountState::new();
+        state.get_or_create(&creator).balance = u64::MAX;
+        state.proof_market.fund_escrow(creator, 1).unwrap();
+        state
+            .proof_market
+            .add_task(expiring_proof_task(creator, 1), 0)
+            .unwrap();
+        let committed_before =
+            u128::from(state.get_balance(&creator)) + state.proof_market.total_locked_supply();
+
+        state.advance_epoch(0, crate::core::transaction::DEFAULT_CHAIN_ID);
+        state.advance_epoch(0, crate::core::transaction::DEFAULT_CHAIN_ID);
+
+        assert_eq!(state.get_balance(&creator), u64::MAX);
+        assert!(state.proof_market.active_tasks.is_empty());
+        assert_eq!(state.proof_market.escrow_balance(&creator), 1);
+        let committed_after =
+            u128::from(state.get_balance(&creator)) + state.proof_market.total_locked_supply();
+        assert_eq!(committed_after, committed_before);
     }
 
     #[test]
