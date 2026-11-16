@@ -1708,6 +1708,9 @@ jobs:
     timeout-minutes: 30
     strategy:
       fail-fast: false
+      # Five targets, one shared pool; capped for the same reason as the two
+      # matrices above. Every target is still built.
+      max-parallel: 3
       matrix:
         target:
           - aarch64-linux-android
@@ -2214,6 +2217,13 @@ jobs:
     timeout-minutes: 25
     strategy:
       fail-fast: false
+      # Fifteen lockfile graphs on one shared pool. Left uncapped this job and
+      # `license-compliance` queue thirty-one runners ahead of the gates that
+      # decide the pull request, and a stacked head then waits hours for a
+      # check that has nothing to say about its diff (measured on PR #126,
+      # where the Semver Check job sat `queued` for three hours behind them).
+      # A cap changes the order, never the verdict: every graph still runs.
+      max-parallel: 4
       matrix:
         include:
           # The root policy moved to .quality/deny.toml, so it has to be named
@@ -2259,6 +2269,9 @@ jobs:
     timeout-minutes: 25
     strategy:
       fail-fast: false
+      # Same reason as `cargo-deny`: a fifteen-entry matrix that fans out at
+      # once starves the pull-request gates. Every manifest is still checked.
+      max-parallel: 4
       matrix:
         include:
           - { name: root, manifest: "./Cargo.toml", config: "--config .quality/deny.toml" }

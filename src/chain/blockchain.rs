@@ -4808,10 +4808,17 @@ impl Blockchain {
         // V-4 / liveness tracking: absence is a suspension, never a slash. The validator
         // takes no new duty (`active = false`); its stake is untouched and
         // `slashed` stays false. `ResumeValidator` lifts it one epoch later.
+        // Because the validator leaves the active quorum denominator, any vote
+        // it already cast on an open governance proposal is also zeroed.
         for offender in &suspended {
             if let Some(validator) = state.validators.get_mut(offender) {
                 if !validator.slashed {
                     validator.active = false;
+                }
+            }
+            for proposal in &mut state.governance.proposals {
+                if proposal.status == crate::core::governance::ProposalStatus::Active {
+                    proposal.reduce_vote_weight(offender, u64::MAX);
                 }
             }
         }

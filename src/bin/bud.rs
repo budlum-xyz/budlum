@@ -370,6 +370,11 @@ enum GenesisAction {
         /// A tokenomics genesis has no room for one (fixed supply).
         #[arg(long)]
         fund: Vec<String>,
+        /// An authorized `.bud` marketplace primary seller (hex address);
+        /// repeatable. Omitted keeps the template's placeholder seller, which
+        /// no rehearsal holds a key for.
+        #[arg(long)]
+        bns_primary_seller: Vec<String>,
         /// Where to write the genesis file.
         #[arg(long, required = true)]
         out: std::path::PathBuf,
@@ -2344,6 +2349,7 @@ fn run_genesis_assemble(
     destinations: [&str; 5],
     timestamp_ms: Option<u128>,
     fund: &[String],
+    bns_primary_seller: &[String],
     out: &std::path::Path,
 ) -> Result<(), String> {
     use budlum_core::chain::genesis_ceremony::{
@@ -2392,6 +2398,10 @@ fn run_genesis_assemble(
         allocations: fund
             .iter()
             .map(|entry| parse_fund(entry))
+            .collect::<Result<_, _>>()?,
+        bns_primary_sellers: bns_primary_seller
+            .iter()
+            .map(|entry| parse_address(entry))
             .collect::<Result<_, _>>()?,
     };
     let genesis = assemble(network, inputs)?;
@@ -4132,6 +4142,7 @@ fn main() {
                 burn_reserve,
                 timestamp_ms,
                 fund,
+                bns_primary_seller,
                 out,
             } => run_genesis_assemble(
                 network,
@@ -4139,6 +4150,7 @@ fn main() {
                 [community, liquidity, ecosystem, team, burn_reserve],
                 *timestamp_ms,
                 fund,
+                bns_primary_seller,
                 out,
             ),
         },

@@ -34,6 +34,7 @@ pub const DEPENDENCY_ID_TAG: &[u8] = b"BDLM_OBJECT_LAYER_DEP_V1";
 pub const HOME_IDENTITY_TAG: &[u8] = b"BDLM_HOME_IDENTITY_V1";
 pub const DEPARTURE_ID_TAG: &[u8] = b"BDLM_OBJECT_LAYER_DEPARTURE_V1";
 pub const ARRIVAL_KEY_TAG: &[u8] = b"BDLM_OBJECT_LAYER_ARRIVAL_V1";
+pub const SCOPED_ARRIVAL_KEY_TAG: &[u8] = b"BDLM_OBJECT_LAYER_SCOPED_ARRIVAL_V1";
 
 fn len_field(bytes: &[u8]) -> [u8; 8] {
     (bytes.len() as u64).to_le_bytes()
@@ -171,6 +172,29 @@ impl ArrivalKey {
             event_id,
         ]))
     }
+
+    /// Door- and asset-scoped single-use key so non-arrival doors such as
+    /// `GuestReturn` cannot consume the shared arrival key of an unrelated
+    /// `Arrive` or `ConfirmDeparture` event.
+    #[must_use]
+    pub(crate) fn derive_scoped(
+        scope: &[u8],
+        home_domain: DomainId,
+        home_height: u64,
+        event_id: &[u8],
+        asset: &AssetId,
+    ) -> Self {
+        Self(hash_fields_bytes(&[
+            SCOPED_ARRIVAL_KEY_TAG,
+            &len_field(scope),
+            scope,
+            &home_domain.to_le_bytes(),
+            &home_height.to_le_bytes(),
+            &len_field(event_id),
+            event_id,
+            &asset.0,
+        ]))
+    }
 }
 
 #[cfg(test)]
@@ -212,6 +236,7 @@ mod tests {
             HOME_IDENTITY_TAG,
             DEPARTURE_ID_TAG,
             ARRIVAL_KEY_TAG,
+            SCOPED_ARRIVAL_KEY_TAG,
         ];
         for (i, a) in tags.iter().enumerate() {
             for b in &tags[i + 1..] {

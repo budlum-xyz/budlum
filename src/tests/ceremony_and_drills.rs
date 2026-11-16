@@ -53,6 +53,7 @@ fn rehearsal_ceremony_assembles_eight_full_validators_deterministically() {
             tokenomics_addresses: rehearsal_destinations(),
             timestamp_ms: Some(1_800_000_000_000),
             allocations: Vec::new(),
+            bns_primary_sellers: Vec::new(),
         },
     )
     .expect("8-validator rehearsal ceremony must assemble");
@@ -64,6 +65,7 @@ fn rehearsal_ceremony_assembles_eight_full_validators_deterministically() {
             tokenomics_addresses: rehearsal_destinations(),
             timestamp_ms: Some(1_800_000_000_000),
             allocations: Vec::new(),
+            bns_primary_sellers: Vec::new(),
         },
     )
     .expect("reversed operator order must assemble identically");
@@ -82,6 +84,7 @@ fn rehearsal_ceremony_assembles_eight_full_validators_deterministically() {
             tokenomics_addresses: rehearsal_destinations(),
             timestamp_ms: Some(1_800_000_000_000),
             allocations: Vec::new(),
+            bns_primary_sellers: Vec::new(),
         },
     )
     .is_err());
