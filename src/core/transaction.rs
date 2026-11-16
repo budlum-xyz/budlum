@@ -4521,6 +4521,12 @@ fn encode_proof_market_tx(tx: &crate::settlement::proof_market::ProofMarketTx, o
             put_u8(out, 5);
             put_fixed(out, task_id);
         }
+        ProofMarketTx::WithdrawEscrow { amount } => {
+            // Appended after every existing canonical tag so adding the
+            // recovery door cannot change any already-signed preimage.
+            put_u8(out, 7);
+            put_u64(out, *amount);
+        }
     }
 }
 
@@ -4972,6 +4978,37 @@ mod v29_signing_tests {
         tx.sign(&keypair);
         assert!(tx.verify());
         tx
+    }
+
+    #[test]
+    fn proof_market_withdrawal_amount_and_operation_are_signed() {
+        use crate::settlement::domains::SettlementTx;
+        use crate::settlement::proof_market::ProofMarketTx;
+
+        let withdraw = |amount| {
+            TransactionType::Settlement(SettlementTx::ProofMarket(Box::new(
+                ProofMarketTx::WithdrawEscrow { amount },
+            )))
+        };
+        let base = signed_variant(withdraw(10));
+        let base_hash = base.signing_hash();
+
+        let mut changed = base.clone();
+        changed.tx_type = withdraw(11);
+        assert_ne!(
+            changed.signing_hash(),
+            base_hash,
+            "a relay cannot raise a signed withdrawal"
+        );
+
+        changed.tx_type = TransactionType::Settlement(SettlementTx::ProofMarket(Box::new(
+            ProofMarketTx::FundEscrow { amount: 10 },
+        )));
+        assert_ne!(
+            changed.signing_hash(),
+            base_hash,
+            "funding and withdrawal have distinct signed operation tags"
+        );
     }
 
     /// Every field an external-domain transaction carries reaches the
