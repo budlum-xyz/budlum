@@ -2621,6 +2621,12 @@ jobs:
       # printed MB/s always describe an equal-output path.
       - name: Erasure parity rows rayon vs serial throughput
         run: cargo bench --bench erasure_rows
+      # Aggregation Phase 0 baseline: post-quantum witness bytes and verify
+      # time per scheme and per block of 100 and 1000 transfers. The harness
+      # exits 2 without numbers if a signature it made does not verify or a
+      # length differs from the scheme table.
+      - name: Aggregation baseline (witness share of a block)
+        run: cargo bench --bench agg_baseline
 
   docker-security:
     # Dockerfile static lint (hadolint) + repo fs trivy scan.

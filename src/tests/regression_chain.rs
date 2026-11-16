@@ -139,7 +139,7 @@ fn state_update_is_retired_for_every_sender() {
 #[test]
 fn producer_executes_on_a_disposable_candidate_state() {
     let src = production_part(include_str!("../chain/blockchain.rs"));
-    let body = window(src, "fn collect_block_transactions(", 5130);
+    let body = window(src, "fn collect_block_transactions(", 5600);
     let clone_at = body
         .find("let mut candidate_state = temp_state.clone();")
         .expect("candidate copy");

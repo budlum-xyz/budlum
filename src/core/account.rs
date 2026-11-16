@@ -691,6 +691,16 @@ pub(crate) fn enforce_classical_message_intake(
     Ok(())
 }
 
+/// Who vouches for the sender of a transaction that is being validated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TxAuthority {
+    /// The transaction carries its own witness; it is verified here.
+    Inline,
+    /// The claim that stands for the witness was checked by the caller: the
+    /// claim frame of the block, or the object behind the claim.
+    ClaimChecked,
+}
+
 impl AccountState {
     pub fn new() -> Self {
         AccountState {
@@ -2027,6 +2037,7 @@ impl AccountState {
             tx,
             self.get_nonce(&tx.from),
             self.spendable_balance(&tx.from),
+            TxAuthority::Inline,
         )
     }
 
@@ -2107,15 +2118,36 @@ impl AccountState {
         }
     }
 
+    /// Validate a claimed transaction of a block whose claim frame was
+    /// checked: the frame proves that the signature behind the claim was
+    /// verified, so the transaction carries none. Everything else (nonce,
+    /// balance, fee, type) is checked exactly as for any transaction.
+    ///
+    /// Only a caller that holds that proof may use this: block validation
+    /// after `aggregation::chain::check_block` accepted the block, or the
+    /// object pool after it verified the object of the transaction.
+    pub fn validate_claimed_transaction(&self, tx: &Transaction) -> Result<(), String> {
+        self.validate_transaction_with_context(
+            tx,
+            self.get_nonce(&tx.from),
+            self.spendable_balance(&tx.from),
+            TxAuthority::ClaimChecked,
+        )
+    }
+
     /// Validate a transaction against the account state: nonce, spendable
     /// balance, fee and type. A zero-address sender is only admissible as the
     /// canonical genesis transaction (security audit, HIGH, CWE-306);
     /// any other zero-address transaction fails here.
+    ///
+    /// `authority` says who vouches for the sender: the witness the
+    /// transaction carries, or a claim frame the caller already checked.
     pub fn validate_transaction_with_context(
         &self,
         tx: &Transaction,
         expected_nonce: u64,
         spendable_balance: u64,
+        authority: TxAuthority,
     ) -> Result<(), String> {
         if tx.from == Address::zero() {
             if tx.verify_in(&self.scheme_registry) {
@@ -2196,8 +2228,20 @@ impl AccountState {
                 spendable_balance, total_cost, tx.amount, tx.fee
             ));
         }
-        if !tx.verify_in(&self.scheme_registry) {
-            return Err("Invalid signature".into());
+        // A claimed transaction has no signature to verify here; its caller
+        // checked the frame that stands for it. Every other transaction
+        // carries its own authority.
+        match authority {
+            TxAuthority::ClaimChecked => {
+                if !tx.claimed_shape_is_canonical() {
+                    return Err("claimed transaction carries a witness or a wrong id".into());
+                }
+            }
+            TxAuthority::Inline => {
+                if !tx.verify_in(&self.scheme_registry) {
+                    return Err("Invalid signature".into());
+                }
+            }
         }
         self.check_validator_v7_binding(tx)?;
 
@@ -5681,7 +5725,7 @@ mod tests {
         // transaction must be rejected rather than bypassed.
         let tx = Transaction::new(Address::zero(), Address::zero(), 0, Vec::new());
         let err = state
-            .validate_transaction_with_context(&tx, 0, 0)
+            .validate_transaction_with_context(&tx, 0, 0, TxAuthority::Inline)
             .unwrap_err();
         assert!(
             err.contains("zero-address sender is only valid for the canonical genesis transaction"),

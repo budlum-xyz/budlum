@@ -389,6 +389,14 @@ fn refusal_is_benign_fork_or_lag(error: &str) -> bool {
     .any(|refusal| error.contains(refusal))
 }
 
+/// The gossip topics of the aggregation layer: objects on their way to the
+/// aggregators and the frames the aggregators publish. A node joins them
+/// when it runs the aggregation side of its chain.
+const AGGREGATION_TOPICS: [&str; 2] = [
+    crate::network::protocol::TOPIC_AGG_OBJECT,
+    crate::network::protocol::TOPIC_AGG_FRAME,
+];
+
 fn budlum_topic_score_params() -> gossipsub::TopicScoreParams {
     // Keep P1/P2/P4 active while disabling P3/P3b delivery-deficit penalties:
     // sparse low-rate testnet meshes otherwise fall below the 20 msg/s default
@@ -596,6 +604,10 @@ pub enum NodeCommand {
     /// command; a `GetHeaders` must not travel over gossip.
     RequestSync,
     BroadcastTx(crate::core::transaction::Transaction),
+    /// The chain runs the aggregation layer and this node its aggregator:
+    /// join `agg/object` and `agg/frame`, and send a signed quantum-safe
+    /// transaction as an object from here on.
+    EnableAggregation,
     ListPeers,
     /// Hard Pruning - physical deletion of B.U.D. content.
     /// Triggered ONLY by local Executor after verified `NftBurn` (`SECURITY_AUDIT_HACKER`.md).
@@ -644,6 +656,10 @@ impl NodeClient {
     }
     pub async fn broadcast_tx(&self, tx: crate::core::transaction::Transaction) {
         let _ = self.sender.send(NodeCommand::BroadcastTx(tx)).await;
+    }
+    /// Join the two aggregation topics; see [`NodeCommand::EnableAggregation`].
+    pub async fn enable_aggregation(&self) {
+        let _ = self.sender.send(NodeCommand::EnableAggregation).await;
     }
     pub fn broadcast_tx_sync(&self, tx: crate::core::transaction::Transaction) {
         let _ = self.sender.try_send(NodeCommand::BroadcastTx(tx));
@@ -1114,6 +1130,9 @@ pub struct Node {
     /// attempt rather than a description of where the peer is.
     pub accept_private_peer_addresses: bool,
     pub metrics: Option<Arc<crate::core::metrics::Metrics>>,
+    /// Whether this node runs the aggregation side of its chain; set by
+    /// `NodeCommand::EnableAggregation`.
+    aggregation: bool,
     pub storage_node: Option<Arc<bud_node::BudBitswap>>,
     /// What this node is allowed to delete, and whether it may delete at all.
     ///
@@ -2648,6 +2667,13 @@ impl Node {
                 budlum_topic_score_params(),
             );
         }
+        // The two topics of the aggregation layer, scored like the others.
+        for topic in AGGREGATION_TOPICS {
+            score_params.topics.insert(
+                gossipsub::IdentTopic::new(topic).hash(),
+                budlum_topic_score_params(),
+            );
+        }
         let score_thresholds = gossipsub::PeerScoreThresholds::default();
         gossipsub
             .with_peer_score(score_params, score_thresholds)
@@ -2837,6 +2863,7 @@ impl Node {
             mdns_enabled,
             accept_private_peer_addresses: true,
             metrics: None,
+            aggregation: false,
             storage_node,
             pruning_policy: None,
             shard_manager,
@@ -3905,10 +3932,38 @@ impl Node {
                                 }
                             }
                             NodeCommand::BroadcastTx(tx) => {
-                                let msg = NetworkMessage::Transaction(tx);
-                                let topic = gossipsub::IdentTopic::new("transactions");
+                                // With the aggregation side running, a signed
+                                // quantum-safe transaction travels as an object:
+                                // the envelope with its signature, and the
+                                // transaction without it.
+                                let object = self
+                                    .aggregation
+                                    .then(|| crate::aggregation::chain::claim_signature(&tx))
+                                    .flatten();
+                                let (topic, msg) = match object {
+                                    Some((transaction, envelope)) => (
+                                        crate::network::protocol::TOPIC_AGG_OBJECT,
+                                        NetworkMessage::AggObject {
+                                            envelope: envelope.encode(),
+                                            transaction,
+                                        },
+                                    ),
+                                    None => ("transactions", NetworkMessage::Transaction(tx)),
+                                };
+                                let topic = gossipsub::IdentTopic::new(topic);
                                 if let Err(e) = self.swarm.behaviour_mut().gossipsub.publish(topic, msg.to_bytes()) {
                                     warn!("Failed to gossip transaction: {e}");
+                                }
+                            }
+                            NodeCommand::EnableAggregation => {
+                                self.aggregation = true;
+                                for topic in AGGREGATION_TOPICS {
+                                    let topic = gossipsub::IdentTopic::new(topic);
+                                    if let Err(e) = self.swarm.behaviour_mut().gossipsub.subscribe(&topic) {
+                                        warn!("Failed to subscribe to {topic}: {e}");
+                                    } else {
+                                        info!("Subscribed to topic: {topic}");
+                                    }
                                 }
                             }
                             NodeCommand::StoragePrune { cid } => {
@@ -4658,6 +4713,72 @@ impl Node {
                                         }
                                     }
 
+                                    NetworkMessage::AggObject { envelope, transaction } => {
+                                        if !self.aggregation {
+                                            self.report_gossip(&id, &peer_id, gossipsub::MessageAcceptance::Ignore);
+                                            continue;
+                                        }
+                                        if let Err(e) = NetworkMessage::validate_tx_size(&transaction) {
+                                            warn!("Received oversized object transaction from {}: {:?}", peer_id, e);
+                                            {
+                                                let mut pm = self.peer_manager_lock();
+                                                pm.report_oversized_message(&peer_id);
+                                            }
+                                            self.report_gossip(&id, &peer_id, gossipsub::MessageAcceptance::Reject);
+                                            continue;
+                                        }
+                                        match self.chain.submit_agg_object(envelope, transaction).await {
+                                            Ok(_) => {
+                                                let mut pm = self.peer_manager_lock();
+                                                pm.report_good_behavior(&peer_id);
+                                            }
+                                            Err(refusal) => {
+                                                // The penalty of the network layer
+                                                // goes to the peer that sent an
+                                                // object it could have checked.
+                                                let blame = refusal.blames_peer();
+                                                warn!(peer = %peer_id, blame, "Object refused: {refusal}");
+                                                if blame {
+                                                    let mut pm = self.peer_manager_lock();
+                                                    pm.report_invalid_tx(&peer_id);
+                                                }
+                                                self.report_gossip(
+                                                    &id,
+                                                    &peer_id,
+                                                    if blame {
+                                                        gossipsub::MessageAcceptance::Reject
+                                                    } else {
+                                                        gossipsub::MessageAcceptance::Ignore
+                                                    },
+                                                );
+                                                continue;
+                                            }
+                                        }
+                                    }
+                                    NetworkMessage::AggFrame(frame) => {
+                                        if !self.aggregation {
+                                            self.report_gossip(&id, &peer_id, gossipsub::MessageAcceptance::Ignore);
+                                            continue;
+                                        }
+                                        match self.chain.submit_agg_frame(frame).await {
+                                            Ok(_) => {
+                                                let mut pm = self.peer_manager_lock();
+                                                pm.report_good_behavior(&peer_id);
+                                            }
+                                            Err(e) => {
+                                                // A frame is self-contained: one
+                                                // that does not verify was never
+                                                // valid for anyone.
+                                                warn!(peer = %peer_id, "Frame refused: {e}");
+                                                {
+                                                    let mut pm = self.peer_manager_lock();
+                                                    pm.report_invalid_block(&peer_id);
+                                                }
+                                                self.report_gossip(&id, &peer_id, gossipsub::MessageAcceptance::Reject);
+                                                continue;
+                                            }
+                                        }
+                                    }
                                     NetworkMessage::SlashingEvidence(evidence) => {
                                         match self.chain.submit_slashing_evidence(evidence.clone()).await {
                                             Ok(_) => {

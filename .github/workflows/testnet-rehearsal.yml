@@ -21,7 +21,7 @@ on:
   pull_request:
     branches: [main, consensus-of-consensuses]
   schedule:
-    - cron: "17 2 * * *"
+    - cron: "17 8 * * *" # daily 08:17 UTC, outside the long heavy windows
   workflow_dispatch:
 
 concurrency:
