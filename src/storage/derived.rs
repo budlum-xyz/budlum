@@ -463,7 +463,7 @@ impl DerivedSpec {
             });
         }
         if let Some(span) = self.prefix {
-            // BLG-0417: these fields are hashed but ignored by Prefix.
+            // These fields are hashed but ignored by Prefix.
             // Canonical zeroes prevent many ids describing the same bytes.
             if [
                 self.block_x,
@@ -755,7 +755,7 @@ impl MasterRegistry {
                 master_id: *master_id,
             });
         };
-        // BLG-0417: saturation would lose one reference, making a later
+        // Saturation would lose one reference, making a later
         // release report zero while a live derivation still holds the master.
         entry.derivations =
             entry

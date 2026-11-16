@@ -178,7 +178,7 @@ impl GardenState {
     }
 
     /// The key whose seat a newcomer takes when every seat is taken: one
-    /// that left and never published. It holds nothing the Garden keeps, so
+    /// that left and never published. It published nothing the Garden keeps, so
     /// removing its record costs it one thing: it returns with the invite
     /// like a new key, not with `Resume`. The host is never chosen, and
     /// every node picks the same key: the earliest to have joined.

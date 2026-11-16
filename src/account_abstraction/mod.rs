@@ -1,4 +1,4 @@
-//! Quantum-safe account abstraction (the KQ-* gates).
+//! Quantum-safe account abstraction (the gates).
 //!
 //! # The history of this directory
 //!

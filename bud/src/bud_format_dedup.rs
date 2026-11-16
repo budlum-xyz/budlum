@@ -1,4 +1,4 @@
-//! B.U.D. 2.0 - K20: tenant-local dedup + PoW ownership
+//! B.U.D. 2.0 -: tenant-local dedup + PoW ownership
 //!
 //! S.30/S.72 (privacy-preserving dedup, PM-Dedup and ase-PoW), DECISION 71
 //! (convergent-encryption attacks cannot be closed -> tenant-local dedup +

@@ -18,7 +18,11 @@ use crate::domain::types::Hash32;
 use crate::storage::content_id::ContentId;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static TEMP_FILE_SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// Where the objects of one Garden live on this node.
 #[derive(Debug)]
@@ -59,8 +63,23 @@ impl GardenContentStore {
         }
         let content_id = ContentId::of(bytes).0;
         match self.path_of(&content_id) {
-            Some(path) => fs::write(&path, bytes)
-                .map_err(|e| format!("garden object cannot be written: {e}"))?,
+            Some(path) => {
+                if !path.is_file() {
+                    let seq = TEMP_FILE_SEQ.fetch_add(1, Ordering::Relaxed);
+                    let tmp = path.with_extension(format!("tmp.{}.{seq}", std::process::id()));
+                    let write_res = (|| -> std::io::Result<()> {
+                        let mut file = fs::File::create(&tmp)?;
+                        file.write_all(bytes)?;
+                        file.sync_all()?;
+                        fs::rename(&tmp, &path)?;
+                        Ok(())
+                    })();
+                    if let Err(e) = write_res {
+                        let _ = fs::remove_file(&tmp);
+                        return Err(format!("garden object cannot be written: {e}"));
+                    }
+                }
+            }
             None => {
                 self.memory.insert(content_id, bytes.to_vec());
             }
@@ -70,6 +89,13 @@ impl GardenContentStore {
 
     /// Store bytes received from a peer, but only under the id they hash to.
     pub fn put_verified(&mut self, expected: &Hash32, bytes: &[u8]) -> Result<(), String> {
+        if bytes.is_empty() || bytes.len() > self.max_object_bytes {
+            return Err(format!(
+                "object size {} is outside 1..={} bytes",
+                bytes.len(),
+                self.max_object_bytes
+            ));
+        }
         if ContentId::of(bytes).0 != *expected {
             return Err("received bytes do not hash to the requested content id".into());
         }
@@ -86,24 +112,27 @@ impl GardenContentStore {
     }
 
     pub fn contains(&self, content_id: &Hash32) -> bool {
-        match self.path_of(content_id) {
-            Some(path) => path.is_file(),
-            None => self.memory.contains_key(content_id),
-        }
+        self.path_of(content_id).map_or_else(
+            || self.memory.contains_key(content_id),
+            |path| path.is_file(),
+        )
     }
 
     /// The byte length of a stored object, without reading it.
     pub fn stored_len(&self, content_id: &Hash32) -> Option<u64> {
-        match self.path_of(content_id) {
-            Some(path) => fs::metadata(path)
-                .ok()
-                .filter(fs::Metadata::is_file)
-                .map(|meta| meta.len()),
-            None => self
-                .memory
-                .get(content_id)
-                .and_then(|bytes| u64::try_from(bytes.len()).ok()),
-        }
+        self.path_of(content_id).map_or_else(
+            || {
+                self.memory
+                    .get(content_id)
+                    .and_then(|bytes| u64::try_from(bytes.len()).ok())
+            },
+            |path| {
+                fs::metadata(path)
+                    .ok()
+                    .filter(fs::Metadata::is_file)
+                    .map(|meta| meta.len())
+            },
+        )
     }
 
     /// Drop one object, when this node no longer holds it.
@@ -218,11 +247,24 @@ mod tests {
         let mut store = GardenContentStore::open(Some(&root), 1024).unwrap();
         let kept = store.put(b"published").unwrap();
         let orphan = store.put(b"unaccounted").unwrap();
+        let stale_tmp = root.join(format!("{}.tmp.1.0", hex::encode(kept)));
+        fs::write(&stale_tmp, b"partial").unwrap();
         let mut keep = BTreeSet::new();
         keep.insert(kept);
         let removed = store.prune_unaccounted(&keep);
-        assert_eq!(removed, 1);
+        assert_eq!(removed, 2);
         assert!(store.contains(&kept));
         assert!(!store.contains(&orphan));
+        assert!(!stale_tmp.exists());
+    }
+
+    #[test]
+    fn garden_store_put_verified_checks_size_before_hashing() {
+        let mut store = GardenContentStore::open(None, 8).unwrap();
+        let oversized = vec![7u8; 16];
+        let id = ContentId::of(&oversized).0;
+        let err = store.put_verified(&id, &oversized).unwrap_err();
+        assert!(err.contains("outside 1..=8"), "{err}");
+        assert!(!store.contains(&id));
     }
 }

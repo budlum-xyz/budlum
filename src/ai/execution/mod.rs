@@ -5,24 +5,31 @@
 //! - host bit-exact fixed-point MLP eval + domain commitments
 //! - guest bytecode computes the forward pass in-VM over a host-published
 //!   memory image; its result is checked against the host evaluator
-//! - structural verify + optional STARK verify (postcard ProofEnvelope)
-//! - prove_mlp_inference packages AiExecutionProof for the chain attach
+//! - structural verify + optional STARK verify (postcard `ProofEnvelope`)
+//! - `prove_mlp_inference` packages `AiExecutionProof` for the chain attach
 
+mod blind_compute;
 mod guest;
 mod model_class;
 mod stark;
 mod verify;
 
+pub use blind_compute::{
+    blind_compute_scope_tag, verify_compute_without_seeing, ComputeWithoutSeeingBundle,
+    ComputeWithoutSeeingPermit,
+};
+
 pub use guest::{
-    build_fixed_point_mlp_guest, build_matmul_guest_program, estimate_full_gas,
-    estimate_guest_instruction_count, estimate_structural_gas, eval_fixed_point_mlp, field_to_i32,
-    guest_program_for_model, i32_to_field, input_commitment, matmul_program_hash,
-    output_commitment, program_hash_from_words, prove_mlp_inference, read_guest_output,
-    run_matmul_guest, setup_guest_memory, stark_program_hash_from_words, validate_gas_budget,
-    weights_digest, words_to_bytecode, FixedPointMlpSpec, GuestMemoryLayout, FIELD_HALF,
-    GAS_BASE_STARK, GAS_BASE_STRUCTURAL, GAS_PER_KIB_PROOF, GAS_PER_LAYER, GAS_PER_PARAM,
-    GOLDILOCKS_P, GUEST_MEMORY_BYTES, MAX_GUEST_OPS, MAX_PROOF_BYTES, MLP_GUEST_VERSION,
-    WORD_BYTES,
+    build_fixed_point_mlp_guest, build_matmul_guest_program, encode_input_limbs,
+    encode_output_limbs, estimate_full_gas, estimate_guest_instruction_count,
+    estimate_structural_gas, eval_fixed_point_mlp, field_to_i32, guest_program_for_model,
+    i32_to_field, input_commitment, matmul_program_hash, output_commitment,
+    program_hash_from_words, prove_mlp_inference, prove_mlp_inference_with_context,
+    read_guest_output, run_matmul_guest, setup_guest_memory, stark_program_hash_from_words,
+    validate_gas_budget, weights_digest, words_to_bytecode, FixedPointMlpSpec, GuestMemoryLayout,
+    ProveInferenceContext, FIELD_HALF, GAS_BASE_STARK, GAS_BASE_STRUCTURAL, GAS_PER_KIB_PROOF,
+    GAS_PER_LAYER, GAS_PER_PARAM, GOLDILOCKS_P, GUEST_MEMORY_BYTES, MAX_GUEST_OPS, MAX_PROOF_BYTES,
+    MLP_GUEST_VERSION, WORD_BYTES,
 };
 pub use model_class::{
     AiExecutionModelClass, ModelClassLimits, DEFAULT_EXECUTION_CLASS, MAX_MLP_LAYERS,

@@ -38,7 +38,7 @@
 //!
 //! Zero padding means the hash space of packed notes is a sparse subset of
 //! the full 32-byte space, which is a virtue here: the note subtree is
-//! isolated from the account, NFT, B.U.D. and Pollen state, so a packed note
+//! isolated from the account, NFT, B.U.D. and Data Market state, so a packed note
 //! hash cannot be confused with a hash from another subtree by construction
 //! rather than by convention. A domain tag in the high bytes would add
 //! nothing this isolation does not already provide, and would silently
@@ -46,6 +46,11 @@
 
 #![forbid(unsafe_code)]
 #![no_std]
+
+pub mod digest4;
+pub mod poseidon;
+
+pub use digest4::{Digest4, HashSuiteId, SuiteTaggedCommitment};
 
 /// A packed note hash: commitment or nullifier, as stored on chain.
 pub type NoteHash = [u8; 32];
@@ -61,6 +66,21 @@ pub const FIELD_BYTES: usize = 8;
 /// in its own arithmetic, and quietly reducing it here would hide that bug
 /// behind a hash that looks fine.
 pub const GOLDILOCKS_P: u64 = 0xFFFF_FFFF_0000_0001;
+
+/// Pack a canonical Goldilocks field element into a note hash, refusing values
+/// at or above [`GOLDILOCKS_P`].
+///
+/// Convenience: checked counterpart to [`hash_from_field`] so callers cannot
+/// silently pack a non-canonical `u64` that [`field_of_packed_hash`] will later
+/// refuse.
+#[must_use]
+pub const fn try_hash_from_field(fe: u64) -> Option<NoteHash> {
+    if fe < GOLDILOCKS_P {
+        Some(hash_from_field(fe))
+    } else {
+        None
+    }
+}
 
 /// Pack a field element into a note hash.
 ///
@@ -94,7 +114,7 @@ pub fn field_from_hash(h: &NoteHash) -> u64 {
     u64::from_le_bytes(b)
 }
 
-/// BLG-0284 (P17-F18): the fold the outside world should actually use.
+/// The fold the outside world should actually use.
 ///
 /// The old contract was a comment: "callers must call [`is_packed`] first".
 /// A contract the type cannot check is a contract someone will forget, and
@@ -151,7 +171,7 @@ pub const fn is_canonical_field(fe: u64) -> bool {
 mod tests {
     use super::*;
 
-    /// BLG-0284 (P17-F18): `field_of_packed_hash` is the refusal the raw
+    /// `field_of_packed_hash` is the refusal the raw
     /// fold never gave. A foreign hash that shares the low eight bytes with
     /// a real element must NOT fold through the checked accessor - that
     /// aliasing is how two notes read as one.
@@ -195,7 +215,7 @@ mod tests {
             u64::MAX,
         ] {
             assert_eq!(field_from_hash(&hash_from_field(fe)), fe, "fe = {fe}");
-            // BLG-0284: the checked accessor agrees with the raw fold below
+            // The checked accessor agrees with the raw fold below
             // the prime and refuses at-or-above it, even when the bytes came
             // from this module's own packer.
             let expected = if fe < GOLDILOCKS_P { Some(fe) } else { None };
@@ -249,5 +269,8 @@ mod tests {
         assert!(is_canonical_field(GOLDILOCKS_P - 1));
         assert!(!is_canonical_field(GOLDILOCKS_P));
         assert!(!is_canonical_field(u64::MAX));
+        assert!(try_hash_from_field(GOLDILOCKS_P - 1).is_some());
+        assert!(try_hash_from_field(GOLDILOCKS_P).is_none());
+        assert!(try_hash_from_field(u64::MAX).is_none());
     }
 }

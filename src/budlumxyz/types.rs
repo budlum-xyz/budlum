@@ -25,8 +25,31 @@ pub struct AppRecord {
     pub registered_at_epoch: u64,
     /// Developer self-attestation only (ownership proof). NOT third-party audit.
     pub developer_attested: bool,
-    /// DAO / governance-vetted flag. Distinct from developer_attested.
+    /// DAO / governance-vetted flag. Distinct from `developer_attested`.
     pub verified: bool,
+}
+
+impl AppRecord {
+    /// Convert the optional frontend content digest and object commitment into a B.U.D. 3.0 [`ContentRef`](crate::storage::bud3::ContentRef).
+    /// exposed for app registry frontend resolution over `Bud3ContentGateway`.
+    #[must_use]
+    pub fn bud3_content_ref(
+        &self,
+        object_commitment: [u8; 32],
+        content_len: u64,
+    ) -> Option<crate::storage::bud3::ContentRef> {
+        let cid = self.manifest_id?;
+        crate::storage::bud3::ContentRef::new(
+            crate::storage::bud3::ContentId {
+                kind: crate::storage::bud3::content_id::ContentIdKind::Public,
+                digest: cid.0,
+                len: content_len,
+            },
+            object_commitment,
+            None,
+        )
+        .ok()
+    }
 }
 
 #[derive(Debug, thiserror::Error)]

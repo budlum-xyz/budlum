@@ -128,7 +128,7 @@ pub fn office_restore(transformed: &[u8]) -> Option<Vec<u8>> {
     let n = u32::from_le_bytes(transformed.get(pos..pos + 4)?.try_into().ok()?) as usize;
     pos += 4;
     if n > 1_000_000 {
-        return None; // a huge entry count is refused, an alloc-bomb guard (K38)
+        return None; // a huge entry count is refused, an alloc-bomb guard
     }
     let mut entries = Vec::with_capacity(n.min(1024));
     for _ in 0..n {

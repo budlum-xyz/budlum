@@ -88,7 +88,7 @@ updates:
         update-types: ["version-update:semver-major"]
       # Hickory-proto remains only in the explicit devnet `p2p-mdns` feature
       # graph. Production/default builds do not compile or construct the MDNS
-      # behaviour. BLG-1052 (P58-F06, decision A): the old reason claimed
+      # behaviour.: the old reason claimed
       # "hickory-proto 0.25 remains", which went stale - the locks resolved
       # 0.26.1 while the ignore kept hiding every update. The ignore is now
       # scoped to what the reason actually justifies: hold the line the locks
@@ -98,17 +98,17 @@ updates:
       - dependency-name: "hickory-proto"
         update-types:
           - "version-update:semver-major"
-  # P58-F06: the standalone workspaces carry their own Cargo.lock and were not
+  # The standalone workspaces carry their own Cargo.lock and were not
   # covered by any entry above. None of them depends on bincode, so no ignore is needed.
   - package-ecosystem: "cargo"
     directories:
       - "/bud"
       - "/crates/ai-inference"
-      - "/crates/bpqs"
-      - "/crates/budscan"
+      - "/crates/budlum-explorer"
       - "/crates/note-packing"
       - "/crates/wallet-core"
       - "/xtask/gates"
+      - "/xtask/release"
       - "/xtask/tools"
     schedule:
       interval: "weekly"
@@ -121,6 +121,23 @@ updates:
     groups:
       rust-minor-patch:
         update-types: ["minor", "patch"]
+  - package-ecosystem: "cargo"
+    directory: "/crates/bpqs"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "Europe/Istanbul"
+    open-pull-requests-limit: 3
+    cooldown:
+      default-days: 7
+    groups:
+      rust-minor-patch:
+        update-types: ["minor", "patch"]
+    ignore:
+      # slh-dsa 0.1.0 requires rand_core =0.6.4 (CryptoRngCore trait boundary).
+      - dependency-name: "rand_core"
+        update-types: ["version-update:semver-major"]
   - package-ecosystem: "docker"
     # The Dockerfile lives under ops/; with directory: "/" Dependabot ERRORED
     # with "No Dockerfiles nor Kubernetes YAML found in /".

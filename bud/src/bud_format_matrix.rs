@@ -13,7 +13,7 @@
 //! `the_ceiling_claim_depends_on_the_lrc_overhead`). Do not repeat "30 of 30"
 //! in public text for the shipped pipeline. Two canaries: (a) an already
 //! compressed single video (no lossless gain was measured), (b)
-//! random/encrypted data (K25: >100:1 REFUSED - not stored).
+//! random/encrypted data (>100:1 REFUSED - not stored).
 //!
 //! HONESTY: the `single_ratio` values are the real measurement of this corpus;
 //! the multipliers stay INSIDE the measured upper bounds (corpus dedup 9.67x,
@@ -334,7 +334,7 @@ pub fn matrix_get(class: &str) -> Option<&'static MatrixEntry> {
 }
 
 /// Honesty canary: no multiplier is larger than the measured ceiling
-/// (an invented ratio is blocked - the K16/K17/K18 canary pattern).
+/// (an invented ratio is blocked - the canary pattern).
 pub fn matrix_honesty_check() -> bool {
     for e in MATRIX {
         match e.multiplier_kind {
@@ -396,7 +396,7 @@ mod tests {
         assert_eq!(passing, 30);
     }
 
-    /// BLG-0608: the 30 of 30 result needs the LRC overhead. With the (4,2)
+    /// The 30 of 30 result needs the LRC overhead. With the (4,2)
     /// code the engine really writes (1.5x) the ceiling fails for some classes.
     #[test]
     fn the_ceiling_claim_depends_on_the_lrc_overhead() {

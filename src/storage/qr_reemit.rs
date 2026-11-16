@@ -1,4 +1,4 @@
-//! B.U.D. 3.0 recipe → stream re-emit (plan §CH A6, K-QR-GERIDONUS).
+//! B.U.D. 3.0 recipe → stream re-emit.
 //!
 //! The stream pin is verified on the reveal path: the reveal session in
 //! `crate::storage::three_reveal` builds the one-shot pass once at open and

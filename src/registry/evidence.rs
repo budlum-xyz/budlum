@@ -57,6 +57,7 @@ use serde::{Deserialize, Serialize};
 /// The registry uses this to decide whether it may act on a report without
 /// Re-implementing consensus-specific checks it cannot perform generically.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// WIRING: registry surface - the delegation door that reads it lands with its wiring.
 pub enum ProofProvenance {
     /// Verified by the local consensus engine (signatures/quorum checked).
     ConsensusVerified,
@@ -77,7 +78,7 @@ type InvalidVoteSample = (Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>);
 pub enum SlashingProof {
     /// Two conflicting signed votes or headers (equivocation).
     ///
-    /// BLG-0196 (P10-F06): a report must let a THIRD PARTY rebuild the signed
+    /// A report must let a THIRD PARTY rebuild the signed
     /// bytes. The voting messages are domain-separated by kind (prevote vs
     /// precommit) and bound to an epoch, so the old payload - two hashes and
     /// two signatures - only verified against the local node's memory.
@@ -119,10 +120,10 @@ pub enum SlashingProof {
 
 /// Which message a [`SlashingProof::DoubleSign`] evidence pair consists of.
 /// The signing root differs by kind; naming it is what makes the proof
-/// independently checkable (BLG-0196/P10-F06).
+/// independently checkable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DoubleSignKind {
-    /// Two conflicting block headers at one height (PoS block equivocation).
+    /// Two conflicting block headers at one height (`PoS` block equivocation).
     BlockHeader,
     /// Two conflicting BLS prevotes at one checkpoint.
     Prevote,
@@ -154,7 +155,7 @@ pub struct SlashingReport {
     pub role: RoleId,
     /// The proof of the offence.
     pub proof: SlashingProof,
-    /// Provenance of the proof's verification. Private (BLG-0100/P04-F18):
+    /// Provenance of the proof's verification. Private:
     /// only the constructors here can certify a report - a public field let
     /// any caller stamp `ConsensusVerified` on its own claim.
     provenance: ProofProvenance,
@@ -162,7 +163,7 @@ pub struct SlashingReport {
     pub reporter: Option<Address>,
 }
 
-/// BLG-0100 (P04-F18): shape bounds matching the sibling verifier-registry
+/// Shape bounds matching the sibling verifier-registry
 /// evidence: a post-quantum signature (ML-DSA-87, under 5 KiB) still fits.
 const MAX_BLOCK_HASH_LEN: usize = 128;
 const MAX_SIGNATURE_LEN: usize = 8192;
@@ -172,7 +173,7 @@ const MAX_EVIDENCE_DATA_LEN: usize = 4096;
 /// Reasons a report is structurally invalid (before any crypto check).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EvidenceError {
-    /// A byte-carrying field exceeds its shape bound (BLG-0100).
+    /// A byte-carrying field exceeds its shape bound.
     FieldTooLarge {
         field: &'static str,
         len: usize,
@@ -209,7 +210,7 @@ pub enum EvidenceError {
     /// report alone; see the note on the RPC path.
     WrongProofForVerification,
     /// A double-sign proof's `kind` and `epoch` disagree: voting messages
-    /// are bound to an epoch, block headers have none (BLG-0196).
+    /// are bound to an epoch, block headers have none.
     KindEpochMismatch,
 }
 
@@ -266,7 +267,7 @@ impl SlashingReport {
     /// public constructor may certify. Consensus-verified reports come from
     /// `SlashingReport::new_verified` or a cryptographic self-proof
     /// ([`SlashingReport::promote_self_proven`]), never from a claim
-    /// (BLG-0100/P04-F18, CWE-347).
+    /// (CWE-347).
     pub fn new(
         offender: Address,
         role: RoleId,
@@ -302,7 +303,7 @@ impl SlashingReport {
         }
     }
 
-    /// The report's provenance (BLG-0100: the field is private).
+    /// The report's provenance (the field is private).
     #[must_use]
     pub fn provenance(&self) -> ProofProvenance {
         self.provenance
@@ -315,7 +316,7 @@ impl SlashingReport {
     }
 
     /// Promotes the report on the strength of its own cryptographic proof
-    /// (BLG-0102/P04-F24): a double-sign proof carries two signatures by the
+    /// A double-sign proof carries two signatures by the
     /// offender over two different hashes at one height, so it needs no
     /// trusted sender. Runs [`SlashingReport::verify_double_sign`] first -
     /// nothing promotes without opening the signatures.
@@ -339,7 +340,7 @@ impl SlashingReport {
     }
 
     /// Convenience: a consensus-verified double-sign against the validator
-    /// role. The proof travels whole (BLG-0107/P04-F25: seven separate
+    /// role. The proof travels whole (seven separate
     /// arguments were the shape the stale `too_many_arguments` allow hid).
     pub fn consensus_double_sign(
         offender: Address,
@@ -350,7 +351,7 @@ impl SlashingReport {
     }
 
     /// Convenience: a consensus-verified liveness (downtime) fault. The
-    /// window travels whole (BLG-0107/P04-F25).
+    /// window travels whole.
     pub fn consensus_liveness(
         offender: Address,
         role: RoleId,
@@ -410,7 +411,7 @@ impl SlashingReport {
 
     /// A relayer invalid proof - griefing, fronting or a wrong relay.
     /// Uses `Other` with tag `relayer_invalid_proof` and maps to MaliciousBehaviour (100% slash in default params).
-    /// Per decision reuse_malicious to avoid semver break.
+    /// Per decision `reuse_malicious` to avoid semver break.
     #[cfg(test)]
     pub fn consensus_invalid_relay_proof(
         offender: Address,
@@ -578,7 +579,15 @@ impl SlashingReport {
                         max: MAX_SIGNATURE_LEN,
                     });
                 }
-                if block_hash_1 == block_hash_2 {
+                let norm = |s: &str| -> String {
+                    let trimmed = s.trim();
+                    let body = trimmed
+                        .strip_prefix("0x")
+                        .or_else(|| trimmed.strip_prefix("0X"))
+                        .unwrap_or(trimmed);
+                    body.to_ascii_lowercase()
+                };
+                if norm(block_hash_1) == norm(block_hash_2) {
                     return Err(EvidenceError::NonConflictingHashes);
                 }
                 if signature_1.is_empty() || signature_2.is_empty() {
@@ -586,9 +595,16 @@ impl SlashingReport {
                 }
             }
             SlashingProof::Liveness {
-                missed, expected, ..
+                window_start_epoch,
+                window_end_epoch,
+                missed,
+                expected,
             } => {
-                if missed > expected {
+                if window_start_epoch > window_end_epoch
+                    || missed > expected
+                    || *missed == 0
+                    || *expected == 0
+                {
                     return Err(EvidenceError::ImpossibleLivenessWindow);
                 }
             }
@@ -672,9 +688,10 @@ impl SlashingReport {
     /// [`EvidenceError`] naming the first check that failed. A caller must
     /// treat every error as "not proven" rather than "proven innocent": a
     /// malformed report is not evidence of anything.
-    /// Production again (BLG-0102/P04-F24): the permissionless route earns
+    /// Production again: the permissionless route earns
     /// its promotion HERE, by opening the signatures - not by claiming a
     /// provenance (CWE-347's rule stands: claims certify nothing).
+    /// WIRING: registry surface - the delegation door that reads it lands with its wiring.
     pub fn verify_double_sign(&self) -> Result<(), EvidenceError> {
         self.validate_shape()?;
 
@@ -721,7 +738,7 @@ impl SlashingReport {
 
 /// Decode a block hash from the hex a report carries into the bytes that were
 /// signed. Used by `verify_double_sign`, which opens the signatures again
-/// since BLG-0102 (P04-F24).
+/// since.
 fn decode_block_hash(hex_hash: &str) -> Result<[u8; 32], EvidenceError> {
     let raw = hex::decode(hex_hash).map_err(|_| EvidenceError::MalformedBlockHash)?;
     raw.try_into()
@@ -809,7 +826,7 @@ mod tests {
         assert_eq!(r.validate_shape(), Err(EvidenceError::ZeroOffender));
     }
 
-    /// (security audit §6) pin the invariant that
+    /// (security audit) pin the invariant that
     /// `SlashingProof::DoubleSign` is labeled as
     /// `SlashingCondition::DoubleSign` and `SlashingProof::Liveness`
     /// Is labeled as `SlashingCondition::LivenessFault`, and that
@@ -1019,7 +1036,10 @@ mod tests {
         *block_hash_1 = block_hash_1.to_lowercase();
         *block_hash_2 = block_hash_2.to_uppercase();
         assert_ne!(block_hash_1, block_hash_2, "the strings differ");
-        assert!(r.validate_shape().is_ok(), "so the shape check lets it by");
+        assert!(
+            r.validate_shape().is_err(),
+            "case-insensitive shape check already catches equal hex hashes"
+        );
 
         assert_eq!(
             r.verify_double_sign(),
@@ -1077,7 +1097,7 @@ mod tests {
         );
     }
 
-    /// BLG-0100 (P04-F18): shape bounds refuse oversized fields, and the
+    /// Shape bounds refuse oversized fields, and the
     /// public constructor cannot certify its own report.
     #[test]
     fn shape_bounds_refuse_oversized_fields_and_new_never_certifies() {
@@ -1120,7 +1140,7 @@ mod tests {
         assert_eq!(r.provenance(), ProofProvenance::Unverified);
     }
 
-    /// BLG-0102 (P04-F24): the promotion flow is real - a report only earns
+    /// The promotion flow is real - a report only earns
     /// ConsensusVerified by opening its own double-sign signatures. Junk
     /// signatures refuse and the report stays Unverified.
     #[test]
@@ -1183,5 +1203,45 @@ mod tests {
         );
         assert_eq!(r.promote_self_proven(), Err(EvidenceError::Unverified));
         assert_eq!(r.provenance(), ProofProvenance::Unverified);
+    }
+
+    #[test]
+    fn case_aliased_double_sign_and_invalid_liveness_windows_rejected() {
+        let same_block = SlashingReport::new(
+            Address::from([3u8; 32]),
+            roles::VALIDATOR,
+            SlashingProof::DoubleSign {
+                height: 10,
+                kind: DoubleSignKind::BlockHeader,
+                epoch: None,
+                block_hash_1: "0xAA".into(),
+                block_hash_2: "aa".into(),
+                signature_1: vec![1],
+                signature_2: vec![2],
+            },
+            None,
+        );
+        assert_eq!(
+            same_block.validate_shape(),
+            Err(EvidenceError::NonConflictingHashes)
+        );
+
+        for (start, end, missed, expected) in [(10, 5, 3, 10), (0, 10, 0, 10), (0, 10, 0, 0)] {
+            let bad_liv = SlashingReport::new(
+                Address::from([3u8; 32]),
+                roles::VALIDATOR,
+                SlashingProof::Liveness {
+                    window_start_epoch: start,
+                    window_end_epoch: end,
+                    missed,
+                    expected,
+                },
+                None,
+            );
+            assert_eq!(
+                bad_liv.validate_shape(),
+                Err(EvidenceError::ImpossibleLivenessWindow)
+            );
+        }
     }
 }

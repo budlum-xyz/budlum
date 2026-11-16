@@ -40,6 +40,10 @@ WORKDIR /build
 # producing a bit-for-bit different binary.
 COPY Cargo.toml Cargo.lock build.rs rust-toolchain.toml ./
 COPY src/ ./src/
+# The VM-family modules embed these reviewed contract sources with
+# include_bytes! at compile time. They are not Cargo path dependencies, so
+# copying only src/ makes the release build fail for all four families.
+COPY contracts/object-layer/ ./contracts/object-layer/
 COPY benches/ ./benches/
 COPY proto/ ./proto/
 COPY budzero/ ./budzero/
@@ -48,9 +52,18 @@ COPY budzero/ ./budzero/
 # anything, it fails to resolve, which is how this line came to be missing
 # and be noticed the same hour.
 COPY crates/note-packing/ ./crates/note-packing/
+COPY crates/uel-abi/ ./crates/uel-abi/
+COPY crates/budlum-types/ ./crates/budlum-types/
+COPY crates/bud-codec/ ./crates/bud-codec/
 # Optional feature-gated research crate (`bpqs-research`); path dependencies
 # must exist in the build context even when their feature is off.
 COPY crates/bpqs/ ./crates/bpqs/
+# The BIP-39 wordlist is compiled straight into the wallet crate
+# (`mod bip39_wordlist` in `crates/wallet-core/src/lib.rs`), so a context
+# without the crate cannot build the node's wallet feature at all: the
+# include resolves a path that does not exist in the image. Path
+# dependencies are copied, not vendored - same rule as note-packing above.
+COPY crates/wallet-core/ ./crates/wallet-core/
 
 # Is the compiler really the pinned version: BEFORE the build, inside the image.
 # Without this line a binary produced by the wrong compiler would be published
@@ -66,7 +79,7 @@ RUN pinned="$(sed -n 's/^channel *= *"\(.*\)"/\1/p' rust-toolchain.toml)" && \
     actual="${version_line#rustc }" && \
     actual="${actual%% *}" && \
     if [ "$pinned" != "$actual" ]; then \
-      echo "HATA: imaj rustc $actual tasiyor, rust-toolchain.toml $pinned pinliyor" >&2; \
+      echo "ERROR: image carries rustc $actual while rust-toolchain.toml pins $pinned" >&2; \
       exit 1; \
     fi && \
     echo "toolchain OK: rustc $actual == rust-toolchain.toml $pinned"
@@ -75,19 +88,24 @@ RUN pinned="$(sed -n 's/^channel *= *"\(.*\)"/\1/p' rust-toolchain.toml)" && \
 # Pass the PROTOC env explicitly to the build: prost-build resolves protoc
 # could not find it, docker-smoke reported 'Could not find protoc'.
 RUN PROTOC=/usr/bin/protoc cargo build --release --locked && \
-    cp target/release/budlum-core /usr/local/bin/budlum-core
+    cp target/release/budlum-core /usr/local/bin/budlum-core && \
+    cp target/release/bud /usr/local/bin/bud && \
+    cp target/release/budlum-faucet /usr/local/bin/budlum-faucet && \
+    cp target/release/budlum-indexer /usr/local/bin/budlum-indexer
 
 # ── Stage 2: Runtime ────────────────────────────────────────
-FROM cgr.dev/chainguard/wolfi-base@sha256:24f549a7fcace88e69b9557941168c74645688ecc4acf7fb6d734a6b74e9019d
+FROM cgr.dev/chainguard/wolfi-base@sha256:833c48f1faf32c90e6f9501a2410a9aa28ceb2c594102edd4470053c30efa089
 
 # Runtime stage migrated from debian:bookworm-slim (which carried 305 unfixed
 # Debian no-dsa Trivy OS advisories) to digest-pinned Chainguard Wolfi glibc
-# runtime. The Stage 1 binary links only against glibc (`libc.so.6`, `libm.so.6`,
+# runtime. The Stage 1 binaries link only against glibc (`libc.so.6`, `libm.so.6`,
 # `ld-linux-x86-64.so.2`) and `libgcc_s.so.1`, while `coreutils`, `curl`, `grep`,
-# `sed`, `bash` and `shadow` preserve `date +%s%3N` in `ops/docker-compose.yml`,
-# the RPC healthcheck, and deterministic UID 1000 setup.
+# `sed`, `bash` and `shadow` preserve `date +%s%3N` in `ops/docker-compose.yml`
+# ceremony, the `node1` operator RPC healthcheck, and deterministic UID 1000 setup.
+# The eight-seat rehearsal's validator entrypoint is Python. The builder's
+# Python does not carry into this runtime image; install it explicitly.
 # hadolint ignore=DL3018
-RUN apk add --no-cache \
+RUN apk update && apk upgrade --no-cache && apk add --no-cache \
     bash \
     ca-certificates-bundle \
     coreutils \
@@ -96,11 +114,20 @@ RUN apk add --no-cache \
     grep \
     libgcc \
     openssl \
+    python3 \
     sed \
     shadow \
     tzdata
 
 COPY --from=builder /usr/local/bin/budlum-core /usr/local/bin/budlum-core
+# The CLI runs the validator key generation and the genesis ceremony
+# (`bud validator init`, `bud genesis assemble`) in the compose rehearsal.
+COPY --from=builder /usr/local/bin/bud /usr/local/bin/bud
+# One image, four roles: validator and RPC
+# node (budlum-core), faucet (budlum-faucet) and explorer API
+# (budlum-indexer). ops/testnet-local.yml picks the role by entrypoint.
+COPY --from=builder /usr/local/bin/budlum-faucet /usr/local/bin/budlum-faucet
+COPY --from=builder /usr/local/bin/budlum-indexer /usr/local/bin/budlum-indexer
 
 # Hadolint DL3066: non-numeric user-id. The user is created with the deterministic
 # UID 1000 and `USER 1000` uses the numeric form, so it resolves on the host side
@@ -111,7 +138,7 @@ RUN useradd --create-home --shell /bin/bash --uid 1000 budlum
 # inherits the image directory ownership on first mount - if it is not created
 # owned by budlum beforehand the container (USER 1000) gets EACCES during storage
 # init and falls into a restart loop (a defect caught in the first CI run, 2026-07-18).
-RUN mkdir -p /home/budlum/data /home/budlum/secrets \
+RUN mkdir -p /home/budlum/data /home/budlum/secrets /home/budlum/ceremony \
     && chown -R 1000:1000 /home/budlum
 
 USER 1000

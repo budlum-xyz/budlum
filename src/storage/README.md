@@ -1,16 +1,26 @@
-# B.U.D.: Broad Universal Database (module README)
+# Legacy storage notes (historical)
 
-**By the module-separation rule this is B.U.D.'s own README.**
-The root `README.md` is a dashboard only; maturity and risk warnings live here.
+This document describes a pre-migration storage implementation. It does not
+reflect the current RPC surface. The legacy routes described below are removed.
+See `docs/STORAGE.md` for the current B.U.D. 3.0 construction status.
+
 
 ## Status
 
 - **Maturity:** devnet-only. Whether it ships on mainnet is a separate decision.
 - **Code location:** `src/storage/` (manifest, deal, params), RPC endpoints in `src/rpc/api.rs` (`bud_storage*`),
   E2E tests in `src/tests/bud_e2e.rs`.
-- **RPC surface:** `bud_storageRegisterManifest`, `bud_storageOpenDeal`,
-  `bud_storageGetManifest`, `bud_storageGetDealsByManifest`, `bud_storageGetDealsByShard`,
-  `bud_storageOpenChallenge`, `bud_storageAnswerChallenge`,
+- **Writes are transactions.** Manifest registration, the operator class and
+  self-host declarations, deal opening, coding-audit answers, repair
+  acceptance, and opening and answering retrieval challenges are
+  `StorageTx` variants (`src/domain/storage_tx.rs`), sent with
+  `bud_sendRawTransaction` and applied by the executor in block. The old
+  operator RPCs (`bud_storageRegisterManifest`, `bud_storageOpenDeal`,
+  `bud_storageAcceptReallocation`, `bud_storageOpenChallenge`,
+  `bud_storageAnswerChallenge`) refuse every call and name the transaction
+.
+- **Read RPC surface:** `bud_storageGetManifest`, `bud_storageGetDealsByManifest`,
+  `bud_storageGetDealsByShard`, `bud_storageGetChallenges`,
   `bud_storageGetOutcome`, `bud_storageGetEconomicsSummary`,
   `bud_storageGetEconomicsEvents`, `bud_storageGetOperatorEconomics`.
 - **Data sovereignty rule:** there is NO whitelist/admin/pause/freeze hook; every RPC can be
@@ -19,7 +29,7 @@ The root `README.md` is a dashboard only; maturity and risk warnings live here.
 ## Maturity warnings (they stay here rather than moving to the root dashboard)
 
 1. **Risk of a false green:** `RetrievalChallenge` is not a real Proof-of-Storage;
-   the answer only accepts a `range_hash` (see the note in `api.rs`), so an operator can pass
+   the answer only carries a `range_hash` (see the note in `api.rs`), so an operator can pass
    the gate by storing only the requested byte range instead of the full data.
    `bud_storageGetOutcome` therefore returns `proofKind` / `proof_kind = "interim_availability_only"`
    on every answer. A full proof depends on the BudZKVM `VerifyMerkle` 64-depth production gate (closed).
@@ -37,7 +47,7 @@ The root `README.md` is a dashboard only; maturity and risk warnings live here.
    hash, N operators storing the same shard hold byte-identical data. One physical copy can
    satisfy N deals and one machine can collect N rewards under N identities. Filecoin's PoRep
    solves this with per-replica encoding; B.U.D. has **no** such encoding. Detail and roadmap:
-   `docs/BUD_STORAGE_ROADMAP.md`.
+   `docs/STORAGE.md` (in construction).
 5. **Erasure coding exists, but parity generation is not wired into the production flow.**
    `ShardRef` now carries a `kind` (`Data` / `Parity`) and `ContentManifest`
    carries an `ErasureScheme { k, n }`; `src/storage/erasure.rs` is a real Reed-Solomon
@@ -130,7 +140,7 @@ add a 16-byte tag, so an object declaring `ClientSide` and shorter than 16 bytes
 is refused. This catches the careless client, not the
 determined liar.
 
-Detail, what is not claimed, and why: `docs/BUD_CONTENT_ENCRYPTION.md`.
+Detail, what is not claimed, and why: `docs/STORAGE.md` (in construction).
 Gate: `scripts/check-content-encryption-is-declared-and-bound.sh` (14 canaries).
 
 ## Coding audit: is the parity really parity
@@ -155,7 +165,7 @@ What it does not prove: that the operator STORES anything. Parity can be compute
 someone holding nothing. Replicated objects are not audited but refused: if every shard is data
 there is no `i`, and saying "passed" would report a check that was never performed.
 
-Detail and probability table: `docs/BUD_STORAGE_ROADMAP.md` Gap 3b.
+Detail and probability table: `docs/STORAGE.md` (in construction).
 Gate: `scripts/check-coding-audit-samples-the-relationship.sh` (13 canaries).
 
 ## Roadmap markers

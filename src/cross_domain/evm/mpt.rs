@@ -1,7 +1,7 @@
 //! In-tree Merkle-Patricia Trie (MPT) verifier - Ethereum Yellow Paper
 //! Appendix D.
 //!
-//! Verify only (RFC Q1 = relayer_produces): proof generation lives in the relayer binary;
+//! Verify only (RFC Q1 = `relayer_produces`): proof generation lives in the relayer binary;
 //! Budlum only verifies `(proof_nodes, root, key) -> value`.
 //! Deterministic and network free - critical for consensus safety.
 //!
@@ -33,8 +33,8 @@ use sha3::{Digest, Keccak256};
 /// *empty* nibble list (`hp_decode(&[0x00])`), and `nibbles.starts_with(&[])`
 /// is always true, so `remaining` comes back the same length it went in.
 ///
-/// Two such nodes pointing at each other would never terminate. BLG-0124
-/// (P05-F17) corrects the reachability claim: through `verify` a hash cycle
+/// Two such nodes pointing at each other would never terminate.
+/// corrects the reachability claim: through `verify` a hash cycle
 /// is NOT constructible - `node_map` is keyed by keccak of the node bytes,
 /// so a node cannot reference itself without a keccak preimage fixpoint. The
 /// depth bound is still load-bearing as defence-in-depth: a caller that
@@ -57,7 +57,7 @@ use std::collections::HashMap;
 pub enum MptError {
     /// The key is not in the trie (null child / empty value slot).
     KeyNotFound,
-    /// A node is missing from the proof (the referenced hash is not in node_map).
+    /// A node is missing from the proof (the referenced hash is not in `node_map`).
     MissingNode,
     /// Node RLP decode error.
     Rlp(RlpError),
@@ -129,7 +129,7 @@ pub fn to_nibbles(bytes: &[u8]) -> Vec<u8> {
     nibbles
 }
 
-/// Hex-prefix encode (Yellow Paper Appendix D \mathrm{compact} fonksiyonu).
+/// Hex-prefix encode (Yellow Paper Appendix D compact function).
 ///
 /// `is_leaf=true` -> the terminator flag; `nibbles` may have odd or even length.
 pub fn hp_encode(nibbles: &[u8], is_leaf: bool) -> Vec<u8> {
@@ -152,7 +152,11 @@ pub fn hp_encode(nibbles: &[u8], is_leaf: bool) -> Vec<u8> {
     out
 }
 
-/// Hex-prefix decode → (is_leaf, path_nibbles).
+/// Hex-prefix decode → (`is_leaf`, `path_nibbles`).
+///
+/// # Errors
+///
+/// Returns an error if the operation fails.
 pub fn hp_decode(bytes: &[u8]) -> Result<(bool, Vec<u8>), MptError> {
     if bytes.is_empty() {
         return Err(MptError::InvalidHpEncoding);
@@ -164,7 +168,7 @@ pub fn hp_decode(bytes: &[u8]) -> Result<(bool, Vec<u8>), MptError> {
     }
     let is_leaf = (flag_byte & 0b10) != 0;
     let odd = (flag_byte & 0b01) != 0;
-    // BLG-0124 (P05-F17): on an EVEN path the low nibble of the prefix byte
+    // On an EVEN path the low nibble of the prefix byte
     // is the zero pad - a nonzero value is a non-canonical HP encoding.
     if !odd && (first & 0x0f) != 0 {
         return Err(MptError::InvalidHpEncoding);
@@ -191,8 +195,12 @@ pub fn hp_decode(bytes: &[u8]) -> Result<(bool, Vec<u8>), MptError> {
 ///
 /// On success -> the value bytes (leaf value or branch value slot, raw).
 /// On failure -> the proof is invalid (MissingNode/PathMismatch/KeyNotFound and so on).
+///
+/// # Errors
+///
+/// Returns an error if the operation fails.
 pub fn verify(proof_nodes: &[Vec<u8>], root: &[u8; 32], key: &[u8]) -> Result<Vec<u8>, MptError> {
-    // Node map: hash → RLP bytes (relayer proof'tan).
+    // Node map: hash -> RLP bytes (from relayer proof).
     let mut node_map: HashMap<[u8; 32], Vec<u8>> = HashMap::new();
     for node_bytes in proof_nodes {
         node_map.insert(keccak256(node_bytes), node_bytes.clone());
@@ -240,7 +248,7 @@ fn walk(
             walk(&child, remaining, node_map, depth + 1)
         }
 
-        // 17-eleman liste: branch.
+        // A 17-element list: branch.
         Item::List(items) if items.len() == 17 => {
             if nibbles.is_empty() {
                 // The whole path is consumed -> the branch value slot (index 16).
@@ -259,7 +267,7 @@ fn walk(
     }
 }
 
-/// Resolves a node reference: a 32-byte hash (node_map lookup) or an inline RLP node.
+/// Resolves a node reference: a 32-byte hash (`node_map` lookup) or an inline RLP node.
 fn resolve_ref(item: &Item, node_map: &HashMap<[u8; 32], Vec<u8>>) -> Result<Item, MptError> {
     match item {
         Item::String(b) if b.is_empty() => Err(MptError::KeyNotFound),
@@ -271,14 +279,19 @@ fn resolve_ref(item: &Item, node_map: &HashMap<[u8; 32], Vec<u8>>) -> Result<Ite
         }
         Item::String(b) if b.len() < 32 => {
             // An inline node (RLP strictly under 32 bytes) - decode and handle
-            // in place. BLG-0124 (P05-F17): anything 32 bytes or above is a
+            // in place.: anything 32 bytes or above is a
             // hash reference, never an inline node - a longer string used to
             // be decoded as one regardless of size.
             rlp::decode(b).map_err(MptError::from)
         }
         Item::String(_) => Err(MptError::InvalidNodeRef),
         Item::List(_) => {
-            // A nested decoded inline node (the branch child is a list directly).
+            // A nested decoded inline node (the branch child is a list directly)
+            // is canonical in Yellow Paper MPT only when its RLP encoding is
+            // strictly shorter than 32 bytes.
+            if rlp::encode(item).len() >= 32 {
+                return Err(MptError::InvalidNodeRef);
+            }
             Ok(item.clone())
         }
     }
@@ -497,7 +510,7 @@ mod tests {
         assert_eq!(keccak256(&ext_bytes), root);
     }
 
-    /// P05-F03: the receipts trie is a plain trie keyed by `rlp(tx_index)`.
+    /// The receipts trie is a plain trie keyed by `rlp(tx_index)`.
     /// Index 0 has key 0x80 (nibbles 8, 0) and index 1 has key 0x01 (nibbles 0, 1).
     /// The shape below is what Ethereum builds for a block with two receipts: a
     /// branch root, one leaf per first nibble. The key is NOT hashed.
@@ -607,7 +620,7 @@ mod tests {
         ];
         let root = [0x42u8; 32];
         for proof in &garbage_sets {
-            // BLG-0126 (P05-F19): every garbage case must be an Err (the
+            // Every garbage case must be an Err (the
             // exact kind varies: MissingNode / InvalidNode / Rlp), not a
             // panic and never a silent success.
             let result = verify(proof, &root, b"key");
@@ -728,6 +741,24 @@ mod depth_bound_locks {
             verify(&[leaf_bytes], &root, key),
             Ok(value.to_vec()),
             "a single-leaf trie must still verify"
+        );
+    }
+
+    #[test]
+    fn overlong_inline_list_ref_is_refused() {
+        let key = &[0x12u8];
+        let overlong_leaf = Item::List(vec![
+            Item::String(hp_encode(&[2], true)),
+            Item::String(vec![0xaa; 40]),
+        ]);
+        assert!(rlp_encode(&overlong_leaf).len() >= 32);
+        let mut children: Vec<Item> = (0..17).map(|_| Item::String(Vec::new())).collect();
+        children[1] = overlong_leaf;
+        let branch_bytes = rlp_encode(&Item::List(children));
+        let root = keccak256(&branch_bytes);
+        assert_eq!(
+            verify(&[branch_bytes], &root, key),
+            Err(MptError::InvalidNodeRef)
         );
     }
 }

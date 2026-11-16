@@ -33,7 +33,13 @@ mod tests {
             pkcs11_token_pin_env: Some("PIN"),
             resolve_pin_env: false,
         };
-        assert!(check_mainnet_validator_key_policy(&ok).is_ok());
+        // Every other field of `ok` is acceptable, and the module it names is
+        // still refused: custody is decided by the release's module pin, not by
+        // the shape of the configuration.
+        assert_eq!(
+            check_mainnet_validator_key_policy(&ok),
+            Err(MainnetKeyPolicyViolation::UnsignedPkcs11Module)
+        );
 
         let mut mock = ok.clone();
         mock.signer_backend = Some("hsm_mock");

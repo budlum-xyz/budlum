@@ -1,6 +1,6 @@
 //! A B.U.D. 2.0 invention: the compiled view layer, 2026-08-16.
 //!
-//! K83, the "compact compiled view" approach: the original content is stored
+//! the "compact compiled view" approach: the original content is stored
 //! LOSSLESSLY, and on top of it an OPTIONAL compiled view, a schema plus a
 //! summary plus a compact table, can be added for an LLM or agent to read.
 //!

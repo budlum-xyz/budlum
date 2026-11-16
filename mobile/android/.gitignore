@@ -1,0 +1,6 @@
+# Local Gradle/Android state: never commit generated APKs or workstation paths.
+.gradle/
+.kotlin/
+**/build/
+local.properties
+*.iml

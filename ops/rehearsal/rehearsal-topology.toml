@@ -1,0 +1,86 @@
+# Multi-Region Rehearsal Network Topology Manifest
+# Minimum requirements: >= 8 Full validators across >= 3 cloud regions and
+# >= 2 providers, >= 4 relay nodes, >= 2 upload gateways, faucet, explorer,
+# public/operator RPC gateways, and >= 1,000 headless Mobile validators.
+
+schema_version = 1
+network = "testnet"
+chain_id = 45261
+target_duration_hours = 72
+genesis_fixture = "config/ceremony-rehearsal-genesis.json"
+
+[counts]
+min_full_validators = 8
+min_regions = 3
+min_providers = 2
+min_relays = 4
+min_upload_gateways = 2
+min_physical_phones = 20
+min_simulated_mobile_validators = 1000
+
+[[full_validators]]
+id = "full-01"
+provider = "provider-a"
+region = "eu-central"
+role = ["proposer", "finality_seat", "custody", "relay"]
+
+[[full_validators]]
+id = "full-02"
+provider = "provider-a"
+region = "eu-central"
+role = ["proposer", "finality_seat", "custody", "relay"]
+
+[[full_validators]]
+id = "full-03"
+provider = "provider-b"
+region = "eu-central"
+role = ["proposer", "finality_seat", "custody"]
+
+[[full_validators]]
+id = "full-04"
+provider = "provider-a"
+region = "us-east"
+role = ["proposer", "finality_seat", "custody", "relay"]
+
+[[full_validators]]
+id = "full-05"
+provider = "provider-b"
+region = "us-east"
+role = ["proposer", "finality_seat", "custody"]
+
+[[full_validators]]
+id = "full-06"
+provider = "provider-a"
+region = "ap-southeast"
+role = ["proposer", "finality_seat", "custody", "relay"]
+
+[[full_validators]]
+id = "full-07"
+provider = "provider-b"
+region = "ap-southeast"
+role = ["proposer", "finality_seat", "custody"]
+
+[[full_validators]]
+id = "full-08"
+provider = "provider-b"
+region = "ap-southeast"
+role = ["proposer", "finality_seat", "custody"]
+
+[[upload_gateways]]
+id = "gateway-eu-01"
+provider = "provider-a"
+region = "eu-central"
+
+[[upload_gateways]]
+id = "gateway-us-01"
+provider = "provider-b"
+region = "us-east"
+
+[services]
+public_rpc = true
+operator_rpc_loopback_only = true
+faucet = true
+explorer_indexer = true
+prometheus = true
+grafana = true
+headless_mobile_fleet = 1000

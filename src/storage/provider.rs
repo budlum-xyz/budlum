@@ -1,7 +1,7 @@
 //! `StorageProvider` trait and deterministic mock implementation.
 //!
 //! This is the off-chain/on-chain boundary described in
-//! `docs/BUD_STORAGE_ROADMAP.md`: provider implementations move bytes and
+//! the single-storage model in `docs/STORAGE.md`: provider implementations move bytes and
 //! Proofs off-chain, while consensus code keeps the on-chain deal/challenge
 //! Accounting in `domain::storage_deal`.
 //!
@@ -76,6 +76,13 @@ pub enum StorageProviderError {
     NotAShard {
         manifest_id: ContentId,
         content_id: ContentId,
+    },
+    /// The bytes hash to the listed shard id but their measured length does
+    /// not equal the size the deal will price and challenge.
+    ShardSizeMismatch {
+        content_id: ContentId,
+        listed: u64,
+        measured: u64,
     },
     /// The answer came after the challenge's deadline. The chain refuses the
     /// same answer, so the provider does not pretend it settled.
@@ -224,10 +231,19 @@ impl StorageProvider for InMemoryStorageProvider {
         // The receipt below binds `manifest_id` to `content_id`. Without this
         // check any bytes earned a receipt against any manifest, and the
         // attestation said nothing.
-        if manifest.shard(&content_id).is_none() {
+        let Some(shard) = manifest.shard(&content_id) else {
             return Err(StorageProviderError::NotAShard {
                 manifest_id: manifest.manifest_id,
                 content_id,
+            });
+        };
+        let measured = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+        let listed = u64::from(shard.size);
+        if measured != listed {
+            return Err(StorageProviderError::ShardSizeMismatch {
+                content_id,
+                listed,
+                measured,
             });
         }
         self.chunks.insert(content_id, bytes.to_vec());
@@ -283,7 +299,7 @@ impl StorageProvider for InMemoryStorageProvider {
         // Bound to this deal, not just to the bytes. A plain content hash is
         // identical for every operator holding a replica of the same shard,
         // so one of them could answer for all of them, the outsourcing and
-        // Sybil cases in docs/BUD_STORAGE_ROADMAP.md Gap 2.
+        // Sybil cases are covered by the single-storage model in `docs/STORAGE.md`.
         let range_hash = ContentId::of_subrange_for_deal(
             bytes,
             challenge.byte_start,
@@ -410,7 +426,7 @@ mod tests {
     }
 
     /// The put receipt hashes the length as a fixed u64, so it is the same on
-    /// 32 and 64 bit targets (P26-F12).
+    /// 32 and 64 bit targets.
     #[test]
     fn put_receipt_commitment_uses_fixed_width_length() {
         let (manifest, bytes) = manifest_and_bytes();
@@ -423,6 +439,27 @@ mod tests {
             &(bytes.len() as u64).to_le_bytes(),
         ]);
         assert_eq!(receipt.provider_commitment, expected);
+    }
+
+    #[test]
+    fn a_provider_refuses_bytes_shorter_than_the_manifest_prices() {
+        let (mut manifest, bytes) = manifest_and_bytes();
+        manifest.shards[0].size = manifest.shards[0].size.saturating_add(1);
+        manifest.total_size = manifest.total_size.saturating_add(1);
+        manifest.content_size = manifest.content_size.saturating_add(1);
+        let mut provider = InMemoryStorageProvider::new();
+        let error = provider
+            .put(&manifest, &bytes)
+            .expect_err("a receipt must attest the measured shard length");
+        assert_eq!(
+            error,
+            StorageProviderError::ShardSizeMismatch {
+                content_id: ContentId::of(&bytes),
+                listed: bytes.len() as u64 + 1,
+                measured: bytes.len() as u64,
+            }
+        );
+        assert!(!provider.contains(&ContentId::of(&bytes)));
     }
 
     /// Every transport shape the pipe can emit is refused from a body slot,

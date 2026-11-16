@@ -26,7 +26,7 @@ use bincode::Options;
 const MAX_RECEIPT_PROOF_BYTES: u64 = 4 * 1024;
 
 /// Test adapters have no external anchor to give, so the default
-/// `verify_observation` (BLG-0129) refuses them. This is the self-check they
+/// `verify_observation` refuses them. This is the self-check they
 /// stand in with: decode the proof and verify it against the root the result
 /// itself carries. Valid for a stub only - it proves the result is
 /// self-consistent, nothing about the external chain.
@@ -35,6 +35,14 @@ pub(crate) fn self_checked_observation<A: ChainAdapter + ?Sized>(
     adapter: &A,
     result: &RelayerExternalResult,
 ) -> Result<(), AdapterError> {
+    if result.chain != adapter.chain_type() {
+        return Err(AdapterError::UnsupportedChain(result.chain));
+    }
+    if !result.success {
+        return Err(AdapterError::ProofVerificationFailed(
+            "external transaction execution reported failure".into(),
+        ));
+    }
     let proof: MerkleProof = bincode::options()
         .with_fixint_encoding()
         .with_limit(MAX_RECEIPT_PROOF_BYTES)
@@ -160,7 +168,15 @@ pub trait ChainAdapter: Send + Sync {
     }
 
     fn verify_observation(&self, result: &RelayerExternalResult) -> Result<(), AdapterError> {
-        // BLG-0129 (P05-F22): the root must NOT come from the same result
+        if result.chain != self.chain_type() {
+            return Err(AdapterError::UnsupportedChain(result.chain));
+        }
+        if !result.success {
+            return Err(AdapterError::ProofVerificationFailed(
+                "external transaction execution reported failure".into(),
+            ));
+        }
+        // The root must NOT come from the same result
         // being verified - that only proved the result is self-consistent.
         // The default fails closed: an adapter without a trusted anchor
         // overrides this method with a real check.
@@ -341,9 +357,17 @@ pub mod test_adapter {
         }
 
         // A STUB: it stands in for plumbing, so it self-checks on purpose.
-        // The default now fails closed (BLG-0129), and the stub has no
+        // The default now fails closed, and the stub has no
         // anchor to give.
         fn verify_observation(&self, result: &RelayerExternalResult) -> Result<(), AdapterError> {
+            if result.chain != self.chain {
+                return Err(AdapterError::UnsupportedChain(result.chain));
+            }
+            if !result.success {
+                return Err(AdapterError::ProofVerificationFailed(
+                    "observation indicates failure".into(),
+                ));
+            }
             let proof: MerkleProof = bincode::options()
                 .with_fixint_encoding()
                 .with_limit(MAX_RECEIPT_PROOF_BYTES)
@@ -465,6 +489,27 @@ pub mod test_adapter {
             AdapterError::DuplicateChainAdapter(ExternalChain::Ethereum)
         );
         assert_eq!(registry.supported_chains().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn verify_observation_refuses_failed_and_cross_chain_results() {
+        let adapter = StubAdapter::new(ExternalChain::Ethereum);
+        let valid = adapter.wait_for_confirmation("0xabc123", 1).await.unwrap();
+        assert!(adapter.verify_observation(&valid).is_ok());
+
+        let mut failed = valid.clone();
+        failed.success = false;
+        assert!(matches!(
+            adapter.verify_observation(&failed),
+            Err(AdapterError::ProofVerificationFailed(_))
+        ));
+
+        let mut wrong_chain = valid;
+        wrong_chain.chain = ExternalChain::Solana;
+        assert_eq!(
+            adapter.verify_observation(&wrong_chain),
+            Err(AdapterError::UnsupportedChain(ExternalChain::Solana))
+        );
     }
 }
 

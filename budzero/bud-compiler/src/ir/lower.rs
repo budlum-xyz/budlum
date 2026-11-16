@@ -11,7 +11,7 @@
 //! - Expressions: integer literal, identifier, arithmetic, comparison,
 //!   function call, storage read, context built-ins, poseidon(...)
 //! - Expressions (not yet supported): struct literal, mapping read/write
-//! - Deyimler: let, assign, constrain, if/else, while, for, return,
+//! - Statements: let, assign, constrain, if/else, while, for, return,
 //!   emit, storage write, expression statement
 //!
 //! ## The SSA decision

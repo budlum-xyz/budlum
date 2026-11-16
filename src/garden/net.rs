@@ -28,6 +28,8 @@ pub const MAX_REQUEST_BYTES: usize = 18 * 1024 * 1024;
 const MAX_UNADMITTED_REQUEST_BYTES: usize = 1024;
 /// Maximum unauthenticated greetings accepted per second across all strangers.
 const MAX_UNADMITTED_HELLOS_PER_SEC: usize = 32;
+/// Maximum requests accepted from a single unadmitted peer before disconnecting it.
+const MAX_UNADMITTED_REQUESTS_PER_PEER: u8 = 12;
 /// Largest response frame. A response carries at most one object or a batch
 /// of commits.
 pub const MAX_RESPONSE_BYTES: usize = 18 * 1024 * 1024;
@@ -117,6 +119,24 @@ const MIN_DIAL_PORT: u16 = 1024;
 /// and loopback hosts stay: a Garden runs in a home network and on one
 /// machine. What such a dial can do there is open a connection that must
 /// pass the Noise handshake of the named peer id before a byte of the
+const fn ipv4_is_dialable(ip: std::net::Ipv4Addr) -> bool {
+    !(ip.is_unspecified() || ip.is_multicast() || ip.is_broadcast() || ip.is_link_local())
+}
+
+fn ipv6_is_dialable(ip: std::net::Ipv6Addr) -> bool {
+    if ip.is_unspecified() || ip.is_multicast() {
+        return false;
+    }
+    // Reject IPv6 link-local (fe80::/10).
+    if (ip.segments()[0] & 0xffc0) == 0xfe80 {
+        return false;
+    }
+    if let Some(v4) = ip.to_ipv4_mapped() {
+        return ipv4_is_dialable(v4);
+    }
+    true
+}
+
 /// Garden protocol is sent.
 pub fn dial_address(address: &str) -> Result<(Multiaddr, PeerId), String> {
     use libp2p::multiaddr::Protocol;
@@ -125,8 +145,8 @@ pub fn dial_address(address: &str) -> Result<(Multiaddr, PeerId), String> {
         .map_err(|e| format!("address is not a multiaddr: {e}"))?;
     let mut parts = parsed.iter();
     let one_host = match parts.next() {
-        Some(Protocol::Ip4(ip)) => !(ip.is_unspecified() || ip.is_multicast() || ip.is_broadcast()),
-        Some(Protocol::Ip6(ip)) => !(ip.is_unspecified() || ip.is_multicast()),
+        Some(Protocol::Ip4(ip)) => ipv4_is_dialable(ip),
+        Some(Protocol::Ip6(ip)) => ipv6_is_dialable(ip),
         Some(Protocol::Dns(_) | Protocol::Dns4(_) | Protocol::Dns6(_)) => true,
         _ => false,
     };
@@ -390,7 +410,7 @@ async fn start_with(
             ),
         })
         .map_err(|e| format!("garden behaviour cannot start: {e}"))?
-        .with_swarm_config(|cfg| cfg.with_idle_connection_timeout(Duration::from_secs(60)))
+        .with_swarm_config(|cfg| cfg.with_idle_connection_timeout(Duration::from_mins(1)))
         .build();
     swarm
         .listen_on(listen)
@@ -412,6 +432,7 @@ async fn start_with(
         let mut tags = BTreeMap::new();
         let mut admitted: HashSet<PeerId> = HashSet::new();
         let mut unadmitted_in: VecDeque<PeerId> = VecDeque::new();
+        let mut unadmitted_attempts: BTreeMap<PeerId, u8> = BTreeMap::new();
         let mut hello_window_start = Instant::now();
         let mut hello_window_count: usize = 0;
         // Events wait here, not in a blocking send: the task keeps taking
@@ -460,6 +481,7 @@ async fn start_with(
                     Some(NetCommand::Admit(peer)) => {
                         admitted.insert(peer);
                         unadmitted_in.retain(|p| *p != peer);
+                        unadmitted_attempts.remove(&peer);
                     }
                     Some(NetCommand::Send { peer, request, tag }) => match bincode::serialized_size(&request) {
                         Ok(size) if size <= MAX_REQUEST_BYTES as u64 => match bincode::serialize(&request) {
@@ -527,6 +549,7 @@ async fn start_with(
                     Some(NetCommand::Disconnect(peer)) => {
                         admitted.remove(&peer);
                         unadmitted_in.retain(|p| *p != peer);
+                        unadmitted_attempts.remove(&peer);
                         let _ = swarm.disconnect_peer_id(peer);
                     }
                 },
@@ -538,6 +561,7 @@ async fn start_with(
                                 unadmitted_in.push_back(peer_id);
                                 while unadmitted_in.len() > max_unadmitted_in {
                                     if let Some(oldest) = unadmitted_in.pop_front() {
+                                        unadmitted_attempts.remove(&oldest);
                                         let _ = swarm.disconnect_peer_id(oldest);
                                     }
                                 }
@@ -547,6 +571,7 @@ async fn start_with(
                         SwarmEvent::ConnectionClosed { peer_id, num_established: 0, .. } => {
                             admitted.remove(&peer_id);
                             unadmitted_in.retain(|p| *p != peer_id);
+                            unadmitted_attempts.remove(&peer_id);
                             Some(NetEvent::Disconnected(peer_id))
                         }
                         SwarmEvent::OutgoingConnectionError { peer_id: Some(peer), error, .. } => {
@@ -561,7 +586,19 @@ async fn start_with(
                         )) => match message {
                             request_response::Message::Request { request, channel, .. } => {
                                 if unadmitted_in.contains(&peer) && !admitted.contains(&peer) {
-                                    if request.len() > MAX_UNADMITTED_REQUEST_BYTES {
+                                    let attempts = unadmitted_attempts.entry(peer).or_insert(0);
+                                    *attempts = attempts.saturating_add(1);
+                                    let too_many_from_peer = *attempts > MAX_UNADMITTED_REQUESTS_PER_PEER;
+                                    if too_many_from_peer {
+                                        let refusal = GardenResponse::Refused("too many greetings".into());
+                                        if let Ok(bytes) = bincode::serialize(&refusal) {
+                                            let _ = swarm.behaviour_mut().rpc.send_response(channel, bytes);
+                                        }
+                                        unadmitted_in.retain(|p| *p != peer);
+                                        unadmitted_attempts.remove(&peer);
+                                        let _ = swarm.disconnect_peer_id(peer);
+                                        None
+                                    } else if request.len() > MAX_UNADMITTED_REQUEST_BYTES {
                                         let refusal = GardenResponse::Refused("show the invite first".into());
                                         if let Ok(bytes) = bincode::serialize(&refusal) {
                                             let _ = swarm.behaviour_mut().rpc.send_response(channel, bytes);
@@ -579,6 +616,7 @@ async fn start_with(
                                                 let _ = swarm.behaviour_mut().rpc.send_response(channel, bytes);
                                             }
                                             unadmitted_in.retain(|p| *p != peer);
+                                            unadmitted_attempts.remove(&peer);
                                             let _ = swarm.disconnect_peer_id(peer);
                                             None
                                         } else {
@@ -603,17 +641,14 @@ async fn start_with(
                                             }
                                         }
                                     }
+                                } else if let Ok(request) = bincode::deserialize::<GardenRequest>(&request) {
+                                    Some(NetEvent::Request { peer, request, channel })
                                 } else {
-                                    match bincode::deserialize::<GardenRequest>(&request) {
-                                        Ok(request) => Some(NetEvent::Request { peer, request, channel }),
-                                        Err(_) => {
-                                            let refusal = GardenResponse::Refused("malformed request".into());
-                                            if let Ok(bytes) = bincode::serialize(&refusal) {
-                                                let _ = swarm.behaviour_mut().rpc.send_response(channel, bytes);
-                                            }
-                                            None
-                                        }
+                                    let refusal = GardenResponse::Refused("malformed request".into());
+                                    if let Ok(bytes) = bincode::serialize(&refusal) {
+                                        let _ = swarm.behaviour_mut().rpc.send_response(channel, bytes);
                                     }
+                                    None
                                 }
                             }
                             request_response::Message::Response { request_id, response } => {
@@ -663,6 +698,18 @@ mod tests {
         assert!(validator_dial_address(&address, &other).is_err());
         assert!(validator_dial_address("/ip4/10.0.0.1/tcp/22", &me).is_err());
         assert!(validator_dial_address("http://10.0.0.1/", &me).is_err());
+        let id = peer_id_of(&me).unwrap();
+        for bad in [
+            format!("/ip4/169.254.169.254/tcp/4001/p2p/{id}"),
+            format!("/ip6/fe80::1/tcp/4001/p2p/{id}"),
+            format!("/ip6/::ffff:169.254.169.254/tcp/4001/p2p/{id}"),
+            format!("/ip6/::ffff:0.0.0.0/tcp/4001/p2p/{id}"),
+        ] {
+            assert!(
+                validator_dial_address(&bad, &me).is_err(),
+                "expected link-local or invalid mapped address refusal for {bad}"
+            );
+        }
     }
 
     #[test]

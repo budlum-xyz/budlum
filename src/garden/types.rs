@@ -615,7 +615,7 @@ pub enum GardenTxKind {
 }
 
 impl GardenTxKind {
-    pub fn label(&self) -> &'static str {
+    pub const fn label(&self) -> &'static str {
         match self {
             Self::Join { .. } => "join",
             Self::Leave => "leave",

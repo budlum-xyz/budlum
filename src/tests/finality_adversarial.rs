@@ -26,6 +26,7 @@ use crate::chain::finality::{
 };
 use crate::consensus::pow::PoWEngine;
 use crate::core::address::Address;
+use crate::core::transaction::DEFAULT_CHAIN_ID;
 #[cfg(test)]
 fn test_addr_from_byte(byte: u8) -> crate::core::address::Address {
     let mut b = [0u8; 32];
@@ -130,6 +131,7 @@ fn signed_precommit(sk: &Scalar, epoch: u64, height: u64, hash: &str, voter: Add
         voter_id: voter,
         sig_bls: sign_bls(sk, &msg),
         auth_sig: Vec::new(),
+        pq_sig: Vec::new(),
     }
 }
 
@@ -173,6 +175,7 @@ fn signed_precommit_with_chain(
         voter_id: voter,
         sig_bls: sign_bls(sk, &msg),
         auth_sig: Vec::new(),
+        pq_sig: Vec::new(),
     }
 }
 
@@ -203,7 +206,13 @@ fn finality_rejects_equivocating_voter() {
     let (snap, sks) = make_snapshot_with_keys(4, 1000);
     let epoch = 1;
     let height = 10;
-    let mut agg = FinalityAggregator::new(epoch, height, "HASH_A".into(), snap.clone());
+    let mut agg = FinalityAggregator::new(
+        DEFAULT_CHAIN_ID,
+        epoch,
+        height,
+        "HASH_A".into(),
+        snap.clone(),
+    );
 
     // Voter 0 votes for the correct hash (HASH_A) -> accepted, no evidence.
     let pv_a = signed_prevote(&sks[0], epoch, height, "HASH_A", snap.validators[0].address);
@@ -256,7 +265,8 @@ fn finality_stays_pending_below_quorum() {
     let epoch = 1;
     let height = 10;
     let hash = "cp";
-    let mut agg = FinalityAggregator::new(epoch, height, hash.into(), snap.clone());
+    let mut agg =
+        FinalityAggregator::new(DEFAULT_CHAIN_ID, epoch, height, hash.into(), snap.clone());
 
     // Only 2/4 prevotes -> 2000 < 2667.
     drive_prevote_quorum(&mut agg, &snap, &sks, 2, epoch, height, hash);
@@ -285,7 +295,8 @@ fn finality_recovers_honest_subset_after_invalid_signature() {
     let epoch = 1;
     let height = 10;
     let hash = "cp";
-    let mut agg = FinalityAggregator::new(epoch, height, hash.into(), snap.clone());
+    let mut agg =
+        FinalityAggregator::new(DEFAULT_CHAIN_ID, epoch, height, hash.into(), snap.clone());
 
     drive_prevote_quorum(&mut agg, &snap, &sks, 4, epoch, height, hash);
     assert!(agg.prevote_quorum_reached);
@@ -305,6 +316,7 @@ fn finality_recovers_honest_subset_after_invalid_signature() {
         voter_id: snap.validators[3].address,
         sig_bls: sign_bls(&sks[3], &wrong_msg),
         auth_sig: Vec::new(),
+        pq_sig: Vec::new(),
     };
     // REFUSED at ingest, never enters the aggregate.
     let err = agg
@@ -342,7 +354,8 @@ fn finality_valid_quorum_produces_verifiable_cert() {
     let epoch = 1;
     let height = 10;
     let hash = "cp";
-    let mut agg = FinalityAggregator::new(epoch, height, hash.into(), snap.clone());
+    let mut agg =
+        FinalityAggregator::new(DEFAULT_CHAIN_ID, epoch, height, hash.into(), snap.clone());
 
     drive_prevote_quorum(&mut agg, &snap, &sks, 3, epoch, height, hash);
     for (sk, v) in sks.iter().zip(snap.validators.iter()).take(3) {
@@ -366,14 +379,26 @@ fn finality_prevents_split_brain_on_partition() {
     let height = 10;
 
     // Grup A: validator 0,1 -> HASH_A
-    let mut agg_a = FinalityAggregator::new(epoch, height, "HASH_A".into(), snap.clone());
+    let mut agg_a = FinalityAggregator::new(
+        DEFAULT_CHAIN_ID,
+        epoch,
+        height,
+        "HASH_A".into(),
+        snap.clone(),
+    );
     for (sk, v) in sks.iter().zip(snap.validators.iter()).take(2) {
         let pv = signed_prevote(sk, epoch, height, "HASH_A", v.address);
         agg_a.add_prevote(pv).expect("group A prevote");
     }
 
     // Grup B: validator 2,3 -> HASH_B
-    let mut agg_b = FinalityAggregator::new(epoch, height, "HASH_B".into(), snap.clone());
+    let mut agg_b = FinalityAggregator::new(
+        DEFAULT_CHAIN_ID,
+        epoch,
+        height,
+        "HASH_B".into(),
+        snap.clone(),
+    );
     for (sk, v) in sks.iter().zip(snap.validators.iter()).skip(2).take(2) {
         let pv = signed_prevote(sk, epoch, height, "HASH_B", v.address);
         agg_b.add_prevote(pv).expect("group B prevote");
@@ -403,7 +428,8 @@ fn finality_ignores_late_votes_after_cert() {
     let epoch = 1;
     let height = 10;
     let hash = "cp";
-    let mut agg = FinalityAggregator::new(epoch, height, hash.into(), snap.clone());
+    let mut agg =
+        FinalityAggregator::new(DEFAULT_CHAIN_ID, epoch, height, hash.into(), snap.clone());
 
     drive_prevote_quorum(&mut agg, &snap, &sks, 3, epoch, height, hash);
     for (sk, v) in sks.iter().zip(snap.validators.iter()).take(3) {
@@ -451,7 +477,13 @@ fn finality_honest_quorum_survives_byzantine_noise() {
     let height = 10;
     let honest_hash = "HONEST";
     let byz_hash = "BYZANTINE";
-    let mut agg = FinalityAggregator::new(epoch, height, honest_hash.into(), snap.clone());
+    let mut agg = FinalityAggregator::new(
+        DEFAULT_CHAIN_ID,
+        epoch,
+        height,
+        honest_hash.into(),
+        snap.clone(),
+    );
 
     // Let the byzantine noise arrive FIRST (conflicting hash) -> must be refused.
     for (sk, v) in sks.iter().zip(snap.validators.iter()).skip(5).take(2) {
@@ -487,6 +519,7 @@ fn finality_honest_quorum_survives_byzantine_noise() {
                 ),
             ),
             auth_sig: Vec::new(),
+            pq_sig: Vec::new(),
         };
         assert!(
             agg.add_precommit(noise).is_err(),
@@ -515,8 +548,6 @@ fn finality_honest_quorum_survives_byzantine_noise() {
 /// path and applies a real slash.
 #[test]
 fn equivocation_generates_slashing_evidence() {
-    use crate::core::chain_config::FINALITY_CHECKPOINT_INTERVAL;
-
     // Two validators: `honest` produces the blocks, `equivocator` will double-sign.
     let mut hsk = [0u8; 64];
     hsk[0] = 11;
@@ -552,7 +583,7 @@ fn equivocation_generates_slashing_evidence() {
     assert_eq!(before.stake, 10_000);
     assert!(matches!(before.status, MemberStatus::Active));
 
-    let cp = FINALITY_CHECKPOINT_INTERVAL;
+    let cp = crate::core::chain_config::finality_checkpoint_interval_for_chain_id(45262);
     for _ in 1..cp {
         let _ = bc.produce_block(honest).unwrap();
     }
@@ -634,7 +665,6 @@ fn equivocation_generates_slashing_evidence() {
 fn equivocation_slashing_record_survives_snapshot_roundtrip() {
     use crate::chain::snapshot::{StateSnapshotV2, StateSnapshotV2Params};
     use crate::core::account::AccountState;
-    use crate::core::chain_config::FINALITY_CHECKPOINT_INTERVAL;
     use crate::registry::evidence::SlashingProof;
 
     // A BLS-keyed equivocator + an honest producer.
@@ -656,7 +686,7 @@ fn equivocation_slashing_record_survives_snapshot_roundtrip() {
     install_consensus_keys(&mut bc, honest, &honest_bls, honest_pk);
     install_consensus_keys(&mut bc, equivocator, &equiv_bls, equiv_pk);
 
-    let cp = FINALITY_CHECKPOINT_INTERVAL;
+    let cp = crate::core::chain_config::finality_checkpoint_interval_for_chain_id(45262);
     for _ in 1..cp {
         let _ = bc.produce_block(honest).unwrap();
     }
@@ -744,7 +774,6 @@ fn equivocation_slashing_record_survives_snapshot_roundtrip() {
 /// (`max_invalid_votes_per_epoch`) allows -> a slash is triggered through the end-to-end `handle_prevote` flow.
 #[test]
 fn repeated_invalid_signatures_trigger_slash() {
-    use crate::core::chain_config::FINALITY_CHECKPOINT_INTERVAL;
     use crate::registry::params::RegistryParams;
 
     let honest = test_addr_from_byte(1u8);
@@ -776,7 +805,7 @@ fn repeated_invalid_signatures_trigger_slash() {
         ..RegistryParams::default()
     });
 
-    let cp = FINALITY_CHECKPOINT_INTERVAL;
+    let cp = crate::core::chain_config::finality_checkpoint_interval_for_chain_id(45262);
     for _ in 1..cp {
         let _ = bc.produce_block(honest).unwrap();
     }
@@ -784,7 +813,7 @@ fn repeated_invalid_signatures_trigger_slash() {
     bc.start_prevote_task(block.index, block.hash.clone());
     let epoch = bc.finality_aggregator.as_ref().unwrap().epoch;
 
-    // Threshold-1 invalid signatures: no slash yet. BLG-0083 (P04-F01): the
+    // Threshold-1 invalid signatures: no slash yet.: the
     // spam is self-authenticated under the spammer's key - only distinct votes
     // the validator's own key vouches for can count against the validator.
     for i in 0..(threshold - 1) {
@@ -809,7 +838,7 @@ fn repeated_invalid_signatures_trigger_slash() {
     );
     assert_eq!(mid.stake, 10_000);
 
-    // An invalid signature past the threshold -> slash (BLG-0083: the spam
+    // An invalid signature past the threshold -> slash (the spam
     // authenticates itself under the spammer's key).
     let mut final_bad_sig = vec![0u8; 48];
     final_bad_sig[0] = threshold as u8;
@@ -861,7 +890,6 @@ fn repeated_invalid_signatures_trigger_slash() {
 /// Yok).
 #[test]
 fn invalid_signatures_below_threshold_do_not_slash() {
-    use crate::core::chain_config::FINALITY_CHECKPOINT_INTERVAL;
     use crate::registry::params::RegistryParams;
 
     let honest = test_addr_from_byte(1u8);
@@ -890,7 +918,7 @@ fn invalid_signatures_below_threshold_do_not_slash() {
         ..RegistryParams::default()
     });
 
-    let cp = FINALITY_CHECKPOINT_INTERVAL;
+    let cp = crate::core::chain_config::finality_checkpoint_interval_for_chain_id(45262);
     for _ in 1..cp {
         let _ = bc.produce_block(honest).unwrap();
     }
@@ -911,7 +939,7 @@ fn invalid_signatures_below_threshold_do_not_slash() {
             sig_bls: bad_sig,
             auth_sig: Vec::new(),
         };
-        // Authenticated, so the vote may incriminate its own sender (BLG-0083):
+        // Authenticated, so the vote may incriminate its own sender:
         // the vote signature is the invalid part.
         bad.auth_sig = sign_bls(&spammer_bls, &bad.auth_signing_message());
         let _ = bc.handle_prevote(bad);
@@ -934,8 +962,6 @@ fn invalid_signatures_below_threshold_do_not_slash() {
 /// signature at ingest - it never enters the aggregate and state does not change.
 #[test]
 fn blockchain_rejects_invalid_vote_signature_at_ingest() {
-    use crate::core::chain_config::FINALITY_CHECKPOINT_INTERVAL;
-
     let mut hsk = [0u8; 64];
     hsk[0] = 33;
     let honest_bls = Scalar::from_bytes_wide(&hsk);
@@ -950,7 +976,7 @@ fn blockchain_rejects_invalid_vote_signature_at_ingest() {
     bc.state.add_validator(honest, 10_000);
     bc.state.validators.get_mut(&honest).unwrap().bls_public_key = honest_pk;
 
-    let cp = FINALITY_CHECKPOINT_INTERVAL;
+    let cp = crate::core::chain_config::finality_checkpoint_interval_for_chain_id(45262);
     for _ in 1..cp {
         let _ = bc.produce_block(honest).unwrap();
     }
@@ -958,7 +984,7 @@ fn blockchain_rejects_invalid_vote_signature_at_ingest() {
     bc.start_prevote_task(block.index, block.hash.clone());
     let epoch = bc.finality_aggregator.as_ref().unwrap().epoch;
 
-    // BLG-0083 (P04-F01): a garbage vote WITHOUT authentication is dropped
+    // A garbage vote WITHOUT authentication is dropped
     // without attributing anything to the named validator - anybody can put
     // any name in a message, so the tick is only reachable through the
     // voter's own authenticated signature (self-incrimination).
@@ -1011,7 +1037,6 @@ fn blockchain_rejects_invalid_vote_signature_at_ingest() {
 #[test]
 fn gossip_equivocation_orders_converge_and_forged_reports_fail_block_validation() {
     use crate::chain::finality::sign_bls;
-    use crate::core::chain_config::FINALITY_CHECKPOINT_INTERVAL;
 
     let mut esk = [0u8; 64];
     esk[0] = 55;
@@ -1037,7 +1062,7 @@ fn gossip_equivocation_orders_converge_and_forged_reports_fail_block_validation(
     install_consensus_keys(&mut node_a, equivocator, &equiv_bls, equiv_pk);
     install_consensus_keys(&mut node_a, honest, &honest_bls, honest_pk);
 
-    let cp = FINALITY_CHECKPOINT_INTERVAL;
+    let cp = crate::core::chain_config::finality_checkpoint_interval_for_chain_id(45262);
     for _ in 1..=cp {
         let _ = node_a.produce_block(honest).unwrap();
     }
@@ -1329,6 +1354,7 @@ fn oversized_checkpoint_hash_is_refused_and_oversized_pending_report_is_dropped(
             voter_id: voter,
             sig_bls: vec![0; 48],
             auth_sig: vec![0; 48],
+            pq_sig: Vec::new(),
         })
         .expect_err("oversized precommit checkpoint_hash must be refused");
     assert!(
@@ -1370,8 +1396,6 @@ const OTHER_CHAIN_ID: u64 = 45262 + 1;
 
 #[test]
 fn votes_signed_for_another_chain_are_refused_at_ingest() {
-    use crate::core::chain_config::FINALITY_CHECKPOINT_INTERVAL;
-
     let (bls_sk, bls_pk) = make_test_key(41);
     let voter = test_addr_from_byte(7u8);
 
@@ -1382,7 +1406,7 @@ fn votes_signed_for_another_chain_are_refused_at_ingest() {
     bc.state.add_validator(voter, 10_000);
     install_consensus_keys(&mut bc, voter, &bls_sk, bls_pk);
 
-    let cp = FINALITY_CHECKPOINT_INTERVAL;
+    let cp = crate::core::chain_config::finality_checkpoint_interval_for_chain_id(45262);
     for _ in 1..cp {
         let _ = bc.produce_block(voter).unwrap();
     }
@@ -1423,8 +1447,6 @@ fn votes_signed_for_another_chain_are_refused_at_ingest() {
 
 #[test]
 fn a_cross_chain_vote_pair_is_not_equivocation() {
-    use crate::core::chain_config::FINALITY_CHECKPOINT_INTERVAL;
-
     let (bls_sk, bls_pk) = make_test_key(43);
     let voter = test_addr_from_byte(9u8);
 
@@ -1434,7 +1456,7 @@ fn a_cross_chain_vote_pair_is_not_equivocation() {
     bc.state.add_validator(voter, 10_000);
     install_consensus_keys(&mut bc, voter, &bls_sk, bls_pk);
 
-    let cp = FINALITY_CHECKPOINT_INTERVAL;
+    let cp = crate::core::chain_config::finality_checkpoint_interval_for_chain_id(45262);
     for _ in 1..cp {
         let _ = bc.produce_block(voter).unwrap();
     }
@@ -1502,6 +1524,7 @@ fn a_finality_cert_from_another_chain_is_refused() {
         agg_sig_bls: vec![0u8; 48],
         bitmap: vec![1],
         set_hash: String::new(),
+        seat_table_version: 0,
     };
     let err = bc
         .handle_finality_cert(cert)
@@ -1515,52 +1538,388 @@ fn a_finality_cert_from_another_chain_is_refused() {
 
 #[test]
 fn stale_epoch_cert_and_qc_blob_are_refused_for_later_checkpoint() {
-    use crate::core::chain_config::FINALITY_CHECKPOINT_INTERVAL;
-
     let voter = test_addr_from_byte(0x77);
     let consensus = Arc::new(PoWEngine::new(0));
     let mut bc = Blockchain::new(consensus, None, 45262, None);
     bc.state.add_balance(&voter, 10_000);
     bc.state.add_validator(voter, 10_000);
 
-    let cp = FINALITY_CHECKPOINT_INTERVAL;
-    for _ in 1..cp {
-        let _ = bc.produce_block(voter).unwrap();
+    let epoch_len = crate::core::chain_config::epoch_len_for_chain_id(bc.chain_id);
+    let interval =
+        crate::core::chain_config::finality_checkpoint_interval_for_chain_id(bc.chain_id);
+    assert!(epoch_len > 0 && interval > 0);
+    let checkpoint_height = epoch_len.div_ceil(interval) * interval;
+    for _ in 0..checkpoint_height {
+        bc.produce_block(voter).expect("produce checkpoint history");
     }
-    let (mut block, _) = bc.produce_block(voter).unwrap();
-    block.epoch = 2;
-    if let Some(slot) = bc.chain.get_mut(cp as usize) {
-        slot.epoch = 2;
-    }
+    let block = bc.chain.last().expect("checkpoint").clone();
+    assert_eq!(block.index, checkpoint_height);
+    // The protocol derives the epoch from the height, not an edited block
+    // field. Exercise a genuine later checkpoint without forging its metadata.
+    let expected_epoch = block.index / epoch_len;
+    assert!(expected_epoch > 0);
+    let stale_epoch = expected_epoch - 1;
 
     let stale_cert = crate::chain::finality::FinalityCert {
-        epoch: 1,
+        epoch: stale_epoch,
         checkpoint_height: block.index,
         checkpoint_hash: block.hash.clone(),
         chain_id: 45262,
         agg_sig_bls: vec![0u8; 48],
         bitmap: vec![1],
         set_hash: String::new(),
+        seat_table_version: 0,
     };
     let cert_err = bc
         .handle_finality_cert(stale_cert)
         .expect_err("stale-epoch finality certificate must be refused");
     assert!(
-        cert_err.contains(&format!("epoch 1 does not match epoch {}", block.epoch)),
+        cert_err.contains(&format!(
+            "epoch {stale_epoch} does not match epoch {expected_epoch}"
+        )),
         "unexpected error: {cert_err}"
     );
     assert_eq!(bc.finalized_height, 0);
 
-    let stale_blob = crate::consensus::qc::QcBlob::new(1, block.index, block.hash, Vec::new());
+    let stale_blob =
+        crate::consensus::qc::QcBlob::new(stale_epoch, block.index, block.hash, Vec::new());
     let blob_err = bc
         .import_qc_blob(stale_blob)
         .expect_err("stale-epoch QC blob must be refused");
     assert!(
         blob_err.contains(&format!(
-            "QcBlob epoch 1 does not match epoch {}",
-            block.epoch
+            "QcBlob epoch {stale_epoch} does not match epoch {expected_epoch}"
         )),
         "unexpected error: {blob_err}"
     );
     assert!(bc.get_qc_blob(block.index).is_none());
+}
+
+/// Real BLS and ML-DSA keys for the PR110-C4510256171 ingress regressions.
+struct PqPrecommitHarness {
+    node: Blockchain,
+    keys: Vec<(Address, ValidatorKeys)>,
+    snapshot: ValidatorSetSnapshot,
+    height: u64,
+    hash: String,
+}
+
+impl PqPrecommitHarness {
+    fn new() -> Result<Self, String> {
+        let mut node = Blockchain::new(Arc::new(PoWEngine::new(0)), None, 45262, None);
+        let mut keys = Vec::new();
+        for index in 0..4 {
+            let address = addr_for(index);
+            let validator_keys = ValidatorKeys::generate().map_err(|error| error.to_string())?;
+            node.state.add_balance(&address, 50_000);
+            node.state.add_validator(address, 10_000);
+            let validator = node.state.validators.get_mut(&address).ok_or("validator")?;
+            validator.vrf_public_key = validator_keys.vrf_key.public.to_bytes().to_vec();
+            let bls = validator_keys.bls_key.as_ref().ok_or("BLS key")?;
+            validator.bls_public_key = bls.public_key.clone();
+            validator.pop_signature = sign_bls_pop(
+                &bls.secret_key,
+                &pop_signing_message(node.chain_id, &address, &validator.bls_public_key),
+            );
+            validator.pq_public_key = validator_keys
+                .pq_key
+                .as_ref()
+                .ok_or("PQ key")?
+                .public_key_bytes()
+                .to_vec();
+            validator.active = true;
+            keys.push((address, validator_keys));
+        }
+        let height =
+            crate::core::chain_config::finality_checkpoint_interval_for_chain_id(node.chain_id);
+        let producer = keys.first().ok_or("producer")?.0;
+        for _ in 0..height {
+            node.produce_block(producer)
+                .ok_or("checkpoint production refused")?;
+        }
+        let hash = node.chain.last().ok_or("checkpoint")?.hash.clone();
+        node.start_prevote_task(height, hash.clone());
+        let snapshot = node
+            .finality_aggregator
+            .as_ref()
+            .ok_or("round")?
+            .validator_snapshot
+            .clone();
+        assert_eq!(snapshot.validators.len(), 4);
+        // This harness jumps straight to checkpoint 10 instead of applying
+        // the epoch-boundary block that persists the validator snapshot in a
+        // real chain. Record the exact round snapshot explicitly so changing
+        // the alarm cannot make the test depend on the current-set fallback.
+        node.validator_snapshots
+            .insert(snapshot.epoch, snapshot.clone());
+        Ok(Self {
+            node,
+            keys,
+            snapshot,
+            height,
+            hash,
+        })
+    }
+
+    fn drive_prevotes(&mut self) -> Result<(), String> {
+        for (address, keys) in self.keys.iter().take(3) {
+            let bls = keys.bls_key.as_ref().ok_or("BLS key")?;
+            let mut vote = signed_prevote(
+                &bls.secret_key,
+                self.snapshot.epoch,
+                self.height,
+                &self.hash,
+                *address,
+            );
+            vote.auth_sig = sign_bls(&bls.secret_key, &vote.auth_signing_message());
+            self.node.handle_prevote(vote)?;
+        }
+        Ok(())
+    }
+
+    fn precommit(&self, key_index: usize) -> Result<Precommit, String> {
+        let (address, keys) = self.keys.get(key_index).ok_or("key index")?;
+        let bls = keys.bls_key.as_ref().ok_or("BLS key")?;
+        let mut vote = signed_precommit(
+            &bls.secret_key,
+            self.snapshot.epoch,
+            self.height,
+            &self.hash,
+            *address,
+        );
+        let validator_index = u32::try_from(
+            self.snapshot
+                .validator_index(address)
+                .ok_or("snapshot member")?,
+        )
+        .map_err(|error| error.to_string())?;
+        vote.pq_sig = keys
+            .pq_key
+            .as_ref()
+            .ok_or("PQ key")?
+            .sign(
+                crate::crypto::ctx::QC_V2,
+                &crate::consensus::qc::pq_signing_message(
+                    vote.epoch,
+                    vote.checkpoint_height,
+                    &vote.checkpoint_hash,
+                    validator_index,
+                ),
+            )
+            .map_err(|error| error.to_string())?;
+        vote.auth_sig = sign_bls(&bls.secret_key, &vote.auth_signing_message());
+        Ok(vote)
+    }
+}
+
+#[test]
+fn a_forged_certificate_cannot_buy_sync_work_before_signature_verification() -> Result<(), String> {
+    let mut harness = PqPrecommitHarness::new()?;
+    // The certificate names a sibling of the checkpoint block this node holds.
+    // A sibling hash is a sync hint, so availability must not be consulted
+    // before the invalid aggregate signature is.
+    let sibling = "ee".repeat(32);
+    assert_ne!(sibling, harness.hash);
+    let cert = crate::chain::finality::FinalityCert {
+        epoch: harness.snapshot.epoch,
+        checkpoint_height: harness.height,
+        checkpoint_hash: sibling,
+        chain_id: harness.node.chain_id,
+        agg_sig_bls: vec![0u8; 48],
+        bitmap: vec![0b0000_0111],
+        set_hash: harness.snapshot.set_hash.clone(),
+        seat_table_version: 0,
+    };
+    let error = harness
+        .node
+        .handle_finality_cert(cert)
+        .expect_err("a forged certificate must fail authentication");
+    assert!(
+        !error.contains("We don't have block") && !error.contains("mismatch with our block hash"),
+        "an unauthenticated certificate became a sync hint: {error}"
+    );
+    assert!(
+        harness.node.pending_finality_certs.is_empty(),
+        "a forged certificate must not enter a deferred queue"
+    );
+    Ok(())
+}
+
+#[test]
+fn quantum_alarm_requires_qc_authentication_before_a_sync_hint() -> Result<(), String> {
+    let mut harness = PqPrecommitHarness::new()?;
+    harness.node.state.settlement.quantum.force_solved(
+        crate::security::quantum_canary::CanaryId::EccK1,
+        crate::security::quantum_canary::CanaryClaim {
+            commit_height: 1,
+            claimer: harness.keys[0].0,
+            accepted_height: 2,
+        },
+    );
+    let cert = crate::chain::finality::FinalityCert {
+        epoch: harness.snapshot.epoch,
+        checkpoint_height: harness.height,
+        checkpoint_hash: harness.hash.clone(),
+        chain_id: harness.node.chain_id,
+        agg_sig_bls: vec![0u8; 48],
+        bitmap: vec![0b0000_0111],
+        set_hash: harness.snapshot.set_hash.clone(),
+        seat_table_version: 0,
+    };
+    let error = harness
+        .node
+        .handle_finality_cert(cert)
+        .expect_err("the alarm path has no QC to authenticate the hint");
+    assert!(error.contains("Missing verified QC blob"), "{error}");
+    assert!(
+        !error.contains("We don't have block"),
+        "an unauthenticated alarm-mode certificate became a sync hint: {error}"
+    );
+    Ok(())
+}
+
+#[test]
+fn a_stripped_precommit_cannot_win_the_duplicate_race() -> Result<(), String> {
+    let mut harness = PqPrecommitHarness::new()?;
+    harness.drive_prevotes()?;
+    let authentic = harness.precommit(0)?;
+    let mut stripped = authentic.clone();
+    stripped.pq_sig.clear();
+    let result = harness.node.handle_precommit(stripped);
+    assert!(result.is_err(), "a stripped precommit entered the round");
+    assert!(result
+        .err()
+        .ok_or("missing error")?
+        .contains("PQ attestation"));
+    assert!(harness
+        .node
+        .finality_aggregator
+        .as_ref()
+        .ok_or("round")?
+        .precommits
+        .is_empty());
+    assert!(harness.node.handle_precommit(authentic)?.is_none());
+    assert_eq!(
+        harness
+            .node
+            .finality_aggregator
+            .as_ref()
+            .ok_or("round")?
+            .precommits
+            .len(),
+        1
+    );
+    Ok(())
+}
+
+#[test]
+fn a_stripped_early_precommit_is_not_replayed() -> Result<(), String> {
+    let mut harness = PqPrecommitHarness::new()?;
+    let authentic = harness.precommit(0)?;
+    let mut stripped = authentic.clone();
+    stripped.pq_sig.clear();
+    let result = harness.node.handle_precommit(stripped);
+    assert!(result.is_err());
+    assert!(result
+        .err()
+        .ok_or("missing error")?
+        .contains("PQ attestation"));
+    harness.drive_prevotes()?;
+    assert!(harness.node.handle_precommit(authentic)?.is_none());
+    assert_eq!(
+        harness
+            .node
+            .finality_aggregator
+            .as_ref()
+            .ok_or("round")?
+            .precommits
+            .len(),
+        1
+    );
+    Ok(())
+}
+
+#[test]
+fn the_aggregator_rejects_a_stripped_precommit() -> Result<(), String> {
+    let mut harness = PqPrecommitHarness::new()?;
+    harness.drive_prevotes()?;
+    let authentic = harness.precommit(0)?;
+    let mut stripped = authentic.clone();
+    stripped.pq_sig.clear();
+    let round = harness.node.finality_aggregator.as_mut().ok_or("round")?;
+    assert!(round.add_precommit(stripped).is_err());
+    assert!(round.precommits.is_empty());
+    round.add_precommit(authentic)?;
+    assert_eq!(round.precommits.len(), 1);
+    Ok(())
+}
+
+#[test]
+fn no_certificate_forms_without_a_pq_quorum() -> Result<(), String> {
+    let (snapshot, keys) = make_snapshot_with_keys(4, 1000);
+    let mut round = FinalityAggregator::new(45262, 1, 10, "cp".into(), snapshot.clone());
+    drive_prevote_quorum(&mut round, &snapshot, &keys, 3, 1, 10, "cp");
+    let mut node = Blockchain::new(Arc::new(PoWEngine::new(0)), None, 45262, None);
+    node.finality_aggregator = Some(round);
+    for (key, validator) in keys.iter().zip(&snapshot.validators).take(3) {
+        let vote = signed_precommit(key, 1, 10, "cp", validator.address);
+        assert!(
+            node.handle_precommit(vote)?.is_none(),
+            "a certificate without a PQ quorum was emitted"
+        );
+    }
+    let round = node
+        .finality_aggregator
+        .as_ref()
+        .ok_or("round must be retained")?;
+    assert!(round.precommit_quorum_reached);
+    assert!(round.try_produce_qc_blob().is_none());
+    assert_eq!(node.finalized_height, 0);
+    Ok(())
+}
+
+#[test]
+fn a_valid_hybrid_quorum_still_finalizes() -> Result<(), String> {
+    let mut harness = PqPrecommitHarness::new()?;
+    let checkpoint = harness.node.chain.last().ok_or("checkpoint")?.clone();
+    assert_eq!(checkpoint.index, harness.height);
+    harness.drive_prevotes()?;
+    for index in 0..2 {
+        let vote = harness.precommit(index)?;
+        assert!(harness.node.handle_precommit(vote)?.is_none());
+    }
+    let vote = harness.precommit(2)?;
+    let cert = harness
+        .node
+        .handle_precommit(vote)?
+        .ok_or("hybrid certificate")?;
+    assert_eq!(cert.checkpoint_height, harness.height);
+    assert_eq!(harness.node.finalized_height, harness.height);
+    assert!(harness.node.get_qc_blob(harness.height).is_some());
+    assert!(harness.node.finality_aggregator.is_none());
+    Ok(())
+}
+
+#[test]
+fn an_invalid_nonempty_pq_attestation_cannot_claim_a_slot() -> Result<(), String> {
+    let mut harness = PqPrecommitHarness::new()?;
+    harness.drive_prevotes()?;
+    let authentic = harness.precommit(0)?;
+    let mut corrupted = authentic.clone();
+    *corrupted.pq_sig.first_mut().ok_or("PQ signature")? ^= 1;
+    let error = harness
+        .node
+        .handle_precommit(corrupted)
+        .err()
+        .ok_or("invalid PQ was accepted")?;
+    assert!(error.contains("Invalid PQ attestation"), "{error}");
+    assert!(harness
+        .node
+        .finality_aggregator
+        .as_ref()
+        .ok_or("round")?
+        .precommits
+        .is_empty());
+    assert!(harness.node.handle_precommit(authentic)?.is_none());
+    Ok(())
 }

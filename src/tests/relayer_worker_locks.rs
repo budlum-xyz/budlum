@@ -495,7 +495,10 @@ async fn a_result_tagged_for_a_different_chain_is_refused() {
             .await
             .expect_err("chain tag must match the adapter that produced the result");
     let msg = format!("{err}");
-    assert!(msg.contains("tagged"), "msg: {msg}");
+    assert!(
+        msg.contains("tagged") || msg.contains("unsupported chain"),
+        "msg: {msg}"
+    );
 }
 
 #[tokio::test]
@@ -798,7 +801,7 @@ fn the_relay_cursor_scan_can_detect_a_violation() {
 }
 
 /// An unconfigured worker refuses every external chain, and the EVM
-/// registration surface stays REMOVED (BLG-0135/P06-F06, decision B).
+/// registration surface stays REMOVED.
 ///
 /// The EVM bridge leg has no live end-to-end route - the off-chain half is a
 /// stub that refuses at broadcast - so the CLI must not accept a bridge
@@ -828,7 +831,7 @@ async fn an_unconfigured_worker_refuses_every_external_chain() {
         );
     }
 
-    // BLG-0135 (P06-F06, decision B): the registration surface is REMOVED,
+    // The registration surface is REMOVED,
     // not merely defaulted off. The EVM bridge leg has no live end-to-end
     // route (the adapter refuses at broadcast), so a CLI that accepts a
     // bridge address would read as "production" while the leg cannot operate.

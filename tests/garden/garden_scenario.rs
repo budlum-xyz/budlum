@@ -181,6 +181,8 @@ impl Node {
             // The public listener of a test node needs no API key; the
             // Garden surface is refused there whatever the auth setting is.
             .env("BUDLUM_RPC_AUTH_REQUIRED", "0")
+            .env("BUDLUM_APTOS_LISTENER", "none")
+            .env("BUDLUM_SOLANA_LISTENER", "none")
             .current_dir(dir.path())
             .stdin(Stdio::null())
             .stdout(Stdio::from(log))

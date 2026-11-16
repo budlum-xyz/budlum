@@ -89,7 +89,7 @@ pub struct BpqsSigner<P: BpqsParams, H: BpqsHash> {
     /// epoch key this device will ever mint.
     root_seed: [u8; 32],
     public: BpqsPublicKey<P>,
-    /// Signatures minted per epoch (BLG-0041). The WOTS one-time property
+    /// Signatures minted per epoch. The WOTS one-time property
     /// per (epoch, count) is only safe if a count is never reused, and a
     /// caller-held count nothing persists could not promise that. The device
     /// keeps its own counters, and `sign_at_height` takes `&mut self`.
@@ -130,6 +130,7 @@ impl<P: BpqsParams, H: BpqsHash> BpqsSigner<P, H> {
     /// through [`BpqsSigner::resume`] (or declares a never-minted device with
     /// [`BpqsSigner::fresh_device`]).
     pub fn ceremonial_keygen(root_seed: [u8; 32], window: EpochWindow) -> Result<Self, BpqsError> {
+        crate::params::ensure_valid_params::<P>()?;
         let mut vks = Vec::with_capacity(1usize << P::T_LOG2);
         for epoch in 0..(1u32 << P::T_LOG2) {
             let seed = prf_epoch_seed::<H>(&root_seed, epoch);
@@ -229,7 +230,7 @@ impl<P: BpqsParams, H: BpqsHash> BpqsSigner<P, H> {
     }
 
     /// Sign `msg` for the epoch of `height`, consuming one slot of the
-    /// epoch's quota (BLG-0041).
+    /// epoch's quota.
     ///
     /// The device counts its own signatures per epoch and refuses the next
     /// mint once `Q_MAX` is reached, so two messages in one epoch can never
@@ -264,7 +265,7 @@ impl<P: BpqsParams, H: BpqsHash> BpqsSigner<P, H> {
         if used >= P::Q_MAX {
             return Err(BpqsError::QuotaExceeded {
                 epoch,
-                // Saturating (BLG-0052): `used + 1` overflowed at u32::MAX and
+                // Saturating: `used + 1` overflowed at u32::MAX and
                 // aborted a build that promised never to panic.
                 attempted: used.saturating_add(1),
             });
@@ -359,6 +360,7 @@ pub fn verify_at_height<H: BpqsHash, P: BpqsParams>(
     msg: &[u8],
     sig: &BpqsSignature<P>,
 ) -> Result<(), BpqsError> {
+    crate::params::ensure_valid_params::<P>()?;
     if public.params_name != P::NAME {
         return Err(BpqsError::Malformed(
             "keybook entry and signature are from different parameter rows",
@@ -380,6 +382,70 @@ pub fn verify_at_height<H: BpqsHash, P: BpqsParams>(
     merkle::verify_path::<H, P>(&rebuilt, sig.epoch as usize, &sig.path, &public.root)
 }
 
+/// Stateful verifier-side ceremony log enforcing one-time epoch consumption
+/// (`Q_MAX = 1`) and refusing non-production parameter rows unless
+/// explicitly constructed for tests.
+///
+/// WIRING: anchor family verifier log for research line F2.
+#[derive(Clone, Debug, Default)]
+pub struct BpqsVerifierLog {
+    seen_epochs: alloc::collections::BTreeSet<([u8; 32], u32)>,
+    allow_test_params: bool,
+}
+
+impl BpqsVerifierLog {
+    /// Create a production verifier log that refuses non-production parameter
+    /// rows (`ParamsTestFast`, benchmark rows) and records spent epochs.
+    ///
+    /// WIRING: cold-committee anchor verification state.
+    #[must_use]
+    pub const fn new_production() -> Self {
+        Self {
+            seen_epochs: alloc::collections::BTreeSet::new(),
+            allow_test_params: false,
+        }
+    }
+
+    /// Create a test-capable verifier log that still enforces one-time epoch
+    /// consumption while permitting small-tree test parameter rows.
+    ///
+    /// WIRING: exposed for small-tree unit and integration batteries.
+    #[must_use]
+    pub const fn new_allow_test_params() -> Self {
+        Self {
+            seen_epochs: alloc::collections::BTreeSet::new(),
+            allow_test_params: true,
+        }
+    }
+
+    /// Verify `sig` at `height` and atomically record `(public.root, sig.epoch)`
+    /// as spent so any second signature under the same key and epoch is refused.
+    ///
+    /// WIRING: stateful verifier entry point pairing `verify_at_height` with
+    /// one-time epoch tracking.
+    pub fn accept_at_height<H: BpqsHash, P: BpqsParams>(
+        &mut self,
+        public: &BpqsPublicKey<P>,
+        height: u64,
+        msg: &[u8],
+        sig: &BpqsSignature<P>,
+    ) -> Result<(), BpqsError> {
+        if !self.allow_test_params && !P::IS_PRODUCTION {
+            return Err(BpqsError::Malformed(
+                "non-production BPQS parameter row refused by production verifier",
+            ));
+        }
+        verify_at_height::<H, P>(public, height, msg, sig)?;
+        if !self.seen_epochs.insert((public.root, sig.epoch)) {
+            return Err(BpqsError::QuotaExceeded {
+                epoch: sig.epoch,
+                attempted: 2,
+            });
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod sign_tests {
     use super::*;
@@ -397,7 +463,7 @@ mod sign_tests {
     #[test]
     fn roundtrip_across_epochs() {
         let mut signer = committee();
-        // One mint per epoch: Q_MAX is 1 (BLG-0041), and the device now
+        // One mint per epoch: Q_MAX is 1, and the device now
         // enforces the quota itself.
         for height in [0u64, 8, 16, 24, 32, 40] {
             let sig = signer
@@ -690,7 +756,7 @@ mod tests {
         signer.sign_at_height(0, b"canonical-check").unwrap()
     }
 
-    // BLG-0045: check_canonical is the malleability gate; every refusal arm
+    // Check_canonical is the malleability gate; every refusal arm
     // and the pass case get a test.
     #[test]
     fn check_canonical_accepts_the_unmodified_signature() {

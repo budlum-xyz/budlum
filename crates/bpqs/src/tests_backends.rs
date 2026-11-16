@@ -1,6 +1,6 @@
 //! Backend differential battery (milestone M2): the *same* construction run
-//! under three hash families - canonical Poseidon2-Goldilocks-16 and the two
-//! FIPS-202 cross-checks. If a behavior binds the scheme (roundtrip, tamper
+//! under three hash families - the canonical SHAKE-256, the SHA3-256
+//! cross-check and the research-only Poseidon2-Goldilocks-16. If a behavior binds the scheme (roundtrip, tamper
 //! refusal, epoch refusal, quota refusal), it must bind under every backend;
 //! if a behavior binds the hash family (digests), it must differ across
 //! backends. That two-sentence contract is the whole differential argument
@@ -90,7 +90,7 @@ fn tamper_refuses<H: BpqsHash, P: BpqsParams>() {
 /// Per-call randomizer semantics (2026-09-22, bar-1 record): the same tuple
 /// signs byte-identically (determinism; KAT stability), while a different
 /// message draws a different randomizer - the anti-adaptive property of the
-/// PRF-derived r. The tuple's count slot is the signer's own (BLG-0041), so
+/// PRF-derived r. The tuple's count slot is the signer's own, so
 /// determinism is pinned across independent signers minting their first
 /// signature of the epoch.
 fn randomizer_bound_and_deterministic<H: BpqsHash, P: BpqsParams>() {
@@ -216,6 +216,22 @@ backend_battery!(shake_battery, Shake256Hash);
 backend_battery!(poseidon_battery, Poseidon2GoldilocksHash);
 
 #[test]
+fn the_canonical_backend_is_shake256_and_not_poseidon2() {
+    // the canonical label names the FIPS 202 member. The alias must
+    // compute exactly SHAKE-256, and it must not be the algebraic backend.
+    let framed: [&[u8]; 2] = [&[0u8; 16], b"x"];
+    let canonical = crate::CanonicalHash::digest32(crate::domains::MESSAGE_BIND_V1, &framed);
+    assert_eq!(
+        canonical,
+        Shake256Hash::digest32(crate::domains::MESSAGE_BIND_V1, &framed)
+    );
+    assert_ne!(
+        canonical,
+        Poseidon2GoldilocksHash::digest32(crate::domains::MESSAGE_BIND_V1, &framed)
+    );
+}
+
+#[test]
 fn backends_are_three_distinct_functions() {
     // One framing, one payload, three different digests: proves the battery
     // above is not comparing one function to itself under three names.
@@ -334,7 +350,7 @@ fn kat_file_writer() {
     std::println!("#       regenerated 2026-10-19 for the step-bound chains below)");
     std::println!("# construction: epoch-chained Winternitz (one-time per epoch, q_max=1,");
     std::println!("#       PRF-derived 16B randomizer, MESSAGE_BIND_V1, chain steps bound");
-    std::println!("#       to their absolute position (P02-F19))");
+    std::println!("#       to their absolute position (absolute-position binding)");
     std::println!("# row: ParamsTestFast lane (N=32, LEN=67, T_LOG2=4) - identical hash");
     std::println!("#      discipline to the canonical L5/L3 rows, ceremony depth pruned.");
     std::println!("# pins: root_seed=0xA5*32, window=3, msg='bpqs-backend-differential-payload',");

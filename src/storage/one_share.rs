@@ -12,10 +12,7 @@
 //! bytes. The single screen assembles from these shares, so everything the
 //! user can see is shown in one place with its responsibility attributed.
 //!
-//! WIRING: unwired - measured: no production module builds a
-//! `OneShareRegistry` or calls `screen`, `endpoint_refs`, `admit_as_server`
-//! or `all_user_held`. The module used to pass as wired only because `create`
-//! was a name no other module exported, so any `.create(` call counted.
+//! WIRING: unwired - legacy B.U.D. 1.0 marker projection retained for backward schema compatibility while B.U.D. 3.0 manifest deals own active routing.
 
 use crate::core::address::Address;
 use crate::storage::content_id::ContentId;
@@ -136,6 +133,7 @@ impl OneShareRegistry {
     }
 
     /// Every share as an endpoint ref, for the single screen.
+    /// WIRING: Device-screen RPC surface (`one_view::screen`).
     #[must_use]
     pub fn endpoint_refs(&self) -> Vec<EndpointRef> {
         self.shares
@@ -166,6 +164,10 @@ impl OneShareRegistry {
     /// is handed to the admission rule. The screen shows the result; the
     /// rule itself lives in
     /// [`admit_device_as_server`](crate::storage::server_admission::admit_device_as_server).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn admit_as_server(&self) -> Result<ServerAdmission, ServerAdmissionRefusal> {
         let mut ledger = CustodyLedger::default();
         for s in self.shares.values() {
@@ -294,7 +296,7 @@ mod one_share_tests {
 
     #[test]
     fn shares_together_may_not_exceed_the_declared_capacity() {
-        // P27-F12: each share fit on its own, the sum did not.
+        // Each share fit on its own, the sum did not.
         let p = profile(1000);
         let mut reg = OneShareRegistry::new();
         reg.create(&p, ContentId([1; 32]), 600, addr(1)).unwrap();

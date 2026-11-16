@@ -57,6 +57,10 @@ struct Escrow {
 ///
 /// `payer_reserve` is a balance the payer must keep after paying. It is
 /// required, not spent.
+///
+/// # Errors
+///
+/// Returns an error if the operation fails.
 pub fn open_deal_escrowed(
     state: &mut AccountState,
     terms: &DealOpenTerms<'_>,
@@ -181,7 +185,11 @@ pub fn accept_reallocation_escrowed(
         ReallocationCause::NeverPlaced => {
             if !state
                 .storage_registry
-                .has_claim(&ticket.manifest_id, &payer)
+                .has_manifest_claim(&ticket.manifest_id, &payer)
+                || state
+                    .storage_registry
+                    .owner_of(&ticket.manifest_id)
+                    .is_some_and(|owner| owner != payer)
             {
                 return Err(format!(
                     "manifest {} does not belong to payer {payer}; refusing to fund never-placed ticket {ticket_id}",
