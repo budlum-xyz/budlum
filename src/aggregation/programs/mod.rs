@@ -15,7 +15,7 @@
 //! These are the reference programs: plain instructions of the machine, no
 //! chips. They are what a chip must reproduce, and what the step counts
 //! that decide where chips go are measured on. One signature takes about
-//! twelve million steps, nine tenths of them in Keccak-f[1600]; the prover
+//! twelve million steps, nine tenths of them in `Keccak-f[1600]`; the prover
 //! of the machine takes about forty thousand steps a proof, so no tick is
 //! proven from these programs as they are.
 //!
