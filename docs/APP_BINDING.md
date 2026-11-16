@@ -8,8 +8,8 @@ on another network from inside Budlum and pay for it in BUD. The application
 does not move. Budlum holds a binding row for it, and every write is a signed
 in-block settlement transaction.
 
-Status: **closed on testnet** (`45261`) and **active on devnet** (`45262`).
-Public networks stay closed until an explicit launch activation. Values
+Status: **active on testnet** (`45261`) and **active on devnet** (`45262`).
+Mainnet (`45260`) stays closed until an explicit launch activation. Values
 marked TESTNET-DEFAULT are genesis parameters.
 
 ## 1. The application binding row

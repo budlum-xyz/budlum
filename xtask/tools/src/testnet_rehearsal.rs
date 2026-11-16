@@ -1309,9 +1309,13 @@ fn scenario_bns(backend: &Backend<'_>, wallets: &Wallets) -> Result<String, Stri
 fn scenario_app_binding(backend: &Backend<'_>, wallets: &Wallets) -> Result<String, String> {
     const DOMAIN: &str = "4242";
     const ORIGIN: &str = "00000000000000000000000000000000000000aa";
+    // A BFT domain, not PoW: `ensure_serving_origin` refuses a
+    // permissionless PoW domain outside the canonical chain set as an
+    // AppBinding trust anchor (self-mined roots must not claim apps).
+    // A BFT domain passes that gate while keeping it intact.
     backend.bud(&[
         "domain",
-        "register-pow",
+        "register-bft",
         "--key-file",
         &wallets.alice_file,
         "--id",
@@ -1326,7 +1330,7 @@ fn scenario_app_binding(backend: &Backend<'_>, wallets: &Wallets) -> Result<Stri
             .filter(|registered| **registered == crate::json::Value::Bool(true))
             .map(|_| ())
     })
-    .ok_or("the PoW domain did not register within 120 s")?;
+    .ok_or("the BFT domain did not register within 120 s")?;
     let ids = backend.bud(&[
         "app-binding",
         "id",
