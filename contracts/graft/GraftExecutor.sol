@@ -14,8 +14,21 @@ contract GraftExecutor is BudlumOutboundEmitter {
     uint256 private constant FULFILLED_PAYLOAD_FIELDS = 9;
     uint256 private constant POST_CALL_GAS_RESERVE = 8_000;
 
-    mapping(bytes32 => mapping(address => bool)) public fulfilled;
-    mapping(address => bytes32) public solverKey;
+    struct IntentAuthorization {
+        address solver;
+        bytes32 budlumSolver;
+        address target;
+        bytes32 calldataHash;
+        uint64 value;
+        bytes32 beneficiaryHash;
+    }
+
+    /// The domain operator that deployed this executor. It mirrors only a
+    /// finalized Budlum award into the exact origin-chain call below; random
+    /// accounts cannot self-claim another solver's Budlum identity.
+    address public immutable authority;
+    mapping(bytes32 => IntentAuthorization) public intentAuthorization;
+    mapping(bytes32 => bool) public fulfilled;
 
     event BudlumGraftFulfilled(
         bytes32 indexed intentId,
@@ -26,45 +39,86 @@ contract GraftExecutor is BudlumOutboundEmitter {
         bool success
     );
 
-    event SolverKeyRegistered(address indexed account, bytes32 solverKey);
+    event IntentAuthorized(
+        bytes32 indexed intentId,
+        address indexed solver,
+        bytes32 indexed budlumSolver,
+        address target,
+        bytes32 calldataHash,
+        uint64 value,
+        bytes32 beneficiaryHash
+    );
 
     error AlreadyFulfilled(bytes32 intentId);
-    error ValueTooLarge(uint256 value);
+    error AlreadyAuthorized(bytes32 intentId);
+    error AuthorizationMismatch(bytes32 intentId);
     error CallFailed(bytes32 intentId, bytes reason);
-    error SolverKeyNotBound(address account);
-    error SolverKeyAlreadyBound(address account, bytes32 current);
-    error SolverKeyIsZero();
+    error InvalidAuthorization();
+    error IntentNotAuthorized(bytes32 intentId);
+    error NotAuthority(address caller);
+    error NotAwardedSolver(bytes32 intentId, address caller);
+    error ValueTooLarge(uint256 value);
 
-    function registerSolverKey(bytes32 budlumSolver) external {
-        if (budlumSolver == bytes32(0)) {
-            revert SolverKeyIsZero();
-        }
-        bytes32 current = solverKey[msg.sender];
-        if (current != bytes32(0)) {
-            revert SolverKeyAlreadyBound(msg.sender, current);
-        }
-        solverKey[msg.sender] = budlumSolver;
-        emit SolverKeyRegistered(msg.sender, budlumSolver);
+    constructor() {
+        authority = msg.sender;
     }
 
-    function execute(
+    /// Mirror one finalized Budlum award into a one-use, exact call permit.
+    /// The permit binds the EVM account that must send `execute`, its awarded
+    /// Budlum solver address, and every call field checked by settlement.
+    function authorizeIntent(
         bytes32 intentId,
+        address solver,
+        bytes32 budlumSolver,
         address target,
-        bytes calldata data,
-        bytes calldata beneficiary
-    ) external payable returns (bytes memory result) {
-        if (msg.sender == address(0) || target == address(0)) {
-            revert CallFailed(intentId, "invalid address");
+        bytes32 calldataHash,
+        uint64 value,
+        bytes32 beneficiaryHash
+    ) external {
+        if (msg.sender != authority) {
+            revert NotAuthority(msg.sender);
         }
-        bytes32 budlumSolver = solverKey[msg.sender];
-        if (budlumSolver == bytes32(0)) {
-            revert SolverKeyNotBound(msg.sender);
+        if (intentId == bytes32(0) || solver == address(0) || budlumSolver == bytes32(0) || target == address(0)) {
+            revert InvalidAuthorization();
         }
-        if (fulfilled[intentId][msg.sender]) {
+        if (intentAuthorization[intentId].solver != address(0) || fulfilled[intentId]) {
+            revert AlreadyAuthorized(intentId);
+        }
+        intentAuthorization[intentId] = IntentAuthorization({
+            solver: solver,
+            budlumSolver: budlumSolver,
+            target: target,
+            calldataHash: calldataHash,
+            value: value,
+            beneficiaryHash: beneficiaryHash
+        });
+        emit IntentAuthorized(intentId, solver, budlumSolver, target, calldataHash, value, beneficiaryHash);
+    }
+
+    function execute(bytes32 intentId, address target, bytes calldata data, bytes calldata beneficiary)
+        external
+        payable
+        returns (bytes memory result)
+    {
+        IntentAuthorization memory authorization = intentAuthorization[intentId];
+        if (authorization.solver == address(0)) {
+            revert IntentNotAuthorized(intentId);
+        }
+        if (msg.sender != authorization.solver) {
+            revert NotAwardedSolver(intentId, msg.sender);
+        }
+        if (fulfilled[intentId]) {
             revert AlreadyFulfilled(intentId);
         }
         if (msg.value > type(uint64).max) {
             revert ValueTooLarge(msg.value);
+        }
+        bytes32 callHash = keccak256(data);
+        if (
+            target != authorization.target || callHash != authorization.calldataHash || msg.value != authorization.value
+                || keccak256(beneficiary) != authorization.beneficiaryHash
+        ) {
+            revert AuthorizationMismatch(intentId);
         }
         if (target.code.length == 0) {
             revert CallFailed(intentId, "target has no code");
@@ -73,14 +127,14 @@ contract GraftExecutor is BudlumOutboundEmitter {
         if (availableGas <= POST_CALL_GAS_RESERVE) {
             revert CallFailed(intentId, "insufficient gas");
         }
-        fulfilled[intentId][msg.sender] = true;
+        fulfilled[intentId] = true;
         uint256 callGas = availableGas - POST_CALL_GAS_RESERVE;
         bool ok;
         (ok, result) = target.call{gas: callGas, value: msg.value}(data);
         if (!ok) {
             revert CallFailed(intentId, result);
         }
-        _emitFulfilled(intentId, budlumSolver, target, keccak256(data), beneficiary);
+        _emitFulfilled(intentId, authorization.budlumSolver, target, callHash, beneficiary);
     }
 
     function _emitFulfilled(
@@ -95,9 +149,7 @@ contract GraftExecutor is BudlumOutboundEmitter {
             FULFILLED_KIND,
             bytes32(0),
             intentId,
-            fulfilledPayloadHash(
-                intentId, target, callHash, uint64(msg.value), beneficiary, budlumSolver
-            )
+            fulfilledPayloadHash(intentId, target, callHash, uint64(msg.value), beneficiary, budlumSolver)
         );
     }
 
