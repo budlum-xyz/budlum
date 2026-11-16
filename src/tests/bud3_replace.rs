@@ -204,7 +204,7 @@ fn bud3_object_replacement_keeps_the_content_id_and_moves_the_references() {
     let new = new_record.commitment;
     let _shares = placement(1);
     assert!(matches!(
-        apply(
+        crate::storage::bud3::tx::apply_with_validators_and_nft_owner(
             &mut r,
             addr(OWNER),
             StorageTxV3::BindNft {
@@ -212,6 +212,8 @@ fn bud3_object_replacement_keeps_the_content_id_and_moves_the_references() {
                 object: old,
             },
             0,
+            &BTreeMap::new(),
+            Some(addr(OWNER)),
         ),
         Ok(Applied::Bound)
     ));

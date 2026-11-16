@@ -457,11 +457,14 @@ fn check_placement(record: &ObjectRecord, shares: &[(u64, Share)]) -> Result<(),
         if u64::from(record.symbols_per_segment) < k + 2 {
             return Err(RegistryError::BadPlacement("fewer than k + 2 symbols"));
         }
-        let mut ranges: Vec<(u32, u32)> = shares
-            .iter()
-            .filter(|(s, _)| *s == index)
-            .map(|(_, sh)| (sh.first_esi, sh.symbols))
-            .collect();
+        let mut ranges: Vec<(u32, u32)> = Vec::new();
+        let mut distinct_validators = BTreeSet::new();
+        for (s, sh) in shares {
+            if *s == index {
+                distinct_validators.insert(sh.validator);
+                ranges.push((sh.first_esi, sh.symbols));
+            }
+        }
         ranges.sort_unstable();
         let mut next = 0u64;
         let mut covered = 0u64;
@@ -477,6 +480,11 @@ fn check_placement(record: &ObjectRecord, shares: &[(u64, Share)]) -> Result<(),
                 return Err(RegistryError::BadPlacement("ESI past the coded symbols"));
             }
             covered += u64::from(n);
+        }
+        if distinct_validators.len() < 2 {
+            return Err(RegistryError::BadPlacement(
+                "each segment requires at least two distinct validators",
+            ));
         }
         if covered < k + 2 {
             return Err(RegistryError::BadPlacement("shares hold fewer than k + 2"));
@@ -1301,7 +1309,7 @@ impl Bud3Registry {
             .objects
             .iter()
             .filter(|(k, o)| {
-                o.expires_at < epoch && !self.replacements.get(*k).is_some_and(|r| !r.finalized)
+                o.expires_at < epoch && self.replacements.get(*k).is_none_or(|r| r.finalized)
             })
             .map(|(k, _)| *k)
             .collect();
@@ -1914,7 +1922,7 @@ impl Bud3Registry {
     /// Verify and record a segment repair using either Merkle-proven live symbols
     /// or `MIN_REPAIR_ATTESTATIONS` independent active Full validator signatures.
     ///
-    /// Convenience: called by [`super::tx::apply_with_validators`] with the
+    /// Convenience: called by `super::tx::apply_with_validators_and_nft_owner` with the
     /// consensus active Full validator key directory and by direct registry callers.
     ///
     /// # Errors
@@ -1973,7 +1981,7 @@ impl Bud3Registry {
         if first < k_u32 {
             return Err(RegistryError::BadRepair("repair ESIs must exceed k"));
         }
-        let mut sorted = new_shares.clone();
+        let mut sorted = new_shares;
         sorted.sort_by_key(|s| s.first_esi);
         let content_digest = obj.record.content_id.digest;
         let existing_holders: BTreeSet<Address> = obj
@@ -3469,5 +3477,55 @@ mod tests {
         assert!(r.object(&key).is_none());
         assert!(!r.verify_paid_view(&second));
         assert!(r.paid_views.is_empty());
+    }
+
+    #[test]
+    fn single_validator_placement_is_refused_and_cannot_self_certify_custody() {
+        let mut r = Bud3Registry::default();
+        let (up, _) = upload(b"single validator cannot self certify custody");
+        let syms = up.record.symbols_per_segment;
+        let single = vec![(
+            0,
+            Share {
+                validator: addr(9),
+                class: Class::Full,
+                first_esi: 0,
+                symbols: syms,
+            },
+        )];
+        assert_eq!(
+            r.register_object(addr(1), up.record.clone(), single, 0, 10),
+            Err(RegistryError::BadPlacement(
+                "each segment requires at least two distinct validators",
+            ))
+        );
+        // Splitting the same validator into two shares still fails the distinct-validator rule.
+        let half = syms / 2;
+        let duplicate_same_validator = vec![
+            (
+                0,
+                Share {
+                    validator: addr(9),
+                    class: Class::Full,
+                    first_esi: 0,
+                    symbols: half,
+                },
+            ),
+            (
+                0,
+                Share {
+                    validator: addr(9),
+                    class: Class::Full,
+                    first_esi: half,
+                    symbols: syms - half,
+                },
+            ),
+        ];
+        assert_eq!(
+            r.register_object(addr(1), up.record, duplicate_same_validator, 0, 10),
+            Err(RegistryError::BadPlacement(
+                "each segment requires at least two distinct validators",
+            ))
+        );
     }
 }

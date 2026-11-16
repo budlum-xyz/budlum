@@ -185,9 +185,9 @@ fn application_contract_fee_is_split_between_recipient_and_producer() {
     state.add_balance(&sender, 1_000_000);
     let mut origin_domain = crate::domain::plugin::default_domain(
         7,
-        crate::domain::ConsensusKind::PoW,
+        crate::domain::ConsensusKind::PoA,
         45262,
-        crate::domain::POW_HEADER_CHAIN_ADAPTER,
+        "poa-authority-quorum",
         1,
     );
     origin_domain.operator = Some(sender);
@@ -227,6 +227,9 @@ fn application_contract_fee_is_split_between_recipient_and_producer() {
 
     let fee = 10_000;
     let mut tx = Transaction::new_contract_call_to(sender, app.mirror_account, fee, 0, bytecode);
+    tx.chain_id = crate::core::chain_config::Network::Testnet
+        .chain_id()
+        .value();
     tx.hash = tx.calculate_hash();
     Executor::apply_block(&mut state, &[tx], Some(&producer)).unwrap();
 
