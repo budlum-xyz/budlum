@@ -737,18 +737,12 @@ fn replace_object_rejects_slashed_or_jailed_validator_even_when_present_in_direc
     state.add_balance(&owner, 50_000);
     state.add_balance(&proposer, 50_000);
 
-    for (idx, v) in [FULL_A, FULL_B, FULL_C].into_iter().enumerate() {
+    for v in [FULL_A, FULL_B, FULL_C] {
         let v_addr = Address::from([v; 32]);
         let pk = ml_dsa_public_key(SchemeId::ML_DSA_65, &[v; 32]).unwrap();
         state.add_validator(v_addr, 100_000);
         let info = state.get_validator_mut(&v_addr).unwrap();
         info.pq_public_key = pk.clone();
-        if idx == 0 {
-            info.jailed = true;
-        }
-        if idx == 1 {
-            info.slashed = true;
-        }
         let reg = crate::validators::ValidatorRegistration {
             owner: v_addr,
             class: crate::validators::ValidatorClass::Full,
@@ -790,6 +784,16 @@ fn replace_object_rejects_slashed_or_jailed_validator_even_when_present_in_direc
         ),
     )
     .unwrap();
+
+    // Jail FULL_A and slash FULL_B after registration so only FULL_C remains active.
+    state
+        .get_validator_mut(&Address::from([FULL_A; 32]))
+        .unwrap()
+        .jailed = true;
+    state
+        .get_validator_mut(&Address::from([FULL_B; 32]))
+        .unwrap()
+        .slashed = true;
 
     let new_record = recoded(&record, 0x2B, 48);
     let atts = attestations(&old, &new_record);

@@ -34,6 +34,11 @@ services:
     container_name: testnet-ceremony
     volumes:
       - ceremony:/home/budlum/ceremony
+    environment:
+      - RUST_LOG=info
+      # The ceremony seals the rehearsal wallets, so it needs the password the
+      # scenarios sign with. Throwaway value; this stack is loopback-only.
+      - BUD_WALLET_PASSWORD=rehearsal-only-password
     entrypoint: ["/bin/sh", "-c"]
     command:
       - |
@@ -53,6 +58,12 @@ services:
             | sed -n 's/^bootnode (config \[p2p\] bootnodes): "\(.*\)"$$/\1/p' > "$$dir/validator$$i.bootnode"
         done
         faucet=$$(budlum-faucet keygen --out "$$dir/faucet.seed" | sed -n 's/^faucet address: 0x//p')
+        # The scenarios sign with these. They are ceremony output because a
+        # `.bud` name is created by a primary seller settling a Primary offer,
+        # and the seller list is a hashed genesis field: an address created
+        # after the ceremony could never be one.
+        alice=$$(bud wallet create --key-file "$$dir/alice.key" | sed -n 's/^address: 0x//p')
+        bud wallet create --key-file "$$dir/bob.key" > /dev/null
         # The testnet template has a 2025 timestamp. Use the wall clock just
         # like the devnet ceremony, or the slot ladder starts years behind.
         stamp_ms=$$(date +%s%3N)
@@ -63,6 +74,7 @@ services:
           --ecosystem 5252525252525252525252525252525252525252525252525252525252525252 \
           --team 5353535353535353535353535353535353535353535353535353535353535353 \
           --burn-reserve 5454545454545454545454545454545454545454545454545454545454545454 \
+          --bns-primary-seller "$$alice" \
           --out "$$dir/genesis.tmp"
         mv "$$dir/genesis.tmp" "$$dir/genesis.json"
     restart: "no"

@@ -419,7 +419,21 @@ pub(crate) fn finalize_missed_challenges(
             .get_challenge(challenge_id)
             .map(|challenge| (challenge.opener, challenge.opener_bond))
             .filter(|(opener, bond)| *bond > 0 && *opener != Address::zero());
+        let sibling_refunds = state
+            .storage_registry
+            .open_sibling_opener_refunds(deal_id, challenge_id);
+        let mut refund_totals: std::collections::BTreeMap<Address, u64> =
+            std::collections::BTreeMap::new();
         if let Some((opener, bond)) = opener_refund {
+            refund_totals.insert(opener, bond);
+        }
+        for &(sib_opener, sib_bond) in &sibling_refunds {
+            let entry = refund_totals.entry(sib_opener).or_insert(0);
+            *entry = entry
+                .checked_add(sib_bond)
+                .ok_or_else(|| format!("sibling opener bond refund overflow for {sib_opener}"))?;
+        }
+        for (&opener, &bond) in &refund_totals {
             if state.get_balance(&opener).checked_add(bond).is_none() {
                 return Err(format!("opener bond refund overflow for {opener}"));
             }
@@ -440,6 +454,13 @@ pub(crate) fn finalize_missed_challenges(
                 result.slashed_bond,
                 "missed challenge",
             )?;
+            for (sib_opener, sib_bond) in sibling_refunds {
+                state
+                    .try_add_balance(&sib_opener, sib_bond)
+                    .map_err(|error| {
+                        format!("sibling opener bond refund overflow for {sib_opener}: {error}")
+                    })?;
+            }
         }
         if let Some((opener, bond)) = opener_refund {
             state
@@ -768,6 +789,101 @@ mod tests {
         assert_eq!(
             issued_valid, 1,
             "valid consented shard_bytes matching manifest must issue a retrieval challenge"
+        );
+    }
+
+    #[test]
+    fn slashing_a_deal_resolves_sibling_challenges_and_refunds_every_opener_bond() {
+        use crate::domain::storage_deal::{ChallengeOutcome, DealStatus};
+        let mut state = AccountState::new();
+        let owner = Address::from([0x10; 32]);
+        let operator = Address::from([0x11; 32]);
+        let opener_a = Address::from([0x21; 32]);
+        let opener_b = Address::from([0x22; 32]);
+        let bond = 500u64;
+        state.add_balance(&operator, 10_000);
+        state.add_balance(&opener_a, bond);
+        state.add_balance(&opener_b, bond);
+
+        let bytes = vec![0x42u8; 8_192];
+        let shard = ShardRef::from_bytes(0, &bytes);
+        let shard_id = shard.shard_id;
+        let manifest = ContentManifest::from_shards(vec![shard])
+            .unwrap()
+            .with_owner(owner);
+        state.storage_registry.register_manifest(&manifest);
+        let envelope = bud_proof::ProofEnvelope {
+            proof_format_version: 1,
+            backend: "test-backend".to_string(),
+            p3_version: "0.6".to_string(),
+            fri_params_id: "test-fri".to_string(),
+            public_inputs_hash: [0x42u8; 32],
+            proof_bytes: vec![0xABu8; 96],
+            degree_bits: 8,
+        };
+        let proof = bincode::serialize(&envelope).expect("envelope");
+        let deal_id = state
+            .storage_registry
+            .open_deal(
+                1,
+                &manifest,
+                shard_id,
+                operator,
+                0,
+                1,
+                500,
+                StorageEconomicsParams {
+                    operator_bond: STORAGE_MIN_OPERATOR_BOND,
+                    fee_per_byte_epoch: 1,
+                },
+                &StorageDomainParams::default(),
+                Some(proof),
+                Some([0x42; 32]),
+            )
+            .expect("open deal");
+        state.storage_registry.set_deal_payer(deal_id, owner);
+        // Debit both openers' bonds to mirror on-chain challenge escrow.
+        state.get_or_create(&opener_a).balance -= bond;
+        state.get_or_create(&opener_b).balance -= bond;
+        let c1 = state
+            .storage_registry
+            .open_challenge(deal_id, 0, 16, 10, 20, opener_a, bond)
+            .expect("open c1");
+        let c2 = state
+            .storage_registry
+            .open_challenge(deal_id, 0, 16, 15, 40, opener_b, bond)
+            .expect("open c2");
+
+        state.epoch_index = 25;
+        let _ = accrue_operator_rewards(&mut state, 25);
+        let total_before = state.total_bud_committed() + u128::from(state.burned_total);
+        let (finalized, slashed) = finalize_missed_challenges(&mut state, 25).expect("finalize");
+        assert_eq!(finalized, 1);
+        assert_eq!(slashed, STORAGE_MIN_OPERATOR_BOND);
+        assert_eq!(
+            state.storage_registry.get_deal(deal_id).unwrap().status,
+            DealStatus::Slashed
+        );
+        assert_eq!(
+            state.storage_registry.get_result(c1).unwrap().outcome,
+            ChallengeOutcome::Missed
+        );
+        let c2_res = state
+            .storage_registry
+            .get_result(c2)
+            .expect("sibling challenge must be resolved on slash");
+        assert_eq!(c2_res.outcome, ChallengeOutcome::DealSlashed);
+        assert_eq!(c2_res.slashed_bond, 0);
+        assert_eq!(state.get_balance(&opener_a), bond);
+        assert_eq!(
+            state.get_balance(&opener_b),
+            bond,
+            "sibling opener bond must be refunded, never stranded"
+        );
+        let total_after = state.total_bud_committed() + u128::from(state.burned_total);
+        assert_eq!(
+            total_after, total_before,
+            "slash + sibling opener refunds must preserve total committed + burned supply"
         );
     }
 }
