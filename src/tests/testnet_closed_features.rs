@@ -76,11 +76,14 @@ fn ai_layer_is_closed_on_testnet() {
 }
 
 #[test]
-fn app_binding_is_closed_on_testnet() {
-    assert!(!app_binding_enabled_for_chain_id(
+fn app_binding_is_open_on_testnet() {
+    assert!(app_binding_enabled_for_chain_id(
         Network::Testnet.chain_id().value()
     ));
     assert!(app_binding_enabled_for_chain_id(
         Network::Devnet.chain_id().value()
+    ));
+    assert!(!app_binding_enabled_for_chain_id(
+        Network::Mainnet.chain_id().value()
     ));
 }
