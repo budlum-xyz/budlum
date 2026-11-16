@@ -47,7 +47,7 @@ use super::merkle::{LEAF_PREFIX, NODE_PREFIX};
 pub const fn chain_rules() -> agg_tick::TickRules<'static> {
     agg_tick::TickRules {
         object: object::ObjectRules {
-            address_tag: crate::account_abstraction::quantum_account::ADDRESS_DOMAIN_V2,
+            address_tag: crate::crypto::primitives::ADDRESS_DOMAIN_V2,
             context: crate::crypto::ctx::TX_V5,
         },
         tag_claim: TAG_CLAIM,
