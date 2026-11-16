@@ -310,6 +310,65 @@ fn verify_inference_and_forged_swrite_digest_refused() {
     assert!(prove_and_verify(&vm, &forged, &program).is_err());
 }
 
+/// A storage write, other work, another storage write. The second write
+/// chains from the accumulator the first one left, carried across the rows
+/// between them. The witness used to fill that carry after its row loop, so
+/// the second write hashed from zero: the prover returned a proof and its own
+/// verifier refused it. Consecutive writes never showed it.
+#[test]
+fn storage_writes_with_work_between_them_are_provable() {
+    let program = vec![
+        inst(Opcode::Load, 1, 0, 0, 5),
+        inst(Opcode::SWrite, 0, 1, 0, 0),
+        inst(Opcode::Add, 2, 1, 1, 0),
+        inst(Opcode::SWrite, 0, 2, 0, 1),
+        inst(Opcode::Mul, 3, 2, 2, 0),
+        inst(Opcode::Mul, 3, 3, 2, 0),
+        inst(Opcode::SWrite, 0, 3, 0, 2),
+        inst(Opcode::Halt, 0, 0, 0, 0),
+    ];
+    let mut vm = Vm::new(1024);
+    let receipt = vm.run_receipt(&program);
+    assert!(receipt.success);
+    assert_eq!(vm.state_writes, vec![(0, 5), (1, 10), (2, 1000)]);
+    let mut pi = honest_inputs(&vm, &program, &receipt.events);
+    pi.state_writes_digest = receipt.state_writes_digest;
+    pi.final_state_root = receipt.state_writes_digest;
+    must_ok(
+        prove_and_verify(&vm, &pi, &program),
+        "writes with work between them verify",
+    );
+
+    // The digest that verifies is the chain over all three writes: the one
+    // of the first write alone, or of the writes in another order, is not.
+    for other in [
+        vec![
+            inst(Opcode::Load, 1, 0, 0, 5),
+            inst(Opcode::SWrite, 0, 1, 0, 0),
+            inst(Opcode::Halt, 0, 0, 0, 0),
+        ],
+        vec![
+            inst(Opcode::Load, 1, 0, 0, 5),
+            inst(Opcode::Add, 2, 1, 1, 0),
+            inst(Opcode::SWrite, 0, 2, 0, 1),
+            inst(Opcode::SWrite, 0, 1, 0, 0),
+            inst(Opcode::Halt, 0, 0, 0, 0),
+        ],
+    ] {
+        let mut other_vm = Vm::new(1024);
+        let other_receipt = other_vm.run_receipt(&other);
+        assert!(other_receipt.success);
+        assert_ne!(
+            other_receipt.state_writes_digest,
+            receipt.state_writes_digest
+        );
+        let mut forged = pi.clone();
+        forged.state_writes_digest = other_receipt.state_writes_digest;
+        forged.final_state_root = other_receipt.state_writes_digest;
+        assert!(prove_and_verify(&vm, &forged, &program).is_err());
+    }
+}
+
 #[test]
 fn memory_event_chain_id_and_zk_mode_bound() {
     let (program, vm, events) = logging_run();
