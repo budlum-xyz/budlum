@@ -58,25 +58,16 @@ contract Receiver is BudlumPaymentReceiver {
     }
 }
 
-/// A second account that fulfils through the executor: the per-account guard
-/// must let it through even after the test contract has used its own slot.
+/// A second origin-chain account used to prove that only the account named by
+/// the finalized award permit can call the executor.
 contract Filler {
-    function bind(AppBindingExecutor executor, bytes32 solver) external {
-        executor.registerSolverKey(solver);
-    }
-
     function run(AppBindingExecutor executor, bytes32 intent, address target) external {
         executor.execute(intent, target, abi.encodeCall(Counter.bump, ()), hex"01");
     }
 }
 
-/// An account that binds somebody else's solver key and fulfils with its own
-/// harmless call: the griefing move the per-account slot has to absorb.
+/// An unawarded account attempting to pre-empt the exact authorized call.
 contract Attacker {
-    function bind(AppBindingExecutor executor, bytes32 solver) external {
-        executor.registerSolverKey(solver);
-    }
-
     function run(AppBindingExecutor executor, bytes32 intent, address target) external {
         executor.execute(intent, target, abi.encodeCall(Counter.bump, ()), hex"01");
     }
@@ -91,7 +82,22 @@ contract AppBindingTest is Harness {
     function setUp() public {
         executor = new AppBindingExecutor();
         counter = new Counter();
-        executor.registerSolverKey(SOLVER);
+    }
+
+    function _authorize(
+        bytes32 intent,
+        address solver,
+        bytes32 budlumSolver,
+        address target,
+        bytes memory data,
+        bytes memory beneficiary,
+        uint64 value
+    ) internal {
+        executor.authorizeIntent(intent, solver, budlumSolver, target, keccak256(data), value, keccak256(beneficiary));
+    }
+
+    function _authorizeSelf(bytes32 intent, address target, bytes memory data) internal {
+        _authorize(intent, address(this), SOLVER, target, data, hex"01", 0);
     }
 
     /// Same values as `event_payload_hashes_match_the_solidity_known_answers`
@@ -110,9 +116,7 @@ contract AppBindingTest is Harness {
             bytes32(uint256(0x5555555555555555555555555555555555555555555555555555555555555555))
         );
         assertEq(
-            fulfilledHash,
-            0x6adf4090bb15ec7ee9af78d320f48e22c0eb09b68dd2a3a4ea36db9eeb0c5097,
-            "fulfilled payload hash"
+            fulfilledHash, 0x6adf4090bb15ec7ee9af78d320f48e22c0eb09b68dd2a3a4ea36db9eeb0c5097, "fulfilled payload hash"
         );
         ClaimingApp app = new ClaimingApp();
         assertEq(
@@ -127,110 +131,109 @@ contract AppBindingTest is Harness {
 
     function test_an_intent_is_fulfilled_once() public {
         bytes32 intent = keccak256("intent");
-        executor.execute(intent, address(counter), abi.encodeCall(Counter.bump, ()), hex"01");
+        bytes memory data = abi.encodeCall(Counter.bump, ());
+        _authorizeSelf(intent, address(counter), data);
+        executor.execute(intent, address(counter), data, hex"01");
         assertEq(counter.count(), 1, "the call was made");
-        assertTrue(executor.fulfilled(intent, address(this)), "the caller's own slot is used");
+        assertTrue(executor.fulfilled(intent), "the one intent slot is used");
         vm.expectPartialRevert(AppBindingExecutor.AlreadyFulfilled.selector);
-        executor.execute(intent, address(counter), abi.encodeCall(Counter.bump, ()), hex"01");
+        executor.execute(intent, address(counter), data, hex"01");
     }
 
-    /// The once-per-intent guard is per executing account: a second account
-    /// cannot burn the id, and cannot be blocked by the first account either.
-    function test_the_once_per_intent_guard_is_per_account() public {
+    /// A random account cannot perform or pre-empt the exact call that the
+    /// finalized award assigned to another solver.
+    function test_only_the_authorized_solver_can_execute_the_intent() public {
         bytes32 intent = keccak256("contested-intent");
-        executor.execute(intent, address(counter), abi.encodeCall(Counter.bump, ()), hex"01");
-        assertTrue(executor.fulfilled(intent, address(this)), "the caller's slot is used");
-        assertEq(counter.count(), 1, "the call was made");
-
-        // Another account still gets to fulfil the same intent: the first
-        // one cannot burn the id for everyone.
-        Filler filler = new Filler();
-        filler.bind(executor, bytes32(uint256(2)));
-        filler.run(executor, intent, address(counter));
-        assertTrue(executor.fulfilled(intent, address(filler)), "the other account's slot was free");
-        assertEq(counter.count(), 2, "the second call was made too");
-    }
-
-    /// Binding somebody else's Budlum key no longer spends that solver's slot.
-    ///
-    /// `registerSolverKey` is permissionless and proves nothing, so an attacker
-    /// could bind the awarded solver's address and `execute` the intent with its
-    /// own target: the awarded solver then reverted `AlreadyFulfilled` forever,
-    /// could never emit the event the settlement door requires, and the
-    /// deadline handed anyone the liveness slash of its bond. The slot is the
-    /// executing account's now, so the griefing move buys nothing.
-    function test_binding_another_solvers_key_cannot_burn_its_slot() public {
-        bytes32 intent = keccak256("griefed-intent");
+        bytes memory data = abi.encodeCall(Counter.bump, ());
+        _authorizeSelf(intent, address(counter), data);
         Attacker attacker = new Attacker();
 
-        // The attacker names the awarded solver and fulfils with a harmless call.
-        attacker.bind(executor, SOLVER);
+        vm.expectPartialRevert(AppBindingExecutor.NotAwardedSolver.selector);
         attacker.run(executor, intent, address(counter));
-        assertEq(counter.count(), 1, "the attacker's call went through");
+        assertEq(counter.count(), 0, "the unawarded account made no call");
+        assertTrue(!executor.fulfilled(intent), "the attacker did not burn the intent");
 
-        // The real solver is not blocked: the intent is theirs to fulfil, and
-        // their event still carries their own key.
-        executor.execute(intent, address(counter), abi.encodeCall(Counter.bump, ()), hex"01");
-        assertEq(counter.count(), 2, "the awarded solver still fulfils the intent");
-        assertTrue(executor.fulfilled(intent, address(this)), "the solver's own slot is used");
-        assertTrue(executor.fulfilled(intent, address(attacker)), "and the attacker only spent its own");
+        executor.execute(intent, address(counter), data, hex"01");
+        assertEq(counter.count(), 1, "the awarded solver still fulfils");
+        assertTrue(executor.fulfilled(intent), "the intent is now consumed");
     }
 
-    /// A fulfilment names the solver the executing account bound, never one the
-    /// caller chose for this call. The executor cannot authenticate a Budlum
-    /// address, so it must not accept one it was merely told about.
-    function test_an_unbound_account_cannot_fulfil() public {
-        Filler stranger = new Filler();
-        vm.expectPartialRevert(AppBindingExecutor.SolverKeyNotBound.selector);
-        stranger.run(executor, keccak256("unbound"), address(counter));
+    function test_an_intent_without_a_finalized_award_permit_cannot_execute() public {
+        vm.expectPartialRevert(AppBindingExecutor.IntentNotAuthorized.selector);
+        executor.execute(keccak256("unbound"), address(counter), abi.encodeCall(Counter.bump, ()), hex"01");
         assertEq(counter.count(), 0, "no call was made");
     }
 
-    /// The binding is immutable, so one account cannot re-point its
-    /// fulfilments at another solver's address after the fact.
-    function test_a_solver_key_cannot_be_repointed() public {
-        assertEq(executor.solverKey(address(this)), SOLVER, "the binding is in place");
-        vm.expectPartialRevert(AppBindingExecutor.SolverKeyAlreadyBound.selector);
-        executor.registerSolverKey(bytes32(uint256(3)));
-        assertEq(executor.solverKey(address(this)), SOLVER, "the binding did not move");
+    function test_only_the_deployment_authority_can_mirror_an_award() public {
+        bytes32 intent = keccak256("foreign-authority");
+        bytes memory data = abi.encodeCall(Counter.bump, ());
+        vm.expectPartialRevert(AppBindingExecutor.NotAuthority.selector);
+        vm.prank(address(0xBEEF));
+        executor.authorizeIntent(
+            intent, address(this), SOLVER, address(counter), keccak256(data), 0, keccak256(hex"01")
+        );
+        assertTrue(!executor.fulfilled(intent), "an unauthorized permit changed nothing");
     }
 
-    /// A zero binding would name no solver at all, so it is refused rather than
-    /// treated as an unbound account that later cannot be bound.
-    function test_a_zero_solver_key_is_refused() public {
-        Filler filler = new Filler();
-        vm.expectPartialRevert(AppBindingExecutor.SolverKeyIsZero.selector);
-        filler.bind(executor, bytes32(0));
+    function test_an_award_permit_is_immutable() public {
+        bytes32 intent = keccak256("immutable-award");
+        bytes memory data = abi.encodeCall(Counter.bump, ());
+        _authorizeSelf(intent, address(counter), data);
+        Filler replacement = new Filler();
+        vm.expectPartialRevert(AppBindingExecutor.AlreadyAuthorized.selector);
+        _authorize(intent, address(replacement), bytes32(uint256(2)), address(counter), data, hex"01", 0);
     }
 
-    /// The payload hash the settlement door checks commits to the bound
-    /// solver, and the slot `execute` spends is the executing account's.
-    function test_the_payload_hash_commits_to_the_bound_solver() public {
+    function test_the_exact_call_is_bound_by_the_award_permit() public {
+        bytes32 intent = keccak256("exact-call");
+        bytes memory data = abi.encodeCall(Counter.bump, ());
+        Counter other = new Counter();
+        _authorizeSelf(intent, address(counter), data);
+
+        vm.expectPartialRevert(AppBindingExecutor.AuthorizationMismatch.selector);
+        executor.execute(intent, address(other), data, hex"01");
+        vm.expectPartialRevert(AppBindingExecutor.AuthorizationMismatch.selector);
+        executor.execute(intent, address(counter), abi.encodeCall(Counter.fail, ()), hex"01");
+        vm.expectPartialRevert(AppBindingExecutor.AuthorizationMismatch.selector);
+        executor.execute(intent, address(counter), data, hex"02");
+        vm.deal(address(this), 1);
+        vm.expectPartialRevert(AppBindingExecutor.AuthorizationMismatch.selector);
+        executor.execute{value: 1}(intent, address(counter), data, hex"01");
+        assertEq(counter.count(), 0, "a mismatched permit made no call");
+        assertEq(other.count(), 0, "a mismatched target made no call");
+        assertTrue(!executor.fulfilled(intent), "a mismatch did not consume the intent");
+    }
+
+    /// The payload hash checked by settlement commits to the Budlum solver
+    /// rooted in the authority's immutable intent permit.
+    function test_the_payload_hash_commits_to_the_authorized_solver() public {
         bytes32 intent = keccak256("bound-solver-intent");
-        bytes32 callHash = keccak256(abi.encodeCall(Counter.bump, ()));
+        bytes memory data = abi.encodeCall(Counter.bump, ());
+        bytes32 callHash = keccak256(data);
         assertTrue(
             executor.fulfilledPayloadHash(intent, address(counter), callHash, 0, hex"01", SOLVER)
-                != executor.fulfilledPayloadHash(
-                    intent, address(counter), callHash, 0, hex"01", bytes32(uint256(2))
-                ),
+                != executor.fulfilledPayloadHash(intent, address(counter), callHash, 0, hex"01", bytes32(uint256(2))),
             "the payload hash commits to the solver"
         );
-        executor.execute(intent, address(counter), abi.encodeCall(Counter.bump, ()), hex"01");
-        assertTrue(executor.fulfilled(intent, address(this)), "the executor's own slot is the one used");
-        assertEq(executor.solverKey(address(this)), SOLVER, "and the event names the bound solver");
+        _authorizeSelf(intent, address(counter), data);
+        executor.execute(intent, address(counter), data, hex"01");
+        assertTrue(executor.fulfilled(intent), "the authorized intent slot is used");
     }
 
     function test_a_call_to_an_address_with_no_code_is_refused() public {
+        bytes32 intent = keccak256("no-code");
+        _authorizeSelf(intent, address(0xdead), hex"");
         vm.expectPartialRevert(AppBindingExecutor.CallFailed.selector);
-        executor.execute(keccak256("no-code"), address(0xdead), hex"", hex"01");
+        executor.execute(intent, address(0xdead), hex"", hex"01");
     }
 
     function test_a_failed_call_emits_nothing_and_reverts() public {
+        bytes32 intent = keccak256("intent");
+        bytes memory data = abi.encodeCall(Counter.fail, ());
+        _authorizeSelf(intent, address(counter), data);
         vm.expectPartialRevert(AppBindingExecutor.CallFailed.selector);
-        executor.execute(
-            keccak256("intent"), address(counter), abi.encodeCall(Counter.fail, ()), hex"01"
-        );
-        assertTrue(!executor.fulfilled(keccak256("intent"), address(this)), "not marked fulfilled");
+        executor.execute(intent, address(counter), data, hex"01");
+        assertTrue(!executor.fulfilled(intent), "not marked fulfilled");
     }
 
     function _proof(Receiver receiver, FinalityStub finality, bytes32 appId)

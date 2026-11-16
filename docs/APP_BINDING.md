@@ -104,12 +104,19 @@ A person who holds no coin of the origin network asks for a call there:
 - The owner freezes the cheapest offer (ties go to the earliest bid). The
   award must leave at least 8 blocks before expiry, and no new bid is accepted
   after it. A solver should wait for the award to be finalized before acting.
-- The awarded solver makes the call through the domain's executor contract and
-  submits its anchored fulfilment event. The executor takes no solver argument:
-  the origin-chain account binds its Budlum solver address once with
-  `registerSolverKey`, the binding is immutable, and every fulfilment it emits
-  names that address. An unbound account cannot fulfil, and one account cannot
-  name another solver's key.
+- After the award is final, the domain operator mirrors it into the snapshotted
+  executor with `authorizeIntent`. That one-use permit binds the awarded
+  origin-chain account, its Budlum solver address, target, calldata hash,
+  value, and beneficiary hash. The permit is immutable and only the executor's
+  deployment authority may create it. The authority is the domain operator's
+  deployer account; it must derive the permit from a finalized `Award`, set
+  `target` to the registered `origin_app`, and verify the Budlum solver address
+  and the solver's origin-chain account before signing the origin transaction.
+  A permit event is an audit record, not a replacement for Budlum finality.
+- The awarded account then makes that exact call through the executor and
+  submits its anchored fulfilment event. A random account cannot self-claim a
+  solver key, change a call field, execute the intent, or consume its global
+  one-use slot before the awarded solver.
 - On a proven fulfilment the solver receives `cost + fee`, the application
   receives `service_price`, and the rest returns to the person.
 - After the deadline anyone may trigger a refund: the escrow returns, and only
