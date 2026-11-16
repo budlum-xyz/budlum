@@ -8,4 +8,6 @@ mod flow;
 #[cfg(feature = "wallet-ml-dsa")]
 mod node;
 #[cfg(feature = "wallet-ml-dsa")]
+mod programs;
+#[cfg(feature = "wallet-ml-dsa")]
 mod support;

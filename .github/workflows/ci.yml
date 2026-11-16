@@ -2638,6 +2638,12 @@ jobs:
       # length differs from the scheme table.
       - name: Aggregation baseline (witness share of a block)
         run: cargo bench --bench agg_baseline
+      # Aggregation Phase 2 measurement: the reference programs (verify_sig,
+      # AggTick) run on the virtual machine; steps per stage and per tick of
+      # 1 and 16 objects. The harness exits 2 without numbers when a run
+      # stops or publishes another tick_pi than the node computes.
+      - name: Aggregation tick steps (reference programs on the VM)
+        run: cargo bench --bench agg_tick_steps
 
   docker-security:
     # Dockerfile static lint (hadolint) + repo fs trivy scan.
