@@ -26,13 +26,13 @@ For each row, locate the current production path and file:line, choose or cite a
 | BLG-018 | Section 14.3, L2608 | Critical | WP-12 | Unknown / unverified | Not recorded | Not collected |
 | BLG-019 | Section 14.3, L2609 | Critical | WP-17 | Unknown / unverified | Not recorded | Not collected |
 | BLG-020 | Section 14.3, L2610 | Critical | WP-17 | Fixed in tree. Selection runs on a disposable candidate, and the block path demands the exact account nonce before any arm runs. | tests::regression_chain::producer_executes_on_a_disposable_candidate_state; tests::regression_chain::a_block_transaction_must_carry_the_exact_account_nonce | src/chain/blockchain.rs:4618; src/execution/executor.rs:4672 |
-| BLG-021 | Section 14.3, L2611 | Critical | WP-17 | Unknown / unverified | Not recorded | Not collected |
+| BLG-021 | Section 14.3, L2611 | Critical | WP-17 | Fixed in tree. A role bond is additive and settled inside the block, and the out-of-block RPC bond doors are refused. | tests::regression_chain::role_bond_is_additive_and_rpc_doors_are_refused | src/core/account.rs:2927 |
 | BLG-022 | Section 14.3, L2612 | Medium | WP-11 | Fixed in tree. Closed-form walk, no loop. | light_client::tests::next_checkpoint_height_is_closed_form; tests::regression_ops_crypto::next_checkpoint_height_terminates_at_the_u64_edge (both green, local run 2026-11-16) | src/light_client/mod.rs:689 |
 | BLG-023 | Section 14.3, L2613 | Medium | WP-17 | Unknown / unverified | Not recorded | Not collected |
 | BLG-024 | Section 14.3, L2614 | Low | WP-44 | Fixed in this round. A zero denominator requires every authority instead of calling div_ceil(0). | domain::finality_adapter::tests::a_poa_adapter_with_a_zero_denominator_requires_every_authority (green, local run 2026-11-16) | src/domain/finality_adapter.rs:815 |
 | BLG-025 | Section 14.3, L2615 | Low | WP-45 | Unknown / unverified | Not recorded | Not collected |
 | BLG-026 | Section 14.3, L2616 | Medium | WP-39 | Unknown / unverified | Not recorded | Not collected |
-| BLG-027 | Section 14.3, L2617 | High | WP-12 | Unknown / unverified | Not recorded | Not collected |
+| BLG-027 | Section 14.3, L2617 | High | WP-12 | Invalid as reported. A validator is bound to its registered ML-DSA-65 consensus key, and a V5 wallet address is a user account, not a validator identity. The binding is enforced on every validator transaction. | core::account::tests::a_v7_validator_transaction_verifies_from_its_ed25519_address; core::account::tests::a_self_signed_key_registration_before_registration_is_refused | src/core/account.rs:2079 |
 | BLG-028 | Section 14.3, L2618 | High | WP-17 | Unknown / unverified | Not recorded | Not collected |
 | BLG-029 | Section 14.3, L2619 | High | WP-61 | Unknown / unverified | Not recorded | Not collected |
 | BLG-030 | Section 14.3, L2620 | Critical | WP-41, WP-61 | Unknown / unverified | Not recorded | Not collected |
@@ -124,7 +124,7 @@ For each row, locate the current production path and file:line, choose or cite a
 | BLG-116 | Section 14.3, L2706 | Critical | WP-44 | Unknown / unverified | Not recorded | Not collected |
 | BLG-117 | Section 14.3, L2707 | Critical | WP-39 | Unknown / unverified | Not recorded | Not collected |
 | BLG-118 | Section 14.3, L2708 | Critical | WP-17 | Unknown / unverified | Not recorded | Not collected |
-| BLG-119 | Section 14.3, L2709 | Critical | WP-17 | Unknown / unverified | Not recorded | Not collected |
+| BLG-119 | Section 14.3, L2709 | Critical | WP-17 | Fixed in tree. A full unstake cannot escape the queue, and a slash sweeps every other role the account holds. | core::account::tests::slash_validator_counts_cross_role_sweep_in_burned_total | src/core/account.rs:2981; src/registry/permissionless.rs:938 |
 | BLG-120 | Section 14.3, L2710 | High | WP-44 | Unknown / unverified | Not recorded | Not collected |
 | BLG-121 | Section 14.3, L2711 | High | WP-40 | Unknown / unverified | Not recorded | Not collected |
 | BLG-122 | Section 14.3, L2712 | High | WP-07 | Unknown / unverified | Not recorded | Not collected |
