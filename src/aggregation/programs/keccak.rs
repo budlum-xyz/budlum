@@ -316,15 +316,28 @@ impl Keccak {
         }
     }
 
-    /// The 24 rounds. Registers: 1 to 10 the column parities, then the
-    /// work of rho and chi; 11 to 20 the theta effect; 21 and 22 the
-    /// constants of the rotation by one; 23 to 27 scratch; 28 the pointer
-    /// to the round constant; 29 its end.
+    /// The 24 rounds.
     fn emit_permutation(&self, asm: &mut Asm) {
+        self.emit_rounds(asm, 0, 24);
+    }
+
+    /// `count` rounds of the permutation in line, from round `first` on.
+    /// Registers: 1 to 10 the column parities, then the work of rho and
+    /// chi; 11 to 20 the theta effect; 21 and 22 the constants of the
+    /// rotation by one; 23 to 27 scratch; 28 the pointer to the round
+    /// constant; 29 its end.
+    ///
+    /// The rounds are exposed for the tests: one round is a run short
+    /// enough for one proof of the machine, the whole permutation is not.
+    pub fn emit_rounds(&self, asm: &mut Asm, first: u64, count: u64) {
         let pointer = R[28];
         let end = R[29];
-        asm.li(pointer, Asm::address(self.constants));
-        asm.li(end, Asm::address(self.constants.saturating_add(48)));
+        let start = self.constants.saturating_add(first.saturating_mul(2));
+        asm.li(pointer, Asm::address(start));
+        asm.li(
+            end,
+            Asm::address(start.saturating_add(count.saturating_mul(2))),
+        );
         let top = asm.here();
         self.emit_theta(asm);
         self.emit_rho_pi(asm);
