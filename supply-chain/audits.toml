@@ -67,6 +67,12 @@ criteria = "safe-to-deploy"
 version = "1.1.10"
 notes = "delta audit against this tree's audited 1.1.9 (cargo vet diff --mode=local, 27 files): the cloudflare_zlib C-backend feature is dropped, the backend set is restructured (runtime_detection feature added) and miniz_oxide moves to 0.9; io traits move std -> core/alloc. No unsafe, network or build-script additions. This workspace pins default-features=false + rust_backend, so the shipped path stays pure-Rust miniz_oxide."
 
+[[audits.flate2]]
+who = "Budlum Security <security@budlum.xyz>"
+criteria = "safe-to-deploy"
+delta = "1.1.10 -> 1.1.11"
+notes = "delta audit against this tree's audited 1.1.10 (diff of the two published sources, 24 files): the miniz_oxide backend now resets with FullReset so a reused decoder cannot leak the previous stream's dictionary, zio.rs reports partial writes and read errors instead of swallowing them, and five tests are added. The only new unsafe is in src/ffi/c.rs (C backend, checks the inflateReset2 return code) and in a test. No build script, network, filesystem or process additions. This workspace pins default-features=false + rust_backend, so the shipped path stays pure-Rust miniz_oxide."
+
 [[audits.g2gen]]
 who = "Budlum Security <security@budlum.xyz>"
 criteria = "safe-to-deploy"
@@ -222,3 +228,15 @@ who = "Budlum Security <security@budlum.xyz>"
 criteria = "safe-to-deploy"
 version = "2.1.2+zstd.1.5.7"
 notes = "vendored libzstd 1.5.7 C FFI bindings; reviewed 2.1.2+zstd.1.5.7 build.rs and generated bindings: compiles vendored C sources via cc with no network downloads or external process fetches"
+
+[[audits.pem]]
+who = "Budlum Security <security@budlum.xyz>"
+criteria = "safe-to-run"
+version = "4.0.0"
+notes = "reviewed full 4.0.0 source (src/, 1376 lines): PEM encode/decode over base64; unsafe_code is denied crate-wide, no build script, no filesystem, network, process or environment access. Reached only through rcgen, a dev-dependency that generates throwaway TLS identities in tests."
+
+[[audits.rcgen]]
+who = "Budlum Security <security@budlum.xyz>"
+criteria = "safe-to-run"
+version = "0.14.10"
+notes = "reviewed 0.14.10 source (src/, 5742 lines): X.509 certificate generation; #![forbid(unsafe_code)], no build script, no filesystem, process or socket use (std::net appears only as the IpAddr type of subject alternative names). Dev-dependency: generates throwaway self-signed TLS identities in src/rpc/tls.rs and src/crypto/tls.rs tests; nothing shipped links it."
