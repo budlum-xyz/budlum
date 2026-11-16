@@ -37,7 +37,7 @@ flate2 = { version = "1", default-features = false, features = ["rust_backend"] 
 # G1 payload AEAD (T11): content bytes encrypted before A1 pack.
 chacha20poly1305 = { version = "0.11", default-features = false, features = ["alloc"] }
 # HPKE RFC 9180 with KEM 0x647a (X-Wing), HKDF-SHA256, ChaCha20-Poly1305.
-hpke = { version = "=0.15.0", default-features = false, features = ["alloc", "getrandom", "chacha", "mlkem", "x25519", "hkdfsha2"] }
+hpke = { version = "=0.15.1", default-features = false, features = ["alloc", "getrandom", "chacha", "mlkem", "x25519", "hkdfsha2"] }
 # ISO QR encode for Three optical frames (EC=L, mask pin). MIT/Apache.
 qrcode = { version = "0.14", default-features = false, features = [] }
 # Decode QR modules from our deterministic PNGs (MIT/Apache).
@@ -134,7 +134,7 @@ slh-dsa = { version = "=0.2.0-rc.5", features = ["zeroize"] }
 zeroize = { version = "=1.9.1", features = ["alloc"] }
 # the wallet password is NFKD normalized before it enters the
 # root derivation. No default features: the crate needs no std or table extras.
-unicode-normalization = { version = "=0.1.24", default-features = false }
+unicode-normalization = { version = "=0.1.26", default-features = false }
 # quantum canary puzzles. Classical curves appear only as puzzles whose
 # solution proves a break; none of them is on an acceptance path.
 shake = "=0.1.0"
@@ -148,7 +148,7 @@ jsonrpsee = { version = "0.26", features = ["server", "macros"] }
 # The TLS provider is installed by `crypto::tls` (aws-lc-rs, X25519MLKEM768 only),
 # so reqwest takes the provider-less rustls feature.
 reqwest = { version = "0.12", features = ["json", "rustls-tls-webpki-roots-no-provider"], default-features = false }
-tokio-rustls = { version = "=0.26.4", default-features = false }
+tokio-rustls = { version = "=0.26.6", default-features = false }
 rustls = { version = "=0.23.46", default-features = false, features = ["aws-lc-rs", "prefer-post-quantum", "std"] }
 rand_core = { version = "0.6", features = ["getrandom"] }
 prometheus = "0.14"
