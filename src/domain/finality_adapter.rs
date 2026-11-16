@@ -806,9 +806,19 @@ impl Default for PoAFinalityAdapter {
 
 impl PoAFinalityAdapter {
     /// Number of authority signatures required for finality: ceil(N * num / den).
+    ///
+    /// A zero denominator is a broken configuration, not a quorum of zero: it
+    /// used to reach `div_ceil(0)` and panic inside the finality path. It now
+    /// fails closed by requiring every authority, and the multiplication
+    /// saturates instead of wrapping, so a numerator wide enough to overflow
+    /// cannot lower the bar either.
     pub fn required_signatures(&self, authority_count: usize) -> usize {
-        ((authority_count as u64 * self.quorum_numerator).div_ceil(self.quorum_denominator))
-            as usize
+        if self.quorum_denominator == 0 {
+            return authority_count;
+        }
+        let product = (authority_count as u64).saturating_mul(self.quorum_numerator);
+        let required = product.div_ceil(self.quorum_denominator);
+        usize::try_from(required).unwrap_or(usize::MAX)
     }
 
     /// The composite path: the declared keys must hash to the
@@ -3148,6 +3158,28 @@ mod tests {
         let qc = qc_signed_by(&other, &snapshot, &keys, &[0, 1]);
         let registry = crate::crypto::scheme::SchemeStatusRegistry::genesis();
         assert!(verify_pq_quorum(&registry, &cert, &snapshot, &qc).is_err());
+    }
+
+    /// A zero quorum denominator is a configuration error, and it used to
+    /// reach `div_ceil(0)` and panic inside the finality path. It now fails
+    /// closed: every authority is required, and nothing panics.
+    #[test]
+    fn a_poa_adapter_with_a_zero_denominator_requires_every_authority() {
+        let broken = PoAFinalityAdapter {
+            quorum_numerator: 2,
+            quorum_denominator: 0,
+        };
+        for count in [0usize, 1, 3, 7] {
+            assert_eq!(broken.required_signatures(count), count);
+        }
+        let wide = PoAFinalityAdapter {
+            quorum_numerator: u64::MAX,
+            quorum_denominator: 3,
+        };
+        assert!(wide.required_signatures(usize::MAX) >= usize::MAX / 3);
+        let honest = PoAFinalityAdapter::default();
+        assert_eq!(honest.required_signatures(4), 3);
+        assert_eq!(honest.required_signatures(0), 0);
     }
 
     #[test]
