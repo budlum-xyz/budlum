@@ -8,7 +8,7 @@ For closure, record named reproduction test and pre-fix red result (or permanent
 |---|---|---|---|---|---|---|---|
 | BLG-001 | Unknown / unverified | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded |
 | BLG-002 | Unknown / unverified | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded |
-| BLG-003 | Unknown / unverified | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded |
+| BLG-003 | Fixed in tree. Issuance is checked as one total: allocations, distribution, validator stake and the reward pool, with the stake and pool required to fit inside the ecosystem share. | tests::regression_chain::genesis_issuance_is_checked_as_one_total | src/chain/genesis.rs:481 | fb4c7b596da3af0b2fc534e14a546d0c5a9ab306 | queued at write time | Not needed, the feature is on and its test is green | Self review of the live source, not an independent reviewer |
 | BLG-004 | Unknown / unverified | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded |
 | BLG-005 | Unknown / unverified | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded |
 | BLG-006 | Unknown / unverified | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded |
@@ -58,7 +58,7 @@ For closure, record named reproduction test and pre-fix red result (or permanent
 | BLG-050 | Unknown / unverified | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded |
 | BLG-051 | Unknown / unverified | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded |
 | BLG-052 | Unknown / unverified | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded |
-| BLG-053 | Unknown / unverified | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded |
+| BLG-053 | Fixed in tree. A task cannot be completed twice: the receipt check and the retired-id set both refuse it. | settlement::proof_market tests | src/settlement/proof_market.rs:1032 | fb4c7b596da3af0b2fc534e14a546d0c5a9ab306 | queued at write time | Not needed, the feature is on and its test is green | Self review of the live source, not an independent reviewer |
 | BLG-054 | Unknown / unverified | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded |
 | BLG-055 | Unknown / unverified | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded |
 | BLG-056 | Fixed in tree. The bridge enforces `require_slashable` for every external domain it admits. | cross_domain::external::domain_bridge::tests::require_slashable_is_enforced_at_the_bridge | src/cross_domain/external/domain_bridge.rs:163 | e3d384085f0aa506ff37b84fc8d7a3656053256a | 43821954493 (queued at write time) | Not needed, the feature is on and its test is green | Self review of the live source, not an independent reviewer |
@@ -209,7 +209,7 @@ For closure, record named reproduction test and pre-fix red result (or permanent
 | BLG-201 | Unknown / unverified | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded |
 | BLG-202 | Unknown / unverified | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded |
 | BLG-203 | Fixed in tree. The proof length, element width, zero root and high index bits are all refused. | consensus::qc tests (green in the lib run that carries this row) | src/consensus/qc.rs:691 | 36959d6b54f3783cfd997d93b93449dd0c159ff0 | 43811629332 (queued at write time) | Not needed, the feature is on and the test is green | Self review of the live source, not an independent reviewer |
-| BLG-204 | Unknown / unverified | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded |
+| BLG-204 | Fixed in tree. The reward is escrowed before the task exists, the deadline span is bounded, and the payout total is computed before the receipt changes state. | settlement::proof_market tests | src/settlement/proof_market.rs:1055,1160 | fb4c7b596da3af0b2fc534e14a546d0c5a9ab306 | queued at write time | Not needed, the feature is on and its test is green | Self review of the live source, not an independent reviewer |
 | BLG-205 | Fixed in tree. `readmit` demands an admitted, golden-verified report whose every test passed and whose adapter version matches the record. | cross_domain::external::registry tests: readmit_reopens_a_faulted_domain_but_is_not_an_edit | src/cross_domain/external/registry.rs:355 | e3d384085f0aa506ff37b84fc8d7a3656053256a | 43821954493 (queued at write time) | Not needed, the feature is on and its test is green | Self review of the live source, not an independent reviewer |
 | BLG-206 | Unknown / unverified | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded |
 | BLG-207 | Unknown / unverified | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded |
