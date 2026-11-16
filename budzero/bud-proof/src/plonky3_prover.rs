@@ -525,12 +525,22 @@ pub fn trace_matrix(
         let row_start = i * TRACE_WIDTH;
         let op = step.instruction.opcode as u8;
         // HIGH CWE-345 (2026-08-17): state-write accumulator. Row 0
-        // starts at zero; later rows are filled by the post-loop carry below
-        // (which never overwrites the fresh value an SWrite row wrote into
-        // the following row).
+        // starts at zero. A row after an SWrite row holds the value that
+        // row wrote into it; every other row carries the value of the row
+        // before it, and it has to do so here, before the row is filled: an
+        // SWrite row reads its own accumulator as the input of its gadget.
+        // The carry used to run only after this loop, so an SWrite that
+        // followed any other instruction hashed from zero and the proof did
+        // not verify. The post-loop carry stays for the padding rows.
         if i == 0 {
             for j in 0..8 {
                 values[row_start + COL_STATE_WRITES_0 + j] = Goldilocks::ZERO;
+            }
+        } else if !matches!(trace[i - 1].instruction.opcode, bud_isa::Opcode::SWrite) {
+            let previous = row_start - TRACE_WIDTH;
+            for j in 0..8 {
+                values[row_start + COL_STATE_WRITES_0 + j] =
+                    values[previous + COL_STATE_WRITES_0 + j];
             }
         }
         values[row_start + COL_CLK] = Goldilocks::new(i as u64);
