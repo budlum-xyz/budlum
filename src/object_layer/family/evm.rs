@@ -288,6 +288,10 @@ impl FamilyProfile for EvmFamily {
         expect_len(raw, 20)
     }
 
+    fn home_key_scheme(&self) -> crate::object_layer::tx::HomeKeyScheme {
+        crate::object_layer::tx::HomeKeyScheme::EthereumSecp256k1
+    }
+
     fn display_address(&self, _ctx: &FamilyContext<'_>, raw: &[u8]) -> String {
         match <[u8; 20]>::try_from(raw) {
             Ok(a) => eip55(&a),

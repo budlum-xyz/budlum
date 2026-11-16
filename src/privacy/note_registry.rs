@@ -20,6 +20,11 @@ pub type NoteHash = budlum_note_packing::NoteHash;
 /// At 65536 entries × 32 bytes = 2MB - well within node memory limits.
 pub const MAX_LIVE_COMMITMENTS: usize = 65_536;
 
+/// Maximum live commitments owned by any single account so one funded
+/// depositor cannot saturate `MAX_LIVE_COMMITMENTS` and refuse all other
+/// accounts' deposits.
+pub const MAX_LIVE_COMMITMENTS_PER_OWNER: usize = 1_024;
+
 /// Maximum spent nullifiers before fail-closed rejection.
 /// At 262144 entries × 32 bytes = 8MB - bounded memory for consensus replay protection.
 pub const MAX_SPENT_NULLIFIERS: usize = 262_144;
@@ -148,6 +153,16 @@ impl L1NoteRegistry {
         commitment: NoteHash,
         owner: Address,
     ) -> Result<(), String> {
+        let owner_live = self
+            .note_owners
+            .values()
+            .filter(|recorded| **recorded == owner)
+            .count();
+        if owner_live >= MAX_LIVE_COMMITMENTS_PER_OWNER {
+            return Err(format!(
+                "owner live commitment limit reached ({owner_live}/{MAX_LIVE_COMMITMENTS_PER_OWNER})"
+            ));
+        }
         self.insert_note(commitment)?;
         self.note_owners.insert(hex::encode(commitment), owner);
         Ok(())
@@ -807,5 +822,24 @@ mod h3_tests {
         let c = budlum_note_packing::hash_from_field(77);
         r.spent_commitments.insert(c);
         assert!(!r.is_empty());
+    }
+
+    #[test]
+    fn per_owner_live_note_cap_blocks_single_account_exhaustion() {
+        let mut r = L1NoteRegistry::new();
+        let alice = Address::from([0x11; 32]);
+        let bob = Address::from([0x22; 32]);
+        for i in 0..MAX_LIVE_COMMITMENTS_PER_OWNER {
+            let c = budlum_note_packing::hash_from_field(1000 + i as u64);
+            r.insert_note_for_owner(c, alice).unwrap();
+        }
+        let overflow = budlum_note_packing::hash_from_field(999_999);
+        let err = r.insert_note_for_owner(overflow, alice).unwrap_err();
+        assert!(
+            err.contains("owner live commitment limit reached"),
+            "unexpected error: {err}"
+        );
+        // Another owner can still deposit unaffected.
+        r.insert_note_for_owner(overflow, bob).unwrap();
     }
 }

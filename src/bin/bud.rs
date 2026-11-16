@@ -370,6 +370,11 @@ enum GenesisAction {
         /// A tokenomics genesis has no room for one (fixed supply).
         #[arg(long)]
         fund: Vec<String>,
+        /// An authorized `.bud` marketplace primary seller (hex address);
+        /// repeatable. Omitted keeps the template's placeholder seller, which
+        /// no rehearsal holds a key for.
+        #[arg(long)]
+        bns_primary_seller: Vec<String>,
         /// Where to write the genesis file.
         #[arg(long, required = true)]
         out: std::path::PathBuf,
@@ -2344,6 +2349,7 @@ fn run_genesis_assemble(
     destinations: [&str; 5],
     timestamp_ms: Option<u128>,
     fund: &[String],
+    bns_primary_seller: &[String],
     out: &std::path::Path,
 ) -> Result<(), String> {
     use budlum_core::chain::genesis_ceremony::{
@@ -2392,6 +2398,10 @@ fn run_genesis_assemble(
         allocations: fund
             .iter()
             .map(|entry| parse_fund(entry))
+            .collect::<Result<_, _>>()?,
+        bns_primary_sellers: bns_primary_seller
+            .iter()
+            .map(|entry| parse_address(entry))
             .collect::<Result<_, _>>()?,
     };
     let genesis = assemble(network, inputs)?;
@@ -4132,6 +4142,7 @@ fn main() {
                 burn_reserve,
                 timestamp_ms,
                 fund,
+                bns_primary_seller,
                 out,
             } => run_genesis_assemble(
                 network,
@@ -4139,6 +4150,7 @@ fn main() {
                 [community, liquidity, ecosystem, team, burn_reserve],
                 *timestamp_ms,
                 fund,
+                bns_primary_seller,
                 out,
             ),
         },
@@ -4283,6 +4295,81 @@ fn run_cli_conformance(samples: usize) -> Result<(), String> {
     {
         let _ = live_gw.admit_live_object(&probe_obj, 0);
     }
+
+    // Verify G5 optical upload and view equivalence through the production CLI helpers.
+    let optical_profile = budlum_core::storage::bud3::limits::Profile {
+        id: 0,
+        qr_version: 40,
+        symbol_size: 128,
+        fps: 10,
+        k_max: 16,
+    };
+    let optical_payload = b"budlum g5 optical conformance probe";
+    let optical_candidates: Vec<budlum_core::storage::bud3::placement::Candidate> = (0..2u8)
+        .map(|i| budlum_core::storage::bud3::placement::Candidate {
+            validator: [0x60 + i; 32],
+            account: [0x60 + i; 32],
+            class: budlum_core::storage::bud3::placement::Class::Full,
+            stake: 5_000,
+            free_quota_bytes: u64::MAX,
+            network: None,
+        })
+        .collect();
+    let optical_row = budlum_core::storage::bud3::placement::PlacementRow {
+        n_full: 2,
+        s_full: 6,
+        n_mobile: 0,
+        s_mobile: 0,
+    };
+    let optical_params = budlum_core::cli::bud3_commands::CliUploadParams {
+        uploader: [0x51; 32],
+        signing_chain_id: budlum_core::core::chain_config::Network::Testnet
+            .chain_id()
+            .value(),
+        chunk_size: 128,
+        profile: optical_profile,
+        lifetime_epochs: 20,
+        now_secs: 1,
+    };
+    let (optical_up, _optical_video_commit, optical_tx) =
+        budlum_core::cli::bud3_commands::cli_storage_upload_optical(
+            &optical_params,
+            optical_payload,
+            &optical_row,
+            &optical_candidates,
+        )
+        .map_err(|e| format!("optical upload conformance failed: {e}"))?;
+    let mut optical_registry = budlum_core::storage::bud3::registry::Bud3Registry::default();
+    budlum_core::storage::bud3::tx::apply(
+        &mut optical_registry,
+        optical_params.uploader,
+        optical_tx,
+        1,
+    )
+    .map_err(|e| format!("optical registry apply failed: {e:?}"))?;
+    let optical_selected = bud_codec::select(optical_payload);
+    let optical_object = budlum_core::storage::bud3::bof1::Object::public_coded(
+        optical_selected.codec,
+        optical_selected.payload,
+        optical_payload,
+    )
+    .map_err(|e| format!("optical bof1 encode failed: {e:?}"))?;
+    let optical_seconds = budlum_core::storage::bud3::qr::render_optical_seconds(
+        &optical_object,
+        &optical_profile,
+        2,
+    )
+    .map_err(|e| format!("optical render failed: {e:?}"))?;
+    let optical_viewed = budlum_core::cli::bud3_commands::cli_storage_view_optical(
+        &optical_registry,
+        &optical_up.record.commitment,
+        &optical_seconds,
+    )
+    .map_err(|e| format!("optical view conformance failed: {e}"))?;
+    if optical_viewed.as_slice() != optical_payload {
+        return Err(String::from("optical G5 view mismatch"));
+    }
+
     let _ = budlum_core::execution::zkvm::four_words_to_address([0, 0, 0, 0]);
 
     println!(
