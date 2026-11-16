@@ -65,6 +65,7 @@ fn scan_disk_bytes(root: &Path) -> u64 {
 impl GardenContentStore {
     /// Open a store under `root` using the default local byte ceiling
     /// (`MAX_LOCAL_GARDEN_BYTES`). `None` keeps the objects in memory only.
+    #[cfg(test)]
     pub fn open(root: Option<&Path>, max_object_bytes: usize) -> Result<Self, String> {
         Self::open_with_limit(root, max_object_bytes, MAX_LOCAL_GARDEN_BYTES)
     }

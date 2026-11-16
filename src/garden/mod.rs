@@ -46,4 +46,6 @@ mod testkit;
 mod types;
 
 pub use service::{GardenOptions, GardenService};
-pub(crate) use types::{garden_domain_id, is_garden_domain_id};
+#[cfg(test)]
+pub(crate) use types::garden_domain_id;
+pub(crate) use types::is_garden_domain_id;
