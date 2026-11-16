@@ -3,6 +3,10 @@
 //! Prints a Markdown table. Today the only chip is Keccak-f[1600]: the ML-DSA-87
 //! verification chips and `PulAir` do not exist yet, so this measures the Keccak
 //! chip only and says so in its output. Timings depend on the machine and are not committed.
+//!
+//! The batch sizes default to 1, 4, 16 and 64 permutations; other sizes are given
+//! as arguments. 329 is what one ML-DSA-87 verification of the aggregation layer
+//! spends in the reference program (`src/aggregation/programs`).
 
 use bud_pul::keccak_chip::{prove_keccak_f, verify_keccak_f, ROWS_PER_PERMUTATION};
 use std::time::Instant;
@@ -12,7 +16,14 @@ fn main() {
         "| Keccak-f permutations | Trace rows (padded) | Proof bytes | Prove ms | Verify ms |"
     );
     println!("|---|---|---|---|---|");
-    for batch in [1usize, 4, 16, 64] {
+    let mut batches: Vec<usize> = std::env::args()
+        .skip(1)
+        .filter_map(|arg| arg.parse().ok())
+        .collect();
+    if batches.is_empty() {
+        batches = vec![1, 4, 16, 64];
+    }
+    for batch in batches {
         let inputs: Vec<[u64; 25]> = (0..batch)
             .map(|i| core::array::from_fn(|j| (i as u64 + 1).wrapping_mul(j as u64 + 7)))
             .collect();
