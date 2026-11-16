@@ -292,9 +292,12 @@ operator's control.
 
 The module is `web_gateway`, not `gateway`: `src/gateway` already holds the
 wallet gateway (atlas, passport, service), which is a different thing. The gate
-`gateway-gate` names six of these tests, including the cookie
-prohibition, the CSP floor, the traversal rule and the 502-on-tampered-proof
-rule, so none of them can be deleted without failing the relay.
+`gateway-gate` names ten of these tests: the cookie prohibition, the CSP floor,
+the traversal rule, the 502-on-tampered-proof rule, the 404 for an expired
+record and for a proven absence, the subdomain that never falls back to its
+parent, and the rule that one prover alone is not agreement. None of them can be
+deleted without failing the relay. The `bns-gate` CI job runs the gate against
+the `web_gateway` test log and runs the tests of the `budlum-gateway` binary.
 
 ## Current behaviour (locked by tests)
 
