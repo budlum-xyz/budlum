@@ -1575,10 +1575,10 @@ pub fn apply_burn_to_state(
     )
     .map_err(|e| e.to_string())?;
     let amount = held.get();
-    let burner_balance = state.get_balance(&burner);
+    let burner_balance = state.spendable_balance(&burner);
     if burner_balance < amount {
         return Err(format!(
-            "Insufficient balance for bridge burn: burner has {burner_balance}, needed {amount}"
+            "Insufficient spendable balance for bridge burn: burner has {burner_balance}, needed {amount}"
         ));
     }
     // The message is registered BEFORE the row flips, so a refused
