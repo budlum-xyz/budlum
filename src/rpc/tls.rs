@@ -67,7 +67,7 @@ mod tests {
         let cert = dir.path().join("cert.pem");
         let key = dir.path().join("key.pem");
         std::fs::write(&cert, generated.cert.pem()).unwrap();
-        std::fs::write(&key, generated.key_pair.serialize_pem()).unwrap();
+        std::fs::write(&key, generated.signing_key.serialize_pem()).unwrap();
         assert!(acceptor_from_files(&cert, &key).is_ok());
     }
 }
