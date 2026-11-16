@@ -401,9 +401,12 @@ fn actor_commands_do_not_mutate_state_between_blocks() {
 #[test]
 fn missed_challenge_settles_through_one_slash_path() {
     let m = production_part(include_str!("../chain/storage_maintenance.rs"));
-    let body = window(m, "pub(crate) fn finalize_missed_challenges(", 1800);
-    assert!(body.contains("apply_bond_slash("));
-    assert!(body.matches("apply_bond_slash(").count() >= 1);
+    let body = window(m, "pub(crate) fn finalize_missed_challenges(", 6000);
+    assert_eq!(
+        body.matches("apply_bond_slash(").count(),
+        1,
+        "missed challenges must settle through exactly one bond-slash call site"
+    );
     for file in [
         include_str!("../domain/storage_deal.rs"),
         include_str!("../chain/storage_maintenance.rs"),

@@ -13,9 +13,16 @@ use crate::storage::bud3::content_ref::{ContentRef, ContentRefError};
 use crate::storage::bud3::delete::GrantShredAuth;
 use crate::storage::bud3::grants::{build_grant_row, compute_grant_tag, GrantBud3Error, GrantRow};
 use crate::storage::bud3::keys::{seal_key_package, KeyPkgBud3Error};
-use crate::storage::bud3::limits::Profile;
-use crate::storage::bud3::placement::{Candidate, Class, PlacementRow};
+use crate::storage::bud3::limits::{Bud3Limits, Profile};
+use crate::storage::bud3::pipeline::{
+    prepare_public_upload_two_path, view_public_optical, PipelineError, PreparedUpload,
+};
+use crate::storage::bud3::placement::{
+    place, segment_key, Candidate, Class, PlacementError, PlacementRow, Share,
+};
+use crate::storage::bud3::qr::OpticalSecond;
 use crate::storage::bud3::registry::{Bud3Registry, NftId, ObjectKey, RegistryError};
+use crate::storage::bud3::segment::Segmentation;
 use crate::storage::bud3::tx::StorageTxV3;
 use crate::storage::bud3::upload::{FinishedUploadSession, UploadError, UploadSessionManager};
 use crate::storage::bud3::view::{
@@ -48,6 +55,10 @@ pub enum CliBud3Error {
     UnavailableNetworkBaseFee,
     /// Streaming upload session error.
     Upload(UploadError),
+    /// Optical two-path pipeline error.
+    Pipeline(PipelineError),
+    /// Placement error during optical upload preparation.
+    Placement(PlacementError),
     /// Content gateway error.
     Gateway(ContentGatewayError),
     /// Network view reconstruction error.
@@ -76,6 +87,8 @@ impl std::fmt::Display for CliBud3Error {
                 f.write_str("network base_fee must be queried and non-zero when --fee is omitted")
             }
             Self::Upload(e) => write!(f, "cli upload error: {e:?}"),
+            Self::Pipeline(e) => write!(f, "cli pipeline error: {e:?}"),
+            Self::Placement(e) => write!(f, "cli placement error: {e:?}"),
             Self::Gateway(e) => write!(f, "cli gateway error: {e:?}"),
             Self::View(e) => write!(f, "cli view error: {e:?}"),
             Self::InvalidContentRef(e) => write!(f, "cli ContentRef error: {e:?}"),
@@ -199,6 +212,83 @@ pub fn cli_storage_view<N: NetworkSymbolSource>(
     let _bundle = Bud3ContentGateway::fetch_symbol_bundle(bud3, &cref, network)
         .map_err(CliBud3Error::Gateway)?;
     view_from_network(bud3, object_commitment, content_key, network).map_err(CliBud3Error::View)
+}
+
+/// Prepare a public upload through optical two-path verification (Y10-Y12).
+///
+/// Builds the verified `ObjectRecord` and its unsigned `RegisterObject`
+/// transaction. exposed for `bud storage upload --optical` and
+/// `bud conformance`.
+///
+/// # Errors
+///
+/// Returns [`CliBud3Error`] if `signing_chain_id == 0`, two-path optical
+/// verification fails, or placement fails.
+pub fn cli_storage_upload_optical(
+    params: &CliUploadParams,
+    payload: &[u8],
+    row: &PlacementRow,
+    candidates: &[Candidate],
+) -> Result<(PreparedUpload, [u8; 32], StorageTxV3), CliBud3Error> {
+    if params.signing_chain_id == 0 {
+        return Err(CliBud3Error::MissingSigningChainId);
+    }
+    let symbols_per_segment = u32::try_from(row.total_symbols())
+        .map_err(|_| CliBud3Error::Placement(PlacementError::RowTooSmall))?;
+    let (prepared, video_commitment) = prepare_public_upload_two_path(
+        payload,
+        &params.profile,
+        &Bud3Limits::default(),
+        symbols_per_segment,
+    )
+    .map_err(CliBud3Error::Pipeline)?;
+    let seg = Segmentation::new(prepared.record.object_len, &params.profile)
+        .ok_or(CliBud3Error::Placement(PlacementError::RowTooSmall))?;
+    let mut shares: Vec<(u64, Share)> = Vec::new();
+    for index in 0..seg.count() {
+        let k_u64 = seg
+            .source_symbols(index)
+            .ok_or(CliBud3Error::Placement(PlacementError::RowTooSmall))?;
+        let k = u32::try_from(k_u64)
+            .map_err(|_| CliBud3Error::Placement(PlacementError::RowTooSmall))?;
+        let skey = segment_key(&prepared.record.commitment, index);
+        let seg_shares = place(
+            &skey,
+            candidates,
+            row,
+            k,
+            u32::from(params.profile.symbol_size),
+        )
+        .map_err(CliBud3Error::Placement)?;
+        for sh in seg_shares {
+            shares.push((index, sh));
+        }
+    }
+    let tx = StorageTxV3::RegisterObject {
+        record: prepared.record.clone(),
+        shares,
+        lifetime_epochs: params.lifetime_epochs,
+    };
+    Ok((prepared, video_commitment, tx))
+}
+
+/// Reconstruct and verify a public object through the G5 optical view path
+/// against the registered on-chain [`Bud3Registry`] record.
+/// exposed for `bud storage view --optical` and `bud conformance`.
+///
+/// # Errors
+///
+/// Returns [`CliBud3Error`] if the object is unknown or optical decoding/content
+/// verification fails.
+pub fn cli_storage_view_optical(
+    bud3: &Bud3Registry,
+    object_commitment: &ObjectKey,
+    seconds: &[OpticalSecond],
+) -> Result<Vec<u8>, CliBud3Error> {
+    let entry = bud3
+        .object(object_commitment)
+        .ok_or(CliBud3Error::Registry(RegistryError::UnknownObject))?;
+    view_public_optical(&entry.record, seconds).map_err(CliBud3Error::Pipeline)
 }
 
 /// Build a `bud storage renew` transaction (`StorageTxV3::RenewObject`).
@@ -491,6 +581,53 @@ mod tests {
         bud3.bind_nft(nft_id, uploader, &key).unwrap();
 
         let viewed = cli_storage_view(&bud3, &net, &key, Some(nft_id), None, None).unwrap();
+        assert_eq!(viewed, payload);
+    }
+
+    #[test]
+    fn cli_storage_optical_upload_and_view_round_trip() {
+        let mut bud3 = Bud3Registry::default();
+        let uploader = [0x43; 32];
+        let payload = b"bud cli g5 optical two-path upload and view round trip".to_vec();
+        let candidates: Vec<Candidate> = (0..4u8)
+            .map(|i| Candidate {
+                validator: [20 + i; 32],
+                account: [20 + i; 32],
+                class: Class::Full,
+                stake: 5_000,
+                free_quota_bytes: u64::MAX,
+                network: None,
+            })
+            .collect();
+        let row = PlacementRow {
+            n_full: 2,
+            s_full: 6,
+            n_mobile: 0,
+            s_mobile: 0,
+        };
+        let params = CliUploadParams {
+            uploader,
+            signing_chain_id: 45261,
+            chunk_size: 128,
+            profile: P,
+            lifetime_epochs: 20,
+            now_secs: 100,
+        };
+        let (prepared, video_commitment, tx) =
+            cli_storage_upload_optical(&params, &payload, &row, &candidates).unwrap();
+        assert_ne!(video_commitment, [0u8; 32]);
+        let key = prepared.record.commitment;
+        apply_bud3_tx(&mut bud3, uploader, tx, 1).unwrap();
+
+        let selected = bud_codec::select(&payload);
+        let object = crate::storage::bud3::bof1::Object::public_coded(
+            selected.codec,
+            selected.payload,
+            &payload,
+        )
+        .unwrap();
+        let seconds = crate::storage::bud3::qr::render_optical_seconds(&object, &P, 2).unwrap();
+        let viewed = cli_storage_view_optical(&bud3, &key, &seconds).unwrap();
         assert_eq!(viewed, payload);
     }
 

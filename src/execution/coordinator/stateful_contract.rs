@@ -306,7 +306,7 @@ pub fn execute_stateful_contract_tx(
             vm.context.nonce = tx.nonce;
             vm.context.block_height = state.current_block_height;
 
-            for slot in declared_slots {
+            for &slot in &declared_slots {
                 let key = storage_slot_key(&contract, slot);
                 if let Some(raw) = overlay
                     .read(&state.execution_state, &cache, NS_BUDZERO_STORAGE, &key)
@@ -318,6 +318,17 @@ pub fn execute_stateful_contract_tx(
                 }
             }
             for (slot, val) in call_inputs {
+                let key = storage_slot_key(&contract, slot);
+                let collides_committed = declared_slots.contains(&slot)
+                    || overlay
+                        .read(&state.execution_state, &cache, NS_BUDZERO_STORAGE, &key)
+                        .map_err(|e| e.to_string())?
+                        .is_some();
+                if collides_committed {
+                    return Err(format!(
+                        "call input slot {slot} collides with committed contract storage"
+                    ));
+                }
                 vm.storage.insert(slot, val);
             }
 
@@ -492,6 +503,27 @@ mod tests {
         let mut call2 = call1;
         call2.nonce = 3;
         execute_stateful_contract_tx(&call2, &mut state, &policy).unwrap();
+        assert_eq!(read_budzero_contract_slot(&state, &contract, 0), Some(42));
+
+        // 4. Caller-supplied call_inputs must never overwrite committed storage slots.
+        let mut forged = Transaction::new(
+            alice,
+            contract,
+            0,
+            StatefulContractEnvelope::Call {
+                contract,
+                declared_slots: vec![0],
+                call_inputs: vec![(0, 999)],
+                gas_limit: 500_000,
+            }
+            .encode(),
+        );
+        forged.nonce = 4;
+        let err = execute_stateful_contract_tx(&forged, &mut state, &policy).unwrap_err();
+        assert!(
+            err.contains("collides with committed contract storage"),
+            "unexpected error: {err}"
+        );
         assert_eq!(read_budzero_contract_slot(&state, &contract, 0), Some(42));
     }
 }

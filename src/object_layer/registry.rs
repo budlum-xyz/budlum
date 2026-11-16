@@ -463,7 +463,7 @@ impl ObjectLayerRegistry {
         Ok(true)
     }
 
-    fn active_charter(&self, domain: DomainId) -> Result<&DomainCharter, Refusal> {
+    pub(crate) fn active_charter(&self, domain: DomainId) -> Result<&DomainCharter, Refusal> {
         let charter = self.charters.get(&domain).ok_or(Refusal::NoCharter)?;
         if charter.status != CharterStatus::Active {
             return Err(Refusal::CharterNotActive);
@@ -1534,33 +1534,73 @@ impl ObjectLayerRegistry {
 
     /// `ObjectLayerTx::GuestReturn` (`UOL-K2`): return a unique asset from
     /// [`Location::Guest`] back to [`Location::ObjectLayer`] upon a finalized
-    /// endpoint event emitted by the guest domain.
+    /// `Call` event emitted by the guest domain.
+    ///
+    /// Authorization binds the return to the recorded guest holder:
+    /// - `recipient` must match the recorded guest `holder`.
+    /// - When the recorded guest holder is `Holder::Home(home)`, the proven
+    ///   guest `Call` sender must derive to `home` on `proof.domain`.
+    /// - When the recorded guest holder is `Holder::Budlum(_)`, the submitting
+    ///   transaction signer (`caller`) must equal that recorded holder.
+    /// - Single-use replay protection uses a door- and asset-scoped key so a
+    ///   guest return cannot burn the shared `ArrivalKey` of another home event.
     ///
     /// # Errors
     ///
-    /// Returns [`Refusal`] when finality is unproven, `proof.domain` does not
-    /// match the recorded guest domain, or the asset is not in guest placement.
+    /// Returns [`Refusal`] when finality is unproven, the event is not a guest
+    /// `Call`, `proof.domain` does not match the recorded guest domain, the
+    /// caller or recipient is not authorized, or the asset is not in guest
+    /// placement.
     pub fn guest_return(
         &mut self,
+        caller: Holder,
         class: AssetClassId,
         native_id: &[u8],
         recipient: Holder,
         proof: &HomeEventProof,
         finality: &dyn HomeFinality,
     ) -> Result<AssetId, Refusal> {
-        let (_, _event) = self.read_event(proof, finality, false)?;
+        let (family, event) = self.read_event(proof, finality, false)?;
+        let EndpointEvent::Call { sender, .. } = event else {
+            return Err(Refusal::UnexpectedEvent);
+        };
+        profile_for(family).validate_address(&sender)?;
+        let asset = AssetId::derive(&class, native_id);
         self.atomic(|r| {
-            r.use_arrival(proof)?;
-            let asset = AssetId::derive(&class, native_id);
+            let scoped_key = ArrivalKey::derive_scoped(
+                b"GUEST_RETURN",
+                proof.domain,
+                proof.home_height,
+                &proof.event_id,
+                &asset,
+            );
+            if !r.arrivals.insert(scoped_key) {
+                return Err(Refusal::ArrivalAlreadyUsed);
+            }
             let entry = r.unique.get_mut(&asset).ok_or(Refusal::UnknownAsset)?;
-            let Location::Guest { domain, .. } = entry.location else {
+            let Location::Guest { domain, holder } = entry.location else {
                 return Err(Refusal::AssetNotHere);
             };
             if domain != proof.domain {
                 return Err(Refusal::WrongEmitter);
             }
+            if recipient != holder {
+                return Err(Refusal::NotAuthorized);
+            }
+            match holder {
+                Holder::Home(home) => {
+                    if home != HomeIdentity::derive(proof.domain, &sender) {
+                        return Err(Refusal::NotAuthorized);
+                    }
+                }
+                Holder::Account(_) => {
+                    if caller != holder {
+                        return Err(Refusal::NotAuthorized);
+                    }
+                }
+            }
             entry.location = Location::ObjectLayer;
-            entry.holder = Some(recipient);
+            entry.holder = Some(holder);
             Ok(asset)
         })
     }
@@ -1594,7 +1634,12 @@ impl ObjectLayerRegistry {
         {
             return Err(Refusal::NotAuthorized);
         }
-        let _ = self.active_charter(domain)?;
+        let charter = self.active_charter(domain)?;
+        if crate::object_layer::family::profile_for(charter.vm_family).home_key_scheme()
+            != auth.scheme
+        {
+            return Err(Refusal::NotAuthorized);
+        }
         let action_digest = home_stipend_action_digest(action)?;
         verifier
             .ok_or(Refusal::NotAuthorized)?
