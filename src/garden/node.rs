@@ -3425,6 +3425,7 @@ impl Node {
             "pending_transactions": self.mempool.len(),
             "objects": state.objects.len(),
             "objects_wanted_here": self.wanted.len(),
+            "stored_object_bytes": self.store.total_bytes(),
             "limits": {
                 "max_validators": limits.max_validators,
                 "max_object_bytes": limits.max_object_bytes,
