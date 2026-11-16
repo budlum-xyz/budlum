@@ -1343,7 +1343,6 @@ src/project_manifest.rs	struct	ProofFixture
 src/project_manifest.rs	struct	RelayerPolicyFixture
 src/project_manifest.rs	type	DeveloperProjectId
 src/domain/commitment_registry.rs	fn	get_by_block_hash
-src/domain/finality_adapter.rs	fn	poa_authority_set_hash
 src/domain/finality_adapter.rs	fn	poa_commit_signing_message
 src/domain/finality_adapter.rs	fn	required_signatures
 src/domain/fork_choice.rs	enum	DomainFinalityStatus
