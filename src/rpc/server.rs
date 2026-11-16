@@ -1048,8 +1048,23 @@ impl RpcServer {
         // a block whose witnesses were pruned says so, so a client
         // does not read an empty signature as an unsigned transaction.
         let witness_pruned = b.witness_is_stripped();
+        // The claim frame of the block, when it carries one: what it proves
+        // and who proved it. The proof itself can be a quarter of a megabyte
+        // and is not part of this view; its size is.
+        let claim_frame = b.claim_frame.as_ref().map(|frame| {
+            serde_json::json!({
+                "claims": frame.claims.len(),
+                "proofBytes": frame.proof.len(),
+                "segments": frame.segments.iter().map(|segment| serde_json::json!({
+                    "aggregator": segment.aggregator.to_string(),
+                    "count": segment.count,
+                })).collect::<Vec<_>>(),
+            })
+        });
         serde_json::json!({
             "number": Self::to_hex(b.index),
+            "frameHash": b.frame_hash.map(|hash| format!("0x{}", hex::encode(hash))),
+            "claimFrame": claim_frame,
             "witnessPruned": witness_pruned,
             "hash": Self::to_0x_hash(b.hash),
             "parentHash": Self::to_0x_hash(b.previous_hash),
@@ -1074,6 +1089,11 @@ impl RpcServer {
             "type": format!("{:?}", t.tx_type),
             "chainId": Self::to_hex(t.chain_id),
             "signature": t.signature.map(|s| format!("0x{}", hex::encode(s))),
+            // A transaction authorized by a claim carries no signature: the
+            // digest of the claim that stands for it says so, so a client
+            // does not read the empty signature as an unsigned transaction.
+            "authClaim": t.auth_claim.map(|claim| format!("0x{}", hex::encode(claim))),
+            "claimRefs": t.claim_refs.iter().map(|claim| format!("0x{}", hex::encode(claim))).collect::<Vec<_>>(),
         })
     }
 
@@ -2271,7 +2291,7 @@ impl BudlumApiServer for RpcServer {
     }
 
     async fn get_domain_commitments(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
-        let commitments = self.chain.get_domain_commitments().await;
+        let commitments = cap_list_response(self.chain.get_domain_commitments().await);
         Ok(serde_json::Value::Array(
             commitments
                 .into_iter()
@@ -4863,6 +4883,8 @@ impl BudlumApiServer for RpcServer {
             chain_id: self.chain.get_chain_id().await,
             signature_version: crate::core::transaction::SIGNATURE_VERSION_V5,
             tx_type: crate::core::transaction::TransactionType::BnsSetAddress,
+            auth_claim: None,
+            claim_refs: Vec::new(),
         };
         let tx = self.finish_template(tx).await?;
         Ok(serde_json::json!({
@@ -4921,6 +4943,8 @@ impl BudlumApiServer for RpcServer {
             chain_id: self.chain.get_chain_id().await,
             signature_version: crate::core::transaction::SIGNATURE_VERSION_V5,
             tx_type: crate::core::transaction::TransactionType::BnsSetPrimary,
+            auth_claim: None,
+            claim_refs: Vec::new(),
         };
         let tx = self.finish_template(tx).await?;
         Ok(serde_json::json!({
@@ -5021,6 +5045,8 @@ impl BudlumApiServer for RpcServer {
             chain_id: self.chain.get_chain_id().await,
             signature_version: crate::core::transaction::SIGNATURE_VERSION_V5,
             tx_type: crate::core::transaction::TransactionType::BnsSetRecords,
+            auth_claim: None,
+            claim_refs: Vec::new(),
         };
         let tx = self.finish_template(tx).await?;
         Ok(serde_json::json!({
@@ -5152,6 +5178,8 @@ impl BudlumApiServer for RpcServer {
             chain_id: self.chain.get_chain_id().await,
             signature_version: crate::core::transaction::SIGNATURE_VERSION_V5,
             tx_type: crate::core::transaction::TransactionType::BnsCreateOffer,
+            auth_claim: None,
+            claim_refs: Vec::new(),
         };
         let tx = self.finish_template(tx).await?;
 
@@ -5222,6 +5250,8 @@ impl BudlumApiServer for RpcServer {
             chain_id: self.chain.get_chain_id().await,
             signature_version: crate::core::transaction::SIGNATURE_VERSION_V5,
             tx_type: crate::core::transaction::TransactionType::BnsBuyName,
+            auth_claim: None,
+            claim_refs: Vec::new(),
         };
         let tx = self.finish_template(tx).await?;
 
@@ -5291,6 +5321,8 @@ impl BudlumApiServer for RpcServer {
             chain_id: self.chain.get_chain_id().await,
             signature_version: crate::core::transaction::SIGNATURE_VERSION_V5,
             tx_type: crate::core::transaction::TransactionType::BnsCancelOffer,
+            auth_claim: None,
+            claim_refs: Vec::new(),
         };
         let tx = self.finish_template(tx).await?;
 
@@ -5365,6 +5397,8 @@ impl BudlumApiServer for RpcServer {
             chain_id: self.chain.get_chain_id().await,
             signature_version: crate::core::transaction::SIGNATURE_VERSION_V5,
             tx_type: crate::core::transaction::TransactionType::BnsRegisterSubdomain,
+            auth_claim: None,
+            claim_refs: Vec::new(),
         };
         let tx = self.finish_template(tx).await?;
 
@@ -5453,6 +5487,8 @@ impl BudlumApiServer for RpcServer {
             chain_id: self.chain.get_chain_id().await,
             signature_version: crate::core::transaction::SIGNATURE_VERSION_V5,
             tx_type: crate::core::transaction::TransactionType::BnsRemoveSubdomain,
+            auth_claim: None,
+            claim_refs: Vec::new(),
         };
         let tx = self.finish_template(tx).await?;
         Ok(serde_json::json!({
@@ -5518,6 +5554,8 @@ impl BudlumApiServer for RpcServer {
             chain_id: self.chain.get_chain_id().await,
             signature_version: crate::core::transaction::SIGNATURE_VERSION_V5,
             tx_type: crate::core::transaction::TransactionType::BnsSetSubdomainContent,
+            auth_claim: None,
+            claim_refs: Vec::new(),
         };
         let tx = self.finish_template(tx).await?;
         Ok(serde_json::json!({
@@ -5577,6 +5615,8 @@ impl BudlumApiServer for RpcServer {
             chain_id: self.chain.get_chain_id().await,
             signature_version: crate::core::transaction::SIGNATURE_VERSION_V5,
             tx_type: crate::core::transaction::TransactionType::BnsSetContent,
+            auth_claim: None,
+            claim_refs: Vec::new(),
         };
         let tx = self.finish_template(tx).await?;
         Ok(serde_json::json!({
@@ -5637,6 +5677,8 @@ impl BudlumApiServer for RpcServer {
             chain_id: self.chain.get_chain_id().await,
             signature_version: crate::core::transaction::SIGNATURE_VERSION_V5,
             tx_type: crate::core::transaction::TransactionType::BnsSetStorage,
+            auth_claim: None,
+            claim_refs: Vec::new(),
         };
         let tx = self.finish_template(tx).await?;
         Ok(serde_json::json!({
@@ -5699,6 +5741,8 @@ impl BudlumApiServer for RpcServer {
             chain_id: self.chain.get_chain_id().await,
             signature_version: crate::core::transaction::SIGNATURE_VERSION_V5,
             tx_type: crate::core::transaction::TransactionType::BnsRenew,
+            auth_claim: None,
+            claim_refs: Vec::new(),
         };
         let tx = self.finish_template(tx).await?;
         Ok(serde_json::json!({
@@ -5764,6 +5808,8 @@ impl BudlumApiServer for RpcServer {
             chain_id: self.chain.get_chain_id().await,
             signature_version: crate::core::transaction::SIGNATURE_VERSION_V5,
             tx_type: crate::core::transaction::TransactionType::BnsTransfer,
+            auth_claim: None,
+            claim_refs: Vec::new(),
         };
         let tx = self.finish_template(tx).await?;
         Ok(serde_json::json!({
@@ -5891,6 +5937,8 @@ impl BudlumApiServer for RpcServer {
             chain_id: self.chain.get_chain_id().await,
             signature_version: crate::core::transaction::SIGNATURE_VERSION_V5,
             tx_type: crate::core::transaction::TransactionType::NftMint,
+            auth_claim: None,
+            claim_refs: Vec::new(),
         };
         let tx = self.finish_template(tx).await?;
 
@@ -5935,6 +5983,8 @@ impl BudlumApiServer for RpcServer {
             chain_id: self.chain.get_chain_id().await,
             signature_version: crate::core::transaction::SIGNATURE_VERSION_V5,
             tx_type: crate::core::transaction::TransactionType::NftBurn,
+            auth_claim: None,
+            claim_refs: Vec::new(),
         };
         let tx = self.finish_template(tx).await?;
 
@@ -5976,6 +6026,8 @@ impl BudlumApiServer for RpcServer {
             chain_id: self.chain.get_chain_id().await,
             signature_version: crate::core::transaction::SIGNATURE_VERSION_V5,
             tx_type: crate::core::transaction::TransactionType::NftBoost { nft_id, amount },
+            auth_claim: None,
+            claim_refs: Vec::new(),
         };
         let tx = self.finish_template(tx).await?;
 
@@ -6035,6 +6087,8 @@ impl BudlumApiServer for RpcServer {
                 cid: cid_obj,
                 price,
             },
+            auth_claim: None,
+            claim_refs: Vec::new(),
         };
         let tx = self.finish_template(tx).await?;
 
@@ -6079,6 +6133,8 @@ impl BudlumApiServer for RpcServer {
             chain_id: self.chain.get_chain_id().await,
             signature_version: crate::core::transaction::SIGNATURE_VERSION_V5,
             tx_type: crate::core::transaction::TransactionType::AiPurchaseData { offer_id },
+            auth_claim: None,
+            claim_refs: Vec::new(),
         };
         let tx = self.finish_template(tx).await?;
 
@@ -6369,6 +6425,8 @@ impl BudlumApiServer for RpcServer {
                 website_url,
                 manifest_id: m_id,
             },
+            auth_claim: None,
+            claim_refs: Vec::new(),
         };
         let tx = self.finish_template(tx).await?;
 
@@ -6423,6 +6481,8 @@ impl BudlumApiServer for RpcServer {
             chain_id: self.chain.get_chain_id().await,
             signature_version: crate::core::transaction::SIGNATURE_VERSION_V5,
             tx_type: crate::core::transaction::TransactionType::UniversalRelay(ext_tx),
+            auth_claim: None,
+            claim_refs: Vec::new(),
         };
         let tx = self.finish_template(tx).await?;
 
@@ -6532,6 +6592,8 @@ impl BudlumApiServer for RpcServer {
             crate::wallet::identity_profile::validate_passport_name(&name).map_err(|e| {
                 ErrorObjectOwned::owned(-32602, format!("Invalid identity name: {e}"), None::<()>)
             })?;
+            let height = self.chain.get_height().await;
+            let state_root = self.chain.get_state_root(height).await;
             let resolved = self.chain.bns_resolve_full(name.clone()).await;
             let bns_proof = self.chain.bns_prove_name(name.clone()).await;
             let current_epoch = bns_proof.as_ref().map_or(0, |p| p.epoch);
@@ -6539,8 +6601,15 @@ impl BudlumApiServer for RpcServer {
                 Some(r) => self.chain.bns_reverse_resolve(r.owner).await,
                 None => None,
             };
+            // The root carried in this reply's own proof is not an independent
+            // trust anchor: checking the proof against it proves only that the
+            // answering node is self-consistent, while a hostile or on-path
+            // node can mint both. Leave `expected_bns_root` empty so the card
+            // stays Unverified, and return `bns_proof`, `observed_height`, and
+            // `observed_state_root` so callers can verify against a finalized
+            // header root they trust themselves.
             let proof_ctx = crate::wallet::identity_profile::IdentityProofContext {
-                expected_bns_root: bns_proof.as_ref().map(|p| p.bns_root),
+                expected_bns_root: None,
                 bns_proof,
                 current_epoch,
                 reverse_primary_name,
@@ -6558,7 +6627,7 @@ impl BudlumApiServer for RpcServer {
             let data_assets = self.chain.pollen_get_data_assets().await;
             let access_grants = self.chain.pollen_get_access_grants().await;
             let sale_authorizations = self.chain.pollen_get_sale_authorizations().await;
-            let profile = crate::wallet::identity_profile::build_identity_profile_verified(
+            let mut profile = crate::wallet::identity_profile::build_identity_profile_verified(
                 name,
                 resolved,
                 manifest,
@@ -6567,6 +6636,8 @@ impl BudlumApiServer for RpcServer {
                 &sale_authorizations,
                 Some(&proof_ctx),
             );
+            profile.observed_height = Some(height);
+            profile.observed_state_root = state_root;
             serde_json::to_value(profile).map_err(|e| {
                 ErrorObjectOwned::owned(
                     -32603,
@@ -6595,6 +6666,8 @@ impl BudlumApiServer for RpcServer {
             crate::wallet::identity_profile::validate_passport_name(&name).map_err(|e| {
                 ErrorObjectOwned::owned(-32602, format!("Invalid identity name: {e}"), None::<()>)
             })?;
+            let height = self.chain.get_height().await;
+            let state_root = self.chain.get_state_root(height).await;
             let resolved = self.chain.bns_resolve_full(name.clone()).await;
             let bns_proof = self.chain.bns_prove_name(name.clone()).await;
             let current_epoch = bns_proof.as_ref().map_or(0, |p| p.epoch);
@@ -6602,8 +6675,11 @@ impl BudlumApiServer for RpcServer {
                 Some(r) => self.chain.bns_reverse_resolve(r.owner).await,
                 None => None,
             };
+            // Same anchor rule as `passport_get_profile`: the bundle root
+            // commits to the card statuses, so a self-supplied root would turn
+            // a node's own assertion into a portable Verified attestation.
             let proof_ctx = crate::wallet::identity_profile::IdentityProofContext {
-                expected_bns_root: bns_proof.as_ref().map(|p| p.bns_root),
+                expected_bns_root: None,
                 bns_proof,
                 current_epoch,
                 reverse_primary_name,
@@ -6621,7 +6697,7 @@ impl BudlumApiServer for RpcServer {
             let data_assets = self.chain.pollen_get_data_assets().await;
             let access_grants = self.chain.pollen_get_access_grants().await;
             let sale_authorizations = self.chain.pollen_get_sale_authorizations().await;
-            let profile = crate::wallet::identity_profile::build_identity_profile_verified(
+            let mut profile = crate::wallet::identity_profile::build_identity_profile_verified(
                 name,
                 resolved,
                 manifest,
@@ -6630,7 +6706,8 @@ impl BudlumApiServer for RpcServer {
                 &sale_authorizations,
                 Some(&proof_ctx),
             );
-            let height = self.chain.get_height().await;
+            profile.observed_height = Some(height);
+            profile.observed_state_root = state_root;
             let bundle =
                 crate::wallet::identity_profile::try_build_passport_proof_bundle(&profile, height)
                     .map_err(|e| {
@@ -6781,6 +6858,8 @@ impl BudlumApiServer for RpcServer {
             chain_id: self.chain.get_chain_id().await,
             signature_version: crate::core::transaction::SIGNATURE_VERSION_V5,
             tx_type: crate::core::transaction::TransactionType::AiModelRegister(spec),
+            auth_claim: None,
+            claim_refs: Vec::new(),
         };
         let tx = self.finish_template(tx).await?;
 
@@ -6979,6 +7058,8 @@ impl BudlumApiServer for RpcServer {
             chain_id: self.chain.get_chain_id().await,
             signature_version: crate::core::transaction::SIGNATURE_VERSION_V5,
             tx_type: crate::core::transaction::TransactionType::AiInferenceRequest(req.clone()),
+            auth_claim: None,
+            claim_refs: Vec::new(),
         };
         let tx = self.finish_template(tx).await?;
 
@@ -7080,6 +7161,8 @@ impl BudlumApiServer for RpcServer {
             chain_id: self.chain.get_chain_id().await,
             signature_version: crate::core::transaction::SIGNATURE_VERSION_V5,
             tx_type: crate::core::transaction::TransactionType::AiInferenceResult(res),
+            auth_claim: None,
+            claim_refs: Vec::new(),
         };
         let tx = self.finish_template(tx).await?;
 
@@ -7336,6 +7419,8 @@ impl BudlumApiServer for RpcServer {
                 request_id: rid,
                 verifier: v_addr,
             },
+            auth_claim: None,
+            claim_refs: Vec::new(),
         };
         let tx = self.finish_template(tx).await?;
 

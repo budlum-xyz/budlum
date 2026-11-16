@@ -13,14 +13,12 @@ on:
   # more work than the shared runner pool can finish before the next push cancels it.
   pull_request:
     branches: [main, consensus-of-consensuses]
-  # Section 16.2 puts this workflow on a pull request *and* on a nightly run.
-  # The nightly half was missing: the file ran only on a push or a pull
-  # request, so a drift that appears with no commit in front of it (a runner
-  # image change, a toolchain resolution) was never seen.
+  # Section 16.2 puts this workflow on pull requests and on a periodic run.
+  # The periodic half catches runner-image or toolchain drift with no commit in
+  # front of it. It is staggered weekly because this file launches five jobs,
+  # including clean rebuilds; daily fan-out was starving live PR gates.
   schedule:
-    # 01:23 UTC, before the conformance run at 02:41 and the fuzz run at
-    # 03:17, so the cheap determinism check is not queued behind them.
-    - cron: "23 1 * * *"
+    - cron: "23 0 * * 4" # Thursday 00:23 UTC
 
 concurrency:
   group: determinism-${{ github.ref }}

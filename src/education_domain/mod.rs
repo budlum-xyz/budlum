@@ -261,15 +261,26 @@ mod tests {
                     created_at: 1_700_000_000,
                 },
                 up.record,
-                vec![(
-                    0,
-                    Share {
-                        validator: [5u8; 32],
-                        class: Class::Full,
-                        first_esi: 0,
-                        symbols: 8,
-                    },
-                )],
+                vec![
+                    (
+                        0,
+                        Share {
+                            validator: [5u8; 32],
+                            class: Class::Full,
+                            first_esi: 0,
+                            symbols: 4,
+                        },
+                    ),
+                    (
+                        0,
+                        Share {
+                            validator: [6u8; 32],
+                            class: Class::Full,
+                            first_esi: 4,
+                            symbols: 4,
+                        },
+                    ),
+                ],
                 20,
                 1,
             )

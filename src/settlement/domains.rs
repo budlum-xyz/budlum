@@ -386,6 +386,12 @@ pub fn validate_domain_registration(domain: &ConsensusDomain) -> Result<(), Stri
 /// refusal (duplicate id, bond, lifecycle, ceiling).
 pub fn register_domain(state: &mut AccountState, domain: ConsensusDomain) -> Result<(), String> {
     validate_domain_registration(&domain)?;
+    if crate::garden::is_garden_domain_id(domain.id) {
+        return Err(format!(
+            "Domain {} lies in the reserved Garden domain id range",
+            domain.id
+        ));
+    }
     // The other half of the admission gate in `AccountState::execute_proposal`:
     // a domain that already carries PoA admins must be a PoA domain.
     if state.poa_is_permissioned(domain.id) && domain.kind != ConsensusKind::PoA {
@@ -1566,6 +1572,12 @@ pub fn execute_settlement_tx(
                     "domain {} is reserved for canonical external chain {:?}; \
                      canonical external-chain ids are seeded by genesis only",
                     domain.id, chain
+                )));
+            }
+            if crate::garden::is_garden_domain_id(domain.id) {
+                return Err(SettlementTxError::Refused(format!(
+                    "domain {} lies in the reserved Garden domain id range",
+                    domain.id
                 )));
             }
             let balance = state.spendable_balance(&ctx.sender);
@@ -5285,6 +5297,32 @@ mod tests {
         assert!(
             format!("{err:?}").contains("authorized storage domain"),
             "got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn permissionless_register_domain_refuses_reserved_garden_domain_ids() {
+        let mut state = AccountState::new();
+        let garden_id = crate::garden::garden_domain_id(42);
+        let mut domain = pow(garden_id);
+        domain.domain_chain_id = 9_999;
+        let op = operator(&domain);
+        state.add_balance(&op, MIN_DOMAIN_OPERATOR_BOND + FEE);
+        let err = execute_settlement_tx(
+            &mut state,
+            &ctx(op),
+            &SettlementTx::RegisterDomain(Box::new(domain.clone())),
+        )
+        .unwrap_err();
+        assert!(
+            format!("{err:?}").contains("reserved Garden domain id"),
+            "got: {err:?}"
+        );
+        assert!(state.settlement.domains.get(garden_id).is_none());
+        let direct_err = register_domain(&mut state, domain).unwrap_err();
+        assert!(
+            direct_err.contains("reserved Garden domain id"),
+            "{direct_err}"
         );
     }
 }

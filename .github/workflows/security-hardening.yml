@@ -14,7 +14,7 @@ name: Security Hardening
 
 on:
   schedule:
-    - cron: "30 5 * * 1"   # weekly, Monday 05:30 UTC
+    - cron: "30 10 * * 5"  # weekly, Friday 10:30 UTC
   workflow_dispatch:
     inputs:
       since:
@@ -169,7 +169,9 @@ jobs:
       # because one found something hides the rest of that list.
       fail-fast: false
       # Shards queue behind pull request checks instead of ahead of them.
-      max-parallel: 6
+      # Keep half of the six-runner observed pool available to live PR gates.
+      # Every matrix leg still runs; this changes only their launch order.
+      max-parallel: 3
       matrix:
         shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23]
     env:

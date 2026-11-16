@@ -196,7 +196,7 @@ impl GardenBudlumLink {
     pub async fn view(&self, chain_id: u64) -> Option<GardenDomainView> {
         let domain_id = garden_domain_id(chain_id);
         self.chain
-            .get_consensus_domains()
+            .get_consensus_domains_with_garden()
             .await
             .into_iter()
             .find(|domain| domain.id == domain_id)
@@ -362,6 +362,7 @@ mod tests {
         let genesis = &net.ledger.state.genesis;
         let hash = authority_set_hash(genesis.chain_id, &[genesis.host]).unwrap();
         let mut bridged = domain_record(genesis, net.host, hash);
+        bridged.id = 99;
         bridged.bridge_enabled = true;
         let domain_id = bridged.id;
         chain.register_consensus_domain(bridged).unwrap();
@@ -481,5 +482,31 @@ mod tests {
             DomainStatus::Frozen
         );
         assert_eq!(chain.state.calculate_state_root(), root_before);
+    }
+
+    #[test]
+    fn garden_retire_prunes_retained_commitments_and_garden_record_wins_merge() {
+        let mut net = Net::new();
+        let mut chain = budlum();
+        let domain_id = register(&mut chain, &net);
+        let a = net.join("a");
+        net.commit(vec![net.publish(&a, 1)]).unwrap();
+        for height in 1..=net.ledger.state.height {
+            report(&mut chain, &net, height).unwrap();
+        }
+        assert_eq!(chain.garden_commitments.len(), 2);
+        // Local Garden record appears in `consensus_domains_with_garden` and is
+        // never duplicated or shadowed by canonical state.
+        let merged = chain.consensus_domains_with_garden();
+        assert_eq!(merged.iter().filter(|d| d.id == domain_id).count(), 1);
+        // Retiring the Garden drains its retained local commitments.
+        let host = Address(net.host);
+        chain
+            .transition_bridgeless_poa_domain_status(domain_id, host, DomainStatus::Frozen)
+            .unwrap();
+        chain
+            .transition_bridgeless_poa_domain_status(domain_id, host, DomainStatus::Retired)
+            .unwrap();
+        assert_eq!(chain.garden_commitments.len(), 0);
     }
 }

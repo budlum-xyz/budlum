@@ -80,13 +80,19 @@ fn conformance_ctx() -> BlockContext {
     }
 }
 
-fn funded_pair() -> (AccountState, Address, Address) {
-    let sender = Address::from([0xA1; 32]);
+const CONFORMANCE_SENDER_SEED: [u8; 32] = [0xA1; 32];
+
+fn funded_pair() -> Result<(AccountState, Address, Address), String> {
+    let sender = UelTx::signer_address_from_seed(&CONFORMANCE_SENDER_SEED)?;
     let proposer = Address::from([0xA2; 32]);
     let mut state = AccountState::new();
     state.add_balance(&sender, 50_000);
     state.add_balance(&proposer, 50_000);
-    (state, sender, proposer)
+    Ok((state, sender, proposer))
+}
+
+fn sign_conformance_tx(tx: UelTx) -> Result<UelTx, String> {
+    tx.signed_with_seed(conformance_ctx().chain_id, &CONFORMANCE_SENDER_SEED)
 }
 
 /// Runs the Prague EVM conformance vector pack.
@@ -104,7 +110,7 @@ pub fn run_evm_conformance() -> Result<ConformanceReport, String> {
         ));
     }
 
-    let (mut state, sender, proposer) = funded_pair();
+    let (mut state, sender, proposer) = funded_pair()?;
     let mut coord = ExecutionCoordinator::new();
     // Arithmetic + PUSH0 (`0x5f`) + MSTORE + SSTORE + RETURN conformance contract:
     // PUSH0, PUSH1 7, ADD -> 7, DUP1, PUSH1 0, SSTORE, PUSH1 0, MSTORE, RETURN(0, 32)
@@ -117,7 +123,7 @@ pub fn run_evm_conformance() -> Result<ConformanceReport, String> {
             &mut coord,
             conformance_ctx(),
             proposer,
-            &[UelTx {
+            &[sign_conformance_tx(UelTx {
                 tx_hash: [0x01; 32],
                 sender,
                 nonce: 0,
@@ -130,7 +136,8 @@ pub fn run_evm_conformance() -> Result<ConformanceReport, String> {
                 gas_limit_bgu: 250_000,
                 max_fee_per_bgu_attos: MIN_UEL_BASE_FEE_ATTOS * 2,
                 max_priority_fee_per_bgu_attos: 100,
-            }],
+                auth: super::UelTxAuth::default(),
+            })?],
         )
         .map_err(|e| format!("{e:?}"))?;
     let Some(dep_rec) = dep.first() else {
@@ -146,7 +153,7 @@ pub fn run_evm_conformance() -> Result<ConformanceReport, String> {
             &mut coord,
             conformance_ctx(),
             proposer,
-            &[UelTx {
+            &[sign_conformance_tx(UelTx {
                 tx_hash: [0x02; 32],
                 sender,
                 nonce: 1,
@@ -159,7 +166,8 @@ pub fn run_evm_conformance() -> Result<ConformanceReport, String> {
                 gas_limit_bgu: 250_000,
                 max_fee_per_bgu_attos: MIN_UEL_BASE_FEE_ATTOS * 2,
                 max_priority_fee_per_bgu_attos: 100,
-            }],
+                auth: super::UelTxAuth::default(),
+            })?],
         )
         .map_err(|e| format!("{e:?}"))?;
     let Some(call_rec) = call.first() else {
@@ -193,7 +201,7 @@ pub fn run_wasm_conformance() -> Result<ConformanceReport, String> {
         return Err(String::from("WASM float/IBC refusal failed"));
     }
 
-    let (mut state, sender, proposer) = funded_pair();
+    let (mut state, sender, proposer) = funded_pair()?;
     let mut coord = ExecutionCoordinator::new();
     let ok_mod = build_valid_cosmwasm_module(&["instantiate", "execute", "query"], &[0x01]);
     let dep = state
@@ -201,7 +209,7 @@ pub fn run_wasm_conformance() -> Result<ConformanceReport, String> {
             &mut coord,
             conformance_ctx(),
             proposer,
-            &[UelTx {
+            &[sign_conformance_tx(UelTx {
                 tx_hash: [0x11; 32],
                 sender,
                 nonce: 0,
@@ -214,7 +222,8 @@ pub fn run_wasm_conformance() -> Result<ConformanceReport, String> {
                 gas_limit_bgu: 200_000,
                 max_fee_per_bgu_attos: MIN_UEL_BASE_FEE_ATTOS * 2,
                 max_priority_fee_per_bgu_attos: 100,
-            }],
+                auth: super::UelTxAuth::default(),
+            })?],
         )
         .map_err(|e| format!("{e:?}"))?;
     let Some(r0) = dep.first() else {
@@ -242,7 +251,7 @@ pub fn run_svm_conformance() -> Result<ConformanceReport, String> {
     if svm.config().jit_enabled {
         return Err(String::from("SVM JIT must remain disabled"));
     }
-    let (mut state, sender, proposer) = funded_pair();
+    let (mut state, sender, proposer) = funded_pair()?;
     let mut coord = ExecutionCoordinator::new();
     let mut elf = ELF_MAGIC.to_vec();
     elf.extend_from_slice(&[0x02, 0x01, 0x01, 0x00]);
@@ -257,7 +266,7 @@ pub fn run_svm_conformance() -> Result<ConformanceReport, String> {
             conformance_ctx(),
             proposer,
             &[
-                UelTx {
+                sign_conformance_tx(UelTx {
                     tx_hash: [0x21; 32],
                     sender,
                     nonce: 0,
@@ -270,8 +279,9 @@ pub fn run_svm_conformance() -> Result<ConformanceReport, String> {
                     gas_limit_bgu: 150_000,
                     max_fee_per_bgu_attos: MIN_UEL_BASE_FEE_ATTOS * 2,
                     max_priority_fee_per_bgu_attos: 100,
-                },
-                UelTx {
+                    auth: super::UelTxAuth::default(),
+                })?,
+                sign_conformance_tx(UelTx {
                     tx_hash: [0x22; 32],
                     sender,
                     nonce: 1,
@@ -284,8 +294,9 @@ pub fn run_svm_conformance() -> Result<ConformanceReport, String> {
                     gas_limit_bgu: 150_000,
                     max_fee_per_bgu_attos: MIN_UEL_BASE_FEE_ATTOS * 2,
                     max_priority_fee_per_bgu_attos: 100,
-                },
-                UelTx {
+                    auth: super::UelTxAuth::default(),
+                })?,
+                sign_conformance_tx(UelTx {
                     tx_hash: [0x23; 32],
                     sender,
                     nonce: 2,
@@ -298,8 +309,9 @@ pub fn run_svm_conformance() -> Result<ConformanceReport, String> {
                     gas_limit_bgu: 150_000,
                     max_fee_per_bgu_attos: MIN_UEL_BASE_FEE_ATTOS * 2,
                     max_priority_fee_per_bgu_attos: 100,
-                },
-                UelTx {
+                    auth: super::UelTxAuth::default(),
+                })?,
+                sign_conformance_tx(UelTx {
                     tx_hash: [0x24; 32],
                     sender,
                     nonce: 3,
@@ -312,7 +324,8 @@ pub fn run_svm_conformance() -> Result<ConformanceReport, String> {
                     gas_limit_bgu: 150_000,
                     max_fee_per_bgu_attos: MIN_UEL_BASE_FEE_ATTOS * 2,
                     max_priority_fee_per_bgu_attos: 100,
-                },
+                    auth: super::UelTxAuth::default(),
+                })?,
             ],
         )
         .map_err(|e| format!("{e:?}"))?;
@@ -342,7 +355,7 @@ pub fn run_move_conformance() -> Result<ConformanceReport, String> {
     if mv.validate_deploy(b"bad").is_ok() {
         return Err(String::from("Move invalid binary magic must be refused"));
     }
-    let (mut state, sender, proposer) = funded_pair();
+    let (mut state, sender, proposer) = funded_pair()?;
     let mut coord = ExecutionCoordinator::new();
     let mut mod_bytes = MOVE_BINARY_MAGIC.to_vec();
     mod_bytes.extend_from_slice(&[0x06, 0x00, 0x00, 0x00]);
@@ -359,7 +372,7 @@ pub fn run_move_conformance() -> Result<ConformanceReport, String> {
             conformance_ctx(),
             proposer,
             &[
-                UelTx {
+                sign_conformance_tx(UelTx {
                     tx_hash: [0x31; 32],
                     sender,
                     nonce: 0,
@@ -372,8 +385,9 @@ pub fn run_move_conformance() -> Result<ConformanceReport, String> {
                     gas_limit_bgu: 150_000,
                     max_fee_per_bgu_attos: MIN_UEL_BASE_FEE_ATTOS * 2,
                     max_priority_fee_per_bgu_attos: 100,
-                },
-                UelTx {
+                    auth: super::UelTxAuth::default(),
+                })?,
+                sign_conformance_tx(UelTx {
                     tx_hash: [0x32; 32],
                     sender,
                     nonce: 1,
@@ -386,7 +400,8 @@ pub fn run_move_conformance() -> Result<ConformanceReport, String> {
                     gas_limit_bgu: 150_000,
                     max_fee_per_bgu_attos: MIN_UEL_BASE_FEE_ATTOS * 2,
                     max_priority_fee_per_bgu_attos: 100,
-                },
+                    auth: super::UelTxAuth::default(),
+                })?,
             ],
         )
         .map_err(|e| format!("{e:?}"))?;
@@ -410,7 +425,7 @@ pub fn run_move_conformance() -> Result<ConformanceReport, String> {
 ///
 /// Returns an error if the operation fails.
 pub fn run_budzero_conformance() -> Result<ConformanceReport, String> {
-    let (mut state, sender, proposer) = funded_pair();
+    let (mut state, sender, proposer) = funded_pair()?;
     let mut coord = ExecutionCoordinator::new();
     // 8-byte aligned BudZero bytecode (`HALT` = `[0x00; 8]`).
     let prog = vec![0u8; 16];
@@ -419,7 +434,7 @@ pub fn run_budzero_conformance() -> Result<ConformanceReport, String> {
             &mut coord,
             conformance_ctx(),
             proposer,
-            &[UelTx {
+            &[sign_conformance_tx(UelTx {
                 tx_hash: [0x41; 32],
                 sender,
                 nonce: 0,
@@ -432,7 +447,8 @@ pub fn run_budzero_conformance() -> Result<ConformanceReport, String> {
                 gas_limit_bgu: 100_000,
                 max_fee_per_bgu_attos: MIN_UEL_BASE_FEE_ATTOS * 2,
                 max_priority_fee_per_bgu_attos: 100,
-            }],
+                auth: super::UelTxAuth::default(),
+            })?],
         )
         .map_err(|e| format!("{e:?}"))?;
     if recs.first().map(|r| r.status.clone()) != Some(UelReceiptStatus::Success) {
@@ -456,7 +472,7 @@ pub fn run_budzero_conformance() -> Result<ConformanceReport, String> {
 pub fn calibrate_bgu_schedule(samples: usize) -> Result<(u64, CalibratedBguSchedule), String> {
     let count = samples.max(20);
     let mut ns_per_bgu_samples = Vec::with_capacity(count);
-    let (mut state, sender, proposer) = funded_pair();
+    let (mut state, sender, proposer) = funded_pair()?;
     let mut coord = ExecutionCoordinator::new();
     let runtime_code = vec![0x60, 0x00, 0x35, 0x60, 0x01, 0x55, 0x00];
     let dep = state
@@ -464,7 +480,7 @@ pub fn calibrate_bgu_schedule(samples: usize) -> Result<(u64, CalibratedBguSched
             &mut coord,
             conformance_ctx(),
             proposer,
-            &[UelTx {
+            &[sign_conformance_tx(UelTx {
                 tx_hash: [0x90; 32],
                 sender,
                 nonce: 0,
@@ -477,7 +493,8 @@ pub fn calibrate_bgu_schedule(samples: usize) -> Result<(u64, CalibratedBguSched
                 gas_limit_bgu: 250_000,
                 max_fee_per_bgu_attos: MIN_UEL_BASE_FEE_ATTOS * 2,
                 max_priority_fee_per_bgu_attos: 100,
-            }],
+                auth: super::UelTxAuth::default(),
+            })?],
         )
         .map_err(|e| format!("{e:?}"))?;
     let target = dep.first().map(|r| r.output.clone()).unwrap_or_default();
@@ -491,27 +508,24 @@ pub fn calibrate_bgu_schedule(samples: usize) -> Result<(u64, CalibratedBguSched
         if let Some(b0) = h.get_mut(..8) {
             b0.copy_from_slice(&(i as u64).to_le_bytes());
         }
+        let tx = sign_conformance_tx(UelTx {
+            tx_hash: h,
+            sender,
+            nonce: 1 + i as u64,
+            ee: EeId::EVM,
+            action: UelAction::Call {
+                target: target.clone(),
+                input: word.to_vec(),
+            },
+            value_attos: 0,
+            gas_limit_bgu: 250_000,
+            max_fee_per_bgu_attos: MIN_UEL_BASE_FEE_ATTOS * 2,
+            max_priority_fee_per_bgu_attos: 100,
+            auth: super::UelTxAuth::default(),
+        })?;
         let t0 = Instant::now();
         let rec = state
-            .execute_uel_block(
-                &mut coord,
-                conformance_ctx(),
-                proposer,
-                &[UelTx {
-                    tx_hash: h,
-                    sender,
-                    nonce: 1 + i as u64,
-                    ee: EeId::EVM,
-                    action: UelAction::Call {
-                        target: target.clone(),
-                        input: word.to_vec(),
-                    },
-                    value_attos: 0,
-                    gas_limit_bgu: 250_000,
-                    max_fee_per_bgu_attos: MIN_UEL_BASE_FEE_ATTOS * 2,
-                    max_priority_fee_per_bgu_attos: 100,
-                }],
-            )
+            .execute_uel_block(&mut coord, conformance_ctx(), proposer, &[tx])
             .map_err(|e| format!("{e:?}"))?;
         let elapsed_ns = t0.elapsed().as_nanos() as u64;
         let used = rec.first().map_or(1u64, |r| r.gas_used_bgu.max(1));

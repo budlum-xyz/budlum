@@ -1265,3 +1265,119 @@ fn resume_validator_is_suspension_only_and_activates_one_epoch_later() {
         "absence and resume move no stake"
     );
 }
+
+#[test]
+fn duty_lane_full_never_deletes_another_validators_single_live_batch() {
+    let keys: Vec<KeyPair> = (61u8..66u8)
+        .map(|seed| KeyPair::from_seed(&[seed; 32]).unwrap())
+        .collect();
+    let now: u128 = 4_200_005;
+    let live: Vec<Transaction> = keys[..4]
+        .iter()
+        .enumerate()
+        .map(|(i, k)| duty_ack(k, 0, [i as u8 + 1; 32]))
+        .collect();
+    let newcomer = duty_ack(&keys[4], 0, [99u8; 32]);
+    let batch_size = live
+        .iter()
+        .chain([&newcomer])
+        .map(block_bytes)
+        .max()
+        .unwrap();
+    assert!(
+        live.iter().map(block_bytes).sum::<usize>() + block_bytes(&newcomer) > batch_size * 4,
+        "5 single live batches must exceed the 4-block duty-lane ceiling"
+    );
+
+    // Exact capacity for 4 single-batch validators.
+    let mut pool = Mempool::new(MempoolConfig {
+        min_fee: 5,
+        duty_block_bytes: batch_size,
+        ..MempoolConfig::default()
+    });
+    pool.sync_duty_validators(live.iter().map(|t| t.from).chain([newcomer.from]));
+
+    for batch in &live {
+        pool.admit_at(batch.clone(), now)
+            .expect("single live batch fits");
+    }
+    assert_eq!(pool.len(), 4);
+
+    // A 5th validator submitting a batch into a lane where every incumbent
+    // holds only a single live batch must be refused and delete nothing.
+    let refusal = pool.admit_at(newcomer.clone(), now);
+    assert!(
+        matches!(
+            refusal,
+            Err(MempoolError::DutyLaneRefused(
+                DutyRefusal::LaneBytesFull { .. }
+            ))
+        ),
+        "expected LaneBytesFull, got {refusal:?}"
+    );
+    assert_eq!(pool.len(), 4);
+    assert!(pool.get(&newcomer.hash).is_none());
+    for batch in &live {
+        assert!(
+            pool.get(&batch.hash).is_some(),
+            "single live duty batch must never be evicted"
+        );
+    }
+}
+
+#[test]
+fn duty_lane_signers_exclude_underbonded_and_zero_stake_resumed_validators() {
+    let f = fixture(0x74, DEFAULT_CHAIN_ID);
+    let mut state = funded(&f.owner, 10_000);
+    apply(
+        &mut state,
+        &tx(
+            f.owner,
+            1_000,
+            0,
+            DEFAULT_CHAIN_ID,
+            ValidatorTx::Register(Box::new(registration(&f, ValidatorClass::Full, 0x74))),
+        ),
+    )
+    .unwrap();
+    assert!(state.duty_lane_signers().contains(&f.owner));
+
+    // Case 1: unbonding down to 1 atom (below min_stake) removes duty-lane eligibility
+    // even if `active` were still true on a stale record.
+    let mut underbonded = state.clone();
+    underbonded.validators.get_mut(&f.owner).unwrap().stake = 1;
+    underbonded.validators.get_mut(&f.owner).unwrap().active = true;
+    assert!(
+        !underbonded.duty_lane_signers().contains(&f.owner),
+        "1-atom stake below min_stake must not keep free duty lane"
+    );
+
+    // Case 2: suspend -> unstake to zero -> Resume -> advance_epoch must NOT
+    // re-activate a zero-stake validator or re-admit it to the duty lane.
+    let mut params = *state.registry.params();
+    params.liveness_max_missed_epochs = 1;
+    assert_eq!(
+        state
+            .liveness
+            .record_epoch(1, &[f.owner], |_| false, &params),
+        vec![f.owner]
+    );
+    state.validators.get_mut(&f.owner).unwrap().active = false;
+    state.validators.get_mut(&f.owner).unwrap().stake = 0;
+    state.epoch_index = 1;
+
+    apply(
+        &mut state,
+        &tx(f.owner, 0, 1, DEFAULT_CHAIN_ID, ValidatorTx::Resume),
+    )
+    .expect("resume request queues");
+    state.advance_epoch(2, DEFAULT_CHAIN_ID);
+    assert!(
+        !state.validators.get(&f.owner).unwrap().active,
+        "resuming with zero stake must not restore active=true"
+    );
+    assert!(
+        !state.duty_lane_signers().contains(&f.owner),
+        "zero-stake resumed validator must not gain free duty lane"
+    );
+}

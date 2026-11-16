@@ -80,8 +80,23 @@ impl GardenInvite {
                 return Err("invite carries a peer address that is not a plain multiaddr".into());
             }
             // A node dials these before it knows anything else about the
-            // Garden, so each one names the validator it leads to.
-            dial_address(peer).map_err(|e| format!("invite peer {peer} is refused: {e}"))?;
+            // Garden, so each one names the validator it leads to and uses a
+            // numeric IP host (never a DNS name that would query local
+            // resolvers on untrusted pasted text before genesis verification).
+            let (parsed, _) =
+                dial_address(peer).map_err(|e| format!("invite peer {peer} is refused: {e}"))?;
+            if matches!(
+                parsed.iter().next(),
+                Some(
+                    libp2p::multiaddr::Protocol::Dns(_)
+                        | libp2p::multiaddr::Protocol::Dns4(_)
+                        | libp2p::multiaddr::Protocol::Dns6(_)
+                )
+            ) {
+                return Err(format!(
+                    "invite peer {peer} is refused: invite peers must use numeric IP addresses, not DNS names"
+                ));
+            }
         }
         Ok(())
     }
@@ -194,16 +209,27 @@ mod tests {
         let invite = GardenInvite::new(
             &g,
             token,
-            vec![
-                peer("/ip4/127.0.0.1", 4001),
-                peer("/dns4/relay.example", 4002),
-            ],
+            vec![peer("/ip4/127.0.0.1", 4001), peer("/ip6/::1", 4002)],
         )
         .unwrap();
         let link = invite.to_link();
         assert!(link.starts_with("budlum-garden:1?chain="));
         assert_eq!(GardenInvite::parse(&link).unwrap(), invite);
         invite.accepts(&g).unwrap();
+    }
+
+    #[test]
+    fn garden_invite_refuses_dns_peer_addresses() {
+        let token = [3u8; 32];
+        let g = genesis(&token);
+        for dns_peer in [
+            peer("/dns/relay.example", 4002),
+            peer("/dns4/relay.example", 4002),
+            peer("/dns6/relay.example", 4002),
+        ] {
+            let err = GardenInvite::new(&g, token, vec![dns_peer]).unwrap_err();
+            assert!(err.contains("numeric IP"), "{err}");
+        }
     }
 
     #[test]

@@ -30,7 +30,7 @@ on:
     branches: [main]
   schedule:
     # Weekly: a new advisory can be published without the code changing.
-    - cron: "0 6 * * 3"
+    - cron: "0 22 * * 0" # Sunday 22:00 UTC, after the deep fuzz window
   workflow_dispatch:
 
 permissions:

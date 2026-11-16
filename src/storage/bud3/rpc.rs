@@ -539,21 +539,33 @@ mod upload_delivery_tests {
             registry.register_object(
                 [1; 32],
                 prepared.record,
-                vec![(
-                    0,
-                    Share {
-                        validator: [10; 32],
-                        class: Class::Full,
-                        first_esi: 0,
-                        symbols: 3
-                    }
-                )],
+                vec![
+                    (
+                        0,
+                        Share {
+                            validator: [10; 32],
+                            class: Class::Full,
+                            first_esi: 0,
+                            symbols: 2,
+                        },
+                    ),
+                    (
+                        0,
+                        Share {
+                            validator: [11; 32],
+                            class: Class::Full,
+                            first_esi: 2,
+                            symbols: 1,
+                        },
+                    ),
+                ],
                 0,
                 20,
             ),
             Ok(Registered::New(key))
         );
         registry.ack(&key, &[10; 32]).unwrap();
+        registry.ack(&key, &[11; 32]).unwrap();
         let (row, candidates) = placement();
         let reply = upload_from_rpc(
             &mut Bud3RpcService::default(),

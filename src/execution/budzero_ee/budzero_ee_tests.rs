@@ -134,7 +134,7 @@ fn budzero_sender_is_four_words() {
 
 #[test]
 fn budzero_ee_stateful_program_persists() {
-    let sender = Address::from([0x91; 32]);
+    let (sender_seed, sender) = crate::execution::coordinator::test_uel_signer(0x91);
     let proposer = Address::from([0x92; 32]);
     let mut state = AccountState::new();
     state.add_balance(&sender, 20_000);
@@ -150,10 +150,11 @@ fn budzero_ee_stateful_program_persists() {
     }]);
 
     // Block 1: deploy BudZero program.
+    let ctx1 = sample_ctx(1);
     let dep = state
         .execute_uel_block(
             &mut coord,
-            sample_ctx(1),
+            ctx1,
             proposer,
             &[UelTx {
                 tx_hash: [0x81; 32],
@@ -168,7 +169,9 @@ fn budzero_ee_stateful_program_persists() {
                 gas_limit_bgu: 200_000,
                 max_fee_per_bgu_attos: MIN_UEL_BASE_FEE_ATTOS * 2,
                 max_priority_fee_per_bgu_attos: 100,
-            }],
+                auth: crate::execution::coordinator::UelTxAuth::default(),
+            }
+            .signed(ctx1.chain_id, &sender_seed)],
         )
         .expect("deploy budzero");
     assert_eq!(dep[0].status, UelReceiptStatus::Success);
@@ -178,10 +181,11 @@ fn budzero_ee_stateful_program_persists() {
     let slot32 = [0xABu8; 32];
     let mut put_input = slot32.to_vec();
     put_input.extend_from_slice(b"persisted");
+    let ctx2 = sample_ctx(2);
     let put_rec = state
         .execute_uel_block(
             &mut coord,
-            sample_ctx(2),
+            ctx2,
             proposer,
             &[UelTx {
                 tx_hash: [0x82; 32],
@@ -196,16 +200,19 @@ fn budzero_ee_stateful_program_persists() {
                 gas_limit_bgu: 200_000,
                 max_fee_per_bgu_attos: MIN_UEL_BASE_FEE_ATTOS * 2,
                 max_priority_fee_per_bgu_attos: 100,
-            }],
+                auth: crate::execution::coordinator::UelTxAuth::default(),
+            }
+            .signed(ctx2.chain_id, &sender_seed)],
         )
         .expect("put budzero");
     assert_eq!(put_rec[0].status, UelReceiptStatus::Success);
 
     // Block 3: call deployed program again and verify slot persists across blocks.
+    let ctx3 = sample_ctx(3);
     let call_rec = state
         .execute_uel_block(
             &mut coord,
-            sample_ctx(3),
+            ctx3,
             proposer,
             &[UelTx {
                 tx_hash: [0x83; 32],
@@ -220,7 +227,9 @@ fn budzero_ee_stateful_program_persists() {
                 gas_limit_bgu: 200_000,
                 max_fee_per_bgu_attos: MIN_UEL_BASE_FEE_ATTOS * 2,
                 max_priority_fee_per_bgu_attos: 100,
-            }],
+                auth: crate::execution::coordinator::UelTxAuth::default(),
+            }
+            .signed(ctx3.chain_id, &sender_seed)],
         )
         .expect("call budzero");
     assert_eq!(call_rec[0].status, UelReceiptStatus::Success);
