@@ -749,6 +749,8 @@ impl From<&Transaction> for pb::ProtoTransaction {
             tx_type: tx_type_i32,
             wire_version: TX_WIRE_VERSION,
             type_payload,
+            auth_claim: tx.auth_claim.map(Vec::from).unwrap_or_default(),
+            claim_refs: tx.claim_refs.concat(),
             signer_public_key: tx.signer_public_key.clone(),
             authorization: tx
                 .authorization
@@ -1155,6 +1157,25 @@ impl TryFrom<pb::ProtoTransaction> for Transaction {
         } else {
             Some(proto.signature)
         };
+        let auth_claim = decode_optional_hash32(proto.auth_claim, "transaction auth_claim")?;
+        if !proto.claim_refs.len().is_multiple_of(32) {
+            return Err(format!(
+                "Invalid claim references: {} bytes are not whole 32-byte digests",
+                proto.claim_refs.len()
+            ));
+        }
+        if proto.claim_refs.len() / 32 > crate::core::transaction::MAX_CLAIM_REFS_PER_TX {
+            return Err(format!(
+                "Too many claim references: {} > {}",
+                proto.claim_refs.len() / 32,
+                crate::core::transaction::MAX_CLAIM_REFS_PER_TX
+            ));
+        }
+        let claim_refs: Vec<[u8; 32]> = proto
+            .claim_refs
+            .chunks_exact(32)
+            .filter_map(|reference| <[u8; 32]>::try_from(reference).ok())
+            .collect();
         let tx_type_proto = pb::ProtoTransactionType::try_from(proto.tx_type)
             .map_err(|_| "Invalid transaction type in proto payload")?;
 
@@ -2062,6 +2083,8 @@ impl TryFrom<pb::ProtoTransaction> for Transaction {
             chain_id: proto.chain_id,
             signature_version: proto.signature_version,
             tx_type,
+            auth_claim,
+            claim_refs,
         })
     }
 }
@@ -2119,6 +2142,7 @@ impl From<&BlockHeader> for pb::ProtoBlockHeader {
             shards_root: header.shards_root.map(Vec::from).unwrap_or_default(),
             witness_root: header.witness_root.map(Vec::from).unwrap_or_default(),
             seat_participation: encode_seat_participation(&header.seat_participation),
+            frame_hash: header.frame_hash.map(Vec::from).unwrap_or_default(),
             producer_public_key: header.producer_public_key.clone(),
             slashing_reports: header
                 .slashing_reports
@@ -2202,6 +2226,7 @@ impl TryFrom<pb::ProtoBlockHeader> for BlockHeader {
                 proto.seat_participation,
                 "block header seat_participation",
             )?,
+            frame_hash: decode_optional_hash32(proto.frame_hash, "block header frame_hash")?,
         })
     }
 }
@@ -2240,6 +2265,12 @@ impl From<&Block> for pb::ProtoBlock {
             shards_root: block.shards_root.map(Vec::from).unwrap_or_default(),
             witness_root: block.witness_root.map(Vec::from).unwrap_or_default(),
             seat_participation: encode_seat_participation(&block.seat_participation),
+            frame_hash: block.frame_hash.map(Vec::from).unwrap_or_default(),
+            claim_frame: block
+                .claim_frame
+                .as_ref()
+                .map(crate::aggregation::frame::ClaimFrame::encode)
+                .unwrap_or_default(),
             producer_public_key: block.producer_public_key.clone(),
             slashing_reports: block
                 .slashing_reports
@@ -2340,6 +2371,8 @@ impl TryFrom<pb::ProtoBlock> for Block {
                 proto.seat_participation,
                 "block seat_participation",
             )?,
+            frame_hash: decode_optional_hash32(proto.frame_hash, "block frame_hash")?,
+            claim_frame: crate::aggregation::chain::decode_wire_frame(&proto.claim_frame)?,
         })
     }
 }
@@ -2587,6 +2620,18 @@ impl From<&NetworkMessage> for pb::ProtoNetworkMessage {
                     pb::ProtoSlashingEvidence::from(evidence),
                 )
             }
+            NetworkMessage::AggObject {
+                envelope,
+                transaction,
+            } => pb::proto_network_message::Payload::AggObject(pb::ProtoAggObject {
+                envelope: envelope.clone(),
+                transaction: Some(pb::ProtoTransaction::from(transaction)),
+            }),
+            NetworkMessage::AggFrame(frame) => {
+                pb::proto_network_message::Payload::AggFrame(pb::ProtoAggFrame {
+                    frame: frame.clone(),
+                })
+            }
             NetworkMessage::GlobalHeader(header) => {
                 pb::proto_network_message::Payload::GlobalHeader(pb::ProtoGlobalHeader {
                     data: serialize_payload_or_log("GlobalHeader", header),
@@ -2822,6 +2867,26 @@ impl TryFrom<pb::ProtoNetworkMessage> for NetworkMessage {
             pb::proto_network_message::Payload::SlashingEvidence(e) => Ok(
                 NetworkMessage::SlashingEvidence(SlashingEvidence::try_from(e)?),
             ),
+            pb::proto_network_message::Payload::AggObject(object) => {
+                if object.envelope.is_empty()
+                    || object.envelope.len() > crate::network::protocol::MAX_AGG_OBJECT_BYTES
+                {
+                    return Err("AggObject envelope is empty or over the limit".into());
+                }
+                let transaction = object
+                    .transaction
+                    .ok_or_else(|| "AggObject carries no transaction".to_string())?;
+                Ok(NetworkMessage::AggObject {
+                    envelope: object.envelope,
+                    transaction: Transaction::try_from(transaction)?,
+                })
+            }
+            pb::proto_network_message::Payload::AggFrame(frame) => {
+                if frame.frame.is_empty() {
+                    return Err("AggFrame is empty".into());
+                }
+                Ok(NetworkMessage::AggFrame(frame.frame))
+            }
             pb::proto_network_message::Payload::GlobalHeader(h) => {
                 let header = decode_bounded_json(&h.data, "global header payload")?;
                 Ok(NetworkMessage::GlobalHeader(header))
@@ -3443,6 +3508,8 @@ mod tests {
             type_payload: None, // Missing payload for NftBoost!
             signer_public_key: Vec::new(),
             authorization: None,
+            auth_claim: Vec::new(),
+            claim_refs: Vec::new(),
         };
 
         assert!(Transaction::try_from(proto.clone()).is_err());
@@ -3494,6 +3561,8 @@ mod tests {
             )),
             signer_public_key: Vec::new(),
             authorization: None,
+            auth_claim: Vec::new(),
+            claim_refs: Vec::new(),
         };
         assert!(Transaction::try_from(proto.clone()).is_err());
 
