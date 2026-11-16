@@ -170,7 +170,7 @@ impl NftFolderRegistry {
         let content_ref = ContentRef::new(cid, object_commitment, Some(nft_id))
             .map_err(SocialFiBud3Error::InvalidContentRef)?;
         bud3_reg
-            .bind_nft(nft_id, caller.0, &object_commitment)
+            .bind_nft(nft_id, caller.0, Some(caller.0), &object_commitment)
             .map_err(SocialFiBud3Error::Registry)?;
 
         let meta = Bud3NftCommitment {

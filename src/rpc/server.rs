@@ -6565,6 +6565,8 @@ impl BudlumApiServer for RpcServer {
             crate::wallet::identity_profile::validate_passport_name(&name).map_err(|e| {
                 ErrorObjectOwned::owned(-32602, format!("Invalid identity name: {e}"), None::<()>)
             })?;
+            let height = self.chain.get_height().await;
+            let state_root = self.chain.get_state_root(height).await;
             let resolved = self.chain.bns_resolve_full(name.clone()).await;
             let bns_proof = self.chain.bns_prove_name(name.clone()).await;
             let current_epoch = bns_proof.as_ref().map_or(0, |p| p.epoch);
@@ -6572,8 +6574,15 @@ impl BudlumApiServer for RpcServer {
                 Some(r) => self.chain.bns_reverse_resolve(r.owner).await,
                 None => None,
             };
+            // The root carried in this reply's own proof is not an independent
+            // trust anchor: checking the proof against it proves only that the
+            // answering node is self-consistent, while a hostile or on-path
+            // node can mint both. Leave `expected_bns_root` empty so the card
+            // stays Unverified, and return `bns_proof`, `observed_height`, and
+            // `observed_state_root` so callers can verify against a finalized
+            // header root they trust themselves.
             let proof_ctx = crate::wallet::identity_profile::IdentityProofContext {
-                expected_bns_root: bns_proof.as_ref().map(|p| p.bns_root),
+                expected_bns_root: None,
                 bns_proof,
                 current_epoch,
                 reverse_primary_name,
@@ -6591,7 +6600,7 @@ impl BudlumApiServer for RpcServer {
             let data_assets = self.chain.pollen_get_data_assets().await;
             let access_grants = self.chain.pollen_get_access_grants().await;
             let sale_authorizations = self.chain.pollen_get_sale_authorizations().await;
-            let profile = crate::wallet::identity_profile::build_identity_profile_verified(
+            let mut profile = crate::wallet::identity_profile::build_identity_profile_verified(
                 name,
                 resolved,
                 manifest,
@@ -6600,6 +6609,8 @@ impl BudlumApiServer for RpcServer {
                 &sale_authorizations,
                 Some(&proof_ctx),
             );
+            profile.observed_height = Some(height);
+            profile.observed_state_root = state_root;
             serde_json::to_value(profile).map_err(|e| {
                 ErrorObjectOwned::owned(
                     -32603,
@@ -6628,6 +6639,8 @@ impl BudlumApiServer for RpcServer {
             crate::wallet::identity_profile::validate_passport_name(&name).map_err(|e| {
                 ErrorObjectOwned::owned(-32602, format!("Invalid identity name: {e}"), None::<()>)
             })?;
+            let height = self.chain.get_height().await;
+            let state_root = self.chain.get_state_root(height).await;
             let resolved = self.chain.bns_resolve_full(name.clone()).await;
             let bns_proof = self.chain.bns_prove_name(name.clone()).await;
             let current_epoch = bns_proof.as_ref().map_or(0, |p| p.epoch);
@@ -6635,8 +6648,11 @@ impl BudlumApiServer for RpcServer {
                 Some(r) => self.chain.bns_reverse_resolve(r.owner).await,
                 None => None,
             };
+            // Same anchor rule as `passport_get_profile`: the bundle root
+            // commits to the card statuses, so a self-supplied root would turn
+            // a node's own assertion into a portable Verified attestation.
             let proof_ctx = crate::wallet::identity_profile::IdentityProofContext {
-                expected_bns_root: bns_proof.as_ref().map(|p| p.bns_root),
+                expected_bns_root: None,
                 bns_proof,
                 current_epoch,
                 reverse_primary_name,
@@ -6654,7 +6670,7 @@ impl BudlumApiServer for RpcServer {
             let data_assets = self.chain.pollen_get_data_assets().await;
             let access_grants = self.chain.pollen_get_access_grants().await;
             let sale_authorizations = self.chain.pollen_get_sale_authorizations().await;
-            let profile = crate::wallet::identity_profile::build_identity_profile_verified(
+            let mut profile = crate::wallet::identity_profile::build_identity_profile_verified(
                 name,
                 resolved,
                 manifest,
@@ -6663,7 +6679,8 @@ impl BudlumApiServer for RpcServer {
                 &sale_authorizations,
                 Some(&proof_ctx),
             );
-            let height = self.chain.get_height().await;
+            profile.observed_height = Some(height);
+            profile.observed_state_root = state_root;
             let bundle =
                 crate::wallet::identity_profile::try_build_passport_proof_bundle(&profile, height)
                     .map_err(|e| {

@@ -13,7 +13,11 @@ the layer asks which finality proof holds for a fact, never which consensus prod
 value moves between domains without trusting an intermediary.
 
 [![CI](https://github.com/budlum-xyz/budlum/actions/workflows/ci.yml/badge.svg?branch=main&event=push)](https://github.com/budlum-xyz/budlum/actions/workflows/ci.yml?query=branch%3Amain+event%3Apush)
+<<<<<<< HEAD
 [![Tests](https://img.shields.io/badge/tests-5812%20lib-blue)](https://github.com/budlum-xyz/budlum/actions/workflows/ci.yml?query=branch%3Amain+event%3Apush)
+=======
+[![Tests](https://img.shields.io/badge/tests-5715%20lib-blue)](https://github.com/budlum-xyz/budlum/actions/workflows/ci.yml?query=branch%3Amain+event%3Apush)
+>>>>>>> 76d78fba (testnet: audit/remediate PR #126 per the denetim direktifi (bottom-up))
 [![Rust](https://img.shields.io/badge/rust-1.97.1-orange?logo=rust)](rust-toolchain.toml)
 [![License](https://img.shields.io/badge/license-PolyForm%20Shield%201.0.0-blue)](LICENSE.md)
 
