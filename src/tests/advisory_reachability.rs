@@ -243,6 +243,10 @@ mod tests {
                 ".quality/deny.toml",
                 include_str!("../../.quality/deny.toml"),
             ),
+            (
+                ".quality/deny-fuzz.toml",
+                include_str!("../../.quality/deny-fuzz.toml"),
+            ),
             ("budzero/deny.toml", include_str!("../../budzero/deny.toml")),
         ] {
             assert!(

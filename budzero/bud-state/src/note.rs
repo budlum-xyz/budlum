@@ -1,7 +1,7 @@
 //! Privacy-layer note/UTXO model - paralel izole subtree.
 //!
-//! It lives in a separate state area WITHOUT TOUCHING the account model (the
-//! privacy directive, section 7 isolation rule). It is not shared with NFT / B.U.D. / Pollen state.
+//! It lives in a separate state area without touching the account model, and is
+//! not shared with NFT / B.U.D. / Pollen state.
 //!
 //! Commitment + nullifier primitifleri:
 //! - commitment = Poseidon(amount || recipient || blinding); only this hash is
@@ -70,7 +70,7 @@ impl PrivacyNote {
 #[derive(Debug, Clone, Default)]
 pub struct NoteRegistry {
     /// The live (unspent) note commitments.
-    /// Live commitment -> the nullifier that spends it (P16-F18).
+    /// Live commitment -> the nullifier that spends it.
     notes: BTreeMap<Hash, Hash>,
     /// The spent nullifiers - double spend prevention.
     spent_nullifiers: BTreeSet<Hash>,
@@ -112,7 +112,7 @@ impl NoteRegistry {
         }
         match self.notes.get(&commitment) {
             None => return Err("spend: commitment not found in live note set".into()),
-            // P16-F18: the nullifier must be the one this note was created with.
+            // The nullifier must be the one this note was created with.
             Some(bound) if *bound != nullifier => {
                 return Err("spend: nullifier does not belong to this commitment".into())
             }
@@ -220,7 +220,7 @@ mod tests {
             .is_err());
     }
 
-    /// P16-F18: a nullifier cannot spend a commitment it was not created with.
+    /// A nullifier cannot spend a commitment it was not created with.
     #[test]
     fn spend_with_a_foreign_nullifier_rejected() {
         let mut r = NoteRegistry::new();
@@ -256,5 +256,18 @@ mod tests {
         assert!(r.contains(note.commitment));
         r.spend(note.nullifier, note.commitment).unwrap();
         assert!(r.is_spent(note.nullifier));
+    }
+
+    #[test]
+    fn note_registry_binds_nullifier_to_commitment() {
+        let mut r = NoteRegistry::new();
+        let victim = PrivacyNote::from_field_elements(0x1111, 0x2222);
+        let attacker = PrivacyNote::from_field_elements(0x3333, 0x4444);
+        assert!(r.insert(&victim).is_ok());
+        assert!(r.insert(&attacker).is_ok());
+        assert!(r.spend(attacker.nullifier, victim.commitment).is_err());
+        assert!(!r.is_spent(attacker.nullifier));
+        assert!(r.spend(victim.nullifier, victim.commitment).is_ok());
+        assert!(r.is_spent(victim.nullifier));
     }
 }

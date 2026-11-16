@@ -249,16 +249,32 @@ fn shipped_profiles_keep_rpc_on_loopback_and_carry_a_key() {
             let auth = rpc
                 .and_then(|r| r.get("auth_required"))
                 .and_then(toml::Value::as_bool);
+            let op_auth = rpc
+                .and_then(|r| r.get("operator_auth_required"))
+                .and_then(toml::Value::as_bool);
             let key_env = rpc
                 .and_then(|r| r.get("api_key_env"))
                 .and_then(toml::Value::as_str)
                 .unwrap_or("");
-            assert_eq!(
-                auth,
-                Some(true),
-                "{file} is a {profile} profile and must say auth_required = true; TLS \
-                 names the server, the key names the caller"
-            );
+            if profile == "mainnet" {
+                assert_eq!(
+                    auth,
+                    Some(true),
+                    "{file} is a mainnet profile and must say auth_required = true; TLS \
+                     names the server, the key names the caller"
+                );
+            } else {
+                assert_eq!(
+                    auth,
+                    Some(false),
+                    "{file} is a testnet profile and exposes keyless public reads + signed-tx submission"
+                );
+                assert_eq!(
+                    op_auth,
+                    Some(true),
+                    "{file} is a testnet profile and must require API-key authentication on operator_listener"
+                );
+            }
             assert!(
                 !key_env.trim().is_empty(),
                 "{file} is a {profile} profile and must name api_key_env"
@@ -294,7 +310,7 @@ fn shipped_profiles_keep_rpc_on_loopback_and_carry_a_key() {
     }
 }
 
-/// BLG-1077: `config/archive.toml` said chain id 42 under the testnet
+/// `config/archive.toml` said chain id 42 under the testnet
 /// profile. The start-up check exits when the id differs from the profile id,
 /// so the archive profile could not start. Every shipped profile must carry
 /// the same chain id as the genesis file it names.
@@ -349,7 +365,7 @@ fn systemd_unit_lines() -> Vec<String> {
         .collect()
 }
 
-/// BLG-1080: a core dump of a validator process can hold key material, so the
+/// A core dump of a validator process can hold key material, so the
 /// unit must switch core dumps off.
 #[test]
 fn systemd_unit_disables_core_dumps() {
@@ -364,7 +380,7 @@ fn systemd_unit_disables_core_dumps() {
     );
 }
 
-/// BLG-1078: the systemd unit set a variable that no code reads, and its
+/// The systemd unit set a variable that no code reads, and its
 /// value was a directory path (`%d`), not key content. The node
 /// reads the variable that `BUDLUM_RPC_API_KEY_ENV` names, so the unit has to
 /// name it and has to load its value from a file.

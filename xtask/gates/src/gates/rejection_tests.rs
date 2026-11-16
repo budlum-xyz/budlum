@@ -111,7 +111,7 @@ fn has_negative(body: &str) -> bool {
     // `assert_eq!(x, 0)`, `assert_eq!(x, false)`, `assert_eq!(x, None)`,
     // `assert_eq!(x, vec![])`, `assert_eq!(x, "")`: a zero/empty outcome is
     // the refusal. The shell regex is
-    // `assert_eq!\s*\([^;]*?,\s*(?:0|false|None|vec!\[\]|"")\s*[,)]`, so the
+    // `assert_eq!\s*\([^;]*?,\s*(?:0|false|None|vec!\[\]|"")\s*[)]`, so the
     // value may sit on a later line; compare a whitespace-stripped tail.
     if let Some(pos) = b.find("assert_eq!(") {
         let tail = &b[pos..];

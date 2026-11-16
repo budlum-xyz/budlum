@@ -1,4 +1,4 @@
-# BLG-1048 (P58-F02, decision A): the sensitive surfaces below carry owners
+# The sensitive surfaces below carry owners
 # again. The file used to be empty ("disabled to prevent PR deadlock"), which
 # left workflows, .quality, baselines, deny.toml and Cargo.toml with no review
 # owner at all - the baseline rule was convention plus ci-workflow-guards
@@ -13,20 +13,20 @@
 
 # CI and its guardrails: every workflow, the lint/deny tables and the
 # quality gates.
-/.github/workflows/ @lubothebook
-/.quality/ @lubothebook
-/.github/clippy-extra-baseline.txt @lubothebook
-/.github/codeql/ @lubothebook
-/codeql/ @lubothebook
+/.github/workflows/ @lubosruler
+/.quality/ @lubosruler
+/.github/clippy-extra-baseline.txt @lubosruler
+/.github/codeql/ @lubosruler
+/codeql/ @lubosruler
 
 # Supply-chain and policy manifests: a loosened deny or audit table is
 # invisible in a code diff.
-/budzero/deny.toml @lubothebook
-/.cargo/audit.toml @lubothebook
-/supply-chain/ @lubothebook
-/audits.toml @lubothebook
-/.github/dependabot.yml @lubothebook
+/budzero/deny.toml @lubosruler
+/.cargo/audit.toml @lubosruler
+/supply-chain/ @lubosruler
+/audits.toml @lubosruler
+/.github/dependabot.yml @lubosruler
 
 # The dependency surface itself: manifest changes route to the same owner.
-/Cargo.toml @lubothebook
-/Cargo.lock @lubothebook
+/Cargo.toml @lubosruler
+/Cargo.lock @lubosruler

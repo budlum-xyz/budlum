@@ -247,6 +247,20 @@ pub struct VerifierRegistry {
     charged_offences: BTreeMap<String, BTreeSet<(u8, u64, u64)>>,
 }
 
+const MAX_VERIFIER_PARAM_AMOUNT: u64 = 1_000_000_000_000_000_000;
+const MAX_VERIFIER_UNBONDING_EPOCHS: u64 = 100_000;
+
+fn validate_registry_params(params: &RegistryParams) -> Result<(), String> {
+    params.validate()?;
+    if params.min_stake > MAX_VERIFIER_PARAM_AMOUNT {
+        return Err("min_stake exceeds the maximum parameter amount".into());
+    }
+    if params.unbonding_epochs > MAX_VERIFIER_UNBONDING_EPOCHS {
+        return Err("unbonding_epochs must be between 1 and 100,000".into());
+    }
+    Ok(())
+}
+
 fn offence_member_key(role: RoleId, account: Address) -> String {
     format!(
         "{}:{}",
@@ -312,11 +326,10 @@ impl VerifierRegistry {
         }
     }
 
-    /// P16-F12: like [`Self::with_params`], but refuses parameters that fail
-    /// [`RegistryParams::validate`] (zero `min_stake` or `unbonding_epochs`,
-    /// ratios above the scale).
+    /// Like [`Self::with_params`], but refuses parameters that fail
+    /// [`RegistryParams::validate`] or exceed protocol ceilings.
     pub fn try_with_params(params: RegistryParams) -> Result<Self, String> {
-        params.validate()?;
+        validate_registry_params(&params)?;
         Ok(Self::with_params(params))
     }
 
@@ -325,7 +338,7 @@ impl VerifierRegistry {
     }
 
     pub fn set_params(&mut self, params: RegistryParams) -> Result<(), String> {
-        params.validate()?;
+        validate_registry_params(&params)?;
         self.params = params;
         Ok(())
     }
@@ -344,6 +357,9 @@ impl VerifierRegistry {
                 required: self.params.min_stake,
                 provided: stake,
             });
+        }
+        if stake > MAX_VERIFIER_PARAM_AMOUNT {
+            return Err(RegistryError::StakeOverflow { account, role });
         }
         let key = (role, account);
         if self.registrations.contains_key(&key) {
@@ -444,7 +460,7 @@ impl VerifierRegistry {
         match self.registrations.get_mut(&key) {
             Some(reg) => {
                 if total_stake == 0 {
-                    // P16-F11: a zero stake is an exit, not a deletion. The
+                    // A zero stake is an exit, not a deletion. The
                     // bond stays slashable and locked for the unbonding
                     // window; removing it let evidence find `NotRegistered`.
                     //
@@ -464,7 +480,7 @@ impl VerifierRegistry {
                     reg.stake = total_stake;
                     return;
                 }
-                // BLG-0253 (P16-F10): a slashed entry may only shrink.
+                // A slashed entry may only shrink.
                 // Writing the caller's uncut total back undid the slash on the
                 // next mirrored Stake/Unstake, which made the "terminal" status
                 // below even less coherent.
@@ -503,7 +519,7 @@ impl VerifierRegistry {
             .registrations
             .get_mut(&(role, account))
             .ok_or(RegistryError::NotRegistered { account, role })?;
-        // P16-F13: only an Active bond can grow; an unbonding or slashed
+        // Only an Active bond can grow; an unbonding or slashed
         // bond is on its way out. An overflow is an error, not a clip.
         if !matches!(reg.status, MemberStatus::Active) {
             return Err(RegistryError::NotActive { account, role });
@@ -511,6 +527,7 @@ impl VerifierRegistry {
         reg.stake = reg
             .stake
             .checked_add(amount)
+            .filter(|&next| next <= MAX_VERIFIER_PARAM_AMOUNT)
             .ok_or(RegistryError::StakeOverflow { account, role })?;
         Ok(reg.stake)
     }
@@ -527,7 +544,7 @@ impl VerifierRegistry {
             .registrations
             .get_mut(&(role, account))
             .ok_or(RegistryError::NotRegistered { account, role })?;
-        // BLG-0253, decision 5A: exclusion is not confiscation. The
+        // decision 5A: exclusion is not confiscation. The
         // penalty already reduced stake; the remainder exits with the same
         // delay as an active bond, matching the node registry.
         if !matches!(reg.status, MemberStatus::Active | MemberStatus::Slashed) {
@@ -591,8 +608,8 @@ impl VerifierRegistry {
 
         let penalty = slash_penalty(reg.stake, slash_ratio_fixed);
         reg.stake = reg.stake.saturating_sub(penalty);
-        // BLG-0253 (P16-F10, mirroring the node's twin at
-        // src/registry/permissionless.rs, BLG-0087 decision B): Slashed had
+        // (mirroring the node's twin at
+        // src/registry/permissionless.rs, decision B): Slashed had
         // no exit at all - a 1% liveness cut froze the remaining stake
         // forever, because begin_unbonding required Active and withdraw
         // required Unbonding. A liveness fault is a timed event: cut the
@@ -639,7 +656,7 @@ impl VerifierRegistry {
                 }
                 let penalty = slash_penalty(reg.stake, slash_ratio_fixed);
                 reg.stake = reg.stake.saturating_sub(penalty);
-                // BLG-0253: the liveness exemption applies to the sweep
+                // The liveness exemption applies to the sweep
                 // too - a cross-role jail over an unrelated role would lock
                 // that role's bond with no exit, the exact defect just fixed.
                 if condition != SlashingCondition::LivenessFault {
@@ -847,6 +864,18 @@ impl VerifierRegistry {
             hasher.update(record.remaining_stake.to_le_bytes());
             hasher.update(record.report.offender.as_bytes());
             hasher.update(record.report.role.as_bytes());
+            let prov_tag = match record.report.provenance() {
+                crate::evidence::ProofProvenance::ConsensusVerified => 0u8,
+                crate::evidence::ProofProvenance::Unverified => 1u8,
+            };
+            hasher.update([prov_tag]);
+            match record.report.reporter {
+                Some(rep) => {
+                    hasher.update([1u8]);
+                    hasher.update(rep.as_bytes());
+                }
+                None => hasher.update([0u8]),
+            }
             let (variant_tag, proof_bytes): (u8, Vec<u8>) = match &record.report.proof {
                 SlashingProof::DoubleSign {
                     height,
@@ -1207,7 +1236,7 @@ mod tests {
         assert!(!reg.is_active_attester(&account));
     }
 
-    /// BLG-0253 (P16-F10): a liveness fault is a timed cut with an exit;
+    /// A liveness fault is a timed cut with an exit;
     /// the remaining stake must be withdrawable after the unbonding window.
     #[test]
     fn liveness_fault_leaves_an_exit_for_the_remainder() {
@@ -1267,7 +1296,7 @@ mod tests {
         assert!(reg.get(&account, roles::VALIDATOR).is_none());
     }
 
-    /// BLG-0253: the mirror may only shrink a slashed entry.
+    /// The mirror may only shrink a slashed entry.
     #[test]
     fn upsert_cannot_undraw_a_slash() {
         let account = addr(53);
@@ -1291,7 +1320,7 @@ mod tests {
         );
     }
 
-    /// BLG-0253 (P16-F10) was enforced only while the entry still carried
+    ///was enforced only while the entry still carried
     /// `Slashed`. `begin_unbonding` moves a slashed entry to `Unbonding`, and
     /// from that point the shrink-only test no longer saw it: one mirrored
     /// stake event carrying the pre-slash total raised the bond back, and the
@@ -1348,7 +1377,7 @@ mod tests {
 
     #[test]
     fn unverified_report_not_actionable() {
-        use crate::evidence::{ProofProvenance, SlashingProof};
+        use crate::evidence::SlashingProof;
 
         let mut reg = VerifierRegistry::new();
         reg.register_master_verifier(addr(10), 10_000, 0).unwrap();
@@ -1362,7 +1391,6 @@ mod tests {
                 missed: 5,
                 expected: 10,
             },
-            ProofProvenance::Unverified,
             None,
         );
 
@@ -1373,12 +1401,12 @@ mod tests {
 
     #[test]
     fn consensus_verified_report_slashes() {
-        use crate::evidence::{ProofProvenance, SlashingProof};
+        use crate::evidence::SlashingProof;
 
         let mut reg = VerifierRegistry::new();
         reg.register_master_verifier(addr(11), 10_000, 0).unwrap();
 
-        let report = SlashingReport::new(
+        let report = SlashingReport::new_verified(
             addr(11),
             roles::MASTER_VERIFIER,
             SlashingProof::Liveness {
@@ -1387,13 +1415,12 @@ mod tests {
                 missed: 5,
                 expected: 10,
             },
-            ProofProvenance::ConsensusVerified,
             None,
         );
 
         let result = reg.slash_from_report(&report).unwrap();
         assert!(result.is_some());
-        // BLG-0253 (P16-F10, decision mirrored from the node's BLG-0087):
+        // (decision mirrored from the node's):
         // a liveness report is a timed cut, not a terminal status. The
         // penalty stands and the entry stays Active so the remainder can
         // leave through the unbonding path; the record is the slash.
@@ -1427,7 +1454,7 @@ mod tests {
     /// silently misanswered.
     #[test]
     fn the_slashing_history_stops_growing_at_the_cap() {
-        use crate::evidence::{ProofProvenance, SlashingProof};
+        use crate::evidence::SlashingProof;
 
         let mut reg = VerifierRegistry::new();
         let total = MAX_SLASHING_HISTORY + 3;
@@ -1437,7 +1464,7 @@ mod tests {
             raw[1] = (i % 256) as u8;
             let offender = Address::from(raw);
             reg.register_master_verifier(offender, 10_000, 0).unwrap();
-            let report = SlashingReport::new(
+            let report = SlashingReport::new_verified(
                 offender,
                 roles::MASTER_VERIFIER,
                 SlashingProof::Liveness {
@@ -1446,7 +1473,6 @@ mod tests {
                     missed: 5,
                     expected: 10,
                 },
-                ProofProvenance::ConsensusVerified,
                 None,
             );
             assert!(reg.slash_from_report(&report).unwrap().is_some());
@@ -1473,7 +1499,7 @@ mod tests {
         assert_eq!(last, Some(Address::from(expected_last)));
     }
 
-    /// P16-F11: a zero stake unbonds, it does not delete the registration.
+    /// A zero stake unbonds, it does not delete the registration.
     #[test]
     fn upsert_zero_stake_keeps_the_bond_slashable() {
         let mut reg = VerifierRegistry::new();
@@ -1499,11 +1525,11 @@ mod tests {
             .is_ok());
     }
 
-    /// P16-F13: stake only grows on an Active bond and never clips.
+    /// Stake only grows on an Active bond and never clips.
     #[test]
     fn add_stake_refuses_non_active_and_overflow() {
         let mut reg = VerifierRegistry::new();
-        reg.register_master_verifier(addr(31), u64::MAX - 1, 0)
+        reg.register_master_verifier(addr(31), MAX_VERIFIER_PARAM_AMOUNT - 1, 0)
             .unwrap();
         assert!(matches!(
             reg.add_stake(addr(31), roles::MASTER_VERIFIER, 2),
@@ -1511,7 +1537,7 @@ mod tests {
         ));
         assert_eq!(
             reg.add_stake(addr(31), roles::MASTER_VERIFIER, 1),
-            Ok(u64::MAX)
+            Ok(MAX_VERIFIER_PARAM_AMOUNT)
         );
         reg.begin_unbonding(addr(31), roles::MASTER_VERIFIER, 0)
             .unwrap();
@@ -1521,7 +1547,7 @@ mod tests {
         ));
     }
 
-    /// P16-F12: parameters that fail validation are refused.
+    /// Parameters that fail validation are refused.
     #[test]
     fn invalid_params_are_refused() {
         let bad = RegistryParams {
@@ -1545,7 +1571,7 @@ mod tests {
         assert!(reg.is_active_content_validator(&addr(21)));
     }
 
-    /// BLG-0257 (P16-F14): the root commits to EVERYTHING the struct holds.
+    /// The root commits to EVERYTHING the struct holds.
     /// V1 hashed the registration table only - parameters and the slashing
     /// history were invisible, so a snapshot could not tell apart registries
     /// whose unbonding window, min stake, slash ratios, or truncation of the
@@ -1560,7 +1586,7 @@ mod tests {
         assert_ne!(
             empty.state_root(),
             other_params.state_root(),
-            "parameters are part of the state root (BLG-0257)"
+            "parameters are part of the state root"
         );
 
         let mut with_history = VerifierRegistry::default();
@@ -1572,7 +1598,6 @@ mod tests {
                     tag: "t".into(),
                     data: vec![1],
                 },
-                crate::evidence::ProofProvenance::Unverified,
                 None,
             ),
             penalty: 5,
@@ -1582,7 +1607,7 @@ mod tests {
         assert_ne!(
             empty.state_root(),
             with_history.state_root(),
-            "slashing history is part of the state root (BLG-0257)"
+            "slashing history is part of the state root"
         );
         let mut other_history = VerifierRegistry::default();
         other_history.slashing_history.push(SlashingRecord {
@@ -1602,12 +1627,11 @@ mod tests {
 
     #[test]
     fn liveness_offence_window_is_charged_at_most_once_even_after_history_eviction() {
-        use crate::evidence::ProofProvenance;
         let mut reg = VerifierRegistry::new();
         let victim = addr(0xAA);
         reg.register_master_verifier(victim, 10_000, 0).unwrap();
 
-        let first = SlashingReport::new(
+        let first = SlashingReport::new_verified(
             victim,
             roles::MASTER_VERIFIER,
             SlashingProof::Liveness {
@@ -1616,11 +1640,10 @@ mod tests {
                 missed: 5,
                 expected: 10,
             },
-            ProofProvenance::ConsensusVerified,
             None,
         );
         let outcome = reg.slash_from_report(&first).unwrap().expect("initial cut");
-        let modified_same_window = SlashingReport::new(
+        let modified_same_window = SlashingReport::new_verified(
             victim,
             roles::MASTER_VERIFIER,
             SlashingProof::Liveness {
@@ -1629,7 +1652,6 @@ mod tests {
                 missed: 8,
                 expected: 10,
             },
-            ProofProvenance::ConsensusVerified,
             Some(addr(0xBB)),
         );
         assert!(reg
@@ -1643,7 +1665,7 @@ mod tests {
             raw[1] = (i % 256) as u8;
             let other = Address::from(raw);
             reg.register_master_verifier(other, 10_000, 0).unwrap();
-            let r = SlashingReport::new(
+            let r = SlashingReport::new_verified(
                 other,
                 roles::MASTER_VERIFIER,
                 SlashingProof::Liveness {
@@ -1652,7 +1674,6 @@ mod tests {
                     missed: 6,
                     expected: 10,
                 },
-                ProofProvenance::ConsensusVerified,
                 None,
             );
             let _ = reg.slash_from_report(&r).unwrap();
@@ -1666,7 +1687,6 @@ mod tests {
 
     #[test]
     fn state_root_distinguishes_shifted_proof_field_boundaries() {
-        use crate::evidence::ProofProvenance;
         let mut reg_a = VerifierRegistry::new();
         let mut reg_b = VerifierRegistry::new();
         reg_a
@@ -1676,7 +1696,7 @@ mod tests {
             .register_master_verifier(addr(0xCC), 10_000, 0)
             .unwrap();
 
-        let report_a = SlashingReport::new(
+        let report_a = SlashingReport::new_verified(
             addr(0xCC),
             roles::MASTER_VERIFIER,
             SlashingProof::DoubleSign {
@@ -1686,10 +1706,9 @@ mod tests {
                 signature_1: vec![1],
                 signature_2: vec![2],
             },
-            ProofProvenance::ConsensusVerified,
             None,
         );
-        let report_b = SlashingReport::new(
+        let report_b = SlashingReport::new_verified(
             addr(0xCC),
             roles::MASTER_VERIFIER,
             SlashingProof::DoubleSign {
@@ -1699,11 +1718,91 @@ mod tests {
                 signature_1: vec![1],
                 signature_2: vec![2],
             },
-            ProofProvenance::ConsensusVerified,
             None,
         );
         reg_a.slash_from_report(&report_a).unwrap();
         reg_b.slash_from_report(&report_b).unwrap();
         assert_ne!(reg_a.state_root(), reg_b.state_root());
+    }
+
+    #[test]
+    fn param_ceilings_and_reporter_root_binding() {
+        let bad_stake = RegistryParams {
+            min_stake: u64::MAX,
+            ..RegistryParams::default()
+        };
+        assert!(VerifierRegistry::try_with_params(bad_stake).is_err());
+
+        let bad_unbond = RegistryParams {
+            unbonding_epochs: u64::MAX,
+            ..RegistryParams::default()
+        };
+        assert!(VerifierRegistry::try_with_params(bad_unbond).is_err());
+
+        let mut reg = VerifierRegistry::new();
+        assert!(matches!(
+            reg.register_master_verifier(addr(0x11), u64::MAX, 0),
+            Err(RegistryError::StakeOverflow { .. })
+        ));
+
+        let mut reg_none = VerifierRegistry::new();
+        let mut reg_some = VerifierRegistry::new();
+        reg_none
+            .register_master_verifier(addr(0xDD), 10_000, 0)
+            .unwrap();
+        reg_some
+            .register_master_verifier(addr(0xDD), 10_000, 0)
+            .unwrap();
+        let proof = SlashingProof::DoubleSign {
+            height: 9,
+            block_hash_1: "11".into(),
+            block_hash_2: "22".into(),
+            signature_1: vec![1],
+            signature_2: vec![2],
+        };
+        let r_none =
+            SlashingReport::new_verified(addr(0xDD), roles::MASTER_VERIFIER, proof.clone(), None);
+        let r_some = SlashingReport::new_verified(
+            addr(0xDD),
+            roles::MASTER_VERIFIER,
+            proof,
+            Some(addr(0xEE)),
+        );
+        reg_none.slash_from_report(&r_none).unwrap();
+        reg_some.slash_from_report(&r_some).unwrap();
+        assert_ne!(reg_none.state_root(), reg_some.state_root());
+    }
+
+    /// A decoded report cannot slash on its own say-so. An `Other` proof maps to
+    /// `MaliciousBehaviour`: the full cut and a terminal `Slashed`, so the claim decides a lot.
+    #[test]
+    fn a_decoded_report_cannot_slash_whatever_it_claims() {
+        use crate::evidence::SlashingProof;
+
+        let mut reg = VerifierRegistry::new();
+        reg.register_master_verifier(addr(12), 10_000, 0).unwrap();
+        let certified = SlashingReport::new_verified(
+            addr(12),
+            roles::MASTER_VERIFIER,
+            SlashingProof::Other {
+                tag: "malicious".into(),
+                data: vec![1],
+            },
+            None,
+        );
+        let wire = serde_json::to_string(&certified).unwrap();
+        assert!(
+            wire.contains("ConsensusVerified"),
+            "the claim is on the wire: {wire}"
+        );
+
+        let decoded: SlashingReport = serde_json::from_str(&wire).unwrap();
+        assert!(reg.slash_from_report(&decoded).is_err());
+        assert!(reg.is_active_master_verifier(&addr(12)));
+        assert!(reg.slashing_history().is_empty());
+
+        // Control: the same report, certified by this crate, slashes.
+        assert!(reg.slash_from_report(&certified).unwrap().is_some());
+        assert!(!reg.is_active_master_verifier(&addr(12)));
     }
 }

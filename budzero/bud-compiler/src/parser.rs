@@ -534,6 +534,13 @@ impl<'a> Parser<'a> {
                 self.expect(Token::Semicolon)?;
                 Ok(Stmt::Emit(event_name, args))
             }
+            // A call used as a statement: `f(1);`. An identifier followed by an
+            // opening parenthesis is never an assignment target.
+            Token::Ident(_) if self.tokens.get(self.pos + 1) == Some(&Token::ParenOpen) => {
+                let expr = self.parse_expr()?;
+                self.expect(Token::Semicolon)?;
+                Ok(Stmt::Expr(expr))
+            }
             Token::Ident(name) => {
                 let name = name.clone();
                 self.consume();
@@ -663,6 +670,17 @@ impl<'a> Parser<'a> {
                 self.consume();
                 MatchPattern::IntLit(v)
             }
+            Token::Hex(text) => {
+                // The same literal an expression would read, so `0x10` and `16`
+                // are one pattern.
+                let text = text.clone();
+                self.consume();
+                let digits = text.strip_prefix("0x").unwrap_or(&text);
+                let v = u64::from_str_radix(digits, 16).map_err(|e| {
+                    CompileError::ParserError(format!("Invalid hex literal {text}: {e}"))
+                })?;
+                MatchPattern::IntLit(v)
+            }
             _ => {
                 return Err(CompileError::ParserError(
                     "match arm pattern must be an integer literal or '_'".to_string(),
@@ -741,17 +759,13 @@ impl<'a> Parser<'a> {
                     self.expect(Token::ParenClose)?;
                     Ok(Expr::Call(format!("block::{field}"), Vec::new()))
                 } else if name == "verify_merkle_proof" {
+                    // One argument: the address of the path window. The key, the
+                    // 256-bit leaf and root and the 64 siblings live in that window
+                    //; a node does not fit a register.
                     self.expect(Token::ParenOpen)?;
-                    let root = self.parse_child(child_max)?;
-                    self.expect(Token::Comma)?;
-                    let leaf = self.parse_child(child_max)?;
-                    self.expect(Token::Comma)?;
                     let path = self.parse_child(child_max)?;
                     self.expect(Token::ParenClose)?;
-                    Ok(Expr::Call(
-                        "verify_merkle_proof".to_string(),
-                        vec![root, leaf, path],
-                    ))
+                    Ok(Expr::Call("verify_merkle_proof".to_string(), vec![path]))
                 } else if self.peek() == &Token::ParenOpen {
                     self.consume();
                     let mut args = Vec::new();
@@ -900,7 +914,7 @@ mod tests {
         assert!(parser.parse_contract().is_ok());
     }
 
-    /// P35-F08: operator and field chains are parsed in loops, so the
+    /// Operator and field chains are parsed in loops, so the
     /// nesting guard never sees them. Before, a flat chain built a tree as
     /// tall as the chain, and sema or codegen recursed once per level.
     #[test]

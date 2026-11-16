@@ -1,28 +1,28 @@
 //! B.U.D. 3.0 - SPEC v4.0 CONFORMANCE GATES (2026-08-17)
 //!
 //! The principle: every claim is verified by measurement; the B.U.D. 3.0 hardening scope.
-//! This module verifies the B.U.D. 3.0 spec clauses (K4, K5, K6, K10, K13, K14b)
+//! This module verifies the B.U.D. 3.0 spec clauses
 //! IN CODE: each clause is a gate function plus a test. The claim does not live in prose,
 //! it lives in the measurement.
 //!
-//! K4  : bit-equal, full-resolution content from a 120 B recipe record.
-//! K5  : compress FIRST (the codec gain lowers the rent; without compression there is no recipe).
-//! K6  : the systematic carousel, overhead 1.00 (no repair drops, fully systematic).
-//! K10 : byte-equal read-back (an exact roundtrip).
-//! K13 : an 8-format sweep; the R3 rent uses the REAL measured ratio (floor 0.23342).
-//! K14b: three meters: rent -> the storer, step -> the validator, commitment -> consensus.
+//! Bit-equal, full-resolution content from a 120 B recipe record.
+//! Compress FIRST (the codec gain lowers the rent; without compression there is no recipe).
+//! The systematic carousel, overhead 1.00 (no repair drops, fully systematic).
+//! Byte-equal read-back (an exact roundtrip).
+//! An 8-format sweep; the R3 rent uses the REAL measured ratio (floor 0.23342).
+//! Three meters: rent -> the storer, step -> the validator, commitment -> consensus.
 
 #![forbid(unsafe_code)]
 
 use crate::bud_format_r3fix::{Codec, R3Recipe};
 use crate::bud_format_recipe_record::RecipeRecord;
 
-/// The K4 gate: a generative recipe record is within the 120 B limit (spec K4).
+/// The gate: a generative recipe record is within the 120 B limit.
 pub fn recipe_record_120b_k4(t: &RecipeRecord) -> bool {
     t.record_bytes() <= 120
 }
 
-/// The K5 gate: compression is applied FIRST and shrinks the raw size (ratio >= 1.0).
+/// The gate: compression is applied FIRST and shrinks the raw size (ratio >= 1.0).
 /// On a very small input the zstd header can grow it; the gate measures with an input of
 /// sufficient length (a small input enters storage as a body anyway, it does not become a recipe).
 pub fn compress_first_k5(raw: &[u8]) -> bool {
@@ -34,10 +34,10 @@ pub fn compress_first_k5(raw: &[u8]) -> bool {
         .unwrap_or(false)
 }
 
-/// The K6 gate: the systematic carousel's overhead is around 1.00 (no repair drops,
-/// only the DamlaHdr header). The limit: the ratio cannot exceed 1.25 (K-QR-GENISLEME).
+/// The gate: the systematic carousel's overhead is around 1.00 (no repair drops,
+/// only the DamlaHdr header). The limit: the ratio cannot exceed 1.25.
 /// Note: `derive_stream` also packs repair drops (turns >= 1); the pure systematic
-/// overhead is measured as the sum of the blocks' systematic_drop packets (K6).
+/// overhead is measured as the sum of the blocks' systematic_drop packets.
 pub fn carousel_overhead_k6(data: &[u8]) -> Option<f64> {
     if data.is_empty() {
         return None;
@@ -52,7 +52,7 @@ pub fn carousel_overhead_k6(data: &[u8]) -> Option<f64> {
     (ratio <= 1.25).then_some(ratio)
 }
 
-/// The K10 gate: a roundtrip through an R3 bodied recipe is exact (byte-equal).
+/// The gate: a roundtrip through an R3 bodied recipe is exact (byte-equal).
 pub fn byte_equal_k10(input: &[u8], mime: &str) -> bool {
     let t = R3Recipe::produce(
         input,
@@ -90,14 +90,14 @@ fn recipe_reads_back(t: &R3Recipe, input: &[u8]) -> bool {
     }
 }
 
-/// The K13 gate: the R3 rent with the REAL measured ratio (floor 0.23342 x erasure / ratio).
+/// The gate: the R3 rent with the REAL measured ratio (floor 0.23342 x erasure / ratio).
 /// The R3 recipe ceiling, section 18.1b: $0.016/TB. Honesty: not every codec FITS the ceiling;
 /// a codec that compresses poorly stays above the ceiling and does not enter storage.
 pub fn k13_rent(codec: Codec, erasure: f64) -> f64 {
     crate::bud_format_r3fix::r3_real_rent(&codec, erasure)
 }
 
-/// The K13 sweep result: which measured codecs stay within the R3 ceiling (0.016).
+/// The sweep result: which measured codecs stay within the R3 ceiling (0.016).
 pub fn k13_within_ceiling(ceiling: f64) -> Vec<(&'static str, f64, bool)> {
     use crate::bud_format_r3fix::Codec as C;
     [
@@ -115,7 +115,7 @@ pub fn k13_within_ceiling(ceiling: f64) -> Vec<(&'static str, f64, bool)> {
     .collect()
 }
 
-/// The K14b three meters: rent -> the storer, step -> the validator, commitment -> consensus.
+/// The three meters: rent -> the storer, step -> the validator, commitment -> consensus.
 /// The three channels are SEPARATE; when one is zeroed the other does not take over.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ThreeMeterK14b {
@@ -124,12 +124,12 @@ pub struct ThreeMeterK14b {
     pub consensus_commitment: [u8; 32], // the commitment: the consensus record
 }
 
-/// The K14b computation: the recipe rent + the step floor + the commitment digest in one place.
+/// The computation: the recipe rent + the step floor + the commitment digest in one place.
 pub fn three_meter_k14b(t: &RecipeRecord, erasure: f64, compression_ratio: f64) -> ThreeMeterK14b {
     let rent = crate::bud_format_recipe_record::rent(t, erasure, compression_ratio);
     let gen = match t {
         RecipeRecord::Generative { generator, .. } => *generator,
-        RecipeRecord::Bodied { .. } => 99, // the step ceiling for a bodied recipe (K14b)
+        RecipeRecord::Bodied { .. } => 99, // the step ceiling for a bodied recipe
     };
     let step = crate::bud_format_recipe_record::step_floor(gen);
     let commitment = crate::bud_format_recipe_record::recipe_digest(t);
@@ -140,18 +140,18 @@ pub fn three_meter_k14b(t: &RecipeRecord, erasure: f64, compression_ratio: f64) 
     }
 }
 
-/// K14b honesty: if step is 0 nothing flows to the validator (unpaid generation labor =
+/// honesty: if step is 0 nothing flows to the validator (unpaid generation labor =
 /// DoS), the commitment is deterministic (the same recipe -> the same digest), and the rent
 /// channel is open or closed by recipe kind (R1 generation stores nothing -> rent 0).
 pub fn three_meter_is_honest(s: &ThreeMeterK14b) -> bool {
     if s.validator_step_usd <= 0.0 {
-        return false; // in a generative recipe the step cannot be ZERO (K14b)
+        return false; // in a generative recipe the step cannot be ZERO
     }
     !s.consensus_commitment.iter().all(|&b| b == 0)
 }
 
 /// The QR derivative growth limit: the derivative cannot exceed 2x the original plus a 1 KB
-/// constant (spec K-QR-GENISLEME; the carousel drop headers are bounded).
+/// constant (spec; the carousel drop headers are bounded).
 pub fn qr_derivative_growth_limit(derived_len: usize, original_len: usize) -> bool {
     original_len
         .checked_mul(2)
@@ -176,7 +176,7 @@ mod tests {
 
     #[test]
     fn k5_compress_first_gives_a_ratio_above_one() {
-        // Repetitive content: zstd shrinks it meaningfully below 1.0 (K5)
+        // Repetitive content: zstd shrinks it meaningfully below 1.0
         let raw: Vec<u8> = (0u8..=255).cycle().take(8 * 1024).collect();
         assert!(compress_first_k5(&raw), "zstd must shrink the raw size");
     }
@@ -189,7 +189,7 @@ mod tests {
             (1.0..=1.25).contains(&ratio),
             "the systematic overhead is ~1.00: {ratio}"
         );
-        // Production (systematic + repair) is within 2x plus a constant (K-QR-GENISLEME)
+        // Production (systematic + repair) is within 2x plus a constant
         let derived = crate::bud_format_qrvideo::derive_stream(&data, 0, 1).expect("derivative");
         assert!(qr_derivative_growth_limit(derived.len(), data.len()));
     }

@@ -1,7 +1,7 @@
 //! Repeated invalid-signature vote tracking.
 //!
 //! Rejects every cryptographically-invalid finality vote at ingest
-//! (closing a single-signature DoS). But a rejected vote never enters the
+//! (closing a single-signature `DoS`). But a rejected vote never enters the
 //! Aggregate, so the sender paid nothing - a validator could spam garbage
 //! Signatures forever. This module closes that gap with the SAME pattern as
 //! [`LivenessTracker`](crate::registry::LivenessTracker): a persisted per-epoch
@@ -29,7 +29,7 @@ use crate::registry::evidence::SlashingReport;
 use crate::registry::params::RegistryParams;
 use crate::registry::role::roles;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 type InvalidVoteSample = (Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>);
 
@@ -52,7 +52,7 @@ type InvalidVoteSample = (Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>);
 /// reported for the epoch.
 pub const MAX_SPAM_REPORT_SAMPLES: usize = 24;
 
-/// The encoded size the block door allows one slashing report to occupy.
+/// The encoded size the spam-report test holds the producer to.
 ///
 /// `chain::blockchain` reads this constant for both of its block-door checks
 /// (the evidence sweep and the report queue), so a report the producer builds
@@ -97,6 +97,15 @@ impl InvalidVoteTracker {
     /// Current invalid-vote count for a validator in the tracker's active epoch.
     pub fn invalid_count(&self, validator: &Address) -> u64 {
         self.counts.get(validator).copied().unwrap_or(0)
+    }
+
+    #[must_use]
+    pub fn tracked_validator_count(&self) -> usize {
+        let mut validators = BTreeSet::new();
+        validators.extend(self.counts.keys().copied());
+        validators.extend(self.reported.keys().copied());
+        validators.extend(self.samples.keys().copied());
+        validators.len()
     }
 
     /// The epoch the current counts belong to.
@@ -370,7 +379,7 @@ mod tests {
         }
     }
 
-    /// PR #97 review: the counter can no longer be pinned at one.
+    /// The counter can no longer be pinned at one.
     ///
     /// One rejected vote has exactly one wire spelling that the vote-auth
     /// preimage covers, so a bonded validator can re-wrap it without limit and

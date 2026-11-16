@@ -712,10 +712,16 @@ fn collect_rs(root: &Path, out: &mut Vec<PathBuf>) {
 }
 
 /// Does the module declare itself unwired?
-fn declares_unwired(src: &str) -> bool {
+fn declares_unwired(src: &str, fns: &std::collections::BTreeSet<String>) -> bool {
     src.lines().any(|l| {
         let t = l.trim_start();
-        t.starts_with("//!") && t.contains("WIRING:") && t.contains("unwired")
+        // A header line that names one of this module's own functions is a
+        // function-scoped claim ("X is unwired"), not a claim that the whole
+        // module is unreached; a module-wide claim must stand on its own.
+        t.starts_with("//!")
+            && t.contains("WIRING:")
+            && t.contains("unwired")
+            && !fns.iter().any(|f| t.contains(f.as_str()))
     })
 }
 
@@ -811,6 +817,20 @@ fn measure(root: &Path) -> Result<Outcome, String> {
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_default();
 
+        // A crate-visible function called from another module is a call into
+        // this module too. It does not make the module a capability surface,
+        // so it is read here and not in the export count. Only a name no
+        // other production file defines can stand as evidence.
+        let crate_fns: Vec<String> = names_after(body, "pub(crate) fn", true)
+            .into_iter()
+            .filter(|n| {
+                let definition = format!("fn {n}(");
+                !production
+                    .iter()
+                    .any(|other| other != path && bodies[other].contains(&definition))
+            })
+            .collect();
+
         let mut wired = false;
         'outer: for other in &production {
             if other == path {
@@ -823,9 +843,15 @@ fn measure(root: &Path) -> Result<Outcome, String> {
                     break 'outer;
                 }
             }
+            for n in &crate_fns {
+                if mentions(hay, n, &mod_name, true, &own_types) {
+                    wired = true;
+                    break 'outer;
+                }
+            }
         }
 
-        let declared = declares_unwired(body);
+        let declared = declares_unwired(body, &fns);
         let rel = path
             .strip_prefix(root)
             .unwrap_or(path)
@@ -1035,10 +1061,16 @@ fn self_test_extraction(problems: &mut Vec<String>) {
     }
 
     // The marker.
-    if !declares_unwired("//! WIRING: unwired - measured: nothing calls this\n") {
+    if !declares_unwired(
+        "//! WIRING: unwired - measured: nothing calls this\n",
+        &std::collections::BTreeSet::new(),
+    ) {
         problems.push(String::from("BROKEN: an unwired marker was not recognised"));
     }
-    if declares_unwired("//! this module is wired\n") {
+    if declares_unwired(
+        "//! this module is wired\n",
+        &std::collections::BTreeSet::new(),
+    ) {
         problems.push(String::from(
             "VACUOUS: a module without a marker declared one",
         ));

@@ -14,9 +14,29 @@ use sha2::{Digest, Sha256};
 
 use super::{AssetId, GrantId, Signature64};
 
-/// The AI input_ref prefix. A payload starting with it counts as a Pollen
-/// data-ref and has to pass the strict AccessGrant check.
+/// The AI `input_ref` prefix. A payload starting with it counts as a Pollen
+/// data-ref and has to pass the strict `AccessGrant` check.
 pub const POLLEN_AI_INPUT_REF_PREFIX: &[u8] = b"BDLM_POLLEN_AI_INPUT_REF_V1";
+
+/// HPKE KEM 0x647a, MLKEM768-X25519. The only
+/// suite a mainnet policy may name.
+/// exposed for: pollen surface - offer/data-rights readers land with the pollen rollout.
+pub const HPKE_SUITE_MLKEM768_X25519: u16 = 0x647a;
+
+/// HPKE KEM 0x0020, X25519 alone. A recorded ciphertext opens once a quantum
+/// attacker exists, so it is a devnet and testnet suite only.
+/// exposed for: pollen surface - offer/data-rights readers land with the pollen rollout.
+pub const HPKE_SUITE_X25519_ONLY: u16 = 0x0020;
+
+/// Public key size of KEM 0x647a: ML-KEM-768 encapsulation key (1,184 bytes)
+/// plus X25519 (32 bytes).
+/// exposed for: pollen surface - offer/data-rights readers land with the pollen rollout.
+pub const HPKE_MLKEM768_X25519_PUBLIC_KEY_BYTES: u16 = 1216;
+
+/// First policy version a mainnet chain accepts. Version 1 carried the
+/// X25519-only default; the post-quantum default starts at 2.
+/// exposed for: pollen surface - offer/data-rights readers land with the pollen rollout.
+pub const MAINNET_MIN_ENCRYPTION_POLICY_VERSION: u32 = 2;
 
 /// DAO-managed encryption policy. DAO can tune protocol parameters, but it
 /// Cannot decrypt data, grant read access, or override owner signatures.
@@ -31,6 +51,11 @@ pub struct EncryptionPolicy {
 }
 
 impl EncryptionPolicy {
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn validate(&self) -> Result<(), String> {
         if self.version == 0 {
             return Err("EncryptionPolicy version must be >= 1".into());
@@ -48,6 +73,67 @@ impl EncryptionPolicy {
             if deprecated == 0 {
                 return Err("EncryptionPolicy deprecated_after_block cannot be zero".into());
             }
+        }
+        if self.hpke_suite_id == HPKE_SUITE_MLKEM768_X25519
+            && self.min_public_key_bytes < HPKE_MLKEM768_X25519_PUBLIC_KEY_BYTES
+        {
+            return Err(format!(
+                "EncryptionPolicy suite 0x{HPKE_SUITE_MLKEM768_X25519:04x} needs min_public_key_bytes >= {HPKE_MLKEM768_X25519_PUBLIC_KEY_BYTES}"
+            ));
+        }
+        Ok(())
+    }
+
+    /// The post-quantum default: KEM 0x647a with the full public key size.
+    /// WIRING: unwired - no caller in this tree yet; kept as a declared surface, and nothing depends on it until one arrives.
+    pub fn post_quantum(
+        version: u32,
+        max_grant_duration_blocks: u64,
+        deprecated_after_block: Option<u64>,
+    ) -> Self {
+        Self {
+            version,
+            hpke_suite_id: HPKE_SUITE_MLKEM768_X25519,
+            min_public_key_bytes: HPKE_MLKEM768_X25519_PUBLIC_KEY_BYTES,
+            max_grant_duration_blocks,
+            deprecated_after_block,
+            active: true,
+        }
+    }
+
+    /// [`Self::validate`] plus the rules of the chain the policy is for.
+    ///
+    /// A mainnet policy names suite 0x647a, and its version is at least
+    /// [`MAINNET_MIN_ENCRYPTION_POLICY_VERSION`]. Suite 0x0020 (X25519 only)
+    /// is refused there. An unknown chain id is judged as mainnet: a chain
+    /// the node cannot name gets the strict rule, not the loose one.
+    ///
+    /// # Errors
+    ///
+    /// Returns the first rule the policy breaks.
+    pub fn validate_for_chain(&self, chain_id: u64) -> Result<(), String> {
+        self.validate()?;
+        let relaxed = matches!(
+            crate::core::chain_config::Network::from_chain_id(chain_id),
+            Some(
+                crate::core::chain_config::Network::Devnet
+                    | crate::core::chain_config::Network::Testnet
+            )
+        );
+        if relaxed {
+            return Ok(());
+        }
+        if self.hpke_suite_id != HPKE_SUITE_MLKEM768_X25519 {
+            return Err(format!(
+                "EncryptionPolicy suite 0x{:04x} is refused on mainnet: only 0x{HPKE_SUITE_MLKEM768_X25519:04x} (MLKEM768-X25519) is accepted",
+                self.hpke_suite_id
+            ));
+        }
+        if self.version < MAINNET_MIN_ENCRYPTION_POLICY_VERSION {
+            return Err(format!(
+                "EncryptionPolicy version {} is below the mainnet minimum {MAINNET_MIN_ENCRYPTION_POLICY_VERSION}",
+                self.version
+            ));
         }
         Ok(())
     }
@@ -115,10 +201,10 @@ impl EncryptionPolicy {
     }
 }
 
-/// The SaleAuthorization identity = the canonical seller authorization hash.
+/// The `SaleAuthorization` identity = the canonical seller authorization hash.
 pub type SaleAuthorizationId = AssetId;
 
-/// Owner/seller signed authorization to sell pollen for a DataAsset.
+/// Owner/seller signed authorization to sell pollen for a `DataAsset`.
 ///
 /// This is the bridge between "the bud is mine" and "I am selling my pollen":
 /// The DataAsset remains owned by `seller`, while grants may be issued under
@@ -209,6 +295,11 @@ impl SaleAuthorization {
         hasher.finalize().into()
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn validate_shape(&self) -> Result<(), String> {
         if self.authorization_id == SaleAuthorizationId::zero() {
             return Err("SaleAuthorization authorization_id cannot be zero".into());
@@ -255,6 +346,11 @@ impl SaleAuthorization {
             && self.grants_issued < self.max_grants
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn record_issued_grant(&mut self) -> Result<(), String> {
         if self.grants_issued >= self.max_grants {
             return Err("SaleAuthorization grant limit exhausted".into());
@@ -280,7 +376,7 @@ impl SaleAuthorization {
     }
 }
 
-/// DataAsset lifecycle state.
+/// `DataAsset` lifecycle state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum DataAssetStatus {
     #[default]
@@ -289,7 +385,7 @@ pub enum DataAssetStatus {
 }
 
 /// The user's sellable data asset. The asset itself is not sold; the access
-/// pollen is sold through an AccessGrant.
+/// pollen is sold through an `AccessGrant`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DataAsset {
     pub asset_id: AssetId,
@@ -332,6 +428,11 @@ impl DataAsset {
         AssetId(hasher.finalize().into())
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn validate(&self) -> Result<(), String> {
         if self.asset_id == AssetId::zero() {
             return Err("DataAsset asset_id cannot be zero".into());
@@ -366,7 +467,7 @@ impl DataAsset {
     }
 }
 
-/// AccessGrant lifecycle state.
+/// `AccessGrant` lifecycle state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum AccessGrantStatus {
     #[default]
@@ -481,6 +582,11 @@ impl AccessGrant {
         hasher.finalize().into()
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn validate_shape(&self) -> Result<(), String> {
         if self.grant_id == GrantId::zero() {
             return Err("AccessGrant grant_id cannot be zero".into());
@@ -528,6 +634,11 @@ impl AccessGrant {
             && self.reads_used < self.max_reads
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn record_read(&mut self) -> Result<(), String> {
         if self.reads_used >= self.max_reads {
             return Err("AccessGrant read limit exhausted".into());
@@ -560,7 +671,7 @@ impl AccessGrant {
 }
 
 /// Canonical reference embedded in `AiInferenceRequest.input_ref` when the
-/// Request wants to read a Pollen/B.U.D. DataAsset.
+/// Request wants to read a Pollen/B.U.D. `DataAsset`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AiDataInputRef {
     pub asset_id: AssetId,
@@ -578,6 +689,11 @@ impl AiDataInputRef {
         out
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn decode(bytes: &[u8]) -> Result<Option<Self>, String> {
         if !bytes.starts_with(POLLEN_AI_INPUT_REF_PREFIX) {
             return Ok(None);
@@ -684,6 +800,54 @@ mod tests {
         assert!(!json.contains("decrypt"));
         assert!(!json.contains("private"));
         assert!(!json.contains("override"));
+    }
+
+    #[test]
+    fn mainnet_policy_refuses_the_x25519_only_suite() {
+        use crate::core::chain_config::Network;
+        let legacy = EncryptionPolicy {
+            version: 2,
+            hpke_suite_id: HPKE_SUITE_X25519_ONLY,
+            min_public_key_bytes: 32,
+            max_grant_duration_blocks: 100,
+            deprecated_after_block: None,
+            active: true,
+        };
+        let err = legacy
+            .validate_for_chain(Network::Mainnet.chain_id().0)
+            .unwrap_err();
+        assert!(err.contains("refused on mainnet"), "{err}");
+        assert!(legacy
+            .validate_for_chain(Network::Devnet.chain_id().0)
+            .is_ok());
+        assert!(legacy
+            .validate_for_chain(Network::Testnet.chain_id().0)
+            .is_ok());
+        // A chain id the node cannot name gets the strict rule.
+        assert!(legacy.validate_for_chain(1).is_err());
+    }
+
+    #[test]
+    fn post_quantum_policy_is_the_mainnet_default() {
+        use crate::core::chain_config::Network;
+        let policy =
+            EncryptionPolicy::post_quantum(MAINNET_MIN_ENCRYPTION_POLICY_VERSION, 100, None);
+        assert_eq!(policy.hpke_suite_id, 0x647a);
+        assert_eq!(policy.min_public_key_bytes, 1216);
+        assert!(policy
+            .validate_for_chain(Network::Mainnet.chain_id().0)
+            .is_ok());
+
+        let old_version = EncryptionPolicy::post_quantum(1, 100, None);
+        assert!(old_version
+            .validate_for_chain(Network::Mainnet.chain_id().0)
+            .is_err());
+
+        let short_key = EncryptionPolicy {
+            min_public_key_bytes: 32,
+            ..policy
+        };
+        assert!(short_key.validate().is_err());
     }
 
     fn policy_with_max(max: u64) -> EncryptionPolicy {

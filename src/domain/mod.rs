@@ -4,8 +4,8 @@ pub mod finality_adapter;
 pub mod fork_choice;
 pub mod plugin;
 pub mod plugin_registry;
-pub mod regen_health;
-pub mod regeneration_stage;
+pub mod pq_canonical;
+pub mod producer;
 pub mod registry;
 pub mod sovereign;
 pub mod storage_deal;
@@ -29,7 +29,7 @@ pub use plugin::{
     PoADomainPlugin, PoSDomainPlugin, PoWDomainPlugin, ZkDomainPlugin,
 };
 pub use plugin_registry::DomainPluginRegistry;
-pub use regen_health::{assess, AlarmReason, HealthPolicy, HealthVerdict};
+pub use pq_canonical::{PqCanonicalSource, SealId, SealKind, SourceError};
 pub use registry::ConsensusDomainRegistry;
 pub use sovereign::{
     AuditExportBundle, ComplianceEvidence, DomainLifecycleState, SovereignDomainClass,
@@ -44,9 +44,10 @@ pub use storage_params::{
     storage_params_bytes, StorageDomainParams, DEFAULT_CHUNK_SIZE, MAX_CHUNK_SIZE, MIN_CHUNK_SIZE,
 };
 pub use storage_tx::{
-    execute_storage_tx, open_deal_consent_digest, StorageDealOpen, StorageTx, StorageTxContext,
-    StorageTxError,
+    execute_storage_tx, open_deal_consent_digest, operator_open_deal_consent_digest,
+    StorageDealOpen, StorageTx, StorageTxContext, StorageTxError,
 };
+pub use types::expected_initial_root;
 pub use types::{
     normalize_hash32, validator_set_commitment, ConsensusDomain, ConsensusKind, DomainCommitment,
     DomainId, DomainStatus, Hash32, PoWDomainParameters, RootScheme, VerifiedDomainCommitment,

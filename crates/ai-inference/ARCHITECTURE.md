@@ -39,12 +39,12 @@ This file summarises the layers.
 
 | Decision | Status |
 |---|---|
-| K1 skeleton and repository | produced; awaiting review |
-| K2 base model | abstract; the light tier is the default, with approval before the first run |
-| K3 type binding | deferred; the skeleton suits either option |
-| K5 method | LoRA SFT with a BF16 adapter |
-| K6 data source | **HYBRID**: open sets enter the network with a B.U.D. record |
-| K7 tier naming | **light** (the smaller base) and **normal** (the larger base); there are no multiplier labels |
+| skeleton and repository | produced; awaiting review |
+| base model | abstract; the light tier is the default, with approval before the first run |
+| type binding | deferred; the skeleton suits either option |
+| method | LoRA SFT with a BF16 adapter |
+| data source | **HYBRID**: open sets enter the network with a B.U.D. record |
+| tier naming | **light** (the smaller base) and **normal** (the larger base); there are no multiplier labels |
 
 ## Deepening
 
@@ -136,7 +136,7 @@ the prompt.
 
 Some of the designs here were reached by reading other projects. No code was
 copied and no dependency was added. Those projects are named where
-attribution belongs, in `docs/NOTICE` and `docs/PROVENANCE_NOTES.md`, with
+attribution belongs, in `docs/NOTICE`, with
 what was taken and what was not. Types and variants in the tree are named for
 what they select - an engine that pages experts off disk - because a variant
 called after another product tells a reader the tree depends on it: they

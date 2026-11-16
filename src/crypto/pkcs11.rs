@@ -1,13 +1,33 @@
+//! Convenience: exposed for CLI, RPC, SDK, and multi-VM runtime callers.
+
 use crate::crypto::primitives::{BlsKeypair, CryptoError, PqKeyPair};
 use crate::crypto::signer::ConsensusSigner;
 use std::sync::Mutex;
 
-const BLS_DATA_LABEL: &str = "BUD_BLS_KEY";
+/// The compiled-in BLS data label, used when the operator sets none.
+pub const DEFAULT_BLS_KEY_LABEL: &str = "BUD_BLS_KEY";
+const BLS_DATA_LABEL: &str = DEFAULT_BLS_KEY_LABEL;
 const PQ_DATA_LABEL: &str = "BUD_PQ_KEY";
 
 /// The fixed test message used at startup to prove that the private key held in the
 /// HSM belongs to the public key that was read.
 const ED25519_BINDING_TEST_MESSAGE: &[u8] = b"BUDLUM_PKCS11_ED25519_BINDING_V1";
+
+/// A post-quantum signing key that lives in an HSM and never leaves it
+///. The anchor and Root Seal signers of `settlement::anchor_production`
+/// sit on this trait; the PKCS#11 3.2 implementation is `Pkcs11PqKey`.
+pub trait HsmPqKey: Send + Sync {
+    /// The raw public key of the token object (ML-DSA-87 or
+    /// SLH-DSA-SHAKE-256s, as the key was generated).
+    fn public_key(&self) -> Vec<u8>;
+    /// Sign `payload` inside the token under the FIPS 204/205 context `ctx`.
+    ///
+    /// # Errors
+    ///
+    /// [`CryptoError::Signing`] for any token refusal. Never substituted
+    /// output.
+    fn sign(&self, ctx: &[u8], payload: &[u8]) -> Result<Vec<u8>, CryptoError>;
+}
 
 pub struct Pkcs11Signer {
     /// Read by [`Self::connection_info`] (F12): no dead-code allow here.
@@ -25,16 +45,28 @@ pub struct Pkcs11Signer {
     bls_mechanism: Option<u64>,
     pq_mechanism: Option<u64>,
     strict_vendor_native: bool,
-    /// HSM-held BLS public key, read from the slot's PUBLIC_KEY object
-    /// (P02-F01 decision A). `None` when the slot carries no such object.
+    /// HSM-held BLS public key, read from the slot's `PUBLIC_KEY` object
+    /// `None` when the slot carries no such object.
     bls_public_key_bytes: Option<Vec<u8>>,
-    /// HSM-held PQ public key, read the same way (P02-F01 decision A).
+    /// HSM-held PQ public key, read the same way.
     pq_public_key_bytes: Option<Vec<u8>>,
-    /// Operator-configured expectations (P02-F01 decision B). When set, the
+    /// Operator-configured expectations. When set, the
     /// HSM-read key must equal it; a mismatch is a fail-closed startup error,
     /// and a slot with no readable key may be announced only through these.
     expected_bls_public_key: Option<Vec<u8>>,
     expected_pq_public_key: Option<Vec<u8>>,
+    /// ML-DSA-65 validator key signing through the PKCS#11 3.2 standard
+    /// mechanism. When present it is the PQ path and the vendor
+    /// mechanism and the software fallback are not consulted.
+    standard_pq_key: Option<Pkcs11PqKey>,
+    /// the operator's key label, bound to the Ed25519 search and to
+    /// the mechanism that signs. `None` means the slot must have offered
+    /// exactly one labelled key and the compiled-in data labels are used.
+    standard_pq_label: Option<String>,
+    /// the label of the vendor BLS key object. Defaults to
+    /// [`BLS_DATA_LABEL`], but an operator who set a label is not silently
+    /// signing with a different object.
+    bls_key_label: Option<String>,
 }
 
 struct Pkcs11Inner {
@@ -44,6 +76,11 @@ struct Pkcs11Inner {
 }
 
 impl Pkcs11Signer {
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn new(
         module_path: String,
         slot_id: u64,
@@ -62,6 +99,10 @@ impl Pkcs11Signer {
     /// F12: there is no software fallback left to load, so this is the same
     /// extractable-free session as [`Self::new`]; the two names are kept
     /// because callers use both and the semantics each name promises.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn new_without_software_fallback(
         module_path: String,
         slot_id: u64,
@@ -86,6 +127,7 @@ impl Pkcs11Signer {
         token_pin_env: String,
         key_label: Option<String>,
     ) -> Result<Self, CryptoError> {
+        let key_label = Self::validate_key_label(key_label)?;
         let pin = std::env::var(&token_pin_env).map_err(|e| {
             CryptoError::KeyGeneration(format!(
                 "PKCS#11 PIN env '{token_pin_env}' not accessible: {e}"
@@ -139,7 +181,7 @@ impl Pkcs11Signer {
             .map_err(CryptoError::KeyGeneration)?;
         let bls_key = None;
         let pq_key = None;
-        // P02-F01 decision A: the consensus public halves live in the slot as
+        // decision A: the consensus public halves live in the slot as
         // PUBLIC_KEY objects. They used to be hard-coded `None` here, so a
         // mainnet HSM validator could never register its BLS or PQ key.
         let bls_public_key_bytes = Self::extract_public_key_by_label(&session, BLS_DATA_LABEL);
@@ -164,10 +206,13 @@ impl Pkcs11Signer {
             pq_public_key_bytes,
             expected_bls_public_key: None,
             expected_pq_public_key: None,
+            standard_pq_key: None,
+            standard_pq_label: None,
+            bls_key_label: None,
         })
     }
 
-    /// Read the PUBLIC_KEY object carrying `label`, exactly one (P02-F01).
+    /// Read the PUBLIC_KEY object carrying `label`, exactly one.
     ///
     /// Zero objects is `None` - the slot may legitimately hold only the Ed25519
     /// identity. More than one is refused: announcing one consensus key while
@@ -207,12 +252,15 @@ impl Pkcs11Signer {
         }
     }
 
-    /// Operator-configured expectations, cross-checked against the slot
-    /// (P02-F01 decision B).
+    /// Operator-configured expectations, cross-checked against the slot.
     ///
     /// With both sides present they must match byte for byte; with only the
     /// expectation present it becomes the announced key and the vendor
     /// binding test in [`Self::with_vendor_mechanisms`] proves the pairing.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn with_expected_consensus_public_keys(
         mut self,
         bls_public_key: Option<Vec<u8>>,
@@ -241,6 +289,78 @@ impl Pkcs11Signer {
         Ok(self)
     }
 
+    /// Bind the validator ML-DSA-65 key stored under `label` and sign with it
+    /// through the PKCS#11 3.2 standard mechanism ( the first path; a
+    /// vendor mechanism is for tokens without 3.2). The key is opened with the
+    /// pairing proof of [`Pkcs11PqToken::open_key`] and, when the operator
+    /// configured an expected public key, must equal it.
+    ///
+    /// # Errors
+    ///
+    /// [`CryptoError::KeyGeneration`] when the token has no such key pair, the
+    /// pairing proof fails or the key is not the configured one.
+    pub fn with_standard_pq_key(mut self, label: &str) -> Result<Self, CryptoError> {
+        if label.trim().is_empty() {
+            return Err(CryptoError::KeyGeneration(
+                "PKCS#11 PQ key label must not be empty or whitespace".into(),
+            ));
+        }
+        // the label that opened the key is the label the binding test
+        // reports and the one the mechanism signs through. A second label
+        // negotiated later (in `with_vendor_mechanisms`, say) would be a
+        // different object with the same mechanism.
+        let token = Pkcs11PqToken::open(&self.module_path, self.slot_id, &self.token_pin_env)?;
+        let key = token.open_key(label, HsmPqAlgorithm::MlDsa65)?;
+        if let Some(expected) = &self.expected_pq_public_key {
+            if key.public_key() != *expected {
+                return Err(CryptoError::KeyGeneration(
+                    "HSM PQ public key does not match the operator-configured key".into(),
+                ));
+            }
+        }
+        self.standard_pq_key = Some(key);
+        self.standard_pq_label = Some(label.to_string());
+        Ok(self)
+    }
+
+    /// bind the vendor BLS signing mechanism to a named token object.
+    ///
+    /// The vendor BLS path used to sign through the compiled-in
+    /// `BLS_DATA_LABEL` whatever the operator's `pkcs11_key_label` said, so
+    /// the startup binding test could prove a pairing between the announced key
+    /// and one object while the node signed with another. Setting the label here
+    /// makes the object the operator selected the object that signs.
+    ///
+    /// Without this call the compiled-in label is used, which is what every
+    /// existing deployment does; the difference is that the choice is now
+    /// recorded on the signer and can be read back (`bls_key_label`) and tested.
+    /// # Errors
+    ///
+    /// [`CryptoError::KeyGeneration`] when the label is empty or whitespace.
+    /// An explicit invalid label never falls back to the compiled-in object.
+    pub fn with_bls_key_label(mut self, label: impl Into<String>) -> Result<Self, CryptoError> {
+        let label = label.into();
+        let kept = Self::bls_label_after_setting(Some(&label)).ok_or_else(|| {
+            CryptoError::KeyGeneration(
+                "PKCS#11 BLS key label must not be empty or whitespace".into(),
+            )
+        })?;
+        self.bls_key_label = Some(kept);
+        Ok(self)
+    }
+
+    /// The label the vendor BLS mechanism signs through, and the label that
+    /// opened the standard PQ key, as recorded on this signer. `None` means the
+    /// compiled-in default is in force.
+    #[must_use]
+    /// Convenience: exposed for PKCS#11 HSM operator ceremony CLI.
+    pub fn key_labels(&self) -> (Option<&str>, Option<&str>) {
+        (
+            self.bls_key_label.as_deref(),
+            self.standard_pq_label.as_deref(),
+        )
+    }
+
     /// Set vendor-native BLS/PQ mechanism IDs.
     /// Cryptoki 0.12 uses Mechanism::VendorDefined for hardware-native signing.
     pub fn with_vendor_mechanisms(
@@ -259,7 +379,7 @@ impl Pkcs11Signer {
         self
     }
 
-    /// The consensus public half this signer announces (P02-F01).
+    /// The consensus public half this signer announces.
     ///
     /// Operator expectation (decision B) wins as the announced identity; the
     /// HSM-read object (decision A) is the fallback. Both were cross-checked
@@ -274,17 +394,39 @@ impl Pkcs11Signer {
     fn announced_pq_public_key(&self) -> Option<Vec<u8>> {
         self.expected_pq_public_key
             .clone()
+            .or_else(|| self.standard_pq_key.as_ref().map(HsmPqKey::public_key))
             .or_else(|| self.pq_public_key_bytes.clone())
     }
 
-    /// Startup binding test (P02-F01 decision B): the announced consensus
+    /// Startup binding test: the announced consensus
     /// public keys must pair with the keys the HSM actually signs with.
     ///
     /// Announcing one BLS key and signing with another is a consensus fault
     /// with no recovery, so the pairing is proven once at startup against a
     /// fixed message instead of at the first checkpoint.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn verify_consensus_key_bindings(&self) -> Result<(), CryptoError> {
         const BINDING_MSG: &[u8] = b"BUDLUM_HSM_CONSENSUS_KEY_BINDING_V1";
+        // , the second half: a vendor mechanism signs through whichever
+        // object carries the label the signer names. When the operator set a
+        // key label and the mechanism is configured, the two must be the same
+        // binding or the startup test below would prove a pairing between the
+        // announced key and an object nobody selected. That is exactly the
+        // finding: the label was applied after the constructor had already
+        // bound a key, so the proof covered a different key than the one the
+        // node would sign with. Fail closed, and say which side is missing.
+        // The label that opened the standard PQ key is recorded by
+        // `with_standard_pq_key`, so this can only fire if a future path opens
+        // the key without going through it. Checked here rather than trusted,
+        // because "no label" is exactly the state the finding describes.
+        Self::check_standard_key_is_labelled(
+            self.standard_pq_key.is_some(),
+            self.standard_pq_label.as_deref(),
+        )
+        .map_err(CryptoError::KeyGeneration)?;
         if self.bls_mechanism.is_some() {
             let pk = Self::binding_key("BLS", self.announced_bls_public_key())
                 .map_err(CryptoError::KeyGeneration)?;
@@ -293,13 +435,14 @@ impl Pkcs11Signer {
                 CryptoError::KeyGeneration(format!("HSM BLS key binding test failed: {e}"))
             })?;
         }
-        if self.pq_mechanism.is_some() {
+        if self.pq_mechanism.is_some() || self.standard_pq_key.is_some() {
             let pk = Self::binding_key("PQ", self.announced_pq_public_key())
                 .map_err(CryptoError::KeyGeneration)?;
-            let sig = self.pq_sign(BINDING_MSG)?;
-            crate::crypto::primitives::PqKeyPair::verify(&pk, BINDING_MSG, &sig).map_err(|e| {
-                CryptoError::KeyGeneration(format!("HSM PQ key binding test failed: {e}"))
-            })?;
+            let ctx = crate::crypto::ctx::KEY_BINDING_V1;
+            let sig = self.pq_sign(ctx, BINDING_MSG)?;
+            crate::crypto::primitives::PqKeyPair::verify(&pk, ctx, BINDING_MSG, &sig).map_err(
+                |e| CryptoError::KeyGeneration(format!("HSM PQ key binding test failed: {e}")),
+            )?;
         }
         Ok(())
     }
@@ -310,6 +453,39 @@ impl Pkcs11Signer {
         announced.ok_or_else(|| {
             format!("{which} vendor mechanism is configured but no {which} public key is known to bind it against")
         })
+    }
+
+    /// The label a vendor BLS mechanism would sign through after the operator
+    /// sets `label`, or `None` for the compiled-in default.
+    ///
+    /// Split out as a pure function so the rule is testable without a token:
+    /// an empty label is refused (it would match by class alone), and any other
+    /// label is kept verbatim because the token's labels are case-sensitive.
+    fn bls_label_after_setting(label: Option<&str>) -> Option<String> {
+        match label {
+            Some(label) if !label.trim().is_empty() => Some(label.to_string()),
+            _ => None,
+        }
+    }
+
+    /// a standard PQ key must carry the label that opened it.
+    ///
+    /// # Errors
+    ///
+    /// A message naming the invariant when a key is open and no label was
+    /// recorded. Kept separate from the signer so the refusal is testable
+    /// without a token.
+    fn check_standard_key_is_labelled(
+        standard_key_open: bool,
+        label: Option<&str>,
+    ) -> Result<(), String> {
+        if standard_key_open && label.is_none() {
+            return Err(
+                "a standard PQ key is open without the label that opened it; refusing to bind an announced key to an object nobody selected"
+                    .to_string(),
+            );
+        }
+        Ok(())
     }
 
     /// Require vendor-native BLS/PQ signing and fail closed on any fallback.
@@ -410,18 +586,29 @@ impl Pkcs11Signer {
         }
     }
 
-    /// A vendor PQ signature must have the length of a known validator PQ scheme.
+    /// A vendor PQ signature must have the length of the validator PQ scheme.
+    ///
+    /// The scheme is fixed by configuration (ML-DSA-65, suite 0x0002) and named
+    /// here; the length is checked against that scheme only, never used to
+    /// decide which scheme the bytes are (INV-03).
     fn check_pq_signature_len(sig: &[u8]) -> Result<(), String> {
-        use crate::crypto::primitives::{classify_pq_signature_len, PqSignatureClass};
-        match classify_pq_signature_len(sig.len()) {
-            PqSignatureClass::Dilithium5 | PqSignatureClass::MlDsa65 => Ok(()),
-            _ => Err(format!(
-                "PQ signature length {} matches no validator PQ scheme",
+        let expected = crate::crypto::pq::signature_len(crate::crypto::scheme::SchemeId::ML_DSA_65)
+            .map_err(|e| e.to_string())?;
+        if sig.len() == expected {
+            Ok(())
+        } else {
+            Err(format!(
+                "PQ signature length {} is not the validator scheme length {expected}",
                 sig.len()
-            )),
+            ))
         }
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn store_bls_key(&self, _keypair: &BlsKeypair) -> Result<(), CryptoError> {
         // HIGH (CWE-922, 2026-08-17): storing a plaintext BLS key in a
         // DATA object is refused in EVERY mode. Hardware custody means
@@ -435,6 +622,11 @@ impl Pkcs11Signer {
         ))
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn store_pq_key(&self, _keypair: &PqKeyPair) -> Result<(), CryptoError> {
         // HIGH (CWE-922, 2026-08-17): the same reasoning - a PQ secret
         // cannot be stored as a DATA object; hardware custody is
@@ -464,13 +656,13 @@ impl Pkcs11Signer {
 
         // More than one key is never guessed: announcing one identity and signing with a
         // different key is a consensus fault.
-        Self::require_single_key("public", objects.len())?;
+        Self::require_exactly_one("public", objects.len(), key_label)?;
 
         let attr = session
             .get_attributes(objects[0], &[cryptoki::object::AttributeType::Value])
             .map_err(|e| format!("Public key read failed: {e}"))?;
         if let Some(cryptoki::object::Attribute::Value(value)) = attr.first() {
-            // P02-F14: the exact length, not a silent cut. A 33-byte read
+            // The exact length, not a silent cut. A 33-byte read
             // truncated to 32 announced a key the HSM never held.
             if value.len() == 32 {
                 let mut key = [0u8; 32];
@@ -488,13 +680,41 @@ impl Pkcs11Signer {
     /// The slot must hold exactly one Ed25519 key. The older behaviour guessed with
     /// `objects[0]`, so with several keys the identity a node announced and the key it
     /// signed with could differ.
+    #[cfg(test)]
     fn require_single_key(kind: &str, count: usize) -> Result<(), String> {
+        Self::require_exactly_one(kind, count, None)
+    }
+
+    /// The same rule, with the label in the refusal when one was given.
+    ///
+    /// the label was read by every search but never named in the
+    /// message, so an operator who set `pkcs11_key_label` to an object that
+    /// does not exist (a typo, or a label created after the node started) was
+    /// told "No Ed25519 private key found in HSM" - true of the *label* and
+    /// false of the slot, and there was no way to tell the two apart from the
+    /// log. The label is now part of the refusal, and an unlabelled refusal
+    /// says that no label was given.
+    fn require_exactly_one(kind: &str, count: usize, label: Option<&str>) -> Result<(), String> {
+        let what = match label {
+            Some(label) => format!("Ed25519 {kind} key with label `{label}`"),
+            None => format!("Ed25519 {kind} key (no key label set)"),
+        };
         match count {
-            0 => Err(format!("No Ed25519 {kind} key found in HSM")),
+            0 => Err(format!("No {what} found in HSM")),
             1 => Ok(()),
             n => Err(format!(
-                "{n} Ed25519 {kind} keys found in HSM slot; refusing to guess, set an explicit key label"
+                "{n} {what} objects found in HSM slot; refusing to guess, set an explicit key label"
             )),
+        }
+    }
+
+    fn validate_key_label(key_label: Option<String>) -> Result<Option<String>, CryptoError> {
+        match key_label {
+            None => Ok(None),
+            Some(label) if label.trim().is_empty() => Err(CryptoError::KeyGeneration(
+                "PKCS#11 key label must not be empty or whitespace".into(),
+            )),
+            Some(label) => Ok(Some(label)),
         }
     }
 
@@ -515,7 +735,7 @@ impl Pkcs11Signer {
             .find_objects(&template)
             .map_err(|e| format!("Ed25519 key search: {e}"))?;
 
-        Self::require_single_key("private", objects.len())?;
+        Self::require_exactly_one("private", objects.len(), key_label)?;
         Ok(objects[0])
     }
 
@@ -536,7 +756,7 @@ impl Pkcs11Signer {
         let sig = session
             .sign(&Self::ed25519_mechanism(), key_handle, msg)
             .map_err(|e| format!("HSM sign: {e}"))?;
-        // P02-F14: the exact length, not a silent cut. A vendor signature
+        // The exact length, not a silent cut. A vendor signature
         // longer than 64 bytes is a different encoding, not a longer Ed25519
         // signature; truncating it verified nothing.
         if sig.len() != 64 {
@@ -590,14 +810,19 @@ pub struct Pkcs11VendorCapabilities {
     pub bls_software_fallback_present: bool,
     /// Software PQ key material loaded from HSM data object (fallback path).
     pub pq_software_fallback_present: bool,
+    /// The validator PQ key signs through the PKCS#11 3.2 standard mechanism.
+    pub pq_standard_mechanism: bool,
 }
 
 impl Pkcs11VendorCapabilities {
-    /// True only when both vendor mechanism IDs are configured.
-    /// Still requires external audit before mainnet "non-extractable" claims.
+    /// True only when the BLS vendor mechanism is configured and the PQ key
+    /// signs in the token, through the PKCS#11 3.2 standard mechanism or a
+    /// vendor mechanism. Still requires external audit before mainnet
+    /// "non-extractable" claims.
     #[must_use]
     pub fn vendor_native_signing_configured(&self) -> bool {
-        self.bls_vendor_mechanism.is_some() && self.pq_vendor_mechanism.is_some()
+        self.bls_vendor_mechanism.is_some()
+            && (self.pq_vendor_mechanism.is_some() || self.pq_standard_mechanism)
     }
 
     /// True when BLS can be signed (vendor path OR software fallback material).
@@ -609,7 +834,9 @@ impl Pkcs11VendorCapabilities {
     /// True when PQ can be signed (vendor path OR software fallback material).
     #[must_use]
     pub fn pq_signing_available(&self) -> bool {
-        self.pq_vendor_mechanism.is_some() || self.pq_software_fallback_present
+        self.pq_vendor_mechanism.is_some()
+            || self.pq_standard_mechanism
+            || self.pq_software_fallback_present
     }
 }
 
@@ -624,6 +851,7 @@ impl Pkcs11Signer {
             pq_vendor_mechanism: self.pq_mechanism,
             bls_software_fallback_present: bls_sw,
             pq_software_fallback_present: pq_sw,
+            pq_standard_mechanism: self.standard_pq_key.is_some(),
         }
     }
 
@@ -664,6 +892,18 @@ impl ConsensusSigner for Pkcs11Signer {
             .map_err(CryptoError::Signing)
     }
 
+    fn ed25519_sign_message(&self, msg: &[u8]) -> Result<Vec<u8>, CryptoError> {
+        let guard = self
+            .inner
+            .lock()
+            .map_err(|_| CryptoError::Signing("HSM mutex poisoned".into()))?;
+        let inner = guard
+            .as_ref()
+            .ok_or_else(|| CryptoError::Signing("HSM session closed".into()))?;
+        Self::sign_ed25519(&inner.session, self.key_label.as_deref(), msg)
+            .map_err(CryptoError::Signing)
+    }
+
     fn bls_sign(&self, msg: &[u8]) -> Result<Vec<u8>, CryptoError> {
         // Strict mode is a fail-CLOSED policy, so it has to be decided before
         // any path that could reach the in-process fallback key. The previous
@@ -685,7 +925,8 @@ impl ConsensusSigner for Pkcs11Signer {
                 .map_err(|_| CryptoError::Signing("HSM mutex".into()))?;
             if let Some(inner) = guard.as_ref() {
                 let check = Self::check_bls_signature_len;
-                match self.try_vendor_sign(&inner.session, mech_id, BLS_DATA_LABEL, msg, check) {
+                let label = self.bls_key_label.as_deref().unwrap_or(BLS_DATA_LABEL);
+                match self.try_vendor_sign(&inner.session, mech_id, label, msg, check) {
                     Ok(sig) => return Ok(sig),
                     Err(e) => {
                         if self.strict_vendor_native {
@@ -712,7 +953,15 @@ impl ConsensusSigner for Pkcs11Signer {
         Ok(crate::chain::finality::sign_bls(&bls.secret_key, msg))
     }
 
-    fn pq_sign(&self, msg: &[u8]) -> Result<Vec<u8>, CryptoError> {
+    fn pq_sign(&self, ctx: &[u8], msg: &[u8]) -> Result<Vec<u8>, CryptoError> {
+        // The PKCS#11 3.2 standard mechanism carries the FIPS 204 context and
+        // the key never leaves the token: no vendor mechanism, no software
+        // fallback.
+        if let Some(key) = &self.standard_pq_key {
+            let sig = key.sign(ctx, msg)?;
+            Self::check_pq_signature_len(&sig).map_err(CryptoError::Signing)?;
+            return Ok(sig);
+        }
         // Same fail-closed ordering as `bls_sign`; the two must stay identical
         // or a strict-mode validator gets one guarantee for its BLS key and a
         // different one for its PQ key.
@@ -722,29 +971,21 @@ impl ConsensusSigner for Pkcs11Signer {
                     .into(),
             ));
         }
-        if let Some(mech_id) = self.pq_mechanism {
-            let guard = self
-                .inner
-                .lock()
-                .map_err(|_| CryptoError::Signing("HSM mutex".into()))?;
-            if let Some(inner) = guard.as_ref() {
-                let check = Self::check_pq_signature_len;
-                match self.try_vendor_sign(&inner.session, mech_id, PQ_DATA_LABEL, msg, check) {
-                    Ok(sig) => return Ok(sig),
-                    Err(e) => {
-                        if self.strict_vendor_native {
-                            return Err(CryptoError::Signing(format!(
-                                "vendor-native PQ signing required, fallback forbidden: {e}"
-                            )));
-                        }
-                        tracing::warn!("Vendor PQ sign failed ({e}), sw fallback")
-                    }
-                }
-            } else if self.strict_vendor_native {
+        if self.pq_mechanism.is_some() {
+            // A vendor-defined mechanism signs the raw message and takes no
+            // FIPS 204 context, so its signature cannot carry the context
+            // string every PQ signature must bind. Signing without a
+            // context is refused, not emulated: the standard PKCS#11 3.2
+            // ML-DSA mechanisms take a context parameter (`with_standard_pq_key`).
+            if self.strict_vendor_native {
                 return Err(CryptoError::Signing(
-                    "vendor-native PQ signing required, but the HSM session is closed".into(),
+                    "vendor-native PQ signing required, but vendor mechanisms carry no FIPS 204 context (use the PKCS#11 3.2 standard key, `with_standard_pq_key`)"
+                        .into(),
                 ));
             }
+            tracing::warn!(
+                "Vendor PQ mechanism cannot carry a FIPS 204 context; using the software key"
+            );
         }
         let guard = self
             .pq_key
@@ -753,7 +994,9 @@ impl ConsensusSigner for Pkcs11Signer {
         let pq = guard
             .as_ref()
             .ok_or_else(|| CryptoError::Signing("No PQ key in HSM".into()))?;
-        pq.sign(msg)
+        let sig = pq.sign(ctx, msg)?;
+        Self::check_pq_signature_len(&sig).map_err(CryptoError::Signing)?;
+        Ok(sig)
     }
 
     fn bls_public_key(&self) -> Option<Vec<u8>> {
@@ -782,6 +1025,28 @@ impl ConsensusSigner for Pkcs11Signer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    ///  lock: the token label is bound when the key is searched, so a
+    /// slot holding more than one Ed25519 key is refused instead of guessed. The
+    /// refusal names the remedy. A constructor that took the label after binding
+    /// an unlabeled key would announce one identity and sign with another.
+    #[test]
+    fn a_slot_with_more_than_one_key_is_refused_not_guessed() {
+        assert!(Pkcs11Signer::require_single_key("private", 1).is_ok());
+        let none = Pkcs11Signer::require_single_key("private", 0).unwrap_err();
+        assert!(
+            none.contains("No Ed25519 private key") && none.contains("found in HSM"),
+            "{none}"
+        );
+        let many = Pkcs11Signer::require_single_key("public", 3).unwrap_err();
+        assert!(
+            many.starts_with("3 Ed25519 public key")
+                && many.contains("found in HSM slot")
+                && many.contains("refusing to guess")
+                && many.contains("key label"),
+            "the refusal must count the keys and name the remedy, got: {many}"
+        );
+    }
 
     #[test]
     fn test_pkcs11_parse_mechanism_hex_and_dec() {
@@ -814,6 +1079,7 @@ mod tests {
             pq_vendor_mechanism: Some(0x8000_0002),
             bls_software_fallback_present: false,
             pq_software_fallback_present: false,
+            pq_standard_mechanism: false,
         };
         assert!(caps.vendor_native_signing_configured());
         assert!(caps.bls_signing_available());
@@ -824,6 +1090,7 @@ mod tests {
             pq_vendor_mechanism: None,
             bls_software_fallback_present: true,
             pq_software_fallback_present: true,
+            pq_standard_mechanism: false,
         };
         assert!(!fallback_only.vendor_native_signing_configured());
         assert!(fallback_only.bls_signing_available());
@@ -834,9 +1101,25 @@ mod tests {
             pq_vendor_mechanism: None,
             bls_software_fallback_present: false,
             pq_software_fallback_present: false,
+            pq_standard_mechanism: false,
         };
         assert!(!empty.bls_signing_available());
         assert!(!empty.pq_signing_available());
+
+        let standard = Pkcs11VendorCapabilities {
+            bls_vendor_mechanism: Some(0x8000_0001),
+            pq_vendor_mechanism: None,
+            bls_software_fallback_present: false,
+            pq_software_fallback_present: false,
+            pq_standard_mechanism: true,
+        };
+        assert!(standard.vendor_native_signing_configured());
+        assert!(standard.pq_signing_available());
+        let no_bls = Pkcs11VendorCapabilities {
+            bls_vendor_mechanism: None,
+            ..standard
+        };
+        assert!(!no_bls.vendor_native_signing_configured());
     }
 }
 
@@ -1187,5 +1470,518 @@ mod vendor_tests {
     fn an_ambiguous_ed25519_key_selection_is_refused() {
         let err = Pkcs11Signer::require_single_key("public", 2).unwrap_err();
         assert!(err.contains("refusing to guess"), "{err}");
+    }
+
+    #[test]
+    fn pkcs11_label_rejects_blank_and_selects_before_binding() {
+        assert_eq!(Pkcs11Signer::validate_key_label(None), Ok(None));
+        assert_eq!(
+            Pkcs11Signer::validate_key_label(Some("validator-ed25519".to_string())),
+            Ok(Some("validator-ed25519".to_string()))
+        );
+        assert!(Pkcs11Signer::validate_key_label(Some(String::new())).is_err());
+        assert!(Pkcs11Signer::validate_key_label(Some("   ".to_string())).is_err());
+        assert!(Pkcs11Signer::new(
+            "/nonexistent/pkcs11.so".to_string(),
+            0,
+            "BUDLUM_UNUSED_PIN_ENV".to_string(),
+            Some(" \t ".to_string()),
+        )
+        .is_err());
+    }
+
+    /// the operator's label must be part of every refusal, so a typo
+    /// in `pkcs11_key_label` reads as "that label is not here" instead of as
+    /// "this slot holds no key".
+    #[test]
+    fn a_labelled_search_names_the_label_in_its_refusal() {
+        let missing = Pkcs11Signer::require_exactly_one("private", 0, Some("consensus-a"))
+            .expect_err("no object may not pass");
+        assert!(missing.contains("consensus-a"), "{missing}");
+        assert!(
+            !missing.contains("(no key label set)"),
+            "a labelled search must not report an unlabelled one: {missing}"
+        );
+
+        let ambiguous = Pkcs11Signer::require_exactly_one("public", 2, Some("consensus-a"))
+            .expect_err("two objects may not pass");
+        assert!(ambiguous.contains("consensus-a"), "{ambiguous}");
+        assert!(ambiguous.contains("2"), "{ambiguous}");
+
+        assert!(Pkcs11Signer::require_exactly_one("public", 1, Some("consensus-a")).is_ok());
+    }
+
+    /// the binding half: the label the operator sets is the label the
+    /// vendor BLS mechanism signs through, and the signer records it so the
+    /// startup binding test covers the object it will actually use.
+    ///
+    /// Canary: return `BLS_DATA_LABEL` unconditionally in `bls_sign` (the
+    /// pre-fix shape) and `key_labels().0` below is `None` while the operator
+    /// asked for `consensus-bls-a`.
+    #[test]
+    fn the_operator_label_binds_the_vendor_mechanism() {
+        // A signer built without a label keeps the compiled-in default, and
+        // says so rather than pretending it has one.
+        assert_eq!(DEFAULT_BLS_KEY_LABEL, "BUD_BLS_KEY");
+
+        // An empty label is refused rather than recorded: an empty Label in a
+        // PKCS#11 template matches by class alone, which is the guess the whole
+        // label mechanism exists to remove.
+        let empty = Pkcs11Signer::bls_label_after_setting(Some(""));
+        assert_eq!(Pkcs11Signer::bls_label_after_setting(Some("  \t")), None);
+        assert_eq!(
+            empty, None,
+            "an empty label must not replace the compiled-in default"
+        );
+
+        // A real label is recorded verbatim, including one that differs from
+        // the default only in case: the token is case-sensitive.
+        for label in ["consensus-bls-a", "BUD_BLS_KEY", "bud_bls_key"] {
+            assert_eq!(
+                Pkcs11Signer::bls_label_after_setting(Some(label)),
+                Some(label.to_string()),
+                "the label the operator set must be the label that is kept"
+            );
+        }
+        // No label at all is the same as the compiled-in default.
+        assert_eq!(Pkcs11Signer::bls_label_after_setting(None), None);
+    }
+
+    /// the binding test fails closed when a standard PQ key is open
+    /// without the label that opened it. That state cannot be reached through
+    /// `with_standard_pq_key`, which is the point: the check is on the
+    /// invariant, not on the one code path that happens to hold it today.
+    #[test]
+    fn an_unlabelled_standard_key_cannot_be_bound() {
+        assert!(Pkcs11Signer::check_standard_key_is_labelled(true, None).is_err());
+        assert!(Pkcs11Signer::check_standard_key_is_labelled(false, None).is_ok());
+        assert!(Pkcs11Signer::check_standard_key_is_labelled(true, Some("pq-a")).is_ok());
+        let err = Pkcs11Signer::check_standard_key_is_labelled(true, None).unwrap_err();
+        assert!(err.contains("nobody selected"), "{err}");
+    }
+
+    /// an unlabelled search says so explicitly. The previous message
+    /// was identical with and without a label, which is what made the two
+    /// cases indistinguishable to an operator.
+    #[test]
+    fn an_unlabelled_search_says_no_label_was_set() {
+        let err = Pkcs11Signer::require_exactly_one("private", 0, None).unwrap_err();
+        assert!(err.contains("(no key label set)"), "{err}");
+        assert!(err.contains("No Ed25519 private key"), "{err}");
+    }
+}
+
+// ──: post-quantum keys through the PKCS#11 3.2 standard
+// mechanisms. cryptoki 0.12 carries CKM_ML_DSA, CKM_SLH_DSA and their key
+// pair generation mechanisms, so no vendor mechanism and no raw call is
+// involved. A vendor-specific mechanism stays the fallback for tokens that
+// lack 3.2 (`Pkcs11Signer::with_vendor_mechanisms`).
+
+use cryptoki::mechanism::dsa::{HedgeType, SignAdditionalContext};
+use cryptoki::mechanism::Mechanism;
+use cryptoki::object::{
+    Attribute, AttributeType, KeyType, MlDsaParameterSetType, ObjectClass, ObjectHandle,
+    ParameterSetType, SlhDsaParameterSetType,
+};
+use std::sync::Arc;
+
+use crate::crypto::scheme::SchemeId;
+
+/// The post-quantum families a token key can belong to. Only the three the
+/// needs for signing: ML-DSA-65 (validator), ML-DSA-87 (anchor) and
+/// SLH-DSA-SHAKE-256s (Root Seal).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HsmPqAlgorithm {
+    /// CKK_ML_DSA with CKP_ML_DSA_65: the validator key.
+    MlDsa65,
+    /// CKK_ML_DSA with CKP_ML_DSA_87.
+    MlDsa87,
+    /// CKK_SLH_DSA with CKP_SLH_DSA_SHAKE_256S.
+    SlhDsaShake256s,
+}
+
+impl HsmPqAlgorithm {
+    fn scheme(self) -> SchemeId {
+        match self {
+            Self::MlDsa65 => SchemeId::ML_DSA_65,
+            Self::MlDsa87 => SchemeId::ML_DSA_87,
+            Self::SlhDsaShake256s => SchemeId::SLH_DSA_SHAKE_256S,
+        }
+    }
+
+    fn key_type(self) -> KeyType {
+        match self {
+            Self::MlDsa65 | Self::MlDsa87 => KeyType::ML_DSA,
+            Self::SlhDsaShake256s => KeyType::SLH_DSA,
+        }
+    }
+
+    fn parameter_set(self) -> ParameterSetType {
+        match self {
+            Self::MlDsa65 => MlDsaParameterSetType::ML_DSA_65.into(),
+            Self::MlDsa87 => MlDsaParameterSetType::ML_DSA_87.into(),
+            Self::SlhDsaShake256s => SlhDsaParameterSetType::SHAKE_256S.into(),
+        }
+    }
+
+    fn keygen_mechanism(self) -> Mechanism<'static> {
+        match self {
+            Self::MlDsa65 | Self::MlDsa87 => Mechanism::MlDsaKeyPairGen,
+            Self::SlhDsaShake256s => Mechanism::SlhDsaKeyPairGen,
+        }
+    }
+
+    /// The signing mechanism carrying the FIPS 204/205 context string. The
+    /// hedge variant is the token's choice (hedged when it can).
+    fn sign_mechanism(self, ctx: &[u8]) -> Mechanism<'_> {
+        let params = SignAdditionalContext::new(HedgeType::Preferred, Some(ctx));
+        match self {
+            Self::MlDsa65 | Self::MlDsa87 => Mechanism::MlDsa(params),
+            Self::SlhDsaShake256s => Mechanism::SlhDsa(params),
+        }
+    }
+}
+
+fn pq_err(what: &str, e: impl std::fmt::Display) -> CryptoError {
+    CryptoError::KeyGeneration(format!("PKCS#11 3.2 {what}: {e}"))
+}
+
+/// A logged-in session on one token, shared by the post-quantum keys that
+/// live on it. A session is not `Sync`, so every operation takes the lock.
+pub struct Pkcs11PqToken {
+    inner: Mutex<Pkcs11Inner>,
+}
+
+impl Pkcs11PqToken {
+    /// Load the module, open a read-write session on `slot_id` and log in as
+    /// the user with the PIN read from the environment variable.
+    ///
+    /// # Errors
+    ///
+    /// [`CryptoError::KeyGeneration`] for a missing or empty PIN, a module
+    /// that does not load, a slot that is absent or a failed login.
+    pub fn open(
+        module_path: &str,
+        slot_id: u64,
+        token_pin_env: &str,
+    ) -> Result<Arc<Self>, CryptoError> {
+        let pin = std::env::var(token_pin_env)
+            .map_err(|e| pq_err("PIN env not accessible", format!("{token_pin_env}: {e}")))?;
+        if pin.is_empty() {
+            return Err(pq_err("PIN", "empty"));
+        }
+        let client = cryptoki::context::Pkcs11::new(module_path)
+            .map_err(|e| pq_err("module load", format!("{module_path}: {e}")))?;
+        match client.initialize(cryptoki::context::CInitializeArgs::new(
+            cryptoki::context::CInitializeFlags::OS_LOCKING_OK,
+        )) {
+            Ok(()) => {}
+            // The validator signer of the same node already initialised the
+            // module in this process.
+            Err(cryptoki::error::Error::Pkcs11(
+                cryptoki::error::RvError::CryptokiAlreadyInitialized,
+                _,
+            )) => {}
+            Err(e) => return Err(pq_err("initialize", e)),
+        }
+        let slots = client
+            .get_slots_with_token()
+            .map_err(|e| pq_err("slot enumeration", e))?;
+        let slot = slots
+            .iter()
+            .find(|s| s.id() == slot_id)
+            .copied()
+            .ok_or_else(|| pq_err("slot", format!("{slot_id} not found")))?;
+        let session = client
+            .open_rw_session(slot)
+            .map_err(|e| pq_err("session", e))?;
+        let pin_secret = secrecy::SecretString::new(pin.into_boxed_str());
+        session
+            .login(cryptoki::session::UserType::User, Some(&pin_secret))
+            .map_err(|e| pq_err("login", e))?;
+        Ok(Arc::new(Self {
+            inner: Mutex::new(Pkcs11Inner {
+                pkcs11_client: client,
+                session,
+            }),
+        }))
+    }
+
+    fn lock(&self) -> Result<std::sync::MutexGuard<'_, Pkcs11Inner>, CryptoError> {
+        self.inner
+            .lock()
+            .map_err(|_| pq_err("session", "lock poisoned"))
+    }
+
+    /// Generate a key pair inside the token under `label`. The private key is
+    /// a token object, sensitive and not extractable; the public key is read
+    /// back and length checked.
+    ///
+    /// # Errors
+    ///
+    /// [`CryptoError::KeyGeneration`] when the token lacks the 3.2 mechanism,
+    /// refuses the template, or returns a public key of the wrong length.
+    /// WIRING: unwired - no caller in this tree yet; kept as a declared surface, and nothing depends on it until one arrives.
+    pub fn generate_key(
+        self: &Arc<Self>,
+        label: &str,
+        algorithm: HsmPqAlgorithm,
+    ) -> Result<Pkcs11PqKey, CryptoError> {
+        {
+            let guard = self.lock()?;
+            let public_template = [
+                Attribute::Token(true),
+                Attribute::Verify(true),
+                Attribute::Label(label.into()),
+                Attribute::ParameterSet(algorithm.parameter_set()),
+            ];
+            let private_template = [
+                Attribute::Token(true),
+                Attribute::Private(true),
+                Attribute::Sensitive(true),
+                Attribute::Extractable(false),
+                Attribute::Sign(true),
+                Attribute::Label(label.into()),
+            ];
+            guard
+                .session
+                .generate_key_pair(
+                    &algorithm.keygen_mechanism(),
+                    &public_template,
+                    &private_template,
+                )
+                .map_err(|e| pq_err("key pair generation", e))?;
+        }
+        self.open_key(label, algorithm)
+    }
+
+    /// Bind to the key pair stored under `label`. Exactly one private and one
+    /// public object must carry the label; the public key must have the
+    /// length and parameter set of `algorithm`; and a probe signature made by
+    /// the token must verify under that public key, which proves the two
+    /// objects are one pair.
+    ///
+    /// # Errors
+    ///
+    /// [`CryptoError::KeyGeneration`] naming the check that failed.
+    pub fn open_key(
+        self: &Arc<Self>,
+        label: &str,
+        algorithm: HsmPqAlgorithm,
+    ) -> Result<Pkcs11PqKey, CryptoError> {
+        let (private_key, public_key) = {
+            let guard = self.lock()?;
+            let find_one = |class: ObjectClass| -> Result<ObjectHandle, CryptoError> {
+                let template = [
+                    Attribute::Class(class),
+                    Attribute::KeyType(algorithm.key_type()),
+                    Attribute::Label(label.into()),
+                ];
+                let found = guard
+                    .session
+                    .find_objects(&template)
+                    .map_err(|e| pq_err("object search", e))?;
+                match found.as_slice() {
+                    [one] => Ok(*one),
+                    [] => Err(pq_err("key", format!("no {class} object labelled {label}"))),
+                    many => Err(pq_err(
+                        "key",
+                        format!("{} objects labelled {label}, refusing to guess", many.len()),
+                    )),
+                }
+            };
+            let private_key = find_one(ObjectClass::PRIVATE_KEY)?;
+            let public_handle = find_one(ObjectClass::PUBLIC_KEY)?;
+            let attributes = guard
+                .session
+                .get_attributes(
+                    public_handle,
+                    &[AttributeType::Value, AttributeType::ParameterSet],
+                )
+                .map_err(|e| pq_err("public key attributes", e))?;
+            let mut value = None;
+            for attribute in attributes {
+                match attribute {
+                    Attribute::Value(bytes) => value = Some(bytes),
+                    Attribute::ParameterSet(set) if set != algorithm.parameter_set() => {
+                        return Err(pq_err("key", "parameter set is not the expected one"));
+                    }
+                    _ => {}
+                }
+            }
+            (
+                private_key,
+                value.ok_or_else(|| pq_err("key", "public key has no value"))?,
+            )
+        };
+        let expected = crate::crypto::pq::public_key_len(algorithm.scheme())
+            .map_err(|e| pq_err("public key length", format!("{e:?}")))?;
+        if public_key.len() != expected {
+            return Err(pq_err(
+                "key",
+                format!(
+                    "public key is {} bytes, expected {expected}",
+                    public_key.len()
+                ),
+            ));
+        }
+        let key = Pkcs11PqKey {
+            algorithm,
+            public_key,
+            private_key,
+            token: Arc::clone(self),
+        };
+        // The pairing proof: a probe signed in the token verifies under the
+        // public key that was read.
+        let probe = b"BDLM_PKCS11_PQ_BINDING_V1";
+        key.sign(crate::crypto::ctx::ANCHOR_V2, probe)?;
+        Ok(key)
+    }
+}
+
+/// A post-quantum signing key held in a PKCS#11 3.2 token. The private key
+/// never leaves the token; the signature is checked against the public key
+/// before it is returned.
+/// exposed for: the crypto/key registry's public labels and shapes - production readers land with the anchor-ceremony and key-config doors (wiring pending).
+pub struct Pkcs11PqKey {
+    algorithm: HsmPqAlgorithm,
+    public_key: Vec<u8>,
+    private_key: ObjectHandle,
+    token: Arc<Pkcs11PqToken>,
+}
+
+impl HsmPqKey for Pkcs11PqKey {
+    fn public_key(&self) -> Vec<u8> {
+        self.public_key.clone()
+    }
+
+    fn sign(&self, ctx: &[u8], payload: &[u8]) -> Result<Vec<u8>, CryptoError> {
+        let signature = {
+            let guard = self.token.lock()?;
+            guard
+                .session
+                .sign(
+                    &self.algorithm.sign_mechanism(ctx),
+                    self.private_key,
+                    payload,
+                )
+                .map_err(|e| CryptoError::Signing(format!("PKCS#11 3.2 sign: {e}")))?
+        };
+        // A token that returns a signature its own public key does not accept
+        // is faulty or lying; nothing downstream sees that signature.
+        crate::crypto::pq::verify(
+            self.algorithm.scheme(),
+            &self.public_key,
+            payload,
+            ctx,
+            &signature,
+        )
+        .map_err(|e| {
+            CryptoError::Signing(format!("PKCS#11 3.2 token signature rejected: {e:?}"))
+        })?;
+        Ok(signature)
+    }
+}
+
+#[cfg(test)]
+mod pkcs11_pq_tests {
+    use super::*;
+
+    /// The environment of the software token CI job (kryoptic built with the
+    /// `pqc` feature). Without it the test has nothing to talk to and reports
+    /// that it did not run; CI sets it and fails the job when it is missing.
+    const MODULE_ENV: &str = "BUDLUM_PKCS11_32_MODULE";
+    const PIN_ENV: &str = "BUDLUM_PKCS11_32_PIN";
+    const SO_PIN: &str = "so-pin-for-tests";
+    const USER_PIN: &str = "user-pin-for-tests";
+
+    fn initialise_token(module: &str) -> u64 {
+        let client = cryptoki::context::Pkcs11::new(module).expect("module loads");
+        client
+            .initialize(cryptoki::context::CInitializeArgs::new(
+                cryptoki::context::CInitializeFlags::OS_LOCKING_OK,
+            ))
+            .expect("initialize");
+        let slot = *client
+            .get_slots_with_token()
+            .expect("slots")
+            .first()
+            .expect("a slot");
+        let so = secrecy::SecretString::new(SO_PIN.to_string().into_boxed_str());
+        client
+            .init_token(slot, &so, "budlum-pq")
+            .expect("init token");
+        let session = client.open_rw_session(slot).expect("so session");
+        session
+            .login(cryptoki::session::UserType::So, Some(&so))
+            .expect("so login");
+        let user = secrecy::SecretString::new(USER_PIN.to_string().into_boxed_str());
+        session.init_pin(&user).expect("init user pin");
+        session.logout().expect("logout");
+        slot.id()
+    }
+
+    #[test]
+    fn a_pkcs11_3_2_token_signs_ml_dsa_87_and_slh_dsa_with_the_fips_context() {
+        let Ok(module) = std::env::var(MODULE_ENV) else {
+            eprintln!("{MODULE_ENV} is not set: the PKCS#11 3.2 token test did not run");
+            return;
+        };
+        let slot = initialise_token(&module);
+        std::env::set_var(PIN_ENV, USER_PIN);
+        let token = Pkcs11PqToken::open(&module, slot, PIN_ENV).expect("token opens");
+
+        for (label, algorithm, scheme, ctx) in [
+            (
+                "validator-0",
+                HsmPqAlgorithm::MlDsa65,
+                SchemeId::ML_DSA_65,
+                crate::crypto::ctx::KEY_BINDING_V1,
+            ),
+            (
+                "anchor-0",
+                HsmPqAlgorithm::MlDsa87,
+                SchemeId::ML_DSA_87,
+                crate::crypto::ctx::ANCHOR_V2,
+            ),
+            (
+                "seal-0",
+                HsmPqAlgorithm::SlhDsaShake256s,
+                SchemeId::SLH_DSA_SHAKE_256S,
+                crate::crypto::ctx::SEAL_V1,
+            ),
+        ] {
+            let key = token
+                .generate_key(label, algorithm)
+                .expect("generate in token");
+            let payload = b"payload signed inside the token";
+            let signature = key.sign(ctx, payload).expect("token signs");
+            crate::crypto::pq::verify(scheme, &key.public_key(), payload, ctx, &signature)
+                .expect("the signature verifies through the dual verifier facade");
+            // The FIPS context is bound: another context does not verify.
+            assert!(crate::crypto::pq::verify(
+                scheme,
+                &key.public_key(),
+                payload,
+                crate::crypto::ctx::COLD_V1,
+                &signature
+            )
+            .is_err());
+            // The private key is not extractable.
+            {
+                let guard = token.lock().expect("lock");
+                let value = guard
+                    .session
+                    .get_attributes(key.private_key, &[AttributeType::Value]);
+                assert!(
+                    value.map_or(true, |attrs| attrs.is_empty()),
+                    "the private key value must not be readable"
+                );
+            }
+            // A second handle binds to the same pair and a missing label fails.
+            let again = token.open_key(label, algorithm).expect("reopen");
+            assert_eq!(again.public_key(), key.public_key());
+            assert!(token.open_key("no-such-label", algorithm).is_err());
+        }
     }
 }

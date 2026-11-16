@@ -52,6 +52,7 @@ fn domain_record(
         pow_parameters: None,
         zk_program_allowlist: Vec::new(),
         plugin_code_hash: None,
+        genesis_state_root: genesis.hash(),
     }
 }
 
@@ -78,6 +79,7 @@ pub fn authority_set_hash(chain_id: u64, authorities: &[GardenKey]) -> Result<Ha
         pow_parameters: None,
         zk_program_allowlist: Vec::new(),
         plugin_code_hash: None,
+        genesis_state_root: [0u8; 32],
     };
     let addresses: Vec<Address> = authorities.iter().map(|key| Address(*key)).collect();
     poa_authority_set_hash(&probe, &addresses).map_err(|e| e.to_string())
@@ -137,7 +139,7 @@ impl GardenBudlumLink {
     ) -> Result<(), String> {
         let hash = authority_set_hash(genesis.chain_id, &[genesis.host])?;
         self.chain
-            .register_consensus_domain(domain_record(genesis, operator, hash))
+            .register_garden_domain(domain_record(genesis, operator, hash))
             .await
     }
 
@@ -160,7 +162,7 @@ impl GardenBudlumLink {
             )
             .await?;
         self.chain
-            .submit_verified_domain_commitment(verified_commitment(electorate, commit)?)
+            .submit_verified_garden_commitment(verified_commitment(electorate, commit)?)
             .await
     }
 
@@ -230,7 +232,7 @@ mod tests {
         let genesis = &net.ledger.state.genesis;
         let hash = authority_set_hash(genesis.chain_id, &[genesis.host]).unwrap();
         chain
-            .register_consensus_domain(domain_record(genesis, net.host, hash))
+            .register_garden_domain(domain_record(genesis, net.host, hash))
             .unwrap();
         garden_domain_id(genesis.chain_id)
     }
@@ -245,13 +247,14 @@ mod tests {
             commit.block.header.authority_set_hash,
         )?;
         let verified = verified_commitment(electorate, commit)?;
-        chain.submit_verified_domain_commitment(verified.commitment, verified.proof)
+        chain.submit_verified_garden_commitment(verified.commitment, verified.proof)
     }
 
     #[test]
     fn garden_finality_is_accepted_by_the_budlum_poa_adapter_as_members_change() {
         let mut net = Net::new();
         let mut chain = budlum();
+        let root_before = chain.state.calculate_state_root();
         let domain_id = register(&mut chain, &net);
         let a = net.join("a");
         let b = net.join("b");
@@ -260,7 +263,7 @@ mod tests {
         net.commit(vec![net.publish(&a, 2)]).unwrap();
         for height in 1..=net.ledger.state.height {
             report(&mut chain, &net, height).unwrap();
-            let domain = chain.domain_registry.get(domain_id).unwrap();
+            let domain = chain.garden_domains.get(domain_id).unwrap();
             let (commit, _) = net.ledger.commit_at(height).unwrap();
             assert_eq!(domain.last_committed_height, height);
             assert_eq!(domain.last_committed_hash, commit.block.header.hash());
@@ -269,10 +272,13 @@ mod tests {
                 commit.block.header.authority_set_hash
             );
         }
-        let domain = chain.domain_registry.get(domain_id).unwrap();
+        let domain = chain.garden_domains.get(domain_id).unwrap();
         assert_eq!(domain.status, DomainStatus::Active);
         assert!(!domain.bridge_enabled);
         assert_eq!(domain.kind, ConsensusKind::PoA);
+        // Node-local Garden writes never alter the settlement chain state root.
+        assert_eq!(chain.state.calculate_state_root(), root_before);
+        assert!(chain.state.settlement.domains.get(domain_id).is_none());
     }
 
     #[test]
@@ -298,22 +304,22 @@ mod tests {
                 commit.block.header.authority_set_hash,
             )
             .unwrap();
-        let before = chain.domain_registry.get(domain_id).unwrap().clone();
+        let before = chain.garden_domains.get(domain_id).unwrap().clone();
         let verified = verified_commitment(electorate, &thin).unwrap();
         let refusal = chain
-            .submit_verified_domain_commitment(verified.commitment, verified.proof)
+            .submit_verified_garden_commitment(verified.commitment, verified.proof)
             .unwrap_err();
         assert!(refusal.contains("required=3, observed=2"), "{refusal}");
-        assert_eq!(chain.domain_registry.get(domain_id).unwrap(), &before);
+        assert_eq!(chain.garden_domains.get(domain_id).unwrap(), &before);
 
         // A proof that names a smaller electorate than the registered one
         // does not pass either: the adapter recomputes the set hash.
         let small: Vec<GardenKey> = thin.votes.iter().map(|vote| vote.voter).collect();
         let verified = verified_commitment(&small, &thin).unwrap();
         assert!(chain
-            .submit_verified_domain_commitment(verified.commitment, verified.proof)
+            .submit_verified_garden_commitment(verified.commitment, verified.proof)
             .is_err());
-        assert_eq!(chain.domain_registry.get(domain_id).unwrap(), &before);
+        assert_eq!(chain.garden_domains.get(domain_id).unwrap(), &before);
 
         report(&mut chain, &net, 4).unwrap();
     }
@@ -324,7 +330,7 @@ mod tests {
         let mut chain = budlum();
         let domain_id = register(&mut chain, &net);
         let stranger = net.join("a");
-        let before = chain.domain_registry.get(domain_id).unwrap().clone();
+        let before = chain.garden_domains.get(domain_id).unwrap().clone();
 
         let refusal = chain
             .rotate_bridgeless_poa_authority_set(domain_id, Address(stranger), [7u8; 32])
@@ -346,7 +352,7 @@ mod tests {
             .rotate_bridgeless_poa_authority_set(domain_id + 1, Address(net.host), [7u8; 32])
             .unwrap_err();
         assert!(refusal.contains("Unknown consensus domain"), "{refusal}");
-        assert_eq!(chain.domain_registry.get(domain_id).unwrap(), &before);
+        assert_eq!(chain.garden_domains.get(domain_id).unwrap(), &before);
     }
 
     #[test]
@@ -359,7 +365,13 @@ mod tests {
         bridged.bridge_enabled = true;
         let domain_id = bridged.id;
         chain.register_consensus_domain(bridged).unwrap();
-        let before = chain.domain_registry.get(domain_id).unwrap().clone();
+        let before = chain
+            .state
+            .settlement
+            .domains
+            .get(domain_id)
+            .unwrap()
+            .clone();
 
         let refusal = chain
             .rotate_bridgeless_poa_authority_set(domain_id, Address(net.host), [7u8; 32])
@@ -373,18 +385,22 @@ mod tests {
             )
             .unwrap_err();
         assert!(refusal.contains("bridge-enabled"), "{refusal}");
-        assert_eq!(chain.domain_registry.get(domain_id).unwrap(), &before);
+        assert_eq!(
+            chain.state.settlement.domains.get(domain_id).unwrap(),
+            &before
+        );
     }
 
     #[test]
     fn garden_status_on_budlum_follows_active_frozen_retired() {
         let mut net = Net::new();
         let mut chain = budlum();
+        let root_before = chain.state.calculate_state_root();
         let domain_id = register(&mut chain, &net);
         let host = Address(net.host);
         let a = net.join("a");
         report(&mut chain, &net, 1).unwrap();
-        let status = |chain: &Blockchain| chain.domain_registry.get(domain_id).unwrap().status;
+        let status = |chain: &Blockchain| chain.garden_domains.get(domain_id).unwrap().status;
 
         let refusal = chain
             .transition_bridgeless_poa_domain_status(domain_id, host, DomainStatus::Retired)
@@ -401,7 +417,7 @@ mod tests {
         assert!(report(&mut chain, &net, 2).is_err());
         assert_eq!(
             chain
-                .domain_registry
+                .garden_domains
                 .get(domain_id)
                 .unwrap()
                 .last_committed_height,
@@ -430,12 +446,14 @@ mod tests {
             .unwrap_err();
         assert!(refusal.contains("retired"), "{refusal}");
         assert_eq!(status(&chain), DomainStatus::Retired);
+        assert_eq!(chain.state.calculate_state_root(), root_before);
     }
 
     #[test]
     fn garden_fork_seen_by_budlum_cannot_be_reactivated_by_the_operator() {
         let mut net = Net::new();
         let mut chain = budlum();
+        let root_before = chain.state.calculate_state_root();
         let domain_id = register(&mut chain, &net);
         let host = Address(net.host);
         let token = net.tx(&net.host, GardenTxKind::Leave);
@@ -451,7 +469,7 @@ mod tests {
         report(&mut chain, &net, 1).unwrap();
         assert!(report(&mut chain, &other, 1).is_err());
         assert_eq!(
-            chain.domain_registry.get(domain_id).unwrap().status,
+            chain.garden_domains.get(domain_id).unwrap().status,
             DomainStatus::Frozen
         );
         let refusal = chain
@@ -459,8 +477,9 @@ mod tests {
             .unwrap_err();
         assert!(refusal.contains("quarantined"), "{refusal}");
         assert_eq!(
-            chain.domain_registry.get(domain_id).unwrap().status,
+            chain.garden_domains.get(domain_id).unwrap().status,
             DomainStatus::Frozen
         );
+        assert_eq!(chain.state.calculate_state_root(), root_before);
     }
 }

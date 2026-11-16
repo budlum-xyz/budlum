@@ -7,7 +7,7 @@ use std::sync::Arc;
 use tracing::{error, info, warn};
 
 /// Universal Relayer Worker.
-/// Watches the Budlum chain for UniversalRelay transactions and
+/// Watches the Budlum chain for `UniversalRelay` transactions and
 /// relays them to external chains (EVM, Solana, etc.).
 ///
 /// # What this worker is allowed to assert
@@ -33,6 +33,43 @@ use tracing::{error, info, warn};
 /// success is indistinguishable from an attacker, because the signature makes
 /// the lie authentic. That asymmetry is why every failure path below is a
 /// refusal and not a fallback.
+/// The key a relayer signs result transactions with.
+///
+/// A V3 account signs V7 composite transactions and is the only form a
+/// mainnet node admits. A legacy Ed25519 key signs V4, which devnet and
+/// testnet still accept.
+#[derive(Clone)]
+/// exposed for: public surface of this module - production readers land with the wiring change.
+pub enum RelayerKey {
+    /// The legacy Ed25519 key (V4).
+    Legacy(Arc<KeyPair>),
+    /// A V3 account (V7 composite).
+    V3(Arc<crate::crypto::key_derivation::UserAccount>),
+}
+
+impl RelayerKey {
+    /// Sign `tx` as its sender. The V3 form rewrites `from` to its Address V3.
+    fn sign(&self, tx: &mut Transaction) -> Result<(), String> {
+        match self {
+            Self::Legacy(kp) => {
+                tx.sign(kp);
+                Ok(())
+            }
+            Self::V3(account) => {
+                use rand::Rng;
+                let mut rnd = [0u8; 32];
+                rand::rng().fill_bytes(&mut rnd);
+                tx.sign_v7(
+                    &crate::crypto::scheme::SchemeStatusRegistry::genesis(),
+                    &account.signing,
+                    &account.recovery_public_key,
+                    &rnd,
+                )
+            }
+        }
+    }
+}
+
 pub struct RelayerWorker {
     chain: ChainHandle,
     /// Rewards for the relayer are minted in $BUD (Decision 9).
@@ -40,7 +77,7 @@ pub struct RelayerWorker {
     /// Relayer must sign result TXs.
     /// Without a signing key, the worker refuses to submit results
     /// (fail-closed).
-    relayer_keypair: Option<Arc<KeyPair>>,
+    relayer_keypair: Option<RelayerKey>,
     /// Chain adapters that can actually reach the external chains.
     ///
     /// Empty by default: a worker with no adapter can observe relay requests
@@ -80,6 +117,14 @@ pub struct RelayerWorker {
     /// the map is written to disk next to the cursor so a restart between
     /// the external action and that finality resumes the same submission.
     observed: std::collections::HashMap<String, PendingResult>,
+    /// Metrics handle, when the node wired one.
+    ///
+    /// The two reservation gauges are the operator's view of the pending store
+    /// without reading its file: how much work is waiting on finality, and how
+    /// much of it needs a person. Both are rewritten whenever the store
+    /// changes, so a scrape can never show a reservation the worker has
+    /// already dropped.
+    metrics: Option<Arc<crate::core::metrics::Metrics>>,
 }
 
 /// A verified external result together with the hash of the result
@@ -197,6 +242,7 @@ impl RelayerWorker {
             attempts: std::collections::HashMap::new(),
             next_nonce: None,
             observed: std::collections::HashMap::new(),
+            metrics: None,
         }
     }
 
@@ -225,7 +271,21 @@ impl RelayerWorker {
     /// cryptographically signed before injection into the chain.
     #[must_use]
     pub fn with_signing_key(mut self, keypair: Arc<KeyPair>) -> Self {
-        self.relayer_keypair = Some(keypair);
+        self.relayer_keypair = Some(RelayerKey::Legacy(keypair));
+        self
+    }
+
+    /// Bind a V3 account: result transactions are V7 composite transactions
+    /// from its Address V3, which replaces the address the worker was built
+    /// with so the nonce and the sender agree.
+    #[must_use]
+    /// WIRING: unwired - no caller in this tree yet; kept as a declared surface, and nothing depends on it until one arrives.
+    pub fn with_account(
+        mut self,
+        account: Arc<crate::crypto::key_derivation::UserAccount>,
+    ) -> Self {
+        self.relayer_address = Address::from(account.address);
+        self.relayer_keypair = Some(RelayerKey::V3(account));
         self
     }
 
@@ -264,6 +324,42 @@ impl RelayerWorker {
     pub fn with_adapters(mut self, adapters: Arc<AdapterRegistry>) -> Self {
         self.adapters = adapters;
         self
+    }
+
+    /// Bind the node's metrics registry so the reservation gauges are
+    /// exported.
+    ///
+    /// A worker built in a test keeps `None` and simply holds its pending
+    /// store privately, which is what the tests relied on before the gauges
+    /// existed.
+    #[must_use]
+    pub fn with_metrics(mut self, metrics: Arc<crate::core::metrics::Metrics>) -> Self {
+        self.metrics = Some(metrics);
+        self.emit_reservation_metrics();
+        self
+    }
+
+    /// Publish the pending-store depth and its operator-needed subset.
+    ///
+    /// `relay_reservations` counts every entry that has not been seen in a
+    /// finalized block; `relay_inflight_reservations` counts the ones whose
+    /// external action is still unresolved (no verified result yet). The
+    /// second is the number a person has to work off by hand, so it gets its
+    /// own series rather than a label an alert would have to filter.
+    fn emit_reservation_metrics(&self) {
+        let Some(ref m) = self.metrics else {
+            return;
+        };
+        let live = self.observed.len();
+        let inflight = self
+            .observed
+            .values()
+            .filter(|pending| pending.result.is_none())
+            .count();
+        m.relay_reservations
+            .set(i64::try_from(live).unwrap_or(i64::MAX));
+        m.relay_inflight_reservations
+            .set(i64::try_from(inflight).unwrap_or(i64::MAX));
     }
 
     /// Persist the relay cursor to `path` so a restart resumes where it left
@@ -406,6 +502,9 @@ impl RelayerWorker {
     /// the cursor (relayed again from the stored observation) or the stored
     /// observation itself; never a request nothing knows about.
     fn save_pending(&self) {
+        // The in-memory reservation is live even when persistence is disabled
+        // or fails, so every early return below still leaves honest gauges.
+        self.emit_reservation_metrics();
         let Some(path) = self.pending_path() else {
             return;
         };
@@ -622,7 +721,7 @@ impl RelayerWorker {
         request: &str,
         user: Address,
         result: &crate::core::transaction::RelayerExternalResult,
-        kp: &KeyPair,
+        kp: &RelayerKey,
     ) -> RelayOutcome {
         // The first result of a pass takes the chain's nonce; every later
         // one in the same pass takes the next number, because the chain
@@ -649,7 +748,10 @@ impl RelayerWorker {
             self.chain.get_chain_id().await,
             TransactionType::RelayerResult(result.clone()),
         );
-        result_tx.sign(kp);
+        if let Err(e) = kp.sign(&mut result_tx) {
+            error!(request, "Relayer: cannot sign the relay result: {e}");
+            return RelayOutcome::Retry;
+        }
         let tx_hash = result_tx.hash.clone();
         match self.chain.add_transaction(result_tx).await {
             Ok(()) => {
@@ -798,6 +900,10 @@ impl RelayerWorker {
                 return;
             }
         };
+        // The resumed set is already a backlog: those are requests a previous
+        // run could not confirm, so the gauges start from it rather than from
+        // zero until the first change.
+        self.emit_reservation_metrics();
 
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(5)).await;
@@ -940,6 +1046,10 @@ impl RelayerWorker {
     /// directly testable without a running chain actor: the interesting
     /// property is that no input can make this return a `success: true`
     /// result the adapter did not verify.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub async fn build_verified_result(
         adapters: &AdapterRegistry,
         ext_tx: &crate::core::transaction::ExternalTransaction,
@@ -1719,6 +1829,62 @@ mod pending_results {
         }
     }
 
+    /// The two reservation gauges follow the pending store.
+    ///
+    /// `relay_reservations` is everything the worker still holds; the
+    /// in-flight gauge is the subset whose external action has no verified
+    /// result yet, which is the part that needs a person. Both are rewritten
+    /// on every change to the store, so a scrape between two changes shows
+    /// the store, not the last state the file happened to hold.
+    #[test]
+    fn relay_reservation_gauges_follow_the_pending_store() {
+        let metrics =
+            Arc::new(crate::core::metrics::Metrics::new().expect("metric names are literals"));
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        let mut w = RelayerWorker::new(ChainHandle::new(tx), Address::from([7u8; 32]))
+            .with_metrics(metrics.clone());
+        assert_eq!(metrics.relay_reservations.get(), 0);
+        assert_eq!(metrics.relay_inflight_reservations.get(), 0);
+
+        // One reservation whose action completed and one still in flight.
+        w.observed.insert(
+            "req-done".to_string(),
+            PendingResult {
+                result: Some(observation(1)),
+                submitted_tx: Some("tx-a".to_string()),
+                requester_lookups_failed: 0,
+                done: false,
+            },
+        );
+        w.observed.insert(
+            "req-inflight".to_string(),
+            PendingResult {
+                result: None,
+                submitted_tx: None,
+                requester_lookups_failed: 0,
+                done: false,
+            },
+        );
+        // No cursor path: the store is in memory only, and the gauges must
+        // still follow it. This is the case a test worker runs in.
+        w.emit_reservation_metrics();
+        assert_eq!(metrics.relay_reservations.get(), 2);
+        assert_eq!(
+            metrics.relay_inflight_reservations.get(),
+            1,
+            "only the entry with no verified result needs an operator"
+        );
+
+        w.observed.remove("req-inflight");
+        w.emit_reservation_metrics();
+        assert_eq!(metrics.relay_reservations.get(), 1);
+        assert_eq!(metrics.relay_inflight_reservations.get(), 0);
+
+        let scrape = metrics.encode();
+        assert!(scrape.contains("budlum_relay_reservations 1"));
+        assert!(scrape.contains("budlum_relay_inflight_reservations 0"));
+    }
+
     /// An actor stub that answers the relay loop's finality questions from
     /// two tables: which hashes sit in which block, and which hashes the
     /// mempool still holds. Every `AddTransaction` is accepted and counted.
@@ -2190,7 +2356,7 @@ mod pending_results {
         );
     }
 
-    /// BLG-0716: a finalized result must survive a restart while the cursor
+    /// A finalized result must survive a restart while the cursor
     /// still holds the request's block, so the replay does not repeat the
     /// external action.
     #[tokio::test]

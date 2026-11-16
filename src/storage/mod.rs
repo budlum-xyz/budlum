@@ -1,15 +1,12 @@
 //! Storage layer.
 //!
-//! Two intentionally separate namespaces live in `src/storage/`:
-//!
-//! * [`db`] / [`traits`] - the *node-local* key-value store (sled) that
-//!   Holds chain state, accounts, blocks, etc. Pre-existing, not touched
-//!   By the storage layer.
+//! The node-local key-value store, its traits, the proof-bearing state
+//! trie, pruning and witness retention live in `crate::persistence`: they
+//! hold the node's own chain state, not content.
 //!
 //! * [`content_id`] / [`manifest`] - the *B.U.D. on-chain content-addressing
 //!   Primitives* introduced. These are
-//!   Pure data shapes - no I/O, no admin hooks, no team-server dependency
-//!   (plan §0.5).
+//!   Pure data shapes - no I/O, no admin hooks, no team-server dependency.
 //!
 //! The domain-level deal / challenge accounting lives in
 //! `crate::domain::storage_deal::StorageRegistry` (kept under
@@ -17,27 +14,29 @@
 //! Transport types).
 
 pub mod assignment;
+/// B.U.D. 3.0: content id, BOF-1 object, segments and the RFC 6330 code.
+pub mod bud3;
 pub mod column_commitment;
+pub mod content_gateway;
 pub mod content_id;
-pub mod db;
 pub mod derived;
 pub mod dictionary;
 pub mod emit;
 pub mod erasure;
 pub mod fixed_point;
 pub mod generated;
+/// Content-key delivery for view grants: HPKE package, hash as `key_id`.
+pub mod key_package;
 pub mod lifecycle;
 pub mod living_threshold;
 pub mod lrc;
 pub mod manifest;
-pub mod merkle_trie;
 pub mod mobile_self;
 pub mod msr;
 pub mod one_share;
 pub mod one_view;
 pub mod payload_crypt;
 pub mod provider;
-pub mod pruning;
 pub mod qr_carousel;
 pub mod qr_codec;
 pub mod qr_encode;
@@ -61,11 +60,9 @@ pub mod three_meter;
 pub mod three_nft;
 pub mod three_pipe;
 pub mod three_recipe;
-pub mod three_regime;
 pub mod three_reveal;
 pub mod three_rpc;
 pub mod three_visibility;
-pub mod traits;
 pub mod transformed;
 pub mod view_grant;
 
@@ -119,7 +116,6 @@ pub use provider::{
     provider_challenge_id, ChallengeId, DealId, InMemoryStorageProvider, ProviderChallengeResult,
     PutReceipt, StorageProof, StorageProvider, StorageProviderError,
 };
-pub use pruning::{NodeMode, PruningPolicy};
 pub use render::{render, render_and_verify, RenderError, RenderFormat};
 pub use server_admission::{admit_device_as_server, ServerAdmission, ServerAdmissionRefusal};
 
@@ -175,10 +171,6 @@ pub use three_nft::{
 pub use three_recipe::{
     recipe_class, RecipeTransform, VideoRecipe, VideoRecipeError, VideoRecipeSealed,
     RECIPE_VIDEO_MAGIC,
-};
-pub use three_regime::{
-    admits_body as three_regime_admits_body, held_bytes_for, refuse_rent_without_held_bytes,
-    regime_of, rent_basis_for, AccountingRefusal, ContentRegime, RentBasis,
 };
 pub use three_reveal::{RevealError, RevealSession};
 pub use three_rpc::{

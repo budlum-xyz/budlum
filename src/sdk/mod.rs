@@ -26,8 +26,8 @@
 //! copy standing next to the real one only misleads.
 //!
 //! `fixture.rs` went too: the `ProofFixture` it produced carried the same name
-//! as the verified manifest record in `developer_os.rs` while meaning something
-//! different. One type now lives, in `developer_os.rs`.
+//! as the verified manifest record in `project_manifest.rs` while meaning something
+//! different. One type now lives, in `project_manifest.rs`.
 //!
 //! # What remains
 //!
@@ -48,9 +48,10 @@
 //! believes those domains will be started. The three sections were deleted, and
 //! what is left is what the project actually has: its name and its version.
 //!
-//! WIRING: unwired - this is a file-format schema for a project file that
-//! lives outside the node. Nothing in the node reads `budlum.toml`, and
-//! nothing should: it describes a developer's project, not chain state.
+//! WIRING: wired to `bud dev init` and `bud dev info` (src/bin/bud.rs). It
+//! is a file-format schema for a project file that lives outside the node:
+//! nothing in the node reads `budlum.toml`, and nothing should, because it
+//! describes a developer's project, not chain state.
 
 /// The `budlum.toml` project configuration schema.
 ///
@@ -72,12 +73,14 @@
 /// budlum_version = "0.1.0"
 /// ```
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct BudlumToml {
     /// Project metadata.
     pub project: ProjectSection,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ProjectSection {
     /// Project name.
     pub name: String,
@@ -248,5 +251,22 @@ mod tests {
         std::fs::write(&path, "not valid toml [[[[").unwrap();
         let result = BudlumToml::load(&path);
         assert!(matches!(result, Err(BudlumTomlError::Parse { .. })));
+    }
+
+    #[test]
+    fn removed_sections_and_unknown_fields_are_rejected() {
+        let base = "[project]\nname = \"x\"\nversion = \"0.1.0\"\n";
+        for extra in [
+            "[devnet]\ndomains = [\"pow\"]\n",
+            "[contracts]\nentry = \"a.budl\"\n",
+            "[fixtures]\ndir = \"f\"\n",
+            "unknown_key = true\n",
+        ] {
+            let doc = format!("{base}{extra}");
+            assert!(
+                toml::from_str::<BudlumToml>(&doc).is_err(),
+                "removed or unknown schema field must be rejected: {doc}"
+            );
+        }
     }
 }

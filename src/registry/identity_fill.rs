@@ -113,7 +113,7 @@ pub enum FillError {
     /// The receipt opens more fields than a verifier will check. Each entry
     /// costs hashing work, and the receipt comes from outside.
     TooManyEntries { max: usize },
-    /// BLG-0097 (P04-F15): the receipt carries no subject signature. An
+    /// The receipt carries no subject signature. An
     /// unsigned receipt can be rewritten - requester, document and epoch
     /// alike - and still verify, which is what this variant refuses.
     UnsignedReceipt,
@@ -130,6 +130,9 @@ impl std::fmt::Display for FillError {
             Self::EmptySlot => write!(f, "a slot was named nothing"),
             Self::DuplicateSlot { slot } => {
                 write!(f, "slot `{slot}` appears twice in the template")
+            }
+            Self::MissingSlot { slot } if slot.is_empty() => {
+                f.write_str("presentation receipt opens no credential fields")
             }
             Self::MissingSlot { slot } => {
                 write!(f, "no disclosure fills the template's slot `{slot}`")
@@ -375,7 +378,7 @@ pub struct PresentationReceipt {
     pub document_digest: [u8; 32],
     pub epoch: u64,
     pub entries: Vec<ReceiptEntry>,
-    /// BLG-0097 (P04-F15): the subject's Ed25519 account key - the V4
+    /// The subject's Ed25519 account key - the V4
     /// derivation makes the key bytes the address itself, so a verifier
     /// needs no registry lookup to know who must have signed.
     #[serde(default)]
@@ -403,13 +406,23 @@ impl PresentationReceipt {
     #[must_use]
     pub fn digest(&self) -> [u8; 32] {
         let mut acc = hash_fields_bytes(&[
-            b"bud-vc-presentation-v1",
+            b"bud-vc-presentation-v2",
             self.requester.as_bytes(),
             self.subject.as_bytes(),
             &self.document_digest,
             &self.epoch.to_le_bytes(),
+            &(self.entries.len() as u64).to_le_bytes(),
         ]);
         for entry in &self.entries {
+            let mut proof_acc = hash_fields_bytes(&[
+                b"bud-vc-presentation-proof",
+                &(entry.proof.leaf_index as u64).to_le_bytes(),
+                &(entry.proof.leaf_count as u64).to_le_bytes(),
+                &(entry.proof.siblings.len() as u64).to_le_bytes(),
+            ]);
+            for sib in &entry.proof.siblings {
+                proof_acc = hash_fields_bytes(&[&proof_acc, sib]);
+            }
             acc = hash_fields_bytes(&[
                 &acc,
                 entry.slot.as_bytes(),
@@ -417,14 +430,13 @@ impl PresentationReceipt {
                 entry.field.as_bytes(),
                 &entry.salt,
                 &entry.value_digest,
-                &(entry.proof.leaf_index as u64).to_le_bytes(),
-                &(entry.proof.leaf_count as u64).to_le_bytes(),
+                &proof_acc,
             ]);
         }
         acc
     }
 
-    /// Sign the receipt with the subject's account key (BLG-0097). The
+    /// Sign the receipt with the subject's account key. The
     /// signature covers [`Self::digest`] - every field above, requester,
     /// document digest and epoch included.
     pub fn sign(&mut self, keypair: &crate::crypto::primitives::KeyPair) {
@@ -434,7 +446,7 @@ impl PresentationReceipt {
     }
 
     /// Verify the subject signature against [`Self::digest`]
-    /// (BLG-0097). An unsigned receipt, a receipt whose signer is not the
+    /// An unsigned receipt, a receipt whose signer is not the
     /// subject, and a rewritten receipt all answer here - before any
     /// semantic check trusts the values the signature covers.
     ///
@@ -489,6 +501,9 @@ pub fn build_presentation(
     epoch: u64,
 ) -> Result<(String, PresentationReceipt), FillError> {
     let filled = fill_template(template, disclosures)?;
+    if disclosures.is_empty() {
+        return Err(empty_receipt_error());
+    }
     let mut entries = Vec::with_capacity(disclosures.len());
     for disclosure in disclosures {
         let credential = registry
@@ -564,7 +579,7 @@ pub fn build_presentation(
             document_digest,
             epoch,
             entries,
-            // BLG-0097: the subject signs the digest before presenting; the
+            // The subject signs the digest before presenting; the
             // fill itself holds no key and must not pretend to one.
             subject_public_key: Vec::new(),
             signature: Vec::new(),
@@ -586,6 +601,17 @@ pub fn credential_proof(
 /// The most entries `check_receipt` will verify in one receipt.
 pub const MAX_RECEIPT_ENTRIES: usize = 256;
 
+/// Reuse the existing `MissingSlot` error shape to reject a receipt with no
+/// credential disclosures without adding a public `FillError` variant (the
+/// enum is exhaustively matchable by downstream callers). An empty slot name
+/// is unconstructible through the template parser and is reserved for this
+/// receipt-level refusal.
+fn empty_receipt_error() -> FillError {
+    FillError::MissingSlot {
+        slot: String::new(),
+    }
+}
+
 /// Re-verify a receipt the way the receiving side must: bound to this
 /// requester, bound to this document, and - through the registry - backed by
 /// credentials that are still valid at the receipt's epoch. A credential
@@ -594,20 +620,25 @@ pub const MAX_RECEIPT_ENTRIES: usize = 256;
 ///
 /// # Errors
 ///
-/// [`FillError::WrongRequester`], [`FillError::WrongDocument`], or the first
-/// entry whose credential no longer stands.
+/// [`FillError::MissingSlot`] when the receipt opens no credential fields,
+/// [`FillError::TooManyEntries`], [`FillError::WrongRequester`],
+/// [`FillError::WrongDocument`], or the first entry whose credential no longer
+/// stands.
 pub fn check_receipt(
     registry: &IdentityRegistry,
     receipt: &PresentationReceipt,
     requester: &Address,
     document: &str,
 ) -> Result<(), FillError> {
+    if receipt.entries.is_empty() {
+        return Err(empty_receipt_error());
+    }
     if receipt.entries.len() > MAX_RECEIPT_ENTRIES {
         return Err(FillError::TooManyEntries {
             max: MAX_RECEIPT_ENTRIES,
         });
     }
-    // BLG-0097 (P04-F15): the subject's signature first. Every value read
+    // The subject's signature first. Every value read
     // below - requester, document digest, epoch - is inside the signed
     // digest; a receipt whose signature does not hold gets to assert
     // nothing.
@@ -621,7 +652,19 @@ pub fn check_receipt(
     if document_digest_of(document) != receipt.document_digest {
         return Err(FillError::WrongDocument);
     }
+    if receipt.entries.is_empty() {
+        return Err(FillError::CredentialNotValid {
+            slot: String::new(),
+            reason: "receipt discloses no credential fields".to_string(),
+        });
+    }
+    let mut seen_slots = std::collections::BTreeSet::new();
     for entry in &receipt.entries {
+        if !seen_slots.insert(entry.slot.as_str()) {
+            return Err(FillError::DuplicateSlot {
+                slot: entry.slot.clone(),
+            });
+        }
         let credential = registry.credential(&entry.credential_id).ok_or_else(|| {
             FillError::CredentialNotValid {
                 slot: entry.slot.clone(),
@@ -697,7 +740,7 @@ mod tests {
         assert!(matches!(template_slots("{{ }}"), Err(FillError::EmptySlot)));
     }
 
-    /// BLG-0098: a receipt with an unbounded entry list is refused before
+    /// A receipt with an unbounded entry list is refused before
     /// any entry is hashed.
     #[test]
     fn receipt_with_too_many_entries_is_refused() {
@@ -726,6 +769,53 @@ mod tests {
                 max: MAX_RECEIPT_ENTRIES
             })
         );
+    }
+
+    #[test]
+    fn a_signed_empty_receipt_is_not_a_credential_presentation() {
+        let subject_key = crate::crypto::primitives::KeyPair::from_seed(&[31; 32])
+            .expect("deterministic subject keypair");
+        let subject = Address::from(subject_key.public_key_bytes());
+        let requester = Address([7u8; 32]);
+        let document = "No identity fields";
+        let mut receipt = PresentationReceipt {
+            requester,
+            subject,
+            document_digest: document_digest_of(document),
+            epoch: 5,
+            entries: Vec::new(),
+            subject_public_key: Vec::new(),
+            signature: Vec::new(),
+        };
+        receipt.sign(&subject_key);
+        receipt
+            .verify_binding()
+            .expect("the empty receipt has a valid subject signature");
+
+        let check_error = check_receipt(&IdentityRegistry::new(), &receipt, &requester, document)
+            .expect_err("an empty signed receipt must not count as credential evidence");
+        assert!(matches!(
+            &check_error,
+            FillError::MissingSlot { slot } if slot.is_empty()
+        ));
+        assert_eq!(
+            check_error.to_string(),
+            "presentation receipt opens no credential fields"
+        );
+
+        let build_error = build_presentation(
+            &IdentityRegistry::new(),
+            &requester,
+            &subject,
+            document,
+            &[],
+            5,
+        )
+        .expect_err("the builder must not create a receipt the verifier refuses");
+        assert!(matches!(
+            &build_error,
+            FillError::MissingSlot { slot } if slot.is_empty()
+        ));
     }
 
     #[test]
@@ -761,7 +851,7 @@ mod tests {
             IdentityRecord, MethodKind, VerificationMethod,
         };
         use crate::registry::IdentityRegistry;
-        // BLG-0097 (P04-F15): the subject is an account-key holder - the
+        // The subject is an account-key holder - the
         // presentation receipt must be signable and is verified as such.
         let subject_key = crate::crypto::primitives::KeyPair::generate().unwrap();
         let subject = Address::from(subject_key.public_key_bytes());
@@ -847,7 +937,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(filled, "Customer: Elif Ayaz.");
-        // BLG-0097: an unsigned receipt is refused first; the signed one
+        // An unsigned receipt is refused first; the signed one
         // passes, and the signature covers requester, document and epoch.
         assert_eq!(
             check_receipt(&registry, &receipt, &requester, &filled),
@@ -1015,6 +1105,29 @@ mod tests {
         assert!(matches!(
             fill_template("{{name}}", &[d]),
             Err(FillError::ValueCarriesBraces { .. })
+        ));
+    }
+
+    #[test]
+    fn check_receipt_refuses_empty_entries() {
+        let registry = IdentityRegistry::new();
+        let key = crate::crypto::primitives::KeyPair::generate().unwrap();
+        let subject = Address::from(key.public_key_bytes());
+        let requester = Address([7u8; 32]);
+        let doc = "Empty presentation";
+        let mut receipt = PresentationReceipt {
+            requester,
+            subject,
+            document_digest: document_digest_of(doc),
+            epoch: 10,
+            entries: Vec::new(),
+            subject_public_key: Vec::new(),
+            signature: Vec::new(),
+        };
+        receipt.sign(&key);
+        assert!(matches!(
+            check_receipt(&registry, &receipt, &requester, doc),
+            Err(FillError::MissingSlot { ref slot }) if slot.is_empty()
         ));
     }
 }

@@ -5,6 +5,11 @@ global:
   scrape_timeout: 10s
   evaluation_interval: 30s
 
+# Alert rules. Mounted next to this file by
+# ops/docker-compose.yml.
+rule_files:
+  - /etc/prometheus/alerts.yml
+
 scrape_configs:
   - job_name: budlum-node1
     static_configs:
@@ -32,4 +37,26 @@ scrape_configs:
       - targets: ["node4:9090"]
         labels:
           node: "node4"
+          network: "devnet"
+  - job_name: budlum-node5
+    static_configs:
+      - targets: ["node5:9090"]
+        labels:
+          node: "node5"
+          network: "devnet"
+
+  # node_exporter on this compose host. The disk rule reads
+  # reads `node_filesystem_avail_bytes`, and until this job existed that rule
+  # could not fire: the series was never scraped, so `BudlumDiskFillingUp` sat
+  # green through a full disk.
+  #
+  # The exporter is not part of the node image on purpose: it needs host
+  # namespaces and a read-only mount of `/`, which a container running as the
+  # node has no business holding. Install it on the host; `host.docker.internal`
+  # is Docker's name for the host, and the label below pins the target to it.
+  - job_name: node
+    static_configs:
+      - targets: ["host.docker.internal:9100"]
+        labels:
+          node: "node1"
           network: "devnet"

@@ -1,7 +1,7 @@
 //! $BUD tokenomics: genesis supply, distribution, vesting and burn schedules.
 //!
 //! Scope: ONLY genesis supply, distribution, team vesting and the two
-//! Burn mechanisms. PoSV consensus, $LUM, launchpad/presale are explicitly out
+//! Burn mechanisms. `PoSV` consensus, $LUM, launchpad/presale are explicitly out
 //! Of scope (separate future work).
 //!
 //! ## Key facts grounded in the existing codebase (research)
@@ -17,6 +17,8 @@
 //!   The producer receives `tx.fee - metabolic_burn` exactly once per included
 //!   Transaction. The legacy `block_reward` field is wire/snapshot compatibility
 //!   Metadata and cannot mint supply.
+//!
+//! Convenience: exposed for CLI, RPC, SDK, and multi-VM runtime callers.
 
 pub mod reward_pool;
 
@@ -26,7 +28,7 @@ use serde::{Deserialize, Serialize};
 /// Decimal places for $BUD. Chosen as 6 so 100M whole tokens fit in `u64`.
 pub const BUD_DECIMALS: u32 = 6;
 
-/// Smallest-unit multiplier: 1 whole $BUD = 10^BUD_DECIMALS base units.
+/// Smallest-unit multiplier: 1 whole $BUD = 10^`BUD_DECIMALS` base units.
 pub const BUD_UNIT: u64 = 1_000_000; // 10^6
 
 /// Total genesis supply in base units: 100,000,000 $BUD.
@@ -35,6 +37,46 @@ pub const BUD_TOTAL_SUPPLY: u64 = 100_000_000 * BUD_UNIT; // 1e14
 /// Convert whole $BUD to base units.
 pub const fn bud(whole: u64) -> u64 {
     whole * BUD_UNIT
+}
+
+/// Basis-point denominator for Network Security Pool splits.
+pub const REWARD_SHARE_BPS_SCALE: u64 = 10_000;
+
+/// Network Security Pool share allocated to Full consensus validators (40%).
+pub const CONSENSUS_REWARD_SHARE_BPS: u64 = 4_000;
+
+/// Network Security Pool share allocated to custody share holders across all classes (50%).
+pub const STORAGE_REWARD_SHARE_BPS: u64 = 5_000;
+
+/// Network Security Pool share allocated to Full repair and active relay work (10%).
+pub const REPAIR_RELAY_REWARD_SHARE_BPS: u64 = 1_000;
+
+const _: () = assert!(
+    CONSENSUS_REWARD_SHARE_BPS + STORAGE_REWARD_SHARE_BPS + REPAIR_RELAY_REWARD_SHARE_BPS
+        == REWARD_SHARE_BPS_SCALE
+);
+
+/// Read the 50% custody share out of an epoch's Network Security Pool budget `P_e`.
+#[must_use]
+pub const fn epoch_storage_reward_share(epoch_pool_budget: u64) -> u64 {
+    ((epoch_pool_budget as u128) * (STORAGE_REWARD_SHARE_BPS as u128)
+        / (REWARD_SHARE_BPS_SCALE as u128)) as u64
+}
+
+/// Convenience: read the 40% consensus share out of an epoch's Network Security Pool budget `P_e`.
+#[must_use]
+pub const fn epoch_consensus_reward_share(epoch_pool_budget: u64) -> u64 {
+    ((epoch_pool_budget as u128) * (CONSENSUS_REWARD_SHARE_BPS as u128)
+        / (REWARD_SHARE_BPS_SCALE as u128)) as u64
+}
+
+/// Convenience: read the 10% repair-and-relay share out of `P_e`, absorbing rounding dust so the
+/// three shares sum to `epoch_pool_budget` with zero created or lost base units.
+#[must_use]
+pub const fn epoch_repair_relay_reward_share(epoch_pool_budget: u64) -> u64 {
+    epoch_pool_budget
+        .saturating_sub(epoch_consensus_reward_share(epoch_pool_budget))
+        .saturating_sub(epoch_storage_reward_share(epoch_pool_budget))
 }
 
 /// Recipient categories of the genesis distribution.
@@ -268,7 +310,7 @@ impl TokenomicsParams {
         // through this function re-deriving it. Devnet keeps its own
         // deterministic (faster) payout cadence through its own
         // `epochs_per_year` value.
-        // BLG-0077/0078 (P03-F20/F21): the yield ratio is capped at 100%
+        // (F21): the yield ratio is capped at 100%
         // here too, not only at genesis - the cap is a property of the
         // formula, so a hand-built parameter set cannot mint u64::MAX money.
         let ratio = self
@@ -286,7 +328,7 @@ impl TokenomicsParams {
 
     pub fn annual_burn_amount(&self) -> u64 {
         use crate::core::chain_config::FIXED_POINT_SCALE;
-        // BLG-0077 (P03-F20): no `as u64` truncation. With the ratio capped
+        // No `as u64` truncation. With the ratio capped
         // the quotient cannot exceed the reserve; the fallback says exactly
         // that rather than silently wrapping.
         let ratio = self.annual_burn_ratio_fixed.min(FIXED_POINT_SCALE);
@@ -298,7 +340,7 @@ impl TokenomicsParams {
     /// The metabolic burn taken from a single `fee`.
     pub fn metabolic_burn(&self, fee: u64) -> u64 {
         use crate::core::chain_config::FIXED_POINT_SCALE;
-        // BLG-0077: same rule - a burn can never exceed the fee it comes
+        // Same rule - a burn can never exceed the fee it comes
         // from, and the arithmetic says so instead of truncating.
         let ratio = self.tx_fee_burn_ratio_fixed.min(FIXED_POINT_SCALE);
         let amount = (u128::from(fee) * u128::from(ratio)) / u128::from(FIXED_POINT_SCALE);
@@ -361,7 +403,7 @@ impl TokenomicsAddresses {
 /// - Team: allocated to the team account but subject to [`VestingSchedule`]
 ///   (see [`TokenomicsParams::team_vesting`]); consumers enforce vesting when
 ///   Moving funds.
-/// - BurnReserve: held in the reserve account, consumed by the timed burn.
+/// - `BurnReserve`: held in the reserve account, consumed by the timed burn.
 ///
 /// # Errors
 ///

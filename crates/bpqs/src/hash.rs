@@ -1,20 +1,22 @@
 //! Hash backend seam. The whole construction is written against `BpqsHash`;
-//! parameter rows never touch a concrete hash directly. Milestone M2 landed
-//! the swap this seam was cut for: the canonical backend is now
-//! [`super::poseidon2::Poseidon2GoldilocksHash`] (Poseidon2 over Goldilocks,
-//! p3 parameters), with the two FIPS-202 members kept as the audit
-//! cross-checks the differential battery compares against.
+//! parameter rows never touch a concrete hash directly. The seam let the
+//! research line carry an algebraic backend next to the FIPS 202 members; the
+//! settled which one is canonical: a
+//! long-lived signature or commitment never rests on Poseidon2.
 //!
 //! ## Backends
 //!
-//! - Canonical: [`super::poseidon2::Poseidon2GoldilocksHash`] -
-//!   Poseidon2-Goldilocks-16 with the BPQS-POSEIDON2-SPONGE-v0 byte binding
-//!   (see the poseidon2 module header for the full binding proof sketch).
-//! - Cross-check 1: [`Sha3_256Hash`] - NIST FIPS 202 fixed-output member,
+//! - Canonical: [`super::shake256::Shake256Hash`] - the FIPS 202 XOF member
+//!   (domain suffix 0x1F, 32-byte read), implemented in-crate on the
+//!   `keccak` permutation because sha3 0.12 ships no SHAKE surface. Exposed as
+//!   [`super::CanonicalHash`].
+//! - Cross-check: [`Sha3_256Hash`] - NIST FIPS 202 fixed-output member,
 //!   present and vetted in-tree since M1.
-//! - Cross-check 2: [`super::shake256::Shake256Hash`] - the FIPS 202
-//!   XOF member (domain suffix 0x1F, 32-byte read), implemented in-crate on
-//!   the `keccak` permutation because sha3 0.12 ships no SHAKE surface.
+//! - Research only: [`super::poseidon2::Poseidon2GoldilocksHash`] -
+//!   Poseidon2-Goldilocks-16 with the BPQS-POSEIDON2-SPONGE-v0 byte binding
+//!   (see the poseidon2 module header for the full binding proof sketch). It
+//!   exists for in-VM verification research and is not used for long-lived
+//!   keys or commitments.
 //!
 //! Research-line usage note: parameter rows with N < 32 truncate the 32-byte
 //! digest under their own domain separation; the truncation argument remains
@@ -49,12 +51,18 @@ pub trait BpqsHash {
 /// the packaging contract; backends differ only in what they do to these
 /// bytes afterwards.
 pub(crate) fn frame_bytes(domain: &[u8], parts: &[&[u8]]) -> Vec<u8> {
+    let Ok(dom_len) = u16::try_from(domain.len()) else {
+        panic!("BPQS domain tag exceeds u16::MAX");
+    };
     let mut frame =
         Vec::with_capacity(2 + domain.len() + parts.iter().map(|p| 4 + p.len()).sum::<usize>());
-    frame.extend_from_slice(&(domain.len() as u16).to_le_bytes());
+    frame.extend_from_slice(&dom_len.to_le_bytes());
     frame.extend_from_slice(domain);
     for part in parts {
-        frame.extend_from_slice(&(part.len() as u32).to_le_bytes());
+        let Ok(part_len) = u32::try_from(part.len()) else {
+            panic!("BPQS hash part exceeds u32::MAX");
+        };
+        frame.extend_from_slice(&part_len.to_le_bytes());
         frame.extend_from_slice(part);
     }
     frame
@@ -123,5 +131,12 @@ mod hash_tests {
         h.update([0u8; 6]);
         let expected: [u8; 32] = h.finalize().into();
         assert_eq!(out, expected);
+    }
+
+    #[test]
+    #[should_panic(expected = "BPQS domain tag exceeds u16::MAX")]
+    fn frame_bytes_rejects_domain_length_u16_truncation() {
+        let overlong = alloc::vec![b'A'; usize::from(u16::MAX) + 1];
+        let _ = Sha3_256Hash::digest32(&overlong, &[b"x"]);
     }
 }

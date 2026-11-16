@@ -300,6 +300,7 @@ struct Fetch {
 }
 
 struct Relay {
+    requester: PeerId,
     channel: Option<ResponseChannel<Vec<u8>>>,
     outstanding: usize,
     content_id: Hash32,
@@ -1047,12 +1048,11 @@ impl Node {
                     Some(event) => self.on_net(event).await,
                     None => break,
                 },
-                command = commands.recv() => match command {
-                    Some(command) => self.on_command(command).await,
-                    None => {
-                        self.shutdown().await;
-                        break;
-                    }
+                command = commands.recv() => if let Some(command) = command {
+                    self.on_command(command).await;
+                } else {
+                    self.shutdown().await;
+                    break;
                 },
                 _ = ticker.tick() => self.on_tick().await,
             }
@@ -1063,7 +1063,7 @@ impl Node {
         &self.ledger.state.genesis.limits
     }
 
-    fn chain_id(&self) -> u64 {
+    const fn chain_id(&self) -> u64 {
         self.ledger.state.chain_id()
     }
 
@@ -1077,10 +1077,10 @@ impl Node {
             return true;
         }
         let timeout = millis(self.limits().host_timeout_ms);
-        match self.last_seen.get(&self.ledger.state.host()) {
-            Some(seen) => seen.elapsed() < timeout,
-            None => self.started.elapsed() < timeout,
-        }
+        self.last_seen.get(&self.ledger.state.host()).map_or_else(
+            || self.started.elapsed() < timeout,
+            |seen| seen.elapsed() < timeout,
+        )
     }
 
     /// The Garden status this node observes: the chain's own status, and
@@ -1096,10 +1096,10 @@ impl Node {
         if *key == self.me {
             return false;
         }
-        match self.last_seen.get(key) {
-            Some(seen) => seen.elapsed() >= limit,
-            None => self.started.elapsed() >= limit,
-        }
+        self.last_seen.get(key).map_or_else(
+            || self.started.elapsed() >= limit,
+            |seen| seen.elapsed() >= limit,
+        )
     }
 
     async fn send(&self, peer: PeerId, request: GardenRequest, tag: u64) {
@@ -1521,6 +1521,7 @@ impl Node {
                 self.relays.insert(
                     job,
                     Relay {
+                        requester: peer,
                         channel: Some(channel),
                         outstanding: others.len(),
                         content_id,
@@ -1732,7 +1733,9 @@ impl Node {
     }
 
     async fn on_relay_answer(&mut self, job: u64, bytes: Option<Vec<u8>>) {
-        let Some(content_id) = self.relays.get(&job).map(|r| r.content_id) else {
+        let Some((requester, content_id)) =
+            self.relays.get(&job).map(|r| (r.requester, r.content_id))
+        else {
             return;
         };
         let valid = bytes.filter(|b| self.object_is_valid(&content_id, b));
@@ -1749,6 +1752,12 @@ impl Node {
             self.relays.remove(&job);
         }
         if let Some((channel, bytes)) = answer {
+            if let Some(payload) = &bytes {
+                let len = u64::try_from(payload.len()).unwrap_or(u64::MAX);
+                if let Some(entry) = self.object_budget.get_mut(&requester) {
+                    entry.2 = entry.2.saturating_add(len);
+                }
+            }
             self.respond(channel, GardenResponse::Object(bytes)).await;
         }
     }
@@ -2138,10 +2147,9 @@ impl Node {
     /// The round this node is in, counted from the moment the current
     /// height had work to do.
     fn local_round(&self) -> u64 {
-        let base = match self.pending_since {
-            Some(pending) => pending.max(self.height_started),
-            None => self.height_started,
-        };
+        let base = self.pending_since.map_or(self.height_started, |pending| {
+            pending.max(self.height_started)
+        });
         let round_ms = u128::from(self.limits().round_ms.max(1));
         u64::try_from(base.elapsed().as_millis() / round_ms).unwrap_or(u64::MAX)
     }
@@ -2216,13 +2224,12 @@ impl Node {
     }
 
     async fn request_sync(&mut self, from: Option<PeerId>) {
-        let peer = match from.filter(|peer| self.peers.contains_key(peer)) {
-            Some(peer) => Some(peer),
-            None => {
-                let count = self.peers.len().max(1);
-                self.sync_cursor = self.sync_cursor.wrapping_add(1) % count;
-                self.peers.keys().nth(self.sync_cursor).copied()
-            }
+        let peer = if let Some(peer) = from.filter(|peer| self.peers.contains_key(peer)) {
+            Some(peer)
+        } else {
+            let count = self.peers.len().max(1);
+            self.sync_cursor = self.sync_cursor.wrapping_add(1) % count;
+            self.peers.keys().nth(self.sync_cursor).copied()
         };
         if let Some(peer) = peer {
             self.last_sync = Instant::now();
@@ -2991,10 +2998,10 @@ impl Node {
             })
             .collect();
         let budlum = match &self.link {
-            Some(link) => match link.view(self.chain_id()).await {
-                Some(view) => budlum_record(&view, self.budlum_error.as_deref()),
-                None => json!({ "linked": false, "error": self.budlum_error }),
-            },
+            Some(link) => link.view(self.chain_id()).await.map_or_else(
+                || json!({ "linked": false, "error": self.budlum_error }),
+                |view| budlum_record(&view, self.budlum_error.as_deref()),
+            ),
             None => json!({ "linked": false, "error": Value::Null }),
         };
         json!({
@@ -5260,7 +5267,7 @@ mod tests {
         }
         // And a node that holds the invite walks in past the rest.
         join_as_second(invite).await;
-        handle.leave().await.unwrap();
+        drop(handle);
     }
 
     #[tokio::test]

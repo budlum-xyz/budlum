@@ -3,7 +3,7 @@
 //! The constitution layer binds governance to user-sovereignty guardrails. DAO
 //! Proposals may tune bounded operational parameters, but they must not weaken
 //! Hard rules such as AI default-deny, no decrypt override, permissionless core
-//! Operation, or PoA island isolation.
+//! Operation, or `PoA` island isolation.
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -125,6 +125,11 @@ impl ConstitutionParameter {
         }
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn validate_update(&self) -> Result<(), String> {
         self.validate_value()?;
         if self.key.is_hard_guardrail() {
@@ -166,6 +171,11 @@ pub struct ConstitutionRegistry {
 }
 
 impl ConstitutionRegistry {
+    #[must_use]
+    pub fn parameter_count(&self) -> usize {
+        self.parameters.len()
+    }
+
     pub fn new() -> Self {
         let mut parameters = BTreeMap::new();
         for key in [
@@ -199,6 +209,11 @@ impl ConstitutionRegistry {
         Self { parameters }
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn set_parameter(&mut self, parameter: ConstitutionParameter) -> Result<(), String> {
         parameter.validate_update()?;
         self.parameters.insert(parameter.key, parameter);
@@ -223,6 +238,11 @@ impl ConstitutionRegistry {
         }
     }
 
+    /// Performs the requested operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
     pub fn assert_hard_guardrails(&self) -> Result<(), String> {
         for key in [
             ConstitutionParameterKey::AiReadRequiresPollenGrant,
@@ -297,9 +317,9 @@ mod tests {
         );
     }
 
-    /// P20-F08: a guardrail slot must hold the parameter of its own key.
+    /// A guardrail slot must hold the parameter of its own key.
     #[test]
-    fn p20_f08_guardrail_slot_with_foreign_parameter_is_rejected() {
+    fn guardrail_slot_with_foreign_parameter_is_rejected() {
         let mut registry = ConstitutionRegistry::new();
         registry.parameters.insert(
             ConstitutionParameterKey::PoaIslandIsolation,

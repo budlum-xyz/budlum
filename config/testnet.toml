@@ -20,6 +20,19 @@ identity_file = "./secrets/testnet-node-id.key"
 # to record. mDNS is devnet-only, and a node with no peer source refuses to
 # start (`has_peer_source`): record the peers of your mesh here or pass
 # --bootstrap.
+#
+# Formats. `bud node identity --identity-file
+# <file> --host <ip or name> --port 5001 --seed-domain seeds.<TESTNET_DOMAIN>`
+# prints both for a node:
+#   bootnodes = ["/ip4/203.0.113.7/tcp/5001/p2p/12D3KooW...",
+#                "/dns4/seed1.<TESTNET_DOMAIN>/tcp/5001/p2p/12D3KooW..."]
+#   dns_seeds = ["seeds.<TESTNET_DOMAIN>"]
+# A DNS seed name is resolved through its address records (one A or AAAA
+# record per seed node) and every address is dialled at port 5001:
+#   seeds.<TESTNET_DOMAIN> A 203.0.113.7
+#   seeds.<TESTNET_DOMAIN> A 198.51.100.4
+# The node does not read libp2p `_dnsaddr` TXT records. The real
+# addresses come from the operators (DECISIONS.md, section 10.3).
 bootnodes = []
 dns_seeds = []
 max_peers = 75
@@ -33,8 +46,11 @@ public_listener = "127.0.0.1:18545"
 operator_listener = "127.0.0.1:18546"
 trusted_proxies = ["127.0.0.1"]
 enabled = true
-# Same rule as mainnet: the key is required whatever the bind address.
-auth_required = true
+# Public reads and signed-transaction submission are keyless on testnet;
+# operator/admin methods remain refused on the public listener and require
+# BUDLUM_RPC_API_KEY on the loopback operator listener.
+auth_required = false
+operator_auth_required = true
 api_key_env = "BUDLUM_RPC_API_KEY"
 allowed_ips = []
 rate_limit_per_minute = 600
@@ -48,7 +64,32 @@ listener = "127.0.0.1:19090"
 key_file = "./secrets/testnet-validator.key"
 backend = "softhsm"
 
+# the signer the first run needs. src/cli/commands.rs
+# canonicalises "softhsm" to "pkcs11", and src/main.rs requires the module
+# path and the PIN environment name on that path. ops/softhsm2.conf supplies
+# the token directory through SOFTHSM2_CONF; ops/TESTNET_FIRST_RUN.md
+# initialises the token. The PIN value is never stored in this file.
+[validator.signer]
+backend = "softhsm"
+
+[validator.signer.pkcs11]
+module_path = "/usr/lib/softhsm/libsofthsm2.so"
+slot_id = 0
+token_pin_env = "BUDLUM_HSM_PIN"
+
 [features]
-governance = false
-zkvm_contracts = false
 pruning = false
+
+[compat.ethereum]
+enabled = true
+listener = "127.0.0.1:18547"
+operator_listener = "127.0.0.1:18557"
+max_filters = 1024
+max_filters_per_peer = 32
+filter_ttl_secs = 300
+max_subscriptions = 512
+
+[compat.cosmos]
+enabled = true
+listener = "127.0.0.1:18550"
+rest_listener = "127.0.0.1:18551"

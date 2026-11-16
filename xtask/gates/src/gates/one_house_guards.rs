@@ -1,15 +1,15 @@
 //! One house rule: siblings that do the same job must run the same checks.
 //!
-//! The audit report's dominant finding class (7 of 12 findings) was not a
-//! wrong check but a **missing sibling**: the mint path validated the fee
-//! ceiling while the unlock path narrowed it with a cast (F-8), two of the
-//! three Merkle implementations promoted an odd tail while the third
-//! duplicated it (F-6), one fork-choice family resolved equal-weight ties
-//! while its siblings refused the reorg in both directions (F-2). Every
-//! one of those is a set of functions that do the same job, where one of
-//! them stopped carrying a guard its siblings still carry.
+//! The dominant class of sibling divergence is not a wrong check in isolation
+//! but a **missing sibling**: the mint path validated the fee ceiling while
+//! the unlock path narrowed it with a cast, two of the three Merkle
+//! implementations promoted an odd tail while the third duplicated it, and one
+//! fork-choice family resolved equal-weight ties while its siblings refused
+//! the reorg in both directions. Every one of those is a set of functions that
+//! do the same job, where one of them stopped carrying a guard its siblings
+//! still carry.
 //!
-//! This gate makes that class a config entry instead of an audit finding.
+//! This gate makes that shared invariant a config entry.
 //! A *family* is a set of code slices that do the same job (a function
 //! body, a match arm - any brace-balanced slice rooted at a needle). A
 //! *guard* is a mark every member of the family must carry. The gate
@@ -58,13 +58,13 @@ const FAMILIES: &[Family] = &[
                 start: "MessageKind::BridgeLock => {",
             },
             Sibling {
-                name: "blockchain-verified-mint",
-                file: "src/chain/blockchain.rs",
-                start: "pub fn mint_bridge_transfer_from_verified_event(",
+                name: "bridge-door-verified-mint",
+                file: "src/cross_domain/bridge_tx.rs",
+                start: "pub fn mint_from_verified_event(",
             },
             Sibling {
-                name: "blockchain-relay-mint",
-                file: "src/chain/blockchain.rs",
+                name: "bridge-door-relay-mint",
+                file: "src/cross_domain/bridge_tx.rs",
                 start: "MessageKind::BridgeLock => {",
             },
         ],
@@ -98,13 +98,13 @@ const FAMILIES: &[Family] = &[
                 start: "MessageKind::BridgeBurn => {",
             },
             Sibling {
-                name: "blockchain-verified-unlock",
-                file: "src/chain/blockchain.rs",
-                start: "pub fn unlock_bridge_transfer_from_verified_event(",
+                name: "bridge-door-verified-unlock",
+                file: "src/cross_domain/bridge_tx.rs",
+                start: "pub fn unlock_from_verified_event(",
             },
             Sibling {
-                name: "blockchain-relay-unlock",
-                file: "src/chain/blockchain.rs",
+                name: "bridge-door-relay-unlock",
+                file: "src/cross_domain/bridge_tx.rs",
                 start: "MessageKind::BridgeBurn => {",
             },
         ],
@@ -359,7 +359,7 @@ pub fn self_test() -> Result<String, String> {
     let tmp = crate::gates::rust_literals::exclusive_scratch_dir("budlum-gates-ohg")?;
     let files = [
         "src/execution/executor.rs",
-        "src/chain/blockchain.rs",
+        "src/cross_domain/bridge_tx.rs",
         "src/consensus/pow.rs",
         "src/consensus/poa.rs",
         "src/consensus/pos.rs",
@@ -379,7 +379,7 @@ pub fn self_test() -> Result<String, String> {
     }
 
     // Break 1: the mint family loses its supply ceiling in one sibling.
-    let rel = "src/chain/blockchain.rs";
+    let rel = "src/cross_domain/bridge_tx.rs";
     let text = std::fs::read_to_string(tmp.join(rel)).map_err(|e| e.to_string())?;
     std::fs::write(
         tmp.join(rel),

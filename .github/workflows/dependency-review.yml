@@ -10,7 +10,7 @@ name: Dependency Review (PR security gate)
 # Enable Dependency graph in repository settings for this check.
 on:
   pull_request:
-    branches: [main, fix/architecture-tip-adlari, consensus-of-consensuses, testnet-quantum, testnet]
+    branches: [main, consensus-of-consensuses, testnet-quantum, testnet]
 
 # Salt-okur.
 concurrency:
@@ -25,6 +25,7 @@ jobs:
   dependency-review:
     name: Dependency Review (GH Advisory, PR diff)
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
