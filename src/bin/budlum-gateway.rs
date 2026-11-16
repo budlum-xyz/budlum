@@ -32,14 +32,16 @@
 //! a terminator (the systemd unit in `ops/gateway`) puts TLS in front, so the
 //! binary never needs a private key.
 //!
-//! # What this binary does not do yet
+//! # Content sources
 //!
-//! It does not fetch content. `ContentSource` is implemented for a local
-//! directory so an operator can serve a rehearsal site, and the B.U.D. 3.0
-//! backed implementation is the next piece: it needs a node to answer
-//! `bud_storage*` and a paid-view receipt for the cache fill. Until then the
-//! content path is wired to the directory source and the binary refuses to
-//! start without `content_dir`.
+//! The process supports two mutually exclusive content sources:
+//! - `[bud3]`: production B.U.D. 3.0 RPC source (`bud_storageGetObject`
+//!   metadata agreement across all configured RPC endpoints plus
+//!   `bud_storageGetContent` paid fallback decode verified against the proved
+//!   public `ContentId` and cached under `cache_dir`).
+//! - `content_dir`: local directory source for offline rehearsals.
+//!
+//! If neither is configured (or both are set), the process refuses to start.
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -94,6 +96,9 @@ struct GatewayConfig {
     /// A directory of objects for the rehearsal content source.
     #[serde(default)]
     content_dir: Option<PathBuf>,
+    /// Production B.U.D. 3.0 RPC content source configuration.
+    #[serde(default)]
+    bud3: Option<Bud3SourceConfig>,
     /// How long a cached name resolution is trusted, in seconds.
     #[serde(default = "default_resolve_ttl")]
     resolve_ttl_secs: u64,
@@ -123,6 +128,17 @@ struct GatewayConfig {
     /// only reads it.
     #[serde(default)]
     checkpoints_file: Option<PathBuf>,
+}
+
+/// Configuration for the production B.U.D. 3.0 RPC-backed content source.
+#[derive(Debug, Clone, Deserialize)]
+struct Bud3SourceConfig {
+    /// Payer account (32-byte hex) that funded the gateway's fallback-view receipts.
+    payer: String,
+    /// Paid fallback-view receipt identifier (32-byte hex, `StorageTxV3::PayFallbackView`).
+    receipt_id: String,
+    /// Paid fee in BUD atoms (must be at least `MIN_PAID_VIEW_FEE_ATOMS`).
+    fee_paid_atoms: u64,
 }
 
 /// One verified header, as the configuration and the checkpoint file carry it.
@@ -618,6 +634,248 @@ impl ContentSource for DirectorySource {
     }
 }
 
+/// Production B.U.D. 3.0 content source backed by `bud_storageGetObject`
+/// consensus agreement and `bud_storageGetContent` paid public fallback decode.
+///
+/// Sealed objects are refused unconditionally before any network call. Every
+/// fetched body (and every cached body read back from `cache_dir`) is verified
+/// against the proved public `ContentId` (both SHA-3 digest and exact length).
+struct Bud3RpcSource {
+    endpoints: Vec<String>,
+    client: reqwest::Client,
+    payer_hex: String,
+    receipt_id_hex: String,
+    fee_paid_atoms: u64,
+    cache_dir: PathBuf,
+}
+
+impl Bud3RpcSource {
+    fn new(
+        endpoints: Vec<String>,
+        cfg: &Bud3SourceConfig,
+        cache_dir: PathBuf,
+    ) -> Result<Self, String> {
+        if endpoints.is_empty() {
+            return Err("bud3 content source requires at least one rpc endpoint".into());
+        }
+        let payer = hex32(&cfg.payer).map_err(|e| format!("bud3.payer: {e}"))?;
+        let receipt_id = hex32(&cfg.receipt_id).map_err(|e| format!("bud3.receipt_id: {e}"))?;
+        let min_fee = budlum_core::storage::bud3::view::MIN_PAID_VIEW_FEE_ATOMS;
+        if cfg.fee_paid_atoms < min_fee {
+            return Err(format!(
+                "bud3.fee_paid_atoms ({}) is below MIN_PAID_VIEW_FEE_ATOMS ({min_fee})",
+                cfg.fee_paid_atoms
+            ));
+        }
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(10))
+            .build()
+            .map_err(|e| format!("bud3 rpc client: {e}"))?;
+        Ok(Self {
+            endpoints,
+            client,
+            payer_hex: hex::encode(payer),
+            receipt_id_hex: hex::encode(receipt_id),
+            fee_paid_atoms: cfg.fee_paid_atoms,
+            cache_dir,
+        })
+    }
+
+    fn call_rpc(
+        &self,
+        url: &str,
+        method: &str,
+        params: &serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        let body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": method,
+            "params": params,
+        });
+        let request = async {
+            self.client
+                .post(url)
+                .json(&body)
+                .send()
+                .await?
+                .error_for_status()?
+                .json::<serde_json::Value>()
+                .await
+        };
+        let json = if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            tokio::task::block_in_place(|| handle.block_on(request))
+        } else {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|e| format!("bud3 rpc runtime: {e}"))?;
+            rt.block_on(request)
+        }
+        .map_err(|e| format!("{url}: {e}"))?;
+        if let Some(error) = json.get("error") {
+            return Err(format!("{url}: rpc error {error}"));
+        }
+        json.get("result")
+            .cloned()
+            .ok_or_else(|| format!("{url}: rpc answer has no result"))
+    }
+
+    fn verify_object_record(
+        &self,
+        content: &budlum_core::storage::bud3::content_ref::ContentRef,
+        commitment_hex: &str,
+    ) -> Result<(), String> {
+        let expected_digest = hex::encode(content.content_id.digest);
+        for url in &self.endpoints {
+            let result = self.call_rpc(
+                url,
+                "bud_storageGetObject",
+                &serde_json::json!([commitment_hex]),
+            )?;
+            let status = result
+                .get("status")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("");
+            if status != "live" {
+                return Err(format!(
+                    "{url}: object {commitment_hex} is not live (status={status})"
+                ));
+            }
+            if result
+                .get("sealed")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(true)
+            {
+                return Err(format!(
+                    "{url}: object {commitment_hex} is sealed and refused by public gateway"
+                ));
+            }
+            let digest = result
+                .get("content_digest")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("");
+            let len = result
+                .get("content_len")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(u64::MAX);
+            if !digest.eq_ignore_ascii_case(&expected_digest) || len != content.content_id.len {
+                return Err(format!(
+                    "{url}: object metadata disagrees with proved ContentId"
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn cache_path(&self, digest: &[u8; 32]) -> PathBuf {
+        self.cache_dir.join(hex::encode(digest))
+    }
+
+    fn read_verified_cache(
+        &self,
+        content: &budlum_core::storage::bud3::content_ref::ContentRef,
+    ) -> Option<Vec<u8>> {
+        let bytes = std::fs::read(self.cache_path(&content.content_id.digest)).ok()?;
+        if bytes.len() <= budlum_core::storage::content_gateway::MAX_GATEWAY_CONTENT_BYTES
+            && content.content_id.matches_public(&bytes)
+        {
+            Some(bytes)
+        } else {
+            None
+        }
+    }
+
+    fn write_verified_cache(&self, digest: &[u8; 32], bytes: &[u8]) {
+        if std::fs::create_dir_all(&self.cache_dir).is_err() {
+            return;
+        }
+        let target = self.cache_path(digest);
+        let tmp = self.cache_dir.join(format!(
+            "{}.{}.tmp",
+            hex::encode(digest),
+            std::process::id()
+        ));
+        if std::fs::write(&tmp, bytes).is_ok() {
+            let _ = std::fs::rename(&tmp, &target);
+        }
+    }
+}
+
+impl ContentSource for Bud3RpcSource {
+    fn fetch(
+        &self,
+        content: &budlum_core::storage::bud3::content_ref::ContentRef,
+    ) -> Result<Vec<u8>, String> {
+        if content.content_id.kind != budlum_core::storage::bud3::content_id::ContentIdKind::Public
+        {
+            return Err("sealed B.U.D. 3.0 objects have no public web gateway route".into());
+        }
+        let max_bytes = budlum_core::storage::content_gateway::MAX_GATEWAY_CONTENT_BYTES;
+        if content.content_id.len > max_bytes as u64 {
+            return Err(format!(
+                "content length {} exceeds gateway ceiling {max_bytes}",
+                content.content_id.len
+            ));
+        }
+        if let Some(cached) = self.read_verified_cache(content) {
+            return Ok(cached);
+        }
+        let commitment_hex = hex::encode(content.object_commitment);
+        self.verify_object_record(content, &commitment_hex)?;
+
+        let params = serde_json::json!({
+            "payer": self.payer_hex,
+            "object": commitment_hex,
+            "receipt_id": self.receipt_id_hex,
+            "fee_paid_atoms": self.fee_paid_atoms,
+        });
+        let mut last_err = String::from("no rpc endpoint returned B.U.D. 3.0 content");
+        for url in &self.endpoints {
+            match self.call_rpc(url, "bud_storageGetContent", &params) {
+                Ok(result) => {
+                    let Some(raw_hex) = result
+                        .get("content_hex")
+                        .and_then(serde_json::Value::as_str)
+                    else {
+                        last_err = format!("{url}: bud_storageGetContent missing content_hex");
+                        continue;
+                    };
+                    let clean_hex = raw_hex.strip_prefix("0x").unwrap_or(raw_hex);
+                    if clean_hex.len() > max_bytes.saturating_mul(2) {
+                        last_err = format!("{url}: bud_storageGetContent exceeds gateway ceiling");
+                        continue;
+                    }
+                    let bytes = match hex::decode(clean_hex) {
+                        Ok(b) => b,
+                        Err(e) => {
+                            last_err = format!("{url}: invalid content_hex: {e}");
+                            continue;
+                        }
+                    };
+                    if !content.content_id.matches_public(&bytes) {
+                        return Err(format!(
+                            "{url}: content bytes do not match the proved public ContentId"
+                        ));
+                    }
+                    self.write_verified_cache(&content.content_id.digest, &bytes);
+                    return Ok(bytes);
+                }
+                Err(e) => last_err = e,
+            }
+        }
+        Err(last_err)
+    }
+
+    fn fetch_manifest(
+        &self,
+        content: &budlum_core::storage::bud3::content_ref::ContentRef,
+    ) -> Result<SiteManifest, String> {
+        let bytes = self.fetch(content)?;
+        serde_json::from_slice(&bytes).map_err(|e| format!("manifest: {e}"))
+    }
+}
+
 type BoxBody = http_body_util::Full<Bytes>;
 
 fn plain(status: StatusCode, message: &str) -> Response<BoxBody> {
@@ -899,19 +1157,36 @@ fn build_state(config: GatewayConfig) -> Result<GatewayState, String> {
         }
         None => BlockList::default(),
     };
-    let Some(content_dir) = config.content_dir.clone() else {
-        return Err(
-            "config names no content_dir; the B.U.D. 3.0 content source is not wired yet, so the \
-             process refuses to start rather than answer every request with a 502"
-                .into(),
-        );
-    };
-    if !content_dir.is_dir() {
-        return Err(format!(
-            "content_dir {} is not a directory",
-            content_dir.display()
-        ));
-    }
+    let content: Arc<dyn ContentSource + Send + Sync> =
+        match (config.content_dir.clone(), config.bud3.clone()) {
+            (Some(_), Some(_)) => {
+                return Err(
+                "set either `content_dir` or `[bud3]`, not both: content source must be unambiguous"
+                    .into(),
+            );
+            }
+            (None, None) => {
+                return Err(
+                "config names neither `content_dir` nor `[bud3]`; configure a B.U.D. 3.0 source \
+                 or a rehearsal content_dir before starting"
+                    .into(),
+            );
+            }
+            (Some(content_dir), None) => {
+                if !content_dir.is_dir() {
+                    return Err(format!(
+                        "content_dir {} is not a directory",
+                        content_dir.display()
+                    ));
+                }
+                Arc::new(DirectorySource { root: content_dir })
+            }
+            (None, Some(bud3_cfg)) => Arc::new(Bud3RpcSource::new(
+                config.rpc.clone(),
+                &bud3_cfg,
+                config.cache_dir.clone(),
+            )?),
+        };
     let pinned = checkpoint_table(&config.checkpoints)?;
     let followed = config
         .checkpoints_file
@@ -931,7 +1206,7 @@ fn build_state(config: GatewayConfig) -> Result<GatewayState, String> {
         suffix,
         provers,
         roots: Arc::new(PinnedHeaderRoots { pinned, followed }),
-        content: Arc::new(DirectorySource { root: content_dir }),
+        content,
         blocklist,
         identity,
         limiter: std::sync::Mutex::new(RateLimiter::new(rate, 60)),
@@ -1202,6 +1477,7 @@ mod tests {
             rate_per_minute: 10,
             blocklist_file: None,
             content_dir: None,
+            bud3: None,
             resolve_ttl_secs: 10,
             allow_direct: true,
             trusted_proxies: Vec::new(),
@@ -1226,6 +1502,7 @@ mod tests {
             rate_per_minute: 10,
             blocklist_file: None,
             content_dir: Some(std::env::temp_dir()),
+            bud3: None,
             resolve_ttl_secs: 10,
             allow_direct: true,
             trusted_proxies: Vec::new(),
@@ -1249,6 +1526,7 @@ mod tests {
             rate_per_minute: 10,
             blocklist_file: None,
             content_dir: Some(std::env::temp_dir()),
+            bud3: None,
             resolve_ttl_secs: 10,
             allow_direct,
             trusted_proxies,
@@ -1413,5 +1691,173 @@ mod tests {
         assert_eq!(read(&counters.not_found), 1);
         assert_eq!(read(&counters.rate_limited), 1);
         assert_eq!(read(&counters.refused_upstream), 1);
+    }
+
+    #[test]
+    fn bud3_source_config_validates_fee_floor_and_rejects_dual_sources() {
+        let mut dual = serving_config(true, Vec::new());
+        dual.bud3 = Some(Bud3SourceConfig {
+            payer: "11".repeat(32),
+            receipt_id: "22".repeat(32),
+            fee_paid_atoms: budlum_core::storage::bud3::view::MIN_PAID_VIEW_FEE_ATOMS,
+        });
+        assert!(
+            build_state(dual).is_err(),
+            "configuring both content_dir and bud3 must be refused"
+        );
+
+        let mut underpaid = serving_config(true, Vec::new());
+        underpaid.content_dir = None;
+        underpaid.bud3 = Some(Bud3SourceConfig {
+            payer: "11".repeat(32),
+            receipt_id: "22".repeat(32),
+            fee_paid_atoms: budlum_core::storage::bud3::view::MIN_PAID_VIEW_FEE_ATOMS - 1,
+        });
+        assert!(
+            build_state(underpaid).is_err(),
+            "fee below MIN_PAID_VIEW_FEE_ATOMS must be refused"
+        );
+
+        let mut valid = serving_config(true, Vec::new());
+        valid.content_dir = None;
+        valid.bud3 = Some(Bud3SourceConfig {
+            payer: "11".repeat(32),
+            receipt_id: "22".repeat(32),
+            fee_paid_atoms: budlum_core::storage::bud3::view::MIN_PAID_VIEW_FEE_ATOMS,
+        });
+        assert!(
+            build_state(valid).is_ok(),
+            "valid [bud3] configuration must start without content_dir"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn bud3_source_verifies_object_metadata_and_serves_verified_public_content() {
+        use budlum_core::storage::bud3::content_id::{ContentId, ContentIdKind};
+        use budlum_core::storage::bud3::content_ref::ContentRef;
+        use http_body_util::BodyExt as _;
+
+        budlum_core::crypto::tls::install_default_provider();
+        let manifest = SiteManifest {
+            index: "/index.html".into(),
+            routes: std::collections::BTreeMap::new(),
+            csp: None,
+        };
+        let manifest_bytes = serde_json::to_vec(&manifest).unwrap();
+        let content_id = ContentId::public(&manifest_bytes);
+        let commitment = [0x7Au8; 32];
+        let content_ref = ContentRef::new(content_id, commitment, None).unwrap();
+
+        let tampered_bytes = b"{\"index\":\"/evil.html\",\"routes\":{}}".to_vec();
+        let tamper_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let tamper_server = Arc::clone(&tamper_flag);
+        let expected_digest = hex::encode(content_id.digest);
+        let expected_len = content_id.len;
+        let good_hex = hex::encode(&manifest_bytes);
+        let bad_hex = hex::encode(&tampered_bytes);
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            loop {
+                let Ok((stream, _)) = listener.accept().await else {
+                    break;
+                };
+                let tamper_flag = Arc::clone(&tamper_server);
+                let expected_digest = expected_digest.clone();
+                let good_hex = good_hex.clone();
+                let bad_hex = bad_hex.clone();
+                tokio::spawn(async move {
+                    let svc = service_fn(move |req: Request<hyper::body::Incoming>| {
+                        let tamper_flag = Arc::clone(&tamper_flag);
+                        let expected_digest = expected_digest.clone();
+                        let good_hex = good_hex.clone();
+                        let bad_hex = bad_hex.clone();
+                        async move {
+                            let body = req.collect().await.unwrap().to_bytes();
+                            let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                            let method = v.get("method").and_then(serde_json::Value::as_str);
+                            let resp = match method {
+                                Some("bud_storageGetObject") => serde_json::json!({
+                                    "jsonrpc": "2.0",
+                                    "id": 1,
+                                    "result": {
+                                        "status": "live",
+                                        "sealed": false,
+                                        "content_digest": expected_digest,
+                                        "content_len": expected_len,
+                                    }
+                                }),
+                                Some("bud_storageGetContent") => {
+                                    let payload_hex = if tamper_flag.load(Ordering::Relaxed) {
+                                        bad_hex
+                                    } else {
+                                        good_hex
+                                    };
+                                    serde_json::json!({
+                                        "jsonrpc": "2.0",
+                                        "id": 1,
+                                        "result": { "content_hex": payload_hex }
+                                    })
+                                }
+                                _ => serde_json::json!({
+                                    "jsonrpc": "2.0",
+                                    "id": 1,
+                                    "error": { "code": -32601, "message": "unknown" }
+                                }),
+                            };
+                            Ok::<_, std::convert::Infallible>(Response::new(BoxBody::from(
+                                Bytes::from(serde_json::to_vec(&resp).unwrap()),
+                            )))
+                        }
+                    });
+                    let _ = hyper::server::conn::http1::Builder::new()
+                        .serve_connection(TokioIo::new(stream), svc)
+                        .await;
+                });
+            }
+        });
+
+        let cache = tempfile::tempdir().unwrap();
+        let cfg = Bud3SourceConfig {
+            payer: "11".repeat(32),
+            receipt_id: "22".repeat(32),
+            fee_paid_atoms: budlum_core::storage::bud3::view::MIN_PAID_VIEW_FEE_ATOMS,
+        };
+        let source = Bud3RpcSource::new(
+            vec![format!("http://{addr}")],
+            &cfg,
+            cache.path().to_path_buf(),
+        )
+        .unwrap();
+
+        // Sealed content is refused before touching the network.
+        let sealed_ref = ContentRef::new(
+            ContentId {
+                kind: ContentIdKind::Sealed,
+                digest: [0x99; 32],
+                len: 0,
+            },
+            [0x88; 32],
+            None,
+        )
+        .unwrap();
+        assert!(source.fetch(&sealed_ref).is_err());
+
+        // Tampered content bytes from RPC are refused and never cached.
+        tamper_flag.store(true, Ordering::Relaxed);
+        assert!(source
+            .fetch(&content_ref)
+            .unwrap_err()
+            .contains("ContentId"));
+        assert!(!cache.path().join(hex::encode(content_id.digest)).exists());
+
+        // Verified public bytes succeed, parse as SiteManifest, and populate disk cache.
+        tamper_flag.store(false, Ordering::Relaxed);
+        let fetched_manifest = source.fetch_manifest(&content_ref).unwrap();
+        assert_eq!(fetched_manifest, manifest);
+        assert!(cache.path().join(hex::encode(content_id.digest)).exists());
+
+        server.abort();
     }
 }

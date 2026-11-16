@@ -725,10 +725,10 @@ fn answer_challenge(
     if is_mainnet(ctx.chain_id) {
         return Err(StorageTxError::ChallengeOnMainnet);
     }
-    let (opener, opener_bond) = state
+    let (deal_id, opener, opener_bond) = state
         .storage_registry
         .get_challenge(challenge_id)
-        .map(|c| (c.opener, c.opener_bond))
+        .map(|c| (c.deal_id, c.opener, c.opener_bond))
         .ok_or_else(|| {
             StorageTxError::ChallengeAnswerRefused(
                 StorageError::UnknownChallenge(challenge_id).to_string(),
@@ -737,15 +737,30 @@ fn answer_challenge(
     // Auto-challenges from block maintenance have no opener and no bond
     // that was debited from anyone; only a bonded opener is refunded.
     let refund = opener_bond > 0 && opener != Address::zero();
-    if refund
-        && state
-            .get_balance(&opener)
-            .checked_add(opener_bond)
-            .is_none()
-    {
-        return Err(StorageTxError::ChallengeAnswerRefused(
-            "the opener bond refund would overflow the opener balance".into(),
-        ));
+    let sibling_refunds = state
+        .storage_registry
+        .open_sibling_opener_refunds(deal_id, challenge_id);
+    // Preflight aggregated per-opener bond refunds (primary + any siblings that
+    // would be closed if this answer slashes the deal) before any mutation.
+    let mut refund_totals: std::collections::BTreeMap<Address, u64> =
+        std::collections::BTreeMap::new();
+    if refund {
+        refund_totals.insert(opener, opener_bond);
+    }
+    for &(sib_opener, sib_bond) in &sibling_refunds {
+        let entry = refund_totals.entry(sib_opener).or_insert(0);
+        *entry = entry.checked_add(sib_bond).ok_or_else(|| {
+            StorageTxError::ChallengeAnswerRefused(
+                "sibling opener bond refund total overflowed u64".into(),
+            )
+        })?;
+    }
+    for (&addr, &total_bond) in &refund_totals {
+        if state.get_balance(&addr).checked_add(total_bond).is_none() {
+            return Err(StorageTxError::ChallengeAnswerRefused(
+                "the opener bond refund would overflow the opener balance".into(),
+            ));
+        }
     }
     let epoch = state.epoch_index;
     let proof_bytes = if proof.is_empty() { None } else { Some(proof) };

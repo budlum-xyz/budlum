@@ -100,6 +100,10 @@ impl FamilyProfile for MoveFamily {
         }
     }
 
+    fn home_key_scheme(&self) -> crate::object_layer::tx::HomeKeyScheme {
+        crate::object_layer::tx::HomeKeyScheme::AptosEd25519
+    }
+
     fn finality(&self) -> FamilyFinality {
         FamilyFinality {
             adapter: "external-domain-finality-v1",
