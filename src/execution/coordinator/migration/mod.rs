@@ -141,6 +141,10 @@ pub enum ImportError {
     SourceNotAttested {
         domain: u32,
     },
+    /// No registered domain of the source chain anchored the request's state root.
+    SourceChainNotAttested {
+        chain_id: u64,
+    },
     DeploymentAfterSource {
         deployment_block: u64,
         source_block: u64,
@@ -207,6 +211,10 @@ impl std::fmt::Display for ImportError {
             Self::SourceNotAttested { domain } => write!(
                 f,
                 "migration: source root is not anchored for domain {domain}"
+            ),
+            Self::SourceChainNotAttested { chain_id } => write!(
+                f,
+                "migration: source root is not anchored by a domain of chain {chain_id}"
             ),
             Self::DeploymentAfterSource {
                 deployment_block,
@@ -685,6 +693,34 @@ fn evm_storage_key(addr: &[u8; 20], slot: &[u8; 32]) -> [u8; 52] {
     k
 }
 
+/// The EVM source root must be one this chain anchored for a domain of the source chain.
+///
+/// The request carries its own state root, and the deployment proof carries its own
+/// transaction and receipt roots. Checked only against themselves they show a request that
+/// agrees with itself, so a migrator could install any code at an address it derives from
+/// its own key and have the record name a source chain that never held it. The anchor is
+/// written by consensus from a finality fact of the domain, so it is the one root the
+/// migrator cannot choose. The account at the contract address is opened under that root,
+/// and a contract address is a function of its deployer and nonce, so the anchored state
+/// also settles who deployed it.
+fn require_attested_evm_source(
+    state: &AccountState,
+    source_chain_id: u64,
+    state_root: &[u8; 32],
+) -> Result<(), ImportError> {
+    let anchored = state.settlement.domains.active_domains().any(|domain| {
+        domain.domain_chain_id == source_chain_id
+            && state.external_roots.get(&domain.id) == Some(state_root)
+    });
+    if anchored {
+        Ok(())
+    } else {
+        Err(ImportError::SourceChainNotAttested {
+            chain_id: source_chain_id,
+        })
+    }
+}
+
 /// Applies one [`MigrationTx`] atomically against `state` ( 2/3 installation door).
 ///
 /// Charges the verified migration fee from `migrator` to `reward_pool_account()` on
@@ -720,7 +756,10 @@ pub fn apply_migration_tx(
             }
             let live_occupied = is_evm_address_occupied(state, &state.execution_state, &target)?;
             req.occupied = req.occupied || live_occupied;
+            let source_chain_id = req.source_chain_id;
+            let source_root = req.state_root;
             let mut plan = begin_import(*req, chain_id)?;
+            require_attested_evm_source(state, source_chain_id, &source_root)?;
             plan.migrator = Some(*migrator);
             let actual = plan.source().address;
             let actual_hex = hex::encode(actual);
@@ -1138,6 +1177,90 @@ mod tests {
         );
     }
 
+    const SOURCE_DOMAIN_ID: u32 = 101;
+
+    fn anchor_source_root(state: &mut AccountState, domain: u32, chain_id: u64, root: [u8; 32]) {
+        state
+            .settlement
+            .domains
+            .register(crate::domain::plugin::default_domain(
+                domain,
+                crate::domain::types::ConsensusKind::PoW,
+                chain_id,
+                crate::domain::types::POW_HEADER_CHAIN_ADAPTER,
+                1,
+            ))
+            .expect("register the source domain");
+        assert!(state.anchor_external_root(domain, root));
+    }
+
+    fn begin_evm_import(state: &mut AccountState) -> Result<MigrationTxOutcome, ImportError> {
+        let migrator = Address::from([0x71u8; 32]);
+        state.credit_account(&migrator, 100);
+        let (req, _) = request_with_code(sample_code(), [0u8; 32], 42);
+        apply_migration_tx(
+            state,
+            &migrator,
+            MigrationTx::BeginEvmImport(Box::new(req)),
+            &fee_schedule(),
+            CHAIN_ID,
+        )
+    }
+
+    #[test]
+    fn an_evm_migration_needs_a_source_root_this_chain_anchored() {
+        let (req, _) = request_with_code(sample_code(), [0u8; 32], 42);
+        let refused = Err(ImportError::SourceChainNotAttested {
+            chain_id: SOURCE_CHAIN_ID,
+        });
+
+        // Nothing anchored: the request only agrees with itself.
+        let mut state = AccountState::new();
+        assert_eq!(begin_evm_import(&mut state), refused);
+        assert!(state.execution_state.pending_evm_migrations.is_empty());
+
+        // The source domain anchored another root.
+        let mut state = AccountState::new();
+        anchor_source_root(&mut state, SOURCE_DOMAIN_ID, SOURCE_CHAIN_ID, [0x5A; 32]);
+        assert_eq!(begin_evm_import(&mut state), refused);
+
+        // The root is anchored, but by a domain of another chain.
+        let mut state = AccountState::new();
+        anchor_source_root(
+            &mut state,
+            SOURCE_DOMAIN_ID,
+            SOURCE_CHAIN_ID + 1,
+            req.state_root,
+        );
+        assert_eq!(begin_evm_import(&mut state), refused);
+
+        // A domain that is no longer active does not vouch for its last root.
+        let mut state = AccountState::new();
+        anchor_source_root(
+            &mut state,
+            SOURCE_DOMAIN_ID,
+            SOURCE_CHAIN_ID,
+            req.state_root,
+        );
+        state
+            .settlement
+            .domains
+            .set_status(SOURCE_DOMAIN_ID, crate::domain::types::DomainStatus::Frozen)
+            .expect("freeze the source domain");
+        assert_eq!(begin_evm_import(&mut state), refused);
+
+        // The source domain anchored exactly this root.
+        let mut state = AccountState::new();
+        anchor_source_root(
+            &mut state,
+            SOURCE_DOMAIN_ID,
+            SOURCE_CHAIN_ID,
+            req.state_root,
+        );
+        assert!(begin_evm_import(&mut state).is_ok());
+        assert_eq!(state.execution_state.pending_evm_migrations.len(), 1);
+    }
+
     #[test]
     fn migration_refuses_occupied_address() {
         let (mut req, _) = request_with_code(sample_code(), [0u8; 32], 42);
@@ -1282,6 +1405,12 @@ mod tests {
         let code = sample_code();
         let (req, _) = request_with_code(code.clone(), slot0, 0xBEEF);
         let sched = MigrationFeeSchedule::TESTNET_DEFAULT;
+        anchor_source_root(
+            &mut state,
+            SOURCE_DOMAIN_ID,
+            SOURCE_CHAIN_ID,
+            req.state_root,
+        );
 
         coord
             .apply_evm_migration(
