@@ -89,7 +89,6 @@ src/core/encoding.rs:encode_block_summary
 src/core/encoding.rs:encode_transaction
 src/core/governance.rs:active_proposals
 src/core/governance.rs:cancel_proposal
-src/core/governance.rs:vote_weight_of
 src/core/hash.rs:hash_fields
 src/core/transaction.rs:estimate_gas_with_schedule
 src/core/transaction.rs:fee_limit

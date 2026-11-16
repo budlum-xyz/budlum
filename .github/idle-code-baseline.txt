@@ -1003,7 +1003,6 @@ src/account_abstraction/private_transfer_auth.rs	fn	verify_commitment
 src/account_abstraction/private_transfer_auth.rs	fn	verify_nullifier
 src/account_abstraction/private_transfer_auth.rs	struct	PrivateTransferAuth
 src/account_abstraction/private_transfer_auth.rs	struct	PrivateTransferGates
-src/account_abstraction/quantum_account.rs	const	ADDRESS_DOMAIN_V2
 src/account_abstraction/quantum_account.rs	const	BUD_MAGIC
 src/account_abstraction/quantum_account.rs	const	MIN_SEED_ENTROPY_BYTES
 src/account_abstraction/quantum_account.rs	const	RECOVERY_DOMAIN_V3
