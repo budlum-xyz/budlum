@@ -27,6 +27,13 @@ const KIND_PROG: u8 = 2;
 /// Kind byte of a polynomial claim.
 const KIND_POLY: u8 = 3;
 
+/// The first bytes of the encoding of an ML-DSA-87 signature claim: the
+/// kind byte and the scheme id. The tick program writes them as constants.
+pub(super) const SIG_CLAIM_PREFIX: [u8; 3] = {
+    let scheme = SchemeId::ML_DSA_87.0.to_be_bytes();
+    [KIND_SIG, scheme[0], scheme[1]]
+};
+
 const SIG_LEN: usize = 1 + 2 + 32 + 32;
 const PROG_LEN: usize = 1 + 32 + 32 + 32;
 const POLY_LEN: usize = 1 + 32 + EXT_BYTES + EXT_BYTES;
