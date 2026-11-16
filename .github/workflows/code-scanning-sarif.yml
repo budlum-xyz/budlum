@@ -17,7 +17,7 @@ on:
   push:
     branches: [main]
   schedule:
-    - cron: "30 4 * * 1"
+    - cron: "30 7 * * 6" # Saturday 07:30 UTC, after the AIR mutation window
   workflow_dispatch:
 
 concurrency:
