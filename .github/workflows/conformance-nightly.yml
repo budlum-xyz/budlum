@@ -1,11 +1,12 @@
 name: Conformance Nightly
 
 # Execute compatibility suites and compile the standalone settlement endpoint
-# workspaces so cross-environment interfaces are checked by CI.
+# workspaces so cross-environment interfaces are checked by CI. The full two-arch
+# battery is weekly; relevant main PRs still run it through the path filter below.
 
 on:
   schedule:
-    - cron: "41 2 * * *"
+    - cron: "41 0 * * 5" # Friday 00:41 UTC
   workflow_dispatch:
   pull_request:
     branches: [main]

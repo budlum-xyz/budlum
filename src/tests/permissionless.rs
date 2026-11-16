@@ -890,7 +890,12 @@ fn separate_consensus_key_transaction_activates_bonded_validator() {
     );
     tx.sign(&keys.sig_key);
     state
-        .validate_transaction_with_context(&tx, 0, state.get_balance(&validator))
+        .validate_transaction_with_context(
+            &tx,
+            0,
+            state.get_balance(&validator),
+            crate::core::account::TxAuthority::Inline,
+        )
         .expect("registration precheck");
     Executor::apply_transaction(&mut state, &tx).expect("registration applies");
 

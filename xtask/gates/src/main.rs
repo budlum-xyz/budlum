@@ -44,6 +44,7 @@ mod sha256;
 mod gates {
     pub mod accumulators_pinned;
     pub mod actionlint;
+    pub mod agg_native_backend;
     pub mod ai_inference_prompt_is_true;
     pub mod ai_inference_reads;
     pub mod ai_inference_zk;
@@ -960,6 +961,14 @@ const GATES: &[Gate] = &[
         run_log: None,
         run_args: None,
         self_test: gates::zizmor::self_test,
+    },
+    Gate {
+        name: "agg-native-backend-is-devnet-only",
+        replaces: None,
+        run: gates::agg_native_backend::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::agg_native_backend::self_test,
     },
     Gate {
         name: "docker-toolchain-matches-pin",

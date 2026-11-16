@@ -864,6 +864,31 @@ pub struct Transaction {
     #[serde(default)]
     pub signature_version: u32,
     pub tx_type: TransactionType,
+    /// `TxAuth::Claimed(d)`: the digest of the claim that stands for the
+    /// signature of this transaction. `None` is `TxAuth::Inline`, the
+    /// signature travels with the transaction.
+    ///
+    /// A claimed transaction carries no signature and no key; the block
+    /// frame proves that the signature was verified once. The digest is a
+    /// function of the signing hash, so it stays outside it; the witness
+    /// bytes carry it, and through them the witness root of the block.
+    #[serde(default)]
+    pub auth_claim: Option<[u8; 32]>,
+    /// The digests of the other claims this transaction uses. Inside the
+    /// signing hash: a relay cannot add or drop one.
+    #[serde(default, deserialize_with = "deserialize_bounded_claim_refs")]
+    pub claim_refs: Vec<[u8; 32]>,
+}
+
+/// Most claims one transaction refers to. A reference is 32 bytes and every
+/// one is looked up in the block frame.
+pub const MAX_CLAIM_REFS_PER_TX: usize = 16;
+
+fn deserialize_bounded_claim_refs<'de, D>(deserializer: D) -> Result<Vec<[u8; 32]>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    deserialize_bounded_vec::<D, [u8; 32], MAX_CLAIM_REFS_PER_TX>(deserializer)
 }
 
 fn deserialize_bounded_vec<'de, D, T: Deserialize<'de>, const MAX: usize>(
@@ -964,6 +989,14 @@ pub struct TxWitness {
     #[serde(deserialize_with = "deserialize_bounded_signatures")]
     pub authorization_signatures: Vec<(Vec<u8>, Vec<u8>)>,
 }
+
+/// Follows the serialized witness of a claimed transaction, before its claim
+/// digest.
+const CLAIMED_WITNESS_MARKER: u8 = 0x01;
+
+/// The domain tag that binds the claim references of a transaction into its
+/// signing hash.
+const TX_CLAIM_REFS_TAG: &[u8] = b"BDLM_TX_CLAIM_REFS_V1";
 
 /// The domain tag of a witness hash.
 /// exposed for: the crypto/key registry's public labels and shapes - production readers land with the anchor-ceremony and key-config doors (wiring pending).
@@ -1296,6 +1329,8 @@ impl Transaction {
             chain_id,
             signature_version: SIGNATURE_VERSION_V5,
             tx_type,
+            auth_claim: None,
+            claim_refs: Vec::new(),
         };
         tx.hash = tx.calculate_hash();
         tx
@@ -1337,6 +1372,8 @@ impl Transaction {
             chain_id: DEFAULT_CHAIN_ID,
             signature_version: SIGNATURE_VERSION_V5,
             tx_type: TransactionType::Transfer,
+            auth_claim: None,
+            claim_refs: Vec::new(),
         };
         tx.hash = tx.calculate_hash();
         tx
@@ -1391,7 +1428,27 @@ impl Transaction {
         };
         hasher.update(domain);
         hasher.update(preimage);
-        hasher.finalize().into()
+        let base: [u8; 32] = hasher.finalize().into();
+        if self.claim_refs.is_empty() {
+            // A transaction that uses no claim hashes exactly as it did
+            // before the field existed.
+            return base;
+        }
+        // The references wrap the base hash under a tag of their own. The
+        // base is 32 bytes, the count is fixed-width and every reference is
+        // 32 bytes, so the preimage has one reading.
+        let mut wrapped = Sha3_256::new();
+        wrapped.update(TX_CLAIM_REFS_TAG);
+        wrapped.update(base);
+        wrapped.update(
+            u32::try_from(self.claim_refs.len())
+                .unwrap_or(u32::MAX)
+                .to_be_bytes(),
+        );
+        for reference in &self.claim_refs {
+            wrapped.update(reference);
+        }
+        wrapped.finalize().into()
     }
     pub fn calculate_hash(&self) -> String {
         hex::encode(self.signing_hash())
@@ -1958,8 +2015,44 @@ impl Transaction {
         // root identical on every node if it ever did. Never
         // `unwrap_or_default`: an empty Vec would commit two different
         // witnesses to one digest (tests/hash_input_serialize_locks).
-        bincode::serialize(&self.witness())
-            .unwrap_or_else(|_| b"budlum/serialize-failed/witness".to_vec())
+        let mut bytes = bincode::serialize(&self.witness())
+            .unwrap_or_else(|_| b"budlum/serialize-failed/witness".to_vec());
+        // A claimed transaction has an empty witness; what authorizes it is
+        // the claim digest. The serialized witness delimits itself, so the
+        // marker and the 32 bytes after it have one reading, and an inline
+        // transaction keeps the bytes it always had.
+        if let Some(claim) = &self.auth_claim {
+            bytes.push(CLAIMED_WITNESS_MARKER);
+            bytes.extend_from_slice(claim);
+        }
+        bytes
+    }
+
+    /// Whether a claim stands for the signature of this transaction
+    /// (`TxAuth::Claimed`).
+    #[must_use]
+    pub const fn is_claimed(&self) -> bool {
+        self.auth_claim.is_some()
+    }
+
+    /// Whether this transaction uses the aggregation layer at all.
+    #[must_use]
+    pub fn uses_claims(&self) -> bool {
+        self.auth_claim.is_some() || !self.claim_refs.is_empty()
+    }
+
+    /// Whether a claimed transaction has the one shape it may have: no
+    /// signature, no key and no multi-signature authorization. A claimed
+    /// transaction that still carried a signature would have two sources of
+    /// authority, and only one of them would be checked.
+    #[must_use]
+    pub fn claimed_shape_is_canonical(&self) -> bool {
+        self.auth_claim.is_some()
+            && self.signature.is_none()
+            && self.signer_public_key.is_empty()
+            && self.authorization.is_none()
+            && self.signature_version == SIGNATURE_VERSION_V5
+            && self.hash == self.calculate_hash()
     }
 
     /// The witness of this transaction: the material that authorizes it and
@@ -2036,6 +2129,13 @@ impl Transaction {
         }
         if canonical_genesis {
             return true;
+        }
+        // A claimed transaction carries no signature: nothing here can
+        // verify it. Its authority is the claim in the frame of its block,
+        // and only block validation, which checked that frame, may accept it.
+        if self.auth_claim.is_some() {
+            debug!("a claimed transaction cannot be verified on its own");
+            return false;
         }
         // a mainnet genesis accepts the composite formats alone. V4
         // (Ed25519 only), V5 (ML-DSA-87 only) and V6 (ML-DSA-87 multisig) have

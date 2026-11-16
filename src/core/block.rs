@@ -70,6 +70,14 @@ pub struct BlockHeader {
     /// derived from it.
     #[serde(default)]
     pub seat_participation: Option<crate::validators::committee::SeatParticipation>,
+    /// The hash of the claim frame of the block (aggregation layer, block
+    /// rule 10). `None` on a block that carries no frame. Folded into the
+    /// block hash when present, so the frame of a block cannot be swapped
+    /// for another. On the genesis block the slot carries the commitment of
+    /// the aggregation parameters instead: a chain with other rules is
+    /// another chain.
+    #[serde(default)]
+    pub frame_hash: Option<[u8; 32]>,
 }
 
 /// Stand-in bytes hashed when slashing evidence cannot be serialized.
@@ -102,6 +110,7 @@ struct BlockPreimage<'a> {
     shards_root: Option<&'a [u8; 32]>,
     witness_root: Option<&'a [u8; 32]>,
     seat_participation: Option<&'a crate::validators::committee::SeatParticipation>,
+    frame_hash: Option<&'a [u8; 32]>,
 }
 
 fn hash_block_preimage(p: &BlockPreimage<'_>) -> [u8; 32] {
@@ -197,6 +206,12 @@ fn hash_block_preimage(p: &BlockPreimage<'_>) -> [u8; 32] {
         fields.push(b"BDLM_SEAT_PARTICIPATION_V1");
         fields.push(bytes.as_slice());
     }
+    // Tagged and folded only when present, like the two above: a block
+    // without a claim frame hashes exactly as it did before.
+    if let Some(frame_hash) = &p.frame_hash {
+        fields.push(b"BDLM_BLOCK_FRAME_HASH_V1");
+        fields.push(frame_hash.as_slice());
+    }
     hash_fields_bytes(&fields)
 }
 
@@ -224,6 +239,7 @@ impl BlockHeader {
             shards_root: block.shards_root,
             witness_root: block.witness_root,
             seat_participation: block.seat_participation.clone(),
+            frame_hash: block.frame_hash,
         }
     }
 
@@ -252,6 +268,7 @@ impl BlockHeader {
             shards_root: self.shards_root.as_ref(),
             witness_root: self.witness_root.as_ref(),
             seat_participation: self.seat_participation.as_ref(),
+            frame_hash: self.frame_hash.as_ref(),
         })
     }
 
@@ -332,6 +349,19 @@ pub struct Block {
     /// derived from it.
     #[serde(default)]
     pub seat_participation: Option<crate::validators::committee::SeatParticipation>,
+    /// The hash of the claim frame of the block (aggregation layer, block
+    /// rule 10). `None` on a block that carries no frame. Folded into the
+    /// block hash when present, so the frame of a block cannot be swapped
+    /// for another. On the genesis block the slot carries the commitment of
+    /// the aggregation parameters instead: a chain with other rules is
+    /// another chain.
+    #[serde(default)]
+    pub frame_hash: Option<[u8; 32]>,
+    /// The claim frame of the block: the claims its transactions use, and
+    /// one proof that every object behind them was verified. Part of the
+    /// body; the header commits to it through `frame_hash`.
+    #[serde(default)]
+    pub claim_frame: Option<crate::aggregation::frame::ClaimFrame>,
 }
 
 impl Block {
@@ -374,6 +404,8 @@ impl Block {
             shards_root: None,
             witness_root: None,
             seat_participation: None,
+            frame_hash: None,
+            claim_frame: None,
         };
         block.tx_root = block.calculate_tx_root();
         block.hash = block.calculate_hash();
@@ -558,6 +590,7 @@ impl Block {
             shards_root: self.shards_root.as_ref(),
             witness_root: self.witness_root.as_ref(),
             seat_participation: self.seat_participation.as_ref(),
+            frame_hash: self.frame_hash.as_ref(),
         })
     }
     pub fn sign(&mut self, keypair: &KeyPair) {

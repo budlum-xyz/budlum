@@ -251,6 +251,16 @@ pub struct GenesisConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reward_pool: Option<GenesisRewardPool>,
 
+    /// The parameters of the aggregation layer on this chain.
+    ///
+    /// `None` is the default set with the layer off, which is what every
+    /// ceremony file written before the field existed means. The block
+    /// limits, the claim fee and the aggregator share are consensus data:
+    /// when the layer is on, the genesis block commits to them, so a node
+    /// started with other values is on another chain.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aggregation: Option<crate::aggregation::params::AggParams>,
+
     /// Authorized primary sellers for `.bud` marketplace `Primary` listings.
     /// Defaults to [`crate::bns::BNS_PRIMARY_SELLERS`].
     #[serde(default = "default_bns_primary_sellers")]
@@ -291,6 +301,7 @@ impl Default for GenesisConfig {
             poa_authorities: Vec::new(),
             anchor_ledger: None,
             reward_pool: None,
+            aggregation: None,
             bns_primary_sellers: default_bns_primary_sellers(),
             bns_reserved_labels: default_bns_reserved_labels(),
         }
@@ -640,12 +651,30 @@ impl GenesisConfig {
             .map_err(|e| format!("Genesis anchor ledger refused: {e}"))
     }
 
+    /// The aggregation parameters of the chain: the default set, with the
+    /// layer off, when the genesis names none.
+    #[must_use]
+    pub fn aggregation_or_default(&self) -> crate::aggregation::params::AggParams {
+        self.aggregation.unwrap_or_default()
+    }
+
+    /// Whether the chain may start with its aggregation parameters.
+    ///
+    /// # Errors
+    ///
+    /// The parameter that cannot stand: a limit over what the wire carries,
+    /// the layer turned on where no backend exists, or on the main network.
+    pub fn validate_aggregation(&self) -> Result<(), String> {
+        crate::aggregation::chain::validate_params(&self.aggregation_or_default(), self.chain_id)
+    }
+
     /// Performs the requested operation.
     ///
     /// # Errors
     ///
     /// Returns an error if the operation fails.
     pub fn validate_consensus_ceremony(&self, network: Network) -> Result<(), String> {
+        self.validate_aggregation()?;
         self.validate_pq_scheme()?;
         self.validate_anchor_ledger()?;
         self.validate_reward_pool_flag()?;
@@ -855,6 +884,11 @@ impl GenesisConfig {
             shards_root: None,
             witness_root: None,
             seat_participation: None,
+            frame_hash: crate::aggregation::chain::genesis_commitment(
+                &self.aggregation_or_default(),
+                self.chain_id,
+            ),
+            claim_frame: None,
         };
 
         block.tx_root = block.calculate_tx_root();
@@ -1237,6 +1271,7 @@ fn mainnet_genesis_with(tokenomics: crate::tokenomics::TokenomicsParams) -> Gene
         // decision, and a mainnet genesis asking for the pool is refused by
         // `validate_reward_pool_flag` instead of quietly minting nothing.
         reward_pool: Some(GenesisRewardPool::disabled()),
+        aggregation: None,
         bns_primary_sellers: default_bns_primary_sellers(),
         bns_reserved_labels: default_bns_reserved_labels(),
     }
@@ -1271,6 +1306,7 @@ pub fn testnet_genesis() -> GenesisConfig {
         anchor_ledger: None,
         // testnet: the reward pool is on, and genesis says so.
         reward_pool: Some(GenesisRewardPool::enabled()),
+        aggregation: None,
         bns_primary_sellers: default_bns_primary_sellers(),
         bns_reserved_labels: default_bns_reserved_labels(),
     }
@@ -1314,6 +1350,7 @@ pub fn devnet_genesis() -> GenesisConfig {
         anchor_ledger: None,
         // devnet: no distribution to fund a pool from.
         reward_pool: Some(GenesisRewardPool::disabled()),
+        aggregation: None,
         bns_primary_sellers: default_bns_primary_sellers(),
         bns_reserved_labels: default_bns_reserved_labels(),
     }

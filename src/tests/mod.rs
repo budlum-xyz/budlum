@@ -20,6 +20,8 @@ pub mod adversarial_p2p;
 #[cfg(test)]
 pub mod advisory_reachability;
 #[cfg(test)]
+pub mod aggregation_network;
+#[cfg(test)]
 pub mod ai_inference_runtime;
 #[cfg(test)]
 pub mod ai_verification_status_locks;

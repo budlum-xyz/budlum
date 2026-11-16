@@ -493,7 +493,7 @@ fn check_target_unoccupied(
         return Err(ImportError::AddressOccupied);
     }
     let bud_addr = derive_contract_account(ee, target_key);
-    if account_state.get_attos_balance(&bud_addr) > 0 {
+    if super::is_native_contract_account_occupied(account_state, &bud_addr) {
         return Err(ImportError::AddressOccupied);
     }
     Ok(())
@@ -872,7 +872,7 @@ pub(crate) fn apply_move_migration(
         return Err(ImportError::AddressOccupied);
     }
     let bud_addr = derive_contract_account(EeId::MOVE, &req.account);
-    if state.get_attos_balance(&bud_addr) > 0 {
+    if super::is_native_contract_account_occupied(state, &bud_addr) {
         return Err(ImportError::AddressOccupied);
     }
 
