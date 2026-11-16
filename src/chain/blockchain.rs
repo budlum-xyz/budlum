@@ -162,6 +162,10 @@ pub struct Blockchain {
     /// Node-local commitments verified for Garden domains through
     /// `PoAFinalityAdapter`, kept outside `self.state`.
     pub garden_commitments: DomainCommitmentRegistry,
+    /// Insertion-ordered `(height, sequence)` keys retained per Garden domain
+    /// so `garden_commitments` stays bounded to a sliding window and drains
+    /// cleanly when a Garden retires.
+    garden_commitment_keys: BTreeMap<DomainId, std::collections::VecDeque<(u64, u64)>>,
     /// Garden domains frozen for equivocation; the operator cannot reactivate
     /// them.
     pub garden_quarantined: BTreeSet<DomainId>,
@@ -1275,6 +1279,7 @@ impl Blockchain {
             plugin_registry: DomainPluginRegistry::new(),
             garden_domains: ConsensusDomainRegistry::new(),
             garden_commitments: DomainCommitmentRegistry::new(),
+            garden_commitment_keys: BTreeMap::new(),
             garden_quarantined: BTreeSet::new(),
             quarantine_ledger,
             quarantine_dirty: false,
@@ -1484,15 +1489,24 @@ impl Blockchain {
 
     /// Canonical in-block domains together with this node's local Garden
     /// domains (which live outside `self.state` and never alter consensus
-    /// roots).
+    /// roots). When a local Garden domain exists, it always takes precedence
+    /// over any canonical row sharing the id.
     pub fn consensus_domains_with_garden(&self) -> Vec<ConsensusDomain> {
-        let mut out = self.state.settlement.domains.domains();
+        let mut out: Vec<ConsensusDomain> = self
+            .state
+            .settlement
+            .domains
+            .domains()
+            .into_iter()
+            .filter(|d| self.garden_domains.get(d.id).is_none())
+            .collect();
         out.extend(self.garden_domains.domains());
         out
     }
 
     /// Canonical in-block domain commitments together with verified
     /// commitments for this node's local Garden domains.
+    #[cfg(test)]
     pub fn domain_commitments_with_garden(&self) -> Vec<DomainCommitment> {
         let mut out = self
             .state
@@ -1508,9 +1522,16 @@ impl Blockchain {
     ///
     /// # Errors
     ///
-    /// Refuses non-PoA, bridge-enabled, invalid, or colliding domain ids.
+    /// Refuses non-PoA, bridge-enabled, invalid, non-Garden-range, or
+    /// colliding domain ids.
     pub fn register_garden_domain(&mut self, domain: ConsensusDomain) -> Result<(), String> {
         crate::settlement::domains::validate_domain_registration(&domain)?;
+        if !crate::garden::is_garden_domain_id(domain.id) {
+            return Err(format!(
+                "Domain {} is outside the reserved Garden domain id range",
+                domain.id
+            ));
+        }
         if domain.kind != ConsensusKind::PoA {
             return Err(format!("Domain {} is not a PoA domain", domain.id));
         }
@@ -1625,7 +1646,15 @@ impl Blockchain {
         scratch.restore_persisted(domain.clone())?;
         scratch.transition_status_checked(domain_id, next)?;
         self.garden_domains
-            .transition_status_checked(domain_id, next)
+            .transition_status_checked(domain_id, next)?;
+        if next == DomainStatus::Retired {
+            if let Some(keys) = self.garden_commitment_keys.remove(&domain_id) {
+                for (height, sequence) in keys {
+                    self.garden_commitments.remove(domain_id, height, sequence);
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Verify a Garden commitment through Budlum's `PoAFinalityAdapter` and
@@ -1773,10 +1802,25 @@ impl Blockchain {
             )));
         }
 
+        /// Maximum verified Garden commitments retained per local Garden domain
+        /// in `garden_commitments`. Older commitments are pruned in FIFO order
+        /// once the window fills; `last_committed_height` on the domain record
+        /// continues to enforce strictly sequential advancement.
+        const KEPT_GARDEN_COMMITMENTS: usize = 4096;
+
         let domain_id = commitment.domain_id;
         let height = commitment.domain_height;
+        let sequence = commitment.sequence;
         let block_hash = commitment.domain_block_hash;
         self.garden_commitments.insert(commitment)?;
+        let queue = self.garden_commitment_keys.entry(domain_id).or_default();
+        queue.push_back((height, sequence));
+        while queue.len() > KEPT_GARDEN_COMMITMENTS {
+            if let Some((stale_height, stale_seq)) = queue.pop_front() {
+                self.garden_commitments
+                    .remove(domain_id, stale_height, stale_seq);
+            }
+        }
         if let Some(slot) = self.garden_domains.get_mut(domain_id) {
             slot.last_committed_height = height;
             slot.last_committed_hash = block_hash;
@@ -10444,6 +10488,7 @@ impl Clone for Blockchain {
             plugin_registry: DomainPluginRegistry::new(),
             garden_domains: self.garden_domains.clone(),
             garden_commitments: self.garden_commitments.clone(),
+            garden_commitment_keys: self.garden_commitment_keys.clone(),
             garden_quarantined: self.garden_quarantined.clone(),
             quarantine_ledger: self.quarantine_ledger.clone(),
             quarantine_dirty: self.quarantine_dirty,

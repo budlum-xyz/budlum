@@ -24,26 +24,82 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 static TEMP_FILE_SEQ: AtomicU64 = AtomicU64::new(0);
 
+/// Default local disk ceiling for one Garden content store (16 GiB).
+/// Joining a Garden adopts the host's per-object cap only up to this local
+/// budget so a hostile host cannot fill a joiner's disk via genesis limits.
+pub const MAX_LOCAL_GARDEN_BYTES: u64 = 16 * 1024 * 1024 * 1024;
+
 /// Where the objects of one Garden live on this node.
 #[derive(Debug)]
 pub struct GardenContentStore {
     root: Option<PathBuf>,
     memory: BTreeMap<Hash32, Vec<u8>>,
     max_object_bytes: usize,
+    max_total_bytes: u64,
+    total_bytes: u64,
+}
+
+fn scan_disk_bytes(root: &Path) -> u64 {
+    let mut total = 0u64;
+    if let Ok(entries) = fs::read_dir(root) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            let valid_name = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .and_then(|s| hex::decode(s).ok())
+                .is_some_and(|bytes| bytes.len() == 32);
+            if valid_name {
+                if let Ok(meta) = fs::metadata(&path) {
+                    total = total.saturating_add(meta.len());
+                }
+            }
+        }
+    }
+    total
 }
 
 impl GardenContentStore {
-    /// Open a store under `root`. `None` keeps the objects in memory only.
+    /// Open a store under `root` using the default local byte ceiling
+    /// (`MAX_LOCAL_GARDEN_BYTES`). `None` keeps the objects in memory only.
     pub fn open(root: Option<&Path>, max_object_bytes: usize) -> Result<Self, String> {
-        if let Some(root) = root {
+        Self::open_with_limit(root, max_object_bytes, MAX_LOCAL_GARDEN_BYTES)
+    }
+
+    /// Open a store under `root` with an explicit total-bytes ceiling enforced
+    /// locally regardless of what a Garden's genesis claims.
+    pub fn open_with_limit(
+        root: Option<&Path>,
+        max_object_bytes: usize,
+        max_total_bytes: u64,
+    ) -> Result<Self, String> {
+        let total_bytes = if let Some(root) = root {
             fs::create_dir_all(root)
                 .map_err(|e| format!("garden content directory cannot be created: {e}"))?;
-        }
+            scan_disk_bytes(root)
+        } else {
+            0
+        };
         Ok(Self {
             root: root.map(Path::to_path_buf),
             memory: BTreeMap::new(),
             max_object_bytes,
+            max_total_bytes,
+            total_bytes,
         })
+    }
+
+    /// Total object bytes currently held in this store.
+    pub const fn total_bytes(&self) -> u64 {
+        self.total_bytes
+    }
+
+    /// True when storing an object of `size` bytes fits within the local cap.
+    pub const fn can_fit(&self, size: u64) -> bool {
+        self.total_bytes.saturating_add(size) <= self.max_total_bytes
     }
 
     fn path_of(&self, content_id: &Hash32) -> Option<PathBuf> {
@@ -62,9 +118,16 @@ impl GardenContentStore {
             ));
         }
         let content_id = ContentId::of(bytes).0;
+        let len = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
         match self.path_of(&content_id) {
             Some(path) => {
                 if !path.is_file() {
+                    if !self.can_fit(len) {
+                        return Err(format!(
+                            "garden local storage limit of {} bytes reached",
+                            self.max_total_bytes
+                        ));
+                    }
                     let seq = TEMP_FILE_SEQ.fetch_add(1, Ordering::Relaxed);
                     let tmp = path.with_extension(format!("tmp.{}.{seq}", std::process::id()));
                     let write_res = (|| -> std::io::Result<()> {
@@ -78,10 +141,20 @@ impl GardenContentStore {
                         let _ = fs::remove_file(&tmp);
                         return Err(format!("garden object cannot be written: {e}"));
                     }
+                    self.total_bytes = self.total_bytes.saturating_add(len);
                 }
             }
             None => {
-                self.memory.insert(content_id, bytes.to_vec());
+                if !self.memory.contains_key(&content_id) {
+                    if !self.can_fit(len) {
+                        return Err(format!(
+                            "garden local storage limit of {} bytes reached",
+                            self.max_total_bytes
+                        ));
+                    }
+                    self.memory.insert(content_id, bytes.to_vec());
+                    self.total_bytes = self.total_bytes.saturating_add(len);
+                }
             }
         }
         Ok(content_id)
@@ -139,10 +212,19 @@ impl GardenContentStore {
     pub fn remove(&mut self, content_id: &Hash32) {
         match self.path_of(content_id) {
             Some(path) => {
-                let _ = fs::remove_file(path);
+                let len = fs::metadata(&path)
+                    .ok()
+                    .filter(fs::Metadata::is_file)
+                    .map_or(0, |meta| meta.len());
+                if fs::remove_file(path).is_ok() {
+                    self.total_bytes = self.total_bytes.saturating_sub(len);
+                }
             }
             None => {
-                self.memory.remove(content_id);
+                if let Some(bytes) = self.memory.remove(content_id) {
+                    let len = u64::try_from(bytes.len()).unwrap_or(0);
+                    self.total_bytes = self.total_bytes.saturating_sub(len);
+                }
             }
         }
     }
@@ -173,6 +255,13 @@ impl GardenContentStore {
                     }
                 }
             }
+            self.total_bytes = scan_disk_bytes(root);
+        } else {
+            self.total_bytes = self
+                .memory
+                .values()
+                .map(|bytes| u64::try_from(bytes.len()).unwrap_or(0))
+                .fold(0u64, u64::saturating_add);
         }
         removed
     }
@@ -180,6 +269,7 @@ impl GardenContentStore {
     /// Delete every object and the directory itself.
     pub fn wipe(&mut self) -> Result<(), String> {
         self.memory.clear();
+        self.total_bytes = 0;
         if let Some(root) = &self.root {
             if root.exists() {
                 fs::remove_dir_all(root)
@@ -266,5 +356,32 @@ mod tests {
         let err = store.put_verified(&id, &oversized).unwrap_err();
         assert!(err.contains("outside 1..=8"), "{err}");
         assert!(!store.contains(&id));
+    }
+
+    #[test]
+    fn garden_store_enforces_local_total_byte_ceiling_and_reclaims_on_remove() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("garden");
+        let mut store = GardenContentStore::open_with_limit(Some(&root), 16, 20).unwrap();
+        let a = store.put(&[1u8; 12]).unwrap();
+        assert_eq!(store.total_bytes(), 12);
+        // Re-putting identical bytes is idempotent and does not double-count.
+        assert_eq!(store.put(&[1u8; 12]).unwrap(), a);
+        assert_eq!(store.total_bytes(), 12);
+        // A second 12-byte object exceeds the 20-byte ceiling and is refused.
+        let err = store.put(&[2u8; 12]).unwrap_err();
+        assert!(err.contains("local storage limit"), "{err}");
+        assert_eq!(store.total_bytes(), 12);
+        // Removing `a` reclaims the budget so the new object fits.
+        store.remove(&a);
+        assert_eq!(store.total_bytes(), 0);
+        let b = store.put(&[2u8; 12]).unwrap();
+        assert_eq!(store.total_bytes(), 12);
+        assert!(store.contains(&b));
+        // Re-opening from disk recovers the accurate total byte count.
+        let reopened = GardenContentStore::open_with_limit(Some(&root), 16, 20).unwrap();
+        assert_eq!(reopened.total_bytes(), 12);
+        assert!(!reopened.can_fit(9));
+        assert!(reopened.can_fit(8));
     }
 }

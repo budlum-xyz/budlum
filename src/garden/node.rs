@@ -29,10 +29,10 @@ use super::settlement::{GardenBudlumLink, GardenDomainView};
 use super::state::{quorum, GardenLedger, GardenObject, GardenState};
 use super::storage::GardenContentStore;
 use super::types::{
-    garden_domain_id, invite_keypair, join_message, status_label, GardenAdmission, GardenBlock,
-    GardenCommit, GardenContentKind, GardenFounding, GardenGenesis, GardenKey, GardenLimits,
-    GardenPlacementTable, GardenPresence, GardenTx, GardenTxKind, GardenValidatorStatus,
-    GardenVote, SignedGardenTx,
+    garden_domain_id, invite_keypair, join_message, status_label, GardenAdmission,
+    GardenAdmissionState, GardenBlock, GardenCommit, GardenContentKind, GardenFounding,
+    GardenGenesis, GardenKey, GardenLimits, GardenPlacementTable, GardenPresence, GardenTx,
+    GardenTxKind, GardenValidatorStatus, GardenVote, SignedGardenTx,
 };
 use crate::crypto::primitives::{verify_signature, KeyPair};
 use crate::domain::types::{DomainStatus, Hash32};
@@ -59,10 +59,18 @@ const MAX_PROPOSALS: usize = 32;
 const MAX_ORPHAN_VOTES: usize = 256;
 /// Most orphan votes one validator may hold at one height.
 const MAX_ORPHAN_VOTES_PER_VOTER: usize = 4;
+/// Most orphan votes one peer connection may contribute at one height.
+const MAX_ORPHAN_VOTES_PER_PEER: usize = 16;
 /// Most unjoined invite holders admitted concurrently into `peers`.
 const MAX_UNJOINED_PEERS: usize = 4;
+/// Maximum turned-away keys remembered for immediate refusal in `HostApproval`.
+const MAX_TURNED_AWAY_KEYS: usize = 4096;
 /// Maximum gossip items accepted from one peer per second.
 const MAX_GOSSIP_ITEMS_PER_PEER_PER_SEC: usize = 128;
+/// Maximum `GetCommits` sync requests accepted from one peer per second.
+const MAX_SYNC_REQS_PER_PEER_PER_SEC: usize = 8;
+/// Maximum `PutObject` deposits accepted from one peer per second.
+const MAX_PUT_OBJECT_REQS_PER_PEER_PER_SEC: usize = 96;
 /// Sliding window for per-peer `GetObject` rate limiting.
 const OBJECT_RATE_WINDOW: Duration = Duration::from_secs(10);
 /// Maximum `GetObject` requests accepted from one peer per window.
@@ -118,6 +126,7 @@ const TAG_IGNORE: u64 = 0;
 const TAG_HELLO: u64 = 1;
 const TAG_SYNC: u64 = 2;
 const TAG_GOSSIP: u64 = 3;
+const TAG_ADMISSION: u64 = 4;
 const TAG_FIRST_FETCH: u64 = 100;
 
 /// How this node runs its Garden swarm and where it keeps Garden content.
@@ -502,7 +511,7 @@ struct Node {
     /// block of each proposer, for the height it is at.
     candidate_rounds: BTreeMap<GardenKey, u64>,
     votes: BTreeMap<Hash32, BTreeMap<GardenKey, GardenVote>>,
-    orphan_votes: VecDeque<GardenVote>,
+    orphan_votes: VecDeque<(Option<PeerId>, GardenVote)>,
     my_votes: BTreeSet<Hash32>,
     host_voted: bool,
     proposed_rounds: BTreeSet<u64>,
@@ -542,8 +551,21 @@ struct Node {
     dials: BTreeMap<(GardenKey, String), (Instant, Duration)>,
     /// Per-peer sliding window for inbound gossip items.
     gossip_budget: BTreeMap<PeerId, (Instant, usize)>,
+    /// Per-peer sliding window for inbound `GetCommits` sync requests.
+    sync_budget: BTreeMap<PeerId, (Instant, usize)>,
     /// Per-peer sliding window for inbound `GetObject` requests and served bytes.
     object_budget: BTreeMap<PeerId, (Instant, usize, u64)>,
+    /// Per-peer sliding window for inbound `PutObject` requests and deposited bytes.
+    put_object_budget: BTreeMap<PeerId, (Instant, usize, u64)>,
+    /// When each connected peer passed `Hello`, used to expire idle unjoined peers.
+    peer_admitted_at: BTreeMap<PeerId, Instant>,
+    /// Peers scheduled for disconnect after their refusal/status response flushes.
+    disconnect_after: BTreeMap<PeerId, Instant>,
+    /// Keys refused by `Admit { accept: false }` on this Garden (bounded FIFO).
+    turned_away_keys: BTreeSet<GardenKey>,
+    turned_away_order: VecDeque<GardenKey>,
+    /// Narrow remote status observed by an unseated joiner in `HostApproval` mode.
+    remote_admission: Option<GardenAdmissionState>,
     /// The same record for the invite peers.
     seed_dials: Option<(Instant, Duration)>,
     fetches: BTreeMap<Hash32, Fetch>,
@@ -708,8 +730,11 @@ pub async fn spawn(
         .content_dir
         .as_ref()
         .map(|dir| dir.join(format!("{chain_id:016x}")));
-    let mut store =
-        GardenContentStore::open(content_dir.as_deref(), limits.max_object_bytes as usize)?;
+    let mut store = GardenContentStore::open_with_limit(
+        content_dir.as_deref(),
+        limits.max_object_bytes as usize,
+        super::storage::MAX_LOCAL_GARDEN_BYTES,
+    )?;
     let published_ids: BTreeSet<Hash32> = ledger
         .state
         .objects
@@ -742,6 +767,7 @@ pub async fn spawn(
     // What this node starts with came from the validators it synced from.
     let held_elsewhere = ledger.state.height;
     let verified_peers: BTreeSet<GardenKey> = peers.values().copied().collect();
+    let peer_admitted_at: BTreeMap<PeerId, Instant> = peers.keys().map(|p| (*p, now)).collect();
     for peer in peers.keys().copied() {
         let _ = garden_net.commands.send(NetCommand::Admit(peer)).await;
     }
@@ -795,7 +821,14 @@ pub async fn spawn(
         dial_failures: BTreeMap::new(),
         dials: BTreeMap::new(),
         gossip_budget: BTreeMap::new(),
+        sync_budget: BTreeMap::new(),
         object_budget: BTreeMap::new(),
+        put_object_budget: BTreeMap::new(),
+        peer_admitted_at,
+        disconnect_after: BTreeMap::new(),
+        turned_away_keys: BTreeSet::new(),
+        turned_away_order: VecDeque::new(),
+        remote_admission: None,
         seed_dials: None,
         fetches: BTreeMap::new(),
         fetch_tags: BTreeMap::new(),
@@ -948,6 +981,15 @@ async fn bootstrap(
                         passed.insert(peer, reason);
                         continue;
                     }
+                    if u64::from(shown.limits.max_object_bytes)
+                        > super::storage::MAX_LOCAL_GARDEN_BYTES
+                    {
+                        passed.insert(
+                            peer,
+                            "garden object size limit exceeds local storage ceiling".into(),
+                        );
+                        continue;
+                    }
                     if peer_id_of(&peer_key)? != peer
                         || verify_signature(
                             &join_message(invite.chain_id, &peer_key),
@@ -983,6 +1025,16 @@ async fn bootstrap(
                             .into_iter()
                             .try_for_each(|commit| chain.append(commit))
                             .map(|()| done)
+                    }
+                    Ok(GardenResponse::Refused(reason))
+                        if chain.state.genesis.limits.admission
+                            == GardenAdmission::HostApproval
+                            && reason.contains("not admitted") =>
+                    {
+                        // In HostApproval mode an unseated joiner is refused
+                        // block history until the host seats its key, so start
+                        // cleanly from genesis with zero posts exposed.
+                        Ok(true)
                     }
                     _ => Err("it did not serve the chain".into()),
                 };
@@ -1119,10 +1171,23 @@ impl Node {
         if gossip_bytes(item) > MAX_OUTBOX_BYTES {
             return;
         }
+        let withhold_unseated = self.limits().admission == GardenAdmission::HostApproval
+            && match item {
+                GardenGossip::Proposal(_) | GardenGossip::Commit(_) => true,
+                GardenGossip::Tx(tx) => {
+                    // An unseated joiner still delivers its own Join request to
+                    // connected peers; every other tx (including Publish captions)
+                    // goes only to seated validators.
+                    !(matches!(tx.tx.kind, GardenTxKind::Join { .. })
+                        && tx.tx.sender == self.me
+                        && !self.is_key_seated(&self.me))
+                }
+                GardenGossip::Vote(_) | GardenGossip::Presence(_) => false,
+            };
         let targets: Vec<PeerId> = self
             .peers
             .keys()
-            .filter(|peer| Some(**peer) != except)
+            .filter(|peer| Some(**peer) != except && (!withhold_unseated || self.is_seated(peer)))
             .copied()
             .collect();
         for peer in targets {
@@ -1267,12 +1332,22 @@ impl Node {
                 self.send(peer, hello, TAG_HELLO).await;
             }
             NetEvent::Disconnected(peer) => {
-                self.peers.remove(&peer);
+                if let Some(key) = self.peers.remove(&peer) {
+                    if !self.ledger.state.validators.contains_key(&key)
+                        && !self.peers.values().any(|other| *other == key)
+                    {
+                        self.verified_peers.remove(&key);
+                    }
+                }
                 self.unadmitted.remove(&peer);
+                self.peer_admitted_at.remove(&peer);
+                self.disconnect_after.remove(&peer);
                 self.outbox.remove(&peer);
                 self.gossip_in_flight.remove(&peer);
                 self.gossip_budget.remove(&peer);
+                self.sync_budget.remove(&peer);
                 self.object_budget.remove(&peer);
+                self.put_object_budget.remove(&peer);
                 self.finish_when_delivered().await;
             }
             NetEvent::DialFailed {
@@ -1327,17 +1402,58 @@ impl Node {
     /// the host seated, so one that waits, or was turned away, reads and
     /// deposits none. It still follows the blocks, which is how it learns
     /// the answer.
-    fn is_seated(&self, peer: &PeerId) -> bool {
+    fn is_key_seated(&self, key: &GardenKey) -> bool {
         match self.limits().admission {
             GardenAdmission::Direct => true,
-            GardenAdmission::HostApproval => self.peers.get(peer).is_some_and(|key| {
-                self.ledger
-                    .state
-                    .validators
-                    .get(key)
-                    .is_some_and(|v| v.status != GardenValidatorStatus::Waiting)
-            }),
+            GardenAdmission::HostApproval => self
+                .ledger
+                .state
+                .validators
+                .get(key)
+                .is_some_and(|v| v.status != GardenValidatorStatus::Waiting),
         }
+    }
+
+    fn is_seated(&self, peer: &PeerId) -> bool {
+        self.peers
+            .get(peer)
+            .is_some_and(|key| self.is_key_seated(key))
+    }
+
+    fn unjoined_grace(&self) -> Duration {
+        millis(self.limits().round_ms)
+            .saturating_mul(40)
+            .clamp(Duration::from_secs(2), Duration::from_secs(15))
+    }
+
+    fn record_turned_away(&mut self, key: GardenKey) {
+        if self.turned_away_keys.insert(key) {
+            self.turned_away_order.push_back(key);
+            if self.turned_away_order.len() > MAX_TURNED_AWAY_KEYS {
+                if let Some(old) = self.turned_away_order.pop_front() {
+                    self.turned_away_keys.remove(&old);
+                }
+            }
+        }
+    }
+
+    async fn drop_peer_state(&mut self, victim: PeerId) {
+        if let Some(key) = self.peers.remove(&victim) {
+            if !self.ledger.state.validators.contains_key(&key)
+                && !self.peers.values().any(|other| *other == key)
+            {
+                self.verified_peers.remove(&key);
+            }
+        }
+        self.peer_admitted_at.remove(&victim);
+        self.disconnect_after.remove(&victim);
+        self.outbox.remove(&victim);
+        self.gossip_in_flight.remove(&victim);
+        self.gossip_budget.remove(&victim);
+        self.sync_budget.remove(&victim);
+        self.object_budget.remove(&victim);
+        self.put_object_budget.remove(&victim);
+        let _ = self.net.send(NetCommand::Disconnect(victim)).await;
     }
 
     /// True when `key` is the peer's own key and the invite key signed it.
@@ -1372,14 +1488,52 @@ impl Node {
                 .values()
                 .filter(|k| !self.ledger.state.validators.contains_key(*k))
                 .count();
+            let unjoined_grace = self.unjoined_grace();
             let already = self.peers.contains_key(&peer);
             let mut admit = false;
             let response = if *chain_id != self.chain_id() {
                 GardenResponse::Refused("this node runs another Garden".into())
             } else if !self.holds_invite(peer, key, invite_signature) {
                 GardenResponse::Refused("the invite does not match this Garden".into())
+            } else if !known_validator && self.turned_away_keys.contains(key) {
+                self.disconnect_after
+                    .insert(peer, Instant::now() + Duration::from_millis(250));
+                GardenResponse::Refused("the host turned this key away".into())
             } else if !already && !known_validator && unjoined_count >= MAX_UNJOINED_PEERS {
-                GardenResponse::Refused("this validator has no room for more unjoined peers".into())
+                // Reclaim an expired or turned-away unjoined slot so idle or
+                // rejected invite holders can never wedge the join door.
+                let stale_victim = self
+                    .peers
+                    .iter()
+                    .filter(|(_, k)| !self.ledger.state.validators.contains_key(*k))
+                    .filter(|(p, k)| {
+                        self.turned_away_keys.contains(*k)
+                            || self
+                                .peer_admitted_at
+                                .get(p)
+                                .is_some_and(|at| at.elapsed() >= unjoined_grace)
+                    })
+                    .min_by_key(|(p, k)| {
+                        (
+                            !self.turned_away_keys.contains(*k),
+                            self.peer_admitted_at.get(p).copied(),
+                        )
+                    })
+                    .map(|(p, _)| *p);
+                if let Some(victim) = stale_victim {
+                    self.drop_peer_state(victim).await;
+                    admit = true;
+                    GardenResponse::Welcome {
+                        genesis: Box::new(self.ledger.state.genesis.clone()),
+                        height: self.ledger.state.height,
+                        key: self.me,
+                        invite_signature: self.invite_signature.clone(),
+                    }
+                } else {
+                    GardenResponse::Refused(
+                        "this validator has no room for more unjoined peers".into(),
+                    )
+                }
             } else if !already && self.peers.len() >= peer_cap {
                 if known_validator {
                     let victim = self
@@ -1388,12 +1542,7 @@ impl Node {
                         .find(|(_, k)| !self.ledger.state.validators.contains_key(*k))
                         .map(|(p, _)| *p);
                     if let Some(victim) = victim {
-                        self.peers.remove(&victim);
-                        self.outbox.remove(&victim);
-                        self.gossip_in_flight.remove(&victim);
-                        self.gossip_budget.remove(&victim);
-                        self.object_budget.remove(&victim);
-                        let _ = self.net.send(NetCommand::Disconnect(victim)).await;
+                        self.drop_peer_state(victim).await;
                         admit = true;
                         GardenResponse::Welcome {
                             genesis: Box::new(self.ledger.state.genesis.clone()),
@@ -1418,6 +1567,9 @@ impl Node {
             };
             if admit {
                 self.peers.insert(peer, *key);
+                self.peer_admitted_at
+                    .entry(peer)
+                    .or_insert_with(Instant::now);
                 self.unadmitted.remove(&peer);
                 self.verified_peers.insert(*key);
                 self.dial_failures.retain(|(k, _), _| k != key);
@@ -1467,9 +1619,55 @@ impl Node {
                 }
             }
             GardenRequest::GetCommits { from_height, max } => {
+                if !self.is_seated(&peer) {
+                    self.respond(
+                        channel,
+                        GardenResponse::Refused("the host has not admitted this key".into()),
+                    )
+                    .await;
+                    return;
+                }
+                let now = Instant::now();
+                let entry = self.sync_budget.entry(peer).or_insert((now, 0));
+                if now.duration_since(entry.0) >= Duration::from_secs(1) {
+                    *entry = (now, 0);
+                }
+                if entry.1 >= MAX_SYNC_REQS_PER_PEER_PER_SEC {
+                    self.respond(
+                        channel,
+                        GardenResponse::Refused("sync rate limit exceeded".into()),
+                    )
+                    .await;
+                    return;
+                }
+                entry.1 = entry.1.saturating_add(1);
                 let commits =
                     take_sync_commits(&self.ledger, from_height, max, MAX_SYNC_RESPONSE_BYTES);
                 self.respond(channel, GardenResponse::Commits(commits))
+                    .await;
+            }
+            GardenRequest::AdmissionStatus => {
+                let verdict = match self.peers.get(&peer).copied() {
+                    Some(key) if self.is_key_seated(&key) => GardenAdmissionState::Seated,
+                    Some(key)
+                        if self
+                            .ledger
+                            .state
+                            .validators
+                            .get(&key)
+                            .is_some_and(|v| v.status == GardenValidatorStatus::Waiting) =>
+                    {
+                        GardenAdmissionState::Waiting
+                    }
+                    Some(key) if self.turned_away_keys.contains(&key) => {
+                        self.disconnect_after
+                            .entry(peer)
+                            .or_insert_with(|| Instant::now() + Duration::from_millis(250));
+                        GardenAdmissionState::TurnedAway
+                    }
+                    _ => GardenAdmissionState::Pending,
+                };
+                self.respond(channel, GardenResponse::AdmissionStatus(verdict))
                     .await;
             }
             GardenRequest::GetObject { .. } | GardenRequest::PutObject { .. }
@@ -1544,13 +1742,35 @@ impl Node {
             GardenRequest::PutObject { bytes } => {
                 let response = match self.peers.get(&peer).copied() {
                     None => GardenResponse::Refused("show the invite first".into()),
-                    Some(sender) => match self.store.put(&bytes) {
-                        Ok(content_id) => {
-                            self.note_unreferenced(sender, content_id);
-                            GardenResponse::Ack
+                    Some(sender) => {
+                        let now = Instant::now();
+                        let len = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+                        let max_bytes = u64::from(self.limits().max_object_bytes)
+                            .saturating_mul(2)
+                            .max(4 * 1024 * 1024);
+                        let budget = self.put_object_budget.entry(peer).or_insert((now, 0, 0));
+                        if now.duration_since(budget.0) >= Duration::from_secs(1) {
+                            *budget = (now, 0, 0);
                         }
-                        Err(e) => GardenResponse::Refused(e),
-                    },
+                        if budget.1 >= MAX_PUT_OBJECT_REQS_PER_PEER_PER_SEC
+                            || budget.2.saturating_add(len) > max_bytes
+                        {
+                            GardenResponse::Refused("deposit rate limit exceeded".into())
+                        } else {
+                            budget.1 = budget.1.saturating_add(1);
+                            budget.2 = budget.2.saturating_add(len);
+                            match self.store.put(&bytes) {
+                                Ok(content_id) => {
+                                    if self.note_unreferenced(sender, content_id) {
+                                        GardenResponse::Ack
+                                    } else {
+                                        GardenResponse::Refused("deposit queue is full".into())
+                                    }
+                                }
+                                Err(e) => GardenResponse::Refused(e),
+                            }
+                        }
+                    }
                 };
                 self.respond(channel, response).await;
             }
@@ -1562,13 +1782,27 @@ impl Node {
         self.next_tag
     }
 
-    /// True when any pending publication in the mempool names `content_id`.
+    /// True when an executable (contiguous-nonce, active-validator) pending
+    /// publication in the mempool names `content_id`. Unapplicable gap-nonce
+    /// transactions cannot pin deposits indefinitely.
     fn is_pending_content(&self, content_id: &Hash32) -> bool {
         self.mempool.values().any(|tx| {
-            matches!(
+            if !matches!(
                 &tx.tx.kind,
                 GardenTxKind::Publish { content_id: id, .. } if id == content_id
-            )
+            ) {
+                return false;
+            }
+            if !self.ledger.state.is_active(&tx.tx.sender) {
+                return false;
+            }
+            let expected = self.ledger.state.next_nonce(&tx.tx.sender);
+            if tx.tx.nonce < expected {
+                return false;
+            }
+            // Every nonce in `expected..tx.tx.nonce` must also be present in
+            // the mempool so this publication is actually reachable without a gap.
+            (expected..tx.tx.nonce).all(|n| self.mempool.contains_key(&(tx.tx.sender, n)))
         })
     }
 
@@ -1582,22 +1816,26 @@ impl Node {
     }
 
     /// Track an object no finalized publication accounts for yet, under the
-    /// peer that deposited it. A peer past its share loses its own oldest
-    /// object. When all peers together hold too many, the peer that holds
-    /// most loses one, and a peer that is no active validator goes first:
-    /// only a validator can publish.
-    fn note_unreferenced(&mut self, sender: GardenKey, content_id: Hash32) {
+    /// peer that deposited it. Returns `false` when the queue is saturated by
+    /// executable pending publications and the newly arrived deposit had to be
+    /// dropped instead of retained.
+    fn note_unreferenced(&mut self, sender: GardenKey, content_id: Hash32) -> bool {
         if self.holds_published(&content_id) {
-            return;
+            return true;
         }
         let queue = self.unreferenced.entry(sender).or_default();
         if queue.contains(&content_id) {
-            return;
+            return true;
         }
         queue.push_back(content_id);
         let mut dropped = Vec::new();
+        let mut kept = true;
         if queue.len() > MAX_UNREFERENCED_PER_PEER {
-            dropped.push(self.evict_deposit(sender, sender, content_id));
+            let evicted = self.evict_deposit(sender, sender, content_id);
+            if evicted == content_id {
+                kept = false;
+            }
+            dropped.push(evicted);
         }
         let total: usize = self.unreferenced.values().map(VecDeque::len).sum();
         if total > MAX_UNREFERENCED_OBJECTS {
@@ -1608,7 +1846,11 @@ impl Node {
                 .max_by_key(|(key, queue)| (!state.is_active(key), queue.len()))
                 .map(|(key, _)| *key);
             if let Some(owner) = heaviest {
-                dropped.push(self.evict_deposit(owner, sender, content_id));
+                let evicted = self.evict_deposit(owner, sender, content_id);
+                if evicted == content_id {
+                    kept = false;
+                }
+                dropped.push(evicted);
             }
         }
         self.unreferenced.retain(|_, queue| !queue.is_empty());
@@ -1625,6 +1867,7 @@ impl Node {
                 self.store.remove(&old);
             }
         }
+        kept
     }
 
     /// Take one deposit out of the queue of `owner` and return it.
@@ -1660,7 +1903,14 @@ impl Node {
             TAG_IGNORE => {}
             TAG_GOSSIP => {
                 let carried = self.gossip_in_flight.remove(&peer).unwrap_or(0);
-                if response.is_ok() && carried > self.held_elsewhere {
+                let active_peer = self
+                    .peers
+                    .get(&peer)
+                    .is_some_and(|key| self.ledger.state.is_active(key));
+                if matches!(response, Ok(GardenResponse::Ack))
+                    && active_peer
+                    && carried > self.held_elsewhere
+                {
                     self.held_elsewhere = carried;
                     self.report_to_budlum().await;
                 }
@@ -1683,11 +1933,32 @@ impl Node {
                         && self.holds_invite(peer, &key, &invite_signature)
                     {
                         self.peers.insert(peer, key);
+                        self.peer_admitted_at
+                            .entry(peer)
+                            .or_insert_with(Instant::now);
                         self.unadmitted.remove(&peer);
                         self.verified_peers.insert(key);
                         self.dial_failures.retain(|(k, _), _| *k != key);
                         self.dials.retain(|(k, _), _| *k != key);
                         let _ = self.net.send(NetCommand::Admit(peer)).await;
+                    }
+                }
+            }
+            TAG_ADMISSION => {
+                if let Ok(GardenResponse::AdmissionStatus(state)) = response {
+                    match state {
+                        GardenAdmissionState::Waiting => {
+                            self.remote_admission = Some(GardenAdmissionState::Waiting);
+                        }
+                        GardenAdmissionState::TurnedAway => {
+                            self.turned_away = true;
+                            self.remote_admission = None;
+                        }
+                        GardenAdmissionState::Seated => {
+                            self.remote_admission = None;
+                            self.request_sync(Some(peer)).await;
+                        }
+                        GardenAdmissionState::Pending => {}
                     }
                 }
             }
@@ -1962,9 +2233,10 @@ impl Node {
                 }
                 self.proposals.insert(hash, block.clone());
                 self.gossip(&GardenGossip::Proposal(block), from).await;
-                let orphans: Vec<GardenVote> = self.orphan_votes.drain(..).collect();
-                for vote in orphans {
-                    self.on_vote(vote, None).await;
+                let orphans: Vec<(Option<PeerId>, GardenVote)> =
+                    self.orphan_votes.drain(..).collect();
+                for (src, vote) in orphans {
+                    self.on_vote(vote, src).await;
                 }
                 self.consider(hash).await;
             }
@@ -2105,19 +2377,45 @@ impl Node {
         }
         let Some(block) = self.proposals.get(&vote.block_hash) else {
             if self.ledger.state.is_active(&vote.voter) {
-                let dup = self
+                // Attribute orphan votes by sending peer (`from`) because a
+                // vote signature cannot be verified until the block header
+                // arrives; one peer must not spoof another validator's voter
+                // key to suppress or evict genuine orphan votes.
+                let dup = self.orphan_votes.iter().any(|(src, v)| {
+                    *src == from && v.block_hash == vote.block_hash && v.voter == vote.voter
+                });
+                let per_source = self
                     .orphan_votes
                     .iter()
-                    .any(|v| v.block_hash == vote.block_hash && v.voter == vote.voter);
-                let per_voter = self
-                    .orphan_votes
-                    .iter()
-                    .filter(|v| v.voter == vote.voter)
+                    .filter(|(src, _)| *src == from)
                     .count();
-                if !dup && per_voter < MAX_ORPHAN_VOTES_PER_VOTER {
-                    self.orphan_votes.push_back(vote);
+                let per_source_voter = self
+                    .orphan_votes
+                    .iter()
+                    .filter(|(src, v)| *src == from && v.voter == vote.voter)
+                    .count();
+                if !dup
+                    && per_source < MAX_ORPHAN_VOTES_PER_PEER
+                    && per_source_voter < MAX_ORPHAN_VOTES_PER_VOTER
+                {
+                    self.orphan_votes.push_back((from, vote));
                     if self.orphan_votes.len() > MAX_ORPHAN_VOTES {
-                        self.orphan_votes.pop_front();
+                        // Evict the oldest entry from the peer holding the most
+                        // orphan slots so a single noisy peer cannot evict
+                        // honest validators' votes.
+                        let mut counts: BTreeMap<Option<PeerId>, usize> = BTreeMap::new();
+                        for (src, _) in &self.orphan_votes {
+                            *counts.entry(*src).or_insert(0) += 1;
+                        }
+                        if let Some((heaviest, _)) = counts.into_iter().max_by_key(|(_, n)| *n) {
+                            if let Some(pos) = self
+                                .orphan_votes
+                                .iter()
+                                .position(|(src, _)| *src == heaviest)
+                            {
+                                self.orphan_votes.remove(pos);
+                            }
+                        }
                     }
                 }
             }
@@ -2232,7 +2530,6 @@ impl Node {
             self.peers.keys().nth(self.sync_cursor).copied()
         };
         if let Some(peer) = peer {
-            self.last_sync = Instant::now();
             self.send(
                 peer,
                 GardenRequest::GetCommits {
@@ -2301,8 +2598,31 @@ impl Node {
                 // The silence of a key is counted from the block that seats
                 // it, not from the request it sent while it waited.
                 self.last_seen.insert(*target, Instant::now());
-                if *target == self.me && !*accept {
-                    self.turned_away = true;
+                if *accept {
+                    self.turned_away_keys.remove(target);
+                } else {
+                    self.record_turned_away(*target);
+                    if *target == self.me {
+                        self.turned_away = true;
+                        self.remote_admission = None;
+                    } else {
+                        // Give the rejected peer a brief window to poll its
+                        // `TurnedAway` verdict, then reclaim its connection slot.
+                        let grace = millis(self.limits().round_ms)
+                            .saturating_mul(3)
+                            .max(Duration::from_millis(750));
+                        let rejected_peers: Vec<PeerId> = self
+                            .peers
+                            .iter()
+                            .filter(|(_, key)| **key == *target)
+                            .map(|(p, _)| *p)
+                            .collect();
+                        for p in rejected_peers {
+                            self.disconnect_after
+                                .entry(p)
+                                .or_insert_with(|| Instant::now() + grace);
+                        }
+                    }
                 }
             }
         }
@@ -2352,6 +2672,16 @@ impl Node {
             .get(&content_id)
             .is_some_and(|len| !self.ledger.state.accounts_for(&content_id, *len));
         if unpaid {
+            return;
+        }
+        let declared_size = self
+            .ledger
+            .state
+            .publications(&content_id)
+            .map(|obj| u64::from(obj.size))
+            .max()
+            .unwrap_or(0);
+        if !self.store.can_fit(declared_size) {
             return;
         }
         if self.holders(&content_id).contains(&self.me) && !self.store.contains(&content_id) {
@@ -2478,6 +2808,7 @@ impl Node {
             Some(_) if settled => return,
             // The request is in the record; the answer is the host's.
             Some(GardenValidatorStatus::Waiting) => return,
+            None if self.remote_admission == Some(GardenAdmissionState::Waiting) => return,
             None if self.turned_away => return,
             None if self.observed_status() != DomainStatus::Active => return,
             None => GardenTxKind::Join {
@@ -2573,10 +2904,9 @@ impl Node {
         self.consider(hash).await;
     }
 
-    /// Close the connections of peers that did not show the invite in time.
-    /// A refusal reaches the peer first: the grace is far longer than one
-    /// answer takes. Without this a peer that holds no invite keeps one of
-    /// the connection slots for as long as it keeps talking.
+    /// Close the connections of peers that did not show the invite in time,
+    /// peers that passed `Hello` but never joined before the unjoined grace
+    /// expired, and peers scheduled for disconnect after a refusal/verdict.
     async fn drop_strangers(&mut self) {
         let grace = millis(self.limits().round_ms)
             .saturating_mul(2)
@@ -2590,6 +2920,32 @@ impl Node {
         for peer in overdue {
             self.unadmitted.remove(&peer);
             let _ = self.net.send(NetCommand::Disconnect(peer)).await;
+        }
+        let unjoined_grace = self.unjoined_grace();
+        let expired_unjoined: Vec<PeerId> = self
+            .peers
+            .iter()
+            .filter(|(peer, key)| {
+                !self.ledger.state.validators.contains_key(*key)
+                    && self
+                        .peer_admitted_at
+                        .get(peer)
+                        .is_some_and(|at| at.elapsed() >= unjoined_grace)
+            })
+            .map(|(peer, _)| *peer)
+            .collect();
+        for peer in expired_unjoined {
+            self.drop_peer_state(peer).await;
+        }
+        let now = Instant::now();
+        let scheduled: Vec<PeerId> = self
+            .disconnect_after
+            .iter()
+            .filter(|(_, when)| now >= **when)
+            .map(|(peer, _)| *peer)
+            .collect();
+        for peer in scheduled {
+            self.drop_peer_state(peer).await;
         }
     }
 
@@ -2625,14 +2981,46 @@ impl Node {
             self.report_to_budlum().await;
         }
         if self.last_sync.elapsed() >= millis(limits.round_ms.max(250)) {
-            self.request_sync(None).await;
+            // Only the periodic timer resets `last_sync`; peer-triggered syncs
+            // must never starve periodic sync or `wanted` content fetches.
+            self.last_sync = Instant::now();
+            if limits.admission == GardenAdmission::HostApproval
+                && !self.is_key_seated(&self.me)
+                && !self.turned_away
+            {
+                if let Some(peer) = self.peers.keys().next().copied() {
+                    self.send(peer, GardenRequest::AdmissionStatus, TAG_ADMISSION)
+                        .await;
+                }
+            } else {
+                self.request_sync(None).await;
+            }
+            let mut over_budget = Vec::new();
             let missing: Vec<Hash32> = self
                 .wanted
                 .iter()
                 .filter(|id| !self.fetches.contains_key(*id))
+                .filter(|id| {
+                    let declared = self
+                        .ledger
+                        .state
+                        .publications(id)
+                        .map(|obj| u64::from(obj.size))
+                        .max()
+                        .unwrap_or(0);
+                    if self.store.can_fit(declared) {
+                        true
+                    } else {
+                        over_budget.push(**id);
+                        false
+                    }
+                })
                 .copied()
                 .take(FETCH_FANOUT)
                 .collect();
+            for id in over_budget {
+                self.wanted.remove(&id);
+            }
             for id in missing {
                 self.start_fetch(id, true, None).await;
             }
@@ -3018,7 +3406,14 @@ impl Node {
                 "name": self.name,
                 "host": self.is_host(),
                 "address": self.address,
-                "member": state.validators.get(&self.me).map(|v| v.status.label()),
+                "member": state
+                    .validators
+                    .get(&self.me)
+                    .map(|v| v.status.label())
+                    .or_else(|| {
+                        (self.remote_admission == Some(GardenAdmissionState::Waiting))
+                            .then_some("Waiting")
+                    }),
                 "turned_away": self.turned_away,
                 "leaving": self.leaving.is_some(),
             },
@@ -5061,8 +5456,19 @@ mod tests {
         let welcome_key = key_of(&welcome.status().await.unwrap());
         let unwelcome_key = key_of(&unwelcome.status().await.unwrap());
 
-        // A node that waits publishes nothing, reads no content, and does
-        // not answer for the host: not for another key, not for its own.
+        // A node that waits publishes nothing, reads no content, receives no
+        // block history or captions, and does not answer for the host: not for
+        // another key, not for its own.
+        assert_eq!(
+            welcome.feed(20).await.unwrap()["total"],
+            json!(0),
+            "a waiting node must not receive posts or captions before admission"
+        );
+        assert_eq!(
+            unwelcome.feed(20).await.unwrap()["total"],
+            json!(0),
+            "an unadmitted node must not receive posts or captions"
+        );
         let refusal = say(welcome, "early").await.unwrap_err();
         assert!(refusal.contains("not an active validator"), "{refusal}");
         assert!(
@@ -5106,6 +5512,11 @@ mod tests {
         );
         let outside = unwelcome.status().await.unwrap();
         assert_eq!(outside["me"]["member"], Value::Null, "{outside}");
+        assert_eq!(
+            unwelcome.feed(20).await.unwrap()["total"],
+            json!(0),
+            "a turned-away node must never have received posts or captions"
+        );
         // A second answer for the same key has nothing to answer.
         let refusal = host.admit(unwelcome_key, true).await.unwrap_err();
         assert!(refusal.contains("not waiting"), "{refusal}");
@@ -5371,6 +5782,86 @@ mod tests {
             }
         }
         assert!(refused_gossip, "expected Gossip rate limit refusal");
+
+        let mut refused_sync = false;
+        for _ in 0..(MAX_SYNC_REQS_PER_PEER_PER_SEC + 4) {
+            if let GardenResponse::Refused(reason) = ask(
+                &mut swarm,
+                peer,
+                GardenRequest::GetCommits {
+                    from_height: 1,
+                    max: 4,
+                },
+            )
+            .await
+            {
+                if reason.contains("rate limit") {
+                    refused_sync = true;
+                    break;
+                }
+            }
+        }
+        assert!(refused_sync, "expected GetCommits rate limit refusal");
+
+        let mut refused_put = false;
+        for i in 0..(MAX_PUT_OBJECT_REQS_PER_PEER_PER_SEC + 4) {
+            if let GardenResponse::Refused(reason) = ask(
+                &mut swarm,
+                peer,
+                GardenRequest::PutObject {
+                    bytes: format!("deposit-rate-{i}").into_bytes(),
+                },
+            )
+            .await
+            {
+                if reason.contains("rate limit") {
+                    refused_put = true;
+                    break;
+                }
+            }
+        }
+        assert!(refused_put, "expected PutObject rate limit refusal");
+        handle.leave().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn garden_idle_unjoined_peers_expire_and_free_slots_for_new_joiners() {
+        let handle = spawn(
+            GardenEntry::Create {
+                title: "Expire".into(),
+                limits: GardenLimits {
+                    round_ms: 50,
+                    ..GardenLimits::testnet_default()
+                },
+            },
+            config("host", "/ip4/127.0.0.1/tcp/0"),
+            random_bytes(),
+            None,
+        )
+        .await
+        .unwrap();
+        let invite = handle.invite().await.unwrap();
+        let mut held = Vec::new();
+        for _ in 0..MAX_UNJOINED_PEERS {
+            held.push(guest(&invite).await);
+        }
+        // Wait past the 2-second unjoined grace so the idle guests expire.
+        tokio::time::sleep(Duration::from_millis(2400)).await;
+        let (mut fresh, key, peer) = stranger(&invite).await;
+        let me = key.public_key_bytes();
+        let hello = GardenRequest::Hello {
+            chain_id: invite.chain_id,
+            key: me,
+            invite_signature: invite_keypair(&invite.token)
+                .unwrap()
+                .sign(&join_message(invite.chain_id, &me))
+                .to_vec(),
+        };
+        match ask(&mut fresh, peer, hello).await {
+            GardenResponse::Welcome { .. } => {}
+            other => panic!("expected Welcome after idle unjoined expiry, got {other:?}"),
+        }
+        drop(held);
         handle.leave().await.unwrap();
     }
 }
