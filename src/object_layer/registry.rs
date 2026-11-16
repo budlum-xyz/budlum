@@ -463,7 +463,7 @@ impl ObjectLayerRegistry {
         Ok(true)
     }
 
-    fn active_charter(&self, domain: DomainId) -> Result<&DomainCharter, Refusal> {
+    pub(crate) fn active_charter(&self, domain: DomainId) -> Result<&DomainCharter, Refusal> {
         let charter = self.charters.get(&domain).ok_or(Refusal::NoCharter)?;
         if charter.status != CharterStatus::Active {
             return Err(Refusal::CharterNotActive);
@@ -1594,7 +1594,12 @@ impl ObjectLayerRegistry {
         {
             return Err(Refusal::NotAuthorized);
         }
-        let _ = self.active_charter(domain)?;
+        let charter = self.active_charter(domain)?;
+        if crate::object_layer::family::profile_for(charter.vm_family).home_key_scheme()
+            != auth.scheme
+        {
+            return Err(Refusal::NotAuthorized);
+        }
         let action_digest = home_stipend_action_digest(action)?;
         verifier
             .ok_or(Refusal::NotAuthorized)?

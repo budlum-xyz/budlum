@@ -728,3 +728,88 @@ fn bud3_object_replacement_is_the_signed_door_path() {
         "ReplaceObject charges both the tx fee and the new object's storage fee"
     );
 }
+
+#[test]
+fn replace_object_rejects_slashed_or_jailed_validator_even_when_present_in_directory() {
+    let owner = Address::from([OWNER; 32]);
+    let proposer = Address::from([FULL_A; 32]);
+    let mut state = AccountState::new();
+    state.add_balance(&owner, 50_000);
+    state.add_balance(&proposer, 50_000);
+
+    for (idx, v) in [FULL_A, FULL_B, FULL_C].into_iter().enumerate() {
+        let v_addr = Address::from([v; 32]);
+        let pk = ml_dsa_public_key(SchemeId::ML_DSA_65, &[v; 32]).unwrap();
+        state.add_validator(v_addr, 100_000);
+        let info = state.get_validator_mut(&v_addr).unwrap();
+        info.pq_public_key = pk.clone();
+        if idx == 0 {
+            info.jailed = true;
+        }
+        if idx == 1 {
+            info.slashed = true;
+        }
+        let reg = crate::validators::ValidatorRegistration {
+            owner: v_addr,
+            class: crate::validators::ValidatorClass::Full,
+            operator_key: pk.clone(),
+            bls_key: vec![v; crate::validators::BLS_KEY_LEN],
+            bls_pop: vec![v; crate::validators::BLS_POP_LEN],
+            seat: Some(crate::validators::SeatFields {
+                vrf_key: vec![v; 32],
+                pq_vote_key: pk,
+                leader_commitment: crate::validators::LeaderCommitment {
+                    commitment: [v; 32],
+                    length: 16,
+                },
+            }),
+            custody_quota_bytes: 1_000_000,
+            relay_offer: None,
+            gateway_offer: None,
+            peer_id: [v; 32],
+        };
+        state
+            .validator_directory
+            .register(&reg, 100_000, 1, 0)
+            .expect("register validator in directory");
+    }
+
+    let (record, shares) = upload(b"replace-slashed-validator-test");
+    let old = record.commitment;
+    Executor::apply_transaction_checked(
+        &mut state,
+        &storage_tx(
+            owner,
+            0,
+            1,
+            StorageTxV3::RegisterObject {
+                record: record.clone(),
+                shares,
+                lifetime_epochs: 100,
+            },
+        ),
+    )
+    .unwrap();
+
+    let new_record = recoded(&record, 0x2B, 48);
+    let atts = attestations(&old, &new_record);
+    assert!(
+        Executor::apply_transaction_checked(
+            &mut state,
+            &storage_tx(
+                proposer,
+                0,
+                1,
+                StorageTxV3::ReplaceObject {
+                    old_object: old,
+                    new_record,
+                    new_shares: placement(1),
+                    attestations: atts,
+                    proposer_stake: 100_000,
+                },
+            ),
+        )
+        .is_err(),
+        "jailed or slashed validators must never satisfy ReplaceObject quorum via validator_directory fallback"
+    );
+}
