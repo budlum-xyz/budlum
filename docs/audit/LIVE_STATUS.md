@@ -63,7 +63,7 @@ For each row, locate the current production path and file:line, choose or cite a
 | BLG-055 | Section 14.3, L2645 | Critical | WP-44 | Unknown / unverified | Not recorded | Not collected |
 | BLG-056 | Section 14.3, L2646 | High | WP-44 | Fixed in tree. The bridge enforces `require_slashable` for every external domain it admits. | cross_domain::external::domain_bridge::tests::require_slashable_is_enforced_at_the_bridge | src/cross_domain/external/domain_bridge.rs:163 |
 | BLG-057 | Section 14.3, L2647 | High | WP-44 | Fixed in tree. The bridge transfer carries a bounded expiry, the expiry queue is keyed by height, and the replay store refuses a second delivery. | cross_domain bridge lifecycle tests | src/cross_domain/bridge.rs:270 |
-| BLG-058 | Section 14.3, L2648 | High | WP-44 | Unknown / unverified | Not recorded | Not collected |
+| BLG-058 | Section 14.3, L2648 | High | WP-44 | Fixed in tree. The domain leaf check consults the ZK program allow list, so a program that is not listed cannot settle. | settlement domain leaf tests | src/settlement/domains.rs:1269 |
 | BLG-059 | Section 14.3, L2649 | Critical | WP-45 | Open. The feature is closed on testnet, which the TLG rule accepts as the launch state. | tests::testnet_closed_features::ai_execution_proof_is_closed_on_testnet (green in the lib run) | src/tests/testnet_closed_features.rs:48 |
 | BLG-060 | Section 14.3, L2650 | Critical | WP-45 | Open. The feature is closed on testnet, which the TLG rule accepts as the launch state. | tests::testnet_closed_features::ai_execution_proof_is_closed_on_testnet (green in the lib run) | src/tests/testnet_closed_features.rs:48 |
 | BLG-061 | Section 14.3, L2651 | High | WP-45 | Open. The feature is closed on testnet, which the TLG rule accepts as the launch state. | tests::testnet_closed_features::ai_layer_is_closed_on_testnet (green in the lib run) | src/tests/testnet_closed_features.rs:70 |
@@ -111,7 +111,7 @@ For each row, locate the current production path and file:line, choose or cite a
 | BLG-103 | Section 14.3, L2693 | Critical | WP-17 | Unknown / unverified | Not recorded | Not collected |
 | BLG-104 | Section 14.3, L2694 | Critical | WP-17 | Fixed in tree. The byte budget is charged after the count check and before the replacement is removed, so a refusal cannot delete a transaction it does not replace. | mempool::pool tests (byte budget and replacement refusal) | src/mempool/pool.rs:528 |
 | BLG-105 | Section 14.3, L2695 | Critical | WP-44 | Fixed in tree. The burn records the debit it made, and the claim pays the recorded debit rather than the gross amount. | cross_domain::evm::bud_to_eth tests | src/cross_domain/evm/bud_to_eth.rs:135 |
-| BLG-106 | Section 14.3, L2696 | Critical | WP-45 | Unknown / unverified | Not recorded | Not collected |
+| BLG-106 | Section 14.3, L2696 | Critical | WP-45 | Fixed in tree. The execution dims width is bounded to 2..=32 layers and no layer may be zero before any allocation. | ai::types dims bounds test | src/ai/types.rs:308 |
 | BLG-107 | Section 14.3, L2697 | Critical | WP-17 | Unknown / unverified | Not recorded | Not collected |
 | BLG-108 | Section 14.3, L2698 | Critical | WP-15 | Unknown / unverified | Not recorded | Not collected |
 | BLG-109 | Section 14.3, L2699 | Critical | WP-23 | Unknown / unverified | Not recorded | Not collected |
@@ -218,7 +218,7 @@ For each row, locate the current production path and file:line, choose or cite a
 | BLG-210 | Section 14.4, L2811 | High | WP-19 | Unknown / unverified | Not recorded | Not collected |
 | BLG-211 | Section 14.4, L2812 | Medium | WP-19 | Unknown / unverified | Not recorded | Not collected |
 | BLG-212 | Section 14.4, L2813 | Critical | WP-21, WP-23 | Unknown / unverified | Not recorded | Not collected |
-| BLG-213 | Section 14.4, L2814 | High | WP-18 | Unknown / unverified | Not recorded | Not collected |
+| BLG-213 | Section 14.4, L2814 | High | WP-18 | Fixed in this round for the frame container. The raw-frame mux refuses a frame or a frame count that does not fit its 32-bit field instead of truncating it. | storage::qr_codec::field_width_tests::a_container_field_wider_than_32_bits_is_refused | src/storage/qr_codec.rs:126 |
 | BLG-214 | Section 14.4, L2815 | Medium | WP-19 | Unknown / unverified | Not recorded | Not collected |
 | BLG-215 | Section 14.4, L2816 | High | WP-19 | Unknown / unverified | Not recorded | Not collected |
 | BLG-216 | Section 14.4, L2817 | High | WP-18 | Unknown / unverified | Not recorded | Not collected |
