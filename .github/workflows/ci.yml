@@ -2066,7 +2066,7 @@ jobs:
     # Name canary: if a test is deleted or renamed the gate FAILs.
     name: BNS Name Registry (8/8 isim-kilitli)
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 75
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -2105,6 +2105,15 @@ jobs:
           set -euo pipefail
           cargo test --lib bns 2>&1 | tee /tmp/bns-gate.txt
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- bns-gate /tmp/bns-gate.txt
+      - name: Gateway gate canary (proof it is not vacuous)
+        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- gateway-gate --self-test
+      - name: gateway - name-locked tests
+        run: |
+          set -euo pipefail
+          cargo test --lib web_gateway 2>&1 | tee /tmp/gateway-gate.txt
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- gateway-gate /tmp/gateway-gate.txt
+      - name: gateway process tests
+        run: cargo test --bin budlum-gateway
 
   # ============================  /  (P0) ============================
   # Strict mode: every job below is a FAIL gate from day one (by intent).
