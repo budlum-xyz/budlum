@@ -1,6 +1,7 @@
-//! B.U.D. 3.0 view flow (G1-G8), network-backed reveal sessions (`bud_storageOpenReveal`,
-//! `bud_storageRevealFrames`, `bud_storageCloseReveal`), and paid public G8 fallback
-//! decoding (Section 6.5).
+//! B.U.D. 3.0 view flow, network reveal sessions, and paid fallback decoding.
+//!
+//! Covers G1-G8 views (`bud_storageOpenReveal`, `bud_storageRevealFrames`,
+//! `bud_storageCloseReveal`) and paid public G8 fallback decoding (Section 6.5).
 //! exposed for `Bud3RpcService`, `Bud3ContentGateway`, and BNS/SocialFi viewers.
 //!
 //! Security invariants enforced here:
@@ -85,9 +86,10 @@ impl MemorySymbolNetwork {
     }
 }
 
-/// The symbol source of a node that holds no symbols and has no symbol
-/// transport attached. Every read comes back empty, so a view through it
-/// fails with a missing-symbols error and never returns unverified bytes.
+/// Symbol source of a node that holds no symbols and has no symbol transport.
+///
+/// Every read comes back empty, so a view through it fails with a
+/// missing-symbols error and never returns unverified bytes.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct NoSymbolsHeld;
 
@@ -512,15 +514,26 @@ mod tests {
         reg.register_object(
             [1; 32],
             sealed_up.record,
-            vec![(
-                0,
-                Share {
-                    validator: full_h,
-                    class: Class::Full,
-                    first_esi: 0,
-                    symbols: 8,
-                },
-            )],
+            vec![
+                (
+                    0,
+                    Share {
+                        validator: full_h,
+                        class: Class::Full,
+                        first_esi: 0,
+                        symbols: 4,
+                    },
+                ),
+                (
+                    0,
+                    Share {
+                        validator: mob_h,
+                        class: Class::Mobile,
+                        first_esi: 4,
+                        symbols: 4,
+                    },
+                ),
+            ],
             0,
             20,
         )

@@ -33,10 +33,12 @@ fn rank(randomness: &[u8; 32], address: &[u8]) -> [u8; 32] {
     hasher.finalize().into()
 }
 
-/// The indices (into `validators`) of the members that sign the PQ part of the Handoff
-/// Certificate, in ascending index order. With [`COMMITTEE_SIZE`] or fewer validators every
-/// index is returned: the whole set signs. A duplicate address ranks by its own hash and an
-/// index tie-break, so the result stays total and deterministic.
+/// Indices of the members that sign the PQ part of the Handoff Certificate.
+///
+/// Returned in ascending index order. With [`COMMITTEE_SIZE`] or fewer
+/// validators every index is returned so the whole set signs. A duplicate
+/// address ranks by its own hash and an index tie-break, keeping the result
+/// total and deterministic.
 #[must_use]
 /// WIRING: consensus surface kept public for the QC, Filiz and handoff wiring; production callers land with it.
 pub fn handoff_committee(validators: &[Vec<u8>], randomness: &[u8; 32]) -> Vec<usize> {
@@ -114,8 +116,9 @@ pub fn set_digest(chain_id: u64, epoch: u64, members: &[HandoffMember]) -> [u8; 
     hasher.finalize().into()
 }
 
-/// One committee member's ML-DSA-65 signature; `index` is the member's
-/// position in the outgoing set.
+/// One committee member's ML-DSA-65 signature.
+///
+/// `index` is the member's position in the outgoing set.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 /// WIRING: consensus surface kept public for the QC, Filiz and handoff wiring; production callers land with it.
 pub struct HandoffSignature {
@@ -258,6 +261,22 @@ impl HandoffCertificate {
                 committee: committee.len(),
             });
         }
+        // Seat count alone is a head count: registration is permissionless at
+        // the stake floor, so cheap addresses must not outweigh bonded stake.
+        // Require strictly more than two thirds of the outgoing set's committed
+        // stake as well as more than two thirds of the committee seats.
+        let total_stake: u128 = outgoing.iter().map(|m| u128::from(m.stake)).sum();
+        let signed_stake: u128 = self
+            .signatures
+            .iter()
+            .map(|entry| u128::from(outgoing[entry.index as usize].stake))
+            .sum();
+        if total_stake == 0 || signed_stake * 3 <= total_stake * 2 {
+            return Err(HandoffError::Quorum {
+                signed,
+                committee: committee.len(),
+            });
+        }
         let message = self.signing_message();
         for entry in &self.signatures {
             let member = &outgoing[entry.index as usize];
@@ -311,6 +330,9 @@ pub fn follow_handoffs<'a>(
         }
         cert.verify_in(registry, current, epoch_randomness(cert.epoch))?;
         epoch = epoch.saturating_add(1);
+        if !incoming_set_is_valid(incoming) {
+            return Err(HandoffError::IncomingSet);
+        }
         if set_digest(chain_id, epoch, incoming) != cert.incoming_set {
             return Err(HandoffError::IncomingSet);
         }
@@ -319,12 +341,31 @@ pub fn follow_handoffs<'a>(
     Ok((epoch, current))
 }
 
+fn incoming_set_is_valid(incoming: &[HandoffMember]) -> bool {
+    if incoming.is_empty() {
+        return false;
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    for member in incoming {
+        if member.address.is_empty()
+            || member.pq_public_key.is_empty()
+            || member.stake == 0
+            || !seen.insert(member.address.as_slice())
+        {
+            return false;
+        }
+    }
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn set(n: usize) -> Vec<Vec<u8>> {
-        (0..n).map(|i| (i as u32).to_be_bytes().to_vec()).collect()
+        (0..n)
+            .map(|i| u32::try_from(i).unwrap_or(u32::MAX).to_be_bytes().to_vec())
+            .collect()
     }
 
     #[test]
@@ -442,6 +483,84 @@ mod tests {
         assert_eq!(
             follow_handoffs(&registry, 7, 4, &outgoing, &[(cert, forged_set)], &|_| [3;
                 32]),
+            Err(HandoffError::IncomingSet)
+        );
+    }
+
+    #[test]
+    fn seat_majority_without_two_thirds_stake_is_refused() {
+        let registry = crate::crypto::scheme::SchemeStatusRegistry::genesis();
+        let keys: Vec<_> = (0..4)
+            .map(|_| crate::crypto::primitives::PqKeyPair::generate())
+            .collect();
+        let mut outgoing = members(&keys);
+        // Member 3 holds 1_000 stake; members 0..3 hold 1 stake each (3/4 seats, 3/1003 stake).
+        outgoing[0].stake = 1;
+        outgoing[1].stake = 1;
+        outgoing[2].stake = 1;
+        outgoing[3].stake = 1_000;
+        let incoming = outgoing.clone();
+
+        let low_stake_cert = signed(&keys, &outgoing, &incoming, &[0, 1, 2]);
+        assert!(
+            matches!(
+                low_stake_cert.verify_in(&registry, &outgoing, [3; 32]),
+                Err(HandoffError::Quorum {
+                    signed: 3,
+                    committee: 4
+                })
+            ),
+            "3 of 4 seats with <2/3 committed stake must not clear handoff quorum"
+        );
+
+        let high_stake_cert = signed(&keys, &outgoing, &incoming, &[0, 1, 3]);
+        assert!(high_stake_cert
+            .verify_in(&registry, &outgoing, [3; 32])
+            .is_ok());
+    }
+
+    #[test]
+    fn follow_handoffs_refuses_invalid_successor_sets() {
+        let registry = crate::crypto::scheme::SchemeStatusRegistry::genesis();
+        let keys: Vec<_> = (0..3)
+            .map(|_| crate::crypto::primitives::PqKeyPair::generate())
+            .collect();
+        let outgoing = members(&keys);
+
+        let empty_incoming: Vec<HandoffMember> = Vec::new();
+        let cert_empty = signed(&keys, &outgoing, &empty_incoming, &[0, 1, 2]);
+        assert_eq!(
+            follow_handoffs(
+                &registry,
+                7,
+                4,
+                &outgoing,
+                &[(cert_empty, empty_incoming)],
+                &|_| [3; 32]
+            ),
+            Err(HandoffError::IncomingSet)
+        );
+
+        let mut zero_stake = outgoing.clone();
+        zero_stake[0].stake = 0;
+        let cert_zero = signed(&keys, &outgoing, &zero_stake, &[0, 1, 2]);
+        assert_eq!(
+            follow_handoffs(
+                &registry,
+                7,
+                4,
+                &outgoing,
+                &[(cert_zero, zero_stake)],
+                &|_| [3; 32]
+            ),
+            Err(HandoffError::IncomingSet)
+        );
+
+        let mut dup = outgoing.clone();
+        dup[1].address = dup[0].address.clone();
+        let cert_dup = signed(&keys, &outgoing, &dup, &[0, 1, 2]);
+        assert_eq!(
+            follow_handoffs(&registry, 7, 4, &outgoing, &[(cert_dup, dup)], &|_| [3; 32]),
             Err(HandoffError::IncomingSet)
         );
     }
