@@ -27,9 +27,9 @@ For closure, record named reproduction test and pre-fix red result (or permanent
 | BLG-019 | Unknown / unverified | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded |
 | BLG-020 | Unknown / unverified | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded |
 | BLG-021 | Unknown / unverified | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded |
-| BLG-022 | Unknown / unverified | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded |
+| BLG-022 | Fixed in tree. Closed-form walk, no loop. | light_client::tests::next_checkpoint_height_is_closed_form; tests::regression_ops_crypto::next_checkpoint_height_terminates_at_the_u64_edge (both green, local run 2026-11-16) | src/light_client/mod.rs:689 | 36959d6b54f3783cfd997d93b93449dd0c159ff0 | 43811629332 (queued at write time) | Not needed, the feature is on and the test is green | Self review of the live source, not an independent reviewer |
 | BLG-023 | Unknown / unverified | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded |
-| BLG-024 | Unknown / unverified | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded |
+| BLG-024 | Fixed in this round. A zero denominator requires every authority instead of calling div_ceil(0). | domain::finality_adapter::tests::a_poa_adapter_with_a_zero_denominator_requires_every_authority (green, local run 2026-11-16) | src/domain/finality_adapter.rs:815 | 36959d6b54f3783cfd997d93b93449dd0c159ff0 | 43811629332 (queued at write time) | Not needed, the feature is on and the test is green | Self review of the live source, not an independent reviewer |
 | BLG-025 | Unknown / unverified | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded |
 | BLG-026 | Unknown / unverified | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded |
 | BLG-027 | Unknown / unverified | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded |
@@ -38,13 +38,13 @@ For closure, record named reproduction test and pre-fix red result (or permanent
 | BLG-030 | Unknown / unverified | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded |
 | BLG-031 | Unknown / unverified | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded |
 | BLG-032 | Unknown / unverified | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded |
-| BLG-033 | Unknown / unverified | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded |
+| BLG-033 | Fixed in tree. Every unbounded P2P decode goes through a byte-limited decoder. | network::bounded_bincode::tests (green in the lib run that carries this row) | src/network/bounded_bincode.rs:459 | 36959d6b54f3783cfd997d93b93449dd0c159ff0 | 43811629332 (queued at write time) | Not needed, the feature is on and the test is green | Self review of the live source, not an independent reviewer |
 | BLG-034 | Unknown / unverified | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded |
 | BLG-035 | Unknown / unverified | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded |
 | BLG-036 | Unknown / unverified | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded |
 | BLG-037 | Unknown / unverified | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded |
 | BLG-038 | Unknown / unverified | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded |
-| BLG-039 | Unknown / unverified | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded |
+| BLG-039 | Fixed in tree. A claimed degree above the verifier ceiling is refused before any shift. | budzero bud-proof verifier: degree_bits_ceiling_guards_goldilocks_two_adicity (green in the budzero crate run) | budzero/bud-proof/src/bud_stark/verifier.rs:359 | 36959d6b54f3783cfd997d93b93449dd0c159ff0 | 43811629332 (queued at write time) | Not needed, the feature is on and the test is green | Self review of the live source, not an independent reviewer |
 | BLG-040 | Unknown / unverified | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded |
 | BLG-041 | Unknown / unverified | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded |
 | BLG-042 | Unknown / unverified | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded |
@@ -104,7 +104,7 @@ For closure, record named reproduction test and pre-fix red result (or permanent
 | BLG-096 | Unknown / unverified | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded |
 | BLG-097 | Unknown / unverified | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded |
 | BLG-098 | Unknown / unverified | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded |
-| BLG-099 | Unknown / unverified | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded |
+| BLG-099 | Fixed in tree. No self comparison on a length mismatch. | tests::hardening_h4_locks::constant_time_eq_str_correctness; tests::regression_ops_crypto (spec assertion) (green, local run 2026-11-16) | src/rpc/server.rs:1290 | 36959d6b54f3783cfd997d93b93449dd0c159ff0 | 43811629332 (queued at write time) | Not needed, the feature is on and the test is green | Self review of the live source, not an independent reviewer |
 | BLG-100 | Unknown / unverified | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded |
 | BLG-101 | Unknown / unverified | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded |
 | BLG-102 | Unknown / unverified | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded |
@@ -147,7 +147,7 @@ For closure, record named reproduction test and pre-fix red result (or permanent
 | BLG-139 | Unknown / unverified | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded |
 | BLG-140 | Unknown / unverified | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded |
 | BLG-141 | Unknown / unverified | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded |
-| BLG-142 | Unknown / unverified | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded |
+| BLG-142 | Fixed in tree. Same ceiling guard as BLG-039; the proof bytes cannot choose a domain size. | budzero bud-proof verifier: degree_bits_ceiling_guards_goldilocks_two_adicity | budzero/bud-proof/src/bud_stark/verifier.rs:359 | 36959d6b54f3783cfd997d93b93449dd0c159ff0 | 43811629332 (queued at write time) | Not needed, the feature is on and the test is green | Self review of the live source, not an independent reviewer |
 | BLG-143 | Unknown / unverified | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded |
 | BLG-144 | Unknown / unverified | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded |
 | BLG-145 | Unknown / unverified | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded |
@@ -155,7 +155,7 @@ For closure, record named reproduction test and pre-fix red result (or permanent
 | BLG-147 | Unknown / unverified | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded |
 | BLG-148 | Unknown / unverified | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded |
 | BLG-149 | Unknown / unverified | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded |
-| BLG-150 | Unknown / unverified | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded |
+| BLG-150 | Fixed in tree. Each signed object carries its own context tag. | tests::regression_ops_crypto::vote_signatures_are_domain_separated_from_block (green, local run 2026-11-16) | src/consensus/block_signature.rs:58 | 36959d6b54f3783cfd997d93b93449dd0c159ff0 | 43811629332 (queued at write time) | Not needed, the feature is on and the test is green | Self review of the live source, not an independent reviewer |
 | BLG-151 | Unknown / unverified | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded |
 | BLG-152 | Unknown / unverified | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded |
 | BLG-153 | Unknown / unverified | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded |
@@ -169,7 +169,7 @@ For closure, record named reproduction test and pre-fix red result (or permanent
 | BLG-161 | Unknown / unverified | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded |
 | BLG-162 | Unknown / unverified | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded |
 | BLG-163 | Unknown / unverified | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded |
-| BLG-164 | Unknown / unverified | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded |
+| BLG-164 | Fixed in tree. A height that does not fit the u32 epoch is refused, not truncated. | crates/bpqs epoch tests (green in the bpqs crate run) | crates/bpqs/src/epoch.rs:26 | 36959d6b54f3783cfd997d93b93449dd0c159ff0 | 43811629332 (queued at write time) | Not needed, the feature is on and the test is green | Self review of the live source, not an independent reviewer |
 | BLG-165 | Unknown / unverified | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded |
 | BLG-166 | Unknown / unverified | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded |
 | BLG-167 | Unknown / unverified | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded |
@@ -205,10 +205,10 @@ For closure, record named reproduction test and pre-fix red result (or permanent
 | BLG-197 | Unknown / unverified | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded |
 | BLG-198 | Unknown / unverified | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded |
 | BLG-199 | Unknown / unverified | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded |
-| BLG-200 | Unknown / unverified | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded |
+| BLG-200 | Fixed in tree. The zero scalar and the identity public key are refused. | tests::regression_ops_crypto::bls_from_bytes_refuses_zero_secret (green, local run 2026-11-16) | src/crypto/primitives.rs:152 | 36959d6b54f3783cfd997d93b93449dd0c159ff0 | 43811629332 (queued at write time) | Not needed, the feature is on and the test is green | Self review of the live source, not an independent reviewer |
 | BLG-201 | Unknown / unverified | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded |
 | BLG-202 | Unknown / unverified | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded |
-| BLG-203 | Unknown / unverified | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded |
+| BLG-203 | Fixed in tree. The proof length, element width, zero root and high index bits are all refused. | consensus::qc tests (green in the lib run that carries this row) | src/consensus/qc.rs:691 | 36959d6b54f3783cfd997d93b93449dd0c159ff0 | 43811629332 (queued at write time) | Not needed, the feature is on and the test is green | Self review of the live source, not an independent reviewer |
 | BLG-204 | Unknown / unverified | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded |
 | BLG-205 | Unknown / unverified | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded |
 | BLG-206 | Unknown / unverified | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded |
