@@ -435,10 +435,9 @@ enum DomainAction {
         #[arg(long, default_value_t = 6)]
         min_confirmations: u64,
     },
-    /// Register a proof-of-authority domain with an explicit authority-set
-    /// commitment. Repeat `--authority` at least three times; order does not
-    /// matter, but duplicate authorities are refused.
-    RegisterPoa {
+    /// Register a BFT domain (quorum-commit finality) with the wallet as its
+    /// operator; the operator bond is escrowed from it.
+    RegisterBft {
         #[command(flatten)]
         signer: V5Signer,
         /// The domain id to claim.
@@ -447,10 +446,9 @@ enum DomainAction {
         /// The domain's own chain id.
         #[arg(long, required = true)]
         chain_id: u64,
-        /// An authority address (hex, `0x` prefix optional). Repeat for every
-        /// authority in the set.
-        #[arg(long = "authority", required = true)]
-        authorities: Vec<String>,
+        /// Confirmations required by the domain configuration.
+        #[arg(long, default_value_t = 1)]
+        min_confirmations: u64,
     },
     /// Run an adapter's admission self-test offline: the golden sample must
     /// verify and every fault probe must be refused. Exits non-zero when
@@ -2092,55 +2090,24 @@ fn run_domain_register_pow(
     send_v5(rpc_url, &key, v5_template(tx_type, 0, signer.fee), None)
 }
 
-/// Build the exact PoA domain row committed by `bud domain register-poa`.
-///
-/// The authority list is part of consensus security, not display metadata: a
-/// future finality proof is accepted only when its authority set reproduces
-/// `validator_set_hash`. Requiring three explicit, distinct addresses keeps
-/// this convenience command from creating a bridge-enabled domain whose proof
-/// gate is either unset or accidentally single-key.
-fn poa_domain(
-    id: u32,
-    chain_id: u64,
-    operator: Address,
-    authorities: &[String],
-) -> Result<budlum_core::domain::ConsensusDomain, String> {
-    if authorities.len() < 3 {
-        return Err("register-poa needs at least three --authority addresses".into());
-    }
-    let parsed: Vec<Address> = authorities
-        .iter()
-        .map(|raw| parse_address(raw.strip_prefix("0x").unwrap_or(raw)))
-        .collect::<Result<_, _>>()?;
-    let unique: std::collections::BTreeSet<Address> = parsed.iter().copied().collect();
-    if unique.len() != parsed.len() {
-        return Err("register-poa authority addresses must be unique".into());
-    }
-    let mut domain = budlum_core::domain::plugin::default_domain(
-        id,
-        budlum_core::domain::ConsensusKind::PoA,
-        chain_id,
-        "poa-authority-quorum",
-        1,
-    );
-    domain.operator = Some(operator);
-    domain.validator_set_hash =
-        budlum_core::domain::finality_adapter::poa_authority_set_hash(&domain, &parsed)
-            .map_err(|error| format!("cannot commit the PoA authority set: {error}"))?;
-    Ok(domain)
-}
-
-/// `bud domain register-poa`: a PoA domain with a committed authority set and
+/// `bud domain register-bft`: a BFT domain with the quorum-commit adapter,
 /// the wallet as operator.
-fn run_domain_register_poa(
+fn run_domain_register_bft(
     rpc_url: &str,
     signer: &V5Signer,
     id: u32,
     chain_id: u64,
-    authorities: &[String],
+    min_confirmations: u64,
 ) -> Result<(), String> {
     let key = open_wallet(signer)?;
-    let domain = poa_domain(id, chain_id, key.address(), authorities)?;
+    let mut domain = budlum_core::domain::plugin::default_domain(
+        id,
+        budlum_core::domain::ConsensusKind::Bft,
+        chain_id,
+        "bft-quorum-commit",
+        min_confirmations,
+    );
+    domain.operator = Some(key.address());
     let tx_type = TransactionType::Settlement(
         budlum_core::settlement::domains::SettlementTx::RegisterDomain(Box::new(domain)),
     );
@@ -4065,12 +4032,12 @@ fn main() {
                 chain_id,
                 min_confirmations,
             } => run_domain_register_pow(&cli.rpc_url, signer, *id, *chain_id, *min_confirmations),
-            DomainAction::RegisterPoa {
+            DomainAction::RegisterBft {
                 signer,
                 id,
                 chain_id,
-                authorities,
-            } => run_domain_register_poa(&cli.rpc_url, signer, *id, *chain_id, authorities),
+                min_confirmations,
+            } => run_domain_register_bft(&cli.rpc_url, signer, *id, *chain_id, *min_confirmations),
             DomainAction::Selftest {
                 adapter,
                 network,
@@ -4928,42 +4895,6 @@ mod rpc_auth_tests {
     fn request_text(captured: &Arc<Mutex<Vec<u8>>>) -> String {
         let bytes = captured.lock().expect("capture lock").clone();
         String::from_utf8(bytes).expect("the client writes UTF-8")
-    }
-
-    #[test]
-    fn register_poa_commits_three_explicit_unique_authorities() {
-        let operator = Address::from([0x41; 32]);
-        let authority_addresses = [
-            Address::from([0x51; 32]),
-            Address::from([0x52; 32]),
-            Address::from([0x53; 32]),
-        ];
-        let authorities: Vec<String> = authority_addresses.iter().map(Address::to_hex).collect();
-        let domain = poa_domain(4242, 4242, operator, &authorities).expect("valid PoA domain");
-        assert_eq!(domain.kind, budlum_core::domain::ConsensusKind::PoA);
-        assert_eq!(domain.operator, Some(operator));
-        assert!(domain.bridge_enabled);
-        assert_eq!(
-            domain.validator_set_hash,
-            budlum_core::domain::finality_adapter::poa_authority_set_hash(
-                &domain,
-                &authority_addresses
-            )
-            .unwrap()
-        );
-
-        let too_short = authorities[..2].to_vec();
-        assert!(poa_domain(4242, 4242, operator, &too_short)
-            .unwrap_err()
-            .contains("at least three"));
-        let duplicate = vec![
-            authorities[0].clone(),
-            authorities[1].clone(),
-            authorities[1].clone(),
-        ];
-        assert!(poa_domain(4242, 4242, operator, &duplicate)
-            .unwrap_err()
-            .contains("must be unique"));
     }
 
     #[test]
