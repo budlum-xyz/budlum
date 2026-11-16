@@ -34,7 +34,7 @@ on:
   pull_request:
     branches: [main, consensus-of-consensuses]
   schedule:
-    - cron: "0 4 * * 1" # weekly, Monday 04:00 UTC
+    - cron: "0 6 * * 5" # weekly, Friday 06:00 UTC
   workflow_dispatch:
 
 permissions:
