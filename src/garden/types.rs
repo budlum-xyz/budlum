@@ -125,6 +125,27 @@ pub fn garden_domain_id(chain_id: u64) -> DomainId {
     GARDEN_DOMAIN_PREFIX | (u32::from_le_bytes(leading::<4>(&digest)) & !GARDEN_DOMAIN_PREFIX)
 }
 
+/// True when `id` lies in the half of the domain id space reserved for
+/// Garden domains derived by [`garden_domain_id`].
+pub const fn is_garden_domain_id(id: DomainId) -> bool {
+    id & GARDEN_DOMAIN_PREFIX == GARDEN_DOMAIN_PREFIX
+}
+
+/// Narrow admission verdict returned to an unseated joiner in
+/// [`GardenAdmission::HostApproval`] mode. Reveals only the caller's own
+/// status without exposing chain blocks, posts, or captions.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum GardenAdmissionState {
+    /// No `Join` transaction for this key has finalized yet.
+    Pending,
+    /// The key is waiting for the host to admit or refuse it.
+    Waiting,
+    /// The host seated the key as a validator; full sync is permitted.
+    Seated,
+    /// The host refused this key.
+    TurnedAway,
+}
+
 /// How a holder of the invite becomes a validator. The host chooses it at
 /// the founding and the genesis names it, so it holds for the whole life of
 /// the Garden.
@@ -1125,5 +1146,15 @@ mod tests {
         assert!(verify_signature(&join_message(7, &[3u8; 32]), &signature, &key).is_err());
         assert!(verify_signature(&join_message(8, &joiner), &signature, &key).is_err());
         assert_ne!(invite_keypair(&[4u8; 32]).unwrap().public_key_bytes(), key);
+    }
+
+    #[test]
+    fn garden_domain_id_predicate_separates_garden_and_canonical_ranges() {
+        for chain_id in [1u64, 7, 45_261, 999_999, u64::MAX] {
+            assert!(is_garden_domain_id(garden_domain_id(chain_id)));
+        }
+        for canonical in [0u32, 1, 2, 7, 100, GARDEN_DOMAIN_PREFIX - 1] {
+            assert!(!is_garden_domain_id(canonical));
+        }
     }
 }
