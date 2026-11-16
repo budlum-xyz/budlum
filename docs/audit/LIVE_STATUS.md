@@ -27,9 +27,9 @@ For each row, locate the current production path and file:line, choose or cite a
 | BLG-019 | Section 14.3, L2609 | Critical | WP-17 | Unknown / unverified | Not recorded | Not collected |
 | BLG-020 | Section 14.3, L2610 | Critical | WP-17 | Unknown / unverified | Not recorded | Not collected |
 | BLG-021 | Section 14.3, L2611 | Critical | WP-17 | Unknown / unverified | Not recorded | Not collected |
-| BLG-022 | Section 14.3, L2612 | Medium | WP-11 | Unknown / unverified | Not recorded | Not collected |
+| BLG-022 | Section 14.3, L2612 | Medium | WP-11 | Fixed in tree. Closed-form walk, no loop. | light_client::tests::next_checkpoint_height_is_closed_form; tests::regression_ops_crypto::next_checkpoint_height_terminates_at_the_u64_edge (both green, local run 2026-11-16) | src/light_client/mod.rs:689 |
 | BLG-023 | Section 14.3, L2613 | Medium | WP-17 | Unknown / unverified | Not recorded | Not collected |
-| BLG-024 | Section 14.3, L2614 | Low | WP-44 | Unknown / unverified | Not recorded | Not collected |
+| BLG-024 | Section 14.3, L2614 | Low | WP-44 | Fixed in this round. A zero denominator requires every authority instead of calling div_ceil(0). | domain::finality_adapter::tests::a_poa_adapter_with_a_zero_denominator_requires_every_authority (green, local run 2026-11-16) | src/domain/finality_adapter.rs:815 |
 | BLG-025 | Section 14.3, L2615 | Low | WP-45 | Unknown / unverified | Not recorded | Not collected |
 | BLG-026 | Section 14.3, L2616 | Medium | WP-39 | Unknown / unverified | Not recorded | Not collected |
 | BLG-027 | Section 14.3, L2617 | High | WP-12 | Unknown / unverified | Not recorded | Not collected |
@@ -38,13 +38,13 @@ For each row, locate the current production path and file:line, choose or cite a
 | BLG-030 | Section 14.3, L2620 | Critical | WP-41, WP-61 | Unknown / unverified | Not recorded | Not collected |
 | BLG-031 | Section 14.3, L2621 | Low | WP-17 | Unknown / unverified | Not recorded | Not collected |
 | BLG-032 | Section 14.3, L2622 | Medium | WP-61 | Unknown / unverified | Not recorded | Not collected |
-| BLG-033 | Section 14.3, L2623 | Critical | WP-15 | Unknown / unverified | Not recorded | Not collected |
+| BLG-033 | Section 14.3, L2623 | Critical | WP-15 | Fixed in tree. Every unbounded P2P decode goes through a byte-limited decoder. | network::bounded_bincode::tests (green in the lib run that carries this row) | src/network/bounded_bincode.rs:459 |
 | BLG-034 | Section 14.3, L2624 | High | WP-15 | Unknown / unverified | Not recorded | Not collected |
 | BLG-035 | Section 14.3, L2625 | Medium | WP-07 | Unknown / unverified | Not recorded | Not collected |
 | BLG-036 | Section 14.3, L2626 | Critical | WP-33 | Unknown / unverified | Not recorded | Not collected |
 | BLG-037 | Section 14.3, L2627 | Critical | WP-33 | Unknown / unverified | Not recorded | Not collected |
 | BLG-038 | Section 14.3, L2628 | Critical | WP-33 | Unknown / unverified | Not recorded | Not collected |
-| BLG-039 | Section 14.3, L2629 | Critical | WP-33 | Unknown / unverified | Not recorded | Not collected |
+| BLG-039 | Section 14.3, L2629 | Critical | WP-33 | Fixed in tree. A claimed degree above the verifier ceiling is refused before any shift. | budzero bud-proof verifier: degree_bits_ceiling_guards_goldilocks_two_adicity (green in the budzero crate run) | budzero/bud-proof/src/bud_stark/verifier.rs:359 |
 | BLG-040 | Section 14.3, L2630 | High | WP-33 | Unknown / unverified | Not recorded | Not collected |
 | BLG-041 | Section 14.3, L2631 | Critical | WP-17 | Unknown / unverified | Not recorded | Not collected |
 | BLG-042 | Section 14.3, L2632 | Critical | WP-17 | Unknown / unverified | Not recorded | Not collected |
@@ -104,7 +104,7 @@ For each row, locate the current production path and file:line, choose or cite a
 | BLG-096 | Section 14.3, L2686 | High | WP-12 | Unknown / unverified | Not recorded | Not collected |
 | BLG-097 | Section 14.3, L2687 | High | WP-42 | Unknown / unverified | Not recorded | Not collected |
 | BLG-098 | Section 14.3, L2688 | Critical | WP-39 | Unknown / unverified | Not recorded | Not collected |
-| BLG-099 | Section 14.3, L2689 | High | WP-61 | Unknown / unverified | Not recorded | Not collected |
+| BLG-099 | Section 14.3, L2689 | High | WP-61 | Fixed in tree. No self comparison on a length mismatch. | tests::hardening_h4_locks::constant_time_eq_str_correctness; tests::regression_ops_crypto (spec assertion) (green, local run 2026-11-16) | src/rpc/server.rs:1290 |
 | BLG-100 | Section 14.3, L2690 | Critical | WP-17 | Unknown / unverified | Not recorded | Not collected |
 | BLG-101 | Section 14.3, L2691 | Critical | WP-17 | Unknown / unverified | Not recorded | Not collected |
 | BLG-102 | Section 14.3, L2692 | Critical | WP-17 | Unknown / unverified | Not recorded | Not collected |
@@ -147,7 +147,7 @@ For each row, locate the current production path and file:line, choose or cite a
 | BLG-139 | Section 14.3, L2729 | Critical | WP-33 | Unknown / unverified | Not recorded | Not collected |
 | BLG-140 | Section 14.3, L2730 | High | WP-16 | Unknown / unverified | Not recorded | Not collected |
 | BLG-141 | Section 14.3, L2731 | Medium | WP-07 | Unknown / unverified | Not recorded | Not collected |
-| BLG-142 | Section 14.3, L2732 | Critical | WP-33 | Unknown / unverified | Not recorded | Not collected |
+| BLG-142 | Section 14.3, L2732 | Critical | WP-33 | Fixed in tree. Same ceiling guard as BLG-039; the proof bytes cannot choose a domain size. | budzero bud-proof verifier: degree_bits_ceiling_guards_goldilocks_two_adicity | budzero/bud-proof/src/bud_stark/verifier.rs:359 |
 | BLG-143 | Section 14.3, L2733 | High | WP-40 | Unknown / unverified | Not recorded | Not collected |
 | BLG-144 | Section 14.3, L2734 | High | WP-19 | Unknown / unverified | Not recorded | Not collected |
 | BLG-145 | Section 14.3, L2735 | Medium | WP-45 | Unknown / unverified | Not recorded | Not collected |
@@ -155,7 +155,7 @@ For each row, locate the current production path and file:line, choose or cite a
 | BLG-147 | Section 14.3, L2737 | High | WP-17 | Unknown / unverified | Not recorded | Not collected |
 | BLG-148 | Section 14.3, L2738 | High | WP-07, WP-33 | Unknown / unverified | Not recorded | Not collected |
 | BLG-149 | Section 14.3, L2739 | Medium | WP-45 | Unknown / unverified | Not recorded | Not collected |
-| BLG-150 | Section 14.3, L2740 | Critical | WP-61 | Unknown / unverified | Not recorded | Not collected |
+| BLG-150 | Section 14.3, L2740 | Critical | WP-61 | Fixed in tree. Each signed object carries its own context tag. | tests::regression_ops_crypto::vote_signatures_are_domain_separated_from_block (green, local run 2026-11-16) | src/consensus/block_signature.rs:58 |
 | BLG-151 | Section 14.3, L2741 | High | WP-17 | Unknown / unverified | Not recorded | Not collected |
 | BLG-152 | Section 14.3, L2742 | Medium | WP-07 | Unknown / unverified | Not recorded | Not collected |
 | BLG-153 | Section 14.3, L2743 | Medium | WP-07 | Unknown / unverified | Not recorded | Not collected |
@@ -169,7 +169,7 @@ For each row, locate the current production path and file:line, choose or cite a
 | BLG-161 | Section 14.3, L2751 | Medium | WP-21 | Unknown / unverified | Not recorded | Not collected |
 | BLG-162 | Section 14.3, L2752 | High | WP-33 | Unknown / unverified | Not recorded | Not collected |
 | BLG-163 | Section 14.3, L2753 | High | WP-19 | Unknown / unverified | Not recorded | Not collected |
-| BLG-164 | Section 14.3, L2754 | High | WP-45 | Unknown / unverified | Not recorded | Not collected |
+| BLG-164 | Section 14.3, L2754 | High | WP-45 | Fixed in tree. A height that does not fit the u32 epoch is refused, not truncated. | crates/bpqs epoch tests (green in the bpqs crate run) | crates/bpqs/src/epoch.rs:26 |
 | BLG-165 | Section 14.3, L2755 | Medium | WP-45 | Unknown / unverified | Not recorded | Not collected |
 | BLG-166 | Section 14.3, L2756 | Critical | WP-45 | Unknown / unverified | Not recorded | Not collected |
 | BLG-167 | Section 14.3, L2757 | High | WP-17 | Unknown / unverified | Not recorded | Not collected |
@@ -205,10 +205,10 @@ For each row, locate the current production path and file:line, choose or cite a
 | BLG-197 | Section 14.3, L2787 | Critical | WP-17 | Unknown / unverified | Not recorded | Not collected |
 | BLG-198 | Section 14.3, L2788 | Critical | WP-33 | Unknown / unverified | Not recorded | Not collected |
 | BLG-199 | Section 14.3, L2789 | High | WP-44 | Unknown / unverified | Not recorded | Not collected |
-| BLG-200 | Section 14.3, L2790 | High | WP-61 | Unknown / unverified | Not recorded | Not collected |
+| BLG-200 | Section 14.3, L2790 | High | WP-61 | Fixed in tree. The zero scalar and the identity public key are refused. | tests::regression_ops_crypto::bls_from_bytes_refuses_zero_secret (green, local run 2026-11-16) | src/crypto/primitives.rs:152 |
 | BLG-201 | Section 14.3, L2791 | High | WP-45 | Unknown / unverified | Not recorded | Not collected |
 | BLG-202 | Section 14.3, L2792 | Critical | WP-17 | Unknown / unverified | Not recorded | Not collected |
-| BLG-203 | Section 14.3, L2793 | Critical | WP-12 | Unknown / unverified | Not recorded | Not collected |
+| BLG-203 | Section 14.3, L2793 | Critical | WP-12 | Fixed in tree. The proof length, element width, zero root and high index bits are all refused. | consensus::qc tests (green in the lib run that carries this row) | src/consensus/qc.rs:691 |
 | BLG-204 | Section 14.3, L2794 | High | WP-44 | Unknown / unverified | Not recorded | Not collected |
 | BLG-205 | Section 14.3, L2795 | Critical | WP-15, WP-44 | Unknown / unverified | Not recorded | Not collected |
 | BLG-206 | Section 14.3, L2796 | Critical | WP-12 | Unknown / unverified | Not recorded | Not collected |
