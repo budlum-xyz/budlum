@@ -11,13 +11,11 @@
 //! The chain reaches the module through [`chain`]: block validation checks
 //! the claims of a block there and block execution settles the claim fees.
 //!
-//! WIRING: the node side is not connected yet. Its doors are the two gossip
-//! topics `agg/object` and `agg/frame` (into
-//! [`aggregator::Aggregator::on_object`] and
-//! [`aggregator::Aggregator::on_frame`]) and block production (out of
-//! [`aggregator::Aggregator::block_frame`]). Until they open no node builds
-//! a block that carries a frame; a node accepts one from a producer that
-//! does.
+//! A node reaches it through [`node::AggNode`]: the two gossip topics
+//! `agg/object` and `agg/frame` feed the object pool and the frame store,
+//! and the block producer takes the frame of its next block from there.
+//!
+//! [`programs`] holds the `BudZKVM` programs a tick proof is made over.
 //!
 //! The hash `H` of every digest is Keccak-256, the hash of the `BudZKVM` STARK
 //! configuration, so a digest computed by a node is the digest the proving
@@ -39,6 +37,7 @@ pub mod node;
 pub mod object;
 pub mod params;
 pub mod pool;
+pub mod programs;
 pub mod schemes;
 
 #[cfg(test)]

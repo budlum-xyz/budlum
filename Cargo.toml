@@ -319,6 +319,15 @@ path = "benches/agg_baseline.rs"
 harness = false
 required-features = ["wallet-ml-dsa"]
 
+# Aggregation Phase 2 measurement: the steps the reference programs of the
+# aggregation layer take on the virtual machine, per stage and per tick size.
+# A plain `main` like `agg_baseline`; it proves nothing, it counts.
+[[bench]]
+name = "agg_tick_steps"
+path = "benches/agg_tick_steps.rs"
+harness = false
+required-features = ["wallet-ml-dsa"]
+
 # Domain throughput/latency benchmarks (criterion.rs)
 [[bench]]
 name = "domain_throughput"
