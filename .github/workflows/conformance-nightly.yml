@@ -91,8 +91,16 @@ jobs:
         run: |
           set -euo pipefail
           cargo test --lib execution::coordinator::scheduler::tests:: -- --nocapture | tee "scheduler-${CONFORMANCE_ARCH}.log"
-          sed -n 's/^PARALLEL_BLOCK_TIMING_JSON=//p' "scheduler-${CONFORMANCE_ARCH}.log" | head -n1 > "parallel-block-timing-${CONFORMANCE_ARCH}.json"
+          # The timing line is printed by one test while the others run, so
+          # libtest can glue it onto the end of an unrelated `... ok` line.
+          # An anchored `^` match made that race decide the job: x86_64 caught
+          # the line at column 0 and aarch64 did not, and the shard failed on
+          # its own logging (2026-11-16, Conformance Nightly run 43788838427).
+          # The extraction now finds the marker anywhere on a line.
+          grep -oE 'PARALLEL_BLOCK_TIMING_JSON=\{[^}]*\}' "scheduler-${CONFORMANCE_ARCH}.log" | head -n1 \
+            | sed -e 's/^PARALLEL_BLOCK_TIMING_JSON=//' > "parallel-block-timing-${CONFORMANCE_ARCH}.json"
           test -s "parallel-block-timing-${CONFORMANCE_ARCH}.json"
+          cat "parallel-block-timing-${CONFORMANCE_ARCH}.json"
       - name: Upload execution_root digest
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:

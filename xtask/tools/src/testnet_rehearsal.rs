@@ -532,6 +532,23 @@ impl LocalStack {
         )?;
         let faucet_addr = line_value(&faucet_out, "faucet address: 0x")
             .ok_or("budlum-faucet keygen printed no address")?;
+        // The rehearsal wallets are ceremony output for the reason
+        // `Backend::wallet_path` gives: alice is a `.bud` primary seller, and
+        // that list is a genesis field.
+        let alice_key = self.ceremony_dir.join("alice.key");
+        let alice_out = self.run_bin(
+            root,
+            "bud",
+            &["wallet", "create", "--key-file", &alice_key.to_string_lossy()],
+        )?;
+        let alice_addr = line_value(&alice_out, "address: 0x")
+            .ok_or("bud wallet create printed no address for alice")?;
+        let bob_key = self.ceremony_dir.join("bob.key");
+        self.run_bin(
+            root,
+            "bud",
+            &["wallet", "create", "--key-file", &bob_key.to_string_lossy()],
+        )?;
         let now_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_or(0, |d| d.as_millis());
@@ -558,6 +575,8 @@ impl LocalStack {
                 "5353535353535353535353535353535353535353535353535353535353535353",
                 "--burn-reserve",
                 "5454545454545454545454545454545454545454545454545454545454545454",
+                "--bns-primary-seller",
+                &alice_addr,
                 "--out",
                 &genesis_out.to_string_lossy(),
             ],
@@ -814,11 +833,18 @@ enum Backend<'a> {
 }
 
 impl Backend<'_> {
+    /// Where the rehearsal's `alice` / `bob` key file lives.
+    ///
+    /// The ceremony creates these, not the scenario: a `.bud` name is created
+    /// by an authorized primary seller opening a `Primary` offer, and the
+    /// seller list is public genesis input that is hashed, so the address has
+    /// to exist before `bud genesis assemble` runs. A key created later could
+    /// never be a seller of the chain it signs for.
     fn wallet_path(&self, name: &str) -> String {
         match self {
-            Self::Compose { .. } => format!("/tmp/rehearsal-{name}.key"),
+            Self::Compose { .. } => format!("/home/budlum/ceremony/{name}.key"),
             Self::Local { stack, .. } => stack
-                .work_dir
+                .ceremony_dir
                 .join(format!("{name}.key"))
                 .display()
                 .to_string(),
@@ -1007,8 +1033,19 @@ pub fn line_value(output: &str, prefix: &str) -> Option<String> {
         .map(|rest| rest.trim().to_string())
 }
 
-/// The address `bud wallet create` printed, without its `0x`.
+/// The address a rehearsal key file holds, without its `0x`.
+///
+/// The ceremony creates `alice` and `bob` before the genesis is assembled, so
+/// the normal path is the read-only `wallet address`. `wallet create` runs
+/// only when the file is absent (a rehearsal against a stack whose ceremony
+/// predates this rule), because creating over an existing key would replace
+/// the address the genesis named.
 fn wallet(backend: &Backend<'_>, file: &str) -> Result<String, String> {
+    if let Ok(output) = backend.bud(&["wallet", "address", "--key-file", file]) {
+        if let Some(address) = line_value(&output, "0x") {
+            return Ok(address);
+        }
+    }
     let output = backend.bud(&["wallet", "create", "--key-file", file])?;
     line_value(&output, "address: 0x").ok_or_else(|| "wallet create printed no address".into())
 }
@@ -1129,6 +1166,7 @@ struct Wallets {
     alice: String,
     alice_file: String,
     bob: String,
+    bob_file: String,
 }
 
 fn scenario_faucet(backend: &Backend<'_>) -> Result<(Wallets, String), String> {
@@ -1148,6 +1186,7 @@ fn scenario_faucet(backend: &Backend<'_>) -> Result<(Wallets, String), String> {
             alice,
             alice_file,
             bob,
+            bob_file,
         },
         detail,
     ))
@@ -1207,28 +1246,64 @@ fn scenario_delegation(backend: &Backend<'_>, wallets: &Wallets) -> Result<Strin
 }
 
 fn scenario_bns(backend: &Backend<'_>, wallets: &Wallets) -> Result<String, String> {
-    let name = "rehearsal.bud";
+    const NAME: &str = "rehearsal.bud";
+    const PRICE_ATOMS: &str = "1000";
+    const DURATION: &str = "1000";
+    // The offer has to outlive the whole scenario; the epoch ladder here is
+    // linear in blocks, so a four-digit epoch is a few minutes of chain time.
+    const EXPIRES_AT_EPOCH: &str = "1000000";
+    // There is no direct registration door: the BNS directive removed
+    // `BnsRegister`, so a name exists only after a `Primary` offer from an
+    // authorized seller is settled by a buyer. The ceremony names alice as the
+    // seller, so this is the same two transactions a user makes.
     backend.bud(&[
         "bns",
-        "register",
+        "create-offer",
         "--key-file",
         &wallets.alice_file,
         "--name",
-        name,
+        NAME,
+        "--price-atoms",
+        PRICE_ATOMS,
         "--duration",
-        "1000",
+        DURATION,
+        "--kind",
+        "Primary",
+        "--expires-at-epoch",
+        EXPIRES_AT_EPOCH,
+    ])?;
+    let offer_id = wait_for(60, || {
+        call("bud_bnsListOffers", "[]").as_ref().and_then(|offers| {
+            offers.as_array().and_then(|rows| {
+                rows.iter()
+                    .find(|row| row.get("name").and_then(crate::json::Value::as_str) == Some(NAME))
+                    .and_then(|row| row.get("id"))
+                    .and_then(crate::json::Value::as_u64)
+            })
+        })
+    })
+    .ok_or("the Primary offer did not appear within 120 s")?;
+    backend.bud(&[
+        "bns",
+        "buy",
+        "--key-file",
+        &wallets.bob_file,
+        "--offer-id",
+        &offer_id.to_string(),
     ])?;
     let owner = wait_for(60, || {
-        call("bud_bnsResolve", &format!("[\"{name}\"]"))
+        call("bud_bnsResolve", &format!("[\"{NAME}\"]"))
             .as_ref()
             .and_then(crate::json::Value::as_str)
             .map(str::to_string)
     })
     .ok_or("the name did not resolve within 120 s")?;
-    if owner.trim_start_matches("0x") != wallets.alice {
-        return Err(format!("{name} resolves to {owner}, not to its registrant"));
+    if owner.trim_start_matches("0x") != wallets.bob {
+        return Err(format!(
+            "{NAME} resolves to {owner}, not to the buyer who settled the offer"
+        ));
     }
-    Ok(format!("{name} -> {owner}"))
+    Ok(format!("{NAME} -> {owner} (offer {offer_id} settled)"))
 }
 
 fn scenario_app_binding(backend: &Backend<'_>, wallets: &Wallets) -> Result<String, String> {

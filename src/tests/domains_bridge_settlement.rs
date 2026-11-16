@@ -297,6 +297,10 @@ fn ethereum_sync_committee_is_open_on_testnet() {
 
     let mut state = AccountState::new();
     state.add_balance(&poster, bond.saturating_mul(4));
+    state
+        .settlement
+        .external_intake
+        .pin_ethereum_committee("testnet", committee);
     let ctx = ExternalDomainTxContext {
         sender: poster,
         chain_id: Network::Testnet.chain_id().value(),
@@ -394,9 +398,9 @@ fn app_binding_is_open_on_devnet() {
     state.add_balance(&registrant, 1_000_000_000_000);
     let mut domain = default_domain(
         9,
-        ConsensusKind::PoW,
+        ConsensusKind::PoA,
         TESTNET_CHAIN_ID,
-        POW_HEADER_CHAIN_ADAPTER,
+        "poa-authority-quorum",
         1,
     );
     domain.operator = Some(registrant);
@@ -981,6 +985,7 @@ fn external_registry_readmit_requires_probes_and_height_is_monotonic() {
     };
 
     let mut intake = IntakeState::new();
+    intake.pin_ethereum_committee("devnet", committee.clone());
     let key = intake
         .register_domain(
             RegistrationRequest {

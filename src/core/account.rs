@@ -1289,6 +1289,14 @@ impl AccountState {
             amount,
             self.epoch_index,
         )?;
+        // Trim snapshotted governance vote weight on open proposals just like
+        // self-unstake does, so withdrawing delegated stake cannot leave a
+        // validator voting with exited stake.
+        for proposal in &mut self.governance.proposals {
+            if proposal.status == crate::core::governance::ProposalStatus::Active {
+                proposal.reduce_vote_weight(validator, amount);
+            }
+        }
         if let Some(entry) = self.validators.get_mut(validator) {
             entry.stake = new_stake;
         }
@@ -7901,6 +7909,35 @@ mod validator_v7_binding_tests {
             restored.calculate_state_root(),
             original.calculate_state_root()
         );
+    }
+
+    #[test]
+    fn delegation_unbonding_trims_active_governance_vote_weight() {
+        use crate::core::governance::{Proposal, ProposalType};
+        let mut state = AccountState::new();
+        let validator = Address::from([0xC1; 32]);
+        let delegator = Address::from([0xC2; 32]);
+        state.add_validator(validator, 1_000);
+        state.add_balance(&delegator, 5_000);
+        state
+            .delegate_to_validator(&delegator, &validator, 3_000)
+            .expect("delegate");
+        assert_eq!(state.get_validator(&validator).unwrap().stake, 4_000);
+
+        let mut proposal = Proposal::new(1, validator, ProposalType::ChangeBaseFee(20), 0, 10);
+        proposal.add_vote(validator, 4_000, true, 0).unwrap();
+        state.governance.proposals.push(proposal);
+
+        state
+            .begin_delegation_unbonding(&delegator, &validator, 3_000)
+            .expect("begin delegation unbonding");
+        let p = state.governance.proposals.first().unwrap();
+        assert_eq!(
+            p.vote_weight_of(&validator),
+            1_000,
+            "delegation exit must trim the validator's snapshotted governance vote weight"
+        );
+        assert_eq!(p.votes_for, 1_000);
     }
 }
 
