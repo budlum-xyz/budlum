@@ -15,6 +15,13 @@ RPC methods expose reads and point writers at `bud_sendRawTransaction`.
 | `RelayerIntent` | outbound relayer intents, solver bids, settlement and expiry |
 | `Graft` | Graft applications, payments, ownership claims and solver intents |
 
+Proof-market escrow is never a one-way deposit. `FundEscrow` moves unassigned
+BUD into the market and `WithdrawEscrow` returns any amount not reserved by a
+live task to the same signed sender. Retired task IDs are retained only through
+the epoch in which they were used: every admitted ID commits to the chain's
+current `created_epoch`, so an older ID cannot be re-derived after the boundary
+and lifetime market use cannot fill a permanent global denylist.
+
 ## External evidence
 
 A relayer intent, a Graft claim and a Graft fulfilment prove something that
