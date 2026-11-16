@@ -3,7 +3,7 @@ name: Miri Storage Weekly Full Sweep
 on:
   workflow_dispatch:
   schedule:
-    - cron: '0 3 * * 1'
+    - cron: '0 0 * * 1' # Monday 00:00 UTC; owns the first weekly heavy window
 
 concurrency:
   group: miri-storage-weekly-${{ github.ref }}

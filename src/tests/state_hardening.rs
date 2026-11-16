@@ -189,7 +189,12 @@ fn unstake_checks_fee_not_staked_amount_and_enforces_vesting() {
         TransactionType::Unstake,
     );
     let pre_sig_err = state
-        .validate_transaction_with_context(&unstake_tx, 0, u64::MAX)
+        .validate_transaction_with_context(
+            &unstake_tx,
+            0,
+            u64::MAX,
+            crate::core::account::TxAuthority::Inline,
+        )
         .expect_err("unsigned tx stops at signature, not balance");
     assert!(
         pre_sig_err.contains("Invalid signature"),

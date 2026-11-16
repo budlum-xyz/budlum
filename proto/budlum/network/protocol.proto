@@ -231,6 +231,16 @@ message ProtoTransaction {
     // V6 multisig authorization. Absent for V4 and V5; a transaction that
     // carries it on any other version is refused at admission.
     ProtoMultisigAuthorization authorization = 50;
+    // Aggregation layer. The digest of the claim that stands for the
+    // signature of a claimed transaction: empty, or 32 bytes.
+    //
+    // Both fields sit below 20 on purpose: the wire scan of a transaction
+    // reads 20..=48 and 51..=95 as the `type_payload` oneof, of which a
+    // transaction may carry one, and lets every field appear once.
+    bytes auth_claim = 16;
+    // The digests of the other claims the transaction uses: 32 bytes each,
+    // one after the other, in the order the transaction lists them.
+    bytes claim_refs = 17;
 }
 
 // A t-of-n owner set and the signatures authorizing one transaction.
@@ -523,6 +533,9 @@ message ProtoBlockHeader {
     // Seat participation record (directive section 7.5.1). Absent on a block
     // that is not a checkpoint.
     ProtoSeatParticipation seat_participation = 21;
+    // Hash of the claim frame of the block. Empty when the block carries no
+    // frame.
+    bytes frame_hash = 22;
 }
 
 // The seats whose precommits for `checkpoint` the proposer collected. The
@@ -565,6 +578,12 @@ message ProtoBlock {
     // Seat participation record (directive section 7.5.1). Absent on a block
     // that is not a checkpoint.
     ProtoSeatParticipation seat_participation = 24;
+    // Hash of the claim frame of the block. Empty when the block carries no
+    // frame.
+    bytes frame_hash = 25;
+    // The claim frame in its canonical encoding. Empty when the block
+    // carries none.
+    bytes claim_frame = 26;
 }
 
 
@@ -716,7 +735,22 @@ message ProtoNetworkMessage {
         ProtoSlashingEvidence slashing_evidence = 25;
         ProtoGetFinalityCert get_finality_cert = 26;
         ProtoFinalityCertResponse finality_cert_response = 27;
+        ProtoAggObject agg_object = 28;
+        ProtoAggFrame agg_frame = 29;
     }
+}
+
+// agg/object: a heavy object on its way to the aggregators with the
+// transaction it authorizes. `envelope` is the canonical encoding of the
+// envelope; the transaction carries no witness of its own.
+message ProtoAggObject {
+    bytes envelope = 1;
+    ProtoTransaction transaction = 2;
+}
+
+// agg/frame: a claim frame in its canonical encoding.
+message ProtoAggFrame {
+    bytes frame = 1;
 }
 
 message ProtoHandshake {

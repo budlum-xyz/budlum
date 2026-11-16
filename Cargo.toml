@@ -28,6 +28,11 @@ bpqs-research = ["dep:budlum-bpqs"]
 # and it only builds when somebody turns this on by hand. Cargo warns about a
 # required-features entry with no matching feature, and this is the declaration
 # that silences the warning without making the bench part of any normal build.
+# The native aggregation backend: the proof of a claim frame is the list of
+# its objects. It saves no bytes and does not bind the aggregator of a
+# segment, so it is for devnet builds and tests only. It is never a default
+# feature, and the `agg-native-backend-is-devnet-only` gate keeps it so.
+agg-native-backend = []
 __bench_domain_throughput_disabled = []
 
 [dependencies]
@@ -295,6 +300,16 @@ harness = false
 name = "erasure_rows"
 path = "benches/micro/erasure_rows.rs"
 harness = false
+
+# Aggregation Phase 0 baseline: what a post-quantum witness costs today, per
+# scheme and per block of 100 and 1000 transfers. A plain `main` like the two
+# benches above; `cargo bench --bench agg_baseline` runs it in CI and its
+# numbers belong to the host that ran the step.
+[[bench]]
+name = "agg_baseline"
+path = "benches/agg_baseline.rs"
+harness = false
+required-features = ["wallet-ml-dsa"]
 
 # Domain throughput/latency benchmarks (criterion.rs)
 [[bench]]

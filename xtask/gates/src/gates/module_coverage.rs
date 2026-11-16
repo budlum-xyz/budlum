@@ -29,6 +29,7 @@ use serde_json::Value;
 /// [`missing_prefix_dirs`] fails a prefix whose directory does not exist.
 const MODULE_PREFIXES: &[(&str, &str)] = &[
     ("budlum:account_abstraction", "src/account_abstraction/"),
+    ("budlum:aggregation", "src/aggregation/"),
     ("budlum:ai", "src/ai/"),
     ("budlum:ai_inference", "src/ai_inference/"),
     ("budlum:app_registry", "src/app_registry/"),
