@@ -183,11 +183,12 @@ fn application_contract_fee_is_split_between_recipient_and_producer() {
     let sender = Address::from([0x11u8; 32]);
     let producer = Address::from([0x33u8; 32]);
     state.add_balance(&sender, 1_000_000);
+    const ORIGIN_DOMAIN_ID: u32 = 8;
     let mut origin_domain = crate::domain::plugin::default_domain(
-        7,
-        crate::domain::ConsensusKind::PoW,
+        ORIGIN_DOMAIN_ID,
+        crate::domain::ConsensusKind::PoS,
         45262,
-        crate::domain::POW_HEADER_CHAIN_ADAPTER,
+        "pos-qc-finality",
         1,
     );
     origin_domain.operator = Some(sender);
@@ -196,9 +197,10 @@ fn application_contract_fee_is_split_between_recipient_and_producer() {
     state
         .settlement
         .app_binding
-        .register(7, b"origin-app".to_vec(), [0x44u8; 32], 0)
+        .register(ORIGIN_DOMAIN_ID, b"origin-app".to_vec(), [0x44u8; 32], 0)
         .unwrap();
-    let app_binding_id = crate::settlement::app_binding::app_binding_id(7, b"origin-app");
+    let app_binding_id =
+        crate::settlement::app_binding::app_binding_id(ORIGIN_DOMAIN_ID, b"origin-app");
     // An unclaimed application: its share accrues in the keyless mirror.
     let app = state
         .settlement

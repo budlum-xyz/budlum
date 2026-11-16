@@ -174,6 +174,10 @@ impl FamilyProfile for CosmWasmFamily {
         }
     }
 
+    fn home_key_scheme(&self) -> crate::object_layer::tx::HomeKeyScheme {
+        crate::object_layer::tx::HomeKeyScheme::CosmosSecp256k1
+    }
+
     fn finality(&self) -> FamilyFinality {
         FamilyFinality {
             adapter: "external-domain-finality-v1",

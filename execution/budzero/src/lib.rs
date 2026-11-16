@@ -254,7 +254,7 @@ impl ExecutionEnvironment for BudZeroWorker {
                 set_caller_256(&mut vm, &call.caller.id);
                 vm.context.block_height = ctx.height;
 
-                for slot in declared {
+                for &slot in &declared {
                     let key = slot_key(&call.target.id, slot);
                     if let Ok(Some(raw)) = host.read(&store_ns, &key) {
                         if let Ok(arr) = raw.as_slice().try_into() {
@@ -263,6 +263,16 @@ impl ExecutionEnvironment for BudZeroWorker {
                     }
                 }
                 for (slot, val) in pairs {
+                    let key = slot_key(&call.target.id, slot);
+                    let collides_committed = declared.contains(&slot)
+                        || matches!(host.read(&store_ns, &key), Ok(Some(_)));
+                    if collides_committed {
+                        return Ok(EeOutcome {
+                            status: OutcomeStatus::Revert,
+                            output: b"call input slot collides with declared storage".to_vec(),
+                            gas_used: 0,
+                        });
+                    }
                     vm.storage.insert(slot, val);
                 }
 

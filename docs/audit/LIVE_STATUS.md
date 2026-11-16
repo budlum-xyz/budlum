@@ -8,7 +8,7 @@ For each row, locate the current production path and file:line, choose or cite a
 |---|---|---|---|---|---|---|
 | BLG-001 | Section 14.3, L2591 | Critical | WP-12 | Unknown / unverified | Not recorded | Not collected |
 | BLG-002 | Section 14.3, L2592 | High | WP-16 | Unknown / unverified | Not recorded | Not collected |
-| BLG-003 | Section 14.3, L2593 | High | WP-16 | Unknown / unverified | Not recorded | Not collected |
+| BLG-003 | Section 14.3, L2593 | High | WP-16 | Fixed in tree. Issuance is checked as one total: allocations, distribution, validator stake and the reward pool, with the stake and pool required to fit inside the ecosystem share. | tests::regression_chain::genesis_issuance_is_checked_as_one_total | src/chain/genesis.rs:481 |
 | BLG-004 | Section 14.3, L2594 | Medium | WP-61 | Unknown / unverified | Not recorded | Not collected |
 | BLG-005 | Section 14.3, L2595 | Medium | WP-16 | Unknown / unverified | Not recorded | Not collected |
 | BLG-006 | Section 14.3, L2596 | Medium | WP-16 | Unknown / unverified | Not recorded | Not collected |
@@ -26,13 +26,13 @@ For each row, locate the current production path and file:line, choose or cite a
 | BLG-018 | Section 14.3, L2608 | Critical | WP-12 | Unknown / unverified | Not recorded | Not collected |
 | BLG-019 | Section 14.3, L2609 | Critical | WP-17 | Unknown / unverified | Not recorded | Not collected |
 | BLG-020 | Section 14.3, L2610 | Critical | WP-17 | Fixed in tree. Selection runs on a disposable candidate, and the block path demands the exact account nonce before any arm runs. | tests::regression_chain::producer_executes_on_a_disposable_candidate_state; tests::regression_chain::a_block_transaction_must_carry_the_exact_account_nonce | src/chain/blockchain.rs:4618; src/execution/executor.rs:4672 |
-| BLG-021 | Section 14.3, L2611 | Critical | WP-17 | Unknown / unverified | Not recorded | Not collected |
+| BLG-021 | Section 14.3, L2611 | Critical | WP-17 | Fixed in tree. A role bond is additive and settled inside the block, and the out-of-block RPC bond doors are refused. | tests::regression_chain::role_bond_is_additive_and_rpc_doors_are_refused | src/core/account.rs:2927 |
 | BLG-022 | Section 14.3, L2612 | Medium | WP-11 | Fixed in tree. Closed-form walk, no loop. | light_client::tests::next_checkpoint_height_is_closed_form; tests::regression_ops_crypto::next_checkpoint_height_terminates_at_the_u64_edge (both green, local run 2026-11-16) | src/light_client/mod.rs:689 |
 | BLG-023 | Section 14.3, L2613 | Medium | WP-17 | Unknown / unverified | Not recorded | Not collected |
 | BLG-024 | Section 14.3, L2614 | Low | WP-44 | Fixed in this round. A zero denominator requires every authority instead of calling div_ceil(0). | domain::finality_adapter::tests::a_poa_adapter_with_a_zero_denominator_requires_every_authority (green, local run 2026-11-16) | src/domain/finality_adapter.rs:815 |
 | BLG-025 | Section 14.3, L2615 | Low | WP-45 | Unknown / unverified | Not recorded | Not collected |
 | BLG-026 | Section 14.3, L2616 | Medium | WP-39 | Unknown / unverified | Not recorded | Not collected |
-| BLG-027 | Section 14.3, L2617 | High | WP-12 | Unknown / unverified | Not recorded | Not collected |
+| BLG-027 | Section 14.3, L2617 | High | WP-12 | Invalid as reported. A validator is bound to its registered ML-DSA-65 consensus key, and a V5 wallet address is a user account, not a validator identity. The binding is enforced on every validator transaction. | core::account::tests::a_v7_validator_transaction_verifies_from_its_ed25519_address; core::account::tests::a_self_signed_key_registration_before_registration_is_refused | src/core/account.rs:2079 |
 | BLG-028 | Section 14.3, L2618 | High | WP-17 | Unknown / unverified | Not recorded | Not collected |
 | BLG-029 | Section 14.3, L2619 | High | WP-61 | Unknown / unverified | Not recorded | Not collected |
 | BLG-030 | Section 14.3, L2620 | Critical | WP-41, WP-61 | Unknown / unverified | Not recorded | Not collected |
@@ -58,12 +58,12 @@ For each row, locate the current production path and file:line, choose or cite a
 | BLG-050 | Section 14.3, L2640 | Critical | WP-44 | Unknown / unverified | Not recorded | Not collected |
 | BLG-051 | Section 14.3, L2641 | High | WP-44 | Unknown / unverified | Not recorded | Not collected |
 | BLG-052 | Section 14.3, L2642 | Medium | WP-44 | Unknown / unverified | Not recorded | Not collected |
-| BLG-053 | Section 14.3, L2643 | High | WP-44 | Unknown / unverified | Not recorded | Not collected |
+| BLG-053 | Section 14.3, L2643 | High | WP-44 | Fixed in tree. A task cannot be completed twice: the receipt check and the retired-id set both refuse it. | settlement::proof_market tests | src/settlement/proof_market.rs:1032 |
 | BLG-054 | Section 14.3, L2644 | Critical | WP-44 | Unknown / unverified | Not recorded | Not collected |
 | BLG-055 | Section 14.3, L2645 | Critical | WP-44 | Unknown / unverified | Not recorded | Not collected |
 | BLG-056 | Section 14.3, L2646 | High | WP-44 | Fixed in tree. The bridge enforces `require_slashable` for every external domain it admits. | cross_domain::external::domain_bridge::tests::require_slashable_is_enforced_at_the_bridge | src/cross_domain/external/domain_bridge.rs:163 |
 | BLG-057 | Section 14.3, L2647 | High | WP-44 | Fixed in tree. The bridge transfer carries a bounded expiry, the expiry queue is keyed by height, and the replay store refuses a second delivery. | cross_domain bridge lifecycle tests | src/cross_domain/bridge.rs:270 |
-| BLG-058 | Section 14.3, L2648 | High | WP-44 | Unknown / unverified | Not recorded | Not collected |
+| BLG-058 | Section 14.3, L2648 | High | WP-44 | Fixed in tree. The domain leaf check consults the ZK program allow list, so a program that is not listed cannot settle. | settlement domain leaf tests | src/settlement/domains.rs:1269 |
 | BLG-059 | Section 14.3, L2649 | Critical | WP-45 | Open. The feature is closed on testnet, which the TLG rule accepts as the launch state. | tests::testnet_closed_features::ai_execution_proof_is_closed_on_testnet (green in the lib run) | src/tests/testnet_closed_features.rs:48 |
 | BLG-060 | Section 14.3, L2650 | Critical | WP-45 | Open. The feature is closed on testnet, which the TLG rule accepts as the launch state. | tests::testnet_closed_features::ai_execution_proof_is_closed_on_testnet (green in the lib run) | src/tests/testnet_closed_features.rs:48 |
 | BLG-061 | Section 14.3, L2651 | High | WP-45 | Open. The feature is closed on testnet, which the TLG rule accepts as the launch state. | tests::testnet_closed_features::ai_layer_is_closed_on_testnet (green in the lib run) | src/tests/testnet_closed_features.rs:70 |
@@ -111,7 +111,7 @@ For each row, locate the current production path and file:line, choose or cite a
 | BLG-103 | Section 14.3, L2693 | Critical | WP-17 | Unknown / unverified | Not recorded | Not collected |
 | BLG-104 | Section 14.3, L2694 | Critical | WP-17 | Fixed in tree. The byte budget is charged after the count check and before the replacement is removed, so a refusal cannot delete a transaction it does not replace. | mempool::pool tests (byte budget and replacement refusal) | src/mempool/pool.rs:528 |
 | BLG-105 | Section 14.3, L2695 | Critical | WP-44 | Fixed in tree. The burn records the debit it made, and the claim pays the recorded debit rather than the gross amount. | cross_domain::evm::bud_to_eth tests | src/cross_domain/evm/bud_to_eth.rs:135 |
-| BLG-106 | Section 14.3, L2696 | Critical | WP-45 | Unknown / unverified | Not recorded | Not collected |
+| BLG-106 | Section 14.3, L2696 | Critical | WP-45 | Fixed in tree. The execution dims width is bounded to 2..=32 layers and no layer may be zero before any allocation. | ai::types dims bounds test | src/ai/types.rs:308 |
 | BLG-107 | Section 14.3, L2697 | Critical | WP-17 | Unknown / unverified | Not recorded | Not collected |
 | BLG-108 | Section 14.3, L2698 | Critical | WP-15 | Unknown / unverified | Not recorded | Not collected |
 | BLG-109 | Section 14.3, L2699 | Critical | WP-23 | Unknown / unverified | Not recorded | Not collected |
@@ -124,7 +124,7 @@ For each row, locate the current production path and file:line, choose or cite a
 | BLG-116 | Section 14.3, L2706 | Critical | WP-44 | Unknown / unverified | Not recorded | Not collected |
 | BLG-117 | Section 14.3, L2707 | Critical | WP-39 | Unknown / unverified | Not recorded | Not collected |
 | BLG-118 | Section 14.3, L2708 | Critical | WP-17 | Unknown / unverified | Not recorded | Not collected |
-| BLG-119 | Section 14.3, L2709 | Critical | WP-17 | Unknown / unverified | Not recorded | Not collected |
+| BLG-119 | Section 14.3, L2709 | Critical | WP-17 | Fixed in tree. A full unstake cannot escape the queue, and a slash sweeps every other role the account holds. | core::account::tests::slash_validator_counts_cross_role_sweep_in_burned_total | src/core/account.rs:2981; src/registry/permissionless.rs:938 |
 | BLG-120 | Section 14.3, L2710 | High | WP-44 | Unknown / unverified | Not recorded | Not collected |
 | BLG-121 | Section 14.3, L2711 | High | WP-40 | Unknown / unverified | Not recorded | Not collected |
 | BLG-122 | Section 14.3, L2712 | High | WP-07 | Unknown / unverified | Not recorded | Not collected |
@@ -209,7 +209,7 @@ For each row, locate the current production path and file:line, choose or cite a
 | BLG-201 | Section 14.3, L2791 | High | WP-45 | Unknown / unverified | Not recorded | Not collected |
 | BLG-202 | Section 14.3, L2792 | Critical | WP-17 | Unknown / unverified | Not recorded | Not collected |
 | BLG-203 | Section 14.3, L2793 | Critical | WP-12 | Fixed in tree. The proof length, element width, zero root and high index bits are all refused. | consensus::qc tests (green in the lib run that carries this row) | src/consensus/qc.rs:691 |
-| BLG-204 | Section 14.3, L2794 | High | WP-44 | Unknown / unverified | Not recorded | Not collected |
+| BLG-204 | Section 14.3, L2794 | High | WP-44 | Fixed in tree. The reward is escrowed before the task exists, the deadline span is bounded, and the payout total is computed before the receipt changes state. | settlement::proof_market tests | src/settlement/proof_market.rs:1055,1160 |
 | BLG-205 | Section 14.3, L2795 | Critical | WP-15, WP-44 | Fixed in tree. `readmit` demands an admitted, golden-verified report whose every test passed and whose adapter version matches the record. | cross_domain::external::registry tests: readmit_reopens_a_faulted_domain_but_is_not_an_edit | src/cross_domain/external/registry.rs:355 |
 | BLG-206 | Section 14.3, L2796 | Critical | WP-12 | Unknown / unverified | Not recorded | Not collected |
 | BLG-207 | Section 14.3, L2797 | Critical | WP-12 | Unknown / unverified | Not recorded | Not collected |
@@ -218,7 +218,7 @@ For each row, locate the current production path and file:line, choose or cite a
 | BLG-210 | Section 14.4, L2811 | High | WP-19 | Unknown / unverified | Not recorded | Not collected |
 | BLG-211 | Section 14.4, L2812 | Medium | WP-19 | Unknown / unverified | Not recorded | Not collected |
 | BLG-212 | Section 14.4, L2813 | Critical | WP-21, WP-23 | Unknown / unverified | Not recorded | Not collected |
-| BLG-213 | Section 14.4, L2814 | High | WP-18 | Unknown / unverified | Not recorded | Not collected |
+| BLG-213 | Section 14.4, L2814 | High | WP-18 | Fixed in this round for the frame container. The raw-frame mux refuses a frame or a frame count that does not fit its 32-bit field instead of truncating it. | storage::qr_codec::field_width_tests::a_container_field_wider_than_32_bits_is_refused | src/storage/qr_codec.rs:126 |
 | BLG-214 | Section 14.4, L2815 | Medium | WP-19 | Unknown / unverified | Not recorded | Not collected |
 | BLG-215 | Section 14.4, L2816 | High | WP-19 | Unknown / unverified | Not recorded | Not collected |
 | BLG-216 | Section 14.4, L2817 | High | WP-18 | Unknown / unverified | Not recorded | Not collected |
