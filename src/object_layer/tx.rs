@@ -349,7 +349,7 @@ impl ObjectLayerTx {
                 recipient,
                 proof,
             } => {
-                registry.guest_return(*class, native_id, *recipient, proof, ctx.finality)?;
+                registry.guest_return(me, *class, native_id, *recipient, proof, ctx.finality)?;
             }
             Self::HomeStipendCall {
                 domain,

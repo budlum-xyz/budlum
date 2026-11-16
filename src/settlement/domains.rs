@@ -1164,6 +1164,9 @@ pub fn accept_verified_commitment(
     // into existence), and the domain that declares it has to declare the
     // chain's canonical id. The second alone was not a gate: registration is
     // permissionless, so a registrant supplied both sides of the comparison.
+    // Permissionless PoW domains outside the canonical set also may not write
+    // `external_roots`: a registrant chooses its own difficulty floor and could
+    // otherwise self-mine arbitrary roots to satisfy AppBinding claims.
     let may_anchor = match crate::core::transaction::ExternalChain::from_domain_id(domain_id) {
         Some(chain) => {
             anchor_recognized_chain(domain_id).is_some()
@@ -1173,7 +1176,11 @@ pub fn accept_verified_commitment(
                     .get(domain_id)
                     .is_some_and(|domain| domain.domain_chain_id == chain.canonical_chain_id())
         }
-        None => true,
+        None => state
+            .settlement
+            .domains
+            .get(domain_id)
+            .is_some_and(|domain| domain.kind != ConsensusKind::PoW),
     };
     let outcome = accept_commitment(state, commitment)?;
     // An idempotent resubmission of an old commitment must not move the
@@ -2442,7 +2449,30 @@ fn execute_proof_market_tx(
                     deal_id,
                     challenge_epoch,
                 } => {
-                    if proof.commitment.event_root != *deal_id
+                    // Bind the receipt's storage domain to either a protocol-owned
+                    // storage domain (`operator.is_none()`) or a storage domain
+                    // operated by the task creator itself. Allowing any third-party
+                    // or prover-registered storage domain lets a prover mint its own
+                    // attestation for any `deal_id` and claim the reward.
+                    let domain_authorized = state
+                        .settlement
+                        .domains
+                        .get(proof.commitment.domain_id)
+                        .is_some_and(|domain| {
+                            domain.is_active()
+                                && matches!(domain.kind, ConsensusKind::StorageAttestation(_))
+                                && (domain.operator.is_none()
+                                    || domain.operator == Some(task.creator))
+                        });
+                    let deal_domain_matches = state
+                        .storage_registry
+                        .all_deals()
+                        .iter()
+                        .find(|deal| deal.manifest_id.0 == *deal_id)
+                        .is_none_or(|deal| deal.domain_id == proof.commitment.domain_id);
+                    if !domain_authorized
+                        || !deal_domain_matches
+                        || proof.commitment.event_root != *deal_id
                         || proof.commitment.domain_height != *challenge_epoch
                         || !matches!(
                             &proof.commitment.consensus_kind,
@@ -2450,7 +2480,9 @@ fn execute_proof_market_tx(
                         )
                     {
                         return Err(SettlementTxError::Refused(
-                            "proof-market storage attestation does not match the task".into(),
+                            "proof-market storage attestation does not match an authorized \
+                             storage domain for the task"
+                                .into(),
                         ));
                     }
                 }
@@ -4187,6 +4219,10 @@ mod tests {
             aggregate_pubkey: vec![0x11; 96],
             next_committee_root: [0xbb; 32],
         };
+        state
+            .settlement
+            .external_intake
+            .pin_ethereum_committee("testnet", committee.clone());
         let spec = crate::cross_domain::external::AdapterSpec::EthereumSync {
             network: "testnet".to_string(),
             committee: Some(committee.clone()),
@@ -4317,6 +4353,10 @@ mod tests {
             aggregate_pubkey: vec![0x11; 96],
             next_committee_root: [0xbb; 32],
         };
+        state
+            .settlement
+            .external_intake
+            .pin_ethereum_committee("testnet", committee.clone());
         let spec = crate::cross_domain::external::AdapterSpec::EthereumSync {
             network: "testnet".to_string(),
             committee: Some(committee.clone()),
@@ -4447,6 +4487,10 @@ mod tests {
             aggregate_pubkey: vec![0x11; 96],
             next_committee_root: [0xbb; 32],
         };
+        state
+            .settlement
+            .external_intake
+            .pin_ethereum_committee("testnet", committee.clone());
         let spec = crate::cross_domain::external::AdapterSpec::EthereumSync {
             network: "testnet".to_string(),
             committee: Some(committee.clone()),
@@ -5148,6 +5192,99 @@ mod tests {
         assert!(
             format!("{err:?}").contains("authority_unbound"),
             "expected authority_unbound refusal, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn storage_attestation_task_rejects_prover_operated_storage_domain() {
+        use crate::domain::storage_params::StorageDomainParams;
+        use crate::settlement::proof_market::{ProofMarketTx, ProofTaskKind};
+
+        let mut state = AccountState::new();
+        let creator = Address::from([0x91; 32]);
+        let prover = Address::from([0x92; 32]);
+        state.add_balance(&creator, 100_000);
+        state.add_balance(&prover, 100_000);
+        state.add_validator(prover, 50_000);
+
+        // Prover registers its own permissionless StorageAttestation domain.
+        let mut prover_domain = crate::domain::plugin::default_domain(
+            77,
+            ConsensusKind::StorageAttestation(StorageDomainParams::default()),
+            45262,
+            "storage-attestation-v1",
+            1,
+        );
+        prover_domain.operator = Some(prover);
+        prover_domain.operator_bond = 1_000_000;
+        state.add_balance(&prover, prover_domain.operator_bond + FEE * 10);
+        register_domain(&mut state, prover_domain).expect("register prover storage domain");
+
+        // Creator funds escrow and opens a StorageAttestation task.
+        let deal_id = [0xAB; 32];
+        execute_settlement_tx(
+            &mut state,
+            &ctx(creator),
+            &SettlementTx::ProofMarket(Box::new(ProofMarketTx::FundEscrow { amount: 1_000 })),
+        )
+        .unwrap();
+        execute_settlement_tx(
+            &mut state,
+            &ctx(creator),
+            &SettlementTx::ProofMarket(Box::new(ProofMarketTx::CreateTask {
+                kind: ProofTaskKind::StorageAttestation {
+                    deal_id,
+                    challenge_epoch: 5,
+                },
+                deadline_epoch: 20,
+                reward: 500,
+                slash_condition_hash: [0xC2; 32],
+                min_prover_stake: 0,
+            })),
+        )
+        .unwrap();
+        let task_id = state.proof_market.active_tasks.first().unwrap().task_id;
+        let prover_bond = state.registry.params().min_stake;
+        state.add_balance(&prover, prover_bond);
+        state.bond_prover(&prover, prover_bond).unwrap();
+        execute_settlement_tx(
+            &mut state,
+            &ctx(prover),
+            &SettlementTx::ProofMarket(Box::new(ProofMarketTx::AssignTask { task_id })),
+        )
+        .unwrap();
+
+        let forged_commitment = DomainCommitment {
+            domain_id: 77,
+            domain_height: 5,
+            domain_block_hash: [0x10; 32],
+            parent_domain_block_hash: [0u8; 32],
+            state_root: [0x11; 32],
+            tx_root: [0x12; 32],
+            event_root: deal_id,
+            finality_proof_hash: [0x13; 32],
+            consensus_kind: ConsensusKind::StorageAttestation(StorageDomainParams::default()),
+            validator_set_hash: [0x14; 32],
+            timestamp_ms: 100,
+            sequence: 1,
+            producer: Some(prover),
+            state_updates: std::collections::BTreeMap::new(),
+        };
+        let err = execute_settlement_tx(
+            &mut state,
+            &ctx(prover),
+            &SettlementTx::ProofMarket(Box::new(ProofMarketTx::SubmitReceipt {
+                task_id,
+                proof: Box::new(crate::domain::VerifiedDomainCommitment {
+                    commitment: forged_commitment,
+                    proof: FinalityProof::Raw(vec![0xAA]),
+                }),
+            })),
+        )
+        .expect_err("prover-operated storage domain must never satisfy creator's task");
+        assert!(
+            format!("{err:?}").contains("authorized storage domain"),
+            "got: {err:?}"
         );
     }
 }

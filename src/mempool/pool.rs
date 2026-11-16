@@ -566,6 +566,17 @@ impl Mempool {
                 .saturating_sub(replaced)
                 .saturating_add(batch.block_bytes);
             let cap = self.duty_lane_cap();
+            let sender_cap = self.duty_lane_sender_cap();
+            let sender_bytes = self
+                .duty_lane_bytes_for(&tx.from)
+                .saturating_sub(replaced)
+                .saturating_add(batch.block_bytes);
+            if sender_bytes > sender_cap {
+                return Err(MempoolError::DutyLaneRefused(DutyRefusal::LaneBytesFull {
+                    lane_bytes: sender_bytes,
+                    cap: sender_cap,
+                }));
+            }
             if lane_bytes > cap {
                 return Err(MempoolError::DutyLaneRefused(DutyRefusal::LaneBytesFull {
                     lane_bytes,
@@ -574,26 +585,16 @@ impl Mempool {
             }
         }
 
-        if existing_hash.is_none()
-            && self.transactions.len() >= self.config.max_size
-            && !self.evict_lowest_fee(&tx)
-        {
-            return Err(MempoolError::PoolFull);
-        }
-
-        // The byte budget is charged AFTER the count check and BEFORE the
-        // replacement is removed, and both orderings matter.
+        // Decide the byte budget before removing any resident entry.
         //
-        // After the count check, so a pool that is full by count refuses with
-        // `PoolFull` rather than by whichever limit happens to be read first;
-        // the two errors tell an operator different things.
-        //
-        // Before the removal, so a refusal leaves the pool untouched. The
-        // eviction ordering above exists because a refusal that had already
-        // deleted somebody else's transaction is a free deletion primitive.
-        // Charging bytes after the removal would reintroduce exactly that: a
-        // replacement large enough to exceed the budget would be refused with
-        // the transaction it replaced already gone.
+        // `evict_lowest_fee` removes its victim immediately, so running it
+        // ahead of the byte check lets a later `PoolBytesFull` refusal delete
+        // another sender's cheapest transaction for free. `evict_until_bytes_fit`
+        // chooses its victims first and removes them only when the freed bytes
+        // are enough; whenever bytes are exceeded it removes at least one entry,
+        // which also satisfies the count ceiling. When bytes already fit, the
+        // count-only path keeps the deterministic `PoolFull` refusal.
+        let count_full = existing_hash.is_none() && self.transactions.len() >= self.config.max_size;
         let freed = existing_hash
             .as_ref()
             .and_then(|h| self.transactions.get(h))
@@ -602,10 +603,12 @@ impl Mempool {
             .resident_bytes
             .saturating_sub(freed)
             .saturating_add(incoming);
-        if projected > self.config.max_pool_bytes
-            && !self.evict_until_bytes_fit(&tx, projected - self.config.max_pool_bytes)
-        {
-            return Err(MempoolError::PoolBytesFull);
+        if projected > self.config.max_pool_bytes {
+            if !self.evict_until_bytes_fit(&tx, projected - self.config.max_pool_bytes) {
+                return Err(MempoolError::PoolBytesFull);
+            }
+        } else if count_full && !self.evict_lowest_fee(&tx) {
+            return Err(MempoolError::PoolFull);
         }
 
         if let Some(existing_hash) = existing_hash {
@@ -912,6 +915,16 @@ impl Mempool {
             .sum()
     }
 
+    /// The duty-lane bytes currently held by one validator, over the block measure.
+    fn duty_lane_bytes_for(&self, sender: &Address) -> usize {
+        self.transactions
+            .values()
+            .filter(|entry| entry.tx.from == *sender)
+            .filter_map(|entry| entry.duty)
+            .map(|batch| batch.block_bytes)
+            .sum()
+    }
+
     /// The bytes the lane may hold in the pool.
     ///
     /// Derived from the block share rather than configured beside it: the pool
@@ -921,6 +934,13 @@ impl Mempool {
         self.config
             .duty_block_bytes
             .saturating_mul(DUTY_LANE_POOL_BLOCKS)
+    }
+
+    /// Maximum duty-lane bytes any single validator may occupy in the pool, so
+    /// one validator cannot fill the shared lane and block every other validator.
+    fn duty_lane_sender_cap(&self) -> usize {
+        let divisor = self.duty_validators.len().clamp(4, 32);
+        self.duty_lane_cap() / divisor
     }
 
     /// Drop the lowest-fee transaction to make room, if the incoming one
@@ -1323,25 +1343,26 @@ mod tests {
     #[test]
     fn a_byte_refusal_deletes_nothing() {
         let mut pool = Mempool::new(MempoolConfig {
-            max_size: 100,
+            max_size: 2,
             max_per_sender: 100,
             min_fee: 1,
             max_pool_bytes: 80 * 1024,
             ..Default::default()
         });
 
-        // Two expensive residents fill the budget.
-        pool.add_transaction(create_test_tx_sized(1, 0, 1_000, 32 * 1024))
+        // One cheaper and one expensive resident fill both count and byte headroom.
+        pool.add_transaction(create_test_tx_sized(1, 0, 10, 32 * 1024))
             .unwrap();
         pool.add_transaction(create_test_tx_sized(2, 0, 1_000, 32 * 1024))
             .unwrap();
         let before_len = pool.len();
         let before_bytes = pool.resident_bytes();
 
-        // A cheap newcomer cannot evict either of them, so it must be refused
-        // and must not have removed anything on the way out.
+        // Newcomer beats the cheaper resident's fee (50 > 10), so a count eviction
+        // running first would delete resident 1 before bytes are refused. Deciding
+        // bytes first guarantees neither resident is deleted on PoolBytesFull.
         assert_eq!(
-            pool.add_transaction(create_test_tx_sized(3, 0, 2, 32 * 1024)),
+            pool.add_transaction(create_test_tx_sized(3, 0, 50, 50 * 1024)),
             Err(MempoolError::PoolBytesFull)
         );
         assert_eq!(pool.len(), before_len, "a refusal evicted a resident");
@@ -2031,5 +2052,67 @@ mod tests {
             .add_transaction(tx)
             .expect_err("forged classical stipend signature must not bypass min_fee");
         assert!(matches!(err, MempoolError::FeeTooLow), "got: {err:?}");
+    }
+
+    #[test]
+    fn duty_lane_per_validator_byte_share_protects_other_validators() {
+        use crate::core::transaction::TransactionType;
+        use crate::crypto::primitives::KeyPair;
+
+        let mut pool = Mempool::new(MempoolConfig {
+            max_pool_bytes: 1_000_000,
+            duty_block_bytes: 2_000, // lane cap = 8_000, per-validator share = 2_000
+            min_fee: 1,
+            max_per_sender: 100,
+            ..Default::default()
+        });
+        let spammer = KeyPair::generate().unwrap();
+        let honest = KeyPair::generate().unwrap();
+        pool.sync_duty_validators([
+            Address::from(spammer.public_key_bytes()),
+            Address::from(honest.public_key_bytes()),
+        ]);
+        let make_ack = |kp: &KeyPair, nonce: u64, object: [u8; 32]| {
+            let mut tx = Transaction::new(
+                Address::from(kp.public_key_bytes()),
+                Address::zero(),
+                0,
+                Vec::new(),
+            );
+            tx.nonce = nonce;
+            tx.fee = 0;
+            tx.tx_type = TransactionType::StorageV3(Box::new(
+                crate::storage::bud3::tx::StorageTxV3::CustodyAck { object },
+            ));
+            tx.hash = tx.calculate_hash();
+            tx.sign(kp);
+            tx
+        };
+
+        // Spammer hits its per-validator duty byte share before filling the global lane cap.
+        let mut admitted = 0usize;
+        let mut hit_cap = false;
+        let window_ms: u128 = 10 * 60 * 1000;
+        for window in 0u64..16 {
+            let now = (window as u128) * window_ms + 1;
+            let tx = make_ack(&spammer, window, [window as u8; 32]);
+            match pool.admit_at(tx, now) {
+                Ok(()) => admitted += 1,
+                Err(MempoolError::DutyLaneRefused(DutyRefusal::LaneBytesFull { .. })) => {
+                    hit_cap = true;
+                    break;
+                }
+                Err(other) => panic!("unexpected error: {other:?}"),
+            }
+        }
+        assert!(admitted >= 1, "spammer must admit at least one duty tx");
+        assert!(
+            hit_cap,
+            "spammer must hit per-validator duty byte share before filling global ceiling"
+        );
+        // Honest validator still fits cleanly in the remaining shared duty budget.
+        let honest_tx = make_ack(&honest, 0, [0xEE; 32]);
+        pool.admit_at(honest_tx, 20 * window_ms)
+            .expect("other validator must still be admitted into the duty lane");
     }
 }

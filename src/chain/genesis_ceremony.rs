@@ -44,6 +44,12 @@ pub struct CeremonyInputs {
     /// ceremony check refuses them; the devnet rehearsal funds a validator
     /// that joins later this way.
     pub allocations: Vec<(Address, u64)>,
+    /// Authorized `.bud` marketplace primary sellers. Empty keeps the
+    /// template's default (`crate::bns::BNS_PRIMARY_SELLERS`), which is a
+    /// placeholder nobody holds a key for, so a rehearsal that needs to open
+    /// a `Primary` offer names its own seller here. The list is public input:
+    /// it enters the genesis hash like every other field.
+    pub bns_primary_sellers: Vec<Address>,
 }
 
 /// A published testnet/mainnet ceremony needs eight full validators.
@@ -164,6 +170,9 @@ pub fn assemble(network: Network, inputs: CeremonyInputs) -> Result<GenesisConfi
         .collect();
     genesis.tokenomics_addresses = Some(inputs.tokenomics_addresses);
     genesis.allocations.extend(inputs.allocations);
+    if !inputs.bns_primary_sellers.is_empty() {
+        genesis.bns_primary_sellers = inputs.bns_primary_sellers;
+    }
     if let Some(timestamp) = inputs.timestamp_ms {
         genesis.timestamp = timestamp;
     }
@@ -212,6 +221,7 @@ mod tests {
             tokenomics_addresses: destinations(),
             timestamp_ms: Some(1_800_000_000_000),
             allocations: Vec::new(),
+            bns_primary_sellers: Vec::new(),
         }
     }
 

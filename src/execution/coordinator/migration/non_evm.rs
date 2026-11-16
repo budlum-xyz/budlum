@@ -448,19 +448,29 @@ pub fn fold_sha3_merkle(leaf: [u8; 32], index: usize, siblings: &[[u8; 32]]) -> 
     cur
 }
 
-/// The source root must be one this chain anchored for the source domain.
+/// The source root must be anchored by an active canonical recognized chain
+/// domain whose registered chain id matches the chain's canonical id.
 ///
-/// A request carries its own root. A proof checked against that root only shows
-/// the request agrees with itself, so anyone could fabricate a source state for
-/// any address and install it. The consensus-owned anchor is the one root the
-/// migrator cannot choose.
+/// A request carries its own root, and permissionless domains outside the
+/// canonical recognized chain set can anchor registrant-chosen roots. Resolving
+/// both canonical membership and `DomainStatus::Active` ensures neither a
+/// permissionless registrant nor a frozen/retired domain can vouch for a root.
 fn require_attested_root(
     state: &AccountState,
     domain: u32,
     root: &[u8; 32],
 ) -> Result<(), ImportError> {
+    let chain = crate::settlement::domains::anchor_recognized_chain(domain)
+        .ok_or(ImportError::SourceNotAttested { domain })?;
+    let active_canonical = state
+        .settlement
+        .domains
+        .get(domain)
+        .is_some_and(|registered| {
+            registered.is_active() && registered.domain_chain_id == chain.canonical_chain_id()
+        });
     match state.external_roots.get(&domain) {
-        Some(anchored) if anchored == root => Ok(()),
+        Some(anchored) if active_canonical && anchored == root => Ok(()),
         _ => Err(ImportError::SourceNotAttested { domain }),
     }
 }
