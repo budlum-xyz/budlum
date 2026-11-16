@@ -1596,7 +1596,16 @@ fn bud3_e2e_replace_object_preserves_nft_binding_and_slashes_mismatch() {
 
     let attestations: Vec<_> = [201u8, 202, 203]
         .into_iter()
-        .map(|id| sign_replace_attestation([id; 32], &[id; 32], &old_key, &new_up.record).unwrap())
+        .map(|id| {
+            sign_replace_attestation(
+                [id; 32],
+                &[id; 32],
+                DEFAULT_CHAIN_ID,
+                &old_key,
+                &new_up.record,
+            )
+            .unwrap()
+        })
         .collect();
     let new_shares = vec![(
         0,

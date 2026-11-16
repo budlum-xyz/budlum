@@ -32,7 +32,7 @@ use crate::crypto::scheme::SchemeId;
 pub const REPAIR_TAG: &[u8] = b"BDLM_BUD3_REPAIR_V1";
 
 /// Domain tag binding independent Full-validator repair attestations.
-pub const REPAIR_ATTEST_DOMAIN: &[u8] = b"BDLM_BUD3_REPAIR_ATTEST_V1";
+pub const REPAIR_ATTEST_DOMAIN: &[u8] = b"BDLM_BUD3_REPAIR_ATTEST_V2";
 
 /// Minimum independent active Full-validator attestations required when repair
 /// does not carry an inline Merkle-verified symbol witness.
@@ -63,6 +63,28 @@ pub struct RepairAttestation {
     pub signature: Vec<u8>,
 }
 
+/// Canonical fields covered by an independent Full-validator repair attestation.
+///
+/// Keeping these fields together gives signers and verifiers one named message
+/// shape and makes the chain binding explicit at every call site.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RepairAttestationMessage<'a> {
+    /// Chain on which this repair may be admitted.
+    pub chain_id: u64,
+    /// Object whose segment is being repaired.
+    pub object: &'a ObjectKey,
+    /// Zero-based segment index within `object`.
+    pub segment: u64,
+    /// First encoding-symbol identifier in the repaired range.
+    pub first_esi: u32,
+    /// Number of contiguous encoding symbols in the repaired range.
+    pub count: u32,
+    /// Root committed by the proposed repaired segment.
+    pub new_root: &'a [u8; 32],
+    /// Original committed segment root that authorizes reconstruction.
+    pub original_segment_root: &'a [u8; 32],
+}
+
 /// Cryptographic witness proving `RecordRepair.new_symbols` and `new_root`
 /// are derived from the object's committed segment rather than fabricated bytes.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -78,22 +100,16 @@ pub enum RepairWitness {
 /// Canonical domain-separated digest signed by each independent Full validator
 /// attesting a segment repair.
 #[must_use]
-pub fn repair_attestation_digest(
-    object: &ObjectKey,
-    segment: u64,
-    first_esi: u32,
-    count: u32,
-    new_root: &[u8; 32],
-    original_segment_root: &[u8; 32],
-) -> [u8; 32] {
+pub fn repair_attestation_digest(message: RepairAttestationMessage<'_>) -> [u8; 32] {
     hash_fields_bytes(&[
         REPAIR_ATTEST_DOMAIN,
-        object,
-        &segment.to_le_bytes(),
-        &first_esi.to_le_bytes(),
-        &count.to_le_bytes(),
-        new_root,
-        original_segment_root,
+        &message.chain_id.to_le_bytes(),
+        message.object,
+        &message.segment.to_le_bytes(),
+        &message.first_esi.to_le_bytes(),
+        &message.count.to_le_bytes(),
+        message.new_root,
+        message.original_segment_root,
     ])
 }
 
@@ -107,20 +123,9 @@ pub fn repair_attestation_digest(
 pub fn sign_repair_attestation(
     validator: Address,
     ml_dsa_seed: &[u8; 32],
-    object: &ObjectKey,
-    segment: u64,
-    (first_esi, count): (u32, u32),
-    new_root: &[u8; 32],
-    original_segment_root: &[u8; 32],
+    message: RepairAttestationMessage<'_>,
 ) -> Result<RepairAttestation, PqError> {
-    let digest = repair_attestation_digest(
-        object,
-        segment,
-        first_esi,
-        count,
-        new_root,
-        original_segment_root,
-    );
+    let digest = repair_attestation_digest(message);
     let signature = ml_dsa_sign(
         SchemeId::ML_DSA_65,
         ml_dsa_seed,
@@ -464,6 +469,26 @@ mod tests {
         fps: 10,
         k_max: 16,
     };
+
+    #[test]
+    fn repair_attestations_are_bound_to_one_chain() {
+        let object = [0x11; 32];
+        let new_root = [0x22; 32];
+        let original_root = [0x33; 32];
+        let message = |chain_id| RepairAttestationMessage {
+            chain_id,
+            object: &object,
+            segment: 7,
+            first_esi: 9,
+            count: 3,
+            new_root: &new_root,
+            original_segment_root: &original_root,
+        };
+        assert_ne!(
+            repair_attestation_digest(message(45_261)),
+            repair_attestation_digest(message(45_262)),
+        );
+    }
 
     #[test]
     fn handover_advances_every_twenty_blocks() {

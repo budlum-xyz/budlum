@@ -15,7 +15,7 @@ use crate::crypto::pq::{ml_dsa_sign, verify, PqError};
 use crate::crypto::scheme::SchemeId;
 
 /// Domain tag binding Full-validator replacement attestations to `(old_key, new_record)`.
-pub const REPLACE_ATTEST_DOMAIN: &[u8] = b"BDLM_BUD3_REPLACE_ATTEST_V1";
+pub const REPLACE_ATTEST_DOMAIN: &[u8] = b"BDLM_BUD3_REPLACE_ATTEST_V2";
 
 /// Minimum independent Full validators from the placement group required to
 /// verify `decode(new_object)` produces the exact same `ContentId` (Section 6.14 item 3).
@@ -41,7 +41,11 @@ pub struct ReplaceAttestation {
 /// Canonical domain-separated digest signed by each placement-group Full
 /// validator over `(old_key, new_record)`.
 #[must_use]
-pub fn replace_attestation_digest(old_key: &ObjectKey, new_record: &ObjectRecord) -> [u8; 32] {
+pub fn replace_attestation_digest(
+    chain_id: u64,
+    old_key: &ObjectKey,
+    new_record: &ObjectRecord,
+) -> [u8; 32] {
     let kind_byte = [match new_record.content_id.kind {
         ContentIdKind::Public => 0u8,
         ContentIdKind::Sealed => 1u8,
@@ -62,6 +66,7 @@ pub fn replace_attestation_digest(old_key: &ObjectKey, new_record: &ObjectRecord
     }
     hash_fields_bytes(&[
         REPLACE_ATTEST_DOMAIN,
+        &chain_id.to_le_bytes(),
         old_key,
         &kind_byte,
         &new_record.content_id.digest,
@@ -90,10 +95,11 @@ pub fn replace_attestation_digest(old_key: &ObjectKey, new_record: &ObjectRecord
 pub fn sign_replace_attestation(
     validator: Address,
     ml_dsa_seed: &[u8; 32],
+    chain_id: u64,
     old_key: &ObjectKey,
     new_record: &ObjectRecord,
 ) -> Result<ReplaceAttestation, PqError> {
-    let digest = replace_attestation_digest(old_key, new_record);
+    let digest = replace_attestation_digest(chain_id, old_key, new_record);
     let signature = ml_dsa_sign(
         SchemeId::ML_DSA_65,
         ml_dsa_seed,
@@ -220,6 +226,7 @@ pub enum ReplaceError {
 ///
 /// Returns an error if the operation fails.
 pub fn admit_object_replacement(
+    chain_id: u64,
     (sender, old_owner, proposer_stake): (&Address, &Address, u64),
     (old_record, new_record): (&ObjectRecord, &ObjectRecord),
     (placement_group_full, validator_keys): (&BTreeSet<Address>, &BTreeMap<Address, Vec<u8>>),
@@ -244,7 +251,7 @@ pub fn admit_object_replacement(
         });
     }
 
-    let digest = replace_attestation_digest(&old_record.commitment, new_record);
+    let digest = replace_attestation_digest(chain_id, &old_record.commitment, new_record);
     let mut distinct_attesters = BTreeSet::new();
     for att in attestations {
         if !placement_group_full.contains(&att.validator) {
@@ -304,6 +311,8 @@ mod tests {
     use super::*;
     use crate::crypto::pq::ml_dsa_public_key;
 
+    const CHAIN_ID: u64 = 45_261;
+
     fn sample_record(commitment: [u8; 32], content_id: ContentId, codec: CodecId) -> ObjectRecord {
         ObjectRecord {
             content_id,
@@ -344,11 +353,13 @@ mod tests {
             let atts: Vec<ReplaceAttestation> = [1u8, 2, 3]
                 .into_iter()
                 .map(|b| {
-                    sign_replace_attestation([b; 32], &[b; 32], &old_rec.commitment, &bad).unwrap()
+                    sign_replace_attestation([b; 32], &[b; 32], CHAIN_ID, &old_rec.commitment, &bad)
+                        .unwrap()
                 })
                 .collect();
             assert_eq!(
                 admit_object_replacement(
+                    CHAIN_ID,
                     (&[1u8; 32], &[1u8; 32], 50_000),
                     (&old_rec, &bad),
                     (&pg, &keys),
@@ -382,11 +393,26 @@ mod tests {
         let keys = key_map(&[1, 2, 3, 4]);
 
         let two_att = vec![
-            sign_replace_attestation([1u8; 32], &[1u8; 32], &old_rec.commitment, &new_rec).unwrap(),
-            sign_replace_attestation([2u8; 32], &[2u8; 32], &old_rec.commitment, &new_rec).unwrap(),
+            sign_replace_attestation(
+                [1u8; 32],
+                &[1u8; 32],
+                CHAIN_ID,
+                &old_rec.commitment,
+                &new_rec,
+            )
+            .unwrap(),
+            sign_replace_attestation(
+                [2u8; 32],
+                &[2u8; 32],
+                CHAIN_ID,
+                &old_rec.commitment,
+                &new_rec,
+            )
+            .unwrap(),
         ];
         assert!(matches!(
             admit_object_replacement(
+                CHAIN_ID,
                 (&[9u8; 32], &[1u8; 32], 100_000),
                 (&old_rec, &new_rec),
                 (&pg, &keys),
@@ -397,9 +423,17 @@ mod tests {
 
         let mut three_att = two_att;
         three_att.push(
-            sign_replace_attestation([3u8; 32], &[3u8; 32], &old_rec.commitment, &new_rec).unwrap(),
+            sign_replace_attestation(
+                [3u8; 32],
+                &[3u8; 32],
+                CHAIN_ID,
+                &old_rec.commitment,
+                &new_rec,
+            )
+            .unwrap(),
         );
         admit_object_replacement(
+            CHAIN_ID,
             (&[9u8; 32], &[1u8; 32], 100_000),
             (&old_rec, &new_rec),
             (&pg, &keys),
@@ -407,11 +441,24 @@ mod tests {
         )
         .unwrap();
 
+        assert_eq!(
+            admit_object_replacement(
+                CHAIN_ID + 1,
+                (&[9u8; 32], &[1u8; 32], 100_000),
+                (&old_rec, &new_rec),
+                (&pg, &keys),
+                &three_att,
+            ),
+            Err(ReplaceError::InvalidAttestationSignature([1u8; 32])),
+            "an attestation from another chain must not replay",
+        );
+
         // Forged signature or record swap must fail signature / commitment check.
         let mut forged = three_att.clone();
         forged[0].signature[0] ^= 0xFF;
         assert_eq!(
             admit_object_replacement(
+                CHAIN_ID,
                 (&[9u8; 32], &[1u8; 32], 100_000),
                 (&old_rec, &new_rec),
                 (&pg, &keys),
@@ -424,6 +471,7 @@ mod tests {
         let bad_rec = sample_record([30u8; 32], bad_cid, 1);
         assert_eq!(
             admit_object_replacement(
+                CHAIN_ID,
                 (&[9u8; 32], &[1u8; 32], 100_000),
                 (&old_rec, &bad_rec),
                 (&pg, &keys),

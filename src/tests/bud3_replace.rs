@@ -104,14 +104,23 @@ fn apply(
     tx: StorageTxV3,
     epoch: u64,
 ) -> Result<Applied, RegistryError> {
-    apply_with_validators(registry, signer, tx, epoch, &validator_keys())
+    apply_with_validators(
+        registry,
+        signer,
+        tx,
+        epoch,
+        DEFAULT_CHAIN_ID,
+        &validator_keys(),
+    )
 }
 
 /// Three distinct placement-group ML-DSA-65 attestations over `(old, new_record)`.
 fn attestations(old: &ObjectKey, new_record: &ObjectRecord) -> Vec<ReplaceAttestation> {
     [FULL_A, FULL_B, FULL_C]
         .into_iter()
-        .map(|v| sign_replace_attestation(addr(v), &[v; 32], old, new_record).unwrap())
+        .map(|v| {
+            sign_replace_attestation(addr(v), &[v; 32], DEFAULT_CHAIN_ID, old, new_record).unwrap()
+        })
         .collect()
 }
 
