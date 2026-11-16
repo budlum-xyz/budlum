@@ -4024,22 +4024,30 @@ impl Executor {
                     StorageTxV3::ReplaceObject { attestations, .. } => {
                         for att in attestations {
                             let v_addr = Address::from(att.validator);
-                            let key_opt = state
-                                .get_validator(&v_addr)
-                                .filter(|v| {
-                                    v.active
-                                        && !v.slashed
-                                        && !v.jailed
-                                        && !v.pq_public_key.is_empty()
-                                })
-                                .map(|v| v.pq_public_key.clone())
-                                .or_else(|| {
-                                    state
-                                        .validator_directory
-                                        .get(&v_addr)
-                                        .filter(|r| !r.operator_key.is_empty())
-                                        .map(|r| r.operator_key.clone())
-                                });
+                            // Never fall back to `validator_directory` when a validator is
+                            // present in consensus state but slashed, jailed, or inactive.
+                            let key_opt = match state.get_validator(&v_addr) {
+                                Some(v) => {
+                                    if v.active && !v.slashed && !v.jailed {
+                                        if v.pq_public_key.is_empty() {
+                                            state
+                                                .validator_directory
+                                                .get(&v_addr)
+                                                .filter(|r| !r.operator_key.is_empty())
+                                                .map(|r| r.operator_key.clone())
+                                        } else {
+                                            Some(v.pq_public_key.clone())
+                                        }
+                                    } else {
+                                        None
+                                    }
+                                }
+                                None => state
+                                    .validator_directory
+                                    .get(&v_addr)
+                                    .filter(|r| !r.operator_key.is_empty())
+                                    .map(|r| r.operator_key.clone()),
+                            };
                             if let Some(pk) = key_opt {
                                 validator_keys.insert(att.validator, pk);
                             }
@@ -4090,13 +4098,13 @@ impl Executor {
                             ));
                         }
                         // Also check Mobile share recipients are registered active validators
-                        // (so arbitrary non-validator addresses cannot be assigned shares).
+                        // (never fall back to `validator_directory` for a slashed/jailed/inactive validator).
                         for s in new_shares {
                             let recipient_addr = Address::from(s.validator);
-                            let active_validator = state
-                                .get_validator(&recipient_addr)
-                                .is_some_and(|v| v.active && !v.slashed && !v.jailed)
-                                || state.validator_directory.get(&recipient_addr).is_some();
+                            let active_validator = match state.get_validator(&recipient_addr) {
+                                Some(v) => v.active && !v.slashed && !v.jailed,
+                                None => state.validator_directory.get(&recipient_addr).is_some(),
+                            };
                             if !active_validator {
                                 return Err(BudlumError::validation(
                                     "storage_v3_refused",
@@ -4125,10 +4133,15 @@ impl Executor {
                 }
 
                 let epoch = state.epoch_index;
+                let mut verified_storage_tx = storage_tx.as_ref().clone();
+                if let StorageTxV3::ReplaceObject { proposer_stake, .. } = &mut verified_storage_tx {
+                    // Derive proposer stake from consensus validator state, never trusting caller input.
+                    *proposer_stake = state.get_validator(&tx.from).map_or(0, |v| v.stake);
+                }
                 let applied = crate::storage::bud3::tx::apply_with_validators(
                     &mut state.bud3_registry,
                     *tx.from.as_bytes(),
-                    storage_tx.as_ref().clone(),
+                    verified_storage_tx,
                     epoch,
                     &validator_keys,
                 )

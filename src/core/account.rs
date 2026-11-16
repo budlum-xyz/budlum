@@ -3702,6 +3702,8 @@ impl AccountState {
         // tasks and burns reserve leaves the market consistent with the root
         // taken at the end of this function.
         let (expired, receipts_pruned) = self.proof_market.close_epoch(self.epoch_index);
+        self.execution_state
+            .prune_expired_pending_evm_migrations(self.epoch_index);
         if expired > 0 || receipts_pruned > 0 {
             tracing::info!(
                 epoch = self.epoch_index,
