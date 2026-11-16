@@ -174,7 +174,25 @@ pub enum NetworkMessage {
     SlashingEvidence(crate::consensus::pos::SlashingEvidence),
     GlobalHeader(crate::settlement::GlobalBlockHeader),
     CrossDomainMessage(crate::cross_domain::CrossDomainMessage),
+    /// `agg/object`: an object on its way to the aggregators (the encoded
+    /// envelope) with the transaction it authorizes, which carries no
+    /// witness of its own.
+    AggObject {
+        envelope: Vec<u8>,
+        transaction: Transaction,
+    },
+    /// `agg/frame`: a claim frame in its canonical encoding.
+    AggFrame(Vec<u8>),
 }
+
+/// Topic of the heavy objects on their way to the aggregators.
+pub const TOPIC_AGG_OBJECT: &str = "agg/object";
+/// Topic of the claim frames the aggregators publish.
+pub const TOPIC_AGG_FRAME: &str = "agg/frame";
+/// Most bytes of the envelope in an `agg/object` message: the header and
+/// the largest payload the wire decodes.
+pub const MAX_AGG_OBJECT_BYTES: usize = 64 + crate::aggregation::chain::WIRE_OBJECT_BYTES;
+
 impl NetworkMessage {
     pub fn to_bytes(&self) -> Vec<u8> {
         use prost::Message;
@@ -905,6 +923,25 @@ fn validate_wire_frame_caps(mut slice: &[u8]) -> Result<(), MessageError> {
                     return Err(MessageError::TooLarge(evidence_bytes.len()));
                 }
                 scan_proto_slashing_evidence(evidence_bytes, 1, &mut frame_evidence_total)?;
+            }
+            28 => {
+                // `agg/object`: the envelope is bounded by the conversion;
+                // the transaction it carries gets the scan of any other.
+                let mut object = take_len_delimited(&mut slice, wire_type)?;
+                let mut seen_fields = 0u128;
+                while !object.is_empty() {
+                    let (field, field_wire) =
+                        prost::encoding::decode_key(&mut object).map_err(|e| {
+                            MessageError::ParseError(format!("Protobuf key error: {e}"))
+                        })?;
+                    mark_unique_tag(&mut seen_fields, field, "Duplicate object field")?;
+                    if field == 2 {
+                        let tx_bytes = take_len_delimited(&mut object, field_wire)?;
+                        scan_proto_transaction(tx_bytes, &mut frame_item_budget)?;
+                    } else {
+                        skip_wire_field(&mut object, field_wire)?;
+                    }
+                }
             }
             _ => skip_wire_field(&mut slice, wire_type)?,
         }

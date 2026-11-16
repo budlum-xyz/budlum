@@ -76,6 +76,19 @@ pub enum ChainCommand {
         oneshot::Sender<Option<crate::persistence::state_trie::AccountProofBundle>>,
     ),
     AddTransaction(Transaction, oneshot::Sender<Result<(), String>>),
+    /// Run the aggregation side of the node for this address; the answer
+    /// is the tick interval in milliseconds when the chain has the layer on.
+    EnableAggregator(Address, oneshot::Sender<Option<u64>>),
+    /// An object from `agg/object` with the transaction it authorizes.
+    AggObject(
+        Vec<u8>,
+        Transaction,
+        oneshot::Sender<Result<bool, crate::aggregation::node::ObjectRefusal>>,
+    ),
+    /// A frame from `agg/frame`.
+    AggFrame(Vec<u8>, oneshot::Sender<Result<bool, String>>),
+    /// One tick of the aggregator; the answer is the frames to publish.
+    AggTick(oneshot::Sender<Vec<Vec<u8>>>),
     AddTransactionBundle(
         Vec<Transaction>,
         oneshot::Sender<Result<(), crate::mempool::pool::BundleRefusal>>,
@@ -699,6 +712,59 @@ impl ChainHandle {
         let (tx, rx) = oneshot::channel();
         let _ = self.tx.send(ChainCommand::GetAccountProof(*addr, tx)).await;
         rx.await.unwrap_or(None)
+    }
+
+    /// Run the aggregation side of the node, proving for `aggregator`.
+    /// Returns the tick interval in milliseconds when the chain has the
+    /// layer on, `None` otherwise.
+    pub async fn enable_aggregator(&self, aggregator: Address) -> Option<u64> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::EnableAggregator(aggregator, tx))
+            .await;
+        rx.await.unwrap_or(None)
+    }
+
+    /// Hand an object from `agg/object` to the aggregation side, with the
+    /// transaction it authorizes. Returns whether the pair is new.
+    ///
+    /// # Errors
+    ///
+    /// The refusal, which also says whether the sender is to blame.
+    pub async fn submit_agg_object(
+        &self,
+        envelope: Vec<u8>,
+        transaction: Transaction,
+    ) -> Result<bool, crate::aggregation::node::ObjectRefusal> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::AggObject(envelope, transaction, tx))
+            .await;
+        rx.await
+            .unwrap_or(Err(crate::aggregation::node::ObjectRefusal::NoAggregator))
+    }
+
+    /// Hand a frame from `agg/frame` to the aggregation side. Returns
+    /// whether the frame is new.
+    ///
+    /// # Errors
+    ///
+    /// Why the frame was dropped.
+    pub async fn submit_agg_frame(&self, frame: Vec<u8>) -> Result<bool, String> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self.tx.send(ChainCommand::AggFrame(frame, tx)).await;
+        rx.await
+            .unwrap_or_else(|_| Err("chain actor is not running".into()))
+    }
+
+    /// One tick of the aggregator: the encoded frames to publish on
+    /// `agg/frame`.
+    pub async fn aggregation_tick(&self) -> Vec<Vec<u8>> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self.tx.send(ChainCommand::AggTick(tx)).await;
+        rx.await.unwrap_or_default()
     }
 
     pub async fn add_transaction(&self, tx: Transaction) -> Result<(), String> {
@@ -2877,6 +2943,18 @@ impl ChainActor {
                             .add_transaction(tx_obj)
                             .map_err(|e| e.to_string()),
                     );
+                }
+                ChainCommand::EnableAggregator(aggregator, res_tx) => {
+                    let _ = res_tx.send(self.blockchain.enable_aggregator(aggregator));
+                }
+                ChainCommand::AggObject(envelope, transaction, res_tx) => {
+                    let _ = res_tx.send(self.blockchain.receive_object(&envelope, transaction));
+                }
+                ChainCommand::AggFrame(frame, res_tx) => {
+                    let _ = res_tx.send(self.blockchain.receive_frame(&frame));
+                }
+                ChainCommand::AggTick(res_tx) => {
+                    let _ = res_tx.send(self.blockchain.aggregation_tick());
                 }
                 ChainCommand::AddTransactionBundle(txs, res_tx) => {
                     let _ = res_tx.send(self.blockchain.add_transaction_bundle(txs));
