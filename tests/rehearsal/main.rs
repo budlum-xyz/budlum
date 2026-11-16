@@ -102,7 +102,8 @@ fn rehearsal_t1_to_t7_drills_and_mobile_field_matrix_hold() {
     let nft_id = [0xEE; 32];
     bud3.register_object([1u8; 32], up.record, shares, 1, 30)
         .unwrap();
-    bud3.bind_nft(nft_id, [1u8; 32], &key).unwrap();
+    bud3.bind_nft(nft_id, [1u8; 32], Some([1u8; 32]), &key)
+        .unwrap();
 
     // T-1: Full validators participate while Mobile validators remain silent past the Android
     // suspension window; Mobile validators transition to non-slashing suspension while Full-class

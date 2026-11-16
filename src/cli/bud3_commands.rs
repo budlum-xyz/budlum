@@ -578,7 +578,8 @@ mod tests {
         }
 
         apply_bud3_tx(&mut bud3, uploader, finished.unsigned_tx, 1).unwrap();
-        bud3.bind_nft(nft_id, uploader, &key).unwrap();
+        bud3.bind_nft(nft_id, uploader, Some(uploader), &key)
+            .unwrap();
 
         let viewed = cli_storage_view(&bud3, &net, &key, Some(nft_id), None, None).unwrap();
         assert_eq!(viewed, payload);

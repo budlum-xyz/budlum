@@ -23,7 +23,7 @@ use crate::storage::bud3::pipeline::{prepare_public_upload, ObjectRecord};
 use crate::storage::bud3::placement::{Class, Share};
 use crate::storage::bud3::registry::{Bud3Query, Bud3Registry, ObjectKey, RegistryError};
 use crate::storage::bud3::replace::{sign_replace_attestation, ReplaceAttestation, ReplaceError};
-use crate::storage::bud3::tx::{apply_with_validators, Applied, StorageTxV3};
+use crate::storage::bud3::tx::{apply_with_validators_and_nft_owner, Applied, StorageTxV3};
 use std::collections::BTreeMap;
 
 const P: Profile = Profile {
@@ -104,7 +104,7 @@ fn apply(
     tx: StorageTxV3,
     epoch: u64,
 ) -> Result<Applied, RegistryError> {
-    apply_with_validators(registry, signer, tx, epoch, &validator_keys())
+    apply_with_validators_and_nft_owner(registry, signer, tx, epoch, &validator_keys(), None)
 }
 
 /// Three distinct placement-group ML-DSA-65 attestations over `(old, new_record)`.
