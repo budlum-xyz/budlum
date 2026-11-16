@@ -207,6 +207,7 @@ pub enum ChainCommand {
     ),
     GetDomainCommitments(oneshot::Sender<Vec<crate::domain::DomainCommitment>>),
     GetConsensusDomains(oneshot::Sender<Vec<crate::domain::ConsensusDomain>>),
+    GetConsensusDomainsWithGarden(oneshot::Sender<Vec<crate::domain::ConsensusDomain>>),
     RegisterGardenDomain(
         Box<crate::domain::ConsensusDomain>,
         oneshot::Sender<Result<(), String>>,
@@ -1749,6 +1750,18 @@ impl ChainHandle {
     pub async fn get_consensus_domains(&self) -> Vec<crate::domain::ConsensusDomain> {
         let (tx, rx) = oneshot::channel();
         let _ = self.tx.send(ChainCommand::GetConsensusDomains(tx)).await;
+        rx.await.unwrap_or_default()
+    }
+
+    /// Canonical in-block domains merged with this node's local Garden
+    /// domains. Operator-only callers such as `GardenBudlumLink::view` use
+    /// this instead of `get_consensus_domains`, which serves public RPC.
+    pub async fn get_consensus_domains_with_garden(&self) -> Vec<crate::domain::ConsensusDomain> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::GetConsensusDomainsWithGarden(tx))
+            .await;
         rx.await.unwrap_or_default()
     }
 
@@ -3449,9 +3462,23 @@ impl ChainActor {
                     let _ = tx.send(header);
                 }
                 ChainCommand::GetDomainCommitments(tx) => {
-                    let _ = tx.send(self.blockchain.domain_commitments_with_garden());
+                    // Public RPC (`bud_getDomainCommitments`) reads canonical
+                    // in-block settlement commitments only; node-local Gardens
+                    // stay private to the node operator.
+                    let _ = tx.send(
+                        self.blockchain
+                            .state
+                            .settlement
+                            .commitments
+                            .commitments_for_global_block(),
+                    );
                 }
                 ChainCommand::GetConsensusDomains(tx) => {
+                    // Public RPC (`bud_getConsensusDomains`) reads canonical
+                    // in-block domains only.
+                    let _ = tx.send(self.blockchain.state.settlement.domains.domains());
+                }
+                ChainCommand::GetConsensusDomainsWithGarden(tx) => {
                     let _ = tx.send(self.blockchain.consensus_domains_with_garden());
                 }
                 ChainCommand::RegisterGardenDomain(domain, res_tx) => {
