@@ -967,6 +967,12 @@ impl WalletKeyPair {
     }
 }
 
+/// Domain separator for V2 user address derivation (`SHA3-256("BUDLUM_ADDRESS_V2" || public_key)`).
+///
+/// Defined unconditionally so aggregation programs and feature-minimal builds
+/// share the single canonical constant with `account_abstraction::quantum_account`.
+pub const ADDRESS_DOMAIN_V2: &[u8] = b"BUDLUM_ADDRESS_V2";
+
 #[cfg(feature = "wallet-ml-dsa")]
 /// Compute the 32-byte user address from an ML-DSA-87 public key.
 ///

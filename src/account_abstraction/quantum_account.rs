@@ -24,7 +24,7 @@ use crate::crypto::primitives::{ML_DSA_87_PUBLIC_KEY_LEN, ML_DSA_87_SIGNATURE_LE
 use sha3::{Digest, Sha3_256};
 
 pub const MAX_MULTISIG_OWNERS: usize = 16;
-pub const ADDRESS_DOMAIN_V2: &[u8] = b"BUDLUM_ADDRESS_V2";
+pub use crate::crypto::primitives::ADDRESS_DOMAIN_V2;
 pub const SEED_DOMAIN_V1: &[u8] = b"BUDLUM_MLDSA87_SEED_V1";
 pub const RECOVERY_DOMAIN_V3: &[u8] = b"BUDLUM_WALLET_RECOVERY_PROPOSAL_V3";
 pub const STORAGE_PACT_DOMAIN: &[u8] = b"BUDLUM_STORAGE_PACT_V1";
