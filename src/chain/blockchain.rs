@@ -11916,6 +11916,49 @@ mod tests {
         assert_eq!(bc.state.get_balance(&recipient), 25);
     }
 
+    /// The block frame is part of what the block size limit counts. One
+    /// that does not fit a block next to its transactions is not carried,
+    /// and the state the block is built on stays as it was; one that fits
+    /// is carried with its bytes, so the mempool is packed into what is
+    /// left.
+    #[test]
+    fn a_frame_that_does_not_fit_a_block_is_not_carried() {
+        let sender = KeyPair::generate().unwrap();
+        let sender_pub = Address::from(sender.public_key_bytes());
+        let mut state = AccountState::new();
+        state.add_balance(&sender_pub, 10_000_000);
+        let mut tx =
+            Transaction::new_with_fee(sender_pub, Address::from([7u8; 32]), 1, 100, 0, vec![]);
+        tx.sign(&sender);
+        let tx_bytes = serde_json::to_vec(&tx).unwrap().len() + 1;
+        let budget = Blockchain::block_transaction_budget();
+        let untouched = state.clone();
+
+        // No frame, nothing to carry.
+        assert!(Blockchain::frame_into_block(&mut state, &[], 0).is_none());
+        // One byte over the budget with its transaction: not carried.
+        let over = budget - tx_bytes + 1;
+        assert!(
+            Blockchain::frame_into_block(&mut state, std::slice::from_ref(&tx), over).is_none()
+        );
+        assert_eq!(
+            state.get_nonce(&sender_pub),
+            untouched.get_nonce(&sender_pub)
+        );
+        assert_eq!(
+            state.get_balance(&sender_pub),
+            untouched.get_balance(&sender_pub)
+        );
+        // Exactly the budget: carried, and the bytes are the frame and the
+        // transaction together.
+        let (taken, bytes) =
+            Blockchain::frame_into_block(&mut state, std::slice::from_ref(&tx), over - 1)
+                .expect("a frame that fits is carried");
+        assert_eq!(taken, vec![tx]);
+        assert_eq!(bytes, budget);
+        assert_eq!(state.get_nonce(&sender_pub), 1);
+    }
+
     /// The producer's serialized-byte budget is a boundary, and boundaries
     /// are where comparison mutants live: run 39490423359 reported the
     /// `>`/`>=`/`==` and `+=` mutants of `collect_block_transactions`

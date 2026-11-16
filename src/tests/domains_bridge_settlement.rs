@@ -417,23 +417,23 @@ fn app_binding_is_open_on_devnet() {
         origin_app: vec![0x44; 20],
         manifest_hash: [0x55; 32],
     };
-    let closed_ctx = SettlementTxContext {
+    let mainnet_ctx = SettlementTxContext {
         sender: registrant,
-        chain_id: Network::Testnet.chain_id().value(),
+        chain_id: Network::Mainnet.chain_id().value(),
         fee: 5,
         bls: IntakeState::production_bls,
     };
     let before = state.calculate_state_root();
-    let err = execute_app_binding_tx(&mut state, &closed_ctx, &tx)
-        .expect_err("testnet must refuse app binding");
+    let err = execute_app_binding_tx(&mut state, &mainnet_ctx, &tx)
+        .expect_err("mainnet must refuse app binding");
     assert!(err.to_string().contains("not enabled"), "{err}");
     assert_eq!(state.calculate_state_root(), before);
     let outer = execute_settlement_tx(
         &mut state,
-        &closed_ctx,
+        &mainnet_ctx,
         &SettlementTx::AppBinding(Box::new(tx.clone())),
     )
-    .expect_err("settlement must refuse app binding on testnet");
+    .expect_err("settlement must refuse app binding on mainnet");
     assert!(outer.to_string().contains("not enabled"), "{outer}");
     assert_eq!(state.calculate_state_root(), before);
 
@@ -441,19 +441,32 @@ fn app_binding_is_open_on_devnet() {
         .expect("app_binding must execute on devnet 45262");
     assert_eq!(state.settlement.app_binding.apps.len(), 1);
 
-    let mainnet_ctx = SettlementTxContext {
+    let testnet_ctx = SettlementTxContext {
         sender: registrant,
-        chain_id: Network::Mainnet.chain_id().value(),
+        chain_id: Network::Testnet.chain_id().value(),
         fee: 5,
         bls: IntakeState::production_bls,
     };
+    let testnet_tx = AppBindingTx::Register {
+        domain_key: 9,
+        origin_app: vec![0x45; 20],
+        manifest_hash: [0x56; 32],
+    };
+    execute_settlement_tx(
+        &mut state,
+        &testnet_ctx,
+        &SettlementTx::AppBinding(Box::new(testnet_tx)),
+    )
+    .expect("settlement app registration must execute on testnet 45261");
+    assert_eq!(state.settlement.app_binding.apps.len(), 2);
+
     let outer_err = execute_settlement_tx(
         &mut state,
         &mainnet_ctx,
         &SettlementTx::AppBinding(Box::new(AppBindingTx::Register {
             domain_key: 9,
-            origin_app: vec![0x45; 20],
-            manifest_hash: [0x56; 32],
+            origin_app: vec![0x46; 20],
+            manifest_hash: [0x57; 32],
         })),
     )
     .expect_err("settlement app registration must remain closed on mainnet");

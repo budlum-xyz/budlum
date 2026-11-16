@@ -1,7 +1,6 @@
 use crate::chain::blockchain::Blockchain;
 use crate::consensus::pow::PoWEngine;
 use crate::core::address::Address;
-use crate::core::transaction::ExternalChain;
 
 use crate::cross_domain::DomainEventTree;
 use crate::domain::finality_adapter::leading_zero_bits;
@@ -184,7 +183,9 @@ fn pow_header_finality_authorizes_bridge_mint_but_legacy_does_not() {
 /// mined headers. The first header's state root is parameterized so tests
 /// can exercise the zero-root boundary; the later headers always carry
 /// distinct non-zero roots.
-fn pow_fixture(
+fn pow_fixture_for(
+    domain_id: u32,
+    domain_chain_id: u64,
     first_state_root: [u8; 32],
 ) -> (
     Blockchain,
@@ -193,11 +194,10 @@ fn pow_fixture(
 ) {
     let mut chain = Blockchain::new(Arc::new(PoWEngine::new(0)), None, 45262, None);
 
-    let bitcoin = ExternalChain::Bitcoin;
     let mut source = default_domain(
-        bitcoin.domain_id(),
+        domain_id,
         ConsensusKind::PoW,
-        bitcoin.canonical_chain_id(),
+        domain_chain_id,
         POW_HEADER_CHAIN_ADAPTER,
         3,
     );
@@ -240,6 +240,23 @@ fn pow_fixture(
         mined.push((header, hash));
     }
     (chain, source, mined)
+}
+
+fn pow_fixture(
+    first_state_root: [u8; 32],
+) -> (
+    Blockchain,
+    crate::domain::ConsensusDomain,
+    Vec<(PoWHeader, [u8; 32])>,
+) {
+    // Use the canonical recognized Bitcoin PoW domain (id=3, canonical_chain_id=0);
+    // permissionless PoW domains outside the canonical set are intentionally
+    // disallowed from anchoring into `external_roots`.
+    pow_fixture_for(
+        crate::core::transaction::ExternalChain::Bitcoin.domain_id(),
+        crate::core::transaction::ExternalChain::Bitcoin.canonical_chain_id(),
+        first_state_root,
+    )
 }
 
 /// Bind a three-header sliding window to a domain commitment: the window's
@@ -334,5 +351,19 @@ fn newer_finalized_commitment_supersedes_older_anchor() {
         chain.state.external_roots.get(&source.id),
         Some(&second_root),
         "one latest finalized root per domain: the newer anchor supersedes"
+    );
+}
+
+#[test]
+fn permissionless_pow_domain_does_not_anchor_external_root() {
+    let (mut chain, source, mined) = pow_fixture_for(41, 41_001, [1u8; 32]);
+    let (commitment, proof) = commitment_for_window(&source, &mined[0..3]);
+    chain
+        .submit_verified_domain_commitment(commitment, proof)
+        .expect("permissionless PoW commitment still advances its domain");
+    assert_eq!(
+        chain.state.external_roots.get(&source.id),
+        None,
+        "permissionless PoW domain outside the canonical set must never write external_roots"
     );
 }

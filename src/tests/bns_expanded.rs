@@ -1236,26 +1236,39 @@ fn bns_consensus_bud3_content_ref_validates_against_bud3_registry_and_serves_vie
     );
 
     // Register the object, then the same transaction applies.
+    let holder2 = [holder[0].wrapping_add(1); 32];
     state
         .bud3_registry
         .register_object(
             alice.0,
             up.record,
-            vec![(
-                0,
-                Share {
-                    validator: holder,
-                    class: Class::Full,
-                    first_esi: 0,
-                    symbols: 8,
-                },
-            )],
+            vec![
+                (
+                    0,
+                    Share {
+                        validator: holder,
+                        class: Class::Full,
+                        first_esi: 0,
+                        symbols: 4,
+                    },
+                ),
+                (
+                    0,
+                    Share {
+                        validator: holder2,
+                        class: Class::Full,
+                        first_esi: 4,
+                        symbols: 4,
+                    },
+                ),
+            ],
             1,
             50,
         )
         .unwrap();
 
     state.bud3_registry.ack(&obj_key, &holder).unwrap();
+    state.bud3_registry.ack(&obj_key, &holder2).unwrap();
     let root_before = state.bns_registry.root();
     Executor::apply_transaction_checked(&mut state, &premature_tx).unwrap();
     assert_ne!(state.bns_registry.root(), root_before);
@@ -2054,20 +2067,32 @@ fn bns_set_content_refuses_unknown_content_and_binds_a_registered_object() {
     assert_eq!(state.get_nonce(&alice), 0);
     assert_eq!(state.get_balance(&alice), 10_000);
 
+    let holder2 = [holder[0].wrapping_add(1); 32];
     state
         .bud3_registry
         .register_object(
             alice.0,
             up.record,
-            vec![(
-                0,
-                Share {
-                    validator: holder,
-                    class: Class::Full,
-                    first_esi: 0,
-                    symbols: 8,
-                },
-            )],
+            vec![
+                (
+                    0,
+                    Share {
+                        validator: holder,
+                        class: Class::Full,
+                        first_esi: 0,
+                        symbols: 4,
+                    },
+                ),
+                (
+                    0,
+                    Share {
+                        validator: holder2,
+                        class: Class::Full,
+                        first_esi: 4,
+                        symbols: 4,
+                    },
+                ),
+            ],
             1,
             50,
         )
@@ -2299,20 +2324,32 @@ fn bns_set_subdomain_content_belongs_to_the_subdomain_owner() {
     assert_eq!(state.get_nonce(&sub_owner), 0);
     assert_eq!(state.get_balance(&sub_owner), 10_000);
 
+    let holder2 = [holder[0].wrapping_add(1); 32];
     state
         .bud3_registry
         .register_object(
             sub_owner.0,
             up.record,
-            vec![(
-                0,
-                Share {
-                    validator: holder,
-                    class: Class::Full,
-                    first_esi: 0,
-                    symbols: 8,
-                },
-            )],
+            vec![
+                (
+                    0,
+                    Share {
+                        validator: holder,
+                        class: Class::Full,
+                        first_esi: 0,
+                        symbols: 4,
+                    },
+                ),
+                (
+                    0,
+                    Share {
+                        validator: holder2,
+                        class: Class::Full,
+                        first_esi: 4,
+                        symbols: 4,
+                    },
+                ),
+            ],
             1,
             50,
         )
@@ -2320,6 +2357,10 @@ fn bns_set_subdomain_content_belongs_to_the_subdomain_owner() {
     state
         .bud3_registry
         .ack(&known.object_commitment, &holder)
+        .unwrap();
+    state
+        .bud3_registry
+        .ack(&known.object_commitment, &holder2)
         .unwrap();
 
     // The parent owner created the subdomain and still cannot write into it.
