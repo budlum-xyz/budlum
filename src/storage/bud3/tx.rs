@@ -184,6 +184,7 @@ pub fn apply(
         signer,
         tx,
         epoch,
+        crate::core::transaction::DEFAULT_CHAIN_ID,
         &std::collections::BTreeMap::new(),
     )
 }
@@ -199,6 +200,7 @@ pub fn apply_with_validators(
     signer: Address,
     tx: StorageTxV3,
     epoch: u64,
+    chain_id: u64,
     validator_keys: &std::collections::BTreeMap<Address, Vec<u8>>,
 ) -> Result<Applied, RegistryError> {
     match tx {
@@ -230,6 +232,7 @@ pub fn apply_with_validators(
             }
             registry
                 .record_repair_with_validators(
+                    chain_id,
                     &object,
                     SegmentRepair {
                         segment,
@@ -294,7 +297,7 @@ pub fn apply_with_validators(
                 new_record,
                 new_shares,
                 &attestations,
-                (epoch, validator_keys),
+                (chain_id, epoch, validator_keys),
             )
             .map(Applied::Replaced),
         StorageTxV3::PayFallbackView {

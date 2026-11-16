@@ -4143,6 +4143,7 @@ impl Executor {
                     *tx.from.as_bytes(),
                     verified_storage_tx,
                     epoch,
+                    tx.chain_id,
                     &validator_keys,
                 )
                 .map_err(|e| BudlumError::validation("storage_v3_refused", format!("{e:?}")))?;

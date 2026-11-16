@@ -38,7 +38,8 @@ use super::meter::Meter;
 use super::pipeline::ObjectRecord;
 use super::placement::{Class, Share};
 use super::repair::{
-    repair_attestation_digest, RepairWitness, MAX_REPAIR_WITNESS_SYMBOLS, MIN_REPAIR_ATTESTATIONS,
+    repair_attestation_digest, RepairAttestationMessage, RepairWitness, MAX_REPAIR_WITNESS_SYMBOLS,
+    MIN_REPAIR_ATTESTATIONS,
 };
 use super::segment::Segmentation;
 use super::view::{PaidViewReceipt, MIN_PAID_VIEW_FEE_ATOMS};
@@ -1148,7 +1149,7 @@ impl Bud3Registry {
         new_record: ObjectRecord,
         new_shares: Vec<(u64, Share)>,
         attestations: &[super::replace::ReplaceAttestation],
-        (epoch, validator_keys): (u64, &BTreeMap<Address, Vec<u8>>),
+        (chain_id, epoch, validator_keys): (u64, u64, &BTreeMap<Address, Vec<u8>>),
     ) -> Result<ObjectKey, RegistryError> {
         let (sender, proposer_stake) = proposer;
         if self.tombstones.contains_key(old_key) {
@@ -1182,6 +1183,7 @@ impl Bud3Registry {
             .map(|s| s.share.validator)
             .collect();
         super::replace::admit_object_replacement(
+            chain_id,
             (&sender, &old_entry.owner, proposer_stake),
             (&old_entry.record, &new_record),
             (&pg_full, validator_keys),
@@ -1868,7 +1870,14 @@ impl Bud3Registry {
         repair: SegmentRepair<'_>,
         epoch: u64,
     ) -> Result<(), RegistryError> {
-        self.record_repair_with_validators(key, repair, None, &BTreeMap::new(), epoch)
+        self.record_repair_with_validators(
+            crate::core::transaction::DEFAULT_CHAIN_ID,
+            key,
+            repair,
+            None,
+            &BTreeMap::new(),
+            epoch,
+        )
     }
 
     /// Verify and record a segment repair using either Merkle-proven live symbols
@@ -1882,6 +1891,7 @@ impl Bud3Registry {
     /// [`RegistryError::BadRepair`] or [`RegistryError::UnknownObject`].
     pub fn record_repair_with_validators(
         &mut self,
+        chain_id: u64,
         key: &ObjectKey,
         repair: SegmentRepair<'_>,
         repairer: Option<&Address>,
@@ -2099,8 +2109,15 @@ impl Bud3Registry {
                     .symbol_roots
                     .get(seg_idx)
                     .ok_or(RegistryError::BadRepair("missing original segment root"))?;
-                let digest =
-                    repair_attestation_digest(key, segment, first, count, &new_root, &orig_root);
+                let digest = repair_attestation_digest(RepairAttestationMessage {
+                    chain_id,
+                    object: key,
+                    segment,
+                    first_esi: first,
+                    count,
+                    new_root: &new_root,
+                    original_segment_root: &orig_root,
+                });
                 let new_holders: BTreeSet<Address> = sorted.iter().map(|s| s.validator).collect();
                 let lost_holders: BTreeSet<Address> = obj
                     .shares
