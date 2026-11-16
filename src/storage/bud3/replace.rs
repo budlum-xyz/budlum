@@ -39,9 +39,14 @@ pub struct ReplaceAttestation {
 }
 
 /// Canonical domain-separated digest signed by each placement-group Full
-/// validator over `(old_key, new_record)`.
+/// validator over `(chain_id, old_key, new_record)`.
 #[must_use]
-pub fn replace_attestation_digest(old_key: &ObjectKey, new_record: &ObjectRecord) -> [u8; 32] {
+pub fn replace_attestation_digest(
+    chain_id: u64,
+    old_key: &ObjectKey,
+    new_record: &ObjectRecord,
+) -> [u8; 32] {
+    let chain_bytes = chain_id.to_le_bytes();
     let kind_byte = [match new_record.content_id.kind {
         ContentIdKind::Public => 0u8,
         ContentIdKind::Sealed => 1u8,
@@ -62,6 +67,7 @@ pub fn replace_attestation_digest(old_key: &ObjectKey, new_record: &ObjectRecord
     }
     hash_fields_bytes(&[
         REPLACE_ATTEST_DOMAIN,
+        &chain_bytes,
         old_key,
         &kind_byte,
         &new_record.content_id.digest,
@@ -80,20 +86,19 @@ pub fn replace_attestation_digest(old_key: &ObjectKey, new_record: &ObjectRecord
     ])
 }
 
-/// Sign a [`ReplaceAttestation`] with `validator`'s ML-DSA-65 seed under `ctx::STORAGE_V2`.
-///
-/// Convenience: exposed for validator custody daemons and replacement tests.
+/// Sign a [`ReplaceAttestation`] on `chain_id` with `validator`'s ML-DSA-65 seed under `ctx::STORAGE_V2`.
 ///
 /// # Errors
 ///
 /// Returns an error if the operation fails.
-pub fn sign_replace_attestation(
+pub fn sign_replace_attestation_with_chain_id(
+    chain_id: u64,
     validator: Address,
     ml_dsa_seed: &[u8; 32],
     old_key: &ObjectKey,
     new_record: &ObjectRecord,
 ) -> Result<ReplaceAttestation, PqError> {
-    let digest = replace_attestation_digest(old_key, new_record);
+    let digest = replace_attestation_digest(chain_id, old_key, new_record);
     let signature = ml_dsa_sign(
         SchemeId::ML_DSA_65,
         ml_dsa_seed,
@@ -107,6 +112,28 @@ pub fn sign_replace_attestation(
         new_commitment: new_record.commitment,
         signature,
     })
+}
+
+/// Sign a [`ReplaceAttestation`] on [`crate::core::transaction::DEFAULT_CHAIN_ID`].
+///
+/// Convenience: exposed for validator custody daemons and replacement tests.
+///
+/// # Errors
+///
+/// Returns an error if the operation fails.
+pub fn sign_replace_attestation(
+    validator: Address,
+    ml_dsa_seed: &[u8; 32],
+    old_key: &ObjectKey,
+    new_record: &ObjectRecord,
+) -> Result<ReplaceAttestation, PqError> {
+    sign_replace_attestation_with_chain_id(
+        crate::core::transaction::DEFAULT_CHAIN_ID,
+        validator,
+        ml_dsa_seed,
+        old_key,
+        new_record,
+    )
 }
 
 /// Verified candidate produced during stage A0 codec selection (Section 6.6.2).
@@ -220,6 +247,7 @@ pub enum ReplaceError {
 ///
 /// Returns an error if the operation fails.
 pub fn admit_object_replacement(
+    chain_id: u64,
     (sender, old_owner, proposer_stake): (&Address, &Address, u64),
     (old_record, new_record): (&ObjectRecord, &ObjectRecord),
     (placement_group_full, validator_keys): (&BTreeSet<Address>, &BTreeMap<Address, Vec<u8>>),
@@ -244,7 +272,7 @@ pub fn admit_object_replacement(
         });
     }
 
-    let digest = replace_attestation_digest(&old_record.commitment, new_record);
+    let digest = replace_attestation_digest(chain_id, &old_record.commitment, new_record);
     let mut distinct_attesters = BTreeSet::new();
     for att in attestations {
         if !placement_group_full.contains(&att.validator) {
@@ -349,6 +377,7 @@ mod tests {
                 .collect();
             assert_eq!(
                 admit_object_replacement(
+                    crate::core::transaction::DEFAULT_CHAIN_ID,
                     (&[1u8; 32], &[1u8; 32], 50_000),
                     (&old_rec, &bad),
                     (&pg, &keys),
@@ -374,6 +403,58 @@ mod tests {
     }
 
     #[test]
+    fn replace_attestations_do_not_replay_across_chains() {
+        let cid = ContentId::public(b"canonical object bytes");
+        let old_rec = sample_record([10u8; 32], cid, 0);
+        let new_rec = sample_record([20u8; 32], cid, 1);
+        let pg: BTreeSet<Address> = [[1u8; 32], [2u8; 32], [3u8; 32], [4u8; 32]].into();
+        let keys = key_map(&[1, 2, 3, 4]);
+        let home = crate::core::transaction::DEFAULT_CHAIN_ID;
+        let other = home + 1;
+
+        assert_ne!(
+            replace_attestation_digest(home, &old_rec.commitment, &new_rec),
+            replace_attestation_digest(other, &old_rec.commitment, &new_rec),
+            "the digest must commit to the chain it was signed for"
+        );
+
+        let quorum: Vec<ReplaceAttestation> = [1u8, 2, 3]
+            .into_iter()
+            .map(|v| {
+                sign_replace_attestation_with_chain_id(
+                    home,
+                    [v; 32],
+                    &[v; 32],
+                    &old_rec.commitment,
+                    &new_rec,
+                )
+                .unwrap()
+            })
+            .collect();
+        admit_object_replacement(
+            home,
+            (&[9u8; 32], &[1u8; 32], 100_000),
+            (&old_rec, &new_rec),
+            (&pg, &keys),
+            &quorum,
+        )
+        .expect("a quorum signed for this chain is admitted on it");
+
+        // The very same quorum, replayed on a network that shares the
+        // validators and the object key, verifies against a different digest.
+        assert_eq!(
+            admit_object_replacement(
+                other,
+                (&[9u8; 32], &[1u8; 32], 100_000),
+                (&old_rec, &new_rec),
+                (&pg, &keys),
+                &quorum,
+            ),
+            Err(ReplaceError::InvalidAttestationSignature([1u8; 32]))
+        );
+    }
+
+    #[test]
     fn bud3_object_replacement() {
         let cid = ContentId::public(b"canonical object bytes");
         let old_rec = sample_record([10u8; 32], cid, 0);
@@ -387,6 +468,7 @@ mod tests {
         ];
         assert!(matches!(
             admit_object_replacement(
+                crate::core::transaction::DEFAULT_CHAIN_ID,
                 (&[9u8; 32], &[1u8; 32], 100_000),
                 (&old_rec, &new_rec),
                 (&pg, &keys),
@@ -400,6 +482,7 @@ mod tests {
             sign_replace_attestation([3u8; 32], &[3u8; 32], &old_rec.commitment, &new_rec).unwrap(),
         );
         admit_object_replacement(
+            crate::core::transaction::DEFAULT_CHAIN_ID,
             (&[9u8; 32], &[1u8; 32], 100_000),
             (&old_rec, &new_rec),
             (&pg, &keys),
@@ -412,6 +495,7 @@ mod tests {
         forged[0].signature[0] ^= 0xFF;
         assert_eq!(
             admit_object_replacement(
+                crate::core::transaction::DEFAULT_CHAIN_ID,
                 (&[9u8; 32], &[1u8; 32], 100_000),
                 (&old_rec, &new_rec),
                 (&pg, &keys),
@@ -424,6 +508,7 @@ mod tests {
         let bad_rec = sample_record([30u8; 32], bad_cid, 1);
         assert_eq!(
             admit_object_replacement(
+                crate::core::transaction::DEFAULT_CHAIN_ID,
                 (&[9u8; 32], &[1u8; 32], 100_000),
                 (&old_rec, &bad_rec),
                 (&pg, &keys),

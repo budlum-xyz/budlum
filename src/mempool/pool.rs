@@ -468,10 +468,12 @@ impl Mempool {
             return Err(MempoolError::SenderLimitReached);
         }
 
-        // The duty lane's two limits. Both are refusals with no side effects,
-        // so they run before anything is evicted, for the reason the eviction
-        // comment gives above: a refusal that has already deleted somebody
-        // else's transaction is a free deletion primitive.
+        // The duty lane's limits. Every refusal here has no side effects, for
+        // the reason the eviction comment gives above: a refusal that has
+        // already deleted somebody else's transaction is a free deletion
+        // primitive. The one removal this step can make, taking a batch back
+        // from a signer that holds more of a full lane than the incoming one
+        // would, is provisional and is undone by every refusal below it.
         //
         // The lane is measured over the entries in the pool, not over a
         // counter. A counter has to be told about every path that removes an
@@ -481,6 +483,7 @@ impl Mempool {
         // by the entry cap and runs only for a duty transaction, which the
         // window limit already makes rare.
         let incoming = charged_bytes(&tx);
+        let mut duty_victims: Vec<PendingTx> = Vec::new();
         if let Some(batch) = duty.as_ref() {
             if let Some((open_nonce, _)) = self.open_duty_batch(&tx.from, batch.window) {
                 if open_nonce != tx.nonce {
@@ -507,20 +510,50 @@ impl Mempool {
                 .saturating_sub(replaced)
                 .saturating_add(batch.block_bytes);
             let cap = self.duty_lane_cap();
+            // A batch larger than the lane's share of one block is one that
+            // `get_sorted_transactions` can never hand to a producer. Admitted,
+            // it would hold lane bytes until its TTL and carry nothing.
+            let share = self.config.duty_block_bytes;
+            if batch.block_bytes <= cap && batch.block_bytes > share {
+                return Err(MempoolError::DutyLaneRefused(
+                    DutyRefusal::BatchExceedsBlockShare {
+                        batch_bytes: batch.block_bytes,
+                        share,
+                    },
+                ));
+            }
             if lane_bytes > cap {
-                return Err(MempoolError::DutyLaneRefused(DutyRefusal::LaneBytesFull {
-                    lane_bytes,
-                    cap,
-                }));
+                // The ceiling is shared, so it must not be whoever came first
+                // that keeps it. A signer that would hold less of the lane
+                // than the heaviest signer does takes the room from that one.
+                let signer_bytes = self
+                    .duty_lane_bytes_of(&tx.from)
+                    .saturating_sub(replaced)
+                    .saturating_add(batch.block_bytes);
+                let Some(victims) =
+                    self.evict_duty_from_heavier_signers(&tx.from, signer_bytes, lane_bytes - cap)
+                else {
+                    return Err(MempoolError::DutyLaneRefused(DutyRefusal::LaneBytesFull {
+                        lane_bytes,
+                        cap,
+                    }));
+                };
+                duty_victims = victims;
             }
         }
 
-        if existing_hash.is_none()
-            && self.transactions.len() >= self.config.max_size
-            && !self.evict_lowest_fee(&tx)
-        {
-            return Err(MempoolError::PoolFull);
-        }
+        let count_victim =
+            if existing_hash.is_none() && self.transactions.len() >= self.config.max_size {
+                let Some(victim) = self.evict_lowest_fee_silent(&tx) else {
+                    for victim in duty_victims {
+                        self.restore_entry(victim);
+                    }
+                    return Err(MempoolError::PoolFull);
+                };
+                Some(victim)
+            } else {
+                None
+            };
 
         // The byte budget is charged AFTER the count check and BEFORE the
         // replacement is removed, and both orderings matter.
@@ -529,12 +562,11 @@ impl Mempool {
         // `PoolFull` rather than by whichever limit happens to be read first;
         // the two errors tell an operator different things.
         //
-        // Before the removal, so a refusal leaves the pool untouched. The
-        // eviction ordering above exists because a refusal that had already
-        // deleted somebody else's transaction is a free deletion primitive.
-        // Charging bytes after the removal would reintroduce exactly that: a
-        // replacement large enough to exceed the budget would be refused with
-        // the transaction it replaced already gone.
+        // Before the removal, so a refusal leaves the pool untouched. If the
+        // byte check refuses, any provisional count-victim removed above is
+        // restored immediately before returning `PoolBytesFull` so a huge
+        // low-total-bytes-failing submission can never delete another sender's
+        // pending transaction for free.
         let freed = existing_hash
             .as_ref()
             .and_then(|h| self.transactions.get(h))
@@ -546,7 +578,18 @@ impl Mempool {
         if projected > self.config.max_pool_bytes
             && !self.evict_until_bytes_fit(&tx, projected - self.config.max_pool_bytes)
         {
+            if let Some(victim) = count_victim {
+                self.restore_entry(victim);
+            }
+            for victim in duty_victims {
+                self.restore_entry(victim);
+            }
             return Err(MempoolError::PoolBytesFull);
+        }
+
+        if let Some(journal) = self.journal.as_mut() {
+            journal.extend(count_victim);
+            journal.extend(duty_victims);
         }
 
         if let Some(existing_hash) = existing_hash {
@@ -853,6 +896,93 @@ impl Mempool {
             .sum()
     }
 
+    /// The bytes of the duty lane one signer holds, over the block measure.
+    fn duty_lane_bytes_of(&self, signer: &Address) -> usize {
+        self.by_sender.get(signer).map_or(0, |nonces| {
+            nonces
+                .values()
+                .filter_map(|hash| self.transactions.get(hash))
+                .filter_map(|entry| entry.duty)
+                .map(|batch| batch.block_bytes)
+                .sum()
+        })
+    }
+
+    /// Free `needed` bytes of a full duty lane for a batch of `signer`, which
+    /// would hold `signer_bytes` of the lane once admitted.
+    ///
+    /// The lane's ceiling is one number for every validator, so without this
+    /// it belongs to whoever filled it first: a validator that parks batches
+    /// no block will take (a nonce it has not reached, for example) holds the
+    /// lane until they expire and every other validator's batch is refused.
+    /// The room is therefore taken from the signer holding the most lane
+    /// bytes, for as long as that signer holds strictly more than the incoming
+    /// one would. A signer can only displace one that is heavier than itself,
+    /// so the lane converges on equal shares instead of on arrival order.
+    ///
+    /// The choice is deterministic: the heaviest signer, ties on the smallest
+    /// address, and that signer's highest nonce first, because removing the
+    /// last batch of a sender strands nothing queued behind it.
+    ///
+    /// Returns `None` without having removed anything when the bytes cannot
+    /// be freed under that rule. The removed entries are returned so the
+    /// caller can put them back if the admission is refused further down.
+    fn evict_duty_from_heavier_signers(
+        &mut self,
+        signer: &Address,
+        signer_bytes: usize,
+        needed: usize,
+    ) -> Option<Vec<PendingTx>> {
+        /// The lane batches one signer holds: their bytes, and each batch
+        /// by nonce with its hash and its bytes.
+        #[derive(Default)]
+        struct Holding {
+            bytes: usize,
+            batches: BTreeMap<u64, (String, usize)>,
+        }
+        let mut held: BTreeMap<[u8; 32], Holding> = BTreeMap::new();
+        for entry in self.transactions.values() {
+            let Some(batch) = entry.duty else {
+                continue;
+            };
+            if entry.tx.from == *signer {
+                continue;
+            }
+            let holding = held.entry(entry.tx.from.0).or_default();
+            holding.bytes = holding.bytes.saturating_add(batch.block_bytes);
+            holding
+                .batches
+                .insert(entry.tx.nonce, (entry.tx.hash.clone(), batch.block_bytes));
+        }
+        let mut plan: Vec<String> = Vec::new();
+        let mut freed = 0usize;
+        while freed < needed {
+            // `max_by_key` keeps the last maximum, and the map is in address
+            // order, so the reversed walk leaves the smallest address.
+            let (heaviest, bytes) = held
+                .iter()
+                .rev()
+                .max_by_key(|(_, holding)| holding.bytes)
+                .map(|(address, holding)| (*address, holding.bytes))?;
+            if bytes <= signer_bytes {
+                return None;
+            }
+            let holding = held.get_mut(&heaviest)?;
+            let (_, (hash, batch_bytes)) = holding.batches.pop_last()?;
+            holding.bytes = holding.bytes.saturating_sub(batch_bytes);
+            if holding.batches.is_empty() {
+                held.remove(&heaviest);
+            }
+            freed = freed.saturating_add(batch_bytes);
+            plan.push(hash);
+        }
+        Some(
+            plan.iter()
+                .filter_map(|hash| self.remove_entry_silent(hash))
+                .collect(),
+        )
+    }
+
     /// The bytes the lane may hold in the pool.
     ///
     /// Derived from the block share rather than configured beside it: the pool
@@ -880,7 +1010,25 @@ impl Mempool {
     ///
     /// Skipping the sender's own entries makes the cap mean what it says: to
     /// get a slot when the pool is full, you have to outbid *somebody else*.
-    fn evict_lowest_fee(&mut self, new_tx: &Transaction) -> bool {
+    fn remove_entry_silent(&mut self, hash: &str) -> Option<PendingTx> {
+        let pending = self.transactions.remove(hash)?;
+        self.resident_bytes = self.resident_bytes.saturating_sub(pending.charged);
+        if let Some(sender_txs) = self.by_sender.get_mut(&pending.tx.from) {
+            sender_txs.remove(&pending.tx.nonce);
+            if sender_txs.is_empty() {
+                self.by_sender.remove(&pending.tx.from);
+            }
+        }
+        if let Some(fee_txs) = self.by_fee.get_mut(&pending.tx.fee) {
+            fee_txs.remove(hash);
+            if fee_txs.is_empty() {
+                self.by_fee.remove(&pending.tx.fee);
+            }
+        }
+        Some(pending)
+    }
+
+    fn evict_lowest_fee_silent(&mut self, new_tx: &Transaction) -> Option<PendingTx> {
         for (&fee, hashes) in &self.by_fee {
             if new_tx.fee <= fee {
                 // `by_fee` is ordered, so nothing further down can be cheaper.
@@ -898,11 +1046,10 @@ impl Mempool {
                 .min()
                 .cloned();
             if let Some(hash) = victim {
-                self.remove_transaction(&hash);
-                return true;
+                return self.remove_entry_silent(&hash);
             }
         }
-        false
+        None
     }
 
     /// Evict cheaper transactions until `needed` bytes have been freed.
@@ -1933,5 +2080,67 @@ mod tests {
             matches!(err, MempoolError::InvalidTransaction(_)),
             "got: {err:?}"
         );
+    }
+
+    #[test]
+    fn pool_bytes_full_refusal_does_not_evict_count_victim() {
+        let kp_a = crate::crypto::primitives::KeyPair::generate().expect("keypair");
+        let kp_b = crate::crypto::primitives::KeyPair::generate().expect("keypair");
+
+        let small = {
+            let from = crate::core::address::Address::from(kp_a.public_key_bytes());
+            let mut tx = Transaction::new_with_chain_id(
+                from,
+                crate::core::address::Address::zero(),
+                1,
+                5,
+                0,
+                vec![],
+                crate::core::transaction::DEFAULT_CHAIN_ID,
+                crate::core::transaction::TransactionType::Transfer,
+            );
+            tx.sign(&kp_a);
+            tx.hash = tx.calculate_hash();
+            tx
+        };
+        let small_bytes = charged_bytes(&small);
+        let small_hash = small.hash.clone();
+
+        let mut pool = Mempool::new(MempoolConfig {
+            max_size: 1,
+            max_pool_bytes: small_bytes + 32,
+            min_fee: 0,
+            ..MempoolConfig::default()
+        });
+        pool.add_transaction(small).expect("small tx fits");
+        assert_eq!(pool.len(), 1);
+
+        let oversized = {
+            let from = crate::core::address::Address::from(kp_b.public_key_bytes());
+            let mut tx = Transaction::new_with_chain_id(
+                from,
+                crate::core::address::Address::zero(),
+                1,
+                500,
+                0,
+                vec![0xAA; 2048],
+                crate::core::transaction::DEFAULT_CHAIN_ID,
+                crate::core::transaction::TransactionType::Transfer,
+            );
+            tx.sign(&kp_b);
+            tx.hash = tx.calculate_hash();
+            tx
+        };
+
+        assert_eq!(
+            pool.add_transaction(oversized),
+            Err(MempoolError::PoolBytesFull)
+        );
+        assert_eq!(pool.len(), 1, "refused submission must leave victim intact");
+        assert!(
+            pool.transactions.contains_key(&small_hash),
+            "victim transaction must still be present after PoolBytesFull refusal"
+        );
+        assert_eq!(pool.resident_bytes, small_bytes);
     }
 }

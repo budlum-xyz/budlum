@@ -95,8 +95,12 @@ pub fn extract_object_from_frames(
     if frames.is_empty() {
         return Err(TwoPathError::MissingSegment(0));
     }
+    const MAX_STREAM_SEGMENTS: usize = 1024;
     let mut decoders: BTreeMap<u64, (u32, usize, SegmentDecoder)> = BTreeMap::new();
     for frame in frames {
+        if frame.source_symbols == 0 || frame.source_symbols > Profile::P0.k_max {
+            return Err(TwoPathError::Frame(FrameWireError::BadGeometry));
+        }
         let sym_size_u16 = u16::try_from(frame.data.len())
             .map_err(|_| TwoPathError::Frame(FrameWireError::BadGeometry))?;
         if let Some((seg_len, sym_len, _)) = decoders.get(&frame.segment) {
@@ -104,12 +108,15 @@ pub fn extract_object_from_frames(
                 return Err(TwoPathError::Frame(FrameWireError::BadGeometry));
             }
         } else {
+            if decoders.len() >= MAX_STREAM_SEGMENTS {
+                return Err(TwoPathError::Frame(FrameWireError::BadGeometry));
+            }
             let eph = Profile {
                 id: 0,
                 qr_version: 40,
                 symbol_size: sym_size_u16,
                 fps: 10,
-                k_max: frame.source_symbols.max(1),
+                k_max: frame.source_symbols,
             };
             // A decoder reserves both the padded segment buffer and the per-symbol
             // slot table (~24 bytes per source symbol) regardless of how tiny the
@@ -355,8 +362,10 @@ mod tests {
             Err(FrameWireError::BadGeometry)
         );
 
-        // Craft distinct-segment frames each advertising k = 10_000 symbols of 2048 bytes (~20 MB/decoder)
-        // with a 1 MB meter: second decoder allocation must hit the meter cap.
+        // Distinct-segment frames, each naming the largest permitted source
+        // count (`k_max` symbols of 2048 bytes, about 8 MB per decoder). Under
+        // a 1 MB meter the first decoder allocation hits the meter cap.
+        let k = Profile::P0.k_max;
         let mut bogus_frames = Vec::new();
         for seg in 0..4u64 {
             let mut f = Vec::with_capacity(26 + 2048);
@@ -364,9 +373,9 @@ mod tests {
             f.push(0);
             f.push(0);
             f.extend_from_slice(&seg.to_le_bytes());
-            f.extend_from_slice(&(10_000u32 * 2048).to_le_bytes());
+            f.extend_from_slice(&(k * 2048).to_le_bytes());
             f.extend_from_slice(&0u32.to_le_bytes());
-            f.extend_from_slice(&10_000u32.to_le_bytes());
+            f.extend_from_slice(&k.to_le_bytes());
             f.extend_from_slice(&vec![0x55u8; 2048]);
             bogus_frames.push(Bud3Frame::decode_wire(&f, &mut wire_meter).unwrap());
         }
@@ -376,5 +385,15 @@ mod tests {
             matches!(err, TwoPathError::Frame(FrameWireError::Budget(_))),
             "expected meter budget error, got {err:?}"
         );
+
+        // A frame naming more source symbols than the profile allows is
+        // refused before any decoder is sized from it.
+        let mut over = bogus_frames.swap_remove(0);
+        over.source_symbols = k + 1;
+        let mut meter = Meter::for_object(1 << 30);
+        assert!(matches!(
+            extract_object_from_frames(&[over], &mut meter),
+            Err(TwoPathError::Frame(FrameWireError::BadGeometry))
+        ));
     }
 }

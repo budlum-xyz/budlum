@@ -448,6 +448,8 @@ opt-level = 3
 opt-level = 3
 [profile.dev.package.p3-symmetric]
 opt-level = 3
+[profile.dev.package.raptorq]
+opt-level = 3
 # Upstream rust-libp2p 0.54 uses `debug_assert!(false, ...)` on asynchronous
 # connection/substream teardown races (`libp2p-kad` handler.rs:860 / bootstrap.rs:90,
 # `libp2p-request-response` lib.rs:862..972, `libp2p-ping` handler.rs:202), which

@@ -760,6 +760,10 @@ fn answer_challenge(
             proof_bytes,
         )
         .map_err(|e| StorageTxError::ChallengeAnswerRefused(e.to_string()))?;
+    let mut bond_refunds = Vec::new();
+    if refund {
+        bond_refunds.push((opener, opener_bond));
+    }
     if result.outcome == ChallengeOutcome::Mismatched {
         // The missed-deadline path settles a slash through `apply_bond_slash`:
         // the cooldown starts on the block clock, the confiscated bond is
@@ -780,12 +784,16 @@ fn answer_challenge(
             "mismatched challenge answer",
         )
         .map_err(StorageTxError::ChallengeAnswerRefused)?;
+        bond_refunds.extend(
+            state
+                .storage_registry
+                .close_superseded_challenges_for_slashed_deal(result.deal_id, epoch),
+        );
     }
-    if refund {
-        // The bond `open_challenge` debited from this opener comes back. The
-        // overflow was ruled out above.
+    for (refund_addr, refund_amt) in bond_refunds {
+        // Every entry returns an opener bond that `open_challenge` already debited.
         state
-            .try_add_balance(&opener, opener_bond)
+            .try_add_balance(&refund_addr, refund_amt)
             .map_err(StorageTxError::ChallengeAnswerRefused)?;
     }
     Ok(())

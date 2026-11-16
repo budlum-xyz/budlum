@@ -12,6 +12,11 @@ use serde::{Deserialize, Serialize};
 
 pub const MAX_PROOF_MARKET_ACTIVE_TASKS: usize = 10_000;
 pub const MAX_PROOF_MARKET_PENDING_RECEIPTS: usize = 10_000;
+/// Per-prover ceiling on unsettled receipts so one prover cannot saturate the
+/// global 10,000-row pending receipt queue and block other provers' payouts.
+const MAX_PROOF_MARKET_PENDING_RECEIPTS_PER_PROVER: usize = 256;
+/// Per-prover ceiling on simultaneously assigned open tasks.
+const MAX_PROOF_MARKET_ASSIGNED_TASKS_PER_PROVER: usize = 16;
 /// Maximum retired task IDs tracked per creator within one epoch. The boundary
 /// clears the set because task IDs commit to `created_epoch`; partitioning also
 /// ensures one spammer cannot lock other creators out before that boundary.
@@ -623,7 +628,7 @@ impl ProofTask {
 pub struct ProofReceipt {
     /// The task this belongs to.
     pub task_id: [u8; 32],
-    /// Proof'u sunan prover adresi.
+    /// Address of the prover that submitted the proof.
     pub prover: Address,
     /// Verification timestamp (epoch).
     pub verified_epoch: u64,
@@ -1084,12 +1089,46 @@ impl ProofMarketState {
         prover_stake: u64,
         current_epoch: u64,
     ) -> Result<(), String> {
-        let task = self
+        let idx = self
             .active_tasks
-            .iter_mut()
-            .find(|task| task.task_id == task_id)
+            .iter()
+            .position(|task| task.task_id == task_id)
             .ok_or("ProofMarketState task not found")?;
-        task.assign(prover, prover_stake, current_epoch)
+
+        // An assignment is exclusive until the task's deadline. Elapsed time is
+        // not evidence of a stall: the market carries no progress signal, so a
+        // time-based takeover would let any bonded prover revoke work another
+        // prover is about to deliver. A task whose prover never delivers is
+        // returned to its creator by the expiry refund instead.
+        let target_min_stake = self.active_tasks[idx].min_prover_stake;
+        let mut open_for_prover = 0usize;
+        let mut committed_stake = 0u64;
+        for (i, existing) in self.active_tasks.iter().enumerate() {
+            if i == idx {
+                continue;
+            }
+            if let ProofTaskStatus::Assigned { prover: p, .. } = existing.status {
+                if p == prover {
+                    open_for_prover = open_for_prover.saturating_add(1);
+                    committed_stake = committed_stake.saturating_add(existing.min_prover_stake);
+                }
+            }
+        }
+        if open_for_prover >= MAX_PROOF_MARKET_ASSIGNED_TASKS_PER_PROVER {
+            return Err(format!(
+                "prover {prover} already holds {open_for_prover} assigned tasks (limit {MAX_PROOF_MARKET_ASSIGNED_TASKS_PER_PROVER})"
+            ));
+        }
+        let required_total_stake = committed_stake
+            .checked_add(target_min_stake)
+            .ok_or_else(|| "ProofMarketState committed prover stake overflow".to_string())?;
+        if prover_stake < required_total_stake {
+            return Err(format!(
+                "prover holds {prover_stake} and open assignments plus this task require {required_total_stake}"
+            ));
+        }
+
+        self.active_tasks[idx].assign(prover, prover_stake, current_epoch)
     }
 
     /// On completion, produces a receipt and removes the task.
@@ -1132,6 +1171,16 @@ impl ProofMarketState {
         }
         if self.pending_receipts.len() >= MAX_PROOF_MARKET_PENDING_RECEIPTS {
             return Err("ProofMarketState pending receipt limit exceeded".into());
+        }
+        let prover_pending = self
+            .pending_receipts
+            .iter()
+            .filter(|r| r.prover == receipt.prover && r.status == ReceiptStatus::Pending)
+            .count();
+        if prover_pending >= MAX_PROOF_MARKET_PENDING_RECEIPTS_PER_PROVER {
+            return Err(format!(
+                "ProofMarketState per-prover pending receipt limit ({MAX_PROOF_MARKET_PENDING_RECEIPTS_PER_PROVER}) exceeded"
+            ));
         }
         let total_tasks_completed = self
             .total_tasks_completed
@@ -2434,5 +2483,114 @@ mod tests {
         market
             .add_task(fresh_after_prune, 2)
             .expect("creator can submit fresh tasks again in the new epoch");
+    }
+
+    #[test]
+    fn one_prover_cannot_hold_the_receipt_queue_and_a_refusal_keeps_its_task() {
+        let hoarder = test_address(2);
+        let other = test_address(3);
+        let mut market = ProofMarketState::new();
+        for i in 0..MAX_PROOF_MARKET_PENDING_RECEIPTS_PER_PROVER {
+            let mut id = [0u8; 32];
+            id[..8].copy_from_slice(&(i as u64 + 1).to_le_bytes());
+            market
+                .pending_receipts
+                .push(ProofReceipt::new(id, hoarder, 20, [5u8; 32], 1));
+        }
+
+        let kind = |n: u8| ProofTaskKind::StorageAttestation {
+            deal_id: [n; 32],
+            challenge_epoch: 10,
+        };
+        let mut hoarder_task = task_with(kind(4), test_address(1), 1, 100, 3_000);
+        let hoarder_id = hoarder_task.task_id;
+        hoarder_task.assign(hoarder, 0, 15).unwrap();
+        push_assigned(&mut market, hoarder_task);
+        let mut other_task = task_with(kind(6), test_address(1), 1, 100, 3_000);
+        let other_id = other_task.task_id;
+        other_task.assign(other, 0, 15).unwrap();
+        push_assigned(&mut market, other_task);
+
+        // At its ceiling the prover is refused, and the task it was working on
+        // is still there to be completed once a receipt has been settled.
+        let refusal = market
+            .complete_task(
+                hoarder_id,
+                ProofReceipt::new(hoarder_id, hoarder, 20, [5u8; 32], 3_000),
+                |_| Ok(()),
+            )
+            .unwrap_err();
+        assert!(
+            refusal.contains("per-prover pending receipt limit"),
+            "{refusal}"
+        );
+        assert!(market.active_tasks.iter().any(|t| t.task_id == hoarder_id));
+        assert_eq!(
+            market.pending_receipts.len(),
+            MAX_PROOF_MARKET_PENDING_RECEIPTS_PER_PROVER
+        );
+
+        // Another prover is not affected by that ceiling.
+        market
+            .complete_task(
+                other_id,
+                ProofReceipt::new(other_id, other, 20, [5u8; 32], 3_000),
+                |_| Ok(()),
+            )
+            .expect("an unrelated prover still completes");
+
+        // Only unsettled receipts count: one payment frees one slot.
+        market.pay_receipt(0).unwrap();
+        market
+            .complete_task(
+                hoarder_id,
+                ProofReceipt::new(hoarder_id, hoarder, 20, [5u8; 32], 3_000),
+                |_| Ok(()),
+            )
+            .expect("a settled receipt frees the prover's slot");
+        assert!(!market.active_tasks.iter().any(|t| t.task_id == hoarder_id));
+    }
+
+    #[test]
+    fn assign_task_enforces_cumulative_stake_and_keeps_an_assignment_exclusive() {
+        let creator = Address::from([0x31; 32]);
+        let incumbent = Address::from([0x32; 32]);
+        let rival = Address::from([0x33; 32]);
+        let mut market = ProofMarketState::new();
+        market.fund_escrow(creator, 1_000).unwrap();
+
+        let t1 = ProofTask::new(task_kind(), creator, 0, 20, 100, [0x41; 32], 500);
+        let t2 = ProofTask::new(task_kind(), creator, 0, 20, 100, [0x42; 32], 500);
+        let id1 = t1.task_id;
+        let id2 = t2.task_id;
+        market.add_task(t1, 0).unwrap();
+        market.add_task(t2, 0).unwrap();
+
+        market.assign_task(id1, incumbent, 600, 1).unwrap();
+        assert!(
+            market.assign_task(id2, incumbent, 600, 1).is_err(),
+            "cumulative committed stake (500 + 500 > 600) must refuse second concurrent assignment"
+        );
+
+        // No amount of elapsed time lets another prover take an assigned task:
+        // not early, not late, and not in the last epochs before the deadline.
+        for epoch in [2, 5, 12, 19, 20] {
+            assert!(
+                market.assign_task(id1, rival, 1_000, epoch).is_err(),
+                "an assigned task must stay with its prover at epoch {epoch}"
+            );
+        }
+        assert!(matches!(
+            market
+                .active_tasks
+                .iter()
+                .find(|t| t.task_id == id1)
+                .unwrap()
+                .status,
+            ProofTaskStatus::Assigned { prover, .. } if prover == incumbent
+        ));
+
+        // The rival is free to take the task nobody holds.
+        market.assign_task(id2, rival, 1_000, 5).unwrap();
     }
 }
