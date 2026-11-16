@@ -44,7 +44,7 @@ fn funded(addrs: &[Address]) -> AccountState {
 
 #[test]
 fn evm_state_growth_is_metered() {
-    let sender = Address::from([0x11; 32]);
+    let (sender_seed, sender) = super::test_uel_signer(0x11);
     let proposer = Address::from([0x12; 32]);
     let mut state = funded(&[sender, proposer]);
     let mut coord = ExecutionCoordinator::new();
@@ -65,7 +65,9 @@ fn evm_state_growth_is_metered() {
         gas_limit_bgu: 200_000,
         max_fee_per_bgu_attos: MIN_UEL_BASE_FEE_ATTOS * 2,
         max_priority_fee_per_bgu_attos: 100,
-    };
+        auth: super::UelTxAuth::default(),
+    }
+    .signed(sample_ctx().chain_id, &sender_seed);
     let r_deploy = state
         .execute_uel_block(&mut coord, sample_ctx(), proposer, &[deploy_tx])
         .expect("deploy block");
@@ -90,7 +92,9 @@ fn evm_state_growth_is_metered() {
         gas_limit_bgu: 200_000,
         max_fee_per_bgu_attos: MIN_UEL_BASE_FEE_ATTOS * 2,
         max_priority_fee_per_bgu_attos: 100,
-    };
+        auth: super::UelTxAuth::default(),
+    }
+    .signed(sample_ctx().chain_id, &sender_seed);
     let r_set = state
         .execute_uel_block(&mut coord, sample_ctx(), proposer, &[set_tx])
         .expect("sstore set");
@@ -116,7 +120,9 @@ fn evm_state_growth_is_metered() {
         gas_limit_bgu: 200_000,
         max_fee_per_bgu_attos: MIN_UEL_BASE_FEE_ATTOS * 2,
         max_priority_fee_per_bgu_attos: 100,
-    };
+        auth: super::UelTxAuth::default(),
+    }
+    .signed(sample_ctx().chain_id, &sender_seed);
     let r_upd = state
         .execute_uel_block(&mut coord, sample_ctx(), proposer, &[upd_tx])
         .expect("sstore update");
@@ -141,7 +147,9 @@ fn evm_state_growth_is_metered() {
         gas_limit_bgu: 200_000,
         max_fee_per_bgu_attos: MIN_UEL_BASE_FEE_ATTOS * 2,
         max_priority_fee_per_bgu_attos: 100,
-    };
+        auth: super::UelTxAuth::default(),
+    }
+    .signed(sample_ctx().chain_id, &sender_seed);
     let r_clr = state
         .execute_uel_block(&mut coord, sample_ctx(), proposer, &[clr_tx])
         .expect("sstore clear");
@@ -180,7 +188,7 @@ fn wasm_ibc_entry_points_refused() {
     assert!(err.message.contains("IBC"));
 
     // Also verify runtime refusal of `StakingMsg`, `DistributionMsg`, `GovMsg`, `IbcMsg`.
-    let sender = Address::from([0x21; 32]);
+    let (sender_seed, sender) = super::test_uel_signer(0x21);
     let proposer = Address::from([0x22; 32]);
     let mut state = funded(&[sender, proposer]);
     let mut coord = ExecutionCoordinator::new();
@@ -198,7 +206,9 @@ fn wasm_ibc_entry_points_refused() {
         gas_limit_bgu: 200_000,
         max_fee_per_bgu_attos: MIN_UEL_BASE_FEE_ATTOS * 2,
         max_priority_fee_per_bgu_attos: 100,
-    };
+        auth: super::UelTxAuth::default(),
+    }
+    .signed(sample_ctx().chain_id, &sender_seed);
     let dep = state
         .execute_uel_block(&mut coord, sample_ctx(), proposer, &[deploy_tx])
         .expect("deploy wasm");
@@ -222,7 +232,9 @@ fn wasm_ibc_entry_points_refused() {
             gas_limit_bgu: 200_000,
             max_fee_per_bgu_attos: MIN_UEL_BASE_FEE_ATTOS * 2,
             max_priority_fee_per_bgu_attos: 100,
-        };
+            auth: super::UelTxAuth::default(),
+        }
+        .signed(sample_ctx().chain_id, &sender_seed);
         let rec = state
             .execute_uel_block(&mut coord, sample_ctx(), proposer, &[tx])
             .expect("run forbidden msg");
@@ -267,7 +279,7 @@ fn build_evm_atomic_router_bytecode() -> Vec<u8> {
 
 #[test]
 fn uel_evm_calls_wasm_atomically() {
-    let sender = Address::from([0x31; 32]);
+    let (sender_seed, sender) = super::test_uel_signer(0x31);
     let proposer = Address::from([0x32; 32]);
     let mut state = funded(&[sender, proposer]);
     let mut coord = ExecutionCoordinator::new();
@@ -286,7 +298,9 @@ fn uel_evm_calls_wasm_atomically() {
         gas_limit_bgu: 400_000,
         max_fee_per_bgu_attos: MIN_UEL_BASE_FEE_ATTOS * 2,
         max_priority_fee_per_bgu_attos: 100,
-    };
+        auth: super::UelTxAuth::default(),
+    }
+    .signed(sample_ctx().chain_id, &sender_seed);
     let r_router = state
         .execute_uel_block(&mut coord, sample_ctx(), proposer, &[router_dep])
         .expect("deploy router");
@@ -309,7 +323,9 @@ fn uel_evm_calls_wasm_atomically() {
         gas_limit_bgu: 300_000,
         max_fee_per_bgu_attos: MIN_UEL_BASE_FEE_ATTOS * 2,
         max_priority_fee_per_bgu_attos: 100,
-    };
+        auth: super::UelTxAuth::default(),
+    }
+    .signed(sample_ctx().chain_id, &sender_seed);
     let r_cw = state
         .execute_uel_block(&mut coord, sample_ctx(), proposer, &[cw_dep])
         .expect("deploy cw20");
@@ -341,7 +357,9 @@ fn uel_evm_calls_wasm_atomically() {
         gas_limit_bgu: 300_000,
         max_fee_per_bgu_attos: MIN_UEL_BASE_FEE_ATTOS * 2,
         max_priority_fee_per_bgu_attos: 100,
-    };
+        auth: super::UelTxAuth::default(),
+    }
+    .signed(sample_ctx().chain_id, &sender_seed);
     state
         .execute_uel_block(&mut coord, sample_ctx(), proposer, &[init_tx])
         .expect("init cw20");
@@ -373,7 +391,9 @@ fn uel_evm_calls_wasm_atomically() {
         gas_limit_bgu: 500_000,
         max_fee_per_bgu_attos: MIN_UEL_BASE_FEE_ATTOS * 2,
         max_priority_fee_per_bgu_attos: 100,
-    };
+        auth: super::UelTxAuth::default(),
+    }
+    .signed(sample_ctx().chain_id, &sender_seed);
     let r_rev = state
         .execute_uel_block(&mut coord, sample_ctx(), proposer, &[tx_revert])
         .expect("execute reverting cross-ee tx");
@@ -410,7 +430,9 @@ fn uel_evm_calls_wasm_atomically() {
         gas_limit_bgu: 500_000,
         max_fee_per_bgu_attos: MIN_UEL_BASE_FEE_ATTOS * 2,
         max_priority_fee_per_bgu_attos: 100,
-    };
+        auth: super::UelTxAuth::default(),
+    }
+    .signed(sample_ctx().chain_id, &sender_seed);
     let r_ok = state
         .execute_uel_block(&mut coord, sample_ctx(), proposer, &[tx_commit])
         .expect("execute committing cross-ee tx");
@@ -426,7 +448,7 @@ fn uel_evm_calls_wasm_atomically() {
 
 #[test]
 fn universal_call_log_is_visible_to_evm_indexers() {
-    let sender = Address::from([0x41; 32]);
+    let (sender_seed, sender) = super::test_uel_signer(0x41);
     let proposer = Address::from([0x42; 32]);
     let mut state = funded(&[sender, proposer]);
     let mut coord = ExecutionCoordinator::new();
@@ -451,7 +473,9 @@ fn universal_call_log_is_visible_to_evm_indexers() {
                     gas_limit_bgu: 400_000,
                     max_fee_per_bgu_attos: MIN_UEL_BASE_FEE_ATTOS * 2,
                     max_priority_fee_per_bgu_attos: 100,
-                },
+                    auth: super::UelTxAuth::default(),
+                }
+                .signed(sample_ctx().chain_id, &sender_seed),
                 UelTx {
                     tx_hash: [0x31; 32],
                     sender,
@@ -465,7 +489,9 @@ fn universal_call_log_is_visible_to_evm_indexers() {
                     gas_limit_bgu: 300_000,
                     max_fee_per_bgu_attos: MIN_UEL_BASE_FEE_ATTOS * 2,
                     max_priority_fee_per_bgu_attos: 100,
-                },
+                    auth: super::UelTxAuth::default(),
+                }
+                .signed(sample_ctx().chain_id, &sender_seed),
             ],
         )
         .expect("deploy both");
@@ -503,7 +529,9 @@ fn universal_call_log_is_visible_to_evm_indexers() {
                     gas_limit_bgu: 200_000,
                     max_fee_per_bgu_attos: MIN_UEL_BASE_FEE_ATTOS * 2,
                     max_priority_fee_per_bgu_attos: 100,
-                },
+                    auth: super::UelTxAuth::default(),
+                }
+                .signed(sample_ctx().chain_id, &sender_seed),
                 UelTx {
                     tx_hash: [0x32; 32],
                     sender,
@@ -517,7 +545,9 @@ fn universal_call_log_is_visible_to_evm_indexers() {
                     gas_limit_bgu: 500_000,
                     max_fee_per_bgu_attos: MIN_UEL_BASE_FEE_ATTOS * 2,
                     max_priority_fee_per_bgu_attos: 100,
-                },
+                    auth: super::UelTxAuth::default(),
+                }
+                .signed(sample_ctx().chain_id, &sender_seed),
             ],
         )
         .expect("call router");
@@ -558,7 +588,7 @@ fn asset_id_is_deterministic() {
 
 #[test]
 fn uel_pointer_holds_no_balance() {
-    let alice = Address::from([0x51; 32]);
+    let (alice_seed, alice) = super::test_uel_signer(0x51);
     let bob = Address::from([0x52; 32]);
     let proposer = Address::from([0x53; 32]);
     let mut state = funded(&[alice, bob, proposer]);
@@ -589,7 +619,9 @@ fn uel_pointer_holds_no_balance() {
                 gas_limit_bgu: 300_000,
                 max_fee_per_bgu_attos: MIN_UEL_BASE_FEE_ATTOS * 2,
                 max_priority_fee_per_bgu_attos: 100,
-            }],
+                auth: super::UelTxAuth::default(),
+            }
+            .signed(sample_ctx().chain_id, &alice_seed)],
         )
         .expect("deploy cw20");
     let cw20_home = dep[0].output.clone();
@@ -623,7 +655,9 @@ fn uel_pointer_holds_no_balance() {
                 gas_limit_bgu: 300_000,
                 max_fee_per_bgu_attos: MIN_UEL_BASE_FEE_ATTOS * 2,
                 max_priority_fee_per_bgu_attos: 100,
-            }],
+                auth: super::UelTxAuth::default(),
+            }
+            .signed(sample_ctx().chain_id, &alice_seed)],
         )
         .expect("instantiate cw20");
 
@@ -669,7 +703,9 @@ fn uel_pointer_holds_no_balance() {
                 gas_limit_bgu: 400_000,
                 max_fee_per_bgu_attos: MIN_UEL_BASE_FEE_ATTOS * 2,
                 max_priority_fee_per_bgu_attos: 100,
-            }],
+                auth: super::UelTxAuth::default(),
+            }
+            .signed(sample_ctx().chain_id, &alice_seed)],
         )
         .expect("call pointer transfer");
     assert_eq!(r_ptr[0].status, UelReceiptStatus::Success);
@@ -700,7 +736,7 @@ fn uel_pointer_holds_no_balance() {
 
 #[test]
 fn pointer_allowance_lives_at_home() {
-    let owner = Address::from([0x61; 32]);
+    let (owner_seed, owner) = super::test_uel_signer(0x61);
     let spender = Address::from([0x62; 32]);
     let proposer = Address::from([0x63; 32]);
     let mut state = funded(&[owner, spender, proposer]);
@@ -731,7 +767,9 @@ fn pointer_allowance_lives_at_home() {
                 gas_limit_bgu: 300_000,
                 max_fee_per_bgu_attos: MIN_UEL_BASE_FEE_ATTOS * 2,
                 max_priority_fee_per_bgu_attos: 100,
-            }],
+                auth: super::UelTxAuth::default(),
+            }
+            .signed(sample_ctx().chain_id, &owner_seed)],
         )
         .expect("deploy cw20");
     let cw20_home = dep[0].output.clone();
@@ -774,7 +812,9 @@ fn pointer_allowance_lives_at_home() {
                 gas_limit_bgu: 400_000,
                 max_fee_per_bgu_attos: MIN_UEL_BASE_FEE_ATTOS * 2,
                 max_priority_fee_per_bgu_attos: 100,
-            }],
+                auth: super::UelTxAuth::default(),
+            }
+            .signed(sample_ctx().chain_id, &owner_seed)],
         )
         .expect("approve via pointer");
     assert_eq!(r_app[0].status, UelReceiptStatus::Success);
@@ -823,7 +863,9 @@ fn pointer_allowance_lives_at_home() {
                 gas_limit_bgu: 400_000,
                 max_fee_per_bgu_attos: MIN_UEL_BASE_FEE_ATTOS * 2,
                 max_priority_fee_per_bgu_attos: 100,
-            }],
+                auth: super::UelTxAuth::default(),
+            }
+            .signed(sample_ctx().chain_id, &owner_seed)],
         )
         .expect("deploy home erc20");
     let home_erc20 = dep_erc[0].output.clone();
@@ -864,7 +906,9 @@ fn pointer_allowance_lives_at_home() {
                 gas_limit_bgu: 400_000,
                 max_fee_per_bgu_attos: MIN_UEL_BASE_FEE_ATTOS * 2,
                 max_priority_fee_per_bgu_attos: 100,
-            }],
+                auth: super::UelTxAuth::default(),
+            }
+            .signed(sample_ctx().chain_id, &owner_seed)],
         )
         .expect("approve via cw20 pointer");
     assert_eq!(r_cw_app[0].status, UelReceiptStatus::Success);
@@ -877,8 +921,8 @@ fn pointer_allowance_lives_at_home() {
 
 #[test]
 fn svm_pointer_holds_no_balance() {
-    let alice = Address::from([0x71; 32]);
-    let bob = Address::from([0x72; 32]);
+    let (alice_seed, alice) = super::test_uel_signer(0x71);
+    let (bob_seed, bob) = super::test_uel_signer(0x72);
     let proposer = Address::from([0x73; 32]);
     let mut state = funded(&[alice, bob, proposer]);
     let mut coord = ExecutionCoordinator::new();
@@ -919,7 +963,9 @@ fn svm_pointer_holds_no_balance() {
                 gas_limit_bgu: 400_000,
                 max_fee_per_bgu_attos: MIN_UEL_BASE_FEE_ATTOS * 2,
                 max_priority_fee_per_bgu_attos: 100,
-            }],
+                auth: super::UelTxAuth::default(),
+            }
+            .signed(sample_ctx().chain_id, &alice_seed)],
         )
         .expect("deploy home erc20");
     let home_erc20 = dep[0].output.clone();
@@ -968,7 +1014,9 @@ fn svm_pointer_holds_no_balance() {
                     gas_limit_bgu: 400_000,
                     max_fee_per_bgu_attos: MIN_UEL_BASE_FEE_ATTOS * 2,
                     max_priority_fee_per_bgu_attos: 100,
-                },
+                    auth: super::UelTxAuth::default(),
+                }
+                .signed(sample_ctx().chain_id, &alice_seed),
                 UelTx {
                     tx_hash: [0x83; 32],
                     sender: alice,
@@ -982,7 +1030,9 @@ fn svm_pointer_holds_no_balance() {
                     gas_limit_bgu: 400_000,
                     max_fee_per_bgu_attos: MIN_UEL_BASE_FEE_ATTOS * 2,
                     max_priority_fee_per_bgu_attos: 100,
-                },
+                    auth: super::UelTxAuth::default(),
+                }
+                .signed(sample_ctx().chain_id, &alice_seed),
             ],
         )
         .expect("svm ptr calls");
@@ -1026,7 +1076,9 @@ fn svm_pointer_holds_no_balance() {
                     gas_limit_bgu: 400_000,
                     max_fee_per_bgu_attos: MIN_UEL_BASE_FEE_ATTOS * 2,
                     max_priority_fee_per_bgu_attos: 100,
-                },
+                    auth: super::UelTxAuth::default(),
+                }
+                .signed(sample_ctx().chain_id, &bob_seed),
                 UelTx {
                     tx_hash: [0x85; 32],
                     sender: bob,
@@ -1040,7 +1092,9 @@ fn svm_pointer_holds_no_balance() {
                     gas_limit_bgu: 400_000,
                     max_fee_per_bgu_attos: MIN_UEL_BASE_FEE_ATTOS * 2,
                     max_priority_fee_per_bgu_attos: 100,
-                },
+                    auth: super::UelTxAuth::default(),
+                }
+                .signed(sample_ctx().chain_id, &bob_seed),
             ],
         )
         .expect("svm ptr queries");
@@ -1072,7 +1126,9 @@ fn svm_pointer_holds_no_balance() {
                 gas_limit_bgu: 200_000,
                 max_fee_per_bgu_attos: MIN_UEL_BASE_FEE_ATTOS * 2,
                 max_priority_fee_per_bgu_attos: 100,
-            }],
+                auth: super::UelTxAuth::default(),
+            }
+            .signed(sample_ctx().chain_id, &bob_seed)],
         )
         .expect("evm bal");
     assert_eq!(
@@ -1083,8 +1139,8 @@ fn svm_pointer_holds_no_balance() {
 
 #[test]
 fn move_pointer_holds_no_balance() {
-    let alice = Address::from([0x91; 32]);
-    let bob = Address::from([0x92; 32]);
+    let (alice_seed, alice) = super::test_uel_signer(0x91);
+    let (bob_seed, bob) = super::test_uel_signer(0x92);
     let proposer = Address::from([0x93; 32]);
     let mut state = funded(&[alice, bob, proposer]);
     let mut coord = ExecutionCoordinator::new();
@@ -1125,7 +1181,9 @@ fn move_pointer_holds_no_balance() {
                 gas_limit_bgu: 400_000,
                 max_fee_per_bgu_attos: MIN_UEL_BASE_FEE_ATTOS * 2,
                 max_priority_fee_per_bgu_attos: 100,
-            }],
+                auth: super::UelTxAuth::default(),
+            }
+            .signed(sample_ctx().chain_id, &alice_seed)],
         )
         .expect("deploy home erc20");
     let home_erc20 = dep[0].output.clone();
@@ -1183,7 +1241,9 @@ fn move_pointer_holds_no_balance() {
                     gas_limit_bgu: 400_000,
                     max_fee_per_bgu_attos: MIN_UEL_BASE_FEE_ATTOS * 2,
                     max_priority_fee_per_bgu_attos: 100,
-                },
+                    auth: super::UelTxAuth::default(),
+                }
+                .signed(sample_ctx().chain_id, &alice_seed),
                 UelTx {
                     tx_hash: [0x93; 32],
                     sender: bob,
@@ -1197,7 +1257,9 @@ fn move_pointer_holds_no_balance() {
                     gas_limit_bgu: 400_000,
                     max_fee_per_bgu_attos: MIN_UEL_BASE_FEE_ATTOS * 2,
                     max_priority_fee_per_bgu_attos: 100,
-                },
+                    auth: super::UelTxAuth::default(),
+                }
+                .signed(sample_ctx().chain_id, &bob_seed),
             ],
         )
         .expect("move ptr ops");
@@ -1242,7 +1304,9 @@ fn move_pointer_holds_no_balance() {
                     gas_limit_bgu: 400_000,
                     max_fee_per_bgu_attos: MIN_UEL_BASE_FEE_ATTOS * 2,
                     max_priority_fee_per_bgu_attos: 100,
-                },
+                    auth: super::UelTxAuth::default(),
+                }
+                .signed(sample_ctx().chain_id, &bob_seed),
                 UelTx {
                     tx_hash: [0x95; 32],
                     sender: bob,
@@ -1256,7 +1320,9 @@ fn move_pointer_holds_no_balance() {
                     gas_limit_bgu: 400_000,
                     max_fee_per_bgu_attos: MIN_UEL_BASE_FEE_ATTOS * 2,
                     max_priority_fee_per_bgu_attos: 100,
-                },
+                    auth: super::UelTxAuth::default(),
+                }
+                .signed(sample_ctx().chain_id, &bob_seed),
             ],
         )
         .expect("move ptr queries");
@@ -1268,8 +1334,8 @@ fn move_pointer_holds_no_balance() {
 
 #[test]
 fn home_svm_and_move_pointers_work_cross_ee_and_refuse_unauthorized_mint() {
-    let alice = Address::from([0xA1; 32]);
-    let bob = Address::from([0xA2; 32]);
+    let (alice_seed, alice) = super::test_uel_signer(0xA1);
+    let (bob_seed, bob) = super::test_uel_signer(0xA2);
     let proposer = Address::from([0xA3; 32]);
     let mut state = funded(&[alice, bob, proposer]);
     let mut coord = ExecutionCoordinator::new();
@@ -1316,7 +1382,9 @@ fn home_svm_and_move_pointers_work_cross_ee_and_refuse_unauthorized_mint() {
                 gas_limit_bgu: 300_000,
                 max_fee_per_bgu_attos: MIN_UEL_BASE_FEE_ATTOS * 2,
                 max_priority_fee_per_bgu_attos: 100,
-            }],
+                auth: super::UelTxAuth::default(),
+            }
+            .signed(sample_ctx().chain_id, &alice_seed)],
         )
         .expect("deploy move home");
     let move_home = dep_move[0].output.clone();
@@ -1355,7 +1423,9 @@ fn home_svm_and_move_pointers_work_cross_ee_and_refuse_unauthorized_mint() {
                     gas_limit_bgu: 300_000,
                     max_fee_per_bgu_attos: MIN_UEL_BASE_FEE_ATTOS * 2,
                     max_priority_fee_per_bgu_attos: 100,
-                },
+                    auth: super::UelTxAuth::default(),
+                }
+                .signed(sample_ctx().chain_id, &alice_seed),
                 UelTx {
                     tx_hash: [0xE3; 32],
                     sender: bob,
@@ -1369,7 +1439,9 @@ fn home_svm_and_move_pointers_work_cross_ee_and_refuse_unauthorized_mint() {
                     gas_limit_bgu: 300_000,
                     max_fee_per_bgu_attos: MIN_UEL_BASE_FEE_ATTOS * 2,
                     max_priority_fee_per_bgu_attos: 100,
-                },
+                    auth: super::UelTxAuth::default(),
+                }
+                .signed(sample_ctx().chain_id, &bob_seed),
             ],
         )
         .expect("move mint checks");
@@ -1418,7 +1490,9 @@ fn home_svm_and_move_pointers_work_cross_ee_and_refuse_unauthorized_mint() {
                     gas_limit_bgu: 400_000,
                     max_fee_per_bgu_attos: MIN_UEL_BASE_FEE_ATTOS * 2,
                     max_priority_fee_per_bgu_attos: 100,
-                },
+                    auth: super::UelTxAuth::default(),
+                }
+                .signed(sample_ctx().chain_id, &alice_seed),
                 UelTx {
                     tx_hash: [0xE5; 32],
                     sender: bob,
@@ -1432,7 +1506,9 @@ fn home_svm_and_move_pointers_work_cross_ee_and_refuse_unauthorized_mint() {
                     gas_limit_bgu: 400_000,
                     max_fee_per_bgu_attos: MIN_UEL_BASE_FEE_ATTOS * 2,
                     max_priority_fee_per_bgu_attos: 100,
-                },
+                    auth: super::UelTxAuth::default(),
+                }
+                .signed(sample_ctx().chain_id, &bob_seed),
             ],
         )
         .expect("wasm ptr over move home");
@@ -1482,7 +1558,9 @@ fn home_svm_and_move_pointers_work_cross_ee_and_refuse_unauthorized_mint() {
                     gas_limit_bgu: 300_000,
                     max_fee_per_bgu_attos: MIN_UEL_BASE_FEE_ATTOS * 2,
                     max_priority_fee_per_bgu_attos: 100,
-                },
+                    auth: super::UelTxAuth::default(),
+                }
+                .signed(sample_ctx().chain_id, &alice_seed),
                 UelTx {
                     tx_hash: [0xE7; 32],
                     sender: alice,
@@ -1496,7 +1574,9 @@ fn home_svm_and_move_pointers_work_cross_ee_and_refuse_unauthorized_mint() {
                     gas_limit_bgu: 300_000,
                     max_fee_per_bgu_attos: MIN_UEL_BASE_FEE_ATTOS * 2,
                     max_priority_fee_per_bgu_attos: 100,
-                },
+                    auth: super::UelTxAuth::default(),
+                }
+                .signed(sample_ctx().chain_id, &alice_seed),
             ],
         )
         .expect("svm setup");
@@ -1546,7 +1626,9 @@ fn home_svm_and_move_pointers_work_cross_ee_and_refuse_unauthorized_mint() {
                     gas_limit_bgu: 400_000,
                     max_fee_per_bgu_attos: MIN_UEL_BASE_FEE_ATTOS * 2,
                     max_priority_fee_per_bgu_attos: 100,
-                },
+                    auth: super::UelTxAuth::default(),
+                }
+                .signed(sample_ctx().chain_id, &alice_seed),
                 UelTx {
                     tx_hash: [0xE9; 32],
                     sender: bob,
@@ -1560,7 +1642,9 @@ fn home_svm_and_move_pointers_work_cross_ee_and_refuse_unauthorized_mint() {
                     gas_limit_bgu: 400_000,
                     max_fee_per_bgu_attos: MIN_UEL_BASE_FEE_ATTOS * 2,
                     max_priority_fee_per_bgu_attos: 100,
-                },
+                    auth: super::UelTxAuth::default(),
+                }
+                .signed(sample_ctx().chain_id, &bob_seed),
             ],
         )
         .expect("evm ptr over svm home");

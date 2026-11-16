@@ -1,7 +1,7 @@
-//! B.U.D. 3.0 SocialFi NFT bindings and `nft_folders` registry (Section 5.6).
-//! exposed for SocialFi transaction execution, RPC handlers, and wallet folder organization.
+//! B.U.D. 3.0 `SocialFi` NFT bindings and `nft_folders` registry (Section 5.6).
+//! exposed for `SocialFi` transaction execution, RPC handlers, and wallet folder organization.
 //!
-//! * Every B.U.D. 3.0 SocialFi NFT binds both its [`ContentId`] and its
+//! * Every B.U.D. 3.0 `SocialFi` NFT binds both its [`ContentId`] and its
 //!   `object_commitment` ([`ObjectKey`], Section 6.4 Y15).
 //! * Minting and burning strictly enforce ownership:
 //!   - A caller cannot mint an NFT bound to a third party's sealed object.
@@ -23,7 +23,7 @@ use crate::storage::bud3::content_ref::{ContentRef, ContentRefError};
 use crate::storage::bud3::delete::GrantShredAuth;
 use crate::storage::bud3::registry::{Bud3Registry, NftId, ObjectKey, RegistryError};
 
-/// Domain tag deriving the 32-byte B.U.D. 3.0 [`NftId`] from a SocialFi `u64` id.
+/// Domain tag deriving the 32-byte B.U.D. 3.0 [`NftId`] from a `SocialFi` `u64` id.
 pub const DOMAIN_SOCIALFI_NFT_ID: &[u8] = b"BDLM_BUD3_SOCIALFI_NFT_V1";
 
 /// Maximum folders one owner may create.
@@ -35,16 +35,16 @@ pub const MAX_NFTS_PER_FOLDER: usize = 4_096;
 /// Maximum UTF-8 byte length of a folder title.
 pub const MAX_FOLDER_NAME_BYTES: usize = 64;
 
-/// Derive the canonical 32-byte [`NftId`] for a SocialFi `u64` NFT id.
+/// Derive the canonical 32-byte [`NftId`] for a `SocialFi` `u64` NFT id.
 #[must_use]
 pub fn derive_bud3_nft_id(socialfi_id: u64) -> NftId {
     hash_fields_bytes(&[DOMAIN_SOCIALFI_NFT_ID, &socialfi_id.to_le_bytes()])
 }
 
-/// Errors returned by B.U.D. 3.0 SocialFi NFT bindings and `nft_folders`.
+/// Errors returned by B.U.D. 3.0 `SocialFi` NFT bindings and `nft_folders`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SocialFiBud3Error {
-    /// Underlying SocialFi NFT error (`NotOwner`, `NotFound`, `InvalidName`, etc.).
+    /// Underlying `SocialFi` NFT error (`NotOwner`, `NotFound`, `InvalidName`, etc.).
     Nft(String),
     /// Referenced `ObjectKey` does not exist in [`Bud3Registry`].
     UnknownObject,
@@ -129,7 +129,7 @@ impl NftFolderRegistry {
     }
 
     /// Mint a `SocialFi` NFT bound to a registered B.U.D. 3.0 object.
-    /// exposed for SocialFi mint transaction execution and RPC handlers.
+    /// exposed for `SocialFi` mint transaction execution and RPC handlers.
     ///
     /// Enforces author-name bounds, sealed-object ownership, and increments the
     /// object's on-chain reference count via [`Bud3Registry::bind_nft`].
@@ -186,7 +186,7 @@ impl NftFolderRegistry {
 
     /// Burn a `SocialFi` NFT with strict owner verification and B.U.D. 3.0
     /// reference release / cryptographic grant shredding.
-    /// exposed for SocialFi burn transaction execution and RPC handlers.
+    /// exposed for `SocialFi` burn transaction execution and RPC handlers.
     ///
     /// # Errors
     ///
@@ -239,7 +239,7 @@ impl NftFolderRegistry {
     }
 
     /// Create a named NFT folder owned by `caller`.
-    /// exposed for wallet SDK and SocialFi `nft_folders` RPC handlers.
+    /// exposed for wallet SDK and `SocialFi` `nft_folders` RPC handlers.
     ///
     /// # Errors
     ///
@@ -275,7 +275,7 @@ impl NftFolderRegistry {
     }
 
     /// Place an owned NFT into an owned folder.
-    /// exposed for wallet SDK and SocialFi `nft_folders` RPC handlers.
+    /// exposed for wallet SDK and `SocialFi` `nft_folders` RPC handlers.
     ///
     /// # Errors
     ///
@@ -340,15 +340,26 @@ mod tests {
             .register_object(
                 alice.0,
                 up.record,
-                vec![(
-                    0,
-                    Share {
-                        validator: [9u8; 32],
-                        class: Class::Full,
-                        first_esi: 0,
-                        symbols: 8,
-                    },
-                )],
+                vec![
+                    (
+                        0,
+                        Share {
+                            validator: [9u8; 32],
+                            class: Class::Full,
+                            first_esi: 0,
+                            symbols: 4,
+                        },
+                    ),
+                    (
+                        0,
+                        Share {
+                            validator: [10u8; 32],
+                            class: Class::Full,
+                            first_esi: 4,
+                            symbols: 4,
+                        },
+                    ),
+                ],
                 1,
                 20,
             )
