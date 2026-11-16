@@ -270,6 +270,14 @@ path = "benches/micro/merkle_scaling.rs"
 name = "bench_internal_pipeline_tps"
 path = "benches/single_node/internal_pipeline_tps.rs"
 
+# The phase 1 exit of the aggregation layer on real node processes. It needs
+# the native backend, so it is built only when that feature is asked for:
+# `cargo test --features agg-native-backend --test agg_devnet`.
+[[test]]
+name = "agg_devnet"
+path = "tests/aggregation/agg_devnet.rs"
+required-features = ["agg-native-backend", "wallet-ml-dsa"]
+
 # A dudect style timing-safe regression test. With harness=false,
 # `cargo bench --bench timing_safe` runs on the stable toolchain; it is a CI gate.
 [[bench]]
