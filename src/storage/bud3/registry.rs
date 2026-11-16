@@ -49,6 +49,8 @@ use std::collections::{BTreeMap, BTreeSet};
 pub const FULL_MISSES_TO_LOSS: u64 = 2;
 /// A Mobile share is lost after this many missed windows in a row.
 pub const MOBILE_MISSES_TO_LOSS: u64 = 3;
+/// Maximum number of bound NFT references tracked on a single B.U.D. 3.0 object.
+pub const MAX_OBJECT_REFERENCES: usize = 4096;
 
 /// The state-root tag. V2 commits every serialized field and exact index.
 pub const REGISTRY_TAG: &[u8] = b"BDLM_BUD3_REGISTRY_V2";
@@ -754,6 +756,9 @@ impl Bud3Registry {
             .ok_or(RegistryError::UnknownObject)?;
         if obj.record.content_id.kind == ContentIdKind::Sealed && obj.owner != holder {
             return Err(RegistryError::NotAuthorized);
+        }
+        if obj.references.len() >= MAX_OBJECT_REFERENCES {
+            return Err(RegistryError::BadRecord("object reference limit reached"));
         }
         obj.references.insert(nft);
         self.nfts.insert(nft, (*key, holder));

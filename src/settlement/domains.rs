@@ -1808,6 +1808,18 @@ fn execute_object_layer_tx(
                 "home_stipend_fee_exceeds_stipend".into(),
             ));
         }
+        let charter = state
+            .settlement
+            .object_layer
+            .active_charter(*domain)
+            .map_err(|r| SettlementTxError::Refused(format!("object_layer_refused: {r:?}")))?;
+        if crate::object_layer::family::profile_for(charter.vm_family).home_key_scheme()
+            != auth.scheme
+        {
+            return Err(SettlementTxError::Refused(
+                "home_stipend_scheme_family_mismatch".into(),
+            ));
+        }
         let action_digest = crate::object_layer::tx::home_stipend_action_digest(action)
             .map_err(|r| SettlementTxError::Refused(format!("object_layer_refused: {r:?}")))?;
         let (actor_addr, _) = crate::execution::coordinator::foreign::verify_home_key_stipend_auth(

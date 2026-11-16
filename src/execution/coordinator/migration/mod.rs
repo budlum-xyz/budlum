@@ -42,10 +42,14 @@ pub use fee::{
     MigrationUsage,
 };
 pub use non_evm::{
-    compute_ics23_leaf_hash, fold_sha256_merkle, fold_sha3_merkle, move_migration_digest,
-    move_state_leaf, svm_account_leaf, svm_migration_digest, verify_ics23_existence,
-    wasm_migration_digest, Ics23ExistenceProof, Ics23InnerOp, MoveMigrationEntryKind,
-    MoveMigrationRequest, MoveStateProofEntry, SvmMigrationRequest, WasmMigrationRequest,
+    compute_ics23_leaf_hash, fold_sha256_merkle, fold_sha3_merkle, move_entries_hash,
+    move_migration_digest, move_state_leaf, svm_account_leaf, svm_migration_digest,
+    verify_ics23_existence, wasm_contract_info_proof_key, wasm_migration_digest,
+    wasm_storage_entries_hash, wasm_storage_proof_key, Ics23ExistenceProof, Ics23InnerOp,
+    MoveMigrationEntryKind, MoveMigrationRequest, MoveStateProofEntry, SvmMigrationRequest,
+    WasmMigrationRequest, MAX_ICS23_KEY_BYTES, MAX_ICS23_PREFIX_BYTES, MAX_ICS23_VALUE_BYTES,
+    MAX_MOVE_IDENT_BYTES, MAX_MOVE_RESOURCE_BYTES, WASM_CONTRACT_INFO_PREFIX,
+    WASM_CONTRACT_STORE_PREFIX,
 };
 
 const DOMAIN_NAME: &str = "Budlum Migration";
@@ -59,6 +63,10 @@ pub const MAX_CHUNK_SLOTS: usize = 4096;
 pub const MAX_STAGED_SLOTS: usize = 65_536;
 /// Maximum concurrent pending EVM migrations staged in consensus state.
 pub const MAX_PENDING_MIGRATIONS: usize = 256;
+/// Maximum concurrent pending EVM migrations staged by any single migrator.
+pub const MAX_PENDING_MIGRATIONS_PER_MIGRATOR: usize = 8;
+/// Epoch TTL for an unfinalized pending EVM migration before automatic eviction.
+pub const PENDING_MIGRATION_TTL_EPOCHS: u64 = 16;
 
 /// EIP-712 `MigrationAuthorization` signed by the account with deployment authority.
 ///
@@ -371,6 +379,8 @@ pub struct MigrationPlan {
     proof_nodes: u64,
     #[serde(default)]
     migrator: Option<Address>,
+    #[serde(default)]
+    created_epoch: u64,
 }
 
 /// Consensus-level EVM & non-EVM migration transaction variants (`8.12.2` & `8.12.3`).
@@ -476,6 +486,9 @@ pub fn begin_import(
         &request.state_root,
         &evidence.contract,
     )?;
+    if request.code.is_empty() {
+        return Err(ImportError::PayloadMismatch);
+    }
     if account.code_hash != request.authorization.code_hash {
         return Err(ImportError::PayloadMismatch);
     }
@@ -497,10 +510,26 @@ pub fn begin_import(
         storage: BTreeMap::new(),
         proof_nodes,
         migrator: None,
+        created_epoch: 0,
     })
 }
 
 impl MigrationPlan {
+    /// Returns `true` when this staged migration has outlived [`PENDING_MIGRATION_TTL_EPOCHS`].
+    #[must_use]
+    pub const fn is_expired(&self, current_epoch: u64) -> bool {
+        current_epoch
+            > self
+                .created_epoch
+                .saturating_add(PENDING_MIGRATION_TTL_EPOCHS)
+    }
+
+    /// Epoch at which this migration was staged.
+    #[must_use]
+    pub const fn created_epoch(&self) -> u64 {
+        self.created_epoch
+    }
+
     /// Canonical cryptographic commitment covering every staged field so
     /// pending migrations enter the consensus `execution_root()`.
     #[must_use]
@@ -518,6 +547,7 @@ impl MigrationPlan {
         h.update((self.code.len() as u64).to_le_bytes());
         h.update(&self.code);
         h.update(self.proof_nodes.to_le_bytes());
+        h.update(self.created_epoch.to_le_bytes());
         if let Some(m) = &self.migrator {
             h.update([1u8]);
             h.update(m.as_bytes());
@@ -618,6 +648,7 @@ impl MigrationPlan {
             storage,
             proof_nodes,
             migrator: _,
+            created_epoch: _,
         } = self;
         let proven_code_hash = account_proof::code_hash(&code);
         if proven_code_hash != account.code_hash {
@@ -739,10 +770,29 @@ pub fn apply_migration_tx(
 ) -> Result<MigrationTxOutcome, ImportError> {
     match tx {
         MigrationTx::BeginEvmImport(mut req) => {
-            if state.execution_state.pending_evm_migrations.len() >= MAX_PENDING_MIGRATIONS {
+            let current_epoch = state.epoch_index;
+            let live_pending = state
+                .execution_state
+                .pending_evm_migrations
+                .values()
+                .filter(|p| !p.is_expired(current_epoch))
+                .count();
+            if live_pending >= MAX_PENDING_MIGRATIONS {
                 return Err(ImportError::TooManyPendingMigrations {
-                    pending: state.execution_state.pending_evm_migrations.len(),
+                    pending: live_pending,
                     max: MAX_PENDING_MIGRATIONS,
+                });
+            }
+            let migrator_pending = state
+                .execution_state
+                .pending_evm_migrations
+                .values()
+                .filter(|p| !p.is_expired(current_epoch) && p.migrator == Some(*migrator))
+                .count();
+            if migrator_pending >= MAX_PENDING_MIGRATIONS_PER_MIGRATOR {
+                return Err(ImportError::TooManyPendingMigrations {
+                    pending: migrator_pending,
+                    max: MAX_PENDING_MIGRATIONS_PER_MIGRATOR,
                 });
             }
             let target = req.authorization.contract;
@@ -750,7 +800,8 @@ pub fn apply_migration_tx(
             if state
                 .execution_state
                 .pending_evm_migrations
-                .contains_key(&hex_addr)
+                .get(&hex_addr)
+                .is_some_and(|p| !p.is_expired(current_epoch))
             {
                 return Err(ImportError::MigrationAlreadyPending);
             }
@@ -761,12 +812,14 @@ pub fn apply_migration_tx(
             let mut plan = begin_import(*req, chain_id)?;
             require_attested_evm_source(state, source_chain_id, &source_root)?;
             plan.migrator = Some(*migrator);
+            plan.created_epoch = current_epoch;
             let actual = plan.source().address;
             let actual_hex = hex::encode(actual);
             if state
                 .execution_state
                 .pending_evm_migrations
-                .contains_key(&actual_hex)
+                .get(&actual_hex)
+                .is_some_and(|p| !p.is_expired(current_epoch))
             {
                 return Err(ImportError::MigrationAlreadyPending);
             }
@@ -774,6 +827,9 @@ pub fn apply_migration_tx(
                 return Err(ImportError::AddressOccupied);
             }
             let source_block = plan.source().block;
+            state
+                .execution_state
+                .prune_expired_pending_evm_migrations(current_epoch);
             state
                 .execution_state
                 .pending_evm_migrations
@@ -784,12 +840,16 @@ pub fn apply_migration_tx(
             })
         }
         MigrationTx::ImportEvmStorageChunk(chunk) => {
+            let current_epoch = state.epoch_index;
             let hex_addr = hex::encode(chunk.contract);
             let plan = state
                 .execution_state
                 .pending_evm_migrations
                 .get_mut(&hex_addr)
                 .ok_or(ImportError::NoPendingMigration)?;
+            if plan.is_expired(current_epoch) {
+                return Err(ImportError::NoPendingMigration);
+            }
             if plan.migrator.is_some_and(|m| m != *migrator) {
                 return Err(ImportError::NotAuthorizedMigrator);
             }
@@ -800,6 +860,7 @@ pub fn apply_migration_tx(
             })
         }
         MigrationTx::FinalizeEvmImport { contract } => {
+            let current_epoch = state.epoch_index;
             if is_evm_address_occupied(state, &state.execution_state, &contract)? {
                 return Err(ImportError::AddressOccupied);
             }
@@ -810,6 +871,9 @@ pub fn apply_migration_tx(
                 .get(&hex_addr)
                 .cloned()
                 .ok_or(ImportError::NoPendingMigration)?;
+            if plan.is_expired(current_epoch) {
+                return Err(ImportError::NoPendingMigration);
+            }
             if plan.migrator.is_some_and(|m| m != *migrator) {
                 return Err(ImportError::NotAuthorizedMigrator);
             }
@@ -1552,6 +1616,7 @@ mod tests {
             storage: BTreeMap::new(),
             proof_nodes: 2,
             migrator: Some(migrator_a),
+            created_epoch: 0,
         };
         state
             .execution_state
@@ -1587,5 +1652,26 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(fin_err, ImportError::NotAuthorizedMigrator);
+
+        // UEL-4 regression: once PENDING_MIGRATION_TTL_EPOCHS has elapsed, an
+        // abandoned or front-run staged plan expires so it cannot deadlock the
+        // contract forever.
+        state.epoch_index = state
+            .epoch_index
+            .saturating_add(PENDING_MIGRATION_TTL_EPOCHS + 1);
+        let expired_err = apply_migration_tx(
+            &mut state,
+            &migrator_a,
+            MigrationTx::FinalizeEvmImport { contract },
+            &MigrationFeeSchedule::TESTNET_DEFAULT,
+            45261,
+        )
+        .unwrap_err();
+        assert_eq!(expired_err, ImportError::NoPendingMigration);
+        let pruned = state
+            .execution_state
+            .prune_expired_pending_evm_migrations(state.epoch_index);
+        assert_eq!(pruned, 1);
+        assert!(state.execution_state.pending_evm_migrations.is_empty());
     }
 }
