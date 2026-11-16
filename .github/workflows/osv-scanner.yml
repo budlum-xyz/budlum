@@ -27,7 +27,7 @@ on:
     branches: [main]
   schedule:
     # Weekly: a new advisory can be published without the code changing.
-    - cron: "0 5 * * 1"
+    - cron: "0 10 * * 1" # Monday 10:00 UTC
   workflow_dispatch:
 
 permissions:
