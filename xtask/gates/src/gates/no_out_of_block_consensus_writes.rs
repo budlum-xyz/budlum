@@ -55,11 +55,17 @@ const CALLS: &[(&str, Class)] = &[
     // whole bundle so the all-or-none promise is the pool's and not the RPC
     // layer's.
     ("add_transaction_bundle", NodeLocal),
+    // The aggregation side of a node: the object pool, the frames and the
+    // claimed transactions that wait for a block. None of the four touches
+    // `self.state`; what they hold reaches the state only inside a block,
+    // through `produce_block` and the block rules.
+    ("aggregation_tick", NodeLocal),
     ("apply_state_snapshot", Sync),
     ("build_global_header", Read),
     ("consensus", Read),
     ("credit_development_account", DevnetOnly),
     ("drain_local_slashing_evidence", NodeLocal),
+    ("enable_aggregator", NodeLocal),
     ("external_domain_profile", Read),
     ("external_domain_profiles", Read),
     ("external_domain_registration", Read),
@@ -92,6 +98,8 @@ const CALLS: &[(&str, Class)] = &[
     ("import_qc_blob", NodeLocal),
     ("last_block", Read),
     ("produce_block", BlockPath),
+    ("receive_frame", NodeLocal),
+    ("receive_object", NodeLocal),
     ("sign_precommit", NodeLocal),
     ("sign_prevote", NodeLocal),
     ("start_pending_finality_round", NodeLocal),
