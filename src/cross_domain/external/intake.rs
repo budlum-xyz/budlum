@@ -278,6 +278,14 @@ pub struct IntakeState {
     /// empty intake). A shape change needs a migration, not an attribute.
     #[serde(default)]
     pub quorum: QuorumRounds,
+    /// Consensus/governance-pinned Ethereum sync committees keyed by network
+    /// name. Permissionless `EthereumSync` registration must match a pinned
+    /// committee rather than trusting a registrant-supplied key.
+    #[serde(default)]
+    pub pinned_ethereum_committees: std::collections::BTreeMap<
+        String,
+        crate::cross_domain::external::ethereum::PinnedCommittee,
+    >,
 }
 
 /// The clock `max_age` measures against at submission: the domain's most
@@ -353,6 +361,26 @@ impl IntakeState {
         Self::default()
     }
 
+    /// Pins a consensus/governance-authorized Ethereum sync committee for
+    /// `network`. Only consensus bootstrap or governance may call this;
+    /// permissionless domain registration must match the pinned committee.
+    ///
+    /// WIRING: unwired - the production door is a governance action that
+    /// installs the ceremony's committee (the `BnsSetPrimarySellers` shape:
+    /// an in-block `GovernanceAction` arm in `execution::executor`), and until
+    /// it lands the only callers are the test fixtures of this module,
+    /// `external_tx` and `settlement::domains`. Until then an `EthereumSync`
+    /// registration is refused with `CommitteeNotPinned`, which is the
+    /// fail-closed state and not a silent trust of the registrant's key.
+    pub fn pin_ethereum_committee(
+        &mut self,
+        network: impl Into<String>,
+        committee: crate::cross_domain::external::ethereum::PinnedCommittee,
+    ) {
+        self.pinned_ethereum_committees
+            .insert(network.into(), committee);
+    }
+
     /// Drives the registry clock from the block-import path. Called on every
     /// committed block; monotonicity is the registry's own rule. The quorum
     /// round sweep rides the same clock: rounds nobody finished are swept on
@@ -395,11 +423,17 @@ impl IntakeState {
         {
             return Err(IntakeError::CommitteeNotPinned);
         }
-        // EthereumSync admission is
-        // closed until a sync committee is pinned - the old shape let the
-        // submitter name their own aggregate key.
-        if let AdapterSpec::EthereumSync { committee, .. } = &spec {
-            if committee.is_none() {
+        // EthereumSync admission requires a consensus/governance-pinned sync
+        // committee for the target network; a permissionless registrant may not
+        // supply its own aggregate key and certify its own Ethereum finality.
+        if let AdapterSpec::EthereumSync { network, committee } = &spec {
+            let Some(pinned) = self.pinned_ethereum_committees.get(network) else {
+                return Err(IntakeError::CommitteeNotPinned);
+            };
+            let Some(requested) = committee else {
+                return Err(IntakeError::CommitteeNotPinned);
+            };
+            if requested != pinned {
                 return Err(IntakeError::CommitteeNotPinned);
             }
         }
@@ -923,6 +957,13 @@ mod tests {
 
     fn register(state: &mut IntakeState) -> DomainKey {
         let spec = eth_spec();
+        if let AdapterSpec::EthereumSync {
+            network,
+            committee: Some(committee),
+        } = &spec
+        {
+            state.pin_ethereum_committee(network.clone(), committee.clone());
+        }
         let golden = golden_for(&spec);
         let versions = versions_for(&spec);
         let economics = IntakeState::conservative_economics(1_000_000);
@@ -991,6 +1032,13 @@ mod tests {
     fn economics_that_reward_lying_are_refused_at_the_door() {
         let mut state = IntakeState::new();
         let spec = eth_spec();
+        if let AdapterSpec::EthereumSync {
+            network,
+            committee: Some(committee),
+        } = &spec
+        {
+            state.pin_ethereum_committee(network.clone(), committee.clone());
+        }
         let golden = golden_for(&spec);
         let versions = versions_for(&spec);
         // A fee above the full ceiling: lying pays even if the whole bond is
@@ -1725,6 +1773,28 @@ mod tests {
             )
             .unwrap_err();
         assert!(matches!(err, IntakeError::CommitteeNotPinned), "got: {err}");
+
+        // A caller-supplied committee that consensus/governance has not pinned
+        // must also be refused so a registrant cannot certify its own finality.
+        let attacker_spec = eth_spec();
+        let attacker_golden = golden_for(&attacker_spec);
+        let attacker_versions = versions_for(&attacker_spec);
+        let attacker_economics = IntakeState::conservative_economics(1_000_000);
+        let err = state
+            .register_domain(
+                RegistrationRequest {
+                    spec: attacker_spec,
+                    policy: VerificationPolicy::strict(1_000),
+                    economics: attacker_economics,
+                    versions: attacker_versions,
+                    bond_atoms: economics_bond(),
+                    poster: addr(9),
+                    golden: attacker_golden,
+                },
+                Some(Box::new(StrictTestBls)),
+            )
+            .unwrap_err();
+        assert!(matches!(err, IntakeError::CommitteeNotPinned), "got: {err}");
     }
 
     /// EthereumSync admission and evidence verification are open on Testnet
@@ -1756,6 +1826,10 @@ mod tests {
             aggregate_pubkey: agg_pk.clone(),
             next_committee_root: [0xbb; 32],
         };
+        state
+            .settlement
+            .external_intake
+            .pin_ethereum_committee("testnet", committee.clone());
         let spec = AdapterSpec::EthereumSync {
             network: "testnet".to_string(),
             committee: Some(committee.clone()),

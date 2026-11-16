@@ -42,6 +42,20 @@ impl Value {
         }
     }
 
+    /// The digits of a number value that is a non-negative integer.
+    ///
+    /// The reader keeps a number's source text, so an id that arrives as
+    /// `42` and one that arrives as `"42"` are read by different accessors.
+    /// Without this, a numeric id could only be matched as text and every
+    /// lookup would have to guess which shape the server chose.
+    #[must_use]
+    pub fn as_u64(&self) -> Option<u64> {
+        match self {
+            Value::Number(text) => text.parse::<u64>().ok(),
+            _ => None,
+        }
+    }
+
     /// The items of an array value.
     #[must_use]
     pub fn as_array(&self) -> Option<&[Value]> {

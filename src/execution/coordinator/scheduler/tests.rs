@@ -248,8 +248,11 @@ fn parallel_block_execution_duration_report_matches_sequential_root() {
     );
     assert!(par_rep.used_parallel_waves);
     assert_eq!(seq_rep.state_root, par_rep.state_root);
+    // The leading newline is not cosmetic: libtest writes each test's own
+    // line first, so without it this print can be appended to a concurrent
+    // `... ok` line and become invisible to a line-anchored reader in CI.
     println!(
-        "PARALLEL_BLOCK_TIMING_JSON={{\"tx_count\":{},\"waves\":{},\"seq_us\":{},\"par_us\":{}}}",
+        "\nPARALLEL_BLOCK_TIMING_JSON={{\"tx_count\":{},\"waves\":{},\"seq_us\":{},\"par_us\":{}}}",
         par_rep.tx_count, par_rep.wave_count, seq_rep.elapsed_micros, par_rep.elapsed_micros
     );
 }
