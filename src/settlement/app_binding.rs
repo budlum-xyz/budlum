@@ -564,6 +564,13 @@ fn ensure_serving_origin(state: &AccountState, domain_key: u32) -> Result<(), Se
             "app-binding origin domain is not active with finality anchoring",
         ));
     }
+    if domain.kind == crate::domain::types::ConsensusKind::PoW
+        && crate::settlement::domains::anchor_recognized_chain(domain_key).is_none()
+    {
+        return Err(refused(
+            "permissionless PoW domain cannot serve as an AppBinding trust anchor",
+        ));
+    }
     Ok(())
 }
 
@@ -660,6 +667,28 @@ impl AppBindingRegistry {
         manifest_hash: [u8; 32],
         block: u64,
     ) -> Result<bool, String> {
+        self.register_with_authority(domain_key, origin_app, manifest_hash, block, None, None)
+    }
+
+    /// Register or update an application manifest with caller authority.
+    ///
+    /// Permissionless callers may create a new row or repeat an identical
+    /// manifest idempotently, but cannot permanently pin an incorrect manifest
+    /// against either the domain operator (while unclaimed) or the claimed
+    /// application owner (after claim).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
+    pub fn register_with_authority(
+        &mut self,
+        domain_key: u32,
+        origin_app: Vec<u8>,
+        manifest_hash: [u8; 32],
+        block: u64,
+        caller: Option<Address>,
+        domain_operator: Option<Address>,
+    ) -> Result<bool, String> {
         if !identifier_ok(&origin_app) {
             return Err("AppBinding origin_app length is invalid".into());
         }
@@ -667,8 +696,18 @@ impl AppBindingRegistry {
             return Err("AppBinding manifest_hash cannot be zero".into());
         }
         let id = app_binding_id(domain_key, &origin_app);
-        if let Some(existing) = self.apps.get(&id) {
+        if let Some(existing) = self.apps.get_mut(&id) {
             if existing.manifest_hash == manifest_hash {
+                return Ok(false);
+            }
+            let owner_authorized = caller.is_some_and(|sender| {
+                existing.owner != Address::zero() && existing.owner == sender
+            });
+            let operator_override_unclaimed = caller.is_some_and(|sender| {
+                existing.owner == Address::zero() && domain_operator == Some(sender)
+            });
+            if owner_authorized || operator_override_unclaimed {
+                existing.manifest_hash = manifest_hash;
                 return Ok(false);
             }
             return Err(
@@ -915,10 +954,22 @@ pub fn execute_app_binding_tx(
                 .burned_total
                 .checked_add(registration_fee)
                 .ok_or_else(|| refused("app-binding registration burn accounting overflows"))?;
+            let domain_operator = state
+                .settlement
+                .domains
+                .get(*domain_key)
+                .and_then(|domain| domain.operator);
             let written = state
                 .settlement
                 .app_binding
-                .register(*domain_key, origin_app.clone(), *manifest_hash, block)
+                .register_with_authority(
+                    *domain_key,
+                    origin_app.clone(),
+                    *manifest_hash,
+                    block,
+                    Some(ctx.sender),
+                    domain_operator,
+                )
                 .map_err(SettlementTxError::Refused)?;
             if written {
                 // The registration fee is destroyed, and recorded as such
@@ -947,13 +998,18 @@ pub fn execute_app_binding_tx(
                     "a retired AppBinding application cannot be claimed",
                 ));
             }
-            if !state
+            let domain = state
                 .settlement
                 .domains
                 .get(app.domain_key)
-                .is_some_and(crate::domain::types::ConsensusDomain::is_active)
+                .filter(|domain| domain.is_active())
+                .ok_or_else(|| refused("the remote app binding's domain is not Active"))?;
+            if domain.kind == crate::domain::types::ConsensusKind::PoW
+                && crate::settlement::domains::anchor_recognized_chain(app.domain_key).is_none()
             {
-                return Err(refused("the remote app binding's domain is not Active"));
+                return Err(refused(
+                    "a permissionless PoW domain cannot authorize AppBinding claims",
+                ));
             }
             if evidence.chain.domain_id() != app.domain_key {
                 return Err(refused(
@@ -1652,9 +1708,9 @@ mod tests {
         let mut state = AccountState::new();
         let mut domain = crate::domain::plugin::default_domain(
             DOMAIN,
-            crate::domain::ConsensusKind::PoW,
+            crate::domain::ConsensusKind::PoA,
             45262,
-            crate::domain::POW_HEADER_CHAIN_ADAPTER,
+            "poa-authority-quorum",
             1,
         );
         domain.operator = Some(operator);
@@ -3449,5 +3505,132 @@ mod tests {
             "oldest unclaimed intent-free row should be reclaimed deterministically"
         );
         assert!(reg.apps.contains_key(&app_binding_id(1, b"honest-app")));
+    }
+
+    #[test]
+    fn owner_and_operator_can_override_squatted_manifest_and_permissionless_pow_is_refused() {
+        let operator = Address::from([0x61; 32]);
+        let squatter = Address::from([0x62; 32]);
+        let owner = Address::from([0x63; 32]);
+        let mut state = state_with_domain(operator);
+        let reg_fee = state.registry.params().app_binding_registration_fee;
+        for acct in [operator, squatter, owner] {
+            state.add_balance(&acct, reg_fee.saturating_mul(4) + FEE * 10);
+        }
+        let origin_app = vec![0x44; 20];
+        let bogus_manifest = [0xAA; 32];
+        let operator_manifest = [0xBB; 32];
+        let owner_manifest = [0xCC; 32];
+
+        // Squatter pre-registers the unclaimed app with a bogus manifest.
+        run_binding_tx(
+            &mut state,
+            &ctx(squatter),
+            &BindingTx::Register {
+                domain_key: DOMAIN,
+                origin_app: origin_app.clone(),
+                manifest_hash: bogus_manifest,
+            },
+        )
+        .expect("initial permissionless registration succeeds");
+        let id = calc_binding_id(DOMAIN, &origin_app);
+        assert_eq!(
+            state.settlement.app_binding.get(&id).unwrap().manifest_hash,
+            bogus_manifest
+        );
+
+        // Domain operator can correct the manifest while unclaimed.
+        run_binding_tx(
+            &mut state,
+            &ctx(operator),
+            &BindingTx::Register {
+                domain_key: DOMAIN,
+                origin_app: origin_app.clone(),
+                manifest_hash: operator_manifest,
+            },
+        )
+        .expect("domain operator can override squatted unclaimed manifest");
+        assert_eq!(
+            state.settlement.app_binding.get(&id).unwrap().manifest_hash,
+            operator_manifest
+        );
+
+        // Once claimed, the real application owner can also update the manifest,
+        // while the squatter still cannot overwrite it.
+        let claim_msg = message_at(
+            origin_emitter(&origin_app),
+            owner,
+            claim_payload_hash(id, owner),
+            CLAIM_KIND,
+            id,
+            1,
+            0,
+        );
+        let claim_ev = anchored(&mut state, claim_msg);
+        run_binding_tx(
+            &mut state,
+            &ctx(owner),
+            &BindingTx::Claim {
+                app_binding_id: id,
+                payout: owner,
+                evidence: claim_ev,
+            },
+        )
+        .expect("claim succeeds on non-PoW domain");
+        run_binding_tx(
+            &mut state,
+            &ctx(owner),
+            &BindingTx::Register {
+                domain_key: DOMAIN,
+                origin_app: origin_app.clone(),
+                manifest_hash: owner_manifest,
+            },
+        )
+        .expect("claimed owner can update manifest");
+        assert_eq!(
+            state.settlement.app_binding.get(&id).unwrap().manifest_hash,
+            owner_manifest
+        );
+        assert!(
+            run_binding_tx(
+                &mut state,
+                &ctx(squatter),
+                &BindingTx::Register {
+                    domain_key: DOMAIN,
+                    origin_app: origin_app.clone(),
+                    manifest_hash: bogus_manifest,
+                },
+            )
+            .is_err(),
+            "third party cannot overwrite claimed manifest"
+        );
+
+        // A permissionless PoW domain outside the canonical chain set must be
+        // refused as an AppBinding origin so self-mined PoW roots cannot claim apps.
+        let pow_domain_id = 42u32;
+        let mut pow_domain = crate::domain::plugin::default_domain(
+            pow_domain_id,
+            crate::domain::ConsensusKind::PoW,
+            45262,
+            crate::domain::POW_HEADER_CHAIN_ADAPTER,
+            1,
+        );
+        pow_domain.operator = Some(squatter);
+        state.add_balance(&squatter, pow_domain.operator_bond + FEE);
+        crate::settlement::domains::register_domain(&mut state, pow_domain).unwrap();
+        let err = run_binding_tx(
+            &mut state,
+            &ctx(squatter),
+            &BindingTx::Register {
+                domain_key: pow_domain_id,
+                origin_app,
+                manifest_hash: bogus_manifest,
+            },
+        )
+        .expect_err("permissionless PoW domain must not serve as AppBinding origin");
+        assert!(
+            format!("{err:?}").contains("permissionless PoW"),
+            "got: {err:?}"
+        );
     }
 }

@@ -286,6 +286,9 @@ pub trait FamilyProfile: Sync {
     /// The CAIP-19 asset namespace for a kind (`erc20`, `cw721`, ...).
     fn asset_namespace(&self, kind: AssetKind) -> &'static str;
 
+    /// The classical home-chain key scheme authorized for `UOL-K1` gasless stipends.
+    fn home_key_scheme(&self) -> crate::object_layer::tx::HomeKeyScheme;
+
     fn finality(&self) -> FamilyFinality;
 
     /// Translate one raw endpoint event. Only the endpoint's four events are

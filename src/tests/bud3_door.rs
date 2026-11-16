@@ -45,6 +45,9 @@ fn register_bind_and_view_through_the_executor() {
     let mut state = AccountState::new();
     state.add_balance(&uploader, 10_000);
     state.add_balance(&holder, 1_000);
+    for id in [10u8, 11] {
+        state.add_validator(Address::from([id; 32]), 50_000);
+    }
     let empty_root = state.calculate_state_root();
 
     let content = b"stored on the testnet".repeat(20);
@@ -169,6 +172,7 @@ fn the_epoch_boundary_expires_and_audits() {
     let uploader = Address::from([3u8; 32]);
     let mut state = AccountState::new();
     state.add_balance(&uploader, 10_000);
+    state.add_validator(Address::from([11u8; 32]), 50_000);
     let up = prepare_public_upload(b"short lease", &P, &Bud3Limits::default(), 6).unwrap();
     let key = up.record.commitment;
     let shares = vec![(
@@ -219,6 +223,9 @@ fn closed_codecs_refuse_on_testnet() {
     let uploader = Address::from([4u8; 32]);
     let mut state = AccountState::new();
     state.add_balance(&uploader, 1_000);
+    for id in [10u8, 11] {
+        state.add_validator(Address::from([id; 32]), 50_000);
+    }
     let root = state.calculate_state_root();
     let content = b"closed codecs carry no content".repeat(20);
     let up = prepare_public_upload(&content, &P, &Bud3Limits::default(), 12).unwrap();
@@ -281,6 +288,9 @@ fn endowment_settles_custody_rewards_and_renewal_across_epochs() {
     let mut state = AccountState::new();
     state.add_balance(&uploader, 10_000);
     state.add_balance(&confirmed_holder, 1_000);
+    for v_addr in [confirmed_holder, unconfirmed_holder] {
+        state.add_validator(v_addr, 50_000);
+    }
 
     let up =
         prepare_public_upload(b"endowment-priced payload", &P, &Bud3Limits::default(), 12).unwrap();
@@ -384,6 +394,9 @@ fn bud3_sealed_grant_issue_revoke_and_not_served() {
     let owner = Address::from([41u8; 32]);
     let mut state = AccountState::new();
     state.add_balance(&owner, 50_000);
+    for id in [50u8, 51] {
+        state.add_validator(Address::from([id; 32]), 50_000);
+    }
 
     let owner_secret = [0x91u8; 32];
     let content_key = derive_object_content_key(&owner_secret, 1);
@@ -569,6 +582,9 @@ fn bud3_social_delete_crypto_shredding_and_tombstone() {
     let owner = Address::from([42u8; 32]);
     let mut state = AccountState::new();
     state.add_balance(&owner, 50_000);
+    for id in [60u8, 61] {
+        state.add_validator(Address::from([id; 32]), 50_000);
+    }
 
     let owner_secret = [0x82u8; 32];
     let content_key = derive_object_content_key(&owner_secret, 1);
@@ -720,6 +736,9 @@ fn bud3_public_dedup_sealed_isolation_and_dependency_rules() {
     let mut state = AccountState::new();
     state.add_balance(&alice, 50_000);
     state.add_balance(&bob, 50_000);
+    for id in [80u8, 81] {
+        state.add_validator(Address::from([id; 32]), 50_000);
+    }
 
     let shares = vec![
         (
@@ -1213,6 +1232,9 @@ fn bud3_missed_audit_does_not_slash_and_custody_proof_verifies() {
     for addr in [uploader, honest_holder, sleepy_holder] {
         state.add_balance(&addr, 50_000);
     }
+    for v_addr in [honest_holder, sleepy_holder] {
+        state.add_validator(v_addr, 50_000);
+    }
 
     let up =
         prepare_public_upload(b"audited custody payload", &P, &Bud3Limits::default(), 12).unwrap();
@@ -1350,6 +1372,9 @@ fn bud3_e2e_upload_register_view() {
     let mut state = AccountState::new();
     state.add_balance(&uploader, 100_000);
     state.add_balance(&payer, 100_000);
+    for i in 0..4u8 {
+        state.add_validator(Address::from([120 + i; 32]), 50_000);
+    }
 
     let candidates: Vec<Candidate> = (0..4u8)
         .map(|i| Candidate {
@@ -1919,4 +1944,88 @@ fn testnet_sealed_field_native_remote_view_and_blind_compute_stays_closed() {
         100,
     )
     .is_err());
+}
+
+#[test]
+fn non_validator_share_holder_and_custody_ack_are_refused() {
+    let uploader = Address::from([0xD1; 32]);
+    let sockpuppet = Address::from([0xD2; 32]);
+    let validator = Address::from([0xD3; 32]);
+    let mut state = AccountState::new();
+    state.add_balance(&uploader, 50_000);
+    state.add_balance(&sockpuppet, 10_000);
+    state.add_balance(&validator, 10_000);
+    state.add_validator(validator, 50_000);
+
+    let up = prepare_public_upload(
+        b"custody must come from consensus validators",
+        &P,
+        &Bud3Limits::default(),
+        6,
+    )
+    .unwrap();
+    let key = up.record.commitment;
+    let fake_shares = vec![(
+        0,
+        Share {
+            validator: *sockpuppet.as_bytes(),
+            class: Class::Full,
+            first_esi: 0,
+            symbols: 6,
+        },
+    )];
+    let root_before = state.calculate_state_root();
+    assert!(
+        apply(
+            &mut state,
+            &storage_tx(
+                uploader,
+                0,
+                1,
+                0,
+                StorageTxV3::RegisterObject {
+                    record: up.record.clone(),
+                    shares: fake_shares,
+                    lifetime_epochs: 10,
+                },
+            ),
+        )
+        .is_err(),
+        "non-validator share holder must be refused at RegisterObject"
+    );
+    assert_eq!(state.calculate_state_root(), root_before);
+
+    // Valid validator placement succeeds, and a non-validator CustodyAck is refused.
+    let valid_shares = vec![(
+        0,
+        Share {
+            validator: *validator.as_bytes(),
+            class: Class::Full,
+            first_esi: 0,
+            symbols: 6,
+        },
+    )];
+    apply(
+        &mut state,
+        &storage_tx(
+            uploader,
+            0,
+            1,
+            0,
+            StorageTxV3::RegisterObject {
+                record: up.record,
+                shares: valid_shares,
+                lifetime_epochs: 10,
+            },
+        ),
+    )
+    .expect("active validator placement succeeds");
+    assert!(
+        apply(
+            &mut state,
+            &storage_tx(sockpuppet, 0, 1, 0, StorageTxV3::CustodyAck { object: key }),
+        )
+        .is_err(),
+        "non-validator CustodyAck must be refused"
+    );
 }

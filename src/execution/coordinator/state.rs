@@ -232,6 +232,34 @@ impl ExecutionState {
             .and_then(|bucket| bucket.get(&hex_key).cloned()))
     }
 
+    /// Returns `true` when `ns` holds at least one key starting with `prefix`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `ns` is not a registered UEL namespace.
+    pub fn has_key_with_prefix(&self, ns: &str, prefix: &[u8]) -> Result<bool, String> {
+        if RootGroup::for_namespace(ns).is_none() {
+            return Err(format!("unknown UEL namespace `{ns}`"));
+        }
+        let Some(bucket) = self.namespaces.get(ns) else {
+            return Ok(false);
+        };
+        let hex_prefix = hex::encode(prefix);
+        Ok(bucket
+            .range(hex_prefix.clone()..)
+            .next()
+            .is_some_and(|(k, _)| k.starts_with(&hex_prefix)))
+    }
+
+    /// Drops staged EVM migrations whose TTL has elapsed at `current_epoch`,
+    /// freeing global and per-migrator slots without stranding contracts.
+    pub fn prune_expired_pending_evm_migrations(&mut self, current_epoch: u64) -> usize {
+        let before = self.pending_evm_migrations.len();
+        self.pending_evm_migrations
+            .retain(|_, plan| !plan.is_expired(current_epoch));
+        before.saturating_sub(self.pending_evm_migrations.len())
+    }
+
     /// Writes (`Some`) or deletes (`None`) one raw key in a canonical namespace.
     pub fn write(&mut self, ns: &str, key: &[u8], value: Option<&[u8]>) -> Result<(), String> {
         if RootGroup::for_namespace(ns).is_none() {

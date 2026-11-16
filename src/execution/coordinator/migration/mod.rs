@@ -42,10 +42,14 @@ pub use fee::{
     MigrationUsage,
 };
 pub use non_evm::{
-    compute_ics23_leaf_hash, fold_sha256_merkle, fold_sha3_merkle, move_migration_digest,
-    move_state_leaf, svm_account_leaf, svm_migration_digest, verify_ics23_existence,
-    wasm_migration_digest, Ics23ExistenceProof, Ics23InnerOp, MoveMigrationEntryKind,
-    MoveMigrationRequest, MoveStateProofEntry, SvmMigrationRequest, WasmMigrationRequest,
+    compute_ics23_leaf_hash, fold_sha256_merkle, fold_sha3_merkle, move_entries_hash,
+    move_migration_digest, move_state_leaf, svm_account_leaf, svm_migration_digest,
+    verify_ics23_existence, wasm_contract_info_proof_key, wasm_migration_digest,
+    wasm_storage_entries_hash, wasm_storage_proof_key, Ics23ExistenceProof, Ics23InnerOp,
+    MoveMigrationEntryKind, MoveMigrationRequest, MoveStateProofEntry, SvmMigrationRequest,
+    WasmMigrationRequest, MAX_ICS23_KEY_BYTES, MAX_ICS23_PREFIX_BYTES, MAX_ICS23_VALUE_BYTES,
+    MAX_MOVE_IDENT_BYTES, MAX_MOVE_RESOURCE_BYTES, WASM_CONTRACT_INFO_PREFIX,
+    WASM_CONTRACT_STORE_PREFIX,
 };
 
 const DOMAIN_NAME: &str = "Budlum Migration";
@@ -59,6 +63,10 @@ pub const MAX_CHUNK_SLOTS: usize = 4096;
 pub const MAX_STAGED_SLOTS: usize = 65_536;
 /// Maximum concurrent pending EVM migrations staged in consensus state.
 pub const MAX_PENDING_MIGRATIONS: usize = 256;
+/// Maximum concurrent pending EVM migrations staged by any single migrator.
+pub const MAX_PENDING_MIGRATIONS_PER_MIGRATOR: usize = 8;
+/// Epoch TTL for an unfinalized pending EVM migration before automatic eviction.
+pub const PENDING_MIGRATION_TTL_EPOCHS: u64 = 16;
 
 /// EIP-712 `MigrationAuthorization` signed by the account with deployment authority.
 ///
@@ -364,6 +372,15 @@ pub struct MigrationRecord {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MigrationPlan {
     source: ImportSource,
+    /// Canonical domain id whose anchored root admitted this plan, re-checked at finalization.
+    #[serde(default)]
+    source_domain_id: u32,
+    /// Source chain id whose anchored root admitted this plan, re-checked at finalization.
+    #[serde(default)]
+    source_chain_id: u64,
+    /// Anchored state root the staged proofs were opened against, re-checked at finalization.
+    #[serde(default)]
+    source_root: [u8; 32],
     account: EvmAccount,
     code: Vec<u8>,
     #[serde(with = "crate::core::map_keys")]
@@ -371,6 +388,8 @@ pub struct MigrationPlan {
     proof_nodes: u64,
     #[serde(default)]
     migrator: Option<Address>,
+    #[serde(default)]
+    created_epoch: u64,
 }
 
 /// Consensus-level EVM & non-EVM migration transaction variants (`8.12.2` & `8.12.3`).
@@ -476,6 +495,9 @@ pub fn begin_import(
         &request.state_root,
         &evidence.contract,
     )?;
+    if request.code.is_empty() {
+        return Err(ImportError::PayloadMismatch);
+    }
     if account.code_hash != request.authorization.code_hash {
         return Err(ImportError::PayloadMismatch);
     }
@@ -492,15 +514,34 @@ pub fn begin_import(
             block: request.source_block,
             address: evidence.contract,
         },
+        source_domain_id: 0,
+        source_chain_id: request.source_chain_id,
+        source_root: request.state_root,
         account,
         code: request.code,
         storage: BTreeMap::new(),
         proof_nodes,
         migrator: None,
+        created_epoch: 0,
     })
 }
 
 impl MigrationPlan {
+    /// Returns `true` when this staged migration has outlived [`PENDING_MIGRATION_TTL_EPOCHS`].
+    #[must_use]
+    pub const fn is_expired(&self, current_epoch: u64) -> bool {
+        current_epoch
+            > self
+                .created_epoch
+                .saturating_add(PENDING_MIGRATION_TTL_EPOCHS)
+    }
+
+    /// Epoch at which this migration was staged.
+    #[must_use]
+    pub const fn created_epoch(&self) -> u64 {
+        self.created_epoch
+    }
+
     /// Canonical cryptographic commitment covering every staged field so
     /// pending migrations enter the consensus `execution_root()`.
     #[must_use]
@@ -512,12 +553,16 @@ impl MigrationPlan {
         h.update(self.source.domain.as_bytes());
         h.update(self.source.block.to_le_bytes());
         h.update(self.source.address);
+        h.update(self.source_domain_id.to_le_bytes());
+        h.update(self.source_chain_id.to_le_bytes());
+        h.update(self.source_root);
         h.update(self.account.nonce.to_le_bytes());
         h.update(self.account.storage_root);
         h.update(self.account.code_hash);
         h.update((self.code.len() as u64).to_le_bytes());
         h.update(&self.code);
         h.update(self.proof_nodes.to_le_bytes());
+        h.update(self.created_epoch.to_le_bytes());
         if let Some(m) = &self.migrator {
             h.update([1u8]);
             h.update(m.as_bytes());
@@ -613,11 +658,15 @@ impl MigrationPlan {
     ) -> Result<MigrationRecord, ImportError> {
         let Self {
             source,
+            source_domain_id: _,
+            source_chain_id: _,
+            source_root: _,
             account,
             code,
             storage,
             proof_nodes,
             migrator: _,
+            created_epoch: _,
         } = self;
         let proven_code_hash = account_proof::code_hash(&code);
         if proven_code_hash != account.code_hash {
@@ -703,21 +752,49 @@ fn evm_storage_key(addr: &[u8; 20], slot: &[u8; 32]) -> [u8; 52] {
 /// migrator cannot choose. The account at the contract address is opened under that root,
 /// and a contract address is a function of its deployer and nonce, so the anchored state
 /// also settles who deployed it.
+/// Verify that `state_root` is currently anchored by an active canonical
+/// recognized chain domain whose chain id matches `source_chain_id`,
+/// returning `(domain_id, anchored_height)` so provenance is bound to consensus
+/// state rather than caller-supplied free text.
+///
+/// Mainnet only accepts each recognized chain's canonical chain id; non-mainnet
+/// networks also permit Sepolia (`11_155_111`) on the canonical Ethereum domain.
 fn require_attested_evm_source(
     state: &AccountState,
+    budlum_chain_id: u64,
     source_chain_id: u64,
     state_root: &[u8; 32],
-) -> Result<(), ImportError> {
-    let anchored = state.settlement.domains.active_domains().any(|domain| {
-        domain.domain_chain_id == source_chain_id
+    source_block: u64,
+) -> Result<(u32, u64), ImportError> {
+    let is_mainnet = budlum_chain_id
+        == crate::core::chain_config::Network::Mainnet
+            .chain_id()
+            .value();
+    let matched = state.settlement.domains.active_domains().find(|domain| {
+        let Some(chain) = crate::settlement::domains::anchor_recognized_chain(domain.id) else {
+            return false;
+        };
+        let chain_id_recognized = domain.domain_chain_id == chain.canonical_chain_id()
+            || (!is_mainnet
+                && chain == crate::core::transaction::ExternalChain::Ethereum
+                && domain.domain_chain_id == 11_155_111);
+        chain_id_recognized
+            && domain.domain_chain_id == source_chain_id
             && state.external_roots.get(&domain.id) == Some(state_root)
+            && (domain.last_committed_height == 0 || domain.last_committed_height == source_block)
     });
-    if anchored {
-        Ok(())
-    } else {
-        Err(ImportError::SourceChainNotAttested {
+    match matched {
+        Some(domain) => {
+            let block = if domain.last_committed_height > 0 {
+                domain.last_committed_height
+            } else {
+                source_block
+            };
+            Ok((domain.id, block))
+        }
+        None => Err(ImportError::SourceChainNotAttested {
             chain_id: source_chain_id,
-        })
+        }),
     }
 }
 
@@ -739,10 +816,29 @@ pub fn apply_migration_tx(
 ) -> Result<MigrationTxOutcome, ImportError> {
     match tx {
         MigrationTx::BeginEvmImport(mut req) => {
-            if state.execution_state.pending_evm_migrations.len() >= MAX_PENDING_MIGRATIONS {
+            let current_epoch = state.epoch_index;
+            let live_pending = state
+                .execution_state
+                .pending_evm_migrations
+                .values()
+                .filter(|p| !p.is_expired(current_epoch))
+                .count();
+            if live_pending >= MAX_PENDING_MIGRATIONS {
                 return Err(ImportError::TooManyPendingMigrations {
-                    pending: state.execution_state.pending_evm_migrations.len(),
+                    pending: live_pending,
                     max: MAX_PENDING_MIGRATIONS,
+                });
+            }
+            let migrator_pending = state
+                .execution_state
+                .pending_evm_migrations
+                .values()
+                .filter(|p| !p.is_expired(current_epoch) && p.migrator == Some(*migrator))
+                .count();
+            if migrator_pending >= MAX_PENDING_MIGRATIONS_PER_MIGRATOR {
+                return Err(ImportError::TooManyPendingMigrations {
+                    pending: migrator_pending,
+                    max: MAX_PENDING_MIGRATIONS_PER_MIGRATOR,
                 });
             }
             let target = req.authorization.contract;
@@ -750,7 +846,8 @@ pub fn apply_migration_tx(
             if state
                 .execution_state
                 .pending_evm_migrations
-                .contains_key(&hex_addr)
+                .get(&hex_addr)
+                .is_some_and(|p| !p.is_expired(current_epoch))
             {
                 return Err(ImportError::MigrationAlreadyPending);
             }
@@ -758,15 +855,35 @@ pub fn apply_migration_tx(
             req.occupied = req.occupied || live_occupied;
             let source_chain_id = req.source_chain_id;
             let source_root = req.state_root;
+            let signed_source_block = req.source_block;
             let mut plan = begin_import(*req, chain_id)?;
-            require_attested_evm_source(state, source_chain_id, &source_root)?;
+            let (attested_domain, anchored_height) = require_attested_evm_source(
+                state,
+                chain_id,
+                source_chain_id,
+                &source_root,
+                signed_source_block,
+            )?;
+            // Bind provenance to the verified canonical domain id and anchored
+            // height rather than trusting the caller's free-form domain label.
+            let address = plan.source.address;
+            plan.source = ImportSource {
+                domain: format!("domain:{attested_domain}"),
+                block: anchored_height,
+                address,
+            };
+            plan.source_domain_id = attested_domain;
+            plan.source_chain_id = source_chain_id;
+            plan.source_root = source_root;
             plan.migrator = Some(*migrator);
+            plan.created_epoch = current_epoch;
             let actual = plan.source().address;
             let actual_hex = hex::encode(actual);
             if state
                 .execution_state
                 .pending_evm_migrations
-                .contains_key(&actual_hex)
+                .get(&actual_hex)
+                .is_some_and(|p| !p.is_expired(current_epoch))
             {
                 return Err(ImportError::MigrationAlreadyPending);
             }
@@ -774,6 +891,9 @@ pub fn apply_migration_tx(
                 return Err(ImportError::AddressOccupied);
             }
             let source_block = plan.source().block;
+            state
+                .execution_state
+                .prune_expired_pending_evm_migrations(current_epoch);
             state
                 .execution_state
                 .pending_evm_migrations
@@ -784,12 +904,16 @@ pub fn apply_migration_tx(
             })
         }
         MigrationTx::ImportEvmStorageChunk(chunk) => {
+            let current_epoch = state.epoch_index;
             let hex_addr = hex::encode(chunk.contract);
             let plan = state
                 .execution_state
                 .pending_evm_migrations
                 .get_mut(&hex_addr)
                 .ok_or(ImportError::NoPendingMigration)?;
+            if plan.is_expired(current_epoch) {
+                return Err(ImportError::NoPendingMigration);
+            }
             if plan.migrator.is_some_and(|m| m != *migrator) {
                 return Err(ImportError::NotAuthorizedMigrator);
             }
@@ -800,6 +924,7 @@ pub fn apply_migration_tx(
             })
         }
         MigrationTx::FinalizeEvmImport { contract } => {
+            let current_epoch = state.epoch_index;
             if is_evm_address_occupied(state, &state.execution_state, &contract)? {
                 return Err(ImportError::AddressOccupied);
             }
@@ -810,8 +935,26 @@ pub fn apply_migration_tx(
                 .get(&hex_addr)
                 .cloned()
                 .ok_or(ImportError::NoPendingMigration)?;
+            if plan.is_expired(current_epoch) {
+                return Err(ImportError::NoPendingMigration);
+            }
             if plan.migrator.is_some_and(|m| m != *migrator) {
                 return Err(ImportError::NotAuthorizedMigrator);
+            }
+            // Re-verify the source domain's active status and anchored root at
+            // finalization so a domain frozen or superseded after staging
+            // cannot still install migrated state.
+            let (attested_domain, _) = require_attested_evm_source(
+                state,
+                chain_id,
+                plan.source_chain_id,
+                &plan.source_root,
+                plan.source.block,
+            )?;
+            if plan.source_domain_id != 0 && attested_domain != plan.source_domain_id {
+                return Err(ImportError::SourceChainNotAttested {
+                    chain_id: plan.source_chain_id,
+                });
             }
             let record = plan.finalize(fee_schedule)?;
 
@@ -1177,7 +1320,7 @@ mod tests {
         );
     }
 
-    const SOURCE_DOMAIN_ID: u32 = 101;
+    const SOURCE_DOMAIN_ID: u32 = 1;
 
     fn anchor_source_root(state: &mut AccountState, domain: u32, chain_id: u64, root: [u8; 32]) {
         state
@@ -1185,9 +1328,9 @@ mod tests {
             .domains
             .register(crate::domain::plugin::default_domain(
                 domain,
-                crate::domain::types::ConsensusKind::PoW,
+                crate::domain::types::ConsensusKind::PoS,
                 chain_id,
-                crate::domain::types::POW_HEADER_CHAIN_ADAPTER,
+                "pos-qc-finality",
                 1,
             ))
             .expect("register the source domain");
@@ -1219,6 +1362,12 @@ mod tests {
         assert_eq!(begin_evm_import(&mut state), refused);
         assert!(state.execution_state.pending_evm_migrations.is_empty());
 
+        // A permissionless domain declaring the same chain id cannot attest an
+        // EVM source root even when active and anchored.
+        let mut state = AccountState::new();
+        anchor_source_root(&mut state, 101, SOURCE_CHAIN_ID, req.state_root);
+        assert_eq!(begin_evm_import(&mut state), refused);
+
         // The source domain anchored another root.
         let mut state = AccountState::new();
         anchor_source_root(&mut state, SOURCE_DOMAIN_ID, SOURCE_CHAIN_ID, [0x5A; 32]);
@@ -1249,7 +1398,7 @@ mod tests {
             .expect("freeze the source domain");
         assert_eq!(begin_evm_import(&mut state), refused);
 
-        // The source domain anchored exactly this root.
+        // The canonical source domain anchored exactly this root.
         let mut state = AccountState::new();
         anchor_source_root(
             &mut state,
@@ -1259,6 +1408,37 @@ mod tests {
         );
         assert!(begin_evm_import(&mut state).is_ok());
         assert_eq!(state.execution_state.pending_evm_migrations.len(), 1);
+        let staged = state
+            .execution_state
+            .pending_evm_migrations
+            .values()
+            .next()
+            .expect("staged plan");
+        assert_eq!(
+            staged.source().domain,
+            format!("domain:{SOURCE_DOMAIN_ID}"),
+            "provenance must bind to the verified canonical domain id, not caller free text"
+        );
+
+        // Freezing the source domain after staging must prevent finalization.
+        let migrator = Address::from([0x71u8; 32]);
+        state
+            .settlement
+            .domains
+            .set_status(SOURCE_DOMAIN_ID, crate::domain::types::DomainStatus::Frozen)
+            .expect("freeze after staging");
+        assert_eq!(
+            apply_migration_tx(
+                &mut state,
+                &migrator,
+                MigrationTx::FinalizeEvmImport {
+                    contract: req.authorization.contract,
+                },
+                &fee_schedule(),
+                CHAIN_ID,
+            ),
+            refused
+        );
     }
 
     #[test]
@@ -1525,7 +1705,7 @@ mod tests {
         let get_imp_resp: serde_json::Value =
             serde_json::from_str(&handle_eth_jsonrpc(&state, "127.0.0.1", &get_imp_req))
                 .expect("json");
-        assert_eq!(get_imp_resp["result"]["domain"].as_str(), Some("sepolia"));
+        assert_eq!(get_imp_resp["result"]["domain"].as_str(), Some("domain:1"));
         assert_eq!(get_imp_resp["result"]["block"].as_u64(), Some(SOURCE_BLOCK));
     }
 
@@ -1538,10 +1718,13 @@ mod tests {
         let contract = [0xABu8; 20];
         let plan = MigrationPlan {
             source: ImportSource {
-                domain: "sepolia".to_string(),
+                domain: "domain:1".to_string(),
                 block: 100,
                 address: contract,
             },
+            source_domain_id: 1,
+            source_chain_id: 1,
+            source_root: [0x55; 32],
             account: EvmAccount {
                 nonce: 1,
                 balance_be: [0u8; 32],
@@ -1552,6 +1735,7 @@ mod tests {
             storage: BTreeMap::new(),
             proof_nodes: 2,
             migrator: Some(migrator_a),
+            created_epoch: 0,
         };
         state
             .execution_state
@@ -1587,5 +1771,26 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(fin_err, ImportError::NotAuthorizedMigrator);
+
+        // UEL-4 regression: once PENDING_MIGRATION_TTL_EPOCHS has elapsed, an
+        // abandoned or front-run staged plan expires so it cannot deadlock the
+        // contract forever.
+        state.epoch_index = state
+            .epoch_index
+            .saturating_add(PENDING_MIGRATION_TTL_EPOCHS + 1);
+        let expired_err = apply_migration_tx(
+            &mut state,
+            &migrator_a,
+            MigrationTx::FinalizeEvmImport { contract },
+            &MigrationFeeSchedule::TESTNET_DEFAULT,
+            45261,
+        )
+        .unwrap_err();
+        assert_eq!(expired_err, ImportError::NoPendingMigration);
+        let pruned = state
+            .execution_state
+            .prune_expired_pending_evm_migrations(state.epoch_index);
+        assert_eq!(pruned, 1);
+        assert!(state.execution_state.pending_evm_migrations.is_empty());
     }
 }
