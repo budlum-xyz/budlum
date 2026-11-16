@@ -176,7 +176,12 @@ fn amount_plus_fee_overflow_is_refused_for_the_overflow() {
     for (amount, fee) in [(1u64, u64::MAX), (u64::MAX, u64::MAX)] {
         let tx = Transaction::new_with_fee(from, to, amount, fee, 0, vec![]);
         let err = state
-            .validate_transaction_with_context(&tx, 0, u64::MAX)
+            .validate_transaction_with_context(
+                &tx,
+                0,
+                u64::MAX,
+                crate::core::account::TxAuthority::Inline,
+            )
             .expect_err("amount + fee overflows");
         assert!(
             err.contains("overflows u64"),
@@ -193,7 +198,12 @@ fn a_total_that_fits_gets_past_the_overflow_rule() {
     let state = AccountState::new();
     let tx = Transaction::new_with_fee(addr(0x07), addr(0x08), 1, u64::MAX / 2, 0, vec![]);
     let err = state
-        .validate_transaction_with_context(&tx, 0, u64::MAX)
+        .validate_transaction_with_context(
+            &tx,
+            0,
+            u64::MAX,
+            crate::core::account::TxAuthority::Inline,
+        )
         .expect_err("an unsigned transaction is refused somewhere");
     assert!(
         !err.contains("overflows u64"),
@@ -212,7 +222,12 @@ fn a_wrong_nonce_is_refused_as_a_nonce() {
     let mut tx = Transaction::new_with_fee(addr(0x07), addr(0x08), 1, 1_000, 5, vec![]);
     tx.nonce = 5;
     let err = state
-        .validate_transaction_with_context(&tx, 0, u64::MAX)
+        .validate_transaction_with_context(
+            &tx,
+            0,
+            u64::MAX,
+            crate::core::account::TxAuthority::Inline,
+        )
         .expect_err("nonce mismatch");
     assert!(err.contains("Invalid nonce"), "unexpected reason: {err}");
 }
