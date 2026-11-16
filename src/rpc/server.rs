@@ -1021,8 +1021,23 @@ impl RpcServer {
         // a block whose witnesses were pruned says so, so a client
         // does not read an empty signature as an unsigned transaction.
         let witness_pruned = b.witness_is_stripped();
+        // The claim frame of the block, when it carries one: what it proves
+        // and who proved it. The proof itself can be a quarter of a megabyte
+        // and is not part of this view; its size is.
+        let claim_frame = b.claim_frame.as_ref().map(|frame| {
+            serde_json::json!({
+                "claims": frame.claims.len(),
+                "proofBytes": frame.proof.len(),
+                "segments": frame.segments.iter().map(|segment| serde_json::json!({
+                    "aggregator": segment.aggregator.to_string(),
+                    "count": segment.count,
+                })).collect::<Vec<_>>(),
+            })
+        });
         serde_json::json!({
             "number": Self::to_hex(b.index),
+            "frameHash": b.frame_hash.map(|hash| format!("0x{}", hex::encode(hash))),
+            "claimFrame": claim_frame,
             "witnessPruned": witness_pruned,
             "hash": Self::to_0x_hash(b.hash),
             "parentHash": Self::to_0x_hash(b.previous_hash),
@@ -1047,6 +1062,11 @@ impl RpcServer {
             "type": format!("{:?}", t.tx_type),
             "chainId": Self::to_hex(t.chain_id),
             "signature": t.signature.map(|s| format!("0x{}", hex::encode(s))),
+            // A transaction authorized by a claim carries no signature: the
+            // digest of the claim that stands for it says so, so a client
+            // does not read the empty signature as an unsigned transaction.
+            "authClaim": t.auth_claim.map(|claim| format!("0x{}", hex::encode(claim))),
+            "claimRefs": t.claim_refs.iter().map(|claim| format!("0x{}", hex::encode(claim))).collect::<Vec<_>>(),
         })
     }
 
