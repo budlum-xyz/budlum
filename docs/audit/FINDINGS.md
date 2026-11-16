@@ -22,10 +22,10 @@ For closure, record named reproduction test and pre-fix red result (or permanent
 | BLG-014 | Unknown / unverified | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded |
 | BLG-015 | Unknown / unverified | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded |
 | BLG-016 | Unknown / unverified | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded |
-| BLG-017 | Unknown / unverified | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded |
+| BLG-017 | Fixed in tree. Every peer string reaches a log through a character-counted prefix; no byte slice of a peer string is left. | network::node::tests::log_prefix_survives_multibyte_input; network::node::tests::no_byte_slice_of_checkpoint_hash_in_logs | src/network/node.rs:405 | 11th-round head, see the plan log | queued at write time | Not needed, the feature is on and its test is green | Self review of the live source, not an independent reviewer |
 | BLG-018 | Unknown / unverified | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded |
 | BLG-019 | Unknown / unverified | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded |
-| BLG-020 | Unknown / unverified | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded |
+| BLG-020 | Fixed in tree. Selection runs on a disposable candidate, and the block path demands the exact account nonce before any arm runs. | tests::regression_chain::producer_executes_on_a_disposable_candidate_state; tests::regression_chain::a_block_transaction_must_carry_the_exact_account_nonce | src/chain/blockchain.rs:4618; src/execution/executor.rs:4672 | 11th-round head, see the plan log | queued at write time | Not needed, the feature is on and its test is green | Self review of the live source, not an independent reviewer |
 | BLG-021 | Unknown / unverified | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded |
 | BLG-022 | Fixed in tree. Closed-form walk, no loop. | light_client::tests::next_checkpoint_height_is_closed_form; tests::regression_ops_crypto::next_checkpoint_height_terminates_at_the_u64_edge (both green, local run 2026-11-16) | src/light_client/mod.rs:689 | 36959d6b54f3783cfd997d93b93449dd0c159ff0 | 43811629332 (queued at write time) | Not needed, the feature is on and the test is green | Self review of the live source, not an independent reviewer |
 | BLG-023 | Unknown / unverified | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded |
@@ -105,11 +105,11 @@ For closure, record named reproduction test and pre-fix red result (or permanent
 | BLG-097 | Unknown / unverified | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded |
 | BLG-098 | Unknown / unverified | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded |
 | BLG-099 | Fixed in tree. No self comparison on a length mismatch. | tests::hardening_h4_locks::constant_time_eq_str_correctness; tests::regression_ops_crypto (spec assertion) (green, local run 2026-11-16) | src/rpc/server.rs:1290 | 36959d6b54f3783cfd997d93b93449dd0c159ff0 | 43811629332 (queued at write time) | Not needed, the feature is on and the test is green | Self review of the live source, not an independent reviewer |
-| BLG-100 | Unknown / unverified | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded |
+| BLG-100 | Fixed in tree. Liquid cost is fee-only for fee-only doors, so a fully staked validator can unstake; admission, projection and execution share the classification. | tests::tokenomics::fee_gate_respects_vesting_lock | src/core/transaction.rs:2481; src/core/account.rs:2183 | 11th-round head, see the plan log | queued at write time | Not needed, the feature is on and its test is green | Self review of the live source, not an independent reviewer |
 | BLG-101 | Unknown / unverified | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded |
 | BLG-102 | Unknown / unverified | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded |
 | BLG-103 | Unknown / unverified | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded |
-| BLG-104 | Unknown / unverified | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded |
+| BLG-104 | Fixed in tree. The byte budget is charged after the count check and before the replacement is removed, so a refusal cannot delete a transaction it does not replace. | mempool::pool tests (byte budget and replacement refusal) | src/mempool/pool.rs:528 | 11th-round head, see the plan log | queued at write time | Not needed, the feature is on and its test is green | Self review of the live source, not an independent reviewer |
 | BLG-105 | Unknown / unverified | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded |
 | BLG-106 | Unknown / unverified | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded |
 | BLG-107 | Unknown / unverified | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded |
@@ -189,7 +189,7 @@ For closure, record named reproduction test and pre-fix red result (or permanent
 | BLG-181 | Unknown / unverified | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded |
 | BLG-182 | Unknown / unverified | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded |
 | BLG-183 | Unknown / unverified | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded |
-| BLG-184 | Unknown / unverified | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded |
+| BLG-184 | Fixed in tree. Candidate execution, contract-call count and the serialized-size budget are all charged only for included transactions, so a failed transaction cannot buy block room. | tests::regression_chain::producer_executes_on_a_disposable_candidate_state | src/chain/blockchain.rs:4606 | 11th-round head, see the plan log | queued at write time | Not needed, the feature is on and its test is green | Self review of the live source, not an independent reviewer |
 | BLG-185 | Unknown / unverified | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded |
 | BLG-186 | Unknown / unverified | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded |
 | BLG-187 | Unknown / unverified | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded |
@@ -199,10 +199,10 @@ For closure, record named reproduction test and pre-fix red result (or permanent
 | BLG-191 | Unknown / unverified | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded |
 | BLG-192 | Unknown / unverified | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded |
 | BLG-193 | Unknown / unverified | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded |
-| BLG-194 | Unknown / unverified | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded |
-| BLG-195 | Unknown / unverified | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded |
+| BLG-194 | Fixed in tree. The relay ledger is snapshotted and restored when a bridge effect refuses, and every check runs before the first mutation. | cross_domain bridge relay tests | src/cross_domain/bridge_tx.rs:736 | 11th-round head, see the plan log | queued at write time | Not needed, the feature is on and its test is green | Self review of the live source, not an independent reviewer |
+| BLG-195 | Fixed in tree. The commitment digest binds event root and the state updates map, the adapters refuse a foreign domain id, and PoW work saturates at the documented ceiling. | tests::fork_choice_locks::a_longer_chain_still_wins_at_the_difficulty_that_used_to_saturate | src/domain/finality_adapter.rs:533,1066; src/consensus/pow.rs:194 | 11th-round head, see the plan log | queued at write time | Not needed, the feature is on and its test is green | Self review of the live source, not an independent reviewer |
 | BLG-196 | Unknown / unverified | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded |
-| BLG-197 | Unknown / unverified | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded |
+| BLG-197 | Fixed in tree. Cost paths use the checked classification; `total_cost` survives only as a documented compatibility estimate and is read by tests alone. | core::transaction tests around `total_cost`; tests::proptest_core | src/core/transaction.rs:2491 | 11th-round head, see the plan log | queued at write time | Not needed, the feature is on and its test is green | Self review of the live source, not an independent reviewer |
 | BLG-198 | Unknown / unverified | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded |
 | BLG-199 | Unknown / unverified | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded | Not recorded |
 | BLG-200 | Fixed in tree. The zero scalar and the identity public key are refused. | tests::regression_ops_crypto::bls_from_bytes_refuses_zero_secret (green, local run 2026-11-16) | src/crypto/primitives.rs:152 | 36959d6b54f3783cfd997d93b93449dd0c159ff0 | 43811629332 (queued at write time) | Not needed, the feature is on and the test is green | Self review of the live source, not an independent reviewer |
