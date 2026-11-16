@@ -1038,11 +1038,79 @@ fn non_evm_migration_kit_8_12_3_wasm_svm_and_move() {
             suffix: Vec::new(),
         }],
     };
+    // Register active canonical recognized domains so non-EVM migration doors
+    // can verify source attestation against consensus-recognized chains.
+    for (domain_id, chain_id_val) in [(1u32, 1u64), (2u32, 101u64), (4u32, 43_114u64)] {
+        state
+            .settlement
+            .domains
+            .register(crate::domain::plugin::default_domain(
+                domain_id,
+                crate::domain::types::ConsensusKind::PoS,
+                chain_id_val,
+                "pos-qc-finality",
+                1,
+            ))
+            .expect("register canonical migration domain");
+    }
+    // Also register a permissionless domain (id=11) to prove it cannot vouch
+    // for non-EVM migrations even when active and anchored.
+    state
+        .settlement
+        .domains
+        .register(crate::domain::plugin::default_domain(
+            11,
+            crate::domain::types::ConsensusKind::PoA,
+            99_011,
+            "poa-authority-quorum",
+            1,
+        ))
+        .expect("register permissionless domain");
+
     let wasm_label = String::from("migrated-cw20");
     let storage_entries = vec![store_proof];
     let storage_hash = wasm_storage_entries_hash(&storage_entries);
-    let wasm_digest = wasm_migration_digest(
+    // Permissionless domain 11 must be refused even when active and anchored.
+    let perm_wasm_digest = wasm_migration_digest(
         (chain_id, 11, 500),
+        &contract_bech32,
+        &code_hash,
+        &wasm_root,
+        &wasm_label,
+        &storage_hash,
+    );
+    let perm_wasm_sig: SecpSig = cos_sk.sign(&perm_wasm_digest);
+    let perm_wasm_req = WasmMigrationRequest {
+        budlum_chain_id: chain_id,
+        source_domain_id: 11,
+        source_block: 500,
+        state_root: wasm_root,
+        contract_address: contract_bech32.clone(),
+        creator: creator_bech32.clone(),
+        creator_pubkey33: cos_pk.clone(),
+        creator_signature64: perm_wasm_sig.normalize_s().to_bytes().to_vec(),
+        label: wasm_label.clone(),
+        wasm_code: wasm_code.clone(),
+        contract_info_proof: info_proof.clone(),
+        storage_entries: storage_entries.clone(),
+    };
+    assert!(state.anchor_external_root(11, wasm_root));
+    assert!(
+        matches!(
+            coord.apply_migration(
+                &mut state,
+                &migrator,
+                MigrationTx::ImportWasmContract(Box::new(perm_wasm_req)),
+                &schedule,
+                chain_id,
+            ),
+            Err(ImportError::SourceNotAttested { domain: 11 })
+        ),
+        "a permissionless domain must never attest a non-EVM migration"
+    );
+
+    let wasm_digest = wasm_migration_digest(
+        (chain_id, 1, 500),
         &contract_bech32,
         &code_hash,
         &wasm_root,
@@ -1052,7 +1120,7 @@ fn non_evm_migration_kit_8_12_3_wasm_svm_and_move() {
     let wasm_sig: SecpSig = cos_sk.sign(&wasm_digest);
     let wasm_req = WasmMigrationRequest {
         budlum_chain_id: chain_id,
-        source_domain_id: 11,
+        source_domain_id: 1,
         source_block: 500,
         state_root: wasm_root,
         contract_address: contract_bech32.clone(),
@@ -1072,7 +1140,7 @@ fn non_evm_migration_kit_8_12_3_wasm_svm_and_move() {
     bad_inner_proof.path[0].prefix = vec![0x00];
     assert!(verify_ics23_existence(&bad_inner_proof, &wasm_root).is_err());
     // A proof against the request's own root proves nothing. The chain must
-    // have anchored that root for the source domain.
+    // have anchored that root for an active canonical source domain.
     let apply_wasm = |coord: &mut ExecutionCoordinator, state: &mut AccountState, chain: u64| {
         coord.apply_migration(
             state,
@@ -1084,17 +1152,35 @@ fn non_evm_migration_kit_8_12_3_wasm_svm_and_move() {
     };
     assert!(matches!(
         apply_wasm(&mut coord, &mut state, chain_id),
-        Err(ImportError::SourceNotAttested { domain: 11 })
+        Err(ImportError::SourceNotAttested { domain: 1 })
     ));
-    assert!(state.anchor_external_root(11, [0x5Au8; 32]));
+    assert!(state.anchor_external_root(1, [0x5Au8; 32]));
     assert!(
         matches!(
             apply_wasm(&mut coord, &mut state, chain_id),
-            Err(ImportError::SourceNotAttested { domain: 11 })
+            Err(ImportError::SourceNotAttested { domain: 1 })
         ),
         "another anchored root does not attest the request's root"
     );
-    assert!(state.anchor_external_root(11, wasm_root));
+    assert!(state.anchor_external_root(1, wasm_root));
+    // A frozen canonical domain must not attest its leftover anchor.
+    state
+        .settlement
+        .domains
+        .set_status(1, crate::domain::types::DomainStatus::Frozen)
+        .expect("freeze domain 1");
+    assert!(
+        matches!(
+            apply_wasm(&mut coord, &mut state, chain_id),
+            Err(ImportError::SourceNotAttested { domain: 1 })
+        ),
+        "a frozen canonical domain must not attest a non-EVM migration"
+    );
+    state
+        .settlement
+        .domains
+        .set_status(1, crate::domain::types::DomainStatus::Active)
+        .expect("re-activate domain 1");
     // UEL-1 regression: stripping storage entries or altering label invalidates creator signature.
     let mut gutted_wasm = wasm_req.clone();
     gutted_wasm.storage_entries.clear();
@@ -1182,11 +1268,11 @@ fn non_evm_migration_kit_8_12_3_wasm_svm_and_move() {
     let svm_leaf = svm_account_leaf(900, &svm_pk, 50_000_000, &svm_owner, false, 7, &svm_data);
     let svm_sib = [0x33u8; 32];
     let svm_root = fold_sha256_merkle(svm_leaf, 0, &[svm_sib]);
-    let svm_digest = svm_migration_digest(chain_id, 12, 900, &svm_pk, &svm_root);
+    let svm_digest = svm_migration_digest(chain_id, 2, 900, &svm_pk, &svm_root);
     let svm_sig = svm_sk.sign(&svm_digest).to_bytes().to_vec();
     let svm_req = SvmMigrationRequest {
         budlum_chain_id: chain_id,
-        source_domain_id: 12,
+        source_domain_id: 2,
         source_slot: 900,
         accounts_root: svm_root,
         pubkey: svm_pk,
@@ -1211,17 +1297,17 @@ fn non_evm_migration_kit_8_12_3_wasm_svm_and_move() {
     };
     assert!(matches!(
         apply_svm(&mut coord, &mut state, chain_id),
-        Err(ImportError::SourceNotAttested { domain: 12 })
+        Err(ImportError::SourceNotAttested { domain: 2 })
     ));
-    assert!(state.anchor_external_root(12, [0x5Bu8; 32]));
+    assert!(state.anchor_external_root(2, [0x5Bu8; 32]));
     assert!(
         matches!(
             apply_svm(&mut coord, &mut state, chain_id),
-            Err(ImportError::SourceNotAttested { domain: 12 })
+            Err(ImportError::SourceNotAttested { domain: 2 })
         ),
         "another anchored root does not attest the request's root"
     );
-    assert!(state.anchor_external_root(12, svm_root));
+    assert!(state.anchor_external_root(2, svm_root));
     assert!(matches!(
         apply_svm(&mut coord, &mut state, chain_id + 1),
         Err(ImportError::ChainMismatch { .. })
@@ -1303,7 +1389,7 @@ fn non_evm_migration_kit_8_12_3_wasm_svm_and_move() {
     let move_entries_digest = move_entries_hash(&move_entries);
     let move_digest = move_migration_digest(
         chain_id,
-        13,
+        4,
         42,
         &move_addr,
         &move_root,
@@ -1312,7 +1398,7 @@ fn non_evm_migration_kit_8_12_3_wasm_svm_and_move() {
     let move_sig = move_sk.sign(&move_digest).to_bytes().to_vec();
     let move_req = MoveMigrationRequest {
         budlum_chain_id: chain_id,
-        source_domain_id: 13,
+        source_domain_id: 4,
         source_version: 42,
         state_root: move_root,
         account: move_addr,
@@ -1331,17 +1417,17 @@ fn non_evm_migration_kit_8_12_3_wasm_svm_and_move() {
     };
     assert!(matches!(
         apply_move(&mut coord, &mut state, chain_id),
-        Err(ImportError::SourceNotAttested { domain: 13 })
+        Err(ImportError::SourceNotAttested { domain: 4 })
     ));
-    assert!(state.anchor_external_root(13, [0x5Cu8; 32]));
+    assert!(state.anchor_external_root(4, [0x5Cu8; 32]));
     assert!(
         matches!(
             apply_move(&mut coord, &mut state, chain_id),
-            Err(ImportError::SourceNotAttested { domain: 13 })
+            Err(ImportError::SourceNotAttested { domain: 4 })
         ),
         "another anchored root does not attest the request's root"
     );
-    assert!(state.anchor_external_root(13, move_root));
+    assert!(state.anchor_external_root(4, move_root));
     assert!(matches!(
         apply_move(&mut coord, &mut state, chain_id + 1),
         Err(ImportError::ChainMismatch { .. })
@@ -1370,7 +1456,7 @@ fn non_evm_migration_kit_8_12_3_wasm_svm_and_move() {
     let padded_key = [b"res:", &padded_addr[..], b":", padded_tag.as_bytes()].concat();
     let padded_leaf = move_state_leaf(&padded_key, &[0x01]);
     let padded_root = fold_sha3_merkle(padded_leaf, 0, &[]);
-    assert!(state.anchor_external_root(13, padded_root));
+    assert!(state.anchor_external_root(4, padded_root));
     let padded_entries = vec![MoveStateProofEntry {
         kind: MoveMigrationEntryKind::Resource(String::from(padded_tag)),
         bytes: vec![0x01],
@@ -1379,10 +1465,10 @@ fn non_evm_migration_kit_8_12_3_wasm_svm_and_move() {
     }];
     let padded_hash = move_entries_hash(&padded_entries);
     let padded_digest =
-        move_migration_digest(chain_id, 13, 43, &padded_addr, &padded_root, &padded_hash);
+        move_migration_digest(chain_id, 4, 43, &padded_addr, &padded_root, &padded_hash);
     let padded_req = MoveMigrationRequest {
         budlum_chain_id: chain_id,
-        source_domain_id: 13,
+        source_domain_id: 4,
         source_version: 43,
         state_root: padded_root,
         account: padded_addr,
@@ -1402,7 +1488,7 @@ fn non_evm_migration_kit_8_12_3_wasm_svm_and_move() {
             .is_err(),
         "zero-padded/uppercase 0x1::stake resource tag must be refused"
     );
-    assert!(state.anchor_external_root(13, move_root));
+    assert!(state.anchor_external_root(4, move_root));
 
     let move_out = coord
         .apply_migration(
@@ -1437,7 +1523,7 @@ fn non_evm_migration_kit_8_12_3_wasm_svm_and_move() {
     let extra_key = [b"res:", &move_addr[..], b":", extra_tag.as_bytes()].concat();
     let extra_leaf = move_state_leaf(&extra_key, &[0x99]);
     let extra_root = fold_sha3_merkle(extra_leaf, 0, &[]);
-    assert!(state.anchor_external_root(13, extra_root));
+    assert!(state.anchor_external_root(4, extra_root));
     let extra_entries = vec![MoveStateProofEntry {
         kind: MoveMigrationEntryKind::Resource(String::from(extra_tag)),
         bytes: vec![0x99],
@@ -1445,11 +1531,10 @@ fn non_evm_migration_kit_8_12_3_wasm_svm_and_move() {
         siblings: Vec::new(),
     }];
     let extra_hash = move_entries_hash(&extra_entries);
-    let extra_digest =
-        move_migration_digest(chain_id, 13, 44, &move_addr, &extra_root, &extra_hash);
+    let extra_digest = move_migration_digest(chain_id, 4, 44, &move_addr, &extra_root, &extra_hash);
     let extra_req = MoveMigrationRequest {
         budlum_chain_id: chain_id,
-        source_domain_id: 13,
+        source_domain_id: 4,
         source_version: 44,
         state_root: extra_root,
         account: move_addr,

@@ -11,6 +11,10 @@ use crate::domain::{DomainId, Hash32};
 use serde::{Deserialize, Serialize};
 
 pub const MAX_PROOF_MARKET_ACTIVE_TASKS: usize = 10_000;
+/// Maximum number of active tasks a single creator may hold simultaneously in
+/// `ProofMarketState`, preventing one funded account from saturating the global
+/// queue ceiling and denying proof-market admission to every other creator.
+const MAX_PROOF_MARKET_ACTIVE_TASKS_PER_CREATOR: usize = 256;
 pub const MAX_PROOF_MARKET_PENDING_RECEIPTS: usize = 10_000;
 /// Maximum retired task IDs tracked per creator within one epoch. The boundary
 /// clears the set because task IDs commit to `created_epoch`; partitioning also
@@ -1018,6 +1022,14 @@ impl ProofMarketState {
         }
         if self.active_tasks.len() >= MAX_PROOF_MARKET_ACTIVE_TASKS {
             return Err("ProofMarketState active task limit exceeded".into());
+        }
+        let creator_active = self
+            .active_tasks
+            .iter()
+            .filter(|existing| existing.creator == task.creator)
+            .count();
+        if creator_active >= MAX_PROOF_MARKET_ACTIVE_TASKS_PER_CREATOR {
+            return Err("ProofMarketState per-creator active task limit exceeded".into());
         }
         if self
             .active_tasks
@@ -2434,5 +2446,47 @@ mod tests {
         market
             .add_task(fresh_after_prune, 2)
             .expect("creator can submit fresh tasks again in the new epoch");
+    }
+
+    #[test]
+    fn per_creator_active_task_cap_blocks_single_account_exhaustion() {
+        let mut market = ProofMarketState::default();
+        let spammer = Address::from([0x71; 32]);
+        let honest = Address::from([0x72; 32]);
+        market
+            .fund_escrow(
+                spammer,
+                (MAX_PROOF_MARKET_ACTIVE_TASKS_PER_CREATOR as u64) + 10,
+            )
+            .unwrap();
+        market.fund_escrow(honest, 10).unwrap();
+        for i in 0..MAX_PROOF_MARKET_ACTIVE_TASKS_PER_CREATOR {
+            let kind = ProofTaskKind::DomainCommitment {
+                domain_id: 1,
+                domain_height: (i as u64) + 1,
+                sequence: (i as u64) + 1,
+            };
+            let task = task_with(kind, spammer, 1, 50, 1);
+            market.add_task(task, 1).unwrap();
+        }
+        let overflow_kind = ProofTaskKind::DomainCommitment {
+            domain_id: 1,
+            domain_height: (MAX_PROOF_MARKET_ACTIVE_TASKS_PER_CREATOR as u64) + 100,
+            sequence: (MAX_PROOF_MARKET_ACTIVE_TASKS_PER_CREATOR as u64) + 100,
+        };
+        let err = market
+            .add_task(task_with(overflow_kind, spammer, 1, 50, 1), 1)
+            .expect_err("single creator must not exceed per-creator active task cap");
+        assert!(err.contains("per-creator"), "got: {err}");
+
+        // An independent creator is still admitted cleanly.
+        let honest_kind = ProofTaskKind::DomainCommitment {
+            domain_id: 1,
+            domain_height: 999_999,
+            sequence: 999_999,
+        };
+        market
+            .add_task(task_with(honest_kind, honest, 1, 50, 1), 1)
+            .expect("another creator must still be admitted under global ceiling");
     }
 }

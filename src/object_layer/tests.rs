@@ -1279,24 +1279,22 @@ fn uol_k2_guest_placement_preserves_custody_and_returns_on_proof() {
     let native = w.fx.native_id(77);
     assert_eq!(w.reg.recorded_custody(&class), 1);
 
+    let guest_endpoint = guest_fx.address(0xe0);
+    let guest_holder_addr = guest_fx.address(0x22);
+    let guest_home = Holder::Home(HomeIdentity::derive(guest_domain, &guest_holder_addr));
     w.reg
-        .guest_place(alice(), class, &native, guest_domain, bob())
+        .guest_place(alice(), class, &native, guest_domain, guest_home)
         .unwrap();
     assert_eq!(
         w.reg.unique.get(&asset).unwrap().location,
         Location::Guest {
             domain: guest_domain,
-            holder: bob(),
+            holder: guest_home,
         }
     );
     assert_eq!(w.reg.recorded_custody(&class), 1);
 
-    let ret_raw = guest_fx.call(
-        &guest_fx.address(0xe0),
-        &guest_fx.address(0x22),
-        1,
-        b"return",
-    );
+    let ret_raw = guest_fx.call(&guest_endpoint, &guest_holder_addr, 1, b"return");
     let ret_proof = HomeEventProof {
         domain: guest_domain,
         home_height: 55,
@@ -1306,15 +1304,42 @@ fn uol_k2_guest_placement_preserves_custody_and_returns_on_proof() {
         phase: Phase::Final,
         inclusion: Vec::new(),
     };
+    // An attacker cannot seize a guest-custody asset by naming itself as recipient.
+    assert_eq!(
+        w.reg
+            .guest_return(bob(), class, &native, alice(), &ret_proof, &YES),
+        Err(Refusal::NotAuthorized)
+    );
+    // An unrelated guest sender cannot authorize returning another holder's guest asset.
+    let wrong_sender_proof = HomeEventProof {
+        event: guest_fx.call(&guest_endpoint, &guest_fx.address(0xee), 1, b"return"),
+        ..ret_proof.clone()
+    };
+    assert_eq!(
+        w.reg
+            .guest_return(bob(), class, &native, guest_home, &wrong_sender_proof, &YES),
+        Err(Refusal::NotAuthorized)
+    );
+    // Authorized guest return restores the recorded guest holder and uses a
+    // door- and asset-scoped replay key without burning the shared ArrivalKey.
     w.reg
-        .guest_return(class, &native, alice(), &ret_proof, &YES)
+        .guest_return(bob(), class, &native, guest_home, &ret_proof, &YES)
         .unwrap();
     assert_eq!(
         w.reg.unique.get(&asset).unwrap().location,
         Location::ObjectLayer
     );
-    assert_eq!(w.reg.unique.get(&asset).unwrap().holder, Some(alice()));
+    assert_eq!(w.reg.unique.get(&asset).unwrap().holder, Some(guest_home));
     assert_eq!(w.reg.recorded_custody(&class), 1);
+    let shared_key = crate::object_layer::ids::ArrivalKey::derive(
+        ret_proof.domain,
+        ret_proof.home_height,
+        &ret_proof.event_id,
+    );
+    assert!(
+        !w.reg.arrivals.contains(&shared_key),
+        "guest_return must not consume the shared ArrivalKey"
+    );
 }
 
 #[test]
