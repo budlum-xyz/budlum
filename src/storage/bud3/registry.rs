@@ -1250,6 +1250,7 @@ impl Bud3Registry {
             chain_id,
             (&sender, &old_entry.owner, proposer_stake),
             (&old_entry.record, &new_record),
+            &new_shares,
             (&pg_full, validator_keys),
             attestations,
         )

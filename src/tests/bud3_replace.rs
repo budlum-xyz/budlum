@@ -114,11 +114,17 @@ fn apply(
     )
 }
 
-/// Three distinct placement-group ML-DSA-65 attestations over `(old, new_record)`.
-fn attestations(old: &ObjectKey, new_record: &ObjectRecord) -> Vec<ReplaceAttestation> {
+/// Three distinct placement-group ML-DSA-65 attestations over
+/// `(old, new_record, new_shares)`: the quorum covers the placement the
+/// transaction commits, not only the record.
+fn attestations(
+    old: &ObjectKey,
+    new_record: &ObjectRecord,
+    new_shares: &[(u64, Share)],
+) -> Vec<ReplaceAttestation> {
     [FULL_A, FULL_B, FULL_C]
         .into_iter()
-        .map(|v| sign_replace_attestation(addr(v), &[v; 32], old, new_record).unwrap())
+        .map(|v| sign_replace_attestation(addr(v), &[v; 32], old, new_record, new_shares).unwrap())
         .collect()
 }
 
@@ -164,7 +170,7 @@ fn bud3_object_replacement() {
     let root_before = r.state_root();
     let new_record = recoded(&record, 0x77, 40);
     let new = new_record.commitment;
-    let atts = attestations(&old, &new_record);
+    let atts = attestations(&old, &new_record, &placement(1));
     assert_eq!(
         apply(
             &mut r,
@@ -224,7 +230,7 @@ fn bud3_object_replacement_keeps_the_content_id_and_moves_the_references() {
         ),
         Ok(Applied::Bound)
     ));
-    let atts = attestations(&old, &new_record);
+    let atts = attestations(&old, &new_record, &placement(1));
     assert_eq!(
         apply(
             &mut r,
@@ -258,7 +264,7 @@ fn bud3_object_replacement_keeps_the_old_shares_until_the_new_ones_are_confirmed
     let (mut r, old, record, _) = registered(b"shares do not move before the ack");
     let new_record = recoded(&record, 0xB4, 32);
     let new = new_record.commitment;
-    let atts = attestations(&old, &new_record);
+    let atts = attestations(&old, &new_record, &placement(1));
     apply(
         &mut r,
         addr(FULL_A),
@@ -329,7 +335,7 @@ fn bud3_pending_replacement_expiry_does_not_release_old_shares() {
     let (mut r, old, record, _) = registered(b"expiry is not an acknowledgement");
     let new_record = recoded(&record, 0xB5, 24);
     let new = new_record.commitment;
-    let atts = attestations(&old, &new_record);
+    let atts = attestations(&old, &new_record, &placement(1));
     apply(
         &mut r,
         addr(FULL_A),
@@ -374,7 +380,7 @@ fn bud3_object_replacement_refuses_different_content() {
     let (mut r, old, record, _) = registered(b"the replacement must carry the same bytes");
     let mut other = recoded(&record, 0xC3, 0);
     other.content_id = ContentId::public(b"some other content entirely");
-    let atts = attestations(&old, &other);
+    let atts = attestations(&old, &other, &placement(1));
     assert_eq!(
         apply(
             &mut r,
@@ -421,7 +427,7 @@ fn bud3_object_replacement_needs_a_full_validator_of_the_group() {
     .unwrap();
     let old = record.commitment;
     let new_record = recoded(&record, 0xD2, 8);
-    let atts = attestations(&old, &new_record);
+    let atts = attestations(&old, &new_record, &placement(1));
     let root = r.state_root();
     for proposer in [OUTSIDER, FULL_B] {
         assert_eq!(
@@ -467,7 +473,7 @@ fn bud3_object_replacement_of_sealed_content_is_the_owners() {
     .unwrap();
     let mut new_record = recoded(&record, 0xE2, 16);
     new_record.content_id = content_id;
-    let atts = attestations(&old, &new_record);
+    let atts = attestations(&old, &new_record, &placement(1));
     assert_eq!(
         apply(
             &mut r,
@@ -505,7 +511,7 @@ fn bud3_object_replacement_of_sealed_content_is_the_owners() {
 fn bud3_object_replacement_refuses_a_second_proposal() {
     let (mut r, old, record, _) = registered(b"one replacement at a time");
     let first = recoded(&record, 0xF1, 8);
-    let first_atts = attestations(&old, &first);
+    let first_atts = attestations(&old, &first, &placement(1));
     apply(
         &mut r,
         addr(FULL_A),
@@ -520,7 +526,7 @@ fn bud3_object_replacement_refuses_a_second_proposal() {
     )
     .unwrap();
     let second = recoded(&record, 0xF2, 16);
-    let second_atts = attestations(&old, &second);
+    let second_atts = attestations(&old, &second, &placement(1));
     assert_eq!(
         apply(
             &mut r,
@@ -580,7 +586,7 @@ fn bud3_object_replacement_refuses_a_target_that_is_already_live() {
     )
     .unwrap();
     assert!(r.object(&live.commitment).is_some());
-    let live_atts = attestations(&old, &live);
+    let live_atts = attestations(&old, &live, &placement(1));
     assert_eq!(
         apply(
             &mut r,
@@ -605,7 +611,7 @@ fn bud3_object_replacement_refuses_a_closed_codec() {
     let (mut r, old, record, _) = registered(b"a closed codec cannot carry content");
     let mut closed = recoded(&record, 0x11, 0);
     closed.codec = 9; // reserved codec id is never valid
-    let closed_atts = attestations(&old, &closed);
+    let closed_atts = attestations(&old, &closed, &placement(1));
     assert_eq!(
         apply(
             &mut r,
@@ -627,7 +633,7 @@ fn bud3_object_replacement_refuses_a_closed_codec() {
 fn bud3_object_replacement_round_trips_through_the_wire_codec() {
     let (_, _, record, new_shares) = registered(b"the variant has a wire form");
     let new_rec = recoded(&record, 0x1A, 8);
-    let atts = attestations(&[9; 32], &new_rec);
+    let atts = attestations(&[9; 32], &new_rec, &new_shares);
     let tx = StorageTxV3::ReplaceObject {
         old_object: [9; 32],
         new_record: new_rec,
@@ -687,7 +693,7 @@ fn bud3_object_replacement_is_the_signed_door_path() {
     .unwrap();
     let new_record = recoded(&record, 0x2B, 48);
     let new = new_record.commitment;
-    let atts = attestations(&old, &new_record);
+    let atts = attestations(&old, &new_record, &placement(1));
     let mut forged = atts.clone();
     forged[1].signature[0] ^= 0xFF;
     assert!(
@@ -805,7 +811,7 @@ fn replace_object_rejects_slashed_or_jailed_validator_even_when_present_in_direc
         .slashed = true;
 
     let new_record = recoded(&record, 0x2B, 48);
-    let atts = attestations(&old, &new_record);
+    let atts = attestations(&old, &new_record, &placement(1));
     assert!(
         Executor::apply_transaction_checked(
             &mut state,

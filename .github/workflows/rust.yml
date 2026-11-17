@@ -31,7 +31,7 @@ name: Rust Quality
 
 on:
   pull_request:
-    branches: [main, consensus-of-consensuses, testnet-quantum, testnet, garden]
+    branches: [main, consensus-of-consensuses, testnet-quantum, testnet, garden, budlum-stack]
   schedule:
     - cron: "0 7 * * 4" # weekly, Thursday 07:00 UTC
   workflow_dispatch:
