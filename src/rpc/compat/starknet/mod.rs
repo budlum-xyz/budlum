@@ -183,15 +183,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn starknet_rpc_is_open_on_testnet_at_launch_and_respects_override() {
+    fn starknet_rpc_is_closed_on_testnet_at_launch() {
         let state = AccountState::new();
         let closed = handle_starknet_rpc(
             &state,
-            StarknetActivationPolicy {
-                chain_id: BUDLUM_TESTNET_CHAIN_ID,
-                block_height: 0,
-                activation_height: None,
-            },
+            StarknetActivationPolicy::default(),
             StarknetRpcRequest {
                 jsonrpc: "2.0".into(),
                 id: json!(1),
@@ -203,7 +199,11 @@ mod tests {
 
         let spec = handle_starknet_rpc(
             &state,
-            StarknetActivationPolicy::default(),
+            StarknetActivationPolicy {
+                chain_id: BUDLUM_TESTNET_CHAIN_ID,
+                block_height: 100,
+                activation_height: Some(100),
+            },
             StarknetRpcRequest {
                 jsonrpc: "2.0".into(),
                 id: json!(2),

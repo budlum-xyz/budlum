@@ -789,35 +789,21 @@ mod tests {
         }
     }
 
-    /// Testnet `45261` activation posture: open at launch (`PROPOSED_SUI_ACTIVATION_HEIGHT = 0`),
-    /// while explicit `with_activation_height(None)` retains closed override refusal.
+    /// Testnet `45261` launch posture is closed until an explicit activation height.
     #[test]
-    fn move_sui_is_open_on_testnet() {
-        let mut open_worker = MoveSuiWorker::new();
-        assert!(open_worker.is_active(&launch_ctx()));
-        let mut closed_worker = MoveSuiWorker::with_activation_height(None);
+    fn move_sui_is_closed_on_testnet() {
+        let mut closed_worker = MoveSuiWorker::new();
         assert!(!closed_worker.is_active(&launch_ctx()));
+        let activated_worker = MoveSuiWorker::with_activation_height(Some(100));
+        assert!(!activated_worker.is_active(&BlockContext {
+            height: 99,
+            ..launch_ctx()
+        }));
+        assert!(activated_worker.is_active(&launch_ctx()));
         let mut host = MemoryHost::new(1_000_000);
         let Ok(caller) = EeIdentity::new(EeId::MOVE_SUI, vec![0xAA; 32]) else {
             panic!("caller");
         };
-        let Ok(ok_out) = open_worker.execute(
-            &launch_ctx(),
-            &EeCall {
-                kind: EeCallKind::Call,
-                caller: caller.clone(),
-                target: caller.clone(),
-                value: BudAmount(0),
-                input: br#"{"commands":[]}"#.to_vec(),
-                gas_limit: 500_000,
-                depth: 0,
-                tx_hash: [0x01; 32],
-            },
-            &mut host,
-        ) else {
-            panic!("exec");
-        };
-        assert_eq!(ok_out.status, OutcomeStatus::Success);
         let Ok(out) = closed_worker.execute(
             &launch_ctx(),
             &EeCall {
