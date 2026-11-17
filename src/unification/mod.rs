@@ -13,7 +13,7 @@
 //!   on-chain, POS terminal, and card-network settlement rails) and cross-domain
 //!   collateral liquidation coordinator.
 //! - [`abi_bridge`]: Cross-VM and multi-language canonical call envelope bridge
-//!   projecting typed calls across EVM, SVM, Move, CosmWasm, UTXO, Cairo, and
+//!   projecting typed calls across EVM, SVM, Move, `CosmWasm`, UTXO, Cairo, and
 //!   `BudZero` without altering any domain's inner rules.
 //! - [`storage_fabric`]: Unified Web3 and decentralized storage fabric binding
 //!   B.U.D. 3.0, IPFS, Arweave, Filecoin, Walrus, Swarm, Sia, and Storj under
@@ -114,13 +114,18 @@ pub(crate) fn unification_merkle_root(domain_tag: &[u8], leaves: &[Hash32]) -> H
     while level.len() > 1 {
         let mut next = Vec::with_capacity(level.len().div_ceil(2));
         for pair in level.chunks(2) {
-            let left = pair[0];
+            let Some(&left) = pair.first() else {
+                continue;
+            };
             let right = pair.get(1).copied().unwrap_or(left);
             next.push(merkle_node_hash(domain_tag, &left, &right));
         }
         level = next;
     }
-    level[0]
+    level
+        .first()
+        .copied()
+        .unwrap_or_else(|| hash_domain_fields(domain_tag, &[b"EMPTY"]))
 }
 
 /// Builds a sibling inclusion proof for `leaf_index` in `leaves`.
@@ -146,10 +151,12 @@ pub(crate) fn build_merkle_proof(
         } else {
             idx - 1
         };
-        proof.push(level[sibling_idx]);
+        proof.push(*level.get(sibling_idx)?);
         let mut next = Vec::with_capacity(level.len().div_ceil(2));
         for pair in level.chunks(2) {
-            let left = pair[0];
+            let Some(&left) = pair.first() else {
+                continue;
+            };
             let right = pair.get(1).copied().unwrap_or(left);
             next.push(merkle_node_hash(domain_tag, &left, &right));
         }
