@@ -673,6 +673,29 @@ impl Bud3Registry {
         self.replacements.get(old)
     }
 
+    /// Resolve `key` to its live [`ObjectEntry`], following finalized Section 6.14
+    /// `ReplaceObject` redirects up to 16 hops while rejecting tombstoned,
+    /// cyclic, or missing targets.
+    #[must_use]
+    pub fn resolve_live_object(&self, key: &ObjectKey) -> Option<(ObjectKey, &ObjectEntry)> {
+        let mut cur = *key;
+        let mut seen = BTreeSet::new();
+        for _ in 0..16 {
+            if !seen.insert(cur) || self.tombstones.contains_key(&cur) {
+                return None;
+            }
+            if let Some(entry) = self.objects.get(&cur) {
+                return Some((cur, entry));
+            }
+            let rep = self.replacements.get(&cur)?;
+            if !rep.finalized {
+                return None;
+            }
+            cur = rep.new;
+        }
+        None
+    }
+
     /// Record an on-chain G8 paid fallback decode authorization for a public object.
     ///
     /// # Errors
@@ -715,10 +738,14 @@ impl Bud3Registry {
                 "global paid view receipt limit reached",
             ));
         }
+        let target_object = self
+            .resolve_live_object(&object)
+            .map(|(k, _)| k)
+            .ok_or(RegistryError::UnknownObject)?;
         let mut object_receipts = 0usize;
         let mut payer_object_receipts = 0usize;
         for rec in self.paid_views.values() {
-            if rec.object == object {
+            if rec.object == target_object {
                 object_receipts += 1;
                 if rec.payer == payer {
                     payer_object_receipts += 1;
@@ -737,7 +764,7 @@ impl Bud3Registry {
         }
         let obj = self
             .objects
-            .get_mut(&object)
+            .get_mut(&target_object)
             .ok_or(RegistryError::UnknownObject)?;
         if obj.record.content_id.kind != ContentIdKind::Public {
             return Err(RegistryError::InvalidPaidView(
@@ -749,7 +776,7 @@ impl Bud3Registry {
             receipt_id,
             PaidViewRecord {
                 payer,
-                object,
+                object: target_object,
                 amount_atoms,
                 paid_at_epoch: epoch,
             },
@@ -762,12 +789,15 @@ impl Bud3Registry {
     pub fn verify_paid_view(&self, receipt: &PaidViewReceipt) -> bool {
         receipt.fee_paid_atoms >= MIN_PAID_VIEW_FEE_ATOMS
             && self.paid_views.get(&receipt.receipt_id).is_some_and(|rec| {
-                self.objects.contains_key(&rec.object)
-                    && !self.tombstones.contains_key(&rec.object)
-                    && rec.payer == receipt.payer
-                    && rec.object == receipt.object
-                    && rec.amount_atoms >= receipt.fee_paid_atoms
-                    && rec.amount_atoms >= MIN_PAID_VIEW_FEE_ATOMS
+                self.resolve_live_object(&receipt.object)
+                    .is_some_and(|(resolved, _)| {
+                        resolved == rec.object
+                            && self.objects.contains_key(&rec.object)
+                            && !self.tombstones.contains_key(&rec.object)
+                            && rec.payer == receipt.payer
+                            && rec.amount_atoms >= receipt.fee_paid_atoms
+                            && rec.amount_atoms >= MIN_PAID_VIEW_FEE_ATOMS
+                    })
             })
     }
 
@@ -810,7 +840,11 @@ impl Bud3Registry {
                         dep_set.insert(*key);
                     }
                 }
-                self.paid_views.retain(|_, rec| rec.object != old);
+                for rec in self.paid_views.values_mut() {
+                    if rec.object == old {
+                        rec.object = *key;
+                    }
+                }
                 for nft in obj.references {
                     if let Some((_, holder)) = self.nfts.get(&nft).copied() {
                         self.nfts.insert(nft, (*key, holder));
@@ -889,17 +923,24 @@ impl Bud3Registry {
         self.drop_object(key, epoch);
         // A replacement whose new object is deleted leaves no object that
         // carries the content: the references are already gone (this is the
-        // burn of the last one, or expiry), so the replaced object goes with
-        // it and no redirect stands.
-        let replaced: Vec<ObjectKey> = self
-            .replacements
-            .iter()
-            .filter(|(_, r)| r.new == *key)
-            .map(|(old, _)| *old)
-            .collect();
-        for old in replaced {
-            self.drop_object(&old, epoch);
-            self.replacements.remove(&old);
+        // burn of the last one, or expiry), so every chained replaced object
+        // goes with it and no orphan redirect stands.
+        let mut queue = vec![*key];
+        let mut seen = BTreeSet::from([*key]);
+        while let Some(target) = queue.pop() {
+            let replaced: Vec<ObjectKey> = self
+                .replacements
+                .iter()
+                .filter(|(_, r)| r.new == target)
+                .map(|(old, _)| *old)
+                .collect();
+            for old in replaced {
+                self.drop_object(&old, epoch);
+                self.replacements.remove(&old);
+                if seen.insert(old) {
+                    queue.push(old);
+                }
+            }
         }
     }
 
@@ -923,6 +964,10 @@ impl Bud3Registry {
                 self.nfts.remove(&nft);
             }
             self.base_deps.remove(key);
+            for deps in self.base_deps.values_mut() {
+                deps.remove(key);
+            }
+            self.base_deps.retain(|_, deps| !deps.is_empty());
             self.paid_views.retain(|_, rec| rec.object != *key);
             // Only custody-confirmed objects earn a permanent deletion
             // tombstone: an unconfirmed squatter letting a bogus registration
@@ -4385,5 +4430,132 @@ mod tests {
         let revoked = r.query_json(&Bud3Query::GrantAt(tag, 16));
         assert_eq!(revoked["status"], "revoked");
         assert!(r.query_json(&Bud3Query::GrantAt([0xAA; 32], 16)).is_null());
+    }
+
+    #[test]
+    fn dropping_expired_or_burned_dependent_clears_base_deps_and_unblocks_base_burn() {
+        use super::super::replace::sign_replace_attestation;
+        use crate::crypto::pq::ml_dsa_public_key;
+        use crate::crypto::scheme::SchemeId;
+
+        let mut r = Bud3Registry::default();
+        let owner = addr(1);
+        let (base_up, base_shares) = upload(b"base object for dep cleanup test");
+        let base_key = base_up.record.commitment;
+        r.register_object(owner, base_up.record.clone(), base_shares.clone(), 0, 50)
+            .unwrap();
+        for (_, sh) in &base_shares {
+            r.ack(&base_key, &sh.validator).unwrap();
+        }
+        let base_nft = [0xD1; 32];
+        r.bind_nft(base_nft, owner, Some(owner), &base_key).unwrap();
+
+        let (dep_exp_up, dep_exp_shares) = upload(b"expiring dependent delta object");
+        let dep_exp_key = dep_exp_up.record.commitment;
+        r.register_object(owner, dep_exp_up.record, dep_exp_shares, 0, 5)
+            .unwrap();
+        r.register_dependency(dep_exp_key, base_key).unwrap();
+        assert_eq!(r.refcount(&base_key), 2);
+        assert_eq!(
+            r.burn_reference(&base_nft, &owner, 1),
+            Err(RegistryError::HasDependents)
+        );
+
+        // Expiring the dependent removes it from `base_deps[base_key]` too.
+        r.expire(6);
+        assert!(r.object(&dep_exp_key).is_none());
+        assert_eq!(r.refcount(&base_key), 1);
+
+        // Burning a second dependent also clears `base_deps[base_key]` and unblocks `base_nft` burn.
+        let (dep_burn_up, dep_burn_shares) = upload(b"burnable dependent delta object");
+        let dep_burn_key = dep_burn_up.record.commitment;
+        r.register_object(owner, dep_burn_up.record, dep_burn_shares, 6, 40)
+            .unwrap();
+        let dep_nft = [0xD2; 32];
+        r.bind_nft(dep_nft, owner, Some(owner), &dep_burn_key)
+            .unwrap();
+        r.register_dependency(dep_burn_key, base_key).unwrap();
+        assert_eq!(r.refcount(&base_key), 2);
+        assert!(r.burn_reference(&dep_nft, &owner, 7).unwrap());
+        assert_eq!(r.refcount(&base_key), 1);
+        assert!(r.burn_reference(&base_nft, &owner, 7).unwrap());
+        assert!(r.is_tombstoned(&base_key));
+
+        // Chained finalized replacements (`k1 -> k2 -> k3`) leave zero orphan redirects on delete.
+        let (k1_up, k1_shares) = upload(b"chained replacement deletion test");
+        let k1 = k1_up.record.commitment;
+        r.register_object(owner, k1_up.record.clone(), k1_shares.clone(), 10, 50)
+            .unwrap();
+        for (_, sh) in &k1_shares {
+            r.ack(&k1, &sh.validator).unwrap();
+        }
+        let chain_nft = [0xD3; 32];
+        r.bind_nft(chain_nft, owner, Some(owner), &k1).unwrap();
+        let validator_keys: BTreeMap<Address, Vec<u8>> = [10u8, 11, 12]
+            .into_iter()
+            .map(|v| {
+                (
+                    addr(v),
+                    ml_dsa_public_key(SchemeId::ML_DSA_65, &[v; 32]).unwrap(),
+                )
+            })
+            .collect();
+        let mut r2 = k1_up.record.clone();
+        r2.codec = if r2.codec == 0 { 1 } else { 0 };
+        r2.object_len = r2.object_len.saturating_add(1);
+        r2.commitment = [0xC2; 32];
+        let att2: Vec<_> = [10u8, 11, 12]
+            .into_iter()
+            .map(|v| sign_replace_attestation(addr(v), &[v; 32], &k1, &r2, &k1_shares).unwrap())
+            .collect();
+        let k2 = r
+            .replace_object(
+                (addr(10), 10_000),
+                &k1,
+                r2.clone(),
+                k1_shares.clone(),
+                &att2,
+                (
+                    crate::core::transaction::DEFAULT_CHAIN_ID,
+                    11,
+                    &validator_keys,
+                ),
+            )
+            .unwrap();
+        for (_, sh) in &k1_shares {
+            r.ack(&k2, &sh.validator).unwrap();
+        }
+        assert_eq!(r.resolve_live_object(&k1).map(|(k, _)| k), Some(k2));
+
+        let mut r3 = r2;
+        r3.codec = if r3.codec == 0 { 1 } else { 0 };
+        r3.object_len = r3.object_len.saturating_add(1);
+        r3.commitment = [0xC3; 32];
+        let att3: Vec<_> = [10u8, 11, 12]
+            .into_iter()
+            .map(|v| sign_replace_attestation(addr(v), &[v; 32], &k2, &r3, &k1_shares).unwrap())
+            .collect();
+        let k3 = r
+            .replace_object(
+                (addr(10), 10_000),
+                &k2,
+                r3,
+                k1_shares.clone(),
+                &att3,
+                (
+                    crate::core::transaction::DEFAULT_CHAIN_ID,
+                    12,
+                    &validator_keys,
+                ),
+            )
+            .unwrap();
+        for (_, sh) in &k1_shares {
+            r.ack(&k3, &sh.validator).unwrap();
+        }
+        assert_eq!(r.resolve_live_object(&k1).map(|(k, _)| k), Some(k3));
+        assert!(r.burn_reference(&chain_nft, &owner, 13).unwrap());
+        assert!(r.resolve_live_object(&k1).is_none());
+        assert!(r.replacement(&k1).is_none());
+        assert!(r.replacement(&k2).is_none());
     }
 }

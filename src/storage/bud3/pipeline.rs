@@ -671,31 +671,30 @@ where
 {
     let seg = Segmentation::new(record.object_len, &record.profile)
         .ok_or(PipelineError::Fountain(FountainError::InvalidProfile))?;
-    let count = usize::try_from(seg.count()).map_err(|_| PipelineError::TooLarge)?;
-    let mut decoders = Vec::with_capacity(count.min(1 << 16));
-    for index in 0..seg.count() {
-        let len = seg.len(index).ok_or(PipelineError::TooLarge)?;
-        decoders.push(SegmentDecoder::new(index, len, &record.profile)?);
-    }
+    let seg_count = seg.count();
+    let _ = usize::try_from(seg_count).map_err(|_| PipelineError::TooLarge)?;
+    let mut decoders: std::collections::BTreeMap<u64, SegmentDecoder> =
+        std::collections::BTreeMap::new();
     let mut seen_esis: std::collections::BTreeSet<(u64, u32)> = std::collections::BTreeSet::new();
     let step_budget = u64::from(
         record
             .symbols_per_segment
             .saturating_add(super::fountain::MAX_EXTRA_SYMBOLS),
     )
-    .saturating_mul(seg.count());
+    .saturating_mul(seg_count);
     let byte_budget = step_budget
         .saturating_mul(u64::from(record.profile.symbol_size))
         .max(record.object_len.saturating_mul(4).saturating_add(1 << 20));
     let mut meter = Meter::new(byte_budget, step_budget);
     for s in symbols {
-        if !seen_esis.insert((s.segment, s.esi)) {
+        if s.segment >= seg_count || !seen_esis.insert((s.segment, s.esi)) {
             continue;
         }
-        let Some(dec) = usize::try_from(s.segment)
-            .ok()
-            .and_then(|i| decoders.get_mut(i))
-        else {
+        if let std::collections::btree_map::Entry::Vacant(e) = decoders.entry(s.segment) {
+            let len = seg.len(s.segment).ok_or(PipelineError::TooLarge)?;
+            e.insert(SegmentDecoder::new(s.segment, len, &record.profile)?);
+        }
+        let Some(dec) = decoders.get_mut(&s.segment) else {
             continue;
         };
         if dec.is_done() {
@@ -705,10 +704,13 @@ where
     }
     let cap = usize::try_from(record.object_len).map_err(|_| PipelineError::TooLarge)?;
     let mut object = Vec::with_capacity(cap.min(1 << 20));
-    for (index, dec) in decoders.into_iter().enumerate() {
+    for index in 0..seg_count {
+        let dec = decoders
+            .remove(&index)
+            .ok_or(PipelineError::SegmentMissing(index))?;
         let bytes = dec
             .into_bytes()
-            .ok_or(PipelineError::SegmentMissing(index as u64))?;
+            .ok_or(PipelineError::SegmentMissing(index))?;
         object.extend_from_slice(&bytes);
     }
     if commit_object(&object, &record.profile) != Some(record.commitment) {

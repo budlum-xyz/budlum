@@ -55,11 +55,14 @@ impl Bud3ContentGateway {
         content_ref: &ContentRef,
         network: &N,
     ) -> Result<GatewaySymbolBundle, ViewBud3Error> {
+        let (resolved_key, _) = registry
+            .resolve_live_object(&content_ref.object_commitment)
+            .ok_or(ViewBud3Error::UnknownObject)?;
         if let Some(nft) = content_ref.nft_id {
             let Some((bound_key, _)) = registry.nft_binding(&nft) else {
                 return Err(ViewBud3Error::AccessDenied);
             };
-            if bound_key != content_ref.object_commitment {
+            if bound_key != content_ref.object_commitment && bound_key != resolved_key {
                 return Err(ViewBud3Error::AccessDenied);
             }
         }
@@ -110,8 +113,8 @@ impl Bud3ContentGateway {
         receipt: &PaidViewReceipt,
         network: &N,
     ) -> Result<Vec<u8>, ViewBud3Error> {
-        let entry = registry
-            .object(&content_ref.object_commitment)
+        let (_, entry) = registry
+            .resolve_live_object(&content_ref.object_commitment)
             .ok_or(ViewBud3Error::UnknownObject)?;
         if entry.record.content_id != content_ref.content_id {
             return Err(ViewBud3Error::AccessDenied);
@@ -229,5 +232,136 @@ mod tests {
         )
         .unwrap();
         assert_eq!(fallback, b"gateway delivered bud3 content");
+    }
+
+    #[test]
+    fn gateway_follows_finalized_replacement_with_nft_ref() {
+        use super::super::bof1::Object;
+        use super::super::custody::{symbol_leaf, symbol_root};
+        use super::super::fountain::SegmentEncoder;
+        use super::super::pipeline::ObjectRecord;
+        use super::super::registry::Address;
+        use super::super::replace::sign_replace_attestation;
+        use super::super::segment::commit_object;
+        use crate::crypto::pq::ml_dsa_public_key;
+        use crate::crypto::scheme::SchemeId;
+        use std::collections::BTreeMap;
+
+        let profile = Profile {
+            id: 0,
+            qr_version: 40,
+            symbol_size: 128,
+            fps: 10,
+            k_max: 16,
+        };
+        let payload = b"gateway redirect payload for nft ".repeat(6);
+        let up_old = prepare_public_upload(&payload, &profile, &Bud3Limits::default(), 16).unwrap();
+        let old_key = up_old.record.commitment;
+        let nft = [0x88; 32];
+
+        let raw_obj = Object::raw_public(&payload);
+        let raw_bytes = raw_obj.encode();
+        let new_commit = commit_object(&raw_bytes, &profile).unwrap();
+        let enc_raw = SegmentEncoder::new(0, &raw_bytes, &profile).unwrap();
+        let k_raw = enc_raw.k();
+        let mut syms_new = enc_raw.source_symbols();
+        syms_new.extend(enc_raw.repair_symbols(0, 16 - k_raw).unwrap());
+        let leaves_new: Vec<(u32, [u8; 32])> = syms_new
+            .iter()
+            .map(|s| (s.esi, symbol_leaf(&s.data)))
+            .collect();
+        let new_record = ObjectRecord {
+            content_id: up_old.record.content_id,
+            object_len: raw_bytes.len() as u64,
+            commitment: new_commit,
+            profile,
+            codec: raw_obj.header.codec,
+            symbols_per_segment: 16,
+            symbol_roots: vec![symbol_root(&leaves_new)],
+        };
+
+        let validators = [[61u8; 32], [62u8; 32], [63u8; 32]];
+        let shares = vec![
+            (
+                0,
+                Share {
+                    validator: validators[0],
+                    class: Class::Full,
+                    first_esi: 0,
+                    symbols: 6,
+                },
+            ),
+            (
+                0,
+                Share {
+                    validator: validators[1],
+                    class: Class::Full,
+                    first_esi: 6,
+                    symbols: 6,
+                },
+            ),
+            (
+                0,
+                Share {
+                    validator: validators[2],
+                    class: Class::Full,
+                    first_esi: 12,
+                    symbols: 4,
+                },
+            ),
+        ];
+
+        let mut reg = Bud3Registry::default();
+        reg.register_object([1; 32], up_old.record.clone(), shares.clone(), 0, 40)
+            .unwrap();
+        for v in &validators {
+            reg.ack(&old_key, v).unwrap();
+        }
+        reg.bind_nft(nft, [1; 32], Some([1; 32]), &old_key).unwrap();
+        let cref_old = ContentRef::new(up_old.record.content_id, old_key, Some(nft)).unwrap();
+
+        let validator_keys: BTreeMap<Address, Vec<u8>> = [61u8, 62, 63]
+            .into_iter()
+            .map(|v| {
+                (
+                    [v; 32],
+                    ml_dsa_public_key(SchemeId::ML_DSA_65, &[v; 32]).unwrap(),
+                )
+            })
+            .collect();
+        let attestations: Vec<_> = [61u8, 62, 63]
+            .into_iter()
+            .map(|v| {
+                sign_replace_attestation([v; 32], &[v; 32], &old_key, &new_record, &shares).unwrap()
+            })
+            .collect();
+        let new_key = reg
+            .replace_object(
+                (validators[0], 10_000),
+                &old_key,
+                new_record,
+                shares,
+                &attestations,
+                (
+                    crate::core::transaction::DEFAULT_CHAIN_ID,
+                    1,
+                    &validator_keys,
+                ),
+            )
+            .unwrap();
+        for v in &validators {
+            reg.ack(&new_key, v).unwrap();
+        }
+
+        let mut net = MemorySymbolNetwork::default();
+        net.store_holder_share(validators[0], new_key, 0, syms_new[0..6].to_vec());
+        net.store_holder_share(validators[1], new_key, 0, syms_new[6..12].to_vec());
+        net.store_holder_share(validators[2], new_key, 0, syms_new[12..16].to_vec());
+
+        let bundle = Bud3ContentGateway::fetch_symbol_bundle(&reg, &cref_old, &net).unwrap();
+        assert_eq!(
+            Bud3ContentGateway::decode_symbol_bundle(&bundle, None).unwrap(),
+            payload
+        );
     }
 }
