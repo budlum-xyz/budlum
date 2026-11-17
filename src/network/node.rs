@@ -698,6 +698,18 @@ pub enum NodeCommand {
     AdminListBannedPeers {
         response: oneshot::Sender<Result<Vec<String>, String>>,
     },
+    /// Operator RPC (`bud_adminUpdateSentries`): live zero-downtime replacement
+    /// of sentry peers on a shielded validator without restarting or exporting
+    /// validator keys.
+    AdminUpdateSentries {
+        sentries: Vec<String>,
+        response: oneshot::Sender<Result<crate::network::sentry::SentryRotationDiff, String>>,
+    },
+    /// Operator RPC (`bud_adminSentryStatus`): inspect sentry-architecture
+    /// role, discovery state, and connection counts.
+    AdminSentryStatus {
+        response: oneshot::Sender<Result<crate::network::sentry::SentryStatus, String>>,
+    },
 }
 #[derive(Clone)]
 pub struct NodeClient {
@@ -858,6 +870,54 @@ impl NodeClient {
             .await
             .map_err(|_| "banned-peer list timed out".to_string())?
             .map_err(|e| format!("failed to receive banned-peer list response: {e}"))?
+    }
+
+    /// Replaces the sentry peer list on a shielded validator without
+    /// restarting (`bud_adminUpdateSentries`); operator listener only.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the node is not a shielded validator, if any
+    /// multiaddr is invalid or outside the private VPC/VPN allowlist, or if
+    /// the node command channel is closed.
+    pub async fn admin_update_sentries(
+        &self,
+        sentries: Vec<String>,
+    ) -> Result<crate::network::sentry::SentryRotationDiff, String> {
+        const ADMIN_ROTATE_TIMEOUT: Duration = Duration::from_secs(5);
+        let (tx, rx) = oneshot::channel();
+        self.sender
+            .send(NodeCommand::AdminUpdateSentries {
+                sentries,
+                response: tx,
+            })
+            .await
+            .map_err(|e| format!("failed to send sentry rotation request: {e}"))?;
+        tokio::time::timeout(ADMIN_ROTATE_TIMEOUT, rx)
+            .await
+            .map_err(|_| "sentry rotation timed out".to_string())?
+            .map_err(|e| format!("failed to receive sentry rotation response: {e}"))?
+    }
+
+    /// Queries the active sentry-architecture status (`bud_adminSentryStatus`);
+    /// operator listener only.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the node loop is unreachable or times out.
+    pub async fn admin_sentry_status(
+        &self,
+    ) -> Result<crate::network::sentry::SentryStatus, String> {
+        const ADMIN_STATUS_TIMEOUT: Duration = Duration::from_secs(5);
+        let (tx, rx) = oneshot::channel();
+        self.sender
+            .send(NodeCommand::AdminSentryStatus { response: tx })
+            .await
+            .map_err(|e| format!("failed to send sentry status request: {e}"))?;
+        tokio::time::timeout(ADMIN_STATUS_TIMEOUT, rx)
+            .await
+            .map_err(|_| "sentry status request timed out".to_string())?
+            .map_err(|e| format!("failed to receive sentry status response: {e}"))?
     }
 }
 #[tokio::test]
@@ -1242,6 +1302,8 @@ pub struct Node {
     /// the public networks, where a private advertisement is a poisoning
     /// attempt rather than a description of where the peer is.
     pub accept_private_peer_addresses: bool,
+    /// Sentry node architecture policy (shielded validator / public sentry / standard).
+    pub sentry_policy: crate::network::sentry::SentryPolicy,
     pub metrics: Option<Arc<crate::core::metrics::Metrics>>,
     /// Whether this node runs the aggregation side of its chain; set by
     /// `NodeCommand::EnableAggregation`.
@@ -1761,16 +1823,21 @@ impl Node {
         all_peers.sort_by_key(|p| p.to_bytes());
         sync_peers.sort_by_key(|p| p.to_bytes());
         if all_peers.is_empty()
-            && !self.bootstrap_peers.is_empty()
             && self.stale_tip_ticks >= 3
             && self.stale_tip_ticks.is_multiple_of(3)
         {
-            for addr in self.bootstrap_peers.clone() {
-                if let Err(e) = self.bootstrap(&addr) {
-                    tracing::debug!("Starvation bootstrap retry failed for {addr}: {e}");
-                }
+            if self.sentry_policy.role() == crate::network::sentry::SentryRole::ShieldedValidator {
+                self.dial_configured_sentries();
+                return;
             }
-            return;
+            if !self.sentry_policy.is_discovery_disabled() && !self.bootstrap_peers.is_empty() {
+                for addr in self.bootstrap_peers.clone() {
+                    if let Err(e) = self.bootstrap(&addr) {
+                        tracing::debug!("Starvation bootstrap retry failed for {addr}: {e}");
+                    }
+                }
+                return;
+            }
         }
         if !all_peers.is_empty() {
             let peer = all_peers[self.sync_poll_cursor % all_peers.len()];
@@ -3046,6 +3113,7 @@ impl Node {
             banned_peer_db: None,
             mdns_enabled,
             accept_private_peer_addresses: true,
+            sentry_policy: crate::network::sentry::SentryPolicy::default(),
             metrics: None,
             aggregation: false,
             storage_node,
@@ -3168,7 +3236,9 @@ impl Node {
     pub fn apply_network_security(&mut self, network: crate::core::chain_config::Network) {
         let security = network.security_config();
         self.max_peers = security.max_peers;
-        self.mdns_enabled = security.mdns_enabled && cfg!(feature = "p2p-mdns");
+        self.mdns_enabled = !self.sentry_policy.is_discovery_disabled()
+            && security.mdns_enabled
+            && cfg!(feature = "p2p-mdns");
         // Wire peer_rate_limit_per_minute into PeerManager token bucket.
         {
             let mut pm = self.peer_manager_lock();
@@ -3241,6 +3311,44 @@ impl Node {
         self.metrics = Some(metrics);
         self
     }
+
+    /// Configures the sentry-node architecture policy (shielded validator or
+    /// public sentry node).
+    ///
+    /// - Pins every sentry / private validator / unconditional peer as an
+    ///   explicit gossipsub peer so votes and blocks propagate immediately.
+    /// - Forces mDNS and public discovery off when `policy.is_discovery_disabled()`.
+    #[must_use]
+    pub fn with_sentry_policy(mut self, policy: crate::network::sentry::SentryPolicy) -> Self {
+        if policy.is_discovery_disabled() {
+            self.mdns_enabled = false;
+        }
+        for peer_id in policy.explicit_gossip_peers() {
+            self.swarm
+                .behaviour_mut()
+                .gossipsub
+                .add_explicit_peer(&peer_id);
+        }
+        self.sentry_policy = policy;
+        self
+    }
+
+    /// Dials every configured sentry peer that is not currently connected.
+    /// Used on startup, periodic reconnect, and starvation recovery for
+    /// [`crate::network::sentry::SentryRole::ShieldedValidator`].
+    fn dial_configured_sentries(&mut self) {
+        for (peer_id, addr) in self.sentry_policy.sentry_addrs() {
+            if self.peer_manager_lock().is_banned(&peer_id) || self.swarm.is_connected(&peer_id) {
+                continue;
+            }
+            if let Err(e) = self.swarm.dial(addr.clone()) {
+                warn!("Shielded validator failed to dial sentry {peer_id} at {addr}: {e}");
+            } else {
+                info!("Shielded validator dialing sentry {peer_id} at {addr}");
+            }
+        }
+    }
+
     pub fn get_client(&self) -> NodeClient {
         NodeClient {
             sender: self.command_tx.clone(),
@@ -3249,39 +3357,80 @@ impl Node {
             sync_state: self.sync_state.clone(),
         }
     }
-    /// Performs the requested operation.
+    /// Listens for TCP and QUIC P2P connections on `0.0.0.0:<port>`.
     ///
     /// # Errors
     ///
-    /// Returns an error if the operation fails.
+    /// Returns an error if the TCP listener cannot bind.
     pub fn listen(&mut self, port: u16) -> Result<(), Box<dyn Error>> {
-        let addr: Multiaddr = format!("/ip4/0.0.0.0/tcp/{port}").parse()?;
-        self.swarm.listen_on(addr)?;
-        // The same port over QUIC (UDP),.
-        let quic: Multiaddr = format!("/ip4/0.0.0.0/udp/{port}/quic-v1").parse()?;
-        if let Err(e) = self.swarm.listen_on(quic) {
-            warn!("QUIC listener not started: {e}");
+        self.listen_on(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED), port)
+    }
+
+    /// Listens for TCP and QUIC P2P connections on a specific bind IP and port
+    /// (for example, a shielded validator's private VPC IP `10.10.0.5`).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the TCP listener cannot bind.
+    pub fn listen_on(&mut self, ip: std::net::IpAddr, port: u16) -> Result<(), Box<dyn Error>> {
+        let tcp_addr: Multiaddr = match ip {
+            std::net::IpAddr::V4(v4) => format!("/ip4/{v4}/tcp/{port}").parse()?,
+            std::net::IpAddr::V6(v6) => format!("/ip6/{v6}/tcp/{port}").parse()?,
+        };
+        self.swarm.listen_on(tcp_addr)?;
+        let quic_addr: Multiaddr = match ip {
+            std::net::IpAddr::V4(v4) => format!("/ip4/{v4}/udp/{port}/quic-v1").parse()?,
+            std::net::IpAddr::V6(v6) => format!("/ip6/{v6}/udp/{port}/quic-v1").parse()?,
+        };
+        if let Err(e) = self.swarm.listen_on(quic_addr) {
+            warn!("QUIC listener not started on {ip}:{port}: {e}");
         }
-        info!("Listening on port {port}");
+        info!("Listening on {ip}:{port}");
         Ok(())
     }
-    /// Performs the requested operation.
+
+    /// Adds an additional libp2p listener on an explicit multiaddr (for
+    /// example, a sentry node's dedicated private VPC interface).
     ///
     /// # Errors
     ///
-    /// Returns an error if the operation fails.
+    /// Returns an error if the multiaddr cannot be parsed or bound.
+    pub fn listen_multiaddr(&mut self, addr: &str) -> Result<(), Box<dyn Error>> {
+        let ma: Multiaddr = addr.parse()?;
+        self.swarm.listen_on(ma)?;
+        info!("Listening on additional interface {addr}");
+        Ok(())
+    }
+
+    /// Dials a peer multiaddr, enforcing the active
+    /// [`crate::network::sentry::SentryPolicy`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the address is invalid, refused by sentry policy,
+    /// or rejected by the swarm.
     pub fn dial(&mut self, addr: &str) -> Result<(), Box<dyn Error>> {
         let remote: Multiaddr = addr.parse()?;
+        if let Err(reason) = self.sentry_policy.can_dial(None, &remote) {
+            warn!("Refusing dial to {addr}: {reason}");
+            return Err(Box::new(reason));
+        }
         self.swarm.dial(remote)?;
         info!("Dialing {addr}");
         Ok(())
     }
-    /// Performs the requested operation.
+    /// Bootstraps Kademlia via `addr` unless peer discovery is disabled by the
+    /// active [`crate::network::sentry::SentryPolicy`].
     ///
     /// # Errors
     ///
-    /// Returns an error if the operation fails.
+    /// Returns an error if the address lacks `/p2p/<ID>` or Kademlia bootstrap
+    /// fails.
     pub fn bootstrap(&mut self, addr: &str) -> Result<(), Box<dyn Error>> {
+        if self.sentry_policy.is_discovery_disabled() {
+            info!("Skipping bootstrap for {addr}: peer discovery disabled by sentry policy");
+            return Ok(());
+        }
         let multiaddr: Multiaddr = addr.parse()?;
         let peer_id = match multiaddr
             .iter()
@@ -3291,6 +3440,12 @@ impl Node {
             _ => return Err("Bootstrap address must contain /p2p/<ID>".into()),
         };
         if self.peer_manager_lock().is_banned(&peer_id) {
+            return Ok(());
+        }
+        if !self.sentry_policy.can_share_in_dht(&peer_id) {
+            if !self.swarm.is_connected(&peer_id) {
+                let _ = self.swarm.dial(multiaddr);
+            }
             return Ok(());
         }
         info!("Bootstrapping via {addr}");
@@ -3499,19 +3654,25 @@ impl Node {
         // Load durable banned peers
         self.load_banned_peers_from_db();
 
-        // Bootstrap from configured peers
-        for addr in self.bootstrap_peers.clone() {
-            if let Err(e) = self.bootstrap(&addr) {
-                warn!("Bootstrap dial failed for {addr}: {e}");
+        // Shielded validator: connect ONLY to its configured sentries and never
+        // dial public bootnodes or DNS seeds.
+        if self.sentry_policy.role() == crate::network::sentry::SentryRole::ShieldedValidator {
+            self.dial_configured_sentries();
+        } else if !self.sentry_policy.is_discovery_disabled() {
+            // Bootstrap from configured peers
+            for addr in self.bootstrap_peers.clone() {
+                if let Err(e) = self.bootstrap(&addr) {
+                    warn!("Bootstrap dial failed for {addr}: {e}");
+                }
             }
-        }
 
-        // Resolve and dial DNS seeds
-        if !self.dns_seeds.is_empty() {
-            let dns_addrs = resolve_dns_seeds(&self.dns_seeds, self.dns_seed_port);
-            for addr in &dns_addrs {
-                if let Err(e) = self.dial(addr) {
-                    warn!("DNS seed dial failed for {addr}: {e}");
+            // Resolve and dial DNS seeds
+            if !self.dns_seeds.is_empty() {
+                let dns_addrs = resolve_dns_seeds(&self.dns_seeds, self.dns_seed_port);
+                for addr in &dns_addrs {
+                    if let Err(e) = self.dial(addr) {
+                        warn!("DNS seed dial failed for {addr}: {e}");
+                    }
                 }
             }
         }
@@ -3619,10 +3780,14 @@ impl Node {
                     self.expire_stuck_sync_round();
                 }
                 _ = discovery_interval.tick() => {
-                    info!("Running periodic peer discovery...");
-                    for addr in self.bootstrap_peers.clone() {
-                        if let Err(e) = self.bootstrap(&addr) {
-                            warn!("Periodic bootstrap failed for {addr}: {e}");
+                    if self.sentry_policy.role() == crate::network::sentry::SentryRole::ShieldedValidator {
+                        self.dial_configured_sentries();
+                    } else if !self.sentry_policy.is_discovery_disabled() {
+                        info!("Running periodic peer discovery...");
+                        for addr in self.bootstrap_peers.clone() {
+                            if let Err(e) = self.bootstrap(&addr) {
+                                warn!("Periodic bootstrap failed for {addr}: {e}");
+                            }
                         }
                     }
                 }
@@ -4073,17 +4238,21 @@ impl Node {
                     }
                 }
                 _ = dht_interval.tick() => {
-                    info!("Running periodic DHT bootstrapping...");
-                    let _ = self.swarm.behaviour_mut().kad.bootstrap();
+                    if !self.sentry_policy.is_discovery_disabled() {
+                        info!("Running periodic DHT bootstrapping...");
+                        let _ = self.swarm.behaviour_mut().kad.bootstrap();
+                    }
                 }
                 _ = storage_announce_interval.tick() => {
-                    if let Some(ref bitswap) = self.storage_node {
-                        #[allow(clippy::single_match)]
-                        let cids = bitswap.store().list_cids();
-                        info!("Storage: Announcing {} local chunks to DHT...", cids.len());
-                        for cid in cids {
-                            let key = bud_node::ContentDiscovery::cid_to_key(&cid);
-                            let _ = self.swarm.behaviour_mut().kad.start_providing(key);
+                    if !self.sentry_policy.is_discovery_disabled() {
+                        if let Some(ref bitswap) = self.storage_node {
+                            #[allow(clippy::single_match)]
+                            let cids = bitswap.store().list_cids();
+                            info!("Storage: Announcing {} local chunks to DHT...", cids.len());
+                            for cid in cids {
+                                let key = bud_node::ContentDiscovery::cid_to_key(&cid);
+                                let _ = self.swarm.behaviour_mut().kad.start_providing(key);
+                            }
                         }
                     }
                 }
@@ -4147,9 +4316,16 @@ impl Node {
                                 }
                             }
                             NodeCommand::ListPeers => {
-                                let peers: Vec<_> = self.swarm.behaviour().gossipsub.all_peers().collect();
-                                info!("Connected peers: {:?}", peers.len());
-                                for (peer, _topics) in peers {
+                                let all_ids: Vec<PeerId> = self
+                                    .swarm
+                                    .behaviour()
+                                    .gossipsub
+                                    .all_peers()
+                                    .map(|(peer, _)| *peer)
+                                    .collect();
+                                let visible = self.sentry_policy.scrub_public_peers(&all_ids);
+                                info!("Connected public peers: {}", visible.len());
+                                for peer in visible {
                                     info!(" - {peer}");
                                 }
                             }
@@ -4286,6 +4462,50 @@ impl Node {
                                     });
                                 let _ = response.send(result);
                             }
+                            NodeCommand::AdminUpdateSentries { sentries, response } => {
+                                let result = self
+                                    .sentry_policy
+                                    .update_sentries(&sentries)
+                                    .map_err(|e| e.to_string());
+                                if let Ok(ref diff) = result {
+                                    for removed_id in &diff.removed {
+                                        self.swarm
+                                            .behaviour_mut()
+                                            .gossipsub
+                                            .remove_explicit_peer(removed_id);
+                                        let _ = self.swarm.disconnect_peer_id(*removed_id);
+                                    }
+                                    for (added_id, addr) in &diff.added {
+                                        self.swarm
+                                            .behaviour_mut()
+                                            .gossipsub
+                                            .add_explicit_peer(added_id);
+                                        if !self.swarm.is_connected(added_id) {
+                                            if let Err(e) = self.swarm.dial(addr.clone()) {
+                                                warn!(
+                                                    "Live sentry rotation failed to dial {added_id} at {addr}: {e}"
+                                                );
+                                            }
+                                        }
+                                    }
+                                    info!(
+                                        added = diff.added.len(),
+                                        removed = diff.removed.len(),
+                                        active = diff.active_sentries.len(),
+                                        "Live sentry rotation applied without restart"
+                                    );
+                                }
+                                let _ = response.send(result);
+                            }
+                            NodeCommand::AdminSentryStatus { response } => {
+                                let connected: std::collections::BTreeSet<PeerId> = self
+                                    .peer_manager_lock()
+                                    .connected_peers()
+                                    .into_iter()
+                                    .collect();
+                                let status = self.sentry_policy.status(&connected);
+                                let _ = response.send(Ok(status));
+                            }
                             NodeCommand::FetchRemoteContent { cid, response } => {
                                 // 1. Try local fetch first
                                 let local_result = if let Some(ref storage_node) = self.storage_node {
@@ -4351,11 +4571,38 @@ impl Node {
                 event = self.swarm.select_next_some() => {
                     match event {
                         SwarmEvent::NewListenAddr { address, .. } => {
-                            info!("Listening on {address}");
+                            if self.sentry_policy.should_advertise_external() {
+                                info!("Listening on {address}");
+                            } else {
+                                info!(
+                                    "Shielded validator bound private listener {address} (external advertisement disabled)"
+                                );
+                            }
                         }
                         SwarmEvent::ConnectionEstablished { peer_id, endpoint, .. } => {
                             let remote = endpoint.get_remote_address();
                             let subnet = subnet_bucket(remote);
+                            // Sentry architecture firewall: a shielded validator
+                            // accepts ONLY configured sentries over allowed
+                            // private VPC/VPN CIDRs, and a sentry restricts its
+                            // private_peers to allowed private CIDRs when set.
+                            if let Err(reason) =
+                                self.sentry_policy.check_connection(&peer_id, remote)
+                            {
+                                let code = match reason {
+                                    crate::network::sentry::ConnectionRefusal::NotASentry => "not_a_sentry",
+                                    crate::network::sentry::ConnectionRefusal::DisallowedAddress => "disallowed_address",
+                                    crate::network::sentry::ConnectionRefusal::MissingTargetPeerId => "missing_peer_id",
+                                };
+                                warn!(
+                                    code,
+                                    "Sentry policy rejected peer {} from {}: {}",
+                                    peer_id, remote, reason
+                                );
+                                let _ = self.swarm.disconnect_peer_id(peer_id);
+                                continue;
+                            }
+                            let is_unconditional = self.sentry_policy.is_unconditional(&peer_id);
                             // Security review (HIGH): a banned peer
                             // could reconnect and carry on issuing
                             // /sync requests, because the handshaked
@@ -4367,38 +4614,33 @@ impl Node {
                                 let _ = self.swarm.disconnect_peer_id(peer_id);
                                 continue;
                             }
-                            // H5.1 eclipse bound before admitting.
-                            // Through the recovering helper, not a raw
-                            // `lock()`. A poisoned mutex made this
-                            // `unwrap_or(true)`, which turns the /24
-                            // eclipse bound OFF at exactly the moment
-                            // something has already gone wrong: one
-                            // operator could then fill the peer table
-                            // from a single subnet and surround the
-                            // node. The rest of this file recovers the
-                            // guard and keeps enforcing; these four
-                            // sites were the ones that did not.
-                            let admit = self.peer_manager_lock().is_connected(&peer_id)
-                                || self.peer_manager_lock().can_admit_subnet(subnet);
-                            if !admit {
-                                warn!(
-                                    "Eclipse bound: rejecting {} from {:?} (per-subnet limit)",
-                                    peer_id, subnet
-                                );
-                                let _ = self.swarm.disconnect_peer_id(peer_id);
-                                continue;
-                            }
-                            // H5.2 outbound diversity: an extra /24 limit for outbound connections.
-                            if endpoint.is_dialer() {
-                                let ob_admit = self.peer_manager_lock().is_connected(&peer_id)
-                                    || self.peer_manager_lock().can_admit_outbound_subnet(subnet);
-                                if !ob_admit {
+                            // H5.1 eclipse bound before admitting. Unconditional
+                            // sentry/private-validator peers are exempt so
+                            // multiple sentries sharing a private VPC /24 are
+                            // never blocked; all public peers remain bounded.
+                            if !is_unconditional {
+                                let admit = self.peer_manager_lock().is_connected(&peer_id)
+                                    || self.peer_manager_lock().can_admit_subnet(subnet);
+                                if !admit {
                                     warn!(
-                                        "Outbound diversity: rejecting outbound {} from {:?}",
+                                        "Eclipse bound: rejecting {} from {:?} (per-subnet limit)",
                                         peer_id, subnet
                                     );
                                     let _ = self.swarm.disconnect_peer_id(peer_id);
                                     continue;
+                                }
+                                // H5.2 outbound diversity: an extra /24 limit for outbound connections.
+                                if endpoint.is_dialer() {
+                                    let ob_admit = self.peer_manager_lock().is_connected(&peer_id)
+                                        || self.peer_manager_lock().can_admit_outbound_subnet(subnet);
+                                    if !ob_admit {
+                                        warn!(
+                                            "Outbound diversity: rejecting outbound {} from {:?}",
+                                            peer_id, subnet
+                                        );
+                                        let _ = self.swarm.disconnect_peer_id(peer_id);
+                                        continue;
+                                    }
                                 }
                             }
                             let newly_connected = {
@@ -4409,6 +4651,17 @@ impl Node {
                                 }
                                 c
                             };
+                            if is_unconditional {
+                                self.swarm
+                                    .behaviour_mut()
+                                    .gossipsub
+                                    .add_explicit_peer(&peer_id);
+                                if self.sentry_policy.is_private_peer(&peer_id) {
+                                    info!(
+                                        "Sentry admitted shielded validator peer (identity hidden from DHT/PEX)"
+                                    );
+                                }
+                            }
                             // The peer is back: take its score record
                             // out of the eviction queue so a connected
                             // peer is never dropped while an idle
@@ -4431,26 +4684,47 @@ impl Node {
                                 self.peer_count.load(Ordering::SeqCst)
                             };
                             if count > self.max_peers {
-                                warn!(
-                                    "Max peers reached ({}/{}), disconnecting {}",
-                                    count, self.max_peers, peer_id
-                                );
-                                let _ = self.swarm.disconnect_peer_id(peer_id);
-                                if newly_connected {
-                                    self.peer_count
-                                        .fetch_update(
-                                            Ordering::SeqCst,
-                                            Ordering::SeqCst,
-                                            |v| Some(v.saturating_sub(1)),
-                                        )
-                                        .ok();
-                                    {
-                                        let mut pm = self.peer_manager_lock();
-                                        pm.note_disconnected(&peer_id);
-                                        let _ = pm.note_outbound_disconnected(&peer_id);
+                                if is_unconditional {
+                                    // Unconditional sentry/validator peer must
+                                    // never be starved by a public peer flood:
+                                    // evict one non-unconditional public peer.
+                                    let evict = self
+                                        .peer_manager_lock()
+                                        .connected_peers()
+                                        .into_iter()
+                                        .find(|cand| {
+                                            *cand != peer_id
+                                                && !self.sentry_policy.is_unconditional(cand)
+                                        });
+                                    if let Some(victim) = evict {
+                                        warn!(
+                                            "Max peers reached ({}/{}): evicting public peer {} to protect unconditional peer {}",
+                                            count, self.max_peers, victim, peer_id
+                                        );
+                                        let _ = self.swarm.disconnect_peer_id(victim);
                                     }
+                                } else {
+                                    warn!(
+                                        "Max peers reached ({}/{}), disconnecting {}",
+                                        count, self.max_peers, peer_id
+                                    );
+                                    let _ = self.swarm.disconnect_peer_id(peer_id);
+                                    if newly_connected {
+                                        self.peer_count
+                                            .fetch_update(
+                                                Ordering::SeqCst,
+                                                Ordering::SeqCst,
+                                                |v| Some(v.saturating_sub(1)),
+                                            )
+                                            .ok();
+                                        {
+                                            let mut pm = self.peer_manager_lock();
+                                            pm.note_disconnected(&peer_id);
+                                            let _ = pm.note_outbound_disconnected(&peer_id);
+                                        }
+                                    }
+                                    continue;
                                 }
-                                continue;
                             }
                             if newly_connected {
                                 self.peer_connected_at
@@ -4619,7 +4893,7 @@ impl Node {
                         }
                         #[cfg(feature = "p2p-mdns")]
                         SwarmEvent::Behaviour(BudlumBehaviourEvent::Mdns(event)) => {
-                            if !self.mdns_enabled {
+                            if !self.mdns_enabled || self.sentry_policy.is_discovery_disabled() {
                                 continue;
                             }
                             match event {
@@ -6053,15 +6327,22 @@ impl Node {
                         SwarmEvent::Behaviour(BudlumBehaviourEvent::Identify(identify::Event::Received { info, .. })) => {
                             let identified = info.public_key.to_peer_id();
                             info!("Received identity from {identified:?}");
+                            if !self.sentry_policy.can_share_in_dht(&identified) {
+                                // Shielded validator (discovery disabled) or
+                                // sentry shielding a private validator: never
+                                // enter the peer's addresses into Kademlia.
+                                continue;
+                            }
+                            let allow_private = self.sentry_policy.accept_private_addr_from(
+                                &identified,
+                                self.accept_private_peer_addresses,
+                            );
                             for addr in info.listen_addrs {
                                 // Kademlia poisoning: an advertisement
                                 // is taken on the advertiser's word, so a
                                 // private address is only believable on a
                                 // private network.
-                                if !advertised_address_is_allowed(
-                                    &addr,
-                                    self.accept_private_peer_addresses,
-                                ) {
+                                if !advertised_address_is_allowed(&addr, allow_private) {
                                     warn!("Refusing private address {addr} from {identified}");
                                     continue;
                                 }

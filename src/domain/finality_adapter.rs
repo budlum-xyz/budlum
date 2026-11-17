@@ -2530,7 +2530,7 @@ mod tests {
             matches!(status, FinalityStatus::Finalized),
             "expected Finalized, got {status:?}"
         );
-        // Two regtest headers are worth2 units each; the default floor is4.
+        // Two regtest headers are worth 2 units each; the default floor is 4.
         assert!(bitcoin_work() * 2 >= domain.pow_parameters.as_ref().unwrap().min_cumulative_work);
     }
 

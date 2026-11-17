@@ -1,0 +1,67 @@
+# Budlum Sentry Node Configuration Template
+#
+# A sentry is a public-facing full node that participates in Kademlia peer
+# discovery, syncs blocks and transactions from the public internet, and
+# shields one or more private validators over an internal VPC/VPN link.
+#
+# Topology:
+#   Public Internet <-> Sentry A/B/C <-> Private VPC/VPN <-> Shielded Validator
+#
+# Deployment checklist:
+#   1. Replace `private_peers` with the real libp2p PeerId(s) of your shielded
+#      validator(s). Private peers are NEVER entered into Kademlia or shared
+#      in peer discovery, and are protected as unconditional explicit peers.
+#   2. Set `private_listen_addr` to this sentry's private VPC/WireGuard address
+#      and restrict that port at the host firewall to `allowed_private_cidrs`.
+#   3. Populate `bootnodes` and `archive_bootnodes` with live network peers.
+
+[network]
+profile = "testnet"
+chain_id = 45261
+
+[node]
+mode = "full"
+role = "sentry"
+
+[storage]
+data_dir = "./data/sentry/budlum.db"
+snapshot_dir = "./data/sentry/snapshots"
+backup_dir = "./data/sentry/backups"
+backups_enabled = true
+backup_interval_secs = 3600
+backup_retention_count = 24
+
+[p2p]
+identity_file = "./secrets/sentry-node-id.key"
+listen_addr = "0.0.0.0"
+# Dedicated private VPC/VPN listener for the shielded validator link.
+# private_listen_addr = "/ip4/10.10.0.11/tcp/30334"
+bootnodes = []
+archive_bootnodes = []
+max_peers = 100
+banned_peer_db = "./data/sentry/banned-peers.json"
+mdns_enabled = false
+disable_peer_discovery = false
+# Restrict private validator links to your VPC/WireGuard CIDR.
+allowed_private_cidrs = ["10.10.0.0/16", "100.64.0.0/10"]
+# Add your shielded validator PeerId(s) here. They will never be advertised
+# into Kademlia/PEX and can never be evicted by public peer floods.
+private_peers = []
+unconditional_peers = []
+
+[rpc]
+public_listener = "127.0.0.1:8545"
+operator_listener = "127.0.0.1:8546"
+trusted_proxies = ["127.0.0.1"]
+enabled = true
+auth_required = true
+api_key_env = "BUDLUM_RPC_API_KEY"
+allowed_ips = []
+rate_limit_per_minute = 600
+
+[metrics]
+listener = "127.0.0.1:9090"
+
+[features]
+pruning = false
+verify_merkle = false
