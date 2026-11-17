@@ -80,9 +80,9 @@ fn encode_pospace_witness(plot_id: &[u8; 32], challenge: &[u8; 32], size_bytes: 
     out
 }
 
-fn decode_pospace_witness(
-    block: &Block,
-) -> Result<([u8; 32], [u8; 32], u64, [u8; 32]), ConsensusError> {
+type DecodedSpaceWitness = ([u8; 32], [u8; 32], u64, [u8; 32]);
+
+fn decode_pospace_witness(block: &Block) -> Result<DecodedSpaceWitness, ConsensusError> {
     if block.vrf_proof.len() != POSPACE_WITNESS_LEN || block.vrf_output.len() != 32 {
         return Err(ConsensusError(
             "PoSpace block missing challenge-bound space proof".into(),
