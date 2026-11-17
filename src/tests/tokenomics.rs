@@ -193,6 +193,7 @@ fn application_contract_fee_is_split_between_recipient_and_producer() {
     origin_domain.operator = Some(sender);
     origin_domain.bridge_enabled = true;
     state.settlement.domains.register(origin_domain).unwrap();
+    state.poa_onboarding.add_admin(7, sender);
     state
         .settlement
         .app_binding

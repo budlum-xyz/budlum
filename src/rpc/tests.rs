@@ -1619,13 +1619,13 @@ mod rpc_tests {
         let got_offer = server.bns_get_offer(seeded_offer_id).await.unwrap();
         assert_eq!(got_offer["name"], "bids.bud");
         let listed = server
-            .bns_list_offers(Some("Primary".to_string()))
+            .bns_list_offers(Some("Primary".to_string()), None, None)
             .await
             .unwrap();
         assert_eq!(listed.as_array().unwrap().len(), 1);
         assert!(
             server
-                .bns_list_offers(Some("InvalidKind".to_string()))
+                .bns_list_offers(Some("InvalidKind".to_string()), None, None)
                 .await
                 .unwrap_err()
                 .message()
@@ -2091,8 +2091,12 @@ mod rpc_tests {
             "bud_getValidatorSet"
         );
         assert!(
-            record_answered(&server.get_slashing_history().await.unwrap()),
+            record_answered(&server.get_slashing_history(None, None).await.unwrap()),
             "bud_getSlashingHistory"
+        );
+        assert!(
+            server.get_slashing_history(None, Some(0)).await.is_err(),
+            "bud_getSlashingHistory limit=0 must be refused"
         );
         assert!(
             record_answered(&server.get_restaked_validators().await.unwrap()),
@@ -2175,25 +2179,49 @@ mod rpc_tests {
             "bud_listGateways"
         );
         assert!(
-            record_answered(&server.market_get_offers().await.unwrap()),
+            record_answered(&server.market_get_offers(None, None).await.unwrap()),
             "bud_marketGetOffers"
         );
+        assert!(server.market_get_offers(None, Some(0)).await.is_err());
         assert!(
-            record_answered(&server.pollen_get_access_grants().await.unwrap()),
-            "bud_pollenGetAccessGrants"
+            record_answered(&server.pollen_get_access_grants(None, None).await.unwrap()),
+            "bud_dataMarketGetAccessGrants"
         );
+        assert!(server
+            .pollen_get_access_grants(None, Some(0))
+            .await
+            .is_err());
         assert!(
-            record_answered(&server.pollen_get_data_assets().await.unwrap()),
-            "bud_pollenGetDataAssets"
+            record_answered(&server.pollen_get_data_assets(None, None).await.unwrap()),
+            "bud_dataMarketGetDataAssets"
         );
+        assert!(server.pollen_get_data_assets(None, Some(0)).await.is_err());
         assert!(
-            record_answered(&server.pollen_get_purchase_receipts().await.unwrap()),
-            "bud_pollenGetPurchaseReceipts"
+            record_answered(
+                &server
+                    .pollen_get_purchase_receipts(None, None)
+                    .await
+                    .unwrap()
+            ),
+            "bud_dataMarketGetPurchaseReceipts"
         );
+        assert!(server
+            .pollen_get_purchase_receipts(None, Some(0))
+            .await
+            .is_err());
         assert!(
-            record_answered(&server.pollen_get_sale_authorizations().await.unwrap()),
-            "bud_pollenGetSaleAuthorizations"
+            record_answered(
+                &server
+                    .pollen_get_sale_authorizations(None, None)
+                    .await
+                    .unwrap()
+            ),
+            "bud_dataMarketGetSaleAuthorizations"
         );
+        assert!(server
+            .pollen_get_sale_authorizations(None, Some(0))
+            .await
+            .is_err());
         assert!(
             record_answered(&server.ai_agent_ranking().await.unwrap()),
             "bud_aiAgentRanking"
@@ -2219,13 +2247,23 @@ mod rpc_tests {
             "bud_aiInferenceStats"
         );
         assert!(
-            record_answered(&server.budlumxyz_get_apps().await.unwrap()),
+            record_answered(&server.budlumxyz_get_apps(None, None).await.unwrap()),
             "bud_hubGetApps"
         );
+        assert!(server.budlumxyz_get_apps(None, Some(0)).await.is_err());
         assert!(
-            record_answered(&server.budlumxyz_get_app_binding_apps().await.unwrap()),
+            record_answered(
+                &server
+                    .budlumxyz_get_app_binding_apps(None, None)
+                    .await
+                    .unwrap()
+            ),
             "bud_hubGetAppBindingApps"
         );
+        assert!(server
+            .budlumxyz_get_app_binding_apps(None, Some(0))
+            .await
+            .is_err());
     }
 
     /// the estimate is the fee the chain will actually enforce for
@@ -3166,5 +3204,31 @@ mod rpc_tests {
         assert!(filtered.starts_with("HTTP/1.1 200"), "{filtered}");
         assert!(filtered.contains("-32601"), "{filtered}");
         assert!(!filtered.contains(r#""result":"#), "{filtered}");
+    }
+
+    #[tokio::test]
+    async fn social_get_profile_paginates_and_validates_inputs() {
+        let consensus = Arc::new(PoWEngine::new(0));
+        let blockchain = Blockchain::new(consensus, None, 45268, None);
+        let (chain_actor, chain) = ChainActor::new(blockchain);
+        tokio::spawn(async move {
+            chain_actor.run().await;
+        });
+        let node = Node::new(chain.clone()).expect("node");
+        let server = RpcServer::new(chain, node.get_client());
+
+        let page = server
+            .social_get_profile(Address([0xAB; 32]).to_hex(), Some(0), Some(5))
+            .await
+            .unwrap();
+        assert!(page.is_array());
+        assert!(server
+            .social_get_profile("not-hex".to_string(), None, None)
+            .await
+            .is_err());
+        assert!(server
+            .social_get_profile(Address([0xAB; 32]).to_hex(), None, Some(0))
+            .await
+            .is_err());
     }
 }
