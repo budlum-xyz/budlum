@@ -2057,6 +2057,354 @@ mod rpc_tests {
         }
     }
 
+    #[tokio::test]
+    async fn rpc_bud3_live_symbols_content_placement_nft_and_bns_end_to_end() {
+        use crate::consensus::pow::PoWEngine;
+        use crate::socialfi::nft_folders::derive_bud3_nft_id;
+        use crate::storage::bud3::content_id::ContentKey;
+        use crate::storage::bud3::content_ref::ContentRef;
+        use crate::storage::bud3::custody::symbol_leaf;
+        use crate::storage::bud3::limits::{Bud3Limits, Profile};
+        use crate::storage::bud3::pipeline::{prepare_public_upload, prepare_sealed_upload};
+        use crate::storage::bud3::placement::{Class, Share};
+        use crate::storage::bud3::seal::SEAL_SALT_LEN;
+        use crate::storage::bud3::symbol_protocol::{
+            build_symbol_range_response, verify_symbol_range_response, SymbolRangeRequest,
+            VerifiedSymbolItem,
+        };
+        use crate::storage::bud3::view::MIN_PAID_VIEW_FEE_ATOMS;
+        use crate::storage::content_id::ContentId;
+
+        let profile = Profile {
+            id: 0,
+            qr_version: 40,
+            symbol_size: 128,
+            fps: 10,
+            k_max: 16,
+        };
+        let payload =
+            b"B.U.D. 3.0 live node retrieval, NFT binding, and verifiable symbols".repeat(4);
+        let pub_up = prepare_public_upload(&payload, &profile, &Bud3Limits::default(), 8).unwrap();
+        let pub_key = pub_up.record.commitment;
+
+        let sealed_up = prepare_sealed_upload(
+            b"sealed object must reject paid fallback decode",
+            &ContentKey([0x55u8; 32]),
+            [0x66u8; SEAL_SALT_LEN],
+            &profile,
+            &Bud3Limits::default(),
+            8,
+        )
+        .unwrap();
+        let sealed_key = sealed_up.record.commitment;
+
+        let alice = Address::from([0xA1u8; 32]);
+        let payer = Address::from([0xB2u8; 32]);
+        let holder_full = [0x10u8; 32];
+        let holder_mobile = [0x11u8; 32];
+        let receipt_id = [0x77u8; 32];
+
+        let mut bc = Blockchain::new(Arc::new(PoWEngine::new(0)), None, 45262, None);
+        let shares = vec![
+            (
+                0,
+                Share {
+                    validator: holder_full,
+                    class: Class::Full,
+                    first_esi: 0,
+                    symbols: 4,
+                },
+            ),
+            (
+                0,
+                Share {
+                    validator: holder_mobile,
+                    class: Class::Mobile,
+                    first_esi: 4,
+                    symbols: 4,
+                },
+            ),
+        ];
+        bc.state
+            .bud3_registry
+            .register_object(alice.0, pub_up.record.clone(), shares.clone(), 0, 50)
+            .unwrap();
+        bc.state
+            .bud3_registry
+            .register_object(alice.0, sealed_up.record.clone(), shares, 0, 50)
+            .unwrap();
+
+        let social_id = bc
+            .state
+            .nft_registry
+            .mint(
+                alice,
+                ContentId(pub_up.record.content_id.digest),
+                0,
+                Some("Alice".to_string()),
+            )
+            .unwrap();
+        let bud3_nft = derive_bud3_nft_id(social_id);
+        bc.state
+            .bud3_registry
+            .bind_nft(bud3_nft, alice.0, Some(alice.0), &pub_key)
+            .unwrap();
+
+        bc.state
+            .bns_registry
+            .register("livebud3.bud".to_string(), alice, 0, 50)
+            .unwrap();
+        let cref = ContentRef::new(pub_up.record.content_id, pub_key, Some(bud3_nft)).unwrap();
+        bc.state
+            .bns_registry
+            .set_content(
+                "livebud3.bud",
+                &alice,
+                &bc.state.bud3_registry,
+                Some(cref),
+                0,
+            )
+            .unwrap();
+        bc.state
+            .bud3_registry
+            .record_paid_view(payer.0, pub_key, receipt_id, MIN_PAID_VIEW_FEE_ATOMS, 0)
+            .unwrap();
+
+        let (op_server, chain) = setup_with_blockchain(bc).await;
+        let pub_node = Node::new(chain.clone()).unwrap();
+        let pub_server = RpcServer::with_security_and_mode(
+            chain,
+            pub_node.get_client(),
+            RpcSecurityConfig::default(),
+            RpcMode::Public,
+        );
+
+        let full_hex = format!("0x{}", hex::encode(holder_full));
+        let mob_hex = format!("0x{}", hex::encode(holder_mobile));
+        let pub_hex = format!("0x{}", hex::encode(pub_key));
+        let sealed_hex = format!("0x{}", hex::encode(sealed_key));
+        let payer_hex = format!("0x{}", hex::encode(payer.0));
+        let receipt_hex = format!("0x{}", hex::encode(receipt_id));
+
+        let leaves: Vec<(u32, [u8; 32])> = pub_up.segments[0]
+            .iter()
+            .map(|s| (s.esi, symbol_leaf(&s.data)))
+            .collect();
+        let full_items = build_symbol_range_response(
+            &SymbolRangeRequest {
+                object: pub_key,
+                segment: 0,
+                first_esi: 0,
+                count: 4,
+            },
+            &leaves,
+            &pub_up.segments[0][0..4],
+        )
+        .unwrap()
+        .items;
+        let mob_items = build_symbol_range_response(
+            &SymbolRangeRequest {
+                object: pub_key,
+                segment: 0,
+                first_esi: 4,
+                count: 4,
+            },
+            &leaves,
+            &pub_up.segments[0][4..8],
+        )
+        .unwrap()
+        .items;
+        let full_json: Vec<_> = full_items
+            .iter()
+            .map(|item| serde_json::to_value(item).unwrap())
+            .collect();
+        let mob_json: Vec<_> = mob_items
+            .iter()
+            .map(|item| serde_json::to_value(item).unwrap())
+            .collect();
+
+        // Public listener refuses operator-only symbol admission (`require_operator` -> -32004).
+        let denied_pub = pub_server
+            .storage_store_verified_symbols(full_hex.clone(), pub_hex.clone(), 0, full_json.clone())
+            .await
+            .unwrap_err();
+        assert_eq!(denied_pub.code(), -32004);
+
+        // Tampered symbol fails Merkle proof check on operator admission.
+        let mut tampered = full_items.clone();
+        tampered[0].symbol.data[70] ^= 0xFF;
+        let tampered_json = vec![serde_json::to_value(&tampered[0]).unwrap()];
+        assert_eq!(
+            op_server
+                .storage_store_verified_symbols(full_hex.clone(), pub_hex.clone(), 0, tampered_json)
+                .await
+                .unwrap_err()
+                .code(),
+            -32602
+        );
+
+        // Before symbols are admitted, G8 paid decode fails without burning the receipt.
+        assert_eq!(
+            pub_server
+                .storage_get_content(
+                    payer_hex.clone(),
+                    pub_hex.clone(),
+                    receipt_hex.clone(),
+                    MIN_PAID_VIEW_FEE_ATOMS
+                )
+                .await
+                .unwrap_err()
+                .code(),
+            -32000
+        );
+
+        // Admit both verified shares via Operator listener.
+        let stored_full = op_server
+            .storage_store_verified_symbols(full_hex.clone(), pub_hex.clone(), 0, full_json)
+            .await
+            .unwrap();
+        assert_eq!(stored_full["stored"], 4);
+        assert_eq!(
+            op_server
+                .storage_store_verified_symbols(mob_hex, pub_hex.clone(), 0, mob_json)
+                .await
+                .unwrap()["stored"],
+            4
+        );
+
+        // Read verified symbols via Public RPC and authenticate Merkle paths client-side.
+        let syms_page = pub_server
+            .storage_get_symbols(full_hex.clone(), pub_hex.clone(), 0, 0, 4)
+            .await
+            .unwrap();
+        let page_items: Vec<VerifiedSymbolItem> = syms_page["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|entry| {
+                serde_json::from_value(serde_json::json!({
+                    "symbol": entry["symbol"].clone(),
+                    "proof": entry["proof"].clone(),
+                }))
+                .unwrap()
+            })
+            .collect();
+        assert_eq!(page_items.len(), 4);
+        let root_hex = syms_page["symbol_roots"][0]["root"].as_str().unwrap();
+        let mut root_arr = [0u8; 32];
+        root_arr.copy_from_slice(&hex::decode(root_hex).unwrap());
+        verify_symbol_range_response(
+            0,
+            root_arr,
+            syms_page["symbol_roots"][0]["count"].as_u64().unwrap(),
+            profile.symbol_size,
+            &crate::storage::bud3::symbol_protocol::SymbolRangeResponse { items: page_items },
+        )
+        .unwrap();
+        assert_eq!(
+            pub_server
+                .storage_get_symbols(full_hex, pub_hex.clone(), 0, 0, 65)
+                .await
+                .unwrap_err()
+                .code(),
+            -32602
+        );
+
+        // Placement telemetry reflects live Full + Mobile split.
+        let placement = pub_server
+            .storage_get_placement(pub_hex.clone())
+            .await
+            .unwrap();
+        assert_eq!(placement["status"], "live");
+        assert_eq!(placement["n_full"], 1);
+        assert_eq!(placement["n_mobile"], 1);
+        assert_eq!(
+            pub_server
+                .storage_get_placement("0x1234".to_string())
+                .await
+                .unwrap_err()
+                .code(),
+            -32602
+        );
+
+        // Paid fallback decodes public payload once, refuses replay, and refuses sealed objects.
+        let decoded = pub_server
+            .storage_get_content(
+                payer_hex.clone(),
+                pub_hex.clone(),
+                receipt_hex.clone(),
+                MIN_PAID_VIEW_FEE_ATOMS,
+            )
+            .await
+            .unwrap();
+        assert_eq!(decoded["content_hex"], hex::encode(&payload));
+        assert_eq!(
+            pub_server
+                .storage_get_content(
+                    payer_hex.clone(),
+                    pub_hex.clone(),
+                    receipt_hex.clone(),
+                    MIN_PAID_VIEW_FEE_ATOMS
+                )
+                .await
+                .unwrap_err()
+                .code(),
+            -32602
+        );
+        assert_eq!(
+            pub_server
+                .storage_get_content(
+                    payer_hex,
+                    sealed_hex,
+                    format!("0x{}", hex::encode([0x88u8; 32])),
+                    MIN_PAID_VIEW_FEE_ATOMS
+                )
+                .await
+                .unwrap_err()
+                .code(),
+            -32602
+        );
+
+        // Live BNS content resolves through BlockchainSymbolSource.
+        let bns_res = pub_server
+            .bns_resolve_content("livebud3.bud".to_string())
+            .await
+            .unwrap();
+        assert_eq!(bns_res["bytes"], format!("0x{}", hex::encode(&payload)));
+
+        // NFT object query accepts both SocialFi u64 id and 32-byte hex NftId, refuses malformed.
+        let by_id = pub_server
+            .storage_get_nft_object(social_id.to_string())
+            .await
+            .unwrap();
+        assert_eq!(by_id["commitment"], hex::encode(pub_key));
+        assert_eq!(by_id["socialfi_id"], social_id);
+        let by_hex = pub_server
+            .storage_get_nft_object(format!("0x{}", hex::encode(bud3_nft)))
+            .await
+            .unwrap();
+        assert_eq!(by_hex["commitment"], hex::encode(pub_key));
+        assert_eq!(
+            pub_server
+                .storage_get_nft_object("not-an-nft".to_string())
+                .await
+                .unwrap_err()
+                .code(),
+            -32602
+        );
+
+        // SocialFi endpoints include canonical `bud3_nft_id` and live `bud3` object binding.
+        let post = pub_server.social_get_post(social_id).await.unwrap();
+        assert_eq!(post["bud3"]["commitment"], hex::encode(pub_key));
+        let profile_res = pub_server
+            .social_get_profile(format!("0x{}", alice.to_hex()))
+            .await
+            .unwrap();
+        assert_eq!(profile_res[0]["bud3"]["commitment"], hex::encode(pub_key));
+        let feed_res = pub_server.social_get_feed(10).await.unwrap();
+        assert_eq!(feed_res[0]["bud3"]["commitment"], hex::encode(pub_key));
+    }
+
     /// second descent: the node reads. A fresh node has a height of
     /// zero, no peers and nothing to sync, and every one of these reads says so
     /// in its own shape rather than failing. The address reads keep their

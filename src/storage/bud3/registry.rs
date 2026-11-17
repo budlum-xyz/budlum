@@ -272,10 +272,14 @@ impl From<GrantBud3Error> for RegistryError {
 pub enum Bud3Query {
     /// One object by commitment.
     Object(ObjectKey),
+    /// Placement, share confirmation, and physical-byte endowment details for one object.
+    Placement(ObjectKey),
     /// The shares one validator holds.
     Custody(Address),
     /// One unlinkable view grant by `grant_tag`.
     Grant([u8; 32]),
+    /// Resolve an NFT binding (`NftId`) to its live/replaced object metadata.
+    Nft(NftId),
 }
 
 /// What a registration did.
@@ -519,6 +523,12 @@ impl Bud3Registry {
     #[must_use]
     pub fn tombstone(&self, key: &ObjectKey) -> Option<u64> {
         self.tombstones.get(key).copied()
+    }
+
+    /// Iterate tombstoned object keys so node-local symbol caches can purge
+    /// deleted payloads even after a restart.
+    pub fn tombstone_keys(&self) -> impl Iterator<Item = &ObjectKey> {
+        self.tombstones.keys()
     }
 
     /// `RegisterObject`. Public content already held is deduplicated.
@@ -2548,6 +2558,83 @@ impl Bud3Registry {
                     serde_json::Value::Null
                 }
             }
+            Bud3Query::Placement(key) => {
+                if let Some(o) = self.objects.get(key) {
+                    let mut n_full: u64 = 0;
+                    let mut n_mobile: u64 = 0;
+                    let mut total_full_symbols: u64 = 0;
+                    let mut total_mobile_symbols: u64 = 0;
+                    let mut active_symbols: u64 = 0;
+                    let shares: Vec<serde_json::Value> = o
+                        .shares
+                        .iter()
+                        .map(|s| {
+                            if !s.lost {
+                                active_symbols =
+                                    active_symbols.saturating_add(u64::from(s.share.symbols));
+                                match s.share.class {
+                                    Class::Full => {
+                                        n_full = n_full.saturating_add(1);
+                                        total_full_symbols = total_full_symbols
+                                            .saturating_add(u64::from(s.share.symbols));
+                                    }
+                                    Class::Mobile => {
+                                        n_mobile = n_mobile.saturating_add(1);
+                                        total_mobile_symbols = total_mobile_symbols
+                                            .saturating_add(u64::from(s.share.symbols));
+                                    }
+                                }
+                            }
+                            serde_json::json!({
+                                "validator": hex::encode(s.share.validator),
+                                "class": match s.share.class {
+                                    Class::Full => "Full",
+                                    Class::Mobile => "Mobile",
+                                },
+                                "segment": s.segment,
+                                "first_esi": s.share.first_esi,
+                                "symbols": s.share.symbols,
+                                "root": s.root,
+                                "confirmed": s.status == ShareStatus::Confirmed,
+                                "lost": s.lost,
+                                "passes": s.passes,
+                                "misses": s.misses,
+                                "assigned_epoch": s.assigned_epoch,
+                            })
+                        })
+                        .collect();
+                    serde_json::json!({
+                        "commitment": hex::encode(key),
+                        "status": "live",
+                        "content_digest": hex::encode(o.record.content_id.digest),
+                        "content_len": o.record.content_id.len,
+                        "sealed": o.record.content_id.kind == ContentIdKind::Sealed,
+                        "object_len": o.record.object_len,
+                        "symbol_size": o.record.profile.symbol_size,
+                        "segments": o.record.symbol_roots.len(),
+                        "custody_confirmed": o.custody_confirmed,
+                        "expires_at_epoch": o.expires_at,
+                        "repairs_due": self.repairs_due(key),
+                        "n_full": n_full,
+                        "n_mobile": n_mobile,
+                        "total_full_symbols": total_full_symbols,
+                        "total_mobile_symbols": total_mobile_symbols,
+                        "active_symbols": active_symbols,
+                        "user_physical_bytes": o.endowment.fee_record.user_physical_bytes,
+                        "decentralization_physical_bytes": o.endowment.fee_record.decentralization_physical_bytes,
+                        "total_physical_bytes": o.endowment.fee_record.total_physical_bytes(),
+                        "symbol_roots": o.roots.iter().map(|r| serde_json::json!({
+                            "segment": r.segment,
+                            "root": hex::encode(r.root),
+                            "first_esi": r.first_esi,
+                            "count": r.count,
+                        })).collect::<Vec<_>>(),
+                        "shares": shares,
+                    })
+                } else {
+                    self.query_json(&Bud3Query::Object(*key))
+                }
+            }
             Bud3Query::Custody(validator) => {
                 let shares: Vec<serde_json::Value> = self
                     .objects
@@ -2599,6 +2686,27 @@ impl Bud3Registry {
                 } else {
                     serde_json::Value::Null
                 }
+            }
+            Bud3Query::Nft(nft) => {
+                let Some((key, owner)) = self.nfts.get(nft) else {
+                    return serde_json::Value::Null;
+                };
+                let mut obj = self.query_json(&Bud3Query::Object(*key));
+                if let Some(map) = obj.as_object_mut() {
+                    map.insert("nft_id".to_string(), serde_json::json!(hex::encode(nft)));
+                    map.insert(
+                        "nft_owner".to_string(),
+                        serde_json::json!(hex::encode(owner)),
+                    );
+                } else {
+                    obj = serde_json::json!({
+                        "nft_id": hex::encode(nft),
+                        "nft_owner": hex::encode(owner),
+                        "commitment": hex::encode(key),
+                        "status": "missing",
+                    });
+                }
+                obj
             }
         }
     }
@@ -4178,5 +4286,23 @@ mod tests {
         }
         assert_eq!(r.nft_binding(&existing_nft), Some((new_key, addr(1))));
         assert_eq!(r.nft_binding(&late_nft), Some((new_key, addr(2))));
+
+        let nft_view = r.query_json(&Bud3Query::Nft(existing_nft));
+        assert_eq!(nft_view["status"], "live");
+        assert_eq!(nft_view["commitment"], hex::encode(new_key));
+        assert_eq!(nft_view["nft_id"], hex::encode(existing_nft));
+        assert_eq!(nft_view["nft_owner"], hex::encode(addr(1)));
+        assert!(r.query_json(&Bud3Query::Nft([0xFE; 32])).is_null());
+
+        let placement_view = r.query_json(&Bud3Query::Placement(new_key));
+        assert_eq!(placement_view["status"], "live");
+        assert_eq!(placement_view["n_full"], 3);
+        assert!(placement_view["shares"]
+            .as_array()
+            .is_some_and(|s| s.len() == 3));
+        assert_eq!(
+            r.query_json(&Bud3Query::Placement(old_key))["status"],
+            "replaced"
+        );
     }
 }

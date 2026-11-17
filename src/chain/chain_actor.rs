@@ -41,6 +41,14 @@ pub type BnsContentView = (
     Result<Vec<u8>, String>,
 );
 
+/// Verified B.U.D. 3.0 symbol range plus segment root metadata returned to RPC callers.
+#[derive(Debug, Clone)]
+pub struct Bud3SymbolPage {
+    pub symbol_size: u16,
+    pub roots: Vec<crate::storage::bud3::registry::SymbolRoot>,
+    pub items: Vec<crate::storage::bud3::symbol_protocol::VerifiedSymbolItem>,
+}
+
 /// A name proof and the block it was read at.
 #[derive(Debug, Clone)]
 pub struct BnsAnchoredProof {
@@ -188,6 +196,29 @@ pub enum ChainCommand {
         crate::storage::bud3::registry::Bud3Query,
         oneshot::Sender<serde_json::Value>,
     ),
+    GetBud3Nfts(
+        Vec<crate::storage::bud3::registry::NftId>,
+        oneshot::Sender<Vec<serde_json::Value>>,
+    ),
+    Bud3StoreVerifiedSymbols {
+        holder: [u8; 32],
+        object: [u8; 32],
+        segment: u64,
+        items: Vec<crate::storage::bud3::symbol_protocol::VerifiedSymbolItem>,
+        reply: oneshot::Sender<Result<usize, String>>,
+    },
+    Bud3GetSymbols {
+        holder: [u8; 32],
+        object: [u8; 32],
+        segment: u64,
+        first_esi: u32,
+        count: u32,
+        reply: oneshot::Sender<Result<Bud3SymbolPage, String>>,
+    },
+    Bud3GetContent {
+        receipt: crate::storage::bud3::view::PaidViewReceipt,
+        reply: oneshot::Sender<Result<Vec<u8>, crate::storage::bud3::view::ViewBud3Error>>,
+    },
     GetValidatorAddress(oneshot::Sender<Option<Address>>),
     GetAggregatorState(oneshot::Sender<crate::chain::finality::AggregatorState>),
     GetStateRoot(u64, oneshot::Sender<Option<String>>),
@@ -1576,6 +1607,82 @@ impl ChainHandle {
         let (tx, rx) = oneshot::channel();
         self.tx
             .send(ChainCommand::GetBud3(query, tx))
+            .await
+            .map_err(|_| "B.U.D. 3.0 chain actor is unavailable")?;
+        rx.await
+            .map_err(|_| "B.U.D. 3.0 chain actor reply was lost")
+    }
+
+    /// Resolve a batch of B.U.D. 3.0 NFT bindings (`NftId`) in a single actor turn.
+    pub async fn bud3_nfts(
+        &self,
+        nfts: Vec<crate::storage::bud3::registry::NftId>,
+    ) -> Result<Vec<serde_json::Value>, &'static str> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(ChainCommand::GetBud3Nfts(nfts, tx))
+            .await
+            .map_err(|_| "B.U.D. 3.0 chain actor is unavailable")?;
+        rx.await
+            .map_err(|_| "B.U.D. 3.0 chain actor reply was lost")
+    }
+
+    /// Verify and store node-local B.U.D. 3.0 custody symbols against live consensus roots.
+    pub async fn bud3_store_verified_symbols(
+        &self,
+        holder: [u8; 32],
+        object: [u8; 32],
+        segment: u64,
+        items: Vec<crate::storage::bud3::symbol_protocol::VerifiedSymbolItem>,
+    ) -> Result<Result<usize, String>, &'static str> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(ChainCommand::Bud3StoreVerifiedSymbols {
+                holder,
+                object,
+                segment,
+                items,
+                reply,
+            })
+            .await
+            .map_err(|_| "B.U.D. 3.0 chain actor is unavailable")?;
+        rx.await
+            .map_err(|_| "B.U.D. 3.0 chain actor reply was lost")
+    }
+
+    /// Read verified B.U.D. 3.0 symbol items and segment roots for `(holder, object, segment)`.
+    pub async fn bud3_get_symbols(
+        &self,
+        holder: [u8; 32],
+        object: [u8; 32],
+        segment: u64,
+        first_esi: u32,
+        count: u32,
+    ) -> Result<Result<Bud3SymbolPage, String>, &'static str> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(ChainCommand::Bud3GetSymbols {
+                holder,
+                object,
+                segment,
+                first_esi,
+                count,
+                reply,
+            })
+            .await
+            .map_err(|_| "B.U.D. 3.0 chain actor is unavailable")?;
+        rx.await
+            .map_err(|_| "B.U.D. 3.0 chain actor reply was lost")
+    }
+
+    /// G8 paid public fallback decode via the chain actor's verified symbol store.
+    pub async fn bud3_get_content(
+        &self,
+        receipt: crate::storage::bud3::view::PaidViewReceipt,
+    ) -> Result<Result<Vec<u8>, crate::storage::bud3::view::ViewBud3Error>, &'static str> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(ChainCommand::Bud3GetContent { receipt, reply })
             .await
             .map_err(|_| "B.U.D. 3.0 chain actor is unavailable")?;
         rx.await
@@ -3390,6 +3497,53 @@ impl ChainActor {
                 ChainCommand::GetBud3(query, tx) => {
                     let _ = tx.send(self.blockchain.state.bud3_registry.query_json(&query));
                 }
+                ChainCommand::GetBud3Nfts(nfts, tx) => {
+                    let values =
+                        nfts.into_iter()
+                            .map(|nft| {
+                                self.blockchain.state.bud3_registry.query_json(
+                                    &crate::storage::bud3::registry::Bud3Query::Nft(nft),
+                                )
+                            })
+                            .collect();
+                    let _ = tx.send(values);
+                }
+                ChainCommand::Bud3StoreVerifiedSymbols {
+                    holder,
+                    object,
+                    segment,
+                    items,
+                    reply,
+                } => {
+                    let res = self
+                        .blockchain
+                        .store_verified_bud3_symbols(&holder, &object, segment, &items);
+                    let _ = reply.send(res);
+                }
+                ChainCommand::Bud3GetSymbols {
+                    holder,
+                    object,
+                    segment,
+                    first_esi,
+                    count,
+                    reply,
+                } => {
+                    let res = self
+                        .blockchain
+                        .fetch_verified_bud3_symbol_page(
+                            &holder, &object, segment, first_esi, count,
+                        )
+                        .map(|(symbol_size, roots, items)| Bud3SymbolPage {
+                            symbol_size,
+                            roots,
+                            items,
+                        });
+                    let _ = reply.send(res);
+                }
+                ChainCommand::Bud3GetContent { receipt, reply } => {
+                    let res = self.blockchain.decode_bud3_paid_content(&receipt);
+                    let _ = reply.send(res);
+                }
                 ChainCommand::GetValidatorDirectory(query, tx) => {
                     let state = &self.blockchain.state;
                     let result = if matches!(
@@ -4268,6 +4422,7 @@ impl ChainActor {
                 ChainCommand::BnsResolveContent { name, response } => {
                     let state = &self.blockchain.state;
                     let epoch = state.epoch_index;
+                    let source = self.blockchain.bud3_symbol_source();
                     let view =
                         crate::bns::Bud3BnsResolver::binding(&state.bns_registry, &name, epoch)
                             .map(|binding| {
@@ -4275,7 +4430,7 @@ impl ChainActor {
                                 let bytes = crate::bns::Bud3BnsResolver::resolve_via_bud3_view(
                                     &state.bns_registry,
                                     &state.bud3_registry,
-                                    &crate::storage::bud3::view::NoSymbolsHeld,
+                                    &source,
                                     &name,
                                     epoch,
                                     &crate::bns::bud3::BnsViewAccess::default(),

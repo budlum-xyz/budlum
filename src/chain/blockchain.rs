@@ -233,6 +233,10 @@ pub struct Blockchain {
     /// Rolling post-end-of-block state checkpoints so candidate-chain validation
     /// replays from the nearest ancestor anchor rather than genesis (CWE-400).
     reorg_anchors: Vec<(usize, String, AccountState)>,
+    /// Bounded node-local cache of Merkle-verified B.U.D. 3.0 symbol items,
+    /// kept outside consensus `AccountState` and mirrored to `storage` when
+    /// persistent.
+    pub bud3_symbols: crate::storage::bud3::symbol_protocol::Bud3SymbolStore,
 }
 
 /// Heights one finality event looks at for witness pruning: finality
@@ -1301,6 +1305,7 @@ impl Blockchain {
             scheme_registry: crate::crypto::scheme::SchemeStatusRegistry::genesis(),
             recovery_tracker: crate::validators::handover::RecoveryTracker::new(),
             reorg_anchors: init_reorg_anchors,
+            bud3_symbols: crate::storage::bud3::symbol_protocol::Bud3SymbolStore::default(),
         };
 
         if let Some(first) = bc.chain.first() {
@@ -6365,6 +6370,7 @@ impl Blockchain {
 
         let frozen_before = Self::frozen_domain_ids(&self.state);
         self.state = committed_state;
+        self.prune_unregistered_bud3_symbols();
         // Governance-controlled domain unfreeze (5.C) is applied inside
         // `apply_block_effects_with_unfreezes` BEFORE `calculate_state_root`;
         // only the node-local quarantine ledger follows here.
@@ -7006,6 +7012,7 @@ impl Blockchain {
 
         let frozen_before = Self::frozen_domain_ids(&self.state);
         self.state = commit_state;
+        self.prune_unregistered_bud3_symbols();
         // Governance-controlled domain unfreeze (5.C) is applied inside
         // `apply_block_effects_with_unfreezes` BEFORE `calculate_state_root`;
         // only the node-local quarantine ledger follows here.
@@ -7732,6 +7739,7 @@ impl Blockchain {
             self.consensus
                 .record_block_with_chain(last_block, &self.chain, self.storage.as_ref());
         }
+        self.prune_unregistered_bud3_symbols();
         self.mempool.set_min_fee(self.state.base_fee);
         Ok(true)
     }
@@ -10518,6 +10526,242 @@ impl Blockchain {
     ) -> Result<(u32, u64), String> {
         crate::chain::storage_maintenance::finalize_expired_deals(&mut self.state, current_epoch)
     }
+
+    /// Borrow a [`crate::storage::bud3::view::NetworkSymbolSource`] backed by
+    /// this node's Merkle-verified B.U.D. 3.0 symbol cache and persistent `sled`
+    /// storage, checked against the live consensus `Bud3Registry`.
+    #[must_use]
+    pub fn bud3_symbol_source(&self) -> impl crate::storage::bud3::view::NetworkSymbolSource + '_ {
+        BlockchainSymbolSource {
+            registry: &self.state.bud3_registry,
+            symbols: &self.bud3_symbols,
+            storage: self.storage.as_ref(),
+        }
+    }
+
+    /// Verify every item's Merkle custody proof and holder assignment against
+    /// `self.state.bud3_registry`, then store in `self.bud3_symbols` and
+    /// `self.storage` (node-local only, zero impact on `state_root`).
+    ///
+    /// # Errors
+    ///
+    /// Returns an explicit reason if any item fails verification, belongs to an
+    /// unknown/tombstoned object, or persistence fails.
+    pub fn store_verified_bud3_symbols(
+        &mut self,
+        holder: &[u8; 32],
+        object: &[u8; 32],
+        segment: u64,
+        items: &[crate::storage::bud3::symbol_protocol::VerifiedSymbolItem],
+    ) -> Result<usize, String> {
+        let accepted = self
+            .bud3_symbols
+            .insert_verified(&self.state.bud3_registry, holder, object, segment, items)
+            .map_err(|e| format!("verified symbol admission refused: {e:?}"))?;
+        if let Some(ref store) = self.storage {
+            store
+                .put_bud3_verified_symbols(holder, object, segment, &accepted)
+                .map_err(|e| format!("failed to persist verified symbols: {e}"))?;
+        }
+        Ok(accepted.len())
+    }
+
+    /// Fetch up to `count` (`1..=64`) verified B.U.D. 3.0 symbol items and the
+    /// matching segment roots for `(holder, object, segment)` from memory/`sled`,
+    /// re-verifying every item's Merkle custody proof against `self.state.bud3_registry`.
+    ///
+    /// # Errors
+    ///
+    /// Refuses out-of-range counts, unknown/tombstoned objects, or any item
+    /// that fails Merkle proof verification on read.
+    pub fn fetch_verified_bud3_symbol_page(
+        &self,
+        holder: &[u8; 32],
+        object: &[u8; 32],
+        segment: u64,
+        first_esi: u32,
+        count: u32,
+    ) -> Result<
+        (
+            u16,
+            Vec<crate::storage::bud3::registry::SymbolRoot>,
+            Vec<crate::storage::bud3::symbol_protocol::VerifiedSymbolItem>,
+        ),
+        String,
+    > {
+        let resp = self.fetch_verified_bud3_symbols(holder, object, segment, first_esi, count)?;
+        let entry = self
+            .state
+            .bud3_registry
+            .object(object)
+            .ok_or_else(|| "unknown or tombstoned B.U.D. 3.0 object".to_string())?;
+        let roots = entry
+            .roots
+            .iter()
+            .filter(|r| r.segment == segment)
+            .copied()
+            .collect();
+        Ok((entry.record.profile.symbol_size, roots, resp.items))
+    }
+
+    /// Decode and verify a public B.U.D. 3.0 object under G8 paid fallback,
+    /// enforcing live on-chain `PaidViewReceipt` expiry and unconditionally
+    /// refusing sealed objects.
+    ///
+    /// # Errors
+    ///
+    /// [`crate::storage::bud3::view::ViewBud3Error`].
+    pub fn decode_bud3_paid_content(
+        &self,
+        receipt: &crate::storage::bud3::view::PaidViewReceipt,
+    ) -> Result<Vec<u8>, crate::storage::bud3::view::ViewBud3Error> {
+        use crate::storage::bud3::content_id::ContentIdKind;
+        use crate::storage::bud3::view::{fallback_decode_public, ViewBud3Error};
+        let Some(entry) = self.state.bud3_registry.object(&receipt.object) else {
+            return Err(ViewBud3Error::UnknownObject);
+        };
+        if entry.record.content_id.kind == ContentIdKind::Sealed {
+            return Err(ViewBud3Error::SealedFallbackForbidden);
+        }
+        if !self
+            .state
+            .bud3_registry
+            .verify_paid_view_at(receipt, self.state.epoch_index)
+        {
+            return Err(ViewBud3Error::UnpaidFallbackView);
+        }
+        let source = self.bud3_symbol_source();
+        fallback_decode_public(&self.state.bud3_registry, &receipt.object, receipt, &source)
+    }
+
+    fn fetch_verified_bud3_symbols(
+        &self,
+        holder: &[u8; 32],
+        object: &[u8; 32],
+        segment: u64,
+        first_esi: u32,
+        count: u32,
+    ) -> Result<crate::storage::bud3::symbol_protocol::SymbolRangeResponse, String> {
+        use crate::storage::bud3::symbol_protocol::{
+            verify_item_against_entry, SymbolRangeResponse, VerifiedSymbolItem,
+            MAX_SYMBOLS_PER_REQUEST,
+        };
+        if count == 0 || count > MAX_SYMBOLS_PER_REQUEST {
+            return Err(format!(
+                "symbol count must be within 1..={MAX_SYMBOLS_PER_REQUEST}"
+            ));
+        }
+        let entry = self
+            .state
+            .bud3_registry
+            .object(object)
+            .ok_or_else(|| "unknown or tombstoned B.U.D. 3.0 object".to_string())?;
+        let mut by_esi: BTreeMap<u32, VerifiedSymbolItem> = BTreeMap::new();
+        let mem = self.bud3_symbols.verified_range(
+            &self.state.bud3_registry,
+            holder,
+            object,
+            segment,
+            first_esi,
+            count,
+        );
+        for item in mem.items {
+            by_esi.insert(item.symbol.esi, item);
+        }
+        if let Some(ref store) = self.storage {
+            let disk_items = store
+                .get_bud3_verified_symbols(holder, object, segment, first_esi, count)
+                .map_err(|e| format!("failed to read persisted symbols: {e}"))?;
+            for item in disk_items {
+                verify_item_against_entry(entry, holder, segment, &item).map_err(|e| {
+                    format!(
+                        "stored symbol esi {} failed Merkle verification: {e:?}",
+                        item.symbol.esi
+                    )
+                })?;
+                by_esi.entry(item.symbol.esi).or_insert(item);
+            }
+        }
+        Ok(SymbolRangeResponse {
+            items: by_esi.into_values().collect(),
+        })
+    }
+
+    /// Purge cached and persisted B.U.D. 3.0 symbols whose objects are no
+    /// longer registered or have been tombstoned.
+    fn prune_unregistered_bud3_symbols(&mut self) {
+        let removed = self
+            .bud3_symbols
+            .prune_unregistered(&self.state.bud3_registry);
+        if let Some(ref store) = self.storage {
+            for obj in removed {
+                let _ = store.delete_bud3_object_symbols(&obj);
+            }
+            for tomb in self.state.bud3_registry.tombstone_keys() {
+                let _ = store.delete_bud3_object_symbols(tomb);
+            }
+        }
+    }
+}
+
+/// Node-local B.U.D. 3.0 symbol source backed by verified memory cache and
+/// `sled` storage, re-verifying every symbol against live `Bud3Registry` roots.
+struct BlockchainSymbolSource<'a> {
+    registry: &'a crate::storage::bud3::registry::Bud3Registry,
+    symbols: &'a crate::storage::bud3::symbol_protocol::Bud3SymbolStore,
+    storage: Option<&'a Storage>,
+}
+
+impl crate::storage::bud3::view::NetworkSymbolSource for BlockchainSymbolSource<'_> {
+    fn fetch_holder_symbols(
+        &self,
+        holder: &crate::storage::bud3::registry::Address,
+        object: &crate::storage::bud3::registry::ObjectKey,
+        segment: u64,
+        first_esi: u32,
+        count: u32,
+    ) -> Vec<crate::storage::bud3::fountain::Symbol> {
+        use crate::storage::bud3::symbol_protocol::{
+            verify_item_against_entry, MAX_SYMBOLS_PER_REQUEST,
+        };
+        let Some(entry) = self.registry.object(object) else {
+            return Vec::new();
+        };
+        if count == 0 {
+            return Vec::new();
+        }
+        let mut collected = BTreeMap::new();
+        let mut cursor = first_esi;
+        let mut remaining = count;
+        while remaining > 0 {
+            let chunk = remaining.min(MAX_SYMBOLS_PER_REQUEST);
+            let mem_resp =
+                self.symbols
+                    .verified_range(self.registry, holder, object, segment, cursor, chunk);
+            for item in mem_resp.items {
+                collected.insert(item.symbol.esi, item.symbol);
+            }
+            if let Some(store) = self.storage {
+                if let Ok(disk_items) =
+                    store.get_bud3_verified_symbols(holder, object, segment, cursor, chunk)
+                {
+                    for item in disk_items {
+                        if !collected.contains_key(&item.symbol.esi)
+                            && verify_item_against_entry(entry, holder, segment, &item).is_ok()
+                        {
+                            collected.insert(item.symbol.esi, item.symbol);
+                        }
+                    }
+                }
+            }
+            remaining -= chunk;
+            let Some(next) = cursor.checked_add(chunk) else {
+                break;
+            };
+            cursor = next;
+        }
+        collected.into_values().collect()
+    }
 }
 
 impl Clone for Blockchain {
@@ -10568,6 +10812,7 @@ impl Clone for Blockchain {
             scheme_registry: self.scheme_registry.clone(),
             recovery_tracker: self.recovery_tracker.clone(),
             reorg_anchors: Vec::new(),
+            bud3_symbols: self.bud3_symbols.clone(),
         }
     }
 }
@@ -15081,5 +15326,157 @@ mod bond_and_reorg_tests {
             table.version, 0,
             "producer bitmap without a verified QC blob must never hand over seats"
         );
+    }
+
+    #[test]
+    fn bud3_symbols_persist_across_blockchain_reopen_and_refuse_disk_tampering() {
+        use crate::storage::bud3::custody::symbol_leaf;
+        use crate::storage::bud3::limits::{Bud3Limits, Profile};
+        use crate::storage::bud3::pipeline::prepare_public_upload;
+        use crate::storage::bud3::placement::{Class, Share};
+        use crate::storage::bud3::symbol_protocol::{
+            build_symbol_range_response, SymbolRangeRequest,
+        };
+        use crate::storage::bud3::view::view_from_network;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().to_str().expect("utf-8");
+        let profile = Profile {
+            id: 0,
+            qr_version: 40,
+            symbol_size: 128,
+            fps: 10,
+            k_max: 16,
+        };
+        let payload = b"durable verified bud3 blockchain storage test";
+        let up = prepare_public_upload(payload, &profile, &Bud3Limits::default(), 8).unwrap();
+        let obj = up.record.commitment;
+        let holder_a = [0x61u8; 32];
+        let holder_b = [0x62u8; 32];
+        let leaves: Vec<(u32, [u8; 32])> = up.segments[0]
+            .iter()
+            .map(|s| (s.esi, symbol_leaf(&s.data)))
+            .collect();
+        let items_a = build_symbol_range_response(
+            &SymbolRangeRequest {
+                object: obj,
+                segment: 0,
+                first_esi: 0,
+                count: 4,
+            },
+            &leaves,
+            &up.segments[0][0..4],
+        )
+        .unwrap()
+        .items;
+        let items_b = build_symbol_range_response(
+            &SymbolRangeRequest {
+                object: obj,
+                segment: 0,
+                first_esi: 4,
+                count: 4,
+            },
+            &leaves,
+            &up.segments[0][4..8],
+        )
+        .unwrap()
+        .items;
+
+        let shares = vec![
+            (
+                0,
+                Share {
+                    validator: holder_a,
+                    class: Class::Full,
+                    first_esi: 0,
+                    symbols: 4,
+                },
+            ),
+            (
+                0,
+                Share {
+                    validator: holder_b,
+                    class: Class::Full,
+                    first_esi: 4,
+                    symbols: 4,
+                },
+            ),
+        ];
+
+        let storage = Storage::new(db_path).expect("storage");
+        let mut chain = Blockchain::new(
+            Arc::new(crate::consensus::pow::PoWEngine::new(0)),
+            Some(storage),
+            45262,
+            None,
+        );
+        let root_before = chain.state.calculate_state_root();
+        chain
+            .state
+            .bud3_registry
+            .register_object([0x05u8; 32], up.record.clone(), shares.clone(), 0, 50)
+            .unwrap();
+        let root_after_reg = chain.state.calculate_state_root();
+        assert_ne!(root_before, root_after_reg);
+
+        assert_eq!(
+            chain
+                .store_verified_bud3_symbols(&holder_a, &obj, 0, &items_a)
+                .unwrap(),
+            4
+        );
+        assert_eq!(
+            chain
+                .store_verified_bud3_symbols(&holder_b, &obj, 0, &items_b)
+                .unwrap(),
+            4
+        );
+        // Node-local symbol ingestion never perturbs consensus state_root.
+        assert_eq!(chain.state.calculate_state_root(), root_after_reg);
+
+        // Reconstruct directly from verified symbol source.
+        let src = chain.bud3_symbol_source();
+        let recovered = view_from_network(&chain.state.bud3_registry, &obj, None, &src).unwrap();
+        assert_eq!(recovered, payload);
+        drop(chain);
+
+        // Fresh node opening the same sled DB (empty in-memory cache) reads from disk & verifies.
+        let reopened = Storage::new(db_path).expect("reopen storage");
+        let mut chain2 = Blockchain::new(
+            Arc::new(crate::consensus::pow::PoWEngine::new(0)),
+            Some(reopened.clone()),
+            45262,
+            None,
+        );
+        chain2
+            .state
+            .bud3_registry
+            .register_object([0x05u8; 32], up.record, shares, 0, 50)
+            .unwrap();
+        let fetched = chain2
+            .fetch_verified_bud3_symbols(&holder_a, &obj, 0, 0, 4)
+            .unwrap();
+        assert_eq!(fetched.items.len(), 4);
+        assert_eq!(
+            view_from_network(
+                &chain2.state.bud3_registry,
+                &obj,
+                None,
+                &chain2.bud3_symbol_source()
+            )
+            .unwrap(),
+            payload
+        );
+
+        // Tamper one persisted item in sled directly; read must refuse rather than serve forged bytes.
+        let mut bad_items = items_a;
+        bad_items[0].symbol.data[80] ^= 0xFF;
+        reopened
+            .put_bud3_verified_symbols(&holder_a, &obj, 0, &bad_items[..1])
+            .unwrap();
+        let err = chain2
+            .fetch_verified_bud3_symbols(&holder_a, &obj, 0, 0, 4)
+            .unwrap_err();
+        assert!(err.contains("Merkle verification"), "unexpected err: {err}");
     }
 }
