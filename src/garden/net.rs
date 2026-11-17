@@ -140,7 +140,7 @@ const fn ipv4_is_dialable(ip: std::net::Ipv4Addr) -> bool {
     !(ip.is_unspecified() || ip.is_multicast() || ip.is_broadcast() || ip.is_link_local())
 }
 
-fn ipv6_is_dialable(ip: std::net::Ipv6Addr) -> bool {
+const fn ipv6_is_dialable(ip: std::net::Ipv6Addr) -> bool {
     if ip.is_unspecified() || ip.is_multicast() {
         return false;
     }
@@ -1119,7 +1119,7 @@ mod tests {
                         }
                     }
                 }
-                _ = tokio::time::sleep(Duration::from_millis(50)) => {}
+                () = tokio::time::sleep(Duration::from_millis(50)) => {}
             }
         }
         assert!(
@@ -1165,7 +1165,7 @@ mod tests {
             }
         }
         // Exhaust the swarm-wide repeat-greeting budget with multiple spammer connections.
-        for tag in 0..(MAX_UNADMITTED_REQUESTS_PER_PEER as u64) {
+        for tag in 0..u64::from(MAX_UNADMITTED_REQUESTS_PER_PEER) {
             let _ = net_spam
                 .commands
                 .send(NetCommand::Send {
