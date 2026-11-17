@@ -63,6 +63,13 @@ impl DeferredVote {
     const fn is_precommit(&self) -> bool {
         matches!(self, Self::Precommit(_))
     }
+
+    fn checkpoint_hash(&self) -> &str {
+        match self {
+            Self::Prevote(v) => &v.checkpoint_hash,
+            Self::Precommit(v) => &v.checkpoint_hash,
+        }
+    }
 }
 
 /// Bounded, height-keyed store of votes that arrived too early.
@@ -76,16 +83,19 @@ impl DeferredVotes {
         Self::default()
     }
 
-    /// Hold `vote` for `epoch`/`height`, deduplicating per `(round, voter, kind)`,
-    /// bounding each voter's share, and dropping the oldest overall when full.
+    /// Hold `vote` for `epoch`/`height`, deduplicating per
+    /// `(round, checkpoint_hash, voter, kind)`, bounding each voter's share,
+    /// and dropping the oldest overall when full.
     pub(crate) fn push(&mut self, epoch: u64, height: u64, vote: DeferredVote) {
         let voter = vote.voter_id();
         let is_precommit = vote.is_precommit();
+        let checkpoint_hash = vote.checkpoint_hash();
         if self.inner.iter().any(|(e, h, existing)| {
             *e == epoch
                 && *h == height
                 && existing.voter_id() == voter
                 && existing.is_precommit() == is_precommit
+                && existing.checkpoint_hash() == checkpoint_hash
         }) {
             return;
         }
@@ -108,10 +118,45 @@ impl DeferredVotes {
         self.inner.push_back((epoch, height, vote));
     }
 
-    /// Take every vote held for exactly this round, oldest first.
+    /// Drop every vote at or below a finalized height, since finalized rounds
+    /// cannot reopen or reorg.
+    pub(crate) fn prune_through(&mut self, finalized_height: u64) {
+        if finalized_height == 0 {
+            return;
+        }
+        self.inner.retain(|(_, h, _)| *h > finalized_height);
+    }
+
+    /// Take every vote held for the exact `(epoch, height, checkpoint_hash)`
+    /// round, oldest first.
     ///
-    /// Votes for any other round stay: they may still be replayed when their
-    /// own round opens, and they are bounded by the cap.
+    /// Votes naming a different hash at the same height stay queued so a node
+    /// temporarily holding a minority fork preserves canonical votes across its
+    /// subsequent reorg.
+    pub(crate) fn take_for_round(
+        &mut self,
+        epoch: u64,
+        height: u64,
+        checkpoint_hash: &str,
+    ) -> Vec<DeferredVote> {
+        let mut taken = Vec::new();
+        let mut kept = VecDeque::with_capacity(self.inner.len());
+        while let Some((vote_epoch, vote_height, vote)) = self.inner.pop_front() {
+            if vote_epoch == epoch
+                && vote_height == height
+                && vote.checkpoint_hash() == checkpoint_hash
+            {
+                taken.push(vote);
+            } else {
+                kept.push_back((vote_epoch, vote_height, vote));
+            }
+        }
+        self.inner = kept;
+        taken
+    }
+
+    /// Take every vote held for `epoch` and `height` regardless of hash.
+    #[cfg(test)]
     pub(crate) fn take_for(&mut self, epoch: u64, height: u64) -> Vec<DeferredVote> {
         let mut taken = Vec::new();
         let mut kept = VecDeque::with_capacity(self.inner.len());
@@ -225,5 +270,44 @@ mod tests {
             2,
             "a single voter flooding rounds must only evict its own slots"
         );
+    }
+
+    #[test]
+    fn canonical_hash_votes_survive_minority_fork_round_and_prune_on_finality() {
+        let mut held = DeferredVotes::new();
+        let canonical_hash = "ca".repeat(32);
+        let fork_hash = "f0".repeat(32);
+        let mut canonical_pv = prevote(50, 1);
+        canonical_pv.epoch = 1;
+        canonical_pv.checkpoint_hash = canonical_hash.clone();
+        let mut canonical_pc = precommit(50, 2);
+        canonical_pc.epoch = 1;
+        canonical_pc.checkpoint_hash = canonical_hash.clone();
+        let mut fork_pv = prevote(50, 3);
+        fork_pv.epoch = 1;
+        fork_pv.checkpoint_hash = fork_hash.clone();
+
+        held.push(1, 50, DeferredVote::Prevote(canonical_pv));
+        held.push(1, 50, DeferredVote::Precommit(canonical_pc));
+        held.push(1, 50, DeferredVote::Prevote(fork_pv));
+
+        // While the node holds the minority fork round, only the fork vote is
+        // drained; canonical votes stay buffered for post-reorg replay.
+        assert_eq!(held.take_for_round(1, 50, &fork_hash).len(), 1);
+        let replayed = held.take_for_round(1, 50, &canonical_hash);
+        assert_eq!(replayed.len(), 2);
+
+        // Once height 50 finalizes, stale votes at or below 50 are pruned while
+        // future rounds stay intact.
+        let mut stale = prevote(50, 4);
+        stale.epoch = 1;
+        stale.checkpoint_hash = fork_hash;
+        let mut future = prevote(55, 5);
+        future.epoch = 1;
+        held.push(1, 50, DeferredVote::Prevote(stale));
+        held.push(1, 55, DeferredVote::Prevote(future.clone()));
+        held.prune_through(50);
+        assert!(held.take_for(1, 50).is_empty());
+        assert_eq!(held.take_for_round(1, 55, &future.checkpoint_hash).len(), 1);
     }
 }
