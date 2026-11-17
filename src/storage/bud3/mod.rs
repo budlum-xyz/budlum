@@ -153,11 +153,11 @@ pub use seal::{
 };
 pub use segment::{object_commitment, segment_digest, ObjectCommitment, Segmentation};
 pub use symbol_protocol::{
-    build_symbol_range_response, verify_symbol_range_response, CustodyPushMessage, LinkMetering,
-    MobileServePolicy, SymbolPeerLimiter, SymbolProtocolError, SymbolRangeRequest,
-    SymbolRangeResponse, VerifiedSymbolItem, CUSTODY_PROTOCOL_ID, MAX_CUSTODY_STREAMS_PER_PEER,
-    MAX_STREAMS_PER_SHARE, MAX_SYMBOLS_PER_REQUEST, MAX_SYMBOL_REQUESTS_PER_SEC,
-    SYMBOLS_PROTOCOL_ID,
+    build_symbol_range_response, verify_item_against_entry, verify_symbol_range_response,
+    Bud3SymbolStore, CustodyPushMessage, LinkMetering, MobileServePolicy, SymbolPeerLimiter,
+    SymbolProtocolError, SymbolRangeRequest, SymbolRangeResponse, VerifiedSymbolItem,
+    CUSTODY_PROTOCOL_ID, MAX_CUSTODY_STREAMS_PER_PEER, MAX_STREAMS_PER_SHARE,
+    MAX_SYMBOLS_PER_REQUEST, MAX_SYMBOL_REQUESTS_PER_SEC, SYMBOLS_PROTOCOL_ID,
 };
 pub use two_path::{
     decode_logical_path, decode_optical_path, extract_object_from_frames,

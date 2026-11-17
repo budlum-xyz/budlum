@@ -11,8 +11,13 @@ pub const RATE_LIMIT_PENALTY: i32 = -3;
 /// the peer its place in the sync order, not an hour of silence.
 const UNANSWERED_REQUEST_PENALTY: i32 = -5;
 /// Unanswered sync requests in a row after which a peer is set aside as a
-/// sync source for a while. It is not banned: see `report_unanswered_request`.
+/// sync source for a while. It is not banned for one run: see
+/// `report_unanswered_request`.
 const MAX_UNANSWERED_SYNC_STRIKES: u32 = 4;
+/// Rest runs in a row, each a whole run of [`MAX_UNANSWERED_SYNC_STRIKES`]
+/// requests left unanswered, after which the peer is banned. A rest keeps
+/// the connection, so on its own it never gives the inbound slot back.
+const MAX_SYNC_REST_RUNS: u32 = 3;
 /// How long a peer is set aside as a sync source the first time it reaches
 /// [`MAX_UNANSWERED_SYNC_STRIKES`]. Every further run of strikes doubles the
 /// rest, up to one ban-length; delivered sync data clears it.
@@ -58,6 +63,7 @@ pub struct PeerScore {
     pub aux_last_refill: Instant,
     pub vote_tokens: f64,
     pub blob_tokens: f64,
+    pub agg_frame_tokens: f64,
     pub handshaked: bool,
     pub unanswered_sync_strikes: u32,
     /// Until when this peer is not asked for sync data. Only the choice of
@@ -83,6 +89,7 @@ impl Default for PeerScore {
             aux_last_refill: Instant::now(),
             vote_tokens: 10.0,
             blob_tokens: 5.0,
+            agg_frame_tokens: 10.0,
             handshaked: false,
             unanswered_sync_strikes: 0,
             sync_rest_until: None,
@@ -110,6 +117,8 @@ impl PeerScore {
         self.vote_tokens = (self.vote_tokens + elapsed * 2.0).min(20.0);
 
         self.blob_tokens = (self.blob_tokens + elapsed * 0.5).min(10.0);
+
+        self.agg_frame_tokens = (self.agg_frame_tokens + elapsed * 2.0).min(20.0);
 
         self.aux_last_refill = now;
     }
@@ -664,6 +673,45 @@ impl PeerManager {
             false
         }
     }
+
+    #[cfg(test)]
+    pub(crate) fn charge_agg_frame(&mut self, peer_id: &PeerId, objects: usize) -> bool {
+        self.charge_agg_frame_from(peer_id, true, objects)
+    }
+
+    /// Charge a peer's aggregation-frame budget proportionally to the objects
+    /// inside the frame (each object costs a native signature check on the chain
+    /// actor). Relayed frames (`authored_by_peer == false`) enforce the token
+    /// bucket and demote score without auto-banning honest relayers.
+    pub(crate) fn charge_agg_frame_from(
+        &mut self,
+        peer_id: &PeerId,
+        authored_by_peer: bool,
+        objects: usize,
+    ) -> bool {
+        let Some(score) = self.get_or_create(peer_id) else {
+            return false;
+        };
+        score.refill_tokens();
+        let cost = (objects.max(1) as f64 / 16.0).clamp(1.0, 10.0);
+        if score.agg_frame_tokens >= cost {
+            score.agg_frame_tokens -= cost;
+            true
+        } else {
+            let floor = if authored_by_peer {
+                MIN_SCORE
+            } else {
+                MIN_SCORE.saturating_add(1)
+            };
+            score.score = (score.score - 5).max(floor);
+            score.last_seen = Some(Instant::now());
+            let spent = authored_by_peer && score.score <= BAN_THRESHOLD;
+            if spent {
+                self.ban_peer(peer_id);
+            }
+            false
+        }
+    }
     pub fn report_invalid_block(&mut self, peer_id: &PeerId) {
         let Some(score) = self.get_or_create(peer_id) else {
             return;
@@ -865,10 +913,25 @@ impl PeerManager {
                 .saturating_mul(1u32.checked_shl(doublings).unwrap_or(u32::MAX))
                 .min(BAN_DURATION);
             score.sync_rest_until = Some(Instant::now() + rest);
+            // A rest only reorders the asks: the peer keeps the connection,
+            // and that connection keeps an inbound slot a peer that serves
+            // data could hold instead. A peer that comes back from a rest
+            // and leaves a whole run of requests unanswered again is not an
+            // unlucky wait, and the rests stop being an answer for it. Any
+            // delivered sync data clears `sync_rests`, so a validator that
+            // is only slow never reaches the cap.
+            let refused_across_rests = score.sync_rests >= MAX_SYNC_REST_RUNS;
             warn!(
                 "Peer {} left {} sync requests in a row unanswered: not asked for sync data for {:?}",
                 peer_id, MAX_UNANSWERED_SYNC_STRIKES, rest
             );
+            if refused_across_rests {
+                warn!(
+                    "Peer {} refused sync data across {} rests: banned to free its slot",
+                    peer_id, MAX_SYNC_REST_RUNS
+                );
+                self.ban_peer(peer_id);
+            }
         }
     }
     /// Whether the peer is set aside as a sync source right now.
@@ -2182,11 +2245,11 @@ mod tests {
         pm.report_unanswered_request(&flaky);
         assert!(!pm.is_sync_resting(&flaky));
 
-        // However long a peer stays silent, and however slow its rounds
-        // are, it is never banned for it, and every further run of strikes
-        // makes the rest longer, up to one ban-length.
+        // A peer that keeps leaving whole runs unanswered across rests is
+        // refusing sync data and eventually loses its connection slot via ban;
+        // delivered sync data resets the rest streak before the cap.
         let mut rests = Vec::new();
-        for _ in 0..12 {
+        for run in 0..MAX_SYNC_REST_RUNS {
             for _ in 0..MAX_UNANSWERED_SYNC_STRIKES {
                 pm.report_unanswered_request(&staller);
                 pm.report_slow_sync(&staller);
@@ -2196,24 +2259,45 @@ mod tests {
                 .and_then(|score| score.sync_rest_until)
                 .expect("resting");
             rests.push(until.saturating_duration_since(Instant::now()));
+            if run + 1 < MAX_SYNC_REST_RUNS {
+                assert!(!pm.is_banned(&staller));
+            }
         }
-        assert!(!pm.is_banned(&staller));
+        assert!(
+            pm.is_banned(&staller),
+            "refusing sync across MAX_SYNC_REST_RUNS must ban to free the inbound slot"
+        );
         assert!(pm.get_score(&staller) > BAN_THRESHOLD);
-        // Never shorter than the one before (a second of slack for the
-        // clock between the two readings once the cap is reached).
         assert!(rests
             .windows(2)
             .all(|pair| pair[0] <= pair[1] + Duration::from_secs(1)));
         assert!(rests[1] > rests[0] + SYNC_REST_BASE / 2);
-        assert!(rests[11] <= BAN_DURATION);
-        assert!(rests[11] > BAN_DURATION - Duration::from_secs(5));
-        assert!(pm.get_persisted_banned_peers().is_empty());
-        // Sync data from it ends the rest and the escalation.
-        pm.report_sync_success(&staller);
-        assert!(!pm.is_sync_resting(&staller));
+        assert!(rests.last().copied().unwrap() <= BAN_DURATION);
+        assert!(!pm.get_persisted_banned_peers().is_empty());
+
+        // Sync data from a peer before the cap clears the rest and streak.
+        let recovering = test_peer_id();
+        for _ in 0..(MAX_SYNC_REST_RUNS - 1) {
+            for _ in 0..MAX_UNANSWERED_SYNC_STRIKES {
+                pm.report_unanswered_request(&recovering);
+            }
+        }
+        assert!(!pm.is_banned(&recovering));
+        pm.report_sync_success(&recovering);
+        assert!(!pm.is_sync_resting(&recovering));
         assert_eq!(
-            pm.get_peer_info(&staller).map(|score| score.sync_rests),
+            pm.get_peer_info(&recovering).map(|score| score.sync_rests),
             Some(0)
         );
+    }
+
+    #[test]
+    fn agg_frame_budget_charges_proportional_to_object_count() {
+        let mut pm = PeerManager::new();
+        let flooder = test_peer_id();
+        // A 160-object frame costs max budget (10 tokens) and fits once.
+        assert!(pm.charge_agg_frame(&flooder, 160));
+        // A second immediate large frame exceeds the refilled budget and fails.
+        assert!(!pm.charge_agg_frame(&flooder, 160));
     }
 }

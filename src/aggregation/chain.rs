@@ -35,7 +35,7 @@ use crate::domain::types::{DomainId, Hash32};
 /// limits of a chain sit at or below these and are checked by the block
 /// rules; this ceiling only bounds what a decoder allocates before the
 /// rules run.
-const WIRE_FRAME_LIMITS: FrameLimits = FrameLimits {
+pub(crate) const WIRE_FRAME_LIMITS: FrameLimits = FrameLimits {
     max_claims: 65_536,
     max_proof_bytes: crate::network::protocol::MAX_MESSAGE_SIZE,
 };
@@ -471,6 +471,7 @@ pub fn check_block(
         block.frame_hash.as_ref(),
         block.claim_frame.as_ref(),
         &txs,
+        registry,
         &ChainBackend::new(params, registry),
     )
     .map(|_| ())

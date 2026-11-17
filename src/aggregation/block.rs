@@ -12,8 +12,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::backend::{AggBackend, AggError};
-use super::frame::{ClaimFrame, FrameError, FrameLimits};
+use super::frame::{verify_segment_attestations, ClaimFrame, FrameError, FrameLimits};
 use super::params::{AggMode, AggParams};
+use crate::crypto::scheme::SchemeStatusRegistry;
 use crate::domain::types::{DomainId, Hash32};
 
 /// What the block rules need to know about one transaction of a block.
@@ -117,6 +118,7 @@ pub fn check_block_claims<B: AggBackend + ?Sized>(
     header_frame_hash: Option<&Hash32>,
     frame: Option<&ClaimFrame>,
     txs: &[TxClaims<'_>],
+    registry: &SchemeStatusRegistry,
     backend: &B,
 ) -> Result<BlockClaims, BlockClaimError> {
     if params.mode != AggMode::On {
@@ -162,12 +164,16 @@ pub fn check_block_claims<B: AggBackend + ?Sized>(
         .check_structure(domain, &FrameLimits::from(params))
         .map_err(BlockClaimError::Frame)?;
     // Rule 10.
-    if super::frame::frame_hash(&facts.master_pi, &frame.proof) != *header_frame_hash {
+    if super::frame::frame_hash(&facts.master_pi, &frame.segments, &frame.proof)
+        != *header_frame_hash
+    {
         return Err(BlockClaimError::FrameHashMismatch);
     }
     // Rules 7 and 8.
     let payers = claim_payers(&facts.claim_digests, txs)?;
-    // Rule 5.
+    // Rule 5: segment aggregator ownership attestations and proof verification.
+    verify_segment_attestations(registry, domain, &frame.segments)
+        .map_err(BlockClaimError::Proof)?;
     backend
         .verify(frame, domain)
         .map_err(BlockClaimError::Proof)?;

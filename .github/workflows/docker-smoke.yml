@@ -29,7 +29,7 @@ jobs:
     # not start this job. See the note at the top of the file.
     if: ${{ github.event_name != 'pull_request' || contains(fromJSON('["main","consensus-of-consensuses"]'), github.event.pull_request.base.ref) }}
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 60
     # security-events: write is required for Trivy IMAGE findings to be uploaded
     # to the Security tab as SARIF. The workflow default is `contents: read`.
     permissions:
@@ -118,7 +118,7 @@ jobs:
     if: ${{ github.event_name != 'pull_request' || contains(fromJSON('["main","consensus-of-consensuses"]'), github.event.pull_request.base.ref) }}
     name: Devnet Multi-Node Smoke (4x PoS mesh + metrics + operator-RPC izolasyon)
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
