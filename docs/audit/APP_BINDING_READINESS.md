@@ -2,26 +2,22 @@
 
 Inspected source at `62b7beeca453dda88693b928c69f7e5c8d585490`.
 **Do not advertise another network's application as working through the
-Budlum testnet beyond register-and-pay (level 0).** The transaction door is
-now open on testnet `45261` and devnet `45262` by explicit activation
-decision (`docs/APP_BINDING.md`); mainnet `45260` remains closed. Level 1-3
-(origin-chain verifier, solver call, remote account) still require the
-conditions below before any user-facing claim. An open door is not an origin-chain
-user journey. A fixture or a configured chain flag cannot replace one.
+Budlum public testnet.** The transaction door is closed on testnet `45261` and
+mainnet `45260`; it remains available only on devnet `45262` for integration
+work. Levels 0-3 still require the conditions below before public activation.
+A fixture or a configured chain flag cannot replace a live origin-chain user
+journey.
 
 ## Activation gate: wired, not runtime-verified
 
-`src/core/chain_config.rs` defines `app_binding_enabled_for_chain_id`, true
-on testnet (`45261`) and devnet (`45262`), false on mainnet and on an
-unknown chain (activation decision 2026-11-16). The pre-match guard in `execute_app_binding_tx`
+`src/core/chain_config.rs` defines `app_binding_enabled_for_chain_id`: true
+only on devnet (`45262`), false on public testnet (`45261`), mainnet, and an
+unknown chain. The pre-match guard in `execute_app_binding_tx`
 (`src/settlement/app_binding.rs`) refuses a closed chain before moving a
 balance or registering an application. The outer `SettlementTx::AppBinding`
-arm uses that same door. `app_binding_is_open_on_devnet` in
-`src/tests/domains_bridge_settlement.rs` runs the direct entry point on
-devnet. It checks that both entry points accept testnet and that the outer
-one refuses mainnet. `app_binding_is_open_on_testnet` in
-`src/tests/testnet_closed_features.rs` pins the flag per chain. The guard and
-the named tests are source evidence, not a successful testnet rehearsal.
+arm uses that same door. `app_binding_is_open_on_devnet` exercises the devnet
+implementation, while `app_binding_is_closed_on_testnet` pins the public
+fail-closed boundary.
 
 ## Devnet implementation by level, not an end-to-end assertion
 
@@ -40,9 +36,9 @@ foreign app performed the requested action.
 
 ## Conditions for future public testnet instructions
 
-1. Open testnet by an explicit activation decision. DONE 2026-11-16:
-   `app_binding_is_open_on_testnet` runs both entry points on testnet.
-   Mainnet stays closed until its own activation decision.
+1. Open public testnet only after an explicit activation-height decision.
+   Current status: not done. `app_binding_is_closed_on_testnet` pins the
+   refusal until the remaining evidence below exists.
 2. Complete origin-domain verifier/executor configuration, deploy contracts,
    pin addresses and finality trust roots, and pass both positive and negative
    cross-chain tests. Record real genesis, network URL, activation height,

@@ -1890,13 +1890,13 @@ fn execute_object_layer_tx(
         height,
         signer: ctx.sender,
         activation: if ctx.chain_id
-            == crate::core::chain_config::Network::Mainnet
+            == crate::core::chain_config::Network::Devnet
                 .chain_id()
                 .value()
         {
-            crate::object_layer::ObjectLayerActivation { height: None }
-        } else {
             crate::object_layer::ACTIVATION
+        } else {
+            crate::object_layer::ObjectLayerActivation { height: None }
         },
         finality: &finality,
         domain_active: &domain_active,
