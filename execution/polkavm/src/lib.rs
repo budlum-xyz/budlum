@@ -352,8 +352,11 @@ impl PolkaVmWorker {
     /// Returns `true` when PolkaVM is active at `ctx`.
     #[must_use]
     pub const fn is_active(&self, ctx: &BlockContext) -> bool {
-        if ctx.chain_id != BUDLUM_TESTNET_CHAIN_ID {
+        if ctx.chain_id == budlum_uel_abi::BUDLUM_DEVNET_CHAIN_ID {
             return true;
+        }
+        if ctx.chain_id != BUDLUM_TESTNET_CHAIN_ID {
+            return false;
         }
         match self.testnet_activation_height {
             Some(h) => ctx.height >= h,

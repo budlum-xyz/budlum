@@ -56,8 +56,11 @@ impl StarknetActivationPolicy {
     /// Convenience: queried before serving Starknet JSON-RPC requests.
     #[must_use]
     pub const fn is_active(&self) -> bool {
-        if self.chain_id != BUDLUM_TESTNET_CHAIN_ID {
+        if self.chain_id == budlum_uel_abi::BUDLUM_DEVNET_CHAIN_ID {
             return true;
+        }
+        if self.chain_id != BUDLUM_TESTNET_CHAIN_ID {
+            return false;
         }
         match self.activation_height {
             Some(h) => self.block_height >= h,

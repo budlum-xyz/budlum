@@ -81,9 +81,15 @@ impl ParallelSchedulerPolicy {
     /// Convenience: queried by `execute_block_with_policy` and readiness probes.
     #[must_use]
     pub const fn scheduler_active(&self) -> bool {
+        if self.chain_id == budlum_uel_abi::BUDLUM_DEVNET_CHAIN_ID {
+            return true;
+        }
+        if self.chain_id != BUDLUM_TESTNET_CHAIN_ID {
+            return false;
+        }
         match self.activation_height {
             Some(h) => self.block_height >= h,
-            None => self.chain_id != BUDLUM_TESTNET_CHAIN_ID,
+            None => false,
         }
     }
 
