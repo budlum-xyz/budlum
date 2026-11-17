@@ -1049,6 +1049,9 @@ impl OutboundSyncKind {
         self,
         error: &request_response::OutboundFailure,
     ) -> bool {
+        if !self.counts_as_sync_strike() {
+            return false;
+        }
         match self {
             Self::Handshake => false,
             Self::ActiveSync => matches!(
