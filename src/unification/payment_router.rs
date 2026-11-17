@@ -835,7 +835,7 @@ mod tests {
             },
         };
 
-        // Payer holds NO Ethereum USDC — only BUD on Budlum, SOL on Solana, and ATOM on Cosmos.
+        // Payer holds NO Ethereum USDC : only BUD on Budlum, SOL on Solana, and ATOM on Cosmos.
         let mut balances = vec![
             DomainTokenBalance {
                 domain_id: 1,
