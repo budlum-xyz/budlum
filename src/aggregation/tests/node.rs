@@ -307,6 +307,67 @@ fn a_transaction_that_can_no_longer_run_is_dropped_and_the_chain_goes_on() {
 }
 
 #[test]
+fn dropped_transaction_clears_stale_claim_and_allows_resubmission() {
+    let sender = wallet(1);
+    let funder = wallet(2);
+    let mut node = node(&[&sender, &funder], aggregator());
+    let mut rival = self::node(&[&sender, &funder], Address::from([0xA2; 32]));
+
+    // Prove nonce 0 and nonce 1 on `node`.
+    node.add_transaction(transfer(&sender, 0, 5))
+        .expect("nonce 0");
+    assert_eq!(node.aggregation_tick().len(), 1);
+    let original_nonce_1 = transfer(&sender, 1, 6);
+    node.add_transaction(original_nonce_1.clone())
+        .expect("nonce 1");
+    assert!(!node.aggregation_tick().is_empty());
+
+    // `rival` commits a different nonce 0 that drains `sender` below `FEE + 6`.
+    let drained = 10_000_000 - FEE - (FEE + 3);
+    rival
+        .add_transaction(transfer(&sender, 0, drained))
+        .expect("rival nonce 0");
+    assert_eq!(rival.aggregation_tick().len(), 1);
+    let (drain_block, _) = rival.produce_block(producer()).expect("drain block");
+    node.validate_and_add_block(drain_block)
+        .expect("node accepts drain block");
+
+    // `node` cannot run `original_nonce_1` now and drops it along with its
+    // proven claim and zombie frame.
+    let (plain, _) = node.produce_block(producer()).expect("empty block");
+    assert!(plain.claim_frame.is_none() && plain.transactions.is_empty());
+
+    // Top up `sender` from `funder` so `original_nonce_1` is affordable again.
+    // Because the dead frames were dropped, this tick produces exactly one
+    // frame instead of merging with a zombie frame.
+    let mut top_up = Transaction::new_with_fee(
+        funder.address(),
+        sender.address(),
+        1_000,
+        FEE,
+        0,
+        Vec::new(),
+    );
+    top_up.chain_id = CHAIN;
+    top_up.sign_v5(&funder);
+    node.add_transaction(top_up).expect("top up");
+    assert_eq!(node.aggregation_tick().len(), 1);
+    let (fund_block, _) = node.produce_block(producer()).expect("fund block");
+    assert_eq!(fund_block.transactions.len(), 1);
+
+    // Resubmitting the exact same signed `original_nonce_1` must not remain
+    // trapped behind stale `claims`/`seen` state from the dropped run; it must
+    // re-enter, prove into a fresh frame, and execute in a block.
+    node.add_transaction(original_nonce_1)
+        .expect("resubmission of dropped tx");
+    let frames = node.aggregation_tick();
+    assert_eq!(frames.len(), 1);
+    let (block, _) = node.produce_block(producer()).expect("final block");
+    assert_eq!(block.transactions.len(), 1);
+    assert_eq!(node.state.get_nonce(&sender.address()), 2);
+}
+
+#[test]
 fn objects_and_frames_cross_the_wire_and_the_message_layer_bounds_them() {
     let sender = wallet(1);
     let mut node = node(&[&sender], aggregator());
