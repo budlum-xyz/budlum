@@ -24,7 +24,7 @@ use crate::unification::{
     hash_domain_fields, mul_div_ceil, mul_div_floor, unification_merkle_root, validate_safe_label,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Fixed-point basis-points denominator (`10_000` bps = 100%).
 pub const BPS_DENOM: u128 = 10_000;
@@ -40,6 +40,9 @@ pub const MAX_SPLIT_TENDER_LEGS: usize = 16;
 
 /// Maximum quotes inspected in one routing request.
 pub const MAX_PAYMENT_QUOTES: usize = 64;
+
+/// Maximum settled intent IDs retained in one router replay table.
+pub const MAX_SETTLED_INTENTS: usize = 65_536;
 
 /// Maximum liquidation bonus (`1_500` bps = 15%).
 pub const MAX_LIQUIDATION_BONUS_BPS: u16 = 1_500;
@@ -341,6 +344,26 @@ impl UniversalPaymentRouter {
             return Err(PaymentError::InputLimitExceeded);
         }
 
+        let mut seen_balances: BTreeSet<(DomainId, Hash32)> = BTreeSet::new();
+        for bal in balances {
+            if !seen_balances.insert((bal.domain_id, bal.asset_id)) {
+                return Err(PaymentError::InvalidIntent(String::from(
+                    "duplicate balance entry for (domain_id, asset_id)",
+                )));
+            }
+        }
+        let mut remaining_quote_liquidity: BTreeMap<Hash32, u128> = BTreeMap::new();
+        for quote in quotes {
+            if remaining_quote_liquidity
+                .insert(quote.quote_id, quote.max_target_liquidity)
+                .is_some()
+            {
+                return Err(PaymentError::InvalidIntent(String::from(
+                    "duplicate quote_id",
+                )));
+            }
+        }
+
         let mut remaining = intent.target_amount;
         let mut legs = Vec::new();
         let mut used_balance_indices = BTreeSet::new();
@@ -379,15 +402,25 @@ impl UniversalPaymentRouter {
             if used_balance_indices.contains(&idx) || bal.available_amount == 0 {
                 continue;
             }
-            let Some(best_quote) = select_best_quote(intent, bal, quotes, now_unix_secs) else {
+            let Some(best_quote) = select_best_quote(
+                intent,
+                bal,
+                quotes,
+                &remaining_quote_liquidity,
+                now_unix_secs,
+            ) else {
                 continue;
             };
+            let quote_cap = remaining_quote_liquidity
+                .get(&best_quote.quote_id)
+                .copied()
+                .unwrap_or(0);
             let max_deliverable = max_target_from_source(
                 bal.available_amount,
                 best_quote.rate_scaled,
                 best_quote.fee_bps,
             )?
-            .min(best_quote.max_target_liquidity);
+            .min(quote_cap);
             if max_deliverable == 0 {
                 continue;
             }
@@ -398,6 +431,9 @@ impl UniversalPaymentRouter {
                 required_source_for_target(deliver, best_quote.rate_scaled, best_quote.fee_bps)?;
             if required_source == 0 || required_source > bal.available_amount {
                 continue;
+            }
+            if let Some(rem_cap) = remaining_quote_liquidity.get_mut(&best_quote.quote_id) {
+                *rem_cap = rem_cap.saturating_sub(deliver);
             }
             legs.push(SplitTenderLeg {
                 source_domain: bal.domain_id,
@@ -426,7 +462,8 @@ impl UniversalPaymentRouter {
             PaymentRail::PosTerminal { .. } | PaymentRail::CardNetwork { .. } => {
                 let code_hash =
                     hash_domain_fields(b"BDLM_POS_AUTH_CODE_V1", &[&intent_id, &legs_merkle_root]);
-                Some(hex::encode(&code_hash[..6]).to_ascii_uppercase())
+                let prefix = code_hash.get(..6).unwrap_or(&code_hash);
+                Some(hex::encode(prefix).to_ascii_uppercase())
             }
         };
         let dom_bytes = intent.target_domain.to_le_bytes();
@@ -458,6 +495,9 @@ impl UniversalPaymentRouter {
     /// `balances` in place ONLY after all legs succeed and recording `intent_id`
     /// to prevent replay.
     ///
+    /// Convenience: exposed for atomic settlement execution callers alongside
+    /// the dry-run `quote_payment` RPC path.
+    ///
     /// # Errors
     ///
     /// Returns [`PaymentError`] without mutating any balance if the intent is a
@@ -473,17 +513,30 @@ impl UniversalPaymentRouter {
         if self.settled_intents.contains(&id) {
             return Err(PaymentError::ReplayDetected);
         }
+        if self.settled_intents.len() >= MAX_SETTLED_INTENTS {
+            return Err(PaymentError::InputLimitExceeded);
+        }
         let receipt = Self::quote_payment(intent, balances, quotes, now_unix_secs)?;
-        // Atomic commit: apply all debits only after every leg verified above.
+        // Pre-validate every debit into a provisional plan before mutating any balance.
+        let mut provisional: Vec<(usize, u128)> = Vec::with_capacity(receipt.legs.len());
         for leg in &receipt.legs {
-            if let Some(bal) = balances
-                .iter_mut()
-                .find(|b| b.domain_id == leg.source_domain && b.asset_id == leg.source_asset_id)
-            {
-                bal.available_amount = bal
-                    .available_amount
-                    .checked_sub(leg.source_debited)
-                    .ok_or(PaymentError::ArithmeticOverflow)?;
+            let (idx, bal) = balances
+                .iter()
+                .enumerate()
+                .find(|(_, b)| {
+                    b.domain_id == leg.source_domain && b.asset_id == leg.source_asset_id
+                })
+                .ok_or(PaymentError::ArithmeticOverflow)?;
+            let next_amount = bal
+                .available_amount
+                .checked_sub(leg.source_debited)
+                .ok_or(PaymentError::ArithmeticOverflow)?;
+            provisional.push((idx, next_amount));
+        }
+        // Atomic commit: apply all validated debits together.
+        for (idx, next_amount) in provisional {
+            if let Some(bal) = balances.get_mut(idx) {
+                bal.available_amount = next_amount;
             }
         }
         self.settled_intents.insert(id);
@@ -501,17 +554,19 @@ fn select_best_quote<'a>(
     intent: &UniversalPaymentIntent,
     balance: &DomainTokenBalance,
     quotes: &'a [LiquidityQuote],
+    remaining_liquidity: &BTreeMap<Hash32, u128>,
     now_unix_secs: u64,
 ) -> Option<&'a LiquidityQuote> {
     quotes
         .iter()
         .filter(|q| {
+            let avail_cap = remaining_liquidity.get(&q.quote_id).copied().unwrap_or(0);
             q.source_domain == balance.domain_id
                 && q.source_asset_id == balance.asset_id
                 && q.target_domain == intent.target_domain
                 && q.target_asset_id == intent.target_asset_id
                 && q.rate_scaled > 0
-                && q.max_target_liquidity > 0
+                && avail_cap > 0
                 && q.fee_bps <= intent.max_slippage_bps
                 && q.valid_until_unix_secs >= now_unix_secs
         })
@@ -621,7 +676,7 @@ impl CrossDomainPosition {
     }
 }
 
-fn check_oracle_fresh(updated: u64, now: u64) -> Result<(), LiquidationError> {
+const fn check_oracle_fresh(updated: u64, now: u64) -> Result<(), LiquidationError> {
     if updated > now || now.saturating_sub(updated) > MAX_ORACLE_AGE_SECS {
         return Err(LiquidationError::StaleOracle { updated, now });
     }
@@ -675,6 +730,8 @@ impl UniversalLiquidationCoordinator {
     /// `debt_amount` and seizing collateral across external domains up to the
     /// close-factor and liquidation-bonus caps.
     ///
+    /// Convenience: exposed for cross-domain liquidation settlement callers.
+    ///
     /// # Errors
     ///
     /// Returns [`LiquidationError`] without mutating `position` if the position
@@ -707,17 +764,25 @@ impl UniversalLiquidationCoordinator {
             return Err(LiquidationError::InvalidRepayAmount { max_repay });
         }
 
-        let repay_usd = mul_div_ceil(
+        // Floor rounding ensures dust repayments cannot round up to seize
+        // disproportionate collateral.
+        let repay_usd = mul_div_floor(
             repay_debt_amount,
             position.debt_price_usd_scaled,
             RATE_SCALE,
         )
         .ok_or(LiquidationError::ArithmeticOverflow)?;
+        if repay_usd == 0 {
+            return Err(LiquidationError::InvalidRepayAmount { max_repay });
+        }
         let bonus_factor = BPS_DENOM
             .checked_add(u128::from(bonus_bps))
             .ok_or(LiquidationError::ArithmeticOverflow)?;
         let mut remaining_seize_usd = mul_div_floor(repay_usd, bonus_factor, BPS_DENOM)
             .ok_or(LiquidationError::ArithmeticOverflow)?;
+        if remaining_seize_usd == 0 {
+            return Err(LiquidationError::InvalidRepayAmount { max_repay });
+        }
 
         // Compute provisional seizures first so failure leaves `position` untouched.
         let mut plan: Vec<(usize, SeizedCollateralLeg)> = Vec::new();
@@ -763,7 +828,11 @@ impl UniversalLiquidationCoordinator {
             .ok_or(LiquidationError::ArithmeticOverflow)?;
         let mut seized_legs = Vec::with_capacity(plan.len());
         for (idx, leg) in plan {
-            position.collateral[idx].amount = position.collateral[idx]
+            let col = position
+                .collateral
+                .get_mut(idx)
+                .ok_or(LiquidationError::ArithmeticOverflow)?;
+            col.amount = col
                 .amount
                 .checked_sub(leg.amount_seized)
                 .ok_or(LiquidationError::ArithmeticOverflow)?;
@@ -835,7 +904,7 @@ mod tests {
             },
         };
 
-        // Payer holds NO Ethereum USDC : only BUD on Budlum, SOL on Solana, and ATOM on Cosmos.
+        // Payer holds NO Ethereum USDC - only BUD on Budlum, SOL on Solana, and ATOM on Cosmos.
         let mut balances = vec![
             DomainTokenBalance {
                 domain_id: 1,
@@ -1017,5 +1086,98 @@ mod tests {
             UniversalLiquidationCoordinator::execute_liquidation(&mut pos, 100, 500, 1_050),
             Err(LiquidationError::PositionHealthy { .. })
         ));
+    }
+
+    #[test]
+    fn rejects_duplicate_balances_and_tracks_quote_liquidity_atomically() {
+        let usdc = [0x01; 32];
+        let bud = [0x02; 32];
+        let intent = UniversalPaymentIntent {
+            payer_id: [0xA1; 32],
+            merchant_id: [0xB2; 32],
+            nonce: 99,
+            target_domain: 3,
+            target_asset_id: usdc,
+            target_amount: 100,
+            max_slippage_bps: 100,
+            deadline_unix_secs: 2_000,
+            invoice_hash: [0xEE; 32],
+            rail: PaymentRail::OnChain,
+        };
+        let mut dup_balances = vec![
+            DomainTokenBalance {
+                domain_id: 1,
+                asset_id: bud,
+                symbol: String::from("BUD"),
+                available_amount: 60,
+            },
+            DomainTokenBalance {
+                domain_id: 1,
+                asset_id: bud,
+                symbol: String::from("BUD"),
+                available_amount: 60,
+            },
+        ];
+        let quotes = vec![LiquidityQuote {
+            quote_id: [0x44; 32],
+            source_domain: 1,
+            source_asset_id: bud,
+            target_domain: 3,
+            target_asset_id: usdc,
+            rate_scaled: RATE_SCALE,
+            max_target_liquidity: 80,
+            fee_bps: 0,
+            valid_until_unix_secs: 2_500,
+        }];
+        let mut router = UniversalPaymentRouter::new();
+        assert!(matches!(
+            router.settle_payment(&intent, &mut dup_balances, &quotes, 1_500),
+            Err(PaymentError::InvalidIntent(_))
+        ));
+        assert_eq!(dup_balances[0].available_amount, 60);
+        assert_eq!(dup_balances[1].available_amount, 60);
+
+        // Duplicate quote_id is also rejected cleanly.
+        let mut single_bal = vec![DomainTokenBalance {
+            domain_id: 1,
+            asset_id: bud,
+            symbol: String::from("BUD"),
+            available_amount: 200,
+        }];
+        let dup_quotes = vec![quotes[0].clone(), quotes[0].clone()];
+        assert!(matches!(
+            router.settle_payment(&intent, &mut single_bal, &dup_quotes, 1_500),
+            Err(PaymentError::InvalidIntent(_))
+        ));
+        assert_eq!(single_bal[0].available_amount, 200);
+    }
+
+    #[test]
+    fn liquidation_refuses_zero_value_dust_repay_without_over_seizing() {
+        let mut pos = CrossDomainPosition {
+            position_id: [0xD1; 32],
+            debt_domain: 3,
+            debt_asset_id: [0x01; 32],
+            debt_amount: 100_000,
+            // Sub-1 USD per base unit so 1 base unit of debt has 0 whole USD value.
+            debt_price_usd_scaled: RATE_SCALE / 10,
+            debt_oracle_updated_unix_secs: 1_000,
+            collateral: vec![CollateralAsset {
+                domain_id: 4,
+                asset_id: [0x04; 32],
+                amount: 10_000,
+                price_usd_scaled: RATE_SCALE / 2,
+                oracle_updated_unix_secs: 1_000,
+                liquidation_threshold_bps: 8_000,
+            }],
+        };
+
+        // 1 wei of debt floors to 0 USD -> must be rejected rather than rounding up to 1 USD.
+        assert!(matches!(
+            UniversalLiquidationCoordinator::execute_liquidation(&mut pos, 1, 500, 1_050),
+            Err(LiquidationError::InvalidRepayAmount { .. })
+        ));
+        assert_eq!(pos.debt_amount, 100_000);
+        assert_eq!(pos.collateral[0].amount, 10_000);
     }
 }

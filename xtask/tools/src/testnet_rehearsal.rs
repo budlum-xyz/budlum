@@ -1371,7 +1371,14 @@ fn scenario_app_binding(backend: &Backend<'_>, wallets: &Wallets) -> Result<Stri
         line_value(&ids, "app_binding id: ").ok_or("app_binding id printed nothing")?;
     let mirror =
         line_value(&ids, "mirror account: 0x").ok_or("app_binding id printed no mirror")?;
-    backend.bud(&[
+    let query_params = format!("[\"{app_binding_id}\"]");
+    let before_tip = tip();
+    // Remote app binding (`app_binding`) is closed on public testnet (45261)
+    // and mainnet (45260); only devnet (45262) keeps the door open. Verify the
+    // live fail-closed boundary (G-7): registration must either be refused at
+    // submission or dropped in execution without creating a binding row or
+    // crediting the mirror account.
+    let register_result = backend.bud(&[
         "app-binding",
         "register",
         "--key-file",
@@ -1382,33 +1389,34 @@ fn scenario_app_binding(backend: &Backend<'_>, wallets: &Wallets) -> Result<Stri
         ORIGIN,
         "--manifest",
         "1111111111111111111111111111111111111111111111111111111111111111",
-    ])?;
-    let query_params = format!("[\"{app_binding_id}\"]");
-    let lookup_registered = || {
-        call("bud_getAppBindingApplication", &query_params)
-            .filter(|value| *value != crate::json::Value::Null)
+    ]);
+    let refusal_stage = if let Err(err) = register_result {
+        format!("refused at submission ({err})")
+    } else {
+        wait_for(30, || {
+            let now = tip();
+            (now >= before_tip.saturating_add(2)).then_some(now)
+        })
+        .ok_or("chain did not advance 2 blocks after AppBinding closed-feature probe")?;
+        String::from("refused in execution")
     };
-    wait_for(60, lookup_registered)
-        .ok_or("the AppBinding application did not register within 120 s")?;
-    backend.bud(&[
-        "app-binding",
-        "pay",
-        "--key-file",
-        &wallets.alice_file,
-        "--app-binding-id",
-        &app_binding_id,
-        "--amount",
-        "5000",
-        "--origin-recipient",
-        "01",
-    ])?;
-    let held = wait_for(60, || {
-        let amount = balance(&mirror);
-        (amount >= 5000).then_some(amount)
-    })
-    .ok_or("the AppBinding payment did not reach the mirror within 120 s")?;
+    let registered = call("bud_getAppBindingApplication", &query_params);
+    if registered
+        .as_ref()
+        .is_some_and(|v| *v != crate::json::Value::Null)
+    {
+        return Err(format!(
+            "AppBinding {app_binding_id} unexpectedly registered on closed testnet {CHAIN_ID}"
+        ));
+    }
+    let held = balance(&mirror);
+    if held != 0 {
+        return Err(format!(
+            "AppBinding mirror 0x{mirror} unexpectedly holds {held} on closed testnet {CHAIN_ID}"
+        ));
+    }
     Ok(format!(
-        "application {app_binding_id}: mirror 0x{mirror} holds {held}"
+        "PoA domain {DOMAIN} registered; AppBinding {app_binding_id} stayed closed ({refusal_stage})"
     ))
 }
 

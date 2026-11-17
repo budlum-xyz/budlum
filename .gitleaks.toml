@@ -74,3 +74,11 @@ condition = "AND"
 regexTarget = "line"
 paths = ['''(^|/)Cargo\.lock$''']
 regexes = ['''libcrux-secrets''']
+
+# RFC 6455 Section 1.3 standard WebSocket test nonce ("the sample nonce").
+[[allowlists]]
+description = "RFC 6455 sample Sec-WebSocket-Key in RPC WebSocket tests"
+condition = "AND"
+regexTarget = "line"
+paths = ['''^src/rpc/server\.rs$''']
+regexes = ['''Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==''']

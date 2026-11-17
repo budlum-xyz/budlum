@@ -11,9 +11,10 @@
 //! door `bud_encodeCrossVmCall` in `src/rpc/api.rs` and `src/rpc/server.rs`.
 
 use crate::domain::types::{DomainId, Hash32};
+use crate::execution::coordinator::gas::native_gas_to_bgu;
 use crate::unification::domain_catalog::UniversalDomainCatalog;
 use crate::unification::output_composer::{CanonicalValue, LanguageTag};
-use crate::unification::{hash_domain_fields, validate_safe_label};
+use crate::unification::{hash_domain_fields, unification_merkle_root, validate_safe_label};
 use budlum_uel_abi::EeId;
 use serde::{Deserialize, Serialize};
 use sha3::{Digest, Sha3_256};
@@ -42,9 +43,9 @@ pub enum TargetWireEncoding {
     EvmAbi32,
     /// Little-endian length-prefixed binary layout for Solana SVM / NEAR / Rust entrypoints.
     BorshLe,
-    /// Little-endian ULEB128-length binary layout for MoveVM (Aptos / Sui).
+    /// Little-endian ULEB128-length binary layout for `MoveVM` (Aptos / Sui).
     BcsLe,
-    /// Canonical sorted JSON object payload for CosmWasm / JSON-ABI domains.
+    /// Canonical sorted JSON object payload for `CosmWasm` / JSON-ABI domains.
     JsonCanonical,
     /// Domain-separated raw length-prefixed binary payload for UTXO / Cairo / TVM / Plutus / `BudZero`.
     RawCanonical,
@@ -162,15 +163,19 @@ impl CrossVmBridge {
             .get(request.source_domain)
             .ok_or(AbiBridgeError::UnknownDomain(request.source_domain))?;
         let source_ee_id = src
-            .execution_env_id
-            .ok_or(AbiBridgeError::DomainNotExecutable(request.source_domain))?;
+            .execution_env()
+            .ok_or(AbiBridgeError::DomainNotExecutable(request.source_domain))?
+            .0;
         let dst = catalog
             .get(request.target_domain)
             .ok_or(AbiBridgeError::UnknownDomain(request.target_domain))?;
         let target_ee_id = dst
-            .execution_env_id
-            .ok_or(AbiBridgeError::DomainNotExecutable(request.target_domain))?;
+            .execution_env()
+            .ok_or(AbiBridgeError::DomainNotExecutable(request.target_domain))?
+            .0;
 
+        validate_language(&request.source_language)?;
+        validate_language(&request.target_language)?;
         validate_method_name(&request.method)?;
         validate_args(&request.args)?;
 
@@ -187,6 +192,7 @@ impl CrossVmBridge {
             source_language: &request.source_language,
             target_language: &request.target_language,
             method: &request.method,
+            args: &request.args,
             target_encoding,
             nonce: request.nonce,
             encoded_payload: &encoded_payload,
@@ -215,8 +221,25 @@ impl CrossVmBridge {
     ///
     /// Returns [`AbiBridgeError`] if any field is malformed or tampered with.
     pub fn verify_envelope(envelope: &CrossVmCallEnvelope) -> Result<(), AbiBridgeError> {
+        if envelope.source_domain == 0 {
+            return Err(AbiBridgeError::UnknownDomain(0));
+        }
+        if envelope.target_domain == 0 {
+            return Err(AbiBridgeError::UnknownDomain(0));
+        }
+        native_gas_to_bgu(EeId(envelope.source_ee_id), 0)
+            .map_err(|_| AbiBridgeError::DomainNotExecutable(envelope.source_domain))?;
+        native_gas_to_bgu(EeId(envelope.target_ee_id), 0)
+            .map_err(|_| AbiBridgeError::DomainNotExecutable(envelope.target_domain))?;
+        validate_language(&envelope.source_language)?;
+        validate_language(&envelope.target_language)?;
         validate_method_name(&envelope.method)?;
         validate_args(&envelope.args)?;
+        if envelope.encoded_payload.len() > MAX_CROSS_VM_PAYLOAD_BYTES {
+            return Err(AbiBridgeError::PayloadTooLarge(
+                envelope.encoded_payload.len(),
+            ));
+        }
         let expected_payload =
             project_wire_payload(envelope.target_encoding, &envelope.method, &envelope.args)?;
         if expected_payload != envelope.encoded_payload {
@@ -230,6 +253,7 @@ impl CrossVmBridge {
             source_language: &envelope.source_language,
             target_language: &envelope.target_language,
             method: &envelope.method,
+            args: &envelope.args,
             target_encoding: envelope.target_encoding,
             nonce: envelope.nonce,
             encoded_payload: &expected_payload,
@@ -239,6 +263,13 @@ impl CrossVmBridge {
         }
         Ok(())
     }
+}
+
+fn validate_language(language: &LanguageTag) -> Result<(), AbiBridgeError> {
+    if let LanguageTag::Custom(name) = language {
+        validate_safe_label("language", name, 48).map_err(AbiBridgeError::InvalidArg)?;
+    }
+    Ok(())
 }
 
 fn validate_method_name(method: &str) -> Result<(), AbiBridgeError> {
@@ -296,9 +327,8 @@ fn project_wire_payload(
 
 fn push_abi_bytes(out: &mut Vec<u8>, bytes: &[u8]) {
     let len_word = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
-    let mut word = [0u8; 32];
-    word[24..].copy_from_slice(&len_word.to_be_bytes());
-    out.extend_from_slice(&word);
+    out.extend_from_slice(&[0u8; 24]);
+    out.extend_from_slice(&len_word.to_be_bytes());
     out.extend_from_slice(bytes);
     let rem = bytes.len() % 32;
     if rem != 0 {
@@ -313,44 +343,38 @@ fn encode_evm_abi32(method: &str, args: &[CanonicalCallArg]) -> Vec<u8> {
     let digest: [u8; 32] = selector_hasher.finalize().into();
 
     let mut out = Vec::with_capacity(4 + args.len().saturating_mul(32));
-    out.extend_from_slice(&digest[..4]);
+    out.extend_from_slice(digest.get(..4).unwrap_or(&[]));
     for arg in args {
         match &arg.value {
             CanonicalValue::Bool(b) => {
-                let mut word = [0u8; 32];
-                word[31] = u8::from(*b);
-                out.extend_from_slice(&word);
+                out.extend_from_slice(&[0u8; 31]);
+                out.push(u8::from(*b));
             }
             CanonicalValue::U64(v) => {
-                let mut word = [0u8; 32];
-                word[24..].copy_from_slice(&v.to_be_bytes());
-                out.extend_from_slice(&word);
+                out.extend_from_slice(&[0u8; 24]);
+                out.extend_from_slice(&v.to_be_bytes());
             }
             CanonicalValue::U128(v) => {
-                let mut word = [0u8; 32];
-                word[16..].copy_from_slice(&v.to_be_bytes());
-                out.extend_from_slice(&word);
+                out.extend_from_slice(&[0u8; 16]);
+                out.extend_from_slice(&v.to_be_bytes());
             }
             CanonicalValue::I128(v) => {
                 let fill = if *v < 0 { 0xFF } else { 0x00 };
-                let mut word = [fill; 32];
-                word[16..].copy_from_slice(&v.to_be_bytes());
-                out.extend_from_slice(&word);
+                out.extend_from_slice(&[fill; 16]);
+                out.extend_from_slice(&v.to_be_bytes());
             }
             CanonicalValue::Bytes32(h) => out.extend_from_slice(h),
             CanonicalValue::Bytes(b) => push_abi_bytes(&mut out, b),
             CanonicalValue::Text(s) => push_abi_bytes(&mut out, s.as_bytes()),
             CanonicalValue::Address { ee_id, raw } => {
-                let mut tag_word = [0u8; 32];
-                tag_word[31] = *ee_id;
-                out.extend_from_slice(&tag_word);
+                out.extend_from_slice(&[0u8; 31]);
+                out.push(*ee_id);
                 push_abi_bytes(&mut out, raw);
             }
             CanonicalValue::AssetAmount { asset_id, amount } => {
                 out.extend_from_slice(asset_id);
-                let mut word = [0u8; 32];
-                word[16..].copy_from_slice(&amount.to_be_bytes());
-                out.extend_from_slice(&word);
+                out.extend_from_slice(&[0u8; 16]);
+                out.extend_from_slice(&amount.to_be_bytes());
             }
         }
     }
@@ -417,7 +441,7 @@ fn encode_borsh_le(method: &str, args: &[CanonicalCallArg]) -> Vec<u8> {
 
 fn push_uleb128(out: &mut Vec<u8>, mut value: usize) {
     loop {
-        let mut byte = (value & 0x7F) as u8;
+        let mut byte = u8::try_from(value & 0x7F).unwrap_or(0);
         value >>= 7;
         if value != 0 {
             byte |= 0x80;
@@ -547,6 +571,7 @@ struct EnvelopeHashInput<'a> {
     source_language: &'a LanguageTag,
     target_language: &'a LanguageTag,
     method: &'a str,
+    args: &'a [CanonicalCallArg],
     target_encoding: TargetWireEncoding,
     nonce: u64,
     encoded_payload: &'a [u8],
@@ -559,6 +584,15 @@ fn compute_envelope_hash(input: &EnvelopeHashInput<'_>) -> Hash32 {
     let src_lang = input.source_language.encode_bytes();
     let dst_lang = input.target_language.encode_bytes();
     let nonce_bytes = input.nonce.to_le_bytes();
+    let arg_hashes: Vec<Hash32> = input
+        .args
+        .iter()
+        .map(|arg| {
+            let val_hash = arg.value.commitment_hash();
+            hash_domain_fields(b"BDLM_CROSS_VM_ARG_V1", &[arg.name.as_bytes(), &val_hash])
+        })
+        .collect();
+    let args_root = unification_merkle_root(b"BDLM_CROSS_VM_ARGS_V1", &arg_hashes);
     hash_domain_fields(
         b"BDLM_UNIF_CROSS_VM_CALL_V1",
         &[
@@ -568,6 +602,7 @@ fn compute_envelope_hash(input: &EnvelopeHashInput<'_>) -> Hash32 {
             &src_lang,
             &dst_lang,
             input.method.as_bytes(),
+            &args_root,
             input.target_encoding.as_tag().as_bytes(),
             &nonce_bytes,
             input.encoded_payload,
@@ -772,6 +807,77 @@ mod tests {
                 }],
                 encoding_override: None,
                 nonce: 3,
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(err, AbiBridgeError::InvalidArg(_)));
+    }
+
+    #[test]
+    fn verify_envelope_blocks_arg_swap_type_confusion_zero_domain_and_oversized_custom_lang() {
+        let catalog = UniversalDomainCatalog::with_canonical_ecosystems();
+        let env = CrossVmBridge::encode_call(
+            &catalog,
+            &CrossVmCallRequest {
+                source_domain: 5,
+                target_domain: 3, // EVM (EvmAbi32)
+                source_language: LanguageTag::RustCosmWasm,
+                target_language: LanguageTag::Solidity,
+                method: String::from("bridge_note"),
+                args: vec![
+                    CanonicalCallArg {
+                        name: String::from("memo"),
+                        value: CanonicalValue::Text(String::from("hello")),
+                    },
+                    CanonicalCallArg {
+                        name: String::from("amount"),
+                        value: CanonicalValue::U128(42),
+                    },
+                ],
+                encoding_override: None,
+                nonce: 9,
+            },
+        )
+        .expect("encode succeeds");
+        CrossVmBridge::verify_envelope(&env).expect("original envelope verifies");
+
+        // Swapping arg name without changing wire bytes must fail envelope_hash verification.
+        let mut swapped_name = env.clone();
+        swapped_name.args[0].name = String::from("recipient");
+        assert_eq!(
+            CrossVmBridge::verify_envelope(&swapped_name),
+            Err(AbiBridgeError::EnvelopeIntegrityMismatch)
+        );
+
+        // Switching Text("hello") -> Bytes(b"hello") yields identical EvmAbi32 wire bytes
+        // but must still fail envelope_hash verification because args_root is typed.
+        let mut type_confused = env.clone();
+        type_confused.args[0].value = CanonicalValue::Bytes(b"hello".to_vec());
+        assert_eq!(
+            CrossVmBridge::verify_envelope(&type_confused),
+            Err(AbiBridgeError::EnvelopeIntegrityMismatch)
+        );
+
+        // Zero source_domain must be rejected by verify_envelope.
+        let mut zero_dom = env.clone();
+        zero_dom.source_domain = 0;
+        assert_eq!(
+            CrossVmBridge::verify_envelope(&zero_dom),
+            Err(AbiBridgeError::UnknownDomain(0))
+        );
+
+        // Oversized custom language tag must be rejected at encode time.
+        let err = CrossVmBridge::encode_call(
+            &catalog,
+            &CrossVmCallRequest {
+                source_domain: 5,
+                target_domain: 3,
+                source_language: LanguageTag::Custom("a".repeat(200)),
+                target_language: LanguageTag::Solidity,
+                method: String::from("bridge_note"),
+                args: Vec::new(),
+                encoding_override: None,
+                nonce: 10,
             },
         )
         .unwrap_err();
