@@ -8888,12 +8888,43 @@ impl BudlumApiServer for RpcServer {
                 None::<()>,
             ));
         }
-        let page = self
+        let mut page = self
             .chain
             .bud3_get_symbols(holder, object, segment, first_esi, count)
             .await
             .map_err(|_| bud3_actor_unavailable())?
             .map_err(|e| ErrorObjectOwned::owned(-32602, e, None::<()>))?;
+        if page.items.is_empty() {
+            if let Ok(Some(peer_bytes)) = self.chain.validator_peer_id(holder).await {
+                if let Ok(peer_id) =
+                    crate::network::bud3_protocol::ed25519_key_to_peer_id(&peer_bytes)
+                {
+                    if peer_id != self.node.peer_id {
+                        if let Ok(remote_items) = self
+                            .node
+                            .bud3_fetch_symbols(
+                                peer_id,
+                                crate::network::bud3_protocol::Bud3SymbolsRequest {
+                                    holder,
+                                    range:
+                                        crate::storage::bud3::symbol_protocol::SymbolRangeRequest {
+                                            object,
+                                            segment,
+                                            first_esi,
+                                            count,
+                                        },
+                                },
+                                page.symbol_size,
+                                page.roots.clone(),
+                            )
+                            .await
+                        {
+                            page.items = remote_items;
+                        }
+                    }
+                }
+            }
+        }
         let items: Vec<serde_json::Value> = page
             .items
             .into_iter()
@@ -9043,12 +9074,39 @@ impl BudlumApiServer for RpcServer {
         }
         let stored = self
             .chain
-            .bud3_store_verified_symbols(holder, object, segment, decoded)
+            .bud3_store_verified_symbols(holder, object, segment, decoded.clone())
             .await
             .map_err(|_| bud3_actor_unavailable())?
             .map_err(|e| ErrorObjectOwned::owned(-32602, e, None::<()>))?;
+        let mut remote_pushed: Option<usize> = None;
+        let mut remote_error: Option<String> = None;
+        if let Ok(Some(peer_bytes)) = self.chain.validator_peer_id(holder).await {
+            if let Ok(peer_id) = crate::network::bud3_protocol::ed25519_key_to_peer_id(&peer_bytes)
+            {
+                if peer_id != self.node.peer_id {
+                    match self
+                        .node
+                        .bud3_push_custody(
+                            peer_id,
+                            crate::network::bud3_protocol::Bud3CustodyRequest {
+                                holder,
+                                object,
+                                segment,
+                                items: decoded,
+                            },
+                        )
+                        .await
+                    {
+                        Ok(count) => remote_pushed = Some(count),
+                        Err(err) => remote_error = Some(err),
+                    }
+                }
+            }
+        }
         Ok(serde_json::json!({
             "stored": stored,
+            "remote_pushed": remote_pushed,
+            "remote_error": remote_error,
             "holder": hex::encode(holder),
             "object": hex::encode(object),
             "segment": segment,
