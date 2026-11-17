@@ -124,9 +124,11 @@
     builders/readers in `crates/wallet-core/src/rpc.rs`.
   - **B11 (identity profile and SocialFi `.bud` integration):**
     enforces canonical `.bud` validation on identity profiles, binds V3 text and
-    social records (`IdentitySocialSummary`), B.U.D. 3.0 `ContentRef`,
-    bidirectional primary `.bud` names, and per-name `BnsStateProof` Merkle
-    verification into `build_identity_profile_verified`, and attaches
+    social records (`IdentitySocialSummary`), B.U.D. 3.0 `ContentRef`, and
+    per-name `BnsStateProof` Merkle verification into
+    `build_identity_profile_verified`, discloses node-asserted reverse-resolved
+    `primary_name` with an explicit `EvidenceStatus::Unverified` card because
+    the per-name proof commits to `primary_names` only as a whole, and attaches
     reverse-resolved `author_bud_name` handles to SocialFi RPC posts and feeds.
   - **B12 (complete `bud bns` CLI and static site publishing):**
     completes `bud bns` with `resolve [--verify-proof]`, `info`, `offers`,

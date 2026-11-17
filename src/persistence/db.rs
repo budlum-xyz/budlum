@@ -2361,6 +2361,34 @@ impl BlockchainStorage for Storage {
         Self::load_global_headers(self)
     }
 
+    fn prune_global_headers_from(&self, from_height: u64) -> std::io::Result<()> {
+        let mut batch = sled::Batch::default();
+        let mut removed_any = false;
+        let mut max_kept: Option<u64> = None;
+        for item in self.db.scan_prefix(b"GLOBAL_HEADER:") {
+            let (key, val) = item?;
+            let header: GlobalBlockHeader = decode(&val)?;
+            if header.global_height >= from_height {
+                let hash_key = format!("GLOBAL_HEADER_HASH:{}", header.calculate_hash());
+                batch.remove(key.as_ref());
+                batch.remove(hash_key.as_bytes());
+                removed_any = true;
+            } else {
+                max_kept =
+                    Some(max_kept.map_or(header.global_height, |m| m.max(header.global_height)));
+            }
+        }
+        if removed_any {
+            match max_kept {
+                Some(h) => batch.insert(b"LAST_GLOBAL_HEIGHT", h.to_string().as_bytes()),
+                None => batch.remove(b"LAST_GLOBAL_HEIGHT"),
+            }
+            self.db.apply_batch(batch)?;
+            self.db.flush()?;
+        }
+        Ok(())
+    }
+
     fn save_bridge_state(&self, bridge_state: &BridgeState) -> std::io::Result<()> {
         Self::save_bridge_state(self, bridge_state)
     }
@@ -3362,6 +3390,59 @@ mod tests {
 
         storage.delete_block(1).unwrap();
         assert_eq!(storage.get_tx_block_height(&tx_hash).unwrap(), None);
+    }
+
+    /// A reorg that replaces or drops checkpoint global headers must remove the
+    /// superseded rows from disk. Leaving them behind made the next restart read
+    /// a non-contiguous prefix and skip every header past the fork point.
+    #[test]
+    fn prune_global_headers_from_removes_orphaned_rows_and_keeps_a_contiguous_prefix() {
+        use crate::settlement::GlobalBlockHeader;
+
+        let header = |height: u64, prev: [u8; 32], salt: u8| GlobalBlockHeader {
+            version: 1,
+            global_height: height,
+            previous_global_hash: prev,
+            chain_id: 45261,
+            timestamp_ms: 1_000 + u128::from(height),
+            domain_registry_root: [salt; 32],
+            domain_commitment_root: [salt; 32],
+            message_root: [salt; 32],
+            bridge_state_root: [salt; 32],
+            replay_nonce_root: [salt; 32],
+            proposer: None,
+            settlement_finality_root: [salt; 32],
+            storage_root: None,
+            ai_root: None,
+            identity_root: None,
+            checkpoint_height: height,
+            external_intake_root: None,
+            app_binding_root: None,
+            delegation_root: None,
+            object_layer_root: None,
+            proof_root: None,
+            proven_height: 0,
+        };
+
+        let dir = tempdir().unwrap();
+        let storage = Storage::new(dir.path().to_str().unwrap()).unwrap();
+        let zero = header(0, [0u8; 32], 1);
+        let one = header(1, zero.calculate_hash_bytes(), 2);
+        let two = header(2, one.calculate_hash_bytes(), 3);
+        for h in [&zero, &one, &two] {
+            storage.save_global_header(h).unwrap();
+        }
+        assert_eq!(storage.load_global_headers().unwrap().len(), 3);
+
+        storage.prune_global_headers_from(1).unwrap();
+        let kept = storage.load_global_headers().unwrap();
+        assert_eq!(kept.len(), 1, "only the pre-fork header survives");
+        assert_eq!(kept[0].global_height, 0);
+        assert_eq!(
+            storage.get_global_header(1).unwrap(),
+            None,
+            "the orphaned row is really gone, not just filtered on read"
+        );
     }
 
     /// A pruned prefix is not reported as damage by the audit.

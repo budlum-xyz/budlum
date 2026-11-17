@@ -237,16 +237,23 @@ impl Bud3Frame {
 
 /// Emit ordered logical frames (`0..k` source symbols followed by
 /// `repair_per_segment` derived repair symbols per segment) for serialized
+const MAX_REPAIR_PER_SEGMENT: u32 = 4_096;
+
+/// Produce source symbols followed by `repair_per_segment` repair symbols for
 /// BOF-1 `object_bytes` under `profile`.
 ///
 /// # Errors
 ///
-/// Returns [`FrameWireError`] if `object_bytes` is empty or profile coding fails.
+/// Returns [`FrameWireError`] if `object_bytes` is empty, `repair_per_segment`
+/// exceeds the per-segment ceiling, or profile coding fails.
 pub fn frames_for_object_bytes(
     object_bytes: &[u8],
     profile: &Profile,
     repair_per_segment: u32,
 ) -> Result<Vec<Bud3Frame>, FrameWireError> {
+    if repair_per_segment > MAX_REPAIR_PER_SEGMENT {
+        return Err(FrameWireError::BadGeometry);
+    }
     let seg =
         Segmentation::new(object_bytes.len() as u64, profile).ok_or(FrameWireError::BadGeometry)?;
     let mut frames = Vec::new();
@@ -328,6 +335,15 @@ mod tests {
         huge_k[22..26].copy_from_slice(&over_k.to_le_bytes());
         assert_eq!(
             Bud3Frame::decode_wire(&huge_k, &mut m),
+            Err(FrameWireError::BadGeometry)
+        );
+    }
+
+    #[test]
+    fn frames_for_object_bytes_rejects_excessive_repair_count() {
+        let obj = Object::raw_public(b"repair-bound-check");
+        assert_eq!(
+            frames_for_object_bytes(&obj.encode(), &Profile::P0, MAX_REPAIR_PER_SEGMENT + 1),
             Err(FrameWireError::BadGeometry)
         );
     }

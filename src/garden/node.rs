@@ -1511,6 +1511,19 @@ impl Node {
             .is_ok()
     }
 
+    /// True only for keys the host has actually seated (active or offline
+    /// validators). Keys in `GardenValidatorStatus::Waiting` are guests at the
+    /// connection door and must share `MAX_UNJOINED_PEERS` and `unjoined_grace`
+    /// rather than consuming the inbound connection budget reserved for seated
+    /// validators.
+    fn is_seated_validator(&self, key: &GardenKey) -> bool {
+        self.ledger
+            .state
+            .validators
+            .get(key)
+            .is_some_and(|v| v.status != GardenValidatorStatus::Waiting)
+    }
+
     async fn on_request(
         &mut self,
         peer: PeerId,
@@ -1526,11 +1539,11 @@ impl Node {
             let peer_cap = (self.limits().max_validators as usize)
                 .saturating_mul(2)
                 .saturating_add(8);
-            let known_validator = self.ledger.state.validators.contains_key(key);
+            let known_validator = self.is_seated_validator(key);
             let unjoined_count = self
                 .peers
                 .values()
-                .filter(|k| !self.ledger.state.validators.contains_key(*k))
+                .filter(|k| !self.is_seated_validator(k))
                 .count();
             let unjoined_grace = self.unjoined_grace();
             let already = self.peers.contains_key(&peer);
@@ -1549,7 +1562,7 @@ impl Node {
                 let stale_victim = self
                     .peers
                     .iter()
-                    .filter(|(_, k)| !self.ledger.state.validators.contains_key(*k))
+                    .filter(|(_, k)| !self.is_seated_validator(k))
                     .filter(|(p, k)| {
                         self.turned_away_keys.contains(*k)
                             || self
@@ -2980,7 +2993,7 @@ impl Node {
             .peers
             .iter()
             .filter(|(peer, key)| {
-                !self.ledger.state.validators.contains_key(*key)
+                !self.is_seated_validator(key)
                     && self
                         .peer_admitted_at
                         .get(peer)
@@ -5921,6 +5934,111 @@ mod tests {
             other => panic!("expected Welcome after idle unjoined expiry, got {other:?}"),
         }
         drop(held);
+        handle.leave().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn waiting_keys_under_host_approval_count_against_unjoined_cap_and_expire() {
+        let handle = spawn(
+            GardenEntry::Create {
+                title: "waiting-cap".into(),
+                limits: GardenLimits {
+                    round_ms: 50,
+                    admission: GardenAdmission::HostApproval,
+                    ..GardenLimits::testnet_default()
+                },
+            },
+            config("host", "/ip4/127.0.0.1/tcp/0"),
+            random_bytes(),
+            None,
+        )
+        .await
+        .unwrap();
+        let invite = handle.invite().await.unwrap();
+
+        // Register MAX_UNJOINED_PEERS distinct keys into the host's Waiting
+        // queue while keeping their connections open.
+        let mut waiting = Vec::new();
+        for idx in 0..MAX_UNJOINED_PEERS {
+            let (mut net, key, host_peer) = stranger(&invite).await;
+            let me = key.public_key_bytes();
+            let hello = GardenRequest::Hello {
+                chain_id: invite.chain_id,
+                key: me,
+                invite_signature: invite_keypair(&invite.token)
+                    .unwrap()
+                    .sign(&join_message(invite.chain_id, &me))
+                    .to_vec(),
+            };
+            assert!(matches!(
+                ask(&mut net, host_peer, hello).await,
+                GardenResponse::Welcome { .. }
+            ));
+            let join_tx = GardenTx {
+                chain_id: invite.chain_id,
+                sender: me,
+                nonce: 0,
+                kind: GardenTxKind::Join {
+                    name: format!("waiter-{idx}"),
+                    address: String::new(),
+                    invite_signature: invite_keypair(&invite.token)
+                        .unwrap()
+                        .sign(&join_message(invite.chain_id, &me))
+                        .to_vec(),
+                },
+            }
+            .sign(&key)
+            .unwrap();
+            let _ = ask(
+                &mut net,
+                host_peer,
+                GardenRequest::Gossip(vec![GardenGossip::Tx(join_tx)]),
+            )
+            .await;
+            waiting.push((net, key));
+        }
+
+        // Wait until all MAX_UNJOINED_PEERS keys are recorded as Waiting.
+        status_becomes(&handle, "/waiting_for_host", json!(MAX_UNJOINED_PEERS)).await;
+
+        // An extra invitee must be refused while all MAX_UNJOINED_PEERS waiting
+        // slots are freshly occupied (Waiting keys do not bypass the cap).
+        let (mut extra, extra_key, host_peer) = stranger(&invite).await;
+        let extra_pk = extra_key.public_key_bytes();
+        let extra_hello = GardenRequest::Hello {
+            chain_id: invite.chain_id,
+            key: extra_pk,
+            invite_signature: invite_keypair(&invite.token)
+                .unwrap()
+                .sign(&join_message(invite.chain_id, &extra_pk))
+                .to_vec(),
+        };
+        assert!(
+            matches!(
+                ask(&mut extra, host_peer, extra_hello.clone()).await,
+                GardenResponse::Refused(_)
+            ),
+            "fresh waiting connections must count against MAX_UNJOINED_PEERS"
+        );
+
+        // Once the unjoined grace elapses, the waiting connections expire and
+        // a newcomer is welcomed at the door.
+        tokio::time::sleep(Duration::from_millis(2400)).await;
+        let (mut fresh, fresh_key, fresh_host_peer) = stranger(&invite).await;
+        let fresh_pk = fresh_key.public_key_bytes();
+        let fresh_hello = GardenRequest::Hello {
+            chain_id: invite.chain_id,
+            key: fresh_pk,
+            invite_signature: invite_keypair(&invite.token)
+                .unwrap()
+                .sign(&join_message(invite.chain_id, &fresh_pk))
+                .to_vec(),
+        };
+        match ask(&mut fresh, fresh_host_peer, fresh_hello).await {
+            GardenResponse::Welcome { .. } => {}
+            other => panic!("expected Welcome after waiting peers aged out, got {other:?}"),
+        }
+        drop(waiting);
         handle.leave().await.unwrap();
     }
 }
