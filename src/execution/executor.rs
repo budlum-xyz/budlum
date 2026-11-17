@@ -864,7 +864,15 @@ impl Executor {
                     .checked_sub(tx.amount)
                     .ok_or_else(|| BudlumError::validation("stake_underflow", "stake underflow"))?;
 
-                let min_stake = state.registry.params().min_stake.max(1);
+                // The floor of an *active* validator is the network minimum, the
+                // value the registration arms above and the registry sync below
+                // this branch use. The governance parameter
+                // (`RegistryParams::min_stake`) is documented as the floor to
+                // newly register, and on testnet it sits six orders of magnitude
+                // below the network floor, so reading it here left a validator
+                // that holds less than the floor marked active.
+                let min_stake = crate::core::chain_config::Network::from_chain_id(tx.chain_id)
+                    .map_or(1, |network| network.min_stake());
                 if let Some(validator) = state.get_validator_mut(&tx.from) {
                     validator.stake = new_stake;
                     if validator.stake < min_stake {
@@ -6268,6 +6276,54 @@ mod tests {
             "1-unit Stake top-up must never lift a V-4 liveness suspension"
         );
         assert!(state.liveness.is_suspended(&validator));
+    }
+
+    #[test]
+    fn self_unstake_below_network_floor_deactivates_the_validator() {
+        use crate::core::transaction::{Transaction, TransactionType, DEFAULT_CHAIN_ID};
+
+        let mut state = AccountState::new();
+        let validator = Address::from([0xE7; 32]);
+        let floor = crate::core::chain_config::Network::from_chain_id(DEFAULT_CHAIN_ID)
+            .map_or(1_000, |n| n.min_stake());
+        // The governance parameter carries its default here. The fixture only
+        // bites while that default sits below the network floor.
+        let governed = state.registry.params().min_stake.max(1);
+        assert!(
+            governed < floor,
+            "fixture needs a governance floor below the network floor: {governed} vs {floor}"
+        );
+
+        state.add_balance(&validator, floor.saturating_add(500_000));
+        state.add_validator(validator, floor);
+        assert!(
+            state.get_validator(&validator).is_some_and(|v| v.active),
+            "the fixture must start from an active validator"
+        );
+
+        // Unstake down to one atom above the governance floor: below the
+        // network floor, and above the parameter the unstake arm used to read.
+        let amount = floor.saturating_sub(governed.saturating_add(1));
+        let exit = Transaction::new_with_chain_id(
+            validator,
+            Address::zero(),
+            amount,
+            10,
+            0,
+            Vec::new(),
+            DEFAULT_CHAIN_ID,
+            TransactionType::Unstake,
+        );
+        Executor::apply_transaction_checked(&mut state, &exit).unwrap();
+
+        let row = state
+            .get_validator(&validator)
+            .expect("the validator row survives the exit");
+        assert_eq!(row.stake, governed.saturating_add(1));
+        assert!(
+            !row.active,
+            "a validator that holds less than the network floor must not stay active"
+        );
     }
 
     #[test]
