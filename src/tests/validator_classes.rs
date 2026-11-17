@@ -1381,3 +1381,61 @@ fn duty_lane_signers_exclude_underbonded_and_zero_stake_resumed_validators() {
         "zero-stake resumed validator must not gain free duty lane"
     );
 }
+
+/// The testnet Full-validator floor is 1,000 BUD, while the registry's generic
+/// floor is only 1,000 atoms. Leaving the generic floor behind must not preserve
+/// consensus eligibility or the free duty lane.
+#[test]
+fn testnet_unstake_below_full_floor_deactivates_and_loses_duty_lane() {
+    use crate::core::chain_config::Network;
+
+    let f = fixture(0x75, TESTNET);
+    let full_floor = Network::Testnet.min_stake_full();
+    let mut state = funded(&f.owner, full_floor.saturating_add(10));
+    let registry_floor = state.registry.params().min_stake.max(1);
+    assert!(
+        registry_floor < full_floor,
+        "the test must exercise distinct floors"
+    );
+
+    apply(
+        &mut state,
+        &tx(
+            f.owner,
+            full_floor,
+            0,
+            TESTNET,
+            ValidatorTx::Register(Box::new(registration(&f, ValidatorClass::Full, 0x75))),
+        ),
+    )
+    .unwrap();
+    assert!(state.validators.get(&f.owner).unwrap().active);
+    assert!(state
+        .duty_lane_signers_for_chain(TESTNET)
+        .contains(&f.owner));
+
+    let unstake = Transaction::new_with_chain_id(
+        f.owner,
+        Address::zero(),
+        full_floor - registry_floor,
+        1,
+        1,
+        Vec::new(),
+        TESTNET,
+        TransactionType::Unstake,
+    );
+    Executor::apply_transaction_checked(&mut state, &unstake).unwrap();
+
+    let validator = state.validators.get(&f.owner).unwrap();
+    assert_eq!(validator.stake, registry_floor);
+    assert!(
+        !validator.active,
+        "stake below the network Full floor must deactivate the validator"
+    );
+    assert!(
+        !state
+            .duty_lane_signers_for_chain(TESTNET)
+            .contains(&f.owner),
+        "underbonded validator must not retain the free duty lane"
+    );
+}
