@@ -163,7 +163,7 @@ STARK proving on every call.
 
 - EVM and WASM pointers are launch features. SVM, Move, and later catalog
  pointer targets are closed on public testnet and mainnet; unknown chain ids
- fail closed (`svm_and_move_pointers_are_closed_on_testnet`). Devnet retains the
+ fail closed (`svm_move_pointer_policy_is_closed_on_testnet`). Devnet retains the
  explicit conformance path.
 - Stateless pointer codecs in `execution/svm/src/pointer/` and `execution/move/src/pointer/`
  plus 4-way coordinator translation remain testable on devnet

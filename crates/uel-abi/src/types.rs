@@ -424,7 +424,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn svm_and_move_pointers_are_closed_on_testnet() {
+    fn svm_move_pointer_policy_is_closed_on_testnet() {
         for target in [EeId::SVM, EeId::MOVE] {
             assert!(!pointer_target_enabled_by_default(
                 BUDLUM_TESTNET_CHAIN_ID,

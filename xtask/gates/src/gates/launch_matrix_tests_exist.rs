@@ -38,6 +38,92 @@ const MAX_FILE_BYTES: u64 = 4 * 1024 * 1024;
 
 const OPEN_SUFFIX: &str = "_is_open_on_testnet";
 const CLOSED_SUFFIX: &str = "_is_closed_on_testnet";
+const MATRIX_PATH: &str = ".quality/testnet-feature-matrix.toml";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MatrixFeature {
+    id: String,
+    state: String,
+    evidence: String,
+}
+
+fn matrix_string<'a>(
+    table: &'a toml::map::Map<String, toml::Value>,
+    field: &str,
+    index: usize,
+) -> Result<&'a str, String> {
+    table
+        .get(field)
+        .and_then(toml::Value::as_str)
+        .ok_or_else(|| format!("{MATRIX_PATH}: feature row {index} needs string `{field}`"))
+}
+
+fn load_matrix(root: &Path) -> Result<Vec<MatrixFeature>, String> {
+    let path = root.join(MATRIX_PATH);
+    let text = fs::read_to_string(&path)
+        .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    let parsed: toml::Value =
+        toml::from_str(&text).map_err(|e| format!("cannot parse {}: {e}", path.display()))?;
+    let table = parsed
+        .as_table()
+        .ok_or_else(|| format!("{MATRIX_PATH}: root must be a table"))?;
+    if table.get("version").and_then(toml::Value::as_integer) != Some(1) {
+        return Err(format!("{MATRIX_PATH}: `version` must be 1"));
+    }
+    let rows = table
+        .get("feature")
+        .and_then(toml::Value::as_array)
+        .ok_or_else(|| format!("{MATRIX_PATH}: at least one `[[feature]]` row is required"))?;
+    if rows.is_empty() {
+        return Err(format!("{MATRIX_PATH}: feature list cannot be empty"));
+    }
+
+    let mut ids = BTreeSet::new();
+    let mut evidence_names = BTreeSet::new();
+    let mut features = Vec::with_capacity(rows.len());
+    for (index, row) in rows.iter().enumerate() {
+        let row = row
+            .as_table()
+            .ok_or_else(|| format!("{MATRIX_PATH}: feature row {index} must be a table"))?;
+        let id = matrix_string(row, "id", index)?;
+        let state = matrix_string(row, "state", index)?;
+        let evidence = matrix_string(row, "evidence", index)?;
+        if id.is_empty()
+            || !id
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+        {
+            return Err(format!(
+                "{MATRIX_PATH}: feature row {index} has invalid id `{id}`"
+            ));
+        }
+        if !matches!(state, "open" | "closed") {
+            return Err(format!(
+                "{MATRIX_PATH}: feature `{id}` state must be `open` or `closed`, got `{state}`"
+            ));
+        }
+        let expected = format!("{id}_is_{state}_on_testnet");
+        if evidence != expected {
+            return Err(format!(
+                "{MATRIX_PATH}: feature `{id}` says `{state}` but evidence is `{evidence}`; expected `{expected}`"
+            ));
+        }
+        if !ids.insert(id.to_string()) {
+            return Err(format!("{MATRIX_PATH}: duplicate feature id `{id}`"));
+        }
+        if !evidence_names.insert(evidence.to_string()) {
+            return Err(format!(
+                "{MATRIX_PATH}: duplicate evidence test `{evidence}`"
+            ));
+        }
+        features.push(MatrixFeature {
+            id: id.to_string(),
+            state: state.to_string(),
+            evidence: evidence.to_string(),
+        });
+    }
+    Ok(features)
+}
 
 /// Production predicates that share the naming pattern. They are code, not
 /// evidence, so a mention of one is not a citation of a test. Sorted.
@@ -185,7 +271,28 @@ pub fn run(root: &Path) -> Result<String, String> {
         ));
     }
 
+    let matrix = load_matrix(root)?;
+    let matrix_evidence: BTreeSet<&str> = matrix
+        .iter()
+        .map(|feature| feature.evidence.as_str())
+        .collect();
+
     let mut problems = Vec::new();
+    for feature in &matrix {
+        if !survey.defined.contains(&feature.evidence) {
+            problems.push(format!(
+                "{MATRIX_PATH}: feature `{}` names `{}` but no such launch-verdict test exists",
+                feature.id, feature.evidence
+            ));
+        }
+    }
+    for name in &survey.defined {
+        if !matrix_evidence.contains(name.as_str()) {
+            problems.push(format!(
+                "launch-verdict test `{name}` has no row in `{MATRIX_PATH}`"
+            ));
+        }
+    }
     for predicate in PREDICATES {
         if !survey.cited.contains_key(*predicate) {
             problems.push(format!(
@@ -235,7 +342,8 @@ pub fn run(root: &Path) -> Result<String, String> {
         .filter_map(|name| feature_of(name))
         .collect();
     Ok(format!(
-        "launch-matrix-tests-exist OK: {} cited name(s), {} test(s), {} feature(s).",
+        "launch-matrix-tests-exist OK: {} machine row(s), {} cited name(s), {} test(s), {} feature(s).",
+        matrix.len(),
         survey.cited.len(),
         survey.defined.len(),
         features.len()
@@ -267,6 +375,10 @@ pub fn self_test() -> Result<String, String> {
             "src/codec.rs",
             "pub const fn codec_is_open_on_testnet(id: u8) -> bool {\n    id != 9\n}\n",
         )?;
+        put(
+            MATRIX_PATH,
+            "version = 1\n\n[[feature]]\nid = \"widget\"\nstate = \"open\"\nevidence = \"widget_is_open_on_testnet\"\n",
+        )?;
         run(&dir).map_err(|e| format!("canary: clean tree failed: {e}"))?;
 
         // Canary 1: a document cites a test nobody wrote.
@@ -289,6 +401,7 @@ pub fn self_test() -> Result<String, String> {
             return Err(String::from("canary: a plain function counted as a test"));
         }
         put("src/widget.rs", open_test)?;
+        fs::remove_file(dir.join("src/other.rs")).map_err(|e| e.to_string())?;
 
         // Canary 3: a longer name does not stand in for the cited one.
         put(
